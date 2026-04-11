@@ -1,0 +1,73 @@
+#version 460 core
+
+layout(local_size_x = 256) in;
+
+struct CelestialBody {
+    vec3 position;
+    float radius;
+    vec3 velocity;
+    uint visible;
+    uint lodLevel;  // 0 = highest, 3 = lowest
+};
+
+layout(std430, binding = 0) buffer Bodies {
+    CelestialBody bodies[];
+};
+
+layout(std430, binding = 1) buffer FrustumData {
+    vec4 frustumPlanes[6]; // Near, Far, Left, Right, Top, Bottom
+};
+
+uniform vec3 cameraPos;
+uniform float lodDistances[4]; // LOD thresholds (km)
+
+// AABB vs 6 frustum planes
+bool aabbInFrustumPlanes(vec3 center, float halfExtent) {
+    for (int i = 0; i < 6; ++i) {
+        vec4 plane = frustumPlanes[i];
+        float dist = dot(plane.xyz, center) + plane.w;
+        
+        if (dist < -halfExtent) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Calculate LOD level based on distance
+uint calculateLOD(float distance) {
+    if (distance < lodDistances[0]) return 0;      // Highest detail
+    else if (distance < lodDistances[1]) return 1; // High detail
+    else if (distance < lodDistances[2]) return 2; // Medium detail
+    else if (distance < lodDistances[3]) return 3; // Low detail
+    else return 4; // Too far, cull completely
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    
+    if (id >= bodies.length()) return;
+    
+    CelestialBody body = bodies[id];
+    
+    // Calculate distance to camera
+    float distance = length(body.position - cameraPos);
+    
+    // Frustum culling
+    if (aabbInFrustumPlanes(body.position, body.radius)) {
+        body.visible = 1;
+        
+        // Calculate LOD
+        body.lodLevel = calculateLOD(distance);
+        
+        // If LOD is 4 (too far), cull it
+        if (body.lodLevel == 4) {
+            body.visible = 0;
+            body.lodLevel = 3; // Keep last valid LOD for when it comes back
+        }
+    } else {
+        body.visible = 0;
+    }
+    
+    bodies[id] = body;
+}
