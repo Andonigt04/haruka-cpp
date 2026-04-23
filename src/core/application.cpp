@@ -316,8 +316,10 @@ void Application::cleanup() {
 
 void Application::run(const std::string& startScenePath) {
     create_window();
+    create_vulkan_context();
     Haruka::Scene scene;
     if (!startScenePath.empty()) {
+        // loadScene(startScenePath); // Descomentar si implementas loadScene()
         scene.load(startScenePath);
     } else {
         scene = Haruka::Scene("DefaultScene");
@@ -441,124 +443,10 @@ void Application::init(Haruka::Scene& scene) {
     _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_composite.frag");
     _flatShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/light_cube.frag");
     _cascadeShadowShader = std::make_unique<Shader>("shaders/shadow.vert", "shaders/shadow.frag");
+    setupQuad();
 }
 
-void Application::renderScene(Shader* shader) {
-    (void)shader; // Esta función solo construye la cola de render
-
-    Haruka::Scene* scene = MotorInstance::getInstance().getScene();
-    if (!scene) {
-        scene = _currentScene.get();
-    }
-    g_sceneForRender = scene;
-    g_sceneRenderQueue.clear();
-    if (!scene) return;
-
-    Camera* activeCamera = MotorInstance::getInstance().getCamera();
-    if (!activeCamera) {
-        activeCamera = _camera.get();
-    }
-
-    const double nearPlane = 0.0001;
-    const double farPlane = 300000000.0;
-    glm::mat4 view = activeCamera ? activeCamera->getViewMatrix() : glm::mat4(1.0f);
-    glm::mat4 proj = glm::perspective(glm::radians(activeCamera ? activeCamera->zoom : 60.0f), (float)_width / (float)_height, (float)nearPlane, (float)farPlane);
-    glm::mat4 viewProj = proj * view;
-
-    for (const auto& obj : scene->getObjects()) {
-        if (isRenderDisabledByEditor(obj)) continue;
-        Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
-        if (!Haruka::isRenderableObjectType(objType)) continue;
-
-        glm::dvec3 worldPos = obj.getWorldPosition(scene);
-        glm::dvec3 camPos = activeCamera ? activeCamera->position : glm::dvec3(0.0);
-        glm::dvec3 worldScale = obj.getWorldScale(scene);
-        double radius = obj.meshRenderer ? obj.meshRenderer->getBoundingRadius() : 1.0;
-        int layer = obj.renderLayer;
-        double maxScale = std::max(std::abs(worldScale.x), std::max(std::abs(worldScale.y), std::abs(worldScale.z)));
-        const bool isHugeBody = (maxScale > 1000.0) || (obj.name == "Earth") || (obj.name == "Sun");
-
-        // Cuerpos gigantes (Earth/Sun) nunca se descargan ni se reconstruyen
-        if (!isHugeBody) {
-            double unloadDistance = static_cast<double>(s_layerMaxDistance[layer]);
-            double loadDistance = unloadDistance * 0.85;
-            if (layer >= 4 && obj.meshRenderer) {
-                glm::dvec3 diff = worldPos - camPos;
-                double distSq = glm::dot(diff, diff);
-                double unloadDistSq = unloadDistance * unloadDistance * 1.32;  // (1.15)² ≈ 1.32
-                double loadDistanceSq = loadDistance * loadDistance;
-                if (distSq > unloadDistSq) {
-                    maybeReleasePrimitiveMesh(const_cast<Haruka::SceneObject&>(obj));
-                    continue;
-                }
-            }
-        }
-
-        // Cuerpos gigantes siempre se renderizan sin culling
-        if (isHugeBody) {
-            g_sceneRenderQueue.push_back(&obj);
-            continue;
-        }
-
-        // Para objetos normales, aplicar culling por frustum y distancia
-        bool canCullByFrustum = true;
-        if (canCullByFrustum) {
-            double radiusCulling = std::max(0.5 * glm::length(worldScale), maxScale);
-            if (radiusCulling < 0.001) {
-                g_sceneRenderQueue.push_back(&obj);
-                continue;
-            }
-            if (!isSphereInsideCameraFrustum(worldPos, radiusCulling, viewProj)) {
-                continue;
-            }
-        }
-
-        g_sceneRenderQueue.push_back(&obj);
-    }
-
-    // Contadores de total vs renderizado real
-    s_lastTotalVertices = 0;
-    s_lastTotalTriangles = 0;
-    s_lastTotalDrawCalls = 0;
-    for (const auto& obj : scene->getObjects()) {
-        if (isRenderDisabledByEditor(obj)) continue;
-        Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
-        if (!Haruka::isRenderableObjectType(objType)) continue;
-        if (obj.meshRenderer) {
-            s_lastTotalDrawCalls++;
-            s_lastTotalVertices += obj.meshRenderer->getVertexCount();
-            s_lastTotalTriangles += obj.meshRenderer->getTriangleCount();
-        } else if (!obj.modelPath.empty()) {
-            try {
-                auto model = getOrLoadModel(obj.modelPath);
-                if (!model) continue;
-                s_lastTotalDrawCalls++;
-                s_lastTotalVertices += model->getVertexCount();
-                s_lastTotalTriangles += model->getTriangleCount();
-            } catch (...) {}
-        }
-    }
-
-    s_lastRenderedVertices = 0;
-    s_lastRenderedTriangles = 0;
-    s_lastRenderedDrawCalls = 0;
-    for (const auto* obj : g_sceneRenderQueue) {
-        if (!obj) continue;
-        if (obj->meshRenderer && obj->meshRenderer->isResident()) {
-            s_lastRenderedDrawCalls++;
-            s_lastRenderedVertices += obj->meshRenderer->getResidentVertexCount();
-            s_lastRenderedTriangles += obj->meshRenderer->getResidentTriangleCount();
-        } else if (!obj->modelPath.empty()) {
-            try {
-                auto model = getOrLoadModel(obj->modelPath);
-                if (!model) continue;
-                s_lastRenderedDrawCalls++;
-                s_lastRenderedVertices += model->getVertexCount();
-                s_lastRenderedTriangles += model->getTriangleCount();
-            } catch (...) {}
-        }
-    }
-}
+// renderScene eliminado: usar buildRenderQueue()
 
 void Application::create_vulkan_context() {
     printf("[Haruka] >> INICIO create_vulkan_context\n");

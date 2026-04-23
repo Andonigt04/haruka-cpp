@@ -139,7 +139,7 @@ public:
     void init(Haruka::Scene& scene);
     void create_window();
     void loadScene(const std::string& scenePath);
-    void renderScene(Shader* shader = nullptr);
+    // void renderScene(Shader* shader = nullptr); // Eliminada, usar buildRenderQueue()
     void main_loop();
     void renderFrame();
     void renderFrameContent();

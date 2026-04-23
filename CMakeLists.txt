@@ -124,7 +124,14 @@ endforeach()
 add_custom_target(compile_shaders ALL DEPENDS ${SPIRV_SHADERS})
 
 # --- 6. Instalación ---
-install(TARGETS HarukaEngine 
+install(TARGETS HarukaEngine
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Instalar todos los headers (.h) en una carpeta específica
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/src/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/haruka-cpp
+    FILES_MATCHING PATTERN "*.h"
 )

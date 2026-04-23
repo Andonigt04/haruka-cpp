@@ -106,7 +106,7 @@ You can bootstrap the folder with [setup_deps.sh](setup_deps.sh).
 
 ---
 
-## 4) Build and Run
+## 4) Build
 
 Typical Linux flow:
 
@@ -117,12 +117,11 @@ cmake ..
 make -j"$(nproc)"
 ```
 
+cmake --install . --prefix ../../haruka/include/engines/
+
 Generated binaries:
 
-- `build/HarukaEditor`
-- `build/HarukaEngine`
-- `build/HarukaServer`
-- `build/ChatTest`
+- `build/libHarukaEngine.so`
 
 Run examples:
 
@@ -130,12 +129,6 @@ Run examples:
 cd build
 ./HarukaEditor
 ```
-
-Build options from CMake:
-
-- `BUILD_EDITOR` (ON by default)
-- `BUILD_RUNTIME` (ON by default)
-- `BUILD_SERVER` (ON by default)
 
 ---
 
