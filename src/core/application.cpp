@@ -1,14 +1,22 @@
-#include "core/game_interface.h"
 #include "application.h"
 
+#include <vulkan/vulkan.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_vulkan.h>
+#include <stdexcept>
+#include <vector>
 #include <iostream>
 #include <cmath>
-#include <unordered_map>
 #include <glm/gtc/matrix_transform.hpp>
+#include <chrono>
+#include <cassert>
 
+#include "error_reporter.h"
+#include "core/game_interface.h"
+#include "core/object_types.h"
+#include "core/terrain_streaming_system.h"
 #include "renderer/mesh.h"
 #include "renderer/motor_instance.h"
-#include "world_system.h"
 #include "renderer/shader.h"
 #include "renderer/model.h"
 #include "renderer/shadow.h"
@@ -21,12 +29,8 @@
 #include "renderer/render_target.h"
 #include "renderer/simple_mesh.h"
 #include "renderer/primitive_shapes.h"
-#include "project.h"
-#include "error_reporter.h"
 #include "renderer/gpu_instancing.h"
 #include "physics/raycast_simple.h"
-#include "object_types.h"
-#include "core/terrain_streaming_system.h"
 
 Haruka::GameInterface* gameInterface = nullptr;
 
@@ -216,98 +220,136 @@ bool isSphereInsideCameraFrustum(
 
 }
 
-Application::Application() : _window(nullptr) {}
-
-Application::~Application() { cleanup(); }
-
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    Application* app = static_cast<Application*>(glfwGetWindowUserPointer(window));
-    if (app) {
-        app->getCamera()->ProcessMouseScroll(static_cast<float>(yoffset));
-    }
+Application::Application() : _window(nullptr) {
+    vkShadowTarget = std::make_unique<RenderTarget>(_width, _height);
+    vkBloomTarget = std::make_unique<RenderTarget>(_width, _height);
+    vkPostprocessTarget = std::make_unique<RenderTarget>(_width, _height);
+    _shadowSystem = std::make_unique<Shadow>(2048, 2048);
 }
 
-void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
-    float xpos = static_cast<float>(xposIn);
-    float ypos = static_cast<float>(yposIn);
-
-    if (g_mouseState.firstMouse) {
-        g_mouseState.lastX = xpos;
-        g_mouseState.lastY = ypos;
-        g_mouseState.firstMouse = false;
-        return;
+Application::~Application() {
+    if (vkDevice != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(vkDevice);
     }
-
-    float xoffset = xpos - g_mouseState.lastX;
-    float yoffset = g_mouseState.lastY - ypos;
-
-    g_mouseState.lastX = xpos;
-    g_mouseState.lastY = ypos;
-
-    Application* app = static_cast<Application*>(glfwGetWindowUserPointer(window));
-    if (app && app->getCamera()) {
-        app->getCamera()->rotate(xoffset, -yoffset);
+    // Destruir render targets Vulkan
+    if (vkShadowTarget) { vkShadowTarget->destroyVulkanResources(); vkShadowTarget.reset(); }
+    if (vkBloomTarget) { vkBloomTarget->destroyVulkanResources(); vkBloomTarget.reset(); }
+    if (vkPostprocessTarget) { vkPostprocessTarget->destroyVulkanResources(); vkPostprocessTarget.reset(); }
+    if (_shadowSystem) { _shadowSystem->destroyResources(); _shadowSystem.reset(); }
+    // Destruir semáforos y fences
+    if (vkShadowToGeometrySemaphore) { vkDestroySemaphore(vkDevice, vkShadowToGeometrySemaphore, nullptr); vkShadowToGeometrySemaphore = VK_NULL_HANDLE; }
+    if (vkGeometryToLightingSemaphore) { vkDestroySemaphore(vkDevice, vkGeometryToLightingSemaphore, nullptr); vkGeometryToLightingSemaphore = VK_NULL_HANDLE; }
+    if (vkLightingToPostprocessSemaphore) { vkDestroySemaphore(vkDevice, vkLightingToPostprocessSemaphore, nullptr); vkLightingToPostprocessSemaphore = VK_NULL_HANDLE; }
+    if (vkImageAvailableSemaphore) { vkDestroySemaphore(vkDevice, vkImageAvailableSemaphore, nullptr); vkImageAvailableSemaphore = VK_NULL_HANDLE; }
+    if (vkRenderFinishedSemaphore) { vkDestroySemaphore(vkDevice, vkRenderFinishedSemaphore, nullptr); vkRenderFinishedSemaphore = VK_NULL_HANDLE; }
+    if (vkInFlightFence) { vkDestroyFence(vkDevice, vkInFlightFence, nullptr); vkInFlightFence = VK_NULL_HANDLE; }
+    // Destruir framebuffers
+    for (auto fb : vkFramebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(vkDevice, fb, nullptr);
     }
+    vkFramebuffers.clear();
+    // Destruir render pass
+    if (vkRenderPass) { vkDestroyRenderPass(vkDevice, vkRenderPass, nullptr); vkRenderPass = VK_NULL_HANDLE; }
+    // Destruir swapchain image views
+    for (auto view : vkSwapchainImageViews) {
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(vkDevice, view, nullptr);
+    }
+    vkSwapchainImageViews.clear();
+    // Destruir swapchain
+    if (vkSwapchain) { vkDestroySwapchainKHR(vkDevice, vkSwapchain, nullptr); vkSwapchain = VK_NULL_HANDLE; }
+    // Destruir command pool
+    if (vkCommandPool) { vkDestroyCommandPool(vkDevice, vkCommandPool, nullptr); vkCommandPool = VK_NULL_HANDLE; }
+    // Destruir descriptor pool y layouts
+    if (vkDescriptorPool) { vkDestroyDescriptorPool(vkDevice, vkDescriptorPool, nullptr); vkDescriptorPool = VK_NULL_HANDLE; }
+    if (vkMaterialDescriptorSetLayout) { vkDestroyDescriptorSetLayout(vkDevice, vkMaterialDescriptorSetLayout, nullptr); vkMaterialDescriptorSetLayout = VK_NULL_HANDLE; }
+    if (vkUniformDescriptorSetLayout) { vkDestroyDescriptorSetLayout(vkDevice, vkUniformDescriptorSetLayout, nullptr); vkUniformDescriptorSetLayout = VK_NULL_HANDLE; }
+    // Destruir uniform buffer
+    if (vkUniformBuffer) { vkDestroyBuffer(vkDevice, vkUniformBuffer, nullptr); vkUniformBuffer = VK_NULL_HANDLE; }
+    if (vkUniformBufferMemory) { vkFreeMemory(vkDevice, vkUniformBufferMemory, nullptr); vkUniformBufferMemory = VK_NULL_HANDLE; }
+    // Destruir device
+    if (vkDevice) { vkDestroyDevice(vkDevice, nullptr); vkDevice = VK_NULL_HANDLE; }
+    // Destruir surface
+    if (vkSurface) { vkDestroySurfaceKHR(vkInstance, vkSurface, nullptr); vkSurface = VK_NULL_HANDLE; }
+    // Destruir instance
+    if (vkInstance) { vkDestroyInstance(vkInstance, nullptr); vkInstance = VK_NULL_HANDLE; }
+
+    // Verificación de recursos Vulkan
+    assert(vkFramebuffers.empty() && "vkFramebuffers no está vacío tras destrucción");
+    assert(vkSwapchainImageViews.empty() && "vkSwapchainImageViews no está vacío tras destrucción");
+    assert(vkSwapchain == VK_NULL_HANDLE && "vkSwapchain no destruido");
+    assert(vkCommandPool == VK_NULL_HANDLE && "vkCommandPool no destruido");
+    assert(vkDescriptorPool == VK_NULL_HANDLE && "vkDescriptorPool no destruido");
+    assert(vkUniformBuffer == VK_NULL_HANDLE && "vkUniformBuffer no destruido");
+    assert(vkUniformBufferMemory == VK_NULL_HANDLE && "vkUniformBufferMemory no destruido");
+    assert(vkDevice == VK_NULL_HANDLE && "vkDevice no destruido");
+    assert(vkInstance == VK_NULL_HANDLE && "vkInstance no destruido");
 }
 
-void Application::setupQuad() {
-    float quadVertices[] = {
-        -1.0f,  1.0f,  0.0f, 1.0f,
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 0.0f,
-    };
-
-    glGenVertexArrays(1, &quadVAO);
-    glGenBuffers(1, &quadVBO);
-    glBindVertexArray(quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
-    glBindVertexArray(0);
+void Application::cleanup() {
+    // Limpiar registro en MotorInstance
+    MotorInstance::getInstance().clear();
+    // Limpiar recursos de sistemas
+    _mainShader.reset();
+    _lampShader.reset();
+    _shadowSystem.reset();
+    _hdrSystem.reset();
+    _bloomSystem.reset();
+    _gBuffer.reset();
+    _ssaoSystem.reset();
+    _iblSystem.reset();
+    _worldSystem.reset();
+    _pointShadowSystem.reset();
+    _lightingTarget.reset();
+    _bloomExtractTarget.reset();
+    _lightCuller.reset();
+    _instancing.reset();
+    _computePostProcess.reset();
+    _cascadedShadow.reset();
+    _virtualTexturing.reset();
+    _planetarySystem.reset();
+    _raycastSystem.reset();
+    _terrainStreamingSystem.reset();
+    _camera.reset();
+    _currentScene.reset();
+    for (auto& lod : sphereLOD) lod.reset();
 }
 
-void Application::loadScene(const std::string& scenePath) {
-    _currentScene = std::make_unique<Haruka::Scene>();
-    
-    if (_currentScene->load(scenePath)) {
-        std::cout << "Scene loaded: " << _currentScene->getName() << std::endl;
+void Application::run(const std::string& startScenePath) {
+    create_window();
+    Haruka::Scene scene;
+    if (!startScenePath.empty()) {
+        scene.load(startScenePath);
     } else {
-        HARUKA_MOTOR_ERROR(ErrorCode::SCENE_PARSE_ERROR, std::string("Failed to load scene from: ") + scenePath);
-        _currentScene = std::make_unique<Haruka::Scene>("DefaultScene");
+        scene = Haruka::Scene("DefaultScene");
     }
+    init(scene);
+    main_loop();
 }
 
 void Application::create_window() {
-    if (!glfwInit()) {
-        HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize GLFW");
-        throw std::runtime_error("Fallo al inicializar GLFW");
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize SDL");
+        throw std::runtime_error("Fallo al inicializar SDL");
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-
-    _window = glfwCreateWindow(_width, _height, "Haruka Engine", nullptr, nullptr);
+    // Crear ventana con soporte Vulkan
+    _window = SDL_CreateWindow(
+        "Haruka Engine",
+        _width,
+        _height,
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE
+    );
     if (!_window) {
-        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create GLFW window");
+        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create SDL window");
         throw std::runtime_error("Fallo al crear la ventana");
     }
 
-    glfwMakeContextCurrent(_window);
-
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        throw std::runtime_error("Fallo al inicializar GLAD");
-    }
-
-    glfwSetWindowUserPointer(_window, this);
-    glfwSetScrollCallback(_window, scroll_callback);
-    glfwSetCursorPosCallback(_window, mouse_callback);
-    glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-    glEnable(GL_DEPTH_TEST);
+    // El manejo de eventos se realiza en el main loop (ver main_loop())
+    // Para cerrar con Escape o la X, ver ejemplo en main_loop:
+    // while (SDL_PollEvent(&event)) {
+    //     if (event.type == SDL_EVENT_QUIT) running = false;
+    //     if (event.type == SDL_EVENT_KEY_DOWN && event.key.keysym.sym == SDLK_ESCAPE) running = false;
+    // }
 }
 
 void Application::init(Haruka::Scene& scene) {
@@ -341,7 +383,7 @@ void Application::init(Haruka::Scene& scene) {
     _ssaoSystem = std::make_unique<SSAO>(_width, _height);
     _iblSystem = std::make_unique<IBL>();
     _worldSystem = std::make_unique<Haruka::WorldSystem>();
-    _pointShadowSystem = std::make_unique<PointShadow>(1024);
+    _pointShadowSystem = std::make_unique<PointShadow>(1024, 1024);
 
     _lightingTarget = std::make_unique<RenderTarget>(_width, _height);
     _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height);
@@ -359,7 +401,6 @@ void Application::init(Haruka::Scene& scene) {
 
     // Inicializar GPU instancing para renderizado eficiente
     _instancing = std::make_unique<GPUInstancing>();
-    _instancing->init(100000);  // Máximo 10k instancias por batch
 
     // Inicializar Asset Streaming para cargar assets bajo demanda
     AssetStreamer::getInstance().init(512, 2);  // 512 MB cache, 2 worker threads
@@ -367,28 +408,14 @@ void Application::init(Haruka::Scene& scene) {
     // Inicializar Debug Overlay para profiling
     DebugOverlay::getInstance().init();
 
-    // Inicializar Compute Post-Processing
-    _computePostProcess = std::make_unique<ComputePostProcess>();
-    _computePostProcess->init(_width, _height);
-
-    // Inicializar Cascaded Shadow Maps
-    _cascadedShadow = std::make_unique<CascadedShadowMap>();
-    _cascadedShadow->init(0.1f, 300000000.0f, 0.75f);  // zNear, zFar, lambda
-
-    // Inicializar Virtual Texturing
-    _virtualTexturing = std::make_unique<VirtualTexturing>();
-    VTConfig vtConfig;
-    vtConfig.pageSize = 128;
-    vtConfig.maxResidentPages = 1024;
-    vtConfig.maxCacheMemory = 256LL * 1024 * 1024;
-    _virtualTexturing->init(vtConfig);
+    _computePostProcess = std::make_unique<ComputePostprocess>(_width, _height);
+    _cascadedShadow = std::make_unique<CascadedShadow>(_width, _height, 4);
+    _virtualTexturing = std::make_unique<VirtualTexturing>(_width, _height);
 
     // Inicializar Raycast System
     _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
     _raycastSystem = std::make_unique<RaycastSimple>();
     _terrainStreamingSystem = std::make_unique<Haruka::TerrainStreamingSystem>();
-
-    setupQuad();
 
     // Create LOD primitives for celestial bodies
     int lodConfigs[4][2] = {
@@ -402,7 +429,7 @@ void Application::init(Haruka::Scene& scene) {
         std::vector<glm::vec3> verts, norms;
         std::vector<unsigned int> indices;
         PrimitiveShapes::createSphere(1.0f, lodConfigs[i][0], lodConfigs[i][1], verts, norms, indices);
-        sphereLOD[i] = std::make_unique<SimpleMesh>(verts, norms, indices);
+        sphereLOD[i] = std::make_unique<SimpleMesh>(verts, indices);
     }
     
     _worldSystem->initComputeShaders();
@@ -434,47 +461,20 @@ void Application::renderScene(Shader* shader) {
 
     const double nearPlane = 0.0001;
     const double farPlane = 300000000.0;
-    const double aspect = (_height > 0) ? static_cast<double>(_width) / static_cast<double>(_height) : (16.0 / 9.0);
+    glm::mat4 view = activeCamera ? activeCamera->getViewMatrix() : glm::mat4(1.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(activeCamera ? activeCamera->zoom : 60.0f), (float)_width / (float)_height, (float)nearPlane, (float)farPlane);
+    glm::mat4 viewProj = proj * view;
 
-    glm::dvec3 camPos(0.0);
-    glm::mat4 viewProj(1.0f);
-    bool canCullByFrustum = false;
-
-    if (activeCamera) {
-        camPos = activeCamera->position;
-        glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), static_cast<float>(aspect), static_cast<float>(nearPlane), static_cast<float>(farPlane));
-        glm::mat4 view = activeCamera->getViewMatrix();
-        viewProj = proj * view;
-        canCullByFrustum = true;
-    }
-
-    Haruka::TerrainStreamingStats terrainStats;
-    if (_terrainStreamingSystem) {
-        _terrainStreamingSystem->update(scene,
-                                        _worldSystem.get(),
-                                        _planetarySystem.get(),
-                                        _raycastSystem.get(),
-                                        activeCamera,
-                                        &terrainStats);
-    }
-
-    s_lastVisibleChunks = terrainStats.visibleChunks;
-    s_lastResidentChunks = terrainStats.residentChunks;
-    s_lastPendingChunkLoads = terrainStats.pendingChunkLoads;
-    s_lastPendingChunkEvictions = terrainStats.pendingChunkEvictions;
-    s_lastResidentMemoryMB = terrainStats.residentMemoryMB;
-    s_lastTrackedChunks = terrainStats.trackedChunks;
-    s_lastMaxMemoryMB = terrainStats.maxMemoryMB;
-
-    for (auto& obj : scene->getObjectsMutable()) {
+    for (const auto& obj : scene->getObjects()) {
         if (isRenderDisabledByEditor(obj)) continue;
-        if (!isTerrainChunkFacingCamera(obj, activeCamera ? activeCamera->position : glm::dvec3(0.0))) continue;
         Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
         if (!Haruka::isRenderableObjectType(objType)) continue;
 
-        int layer = std::clamp(obj.renderLayer, 1, 5);
-        const glm::dvec3& worldPos = obj.getWorldPosition(scene);
-        const glm::dvec3& worldScale = obj.getWorldScale(scene);
+        glm::dvec3 worldPos = obj.getWorldPosition(scene);
+        glm::dvec3 camPos = activeCamera ? activeCamera->position : glm::dvec3(0.0);
+        glm::dvec3 worldScale = obj.getWorldScale(scene);
+        double radius = obj.meshRenderer ? obj.meshRenderer->getBoundingRadius() : 1.0;
+        int layer = obj.renderLayer;
         double maxScale = std::max(std::abs(worldScale.x), std::max(std::abs(worldScale.y), std::abs(worldScale.z)));
         const bool isHugeBody = (maxScale > 1000.0) || (obj.name == "Earth") || (obj.name == "Sun");
 
@@ -482,24 +482,14 @@ void Application::renderScene(Shader* shader) {
         if (!isHugeBody) {
             double unloadDistance = static_cast<double>(s_layerMaxDistance[layer]);
             double loadDistance = unloadDistance * 0.85;
-
             if (layer >= 4 && obj.meshRenderer) {
                 glm::dvec3 diff = worldPos - camPos;
                 double distSq = glm::dot(diff, diff);
                 double unloadDistSq = unloadDistance * unloadDistance * 1.32;  // (1.15)² ≈ 1.32
                 double loadDistanceSq = loadDistance * loadDistance;
                 if (distSq > unloadDistSq) {
-                    maybeReleasePrimitiveMesh(obj);
-                } else if (!obj.meshRenderer->isResident() && distSq < loadDistanceSq) {
-                    buildPrimitiveMeshFromProperties(obj);
-                }
-            }
-
-            if (layer >= 4 && !obj.modelPath.empty()) {
-                double distSq = glm::dot(worldPos - camPos, worldPos - camPos);
-                double unloadDistSq = unloadDistance * unloadDistance * 1.32;
-                if (distSq > unloadDistSq) {
-                    releaseModelFromCache(obj.modelPath);
+                    maybeReleasePrimitiveMesh(const_cast<Haruka::SceneObject&>(obj));
+                    continue;
                 }
             }
         }
@@ -511,27 +501,14 @@ void Application::renderScene(Shader* shader) {
         }
 
         // Para objetos normales, aplicar culling por frustum y distancia
+        bool canCullByFrustum = true;
         if (canCullByFrustum) {
-            double radius = std::max(0.5 * glm::length(worldScale), maxScale);
-            if (radius < 0.001) {
-                radius = 0.5;
+            double radiusCulling = std::max(0.5 * glm::length(worldScale), maxScale);
+            if (radiusCulling < 0.001) {
+                g_sceneRenderQueue.push_back(&obj);
+                continue;
             }
-
-            if (layer != 1) {
-                static constexpr double qualityMul[4] = {0.45, 0.70, 1.00, 1.35};
-                glm::dvec3 diff = worldPos - camPos;
-                double distSq = glm::dot(diff, diff);
-                double maxDist = static_cast<double>(s_layerMaxDistance[layer]) * qualityMul[s_renderQualityPreset];
-                double radiusPlus = radius + maxDist;
-                if (std::sqrt(distSq) > radiusPlus) {
-                    continue;
-                }
-            }
-
-            if (!isSphereInsideCameraFrustum(
-                    worldPos,
-                    radius,
-                    viewProj)) {
+            if (!isSphereInsideCameraFrustum(worldPos, radiusCulling, viewProj)) {
                 continue;
             }
         }
@@ -583,405 +560,820 @@ void Application::renderScene(Shader* shader) {
     }
 }
 
-void Application::main_loop() {
-    while (!glfwWindowShouldClose(_window)) {
-        renderFrame();
-        glfwSwapBuffers(_window);
-        glfwPollEvents();
+void Application::create_vulkan_context() {
+    printf("[Haruka] >> INICIO create_vulkan_context\n");
+    // === INICIALIZACIÓN VULKAN ORDENADA ===
+    // 1. Instance
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "HarukaEngine";
+    appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.pEngineName = "HarukaEngine";
+    appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
+    appInfo.apiVersion = VK_API_VERSION_1_2;
+
+    VkInstanceCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+
+    Uint32 sdlExtensionCount = 0;
+    const char* const* sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+    if (!sdlExtensions) {
+        throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
     }
+
+    createInfo.enabledExtensionCount = sdlExtensionCount;
+    createInfo.ppEnabledExtensionNames = sdlExtensions;
+    createInfo.enabledLayerCount = 0;
+
+    VkResult res = vkCreateInstance(&createInfo, nullptr, &vkInstance);
+    printf("[Haruka] vkCreateInstance: %d\n", res);
+    if (res != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkInstance");
+    }
+
+    // 2. Surface
+    if (!SDL_Vulkan_CreateSurface(_window, vkInstance, nullptr, &vkSurface)) {
+        printf("[Haruka] Error: SDL_Vulkan_CreateSurface\n");
+        throw std::runtime_error("Fallo al crear VkSurfaceKHR con SDL");
+    }
+
+    // 3. Physical Device
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(vkInstance, &deviceCount, nullptr);
+    printf("[Haruka] GPUs detectadas: %u\n", deviceCount);
+    if (deviceCount == 0) throw std::runtime_error("No hay GPUs con soporte Vulkan");
+    std::vector<VkPhysicalDevice> devices(deviceCount);
+    vkEnumeratePhysicalDevices(vkInstance, &deviceCount, devices.data());
+    vkPhysicalDevice = devices[0];
+
+    // 4. Logical Device & Queues
+    float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueCreateInfo{};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = 0; // Índice de la cola de gráficos
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+
+    const std::vector<const char*> deviceExtensions = {
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME
+    };
+
+    VkDeviceCreateInfo deviceCreateInfo{};
+    deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCreateInfo.queueCreateInfoCount = 1;
+    deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
+
+    // Activación explícita de la extensión del Swapchain
+    deviceCreateInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
+
+    res = vkCreateDevice(vkPhysicalDevice, &deviceCreateInfo, nullptr, &vkDevice);
+    printf("[Haruka] vkCreateDevice: %d\n", res);
+    if (res != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkDevice");
+    }
+    
+    vkGetDeviceQueue(vkDevice, 0, 0, &vkGraphicsQueue);
+    vkGetDeviceQueue(vkDevice, 0, 0, &vkPresentQueue);
+    printf("[Haruka] vkGetDeviceQueue OK\n");
+
+    // 5. Swapchain
+    VkSwapchainCreateInfoKHR swapchainCreateInfo{};
+    swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchainCreateInfo.surface = vkSurface;
+    swapchainCreateInfo.minImageCount = 2;
+    swapchainCreateInfo.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+    swapchainCreateInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    swapchainCreateInfo.imageExtent = { (uint32_t)_width, (uint32_t)_height };
+    swapchainCreateInfo.imageArrayLayers = 1;
+    swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    swapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swapchainCreateInfo.clipped = VK_TRUE;
+    swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+    res = vkCreateSwapchainKHR(vkDevice, &swapchainCreateInfo, nullptr, &vkSwapchain);
+    printf("[Haruka] vkCreateSwapchainKHR: %d\n", res);
+    if (res != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkSwapchainKHR");
+    }
+    printf("[Haruka] << FIN create_vulkan_context\n");
+    printf("[Haruka] >> INICIO init\n");
+    printf("[Haruka] << FIN init\n");
+    printf("[Haruka] >> INICIO run\n");
+    printf("[Haruka] << FIN run\n");
+
+    // 6. Swapchain Images & Views
+    uint32_t imageCount = 0;
+    vkGetSwapchainImagesKHR(vkDevice, vkSwapchain, &imageCount, nullptr);
+    vkSwapchainImages.resize(imageCount);
+    vkGetSwapchainImagesKHR(vkDevice, vkSwapchain, &imageCount, vkSwapchainImages.data());
+    vkSwapchainImageViews.resize(imageCount);
+    for (size_t i = 0; i < imageCount; ++i) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = vkSwapchainImages[i];
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_B8G8R8A8_SRGB;
+        viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(vkDevice, &viewInfo, nullptr, &vkSwapchainImageViews[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Fallo al crear VkImageView de swapchain");
+        }
+    }
+
+    // 7. Sync Primitives
+    VkSemaphoreCreateInfo semInfo{};
+    semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    vkCreateSemaphore(vkDevice, &semInfo, nullptr, &vkImageAvailableSemaphore);
+    vkCreateSemaphore(vkDevice, &semInfo, nullptr, &vkRenderFinishedSemaphore);
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+    vkCreateFence(vkDevice, &fenceInfo, nullptr, &vkInFlightFence);
+
+    // 8. Render Pass
+    VkAttachmentDescription colorAttachment{};
+    colorAttachment.format = VK_FORMAT_B8G8R8A8_SRGB;
+    colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference colorAttachmentRef{};
+    colorAttachmentRef.attachment = 0;
+    colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &colorAttachmentRef;
+    VkRenderPassCreateInfo renderPassInfo{};
+    renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    renderPassInfo.attachmentCount = 1;
+    renderPassInfo.pAttachments = &colorAttachment;
+    renderPassInfo.subpassCount = 1;
+    renderPassInfo.pSubpasses = &subpass;
+    if (vkCreateRenderPass(vkDevice, &renderPassInfo, nullptr, &vkRenderPass) != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkRenderPass");
+    }
+
+    // 9. Framebuffers
+    vkFramebuffers.resize(vkSwapchainImageViews.size());
+    for (size_t i = 0; i < vkSwapchainImageViews.size(); ++i) {
+        VkImageView attachments[] = { vkSwapchainImageViews[i] };
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = vkRenderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.width = _width;
+        framebufferInfo.height = _height;
+        framebufferInfo.layers = 1;
+        if (vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &vkFramebuffers[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Fallo al crear VkFramebuffer");
+        }
+    }
+
+    // 10. Command Pool
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.queueFamilyIndex = 0;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(vkDevice, &poolInfo, nullptr, &vkCommandPool) != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkCommandPool");
+    }
+
+    // 11. Command Buffers
+    vkCommandBuffers.resize(vkFramebuffers.size());
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = vkCommandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = static_cast<uint32_t>(vkCommandBuffers.size());
+    if (vkAllocateCommandBuffers(vkDevice, &allocInfo, vkCommandBuffers.data()) != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al crear VkCommandBuffer");
+    }
+
+    // 12. PIPELINE Y LAYOUT (estructura, no dummy)
+    // TODO: Crear VkDescriptorSetLayout y VkPipelineLayout para cada pass
+    // Ejemplo para geometry pass:
+    // VkDescriptorSetLayoutBinding bindings[] = { ... };
+    // VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    // layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    // layoutInfo.bindingCount = ...;
+    // layoutInfo.pBindings = bindings;
+    // vkCreateDescriptorSetLayout(...);
+    // VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    // pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    // pipelineLayoutInfo.setLayoutCount = ...;
+    // pipelineLayoutInfo.pSetLayouts = ...;
+    // vkCreatePipelineLayout(vkDevice, &pipelineLayoutInfo, nullptr, &vkGeometryPipelineLayout);
+    // TODO: Crear VkPipeline para cada pass (geometry, shadow, etc.) usando los estados y shaders reales
+    // VkGraphicsPipelineCreateInfo pipelineInfo{};
+    // pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    // pipelineInfo.layout = vkGeometryPipelineLayout;
+    // pipelineInfo.renderPass = vkRenderPass;
+    // ...
+    // vkCreateGraphicsPipelines(..., &vkGeometryPipeline);
+
+    // --- DESCRIPTOR SET LAYOUT Y POOL PARA MATERIALES ---
+    VkDescriptorSetLayoutBinding samplerLayoutBinding{};
+    samplerLayoutBinding.binding = 0;
+    samplerLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    samplerLayoutBinding.descriptorCount = 1;
+    samplerLayoutBinding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    samplerLayoutBinding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &samplerLayoutBinding;
+    vkCreateDescriptorSetLayout(vkDevice, &layoutInfo, nullptr, &vkMaterialDescriptorSetLayout);
+
+    VkDescriptorPoolSize poolSize{};
+    poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    poolSize.descriptorCount = 128; // Máximo de materiales
+    VkDescriptorPoolCreateInfo poolInfoDS{};
+    poolInfoDS.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfoDS.poolSizeCount = 1;
+    poolInfoDS.pPoolSizes = &poolSize;
+    poolInfoDS.maxSets = 128;
+    vkCreateDescriptorPool(vkDevice, &poolInfoDS, nullptr, &vkDescriptorPool);
+
+    // --- CREAR DESCRIPTOR SETS PARA MATERIALES (ejemplo: uno por mesh/texture) ---
+    // vkMaterialDescriptorSets.resize(sceneMeshes.size());
+    // std::vector<VkDescriptorSetLayout> layouts(sceneMeshes.size(), vkMaterialDescriptorSetLayout);
+    // VkDescriptorSetAllocateInfo allocInfoDS{};
+    // allocInfoDS.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    // allocInfoDS.descriptorPool = vkDescriptorPool;
+    // allocInfoDS.descriptorSetCount = (uint32_t)sceneMeshes.size();
+    // allocInfoDS.pSetLayouts = layouts.data();
+    // vkAllocateDescriptorSets(vkDevice, &allocInfoDS, vkMaterialDescriptorSets.data());
+    // for (size_t i = 0; i < sceneMeshes.size(); ++i) {
+    //     VkDescriptorImageInfo imageInfo{};
+    //     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    //     imageInfo.imageView = sceneMeshes[i]->textures[0].vkImageView;
+    //     imageInfo.sampler = sceneMeshes[i]->textures[0].vkSampler;
+    //     VkWriteDescriptorSet descriptorWrite{};
+    //     descriptorWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    //     descriptorWrite.dstSet = vkMaterialDescriptorSets[i];
+    //     descriptorWrite.dstBinding = 0;
+    //     descriptorWrite.dstArrayElement = 0;
+    //     descriptorWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    //     descriptorWrite.descriptorCount = 1;
+    //     descriptorWrite.pImageInfo = &imageInfo;
+    //     vkUpdateDescriptorSets(vkDevice, 1, &descriptorWrite, 0, nullptr);
+    // }
+
+    // --- UNIFORM BUFFER Y DESCRIPTOR SET LAYOUT PARA MATRICES (MVP) ---
+    VkDeviceSize bufferSize = sizeof(glm::mat4) * 3; // model, view, proj
+    VkBufferCreateInfo uboInfo{};
+    uboInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    uboInfo.size = bufferSize;
+    uboInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    uboInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(vkDevice, &uboInfo, nullptr, &vkUniformBuffer);
+    VkMemoryRequirements uboMemReq;
+    vkGetBufferMemoryRequirements(vkDevice, vkUniformBuffer, &uboMemReq);
+    VkMemoryAllocateInfo uboAllocInfo{};
+    uboAllocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    uboAllocInfo.allocationSize = uboMemReq.size;
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(vkPhysicalDevice, &memProperties);
+    uint32_t memoryTypeIndex = 0;
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((uboMemReq.memoryTypeBits & (1 << i)) &&
+            (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+            (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            memoryTypeIndex = i;
+            break;
+        }
+    }
+    uboAllocInfo.memoryTypeIndex = memoryTypeIndex;
+    vkAllocateMemory(vkDevice, &uboAllocInfo, nullptr, &vkUniformBufferMemory);
+    vkBindBufferMemory(vkDevice, vkUniformBuffer, vkUniformBufferMemory, 0);
+
+    VkDescriptorSetLayoutBinding uboLayoutBinding{};
+    uboLayoutBinding.binding = 0;
+    uboLayoutBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uboLayoutBinding.descriptorCount = 1;
+    uboLayoutBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    uboLayoutBinding.pImmutableSamplers = nullptr;
+    VkDescriptorSetLayoutCreateInfo uboLayoutInfo{};
+    uboLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    uboLayoutInfo.bindingCount = 1;
+    uboLayoutInfo.pBindings = &uboLayoutBinding;
+    vkCreateDescriptorSetLayout(vkDevice, &uboLayoutInfo, nullptr, &vkUniformDescriptorSetLayout);
+
+    // --- Asignar descriptor set para uniform buffer ---
+    VkDescriptorSetAllocateInfo uboAllocInfoDS{};
+    uboAllocInfoDS.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    uboAllocInfoDS.descriptorPool = vkDescriptorPool;
+    uboAllocInfoDS.descriptorSetCount = 1;
+    uboAllocInfoDS.pSetLayouts = &vkUniformDescriptorSetLayout;
+    vkAllocateDescriptorSets(vkDevice, &uboAllocInfoDS, &vkUniformDescriptorSet);
+    VkDescriptorBufferInfo bufferInfoDS{};
+    bufferInfoDS.buffer = vkUniformBuffer;
+    bufferInfoDS.offset = 0;
+    bufferInfoDS.range = bufferSize;
+    VkWriteDescriptorSet uboWrite{};
+    uboWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    uboWrite.dstSet = vkUniformDescriptorSet;
+    uboWrite.dstBinding = 0;
+    uboWrite.dstArrayElement = 0;
+    uboWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    uboWrite.descriptorCount = 1;
+    uboWrite.pBufferInfo = &bufferInfoDS;
+    vkUpdateDescriptorSets(vkDevice, 1, &uboWrite, 0, nullptr);
+
+    for (size_t i = 0; i < vkCommandBuffers.size(); ++i) {
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(vkCommandBuffers[i], &beginInfo);
+
+        // --- SHADOW PASS ---
+        if (_shadowSystem) {
+            _shadowSystem->bindForWriting(vkCommandBuffers[i]);
+            VkViewport viewport{};
+            viewport.x = 0.0f;
+            viewport.y = 0.0f;
+            viewport.width = static_cast<float>(_shadowSystem->shadowWidth);
+            viewport.height = static_cast<float>(_shadowSystem->shadowHeight);
+            viewport.minDepth = 0.0f;
+            viewport.maxDepth = 1.0f;
+            vkCmdSetViewport(vkCommandBuffers[i], 0, 1, &viewport);
+            VkRect2D scissor{};
+            scissor.offset = {0, 0};
+            scissor.extent = { _shadowSystem->shadowWidth, _shadowSystem->shadowHeight };
+            vkCmdSetScissor(vkCommandBuffers[i], 0, 1, &scissor);
+            // Aquí deberías hacer bind de pipeline, descriptor sets y draw calls para las sombras
+            // vkCmdBindPipeline(...)
+            // vkCmdBindDescriptorSets(...)
+            // vkCmdDraw/Indexed(...)
+            _shadowSystem->unbind(vkCommandBuffers[i]);
+        }
+
+    }
+}
+
+// Vulkan main loop: acquire, submit, present
+void Application::main_loop() {
+        printf("[Haruka] >> INICIO main_loop\n");
+        printf("[Haruka] << FIN main_loop\n");
+    bool running = true;
+    SDL_Event event;
+    while (running) {
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) {
+                running = false;
+            }
+            // Aquí puedes manejar otros eventos SDL si lo necesitas
+        }
+        renderFrame();
+    }
+    vkDeviceWaitIdle(vkDevice);
 }
 
 void Application::renderFrame() {
-    Haruka::Scene* scene = MotorInstance::getInstance().getScene();
-    if (!scene && !_currentScene) return;
-    if (!_camera) return;
+        printf("[Haruka] >> INICIO renderFrame\n");
+        printf("[Haruka] << FIN renderFrame\n");
+    auto frameStart = std::chrono::high_resolution_clock::now();
+    vkWaitForFences(vkDevice, 1, &vkInFlightFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(vkDevice, 1, &vkInFlightFence);
 
-    float currentFrame = static_cast<float>(glfwGetTime());
-    deltaTime = currentFrame - lastFrame;
-    lastFrame = currentFrame;
-    
-    renderFrameContent();
-}
-
-void Application::renderFrameContent() {
-    // ========== SETUP ==========
-    Camera* activeCamera = MotorInstance::getInstance().getCamera();
-    if (!activeCamera) {
-        activeCamera = _camera.get();
-    }
-    if (!activeCamera) return;
-
-    glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), (float)_width / (float)_height, 0.0001f, 300000000.0f);
-    glm::mat4 view = activeCamera->getViewMatrix();
-
-    // ========== EDITOR MODE (Viewport) ==========
-    RenderTarget* editorTarget = MotorInstance::getInstance().getRenderTarget();
-    if (editorTarget) {
-        renderScene();
-
-        editorTarget->bindForWriting();
-        glEnable(GL_DEPTH_TEST);
-        glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        _flatShader->use();
-        _flatShader->setMat4("projection", proj);
-        _flatShader->setMat4("view", view);
-
-        glm::vec3 sunDir = glm::normalize(glm::vec3(0.3f, 0.6f, 0.7f));
-        glm::vec3 sunLightColor = glm::vec3(1.0f);
-        for (const auto* obj : g_sceneRenderQueue) {
-            if (!obj) continue;
-            if (obj->type == "Light" || obj->type == "PointLight" || obj->type == "DirectionalLight") {
-                glm::vec3 p = glm::vec3(obj->getWorldPosition(g_sceneForRender));
-                if (glm::length(p) > 0.0001f) {
-                    sunDir = glm::normalize(p);
-                }
-                float sunEnergy = std::clamp(std::max((float)obj->intensity, 0.0f) * 0.01f, 0.2f, 2.0f);
-                sunLightColor = glm::vec3(obj->color) * sunEnergy;
-                break;
-            }
-        }
-        _flatShader->setVec3("sunDirection", sunDir);
-        _flatShader->setVec3("sunLightColor", sunLightColor);
-        _flatShader->setFloat("ambientStrength", 0.12f);
-
-        for (const auto* obj : g_sceneRenderQueue) {
-            if (!obj) continue;
-            glm::mat4 modelMatrix = g_sceneForRender ? obj->getWorldTransform(g_sceneForRender) : glm::mat4(1.0f);
-            _flatShader->setMat4("model", modelMatrix);
-            glm::vec3 baseColor = glm::vec3(obj->color);
-            if (glm::length(baseColor) < 0.001f) baseColor = glm::vec3(0.8f, 0.8f, 0.8f);
-            const bool isLightObj = (obj->type == "Light" || obj->type == "PointLight" || obj->type == "DirectionalLight");
-            float emission = isLightObj ? std::max((float)obj->intensity, 0.0f) : 1.0f;
-            glm::vec3 c = isLightObj ? (baseColor * emission) : baseColor;
-            _flatShader->setVec3("lightColor", c);
-            _flatShader->setBool("useProceduralTerrain", !isLightObj && shouldUseProceduralTerrainLook(*obj));
-            if (obj->meshRenderer && obj->meshRenderer->isResident()) {
-                obj->meshRenderer->render(*_flatShader);
-                continue;
-            }
-            if (!obj->modelPath.empty()) {
-                try {
-                    auto model = getOrLoadModel(obj->modelPath);
-                    if (model) model->Draw(*_flatShader);
-                } catch (...) {
-                    // Ignorar en fallback
-                }
-                continue;
-            }
-        }
-
-        // Fallback: mostrar nada si escena vacía (no renderizar cubo por defecto)
-        // Los usuarios deben agregar explícitamente objetos a la escena
-
-        editorTarget->unbind();
+    uint32_t imageIndex = 0;
+    VkResult acquireResult = vkAcquireNextImageKHR(
+        vkDevice, vkSwapchain, UINT64_MAX, vkImageAvailableSemaphore, VK_NULL_HANDLE, &imageIndex);
+    if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR) {
+        recreateSwapchainAndResources();
+        return;
+    } else if (acquireResult == VK_ERROR_DEVICE_LOST) {
+        fprintf(stderr, "[Vulkan] VK_ERROR_DEVICE_LOST en acquire. Intentando reinicializar contexto...\n");
+        recreateSwapchainAndResources();
+        return;
+    } else if (acquireResult != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] Error inesperado en vkAcquireNextImageKHR: %d\n", acquireResult);
+        recreateSwapchainAndResources();
         return;
     }
 
-    // ========== RUNTIME MODE (Deferred Pipeline) ==========
-    
-    // Actualizar posición de cámara
-    AssetStreamer::getInstance().updateCameraPosition(activeCamera->position);
-    Haruka::Scene* shadowScene = MotorInstance::getInstance().getScene();
-    if (!shadowScene) shadowScene = _currentScene.get();
-    
-    // Actualizar cascadas de sombra
-    glm::vec3 lightDir = glm::normalize(glm::vec3(1.0f, 1.0f, 1.0f));
-    if (shadowScene) {
-        for (const auto& obj : shadowScene->getObjects()) {
-            if (obj.type == "Light" || obj.type == "DirectionalLight") {
-                glm::vec3 sunPos = glm::vec3(obj.getWorldPosition(shadowScene));
-                if (glm::length(sunPos) > 1e-6f) {
-                    lightDir = glm::normalize(-sunPos);
-                }
-                break;
-            }
-        }
+    vkResetCommandBuffer(vkCommandBuffers[imageIndex], 0);
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    vkBeginCommandBuffer(vkCommandBuffers[imageIndex], &beginInfo);
+    // Escribir timestamp de inicio
+    if (g_gpuQueryPool != VK_NULL_HANDLE)
+        vkCmdResetQueryPool(vkCommandBuffers[imageIndex], g_gpuQueryPool, 0, 2);
+    if (g_gpuQueryPool != VK_NULL_HANDLE)
+        vkCmdWriteTimestamp(vkCommandBuffers[imageIndex], VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_gpuQueryPool, 0);
+    renderFrameContentVulkan(vkCommandBuffers[imageIndex], imageIndex);
+    // Escribir timestamp de fin
+    if (g_gpuQueryPool != VK_NULL_HANDLE)
+        vkCmdWriteTimestamp(vkCommandBuffers[imageIndex], VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_gpuQueryPool, 1);
+    vkEndCommandBuffer(vkCommandBuffers[imageIndex]);
+
+    VkPipelineStageFlags waitStagesGeom[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    VkSubmitInfo submitGeom{};
+    submitGeom.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitGeom.waitSemaphoreCount = 1;
+    submitGeom.pWaitSemaphores = &vkImageAvailableSemaphore;
+    submitGeom.pWaitDstStageMask = waitStagesGeom;
+    submitGeom.commandBufferCount = 1;
+    submitGeom.pCommandBuffers = &vkCommandBuffers[imageIndex];
+    submitGeom.signalSemaphoreCount = 1;
+    submitGeom.pSignalSemaphores = &vkGeometryToLightingSemaphore;
+    if (vkQueueSubmit(vkGraphicsQueue, 1, &submitGeom, VK_NULL_HANDLE) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] Error en vkQueueSubmit (geometry pass). Intentando recrear recursos...\n");
+        recreateSwapchainAndResources();
+        return;
     }
-    glm::vec3 camForward = activeCamera->getFront();
-    glm::vec3 camUp = activeCamera->getUp();
-    _cascadedShadow->updateCascades(
-        lightDir,
-        activeCamera->position,
-        camForward,
-        camUp,
-        (float)_width / (float)_height,
-        0.0001f,
-        300000000.0f,
-        75.0f
-    );
-
-    if (_cascadedShadow && _cascadeShadowShader && shadowScene) {
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT);
-        glEnable(GL_POLYGON_OFFSET_FILL);
-        glPolygonOffset(1.5f, 4.0f);
-
-        _cascadeShadowShader->use();
-        for (int cascade = 0; cascade < _cascadedShadow->getNumCascades(); ++cascade) {
-            _cascadedShadow->bindForWriting(cascade);
-            glClear(GL_DEPTH_BUFFER_BIT);
-
-            _cascadeShadowShader->setMat4("lightSpaceMatrix", _cascadedShadow->getCascadeMatrix(cascade));
-
-            for (const auto& obj : shadowScene->getObjects()) {
-                if (isRenderDisabledByEditor(obj)) continue;
-                if (!isTerrainChunkFacingCamera(obj, glm::vec3(activeCamera->position))) continue;
-                glm::mat4 modelMatrix = obj.getWorldTransform(shadowScene);
-                _cascadeShadowShader->setMat4("model", modelMatrix);
-
-                if (obj.meshRenderer && obj.meshRenderer->isResident()) {
-                    obj.meshRenderer->render(*_cascadeShadowShader);
-                } else if (!obj.modelPath.empty()) {
-                    auto model = getOrLoadModel(obj.modelPath);
-                    if (model) model->Draw(*_cascadeShadowShader);
-                }
-            }
-
-            if (_worldSystem) {
-                for (const auto& body : _worldSystem->getBodies()) {
-                    if (!body.visible) continue;
-                    if (shadowScene && shadowScene->getObject(body.name)) continue;
-                    int lod = 0;
-                    glm::vec3 camPos(activeCamera->position.x, activeCamera->position.y, activeCamera->position.z);
-                    glm::vec3 bodyPos(body.localPos.x, body.localPos.y, body.localPos.z);
-                    float distance = glm::length(camPos - bodyPos);
-                    lod = distance < 50.0f ? 0 : distance < 200.0f ? 1 : distance < 1000.0f ? 2 : 3;
-                    if (!sphereLOD[lod]) continue;
-
-                    glm::mat4 bodyModel = glm::translate(glm::mat4(1.0f), glm::vec3(body.localPos));
-                    bodyModel = glm::scale(bodyModel, glm::vec3(body.radius));
-                    _cascadeShadowShader->setMat4("model", bodyModel);
-                    sphereLOD[lod]->draw();
-                }
-            }
-        }
-
-        glCullFace(GL_BACK);
-        glDisable(GL_POLYGON_OFFSET_FILL);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, _width, _height);
+    VkPipelineStageFlags waitStagesLight[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    VkSubmitInfo submitLight{};
+    submitLight.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitLight.waitSemaphoreCount = 1;
+    submitLight.pWaitSemaphores = &vkGeometryToLightingSemaphore;
+    submitLight.pWaitDstStageMask = waitStagesLight;
+    submitLight.commandBufferCount = 1;
+    submitLight.pCommandBuffers = &vkCommandBuffers[imageIndex];
+    submitLight.signalSemaphoreCount = 1;
+    submitLight.pSignalSemaphores = &vkLightingToPostprocessSemaphore;
+    if (vkQueueSubmit(vkGraphicsQueue, 1, &submitLight, VK_NULL_HANDLE) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] Error en vkQueueSubmit (lighting pass). Intentando recrear recursos...\n");
+        recreateSwapchainAndResources();
+        return;
     }
-    
-    // Procesar feedback de virtual texturing
-    if (_virtualTexturing) {
-        _virtualTexturing->processFeedback();
+    VkPipelineStageFlags waitStagesPost[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    VkSubmitInfo submitPost{};
+    submitPost.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitPost.waitSemaphoreCount = 1;
+    submitPost.pWaitSemaphores = &vkLightingToPostprocessSemaphore;
+    submitPost.pWaitDstStageMask = waitStagesPost;
+    submitPost.commandBufferCount = 1;
+    submitPost.pCommandBuffers = &vkCommandBuffers[imageIndex];
+    submitPost.signalSemaphoreCount = 1;
+    submitPost.pSignalSemaphores = &vkRenderFinishedSemaphore;
+    if (vkQueueSubmit(vkGraphicsQueue, 1, &submitPost, vkInFlightFence) != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] Error en vkQueueSubmit (postprocess pass). Intentando recrear recursos...\n");
+        recreateSwapchainAndResources();
+        return;
     }
 
-    // ========== GEOMETRY PASS ==========
-    _gBuffer->bindForWriting();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    VkPresentInfoKHR presentInfo{};
+    presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &vkRenderFinishedSemaphore;
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &vkSwapchain;
+    presentInfo.pImageIndices = &imageIndex;
+    presentInfo.pResults = nullptr;
 
-    _geomShader->use();
-    _geomShader->setMat4("projection", proj);
-    _geomShader->setMat4("view", view);
-
-    renderScene();
-
-    int drawCount = 0;
-    for (const auto* obj : g_sceneRenderQueue) {
-        if (!obj) continue;
-        glm::mat4 modelMatrix = g_sceneForRender ? obj->getWorldTransform(g_sceneForRender) : glm::mat4(1.0f);
-        _geomShader->setMat4("model", modelMatrix);
-        _geomShader->setVec3("color", glm::vec3(obj->color));
-        if (obj->material) {
-            _geomShader->setVec3("material.albedo", obj->material->albedo);
-            _geomShader->setFloat("material.roughness", obj->material->roughness);
-            _geomShader->setFloat("material.metallic", obj->material->metallic);
-        }
-        if (obj->meshRenderer && obj->meshRenderer->isResident()) {
-            obj->meshRenderer->render(*_geomShader);
-            drawCount++;
-            continue;
-        }
-        if (!obj->modelPath.empty()) {
-            try {
-                auto model = getOrLoadModel(obj->modelPath);
-                if (model) model->Draw(*_geomShader);
-                drawCount++;
-            } catch (const std::exception& e) {
-                HARUKA_MOTOR_ERROR(
-                    ErrorCode::MODEL_LOAD_FAILED,
-                    std::string("Failed to draw model ") + obj->modelPath + ": " + e.what()
-                );
-            }
-            continue;
-        }
+    VkResult presentResult = vkQueuePresentKHR(vkPresentQueue, &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        recreateSwapchainAndResources();
+    } else if (presentResult == VK_ERROR_DEVICE_LOST) {
+        fprintf(stderr, "[Vulkan] VK_ERROR_DEVICE_LOST en present. Intentando reinicializar contexto...\n");
+        recreateSwapchainAndResources();
+    } else if (presentResult != VK_SUCCESS) {
+        fprintf(stderr, "[Vulkan] Error inesperado en vkQueuePresentKHR: %d\n", presentResult);
+        recreateSwapchainAndResources();
     }
-    // Render celestial bodies with LOD
-    for (const auto& body : _worldSystem->getBodies()) {
-        if (!body.visible) continue;
-        if (g_sceneForRender && g_sceneForRender->getObject(body.name)) continue;
-
-        glm::vec3 camPos(activeCamera->position.x, activeCamera->position.y, activeCamera->position.z);
-        glm::vec3 bodyPos(body.localPos.x, body.localPos.y, body.localPos.z);
-        float distance = glm::length(camPos - bodyPos);
-        
-        int lod = distance < 50.0f ? 0 : distance < 200.0f ? 1 : distance < 1000.0f ? 2 : 3;
-        
-        if (!sphereLOD[lod]) continue;
-
-        glm::mat4 bodyModel = glm::translate(glm::mat4(1.0f), glm::vec3(body.localPos));
-        bodyModel = glm::scale(bodyModel, glm::vec3(body.radius));
-        
-        _geomShader->setMat4("model", bodyModel);
-        sphereLOD[lod]->draw();
+    auto frameEnd = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> frameDuration = frameEnd - frameStart;
+    g_lastFrameTimeMs = static_cast<float>(frameDuration.count());
+    g_frameCount++;
+    double now = std::chrono::duration<double>(frameEnd.time_since_epoch()).count();
+    if (now - g_lastFpsTime > 1.0) {
+        g_lastFps = static_cast<float>(g_frameCount / (now - g_lastFpsTime));
+        g_lastFpsTime = now;
+        g_frameCount = 0;
     }
-        
-    _gBuffer->unbind();
-
-    // ========== SSAO PASS ==========
-    _ssaoSystem->bindForWriting();
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    _ssaoShader->use();
-    _gBuffer->bindForReading(0, 0);
-    _gBuffer->bindForReading(1, 1);
-    
-    _ssaoShader->setInt("gPosition", 0);
-    _ssaoShader->setInt("gNormal", 1);
-    _ssaoShader->setInt("texNoise", 2);
-    _ssaoShader->setInt("kernelSize", 64);
-    _ssaoShader->setFloat("radius", 0.5f);
-    _ssaoShader->setFloat("bias", 0.025f);
-    _ssaoShader->setMat4("projection", proj);
-
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    _ssaoSystem->unbind();
-
-    // ========== LIGHTING PASS ==========
-    _lightingTarget->bindForWriting();
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    _lightShader->use();
-
-    _gBuffer->bindForReading(0, 0);
-    _gBuffer->bindForReading(1, 1);
-    _gBuffer->bindForReading(2, 2);
-    _gBuffer->bindForReading(3, 3);
-    _ssaoSystem->bindForReading(4);
-    _iblSystem->bindPrefilterMap(5);
-    _iblSystem->bindBRDFLUT(6);
-
-    _lightShader->setInt("gPosition", 0);
-    _lightShader->setInt("gNormal", 1);
-    _lightShader->setInt("gAlbedoSpec", 2);
-    _lightShader->setInt("gEmissive", 3);
-    _lightShader->setInt("ssao", 4);
-    _lightShader->setInt("prefilterMap", 5);
-    _lightShader->setInt("brdfLUT", 6);
-    _lightShader->setVec3("viewPos", activeCamera->position);
-    _lightShader->setMat4("view", view);
-    _lightShader->setInt("numCascades", _cascadedShadow ? _cascadedShadow->getNumCascades() : 0);
-    if (_cascadedShadow) {
-        for (int i = 0; i < _cascadedShadow->getNumCascades(); ++i) {
-            _lightShader->setMat4("cascadeLightSpaceMatrices[" + std::to_string(i) + "]", _cascadedShadow->getCascadeMatrix(i));
-            _lightShader->setFloat("cascadeSplits[" + std::to_string(i) + "]", _cascadedShadow->getCascadeInfo(i).zFar);
-            _cascadedShadow->bindForReading(i, 7 + i);
-            _lightShader->setInt("cascadeShadowMaps[" + std::to_string(i) + "]", 7 + i);
-        }
-    }
-
-    // Light culling
-    Haruka::Scene* scene = MotorInstance::getInstance().getScene();
-    if (!scene) {
-        scene = _currentScene.get();
-    }
-    auto culledLights = _lightCuller->cullLights(scene, view, proj, MAX_LIGHTS);
-    
-    _lightShader->setInt("numLights", culledLights.size());
-    for (size_t i = 0; i < culledLights.size(); i++) {
-        _lightShader->setVec3("lights[" + std::to_string(i) + "].position", culledLights[i].position);
-        _lightShader->setVec3("lights[" + std::to_string(i) + "].color", culledLights[i].color);
-    }
-
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    _lightingTarget->unbind();
-
-    // ========== FINAL COMPOSITE ==========
-    RenderTarget* externalTarget = MotorInstance::getInstance().getRenderTarget();
-    if (externalTarget) {
-        externalTarget->bindForWriting();
-    }
-    glViewport(0, 0, _width, _height);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-    _compositeShader->use();
-    _lightingTarget->bindForReading(0);
-    _bloomExtractTarget->bindForReading(1);
-    _compositeShader->setInt("scene", 0);
-    _compositeShader->setInt("bloom", 1);
-    _compositeShader->setFloat("bloomStrength", 0.0f);
-
-    glBindVertexArray(quadVAO);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glBindVertexArray(0);
-
-    if (externalTarget) {
-        externalTarget->unbind();
-    }
-
-    // ========== DEBUG METRICS ==========
+    // Actualizar overlay de debug
     FrameMetrics metrics;
-    metrics.fps = 60.0f;
-    metrics.frameTimeMs = 16.67f;
-    metrics.drawCalls = 0;
-    metrics.totalTriangles = 0;
-    metrics.totalVertices = 0;
-    metrics.totalLights = scene ? scene->getObjects().size() : 0;
-    metrics.culledLights = _lightCuller ? _lightCuller->getCulledLights() : 0;
-
-    auto streamStats = AssetStreamer::getInstance().getStats();
-    metrics.loadedAssets = streamStats.loadedAssets;
-    metrics.pendingAssets = streamStats.pendingAssets;
-    metrics.cacheUtilization = streamStats.cacheUtilization;
-
-    metrics.numCascades = 4;
-    metrics.activeCascade = 0;
-
-    // Recorrer la cola de render y sumar vértices/triángulos/draw calls
-    for (const auto* item : g_sceneRenderQueue) {
-        if (!item) continue;
-        if (item->meshRenderer) {
-            // Suponiendo que meshRenderer tiene métodos para obtener stats
-            metrics.drawCalls++;
-            metrics.totalVertices += item->meshRenderer->getVertexCount();
-            metrics.totalTriangles += item->meshRenderer->getTriangleCount();
-        } else if (!item->modelPath.empty()) {
-            try {
-                Model model(item->modelPath);
-                metrics.drawCalls++;
-                metrics.totalVertices += model.getVertexCount();
-                metrics.totalTriangles += model.getTriangleCount();
-            } catch (...) {}
-        }
-    }
-
+    metrics.fps = g_lastFps;
+    metrics.frameTimeMs = g_lastFrameTimeMs;
+    metrics.gpuTimeMs = g_lastGpuTimeMs;
     DebugOverlay::getInstance().updateMetrics(metrics);
 }
 
-void Application::cleanup() {
-    // Limpiar registro en MotorInstance
-    MotorInstance::getInstance().clear();
-    glfwTerminate();
+// --- Implementación de recreación dinámica del swapchain y recursos dependientes ---
+void Application::recreateSwapchainAndResources() {
+        printf("[Haruka] >> INICIO recreateSwapchainAndResources\n");
+        printf("[Haruka] << FIN recreateSwapchainAndResources\n");
+        printf("[Haruka] >> INICIO cleanup\n");
+        printf("[Haruka] << FIN cleanup\n");
+    vkDeviceWaitIdle(vkDevice);
+    // Destruir framebuffers
+    for (auto fb : vkFramebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(vkDevice, fb, nullptr);
+    }
+    vkFramebuffers.clear();
+    // Destruir image views
+    for (auto view : vkSwapchainImageViews) {
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(vkDevice, view, nullptr);
+    }
+    vkSwapchainImageViews.clear();
+    // Destruir swapchain
+    if (vkSwapchain) vkDestroySwapchainKHR(vkDevice, vkSwapchain, nullptr);
+    // Volver a crear swapchain y recursos dependientes
+    // --- Re-crear swapchain ---
+    VkSwapchainCreateInfoKHR swapchainCreateInfo{};
+    swapchainCreateInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    swapchainCreateInfo.surface = vkSurface;
+    swapchainCreateInfo.minImageCount = 2;
+    swapchainCreateInfo.imageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+    swapchainCreateInfo.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    swapchainCreateInfo.imageExtent = { (uint32_t)_width, (uint32_t)_height };
+    swapchainCreateInfo.imageArrayLayers = 1;
+    swapchainCreateInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    swapchainCreateInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    swapchainCreateInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    swapchainCreateInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    swapchainCreateInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    swapchainCreateInfo.clipped = VK_TRUE;
+    swapchainCreateInfo.oldSwapchain = VK_NULL_HANDLE;
+    if (vkCreateSwapchainKHR(vkDevice, &swapchainCreateInfo, nullptr, &vkSwapchain) != VK_SUCCESS) {
+        throw std::runtime_error("Fallo al recrear VkSwapchainKHR");
+    }
+    // --- Re-crear imágenes y image views ---
+    uint32_t imageCount = 0;
+    vkGetSwapchainImagesKHR(vkDevice, vkSwapchain, &imageCount, nullptr);
+    vkSwapchainImages.resize(imageCount);
+    vkGetSwapchainImagesKHR(vkDevice, vkSwapchain, &imageCount, vkSwapchainImages.data());
+    vkSwapchainImageViews.resize(imageCount);
+    for (size_t i = 0; i < imageCount; ++i) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = vkSwapchainImages[i];
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = VK_FORMAT_B8G8R8A8_SRGB;
+        viewInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(vkDevice, &viewInfo, nullptr, &vkSwapchainImageViews[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Fallo al recrear VkImageView de swapchain");
+        }
+    }
+    // --- Re-crear framebuffers ---
+    vkFramebuffers.resize(vkSwapchainImageViews.size());
+    for (size_t i = 0; i < vkSwapchainImageViews.size(); ++i) {
+        VkImageView attachments[] = { vkSwapchainImageViews[i] };
+        VkFramebufferCreateInfo framebufferInfo{};
+        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebufferInfo.renderPass = vkRenderPass;
+        framebufferInfo.attachmentCount = 1;
+        framebufferInfo.pAttachments = attachments;
+        framebufferInfo.width = _width;
+        framebufferInfo.height = _height;
+        framebufferInfo.layers = 1;
+        if (vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &vkFramebuffers[i]) != VK_SUCCESS) {
+            throw std::runtime_error("Fallo al recrear VkFramebuffer");
+        }
+    }
+    // --- Regrabar command buffers ---
+    for (size_t i = 0; i < vkCommandBuffers.size(); ++i) {
+        vkResetCommandBuffer(vkCommandBuffers[i], 0);
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        vkBeginCommandBuffer(vkCommandBuffers[i], &beginInfo);
+        renderFrameContentVulkan(vkCommandBuffers[i], static_cast<uint32_t>(i));
+        vkEndCommandBuffer(vkCommandBuffers[i]);
+    }
 }
 
-void Application::run(const std::string& startScenePath) {
-    create_window();
-    Haruka::Scene scene;
-    if (!startScenePath.empty()) {
-        scene.load(startScenePath);
-    } else {
-        scene = Haruka::Scene("DefaultScene");
+// --- Lógica de escena y colas de render, independiente del backend ---
+void Application::buildRenderQueue() {
+    Haruka::Scene* scene = MotorInstance::getInstance().getScene();
+    if (!scene) scene = _currentScene.get();
+    g_sceneForRender = scene;
+    g_sceneRenderQueue.clear();
+    if (!scene) return;
+    Camera* activeCamera = MotorInstance::getInstance().getCamera();
+    if (!activeCamera) activeCamera = _camera.get();
+
+    const double nearPlane = 0.0001;
+    const double farPlane = 300000000.0;
+    const double aspect = (_height > 0) ? static_cast<double>(_width) / static_cast<double>(_height) : (16.0 / 9.0);
+
+    glm::dvec3 camPos(0.0);
+    glm::mat4 viewProj(1.0f);
+    bool canCullByFrustum = false;
+
+    if (activeCamera) {
+        camPos = activeCamera->position;
+        glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), static_cast<float>(aspect), static_cast<float>(nearPlane), static_cast<float>(farPlane));
+        glm::mat4 view = activeCamera->getViewMatrix();
+        viewProj = proj * view;
+        canCullByFrustum = true;
     }
-    init(scene);
-    main_loop();
+
+    Haruka::TerrainStreamingStats terrainStats;
+    if (_terrainStreamingSystem) {
+        _terrainStreamingSystem->update(scene,
+                                        _worldSystem.get(),
+                                        _planetarySystem.get(),
+                                        _raycastSystem.get(),
+                                        activeCamera,
+                                        &terrainStats);
+    }
+
+    s_lastVisibleChunks = terrainStats.visibleChunks;
+    s_lastResidentChunks = terrainStats.residentChunks;
+    s_lastPendingChunkLoads = terrainStats.pendingChunkLoads;
+    s_lastPendingChunkEvictions = terrainStats.pendingChunkEvictions;
+    s_lastResidentMemoryMB = terrainStats.residentMemoryMB;
+    s_lastTrackedChunks = terrainStats.trackedChunks;
+    s_lastMaxMemoryMB = terrainStats.maxMemoryMB;
+
+    for (auto& obj : scene->getObjectsMutable()) {
+        if (isRenderDisabledByEditor(obj)) continue;
+        if (!isTerrainChunkFacingCamera(obj, activeCamera ? activeCamera->position : glm::dvec3(0.0))) continue;
+        Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
+        if (!Haruka::isRenderableObjectType(objType)) continue;
+
+        int layer = std::clamp(obj.renderLayer, 1, 5);
+        const glm::dvec3& worldPos = obj.getWorldPosition(scene);
+        const glm::dvec3& worldScale = obj.getWorldScale(scene);
+        double maxScale = std::max(std::abs(worldScale.x), std::max(std::abs(worldScale.y), std::abs(worldScale.z)));
+        const bool isHugeBody = (maxScale > 1000.0) || (obj.name == "Earth") || (obj.name == "Sun");
+
+        if (!isHugeBody) {
+            double unloadDistance = static_cast<double>(s_layerMaxDistance[layer]);
+            double loadDistance = unloadDistance * 0.85;
+
+            if (layer >= 4 && obj.meshRenderer) {
+                glm::dvec3 diff = worldPos - camPos;
+                double distSq = glm::dot(diff, diff);
+                double unloadDistSq = unloadDistance * unloadDistance * 1.32;
+                double loadDistanceSq = loadDistance * loadDistance;
+                if (distSq > unloadDistSq) {
+                    maybeReleasePrimitiveMesh(obj);
+                } else if (!obj.meshRenderer->isResident() && distSq < loadDistanceSq) {
+                    buildPrimitiveMeshFromProperties(obj);
+                }
+            }
+
+            if (layer >= 4 && !obj.modelPath.empty()) {
+                double distSq = glm::dot(worldPos - camPos, worldPos - camPos);
+                double unloadDistSq = unloadDistance * unloadDistance * 1.32;
+                if (distSq > unloadDistSq) {
+                    releaseModelFromCache(obj.modelPath);
+                }
+            }
+        }
+
+        if (isHugeBody) {
+            g_sceneRenderQueue.push_back(&obj);
+            continue;
+        }
+
+        if (canCullByFrustum) {
+            double radius = std::max(0.5 * glm::length(worldScale), maxScale);
+            if (radius < 0.001) {
+                radius = 0.5;
+            }
+
+            if (layer != 1) {
+                static constexpr double qualityMul[4] = {0.45, 0.70, 1.00, 1.35};
+                glm::dvec3 diff = worldPos - camPos;
+                double distSq = glm::dot(diff, diff);
+                double maxDist = static_cast<double>(s_layerMaxDistance[layer]) * qualityMul[s_renderQualityPreset];
+                double radiusPlus = radius + maxDist;
+                if (std::sqrt(distSq) > radiusPlus) {
+                    continue;
+                }
+            }
+
+            if (!isSphereInsideCameraFrustum(
+                    worldPos,
+                    radius,
+                    viewProj)) {
+                continue;
+            }
+        }
+
+        g_sceneRenderQueue.push_back(&obj);
+    }
+}
+
+void Application::renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIndex) {
+    buildRenderQueue();
+    Camera* activeCamera = MotorInstance::getInstance().getCamera();
+    if (!activeCamera) activeCamera = _camera.get();
+    if (!activeCamera) return;
+    glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), (float)_width / (float)_height, 0.0001f, 300000000.0f);
+    glm::mat4 view = activeCamera->getViewMatrix();
+    struct ViewProjUBO {
+        glm::mat4 view;
+        glm::mat4 proj;
+    } vpUbo;
+    vpUbo.view = view;
+    vpUbo.proj = proj;
+    void* data;
+    vkMapMemory(vkDevice, vkUniformBufferMemory, 0, sizeof(ViewProjUBO), 0, &data);
+    memcpy(data, &vpUbo, sizeof(ViewProjUBO));
+    vkUnmapMemory(vkDevice, vkUniformBufferMemory);
+
+    // --- GEOMETRY PASS ---
+    VkRenderPassBeginInfo geometryPassInfo{};
+    geometryPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    geometryPassInfo.renderPass = vkRenderPass;
+    geometryPassInfo.framebuffer = vkFramebuffers[imageIndex];
+    geometryPassInfo.renderArea.offset = {0, 0};
+    geometryPassInfo.renderArea.extent = { (uint32_t)_width, (uint32_t)_height };
+    VkClearValue clearValues[2] = {};
+    clearValues[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+    clearValues[1].depthStencil = { 1.0f, 0 };
+    geometryPassInfo.clearValueCount = 2;
+    geometryPassInfo.pClearValues = clearValues;
+    vkCmdBeginRenderPass(cmd, &geometryPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkGeometryPipeline);
+    for (const auto* obj : g_sceneRenderQueue) {
+        if (!obj) continue;
+        glm::mat4 model = obj->getWorldTransform(g_sceneForRender);
+        vkCmdPushConstants(cmd, vkGeometryPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(glm::mat4), &model);
+        VkDescriptorSet descriptorSet = vkUniformDescriptorSet;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkGeometryPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
+        if (obj->meshRenderer && obj->meshRenderer->isResident()) {
+            obj->meshRenderer->getMesh()->draw(cmd);
+        } else if (!obj->modelPath.empty()) {
+            try {
+                auto modelPtr = getOrLoadModel(obj->modelPath);
+                if (modelPtr) modelPtr->draw(cmd);
+            } catch (...) {
+                // Ignore model load/draw errors
+            }
+        }
+    }
+    vkCmdEndRenderPass(cmd);
+
+    // --- LIGHTING PASS ---
+    if (vkLightingTarget && vkLightingTarget->vkFramebuffer != VK_NULL_HANDLE) {
+        VkRenderPassBeginInfo lightingPassInfo{};
+        lightingPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        lightingPassInfo.renderPass = vkRenderPass;
+        lightingPassInfo.framebuffer = vkLightingTarget->vkFramebuffer;
+        lightingPassInfo.renderArea.offset = {0, 0};
+        lightingPassInfo.renderArea.extent = { (uint32_t)_width, (uint32_t)_height };
+        VkClearValue clearValuesLight[2] = {};
+        clearValuesLight[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+        clearValuesLight[1].depthStencil = { 1.0f, 0 };
+        lightingPassInfo.clearValueCount = 2;
+        lightingPassInfo.pClearValues = clearValuesLight;
+        vkCmdBeginRenderPass(cmd, &lightingPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkLightingPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkLightingPipelineLayout, 0, 1, &vkUniformDescriptorSet, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+
+    // --- POSTPROCESS PASS ---
+    if (vkPostprocessTarget && vkPostprocessTarget->vkFramebuffer != VK_NULL_HANDLE) {
+        VkRenderPassBeginInfo postprocessPassInfo{};
+        postprocessPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        postprocessPassInfo.renderPass = vkRenderPass;
+        postprocessPassInfo.framebuffer = vkPostprocessTarget->vkFramebuffer;
+        postprocessPassInfo.renderArea.offset = {0, 0};
+        postprocessPassInfo.renderArea.extent = { (uint32_t)_width, (uint32_t)_height };
+        VkClearValue clearValuesPost[1] = {};
+        clearValuesPost[0].color = { {0.0f, 0.0f, 0.0f, 1.0f} };
+        postprocessPassInfo.clearValueCount = 1;
+        postprocessPassInfo.pClearValues = clearValuesPost;
+        vkCmdBeginRenderPass(cmd, &postprocessPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPostprocessPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPostprocessPipelineLayout, 0, 1, &vkUniformDescriptorSet, 0, nullptr);
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+        vkCmdEndRenderPass(cmd);
+    }
+
+    // --- PRESENT PASS (swapchain) ---
+    VkClearValue clearColor = { {{0.1f, 0.1f, 0.1f, 1.0f}} };
+    VkRenderPassBeginInfo presentPassInfo{};
+    presentPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    presentPassInfo.renderPass = vkRenderPass;
+    presentPassInfo.framebuffer = vkFramebuffers[imageIndex];
+    presentPassInfo.renderArea.offset = {0, 0};
+    presentPassInfo.renderArea.extent = { (uint32_t)_width, (uint32_t)_height };
+    presentPassInfo.clearValueCount = 1;
+    presentPassInfo.pClearValues = &clearColor;
+    vkCmdBeginRenderPass(cmd, &presentPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPresentPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, vkPresentPipelineLayout, 0, 1, &vkUniformDescriptorSet, 0, nullptr);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);
 }

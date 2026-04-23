@@ -1,8 +1,65 @@
 #include "light_culler.h"
-#include <glm/gtc/matrix_transform.hpp>
+
+#include <stdexcept>
+#include <cstring>
 #include <algorithm>
 
 LightCuller::LightCuller() {}
+
+LightCuller::~LightCuller() {
+    destroyLightBuffer();
+}
+
+void LightCuller::createLightBuffer(VkDevice device_, VkPhysicalDevice physicalDevice_, size_t maxLights) {
+    destroyLightBuffer();
+    device = device_;
+    physicalDevice = physicalDevice_;
+    maxLightsBuffer = maxLights;
+    VkDeviceSize bufferSize = maxLights * sizeof(CulledLight);
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bufferSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(device, &bufferInfo, nullptr, &lightBuffer);
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device, lightBuffer, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    auto findMemoryType = [](VkPhysicalDevice pd, uint32_t typeFilter, VkMemoryPropertyFlags properties) -> uint32_t {
+        VkPhysicalDeviceMemoryProperties memProperties;
+        vkGetPhysicalDeviceMemoryProperties(pd, &memProperties);
+        for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+            if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+                return i;
+            }
+        }
+        throw std::runtime_error("No suitable memory type found");
+    };
+    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(device, &allocInfo, nullptr, &lightBufferMemory);
+    vkBindBufferMemory(device, lightBuffer, lightBufferMemory, 0);
+}
+
+void LightCuller::destroyLightBuffer() {
+    if (lightBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, lightBuffer, nullptr);
+        lightBuffer = VK_NULL_HANDLE;
+    }
+    if (lightBufferMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, lightBufferMemory, nullptr);
+        lightBufferMemory = VK_NULL_HANDLE;
+    }
+}
+
+void LightCuller::uploadLightsToBuffer(const std::vector<CulledLight>& lights) {
+    if (lightBuffer == VK_NULL_HANDLE || lightBufferMemory == VK_NULL_HANDLE) return;
+    void* mapped;
+    vkMapMemory(device, lightBufferMemory, 0, lights.size() * sizeof(CulledLight), 0, &mapped);
+    memcpy(mapped, lights.data(), lights.size() * sizeof(CulledLight));
+    vkUnmapMemory(device, lightBufferMemory);
+}
 
 LightCuller::Frustum LightCuller::extractFrustum(const glm::mat4& viewProj) {
     Frustum frustum;

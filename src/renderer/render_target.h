@@ -1,32 +1,22 @@
 #pragma once
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
 
-/**
- * @brief Color render target wrapper (FBO + color texture + depth RBO).
- */
 class RenderTarget {
 public:
-    /** @brief Creates target resources with fixed dimensions. */
     RenderTarget(unsigned int width, unsigned int height);
     ~RenderTarget();
 
-    /** @brief Binds FBO for draw/write operations. */
-    void bindForWriting();
-    /** @brief Restores default framebuffer binding. */
-    void unbind();
-    /** @brief Binds color texture for shader read at texture unit. */
-    void bindForReading(unsigned int textureUnit);
-
-    /** @brief Returns color attachment texture id. */
-    unsigned int getColorTexture() const { return colorTexture; }
-    /** @brief Returns framebuffer object id. */
-    unsigned int getFBO() const { return FBO; }
-
-private:
-    void setupFramebuffer();
-
-    unsigned int FBO = 0;
-    unsigned int colorTexture = 0;
-    unsigned int rboDepth = 0;
+    // Vulkan only
+    void createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h);
+    void destroyVulkanResources();
+    
+    VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
+    VkImage vkColorImage = VK_NULL_HANDLE;
+    VkDeviceMemory vkColorImageMemory = VK_NULL_HANDLE;
+    VkImageView vkColorImageView = VK_NULL_HANDLE;
+    VkImage vkDepthImage = VK_NULL_HANDLE;
+    VkDeviceMemory vkDepthImageMemory = VK_NULL_HANDLE;
+    VkImageView vkDepthImageView = VK_NULL_HANDLE;
     unsigned int width, height;
+    VkDevice m_device = VK_NULL_HANDLE;
 };

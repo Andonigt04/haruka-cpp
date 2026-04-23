@@ -1,5 +1,7 @@
 #pragma once
 
+
+#include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <memory>
 #include "core/camera.h"
@@ -30,8 +32,8 @@ public:
     
     /** @brief Advances movement, camera, and sync state. */
     void update(float deltaTime);
-    /** @brief Processes keyboard/mouse input from GLFW window. */
-    void processInput(GLFWwindow* window, float deltaTime);
+    /** @brief Processes keyboard/mouse input from SDL window and event. */
+    void processInput(SDL_Window* window, const Uint8* keyState, float deltaTime);
     
     /** @name Movement controls */
     ///@{

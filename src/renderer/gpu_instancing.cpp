@@ -1,177 +1,91 @@
 #include "gpu_instancing.h"
+#include <cstring>
 #include <glm/gtc/matrix_transform.hpp>
 
-GPUInstancing::GPUInstancing(PrecisionMode mode) : precisionMode(mode) {}
+GPUInstancing::GPUInstancing() {}
 
 GPUInstancing::~GPUInstancing() {
-    if (instanceVBO) glDeleteBuffers(1, &instanceVBO);
-    if (instanceVAO) glDeleteVertexArrays(1, &instanceVAO);
+    destroyInstanceBuffer();
 }
 
-void GPUInstancing::init(int maxInst) {
+void GPUInstancing::init(int maxInst, VkDevice device_, VkPhysicalDevice physicalDevice_, VkQueue transferQueue_, VkCommandPool commandPool_) {
     maxInstances = maxInst;
+    device = device_;
+    physicalDevice = physicalDevice_;
+    transferQueue = transferQueue_;
+    commandPool = commandPool_;
     instancesDouble.reserve(maxInstances);
     instancesFloat.reserve(maxInstances);
     setupInstanceBuffer();
 }
 
-glm::dmat4 GPUInstancing::createModelMatrixDouble(
-    const glm::dvec3& pos,
-    const glm::vec3& scale,
-    const glm::dvec3& rotation) const {
-    
-    glm::dmat4 model = glm::dmat4(1.0);
-    
-    // Translación (double precision)
-    model = glm::translate(model, pos);
-    
-    // Rotación (Euler angles)
-    model = glm::rotate(model, rotation.x, glm::dvec3(1.0, 0.0, 0.0));
-    model = glm::rotate(model, rotation.y, glm::dvec3(0.0, 1.0, 0.0));
-    model = glm::rotate(model, rotation.z, glm::dvec3(0.0, 0.0, 1.0));
-    
-    // Escala
-    model = glm::scale(model, glm::dvec3(scale));
-    
-    return model;
-}
-
-glm::mat4 GPUInstancing::createModelMatrixFloat(
-    const glm::vec3& pos,
-    const glm::vec3& scale,
-    const glm::vec3& rotation) const {
-    
-    glm::mat4 model = glm::mat4(1.0f);
-    
-    // Translación
-    model = glm::translate(model, pos);
-    
-    // Rotación (Euler angles)
-    model = glm::rotate(model, rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::rotate(model, rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
-    model = glm::rotate(model, rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
-    
-    // Escala
-    model = glm::scale(model, scale);
-    
-    return model;
-}
-
-void GPUInstancing::addInstanceDouble(
-    const glm::dvec3& position,
-    const glm::vec3& scale,
-    const glm::vec4& color,
-    const glm::dvec3& rotation) {
-    
-    if (instancesDouble.size() >= maxInstances) {
-        return;  // Buffer lleno
-    }
-    
-    InstanceDataDouble instance;
-    instance.model = createModelMatrixDouble(position, scale, rotation);
-    instance.position = position;
-    instance.color = color;
-    instance.scale = scale;
-    
-    instancesDouble.push_back(instance);
-    bufferDirty = true;
-}
-
-void GPUInstancing::addInstanceFloat(
-    const glm::vec3& position,
-    const glm::vec3& scale,
-    const glm::vec4& color,
-    const glm::vec3& rotation) {
-    
-    if (instancesFloat.size() >= maxInstances) {
-        return;  // Buffer lleno
-    }
-    
-    InstanceDataFloat instance;
-    instance.model = createModelMatrixFloat(position, scale, rotation);
-    instance.color = color;
-    instance.scale = scale;
-    
-    instancesFloat.push_back(instance);
-    bufferDirty = true;
-}
-
 void GPUInstancing::setupInstanceBuffer() {
-    // Crear VAO si no existe
-    if (instanceVAO == 0) {
-        glGenVertexArrays(1, &instanceVAO);
+    if (instanceBuffer != VK_NULL_HANDLE) destroyInstanceBuffer();
+    size_t elementSize = (precisionMode == PRECISION_DOUBLE) ? sizeof(InstanceDataDouble) : sizeof(InstanceDataFloat);
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = maxInstances * elementSize;
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateBuffer(device, &bufferInfo, nullptr, &instanceBuffer);
+    VkMemoryRequirements memReq;
+    vkGetBufferMemoryRequirements(device, instanceBuffer, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    uint32_t memoryTypeIndex = 0;
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1 << i)) &&
+            (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+            (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+            memoryTypeIndex = i;
+            break;
+        }
     }
-    
-    // Crear VBO para instancias
-    if (instanceVBO == 0) {
-        glGenBuffers(1, &instanceVBO);
-    }
-    
-    glBindVertexArray(instanceVAO);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, instanceVBO);
-    
-    // Calcular tamaño correcto basado en precision mode
-    size_t elementSize = (precisionMode == PRECISION_DOUBLE) ? 
-                         sizeof(InstanceDataDouble) : 
-                         sizeof(InstanceDataFloat);
-    
-    glBufferData(GL_COPY_WRITE_BUFFER, 
-                 maxInstances * elementSize, 
-                 nullptr, 
-                 GL_DYNAMIC_DRAW);
-    
-    // Para SSBO (Shader Storage Buffer Object), no necesitamos vertex attributes
-    // El shader accederá directamente al buffer
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, instanceVBO);
-    
-    glBindVertexArray(0);
+    allocInfo.memoryTypeIndex = memoryTypeIndex;
+    vkAllocateMemory(device, &allocInfo, nullptr, &instanceMemory);
+    vkBindBufferMemory(device, instanceBuffer, instanceMemory, 0);
 }
 
-void GPUInstancing::updateBuffer() {
-    if (!bufferDirty) return;
-    
-    glBindBuffer(GL_COPY_WRITE_BUFFER, instanceVBO);
-    
-    if (precisionMode == PRECISION_DOUBLE && !instancesDouble.empty()) {
-        glBufferSubData(GL_COPY_WRITE_BUFFER, 
-                        0,
-                        instancesDouble.size() * sizeof(InstanceDataDouble),
-                        instancesDouble.data());
-    } else if (precisionMode == PRECISION_FLOAT && !instancesFloat.empty()) {
-        glBufferSubData(GL_COPY_WRITE_BUFFER, 
-                        0,
-                        instancesFloat.size() * sizeof(InstanceDataFloat),
-                        instancesFloat.data());
+void GPUInstancing::destroyInstanceBuffer() {
+    if (instanceBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device, instanceBuffer, nullptr);
+        instanceBuffer = VK_NULL_HANDLE;
     }
-    
+    if (instanceMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, instanceMemory, nullptr);
+        instanceMemory = VK_NULL_HANDLE;
+    }
+}
+
+void GPUInstancing::updateBuffer(VkDevice device) {
+    if (!bufferDirty) return;
+    size_t elementSize = (precisionMode == PRECISION_DOUBLE) ? sizeof(InstanceDataDouble) : sizeof(InstanceDataFloat);
+    void* data;
+    vkMapMemory(device, instanceMemory, 0, maxInstances * elementSize, 0, &data);
+    if (precisionMode == PRECISION_DOUBLE && !instancesDouble.empty()) {
+        memcpy(data, instancesDouble.data(), instancesDouble.size() * sizeof(InstanceDataDouble));
+        instanceCount = instancesDouble.size();
+    } else if (precisionMode == PRECISION_FLOAT && !instancesFloat.empty()) {
+        memcpy(data, instancesFloat.data(), instancesFloat.size() * sizeof(InstanceDataFloat));
+        instanceCount = instancesFloat.size();
+    }
+    vkUnmapMemory(device, instanceMemory);
     bufferDirty = false;
 }
 
-void GPUInstancing::render(GLuint VAO, GLuint indexCount) {
-    int instanceCount = 0;
-    
-    if (precisionMode == PRECISION_DOUBLE) {
-        instanceCount = instancesDouble.size();
-    } else {
-        instanceCount = instancesFloat.size();
-    }
-    
+void GPUInstancing::render(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout layout, VkBuffer meshVertexBuffer, VkBuffer meshIndexBuffer, uint32_t indexCount) {
     if (instanceCount == 0) return;
-    
-    updateBuffer();
-    
-    // Bind tanto el mesh VAO como el instancing VBO
-    glBindVertexArray(VAO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, instanceVBO);
-    
-    // Renderizar con instancing
-    glDrawElementsInstanced(GL_TRIANGLES, 
-                           indexCount, 
-                           GL_UNSIGNED_INT, 
-                           0, 
-                           instanceCount);
-    
-    glBindVertexArray(0);
+    VkDeviceSize offsets[] = {0};
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    VkBuffer vertexBuffers[] = {meshVertexBuffer, instanceBuffer};
+    VkDeviceSize bufferOffsets[] = {0, 0};
+    vkCmdBindVertexBuffers(cmd, 0, 2, vertexBuffers, bufferOffsets);
+    vkCmdBindIndexBuffer(cmd, meshIndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+    // TODO: Bindear descriptor sets si es necesario
+    vkCmdDrawIndexed(cmd, indexCount, static_cast<uint32_t>(instanceCount), 0, 0, 0);
 }
 
 void GPUInstancing::clear() {

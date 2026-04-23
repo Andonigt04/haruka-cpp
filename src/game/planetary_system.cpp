@@ -1,4 +1,5 @@
 #include "planetary_system.h"
+
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -58,42 +59,27 @@ void PlanetarySystem::init(Scene* scene, WorldSystem* worldSystem) {
 
 void PlanetarySystem::initTerrain(int size, float heightScale, int seed) {
     terrain = std::make_unique<Terrain>(size, heightScale);
-    terrain->setPosition(glm::vec3(-size * 0.5f, -10.0f, -size * 0.5f));
-    terrain->setScale(glm::vec3(10.0f, 1.0f, 10.0f));
-    terrain->generatePerlin(seed);
+    // TODO: Adaptar inicialización de posición, escala y generación procedural a Vulkan si es necesario
     std::cout << "[PlanetarySystem] Terrain initialized: size=" << size
               << " heightScale=" << heightScale << " seed=" << seed << std::endl;
 }
 
-void PlanetarySystem::renderTerrain(Shader& shader, const Camera* camera) {
+void PlanetarySystem::renderTerrain(Shader& shader, const Camera* camera, VkCommandBuffer cmd) {
     if (!terrain) return;
-
-    // Asegurar texturas válidas para shaders deferred que esperan samplers
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, 0);
-    glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, 0);
-
-    shader.setInt("texture_diffuse1", 0);
-    shader.setInt("texture_specular1", 1);
-    shader.setInt("texture_emissive1", 2);
 
     // Si el WorldSystem indica solo mesh base, renderizar el mesh base del planeta
     if (worldSystem && worldSystem->shouldRenderBaseMesh()) {
         if (scene) {
             auto* earthObj = scene->getObject("Earth");
             if (earthObj && earthObj->meshRenderer && earthObj->meshRenderer->isResident()) {
-                glm::mat4 model = earthObj->getWorldTransform(scene);
-                shader.setMat4("model", model);
-                earthObj->meshRenderer->render(shader);
+                // TODO: Subir la matriz model a un uniform buffer o push constant
+                earthObj->meshRenderer->render(shader, cmd);
             }
         }
         return;
     }
 
-    terrain->render(shader, camera);
+    terrain->render(shader, camera, cmd);
 }
 
 void PlanetarySystem::setDetailedSurfaceData(const std::string& bodyName, const PlanetData& data) {

@@ -1,15 +1,16 @@
-#version 460 core
+#version 450 core
+
 layout(location = 0) in vec3 aPos;
 
-out VS_OUT {
-    vec3 WorldPos;
-} vs_out;
+layout(location = 0) out vec3 WorldPos;
 
-uniform mat4 model;
+layout(set = 0, binding = 0) uniform Matrices {
+    mat4 model;
+};
 
 void main()
 {
     vec3 worldPos = vec3(model * vec4(aPos, 1.0));
-    vs_out.WorldPos = worldPos;
+    WorldPos = worldPos;
     gl_Position = vec4(worldPos, 1.0);
 }

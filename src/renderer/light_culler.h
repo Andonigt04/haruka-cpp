@@ -1,7 +1,9 @@
 #pragma once
 
-#include <glm/glm.hpp>
+#include <vulkan/vulkan.h>
 #include <vector>
+#include <glm/glm.hpp>
+
 #include "core/scene.h"
 
 /**
@@ -21,7 +23,7 @@ public:
 
     /** @brief Constructs a light culling helper. */
     LightCuller();
-    ~LightCuller() = default;
+    ~LightCuller();
 
     /**
      * @brief Culls scene lights for the current camera/frustum.
@@ -56,6 +58,20 @@ private:
     /** @brief Tests a sphere against the current frustum. */
     bool isSphereInFrustum(const glm::vec3& center, float radius, const Frustum& frustum);
 
+    // Vulkan buffer para luces visibles
+    VkBuffer lightBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory lightBufferMemory = VK_NULL_HANDLE;
+    VkDevice device = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    size_t maxLightsBuffer = 256;
+
+    void createLightBuffer(VkDevice device, VkPhysicalDevice physicalDevice, size_t maxLights = 256);
+    void destroyLightBuffer();
+    void uploadLightsToBuffer(const std::vector<CulledLight>& lights);
+
     int totalLights = 0;
     int culledLights = 0;
+
+    size_t lightCount = 0;
+    // TODO: Implementar lógica de creación y destrucción de buffers y recursos Vulkan
 };

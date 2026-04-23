@@ -1,251 +1,81 @@
 #include "compute_postprocess.h"
-#include <glm/glm.hpp>
-#include <iostream>
 
-ComputePostProcess::ComputePostProcess() {}
+#include <stdexcept>
 
-ComputePostProcess::~ComputePostProcess() {
-    if (bloomShader) glDeleteProgram(bloomShader);
-    if (toneMappingShader) glDeleteProgram(toneMappingShader);
-    if (colorGradingShader) glDeleteProgram(colorGradingShader);
+ComputePostprocess::ComputePostprocess(unsigned int width, unsigned int height)
+    : width(width), height(height) {}
+
+ComputePostprocess::~ComputePostprocess() {
+    // El usuario debe llamar a destroyVulkanResources antes del destructor
 }
 
-GLuint ComputePostProcess::compileComputeShader(const std::string& source) {
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    const char* src = source.c_str();
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-
-    int success;
-    char infoLog[512];
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        std::cerr << "Compute shader compilation failed: " << infoLog << "\n";
-        glDeleteShader(shader);
-        return 0;
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
     }
+    throw std::runtime_error("No suitable memory type found");
+}
 
-    GLuint program = glCreateProgram();
-    glAttachShader(program, shader);
-    glLinkProgram(program);
+void ComputePostprocess::createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, uint32_t w, uint32_t h) {
+    width = w;
+    height = h;
+    VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT; // HDR para postproceso
+    // Crear imagen
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.extent.width = w;
+    imgInfo.extent.height = h;
+    imgInfo.extent.depth = 1;
+    imgInfo.mipLevels = 1;
+    imgInfo.arrayLayers = 1;
+    imgInfo.format = format;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imgInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &imgInfo, nullptr, &vkImage) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create ComputePostprocess image");
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, vkImage, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &vkImageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate ComputePostprocess image memory");
+    vkBindImageMemory(device, vkImage, vkImageMemory, 0);
+    // Crear view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = vkImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device, &viewInfo, nullptr, &vkImageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create ComputePostprocess image view");
+}
 
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        std::cerr << "Shader program linking failed: " << infoLog << "\n";
-        glDeleteProgram(program);
-        glDeleteShader(shader);
-        return 0;
+void ComputePostprocess::destroyVulkanResources(VkDevice device) {
+    if (vkImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, vkImageView, nullptr);
+        vkImageView = VK_NULL_HANDLE;
     }
-
-    glDeleteShader(shader);
-    return program;
-}
-
-void ComputePostProcess::init(int width, int height) {
-    screenWidth = width;
-    screenHeight = height;
-
-    // Compilar bloom shader
-    const char* bloomSource = R"(
-#version 460 core
-layout(local_size_x = 8, local_size_y = 8) in;
-
-layout(rgba16f, binding = 0) uniform image2D inputImg;
-layout(rgba16f, binding = 1) uniform image2D outputImg;
-
-uniform float bloomThreshold = 1.0;
-uniform float bloomStrength = 1.0;
-
-void main() {
-    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-    
-    vec4 color = imageLoad(inputImg, pixel);
-    float brightness = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-    
-    vec4 bloom = vec4(0.0);
-    if (brightness > bloomThreshold) {
-        bloom = color * bloomStrength;
+    if (vkImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device, vkImage, nullptr);
+        vkImage = VK_NULL_HANDLE;
     }
-    
-    imageStore(outputImg, pixel, bloom);
-}
-)";
-
-    bloomShader = compileComputeShader(bloomSource);
-
-    // Compilar tone mapping shader (ACES)
-    const char* toneMappingSource = R"(
-#version 460 core
-layout(local_size_x = 8, local_size_y = 8) in;
-
-layout(rgba16f, binding = 0) uniform image2D inputImg;
-layout(rgba8, binding = 1) uniform image2D outputImg;
-
-uniform float exposure = 1.0;
-uniform int toneMode = 2;  // 2 = ACES
-
-vec3 acesToneMapping(vec3 color) {
-    const float A = 2.51;
-    const float B = 0.03;
-    const float C = 2.43;
-    const float D = 0.59;
-    const float E = 0.14;
-    
-    return clamp((color*(A*color+B))/(color*(C*color+D)+E), 0.0, 1.0);
-}
-
-vec3 reinhardToneMapping(vec3 color) {
-    return color / (color + vec3(1.0));
-}
-
-void main() {
-    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-    
-    vec4 hdrColor = imageLoad(inputImg, pixel);
-    vec3 color = hdrColor.rgb * exposure;
-    
-    vec3 mapped;
-    if (toneMode == 1) {
-        mapped = reinhardToneMapping(color);
-    } else {
-        mapped = acesToneMapping(color);
+    if (vkImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vkImageMemory, nullptr);
+        vkImageMemory = VK_NULL_HANDLE;
     }
-    
-    vec4 ldrColor = vec4(mapped, hdrColor.a);
-    imageStore(outputImg, pixel, ldrColor);
-}
-)";
-
-    toneMappingShader = compileComputeShader(toneMappingSource);
-
-    // Compilar color grading shader
-    const char* colorGradingSource = R"(
-#version 460 core
-layout(local_size_x = 8, local_size_y = 8) in;
-
-layout(rgba8, binding = 0) uniform image2D inputImg;
-layout(rgba8, binding = 1) uniform image2D outputImg;
-
-uniform float saturation = 1.0;
-uniform float contrast = 1.0;
-uniform float brightness = 0.0;
-
-void main() {
-    ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-    
-    vec4 color = imageLoad(inputImg, pixel);
-    vec3 rgb = color.rgb;
-    
-    // Brightness
-    rgb += brightness;
-    
-    // Contrast
-    rgb = (rgb - 0.5) * contrast + 0.5;
-    
-    // Saturation (desaturate and recombine)
-    float gray = dot(rgb, vec3(0.299, 0.587, 0.114));
-    rgb = mix(vec3(gray), rgb, saturation);
-    
-    imageStore(outputImg, pixel, vec4(rgb, color.a));
-}
-)";
-
-    colorGradingShader = compileComputeShader(colorGradingSource);
-
-    stats.dispatchWidth = (screenWidth + localGroupSize - 1) / localGroupSize;
-    stats.dispatchHeight = (screenHeight + localGroupSize - 1) / localGroupSize;
-    stats.localGroupSize = localGroupSize;
-    stats.estimatedSpeedup = 1.2f;  // ~20% speedup
-
-    std::cout << "✓ Compute Post-Processing initialized\n";
-    std::cout << "  Resolution: " << screenWidth << "x" << screenHeight << "\n";
-    std::cout << "  Dispatch: " << stats.dispatchWidth << "x" << stats.dispatchHeight << "\n";
-}
-
-void ComputePostProcess::dispatchCompute(GLuint shader, int width, int height) {
-    glUseProgram(shader);
-    
-    int dispatchX = (width + localGroupSize - 1) / localGroupSize;
-    int dispatchY = (height + localGroupSize - 1) / localGroupSize;
-    
-    glDispatchCompute(dispatchX, dispatchY, 1);
-    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
-}
-
-void ComputePostProcess::bloomCompute(
-    GLuint inputTexture,
-    GLuint outputTexture,
-    float threshold,
-    float strength) {
-    
-    if (!bloomShader) return;
-
-    glUseProgram(bloomShader);
-    
-    glBindImageTexture(0, inputTexture, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA16F);
-    glBindImageTexture(1, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA16F);
-    
-    glUniform1f(glGetUniformLocation(bloomShader, "bloomThreshold"), threshold);
-    glUniform1f(glGetUniformLocation(bloomShader, "bloomStrength"), strength);
-    
-    dispatchCompute(bloomShader, screenWidth, screenHeight);
-}
-
-void ComputePostProcess::toneMappingCompute(
-    GLuint inputTexture,
-    GLuint outputTexture,
-    float exposure,
-    ToneMapMode mode) {
-    
-    if (!toneMappingShader) return;
-
-    glUseProgram(toneMappingShader);
-    
-    glBindImageTexture(0, inputTexture, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA16F);
-    glBindImageTexture(1, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
-    
-    glUniform1f(glGetUniformLocation(toneMappingShader, "exposure"), exposure);
-    glUniform1i(glGetUniformLocation(toneMappingShader, "toneMode"), mode);
-    
-    dispatchCompute(toneMappingShader, screenWidth, screenHeight);
-}
-
-void ComputePostProcess::colorGradingCompute(
-    GLuint inputTexture,
-    GLuint outputTexture,
-    float saturation,
-    float contrast,
-    float brightness) {
-    
-    if (!colorGradingShader) return;
-
-    glUseProgram(colorGradingShader);
-    
-    glBindImageTexture(0, inputTexture, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
-    glBindImageTexture(1, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
-    
-    glUniform1f(glGetUniformLocation(colorGradingShader, "saturation"), saturation);
-    glUniform1f(glGetUniformLocation(colorGradingShader, "contrast"), contrast);
-    glUniform1f(glGetUniformLocation(colorGradingShader, "brightness"), brightness);
-    
-    dispatchCompute(colorGradingShader, screenWidth, screenHeight);
-}
-
-void ComputePostProcess::processAll(
-    GLuint inputTexture,
-    GLuint outputTexture,
-    float exposure,
-    float bloomThreshold,
-    float bloomStrength,
-    ToneMapMode toneMode,
-    float saturation,
-    float contrast,
-    float brightness) {
-    
-    // Pipeline: Bloom -> Tone Mapping -> Color Grading
-    bloomCompute(inputTexture, outputTexture, bloomThreshold, bloomStrength);
-    toneMappingCompute(outputTexture, outputTexture, exposure, toneMode);
-    colorGradingCompute(outputTexture, outputTexture, saturation, contrast, brightness);
 }

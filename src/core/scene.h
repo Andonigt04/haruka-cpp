@@ -1,10 +1,11 @@
-#pragma once
+#ifndef SCENE_H
+#define SCENE_H
 
 #include <string>
 #include <vector>
 #include <memory>
 #include <glm/glm.hpp>
-#include "core/component.h"
+#include "component.h"
 #include <nlohmann/json.hpp>
 #include "core/components/transform_component.h"
 #include "core/components/mesh_component.h"
@@ -97,3 +98,5 @@ namespace Haruka
         void executeInitializer(const std::string& scenePath);
     };
 }
+
+#endif

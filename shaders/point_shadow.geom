@@ -1,16 +1,14 @@
-#version 460 core
+#version 450 core
+
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 18) out;
 
-uniform mat4 shadowMatrices[6];
+layout(set = 0, binding = 0) uniform Matrices {
+    mat4 shadowMatrices[6];
+};
 
-in VS_OUT {
-    vec3 WorldPos;
-} gs_in[];
-
-out GS_OUT {
-    vec4 FragPos;
-} gs_out;
+layout(location = 0) in vec3 WorldPos[];
+layout(location = 0) out vec4 FragPos;
 
 void main()
 {
@@ -20,8 +18,8 @@ void main()
         
         for(int i = 0; i < 3; ++i)
         {
-            gs_out.FragPos = vec4(gs_in[i].WorldPos, 1.0);
-            gl_Position = shadowMatrices[face] * gs_out.FragPos;
+            FragPos = vec4(WorldPos[i], 1.0);
+            gl_Position = shadowMatrices[face] * FragPos;
             EmitVertex();
         }
         EndPrimitive();

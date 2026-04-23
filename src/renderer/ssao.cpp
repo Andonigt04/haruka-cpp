@@ -1,86 +1,96 @@
 #include "ssao.h"
-#include "core/error_reporter.h"
-#include <random>
-#include <iostream>
+#include <stdexcept>
 
 SSAO::SSAO(unsigned int width, unsigned int height)
-    : width(width), height(height) {
-    setupSamples();
-    setupFramebuffer();
-}
-
-void SSAO::setupSamples() {
-    std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
-    std::mt19937 gen;
-    
-    // Kernel de 64 muestras en hemisferio
-    for (unsigned int i = 0; i < 64; ++i) {
-        glm::vec3 sample(
-            randomFloats(gen) * 2.0 - 1.0,
-            randomFloats(gen) * 2.0 - 1.0,
-            randomFloats(gen)
-        );
-        sample = glm::normalize(sample);
-        sample *= randomFloats(gen);
-        
-        float scale = float(i) / 64.0;
-        scale = 0.1f + (scale * scale) * (1.0f - 0.1f);
-        sample *= scale;
-        ssaoKernel.push_back(sample);
-    }
-    
-    // Noise texture (4x4)
-    for (unsigned int i = 0; i < 16; i++) {
-        glm::vec3 noise(
-            randomFloats(gen) * 2.0 - 1.0,
-            randomFloats(gen) * 2.0 - 1.0,
-            0.0f
-        );
-        ssaoNoise.push_back(noise);
-    }
-    
-    glGenTextures(1, &noiseTexture);
-    glBindTexture(GL_TEXTURE_2D, noiseTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-}
-
-void SSAO::setupFramebuffer() {
-    glGenFramebuffers(1, &ssaoFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-    
-    glGenTextures(1, &ssaoColorBuffer);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssaoColorBuffer, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "SSAO framebuffer incomplete!");
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void SSAO::bindForWriting() {
-    glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-    glViewport(0, 0, width, height);
-}
-
-void SSAO::unbind() {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void SSAO::bindForReading(unsigned int textureUnit) {
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
-}
+    : width(width), height(height) {}
 
 SSAO::~SSAO() {
-    glDeleteFramebuffers(1, &ssaoFBO);
-    glDeleteTextures(1, &ssaoColorBuffer);
-    glDeleteTextures(1, &noiseTexture);
+    // Vulkan: liberar recursos debe llamarse explícitamente
+}
+
+
+void SSAO::createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h) {
+    width = w;
+    height = h;
+    VkFormat format = VK_FORMAT_R8_UNORM; // SSAO suele ser un canal
+    // Crear imagen
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.extent.width = w;
+    imgInfo.extent.height = h;
+    imgInfo.extent.depth = 1;
+    imgInfo.mipLevels = 1;
+    imgInfo.arrayLayers = 1;
+    imgInfo.format = format;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &imgInfo, nullptr, &vkImage) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create SSAO image");
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, vkImage, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    uint32_t memoryTypeIndex = 0;
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((memReq.memoryTypeBits & (1 << i)) &&
+            (memProperties.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            memoryTypeIndex = i;
+            break;
+        }
+    }
+    allocInfo.memoryTypeIndex = memoryTypeIndex;
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &vkImageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate SSAO image memory");
+    vkBindImageMemory(device, vkImage, vkImageMemory, 0);
+    // Crear view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = vkImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device, &viewInfo, nullptr, &vkImageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create SSAO image view");
+    // Crear framebuffer
+    VkImageView attachments[] = { vkImageView };
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = renderPass;
+    fbInfo.attachmentCount = 1;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = w;
+    fbInfo.height = h;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &vkFramebuffer) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create SSAO framebuffer");
+}
+
+void SSAO::destroyVulkanResources(VkDevice device) {
+    if (vkFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, vkFramebuffer, nullptr);
+        vkFramebuffer = VK_NULL_HANDLE;
+    }
+    if (vkImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, vkImageView, nullptr);
+        vkImageView = VK_NULL_HANDLE;
+    }
+    if (vkImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device, vkImage, nullptr);
+        vkImage = VK_NULL_HANDLE;
+    }
+    if (vkImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vkImageMemory, nullptr);
+        vkImageMemory = VK_NULL_HANDLE;
+    }
 }

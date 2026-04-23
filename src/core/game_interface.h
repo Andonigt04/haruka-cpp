@@ -2,7 +2,7 @@
 
 #include "scene.h"
 #include "camera.h"
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 
 namespace Haruka {
 
@@ -16,7 +16,7 @@ struct GameInterface {
     /** @brief Called once when the game session starts. */
     typedef void (*OnInitFunc)(Scene* scene);
     /** @brief Called every frame while the game is running. */
-    typedef void (*OnUpdateFunc)(GLFWwindow* window, float deltaTime);
+    typedef void (*OnUpdateFunc)(SDL_Window* window, float deltaTime);
     /** @brief Called once during shutdown. */
     typedef void (*OnShutdownFunc)();
     

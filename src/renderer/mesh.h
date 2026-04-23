@@ -5,10 +5,11 @@
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
-#include <glad/glad.h>
-#include "shader.h"
+#include <vulkan/vulkan.h>
 
-/** @brief Interleaved vertex layout used by complex mesh path. */
+#include "shader.h"
+#include "buffer_objects.h"
+
 #pragma pack(push, 1)
 struct Vertex {
     glm::vec3 Position;
@@ -19,60 +20,43 @@ struct Vertex {
 };
 #pragma pack(pop)
 
-/** @brief Texture binding descriptor attached to a mesh material slot. */
 struct MeshTexture {
-    unsigned int id;
+    VkImage vkImage = VK_NULL_HANDLE;
+    VkDeviceMemory vkImageMemory = VK_NULL_HANDLE;
+    VkImageView vkImageView = VK_NULL_HANDLE;
+    VkSampler vkSampler = VK_NULL_HANDLE;
     std::string type;
     std::string path;
+    void createVulkanImage(VkDevice device, VkPhysicalDevice physicalDevice, uint32_t width, uint32_t height, const void* pixels);
+    void destroyVulkanImage(VkDevice device);
+    VkDescriptorSet vkDescriptorSet = VK_NULL_HANDLE;
 };
 
-/**
- * @brief GPU mesh wrapper with two construction paths.
- *
- * Supports:
- * - full model path (`Vertex` + textures)
- * - simplified geometry path (positions/normals/indices)
- */
 class Mesh {
 public:
     std::vector<Vertex>       vertex;
     std::vector<unsigned int> index;
     std::vector<MeshTexture>  textures;
-    unsigned int VAO;
+    // Vulkan only
+    VertexBuffer vertexBuffer;
+    IndexBuffer indexBuffer;
 
-    /** @brief Constructs mesh from full vertex/material data. */
     Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures);
-    
-    /** @brief Constructs mesh from simple geometry buffers. */
     Mesh(const std::vector<glm::vec3>& vertices,
          const std::vector<glm::vec3>& normals,
          const std::vector<unsigned int>& indices);
-    
     ~Mesh();
 
-    /** @brief Issues draw call using associated textures and shader bindings. */
-    void Draw(Shader &shader);
-    /** @brief Compatibility alias for simple draw usage. */
-    void draw() const;  // Alias para compatibilidad
-    /** @brief Returns index count in index buffer. */
-    size_t getIndexCount() const { return index.size(); }
-    /** @brief Returns vertex count for active mesh representation. */
-    int getVertexCount() const { return isSimpleGeometry ? simpleVertexCount : static_cast<int>(vertex.size()); }
-    /** @brief Returns triangle count (`indices / 3`). */
-    int getTriangleCount() const { return static_cast<int>(index.size() / 3); }
-
-private:
-    unsigned int VBO, EBO;
-    GLuint nbo = 0;  // Normal buffer para geometria simple
-    bool isSimpleGeometry = false;
-    int simpleVertexCount = 0;
+    void createVulkanBuffers(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue transferQueue, VkCommandPool commandPool);
+    void destroyVulkanBuffers();
+    // Vulkan draw call
+    void draw(VkCommandBuffer cmd) const;
     
-    /** @brief Configures VAO/VBO/EBO for full vertex path. */
-    void setupMesh();
-    /** @brief Configures buffers for simplified geometry path. */
-    void setupSimpleMesh(const std::vector<glm::vec3>& vertices,
-                         const std::vector<glm::vec3>& normals,
-                         const std::vector<unsigned int>& indices);
+    size_t getIndexCount() const { return index.size(); }
+    int getVertexCount() const { return static_cast<int>(vertex.size()); }
+    int getTriangleCount() const { return static_cast<int>(index.size() / 3); }
+private:
+    // Vulkan only
 };
 
 #endif

@@ -21,7 +21,6 @@ std::string ErrorInfo::getErrorName() const {
         // Motor
         case ErrorCode::MOTOR_INIT_FAILED: return "MOTOR_INIT_FAILED";
         case ErrorCode::WINDOW_CREATION_FAILED: return "WINDOW_CREATION_FAILED";
-        case ErrorCode::OPENGL_INIT_FAILED: return "OPENGL_INIT_FAILED";
         case ErrorCode::SHADER_COMPILATION_FAILED: return "SHADER_COMPILATION_FAILED";
 
         // Editor

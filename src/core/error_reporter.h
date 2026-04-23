@@ -31,7 +31,6 @@ enum class ErrorCode {
     // Motor/Core (000-099)
     MOTOR_INIT_FAILED = 0,
     WINDOW_CREATION_FAILED = 1,
-    OPENGL_INIT_FAILED = 2,
     SHADER_COMPILATION_FAILED = 3,
     MOTOR_LIBRARY = 4,
 

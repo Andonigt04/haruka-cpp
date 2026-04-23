@@ -1,16 +1,18 @@
-#version 460 core
+#version 450 core
 
-in vec3 FragPos;
-in vec3 Normal;
-in vec2 TexCoord;
-in vec4 InstanceColor;
+layout(location = 0) in vec3 FragPos;
+layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec2 TexCoord;
+layout(location = 3) in vec4 InstanceColor;
+layout(location = 0) out vec4 FragColor;
 
-out vec4 FragColor;
+layout(set = 0, binding = 0) uniform sampler2D texture_diffuse1;
 
-uniform sampler2D texture_diffuse1;
-uniform vec3 viewPos;
-uniform vec3 lightPos;
-uniform vec3 lightColor;
+layout(set = 0, binding = 1) uniform Params {
+    vec3 viewPos;
+    vec3 lightPos;
+    vec3 lightColor;
+};
 
 void main() {
     // Ambient

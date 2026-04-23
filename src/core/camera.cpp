@@ -1,6 +1,5 @@
+#include <SDL3/SDL.h>
 #include "camera.h"
-
-#include <GLFW/glfw3.h>
 
 Camera::Camera(Haruka::WorldPos startPos)
     : position(startPos), orientation(glm::dvec3(0.0, 0.0, 0.0)), zoom(45.0f) {}
@@ -30,16 +29,17 @@ void Camera::rotate(float deltaX, float deltaY) {
     orientation *= glm::angleAxis(yRad, pitchAxis);
 }
 
-void Camera::processInput(GLFWwindow* window, float deltaTime) {
+void Camera::processInput(float deltaTime) {
     double velocity = (double)speed * (double)deltaTime;
     glm::vec3 right = glm::normalize(glm::cross(getFront(), getUp()));
     
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) position += Haruka::WorldPos(getFront()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) position -= Haruka::WorldPos(getFront()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) position -= Haruka::WorldPos(right) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) position += Haruka::WorldPos(right) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) position += Haruka::WorldPos(getUp()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) position -= Haruka::WorldPos(getUp()) * velocity;
+    const bool* keyState = SDL_GetKeyboardState(NULL);
+    if (keyState[SDL_SCANCODE_W]) position += Haruka::WorldPos(getFront()) * velocity;
+    if (keyState[SDL_SCANCODE_S]) position -= Haruka::WorldPos(getFront()) * velocity;
+    if (keyState[SDL_SCANCODE_A]) position -= Haruka::WorldPos(right) * velocity;
+    if (keyState[SDL_SCANCODE_D]) position += Haruka::WorldPos(right) * velocity;
+    if (keyState[SDL_SCANCODE_SPACE]) position += Haruka::WorldPos(getUp()) * velocity;
+    if (keyState[SDL_SCANCODE_LCTRL]) position -= Haruka::WorldPos(getUp()) * velocity;
 }
 
 void Camera::ProcessMouseScroll(float yoffset) {

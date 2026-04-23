@@ -1,7 +1,7 @@
 #ifndef PRIMITIVE_SHAPES_H
 #define PRIMITIVE_SHAPES_H
 
-#include <glad/glad.h>
+#include <vulkan/vulkan.h> // TODO: Usar Vulkan en vez de OpenGL
 #include <glm/glm.hpp>
 #include <vector>
 #include "mesh.h"

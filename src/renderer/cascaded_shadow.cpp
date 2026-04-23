@@ -1,202 +1,116 @@
 #include "cascaded_shadow.h"
-#include "core/error_reporter.h"
-#include <glm/gtc/matrix_transform.hpp>
-#include <array>
-#include <cmath>
-#include <limits>
-#include <iostream>
 
-CascadedShadowMap::CascadedShadowMap() {}
+#include <stdexcept>
 
-CascadedShadowMap::~CascadedShadowMap() {
-    for (auto fbo : shadowMapFramebuffers) {
-        glDeleteFramebuffers(1, &fbo);
-    }
-    for (auto tex : shadowMapTextures) {
-        glDeleteTextures(1, &tex);
-    }
+CascadedShadow::CascadedShadow(unsigned int width, unsigned int height, int numCascades)
+    : width(width), height(height), numCascades(numCascades) {}
+
+CascadedShadow::~CascadedShadow() {
+    // El usuario debe llamar a destroyVulkanResources antes del destructor
 }
 
-void CascadedShadowMap::init(float zNear, float zFar, float lambda) {
-    this->zNear = zNear;
-    this->zFar = zFar;
-    this->lambda = lambda;
-
-    shadowMapTextures.resize(NUM_CASCADES);
-    shadowMapFramebuffers.resize(NUM_CASCADES);
-    cascades.resize(NUM_CASCADES);
-
-    for (int i = 0; i < NUM_CASCADES; i++) {
-        createShadowMap(i);
-    }
-
-    std::cout << "✓ Cascaded Shadow Maps initialized\n";
-    std::cout << "  Cascades: " << NUM_CASCADES << "\n";
-    std::cout << "  Resolution: " << SHADOW_MAP_RESOLUTION << "x" << SHADOW_MAP_RESOLUTION << "\n";
-}
-
-void CascadedShadowMap::createShadowMap(int cascade) {
-    // Crear texture
-    GLuint texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F,
-                 SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION,
-                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
-
-    shadowMapTextures[cascade] = texture;
-
-    // Crear framebuffer
-    GLuint fbo;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "Shadow map framebuffer incomplete!");
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    shadowMapFramebuffers[cascade] = fbo;
-}
-
-namespace {
-glm::vec3 safeNormalize(const glm::vec3& v, const glm::vec3& fallback) {
-    float len = glm::length(v);
-    if (len < 1e-6f) return fallback;
-    return v / len;
-}
-}
-
-void CascadedShadowMap::updateCascades(
-    const glm::vec3& lightDir,
-    const glm::vec3& cameraPos,
-    const glm::vec3& cameraForward,
-    const glm::vec3& cameraUp,
-    float aspect,
-    float zNear,
-    float zFar,
-    float fov) {
-
-    this->zNear = zNear;
-    this->zFar = zFar;
-
-    glm::vec3 forward = safeNormalize(cameraForward, glm::vec3(0.0f, 0.0f, -1.0f));
-    glm::vec3 up = safeNormalize(cameraUp, glm::vec3(0.0f, 1.0f, 0.0f));
-    glm::vec3 right = safeNormalize(glm::cross(forward, up), glm::vec3(1.0f, 0.0f, 0.0f));
-    up = safeNormalize(glm::cross(right, forward), glm::vec3(0.0f, 1.0f, 0.0f));
-
-    float tanHalfFov = std::tan(glm::radians(fov) * 0.5f);
-
-    // Splits prácticos: mezcla entre lineal y logarítmico
-    std::array<float, NUM_CASCADES + 1> splits{};
-    splits[0] = zNear;
-    for (int i = 1; i <= NUM_CASCADES; ++i) {
-        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
-        float logSplit = zNear * std::pow(zFar / zNear, p);
-        float uniformSplit = zNear + (zFar - zNear) * p;
-        splits[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
-    }
-
-    for (int i = 0; i < NUM_CASCADES; i++) {
-        float nearDist = splits[i];
-        float farDist = splits[i + 1];
-
-        glm::vec3 nearCenter = cameraPos + forward * nearDist;
-        glm::vec3 farCenter = cameraPos + forward * farDist;
-
-        float nearHeight = nearDist * tanHalfFov;
-        float nearWidth = nearHeight * aspect;
-        float farHeight = farDist * tanHalfFov;
-        float farWidth = farHeight * aspect;
-
-        std::array<glm::vec3, 8> corners = {
-            nearCenter - right * nearWidth + up * nearHeight,
-            nearCenter + right * nearWidth + up * nearHeight,
-            nearCenter + right * nearWidth - up * nearHeight,
-            nearCenter - right * nearWidth - up * nearHeight,
-            farCenter - right * farWidth + up * farHeight,
-            farCenter + right * farWidth + up * farHeight,
-            farCenter + right * farWidth - up * farHeight,
-            farCenter - right * farWidth - up * farHeight
-        };
-
-        glm::vec3 frustumCenter(0.0f);
-        for (const auto& c : corners) frustumCenter += c;
-        frustumCenter *= 1.0f / 8.0f;
-
-        glm::vec3 lightPos = frustumCenter - safeNormalize(lightDir, glm::vec3(1.0f, 1.0f, 1.0f)) * (farDist * 4.0f);
-        glm::vec3 lightUp = std::abs(glm::dot(safeNormalize(lightDir, glm::vec3(1.0f, 1.0f, 1.0f)), glm::vec3(0.0f, 1.0f, 0.0f))) > 0.9f
-            ? glm::vec3(0.0f, 0.0f, 1.0f)
-            : glm::vec3(0.0f, 1.0f, 0.0f);
-
-        glm::mat4 lightView = glm::lookAt(lightPos, frustumCenter, lightUp);
-
-        glm::vec3 minExtents(std::numeric_limits<float>::max());
-        glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
-        for (const auto& corner : corners) {
-            glm::vec4 tr = lightView * glm::vec4(corner, 1.0f);
-            minExtents = glm::min(minExtents, glm::vec3(tr));
-            maxExtents = glm::max(maxExtents, glm::vec3(tr));
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
         }
+    }
+    throw std::runtime_error("No suitable memory type found");
+}
 
-        const float zMult = 8.0f;
-        if (minExtents.z < 0.0f) minExtents.z *= zMult;
-        else minExtents.z /= zMult;
-        if (maxExtents.z < 0.0f) maxExtents.z /= zMult;
-        else maxExtents.z *= zMult;
-
-        glm::mat4 lightProj = glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y, minExtents.z - 1000.0f, maxExtents.z + 1000.0f);
-
-        cascades[i].zNear = nearDist;
-        cascades[i].zFar = farDist;
-        cascades[i].viewProj = lightProj * lightView;
+void CascadedShadow::createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h, int numCascades) {
+    width = w;
+    height = h;
+    this->numCascades = numCascades;
+    VkFormat depthFormat = VK_FORMAT_D32_SFLOAT;
+    vkShadowImages.resize(numCascades);
+    vkShadowMemories.resize(numCascades);
+    vkShadowViews.resize(numCascades);
+    vkShadowFramebuffers.resize(numCascades);
+    for (int i = 0; i < numCascades; ++i) {
+        // Imagen depth
+        VkImageCreateInfo imgInfo{};
+        imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imgInfo.imageType = VK_IMAGE_TYPE_2D;
+        imgInfo.extent.width = w;
+        imgInfo.extent.height = h;
+        imgInfo.extent.depth = 1;
+        imgInfo.mipLevels = 1;
+        imgInfo.arrayLayers = 1;
+        imgInfo.format = depthFormat;
+        imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        imgInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateImage(device, &imgInfo, nullptr, &vkShadowImages[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create cascaded shadow image");
+        VkMemoryRequirements memReq;
+        vkGetImageMemoryRequirements(device, vkShadowImages[i], &memReq);
+        VkMemoryAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocInfo.allocationSize = memReq.size;
+        allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(device, &allocInfo, nullptr, &vkShadowMemories[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to allocate cascaded shadow memory");
+        vkBindImageMemory(device, vkShadowImages[i], vkShadowMemories[i], 0);
+        // View
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = vkShadowImages[i];
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = depthFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = 0;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device, &viewInfo, nullptr, &vkShadowViews[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create cascaded shadow view");
+        // Framebuffer
+        VkImageView attachments[] = {vkShadowViews[i]};
+        VkFramebufferCreateInfo fbInfo{};
+        fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        fbInfo.renderPass = renderPass;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments = attachments;
+        fbInfo.width = w;
+        fbInfo.height = h;
+        fbInfo.layers = 1;
+        if (vkCreateFramebuffer(device, &fbInfo, nullptr, &vkShadowFramebuffers[i]) != VK_SUCCESS)
+            throw std::runtime_error("Failed to create cascaded shadow framebuffer");
     }
 }
 
-glm::mat4 CascadedShadowMap::getCascadeMatrix(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return cascades[cascade].viewProj;
+void CascadedShadow::destroyVulkanResources(VkDevice device) {
+    for (size_t i = 0; i < vkShadowFramebuffers.size(); ++i) {
+        if (vkShadowFramebuffers[i] != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device, vkShadowFramebuffers[i], nullptr);
+            vkShadowFramebuffers[i] = VK_NULL_HANDLE;
+        }
     }
-    return glm::mat4(1.0f);
-}
-
-GLuint CascadedShadowMap::getShadowMapTexture(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return shadowMapTextures[cascade];
+    for (size_t i = 0; i < vkShadowViews.size(); ++i) {
+        if (vkShadowViews[i] != VK_NULL_HANDLE) {
+            vkDestroyImageView(device, vkShadowViews[i], nullptr);
+            vkShadowViews[i] = VK_NULL_HANDLE;
+        }
     }
-    return 0;
-}
-
-GLuint CascadedShadowMap::getFramebuffer(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return shadowMapFramebuffers[cascade];
+    for (size_t i = 0; i < vkShadowImages.size(); ++i) {
+        if (vkShadowImages[i] != VK_NULL_HANDLE) {
+            vkDestroyImage(device, vkShadowImages[i], nullptr);
+            vkShadowImages[i] = VK_NULL_HANDLE;
+        }
     }
-    return 0;
-}
-
-void CascadedShadowMap::bindForWriting(int cascade) const {
-    if (cascade < 0 || cascade >= NUM_CASCADES) return;
-    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFramebuffers[cascade]);
-    glViewport(0, 0, SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION);
-}
-
-void CascadedShadowMap::bindForReading(int cascade, unsigned int textureUnit) const {
-    if (cascade < 0 || cascade >= NUM_CASCADES) return;
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, shadowMapTextures[cascade]);
-}
-
-CascadedShadowMap::CascadeInfo CascadedShadowMap::getCascadeInfo(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return cascades[cascade];
+    for (size_t i = 0; i < vkShadowMemories.size(); ++i) {
+        if (vkShadowMemories[i] != VK_NULL_HANDLE) {
+            vkFreeMemory(device, vkShadowMemories[i], nullptr);
+            vkShadowMemories[i] = VK_NULL_HANDLE;
+        }
     }
-    return CascadeInfo{zNear, zFar, glm::mat4(1.0f)};
+    vkShadowFramebuffers.clear();
+    vkShadowViews.clear();
+    vkShadowImages.clear();
+    vkShadowMemories.clear();
 }

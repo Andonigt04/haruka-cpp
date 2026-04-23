@@ -1,36 +1,20 @@
 #pragma once
 
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
 
-/**
- * @brief HDR framebuffer wrapper with color and bright attachments.
- */
 class HDR
 {
 public:
-    /** @brief Creates HDR framebuffer at the requested resolution. */
     HDR(unsigned int width, unsigned int height);
     ~HDR();
 
-    /** @brief Binds HDR FBO for scene rendering. */
-    void bindForWriting();
-    /** @brief Restores default framebuffer binding. */
-    void unbind();
-    /** @brief Binds HDR attachments for post-processing reads. */
-    void bindForReading(unsigned int textureUnit, int index);
+    // Vulkan only
+    void createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h);
+    void destroyVulkanResources(VkDevice device);
 
-    /** @brief Returns HDR color texture id. */
-    unsigned int getColorTexture() { return colorTexture; }
-    /** @brief Returns HDR bright-pass texture id. */
-    unsigned int getBrightTexture() { return brightTexture; }
-    /** @brief Returns HDR framebuffer id. */
-    unsigned int getFBO() { return hdrFBO; }
-private:
-    /** @brief Allocates framebuffer and attachments. */
-    void setupFramebuffer();
-    unsigned int hdrFBO;
-    unsigned int colorTexture;
-    unsigned int brightTexture;
-    unsigned int rboDepth;
+    VkImage vkImage = VK_NULL_HANDLE;
+    VkDeviceMemory vkImageMemory = VK_NULL_HANDLE;
+    VkImageView vkImageView = VK_NULL_HANDLE;
+    VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     unsigned int width, height;
 };

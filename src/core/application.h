@@ -1,11 +1,42 @@
 #ifndef APPLICATION_H
 #define APPLICATION_H
 
-#include <glad/glad.h>
-#include <GLFW/glfw3.h>
+
+// Standard
 #include <memory>
 #include <vector>
 
+// Vulkan
+#include <vulkan/vulkan.h>
+
+// SDL
+#include <SDL3/SDL.h>
+
+// Forward declarations (por si faltan en includes de proyecto)
+class RenderTarget;
+class Shadow;
+class HDR;
+class Bloom;
+class GBuffer;
+class SSAO;
+class IBL;
+class PointShadow;
+class LightCuller;
+class GPUInstancing;
+class ComputePostprocess;
+class CascadedShadow;
+class VirtualTexturing;
+class SimpleMesh;
+class RaycastSimple;
+
+namespace Haruka {
+    class WorldSystem;
+    class Scene;
+    class PlanetarySystem;
+    class TerrainStreamingSystem;
+}
+
+// Project
 #include "math_types.h"
 #include "world_system.h"
 #include "camera.h"
@@ -45,18 +76,21 @@ class MotorInstance;
  * - window creation/ownership in editor-driven embedding mode
  * - high-level editor UI orchestration
  */
+
 class Application {
 public:
     Application();
     ~Application();
-    
-    /** @name Accessors */
-    ///@{
+
+    // --- Vulkan ---
+    /** @brief Inicializa contexto y swapchain Vulkan (experimental). */
+    void create_vulkan_context();
+
+    // --- Accesores y control ---
     Camera* getCamera() { return _camera.get(); }
     Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
-    ///@}
 
     // Render quality/layers (global editor-configurable)
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
@@ -83,29 +117,16 @@ public:
     static int getLastTrackedChunks() { return s_lastTrackedChunks; }
     static int getLastMaxMemoryMB() { return s_lastMaxMemoryMB; }
 
-    CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
+    CascadedShadow* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
-    
-    /**
-     * @brief Callback invoked by `MotorInstance` when active scene changes.
-     * @note Performs internal copy into owned scene storage.
-     */
+
+    // Callbacks de integración
     void onSceneChanged(Haruka::Scene* scene) {
-        if (!scene) {
-            _currentScene.reset();
-            return;
-        }
+        if (!scene) { _currentScene.reset(); return; }
         _currentScene = std::make_unique<Haruka::Scene>(*scene);
     }
-    /**
-     * @brief Callback invoked by `MotorInstance` when viewport camera changes.
-     * @note Copies camera state into local owned camera instance.
-     */
     void onCameraChanged(Camera* cam) {
-        if (!cam) {
-            _camera.reset();
-            return;
-        }
+        if (!cam) { _camera.reset(); return; }
         _camera = std::make_unique<Camera>(cam->position);
         _camera->orientation = cam->orientation;
         _camera->zoom = cam->zoom;
@@ -113,40 +134,65 @@ public:
         _camera->sensitivity = cam->sensitivity;
     }
 
-    /** @brief Starts runtime using a scene path bootstrap. */
+    // Ciclo de vida principal
     void run(const std::string& startScenePath);
-    /** @brief Initializes systems from a scene instance. */
     void init(Haruka::Scene& scene);
-    /** @brief Creates runtime window resources (when applicable). */
     void create_window();
-    /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
-    /** @brief Renders current scene using optional override shader. */
     void renderScene(Shader* shader = nullptr);
-    /** @brief Runs main loop until shutdown. */
     void main_loop();
-    /** @brief Renders one frame and updates timing state. */
     void renderFrame();
-    /** @brief Frame rendering body (logic-only path). */
     void renderFrameContent();
-    /** @brief Releases allocated runtime resources. */
+    void renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIndex);
+    void recreateSwapchainAndResources();
     void cleanup();
 
 private:
-    friend class MotorInstance;
+    // --- Vulkan pipeline/layout por pass (ejemplo: geometry, shadow, etc.) ---
+    VkPipelineLayout vkGeometryPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline vkGeometryPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout vkLightingPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline vkLightingPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout vkPostprocessPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline vkPostprocessPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout vkPresentPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline vkPresentPipeline = VK_NULL_HANDLE;
     
-    static constexpr int MAX_LIGHTS = 256;
-    
-    // Window (set by viewport via MotorInstance friend access)
-    GLFWwindow* _window = nullptr;
+    // --- Vulkan descriptor sets para materiales ---
+    VkDescriptorSetLayout vkMaterialDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool vkDescriptorPool = VK_NULL_HANDLE;
+    std::vector<VkDescriptorSet> vkMaterialDescriptorSets;
+
+    // --- Vulkan command pool y command buffers ---
+    VkCommandPool vkCommandPool = VK_NULL_HANDLE;
+    std::vector<VkCommandBuffer> vkCommandBuffers;
+
+    // --- Vulkan handles (experimental) ---
+    VkInstance vkInstance = VK_NULL_HANDLE;
+    VkPhysicalDevice vkPhysicalDevice = VK_NULL_HANDLE;
+    VkDevice vkDevice = VK_NULL_HANDLE;
+    VkSurfaceKHR vkSurface = VK_NULL_HANDLE;
+    VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
+    std::vector<VkImage> vkSwapchainImages;
+    std::vector<VkImageView> vkSwapchainImageViews;
+    VkQueue vkGraphicsQueue = VK_NULL_HANDLE;
+    VkQueue vkPresentQueue = VK_NULL_HANDLE;
+    VkSemaphore vkImageAvailableSemaphore = VK_NULL_HANDLE;
+    VkSemaphore vkRenderFinishedSemaphore = VK_NULL_HANDLE;
+    VkFence vkInFlightFence = VK_NULL_HANDLE;
+
+    // --- Vulkan render pass y framebuffers ---
+    VkRenderPass vkRenderPass = VK_NULL_HANDLE;
+    std::vector<VkFramebuffer> vkFramebuffers;
+
+    // --- Core systems ---
+    SDL_Window* _window = nullptr;
     int _width = 1280;
     int _height = 720;
-
-    // Core systems
     std::unique_ptr<Haruka::Scene> _currentScene;
     std::unique_ptr<Camera> _camera;
-    
-    // Rendering pipeline
+
+    // --- Rendering pipeline ---
     std::unique_ptr<Shader> _mainShader;
     std::unique_ptr<Shader> _lampShader;
     std::unique_ptr<Shadow> _shadowSystem;
@@ -159,37 +205,59 @@ private:
     std::unique_ptr<Haruka::WorldSystem> _worldSystem;
     std::unique_ptr<LightCuller> _lightCuller;
     std::unique_ptr<GPUInstancing> _instancing;
-    std::unique_ptr<ComputePostProcess> _computePostProcess;
-    std::unique_ptr<CascadedShadowMap> _cascadedShadow;
+    std::unique_ptr<ComputePostprocess> _computePostProcess;
+    std::unique_ptr<CascadedShadow> _cascadedShadow;
     std::unique_ptr<VirtualTexturing> _virtualTexturing;
     std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
     std::unique_ptr<RaycastSimple> _raycastSystem;
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
-    
-    // Render targets
+
+    // --- Render targets ---
     std::unique_ptr<RenderTarget> _lightingTarget;
     std::unique_ptr<RenderTarget> _bloomExtractTarget;
-    
-    // Primitives (LOD spheres for celestial bodies)
+
+    // --- Render targets Vulkan para passes principales ---
+    std::unique_ptr<RenderTarget> vkGeometryTarget;
+    std::unique_ptr<RenderTarget> vkLightingTarget;
+    std::unique_ptr<RenderTarget> vkSSAOTarget;
+
+    // --- Render targets Vulkan para todos los passes ---
+    std::unique_ptr<RenderTarget> vkShadowTarget;
+    std::unique_ptr<RenderTarget> vkBloomTarget;
+    std::unique_ptr<RenderTarget> vkPostprocessTarget;
+
+    // --- Sincronización Vulkan entre passes ---
+    VkSemaphore vkShadowToGeometrySemaphore = VK_NULL_HANDLE;
+    VkSemaphore vkGeometryToLightingSemaphore = VK_NULL_HANDLE;
+    VkSemaphore vkLightingToPostprocessSemaphore = VK_NULL_HANDLE;
+
+    // --- Primitives (LOD spheres for celestial bodies) ---
     std::unique_ptr<SimpleMesh> sphereLOD[4];
-    
-    // Shaders (cached to avoid recreation every frame)
+
+    // --- Shaders (cached to avoid recreation every frame) ---
     std::unique_ptr<Shader> _geomShader;
     std::unique_ptr<Shader> _ssaoShader;
     std::unique_ptr<Shader> _lightShader;
     std::unique_ptr<Shader> _compositeShader;
     std::unique_ptr<Shader> _flatShader;
     std::unique_ptr<Shader> _cascadeShadowShader;
-    
-    // Timing
+
+    // --- Vulkan uniform buffer para matrices globales (MVP) ---
+    VkBuffer vkUniformBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vkUniformBufferMemory = VK_NULL_HANDLE;
+    VkDescriptorSetLayout vkUniformDescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSet vkUniformDescriptorSet = VK_NULL_HANDLE;
+
+    // --- Timing ---
     float deltaTime = 0.0f;
     float lastFrame = 0.0f;
-    
-    // Screen quad for post-processing
+
+    // --- Screen quad for post-processing ---
     unsigned int quadVAO = 0;
     unsigned int quadVBO = 0;
     void setupQuad();
 
+    // --- Render quality/statics ---
     inline static int s_renderQualityPreset = 2; // 0=Low,1=Medium,2=High,3=Ultra
     inline static float s_layerMaxDistance[6] = {
         0.0f,
@@ -212,6 +280,17 @@ private:
     inline static int s_lastResidentMemoryMB = 0;
     inline static int s_lastTrackedChunks = 0;
     inline static int s_lastMaxMemoryMB = 0;
+
+    // --- Métricas y queries de GPU ---
+    VkQueryPool g_gpuQueryPool = VK_NULL_HANDLE;
+    uint64_t g_gpuTimestamps[2] = {0, 0};
+    float g_lastGpuTimeMs = 0.0f;
+    uint64_t g_frameCount = 0;
+    double g_lastFpsTime = 0.0;
+    float g_lastFps = 0.0f;
+    float g_lastFrameTimeMs = 0.0f;
+
+    void buildRenderQueue();
 };
 
 #endif

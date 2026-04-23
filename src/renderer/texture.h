@@ -1,21 +1,33 @@
 #ifndef TEXTURE_H
 #define TEXTURE_H
 
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
+#include <string>
+#include <cstdint>
 
-/** @brief Basic 2D texture wrapper. */
 class Texture {
 public:
-    /** @brief OpenGL texture id. */
-    unsigned int ID;
-    /** @brief Loaded image width in pixels. */
-    int width, height, nrChannels;
+    Texture() = default;
+    Texture(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue transferQueue, VkCommandPool commandPool, const std::string& path);
+    ~Texture();
 
-    /** @brief Loads a texture from file path. */
-    Texture(const char* path);
-    /** @brief Binds texture to a sampler unit. */
-    void use(unsigned int unit = 0);
-    /** @brief Deletes owned OpenGL texture resources. */
-    void cleanup();
+    // No copiar
+    Texture(const Texture&) = delete;
+    Texture& operator=(const Texture&) = delete;
+    // Permitir mover
+    Texture(Texture&& other) noexcept;
+    Texture& operator=(Texture&& other) noexcept;
+
+    void create(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue transferQueue, VkCommandPool commandPool, const std::string& path);
+    void destroy();
+
+    VkImage vkImage = VK_NULL_HANDLE;
+    VkDeviceMemory vkImageMemory = VK_NULL_HANDLE;
+    VkImageView vkImageView = VK_NULL_HANDLE;
+    VkSampler vkSampler = VK_NULL_HANDLE;
+    uint32_t width = 0, height = 0;
+
+private:
+    VkDevice m_device = VK_NULL_HANDLE;
 };
 #endif

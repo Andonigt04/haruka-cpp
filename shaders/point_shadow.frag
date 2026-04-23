@@ -1,18 +1,15 @@
-#version 460 core
+#version 450 core
 
-in GS_OUT {
-    vec4 FragPos;
-} fs_in;
+layout(location = 0) in vec4 FragPos;
 
-uniform vec3 lightPos;
-uniform float farPlane;
+layout(set = 0, binding = 0) uniform Params {
+    vec3 lightPos;
+    float farPlane;
+};
 
 void main()
 {
-    float lightDistance = length(fs_in.FragPos.xyz - lightPos);
-    
-    // Normalizar a [0, 1]
+    float lightDistance = length(FragPos.xyz - lightPos);
     lightDistance = lightDistance / farPlane;
-    
     gl_FragDepth = lightDistance;
 }

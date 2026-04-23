@@ -2,9 +2,9 @@
 #define CAMERA_H
 
 #include <glm/gtc/matrix_transform.hpp>
+
 #include "math_types.h"
 
-struct GLFWwindow;
 
 /**
  * @brief Runtime camera state and input-driven transform controller.
@@ -32,8 +32,8 @@ public:
 
     /** @brief Applies mouse-delta rotation update. */
     void rotate(float deltaX, float deltaY);
-    /** @brief Processes movement input from GLFW window state. */
-    void processInput(GLFWwindow* window, float deltaTime);
+    /** @brief Processes movement input state. */
+    void processInput(float deltaTime);
     
     /** @brief Updates zoom/FOV from scroll input. */
     void ProcessMouseScroll(float yoffset);

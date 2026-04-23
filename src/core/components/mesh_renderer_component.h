@@ -28,7 +28,7 @@ public:
     bool isResident() const { return mesh != nullptr; }
     
     /** @brief Issues a draw call when a resident mesh exists. */
-    void render(Shader& shader) const;
+    void render(Shader& shader, VkCommandBuffer cmd) const;
     /** @brief Inspector ImGui de rutas auxiliares. */
     void renderInspector();
     
@@ -48,6 +48,9 @@ public:
     const std::vector<glm::vec3>& getSourceNormals() const { return sourceNormals; }
     /** @brief CPU source indices. */
     const std::vector<unsigned int>& getSourceIndices() const { return sourceIndices; }
+
+    /** @brief Returns the bounding sphere radius of the mesh (world units). */
+    double getBoundingRadius() const;
     
 private:
     std::shared_ptr<SimpleMesh> mesh;

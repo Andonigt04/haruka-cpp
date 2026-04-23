@@ -3,7 +3,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
 #include "mesh_optimizer.h"
 
 /**
@@ -13,50 +13,44 @@
  */
 class MeshLOD {
 public:
-    /** @brief Constructs an empty LOD manager. */
     MeshLOD();
-    /** @brief Releases generated LOD resources. */
     ~MeshLOD();
 
-    /**
-     * @brief Generates LOD levels from source mesh buffers.
-     * @param vertices Source vertices.
-     * @param indices Source indices.
-     * @param distances Split distances per LOD level.
-     */
     void generateLODs(
         const std::vector<Vertex>& vertices,
         const std::vector<unsigned int>& indices,
         const std::vector<float>& distances = {10.0f, 30.0f, 100.0f}
     );
 
-    /** @brief Returns the best LOD index for a given distance. */
     int selectLOD(float distance) const;
+    void render(VkCommandBuffer cmd, VkPipeline pipeline, VkPipelineLayout layout, float distance);
 
-    /** @brief Renders the mesh using the selected LOD level. */
-    void render(float distance);
-
-    /** @brief Statistics for generated LOD levels. */
     struct LODStats {
         int totalLODLevels;
         int totalVertices;
         int totalIndices;
         float memoryReduction;
     };
-
-    /** @brief Returns current LOD statistics. */
     LODStats getStats() const;
 
 private:
     struct LODLevel {
-        GLuint VAO = 0, VBO = 0, EBO = 0;
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
         std::vector<Vertex> vertices;
         std::vector<unsigned int> indices;
         float minDistance = 0.0f, maxDistance = 0.0f;
     };
     std::vector<LODLevel> lodLevels;
     MeshOptimizer optimizer;
-    /** @brief Allocates OpenGL buffers for one LOD level. */
-    void setupGL(LODLevel& level);
+    void setupVulkan(LODLevel& level, VkDevice device, VkPhysicalDevice physicalDevice, VkQueue transferQueue, VkCommandPool commandPool);
+    void destroyVulkan(LODLevel& level, VkDevice device);
+    VkDevice device = VK_NULL_HANDLE;
+    VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+    VkQueue transferQueue = VK_NULL_HANDLE;
+    VkCommandPool commandPool = VK_NULL_HANDLE;
 };
 

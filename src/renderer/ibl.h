@@ -1,6 +1,6 @@
 #pragma once
 
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 #include <string>
 
@@ -10,47 +10,55 @@
  * Manages environment cubemap generation, irradiance, prefilter, and BRDF LUT.
  */
 class IBL {
+
 public:
-    /** @brief Constructs an empty IBL pipeline object. */
     IBL();
     ~IBL();
 
-    /** @brief Loads an HDR environment map from disk. */
+    // Vulkan: recursos para cubemaps y LUTs
+    VkImage envCubemapImage = VK_NULL_HANDLE;
+    VkImageView envCubemapView = VK_NULL_HANDLE;
+    VkSampler envCubemapSampler = VK_NULL_HANDLE;
+
+    VkImage irradianceImage = VK_NULL_HANDLE;
+    VkDeviceMemory irradianceImageMemory = VK_NULL_HANDLE;
+    VkImageView irradianceView = VK_NULL_HANDLE;
+    VkSampler irradianceSampler = VK_NULL_HANDLE;
+
+    VkImage prefilterImage = VK_NULL_HANDLE;
+    VkDeviceMemory prefilterImageMemory = VK_NULL_HANDLE;
+    VkImageView prefilterView = VK_NULL_HANDLE;
+    VkSampler prefilterSampler = VK_NULL_HANDLE;
+
+    VkImage brdfLUTImage = VK_NULL_HANDLE;
+    VkDeviceMemory brdfLUTImageMemory = VK_NULL_HANDLE;
+    VkImageView brdfLUTView = VK_NULL_HANDLE;
+    VkSampler brdfLUTSampler = VK_NULL_HANDLE;
+
+    void createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue transferQueue, VkCommandPool commandPool);
+    void destroyVulkanResources(VkDevice device);
+
+    // Métodos para cargar HDRI y generar mapas (a implementar)
     void loadHDRI(const std::string& imagePath);
-    /** @brief Generates diffuse irradiance cubemap. */
-    void generateIrradianceMap();
-    /** @brief Generates specular prefilter cubemap. */
-    void generatePrefilterMap();
-    /** @brief Generates BRDF integration LUT texture. */
-    void generateBRDFLUT();
+    void generateIrradianceMap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, VkCommandPool commandPool, VkRenderPass renderPass, VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount);
+    void generatePrefilterMap(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, VkCommandPool commandPool, VkRenderPass renderPass, VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount);
+    void generateBRDFLUT(VkDevice device, VkPhysicalDevice physicalDevice, VkQueue queue, VkCommandPool commandPool, VkRenderPass renderPass, VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount);
 
-    /** @brief Returns irradiance cubemap id. */
-    unsigned int getIrradianceMap() const { return irradianceMap; }
-    /** @brief Returns prefilter cubemap id. */
-    unsigned int getPrefilterMap() const { return prefilterMap; }
-    /** @brief Returns BRDF LUT texture id. */
-    unsigned int getBRDFLUT() const { return brdfLUT; }
-    /** @brief Returns environment cubemap id. */
-    unsigned int getEnvCubemap() const { return envCubemap; }
+    // Renderizado de primitivas para convolución y LUT
+    void renderCube(VkCommandBuffer cmd);
+    void renderQuad(VkCommandBuffer cmd);
 
-    /** @brief Binds the prefilter cubemap to a texture unit. */
-    void bindPrefilterMap(unsigned int textureUnit);
-    /** @brief Binds the BRDF LUT texture to a texture unit. */
-    void bindBRDFLUT(unsigned int textureUnit);
+    // Binds para recursos de prefilter y BRDF LUT
+    void bindPrefilterMap(VkCommandBuffer cmd, VkPipelineLayout layout, uint32_t set, uint32_t binding);
+    void bindBRDFLUT(VkCommandBuffer cmd, VkPipelineLayout layout, uint32_t set, uint32_t binding);
 
 private:
-    /** @brief Allocates cubemap and LUT resources. */
+    // Métodos auxiliares Vulkan (a implementar)
     void setupCubemap();
-    /** @brief Draws a unit cube used during cubemap rendering. */
     void renderCube();
-    /** @brief Draws a fullscreen quad used for LUT generation. */
     void renderQuad();
-
-    unsigned int envCubemap = 0;
-    unsigned int irradianceMap = 0;
-    unsigned int prefilterMap = 0;
-    unsigned int brdfLUT = 0;
-
-    unsigned int cubeVAO = 0, cubeVBO = 0;
-    unsigned int quadVAO = 0, quadVBO = 0;
+    // TODO: Vulkan: reemplazar unsigned int por VkImage, VkImageView, VkBuffer
+    // VkImage envCubemapImage, irradianceImage, prefilterImage, brdfLUTImage;
+    // VkImageView envCubemapView, irradianceView, prefilterView, brdfLUTView;
+    // VkBuffer cubeBuffer, quadBuffer;
 };

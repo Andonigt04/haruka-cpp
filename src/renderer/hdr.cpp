@@ -1,71 +1,96 @@
 #include "hdr.h"
-#include "core/error_reporter.h"
+#include <stdexcept>
 
-#include <iostream>
+HDR::HDR(unsigned int width, unsigned int height)
+    : width(width), height(height) {}
 
-HDR::HDR(unsigned int width, unsigned int height) : width(width), height(height)
-{
-    setupFramebuffer();
+HDR::~HDR() {
+    // El usuario debe llamar a destroyVulkanResources antes del destructor
 }
 
-void HDR::setupFramebuffer()
-{
-    glGenFramebuffers(1, &hdrFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
-
-    // Color texture (HDR)
-    glGenTextures(1, &colorTexture);
-    glBindTexture(GL_TEXTURE_2D, colorTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTexture, 0);
-
-    // Bright texture (para Bloom)
-    glGenTextures(1, &brightTexture);  // PRIMERO crear la textura
-    glBindTexture(GL_TEXTURE_2D, brightTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, brightTexture, 0);
-
-    // Depth
-    glGenRenderbuffers(1, &rboDepth);
-    glBindRenderbuffer(GL_RENDERBUFFER, rboDepth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, width, height);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rboDepth);
-
-    // Attachments
-    unsigned int attachments[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
-    glDrawBuffers(2, attachments);
-
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) 
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "HDR framebuffer incomplete");
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+static uint32_t findMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
+    VkPhysicalDeviceMemoryProperties memProperties;
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProperties);
+    for (uint32_t i = 0; i < memProperties.memoryTypeCount; i++) {
+        if ((typeFilter & (1 << i)) && (memProperties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    throw std::runtime_error("No suitable memory type found");
 }
 
-void HDR::bindForWriting()
-{
-    glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
-    glViewport(0, 0, width, height);
+void HDR::createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h) {
+    width = w;
+    height = h;
+    VkFormat format = VK_FORMAT_R16G16B16A16_SFLOAT; // HDR
+    // Crear imagen
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType = VK_IMAGE_TYPE_2D;
+    imgInfo.extent.width = w;
+    imgInfo.extent.height = h;
+    imgInfo.extent.depth = 1;
+    imgInfo.mipLevels = 1;
+    imgInfo.arrayLayers = 1;
+    imgInfo.format = format;
+    imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imgInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateImage(device, &imgInfo, nullptr, &vkImage) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create HDR image");
+    VkMemoryRequirements memReq;
+    vkGetImageMemoryRequirements(device, vkImage, &memReq);
+    VkMemoryAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReq.size;
+    allocInfo.memoryTypeIndex = findMemoryType(physicalDevice, memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device, &allocInfo, nullptr, &vkImageMemory) != VK_SUCCESS)
+        throw std::runtime_error("Failed to allocate HDR image memory");
+    vkBindImageMemory(device, vkImage, vkImageMemory, 0);
+    // Crear view
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = vkImage;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device, &viewInfo, nullptr, &vkImageView) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create HDR image view");
+    // Crear framebuffer
+    VkImageView attachments[] = {vkImageView};
+    VkFramebufferCreateInfo fbInfo{};
+    fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbInfo.renderPass = renderPass;
+    fbInfo.attachmentCount = 1;
+    fbInfo.pAttachments = attachments;
+    fbInfo.width = w;
+    fbInfo.height = h;
+    fbInfo.layers = 1;
+    if (vkCreateFramebuffer(device, &fbInfo, nullptr, &vkFramebuffer) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create HDR framebuffer");
 }
 
-void HDR::unbind()
-{
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void HDR::bindForReading(unsigned int textureUnit, int index)
-{
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, index == 0 ? colorTexture : brightTexture);
-}
-
-HDR::~HDR()
-{
-    glDeleteFramebuffers(1, &hdrFBO);
-    glDeleteTextures(1, &colorTexture);
-    glDeleteTextures(1, &brightTexture);
-    glDeleteRenderbuffers(1, &rboDepth);
+void HDR::destroyVulkanResources(VkDevice device) {
+    if (vkFramebuffer != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device, vkFramebuffer, nullptr);
+        vkFramebuffer = VK_NULL_HANDLE;
+    }
+    if (vkImageView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device, vkImageView, nullptr);
+        vkImageView = VK_NULL_HANDLE;
+    }
+    if (vkImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device, vkImage, nullptr);
+        vkImage = VK_NULL_HANDLE;
+    }
+    if (vkImageMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device, vkImageMemory, nullptr);
+        vkImageMemory = VK_NULL_HANDLE;
+    }
 }

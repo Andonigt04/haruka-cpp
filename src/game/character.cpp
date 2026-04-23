@@ -1,6 +1,6 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "character.h"
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <iostream>
@@ -101,39 +101,39 @@ void Character::update(float deltaTime) {
     currentHeight += (targetHeight - currentHeight) * deltaTime * 10.0f;
 }
 
-void Character::processInput(GLFWwindow* window, float deltaTime) {
+void Character::processInput(SDL_Window* window, const Uint8* keyState, float deltaTime) {
     if (!localPlayer) return;
-    
+
     // Movement
     float speed = sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
 
     glm::dvec3 up, surfaceForward, surfaceRight;
     glm::dquat camOrientation = camera ? camera->orientation : glm::dquat(1.0, 0.0, 0.0, 0.0);
     buildSurfaceBasis(getEffectiveUp(), camOrientation, up, surfaceForward, surfaceRight);
-    
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
+
+    if (keyState[SDL_SCANCODE_W]) {
         position += surfaceForward * (double)(speed * deltaTime);
     }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
+    if (keyState[SDL_SCANCODE_S]) {
         position -= surfaceForward * (double)(speed * deltaTime);
     }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
+    if (keyState[SDL_SCANCODE_A]) {
         position -= surfaceRight * (double)(speed * deltaTime);
     }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
+    if (keyState[SDL_SCANCODE_D]) {
         position += surfaceRight * (double)(speed * deltaTime);
     }
-    
+
     // Jump
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && grounded) {
+    if (keyState[SDL_SCANCODE_SPACE] && grounded) {
         jump();
     }
-    
+
     // Sprint
-    sprint(glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
-    
+    sprint(keyState[SDL_SCANCODE_LSHIFT]);
+
     // Crouch
-    crouch(glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS);
+    crouch(keyState[SDL_SCANCODE_LCTRL]);
 }
 
 void Character::moveForward(float amount) {

@@ -1,92 +1,73 @@
 #include "compute_shader.h"
 
-#include <iostream>
 #include <fstream>
-#include <sstream>
-#include <glm/gtc/type_ptr.hpp>
+#include <vector>
+#include <stdexcept>
+#include <cstring>
 
-ComputeShader::ComputeShader(const std::string& computePath)
-{
-    std::string computeCode = readFile(computePath);
-    const char* cCode = computeCode.c_str();
+static std::vector<char> readFile(const std::string& filename) {
+    std::ifstream file(filename, std::ios::ate | std::ios::binary);
+    if (!file.is_open()) throw std::runtime_error("Failed to open shader file: " + filename);
+    size_t fileSize = (size_t)file.tellg();
+    std::vector<char> buffer(fileSize);
+    file.seekg(0);
+    file.read(buffer.data(), fileSize);
+    file.close();
+    return buffer;
+}
 
-    GLuint compute = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(compute, 1, &cCode, nullptr);
-    glCompileShader(compute);
+static VkShaderModule createShaderModule(VkDevice device, const std::vector<char>& code) {
+    VkShaderModuleCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    createInfo.codeSize = code.size();
+    createInfo.pCode = reinterpret_cast<const uint32_t*>(code.data());
+    VkShaderModule shaderModule;
+    if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create compute shader module");
+    return shaderModule;
+}
 
-    // Error checking
-    int success;
-    char infoLog[512];
-    glGetShaderiv(compute, GL_COMPILE_STATUS, &success);
-    if (!success)
-    {
-        glGetShaderInfoLog(compute, 512, nullptr, infoLog);
-        std::cerr << "COMPUTE SHADER COMPILATION ERROR: " << infoLog << std::endl;
+ComputeShader::ComputeShader(const char* computePath) {
+    // El usuario debe llamar a createVulkanPipeline con el device adecuado
+}
+
+ComputeShader::~ComputeShader() {
+    // El usuario debe llamar a destroyVulkanPipeline antes del destructor
+}
+
+void ComputeShader::createVulkanPipeline(VkDevice device, const char* computePath, VkDescriptorSetLayout* setLayouts, uint32_t setLayoutCount) {
+    std::vector<char> code = readFile(computePath);
+    computeModule = createShaderModule(device, code);
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = computeModule;
+    stageInfo.pName = "main";
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = setLayoutCount;
+    layoutInfo.pSetLayouts = setLayouts;
+    if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create compute pipeline layout");
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage = stageInfo;
+    pipelineInfo.layout = pipelineLayout;
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &computePipeline) != VK_SUCCESS)
+        throw std::runtime_error("Failed to create compute pipeline");
+}
+
+void ComputeShader::destroyVulkanPipeline(VkDevice device) {
+    if (computePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, computePipeline, nullptr);
+        computePipeline = VK_NULL_HANDLE;
     }
-
-    ID = glCreateProgram();
-    glAttachShader(ID, compute);
-    glLinkProgram(ID);
-
-    glGetProgramiv(ID, GL_LINK_STATUS, &success);
-    if (!success)
-    {
-        glGetProgramInfoLog(ID, 512, nullptr, infoLog);
-        std::cerr << "COMPUTE SHADER COMPILATION ERROR: " << infoLog << std::endl;
+    if (pipelineLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+        pipelineLayout = VK_NULL_HANDLE;
     }
-
-    glDeleteShader(compute);
-}
-
-ComputeShader::~ComputeShader()
-{
-    glDeleteProgram(ID);
-}
-
-void ComputeShader::use() const
-{
-    glUseProgram(ID);
-}
-
-void ComputeShader::dispatch(GLuint x, GLuint y, GLuint z) const
-{
-    glDispatchCompute(x, y, z);
-    glMemoryBarrier(GL_ALL_BARRIER_BITS);
-}
-
-void ComputeShader::setInt(const std::string& name, int value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform1i(loc, value);
-}
-
-void ComputeShader::setFloat(const std::string& name, float value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform1f(loc, value);
-}
-
-void ComputeShader::setVec3(const std::string& name, const glm::vec3& value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform3fv(loc, 1, glm::value_ptr(value));
-}
-
-void ComputeShader::setMat4(const std::string& name, const glm::mat4& value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(value));
-}
-
-std::string ComputeShader::readFile(const std::string& filePath)
-{
-    std::ifstream file(filePath);
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
-GLint ComputeShader::getUniformLocation(const std::string& name) const
-{
-    return glGetUniformLocation(ID, name.c_str());
+    if (computeModule != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device, computeModule, nullptr);
+        computeModule = VK_NULL_HANDLE;
+    }
 }

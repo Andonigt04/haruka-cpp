@@ -17,6 +17,7 @@
 struct FrameMetrics {
     float fps = 0.0f;
     float frameTimeMs = 0.0f;
+    float gpuTimeMs = 0.0f;
     int drawCalls = 0;
     int renderTargetBinds = 0;
     int shaderSwitches = 0;

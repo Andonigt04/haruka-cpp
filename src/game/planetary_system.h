@@ -81,7 +81,7 @@ public:
     /** @name Terrain setup */
     ///@{
     void initTerrain(int size = 1024, float heightScale = 200.0f, int seed = 42);
-    void renderTerrain(Shader& shader, const Camera* camera);
+    void renderTerrain(Shader& shader, const Camera* camera, VkCommandBuffer cmd);
     void setDetailedSurfaceData(const std::string& bodyName, const PlanetData& data);
     ///@}
     

@@ -18,8 +18,11 @@ layout(std430, binding = 1) buffer FrustumData {
     vec4 frustumPlanes[6]; // Near, Far, Left, Right, Top, Bottom
 };
 
-uniform vec3 cameraPos;
-uniform float lodDistances[4]; // LOD thresholds (km)
+layout(set = 0, binding = 2) uniform Params {
+    vec3 cameraPos;
+    float _pad;
+    float lodDistances[4]; // LOD thresholds (km)
+};
 
 // AABB vs 6 frustum planes
 bool aabbInFrustumPlanes(vec3 center, float halfExtent) {

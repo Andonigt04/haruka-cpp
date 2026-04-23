@@ -1,7 +1,7 @@
 #ifndef SHADOW_H
 #define SHADOW_H
 
-#include <glad/glad.h>
+#include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 
 /**
@@ -12,23 +12,29 @@
 class Shadow
 {
 public:
-    /** @brief Depth framebuffer object. */
-    unsigned int depthMapFBO;
-    /** @brief Depth texture attachment. */
-    unsigned int depthMap;
-    /** @brief Shadow map width in pixels. */
+    // Vulkan shadow map resources
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthImageMemory = VK_NULL_HANDLE;
+    VkImageView depthImageView = VK_NULL_HANDLE;
+    VkFramebuffer depthFramebuffer = VK_NULL_HANDLE;
     unsigned int shadowWidth, shadowHeight;
+    VkDevice device = VK_NULL_HANDLE;
+    VkRenderPass renderPass = VK_NULL_HANDLE;
 
     /** @brief Creates a shadow map with the requested resolution. */
     Shadow(unsigned int width = 1024, unsigned int height = 1024);
     ~Shadow();
+    void createResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass);
+    void destroyResources();
 
     /** @brief Binds the framebuffer for shadow depth rendering. */
-    void bindForWriting();
-    /** @brief Binds the depth texture for sampling. */
-    void bindForReading(unsigned int textureUnit = 2);
-    /** @brief Restores default framebuffer binding. */
-    void unbind();
+    // Inicia el render pass de sombras en el command buffer dado
+    void bindForWriting(VkCommandBuffer cmdBuffer);
+    void bindForReading(VkCommandBuffer cmdBuffer, unsigned int textureUnit);
+    // Devuelve el image view para bindear en el descriptor set
+    VkImageView getDepthImageView() const { return depthImageView; }
+    // Termina el render pass de sombras
+    void unbind(VkCommandBuffer cmdBuffer);
 private:
     /** @brief Allocates FBO/texture objects. */
     void setupFramebuffer();
