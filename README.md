@@ -19,7 +19,7 @@ The repository builds three main applications from the same codebase:
 
 Download Dev dependecies
 ```bash
-  sudo dnf/apt install
+  sudo dnf install cmake gcc-c++ glfw3-devel assimp-devel openssl-devel openal-soft-devel postgresql-libs gtk3-devel pkgconf-pkg-config glm-devel glad-devel vulkan-loader vulkan-headers vulkan-tools sdl3-devel
 ```
 
 ---
