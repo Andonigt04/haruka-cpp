@@ -7,12 +7,6 @@ Haruka Engine is a C++17 Vulkan real-time engine with:
 - procedural planetary tooling
 - integrated post-processing and lighting stack
 
-The repository builds three main applications from the same codebase:
-
-- `HarukaEditor` (tools and authoring)
-- `HarukaEngine` (runtime client)
-- `HarukaServer` (dedicated server with database support)
-
 ---
 
 ## Setup
