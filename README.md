@@ -125,7 +125,9 @@ cmake ..
 ```
 
 In the build folder indicate, where do you want to store the project for IDE use.
-```cmake --install . --prefix ../../haruka/```
+```bash
+cmake --install . --prefix ../../haruka/
+```
 
 For compilation.
 ```bash
