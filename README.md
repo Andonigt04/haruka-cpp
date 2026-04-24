@@ -1,21 +1,24 @@
 # Haruka Engine
 
-Haruka Engine is a C++17 OpenGL 4.6 real-time engine with:
+Haruka Engine is a C++17 Vulkan real-time engine with:
 
 - deferred rendering + PBR
 - editor/runtime/server targets
 - procedural planetary tooling
 - integrated post-processing and lighting stack
 
-The repository builds three main applications from the same codebase:
+---
 
-- `HarukaEditor` (tools and authoring)
-- `HarukaEngine` (runtime client)
-- `HarukaServer` (dedicated server with database support)
+## Setup
+
+Download Dev dependecies
+```bash
+  sudo dnf install cmake gcc-c++ glfw3-devel assimp-devel openssl-devel openal-soft-devel postgresql-libs gtk3-devel pkgconf-pkg-config glm-devel glad-devel vulkan-loader vulkan-headers vulkan-tools sdl3-devel
+```
 
 ---
 
-## 1) Architecture Overview
+## Architecture Overview
 
 Main source modules:
 
@@ -33,7 +36,7 @@ The engine library target is `HarukaEngineLib` and is linked by runtime/editor.
 
 ---
 
-## 2) Rendering Features
+## Rendering Features
 
 Haruka includes:
 
@@ -48,11 +51,39 @@ Haruka includes:
 - Virtual texturing
 - Compute-shader post-processing path
 
-Core shader assets are in [shaders/](shaders/).
+
+### Shader Asset Overview
+
+| Shader File                | Propósito / Descripción breve                                      |
+|----------------------------|-------------------------------------------------------------------|
+| bloom_blur.frag            | Desenfoque gaussiano para el efecto bloom (horizontal/vertical)    |
+| bloom_composite.frag       | Composición de imagen base y bloom, con ajuste de intensidad       |
+| bloom_extract.frag         | Extracción de regiones brillantes para bloom                      |
+| brdf_lut.frag              | Generación de tabla BRDF LUT para IBL/PBR                         |
+| brdf_lut.vert              | Fullscreen quad para BRDF LUT                                     |
+| deferred_geom.vert/.frag   | Paso de geometría para G-buffer (pos, normal, albedo, etc.)       |
+| deferred_light.frag        | Paso de iluminación diferida, sombras, SSAO, IBL, etc.            |
+| equirect_to_cubemap.*      | Conversión de mapas HDR equirectangulares a cubemap               |
+| frustum_cull.comp          | Culling de cuerpos por frustum y LOD en compute                   |
+| ibl.frag                   | Lighting IBL (irradiancia, prefilter, BRDF LUT)                   |
+| instancing.vert/.frag      | Renderizado de instancias con color y transformaciones por objeto  |
+| irradiance_convolution.*   | Cálculo de irradiancia para IBL (cubemap convolución)              |
+| light_cube.frag            | Sombreado procedural de cubos de luz y terreno                    |
+| parallax.frag              | Sombreado PBR con parallax mapping                                |
+| pbr.frag                   | Sombreado PBR estándar (metallic/roughness, IBL, luces)           |
+| planet_generation.comp     | Generación procedural de planetas en compute                      |
+| point_shadow.vert/.geom/.frag | Sombra de punto omnidireccional (cubemap shadow mapping)      |
+| prefilter_env.vert/.frag   | Prefiltrado de entorno para IBL (roughness mip chain)             |
+| screenquad.vert            | Fullscreen quad para post-procesos                                |
+| shadow.vert/.frag          | Sombreado de mapas de sombra (direccional)                        |
+| simple.vert/.frag          | Sombreado PBR/Phong simple, materiales y luces múltiples           |
+| ssao.frag                  | Ambient occlusion en pantalla (SSAO)                              |
+| tonemapping.frag           | Mapeo de tonos HDR y mezcla de bloom                              |
+
 
 ---
 
-## 3) Build Requirements
+## Build Requirements
 
 ### Toolchain
 
@@ -63,9 +94,6 @@ Core shader assets are in [shaders/](shaders/).
 
 Resolved by CMake via `find_package`/`pkg-config`:
 
-- OpenGL
-- GLFW3
-- Assimp
 - OpenSSL
 - OpenAL
 - PostgreSQL client (`libpq`)
@@ -73,45 +101,45 @@ Resolved by CMake via `find_package`/`pkg-config`:
 
 ### Third-party sources
 
-The repo expects `third_party/` sources (GLM, GLAD, GLFW, stb, etc.).
+The repo expects `third_party/` sources (GLM, stb, etc.).
 You can bootstrap the folder with [setup_deps.sh](setup_deps.sh).
 
 ---
 
-## 4) Build and Run
+## Build
 
-Typical Linux flow:
-
+Build folder
 ```bash
 mkdir -p build
-cd build
+```
+
+Normal cmake setup
+```bash
 cmake ..
-make -j"$(nproc)"
+```
+
+In the build folder indicate, where do you want to store the project for IDE use.
+```bash
+cmake --install . --prefix ../../haruka/
+```
+
+For compilation.
+```bash
+make -j${nproc}
+```
+
+Or if you want to install it into the SO.
+```bash
+make install
 ```
 
 Generated binaries:
 
-- `build/HarukaEditor`
-- `build/HarukaEngine`
-- `build/HarukaServer`
-- `build/ChatTest`
-
-Run examples:
-
-```bash
-cd build
-./HarukaEditor
-```
-
-Build options from CMake:
-
-- `BUILD_EDITOR` (ON by default)
-- `BUILD_RUNTIME` (ON by default)
-- `BUILD_SERVER` (ON by default)
+- `build/libHarukaEngine.so`
 
 ---
 
-## 5) Key Runtime Pipelines
+## Key Runtime Pipelines
 
 ### Terrain/Planet workflow
 
@@ -128,22 +156,21 @@ Build options from CMake:
 
 ---
 
-## 6) Project Layout
+## Project Layout
 
 Top-level folders:
 
 - [src/](src/) → engine/editor/server source
-- [shaders/](shaders/) → GLSL shaders
-- [projects/](projects/) → sample/working projects
+- [shaders/](shaders/) → GLSL shaders compile to SPV
 - [template/](template/) → project template skeleton
-- [documents/](documents/) → engineering and documentation standards
+- [docs/](docs/) → engineering and documentation standards
 
 ---
 
-## 7) Notes
+## Notes
 
 - `Release` is the default build type if not explicitly set.
 - CMake copies the shader directory into the build output.
 - `HarukaEngineLib` is built as a shared library and reused by client/editor.
 
-For deeper internal docs, see [documents/project_stl_standard.md](documents/project_stl_standard.md) and [documents/project_module_map.md](documents/project_module_map.md).
+For deeper internal docs, see [documents/project_stl_standard.md](docs/project_stl_standard.md) and [documents/project_module_map.md](docs/project_module_map.md).
