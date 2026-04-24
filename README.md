@@ -15,7 +15,16 @@ The repository builds three main applications from the same codebase:
 
 ---
 
-## 1) Architecture Overview
+## Setup
+
+Download Dev dependecies
+```bash
+  sudo dnf/apt install
+```
+
+---
+
+## Architecture Overview
 
 Main source modules:
 
@@ -33,7 +42,7 @@ The engine library target is `HarukaEngineLib` and is linked by runtime/editor.
 
 ---
 
-## 2) Rendering Features
+## Rendering Features
 
 Haruka includes:
 
@@ -80,7 +89,7 @@ Haruka includes:
 
 ---
 
-## 3) Build Requirements
+## Build Requirements
 
 ### Toolchain
 
@@ -91,9 +100,6 @@ Haruka includes:
 
 Resolved by CMake via `find_package`/`pkg-config`:
 
-  
-  
-- Assimp
 - OpenSSL
 - OpenAL
 - PostgreSQL client (`libpq`)
@@ -106,33 +112,38 @@ You can bootstrap the folder with [setup_deps.sh](setup_deps.sh).
 
 ---
 
-## 4) Build
+## Build
 
-Typical Linux flow:
-
+Build folder
 ```bash
 mkdir -p build
-cd build
-cmake ..
-make -j"$(nproc)"
 ```
 
-cmake --install . --prefix ../../haruka/include/engines/
+Normal cmake setup
+```bash
+cmake ..
+```
+
+In the build folder indicate, where do you want to store the project for IDE use.
+```cmake --install . --prefix ../../haruka/```
+
+For compilation.
+```bash
+make -j${nproc}
+```
+
+Or if you want to install it into the SO.
+```bash
+make install
+```
 
 Generated binaries:
 
 - `build/libHarukaEngine.so`
 
-Run examples:
-
-```bash
-cd build
-./HarukaEditor
-```
-
 ---
 
-## 5) Key Runtime Pipelines
+## Key Runtime Pipelines
 
 ### Terrain/Planet workflow
 
@@ -149,22 +160,21 @@ cd build
 
 ---
 
-## 6) Project Layout
+## Project Layout
 
 Top-level folders:
 
 - [src/](src/) → engine/editor/server source
-- [shaders/](shaders/) → GLSL shaders
-- [projects/](projects/) → sample/working projects
+- [shaders/](shaders/) → GLSL shaders compile to SPV
 - [template/](template/) → project template skeleton
-- [documents/](documents/) → engineering and documentation standards
+- [docs/](docs/) → engineering and documentation standards
 
 ---
 
-## 7) Notes
+## Notes
 
 - `Release` is the default build type if not explicitly set.
 - CMake copies the shader directory into the build output.
 - `HarukaEngineLib` is built as a shared library and reused by client/editor.
 
-For deeper internal docs, see [documents/project_stl_standard.md](documents/project_stl_standard.md) and [documents/project_module_map.md](documents/project_module_map.md).
+For deeper internal docs, see [documents/project_stl_standard.md](docs/project_stl_standard.md) and [documents/project_module_map.md](docs/project_module_map.md).
