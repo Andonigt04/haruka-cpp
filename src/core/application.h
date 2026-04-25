@@ -142,6 +142,7 @@ public:
     // void renderScene(Shader* shader = nullptr); // Eliminada, usar buildRenderQueue()
     void main_loop();
     void renderFrame();
+    void renderScene(Shader* /*shader*/);
     void renderFrameContent();
     void renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIndex);
     void recreateSwapchainAndResources();
@@ -168,6 +169,8 @@ private:
     std::vector<VkCommandBuffer> vkCommandBuffers;
 
     // --- Vulkan handles (experimental) ---
+    VkBuffer vkQuadBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory vkQuadBufferMemory = VK_NULL_HANDLE;
     VkInstance vkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice vkPhysicalDevice = VK_NULL_HANDLE;
     VkDevice vkDevice = VK_NULL_HANDLE;
@@ -291,6 +294,9 @@ private:
     float g_lastFrameTimeMs = 0.0f;
 
     void buildRenderQueue();
+    void recordCommandBuffer(VkCommandBuffer, uint32_t);
+    bool checkDeviceExtensionSupport(VkPhysicalDevice device);
+    bool isDeviceSuitable(VkPhysicalDevice device, VkSurfaceKHR surface);
 };
 
 #endif
