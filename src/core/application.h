@@ -88,6 +88,17 @@ public:
 
     // --- Accesores y control ---
     Camera* getCamera() { return _camera.get(); }
+
+    VkInstance      getVkInstance()      const { return vkInstance; }
+    VkPhysicalDevice getVkPhysicalDevice() const { return vkPhysicalDevice; }
+    VkDevice        getVkDevice()        const { return vkDevice; }
+    VkQueue         getVkQueue()         const { return vkQueue; }
+    uint32_t        getGraphicsQueueFamily() const { return _graphicsQueueFamily; }
+    VkCommandPool   getVkCommandPool()   const { return vkCommandPool; }
+    VkDescriptorPool getVkDescriptorPool() const { return vkDescriptorPool; }
+    VkRenderPass    getVkRenderPass()    const { return vkRenderPass; }
+    VkSwapchainKHR  getVkSwapchain()     const { return vkSwapchain; }
+
     Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
