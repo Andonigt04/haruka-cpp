@@ -1,10 +1,10 @@
-#pragma once
+#ifndef TERRAIN_STREAMING_SYSTEM_H
+#define TERRAIN_STREAMING_SYSTEM_H
 
 #include <future>
 #include <map>
 #include <string>
 #include <vector>
-
 #include <glm/glm.hpp>
 
 #include "math_types.h"
@@ -94,3 +94,5 @@ private:
 };
 
 } // namespace Haruka
+
+#endif

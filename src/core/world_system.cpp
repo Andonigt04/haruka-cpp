@@ -1,7 +1,9 @@
 #include "world_system.h"
-#include "camera.h"
+
 #include <cmath>
 #include <set>
+
+#include "camera.h"
 
 namespace Haruka {
 

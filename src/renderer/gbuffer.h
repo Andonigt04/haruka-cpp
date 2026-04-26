@@ -1,4 +1,6 @@
-#pragma once
+#ifndef GBUFFER_H
+#define GBUFFER_H
+
 #include <vulkan/vulkan.h>
 #include <vector>
 
@@ -17,3 +19,5 @@ public:
     VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     unsigned int width, height;
 };
+
+#endif

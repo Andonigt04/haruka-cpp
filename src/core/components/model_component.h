@@ -1,7 +1,10 @@
-#pragma once
-#include "core/component.h"
+#ifndef MODEL_COMPONENT_H
+#define MODEL_COMPONENT_H
+
 #include <string>
 #include <nlohmann/json.hpp>
+
+#include "core/component.h"
 
 namespace Haruka {
 
@@ -37,3 +40,5 @@ public:
 };
 
 }
+
+#endif

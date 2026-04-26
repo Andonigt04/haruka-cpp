@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DATABASE_MANAGER_H
+#define DATABASE_MANAGER_H
 
 #include <string>
 #include <memory>
@@ -143,3 +144,5 @@ private:
 };
 
 }
+
+#endif

@@ -1,4 +1,3 @@
-
 #include "terrain.h"
 
 Terrain::Terrain(unsigned int width, unsigned int height)

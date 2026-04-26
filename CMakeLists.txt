@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(HarukaEngine VERSION 0.2.0)
+project(HarukaEngine VERSION 0.9.0)
 
 include(GNUInstallDirs)
 set(CMAKE_INSTALL_LIBDIR "lib64" CACHE PATH "Directory for libraries" FORCE)

@@ -1,4 +1,6 @@
-#pragma once
+#ifndef RENDER_TARGET_H
+#define RENDER_TARGET_H
+
 #include <vulkan/vulkan.h>
 
 class RenderTarget {
@@ -20,3 +22,5 @@ public:
     unsigned int width, height;
     VkDevice m_device = VK_NULL_HANDLE;
 };
+
+#endif

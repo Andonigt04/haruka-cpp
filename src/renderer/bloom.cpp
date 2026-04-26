@@ -1,4 +1,5 @@
 #include "bloom.h"
+
 #include <stdexcept>
 
 Bloom::Bloom(unsigned int width, unsigned int height)

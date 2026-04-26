@@ -1,4 +1,5 @@
-#pragma once
+#ifndef NETWORK_MANAGER_H
+#define NETWORK_MANAGER_H
 
 #include <glm/glm.hpp>
 #include <string>
@@ -204,3 +205,5 @@ private:
 };
 
 }
+
+#endif

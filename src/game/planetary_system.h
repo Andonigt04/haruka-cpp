@@ -1,12 +1,15 @@
-#pragma once
+#ifndef PLANETARY_SYSTEM_H
+#define PLANETARY_SYSTEM_H
+
+#include <memory>
+#include <unordered_map>
+
 #include "core/world_system.h"
 #include "core/math_types.h"
 #include "character.h"
 #include "core/scene.h"
 #include "renderer/terrain.h"
 #include "renderer/shader.h"
-#include <memory>
-#include <unordered_map>
 
 namespace Haruka {
 
@@ -158,3 +161,5 @@ inline bool operator<(const PlanetarySystem::ChunkConfig& a, const PlanetarySyst
 }
 
 }
+
+#endif

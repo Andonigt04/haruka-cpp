@@ -1,4 +1,5 @@
-#pragma once
+#ifndef OCTREE_H
+#define OCTREE_H
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -89,3 +90,5 @@ private:
 };
 
 }
+
+#endif

@@ -1,4 +1,5 @@
 #include "websocket_client.h"
+
 #include <iostream>
 
 namespace Haruka {

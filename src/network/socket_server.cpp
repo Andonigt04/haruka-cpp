@@ -1,4 +1,5 @@
 #include "socket_server.h"
+
 #include <iostream>
 
 namespace Haruka {

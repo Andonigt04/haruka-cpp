@@ -1,4 +1,5 @@
-#pragma once
+#ifndef GPU_INSTANCING_H
+#define GPU_INSTANCING_H
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -45,3 +46,5 @@ private:
     void setupInstanceBuffer();
     void destroyInstanceBuffer();
 };
+
+#endif

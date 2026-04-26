@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SPAWN_SYSTEM_H
+#define SPAWN_SYSTEM_H
 
 #include <glm/glm.hpp>
 #include <string>
@@ -114,3 +115,5 @@ private:
 };
 
 }
+
+#endif

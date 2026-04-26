@@ -1,4 +1,5 @@
-#pragma once
+#ifndef WEBSOCKET_CLIENT_H
+#define WEBSOCKET_CLIENT_H
 
 #include <websocketpp/client.hpp>
 #include <websocketpp/config/asio_client.hpp>
@@ -59,3 +60,5 @@ private:
 };
 
 }
+
+#endif

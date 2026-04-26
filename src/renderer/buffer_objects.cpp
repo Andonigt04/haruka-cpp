@@ -1,4 +1,5 @@
 #include "buffer_objects.h"
+
 #include <stdexcept>
 #include <cstring>
 

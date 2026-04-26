@@ -1,9 +1,11 @@
-#pragma once
+#ifndef MESH_LOD_H
+#define MESH_LOD_H
 
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
 #include <vulkan/vulkan.h>
+
 #include "mesh_optimizer.h"
 
 /**
@@ -54,3 +56,4 @@ private:
     VkCommandPool commandPool = VK_NULL_HANDLE;
 };
 
+#endif

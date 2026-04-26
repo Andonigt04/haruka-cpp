@@ -1,8 +1,10 @@
-#pragma once
+#ifndef MESH_OPTIMIZER_H
+#define MESH_OPTIMIZER_H
 
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
+
 #include "mesh.h"
 
 /**
@@ -94,3 +96,5 @@ private:
 
     Stats stats;
 };
+
+#endif

@@ -1,4 +1,5 @@
 #include "noise_generator.h"
+
 #include <cmath>
 
 namespace Haruka {

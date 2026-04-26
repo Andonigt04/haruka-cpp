@@ -1,4 +1,5 @@
-#pragma once
+#ifndef SOCKET_SERVER_H
+#define SOCKET_SERVER_H
 
 #include <boost/asio.hpp>
 #include <memory>
@@ -61,3 +62,5 @@ private:
 };
 
 }
+
+#endif

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef IBL_H
+#define IBL_H
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
@@ -62,3 +63,5 @@ private:
     // VkImageView envCubemapView, irradianceView, prefilterView, brdfLUTView;
     // VkBuffer cubeBuffer, quadBuffer;
 };
+
+#endif

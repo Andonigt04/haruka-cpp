@@ -9,11 +9,16 @@ Haruka Engine is a C++17 Vulkan real-time engine with:
 
 ---
 
-## Setup
+## Download Dependencies
 
-Download Dev dependecies
+Dev dependencies
 ```bash
-  sudo dnf install cmake gcc-c++ glfw3-devel assimp-devel openssl-devel openal-soft-devel postgresql-libs gtk3-devel pkgconf-pkg-config glm-devel glad-devel vulkan-loader vulkan-headers vulkan-tools sdl3-devel
+sudo dnf install cmake gcc-c++ glfw3-devel assimp-devel openssl-devel openal-soft-devel postgresql-libs gtk3-devel pkgconf-pkg-config glm-devel vulkan-loader vulkan-loader-devel vulkan-headers vulkan-tools sdl3-devel boost-devel asio-devel websocketpp-devel
+```
+
+Optional dependencies for compiling SDL3 (at the moment none rpm in dnf)
+```bash
+sudo dnf install libX11-devel libXext-devel libXrandr-devel libXcursor-devel libXinerama-devel libXi-devel libXScrnSaver-devel wayland-devel libxkbcommon-devel mesa-libgbm-devel libdrm-devel libXtst-devel   
 ```
 
 ---

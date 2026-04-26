@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ASSET_STREAMER_H
+#define ASSET_STREAMER_H
 
 #include <string>
 #include <memory>
@@ -156,3 +157,5 @@ private:
     // Callbacks
     AssetLoadedCallback assetLoadedCallback = nullptr;
 };
+
+#endif

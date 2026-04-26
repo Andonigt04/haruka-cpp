@@ -1,4 +1,5 @@
-#pragma once
+#ifndef VIRTUAL_TEXTURING_H
+#define VIRTUAL_TEXTURING_H
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -18,3 +19,5 @@ public:
     void createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, uint32_t numPages);
     void destroyVulkanResources(VkDevice device);
 };
+
+#endif

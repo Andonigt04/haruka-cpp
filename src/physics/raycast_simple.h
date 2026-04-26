@@ -1,6 +1,8 @@
-#pragma once
+#ifndef RAYCAST_SIMPLE_H
+#define RAYCAST_SIMPLE_H
 
 #define GLM_ENABLE_EXPERIMENTAL
+
 #include <glm/glm.hpp>
 #include <glm/gtx/intersect.hpp>
 #include <string>
@@ -73,3 +75,5 @@ private:
                               float& distance,
                               glm::vec3& hitPoint);
 };
+
+#endif

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef HDR_H
+#define HDR_H
 
 #include <vulkan/vulkan.h>
 
@@ -18,3 +19,5 @@ public:
     VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     unsigned int width, height;
 };
+
+#endif

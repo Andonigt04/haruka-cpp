@@ -1,4 +1,5 @@
 #include "material_component.h"
+
 #include <nlohmann/json.hpp>
 
 namespace Haruka {

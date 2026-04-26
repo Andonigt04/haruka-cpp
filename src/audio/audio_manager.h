@@ -1,4 +1,5 @@
-#pragma once
+#ifndef AUDIO_MANAGER_H
+#define AUDIO_MANAGER_H
 
 #include <AL/al.h>
 #include <AL/alc.h>
@@ -121,3 +122,5 @@ private:
 };
 
 }
+
+#endif

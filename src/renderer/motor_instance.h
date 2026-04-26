@@ -1,4 +1,5 @@
-#pragma once
+#ifndef MOTOR_INSTANCE_H
+#define MOTOR_INSTANCE_H
 
 class Application;
 class RenderTarget;
@@ -89,3 +90,5 @@ private:
     Camera* motorCamera = nullptr;
     Application* motorApplication = nullptr;
 };
+
+#endif

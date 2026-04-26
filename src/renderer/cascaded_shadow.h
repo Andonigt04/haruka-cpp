@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CASCADED_SHADOW_H
+#define CASCADED_SHADOW_H
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -21,3 +22,5 @@ public:
     int numCascades;
     // TODO: Implementar lógica de actualización de matrices y recursos Vulkan
 };
+
+#endif

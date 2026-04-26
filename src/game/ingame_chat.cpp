@@ -1,4 +1,5 @@
 #include "ingame_chat.h"
+
 #include <imgui.h>
 #include <iostream>
 #include <cstring>

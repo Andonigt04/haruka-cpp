@@ -1,7 +1,9 @@
-#pragma once
+#ifndef PREFAB_UTILS_H
+#define PREFAB_UTILS_H
+
+#include <string>
 
 #include "scene.h"
-#include <string>
 
 namespace Haruka {
 
@@ -11,3 +13,5 @@ void savePrefab(const SceneObject& obj, const std::string& path);
 SceneObject loadPrefab(const std::string& path);
 
 }
+
+#endif

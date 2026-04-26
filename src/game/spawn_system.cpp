@@ -1,4 +1,5 @@
 #include "spawn_system.h"
+
 #include <iostream>
 #include <algorithm>
 #include <chrono>

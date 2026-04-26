@@ -1,4 +1,6 @@
-#pragma once
+#ifndef MATERIAL_COMPONENT_H
+#define MATERIAL_COMPONENT_H
+
 #include <string>
 #include <map>
 #include <glm/glm.hpp>
@@ -65,3 +67,5 @@ public:
 };
 
 }
+
+#endif

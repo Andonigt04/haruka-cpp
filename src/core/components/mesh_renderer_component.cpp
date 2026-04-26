@@ -1,8 +1,9 @@
 #include "mesh_renderer_component.h"
 
+#include "imgui.h"
+
 #include "renderer/shader.h"
 #include "renderer/simple_mesh.h"
-#include "imgui.h"
 
 MeshRendererComponent::MeshRendererComponent() 
     : mesh(nullptr), meshPath(""), materialPath("") {}

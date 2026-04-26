@@ -1,4 +1,5 @@
 #include "database_manager.h"
+
 #include <iostream>
 #include <sstream>
 #include <cstring>

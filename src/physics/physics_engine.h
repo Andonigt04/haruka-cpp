@@ -1,9 +1,11 @@
-#pragma once
+#ifndef PHYSICS_ENGINE_H
+#define PHYSICS_ENGINE_H
 
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
 #include <string>
+
 #include "octree.h"
 
 namespace Haruka {
@@ -76,3 +78,5 @@ private:
 };
 
 }
+
+#endif

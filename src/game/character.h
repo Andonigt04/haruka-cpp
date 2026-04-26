@@ -1,9 +1,10 @@
-#pragma once
-
+#ifndef CHARACTER_H
+#define CHARACTER_H
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 #include <memory>
+
 #include "core/camera.h"
 #include "physics/physics_engine.h"
 #include "network/network_manager.h"
@@ -148,3 +149,5 @@ private:
 };
 
 }
+
+#endif

@@ -1,9 +1,11 @@
-#pragma once
+#ifndef MESH_RENDERER_COMPONENT_H
+#define MESH_RENDERER_COMPONENT_H
 
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
 #include <string>
+
 #include "renderer/simple_mesh.h"
 
 class Shader;
@@ -62,3 +64,5 @@ private:
     std::vector<glm::vec3> sourceNormals;
     std::vector<unsigned int> sourceIndices;
 };
+
+#endif

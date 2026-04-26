@@ -1,4 +1,5 @@
 #include "network_manager.h"
+
 #include <iostream>
 #include <sstream>
 #include <chrono>

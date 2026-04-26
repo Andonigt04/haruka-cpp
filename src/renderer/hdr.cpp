@@ -1,4 +1,5 @@
 #include "hdr.h"
+
 #include <stdexcept>
 
 HDR::HDR(unsigned int width, unsigned int height)

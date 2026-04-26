@@ -1,4 +1,5 @@
-#pragma once
+#ifndef LIGHT_CULLER_H
+#define LIGHT_CULLER_H
 
 #include <vulkan/vulkan.h>
 #include <vector>
@@ -75,3 +76,5 @@ private:
     size_t lightCount = 0;
     // TODO: Implementar lógica de creación y destrucción de buffers y recursos Vulkan
 };
+
+#endif

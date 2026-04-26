@@ -1,4 +1,5 @@
 #include "mesh_optimizer.h"
+
 #include <algorithm>
 #include <unordered_map>
 #include <cmath>

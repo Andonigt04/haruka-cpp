@@ -1,4 +1,5 @@
-#pragma once
+#ifndef PROJECT_H
+#define PROJECT_H
 
 #include <string>
 #include <vector>
@@ -75,3 +76,5 @@ namespace Haruka
     };
 
 }
+
+#endif

@@ -1,7 +1,8 @@
 #include "shadow.h"
-#include "core/error_reporter.h"
+
 #include <iostream>
 
+#include "core/error_reporter.h"
 
 Shadow::Shadow(unsigned int width, unsigned int height)
     : shadowWidth(width), shadowHeight(height) {}

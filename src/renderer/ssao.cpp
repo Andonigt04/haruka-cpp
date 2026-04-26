@@ -1,4 +1,5 @@
 #include "ssao.h"
+
 #include <stdexcept>
 
 SSAO::SSAO(unsigned int width, unsigned int height)

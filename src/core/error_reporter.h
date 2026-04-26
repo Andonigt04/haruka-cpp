@@ -1,4 +1,5 @@
-#pragma once
+#ifndef ERROR_REPORTER_H
+#define ERROR_REPORTER_H
 
 #include <string>
 #include <iostream>
@@ -197,3 +198,5 @@ private:
 
 #define HARUKA_NETWORK_ERROR(code, message) \
     ErrorReporter::report(ErrorComponent::NETWORK, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#endif

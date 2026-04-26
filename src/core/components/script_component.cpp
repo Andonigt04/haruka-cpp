@@ -1,4 +1,5 @@
 #include "script_component.h"
+
 #include <imgui.h>
 
 namespace Haruka {

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef GAME_INTERFACE_H
+#define GAME_INTERFACE_H
 
 #include "scene.h"
 #include "camera.h"
@@ -45,3 +46,5 @@ struct GameInterface {
 #define GAME_INTERFACE_EXPORT extern "C"
 
 }
+
+#endif

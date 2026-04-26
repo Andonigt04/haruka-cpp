@@ -1,8 +1,10 @@
-#pragma once
+#ifndef TRANSFORM_COMPONENT_H
+#define TRANSFORM_COMPONENT_H
 
-#include "../component.h"
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
+
+#include "../component.h"
 
 namespace Haruka {
 
@@ -52,3 +54,5 @@ public:
 };
 
 }
+
+#endif

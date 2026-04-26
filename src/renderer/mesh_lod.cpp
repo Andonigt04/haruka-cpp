@@ -1,4 +1,5 @@
 #include "mesh_lod.h"
+
 #include <algorithm>
 #include <cstring>
 

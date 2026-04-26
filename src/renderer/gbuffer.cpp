@@ -1,4 +1,5 @@
 #include "gbuffer.h"
+
 #include <stdexcept>
 
 GBuffer::GBuffer(unsigned int width, unsigned int height)

@@ -1,10 +1,11 @@
 #include "project.h"
-#include "error_reporter.h"
 
 #include <fstream>
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+
+#include "error_reporter.h"
 
 namespace fs = std::filesystem;
 

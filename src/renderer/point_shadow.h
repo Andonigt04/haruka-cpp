@@ -1,4 +1,6 @@
-#pragma once
+#ifndef POINT_SHADOW_H
+#define POINT_SHADOW_H
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <glm/glm.hpp>
@@ -18,3 +20,5 @@ public:
     void createVulkanResources(VkDevice device, VkPhysicalDevice physicalDevice, VkRenderPass renderPass, uint32_t w, uint32_t h);
     void destroyVulkanResources(VkDevice device);
 };
+
+#endif

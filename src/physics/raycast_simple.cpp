@@ -1,4 +1,5 @@
 #include "raycast_simple.h"
+
 #include <glm/gtc/constants.hpp>
 #include <iostream>
 

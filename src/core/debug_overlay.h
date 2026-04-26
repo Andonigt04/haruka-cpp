@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DEBUG_OVERLAY_H
+#define DEBUG_OVERLAY_H
 
 #include <chrono>
 #include <deque>
@@ -131,3 +132,5 @@ private:
     glm::vec4 colorWarning = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f);  // Amarillo
     glm::vec4 colorCritical = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Rojo
 };
+
+#endif

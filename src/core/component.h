@@ -1,4 +1,5 @@
-#pragma once
+#ifndef COMPONENT_H
+#define COMPONENT_H
 
 #include <string>
 #include <memory>
@@ -31,3 +32,5 @@ public:
 using ComponentPtr = std::shared_ptr<Component>;
 
 }
+
+#endif

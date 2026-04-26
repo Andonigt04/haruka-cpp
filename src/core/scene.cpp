@@ -7,10 +7,11 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <dlfcn.h>
-#include "core/game_interface.h"
-#include "renderer/primitive_shapes.h"
 #include <glm/gtx/quaternion.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+
+#include "core/game_interface.h"
+#include "renderer/primitive_shapes.h"
 
 namespace Haruka {
 

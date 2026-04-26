@@ -1,5 +1,6 @@
 #include "core/application.h"
-#include "core/json.hpp"
+
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>

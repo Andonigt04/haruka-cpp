@@ -1,11 +1,13 @@
-#pragma once
+#ifndef INGAME_CHAT_H
+#define INGAME_CHAT_H
 
-#include "chat_system.h"
-#include "network/network_manager.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <thread>
 #include <atomic>
+
+#include "chat_system.h"
+#include "network/network_manager.h"
 
 namespace Haruka {
 
@@ -74,3 +76,5 @@ private:
 };
 
 }
+
+#endif

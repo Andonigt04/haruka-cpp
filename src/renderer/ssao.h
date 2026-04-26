@@ -1,4 +1,6 @@
-#pragma once
+#ifndef SSAO_H
+#define SSAO_H
+
 #include <vulkan/vulkan.h>
 
 class SSAO {
@@ -16,3 +18,5 @@ public:
     VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     unsigned int width, height;
 };
+
+#endif

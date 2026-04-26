@@ -1,6 +1,9 @@
-#pragma once
-#include "../component.h"
+#ifndef SCRIPT_COMPONENT_H
+#define SCRIPT_COMPONENT_H
+
 #include <string>
+
+#include "../component.h"
 
 namespace Haruka {
 
@@ -21,3 +24,5 @@ public:
 };
 
 }
+
+#endif

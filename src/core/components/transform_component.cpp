@@ -1,4 +1,5 @@
 #include "transform_component.h"
+
 #include <imgui.h>
 
 namespace Haruka {

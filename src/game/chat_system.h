@@ -1,4 +1,5 @@
-#pragma once
+#ifndef CHAT_SYSTEM_H
+#define CHAT_SYSTEM_H
 
 #include <string>
 #include <vector>
@@ -110,3 +111,5 @@ private:
 };
 
 }
+
+#endif

@@ -1,4 +1,6 @@
-#pragma once
+#ifndef BLOOM_H
+#define BLOOM_H
+
 #include <vulkan/vulkan.h>
 
 class Bloom {
@@ -16,3 +18,5 @@ public:
     VkFramebuffer vkFramebuffer = VK_NULL_HANDLE;
     unsigned int width, height;
 };
+
+#endif

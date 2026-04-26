@@ -1,5 +1,6 @@
-// Vulkan-only buffer objects
-#pragma once
+#ifndef BUFFER_OBJECTS_H
+#define BUFFER_OBJECTS_H
+
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <cstdint>
@@ -39,3 +40,5 @@ struct VertexInputDescription {
     std::vector<VkVertexInputBindingDescription> bindings;
     std::vector<VkVertexInputAttributeDescription> attributes;
 };
+
+#endif

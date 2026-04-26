@@ -1,7 +1,9 @@
 #include "octree.h"
-#include "physics_engine.h"
+
 #include <iostream>
 #include <algorithm>
+
+#include "physics_engine.h"
 
 namespace Haruka {
 

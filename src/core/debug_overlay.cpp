@@ -1,7 +1,9 @@
 #include "debug_overlay.h"
-#include "io/asset_streamer.h"
+
 #include <imgui.h>
 #include <iostream>
+
+#include "io/asset_streamer.h"
 
 void DebugOverlay::init() {
     lastFrameTime = std::chrono::high_resolution_clock::now();
