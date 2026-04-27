@@ -303,8 +303,7 @@ void Application::create_window() {
         HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize SDL");
         throw std::runtime_error("Fallo al inicializar SDL");
     }
-    _window = SDL_CreateWindow("Haruka Engine", _width, _height,
-                               SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    _window = SDL_CreateWindow("Haruka Engine", _width, _height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!_window) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create SDL window");
         throw std::runtime_error("Fallo al crear la ventana");
@@ -329,25 +328,46 @@ void Application::create_vulkan_context() {
     appInfo.engineVersion      = VK_MAKE_VERSION(1, 0, 0);
     appInfo.apiVersion         = VK_API_VERSION_1_2;
 
+    // 1. Obtener extensiones básicas de SDL
     Uint32 sdlExtCount = 0;
     const char* const* sdlExts = SDL_Vulkan_GetInstanceExtensions(&sdlExtCount);
-    if (!sdlExts) throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
+    if (!sdlExts) {
+        std::cerr << "SDL_Vulkan_GetInstanceExtensions error: " << SDL_GetError() << std::endl;
+        throw std::runtime_error("SDL_Vulkan_GetInstanceExtensions failed");
+    }
 
+    // 2. Creamos nuestro propio vector para añadir las que FALTAN
+    std::vector<const char*> allExtensions;
+    for (Uint32 i = 0; i < sdlExtCount; i++) {
+        allExtensions.push_back(sdlExts[i]);
+    }
+
+    // 3. Añadimos las extensiones manuales que "curan" el error de superficie en Fedora
+    allExtensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+    allExtensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    allExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+
+    // 4. Configuramos el instInfo usando nuestro vector, NO el de SDL directamente
     VkInstanceCreateInfo instInfo{};
     instInfo.sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     instInfo.pApplicationInfo        = &appInfo;
-    instInfo.enabledExtensionCount   = sdlExtCount;
-    instInfo.ppEnabledExtensionNames = sdlExts;
+    instInfo.enabledExtensionCount   = static_cast<uint32_t>(allExtensions.size());
+    instInfo.ppEnabledExtensionNames = allExtensions.data();
     instInfo.enabledLayerCount       = 0;
+
+    // IMPORTANTE: Este flag es necesario por la extensión de Portability en drivers modernos
+    instInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 
     if (vkCreateInstance(&instInfo, nullptr, &vkInstance) != VK_SUCCESS)
         throw std::runtime_error("Fallo al crear VkInstance");
 
-    // ------------------------------------------------------------------
-    // 2. Surface
-    // ------------------------------------------------------------------
-    if (!SDL_Vulkan_CreateSurface(_window, vkInstance, nullptr, &vkSurface))
+    // --- Diagnóstico justo antes del crash ---
+    SDL_ClearError(); 
+    if (!SDL_Vulkan_CreateSurface(_window, vkInstance, nullptr, &vkSurface)) {
+        // Si vuelve a fallar, este print nos dirá la verdad absoluta:
+        std::cerr << "CRASH LOG - SDL Error: " << SDL_GetError() << std::endl;
         throw std::runtime_error("Fallo al crear VkSurfaceKHR con SDL");
+    }
 
     // ------------------------------------------------------------------
     // 3. Physical device
@@ -654,12 +674,6 @@ void Application::create_vulkan_context() {
     uboWrite.descriptorCount = 1;
     uboWrite.pBufferInfo     = &uboBufInfo;
     vkUpdateDescriptorSets(vkDevice, 1, &uboWrite, 0, nullptr);
-
-    // FIX: create_vulkan_context() TERMINA AQUÍ.
-    // Los pipelines gráficos (geometry, lighting, postprocess, present) se
-    // crean en init() cuando los shaders y recursos dependientes ya existen.
-    // Nunca se graban command buffers aquí — eso es responsabilidad de renderFrame().
-    printf("[Haruka] << create_vulkan_context OK\n");
 }
 
 // =============================================================================

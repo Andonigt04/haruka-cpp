@@ -103,6 +103,8 @@ public:
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
 
+    void set_external_window(SDL_Window* window) { _window = window; }
+    
     // Render quality/layers (global editor-configurable)
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
     static int getRenderQualityPreset() { return s_renderQualityPreset; }
