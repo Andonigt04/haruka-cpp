@@ -299,11 +299,13 @@ void Application::run(const std::string& startScenePath) {
 // =============================================================================
 
 void Application::create_window() {
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
         HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize SDL");
         throw std::runtime_error("Fallo al inicializar SDL");
     }
+
     _window = SDL_CreateWindow("Haruka Engine", _width, _height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    
     if (!_window) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create SDL window");
         throw std::runtime_error("Fallo al crear la ventana");
@@ -432,6 +434,8 @@ void Application::create_vulkan_context() {
         swapExtent.width  = std::clamp((uint32_t)_width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
         swapExtent.height = std::clamp((uint32_t)_height, caps.minImageExtent.height, caps.maxImageExtent.height);
     }
+
+    _swapchainExtent = swapExtent;
 
     VkSwapchainCreateInfoKHR scCI{};
     scCI.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -817,6 +821,10 @@ void Application::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t im
 
     // Delegar al método que contiene todos los passes de render.
     renderFrameContentVulkan(commandBuffer, imageIndex);
+
+    // Inyección de ImGui (registrada por el editor)
+    if (_imguiCallback)
+        _imguiCallback(commandBuffer, imageIndex);
 
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
         throw std::runtime_error("Fallo al cerrar command buffer");

@@ -98,6 +98,10 @@ public:
     VkDescriptorPool getVkDescriptorPool()   const { return vkDescriptorPool; }
     VkRenderPass     getVkRenderPass()       const { return vkRenderPass; }
     VkSwapchainKHR   getVkSwapchain()        const { return vkSwapchain; }
+    VkFramebuffer    getSwapchainFramebuffer(uint32_t index) const {
+        return index < vkFramebuffers.size() ? vkFramebuffers[index] : VK_NULL_HANDLE;
+    }
+    VkExtent2D       getSwapchainExtent()    const { return _swapchainExtent; }
 
     Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
@@ -132,6 +136,11 @@ public:
 
     CascadedShadow* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
+
+    // Callback que el editor registra para inyectar ImGui en el command buffer del motor
+    void setImGuiRenderCallback(std::function<void(VkCommandBuffer, uint32_t)> cb) {
+        _imguiCallback = std::move(cb);
+    }
 
     // Callbacks de integración
     void onSceneChanged(Haruka::Scene* scene) {
@@ -171,16 +180,17 @@ private:
     VkPipeline vkPostprocessPipeline = VK_NULL_HANDLE;
     VkPipelineLayout vkPresentPipelineLayout = VK_NULL_HANDLE;
     VkPipeline vkPresentPipeline = VK_NULL_HANDLE;
+
     
     // --- Vulkan descriptor sets para materiales ---
     VkDescriptorSetLayout vkMaterialDescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool vkDescriptorPool = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> vkMaterialDescriptorSets;
-
+    
     // --- Vulkan command pool y command buffers ---
     VkCommandPool vkCommandPool = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> vkCommandBuffers;
-
+    
     // --- Vulkan handles (experimental) ---
     VkBuffer vkQuadBuffer = VK_NULL_HANDLE;
     VkDeviceMemory vkQuadBufferMemory = VK_NULL_HANDLE;
@@ -189,6 +199,7 @@ private:
     VkDevice vkDevice = VK_NULL_HANDLE;
     VkSurfaceKHR vkSurface = VK_NULL_HANDLE;
     VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
+    VkExtent2D _swapchainExtent = {0, 0};
     std::vector<VkImage> vkSwapchainImages;
     std::vector<VkImageView> vkSwapchainImageViews;
     VkQueue vkGraphicsQueue = VK_NULL_HANDLE;
@@ -207,6 +218,8 @@ private:
     int _height = 720;
     std::unique_ptr<Haruka::Scene> _currentScene;
     std::unique_ptr<Camera> _camera;
+
+    std::function<void(VkCommandBuffer, uint32_t)> _imguiCallback;
 
     // --- Rendering pipeline ---
     std::unique_ptr<Shader> _mainShader;
