@@ -103,11 +103,20 @@ public:
     }
     VkExtent2D       getSwapchainExtent()    const { return _swapchainExtent; }
 
+    // Offscreen render target para el panel de viewport del editor
+    VkDescriptorSet  getOffscreenDescriptorSet() const { return _offscreenDescSet; }
+    void             createOffscreenResources();
+    void             destroyOffscreenResources();
+
     Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
 
     void set_external_window(SDL_Window* window) { _window = window; }
+
+    void setImGuiRenderCallback(std::function<void(VkCommandBuffer, uint32_t)> cb) {
+        _imguiCallback = std::move(cb);
+    }
     
     // Render quality/layers (global editor-configurable)
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
@@ -136,11 +145,6 @@ public:
 
     CascadedShadow* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
-
-    // Callback que el editor registra para inyectar ImGui en el command buffer del motor
-    void setImGuiRenderCallback(std::function<void(VkCommandBuffer, uint32_t)> cb) {
-        _imguiCallback = std::move(cb);
-    }
 
     // Callbacks de integración
     void onSceneChanged(Haruka::Scene* scene) {
@@ -201,6 +205,14 @@ private:
     VkSwapchainKHR vkSwapchain = VK_NULL_HANDLE;
     VkExtent2D _swapchainExtent = {0, 0};
     std::vector<VkImage> vkSwapchainImages;
+
+    // --- Offscreen render target (para el panel de viewport del editor) ---
+    VkImage         _offscreenImage       = VK_NULL_HANDLE;
+    VkDeviceMemory  _offscreenMemory      = VK_NULL_HANDLE;
+    VkImageView     _offscreenImageView   = VK_NULL_HANDLE;
+    VkFramebuffer   _offscreenFramebuffer = VK_NULL_HANDLE;
+    VkSampler       _offscreenSampler     = VK_NULL_HANDLE;
+    VkDescriptorSet _offscreenDescSet     = VK_NULL_HANDLE;
     std::vector<VkImageView> vkSwapchainImageViews;
     VkQueue vkGraphicsQueue = VK_NULL_HANDLE;
     VkQueue vkPresentQueue = VK_NULL_HANDLE;

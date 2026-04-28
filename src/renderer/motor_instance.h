@@ -4,6 +4,7 @@
 class Application;
 class RenderTarget;
 class Camera;
+class IEngine;
 
 namespace Haruka {
     class Scene;
@@ -44,7 +45,12 @@ public:
     void setApplication(Application* app) {
         motorApplication = app;
     }
-    
+
+    /** @brief Stores the active engine pointer. */
+    void setEngine(IEngine* eng) { motorEngine = eng; }
+    /** @brief Returns the active engine pointer. */
+    IEngine* getEngine() const { return motorEngine; }
+
     /** @brief Returns the active render target pointer. */
     RenderTarget* getRenderTarget() const {
         return motorRenderTarget;
@@ -75,13 +81,13 @@ public:
         motorScene = nullptr;
         motorCamera = nullptr;
         motorApplication = nullptr;
+        motorEngine = nullptr;
     }
 
 private:
     MotorInstance() = default;
     ~MotorInstance() = default;
 
-    // Prevenir copia
     MotorInstance(const MotorInstance&) = delete;
     MotorInstance& operator=(const MotorInstance&) = delete;
 
@@ -89,6 +95,7 @@ private:
     Haruka::Scene* motorScene = nullptr;
     Camera* motorCamera = nullptr;
     Application* motorApplication = nullptr;
+    IEngine* motorEngine = nullptr;
 };
 
 #endif

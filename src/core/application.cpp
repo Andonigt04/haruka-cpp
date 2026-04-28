@@ -317,6 +317,8 @@ void Application::create_window() {
 // =============================================================================
 
 void Application::create_vulkan_context() {
+    printf("[Haruka] >> create_vulkan_context\n");
+
     // ------------------------------------------------------------------
     // 1. VkInstance
     // ------------------------------------------------------------------
@@ -676,6 +678,10 @@ void Application::create_vulkan_context() {
     uboWrite.descriptorCount = 1;
     uboWrite.pBufferInfo     = &uboBufInfo;
     vkUpdateDescriptorSets(vkDevice, 1, &uboWrite, 0, nullptr);
+
+    // Nota: createOffscreenResources() se llama desde HarukaVulkanEngine::initImGui()
+    // porque necesita que ImGui_ImplVulkan esté inicializado para crear el descriptor set.
+    printf("[Haruka] << create_vulkan_context OK\n");
 }
 
 // =============================================================================
@@ -820,10 +826,6 @@ void Application::recordCommandBuffer(VkCommandBuffer commandBuffer, uint32_t im
     // Delegar al método que contiene todos los passes de render.
     renderFrameContentVulkan(commandBuffer, imageIndex);
 
-    // Inyección de ImGui (registrada por el editor)
-    if (_imguiCallback)
-        _imguiCallback(commandBuffer, imageIndex);
-
     if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS)
         throw std::runtime_error("Fallo al cerrar command buffer");
 }
@@ -941,6 +943,113 @@ void Application::renderFrame() {
 // con la escena posiblemente no inicializada.
 // =============================================================================
 
+// ─── helpers offscreen ───────────────────────────────────────────────────────
+static uint32_t findMemoryTypeApp(VkPhysicalDevice physDev, uint32_t filter, VkMemoryPropertyFlags props) {
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(physDev, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i)
+        if ((filter & (1 << i)) && (mp.memoryTypes[i].propertyFlags & props) == props)
+            return i;
+    throw std::runtime_error("No suitable memory type for offscreen image");
+}
+
+void Application::createOffscreenResources() {
+    destroyOffscreenResources();
+
+    VkFormat fmt = VK_FORMAT_B8G8R8A8_SRGB;
+
+    // 1. Imagen
+    VkImageCreateInfo imgCI{};
+    imgCI.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgCI.imageType     = VK_IMAGE_TYPE_2D;
+    imgCI.format        = fmt;
+    imgCI.extent        = { (uint32_t)_width, (uint32_t)_height, 1 };
+    imgCI.mipLevels     = 1;
+    imgCI.arrayLayers   = 1;
+    imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_SAMPLED_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imgCI.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    vkCreateImage(vkDevice, &imgCI, nullptr, &_offscreenImage);
+
+    VkMemoryRequirements mr;
+    vkGetImageMemoryRequirements(vkDevice, _offscreenImage, &mr);
+    VkMemoryAllocateInfo allocI{};
+    allocI.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocI.allocationSize  = mr.size;
+    allocI.memoryTypeIndex = findMemoryTypeApp(vkPhysicalDevice, mr.memoryTypeBits,
+                                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(vkDevice, &allocI, nullptr, &_offscreenMemory);
+    vkBindImageMemory(vkDevice, _offscreenImage, _offscreenMemory, 0);
+
+    // 2. Image view
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.image                           = _offscreenImage;
+    viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format                          = fmt;
+    viewCI.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewCI.subresourceRange.levelCount     = 1;
+    viewCI.subresourceRange.layerCount     = 1;
+    vkCreateImageView(vkDevice, &viewCI, nullptr, &_offscreenImageView);
+
+    // 3. Sampler
+    VkSamplerCreateInfo sampCI{};
+    sampCI.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampCI.magFilter    = VK_FILTER_LINEAR;
+    sampCI.minFilter    = VK_FILTER_LINEAR;
+    sampCI.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampCI.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    vkCreateSampler(vkDevice, &sampCI, nullptr, &_offscreenSampler);
+
+    // 4. Framebuffer (usando el mismo render pass del swapchain)
+    VkFramebufferCreateInfo fbCI{};
+    fbCI.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fbCI.renderPass      = vkRenderPass;
+    fbCI.attachmentCount = 1;
+    fbCI.pAttachments    = &_offscreenImageView;
+    fbCI.width           = (uint32_t)_width;
+    fbCI.height          = (uint32_t)_height;
+    fbCI.layers          = 1;
+    vkCreateFramebuffer(vkDevice, &fbCI, nullptr, &_offscreenFramebuffer);
+
+    // 5. Descriptor set para ImGui::Image()
+    //    ImGui_ImplVulkan_AddTexture crea un VkDescriptorSet listo para usar
+    _offscreenDescSet = VK_NULL_HANDLE;
+    
+    fprintf(stderr, "[Haruka] Offscreen resources created %dx%d\n", _width, _height);
+}
+
+void Application::destroyOffscreenResources() {
+    if (!vkDevice) return;
+    vkDeviceWaitIdle(vkDevice);
+
+    if (_offscreenFramebuffer) {
+        vkDestroyFramebuffer(vkDevice, _offscreenFramebuffer, nullptr);
+        _offscreenFramebuffer = VK_NULL_HANDLE;
+    }
+    if (_offscreenSampler) {
+        vkDestroySampler(vkDevice, _offscreenSampler, nullptr);
+        _offscreenSampler = VK_NULL_HANDLE;
+    }
+    if (_offscreenImageView) {
+        vkDestroyImageView(vkDevice, _offscreenImageView, nullptr);
+        _offscreenImageView = VK_NULL_HANDLE;
+    }
+    if (_offscreenImage) {
+        vkDestroyImage(vkDevice, _offscreenImage, nullptr);
+        _offscreenImage = VK_NULL_HANDLE;
+    }
+    if (_offscreenMemory) {
+        vkFreeMemory(vkDevice, _offscreenMemory, nullptr);
+        _offscreenMemory = VK_NULL_HANDLE;
+    }
+}
+
 void Application::recreateSwapchainAndResources() {
     vkDeviceWaitIdle(vkDevice);
 
@@ -1043,6 +1152,9 @@ void Application::recreateSwapchainAndResources() {
         cbAI.commandBufferCount = (uint32_t)vkCommandBuffers.size();
         vkAllocateCommandBuffers(vkDevice, &cbAI, vkCommandBuffers.data());
     }
+
+    // Recrear offscreen tras resize
+    createOffscreenResources();
 }
 
 // =============================================================================
@@ -1157,17 +1269,41 @@ void Application::renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIn
     vkUnmapMemory(vkDevice, vkUniformBufferMemory);
 
     // ------------------------------------------------------------------
-    // GEOMETRY PASS (render a la imagen del swapchain por ahora;
-    // cuando los pipelines estén listos usar el G-buffer)
+    // GEOMETRY PASS — dibuja en el framebuffer OFFSCREEN
+    // Al final del command buffer se hace blit al swapchain para presentar,
+    // y el offscreen queda disponible como textura para ImGui::Image().
     // ------------------------------------------------------------------
+
+    // Transición offscreen: UNDEFINED → COLOR_ATTACHMENT_OPTIMAL
+    if (_offscreenImage != VK_NULL_HANDLE) {
+        VkImageMemoryBarrier barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = _offscreenImage;
+        barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        barrier.srcAccessMask       = 0;
+        barrier.dstAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &barrier);
+    }
+
     VkClearValue clearValues[2]{};
-    clearValues[0].color        = { {0.0f, 0.0f, 0.0f, 1.0f} };
+    clearValues[0].color        = { {0.05f, 0.05f, 0.08f, 1.0f} };
     clearValues[1].depthStencil = { 1.0f, 0 };
+
+    VkFramebuffer targetFB = (_offscreenFramebuffer != VK_NULL_HANDLE)
+                           ? _offscreenFramebuffer
+                           : vkFramebuffers[imageIndex];
 
     VkRenderPassBeginInfo geomPass{};
     geomPass.sType             = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     geomPass.renderPass        = vkRenderPass;
-    geomPass.framebuffer       = vkFramebuffers[imageIndex];
+    geomPass.framebuffer       = targetFB;
     geomPass.renderArea.offset = {0, 0};
     geomPass.renderArea.extent = { (uint32_t)_width, (uint32_t)_height };
     geomPass.clearValueCount   = 2;
@@ -1197,8 +1333,87 @@ void Application::renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIn
     vkCmdEndRenderPass(cmd);
 
     // ------------------------------------------------------------------
-    // LIGHTING PASS (solo si el framebuffer y pipeline existen)
+    // BLIT: offscreen → swapchain image (para presentar en pantalla)
+    // Y transición del offscreen a SHADER_READ_ONLY para ImGui::Image()
     // ------------------------------------------------------------------
+    if (_offscreenImage != VK_NULL_HANDLE) {
+        // Transición offscreen: COLOR_ATTACHMENT → TRANSFER_SRC
+        VkImageMemoryBarrier toSrc{};
+        toSrc.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toSrc.oldLayout           = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        toSrc.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toSrc.image               = _offscreenImage;
+        toSrc.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        toSrc.srcAccessMask       = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        toSrc.dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toSrc);
+
+        // Transición swapchain: UNDEFINED → TRANSFER_DST
+        VkImageMemoryBarrier swapToDst{};
+        swapToDst.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        swapToDst.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        swapToDst.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapToDst.image               = vkSwapchainImages[imageIndex];
+        swapToDst.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        swapToDst.srcAccessMask       = 0;
+        swapToDst.dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapToDst);
+
+        // Blit
+        VkImageBlit blit{};
+        blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.srcOffsets[0]  = { 0, 0, 0 };
+        blit.srcOffsets[1]  = { _width, _height, 1 };
+        blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        blit.dstOffsets[0]  = { 0, 0, 0 };
+        blit.dstOffsets[1]  = { _width, _height, 1 };
+        vkCmdBlitImage(cmd,
+            _offscreenImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit, VK_FILTER_LINEAR);
+
+        // Transición swapchain: TRANSFER_DST → PRESENT_SRC
+        VkImageMemoryBarrier swapToPresent{};
+        swapToPresent.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        swapToPresent.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        swapToPresent.newLayout           = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        swapToPresent.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapToPresent.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        swapToPresent.image               = vkSwapchainImages[imageIndex];
+        swapToPresent.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        swapToPresent.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+        swapToPresent.dstAccessMask       = 0;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &swapToPresent);
+
+        // Transición offscreen: TRANSFER_SRC → SHADER_READ_ONLY (para ImGui::Image)
+        VkImageMemoryBarrier offToRead{};
+        offToRead.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        offToRead.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        offToRead.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        offToRead.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        offToRead.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        offToRead.image               = _offscreenImage;
+        offToRead.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        offToRead.srcAccessMask       = VK_ACCESS_TRANSFER_READ_BIT;
+        offToRead.dstAccessMask       = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &offToRead);
+    }
     if (vkLightingTarget && vkLightingTarget->vkFramebuffer != VK_NULL_HANDLE &&
         vkLightingPipeline != VK_NULL_HANDLE) {
         VkClearValue lc[2]{};
