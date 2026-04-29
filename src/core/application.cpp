@@ -317,8 +317,6 @@ void Application::create_window() {
 // =============================================================================
 
 void Application::create_vulkan_context() {
-    printf("[Haruka] >> create_vulkan_context\n");
-
     // ------------------------------------------------------------------
     // 1. VkInstance
     // ------------------------------------------------------------------
@@ -1019,8 +1017,6 @@ void Application::createOffscreenResources() {
     // 5. Descriptor set para ImGui::Image()
     //    ImGui_ImplVulkan_AddTexture crea un VkDescriptorSet listo para usar
     _offscreenDescSet = VK_NULL_HANDLE;
-    
-    fprintf(stderr, "[Haruka] Offscreen resources created %dx%d\n", _width, _height);
 }
 
 void Application::destroyOffscreenResources() {
