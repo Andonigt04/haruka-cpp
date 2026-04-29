@@ -1,9 +1,12 @@
-#version 460 core
-layout (location = 0) in vec3 aPos;
-out vec3 WorldPos;
+#version 450 core
 
-uniform mat4 projection;
-uniform mat4 view;
+layout(location = 0) in vec3 aPos;
+layout(location = 0) out vec3 WorldPos;
+
+layout(set = 0, binding = 0) uniform Matrices {
+    mat4 projection;
+    mat4 view;
+};
 
 void main()
 {

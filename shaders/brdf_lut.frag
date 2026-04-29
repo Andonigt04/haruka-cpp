@@ -1,6 +1,6 @@
-#version 460 core
-out vec2 FragColor;
-in vec2 TexCoords;
+#version 450 core
+layout(location = 0) out vec2 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
 const float PI = 3.14159265359;
 

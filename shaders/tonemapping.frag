@@ -1,12 +1,16 @@
-#version 460 core
-out vec4 FragColor;
+#version 450 core
 
-in vec2 TexCoords;
+layout(location = 0) out vec4 FragColor;
 
-uniform sampler2D scene;
-uniform sampler2D bloom;
-uniform float exposure;
-uniform float bloomStrength;
+layout(location = 0) in vec2 TexCoords;
+
+layout(set = 0, binding = 1) uniform sampler2D scene;
+layout(set = 0, binding = 2) uniform sampler2D bloom;
+
+layout(set = 0, binding = 0) uniform Params {
+    float exposure;
+    float bloomStrength;
+} params;
 
 void main()
 {
@@ -14,10 +18,10 @@ void main()
     vec3 bloomColor = texture(bloom, TexCoords).rgb;
     
     // Tone mapping
-    vec3 mapped = vec3(1.0) - exp(-hdrColor * exposure);
+    vec3 mapped = vec3(1.0) - exp(-hdrColor * params.exposure);
 
     // Bloom
-    mapped += bloomColor * bloomStrength;
+    mapped += bloomColor * params.bloomStrength;
 
     // Gamma correction
     mapped = pow(mapped, vec3(1.0 / 2.2));

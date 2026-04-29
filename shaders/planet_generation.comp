@@ -14,28 +14,30 @@ layout(std430, binding = 2) writeonly buffer NormalsOut {
     vec4 normals_out[];
 };
 
-uniform int u_numVertices;
-uniform float u_seaLevel;
-uniform float u_continentFrequency;
-uniform float u_continentWarpStrength;
-uniform float u_continentHeightStrength;
-uniform int u_octavesContinents;
-uniform float u_macroFrequency;
-uniform float u_macroHeightStrength;
-uniform int u_octavesMacro;
-uniform float u_detailFrequency;
-uniform float u_detailHeightStrength;
-uniform int u_octavesDetail;
-uniform float u_persistence;
-uniform float u_lacunarity;
-uniform int u_seedBase;
-uniform int u_seedContinents;
-uniform int u_seedMacro;
-uniform int u_seedDetail;
-uniform float u_baseRadiusKm;
-uniform float u_baseNegativeDepthKm;
-uniform int u_enableContinents;
-uniform int u_enableMountains;
+layout(set = 0, binding = 3) uniform Params {
+    int u_numVertices;
+    float u_seaLevel;
+    float u_continentFrequency;
+    float u_continentWarpStrength;
+    float u_continentHeightStrength;
+    int u_octavesContinents;
+    float u_macroFrequency;
+    float u_macroHeightStrength;
+    int u_octavesMacro;
+    float u_detailFrequency;
+    float u_detailHeightStrength;
+    int u_octavesDetail;
+    float u_persistence;
+    float u_lacunarity;
+    int u_seedBase;
+    int u_seedContinents;
+    int u_seedMacro;
+    int u_seedDetail;
+    float u_baseRadiusKm;
+    float u_baseNegativeDepthKm;
+    int u_enableContinents;
+    int u_enableMountains;
+} params;
 
 float hash(vec3 p, int seed) {
     vec3 q = fract(p * vec3(0.1031, 0.11369, 0.13787)) + float(seed) * 0.001;
@@ -73,53 +75,53 @@ float smoothstepf(float edge0, float edge1, float x) {
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    if (idx >= uint(u_numVertices)) return;
+    if (idx >= uint(params.u_numVertices)) return;
 
     vec3 v = vertices_in[idx].xyz;
     vec3 dir = normalize(v);
 
-    float baseNegativeRatio = max(0.0, u_baseNegativeDepthKm) / max(1.0, u_baseRadiusKm);
+    float baseNegativeRatio = max(0.0, params.u_baseNegativeDepthKm) / max(1.0, params.u_baseRadiusKm);
     float baseDelta = -baseNegativeRatio;
 
     float continentHeight = 0.0;
     float continentMask = 0.0;
     float coastMask = 1.0;
 
-    if (u_enableContinents != 0) {
-        float wx = fBm(dir, u_seedBase + 11, 3, u_persistence, u_lacunarity, u_continentFrequency * 0.7);
-        float wy = fBm(dir, u_seedBase + 17, 3, u_persistence, u_lacunarity, u_continentFrequency * 0.7);
-        float wz = fBm(dir, u_seedBase + 23, 3, u_persistence, u_lacunarity, u_continentFrequency * 0.7);
-        vec3 warp = vec3(wx, wy, wz) * u_continentWarpStrength;
+    if (params.u_enableContinents != 0) {
+        float wx = fBm(dir, params.u_seedBase + 11, 3, params.u_persistence, params.u_lacunarity, params.u_continentFrequency * 0.7);
+        float wy = fBm(dir, params.u_seedBase + 17, 3, params.u_persistence, params.u_lacunarity, params.u_continentFrequency * 0.7);
+        float wz = fBm(dir, params.u_seedBase + 23, 3, params.u_persistence, params.u_lacunarity, params.u_continentFrequency * 0.7);
+        vec3 warp = vec3(wx, wy, wz) * params.u_continentWarpStrength;
         vec3 cpos = normalize(dir + warp);
 
-        float c = fBm(cpos, u_seedContinents, u_octavesContinents, u_persistence, u_lacunarity, u_continentFrequency);
+        float c = fBm(cpos, params.u_seedContinents, params.u_octavesContinents, params.u_persistence, params.u_lacunarity, params.u_continentFrequency);
         float c01 = (c + 1.0) * 0.5;
         float coastWidth = 0.22;
-        continentMask = smoothstepf(u_seaLevel - coastWidth, u_seaLevel + coastWidth, c01);
+        continentMask = smoothstepf(params.u_seaLevel - coastWidth, params.u_seaLevel + coastWidth, c01);
 
-        float signedContinent = c01 - u_seaLevel;
+        float signedContinent = c01 - params.u_seaLevel;
         coastMask = smoothstepf(0.03, 0.18, abs(signedContinent));
 
         float landPart = max(0.0, signedContinent);
         float oceanPart = min(0.0, signedContinent) * 0.12;
-        continentHeight = (landPart + oceanPart) * u_continentHeightStrength;
+        continentHeight = (landPart + oceanPart) * params.u_continentHeightStrength;
         continentMask = smoothstepf(-0.10, 0.10, signedContinent);
     }
 
     float macroHeight = 0.0;
     float detailHeight = 0.0;
-    if (u_enableMountains != 0) {
-        float macro = fBm(dir, u_seedMacro, u_octavesMacro, u_persistence, u_lacunarity, u_macroFrequency);
+    if (params.u_enableMountains != 0) {
+        float macro = fBm(dir, params.u_seedMacro, params.u_octavesMacro, params.u_persistence, params.u_lacunarity, params.u_macroFrequency);
         float macro01 = (macro + 1.0) * 0.5;
         float mountainMask = smoothstepf(0.48, 0.72, macro01);
         float mountainRidge = 1.0 - abs(2.0 * macro01 - 1.0);
-        float landInfluence = (u_enableContinents != 0) ? (0.20 + 0.80 * continentMask) : 1.0;
-        macroHeight = mountainMask * mountainRidge * u_macroHeightStrength * landInfluence * coastMask;
+        float landInfluence = (params.u_enableContinents != 0) ? (0.20 + 0.80 * continentMask) : 1.0;
+        macroHeight = mountainMask * mountainRidge * params.u_macroHeightStrength * landInfluence * coastMask;
 
-        float detail = fBm(dir, u_seedDetail, u_octavesDetail, u_persistence, u_lacunarity, u_detailFrequency);
+        float detail = fBm(dir, params.u_seedDetail, params.u_octavesDetail, params.u_persistence, params.u_lacunarity, params.u_detailFrequency);
         float detailSigned = detail * 0.5 + 0.5;
         float detailMask = smoothstepf(0.35, 0.80, macro01);
-        detailHeight = detailMask * detailSigned * u_detailHeightStrength * landInfluence * coastMask;
+        detailHeight = detailMask * detailSigned * params.u_detailHeightStrength * landInfluence * coastMask;
     }
 
     float len = max(0.2, 1.0 + baseDelta + continentHeight + macroHeight + detailHeight);

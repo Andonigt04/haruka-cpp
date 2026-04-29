@@ -1,9 +1,15 @@
-#version 460 core
-out vec4 FragColor;
-in vec3 WorldPos;
 
-uniform samplerCube environmentMap;
-uniform float roughness;
+
+#version 450 core
+
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec3 WorldPos;
+
+layout(set = 0, binding = 0) uniform samplerCube environmentMap;
+
+layout(set = 0, binding = 1) uniform Params {
+    float roughness;
+};
 
 const float PI = 3.14159265359;
 

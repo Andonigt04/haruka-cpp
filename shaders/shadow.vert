@@ -1,9 +1,11 @@
-#version 460 core
+#version 450 core
 
 layout (location = 0) in vec3 aPos;
 
-uniform mat4 model;
-uniform mat4 lightSpaceMatrix;
+layout(set = 0, binding = 0) uniform Matrices {
+    mat4 model;
+    mat4 lightSpaceMatrix;
+};
 
 void main()
 {

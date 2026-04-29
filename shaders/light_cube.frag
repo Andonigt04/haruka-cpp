@@ -1,22 +1,28 @@
-#version 460 core
-out vec4 FragColor;
+#version 450 core
 
-in vec3 Normal;
-in vec3 FragPos;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec3 Normal;
+layout(location = 1) in vec3 FragPos;
 
-uniform vec3 lightColor;
-uniform vec3 sunDirection;
-uniform vec3 sunLightColor;
-uniform float ambientStrength;
-uniform bool useShadowMap;
-uniform sampler2D shadowMap;
-uniform mat4 lightSpaceMatrix;
-uniform mat4 view;
-uniform sampler2DShadow cascadeShadowMaps[4];
-uniform mat4 cascadeLightSpaceMatrices[4];
-uniform float cascadeSplits[4];
-uniform int numCascades;
-uniform bool useProceduralTerrain;
+layout(set = 0, binding = 0) uniform sampler2D shadowMap;
+layout(set = 0, binding = 1) uniform sampler2DShadow cascadeShadowMaps[4];
+
+layout(set = 0, binding = 2) uniform Params {
+    vec3 lightColor;
+    vec3 sunDirection;
+    vec3 sunLightColor;
+    float ambientStrength;
+    int numCascades;
+    bool useShadowMap;
+    bool useProceduralTerrain;
+    float cascadeSplits[4];
+} params;
+
+layout(set = 0, binding = 3) uniform Matrices {
+    mat4 lightSpaceMatrix;
+    mat4 view;
+    mat4 cascadeLightSpaceMatrices[4];
+};
 
 float hash31(vec3 p)
 {
@@ -55,7 +61,7 @@ vec3 terrainAlbedo(vec3 worldPos, vec3 N)
 
 float calculateShadow(vec3 normal, vec3 lightDir)
 {
-    if (!useShadowMap) return 0.0;
+    if (!params.useShadowMap) return 0.0;
 
     vec4 fragPosLightSpace = lightSpaceMatrix * vec4(FragPos, 1.0);
     vec3 projCoords = fragPosLightSpace.xyz / max(fragPosLightSpace.w, 0.00001);
@@ -81,15 +87,15 @@ float calculateShadow(vec3 normal, vec3 lightDir)
 
 int getCascadeIndex(float viewDepth)
 {
-    for (int i = 0; i < numCascades; ++i) {
-        if (viewDepth < cascadeSplits[i]) return i;
+    for (int i = 0; i < params.numCascades; ++i) {
+        if (viewDepth < params.cascadeSplits[i]) return i;
     }
-    return max(numCascades - 1, 0);
+    return max(params.numCascades - 1, 0);
 }
 
 float calculateCascadedShadow(vec3 normal, vec3 lightDir)
 {
-    if (numCascades <= 0) return 0.0;
+    if (params.numCascades <= 0) return 0.0;
 
     float viewDepth = -(view * vec4(FragPos, 1.0)).z;
     int cascadeIndex = getCascadeIndex(viewDepth);
@@ -117,21 +123,21 @@ float calculateCascadedShadow(vec3 normal, vec3 lightDir)
 
 void main() {
     vec3 N = normalize(Normal);
-    vec3 L = normalize(sunDirection);
+    vec3 L = normalize(params.sunDirection);
 
     float diff = max(dot(N, L), 0.0);
     float shadow = 0.0;
     if (diff > 0.0) {
-        shadow = (numCascades > 0) ? calculateCascadedShadow(N, L) : calculateShadow(N, L);
+        shadow = (params.numCascades > 0) ? calculateCascadedShadow(N, L) : calculateShadow(N, L);
     }
 
-    vec3 baseColor = lightColor;
-    if (useProceduralTerrain) {
+    vec3 baseColor = params.lightColor;
+    if (params.useProceduralTerrain) {
         baseColor = terrainAlbedo(FragPos, N);
     }
 
-    vec3 ambient = max(ambientStrength, 0.08) * baseColor;
-    vec3 direct = (1.0 - shadow) * diff * baseColor * max(sunLightColor, vec3(0.5));
+    vec3 ambient = max(params.ambientStrength, 0.08) * baseColor;
+    vec3 direct = (1.0 - shadow) * diff * baseColor * max(params.sunLightColor, vec3(0.5));
 
     FragColor = vec4(ambient + direct, 1.0);
 }

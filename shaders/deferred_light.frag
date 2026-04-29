@@ -1,32 +1,40 @@
-#version 460 core
+#version 450 core
+
 #extension GL_ARB_gpu_shader_fp64 : enable
 
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
-in vec2 TexCoords;
+layout(set = 0, binding = 0) uniform sampler2D gPosition;
+layout(set = 0, binding = 1) uniform sampler2D gNormal;
+layout(set = 0, binding = 2) uniform sampler2D gAlbedoSpec;
+layout(set = 0, binding = 3) uniform sampler2D gEmissive;
+layout(set = 0, binding = 4) uniform sampler2D ssao;
+layout(set = 0, binding = 5) uniform samplerCube pointShadowMap;
+layout(set = 0, binding = 6) uniform sampler2DShadow cascadeShadowMaps[4];
 
-uniform sampler2D gPosition;
-uniform sampler2D gNormal;
-uniform sampler2D gAlbedoSpec;
-uniform sampler2D gEmissive;
-uniform sampler2D ssao;
-uniform samplerCube pointShadowMap;
-uniform sampler2DShadow cascadeShadowMaps[4];
+layout(set = 0, binding = 7) uniform Params {
+    vec3 viewPos;
+    float farPlane;
+    int numCascades;
+    int numLights;
+    vec3 lightPos;
+    float _pad1;
+    float cascadeSplits[4];
+} params;
 
-uniform vec3 viewPos;
-uniform mat4 view;
-uniform vec3 lightPos;
-uniform float farPlane;
-uniform mat4 cascadeLightSpaceMatrices[4];
-uniform float cascadeSplits[4];
-uniform int numCascades;
+layout(set = 0, binding = 8) uniform Matrices {
+    mat4 view;
+    mat4 cascadeLightSpaceMatrices[4];
+};
 
 struct Light {
     vec3 position;
     vec3 color;
 };
-uniform Light lights[256];  // Aumentado de 32 a 256
-uniform int numLights;
+layout(set = 0, binding = 9) uniform Lights {
+    Light lights[256];
+};
 
 const vec3 sampleOffsetDirections[8] = vec3[]
 (
@@ -36,7 +44,7 @@ const vec3 sampleOffsetDirections[8] = vec3[]
 
 float ShadowCalculation(vec3 FragPos)
 {
-    vec3 fragToLight = FragPos - lightPos;
+    vec3 fragToLight = FragPos - params.lightPos;
     float currentDepth = length(fragToLight);
 
     float shadow = 0.0;
@@ -47,7 +55,7 @@ float ShadowCalculation(vec3 FragPos)
     for(int i = 0; i < samples; ++i)
     {
         float closestDepth = texture(pointShadowMap, normalize(fragToLight + sampleOffsetDirections[i] * diskRadius)).r;
-        closestDepth *= farPlane;
+        closestDepth *= params.farPlane;
         if(currentDepth - bias > closestDepth)
             shadow += 1.0;
     }
@@ -57,15 +65,15 @@ float ShadowCalculation(vec3 FragPos)
 
 int getCascadeIndex(float viewDepth)
 {
-    for (int i = 0; i < numCascades; ++i) {
-        if (viewDepth < cascadeSplits[i]) return i;
+    for (int i = 0; i < params.numCascades; ++i) {
+        if (viewDepth < params.cascadeSplits[i]) return i;
     }
-    return max(numCascades - 1, 0);
+    return max(params.numCascades - 1, 0);
 }
 
 float calculateCascadedVisibility(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewDepth)
 {
-    if (numCascades <= 0) return 0.0;
+    if (params.numCascades <= 0) return 0.0;
 
     int cascadeIndex = getCascadeIndex(viewDepth);
     vec4 fragPosLightSpace = cascadeLightSpaceMatrices[cascadeIndex] * vec4(fragPosWorld, 1.0);
@@ -98,7 +106,7 @@ void main()
     vec3 Emissive = texture(gEmissive, TexCoords).rgb;
     float AO = 1.0;
 
-    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 viewDir = normalize(params.viewPos - FragPos);
     float viewDepth = -(view * vec4(FragPos, 1.0)).z;
 
     // ===== DIRECT LIGHTING =====
@@ -108,7 +116,7 @@ void main()
     vec3 ambient = 0.1 * Albedo * AO;
     lighting += ambient;
 
-    for(int i = 0; i < numLights; ++i)
+    for(int i = 0; i < params.numLights; ++i)
     {
         // Detectar si es DirectionalLight (posición muy lejana, > 1000)
         float dist = length(lights[i].position);

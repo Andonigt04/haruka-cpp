@@ -11,14 +11,16 @@ layout(location = 7) in vec4 instanceColor;
 layout(location = 8) in vec3 instanceScale;
 
 // Uniforms
-uniform mat4 view;
-uniform mat4 projection;
+layout(set = 0, binding = 0) uniform Matrices {
+    mat4 view;
+    mat4 projection;
+};
 
 // Output
-out vec3 FragPos;
-out vec3 Normal;
-out vec2 TexCoord;
-out vec4 InstanceColor;
+layout(location = 0) out vec3 FragPos;
+layout(location = 1) out vec3 Normal;
+layout(location = 2) out vec2 TexCoord;
+layout(location = 3) out vec4 InstanceColor;
 
 void main() {
     // Transformar posición a world space con instancing

@@ -1,13 +1,18 @@
-#version 460 core
-out vec4 FragColor;
+#version 450 core
 
-in vec2 TexCoord;
-in vec3 Normal;
-in vec3 FragPos;
-in vec3 Tangent;
-in vec3 Bitangent;
+layout(location = 0) out vec4 FragColor;
 
-uniform vec3 viewPos;
+layout(location = 0) in vec2 TexCoord;
+layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec3 FragPos;
+layout(location = 3) in vec3 Tangent;
+layout(location = 4) in vec3 Bitangent;
+
+layout(set = 0, binding = 0) uniform Params {
+    vec3 viewPos;
+    int nr_active_lights;
+    float shininess;
+} params;
 
 struct Material
 {
@@ -56,15 +61,32 @@ struct SpotLight
 
 
 #define MAX_POINT_LIGHTS 32
-uniform PointLight pointLights[MAX_POINT_LIGHTS];
-uniform int nr_active_lights;
-uniform DirLight dirLight;
-uniform SpotLight spotLight;
-uniform Material material;
+layout(set = 0, binding = 3) uniform PointLights {
+    PointLight pointLights[MAX_POINT_LIGHTS];
+};
 
-uniform sampler2D shadowMap;
-uniform mat4 lightView;
-uniform mat4 lightProjection;
+layout(set = 0, binding = 4) uniform DirLightBlock {
+    DirLight dirLight;
+};
+
+layout(set = 0, binding = 5) uniform SpotLightBlock {
+    SpotLight spotLight;
+};
+
+layout(set = 0, binding = 6) uniform sampler2D texture_diffuse1;
+layout(set = 0, binding = 7) uniform sampler2D texture_normal1;
+layout(set = 0, binding = 8) uniform sampler2D texture_roughness1;
+layout(set = 0, binding = 9) uniform sampler2D texture_metallic1;
+layout(set = 0, binding = 10) uniform sampler2D texture_metallic_roughness1;
+layout(set = 0, binding = 11) uniform sampler2D texture_ao1;
+layout(set = 0, binding = 12) uniform sampler2D texture_emissive1;
+layout(set = 0, binding = 13) uniform sampler2D texture_specular1;
+
+layout(set = 0, binding = 1) uniform sampler2D shadowMap;
+layout(set = 0, binding = 2) uniform Matrices {
+    mat4 lightView;
+    mat4 lightProjection;
+};
 
 vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex);
 vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex);
@@ -79,30 +101,30 @@ void main()
     mat3 TBN = mat3(T, B, N);
 
     // Normal Map - fallback si no existe
-    vec3 normalMap = texture(material.texture_normal1, TexCoord).rgb;
+    vec3 normalMap = texture(texture_normal1, TexCoord).rgb;
     vec3 norm = N;
     if (length(normalMap) > 0.1) {
         normalMap = normalMap * 2.0 - 1.0;
         norm = normalize(TBN * normalMap);
     }
 
-    vec3 viewDir = normalize(viewPos - FragPos);
+    vec3 viewDir = normalize(params.viewPos - FragPos);
 
     // Base color - fallback a blanco
-    vec4 diffTexture = texture(material.texture_diffuse1, TexCoord);
+    vec4 diffTexture = texture(texture_diffuse1, TexCoord);
     vec3 diffColor = (length(diffTexture.rgb) > 0.01) ? diffTexture.rgb : vec3(1.0);
     
     // Metallic-Roughness - fallback a defaults
-    vec3 metallicRoughness = texture(material.texture_metallic_roughness1, TexCoord).rgb;
+    vec3 metallicRoughness = texture(texture_metallic_roughness1, TexCoord).rgb;
     float metallic = (length(metallicRoughness) > 0.01) ? metallicRoughness.b : 0.0;
     float roughness = (length(metallicRoughness) > 0.01) ? metallicRoughness.g : 0.5;
     
     // AO - fallback a 1.0 (sin oclusión)
-    float ao = texture(material.texture_ao1, TexCoord).r;
+    float ao = texture(texture_ao1, TexCoord).r;
     ao = (ao > 0.01) ? ao : 1.0;
     
     // Emissive - fallback a negro (no emite)
-    vec3 emissive = texture(material.texture_emissive1, TexCoord).rgb;
+    vec3 emissive = texture(texture_emissive1, TexCoord).rgb;
     emissive = (length(emissive) > 0.01) ? emissive : vec3(0.0);
     
     vec3 specColor = mix(vec3(0.04), diffColor, metallic);
@@ -133,7 +155,7 @@ void main()
 
     vec3 result = CalcDirLight(dirLight, norm, FragPos, viewDir, diffColor, specColor, shadow);
 
-    for(int i = 0; i < nr_active_lights; i++)
+    for(int i = 0; i < params.nr_active_lights; i++)
         result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, diffColor, specColor);
 
     result += CalcSpotLight(spotLight, norm, FragPos, viewDir, diffColor, specColor);
@@ -155,7 +177,7 @@ vec3 CalcDirLight(DirLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 
     vec3 diffuse  = light.diffuse  * diff * diffTex * (1.0 - shadow);
     
     vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), params.shininess);
     vec3 specular = light.specular * spec * specTex * (1.0 - shadow);
     
     return (ambient + diffuse + specular);
@@ -170,7 +192,7 @@ vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, v
 
     // Specular
     vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), params.shininess);
 
     // Attenuation
     float distance = length(light.position - fragPos);
@@ -192,7 +214,7 @@ vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec
 
     float diff = max(dot(normal, lightDir), 0.0);
     vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), params.shininess);
 
     vec3 ambient  = light.ambient  * diffTex;
     vec3 diffuse  = light.diffuse  * diff * diffTex;
