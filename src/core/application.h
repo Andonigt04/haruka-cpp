@@ -105,6 +105,7 @@ public:
 
     // Offscreen render target para el panel de viewport del editor
     VkDescriptorSet  getOffscreenDescriptorSet() const { return _offscreenDescSet; }
+    void setOffscreenDescriptorSet(VkDescriptorSet ds) { _offscreenDescSet = ds; }
     void             createOffscreenResources();
     void             destroyOffscreenResources();
 

@@ -304,7 +304,7 @@ void Application::create_window() {
         throw std::runtime_error("Fallo al inicializar SDL");
     }
 
-    _window = SDL_CreateWindow("Haruka Engine", _width, _height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    _window = SDL_CreateWindow("Haruka Engine", _width, _height, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     
     if (!_window) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create SDL window");
@@ -681,7 +681,6 @@ void Application::create_vulkan_context() {
 
     // Nota: createOffscreenResources() se llama desde HarukaVulkanEngine::initImGui()
     // porque necesita que ImGui_ImplVulkan esté inicializado para crear el descriptor set.
-    printf("[Haruka] << create_vulkan_context OK\n");
 }
 
 // =============================================================================
@@ -1329,6 +1328,9 @@ void Application::renderFrameContentVulkan(VkCommandBuffer cmd, uint32_t imageIn
             }
         }
     }
+
+    if (_imguiCallback)
+        _imguiCallback(cmd, imageIndex);
 
     vkCmdEndRenderPass(cmd);
 
