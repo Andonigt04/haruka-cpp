@@ -305,9 +305,7 @@ void Application::create_gl_context() {
 void Application::init(Haruka::Scene& scene) {
     // Resolver la ruta base al directorio del ejecutable para que los .spv
     // se encuentren independientemente del directorio de trabajo.
-    const char* basePath = SDL_GetBasePath();
-    Shader::setBaseDir(basePath);
-    SDL_free((void*)basePath);
+    Shader::setBaseDir(SDL_GetBasePath());
 
     _currentScene = std::make_unique<Haruka::Scene>(scene);
     // Usar siempre la cámara de la interfaz de juego si está disponible
@@ -317,6 +315,23 @@ void Application::init(Haruka::Scene& scene) {
         std::cout << (sceneCamera ? "✓ Camera from game interface" : "⚠ Game interface did not provide a camera") << std::endl;
     }
 
+    auto applyCameraFromObj = [&](const Haruka::SceneObject& obj) {
+        _camera = std::make_unique<Camera>(obj.position);
+        glm::dquat qYaw   = glm::angleAxis(glm::radians(obj.rotation.y), glm::dvec3(0, 1, 0));
+        glm::dquat qPitch = glm::angleAxis(glm::radians(obj.rotation.x), glm::dvec3(1, 0, 0));
+        glm::dquat qRoll  = glm::angleAxis(glm::radians(obj.rotation.z), glm::dvec3(0, 0, 1));
+        _camera->orientation = qYaw * qPitch * qRoll;
+        if (obj.properties.is_object()) {
+            if (obj.properties.contains("speed"))
+                _camera->speed       = obj.properties["speed"].get<float>();
+            if (obj.properties.contains("sensitivity"))
+                _camera->sensitivity = obj.properties["sensitivity"].get<float>();
+            if (obj.properties.contains("zoom"))
+                _camera->zoom        = obj.properties["zoom"].get<float>();
+        }
+        std::cout << "✓ Camera from scene object: " << obj.name << std::endl;
+    };
+
     if (sceneCamera) {
         _camera = std::make_unique<Camera>(sceneCamera->position);
         _camera->orientation = sceneCamera->orientation;
@@ -324,7 +339,18 @@ void Application::init(Haruka::Scene& scene) {
         _camera->speed = sceneCamera->speed;
         _camera->sensitivity = sceneCamera->sensitivity;
     } else {
-        _camera = std::make_unique<Camera>(Haruka::WorldPos(0.0, 2.0, 8.0));
+        // Search top-level objects then prefab children
+        const Haruka::SceneObject* camObj = nullptr;
+        for (const auto& obj : scene.getObjects()) {
+            if (obj.type == "Camera") { camObj = &obj; break; }
+            for (const auto& child : obj.children)
+                if (child.type == "Camera") { camObj = &child; break; }
+            if (camObj) break;
+        }
+        if (camObj)
+            applyCameraFromObj(*camObj);
+        else
+            _camera = std::make_unique<Camera>(Haruka::WorldPos(0.0, 2.0, 8.0));
     }
 
     // Initialize rendering systems
