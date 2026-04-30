@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
-project(HarukaEngine)
+
+# Definimos la versión aquí para usarla en las rutas
+project(HarukaEngine VERSION 1.0.0)
 
 set(OpenGL_GL_PREFERENCE GLVND)
 set(CMAKE_CXX_STANDARD 17)
@@ -11,6 +13,13 @@ if(NOT MSVC)
 endif()
 
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
+
+# --- Configuración de Estructura de Salida (Build Tree) ---
+# Organiza los archivos dentro de la carpeta build/x.x.x/ [cite: 1]
+set(VERSION_DIR "${CMAKE_BINARY_DIR}/${PROJECT_VERSION}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
 
 # --- 1. Búsqueda de Dependencias (Sistema) ---
 find_package(PkgConfig REQUIRED)
@@ -25,7 +34,6 @@ find_package(PostgreSQL REQUIRED)
 pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
 
 # --- 2. Macro de Fallback para Librerías Header-Only ---
-# Esta macro busca en el sistema y si falla, apunta a third_party
 macro(find_header_fallback NAME HEADER_FILE SUBDIR)
     find_path(${NAME}_INCLUDE_DIR ${HEADER_FILE}
         PATH_SUFFIXES ${SUBDIR}
@@ -39,22 +47,22 @@ macro(find_header_fallback NAME HEADER_FILE SUBDIR)
     endif()
 endmacro()
 
-# Aplicar fallbacks para las dependencias que te daban error
 find_header_fallback(NLOHMANN_JSON "nlohmann/json.hpp" "json/include")
 find_header_fallback(GLM "glm/glm.hpp" "glm")
 find_header_fallback(STB "stb_image.h" "stb")
 
 # --- 3. Configuración de Fuentes ---
 
-# GLAD (Cargador OpenGL - siempre desde source para evitar líos de versión)
+# GLAD
 set(GLAD_SOURCE "${THIRD_PARTY_DIR}/glad/src/glad.c")
 
-# ImGui (Backends SDL3 + OpenGL3)
+# ImGui (Backends SDL3 + OpenGL3 + Demo)
 set(IMGUI_SOURCES
     ${THIRD_PARTY_DIR}/imgui/imgui.cpp
     ${THIRD_PARTY_DIR}/imgui/imgui_draw.cpp
     ${THIRD_PARTY_DIR}/imgui/imgui_tables.cpp
     ${THIRD_PARTY_DIR}/imgui/imgui_widgets.cpp
+    ${THIRD_PARTY_DIR}/imgui/imgui_demo.cpp
     ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl3.cpp
     ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_opengl3.cpp
 )
@@ -78,7 +86,7 @@ add_library(HarukaEngine SHARED
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${THIRD_PARTY_DIR}/glad/include"
-    "${THIRD_PARTY_DIR}/imgui"
+    "${THIRD_PARTY_DIR}/imgui" [cite: 4]
     "${THIRD_PARTY_DIR}/imgui/backends"
     "${THIRD_PARTY_DIR}/nativefiledialog/src/include"
 )
@@ -99,15 +107,11 @@ find_program(GLSLC      glslc)
 find_program(GLSLANG_V  glslangValidator)
 
 if(NOT GLSLC AND NOT GLSLANG_V)
-    message(FATAL_ERROR
-        "Se requiere glslc (Vulkan SDK / shaderc) o glslangValidator para compilar shaders SPIR-V.\n"
-        "  Fedora/RHEL: sudo dnf install glslang\n"
-        "  Ubuntu/Deb:  sudo apt install glslang-tools\n"
-        "  O instala el Vulkan SDK que incluye glslc.")
+    message(FATAL_ERROR "Se requiere glslc o glslangValidator para compilar shaders SPIR-V.")
 endif()
 
 set(SHADER_SRC_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
-set(SHADER_OUT_DIR  "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+set(SHADER_OUT_DIR  "${VERSION_DIR}/bin/shaders") 
 file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
 
 file(GLOB SHADER_SOURCES
@@ -144,16 +148,21 @@ add_dependencies(HarukaEngine HarukaShaders)
 
 # --- 6. Reglas de Instalación ---
 include(GNUInstallDirs)
+
+# Estructura: x.x.x/bin para el .so y los shaders [cite: 7]
 install(TARGETS HarukaEngine
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        LIBRARY DESTINATION "${PROJECT_VERSION}/bin"
+        RUNTIME DESTINATION "${PROJECT_VERSION}/bin")
 
-# Headers del motor
+# Estructura: x.x.x/lib64 para headers y fuentes
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/engines/haruka-cpp"
-        FILES_MATCHING PATTERN "*.h" PATTERN "*.cpp")
+        DESTINATION "${PROJECT_VERSION}/lib64/haruka-cpp"
+        FILES_MATCHING 
+        PATTERN "*.h" 
+        PATTERN "*.hpp" 
+        PATTERN "*.cpp")
 
-# Shaders SPIR-V compilados — se instalan junto al binario para que el IDE los encuentre
+# Shaders SPIR-V compilados específicamente en x.x.x/bin/shaders
 install(DIRECTORY "${SHADER_OUT_DIR}/"
-        DESTINATION "${CMAKE_INSTALL_BINDIR}/shaders"
+        DESTINATION "${PROJECT_VERSION}/bin/shaders"
         FILES_MATCHING PATTERN "*.spv")

@@ -13,12 +13,27 @@
  * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
  *
  * Paths passed to constructors are the original GLSL paths; the class appends
- * ".spv" and loads the binary produced by the CMake build step.
+ * ".spv" and resolves them relative to the base directory set via setBaseDir().
  * Requires OpenGL 4.6 (GL_ARB_gl_spirv — core since 4.6).
+ *
+ * Call Shader::setBaseDir(SDL_GetBasePath()) once at application init so the
+ * .spv files are found regardless of the process working directory.
  */
 class Shader {
 public:
     unsigned int ID;
+
+    /**
+     * @brief Sets the root directory prepended to every shader path.
+     * Must be called before constructing any Shader (typically in Application::init).
+     * Trailing separator is added automatically.
+     */
+    static void setBaseDir(const char* dir) {
+        if (!dir) { s_baseDir.clear(); return; }
+        s_baseDir = dir;
+        if (!s_baseDir.empty() && s_baseDir.back() != '/' && s_baseDir.back() != '\\')
+            s_baseDir += '/';
+    }
 
     /** @brief Builds a program from vertex + fragment (+ optional geometry) SPIR-V. */
     Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr) {
@@ -94,9 +109,11 @@ public:
     ///@}
 
 private:
-    // Loads path+".spv", uploads as SPIR-V binary, specialises at "main", returns shader object.
+    inline static std::string s_baseDir;
+
+    // Loads baseDir+path+".spv", uploads as SPIR-V, specialises at "main", returns shader object.
     static GLuint loadSPV(GLenum type, const char* glslPath) {
-        std::string spvPath = std::string(glslPath) + ".spv";
+        std::string spvPath = s_baseDir + glslPath + ".spv";
 
         std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
         if (!f.is_open()) {

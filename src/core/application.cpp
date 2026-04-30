@@ -298,7 +298,12 @@ void Application::create_gl_context() {
 }
 
 void Application::init(Haruka::Scene& scene) {
-    
+    // Resolver la ruta base al directorio del ejecutable para que los .spv
+    // se encuentren independientemente del directorio de trabajo.
+    const char* basePath = SDL_GetBasePath();
+    Shader::setBaseDir(basePath);
+    SDL_free((void*)basePath);
+
     _currentScene = std::make_unique<Haruka::Scene>(scene);
     // Usar siempre la cámara de la interfaz de juego si está disponible
     Camera* sceneCamera = nullptr;
