@@ -162,21 +162,20 @@ void AssetStreamer::evictLRU() {
     }
 }
 
-Asset* AssetStreamer::loadAssetSync(const StreamRequest& request) {
+std::unique_ptr<Asset> AssetStreamer::loadAssetSync(const StreamRequest& request) {
     auto asset = std::make_unique<Asset>();
     asset->id = request.assetId;
     asset->path = request.assetPath;
     asset->type = request.type;
     asset->sizeBytes = estimateAssetSize(request.assetPath);
 
-    // Simular carga (en producción, parsear archivo real)
     try {
         if (fs::exists(request.assetPath)) {
             asset->data = malloc(asset->sizeBytes);
             asset->loaded = true;
-
-            std::cout << "✓ Loaded asset: " << request.assetId 
+            std::cout << "✓ Loaded asset: " << request.assetId
                       << " (" << asset->sizeBytes / 1024 << " KB)\n";
+            return asset;
         } else {
             std::cerr << "✗ Asset not found: " << request.assetPath << "\n";
             failedAssets++;
@@ -187,8 +186,6 @@ Asset* AssetStreamer::loadAssetSync(const StreamRequest& request) {
         failedAssets++;
         return nullptr;
     }
-
-    return asset.get();
 }
 
 void AssetStreamer::workerThread() {
@@ -206,23 +203,14 @@ void AssetStreamer::workerThread() {
             loadQueue.pop();
         }
 
-        // Cargar asset
-        Asset* loadedAsset = loadAssetSync(request);
+        auto loadedAsset = loadAssetSync(request);
 
         if (loadedAsset) {
             std::lock_guard<std::mutex> lock(cacheMutex);
-            
-            // Verificar espacio en cache
             makeRoomInCache(loadedAsset->sizeBytes);
-
-            // Agregar al cache
-            auto asset = std::make_unique<Asset>(*loadedAsset);
-            totalCacheMemory += asset->sizeBytes;
-            
-            Asset* ptr = asset.get();
-            assetCache[request.assetId] = std::move(asset);
-
-            // Callback
+            totalCacheMemory += loadedAsset->sizeBytes;
+            Asset* ptr = loadedAsset.get();
+            assetCache[request.assetId] = std::move(loadedAsset);
             if (assetLoadedCallback) {
                 assetLoadedCallback(request.assetId, ptr);
             }

@@ -7,6 +7,7 @@
 #include <queue>
 #include <thread>
 #include <mutex>
+#include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <glm/glm.hpp>
@@ -36,8 +37,15 @@ struct Asset {
     void* data = nullptr;
     size_t sizeBytes = 0;
     bool loaded = false;
-    float priority = 0.0f;  // Higher value = higher priority
+    float priority = 0.0f;
     long lastAccessTime = 0;
+
+    ~Asset() { free(data); }
+    Asset() = default;
+    Asset(const Asset&) = delete;
+    Asset& operator=(const Asset&) = delete;
+    Asset(Asset&&) = default;
+    Asset& operator=(Asset&&) = default;
 };
 
 struct StreamRequest {
@@ -116,7 +124,7 @@ private:
     void workerThread();
 
     // Synchronous loading implementation for one request
-    Asset* loadAssetSync(const StreamRequest& request);
+    std::unique_ptr<Asset> loadAssetSync(const StreamRequest& request);
 
     // Estimate source file size for budgeting
     size_t estimateAssetSize(const std::string& path);
@@ -140,7 +148,7 @@ private:
 
     // Worker threads
     std::vector<std::thread> workers;
-    bool running = false;
+    std::atomic<bool> running{false};
 
     // Configuration
     size_t maxCacheMemoryBytes = 512 * 1024 * 1024;  // 512 MB default
