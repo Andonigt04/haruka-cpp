@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <stb_image.h>
+#include "core/error_reporter.h"
 #include "shader.h"
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -34,7 +35,7 @@ void IBL::loadHDRI(const std::string& imagePath) {
     unsigned char* data = stbi_load(imagePath.c_str(), &width, &height, &nrComponents, 0);
 
     if (!data) {
-        std::cerr << "Failed to load LDR: " << imagePath << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load LDR image: " + imagePath);
         return;
     }
 

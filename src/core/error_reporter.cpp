@@ -61,6 +61,8 @@ std::string ErrorInfo::getErrorName() const {
         case ErrorCode::FILE_READ_ERROR: return "FILE_READ_ERROR";
         case ErrorCode::FILE_WRITE_ERROR: return "FILE_WRITE_ERROR";
         case ErrorCode::PERMISSION_DENIED: return "PERMISSION_DENIED";
+        case ErrorCode::THREAD_ERROR: return "THREAD_ERROR";
+        case ErrorCode::OUT_OF_MEMORY: return "OUT_OF_MEMORY";
 
         // Scene
         case ErrorCode::SCENE_PARSE_ERROR: return "SCENE_PARSE_ERROR";
@@ -70,6 +72,9 @@ std::string ErrorInfo::getErrorName() const {
         case ErrorCode::ASSET_NOT_FOUND: return "ASSET_NOT_FOUND";
         case ErrorCode::ASSET_FORMAT_INVALID: return "ASSET_FORMAT_INVALID";
         case ErrorCode::ASSET_CORRUPTED: return "ASSET_CORRUPTED";
+        case ErrorCode::ASSET_STREAMER_INIT_FAILED: return "ASSET_STREAMER_INIT_FAILED";
+        case ErrorCode::ASSET_LOAD_TIMEOUT: return "ASSET_LOAD_TIMEOUT";
+        case ErrorCode::ASSET_CACHE_FULL: return "ASSET_CACHE_FULL";
 
         default: return "UNKNOWN_ERROR";
     }

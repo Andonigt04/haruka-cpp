@@ -280,16 +280,21 @@ void Application::create_window() {
 }
 
 void Application::create_gl_context() {
-    if (!_window) throw std::runtime_error("create_gl_context() llamado sin ventana");
+    if (!_window) {
+        HARUKA_MOTOR_ERROR(ErrorCode::OPENGL_INIT_FAILED, "create_gl_context() called without a window");
+        throw std::runtime_error("create_gl_context() llamado sin ventana");
+    }
 
     _glContext = SDL_GL_CreateContext(_window);
     if (!_glContext) {
+        HARUKA_MOTOR_ERROR(ErrorCode::OPENGL_INIT_FAILED, "Failed to create OpenGL context via SDL3");
         throw std::runtime_error("Fallo al crear contexto OpenGL SDL3");
     }
     SDL_GL_MakeCurrent(_window, _glContext);
     SDL_GL_SetSwapInterval(1);
 
     if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
+        HARUKA_MOTOR_ERROR(ErrorCode::OPENGL_INIT_FAILED, "Failed to initialize GLAD");
         throw std::runtime_error("Fallo al inicializar GLAD");
     }
 

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include "core/error_reporter.h"
 #include <nlohmann/json.hpp>
 #include <dlfcn.h>
 #include "core/game_interface.h"
@@ -309,7 +310,7 @@ bool Scene::load(const std::string& filepath) {
         in.close();
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "Error loading scene: " << e.what() << std::endl;
+        HARUKA_SCENE_ERROR(ErrorCode::SCENE_PARSE_ERROR, std::string("Error loading scene: ") + e.what());
         return false;
     }
 }
@@ -533,7 +534,8 @@ void Scene::executeInitializer(const std::string& scenePath) {
     std::cout << "Loading initializer: " << libPath.string() << std::endl;
     void* handle = dlopen(libPath.c_str(), RTLD_LAZY);
     if (!handle) {
-        std::cerr << "Could not load initializer library: " << dlerror() << std::endl;
+        HARUKA_SCENE_ERROR(ErrorCode::SCENE_PARSE_ERROR,
+            std::string("Could not load initializer library: ") + dlerror());
         return;
     }
 
@@ -587,7 +589,7 @@ void Scene::executeInitializer(const std::string& scenePath) {
     }
 
     if (!initialized) {
-        std::cerr << "Initializer function not found" << std::endl;
+        HARUKA_SCENE_ERROR(ErrorCode::INVALID_OBJECT, "Initializer function not found in library");
     }
     dlclose(handle);
 }

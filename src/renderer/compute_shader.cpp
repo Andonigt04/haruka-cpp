@@ -2,6 +2,7 @@
 
 #include <iostream>
 #include <fstream>
+#include "core/error_reporter.h"
 #include <sstream>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -21,7 +22,8 @@ ComputeShader::ComputeShader(const std::string& computePath)
     if (!success)
     {
         glGetShaderInfoLog(compute, 512, nullptr, infoLog);
-        std::cerr << "COMPUTE SHADER COMPILATION ERROR: " << infoLog << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            std::string("compute shader compile error: ") + infoLog);
     }
 
     ID = glCreateProgram();
@@ -32,7 +34,8 @@ ComputeShader::ComputeShader(const std::string& computePath)
     if (!success)
     {
         glGetProgramInfoLog(ID, 512, nullptr, infoLog);
-        std::cerr << "COMPUTE SHADER COMPILATION ERROR: " << infoLog << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            std::string("compute shader link error: ") + infoLog);
     }
 
     glDeleteShader(compute);

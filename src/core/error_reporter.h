@@ -80,6 +80,8 @@ enum class ErrorCode {
     FILE_READ_ERROR = 701,
     FILE_WRITE_ERROR = 702,
     PERMISSION_DENIED = 703,
+    THREAD_ERROR = 704,
+    OUT_OF_MEMORY = 705,
     
     // Scene (800-899)
     SCENE_PARSE_ERROR = 800,
@@ -89,6 +91,9 @@ enum class ErrorCode {
     ASSET_NOT_FOUND = 900,
     ASSET_FORMAT_INVALID = 901,
     ASSET_CORRUPTED = 902,
+    ASSET_STREAMER_INIT_FAILED = 903,
+    ASSET_LOAD_TIMEOUT = 904,
+    ASSET_CACHE_FULL = 905,
     
     // Unknown
     UNKNOWN_ERROR = 9999
@@ -198,3 +203,18 @@ private:
 
 #define HARUKA_NETWORK_ERROR(code, message) \
     ErrorReporter::report(ErrorComponent::NETWORK, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#define HARUKA_PHYSICS_ERROR(code, message) \
+    ErrorReporter::report(ErrorComponent::PHYSICS, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#define HARUKA_AUDIO_ERROR(code, message) \
+    ErrorReporter::report(ErrorComponent::AUDIO, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#define HARUKA_IO_ERROR(code, message) \
+    ErrorReporter::report(ErrorComponent::IO, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#define HARUKA_SCENE_ERROR(code, message) \
+    ErrorReporter::report(ErrorComponent::SCENE, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+#define HARUKA_ASSET_ERROR(code, message) \
+    ErrorReporter::report(ErrorComponent::ASSET_LOADER, code, message, __FILE__, __LINE__, __FUNCTION__)

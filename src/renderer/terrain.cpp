@@ -3,6 +3,7 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
+#include "core/error_reporter.h"
 #include <cmath>
 #include <algorithm>
 #include "stb_image.h"
@@ -28,14 +29,14 @@ void Terrain::loadHeightmap(const std::string& filepath) {
     unsigned char* data = stbi_load(filepath.c_str(), &width, &height, &channels, 1);
     
     if (!data) {
-        std::cerr << "[Terrain] Failed to load heightmap: " << filepath << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load heightmap: " + filepath);
         return;
     }
-    
-    // Resize if needed
+
     if (width != size || height != size) {
-        std::cerr << "[Terrain] Heightmap size mismatch. Expected " << size << "x" << size 
-                  << ", got " << width << "x" << height << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::ASSET_FORMAT_INVALID,
+            "Heightmap size mismatch. Expected " + std::to_string(size) + "x" + std::to_string(size)
+            + ", got " + std::to_string(width) + "x" + std::to_string(height));
     }
     
     int actualSize = std::min(width, size);

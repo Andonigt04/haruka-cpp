@@ -1,5 +1,6 @@
 #include "websocket_client.h"
 #include <iostream>
+#include "core/error_reporter.h"
 
 namespace Haruka {
 
@@ -24,7 +25,8 @@ bool WebSocketClient::connect(const std::string& uri) {
         WsClient::connection_ptr con = client.get_connection(uri, ec);
         
         if (ec) {
-            std::cerr << "[WS] Connection error: " << ec.message() << std::endl;
+            HARUKA_NETWORK_ERROR(ErrorCode::SOCKET_CREATION_FAILED,
+                std::string("WebSocket connection error: ") + ec.message());
             return false;
         }
         
@@ -39,7 +41,8 @@ bool WebSocketClient::connect(const std::string& uri) {
         std::cout << "[WS] Connecting to " << uri << std::endl;
         return true;
     } catch (const std::exception& e) {
-        std::cerr << "[WS] Exception: " << e.what() << std::endl;
+        HARUKA_NETWORK_ERROR(ErrorCode::CONNECTION_TIMEOUT,
+            std::string("WebSocket exception: ") + e.what());
         return false;
     }
 }

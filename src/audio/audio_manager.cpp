@@ -2,6 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
+#include "core/error_reporter.h"
 
 namespace Haruka {
 
@@ -12,7 +13,7 @@ AudioBuffer::AudioBuffer(const std::string& filepath) {
     } else if (filepath.find(".ogg") != std::string::npos) {
         loadOGG(filepath);
     } else {
-        std::cerr << "[Audio] Unsupported format: " << filepath << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Unsupported audio format: " + filepath);
     }
 }
 
@@ -25,7 +26,7 @@ AudioBuffer::~AudioBuffer() {
 bool AudioBuffer::loadWAV(const std::string& filepath) {
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
-        std::cerr << "[Audio] Cannot open file: " << filepath << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "Cannot open audio file: " + filepath);
         return false;
     }
     
@@ -36,7 +37,7 @@ bool AudioBuffer::loadWAV(const std::string& filepath) {
     
     file.read(chunkId, 4);
     if (std::strncmp(chunkId, "RIFF", 4) != 0) {
-        std::cerr << "[Audio] Not a WAV file: " << filepath << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Not a WAV file (missing RIFF): " + filepath);
         return false;
     }
     
@@ -44,7 +45,7 @@ bool AudioBuffer::loadWAV(const std::string& filepath) {
     file.read(format, 4);
     
     if (std::strncmp(format, "WAVE", 4) != 0) {
-        std::cerr << "[Audio] Not a WAVE format: " << filepath << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Not a WAVE format: " + filepath);
         return false;
     }
     
@@ -76,7 +77,7 @@ bool AudioBuffer::loadWAV(const std::string& filepath) {
     }
     
     if (file.eof()) {
-        std::cerr << "[Audio] No data chunk found: " << filepath << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "No data chunk found in: " + filepath);
         return false;
     }
     
@@ -94,8 +95,9 @@ bool AudioBuffer::loadWAV(const std::string& filepath) {
     else if (numChannels == 2 && bitsPerSample == 8) alFormat = AL_FORMAT_STEREO8;
     else if (numChannels == 2 && bitsPerSample == 16) alFormat = AL_FORMAT_STEREO16;
     else {
-        std::cerr << "[Audio] Unsupported format: " << numChannels << " channels, " 
-                  << bitsPerSample << " bits" << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID,
+            "Unsupported WAV format: " + std::to_string(numChannels) + " channels, "
+            + std::to_string(bitsPerSample) + " bits");
         return false;
     }
     
@@ -105,17 +107,17 @@ bool AudioBuffer::loadWAV(const std::string& filepath) {
     
     ALenum error = alGetError();
     if (error != AL_NO_ERROR) {
-        std::cerr << "[Audio] Error loading: " << filepath << " (" << error << ")" << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED,
+            "OpenAL error loading '" + filepath + "': " + std::to_string(error));
         return false;
     }
-    
+
     std::cout << "[Audio] Loaded: " << filepath << std::endl;
     return true;
 }
 
 bool AudioBuffer::loadOGG(const std::string& filepath) {
-    // TODO: Implementar OGG con libvorbis
-    std::cerr << "[Audio] OGG not implemented yet" << std::endl;
+    HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "OGG loading not implemented: " + filepath);
     return false;
 }
 
@@ -129,13 +131,13 @@ AudioManager::~AudioManager() {
 bool AudioManager::init() {
     device = alcOpenDevice(nullptr);
     if (!device) {
-        std::cerr << "[Audio] Failed to open device" << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_INIT_FAILED, "Failed to open OpenAL device");
         return false;
     }
-    
+
     context = alcCreateContext(device, nullptr);
     if (!context || !alcMakeContextCurrent(context)) {
-        std::cerr << "[Audio] Failed to create context" << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_INIT_FAILED, "Failed to create OpenAL context");
         alcCloseDevice(device);
         return false;
     }
@@ -195,7 +197,7 @@ bool AudioManager::loadSound(const std::string& name, const std::string& filepat
 
 int AudioManager::allocateSource() {
     if (freeSources.empty()) {
-        std::cerr << "[Audio] No free sources" << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "No free audio sources available");
         return -1;
     }
     
@@ -211,11 +213,11 @@ void AudioManager::freeSource(int sourceId) {
     }
 }
 
-int AudioManager::playSound(const std::string& name, const glm::vec3& position, 
+int AudioManager::playSound(const std::string& name, const glm::vec3& position,
                             bool loop, float gain, float pitch) {
     auto it = buffers.find(name);
     if (it == buffers.end()) {
-        std::cerr << "[Audio] Sound not found: " << name << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_NOT_FOUND, "Sound not found: '" + name + "'");
         return -1;
     }
     
@@ -245,7 +247,7 @@ int AudioManager::playSound(const std::string& name, const glm::vec3& position,
 int AudioManager::playSound2D(const std::string& name, bool loop, float gain) {
     auto it = buffers.find(name);
     if (it == buffers.end()) {
-        std::cerr << "[Audio] Sound not found: " << name << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_NOT_FOUND, "Sound not found: '" + name + "'");
         return -1;
     }
     
@@ -342,7 +344,8 @@ void AudioManager::update(float deltaTime) {
 void AudioManager::checkALError(const char* operation) {
     ALenum error = alGetError();
     if (error != AL_NO_ERROR) {
-        std::cerr << "[Audio] Error in " << operation << ": " << error << std::endl;
+        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED,
+            std::string("OpenAL error in ") + operation + ": " + std::to_string(error));
     }
 }
 

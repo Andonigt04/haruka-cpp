@@ -2,6 +2,7 @@
 #include <iostream>
 #include <sstream>
 #include <cstring>
+#include "core/error_reporter.h"
 
 namespace Haruka {
 
@@ -16,7 +17,8 @@ bool DatabaseConnection::connect() {
     conn = PQconnectdb(connectionInfo.c_str());
     
     if (PQstatus(conn) != CONNECTION_OK) {
-        std::cerr << "[DB] Connection failed: " << PQerrorMessage(conn) << std::endl;
+        HARUKA_IO_ERROR(ErrorCode::FILE_READ_ERROR,
+            std::string("DB connection failed: ") + PQerrorMessage(conn));
         PQfinish(conn);
         conn = nullptr;
         return false;
@@ -39,7 +41,8 @@ PGresult* DatabaseConnection::executeQuery(const std::string& query) {
     PGresult* res = PQexec(conn, query.c_str());
     
     if (PQresultStatus(res) != PGRES_TUPLES_OK && PQresultStatus(res) != PGRES_COMMAND_OK) {
-        std::cerr << "[DB] Query failed: " << PQerrorMessage(conn) << std::endl;
+        HARUKA_IO_ERROR(ErrorCode::FILE_READ_ERROR,
+            std::string("DB query failed: ") + PQerrorMessage(conn));
         PQclear(res);
         return nullptr;
     }

@@ -9,8 +9,8 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
-#include <functional>
 #include <glm/glm.hpp>
+#include "core/error_reporter.h"
 
 /**
  * @brief On-demand asynchronous asset streaming service.
@@ -115,6 +115,9 @@ public:
     /** @brief Stops workers and releases streamer resources. */
     void shutdown();
 
+    /** @brief Returns false if init failed or a worker crashed — caller should use fallback paths. */
+    bool isHealthy() const { return healthy; }
+
     ~AssetStreamer();
 
 private:
@@ -149,6 +152,7 @@ private:
     // Worker threads
     std::vector<std::thread> workers;
     std::atomic<bool> running{false};
+    bool healthy = false;
 
     // Configuration
     size_t maxCacheMemoryBytes = 512 * 1024 * 1024;  // 512 MB default

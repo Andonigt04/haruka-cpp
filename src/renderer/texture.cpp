@@ -2,6 +2,7 @@
 
 #include "stb_image.h"
 #include <iostream>
+#include "core/error_reporter.h"
 
 Texture::Texture(const char* path)
 {
@@ -26,7 +27,8 @@ Texture::Texture(const char* path)
         glGenerateMipmap(GL_TEXTURE_2D);
     }
     else {
-        std::cout << "ERROR::TEXTURE::LOAD_FAILED: " << path << std::endl;
+        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED,
+            std::string("Failed to load texture: ") + path);
     }
 
     // Clean CPU memory

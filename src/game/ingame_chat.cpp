@@ -2,6 +2,7 @@
 #include <imgui.h>
 #include <iostream>
 #include <cstring>
+#include "core/error_reporter.h"
 #include <arpa/inet.h>
 #include <unistd.h>
 
@@ -25,7 +26,7 @@ void InGameChat::init() {
     // UDP fallback
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
-        std::cerr << "[Chat] Error creating socket" << std::endl;
+        HARUKA_NETWORK_ERROR(ErrorCode::SOCKET_CREATION_FAILED, "Chat: failed to create UDP socket");
         return;
     }
 
@@ -36,7 +37,8 @@ void InGameChat::init() {
     localAddr.sin_port = htons(localPort);
 
     if (bind(sockfd, (sockaddr*)&localAddr, sizeof(localAddr)) < 0) {
-        std::cerr << "[Chat] Error binding socket" << std::endl;
+        HARUKA_NETWORK_ERROR(ErrorCode::SOCKET_CREATION_FAILED,
+            "Chat: failed to bind UDP socket on port " + std::to_string(localPort));
         close(sockfd);
         sockfd = -1;
         return;

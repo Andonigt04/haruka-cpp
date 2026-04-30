@@ -1,6 +1,7 @@
 #include "compute_postprocess.h"
 #include <glm/glm.hpp>
 #include <iostream>
+#include "core/error_reporter.h"
 
 ComputePostProcess::ComputePostProcess() {}
 
@@ -21,7 +22,8 @@ GLuint ComputePostProcess::compileComputeShader(const std::string& source) {
     glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
     if (!success) {
         glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        std::cerr << "Compute shader compilation failed: " << infoLog << "\n";
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            std::string("compute shader compile error: ") + infoLog);
         glDeleteShader(shader);
         return 0;
     }
@@ -33,7 +35,8 @@ GLuint ComputePostProcess::compileComputeShader(const std::string& source) {
     glGetProgramiv(program, GL_LINK_STATUS, &success);
     if (!success) {
         glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        std::cerr << "Shader program linking failed: " << infoLog << "\n";
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            std::string("compute shader link error: ") + infoLog);
         glDeleteProgram(program);
         glDeleteShader(shader);
         return 0;

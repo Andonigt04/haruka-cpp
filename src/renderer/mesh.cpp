@@ -1,12 +1,13 @@
 #include "mesh.h"
 
 #include <glad/glad.h>
+#include "core/error_reporter.h"
 
 // Constructor para modelos complejos (con texturas)
 Mesh::Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures) {
     if (vertex.empty()) {
-        std::cout << "ERROR::MESH::Vértices vacíos al crear la malla" << std::endl;
-        return; 
+        HARUKA_RENDERER_ERROR(ErrorCode::MODEL_LOAD_FAILED, "Empty vertex list when creating mesh");
+        return;
     }
     this->vertex = vertex;
     this->index = idx;

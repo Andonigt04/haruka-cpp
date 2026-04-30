@@ -1,5 +1,6 @@
 #include "core/application.h"
 #include "core/json.hpp"
+#include "core/error_reporter.h"
 #include <iostream>
 #include <fstream>
 #include <stdexcept>
@@ -21,7 +22,8 @@ int main() {
     try {
         app.run(startScenePath);
     } catch (const std::exception& e) {
-        std::cerr << "Excepcion capturada: " << e.what() << std::endl;
+        HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED,
+            std::string("Uncaught exception: ") + e.what());
         return EXIT_FAILURE;
     }
 

@@ -1,4 +1,5 @@
 #include "core/terrain_streaming_system.h"
+#include "core/error_reporter.h"
 
 #include <algorithm>
 #include <chrono>
@@ -441,7 +442,9 @@ void TerrainStreamingSystem::update(Scene* scene, WorldSystem* worldSystem, Plan
                 if (currentSeed != lastCheckedSeed && lastCheckedSeed != 0) {
                     // Semilla cambió: invalidar chunks
                     invalidateChunksForSeedChange();
-                    std::cerr << "[TerrainStreaming] Seed changed: " << lastCheckedSeed << " -> " << currentSeed << std::endl;
+                    HARUKA_SCENE_ERROR(ErrorCode::INVALID_OBJECT,
+                        "TerrainStreaming: seed changed " + std::to_string(lastCheckedSeed)
+                        + " -> " + std::to_string(currentSeed) + ", chunks invalidated");
                 }
                 lastCheckedSeed = currentSeed;
             }

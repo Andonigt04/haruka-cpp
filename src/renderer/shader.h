@@ -8,6 +8,7 @@
 #include <fstream>
 #include <vector>
 #include <iostream>
+#include "core/error_reporter.h"
 
 /**
  * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
@@ -117,7 +118,7 @@ private:
 
         std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
         if (!f.is_open()) {
-            std::cerr << "ERROR::SHADER::SPV_NOT_FOUND: " << spvPath << "\n";
+            HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED, "SPV not found: " + spvPath);
             return 0;
         }
         auto byteSize = static_cast<std::streamsize>(f.tellg());
@@ -140,13 +141,15 @@ private:
             glGetProgramiv(object, GL_LINK_STATUS, &ok);
             if (!ok) {
                 glGetProgramInfoLog(object, sizeof(log), nullptr, log);
-                std::cerr << "ERROR::SHADER::LINK [" << label << "]\n" << log << "\n";
+                HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+                    std::string("link error [") + label + "]: " + log);
             }
         } else {
             glGetShaderiv(object, GL_COMPILE_STATUS, &ok);
             if (!ok) {
                 glGetShaderInfoLog(object, sizeof(log), nullptr, log);
-                std::cerr << "ERROR::SHADER::SPECIALIZE [" << label << "]\n" << log << "\n";
+                HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+                    std::string("specialize error [") + label + "]: " + log);
             }
         }
     }
