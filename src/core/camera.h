@@ -4,7 +4,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "math_types.h"
 
-struct GLFWwindow;
+struct SDL_Window;
 
 /**
  * @brief Runtime camera state and input-driven transform controller.
@@ -32,8 +32,8 @@ public:
 
     /** @brief Applies mouse-delta rotation update. */
     void rotate(float deltaX, float deltaY);
-    /** @brief Processes movement input from GLFW window state. */
-    void processInput(GLFWwindow* window, float deltaTime);
+    /** @brief Processes movement input from SDL keyboard state. */
+    void processInput(SDL_Window* window, float deltaTime);
     
     /** @brief Updates zoom/FOV from scroll input. */
     void ProcessMouseScroll(float yoffset);

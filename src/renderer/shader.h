@@ -6,193 +6,130 @@
 
 #include <string>
 #include <fstream>
-#include <sstream>
+#include <vector>
 #include <iostream>
 
+/**
+ * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
+ *
+ * Paths passed to constructors are the original GLSL paths; the class appends
+ * ".spv" and loads the binary produced by the CMake build step.
+ * Requires OpenGL 4.6 (GL_ARB_gl_spirv — core since 4.6).
+ */
 class Shader {
 public:
     unsigned int ID;
 
-    /**
-     * @brief Builds a shader program from vertex/fragment paths.
-     * @param vertexPath Vertex shader source path.
-     * @param fragmentPath Fragment shader source path.
-     * @param geometryPath Optional geometry shader source path.
-     */
-    Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr)
-    {
-        std::string vertexCode;
-        std::string fragmentCode;
-        std::string geometryCode;
-        std::ifstream vShaderFile;
-        std::ifstream fShaderFile;
-        std::ifstream gShaderFile;
-        // ifstream execptions
-        vShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        fShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        gShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        // 1. Lee los archivos desde vertexPath y fragmentPath...
-        try
-        {
-            // reads the shader files
-            vShaderFile.open(vertexPath);
-            fShaderFile.open(fragmentPath);
-            std::stringstream vShaderStream, fShaderStream;
+    /** @brief Builds a program from vertex + fragment (+ optional geometry) SPIR-V. */
+    Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr) {
+        GLuint vert = loadSPV(GL_VERTEX_SHADER,   vertexPath);
+        GLuint frag = loadSPV(GL_FRAGMENT_SHADER, fragmentPath);
+        GLuint geom = geometryPath ? loadSPV(GL_GEOMETRY_SHADER, geometryPath) : 0;
 
-            // read file's buffer contents into streams
-            vShaderStream << vShaderFile.rdbuf();
-            fShaderStream << fShaderFile.rdbuf();
-
-            // close file handlers
-            vShaderFile.close();
-            fShaderFile.close();
-
-            // convert stream into string
-            vertexCode = vShaderStream.str();
-            fragmentCode = fShaderStream.str();	
-
-            if (geometryPath != nullptr)
-            {
-                gShaderFile.open(geometryPath);
-                std::stringstream gShaderStream;
-                gShaderStream << gShaderFile.rdbuf();
-                gShaderFile.close();
-                geometryCode = gShaderStream.str();
-            }
-        }
-        catch (std::ifstream::failure& e)
-        {
-            std::cout << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << e.what() << std::endl;
-        }
-        const char* vShaderCode = vertexCode.c_str();
-        const char* fShaderCode = fragmentCode.c_str();
-
-        unsigned int vertex, fragment;
-
-        // vertex shader
-        vertex = glCreateShader(GL_VERTEX_SHADER);
-        glShaderSource(vertex, 1, &vShaderCode, NULL);
-        glCompileShader(vertex);
-        checkCompileErrors(vertex, "VERTEX");
-
-        // fragment shader
-        fragment = glCreateShader(GL_FRAGMENT_SHADER);
-        glShaderSource(fragment, 1, &fShaderCode, NULL);
-        glCompileShader(fragment);
-        checkCompileErrors(fragment, "FRAGMENT");
-
-        // geometry shader
-        unsigned int geometry;
-        if (geometryPath != nullptr)
-        {
-            const char* gShaderCode = geometryCode.c_str();
-            geometry = glCreateShader(GL_GEOMETRY_SHADER);
-            glShaderSource(geometry, 1, &gShaderCode, NULL);
-            glCompileShader(geometry);
-            checkCompileErrors(geometry, "GEOMETRY");
-        }
-
-        // link shader Program
         ID = glCreateProgram();
-        glAttachShader(ID, vertex);
-        glAttachShader(ID, fragment);
-        if (geometryPath != nullptr)
-            glAttachShader(ID, geometry);
+        glAttachShader(ID, vert);
+        glAttachShader(ID, frag);
+        if (geom) glAttachShader(ID, geom);
         glLinkProgram(ID);
+        checkErrors(ID, "PROGRAM");
 
-        glDeleteShader(vertex);
-        glDeleteShader(fragment);
-        if (geometryPath != nullptr)
-            glDeleteShader(geometry);
+        glDeleteShader(vert);
+        glDeleteShader(frag);
+        if (geom) glDeleteShader(geom);
+    }
+
+    /** @brief Builds a program from a single compute SPIR-V. */
+    explicit Shader(const char* computePath) {
+        GLuint comp = loadSPV(GL_COMPUTE_SHADER, computePath);
+
+        ID = glCreateProgram();
+        glAttachShader(ID, comp);
+        glLinkProgram(ID);
+        checkErrors(ID, "PROGRAM");
+
+        glDeleteShader(comp);
     }
 
     /** @brief Binds the program for subsequent draw calls. */
-    void use() { 
-        glUseProgram(ID); 
-    }
+    void use() { glUseProgram(ID); }
 
     /** @name Uniform helpers */
     ///@{
-    // ------------------------------------------------------------------------
-    void setBool(const std::string &name, bool value)
-    {
+    void setBool(const std::string& name, bool value) const {
         glUniform1i(glGetUniformLocation(ID, name.c_str()), (int)value);
     }
-    // ------------------------------------------------------------------------
-    void setInt(const std::string &name, int value) const
-    { 
-        glUniform1i(glGetUniformLocation(ID, name.c_str()), value); 
+    void setInt(const std::string& name, int value) const {
+        glUniform1i(glGetUniformLocation(ID, name.c_str()), value);
     }
-    // ------------------------------------------------------------------------
-    void setFloat(const std::string &name, float value) const
-    { 
-        glUniform1f(glGetUniformLocation(ID, name.c_str()), value); 
+    void setFloat(const std::string& name, float value) const {
+        glUniform1f(glGetUniformLocation(ID, name.c_str()), value);
     }
-    // ------------------------------------------------------------------------
-    void setVec2(const std::string &name, const glm::vec2 &value) const
-    { 
-        glUniform2fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
+    void setVec2(const std::string& name, const glm::vec2& v) const {
+        glUniform2fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]);
     }
-    void setVec2(const std::string &name, float x, float y) const
-    { 
-        glUniform2f(glGetUniformLocation(ID, name.c_str()), x, y); 
+    void setVec2(const std::string& name, float x, float y) const {
+        glUniform2f(glGetUniformLocation(ID, name.c_str()), x, y);
     }
-    // ------------------------------------------------------------------------
-    void setVec3(const std::string &name, const glm::vec3 &value) const
-    { 
-        glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
+    void setVec3(const std::string& name, const glm::vec3& v) const {
+        glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]);
     }
-    void setVec3(const std::string &name, float x, float y, float z) const
-    { 
-        glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z); 
+    void setVec3(const std::string& name, float x, float y, float z) const {
+        glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z);
     }
-    // ------------------------------------------------------------------------
-    void setVec4(const std::string &name, const glm::vec4 &value) const
-    { 
-        glUniform4fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
+    void setVec4(const std::string& name, const glm::vec4& v) const {
+        glUniform4fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]);
     }
-    void setVec4(const std::string &name, float x, float y, float z, float w) 
-    { 
-        glUniform4f(glGetUniformLocation(ID, name.c_str()), x, y, z, w); 
+    void setVec4(const std::string& name, float x, float y, float z, float w) const {
+        glUniform4f(glGetUniformLocation(ID, name.c_str()), x, y, z, w);
     }
-    // ------------------------------------------------------------------------
-    void setMat2(const std::string &name, const glm::mat2 &mat) const
-    {
-        glUniformMatrix2fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
+    void setMat2(const std::string& name, const glm::mat2& m) const {
+        glUniformMatrix2fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]);
     }
-    // ------------------------------------------------------------------------
-    void setMat3(const std::string &name, const glm::mat3 &mat) const
-    {
-        glUniformMatrix3fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
+    void setMat3(const std::string& name, const glm::mat3& m) const {
+        glUniformMatrix3fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]);
     }
-    // ------------------------------------------------------------------------
-    void setMat4(const std::string &name, const glm::mat4 &mat) const
-    {
-        glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
+    void setMat4(const std::string& name, const glm::mat4& m) const {
+        glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]);
     }
     ///@}
+
 private:
-    /** @brief Reports compile/link diagnostics to stdout. */
-    void checkCompileErrors(GLuint shader, std::string type)
-    {
-        GLint success;
-        GLchar infoLog[1024];
-        if(type != "PROGRAM")
-        {
-            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-            if(!success)
-            {
-                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
-                std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
-            }
+    // Loads path+".spv", uploads as SPIR-V binary, specialises at "main", returns shader object.
+    static GLuint loadSPV(GLenum type, const char* glslPath) {
+        std::string spvPath = std::string(glslPath) + ".spv";
+
+        std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
+        if (!f.is_open()) {
+            std::cerr << "ERROR::SHADER::SPV_NOT_FOUND: " << spvPath << "\n";
+            return 0;
         }
-        else
-        {
-            glGetProgramiv(shader, GL_LINK_STATUS, &success);
-            if(!success)
-            {
-                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
-                std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+        auto byteSize = static_cast<std::streamsize>(f.tellg());
+        f.seekg(0, std::ios::beg);
+        std::vector<char> buf(byteSize);
+        f.read(buf.data(), byteSize);
+
+        GLuint shader = glCreateShader(type);
+        glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
+                       buf.data(), static_cast<GLsizei>(byteSize));
+        glSpecializeShader(shader, "main", 0, nullptr, nullptr);
+        checkErrors(shader, spvPath.c_str());
+        return shader;
+    }
+
+    static void checkErrors(GLuint object, const char* label) {
+        GLint ok = GL_TRUE;
+        char log[1024];
+        if (glIsProgram(object)) {
+            glGetProgramiv(object, GL_LINK_STATUS, &ok);
+            if (!ok) {
+                glGetProgramInfoLog(object, sizeof(log), nullptr, log);
+                std::cerr << "ERROR::SHADER::LINK [" << label << "]\n" << log << "\n";
+            }
+        } else {
+            glGetShaderiv(object, GL_COMPILE_STATUS, &ok);
+            if (!ok) {
+                glGetShaderInfoLog(object, sizeof(log), nullptr, log);
+                std::cerr << "ERROR::SHADER::SPECIALIZE [" << label << "]\n" << log << "\n";
             }
         }
     }

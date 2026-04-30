@@ -30,8 +30,8 @@ public:
     
     /** @brief Advances movement, camera, and sync state. */
     void update(float deltaTime);
-    /** @brief Processes keyboard/mouse input from GLFW window. */
-    void processInput(GLFWwindow* window, float deltaTime);
+    /** @brief Processes keyboard/mouse input from SDL window. */
+    void processInput(SDL_Window* window, float deltaTime);
     
     /** @name Movement controls */
     ///@{

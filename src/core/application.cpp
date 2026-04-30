@@ -3,7 +3,9 @@
 
 #include <iostream>
 #include <cmath>
+#include <chrono>
 #include <unordered_map>
+#include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "renderer/mesh.h"
@@ -29,15 +31,6 @@
 #include "core/terrain_streaming_system.h"
 
 Haruka::GameInterface* gameInterface = nullptr;
-
-// Mouse input state
-struct MouseState {
-    float lastX = 640.0f;
-    float lastY = 360.0f;
-    bool firstMouse = true;
-};
-
-static MouseState g_mouseState;
 
 namespace {
 std::vector<const Haruka::SceneObject*> g_sceneRenderQueue;
@@ -220,36 +213,6 @@ Application::Application() : _window(nullptr) {}
 
 Application::~Application() { cleanup(); }
 
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
-    Application* app = static_cast<Application*>(glfwGetWindowUserPointer(window));
-    if (app) {
-        app->getCamera()->ProcessMouseScroll(static_cast<float>(yoffset));
-    }
-}
-
-void mouse_callback(GLFWwindow* window, double xposIn, double yposIn) {
-    float xpos = static_cast<float>(xposIn);
-    float ypos = static_cast<float>(yposIn);
-
-    if (g_mouseState.firstMouse) {
-        g_mouseState.lastX = xpos;
-        g_mouseState.lastY = ypos;
-        g_mouseState.firstMouse = false;
-        return;
-    }
-
-    float xoffset = xpos - g_mouseState.lastX;
-    float yoffset = g_mouseState.lastY - ypos;
-
-    g_mouseState.lastX = xpos;
-    g_mouseState.lastY = ypos;
-
-    Application* app = static_cast<Application*>(glfwGetWindowUserPointer(window));
-    if (app && app->getCamera()) {
-        app->getCamera()->rotate(xoffset, -yoffset);
-    }
-}
-
 void Application::setupQuad() {
     float quadVertices[] = {
         -1.0f,  1.0f,  0.0f, 1.0f,
@@ -270,6 +233,23 @@ void Application::setupQuad() {
     glBindVertexArray(0);
 }
 
+void Application::recreateFBOs(int newWidth, int newHeight) {
+    if (newWidth == _width && newHeight == _height) return;
+    _width  = newWidth;
+    _height = newHeight;
+
+    if (_gBuffer)            _gBuffer            = std::make_unique<GBuffer>(_width, _height);
+    if (_ssaoSystem)         _ssaoSystem         = std::make_unique<SSAO>(_width, _height);
+    if (_hdrSystem)          _hdrSystem          = std::make_unique<HDR>(_width, _height);
+    if (_bloomSystem)        _bloomSystem        = std::make_unique<Bloom>(_width, _height);
+    if (_lightingTarget)     _lightingTarget     = std::make_unique<RenderTarget>(_width, _height);
+    if (_bloomExtractTarget) _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height);
+    if (_computePostProcess) {
+        _computePostProcess = std::make_unique<ComputePostProcess>();
+        _computePostProcess->init(_width, _height);
+    }
+}
+
 void Application::loadScene(const std::string& scenePath) {
     _currentScene = std::make_unique<Haruka::Scene>();
     
@@ -282,31 +262,38 @@ void Application::loadScene(const std::string& scenePath) {
 }
 
 void Application::create_window() {
-    if (!glfwInit()) {
-        HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize GLFW");
-        throw std::runtime_error("Fallo al inicializar GLFW");
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED, "Failed to initialize SDL3");
+        throw std::runtime_error("Fallo al inicializar SDL3");
     }
 
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 
-    _window = glfwCreateWindow(_width, _height, "Haruka Engine", nullptr, nullptr);
+    _window = SDL_CreateWindow("Haruka Engine", _width, _height,
+                               SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!_window) {
-        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create GLFW window");
+        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to create SDL3 window");
         throw std::runtime_error("Fallo al crear la ventana");
     }
+}
 
-    glfwMakeContextCurrent(_window);
+void Application::create_gl_context() {
+    if (!_window) throw std::runtime_error("create_gl_context() llamado sin ventana");
 
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+    _glContext = SDL_GL_CreateContext(_window);
+    if (!_glContext) {
+        throw std::runtime_error("Fallo al crear contexto OpenGL SDL3");
+    }
+    SDL_GL_MakeCurrent(_window, _glContext);
+    SDL_GL_SetSwapInterval(1);
+
+    if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
         throw std::runtime_error("Fallo al inicializar GLAD");
     }
 
-    glfwSetWindowUserPointer(_window, this);
-    glfwSetScrollCallback(_window, scroll_callback);
-    glfwSetCursorPosCallback(_window, mouse_callback);
-    glfwSetInputMode(_window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    SDL_SetWindowRelativeMouseMode(_window, true);
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -416,8 +403,7 @@ void Application::init(Haruka::Scene& scene) {
     _cascadeShadowShader = std::make_unique<Shader>("shaders/shadow.vert", "shaders/shadow.frag");
 }
 
-void Application::renderScene(Shader* shader) {
-    (void)shader; // Esta función solo construye la cola de render
+void Application::buildRenderQueue() {
 
     Haruka::Scene* scene = MotorInstance::getInstance().getScene();
     if (!scene) {
@@ -584,10 +570,25 @@ void Application::renderScene(Shader* shader) {
 }
 
 void Application::main_loop() {
-    while (!glfwWindowShouldClose(_window)) {
+    bool running = true;
+    while (running) {
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_EVENT_QUIT) {
+                running = false;
+            } else if (event.type == SDL_EVENT_MOUSE_MOTION) {
+                if (_camera) {
+                    _camera->rotate(static_cast<float>(event.motion.xrel),
+                                    -static_cast<float>(event.motion.yrel));
+                }
+            } else if (event.type == SDL_EVENT_MOUSE_WHEEL) {
+                if (_camera) _camera->ProcessMouseScroll(static_cast<float>(event.wheel.y));
+            } else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                SDL_GetWindowSize(_window, &_width, &_height);
+            }
+        }
         renderFrame();
-        glfwSwapBuffers(_window);
-        glfwPollEvents();
+        SDL_GL_SwapWindow(_window);
     }
 }
 
@@ -596,11 +597,21 @@ void Application::renderFrame() {
     if (!scene && !_currentScene) return;
     if (!_camera) return;
 
-    float currentFrame = static_cast<float>(glfwGetTime());
-    deltaTime = currentFrame - lastFrame;
-    lastFrame = currentFrame;
-    
+    _frameStart = std::chrono::high_resolution_clock::now();
+
     renderFrameContent();
+
+    auto frameEnd = std::chrono::high_resolution_clock::now();
+    _lastFrameTimeMs = std::chrono::duration<float, std::milli>(frameEnd - _frameStart).count();
+    deltaTime        = _lastFrameTimeMs * 0.001f;
+
+    _fpsFrameCount++;
+    double now = std::chrono::duration<double>(frameEnd.time_since_epoch()).count();
+    if (now - _fpsLastTime >= 1.0) {
+        _lastFps      = static_cast<float>(_fpsFrameCount / (now - _fpsLastTime));
+        _fpsLastTime  = now;
+        _fpsFrameCount = 0;
+    }
 }
 
 void Application::renderFrameContent() {
@@ -617,7 +628,7 @@ void Application::renderFrameContent() {
     // ========== EDITOR MODE (Viewport) ==========
     RenderTarget* editorTarget = MotorInstance::getInstance().getRenderTarget();
     if (editorTarget) {
-        renderScene();
+        buildRenderQueue();
 
         editorTarget->bindForWriting();
         glEnable(GL_DEPTH_TEST);
@@ -672,8 +683,7 @@ void Application::renderFrameContent() {
             }
         }
 
-        // Fallback: mostrar nada si escena vacía (no renderizar cubo por defecto)
-        // Los usuarios deben agregar explícitamente objetos a la escena
+        if (_imguiCallback) _imguiCallback();
 
         editorTarget->unbind();
         return;
@@ -778,7 +788,7 @@ void Application::renderFrameContent() {
     _geomShader->setMat4("projection", proj);
     _geomShader->setMat4("view", view);
 
-    renderScene();
+    buildRenderQueue();
 
     int drawCount = 0;
     for (const auto* obj : g_sceneRenderQueue) {
@@ -931,8 +941,8 @@ void Application::renderFrameContent() {
 
     // ========== DEBUG METRICS ==========
     FrameMetrics metrics;
-    metrics.fps = 60.0f;
-    metrics.frameTimeMs = 16.67f;
+    metrics.fps         = _lastFps;
+    metrics.frameTimeMs = _lastFrameTimeMs;
     metrics.drawCalls = 0;
     metrics.totalTriangles = 0;
     metrics.totalVertices = 0;
@@ -969,13 +979,59 @@ void Application::renderFrameContent() {
 }
 
 void Application::cleanup() {
-    // Limpiar registro en MotorInstance
     MotorInstance::getInstance().clear();
-    glfwTerminate();
+
+    // Render systems (orden inverso al de init)
+    _cascadeShadowShader.reset();
+    _flatShader.reset();
+    _compositeShader.reset();
+    _lightShader.reset();
+    _ssaoShader.reset();
+    _geomShader.reset();
+    for (auto& lod : sphereLOD) lod.reset();
+    _terrainStreamingSystem.reset();
+    _raycastSystem.reset();
+    _planetarySystem.reset();
+    _virtualTexturing.reset();
+    _cascadedShadow.reset();
+    _computePostProcess.reset();
+    _instancing.reset();
+    _lightCuller.reset();
+    _bloomExtractTarget.reset();
+    _lightingTarget.reset();
+    _pointShadowSystem.reset();
+    _worldSystem.reset();
+    _iblSystem.reset();
+    _ssaoSystem.reset();
+    _gBuffer.reset();
+    _bloomSystem.reset();
+    _hdrSystem.reset();
+    _shadowSystem.reset();
+    _lampShader.reset();
+    _mainShader.reset();
+    _camera.reset();
+    _currentScene.reset();
+
+    // Quad VAO/VBO
+    if (quadVAO) { glDeleteVertexArrays(1, &quadVAO); quadVAO = 0; }
+    if (quadVBO) { glDeleteBuffers(1, &quadVBO);      quadVBO = 0; }
+
+    // Solo terminar SDL3 si esta instancia creó la ventana (modo standalone).
+    // En modo embebido (editor), _window es nullptr y SDL3 pertenece al editor.
+    if (_glContext) {
+        SDL_GL_DestroyContext(_glContext);
+        _glContext = nullptr;
+    }
+    if (_window) {
+        SDL_DestroyWindow(_window);
+        _window = nullptr;
+        SDL_Quit();
+    }
 }
 
 void Application::run(const std::string& startScenePath) {
     create_window();
+    create_gl_context();
     Haruka::Scene scene;
     if (!startScenePath.empty()) {
         scene.load(startScenePath);

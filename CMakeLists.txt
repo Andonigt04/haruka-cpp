@@ -40,7 +40,7 @@ macro(find_header_fallback NAME HEADER_FILE SUBDIR)
 endmacro()
 
 # Aplicar fallbacks para las dependencias que te daban error
-find_header_fallback(NLOHMANN_JSON "nlohmann/json.hpp" "json")
+find_header_fallback(NLOHMANN_JSON "nlohmann/json.hpp" "json/include")
 find_header_fallback(GLM "glm/glm.hpp" "glm")
 find_header_fallback(STB "stb_image.h" "stb")
 
@@ -94,15 +94,66 @@ target_link_libraries(HarukaEngine PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
-# --- 5. Shaders (OpenGL usa archivos de texto, no requiere compilar a SPIR-V) ---
-# Copiamos los archivos .vert y .frag directamente al binario
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
+# --- 5. Compilación de Shaders GLSL → SPIR-V ---
+find_program(GLSLC      glslc)
+find_program(GLSLANG_V  glslangValidator)
+
+if(NOT GLSLC AND NOT GLSLANG_V)
+    message(FATAL_ERROR
+        "Se requiere glslc (Vulkan SDK / shaderc) o glslangValidator para compilar shaders SPIR-V.\n"
+        "  Fedora/RHEL: sudo dnf install glslang\n"
+        "  Ubuntu/Deb:  sudo apt install glslang-tools\n"
+        "  O instala el Vulkan SDK que incluye glslc.")
+endif()
+
+set(SHADER_SRC_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+set(SHADER_OUT_DIR  "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
+
+file(GLOB SHADER_SOURCES
+    "${SHADER_SRC_DIR}/*.vert"
+    "${SHADER_SRC_DIR}/*.frag"
+    "${SHADER_SRC_DIR}/*.geom"
+    "${SHADER_SRC_DIR}/*.comp"
+)
+
+set(SPIRV_OUTPUTS "")
+foreach(SRC ${SHADER_SOURCES})
+    get_filename_component(NAME ${SRC} NAME)
+    set(SPV "${SHADER_OUT_DIR}/${NAME}.spv")
+
+    if(GLSLC)
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${GLSLC} ${SRC} -o ${SPV}
+            DEPENDS ${SRC}
+            COMMENT "glslc  ${NAME} → ${NAME}.spv"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${GLSLANG_V} -V ${SRC} -o ${SPV}
+            DEPENDS ${SRC}
+            COMMENT "glslangValidator  ${NAME} → ${NAME}.spv"
+            VERBATIM)
+    endif()
+
+    list(APPEND SPIRV_OUTPUTS ${SPV})
+endforeach()
+
+add_custom_target(HarukaShaders ALL DEPENDS ${SPIRV_OUTPUTS})
+add_dependencies(HarukaEngine HarukaShaders)
 
 # --- 6. Reglas de Instalación ---
 include(GNUInstallDirs)
-install(TARGETS HarukaEngine LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS HarukaEngine
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# Instalar headers del motor
+# Headers del motor
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
         DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/engines/haruka-cpp"
         FILES_MATCHING PATTERN "*.h" PATTERN "*.cpp")
+
+# Shaders SPIR-V compilados — se instalan junto al binario para que el IDE los encuentre
+install(DIRECTORY "${SHADER_OUT_DIR}/"
+        DESTINATION "${CMAKE_INSTALL_BINDIR}/shaders"
+        FILES_MATCHING PATTERN "*.spv")

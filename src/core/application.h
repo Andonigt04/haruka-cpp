@@ -2,9 +2,11 @@
 #define APPLICATION_H
 
 #include <glad/glad.h>
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 #include <memory>
 #include <vector>
+#include <functional>
+#include <chrono>
 
 #include "math_types.h"
 #include "world_system.h"
@@ -85,6 +87,8 @@ public:
 
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
+
+    void setImGuiRenderCallback(std::function<void()> cb) { _imguiCallback = std::move(cb); }
     
     /**
      * @brief Callback invoked by `MotorInstance` when active scene changes.
@@ -119,10 +123,14 @@ public:
     void init(Haruka::Scene& scene);
     /** @brief Creates runtime window resources (when applicable). */
     void create_window();
+    /** @brief Initializes the OpenGL context, GLAD, and input callbacks. */
+    void create_gl_context();
+    /** @brief Recreates all size-dependent FBOs when the viewport is resized. */
+    void recreateFBOs(int newWidth, int newHeight);
     /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
-    /** @brief Renders current scene using optional override shader. */
-    void renderScene(Shader* shader = nullptr);
+    /** @brief Builds the render queue with frustum culling and LOD management. */
+    void buildRenderQueue();
     /** @brief Runs main loop until shutdown. */
     void main_loop();
     /** @brief Renders one frame and updates timing state. */
@@ -138,7 +146,8 @@ private:
     static constexpr int MAX_LIGHTS = 256;
     
     // Window (set by viewport via MotorInstance friend access)
-    GLFWwindow* _window = nullptr;
+    SDL_Window*   _window    = nullptr;
+    SDL_GLContext _glContext = nullptr;
     int _width = 1280;
     int _height = 720;
 
@@ -181,9 +190,17 @@ private:
     std::unique_ptr<Shader> _flatShader;
     std::unique_ptr<Shader> _cascadeShadowShader;
     
-    // Timing
+    // ImGui injection callback (set by editor viewport)
+    std::function<void()> _imguiCallback;
+
+    // Timing (chrono — platform-independent, survives SDL3 migration)
+    std::chrono::time_point<std::chrono::high_resolution_clock> _frameStart;
+    float _lastFrameTimeMs = 0.0f;
+    float _lastFps         = 0.0f;
+    uint64_t _fpsFrameCount  = 0;
+    double   _fpsLastTime    = 0.0;
+    // Kept for Camera::processInput() compatibility
     float deltaTime = 0.0f;
-    float lastFrame = 0.0f;
     
     // Screen quad for post-processing
     unsigned int quadVAO = 0;
