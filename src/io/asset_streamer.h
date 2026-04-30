@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <glm/glm.hpp>
 #include "core/error_reporter.h"
 
