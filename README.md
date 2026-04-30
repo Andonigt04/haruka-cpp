@@ -1,123 +1,106 @@
 # Haruka Engine
 
-Haruka Engine is a C++17 Vulkan real-time engine with:
+C++17 OpenGL 4.6 real-time engine built as a shared library (`libHarukaEngine.so`).
 
-- deferred rendering + PBR
-- editor/runtime/server targets
-- procedural planetary tooling
-- integrated post-processing and lighting stack
+- Deferred rendering + PBR (metallic/roughness)
+- SPIR-V shaders compiled at build time from GLSL
+- Procedural planetary tooling
+- Post-processing: SSAO, IBL, HDR, bloom, tone mapping, cascaded shadows
 
 ---
 
-## Setup
+## Architecture
 
-Download Dev dependecies
+Source modules:
+
+- `src/core` — application shell, scene model, camera, common systems
+- `src/renderer` — rendering pipeline, GPU resources, shadows, post-process
+- `src/game` — gameplay systems, planet generation, character systems
+- `src/network` — websocket/socket client-server abstractions
+- `src/database` — PostgreSQL persistence layer
+- `src/physics` — octree, rigid-body simulation, raycast helpers
+- `src/audio` — OpenAL integration
+- `src/io` — asset streaming and loading utilities
+
+GLSL shaders live in `shaders/` and are compiled to SPIR-V at build time via `glslc` or `glslangValidator`.
+
+---
+
+## Dependencies
+
 ```bash
-  sudo dnf install cmake gcc-c++ assimp-devel openssl-devel openal-soft-devel postgresql-libs gtk3-devel pkgconf-pkg-config glm-devel glad-devel vulkan-loader vulkan-headers vulkan-tools sdl3-devel
+sudo dnf install cmake gcc-c++ assimp-devel openssl-devel openal-soft-devel \
+    postgresql-devel gtk3-devel pkgconf-pkg-config glm-devel sdl3-devel glslang
 ```
 
----
-
-## Architecture Overview
-
-Main source modules:
-
-- `src/core` → application shell, scene model, camera, common systems
-- `src/renderer` → rendering pipeline, GPU resources, shadows, post-process
-- `src/editor` → editor panels, command history, viewport tooling
-- `src/game` → gameplay systems, planet generation, character systems
-- `src/network` → websocket/socket client-server abstractions
-- `src/database` → PostgreSQL persistence layer
-- `src/physics` → octree, rigid-body simulation, raycast helpers
-- `src/audio` → OpenAL integration
-- `src/io` → asset streaming and loading utilities
-
-The engine library target is `HarukaEngineLib` and is linked by runtime/editor.
-
----
-
-## Build Requirements
-
-### Toolchain
-
-- CMake >= 3.14
-- C++17 compiler (GCC/Clang/MSVC)
-
-### Required libraries
-
-Resolved by CMake via `find_package`/`pkg-config`:
-
-- OpenSSL
-- OpenAL
-- PostgreSQL client (`libpq`)
-- GTK3 (for native file dialog/editor integration)
-
-### Third-party sources
-
-The repo expects `third_party/` sources (GLM, stb, etc.).
-You can bootstrap the folder with [setup_deps.sh](setup_deps.sh).
+Also requires `glad` and `stb` under `third_party/`
 
 ---
 
 ## Build
 
-Build folder
 ```bash
-mkdir -p build
+cmake -B build                        # defaults to ENGINE_VERSION=1.0.0
+cmake -B build -DENGINE_VERSION=2.0.0 # explicit version
+cmake --build build -j$(nproc)
 ```
 
-Normal cmake setup
-```bash
-cmake ..
+Output layout inside the build directory:
+
+```
+build/
+└── 1.0.0/
+    └── bin/
+        ├── libHarukaEngine.so
+        └── shaders/
+            ├── simple.vert.spv
+            ├── pbr.frag.spv
+            └── ...
 ```
 
-In the build folder indicate, where do you want to store the project for IDE use.
-```bash
-cmake --install . --prefix ../../haruka/build
-```
-
-For compilation.
-```bash
-make -j${nproc}
-```
-
-Or if you want to install it into the SO.
-```bash
-make install
-```
----
-
-## Key Runtime Pipelines
-
-### Terrain/Planet workflow
-
-1. Configure seed and terrain layer parameters.
-2. Generate base geometry (GPU when available, CPU fallback otherwise).
-3. Optionally split into chunks for editing.
-4. Persist chunk deltas and reload them on scene reopen.
-
-### Deferred render workflow
-
-1. Geometry pass fills G-buffer attachments.
-2. Lighting pass accumulates light contribution.
-3. Post passes apply SSAO/HDR/bloom/tone mapping.
+Headers stay in source at `src/` and are referenced directly during editor builds.
 
 ---
 
-## Project Layout
+## Install into Haruka Editor
 
-Top-level folders:
+To deploy the engine for the editor without a system-wide install:
 
-- [src/](src/) → engine/editor/server source
-- [template/](template/) → project template skeleton
-- [docs/](docs/) → engineering and documentation standards
+```bash
+cmake --install build --prefix ../haruka/build
+```
+
+Result:
+
+```
+haruka/build/
+└── 1.0.0/
+    ├── bin/
+    │   ├── libHarukaEngine.so
+    │   └── shaders/*.spv
+    └── lib64/
+        └── haruka-cpp/   ← headers and sources
+```
+
+The editor's CMake will auto-discover this layout.
+
+---
+
+## Rendering Features
+
+- Deferred shading (G-buffer geometry + lighting passes)
+- PBR material workflow (metallic/roughness)
+- Directional and point-light shadows, cascaded shadow maps
+- SSAO
+- IBL (irradiance + prefilter + BRDF LUT)
+- HDR and tone mapping
+- Bloom
+- Compute-shader post-processing path
 
 ---
 
 ## Notes
 
-- `Release` is the default build type if not explicitly set.
-- CMake copies the shader directory into the build output.
-- `HarukaEngineLib` is built as a shared library and reused by client/editor.
-
-For deeper internal docs, see [docs/project_stl_standard.md](docs/project_stl_standard.md) and [docs/project_module_map.md](docs/project_module_map.md).
+- Requires OpenGL 4.6 (core SPIR-V support via `GL_SHADER_BINARY_FORMAT_SPIR_V`).
+- `Release` is the default build type.
+- `ENGINE_VERSION` controls both the build output subdirectory and the install path.
