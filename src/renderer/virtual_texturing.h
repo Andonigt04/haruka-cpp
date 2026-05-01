@@ -1,3 +1,7 @@
+/**
+ * @file virtual_texturing.h
+ * @brief Page-based virtual texturing system with feedback-driven sparse residency.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

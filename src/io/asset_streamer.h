@@ -1,3 +1,7 @@
+/**
+ * @file asset_streamer.h
+ * @brief Async asset streaming service — background workers, priority queue, and LRU cache.
+ */
 #pragma once
 
 #include <string>

@@ -1,3 +1,16 @@
+/**
+ * @file deferred_geom.frag
+ * @brief GBuffer fill pass for deferred rendering.
+ *
+ * Writes per-fragment surface data into 4 render targets:
+ *   gPosition  (RGB = world-space position)
+ *   gNormal    (RGB = normalized world-space normal)
+ *   gAlbedoSpec (RGB = albedo, A = specular intensity; fallbacks if textures are black)
+ *   gEmissive  (RGB = emissive color)
+ *
+ * In:  FragPos, Normal, TexCoord (from deferred_geom.vert)
+ * Samplers: texture_diffuse1, texture_specular1, texture_emissive1
+ */
 
 #version 450 core
 

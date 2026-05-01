@@ -1,3 +1,7 @@
+/**
+ * @file network_manager.h
+ * @brief Network stack — `NetworkClient`, `NetworkServer` (multi-role), and manager singleton.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

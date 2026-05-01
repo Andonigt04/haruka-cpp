@@ -1,3 +1,15 @@
+/**
+ * @file prefilter_env.vert
+ * @brief Cube-face vertex shader for specular environment pre-filtering.
+ *
+ * Same cube pass-through as equirect_to_cubemap.vert. Rendered 6 times per
+ * roughness mip level to build the pre-filtered specular radiance cubemap
+ * used by IBL split-sum approximation.
+ *
+ * In:  aPos (cube vertex in local space)
+ * Out: WorldPos → prefilter_env.frag
+ * UBO: Matrices { projection, view }
+ */
 #version 450 core
 
 layout (location = 0) in vec3 aPos;

@@ -1,3 +1,7 @@
+/**
+ * @file render_target.h
+ * @brief Color render target wrapper (FBO + color texture + depth RBO).
+ */
 #pragma once
 #include <glad/glad.h>
 

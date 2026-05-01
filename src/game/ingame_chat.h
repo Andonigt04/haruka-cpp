@@ -1,3 +1,7 @@
+/**
+ * @file ingame_chat.h
+ * @brief In-game chat UI and transport bridge (local display or UDP/network mode).
+ */
 #pragma once
 
 #include "chat_system.h"

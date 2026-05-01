@@ -1,3 +1,21 @@
+/**
+ * @file simple.frag
+ * @brief Forward Blinn-Phong shader with PCF shadow, normal mapping, and full light types.
+ *
+ * Supports three light types in a single pass:
+ *   DirLight  — directional with PCF shadow (3×3, 9 samples from shadowMap)
+ *   PointLight — up to MAX_POINT_LIGHTS (32) with quadratic attenuation
+ *   SpotLight  — cone with inner/outer cutoff (smooth edge via smoothstep)
+ * All texture channels have sensible fallbacks (albedo→white, metallic→0,
+ * roughness→0.5, ao→1, emissive→black). AO is applied as a post-multiplier.
+ *
+ * In:  TexCoord, Normal, FragPos, Tangent, Bitangent
+ * Out: FragColor
+ * Samplers: diffuse, normal, roughness, metallic, metallic_roughness,
+ *           ao, emissive, specular, shadowMap
+ * UBO: Params, Matrices { lightView, lightProjection },
+ *      PointLights[32], DirLightBlock, SpotLightBlock
+ */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;
@@ -13,19 +31,6 @@ layout(set = 0, binding = 0) uniform Params {
     int nr_active_lights;
     float shininess;
 } params;
-
-struct Material
-{
-    sampler2D texture_diffuse1;
-    sampler2D texture_normal1;
-    sampler2D texture_roughness1;
-    sampler2D texture_metallic1;  
-    sampler2D texture_metallic_roughness1;
-    sampler2D texture_ao1;
-    sampler2D texture_emissive1;
-    sampler2D texture_specular1;
-    float shininess;
-};
 
 struct DirLight
 {
@@ -73,14 +78,11 @@ layout(set = 0, binding = 5) uniform SpotLightBlock {
     SpotLight spotLight;
 };
 
-layout(set = 0, binding = 6) uniform sampler2D texture_diffuse1;
-layout(set = 0, binding = 7) uniform sampler2D texture_normal1;
-layout(set = 0, binding = 8) uniform sampler2D texture_roughness1;
-layout(set = 0, binding = 9) uniform sampler2D texture_metallic1;
+layout(set = 0, binding = 6)  uniform sampler2D texture_diffuse1;
+layout(set = 0, binding = 7)  uniform sampler2D texture_normal1;
 layout(set = 0, binding = 10) uniform sampler2D texture_metallic_roughness1;
 layout(set = 0, binding = 11) uniform sampler2D texture_ao1;
 layout(set = 0, binding = 12) uniform sampler2D texture_emissive1;
-layout(set = 0, binding = 13) uniform sampler2D texture_specular1;
 
 layout(set = 0, binding = 1) uniform sampler2D shadowMap;
 layout(set = 0, binding = 2) uniform Matrices {
@@ -90,7 +92,7 @@ layout(set = 0, binding = 2) uniform Matrices {
 
 vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex);
 vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex);
-vec3 CalcDirLight(DirLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex, float shadow);
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 diffTex, vec3 specTex, float shadow);
 
 void main()
 {
@@ -117,7 +119,6 @@ void main()
     // Metallic-Roughness - fallback a defaults
     vec3 metallicRoughness = texture(texture_metallic_roughness1, TexCoord).rgb;
     float metallic = (length(metallicRoughness) > 0.01) ? metallicRoughness.b : 0.0;
-    float roughness = (length(metallicRoughness) > 0.01) ? metallicRoughness.g : 0.5;
     
     // AO - fallback a 1.0 (sin oclusión)
     float ao = texture(texture_ao1, TexCoord).r;
@@ -153,7 +154,7 @@ void main()
         shadow /= 9.0;  // Promediar 9 muestras
     }
 
-    vec3 result = CalcDirLight(dirLight, norm, FragPos, viewDir, diffColor, specColor, shadow);
+    vec3 result = CalcDirLight(dirLight, norm, viewDir, diffColor, specColor, shadow);
 
     for(int i = 0; i < params.nr_active_lights; i++)
         result += CalcPointLight(pointLights[i], norm, FragPos, viewDir, diffColor, specColor);
@@ -165,7 +166,7 @@ void main()
     FragColor = vec4(result, 1.0);
 }
 
-vec3 CalcDirLight(DirLight light, vec3 normal, vec3 fragPos, vec3 viewDir, vec3 diffTex, vec3 specTex, float shadow)
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir, vec3 diffTex, vec3 specTex, float shadow)
 {
     vec3 lightDir = normalize(-light.direction);
     

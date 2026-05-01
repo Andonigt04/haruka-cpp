@@ -1,3 +1,17 @@
+/**
+ * @file light_cube.frag
+ * @brief Forward shading with optional procedural planet terrain albedo.
+ *
+ * When `useProceduralTerrain` is true, replaces the flat `lightColor` with a
+ * biome blend computed from latitude, normalized height, and surface slope:
+ *   sand → grass (height),  grass → rock (slope),  mix → snow (latitude + height).
+ * Noise from hash31() breaks up biome edges.
+ *
+ * In:  Normal, FragPos (from simple.vert)
+ * Out: FragColor
+ * Uniforms: lightColor, sunDirection, sunLightColor, ambientStrength,
+ *           useProceduralTerrain, planetCenter, planetRadius
+ */
 #version 450 core
 
 layout(location = 0) in vec3 Normal;

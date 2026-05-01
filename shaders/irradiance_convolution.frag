@@ -1,3 +1,16 @@
+/**
+ * @file irradiance_convolution.frag
+ * @brief Convolves a cubemap environment to produce a diffuse irradiance map.
+ *
+ * For each fragment (= one direction on the cubemap), integrates incoming
+ * radiance over the upper hemisphere using a Riemann sum with fixed angular
+ * step (sampleDelta = 0.025 rad). The result is the average irradiance
+ * weighted by cos(theta)*sin(theta) (solid-angle factor).
+ *
+ * In:  WorldPos (cubemap direction)
+ * Out: FragColor (irradiance for this hemisphere direction)
+ * Sampler: environmentMap (HDR cubemap)
+ */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;

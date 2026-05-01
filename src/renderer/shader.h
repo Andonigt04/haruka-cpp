@@ -1,3 +1,7 @@
+/**
+ * @file shader.h
+ * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries (OpenGL 4.6).
+ */
 #ifndef SHADER_H
 #define SHADER_H
 

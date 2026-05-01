@@ -1,3 +1,15 @@
+/**
+ * @file deferred_geom.vert
+ * @brief Geometry-pass vertex shader for deferred rendering.
+ *
+ * Transforms each vertex into world space (FragPos, Normal) and clip space.
+ * Normal is corrected for non-uniform scaling via the inverse-transpose of the
+ * model matrix.
+ *
+ * In:  aPos, aNormal, aTexCoord
+ * Out: FragPos (world), Normal (world), TexCoord → deferred_geom.frag
+ * UBO: Matrices { model, view, projection }
+ */
 #version 450 core
 
 layout(location = 0) in vec3 aPos;

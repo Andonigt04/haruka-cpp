@@ -1,3 +1,16 @@
+/**
+ * @file instancing.vert
+ * @brief GPU-instanced vertex shader.
+ *
+ * Each instance supplies its own model matrix (locations 3-6, mat4 occupies
+ * 4 attribute slots), per-instance color (loc 7), and scale (loc 8).
+ * Normal is corrected for non-uniform scaling via inverse-transpose.
+ *
+ * In (per-vertex):   position, normal, texCoord
+ * In (per-instance): model (mat4), instanceColor, instanceScale
+ * Out: FragPos, Normal, TexCoord, InstanceColor → instancing.frag
+ * UBO: Matrices { view, projection }
+ */
 #version 460 core
 
 // Vertex attributes del mesh base

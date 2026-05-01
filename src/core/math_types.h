@@ -1,3 +1,14 @@
+/**
+ * @file math_types.h
+ * @brief Engine-wide math type aliases and astrophysical unit constants.
+ *
+ * All world-space positions use double precision (`WorldPos = dvec3`) to
+ * avoid floating-point precision loss at astronomical distances. Local/render
+ * positions use single precision (`LocalPos = vec3`).
+ *
+ * The `Units` namespace provides named constants and converters so that
+ * distances expressed in km remain readable at every scale (planetary → galactic).
+ */
 #ifndef MATH_TYPES_H
 #define MATH_TYPES_H
 

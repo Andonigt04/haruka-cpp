@@ -1,3 +1,7 @@
+/**
+ * @file compute_shader.h
+ * @brief OpenGL compute shader wrapper with uniform setters and dispatch helper.
+ */
 #ifndef COMPUTE_SHADER_H
 #define COMPUTE_SHADER_H
 

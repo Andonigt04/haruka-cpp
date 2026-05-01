@@ -1,3 +1,7 @@
+/**
+ * @file websocket_client.h
+ * @brief websocketpp asynchronous WebSocket client wrapper.
+ */
 #pragma once
 
 #include <websocketpp/client.hpp>

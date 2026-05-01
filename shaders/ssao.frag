@@ -1,3 +1,18 @@
+/**
+ * @file ssao.frag
+ * @brief Screen-Space Ambient Occlusion.
+ *
+ * Builds a TBN matrix from a random rotation vector (tiled 4×noise texture)
+ * and samples `kernelSize` hemisphere directions (max 64) rotated into
+ * view space. A rangeCheck smoothstep prevents contributions from samples
+ * too far in depth (avoids halos). Output is a single float [0,1]:
+ *   1.0 = fully unoccluded,  0.0 = fully occluded.
+ *
+ * In:  TexCoords (screen UV)
+ * Out: FragColor (float occlusion factor)
+ * Samplers: gPosition (binding 2), gNormal (binding 3), texNoise (binding 4)
+ * UBO: Params { samples[64], kernelSize, radius, bias }, Matrices { projection }
+ */
 #version 450 core
 
 layout(location = 0) out float FragColor;

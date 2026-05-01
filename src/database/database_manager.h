@@ -1,3 +1,7 @@
+/**
+ * @file database_manager.h
+ * @brief PostgreSQL persistence layer — per-role connections (web, headmaster, comms, anticheat).
+ */
 #pragma once
 
 #include <string>

@@ -1,3 +1,7 @@
+/**
+ * @file primitive_shapes.h
+ * @brief Procedural mesh generators for sphere, cube, capsule, plane, and cube-sphere.
+ */
 #ifndef PRIMITIVE_SHAPES_H
 #define PRIMITIVE_SHAPES_H
 

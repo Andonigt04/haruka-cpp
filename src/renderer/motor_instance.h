@@ -1,3 +1,7 @@
+/**
+ * @file motor_instance.h
+ * @brief Singleton bridge exposing active render target, scene, camera, and app to editor code.
+ */
 #pragma once
 
 class Application;

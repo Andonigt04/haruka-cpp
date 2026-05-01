@@ -1,3 +1,17 @@
+/**
+ * @file tonemapping.frag
+ * @brief Exposure-based tone mapping with bloom composite and gamma correction.
+ *
+ * Applies exponential (Reinhard-like) tone mapping:
+ *   mapped = 1 - exp(-hdrColor * exposure)
+ * Then adds the bloom contribution scaled by bloomStrength, and applies
+ * gamma correction (γ = 2.2). Final output is LDR sRGB.
+ *
+ * In:  TexCoords (screen UV)
+ * Out: FragColor (LDR, gamma-corrected)
+ * Samplers: scene (HDR, binding 1), bloom (blurred bright regions, binding 2)
+ * UBO: Params { exposure, bloomStrength }
+ */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;

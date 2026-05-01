@@ -1,3 +1,7 @@
+/**
+ * @file light_culler.h
+ * @brief Dynamic light culler — frustum/distance/range rejection before GPU upload.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

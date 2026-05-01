@@ -1,3 +1,7 @@
+/**
+ * @file material_component.h
+ * @brief Serializable PBR material data component (shader path, textures, PBR params).
+ */
 #pragma once
 #include <string>
 #include <map>

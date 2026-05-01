@@ -1,3 +1,15 @@
+/**
+ * @file bloom_composite.frag
+ * @brief Composites the scene with the blurred bloom texture.
+ *
+ * Adds bloom on top of the scene color scaled by bloomStrength, then applies
+ * Reinhard tone mapping and gamma correction (γ = 2.2) in a single pass.
+ *
+ * In:  TexCoords
+ * Out: FragColor (LDR, gamma-corrected)
+ * Samplers: scene (HDR), bloom (blurred bright regions)
+ * UBO: Params { bloomStrength }
+ */
 
 #version 450 core
 

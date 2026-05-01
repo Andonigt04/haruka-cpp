@@ -1,3 +1,16 @@
+/**
+ * @file bloom_blur.frag
+ * @brief Separable 5-tap Gaussian blur for the bloom pipeline.
+ *
+ * Applied twice per bloom iteration — once horizontally, once vertically —
+ * to approximate a 2D Gaussian with fixed weights:
+ *   [0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216]
+ *
+ * In:  TexCoords
+ * Out: FragColor (blurred image)
+ * Sampler: image (source HDR buffer)
+ * UBO: Params { horizontal } — selects blur axis
+ */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;

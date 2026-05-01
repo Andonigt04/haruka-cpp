@@ -1,3 +1,7 @@
+/**
+ * @file planetary_system.h
+ * @brief Planetary body simulation — orbital integration, terrain generation, and player flight state.
+ */
 #pragma once
 #include "core/world_system.h"
 #include "core/math_types.h"

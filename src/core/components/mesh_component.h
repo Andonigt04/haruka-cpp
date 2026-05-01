@@ -1,3 +1,7 @@
+/**
+ * @file mesh_component.h
+ * @brief Lightweight mesh path reference component for serialization.
+ */
 #pragma once
 
 #include "core/component.h"

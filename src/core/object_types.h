@@ -1,3 +1,12 @@
+/**
+ * @file object_types.h
+ * @brief `ObjectType` enum and string-conversion helpers.
+ *
+ * `ObjectType` classifies every scene object for editor and runtime dispatch.
+ * Helper functions `stringToObjectType` / `objectTypeToString` handle JSON
+ * round-trips. `isRenderableObjectType` and `isLightObjectType` are used by
+ * the render queue to filter draw-eligible and light-source objects.
+ */
 #pragma once
 
 #include <string>

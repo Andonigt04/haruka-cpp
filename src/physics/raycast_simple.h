@@ -1,3 +1,7 @@
+/**
+ * @file raycast_simple.h
+ * @brief Lightweight ray-triangle raycaster for terrain height queries and collision tests.
+ */
 #pragma once
 
 #define GLM_ENABLE_EXPERIMENTAL

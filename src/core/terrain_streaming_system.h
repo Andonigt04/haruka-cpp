@@ -1,3 +1,19 @@
+/**
+ * @file terrain_streaming_system.h
+ * @brief Async terrain chunk streaming driven by camera proximity and LOD.
+ *
+ * `TerrainStreamingSystem` works alongside `WorldSystem` to keep only the
+ * chunks near the camera resident in the scene. Each frame `update()`:
+ *   1. Queries `WorldSystem` for the current visible/pending chunk sets.
+ *   2. Fires async generation jobs (`PlanetarySystem::generateChunk`) for
+ *      chunks that need to be loaded.
+ *   3. Polls completed jobs and injects the resulting `SceneObject` geometry
+ *      into the scene.
+ *   4. Evicts far/stale chunks to stay within memory budgets.
+ *
+ * Seed changes can be signalled via `invalidateChunksForSeedChange()` which
+ * bumps an internal generation counter without clearing the scene directly.
+ */
 #pragma once
 
 #include <future>
@@ -20,14 +36,15 @@ namespace Haruka {
 
 class MaterialComponent;
 
+/** @brief Per-frame streaming counters written by `TerrainStreamingSystem::update()`. */
 struct TerrainStreamingStats {
-    int visibleChunks = 0;
-    int residentChunks = 0;
-    int pendingChunkLoads = 0;
-    int pendingChunkEvictions = 0;
-    int residentMemoryMB = 0;
-    int trackedChunks = 0;
-    int maxMemoryMB = 0;
+    int visibleChunks = 0;        ///< Chunks currently in view frustum
+    int residentChunks = 0;       ///< Chunks loaded in GPU/scene memory
+    int pendingChunkLoads = 0;    ///< Chunks queued for async generation
+    int pendingChunkEvictions = 0;///< Chunks queued for eviction this frame
+    int residentMemoryMB = 0;     ///< Resident memory used by chunks (MB)
+    int trackedChunks = 0;        ///< Total chunks tracked (visible + resident + pending)
+    int maxMemoryMB = 0;          ///< Budget ceiling (MB)
 };
 
 class TerrainStreamingSystem {

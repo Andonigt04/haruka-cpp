@@ -1,3 +1,16 @@
+/**
+ * @file scene.h
+ * @brief `Scene` container and `SceneObject` record.
+ *
+ * A `Scene` holds a flat list of `SceneObject` entries that form an implicit
+ * hierarchy via `parentIndex` / `childrenIndices`. Objects carry transform,
+ * rendering references (material, mesh renderer), optional free-form JSON
+ * properties, and world-transform helpers that walk the hierarchy.
+ *
+ * Persistence is handled by `Scene::save()` / `Scene::load()`. An optional
+ * initializer script path can be embedded in the scene file to run startup
+ * logic at load time.
+ */
 #pragma once
 
 #include <string>
@@ -24,17 +37,17 @@ namespace Haruka
      */
     struct SceneObject {
         std::string name;
-        std::string type;
-        std::string modelPath;
-        
+        std::string type;       ///< String form of `ObjectType` (e.g. "Mesh", "Light")
+        std::string modelPath;  ///< Path to the 3D asset file, empty for primitive types
+
         glm::dvec3 position = glm::dvec3(0.0);
-        glm::dvec3 rotation = glm::dvec3(0.0);
-        glm::dvec3 scale = glm::dvec3(1.0);
-        glm::dvec3 color = glm::dvec3(1.0);
-        double intensity = 1.0;
-        int renderLayer = 1; // 1..5
-        
-        int parentIndex = -1;
+        glm::dvec3 rotation = glm::dvec3(0.0); ///< Euler angles in degrees
+        glm::dvec3 scale    = glm::dvec3(1.0);
+        glm::dvec3 color    = glm::dvec3(1.0); ///< Tint or light color
+        double intensity = 1.0;                ///< Light intensity multiplier
+        int renderLayer = 1;                   ///< Visibility layer [1..5]
+
+        int parentIndex = -1;                  ///< Index into Scene::objects; -1 = root
         std::vector<int> childrenIndices;
         
         std::shared_ptr<MaterialComponent> material;

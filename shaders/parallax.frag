@@ -1,3 +1,18 @@
+/**
+ * @file parallax.frag
+ * @brief PBR (Cook-Torrance) with Parallax Occlusion Mapping.
+ *
+ * Uses the AO texture channel as a height map to drive steep parallax
+ * occlusion mapping (8–32 layers adapted to view angle, with linear
+ * interpolation between the last two depth layers). Lighting uses the
+ * same Cook-Torrance BRDF as pbr.frag (GGX NDF, Smith-GGX geometry,
+ * Schlick Fresnel). Tone mapped via Reinhard + gamma 2.2.
+ *
+ * In:  TexCoord, Normal, FragPos, Tangent, Bitangent, TBN
+ * Out: FragColor (LDR)
+ * Samplers: diffuse, normal, metallic_roughness, ao (also height), emissive
+ * UBO: Lights[4], Params { viewPos, numLights, heightScale }
+ */
 #version 450 core
 
 layout(location = 0) in vec2 TexCoord;
@@ -5,7 +20,6 @@ layout(location = 1) in vec3 Normal;
 layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
-layout(location = 5) in mat3 TBN;
 layout(location = 0) out vec4 FragColor;
 
 layout(set = 0, binding = 0) uniform sampler2D texture_diffuse1;

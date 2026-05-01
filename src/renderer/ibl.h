@@ -1,3 +1,7 @@
+/**
+ * @file ibl.h
+ * @brief IBL precomputation — HDRI to cubemap, irradiance map, prefilter map, BRDF LUT.
+ */
 #pragma once
 
 #include <glad/glad.h>

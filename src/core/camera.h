@@ -1,3 +1,15 @@
+/**
+ * @file camera.h
+ * @brief Quaternion-based runtime camera with SDL input handling.
+ *
+ * Position is stored as `Haruka::WorldPos` (dvec3) for double-precision
+ * accuracy at astronomical distances. Orientation is a `Haruka::Rotation`
+ * (dquat). The view matrix is derived from position + orientation each frame.
+ *
+ * Input is polled directly from SDL keyboard state in `processInput()`;
+ * mouse rotation is applied via `rotate()` using delta values from the
+ * SDL mouse-motion event.
+ */
 #ifndef CAMERA_H
 #define CAMERA_H
 
@@ -12,11 +24,11 @@ struct SDL_Window;
 class Camera {
 public:
 
-    Haruka::WorldPos position;
-    Haruka::Rotation orientation;
-    float speed = 5.0f;
-    float sensitivity = 0.1f;
-    float zoom = 45.0f;
+    Haruka::WorldPos position;    ///< World-space position (km, double precision)
+    Haruka::Rotation orientation; ///< Absolute orientation as unit quaternion
+    float speed = 5.0f;           ///< Movement speed in km/s
+    float sensitivity = 0.1f;     ///< Mouse rotation sensitivity (degrees per pixel)
+    float zoom = 45.0f;           ///< Vertical FOV in degrees
 
     /** @brief Constructs camera at initial world-space position. */
     Camera(Haruka::WorldPos startPos);

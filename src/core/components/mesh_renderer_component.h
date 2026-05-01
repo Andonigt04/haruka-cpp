@@ -1,3 +1,7 @@
+/**
+ * @file mesh_renderer_component.h
+ * @brief CPU-side mesh cache + GPU-resident `SimpleMesh` for draw calls.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

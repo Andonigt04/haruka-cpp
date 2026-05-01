@@ -1,3 +1,7 @@
+/**
+ * @file model_component.h
+ * @brief Model asset path reference component for serialization.
+ */
 #pragma once
 #include "core/component.h"
 #include <string>

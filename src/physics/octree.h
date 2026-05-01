@@ -1,3 +1,7 @@
+/**
+ * @file octree.h
+ * @brief Double-precision octree for broad-phase physics queries (AABB, rigid-body lookup).
+ */
 #pragma once
 
 #include <glm/glm.hpp>

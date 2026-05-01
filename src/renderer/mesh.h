@@ -1,3 +1,7 @@
+/**
+ * @file mesh.h
+ * @brief GPU mesh wrapper with full-vertex and simple-geometry construction paths.
+ */
 #ifndef MESH_H
 #define MESH_H
 

@@ -1,3 +1,7 @@
+/**
+ * @file socket_server.h
+ * @brief Boost.Asio TCP socket server for lightweight message relay.
+ */
 #pragma once
 
 #include <boost/asio.hpp>

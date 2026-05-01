@@ -1,3 +1,7 @@
+/**
+ * @file compute_postprocess.h
+ * @brief Compute-shader post-processing pipeline (bloom, tone mapping, color grading).
+ */
 #pragma once
 
 #include <glm/glm.hpp>

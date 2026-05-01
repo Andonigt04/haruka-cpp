@@ -1,3 +1,17 @@
+/**
+ * @file error_reporter.h
+ * @brief Structured error reporting system with per-subsystem error codes.
+ *
+ * `ErrorReporter` is a singleton that receives errors and writes a structured
+ * report to stderr. Callers use the convenience macros (`HARUKA_ERROR`,
+ * `HARUKA_MOTOR_ERROR`, etc.) which capture `__FILE__`, `__LINE__`, and
+ * `__FUNCTION__` automatically.
+ *
+ * Error codes are grouped by subsystem in numeric ranges:
+ *   Motor 0-99 · Editor 100-199 · Gameplay 200-299 · Renderer 300-399
+ *   Network 400-499 · Physics 500-599 · Audio 600-699 · IO 700-799
+ *   Scene 800-899 · Asset 900-999
+ */
 #pragma once
 
 #include <string>

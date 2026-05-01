@@ -1,3 +1,7 @@
+/**
+ * @file shadow.h
+ * @brief Directional shadow map wrapper (depth FBO + depth texture).
+ */
 #ifndef SHADOW_H
 #define SHADOW_H
 

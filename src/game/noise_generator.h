@@ -1,3 +1,7 @@
+/**
+ * @file noise_generator.h
+ * @brief Deterministic 3D Perlin noise and fBm helpers for procedural terrain generation.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

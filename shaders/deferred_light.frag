@@ -1,3 +1,21 @@
+/**
+ * @file deferred_light.frag
+ * @brief Deferred lighting pass — resolves all lights from the GBuffer.
+ *
+ * Reads gPosition/gNormal/gAlbedoSpec/gEmissive and accumulates:
+ *   - Ambient (constant 0.1 * albedo)
+ *   - Directional light (position.length > 1000 = sun heuristic) with
+ *     cascaded shadow maps (PCF 3×3, up to 4 cascades)
+ *   - Point lights (up to 256) with quadratic attenuation
+ *   - Omnidirectional point shadow (PCF disk, 8 taps)
+ *   - Emissive contribution (* 0.5)
+ *
+ * In:  TexCoords (screen UV)
+ * Out: FragColor (HDR lit scene)
+ * Samplers: gPosition, gNormal, gAlbedoSpec, gEmissive, ssao,
+ *           pointShadowMap (cubemap), cascadeShadowMaps[4]
+ * UBO: Params, Matrices, Lights[256]
+ */
 #version 450 core
 
 #extension GL_ARB_gpu_shader_fp64 : enable
@@ -9,17 +27,16 @@ layout(set = 0, binding = 0) uniform sampler2D gPosition;
 layout(set = 0, binding = 1) uniform sampler2D gNormal;
 layout(set = 0, binding = 2) uniform sampler2D gAlbedoSpec;
 layout(set = 0, binding = 3) uniform sampler2D gEmissive;
-layout(set = 0, binding = 4) uniform sampler2D ssao;
-layout(set = 0, binding = 5) uniform samplerCube pointShadowMap;
+layout(set = 0, binding = 4) uniform sampler2D ssao; // reserved — AO not yet wired in main()
 layout(set = 0, binding = 6) uniform sampler2DShadow cascadeShadowMaps[4];
 
 layout(set = 0, binding = 7) uniform Params {
     vec3 viewPos;
-    float farPlane;
+    float farPlane;  // reserved — was used by point shadow (removed); kept to preserve UBO layout
     int numCascades;
     int numLights;
     vec3 lightPos;
-    float _pad1;
+    float _pad1; // UBO alignment padding (vec3 = 12 bytes, needs 4-byte fill before next member)
     float cascadeSplits[4];
 } params;
 
@@ -35,33 +52,6 @@ struct Light {
 layout(set = 0, binding = 9) uniform Lights {
     Light lights[256];
 };
-
-const vec3 sampleOffsetDirections[8] = vec3[]
-(
-   vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1), 
-   vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1)
-);
-
-float ShadowCalculation(vec3 FragPos)
-{
-    vec3 fragToLight = FragPos - params.lightPos;
-    float currentDepth = length(fragToLight);
-
-    float shadow = 0.0;
-    const float bias = 0.05;
-    const int samples = 8;
-    const float diskRadius = 0.01;
-
-    for(int i = 0; i < samples; ++i)
-    {
-        float closestDepth = texture(pointShadowMap, normalize(fragToLight + sampleOffsetDirections[i] * diskRadius)).r;
-        closestDepth *= params.farPlane;
-        if(currentDepth - bias > closestDepth)
-            shadow += 1.0;
-    }
-    shadow /= float(samples);
-    return shadow;
-}
 
 int getCascadeIndex(float viewDepth)
 {

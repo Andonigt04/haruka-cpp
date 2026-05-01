@@ -1,3 +1,17 @@
+/**
+ * @file world_system.h
+ * @brief Celestial body registry, origin-shifting, LOD, and chunk streaming.
+ *
+ * `WorldSystem` maintains the list of `CelestialBody` objects in world space.
+ * Because the engine uses double-precision world coordinates but single-precision
+ * rendering, `toLocal()` converts any world position to camera-relative local
+ * coordinates before upload to the GPU.
+ *
+ * Chunk streaming uses a priority queue (LRU + distance) with configurable
+ * per-frame load/evict budgets and a resident-memory cap. The GPU compute
+ * path (`initComputeShaders` / `frustumCull`) handles visibility in
+ * `frustum_cull.comp`.
+ */
 #ifndef WORLD_SYSTEM_H
 #define WORLD_SYSTEM_H
 
@@ -12,18 +26,16 @@
 
 struct CelestialBody
 {
-    /** @brief High-precision world-space position. */
-    Haruka::WorldPos worldPos;
-    /** @brief Camera-relative/local position cache. */
-    Haruka::LocalPos localPos;
-    glm::vec3 velocity;
-    float radius;
-    float mass;
+    Haruka::WorldPos worldPos;    ///< High-precision world-space position (km)
+    Haruka::LocalPos localPos;    ///< Camera-relative position cache (single precision)
+    glm::vec3 velocity;           ///< Velocity vector (km/s)
+    float radius;                 ///< Body radius (km)
+    float mass;                   ///< Mass (arbitrary units)
     std::string name;
-    glm::vec3 color;
-    float emissionStrength;
-    uint32_t visible;
-    uint32_t lodLevel;
+    glm::vec3 color;              ///< Surface tint color
+    float emissionStrength;       ///< Emissive multiplier (0 = non-emissive)
+    uint32_t visible;             ///< GPU-visible flag set by frustum_cull.comp
+    uint32_t lodLevel;            ///< Current LOD level [0 = highest .. 3 = lowest]
 };
 
 namespace Haruka {

@@ -1,3 +1,7 @@
+/**
+ * @file ssao.h
+ * @brief Screen-space ambient occlusion — kernel generation, noise texture, and FBO.
+ */
 #pragma once
 #include <glad/glad.h>
 #include <glm/glm.hpp>

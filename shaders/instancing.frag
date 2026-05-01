@@ -1,12 +1,21 @@
+/**
+ * @file instancing.frag
+ * @brief Blinn-Phong shading for GPU-instanced objects.
+ *
+ * Applies a single point light with per-instance color tinting.
+ * Alpha is taken from instanceColor.a to support transparent instances.
+ *
+ * In:  FragPos, Normal, TexCoord, InstanceColor (from instancing.vert)
+ * Out: FragColor
+ * Sampler: texture_diffuse1
+ * UBO: Params { viewPos, lightPos, lightColor }
+ */
 #version 450 core
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;
-layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec4 InstanceColor;
 layout(location = 0) out vec4 FragColor;
-
-layout(set = 0, binding = 0) uniform sampler2D texture_diffuse1;
 
 layout(set = 0, binding = 1) uniform Params {
     vec3 viewPos;

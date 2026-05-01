@@ -12,8 +12,9 @@ CREATE_SUBDIRS         = YES
 #---------------------------------------------------------------------------
 # Input
 #---------------------------------------------------------------------------
-INPUT                  = src
-FILE_PATTERNS          = *.h *.hpp *.cpp
+INPUT                  = src shaders
+FILE_PATTERNS          = *.h *.hpp *.cpp *.vert *.frag *.comp *.geom
+EXTENSION_MAPPING      = vert=C frag=C comp=C geom=C
 RECURSIVE              = YES
 EXCLUDE                = src/core/json.hpp
 EXCLUDE_PATTERNS       = */third_party/*

@@ -1,3 +1,7 @@
+/**
+ * @file character.h
+ * @brief Player/NPC controller with camera, physics body, and network sync hooks.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

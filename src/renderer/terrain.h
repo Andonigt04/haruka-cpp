@@ -1,3 +1,7 @@
+/**
+ * @file terrain.h
+ * @brief Heightmap-based terrain mesh with patch LOD support.
+ */
 #ifndef TERRAIN_H
 #define TERRAIN_H
 

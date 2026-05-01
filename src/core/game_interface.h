@@ -1,3 +1,12 @@
+/**
+ * @file game_interface.h
+ * @brief ABI bridge between the editor/runtime and project-defined gameplay code.
+ *
+ * The engine loads the game DLL and reads a `GameInterface` struct exported
+ * by the game code. Function pointers are assigned at load time; null pointers
+ * mean the game doesn't implement that callback. The `GAME_INTERFACE_EXPORT`
+ * macro ensures C linkage to avoid name-mangling across DLL boundaries.
+ */
 #pragma once
 
 #include "scene.h"

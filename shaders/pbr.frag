@@ -1,3 +1,20 @@
+/**
+ * @file pbr.frag
+ * @brief PBR fragment shader — Cook-Torrance BRDF with normal mapping.
+ *
+ * Implements the metallic-roughness PBR workflow:
+ *   NDF  = GGX (Trowbridge-Reitz)
+ *   G    = Smith-Schlick-GGX
+ *   F    = Schlick approximation
+ * Supports up to 4 point lights with quadratic attenuation.
+ * Fallbacks: missing textures default to albedo=0.5, metallic=0, roughness=0.5, ao=1.
+ * Final output is Reinhard tone-mapped and gamma-corrected (γ = 2.2).
+ *
+ * In:  TexCoord, Normal, FragPos, Tangent, Bitangent
+ * Out: FragColor (LDR)
+ * Samplers: diffuse, normal, metallic_roughness, ao, emissive
+ * UBO: Lights[4], Params { viewPos, numLights }
+ */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;

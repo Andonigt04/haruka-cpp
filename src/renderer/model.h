@@ -1,3 +1,7 @@
+/**
+ * @file model.h
+ * @brief Assimp-backed model loader — parses 3D assets into engine `Mesh` instances.
+ */
 #ifndef MODEL_H
 #define MODEL_H
 

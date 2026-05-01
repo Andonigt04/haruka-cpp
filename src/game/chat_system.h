@@ -1,3 +1,7 @@
+/**
+ * @file chat_system.h
+ * @brief Chat state, command routing, mute/block, and multi-channel message history.
+ */
 #pragma once
 
 #include <string>

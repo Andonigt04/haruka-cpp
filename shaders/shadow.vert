@@ -1,3 +1,14 @@
+/**
+ * @file shadow.vert
+ * @brief Directional shadow-map depth pass vertex shader.
+ *
+ * Projects each vertex directly to light-clip space so the depth buffer
+ * captures the scene depth from the light's point of view.
+ * Paired with shadow.frag (empty body — depth is written by fixed-function).
+ *
+ * In:  aPos
+ * UBO: Matrices { model, lightSpaceMatrix }
+ */
 #version 450 core
 
 layout (location = 0) in vec3 aPos;

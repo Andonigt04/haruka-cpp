@@ -1,3 +1,7 @@
+/**
+ * @file physics_engine.h
+ * @brief Rigid body physics engine with octree broad-phase and impulse-based collision resolution.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

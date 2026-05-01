@@ -1,3 +1,12 @@
+/**
+ * @file project.h
+ * @brief `Project` manager and `ProjectConfig` serialization contract.
+ *
+ * A project groups scenes, assets, and export settings into a single
+ * persistent unit. The config is serialized to/from a JSON file on disk.
+ * `Project::create()` generates the initial directory skeleton;
+ * `Project::load()` / `Project::save()` handle round-trips.
+ */
 #pragma once
 
 #include <string>
@@ -10,17 +19,16 @@ namespace Haruka
      */
     struct ProjectConfig
     {
-        // Base project metadata
-        std::string name;
-        std::string version;
-        std::string engineVersion;
-        std::string startScene;
-        std::string engineBinary;
-        std::string editorBinary;
-        std::vector<std::string> scenes;
-        std::string assetsPath;
-        std::string outputPath;
-        std::string shadersPath = "";
+        std::string name;            ///< Human-readable project name
+        std::string version;         ///< Project version string
+        std::string engineVersion;   ///< Engine version this project targets
+        std::string startScene;      ///< Relative path to the default startup scene
+        std::string engineBinary;    ///< Path to the runtime engine binary
+        std::string editorBinary;    ///< Path to the editor binary
+        std::vector<std::string> scenes; ///< All scene paths registered in the project
+        std::string assetsPath;      ///< Root assets directory
+        std::string outputPath;      ///< Build output root
+        std::string shadersPath = ""; ///< Override shader directory (empty = default)
         
         // Export configuration persisted per project
         struct ExportSettings {

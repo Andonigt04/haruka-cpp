@@ -1,3 +1,11 @@
+/**
+ * @file prefab_utils.h
+ * @brief Prefab save/load utilities for `SceneObject` reuse.
+ *
+ * A prefab is a standalone JSON snapshot of a single `SceneObject` (including
+ * its components and properties) that can be instantiated into any scene.
+ * The implementation lives in `prefab_utils.cpp`.
+ */
 #pragma once
 
 #include "scene.h"

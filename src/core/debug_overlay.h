@@ -1,3 +1,15 @@
+/**
+ * @file debug_overlay.h
+ * @brief In-game performance and diagnostics overlay (singleton).
+ *
+ * `DebugOverlay` renders an ImGui panel over the viewport showing FPS,
+ * frame time, draw calls, memory, lighting counts, and streaming stats.
+ * Four presentation modes are available (`MINIMAL` → `GRAPH`).
+ *
+ * Custom metrics can be injected from any subsystem via `addMetric()`.
+ * The overlay is designed to have negligible render cost — it reads from
+ * `FrameMetrics` snapshots pushed each frame via `updateMetrics()`.
+ */
 #pragma once
 
 #include <chrono>

@@ -1,3 +1,7 @@
+/**
+ * @file mesh_optimizer.h
+ * @brief Mesh optimization utilities — LOD generation, vertex deduplication, decimation.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

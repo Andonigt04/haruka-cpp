@@ -1,3 +1,12 @@
+/**
+ * @file component.h
+ * @brief Base `Component` interface and `ComponentPtr` alias.
+ *
+ * Components follow a simple composition model: each `SceneObject` owns a
+ * heterogeneous list of `ComponentPtr`. Derived components override
+ * `getType()` to identify themselves and `toJson()` for serialization.
+ * `renderInspector()` is called by the editor to draw the per-component UI.
+ */
 #pragma once
 
 #include <string>

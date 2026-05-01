@@ -1,3 +1,13 @@
+/**
+ * @file brdf_lut.vert
+ * @brief Pass-through vertex shader for the BRDF LUT pre-computation quad.
+ *
+ * Drives brdf_lut.frag over a full-screen quad (positions already in NDC).
+ * Run once at startup to bake the GGX split-sum LUT into a texture.
+ *
+ * In:  aPos (NDC xy), aTexCoords
+ * Out: TexCoords
+ */
 #version 450 core
 
 layout(location = 0) in vec2 aPos;

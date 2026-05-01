@@ -1,3 +1,7 @@
+/**
+ * @file texture.h
+ * @brief Basic 2D texture loader and GL binding wrapper.
+ */
 #ifndef TEXTURE_H
 #define TEXTURE_H
 
