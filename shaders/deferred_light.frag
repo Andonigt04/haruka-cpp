@@ -23,47 +23,37 @@
 layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec2 TexCoords;
 
-layout(set = 0, binding = 0) uniform sampler2D gPosition;
-layout(set = 0, binding = 1) uniform sampler2D gNormal;
-layout(set = 0, binding = 2) uniform sampler2D gAlbedoSpec;
-layout(set = 0, binding = 3) uniform sampler2D gEmissive;
-layout(set = 0, binding = 4) uniform sampler2D ssao; // reserved — AO not yet wired in main()
-layout(set = 0, binding = 6) uniform sampler2DShadow cascadeShadowMaps[4];
+layout(binding = 0) uniform sampler2D gPosition;
+layout(binding = 1) uniform sampler2D gNormal;
+layout(binding = 2) uniform sampler2D gAlbedoSpec;
+layout(binding = 3) uniform sampler2D gEmissive;
+layout(binding = 4) uniform sampler2D ssao;
+layout(binding = 7) uniform sampler2DShadow cascadeShadowMaps[4];
 
-layout(set = 0, binding = 7) uniform Params {
-    vec3 viewPos;
-    float farPlane;  // reserved — was used by point shadow (removed); kept to preserve UBO layout
-    int numCascades;
-    int numLights;
-    vec3 lightPos;
-    float _pad1; // UBO alignment padding (vec3 = 12 bytes, needs 4-byte fill before next member)
-    float cascadeSplits[4];
-} params;
-
-layout(set = 0, binding = 8) uniform Matrices {
-    mat4 view;
-    mat4 cascadeLightSpaceMatrices[4];
-};
-
-struct Light {
-    vec3 position;
-    vec3 color;
-};
-layout(set = 0, binding = 9) uniform Lights {
-    Light lights[256];
-};
+// locations 0-6: scalars / float array
+layout(location = 0) uniform vec3 viewPos;
+layout(location = 1) uniform int numCascades;
+layout(location = 2) uniform int numLights;
+layout(location = 3) uniform float cascadeSplits[4];   // [0]=3 [1]=4 [2]=5 [3]=6
+// locations 7-10: view mat4 (1 mat4 = 4 locations)
+layout(location = 7) uniform mat4 view;
+// locations 11-26: cascade matrices (4 mat4 = 16 locations)
+layout(location = 11) uniform mat4 cascadeLightSpaceMatrices[4];
+// locations 27-282: light positions, 283-538: light colors
+layout(location = 27)  uniform vec3 lightPositions[256];
+layout(location = 283) uniform vec3 lightColors[256];
 
 int getCascadeIndex(float viewDepth)
 {
-    for (int i = 0; i < params.numCascades; ++i) {
-        if (viewDepth < params.cascadeSplits[i]) return i;
+    for (int i = 0; i < numCascades; ++i) {
+        if (viewDepth < cascadeSplits[i]) return i;
     }
-    return max(params.numCascades - 1, 0);
+    return max(numCascades - 1, 0);
 }
 
 float calculateCascadedVisibility(vec3 fragPosWorld, vec3 normal, vec3 lightDir, float viewDepth)
 {
-    if (params.numCascades <= 0) return 0.0;
+    if (numCascades <= 0) return 0.0;
 
     int cascadeIndex = getCascadeIndex(viewDepth);
     vec4 fragPosLightSpace = cascadeLightSpaceMatrices[cascadeIndex] * vec4(fragPosWorld, 1.0);
@@ -96,7 +86,7 @@ void main()
     vec3 Emissive = texture(gEmissive, TexCoords).rgb;
     float AO = 1.0;
 
-    vec3 viewDir = normalize(params.viewPos - FragPos);
+    vec3 viewDir = normalize(viewPos - FragPos);
     float viewDepth = -(view * vec4(FragPos, 1.0)).z;
 
     // ===== DIRECT LIGHTING =====
@@ -106,35 +96,35 @@ void main()
     vec3 ambient = 0.1 * Albedo * AO;
     lighting += ambient;
 
-    for(int i = 0; i < params.numLights; ++i)
+    for(int i = 0; i < numLights; ++i)
     {
         // Detectar si es DirectionalLight (posición muy lejana, > 1000)
-        float dist = length(lights[i].position);
-        
+        float dist = length(lightPositions[i]);
+
         if (dist > 1000.0) {
             // === DIRECTIONAL LIGHT (Sun) ===
-            vec3 lightDir = normalize(lights[i].position);
+            vec3 lightDir = normalize(lightPositions[i]);
             float diff = max(dot(Normal, lightDir), 0.0);
             float visibility = calculateCascadedVisibility(FragPos, Normal, lightDir, viewDepth);
 
             vec3 halfwayDir = normalize(lightDir + viewDir);
             float spec = pow(max(dot(Normal, halfwayDir), 0.0), 32.0) * Spec;
 
-            vec3 radiance = lights[i].color;
+            vec3 radiance = lightColors[i];
 
             lighting += visibility * (diff * Albedo + spec * vec3(0.5)) * radiance;
         } else {
             // === POINT LIGHT ===
-            vec3 lightDir = normalize(lights[i].position - FragPos);
+            vec3 lightDir = normalize(lightPositions[i] - FragPos);
             float diff = max(dot(Normal, lightDir), 0.0);
 
             vec3 halfwayDir = normalize(lightDir + viewDir);
             float spec = pow(max(dot(Normal, halfwayDir), 0.0), 32.0) * Spec;
 
-            float distance = length(lights[i].position - FragPos);
+            float distance = length(lightPositions[i] - FragPos);
             float attenuation = 1.0 / (distance * distance + 0.001);
 
-            vec3 radiance = lights[i].color * attenuation;
+            vec3 radiance = lightColors[i] * attenuation;
 
             lighting += (diff * Albedo + spec * vec3(0.5)) * radiance;
         }

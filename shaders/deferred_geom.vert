@@ -19,11 +19,9 @@ layout(location = 0) out vec3 FragPos;
 layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 
-layout(set = 0, binding = 0) uniform Matrices {
-    mat4 model;
-    mat4 view;
-    mat4 projection;
-};
+layout(location = 0) uniform mat4 model;       // locations 0-3
+layout(location = 4) uniform mat4 view;        // locations 4-7
+layout(location = 8) uniform mat4 projection;  // locations 8-11
 
 void main()
 {

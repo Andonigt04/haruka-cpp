@@ -848,11 +848,6 @@ void Application::renderFrameContent() {
         glm::mat4 modelMatrix = g_sceneForRender ? obj->getWorldTransform(g_sceneForRender) : glm::mat4(1.0f);
         _geomShader->setMat4("model", modelMatrix);
         _geomShader->setVec3("color", glm::vec3(obj->color));
-        if (obj->material) {
-            _geomShader->setVec3("material.albedo", obj->material->albedo);
-            _geomShader->setFloat("material.roughness", obj->material->roughness);
-            _geomShader->setFloat("material.metallic", obj->material->metallic);
-        }
         if (obj->meshRenderer && obj->meshRenderer->isResident()) {
             obj->meshRenderer->render(*_geomShader);
             drawCount++;
@@ -899,13 +894,15 @@ void Application::renderFrameContent() {
     glClear(GL_COLOR_BUFFER_BIT);
 
     _ssaoShader->use();
-    _gBuffer->bindForReading(0, 0);
-    _gBuffer->bindForReading(1, 1);
-    
-    _ssaoShader->setInt("gPosition", 0);
-    _ssaoShader->setInt("gNormal", 1);
-    _ssaoShader->setInt("texNoise", 2);
-    _ssaoShader->setInt("kernelSize", 64);
+    _gBuffer->bindForReading(0, 2);  // gPosition → unit 2  (binding=2)
+    _gBuffer->bindForReading(1, 3);  // gNormal   → unit 3  (binding=3)
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, _ssaoSystem->getNoiseTexture()); // texNoise → unit 4 (binding=4)
+
+    const auto& kernel = _ssaoSystem->getKernel();
+    for (int i = 0; i < (int)kernel.size(); ++i)
+        _ssaoShader->setVec3("samples[" + std::to_string(i) + "]", kernel[i]);
+    _ssaoShader->setInt("kernelSize", (int)kernel.size());
     _ssaoShader->setFloat("radius", 0.5f);
     _ssaoShader->setFloat("bias", 0.025f);
     _ssaoShader->setMat4("projection", proj);
@@ -956,10 +953,10 @@ void Application::renderFrameContent() {
     }
     auto culledLights = _lightCuller->cullLights(scene, view, proj, MAX_LIGHTS);
     
-    _lightShader->setInt("numLights", culledLights.size());
+    _lightShader->setInt("numLights", (int)culledLights.size());
     for (size_t i = 0; i < culledLights.size(); i++) {
-        _lightShader->setVec3("lights[" + std::to_string(i) + "].position", culledLights[i].position);
-        _lightShader->setVec3("lights[" + std::to_string(i) + "].color", culledLights[i].color);
+        _lightShader->setVec3("lightPositions[" + std::to_string(i) + "]", culledLights[i].position);
+        _lightShader->setVec3("lightColors[" + std::to_string(i) + "]", culledLights[i].color);
     }
 
     glBindVertexArray(quadVAO);
@@ -977,10 +974,8 @@ void Application::renderFrameContent() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     _compositeShader->use();
-    _lightingTarget->bindForReading(0);
-    _bloomExtractTarget->bindForReading(1);
-    _compositeShader->setInt("scene", 0);
-    _compositeShader->setInt("bloom", 1);
+    _lightingTarget->bindForReading(0);       // scene → unit 0  (binding=0)
+    _bloomExtractTarget->bindForReading(1);   // bloom → unit 1  (binding=1)
     _compositeShader->setFloat("bloomStrength", 0.0f);
 
     glBindVertexArray(quadVAO);

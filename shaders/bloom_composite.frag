@@ -7,8 +7,8 @@
  *
  * In:  TexCoords
  * Out: FragColor (LDR, gamma-corrected)
- * Samplers: scene (HDR), bloom (blurred bright regions)
- * UBO: Params { bloomStrength }
+ * Samplers: scene (binding 0), bloom (binding 1)
+ * Uniforms: bloomStrength (location 0)
  */
 
 #version 450 core
@@ -16,11 +16,9 @@
 layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec2 TexCoords;
 
-layout(set = 0, binding = 0) uniform sampler2D scene;
-layout(set = 0, binding = 1) uniform sampler2D bloom;
-layout(set = 0, binding = 2) uniform Params {
-    float bloomStrength;
-};
+layout(binding = 0) uniform sampler2D scene;
+layout(binding = 1) uniform sampler2D bloom;
+layout(location = 0) uniform float bloomStrength;
 
 void main()
 {

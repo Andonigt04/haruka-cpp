@@ -19,6 +19,9 @@ public:
     IBL();
     ~IBL();
 
+    /** @brief Fills the environment with a solid sky color and regenerates IBL maps.
+     *  Called automatically in the constructor. Call again after loadHDRI() to override. */
+    void generateDefaultSky(glm::vec3 skyColor = glm::vec3(0.15f, 0.20f, 0.40f));
     /** @brief Loads an HDR environment map from disk. */
     void loadHDRI(const std::string& imagePath);
     /** @brief Generates diffuse irradiance cubemap. */

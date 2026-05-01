@@ -9,17 +9,15 @@
  * In:  TexCoords
  * Out: FragColor (blurred image)
  * Sampler: image (source HDR buffer)
- * UBO: Params { horizontal } — selects blur axis
+ * Uniforms: horizontal (location 0) — selects blur axis
  */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec2 TexCoords;
 
-layout(set = 0, binding = 0) uniform sampler2D image;
-layout(set = 0, binding = 1) uniform Params {
-    bool horizontal;
-};
+layout(binding = 0) uniform sampler2D image;
+layout(location = 0) uniform bool horizontal;
 
 const float weight[5] = float[] (0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
 

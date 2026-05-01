@@ -7,16 +7,14 @@
  * Paired with shadow.frag (empty body — depth is written by fixed-function).
  *
  * In:  aPos
- * UBO: Matrices { model, lightSpaceMatrix }
+ * Uniforms: model (location 0), lightSpaceMatrix (location 4)
  */
 #version 450 core
 
 layout (location = 0) in vec3 aPos;
 
-layout(set = 0, binding = 0) uniform Matrices {
-    mat4 model;
-    mat4 lightSpaceMatrix;
-};
+layout(location = 0) uniform mat4 model;             // locations 0–3
+layout(location = 4) uniform mat4 lightSpaceMatrix;  // locations 4–7
 
 void main()
 {

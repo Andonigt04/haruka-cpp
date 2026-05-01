@@ -9,17 +9,15 @@
  * In:  TexCoords
  * Out: FragColor — original color if bright, black otherwise
  * Sampler: scene (HDR render target)
- * UBO: Params { threshold }
+ * Uniforms: threshold (location 0)
  */
 #version 450 core
 
 layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec2 TexCoords;
 
-layout(set = 0, binding = 0) uniform sampler2D scene;
-layout(set = 0, binding = 1) uniform Params {
-    float threshold;
-};
+layout(binding = 0) uniform sampler2D scene;
+layout(location = 0) uniform float threshold;
 
 void main()
 {
