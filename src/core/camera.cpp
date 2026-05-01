@@ -14,7 +14,13 @@ glm::vec3 Camera::getUp() const {
 }
 
 glm::mat4 Camera::getViewMatrix() const {
-    return glm::lookAt(Haruka::LocalPos(position), Haruka::LocalPos(position) + getFront(), getUp());
+    // Use double-precision lookAt so the forward direction (pos + front) doesn't
+    // get lost to float rounding at large world positions (e.g. 1.5e8 units).
+    // The resulting dmat4 is then narrowed to mat4 for the shader.
+    glm::dvec3 pos   = position;
+    glm::dvec3 front = glm::dvec3(getFront());
+    glm::dvec3 up    = glm::dvec3(getUp());
+    return glm::mat4(glm::lookAt(pos, pos + front, up));
 }
 
 void Camera::rotate(float deltaX, float deltaY) {

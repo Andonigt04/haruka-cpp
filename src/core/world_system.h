@@ -124,6 +124,10 @@ public:
     void setChunkStreamingBudgets(size_t maxLoadsPerFrame, size_t maxEvictsPerFrame, size_t maxResidentChunks, size_t maxMemoryMB = 512);
     /** @brief Sets active chunk grid dimensions/key-space for visibility generation. */
     void setChunkGrid(int face, int lod, int tilesX, int tilesY, int maxLod = 0);
+    /** @brief Sets the planet center in world space (default is origin). */
+    void setPlanetCenter(Haruka::WorldPos center) { planetCenter = center; }
+    /** @brief Returns the current planet center in world space. */
+    Haruka::WorldPos getPlanetCenter() const { return planetCenter; }
     /** @brief Updates current visible chunk set from camera state. */
     void updateVisibleChunks(float viewDistanceKm, int lod, Camera* camera = nullptr);
 
@@ -151,6 +155,7 @@ public:
 
 private:
     Haruka::WorldPos worldOrigin;
+    Haruka::WorldPos planetCenter{0.0, 0.0, 0.0};
     std::vector<CelestialBody> celestialBodies;
     float lodDistances[4];
 

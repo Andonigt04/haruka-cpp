@@ -126,13 +126,13 @@ foreach(SRC ${SHADER_SOURCES})
 
     if(GLSLC)
         add_custom_command(OUTPUT ${SPV}
-            COMMAND ${GLSLC} ${SRC} -o ${SPV}
+            COMMAND ${GLSLC} --target-env=opengl ${SRC} -o ${SPV}
             DEPENDS ${SRC}
             COMMENT "glslc  ${NAME} -> ${NAME}.spv"
             VERBATIM)
     else()
         add_custom_command(OUTPUT ${SPV}
-            COMMAND ${GLSLANG_V} -V ${SRC} -o ${SPV}
+            COMMAND ${GLSLANG_V} -G ${SRC} -o ${SPV}
             DEPENDS ${SRC}
             COMMENT "glslangValidator  ${NAME} -> ${NAME}.spv"
             VERBATIM)

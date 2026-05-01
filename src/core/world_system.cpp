@@ -129,12 +129,15 @@ void WorldSystem::updateVisibleChunks(float viewDistanceKm, int lod, Camera* cam
     visibleChunks.clear();
     renderBaseMeshOnly = true; // Por defecto, solo mesh base
 
-    const double camLen = glm::length(camera->position);
+    // Use camera position relative to planet center so the system works
+    // regardless of where the planet is in world space.
+    const glm::dvec3 camRelPos = camera->position - planetCenter;
+    const double camLen = glm::length(camRelPos);
     if (camLen <= 1e-6) return;
 
     glm::dvec3 camDir;
     if (camera != nullptr && camLen > 1e-6) {
-        camDir = camera->position / camLen;
+        camDir = camRelPos / camLen;
     } else {
         return;
     }
@@ -171,7 +174,7 @@ void WorldSystem::updateVisibleChunks(float viewDistanceKm, int lod, Camera* cam
                 const double dotv = glm::dot(dir, camDir);
                 if (dotv < horizonDot) continue;
 
-                glm::dvec3 chunkWorldPos = dir * camLen;
+                glm::dvec3 chunkWorldPos = planetCenter + dir * camLen;
                 double realDistance = glm::length(camera->position - chunkWorldPos);
 
                 // Lógica de cúpulas LOD

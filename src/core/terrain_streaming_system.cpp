@@ -458,6 +458,16 @@ void TerrainStreamingSystem::update(Scene* scene, WorldSystem* worldSystem, Plan
 
     ensureTerrainChunkKeysAndGrid(scene, worldSystem);
 
+    // Sync planet center so WorldSystem computes chunk positions relative to the planet,
+    // not the world origin. This is critical when the planet is not at (0,0,0).
+    {
+        int planetIdx = findPlanetRootIndex(scene);
+        if (planetIdx >= 0 && planetIdx < static_cast<int>(scene->getObjects().size())) {
+            const SceneObject& planetObj = scene->getObjects()[planetIdx];
+            worldSystem->setPlanetCenter(planetObj.getWorldPosition(scene));
+        }
+    }
+
     // Dynamic streaming budgets based on camera distance to planet
     // Goal: load chunks continuously, evict only distant ones
     // Calculate optimal budgets: more loads than evicts to expand coverage

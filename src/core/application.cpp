@@ -51,39 +51,37 @@ bool shouldUseProceduralTerrainLook(const Haruka::SceneObject& obj) {
     return obj.properties["terrainEditor"].is_object();
 }
 
-bool isTerrainChunkFacingCamera(const Haruka::SceneObject& obj, const glm::vec3& cameraPos) {
+bool isTerrainChunkFacingCamera(const Haruka::SceneObject& obj, const glm::vec3& camDirFromPlanet) {
     if (!obj.properties.is_object()) return true;
     if (!obj.properties.contains("terrainEditor")) return true;
     const auto& te = obj.properties["terrainEditor"];
     if (!te.is_object() || !te.value("isChunk", false)) return true;
 
-    // En runtime exigimos metadatos explícitos de chunk.
-    if (!te.contains("chunkX") || !te.contains("chunkY") || !te.contains("chunkTilesX") || !te.contains("chunkTilesY")) {
-        return true;
+    if (!te.contains("chunkFace") || !te.contains("chunkX") || !te.contains("chunkY") ||
+        !te.contains("chunkTilesX") || !te.contains("chunkTilesY")) return true;
+
+    const int face  = te.value("chunkFace", 0);
+    const int tileX = te.value("chunkX", 0);
+    const int tileY = te.value("chunkY", 0);
+    const int tilesX = te.value("chunkTilesX", 1);
+    const int tilesY = te.value("chunkTilesY", 1);
+    if (tilesX <= 0 || tilesY <= 0) return true;
+
+    // Cube-sphere direction for this tile's center (same mapping as generateChunkInternal).
+    const float u = (static_cast<float>(tileX) + 0.5f) / static_cast<float>(tilesX) * 2.0f - 1.0f;
+    const float v = (static_cast<float>(tileY) + 0.5f) / static_cast<float>(tilesY) * 2.0f - 1.0f;
+    glm::vec3 cube;
+    switch (face) {
+        case 0: cube = glm::vec3( 1.0f,  v, -u); break;
+        case 1: cube = glm::vec3(-1.0f,  v,  u); break;
+        case 2: cube = glm::vec3( u,  1.0f, -v); break;
+        case 3: cube = glm::vec3( u, -1.0f,  v); break;
+        case 4: cube = glm::vec3( u,  v,  1.0f); break;
+        default:cube = glm::vec3(-u,  v, -1.0f); break;
     }
+    const glm::vec3 chunkDir = glm::normalize(cube);
 
-    const int chunkX = te.value("chunkX", -1);
-    const int chunkY = te.value("chunkY", -1);
-    const int tilesX = te.value("chunkTilesX", 0);
-    const int tilesY = te.value("chunkTilesY", 0);
-    if (chunkX < 0 || chunkY < 0 || tilesX <= 0 || tilesY <= 0) return true;
-
-    const double pi = 3.14159265358979323846;
-    const float lat = ((static_cast<float>(chunkY) + 0.5f) / static_cast<float>(tilesY)) * static_cast<float>(pi) - static_cast<float>(pi * 0.5);
-    const float lon = ((static_cast<float>(chunkX) + 0.5f) / static_cast<float>(tilesX)) * static_cast<float>(2.0 * pi) - static_cast<float>(pi);
-
-    glm::vec3 chunkDir(
-        std::cos(lat) * std::cos(lon),
-        std::sin(lat),
-        std::cos(lat) * std::sin(lon)
-    );
-
-    glm::vec3 camDir = cameraPos;
-    float camLen = glm::length(camDir);
-    if (camLen > 1e-6f) camDir /= camLen;
-    else camDir = glm::vec3(0.0f, 0.0f, 1.0f);
-
-    return glm::dot(chunkDir, camDir) > -0.15f;
+    return glm::dot(chunkDir, camDirFromPlanet) > -0.15f;
 }
 
 void buildPrimitiveMeshFromProperties(Haruka::SceneObject& obj) {
@@ -488,9 +486,18 @@ void Application::buildRenderQueue() {
     s_lastTrackedChunks = terrainStats.trackedChunks;
     s_lastMaxMemoryMB = terrainStats.maxMemoryMB;
 
+    // Compute camera direction relative to planet center for correct hemisphere culling.
+    glm::vec3 camDirFromPlanet(0.0f, 0.0f, 1.0f);
+    {
+        glm::dvec3 pc = _worldSystem ? _worldSystem->getPlanetCenter() : glm::dvec3(0.0);
+        glm::dvec3 rel = camPos - pc;
+        double rlen = glm::length(rel);
+        if (rlen > 1e-6) camDirFromPlanet = glm::vec3(rel / rlen);
+    }
+
     for (auto& obj : scene->getObjectsMutable()) {
         if (isRenderDisabledByEditor(obj)) continue;
-        if (!isTerrainChunkFacingCamera(obj, activeCamera ? activeCamera->position : glm::dvec3(0.0))) continue;
+        if (!isTerrainChunkFacingCamera(obj, camDirFromPlanet)) continue;
         Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
         if (!Haruka::isRenderableObjectType(objType)) continue;
 
@@ -661,6 +668,15 @@ void Application::renderFrameContent() {
     glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), (float)_width / (float)_height, 0.0001f, 300000000.0f);
     glm::mat4 view = activeCamera->getViewMatrix();
 
+    // Camera direction relative to planet center for correct hemisphere culling.
+    glm::vec3 camDirFromPlanet(0.0f, 0.0f, 1.0f);
+    {
+        glm::dvec3 pc = _worldSystem ? _worldSystem->getPlanetCenter() : glm::dvec3(0.0);
+        glm::dvec3 rel = glm::dvec3(activeCamera->position) - pc;
+        double rlen = glm::length(rel);
+        if (rlen > 1e-6) camDirFromPlanet = glm::vec3(rel / rlen);
+    }
+
     // ========== EDITOR MODE (Viewport) ==========
     RenderTarget* editorTarget = MotorInstance::getInstance().getRenderTarget();
     if (editorTarget) {
@@ -774,7 +790,7 @@ void Application::renderFrameContent() {
 
             for (const auto& obj : shadowScene->getObjects()) {
                 if (isRenderDisabledByEditor(obj)) continue;
-                if (!isTerrainChunkFacingCamera(obj, glm::vec3(activeCamera->position))) continue;
+                if (!isTerrainChunkFacingCamera(obj, camDirFromPlanet)) continue;
                 glm::mat4 modelMatrix = obj.getWorldTransform(shadowScene);
                 _cascadeShadowShader->setMat4("model", modelMatrix);
 
