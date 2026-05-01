@@ -242,6 +242,8 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
     if (_bloomSystem)        _bloomSystem        = std::make_unique<Bloom>(_width, _height);
     if (_lightingTarget)     _lightingTarget     = std::make_unique<RenderTarget>(_width, _height);
     if (_bloomExtractTarget) _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height);
+    if (_bloomPing)          _bloomPing          = std::make_unique<RenderTarget>(_width, _height);
+    if (_bloomPong)          _bloomPong          = std::make_unique<RenderTarget>(_width, _height);
     if (_computePostProcess) {
         _computePostProcess = std::make_unique<ComputePostProcess>();
         _computePostProcess->init(_width, _height);
@@ -366,6 +368,8 @@ void Application::init(Haruka::Scene& scene) {
 
     _lightingTarget = std::make_unique<RenderTarget>(_width, _height);
     _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height);
+    _bloomPing = std::make_unique<RenderTarget>(_width, _height);
+    _bloomPong = std::make_unique<RenderTarget>(_width, _height);
 
     // Registrar RenderTarget por defecto (standalone), sin pisar uno externo (viewport)
     if (!MotorInstance::getInstance().getRenderTarget()) {
@@ -379,7 +383,7 @@ void Application::init(Haruka::Scene& scene) {
     _lightCuller = std::make_unique<LightCuller>();
 
     // Inicializar GPU instancing para renderizado eficiente
-    _instancing = std::make_unique<GPUInstancing>();
+    _instancing = std::make_unique<GPUInstancing>(GPUInstancing::PRECISION_FLOAT);
     _instancing->init(100000);  // Máximo 10k instancias por batch
 
     // Inicializar Asset Streaming para cargar assets bajo demanda
@@ -432,9 +436,14 @@ void Application::init(Haruka::Scene& scene) {
     _geomShader = std::make_unique<Shader>("shaders/deferred_geom.vert", "shaders/deferred_geom.frag");
     _ssaoShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/ssao.frag");
     _lightShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/deferred_light.frag");
-    _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_composite.frag");
+    _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/tonemapping.frag");
     _flatShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/light_cube.frag");
     _cascadeShadowShader = std::make_unique<Shader>("shaders/shadow.vert", "shaders/shadow.frag");
+    _bloomExtractShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_extract.frag");
+    _bloomBlurShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_blur.frag");
+    _pointShadowShader = std::make_unique<Shader>("shaders/point_shadow.vert", "shaders/point_shadow.frag",
+                                                   "shaders/point_shadow.geom");
+    _instancingShader = std::make_unique<Shader>("shaders/instancing.vert", "shaders/instancing.frag");
 }
 
 void Application::buildRenderQueue() {
@@ -826,7 +835,56 @@ void Application::renderFrameContent() {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(0, 0, _width, _height);
     }
-    
+
+    // ========== POINT SHADOW DEPTH PASS ==========
+    if (_pointShadowSystem && _pointShadowShader && scene) {
+        // Pick the first point light as the shadow caster
+        glm::vec3 pointLightPos(0.0f);
+        bool foundPointLight = false;
+        for (const auto& obj : scene->getObjects()) {
+            if (obj.type == "PointLight" || obj.type == "Light") {
+                glm::mat4 t = obj.getWorldTransform(scene);
+                pointLightPos = glm::vec3(t[3]);
+                foundPointLight = true;
+                break;
+            }
+        }
+
+        if (foundPointLight) {
+            const float psNear = 0.1f, psFar = 25.0f;
+            glm::mat4 shadowProj = glm::perspective(glm::radians(90.0f), 1.0f, psNear, psFar);
+            glm::mat4 shadowMatrices[6] = {
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3( 1, 0, 0), glm::vec3(0,-1, 0)),
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3(-1, 0, 0), glm::vec3(0,-1, 0)),
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3( 0, 1, 0), glm::vec3(0, 0, 1)),
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3( 0,-1, 0), glm::vec3(0, 0,-1)),
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3( 0, 0, 1), glm::vec3(0,-1, 0)),
+                shadowProj * glm::lookAt(pointLightPos, pointLightPos + glm::vec3( 0, 0,-1), glm::vec3(0,-1, 0)),
+            };
+
+            _pointShadowSystem->bindForWriting();
+            _pointShadowShader->use();
+            for (int f = 0; f < 6; ++f)
+                _pointShadowShader->setMat4("shadowMatrices[" + std::to_string(f) + "]", shadowMatrices[f]);
+            _pointShadowShader->setVec3("lightPos", pointLightPos);
+            _pointShadowShader->setFloat("farPlane", psFar);
+
+            for (const auto& obj : scene->getObjects()) {
+                if (isRenderDisabledByEditor(obj)) continue;
+                _pointShadowShader->setMat4("model", obj.getWorldTransform(scene));
+                if (obj.meshRenderer && obj.meshRenderer->isResident())
+                    obj.meshRenderer->render(*_pointShadowShader);
+                else if (!obj.modelPath.empty()) {
+                    auto mdl = getOrLoadModel(obj.modelPath);
+                    if (mdl) mdl->Draw(*_pointShadowShader);
+                }
+            }
+
+            _pointShadowSystem->unbind();
+            glViewport(0, 0, _width, _height);
+        }
+    }
+
     // Procesar feedback de virtual texturing
     if (_virtualTexturing) {
         _virtualTexturing->processFeedback();
@@ -867,24 +925,26 @@ void Application::renderFrameContent() {
             continue;
         }
     }
-    // Render celestial bodies with LOD
-    for (const auto& body : _worldSystem->getBodies()) {
-        if (!body.visible) continue;
-        if (g_sceneForRender && g_sceneForRender->getObject(body.name)) continue;
-
-        glm::vec3 camPos(activeCamera->position.x, activeCamera->position.y, activeCamera->position.z);
-        glm::vec3 bodyPos(body.localPos.x, body.localPos.y, body.localPos.z);
-        float distance = glm::length(camPos - bodyPos);
-        
-        int lod = distance < 50.0f ? 0 : distance < 200.0f ? 1 : distance < 1000.0f ? 2 : 3;
-        
-        if (!sphereLOD[lod]) continue;
-
-        glm::mat4 bodyModel = glm::translate(glm::mat4(1.0f), glm::vec3(body.localPos));
-        bodyModel = glm::scale(bodyModel, glm::vec3(body.radius));
-        
-        _geomShader->setMat4("model", bodyModel);
-        sphereLOD[lod]->draw();
+    // Render celestial bodies via GPU instancing (all into GBuffer in one draw call)
+    if (_instancing && _instancingShader && _worldSystem && sphereLOD[0]) {
+        _instancing->clear();
+        for (const auto& body : _worldSystem->getBodies()) {
+            if (!body.visible) continue;
+            if (g_sceneForRender && g_sceneForRender->getObject(body.name)) continue;
+            glm::vec3 bodyPos(body.localPos.x, body.localPos.y, body.localPos.z);
+            _instancing->addInstanceFloat(
+                bodyPos,
+                glm::vec3(body.radius),
+                glm::vec4(body.color, 1.0f)
+            );
+        }
+        if (_instancing->getInstanceCount() > 0) {
+            _instancingShader->use();
+            _instancingShader->setMat4("view", view);
+            _instancingShader->setMat4("projection", proj);
+            _instancing->render(sphereLOD[0]->VAO,
+                                (GLuint)sphereLOD[0]->getIndexCount());
+        }
     }
         
     _gBuffer->unbind();
@@ -914,7 +974,7 @@ void Application::renderFrameContent() {
     _ssaoSystem->unbind();
 
     // ========== LIGHTING PASS ==========
-    _lightingTarget->bindForWriting();
+    _hdrSystem->bindForWriting();
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     _lightShader->use();
@@ -926,6 +986,7 @@ void Application::renderFrameContent() {
     _ssaoSystem->bindForReading(4);
     _iblSystem->bindPrefilterMap(5);
     _iblSystem->bindBRDFLUT(6);
+    _pointShadowSystem->bindForReading(11);
 
     _lightShader->setInt("gPosition", 0);
     _lightShader->setInt("gNormal", 1);
@@ -934,6 +995,7 @@ void Application::renderFrameContent() {
     _lightShader->setInt("ssao", 4);
     _lightShader->setInt("prefilterMap", 5);
     _lightShader->setInt("brdfLUT", 6);
+    _lightShader->setFloat("pointFarPlane", 25.0f);
     _lightShader->setVec3("viewPos", activeCamera->position);
     _lightShader->setMat4("view", view);
     _lightShader->setInt("numCascades", _cascadedShadow ? _cascadedShadow->getNumCascades() : 0);
@@ -963,7 +1025,38 @@ void Application::renderFrameContent() {
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     glBindVertexArray(0);
 
-    _lightingTarget->unbind();
+    _hdrSystem->unbind();
+
+    // ========== BLOOM EXTRACT ==========
+    _bloomExtractTarget->bindForWriting();
+    glClear(GL_COLOR_BUFFER_BIT);
+    _bloomExtractShader->use();
+    _hdrSystem->bindForReading(0, 0);  // colorTexture → unit 0
+    _bloomExtractShader->setFloat("threshold", 1.0f);
+    glBindVertexArray(quadVAO);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindVertexArray(0);
+    _bloomExtractTarget->unbind();
+
+    // ========== BLOOM BLUR (ping-pong, 10 passes) ==========
+    _bloomBlurShader->use();
+    RenderTarget* blurSrc = _bloomExtractTarget.get();
+    RenderTarget* pingpong[2] = { _bloomPing.get(), _bloomPong.get() };
+    bool horizontal = true;
+    for (int i = 0; i < 10; ++i) {
+        int dst = horizontal ? 0 : 1;
+        pingpong[dst]->bindForWriting();
+        glClear(GL_COLOR_BUFFER_BIT);
+        blurSrc->bindForReading(0);
+        _bloomBlurShader->setBool("horizontal", horizontal);
+        glBindVertexArray(quadVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+        pingpong[dst]->unbind();
+        blurSrc = pingpong[dst];
+        horizontal = !horizontal;
+    }
+    // After 10 iters (even), last write → pingpong[1] = _bloomPong
 
     // ========== FINAL COMPOSITE ==========
     RenderTarget* externalTarget = MotorInstance::getInstance().getRenderTarget();
@@ -974,9 +1067,10 @@ void Application::renderFrameContent() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     _compositeShader->use();
-    _lightingTarget->bindForReading(0);       // scene → unit 0  (binding=0)
-    _bloomExtractTarget->bindForReading(1);   // bloom → unit 1  (binding=1)
-    _compositeShader->setFloat("bloomStrength", 0.0f);
+    _hdrSystem->bindForReading(1, 0);  // colorTexture → unit 1 (binding=1)
+    _bloomPong->bindForReading(2);     // bloom        → unit 2 (binding=2)
+    _compositeShader->setFloat("exposure", _exposure);
+    _compositeShader->setFloat("bloomStrength", 0.8f);
 
     glBindVertexArray(quadVAO);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -984,6 +1078,17 @@ void Application::renderFrameContent() {
 
     if (externalTarget) {
         externalTarget->unbind();
+    }
+
+    // ========== COMPUTE COLOR GRADING ==========
+    if (_computePostProcess && _lightingTarget) {
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+        _computePostProcess->colorGradingCompute(
+            _lightingTarget->getColorTexture(),
+            1.1f,   // saturation
+            1.05f,  // contrast
+            0.0f    // brightness
+        );
     }
 
     // ========== DEBUG METRICS ==========
@@ -1044,6 +1149,8 @@ void Application::cleanup() {
     _computePostProcess.reset();
     _instancing.reset();
     _lightCuller.reset();
+    _bloomPong.reset();
+    _bloomPing.reset();
     _bloomExtractTarget.reset();
     _lightingTarget.reset();
     _pointShadowSystem.reset();

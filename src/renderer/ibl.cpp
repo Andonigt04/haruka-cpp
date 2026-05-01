@@ -1,13 +1,46 @@
 #include "ibl.h"
 
 #include <iostream>
+#include <vector>
 #include <stb_image.h>
 #include "core/error_reporter.h"
 #include "shader.h"
+#include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 IBL::IBL() {
     setupCubemap();
+    generateDefaultSky();
+}
+
+void IBL::generateDefaultSky(glm::vec3 skyColor) {
+    const int sz = 512;
+    std::vector<float> data(sz * sz * 3);
+
+    glBindTexture(GL_TEXTURE_CUBE_MAP, envCubemap);
+    for (unsigned int face = 0; face < 6; ++face) {
+        for (int y = 0; y < sz; ++y) {
+            float t = (float)y / (sz - 1); // 0=bottom, 1=top
+            glm::vec3 color;
+            if (face == 2) {         // +Y zenith
+                color = skyColor * 0.8f;
+            } else if (face == 3) {  // -Y nadir/ground
+                color = glm::vec3(0.05f, 0.04f, 0.03f);
+            } else {                 // side faces: horizon→sky
+                glm::vec3 horizon = skyColor * 1.6f;
+                color = glm::mix(horizon, skyColor, t);
+            }
+            for (int x = 0; x < sz; ++x) {
+                int idx = (y * sz + x) * 3;
+                data[idx + 0] = color.r;
+                data[idx + 1] = color.g;
+                data[idx + 2] = color.b;
+            }
+        }
+        glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, 0,
+                        0, 0, sz, sz, GL_RGB, GL_FLOAT, data.data());
+    }
+
     generateIrradianceMap();
     generatePrefilterMap();
     generateBRDFLUT();

@@ -17,9 +17,7 @@ layout(location = 0) in vec3 aPos;
 
 layout(location = 0) out vec3 WorldPos;
 
-layout(set = 0, binding = 0) uniform Matrices {
-    mat4 model;
-};
+layout(location = 0) uniform mat4 model;
 
 void main()
 {

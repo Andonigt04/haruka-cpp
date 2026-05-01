@@ -14,10 +14,8 @@
 
 layout(location = 0) in vec4 FragPos;
 
-layout(set = 0, binding = 0) uniform Params {
-    vec3 lightPos;
-    float farPlane;
-};
+layout(location = 28) uniform vec3  lightPos;
+layout(location = 29) uniform float farPlane;
 
 void main()
 {

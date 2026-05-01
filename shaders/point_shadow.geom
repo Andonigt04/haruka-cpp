@@ -3,9 +3,7 @@
 layout(triangles) in;
 layout(triangle_strip, max_vertices = 18) out;
 
-layout(set = 0, binding = 0) uniform Matrices {
-    mat4 shadowMatrices[6];
-};
+layout(location = 4) uniform mat4 shadowMatrices[6];
 
 layout(location = 0) in vec3 WorldPos[];
 layout(location = 0) out vec4 FragPos;

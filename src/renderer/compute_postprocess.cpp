@@ -123,35 +123,30 @@ void main() {
 
     toneMappingShader = compileComputeShader(toneMappingSource);
 
-    // Compilar color grading shader
+    // Compilar color grading shader (in-place, rgba16f)
     const char* colorGradingSource = R"(
 #version 460 core
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(rgba8, binding = 0) uniform image2D inputImg;
-layout(rgba8, binding = 1) uniform image2D outputImg;
+layout(rgba16f, binding = 0) uniform image2D img;
 
 uniform float saturation = 1.0;
-uniform float contrast = 1.0;
+uniform float contrast   = 1.0;
 uniform float brightness = 0.0;
 
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-    
-    vec4 color = imageLoad(inputImg, pixel);
+
+    vec4 color = imageLoad(img, pixel);
     vec3 rgb = color.rgb;
-    
-    // Brightness
+
     rgb += brightness;
-    
-    // Contrast
     rgb = (rgb - 0.5) * contrast + 0.5;
-    
-    // Saturation (desaturate and recombine)
-    float gray = dot(rgb, vec3(0.299, 0.587, 0.114));
+
+    float gray = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
     rgb = mix(vec3(gray), rgb, saturation);
-    
-    imageStore(outputImg, pixel, vec4(rgb, color.a));
+
+    imageStore(img, pixel, vec4(rgb, color.a));
 }
 )";
 
@@ -216,23 +211,21 @@ void ComputePostProcess::toneMappingCompute(
 }
 
 void ComputePostProcess::colorGradingCompute(
-    GLuint inputTexture,
-    GLuint outputTexture,
+    GLuint texture,
     float saturation,
     float contrast,
     float brightness) {
-    
+
     if (!colorGradingShader) return;
 
     glUseProgram(colorGradingShader);
-    
-    glBindImageTexture(0, inputTexture, 0, GL_FALSE, 0, GL_READ_ONLY, GL_RGBA8);
-    glBindImageTexture(1, outputTexture, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
-    
+
+    glBindImageTexture(0, texture, 0, GL_FALSE, 0, GL_READ_WRITE, GL_RGBA16F);
+
     glUniform1f(glGetUniformLocation(colorGradingShader, "saturation"), saturation);
-    glUniform1f(glGetUniformLocation(colorGradingShader, "contrast"), contrast);
+    glUniform1f(glGetUniformLocation(colorGradingShader, "contrast"),   contrast);
     glUniform1f(glGetUniformLocation(colorGradingShader, "brightness"), brightness);
-    
+
     dispatchCompute(colorGradingShader, screenWidth, screenHeight);
 }
 
@@ -250,5 +243,5 @@ void ComputePostProcess::processAll(
     // Pipeline: Bloom -> Tone Mapping -> Color Grading
     bloomCompute(inputTexture, outputTexture, bloomThreshold, bloomStrength);
     toneMappingCompute(outputTexture, outputTexture, exposure, toneMode);
-    colorGradingCompute(outputTexture, outputTexture, saturation, contrast, brightness);
+    colorGradingCompute(outputTexture, saturation, contrast, brightness);
 }

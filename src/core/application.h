@@ -178,6 +178,8 @@ private:
     // Render targets
     std::unique_ptr<RenderTarget> _lightingTarget;
     std::unique_ptr<RenderTarget> _bloomExtractTarget;
+    std::unique_ptr<RenderTarget> _bloomPing;
+    std::unique_ptr<RenderTarget> _bloomPong;
     
     // Primitives (LOD spheres for celestial bodies)
     std::unique_ptr<SimpleMesh> sphereLOD[4];
@@ -189,9 +191,15 @@ private:
     std::unique_ptr<Shader> _compositeShader;
     std::unique_ptr<Shader> _flatShader;
     std::unique_ptr<Shader> _cascadeShadowShader;
+    std::unique_ptr<Shader> _bloomExtractShader;
+    std::unique_ptr<Shader> _bloomBlurShader;
+    std::unique_ptr<Shader> _pointShadowShader;
+    std::unique_ptr<Shader> _instancingShader;
     
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;
+
+    float _exposure = 1.0f;
 
     // Timing (chrono — platform-independent, survives SDL3 migration)
     std::chrono::time_point<std::chrono::high_resolution_clock> _frameStart;

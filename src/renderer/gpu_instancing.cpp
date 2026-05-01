@@ -97,80 +97,63 @@ void GPUInstancing::addInstanceFloat(
 }
 
 void GPUInstancing::setupInstanceBuffer() {
-    // Crear VAO si no existe
-    if (instanceVAO == 0) {
-        glGenVertexArrays(1, &instanceVAO);
-    }
-    
-    // Crear VBO para instancias
-    if (instanceVBO == 0) {
-        glGenBuffers(1, &instanceVBO);
-    }
-    
-    glBindVertexArray(instanceVAO);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, instanceVBO);
-    
-    // Calcular tamaño correcto basado en precision mode
-    size_t elementSize = (precisionMode == PRECISION_DOUBLE) ? 
-                         sizeof(InstanceDataDouble) : 
-                         sizeof(InstanceDataFloat);
-    
-    glBufferData(GL_COPY_WRITE_BUFFER, 
-                 maxInstances * elementSize, 
-                 nullptr, 
-                 GL_DYNAMIC_DRAW);
-    
-    // Para SSBO (Shader Storage Buffer Object), no necesitamos vertex attributes
-    // El shader accederá directamente al buffer
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, instanceVBO);
-    
-    glBindVertexArray(0);
+    if (instanceVBO == 0) glGenBuffers(1, &instanceVBO);
+
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+    glBufferData(GL_ARRAY_BUFFER,
+                 maxInstances * sizeof(InstanceDataFloat),
+                 nullptr, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void GPUInstancing::updateBuffer() {
-    if (!bufferDirty) return;
-    
-    glBindBuffer(GL_COPY_WRITE_BUFFER, instanceVBO);
-    
-    if (precisionMode == PRECISION_DOUBLE && !instancesDouble.empty()) {
-        glBufferSubData(GL_COPY_WRITE_BUFFER, 
-                        0,
-                        instancesDouble.size() * sizeof(InstanceDataDouble),
-                        instancesDouble.data());
-    } else if (precisionMode == PRECISION_FLOAT && !instancesFloat.empty()) {
-        glBufferSubData(GL_COPY_WRITE_BUFFER, 
-                        0,
-                        instancesFloat.size() * sizeof(InstanceDataFloat),
-                        instancesFloat.data());
-    }
-    
+    if (!bufferDirty || instancesFloat.empty()) return;
+
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+    glBufferSubData(GL_ARRAY_BUFFER, 0,
+                    instancesFloat.size() * sizeof(InstanceDataFloat),
+                    instancesFloat.data());
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     bufferDirty = false;
 }
 
 void GPUInstancing::render(GLuint VAO, GLuint indexCount) {
-    int instanceCount = 0;
-    
-    if (precisionMode == PRECISION_DOUBLE) {
-        instanceCount = instancesDouble.size();
-    } else {
-        instanceCount = instancesFloat.size();
-    }
-    
+    int instanceCount = (int)instancesFloat.size();
     if (instanceCount == 0) return;
-    
+
     updateBuffer();
-    
-    // Bind tanto el mesh VAO como el instancing VBO
+
     glBindVertexArray(VAO);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, instanceVBO);
-    
-    // Renderizar con instancing
-    glDrawElementsInstanced(GL_TRIANGLES, 
-                           indexCount, 
-                           GL_UNSIGNED_INT, 
-                           0, 
-                           instanceCount);
-    
+    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+
+    // mat4 model: 4 consecutive vec4 columns at locations 3-6
+    constexpr GLsizei stride = sizeof(InstanceDataFloat);
+    for (int col = 0; col < 4; ++col) {
+        GLuint loc = 3 + col;
+        glEnableVertexAttribArray(loc);
+        glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, stride,
+                              (void*)(col * 16));
+        glVertexAttribDivisor(loc, 1);
+    }
+    // vec4 color at location 7
+    glEnableVertexAttribArray(7);
+    glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, stride,
+                          (void*)offsetof(InstanceDataFloat, color));
+    glVertexAttribDivisor(7, 1);
+    // vec3 scale at location 8
+    glEnableVertexAttribArray(8);
+    glVertexAttribPointer(8, 3, GL_FLOAT, GL_FALSE, stride,
+                          (void*)offsetof(InstanceDataFloat, scale));
+    glVertexAttribDivisor(8, 1);
+
+    glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0, instanceCount);
+
+    // Reset divisors so non-instanced draws of this VAO aren't affected
+    for (int col = 0; col < 4; ++col) glVertexAttribDivisor(3 + col, 0);
+    glVertexAttribDivisor(7, 0);
+    glVertexAttribDivisor(8, 0);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindVertexArray(0);
 }
 

@@ -23,11 +23,9 @@ layout(location = 3) in mat4 model;      // Columnas 3,4,5,6
 layout(location = 7) in vec4 instanceColor;
 layout(location = 8) in vec3 instanceScale;
 
-// Uniforms
-layout(set = 0, binding = 0) uniform Matrices {
-    mat4 view;
-    mat4 projection;
-};
+// locations 0-3: view mat4, 4-7: projection mat4
+layout(location = 0) uniform mat4 view;
+layout(location = 4) uniform mat4 projection;
 
 // Output
 layout(location = 0) out vec3 FragPos;

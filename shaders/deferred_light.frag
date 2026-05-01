@@ -28,7 +28,10 @@ layout(binding = 1) uniform sampler2D gNormal;
 layout(binding = 2) uniform sampler2D gAlbedoSpec;
 layout(binding = 3) uniform sampler2D gEmissive;
 layout(binding = 4) uniform sampler2D ssao;
-layout(binding = 7) uniform sampler2DShadow cascadeShadowMaps[4];
+layout(binding = 5) uniform samplerCube prefilterMap;
+layout(binding = 6) uniform sampler2D brdfLUT;
+layout(binding = 7)  uniform sampler2DShadow cascadeShadowMaps[4];
+layout(binding = 11) uniform samplerCube    pointShadowMap;
 
 // locations 0-6: scalars / float array
 layout(location = 0) uniform vec3 viewPos;
@@ -41,7 +44,31 @@ layout(location = 7) uniform mat4 view;
 layout(location = 11) uniform mat4 cascadeLightSpaceMatrices[4];
 // locations 27-282: light positions, 283-538: light colors
 layout(location = 27)  uniform vec3 lightPositions[256];
-layout(location = 283) uniform vec3 lightColors[256];
+layout(location = 283) uniform vec3  lightColors[256];
+// location 539: point shadow far plane
+layout(location = 539) uniform float pointFarPlane;
+
+float calcPointShadow(vec3 fragPos, vec3 lPos)
+{
+    vec3 fragToLight = fragPos - lPos;
+    float currentDepth = length(fragToLight) / pointFarPlane;
+    float bias = 0.05;
+    float diskRadius = 0.05;
+
+    const vec3 dirs[8] = vec3[8](
+        vec3( 1, 0, 0), vec3(-1, 0, 0),
+        vec3( 0, 1, 0), vec3( 0,-1, 0),
+        vec3( 0, 0, 1), vec3( 0, 0,-1),
+        vec3( 1, 1, 0) * 0.7071, vec3(-1,-1, 0) * 0.7071
+    );
+
+    float shadow = 0.0;
+    for (int s = 0; s < 8; ++s) {
+        float closest = texture(pointShadowMap, fragToLight + dirs[s] * diskRadius).r;
+        shadow += currentDepth - bias > closest ? 1.0 : 0.0;
+    }
+    return shadow / 8.0;
+}
 
 int getCascadeIndex(float viewDepth)
 {
@@ -84,17 +111,24 @@ void main()
     vec3 Albedo  = texture(gAlbedoSpec, TexCoords).rgb;
     float Spec   = texture(gAlbedoSpec, TexCoords).a;
     vec3 Emissive = texture(gEmissive, TexCoords).rgb;
-    float AO = 1.0;
 
     vec3 viewDir = normalize(viewPos - FragPos);
     float viewDepth = -(view * vec4(FragPos, 1.0)).z;
 
+    // ===== IBL AMBIENT =====
+    float AO       = texture(ssao, TexCoords).r;
+    float roughness = 1.0 - Spec;
+    float NdotV    = max(dot(Normal, viewDir), 0.0);
+    vec3  R        = reflect(-viewDir, Normal);
+
+    vec3 diffuseIBL  = textureLod(prefilterMap, Normal, 4.0).rgb;
+    vec3 specularIBL = textureLod(prefilterMap, R, roughness * 4.0).rgb;
+    vec2 brdf        = texture(brdfLUT, vec2(NdotV, roughness)).rg;
+
+    vec3 ambient = (diffuseIBL * Albedo + specularIBL * (0.04 * brdf.x + brdf.y)) * AO;
+
     // ===== DIRECT LIGHTING =====
-    vec3 lighting = vec3(0.0);
-    
-    // Ambient
-    vec3 ambient = 0.1 * Albedo * AO;
-    lighting += ambient;
+    vec3 lighting = ambient;
 
     for(int i = 0; i < numLights; ++i)
     {
@@ -126,7 +160,10 @@ void main()
 
             vec3 radiance = lightColors[i] * attenuation;
 
-            lighting += (diff * Albedo + spec * vec3(0.5)) * radiance;
+            float shadow = pointFarPlane > 0.0
+                ? calcPointShadow(FragPos, lightPositions[i])
+                : 0.0;
+            lighting += (1.0 - shadow) * (diff * Albedo + spec * vec3(0.5)) * radiance;
         }
     }
     

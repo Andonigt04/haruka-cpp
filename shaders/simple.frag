@@ -26,7 +26,7 @@ layout(location = 2) in vec3 FragPos;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
 
-layout(set = 0, binding = 0) uniform Params {
+layout(std140, binding = 0) uniform Params {
     vec3 viewPos;
     int nr_active_lights;
     float shininess;
@@ -66,26 +66,26 @@ struct SpotLight
 
 
 #define MAX_POINT_LIGHTS 32
-layout(set = 0, binding = 3) uniform PointLights {
+layout(std140, binding = 3) uniform PointLights {
     PointLight pointLights[MAX_POINT_LIGHTS];
 };
 
-layout(set = 0, binding = 4) uniform DirLightBlock {
+layout(std140, binding = 4) uniform DirLightBlock {
     DirLight dirLight;
 };
 
-layout(set = 0, binding = 5) uniform SpotLightBlock {
+layout(std140, binding = 5) uniform SpotLightBlock {
     SpotLight spotLight;
 };
 
-layout(set = 0, binding = 6)  uniform sampler2D texture_diffuse1;
-layout(set = 0, binding = 7)  uniform sampler2D texture_normal1;
-layout(set = 0, binding = 10) uniform sampler2D texture_metallic_roughness1;
-layout(set = 0, binding = 11) uniform sampler2D texture_ao1;
-layout(set = 0, binding = 12) uniform sampler2D texture_emissive1;
+layout(binding = 6)  uniform sampler2D texture_diffuse1;
+layout(binding = 7)  uniform sampler2D texture_normal1;
+layout(binding = 10) uniform sampler2D texture_metallic_roughness1;
+layout(binding = 11) uniform sampler2D texture_ao1;
+layout(binding = 12) uniform sampler2D texture_emissive1;
 
-layout(set = 0, binding = 1) uniform sampler2D shadowMap;
-layout(set = 0, binding = 2) uniform Matrices {
+layout(binding = 1) uniform sampler2D shadowMap;
+layout(std140, binding = 2) uniform Matrices {
     mat4 lightView;
     mat4 lightProjection;
 };
