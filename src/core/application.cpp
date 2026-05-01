@@ -837,13 +837,13 @@ void Application::renderFrameContent() {
     }
 
     // ========== POINT SHADOW DEPTH PASS ==========
-    if (_pointShadowSystem && _pointShadowShader && scene) {
+    if (_pointShadowSystem && _pointShadowShader && shadowScene) {
         // Pick the first point light as the shadow caster
         glm::vec3 pointLightPos(0.0f);
         bool foundPointLight = false;
-        for (const auto& obj : scene->getObjects()) {
+        for (const auto& obj : shadowScene->getObjects()) {
             if (obj.type == "PointLight" || obj.type == "Light") {
-                glm::mat4 t = obj.getWorldTransform(scene);
+                glm::mat4 t = obj.getWorldTransform(shadowScene);
                 pointLightPos = glm::vec3(t[3]);
                 foundPointLight = true;
                 break;
@@ -869,9 +869,9 @@ void Application::renderFrameContent() {
             _pointShadowShader->setVec3("lightPos", pointLightPos);
             _pointShadowShader->setFloat("farPlane", psFar);
 
-            for (const auto& obj : scene->getObjects()) {
+            for (const auto& obj : shadowScene->getObjects()) {
                 if (isRenderDisabledByEditor(obj)) continue;
-                _pointShadowShader->setMat4("model", obj.getWorldTransform(scene));
+                _pointShadowShader->setMat4("model", obj.getWorldTransform(shadowScene));
                 if (obj.meshRenderer && obj.meshRenderer->isResident())
                     obj.meshRenderer->render(*_pointShadowShader);
                 else if (!obj.modelPath.empty()) {
