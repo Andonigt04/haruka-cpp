@@ -25,6 +25,7 @@
 #include "renderer/primitive_shapes.h"
 #include "project.h"
 #include "error_reporter.h"
+#include "startup_report.h"
 #include "renderer/gpu_instancing.h"
 #include "physics/raycast_simple.h"
 #include "object_types.h"
@@ -353,97 +354,100 @@ void Application::init(Haruka::Scene& scene) {
             _camera = std::make_unique<Camera>(Haruka::WorldPos(0.0, 2.0, 8.0));
     }
 
-    // Initialize rendering systems
-    _mainShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/pbr.frag");
-    _lampShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/light_cube.frag");
-    
-    _shadowSystem = std::make_unique<Shadow>(1024, 1024);
-    _hdrSystem = std::make_unique<HDR>(_width, _height);
-    _bloomSystem = std::make_unique<Bloom>(_width, _height);
-    _gBuffer = std::make_unique<GBuffer>(_width, _height);
-    _ssaoSystem = std::make_unique<SSAO>(_width, _height);
-    _iblSystem = std::make_unique<IBL>();
-    _worldSystem = std::make_unique<Haruka::WorldSystem>();
-    _pointShadowSystem = std::make_unique<PointShadow>(1024);
+    auto& rep = StartupReport::get();
+    // Lambda: evita los problemas de comas en macros ya que el compilador
+    // parsea los argumentos de funciones (no el preprocesador).
+    auto tryInit = [&](const char* label, auto fn) {
+        try { fn(); rep.record(label, StartupReport::OK); }
+        catch (const std::exception& e) { rep.record(label, StartupReport::FAIL, e.what()); }
+    };
 
-    _lightingTarget = std::make_unique<RenderTarget>(_width, _height);
-    _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height);
-    _bloomPing = std::make_unique<RenderTarget>(_width, _height);
-    _bloomPong = std::make_unique<RenderTarget>(_width, _height);
+    // ── Render systems ──────────────────────────────────────────────────────
+    tryInit("Shadow",      [&]{ _shadowSystem      = std::make_unique<Shadow>(1024, 1024); });
+    tryInit("HDR",         [&]{ _hdrSystem         = std::make_unique<HDR>(_width, _height); });
+    tryInit("Bloom",       [&]{ _bloomSystem       = std::make_unique<Bloom>(_width, _height); });
+    tryInit("GBuffer",     [&]{ _gBuffer           = std::make_unique<GBuffer>(_width, _height); });
+    tryInit("SSAO",        [&]{ _ssaoSystem        = std::make_unique<SSAO>(_width, _height); });
+    tryInit("IBL",         [&]{ _iblSystem         = std::make_unique<IBL>(); });
+    tryInit("PointShadow", [&]{ _pointShadowSystem = std::make_unique<PointShadow>(1024); });
+    tryInit("WorldSystem", [&]{ _worldSystem       = std::make_unique<Haruka::WorldSystem>(); });
+    tryInit("LightCuller", [&]{ _lightCuller       = std::make_unique<LightCuller>(); });
 
-    // Registrar RenderTarget por defecto (standalone), sin pisar uno externo (viewport)
+    // ── Render targets ──────────────────────────────────────────────────────
+    tryInit("RT:Lighting",     [&]{ _lightingTarget     = std::make_unique<RenderTarget>(_width, _height); });
+    tryInit("RT:BloomExtract", [&]{ _bloomExtractTarget = std::make_unique<RenderTarget>(_width, _height); });
+    tryInit("RT:BloomPing",    [&]{ _bloomPing          = std::make_unique<RenderTarget>(_width, _height); });
+    tryInit("RT:BloomPong",    [&]{ _bloomPong          = std::make_unique<RenderTarget>(_width, _height); });
+
     if (!MotorInstance::getInstance().getRenderTarget()) {
         MotorInstance::getInstance().setRenderTarget(_lightingTarget.get());
     }
-
-    // Registrar Application para que scripts accedan a sistemas (raycast, etc)
     MotorInstance::getInstance().setApplication(this);
 
-    // Inicializar light culler para soportar ilimitadas luces
-    _lightCuller = std::make_unique<LightCuller>();
-
-    // Inicializar GPU instancing para renderizado eficiente
-    _instancing = std::make_unique<GPUInstancing>(GPUInstancing::PRECISION_FLOAT);
-    _instancing->init(100000);  // Máximo 10k instancias por batch
-
-    // Inicializar Asset Streaming para cargar assets bajo demanda
-    AssetStreamer::getInstance().init(512, 2);  // 512 MB cache, 2 worker threads
-
-    // Inicializar Debug Overlay para profiling
-    DebugOverlay::getInstance().init();
-
-    // Inicializar Compute Post-Processing
-    _computePostProcess = std::make_unique<ComputePostProcess>();
-    _computePostProcess->init(_width, _height);
-
-    // Inicializar Cascaded Shadow Maps
-    _cascadedShadow = std::make_unique<CascadedShadowMap>();
-    _cascadedShadow->init(0.1f, 300000000.0f, 0.75f);  // zNear, zFar, lambda
-
-    // Inicializar Virtual Texturing
-    _virtualTexturing = std::make_unique<VirtualTexturing>();
-    VTConfig vtConfig;
-    vtConfig.pageSize = 128;
-    vtConfig.maxResidentPages = 1024;
-    vtConfig.maxCacheMemory = 256LL * 1024 * 1024;
-    _virtualTexturing->init(vtConfig);
-
-    // Inicializar Raycast System
-    _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
-    _raycastSystem = std::make_unique<RaycastSimple>();
-    _terrainStreamingSystem = std::make_unique<Haruka::TerrainStreamingSystem>();
+    // ── Utility systems ─────────────────────────────────────────────────────
+    tryInit("GPUInstancing", [&]{
+        _instancing = std::make_unique<GPUInstancing>(GPUInstancing::PRECISION_FLOAT);
+        _instancing->init(100000);
+    });
+    tryInit("AssetStreamer",  [&]{ AssetStreamer::getInstance().init(512, 2); });
+    tryInit("DebugOverlay",   [&]{ DebugOverlay::getInstance().init(); });
+    tryInit("ComputePostPro", [&]{
+        _computePostProcess = std::make_unique<ComputePostProcess>();
+        _computePostProcess->init(_width, _height);
+    });
+    tryInit("CascadedShadow", [&]{
+        _cascadedShadow = std::make_unique<CascadedShadowMap>();
+        _cascadedShadow->init(0.1f, 300000000.0f, 0.75f);
+    });
+    tryInit("VirtualTexture", [&]{
+        _virtualTexturing = std::make_unique<VirtualTexturing>();
+        VTConfig vtConfig;
+        vtConfig.pageSize        = 128;
+        vtConfig.maxResidentPages = 1024;
+        vtConfig.maxCacheMemory  = 256LL * 1024 * 1024;
+        _virtualTexturing->init(vtConfig);
+    });
+    tryInit("PlanetarySystem", [&]{ _planetarySystem        = std::make_unique<Haruka::PlanetarySystem>(); });
+    tryInit("RaycastSystem",   [&]{ _raycastSystem          = std::make_unique<RaycastSimple>(); });
+    tryInit("TerrainStream",   [&]{ _terrainStreamingSystem = std::make_unique<Haruka::TerrainStreamingSystem>(); });
 
     setupQuad();
+    rep.record("ScreenQuad", StartupReport::OK);
 
-    // Create LOD primitives for celestial bodies
-    int lodConfigs[4][2] = {
-        {64, 32},  // LOD 0: High quality
-        {32, 16},  // LOD 1: Medium
-        {16, 8},   // LOD 2: Low
-        {8, 4}     // LOD 3: Very low
-    };
+    // ── Primitives ───────────────────────────────────────────────────────────
+    tryInit("TestCube", [&]{
+        std::vector<glm::vec3> v, n;
+        std::vector<unsigned int> idx;
+        PrimitiveShapes::createCube(1.0f, v, n, idx);
+        _testCube = std::make_unique<SimpleMesh>(v, n, idx);
+    });
 
+    int lodConfigs[4][2] = {{64,32},{32,16},{16,8},{8,4}};
     for (int i = 0; i < 4; i++) {
-        std::vector<glm::vec3> verts, norms;
-        std::vector<unsigned int> indices;
-        PrimitiveShapes::createSphere(1.0f, lodConfigs[i][0], lodConfigs[i][1], verts, norms, indices);
-        sphereLOD[i] = std::make_unique<SimpleMesh>(verts, norms, indices);
+        std::vector<glm::vec3> v, n;
+        std::vector<unsigned int> idx;
+        PrimitiveShapes::createSphere(1.0f, lodConfigs[i][0], lodConfigs[i][1], v, n, idx);
+        sphereLOD[i] = std::make_unique<SimpleMesh>(v, n, idx);
     }
-    
-    _worldSystem->initComputeShaders();
-    
-    // Initialize cached shaders (avoid recreating each frame)
-    _geomShader = std::make_unique<Shader>("shaders/deferred_geom.vert", "shaders/deferred_geom.frag");
-    _ssaoShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/ssao.frag");
-    _lightShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/deferred_light.frag");
-    _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/tonemapping.frag");
-    _flatShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/light_cube.frag");
-    _cascadeShadowShader = std::make_unique<Shader>("shaders/shadow.vert", "shaders/shadow.frag");
-    _bloomExtractShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_extract.frag");
-    _bloomBlurShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_blur.frag");
-    _pointShadowShader = std::make_unique<Shader>("shaders/point_shadow.vert", "shaders/point_shadow.frag",
-                                                   "shaders/point_shadow.geom");
-    _instancingShader = std::make_unique<Shader>("shaders/instancing.vert", "shaders/instancing.frag");
+    rep.record("SphereLODs", StartupReport::OK);
+
+    tryInit("WorldComputeShaders", [&]{ _worldSystem->initComputeShaders(); });
+
+    // ── Shaders ──────────────────────────────────────────────────────────────
+    tryInit("Shader:main",        [&]{ _mainShader        = std::make_unique<Shader>("shaders/simple.vert",       "shaders/pbr.frag"); });
+    tryInit("Shader:lamp",        [&]{ _lampShader        = std::make_unique<Shader>("shaders/simple.vert",       "shaders/light_cube.frag"); });
+    tryInit("Shader:geom",        [&]{ _geomShader        = std::make_unique<Shader>("shaders/deferred_geom.vert","shaders/deferred_geom.frag"); });
+    tryInit("Shader:ssao",        [&]{ _ssaoShader        = std::make_unique<Shader>("shaders/screenquad.vert",   "shaders/ssao.frag"); });
+    tryInit("Shader:light",       [&]{ _lightShader       = std::make_unique<Shader>("shaders/screenquad.vert",   "shaders/deferred_light.frag"); });
+    tryInit("Shader:composite",   [&]{ _compositeShader   = std::make_unique<Shader>("shaders/screenquad.vert",   "shaders/tonemapping.frag"); });
+    tryInit("Shader:flat",        [&]{ _flatShader        = std::make_unique<Shader>("shaders/simple.vert",       "shaders/light_cube.frag"); });
+    tryInit("Shader:cascade",     [&]{ _cascadeShadowShader = std::make_unique<Shader>("shaders/shadow.vert",     "shaders/shadow.frag"); });
+    tryInit("Shader:bloomExtract",[&]{ _bloomExtractShader = std::make_unique<Shader>("shaders/screenquad.vert",  "shaders/bloom_extract.frag"); });
+    tryInit("Shader:bloomBlur",   [&]{ _bloomBlurShader   = std::make_unique<Shader>("shaders/screenquad.vert",   "shaders/bloom_blur.frag"); });
+    tryInit("Shader:pointShadow", [&]{ _pointShadowShader = std::make_unique<Shader>("shaders/point_shadow.vert", "shaders/point_shadow.frag", "shaders/point_shadow.geom"); });
+    tryInit("Shader:instancing",  [&]{ _instancingShader  = std::make_unique<Shader>("shaders/instancing.vert",   "shaders/instancing.frag"); });
+
+    rep.printSummary();
 }
 
 void Application::buildRenderQueue() {
@@ -687,8 +691,9 @@ void Application::renderFrameContent() {
     }
 
     // ========== EDITOR MODE (Viewport) ==========
+    // En play mode se salta esta rama y se ejecuta el pipeline deferred completo.
     RenderTarget* editorTarget = MotorInstance::getInstance().getRenderTarget();
-    if (editorTarget) {
+    if (editorTarget && !MotorInstance::getInstance().isPlayMode()) {
         buildRenderQueue();
 
         editorTarget->bindForWriting();
@@ -947,6 +952,16 @@ void Application::renderFrameContent() {
         }
     }
         
+    // Hardcoded test cube at world origin — remove once pipeline is verified
+    if (_testCube) {
+        _geomShader->use();
+        _geomShader->setMat4("model", glm::mat4(1.0f));
+        _geomShader->setVec3("color", glm::vec3(0.8f, 0.3f, 0.1f));
+        _geomShader->setVec3("emissiveFallback", glm::vec3(0.8f, 0.3f, 0.1f));
+        _testCube->draw();
+        _geomShader->setVec3("emissiveFallback", glm::vec3(0.0f)); // reset for other objects
+    }
+
     _gBuffer->unbind();
 
     // ========== SSAO PASS ==========
@@ -1140,6 +1155,7 @@ void Application::cleanup() {
     _lightShader.reset();
     _ssaoShader.reset();
     _geomShader.reset();
+    _testCube.reset();
     for (auto& lod : sphereLOD) lod.reset();
     _terrainStreamingSystem.reset();
     _raycastSystem.reset();

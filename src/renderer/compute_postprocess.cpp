@@ -157,9 +157,13 @@ void main() {
     stats.localGroupSize = localGroupSize;
     stats.estimatedSpeedup = 1.2f;  // ~20% speedup
 
-    std::cout << "✓ Compute Post-Processing initialized\n";
-    std::cout << "  Resolution: " << screenWidth << "x" << screenHeight << "\n";
-    std::cout << "  Dispatch: " << stats.dispatchWidth << "x" << stats.dispatchHeight << "\n";
+    // Print only on first init; resize silently updates dispatch params
+    if (!initialized) {
+        std::cout << "✓ Compute Post-Processing initialized\n";
+        std::cout << "  Resolution: " << screenWidth << "x" << screenHeight << "\n";
+        std::cout << "  Dispatch: " << stats.dispatchWidth << "x" << stats.dispatchHeight << "\n";
+        initialized = true;
+    }
 }
 
 void ComputePostProcess::dispatchCompute(GLuint shader, int width, int height) {

@@ -25,7 +25,8 @@ layout(location = 2) in vec2 TexCoord;
 layout(binding = 0) uniform sampler2D texture_diffuse1;
 layout(binding = 1) uniform sampler2D texture_specular1;
 layout(binding = 2) uniform sampler2D texture_emissive1;
-layout(location = 12) uniform vec3 color;  // after vert's mat4 locations (0-11)
+layout(location = 12) uniform vec3 color;           // fallback albedo
+layout(location = 13) uniform vec3 emissiveFallback; // fallback emissive (0 = no glow)
 
 void main()
 {
@@ -37,5 +38,6 @@ void main()
     float spec = (length(specTex.rgb) > 0.01) ? specTex.r : 0.5;
     gAlbedoSpec = vec4(albedo, spec);
     vec3 emissive = texture(texture_emissive1, TexCoord).rgb;
+    if(length(emissive) < 0.01) emissive = emissiveFallback;
     gEmissive = vec4(emissive, 1.0);
 }

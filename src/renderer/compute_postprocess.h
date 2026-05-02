@@ -92,6 +92,7 @@ private:
 
     int screenWidth = 0;
     int screenHeight = 0;
+    bool initialized = false;
     int localGroupSize = 8;  // 8x8 compute groups
 
     ComputeStats stats;

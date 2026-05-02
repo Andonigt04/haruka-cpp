@@ -132,7 +132,7 @@ void GPUInstancing::render(GLuint VAO, GLuint indexCount) {
         GLuint loc = 3 + col;
         glEnableVertexAttribArray(loc);
         glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, stride,
-                              (void*)(col * 16));
+                              (void*)(uintptr_t)(col * 16));
         glVertexAttribDivisor(loc, 1);
     }
     // vec4 color at location 7

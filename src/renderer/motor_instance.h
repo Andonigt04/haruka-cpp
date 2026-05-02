@@ -72,12 +72,16 @@ public:
     bool isMotorActive() const {
         return motorScene != nullptr && motorRenderTarget != nullptr;
     }
-    
+
+    void setPlayMode(bool play) { motorPlayMode = play; }
+    bool isPlayMode() const     { return motorPlayMode; }
+
     /** @brief Clears non-owning runtime pointers. */
     void clear() {
         motorScene = nullptr;
         motorCamera = nullptr;
         motorApplication = nullptr;
+        motorPlayMode = false;
     }
 
 private:
@@ -92,4 +96,5 @@ private:
     Haruka::Scene* motorScene = nullptr;
     Camera* motorCamera = nullptr;
     Application* motorApplication = nullptr;
+    bool motorPlayMode = false;
 };

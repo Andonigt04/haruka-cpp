@@ -183,6 +183,7 @@ private:
     
     // Primitives (LOD spheres for celestial bodies)
     std::unique_ptr<SimpleMesh> sphereLOD[4];
+    std::unique_ptr<SimpleMesh> _testCube;
     
     // Shaders (cached to avoid recreation every frame)
     std::unique_ptr<Shader> _geomShader;
