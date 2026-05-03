@@ -71,23 +71,6 @@ public:
         if (layer < 1 || layer > 5) return 0.0f;
         return s_layerMaxDistance[layer];
     }
-    static int getLastRenderedVertices() { return s_lastRenderedVertices; }
-    static int getLastRenderedTriangles() { return s_lastRenderedTriangles; }
-    static int getLastRenderedDrawCalls() { return s_lastRenderedDrawCalls; }
-    static int getLastTotalVertices() { return s_lastTotalVertices; }
-    static int getLastTotalTriangles() { return s_lastTotalTriangles; }
-    static int getLastTotalDrawCalls() { return s_lastTotalDrawCalls; }
-    static int getLastVisibleChunks() { return s_lastVisibleChunks; }
-    static int getLastResidentChunks() { return s_lastResidentChunks; }
-    static int getLastPendingChunkLoads() { return s_lastPendingChunkLoads; }
-    static int getLastPendingChunkEvictions() { return s_lastPendingChunkEvictions; }
-    static int getLastResidentMemoryMB() { return s_lastResidentMemoryMB; }
-    static int getLastTrackedChunks() { return s_lastTrackedChunks; }
-    static int getLastMaxMemoryMB() { return s_lastMaxMemoryMB; }
-
-    // Instance getters — safe to call from the editor via an Application* pointer;
-    // these read instance members written by the engine, not the inline-static copies
-    // that exist separately in each binary due to the shared-library split.
     int getRenderedVertices()      const { return _iRenderedVertices; }
     int getRenderedTriangles()     const { return _iRenderedTriangles; }
     int getRenderedDrawCalls()     const { return _iRenderedDrawCalls; }
@@ -251,22 +234,6 @@ private:
         900.0f,  // layer 4: buildings
         300.0f   // layer 5: small props
     };
-    inline static int s_lastRenderedVertices = 0;
-    inline static int s_lastRenderedTriangles = 0;
-    inline static int s_lastRenderedDrawCalls = 0;
-    inline static int s_lastTotalVertices = 0;
-    inline static int s_lastTotalTriangles = 0;
-    inline static int s_lastTotalDrawCalls = 0;
-    inline static int s_lastVisibleChunks = 0;
-    inline static int s_lastResidentChunks = 0;
-    inline static int s_lastPendingChunkLoads = 0;
-    inline static int s_lastPendingChunkEvictions = 0;
-    inline static int s_lastResidentMemoryMB = 0;
-    inline static int s_lastTrackedChunks = 0;
-    inline static int s_lastMaxMemoryMB = 0;
-
-    // Instance mirrors of the inline statics — readable from the editor via an
-    // Application* pointer without the binary-split problem.
     int _iRenderedVertices      = 0;
     int _iRenderedTriangles     = 0;
     int _iRenderedDrawCalls     = 0;

@@ -505,13 +505,13 @@ void Application::buildRenderQueue() {
                                         &terrainStats);
     }
 
-    s_lastVisibleChunks       = _iVisibleChunks         = terrainStats.visibleChunks;
-    s_lastResidentChunks      = _iResidentChunks        = terrainStats.residentChunks;
-    s_lastPendingChunkLoads   = _iPendingChunkLoads     = terrainStats.pendingChunkLoads;
-    s_lastPendingChunkEvictions = _iPendingChunkEvictions = terrainStats.pendingChunkEvictions;
-    s_lastResidentMemoryMB    = _iResidentMemoryMB      = terrainStats.residentMemoryMB;
-    s_lastTrackedChunks       = _iTrackedChunks         = terrainStats.trackedChunks;
-    s_lastMaxMemoryMB         = _iMaxMemoryMB           = terrainStats.maxMemoryMB;
+    _iVisibleChunks         = terrainStats.visibleChunks;
+    _iResidentChunks        = terrainStats.residentChunks;
+    _iPendingChunkLoads     = terrainStats.pendingChunkLoads;
+    _iPendingChunkEvictions = terrainStats.pendingChunkEvictions;
+    _iResidentMemoryMB      = terrainStats.residentMemoryMB;
+    _iTrackedChunks         = terrainStats.trackedChunks;
+    _iMaxMemoryMB           = terrainStats.maxMemoryMB;
 
     // Compute camera direction relative to planet center for correct hemisphere culling.
     glm::vec3 camDirFromPlanet(0.0f, 0.0f, 1.0f);
@@ -617,53 +617,40 @@ void Application::buildRenderQueue() {
         g_sceneRenderQueue.push_back(&obj);
     }
 
-    // Contadores de total vs renderizado real
-    s_lastTotalVertices = _iTotalVertices = 0;
-    s_lastTotalTriangles = _iTotalTriangles = 0;
-    s_lastTotalDrawCalls = _iTotalDrawCalls = 0;
+    _iTotalVertices = _iTotalTriangles = _iTotalDrawCalls = 0;
     for (const auto& obj : scene->getObjects()) {
         if (isRenderDisabledByEditor(obj)) continue;
         Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
         if (!Haruka::isRenderableObjectType(objType)) continue;
         if (obj.meshRenderer) {
-            s_lastTotalDrawCalls++; _iTotalDrawCalls++;
-            s_lastTotalVertices += obj.meshRenderer->getVertexCount();
-            _iTotalVertices     += obj.meshRenderer->getVertexCount();
-            s_lastTotalTriangles += obj.meshRenderer->getTriangleCount();
-            _iTotalTriangles    += obj.meshRenderer->getTriangleCount();
+            _iTotalDrawCalls++;
+            _iTotalVertices  += obj.meshRenderer->getVertexCount();
+            _iTotalTriangles += obj.meshRenderer->getTriangleCount();
         } else if (!obj.modelPath.empty()) {
             try {
                 auto model = getOrLoadModel(obj.modelPath);
                 if (!model) continue;
-                s_lastTotalDrawCalls++; _iTotalDrawCalls++;
-                s_lastTotalVertices += model->getVertexCount();
-                _iTotalVertices     += model->getVertexCount();
-                s_lastTotalTriangles += model->getTriangleCount();
-                _iTotalTriangles    += model->getTriangleCount();
+                _iTotalDrawCalls++;
+                _iTotalVertices  += model->getVertexCount();
+                _iTotalTriangles += model->getTriangleCount();
             } catch (...) {}
         }
     }
 
-    s_lastRenderedVertices = _iRenderedVertices = 0;
-    s_lastRenderedTriangles = _iRenderedTriangles = 0;
-    s_lastRenderedDrawCalls = _iRenderedDrawCalls = 0;
+    _iRenderedVertices = _iRenderedTriangles = _iRenderedDrawCalls = 0;
     for (const auto* obj : g_sceneRenderQueue) {
         if (!obj) continue;
         if (obj->meshRenderer && obj->meshRenderer->isResident()) {
-            s_lastRenderedDrawCalls++; _iRenderedDrawCalls++;
-            s_lastRenderedVertices += obj->meshRenderer->getResidentVertexCount();
-            _iRenderedVertices     += obj->meshRenderer->getResidentVertexCount();
-            s_lastRenderedTriangles += obj->meshRenderer->getResidentTriangleCount();
-            _iRenderedTriangles    += obj->meshRenderer->getResidentTriangleCount();
+            _iRenderedDrawCalls++;
+            _iRenderedVertices  += obj->meshRenderer->getResidentVertexCount();
+            _iRenderedTriangles += obj->meshRenderer->getResidentTriangleCount();
         } else if (!obj->modelPath.empty()) {
             try {
                 auto model = getOrLoadModel(obj->modelPath);
                 if (!model) continue;
-                s_lastRenderedDrawCalls++; _iRenderedDrawCalls++;
-                s_lastRenderedVertices += model->getVertexCount();
-                _iRenderedVertices     += model->getVertexCount();
-                s_lastRenderedTriangles += model->getTriangleCount();
-                _iRenderedTriangles    += model->getTriangleCount();
+                _iRenderedDrawCalls++;
+                _iRenderedVertices  += model->getVertexCount();
+                _iRenderedTriangles += model->getTriangleCount();
             } catch (...) {}
         }
     }
@@ -882,9 +869,14 @@ void Application::renderFrameContent() {
             const bool useProc = !isLightObj && shouldUseProceduralTerrainLook(*obj);
             _flatShader->setBool(7, useProc);     // useProceduralTerrain
             if (useProc) {
-                // planetCenter and planetRadius must also be in camera-relative space.
+                // planetCenter and planetRadius in camera-relative space.
+                // Use world-space radius so terrain chunks (scale=1.0 locally,
+                // but parented to Earth at scale=6371000) get the right radius.
+                float worldRadius = g_sceneForRender
+                    ? (float)obj->getWorldScale(g_sceneForRender).x
+                    : (float)obj->scale.x;
                 _flatShader->setVec3(8, relTrans);
-                _flatShader->setFloat(9, (float)obj->scale.x);
+                _flatShader->setFloat(9, worldRadius);
             }
             if (obj->meshRenderer && obj->meshRenderer->isResident()) {
                 obj->meshRenderer->render(*_flatShader);
