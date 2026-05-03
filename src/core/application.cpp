@@ -304,6 +304,15 @@ void Application::create_gl_context() {
 }
 
 void Application::init(Haruka::Scene& scene) {
+    {
+        static FILE* s_initLog = fopen("/tmp/haruka_render.log", "a");
+        if (s_initLog) {
+            fprintf(s_initLog, "[Application::init] scene='%s' objects=%zu\n",
+                scene.getName().c_str(), scene.getObjects().size());
+            fflush(s_initLog);
+        }
+    }
+
     // Resolver la ruta base al directorio del ejecutable para que los .spv
     // se encuentren independientemente del directorio de trabajo.
     Shader::setBaseDir(SDL_GetBasePath());
@@ -397,7 +406,7 @@ void Application::init(Haruka::Scene& scene) {
     });
     tryInit("CascadedShadow", [&]{
         _cascadedShadow = std::make_unique<CascadedShadowMap>();
-        _cascadedShadow->init(0.1f, 300000000.0f, 0.75f);
+        _cascadedShadow->init(0.1f, 300000000000.0f, 0.75f);
     });
     tryInit("VirtualTexture", [&]{
         _virtualTexturing = std::make_unique<VirtualTexturing>();
@@ -448,6 +457,7 @@ void Application::init(Haruka::Scene& scene) {
     tryInit("Shader:instancing",  [&]{ _instancingShader  = std::make_unique<Shader>("shaders/instancing.vert",   "shaders/instancing.frag"); });
 
     rep.printSummary();
+    _diagFramesLeft = 5;  // trigger per-init diagnostics for the next 5 frames
 }
 
 void Application::buildRenderQueue() {
@@ -465,8 +475,8 @@ void Application::buildRenderQueue() {
         activeCamera = _camera.get();
     }
 
-    const double nearPlane = 0.0001;
-    const double farPlane = 300000000.0;
+    const double nearPlane = 0.1;            // 10 cm
+    const double farPlane = 300000000000.0;  // 300 billion m = 300 Gm (~2 AU)
     const double aspect = (_height > 0) ? static_cast<double>(_width) / static_cast<double>(_height) : (16.0 / 9.0);
 
     glm::dvec3 camPos(0.0);
@@ -477,7 +487,11 @@ void Application::buildRenderQueue() {
         camPos = activeCamera->position;
         glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), static_cast<float>(aspect), static_cast<float>(nearPlane), static_cast<float>(farPlane));
         glm::mat4 view = activeCamera->getViewMatrix();
-        viewProj = proj * view;
+        // Strip translation from view matrix so frustum planes are in camera-relative
+        // space. At world coordinates ~1.5e11 m, float32 ULP is ~16 km and a straight
+        // proj*view culling test causes catastrophic cancellation → chunks rejected.
+        glm::mat4 viewRot = glm::mat4(glm::mat3(view));
+        viewProj = proj * viewRot;
         canCullByFrustum = true;
     }
 
@@ -491,13 +505,13 @@ void Application::buildRenderQueue() {
                                         &terrainStats);
     }
 
-    s_lastVisibleChunks = terrainStats.visibleChunks;
-    s_lastResidentChunks = terrainStats.residentChunks;
-    s_lastPendingChunkLoads = terrainStats.pendingChunkLoads;
-    s_lastPendingChunkEvictions = terrainStats.pendingChunkEvictions;
-    s_lastResidentMemoryMB = terrainStats.residentMemoryMB;
-    s_lastTrackedChunks = terrainStats.trackedChunks;
-    s_lastMaxMemoryMB = terrainStats.maxMemoryMB;
+    s_lastVisibleChunks       = _iVisibleChunks         = terrainStats.visibleChunks;
+    s_lastResidentChunks      = _iResidentChunks        = terrainStats.residentChunks;
+    s_lastPendingChunkLoads   = _iPendingChunkLoads     = terrainStats.pendingChunkLoads;
+    s_lastPendingChunkEvictions = _iPendingChunkEvictions = terrainStats.pendingChunkEvictions;
+    s_lastResidentMemoryMB    = _iResidentMemoryMB      = terrainStats.residentMemoryMB;
+    s_lastTrackedChunks       = _iTrackedChunks         = terrainStats.trackedChunks;
+    s_lastMaxMemoryMB         = _iMaxMemoryMB           = terrainStats.maxMemoryMB;
 
     // Compute camera direction relative to planet center for correct hemisphere culling.
     glm::vec3 camDirFromPlanet(0.0f, 0.0f, 1.0f);
@@ -518,7 +532,13 @@ void Application::buildRenderQueue() {
         const glm::dvec3& worldPos = obj.getWorldPosition(scene);
         const glm::dvec3& worldScale = obj.getWorldScale(scene);
         double maxScale = std::max(std::abs(worldScale.x), std::max(std::abs(worldScale.y), std::abs(worldScale.z)));
-        const bool isHugeBody = (maxScale > 1000.0) || (obj.name == "Earth") || (obj.name == "Sun");
+        // isPlanetRoot objects are managed by the terrain streaming system (they get
+        // their base mesh released once chunks are resident). Keep them in the render
+        // queue unconditionally so the base sphere is visible before chunks arrive.
+        const bool isPlanetRoot = obj.properties.is_object()
+            && obj.properties.contains("terrainEditor")
+            && obj.properties["terrainEditor"].value("isPlanetRoot", false);
+        const bool isHugeBody = isPlanetRoot || (maxScale > 1000.0) || (obj.name == "Earth") || (obj.name == "Sun");
 
         // Cuerpos gigantes (Earth/Sun) nunca se descargan ni se reconstruyen
         if (!isHugeBody) {
@@ -546,8 +566,24 @@ void Application::buildRenderQueue() {
             }
         }
 
-        // Cuerpos gigantes siempre se renderizan sin culling
+        // Cuerpos gigantes siempre se renderizan sin culling.
+        // Build their primitive mesh on demand if not yet resident (the normal
+        // distance-based lifecycle skips isHugeBody objects, so we must do it here).
         if (isHugeBody) {
+            if (!obj.meshRenderer) {
+                obj.meshRenderer = std::make_shared<MeshRendererComponent>();
+            }
+            if (!obj.meshRenderer->isResident()) {
+                // Try structured property path first.
+                buildPrimitiveMeshFromProperties(obj);
+                // If still no mesh (no meshRenderer property), generate a unit sphere fallback.
+                if (!obj.meshRenderer->isResident()) {
+                    std::vector<glm::vec3> v, n;
+                    std::vector<unsigned int> idx;
+                    PrimitiveShapes::createSphere(1.0f, 32, 32, v, n, idx);
+                    obj.meshRenderer->setMesh(v, n, idx);
+                }
+            }
             g_sceneRenderQueue.push_back(&obj);
             continue;
         }
@@ -571,7 +607,7 @@ void Application::buildRenderQueue() {
             }
 
             if (!isSphereInsideCameraFrustum(
-                    worldPos,
+                    worldPos - camPos,
                     radius,
                     viewProj)) {
                 continue;
@@ -582,44 +618,52 @@ void Application::buildRenderQueue() {
     }
 
     // Contadores de total vs renderizado real
-    s_lastTotalVertices = 0;
-    s_lastTotalTriangles = 0;
-    s_lastTotalDrawCalls = 0;
+    s_lastTotalVertices = _iTotalVertices = 0;
+    s_lastTotalTriangles = _iTotalTriangles = 0;
+    s_lastTotalDrawCalls = _iTotalDrawCalls = 0;
     for (const auto& obj : scene->getObjects()) {
         if (isRenderDisabledByEditor(obj)) continue;
         Haruka::ObjectType objType = Haruka::stringToObjectType(obj.type);
         if (!Haruka::isRenderableObjectType(objType)) continue;
         if (obj.meshRenderer) {
-            s_lastTotalDrawCalls++;
+            s_lastTotalDrawCalls++; _iTotalDrawCalls++;
             s_lastTotalVertices += obj.meshRenderer->getVertexCount();
+            _iTotalVertices     += obj.meshRenderer->getVertexCount();
             s_lastTotalTriangles += obj.meshRenderer->getTriangleCount();
+            _iTotalTriangles    += obj.meshRenderer->getTriangleCount();
         } else if (!obj.modelPath.empty()) {
             try {
                 auto model = getOrLoadModel(obj.modelPath);
                 if (!model) continue;
-                s_lastTotalDrawCalls++;
+                s_lastTotalDrawCalls++; _iTotalDrawCalls++;
                 s_lastTotalVertices += model->getVertexCount();
+                _iTotalVertices     += model->getVertexCount();
                 s_lastTotalTriangles += model->getTriangleCount();
+                _iTotalTriangles    += model->getTriangleCount();
             } catch (...) {}
         }
     }
 
-    s_lastRenderedVertices = 0;
-    s_lastRenderedTriangles = 0;
-    s_lastRenderedDrawCalls = 0;
+    s_lastRenderedVertices = _iRenderedVertices = 0;
+    s_lastRenderedTriangles = _iRenderedTriangles = 0;
+    s_lastRenderedDrawCalls = _iRenderedDrawCalls = 0;
     for (const auto* obj : g_sceneRenderQueue) {
         if (!obj) continue;
         if (obj->meshRenderer && obj->meshRenderer->isResident()) {
-            s_lastRenderedDrawCalls++;
+            s_lastRenderedDrawCalls++; _iRenderedDrawCalls++;
             s_lastRenderedVertices += obj->meshRenderer->getResidentVertexCount();
+            _iRenderedVertices     += obj->meshRenderer->getResidentVertexCount();
             s_lastRenderedTriangles += obj->meshRenderer->getResidentTriangleCount();
+            _iRenderedTriangles    += obj->meshRenderer->getResidentTriangleCount();
         } else if (!obj->modelPath.empty()) {
             try {
                 auto model = getOrLoadModel(obj->modelPath);
                 if (!model) continue;
-                s_lastRenderedDrawCalls++;
+                s_lastRenderedDrawCalls++; _iRenderedDrawCalls++;
                 s_lastRenderedVertices += model->getVertexCount();
+                _iRenderedVertices     += model->getVertexCount();
                 s_lastRenderedTriangles += model->getTriangleCount();
+                _iRenderedTriangles    += model->getTriangleCount();
             } catch (...) {}
         }
     }
@@ -649,9 +693,28 @@ void Application::main_loop() {
 }
 
 void Application::renderFrame() {
+    static FILE* s_log = nullptr;
+    if (!s_log) s_log = fopen("/tmp/haruka_render.log", "w");
+
     Haruka::Scene* scene = MotorInstance::getInstance().getScene();
-    if (!scene && !_currentScene) return;
-    if (!_camera) return;
+    if (!scene && !_currentScene) {
+        if (s_log) { fprintf(s_log, "renderFrame: early exit — no scene\n"); fflush(s_log); }
+        return;
+    }
+    if (!_camera) {
+        if (s_log) { fprintf(s_log, "renderFrame: early exit — no _camera\n"); fflush(s_log); }
+        return;
+    }
+
+    static int s_frameCount = 0;
+    if (++s_frameCount <= 3 && s_log) {
+        fprintf(s_log, "renderFrame #%d: scene=%s camera=(%g,%g,%g) motorRT=%p\n",
+            s_frameCount,
+            scene ? scene->getName().c_str() : (_currentScene ? _currentScene->getName().c_str() : "null"),
+            (double)_camera->position.x, (double)_camera->position.y, (double)_camera->position.z,
+            (void*)MotorInstance::getInstance().getRenderTarget());
+        fflush(s_log);
+    }
 
     _frameStart = std::chrono::high_resolution_clock::now();
 
@@ -671,14 +734,18 @@ void Application::renderFrame() {
 }
 
 void Application::renderFrameContent() {
+    static FILE* s_log2 = fopen("/tmp/haruka_render.log", "a");
     // ========== SETUP ==========
     Camera* activeCamera = MotorInstance::getInstance().getCamera();
     if (!activeCamera) {
         activeCamera = _camera.get();
     }
-    if (!activeCamera) return;
+    if (!activeCamera) {
+        if (s_log2) { fprintf(s_log2, "renderFrameContent: no activeCamera\n"); fflush(s_log2); }
+        return;
+    }
 
-    glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), (float)_width / (float)_height, 0.0001f, 300000000.0f);
+    glm::mat4 proj = glm::perspective(glm::radians(activeCamera->zoom), (float)_width / (float)_height, 0.1f, 300000000000.0f);
     glm::mat4 view = activeCamera->getViewMatrix();
 
     // Camera direction relative to planet center for correct hemisphere culling.
@@ -691,49 +758,134 @@ void Application::renderFrameContent() {
     }
 
     // ========== EDITOR MODE (Viewport) ==========
-    // En play mode se salta esta rama y se ejecuta el pipeline deferred completo.
-    RenderTarget* editorTarget = MotorInstance::getInstance().getRenderTarget();
+    // Use _editorTarget set directly by the viewport (bypasses MotorInstance singleton split
+    // between the engine lib and the editor executable). Fall back to MotorInstance only when
+    // the engine is running standalone (no editor target set).
+    RenderTarget* editorTarget = _editorTarget
+        ? _editorTarget
+        : MotorInstance::getInstance().getRenderTarget();
+    {
+        static bool s_pathLogged = false;
+        if (!s_pathLogged) {
+            s_pathLogged = true;
+            if (s_log2) {
+                fprintf(s_log2,
+                    "renderFrameContent: _editorTarget=%p motorRT=%p using=%p isPlayMode=%d\n",
+                    (void*)_editorTarget,
+                    (void*)MotorInstance::getInstance().getRenderTarget(),
+                    (void*)editorTarget,
+                    (int)MotorInstance::getInstance().isPlayMode());
+                fflush(s_log2);
+            }
+        }
+    }
     if (editorTarget && !MotorInstance::getInstance().isPlayMode()) {
         buildRenderQueue();
+
+        // ── PER-INIT DIAGNOSTICS: fire for first 5 frames after each init() ──
+        if (_diagFramesLeft > 0) {
+            --_diagFramesLeft;
+            GLint linked = 0;
+            if (_flatShader) glGetProgramiv(_flatShader->ID, GL_LINK_STATUS, &linked);
+            editorTarget->bindForWriting();
+            GLenum fbStatus = glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER);
+
+            Haruka::Scene* dbgScene = MotorInstance::getInstance().getScene();
+            if (!dbgScene) dbgScene = _currentScene.get();
+
+            char buf[512];
+            snprintf(buf, sizeof(buf),
+                "[RenderDiag#%d] scene=%s flatShader.ID=%u linked=%d"
+                " fbStatus=0x%X queueSize=%zu _editorTarget=%p\n",
+                5 - _diagFramesLeft,
+                dbgScene ? dbgScene->getName().c_str() : "null",
+                _flatShader ? _flatShader->ID : 0u, linked,
+                fbStatus, g_sceneRenderQueue.size(),
+                (void*)_editorTarget);
+            if (s_log2) { fprintf(s_log2, "%s", buf); fflush(s_log2); }
+
+            int shown = 0;
+            for (const auto* o : g_sceneRenderQueue) {
+                if (!o || shown++ >= 6) break;
+                bool res   = o->meshRenderer && o->meshRenderer->isResident();
+                int  verts = res ? o->meshRenderer->getResidentVertexCount() : 0;
+                snprintf(buf, sizeof(buf),
+                    "[RenderDiag]   \"%s\" type=%s resident=%d verts=%d\n",
+                    o->name.c_str(), o->type.c_str(), (int)res, verts);
+                if (s_log2) { fprintf(s_log2, "%s", buf); fflush(s_log2); }
+            }
+            if (g_sceneRenderQueue.empty() && s_log2) {
+                fprintf(s_log2, "[RenderDiag]   (queue empty)\n");
+                fflush(s_log2);
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────
 
         editorTarget->bindForWriting();
         glEnable(GL_DEPTH_TEST);
         glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+        // simple.vert layout locations:  model=0, view=1, projection=2
+        // light_cube.frag layout locs:   lightColor=3, sunDirection=4, sunLightColor=5,
+        //                                ambientStrength=6, useProceduralTerrain=7
+        //                                planetCenter=8, planetRadius=9
+        //
+        // Camera-relative rendering: strip translation from the view matrix and
+        // inject a camera-relative translation into each model matrix instead.
+        // The subtraction (objWorldPos - camPos) is done in double precision so
+        // float32 never sees the large absolute world coordinates (~149M units).
+        glm::dvec3 camPosD = glm::dvec3(activeCamera->position);
+        glm::mat4 viewRot  = glm::mat4(glm::mat3(view)); // rotation only, no translation
+
         _flatShader->use();
-        _flatShader->setMat4("projection", proj);
-        _flatShader->setMat4("view", view);
+        _flatShader->setMat4(2, proj);    // projection
+        _flatShader->setMat4(1, viewRot); // view (rotation-only)
 
         glm::vec3 sunDir = glm::normalize(glm::vec3(0.3f, 0.6f, 0.7f));
         glm::vec3 sunLightColor = glm::vec3(1.0f);
         for (const auto* obj : g_sceneRenderQueue) {
             if (!obj) continue;
             if (obj->type == "Light" || obj->type == "PointLight" || obj->type == "DirectionalLight") {
-                glm::vec3 p = glm::vec3(obj->getWorldPosition(g_sceneForRender));
-                if (glm::length(p) > 0.0001f) {
-                    sunDir = glm::normalize(p);
-                }
+                // Sun direction = from camera toward sun (camera-relative space)
+                glm::dvec3 sunWorldPos = obj->getWorldPosition(g_sceneForRender);
+                glm::vec3 toSun = glm::vec3(sunWorldPos - camPosD);
+                if (glm::length(toSun) > 0.001f) sunDir = glm::normalize(toSun);
                 float sunEnergy = std::clamp(std::max((float)obj->intensity, 0.0f) * 0.01f, 0.2f, 2.0f);
                 sunLightColor = glm::vec3(obj->color) * sunEnergy;
                 break;
             }
         }
-        _flatShader->setVec3("sunDirection", sunDir);
-        _flatShader->setVec3("sunLightColor", sunLightColor);
-        _flatShader->setFloat("ambientStrength", 0.12f);
+        _flatShader->setVec3(4, sunDir);         // sunDirection
+        _flatShader->setVec3(5, sunLightColor);  // sunLightColor
+        _flatShader->setFloat(6, 0.12f);         // ambientStrength
 
         for (const auto* obj : g_sceneRenderQueue) {
             if (!obj) continue;
-            glm::mat4 modelMatrix = g_sceneForRender ? obj->getWorldTransform(g_sceneForRender) : glm::mat4(1.0f);
-            _flatShader->setMat4("model", modelMatrix);
+            // Build camera-relative model matrix:
+            // keep rotation+scale from the world transform, replace translation
+            // with high-precision (double) offset from camera.
+            glm::mat4 worldTransform = g_sceneForRender
+                ? obj->getWorldTransform(g_sceneForRender) : glm::mat4(1.0f);
+            glm::dvec3 objWorldPos = g_sceneForRender
+                ? obj->getWorldPosition(g_sceneForRender) : glm::dvec3(0.0);
+            glm::vec3 relTrans = glm::vec3(objWorldPos - camPosD);
+            worldTransform[3] = glm::vec4(relTrans, 1.0f);
+
+            _flatShader->setMat4(0, worldTransform); // model (camera-relative)
             glm::vec3 baseColor = glm::vec3(obj->color);
             if (glm::length(baseColor) < 0.001f) baseColor = glm::vec3(0.8f, 0.8f, 0.8f);
             const bool isLightObj = (obj->type == "Light" || obj->type == "PointLight" || obj->type == "DirectionalLight");
             float emission = isLightObj ? std::max((float)obj->intensity, 0.0f) : 1.0f;
             glm::vec3 c = isLightObj ? (baseColor * emission) : baseColor;
-            _flatShader->setVec3("lightColor", c);
-            _flatShader->setBool("useProceduralTerrain", !isLightObj && shouldUseProceduralTerrainLook(*obj));
+            _flatShader->setVec3(3, c);           // lightColor
+            const bool useProc = !isLightObj && shouldUseProceduralTerrainLook(*obj);
+            _flatShader->setBool(7, useProc);     // useProceduralTerrain
+            if (useProc) {
+                // planetCenter and planetRadius must also be in camera-relative space.
+                _flatShader->setVec3(8, relTrans);
+                _flatShader->setFloat(9, (float)obj->scale.x);
+            }
             if (obj->meshRenderer && obj->meshRenderer->isResident()) {
                 obj->meshRenderer->render(*_flatShader);
                 continue;
@@ -742,9 +894,7 @@ void Application::renderFrameContent() {
                 try {
                     auto model = getOrLoadModel(obj->modelPath);
                     if (model) model->Draw(*_flatShader);
-                } catch (...) {
-                    // Ignorar en fallback
-                }
+                } catch (...) {}
                 continue;
             }
         }
@@ -783,8 +933,8 @@ void Application::renderFrameContent() {
         camForward,
         camUp,
         (float)_width / (float)_height,
-        0.0001f,
-        300000000.0f,
+        0.1f,
+        300000000000.0f,
         75.0f
     );
 
@@ -1074,7 +1224,9 @@ void Application::renderFrameContent() {
     // After 10 iters (even), last write → pingpong[1] = _bloomPong
 
     // ========== FINAL COMPOSITE ==========
-    RenderTarget* externalTarget = MotorInstance::getInstance().getRenderTarget();
+    RenderTarget* externalTarget = _editorTarget
+        ? _editorTarget
+        : MotorInstance::getInstance().getRenderTarget();
     if (externalTarget) {
         externalTarget->bindForWriting();
     }

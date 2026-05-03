@@ -85,6 +85,23 @@ public:
     static int getLastTrackedChunks() { return s_lastTrackedChunks; }
     static int getLastMaxMemoryMB() { return s_lastMaxMemoryMB; }
 
+    // Instance getters — safe to call from the editor via an Application* pointer;
+    // these read instance members written by the engine, not the inline-static copies
+    // that exist separately in each binary due to the shared-library split.
+    int getRenderedVertices()      const { return _iRenderedVertices; }
+    int getRenderedTriangles()     const { return _iRenderedTriangles; }
+    int getRenderedDrawCalls()     const { return _iRenderedDrawCalls; }
+    int getTotalVertices()         const { return _iTotalVertices; }
+    int getTotalTriangles()        const { return _iTotalTriangles; }
+    int getTotalDrawCalls()        const { return _iTotalDrawCalls; }
+    int getVisibleChunks()         const { return _iVisibleChunks; }
+    int getResidentChunks()        const { return _iResidentChunks; }
+    int getPendingChunkLoads()     const { return _iPendingChunkLoads; }
+    int getPendingChunkEvictions() const { return _iPendingChunkEvictions; }
+    int getResidentMemoryMB()      const { return _iResidentMemoryMB; }
+    int getTrackedChunks()         const { return _iTrackedChunks; }
+    int getMaxMemoryMB()           const { return _iMaxMemoryMB; }
+
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
@@ -127,6 +144,10 @@ public:
     void create_gl_context();
     /** @brief Recreates all size-dependent FBOs when the viewport is resized. */
     void recreateFBOs(int newWidth, int newHeight);
+    /** @brief Sets the viewport-owned FBO that the editor render path writes into.
+     *  Must be called after recreateRenderTarget() on the viewport side. */
+    void setEditorTarget(RenderTarget* rt) { _editorTarget = rt; }
+
     /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
     /** @brief Builds the render queue with frustum culling and LOD management. */
@@ -175,6 +196,11 @@ private:
     std::unique_ptr<RaycastSimple> _raycastSystem;
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
     
+    // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
+    RenderTarget* _editorTarget = nullptr;
+    // Resets to 0 on each init(); renderFrameContent logs the first 5 frames per init.
+    int _diagFramesLeft = 0;
+
     // Render targets
     std::unique_ptr<RenderTarget> _lightingTarget;
     std::unique_ptr<RenderTarget> _bloomExtractTarget;
@@ -238,6 +264,22 @@ private:
     inline static int s_lastResidentMemoryMB = 0;
     inline static int s_lastTrackedChunks = 0;
     inline static int s_lastMaxMemoryMB = 0;
+
+    // Instance mirrors of the inline statics — readable from the editor via an
+    // Application* pointer without the binary-split problem.
+    int _iRenderedVertices      = 0;
+    int _iRenderedTriangles     = 0;
+    int _iRenderedDrawCalls     = 0;
+    int _iTotalVertices         = 0;
+    int _iTotalTriangles        = 0;
+    int _iTotalDrawCalls        = 0;
+    int _iVisibleChunks         = 0;
+    int _iResidentChunks        = 0;
+    int _iPendingChunkLoads     = 0;
+    int _iPendingChunkEvictions = 0;
+    int _iResidentMemoryMB      = 0;
+    int _iTrackedChunks         = 0;
+    int _iMaxMemoryMB           = 0;
 };
 
 #endif

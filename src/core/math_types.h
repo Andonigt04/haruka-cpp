@@ -27,12 +27,13 @@ namespace Haruka {
     /** @brief Unit and scale helpers for astrophysical distances. */
     namespace Units
     {
-        /** @brief Base unit expressed in kilometers. */
-        constexpr double KM = 1.0;
+        /** @brief Base unit: one meter. All world-space coordinates are in metres. */
+        constexpr double METER = 1.0;
+        constexpr double KM    = 1000.0 * METER;
 
         /** @name Large-scale distance helpers */
         ///@{
-        constexpr double MEGAMETER = 1000.0 * KM; // 10³ km
+        constexpr double MEGAMETER = 1000.0 * KM; // 10⁶ m
         constexpr double GIGAMETER = 1000000.0 * KM; // 10⁶ km
         constexpr double TERAMETER = 1000000000.0 * KM; // 10⁹ km
         constexpr double PETAMETER = 1000000000000.0 * KM; // 10¹² km
@@ -63,23 +64,17 @@ namespace Haruka {
         constexpr double INTERGALACTIC_DISTANCE = 2.5e6 * LIGHT_YEAR;
         ///@}
 
-        /** @brief Render-space kilometer scale (1 unit = 1 km). */
-        constexpr double RENDER_KM_PER_UNIT = 1.0;
+        /** @brief Render-space scale (1 unit = 1 m). */
+        constexpr double RENDER_M_PER_UNIT = 1.0;
 
-        /** @brief Converts kilometers to render units. */
-        inline double kmToRender(double km) {
-            return km / RENDER_KM_PER_UNIT;
-        }
+        /** @brief Converts metres to render units. */
+        inline double mToRender(double m) { return m / RENDER_M_PER_UNIT; }
 
-        /** @brief Converts kilometer vector to render-space vector. */
-        inline glm::dvec3 kmToRender(const glm::dvec3& kmVec) {
-            return kmVec / RENDER_KM_PER_UNIT;
-        }
+        /** @brief Converts kilometres to render units. */
+        inline double kmToRender(double km) { return km * KM / RENDER_M_PER_UNIT; }
 
-        /** @brief Converts kilometer vector to render-space vector. */
-        inline glm::vec3 kmToRender(const glm::vec3& kmVec) {
-            return kmVec / static_cast<float>(RENDER_KM_PER_UNIT);
-        }
+        inline glm::dvec3 kmToRender(const glm::dvec3& kmVec) { return kmVec * KM / RENDER_M_PER_UNIT; }
+        inline glm::vec3  kmToRender(const glm::vec3&  kmVec) { return kmVec * static_cast<float>(KM / RENDER_M_PER_UNIT); }
     }
 };
 #endif

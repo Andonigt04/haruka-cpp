@@ -76,6 +76,18 @@ bool TerrainStreamingSystem::buildTerrainChunkTemplate(Scene* scene, TerrainChun
         return true;
     }
 
+    // Source name from the explicit planet root (isPlanetRoot=true only).
+    if (outTpl.sourceName.empty()) {
+        for (const auto& obj : scene->getObjects()) {
+            if (!obj.properties.is_object() || !obj.properties.contains("terrainEditor")) continue;
+            const auto& te = obj.properties["terrainEditor"];
+            if (te.is_object() && te.value("isPlanetRoot", false)) {
+                outTpl.sourceName = obj.name;
+                break;
+            }
+        }
+    }
+
     if (SceneObject* source = scene->getObject(outTpl.sourceName)) {
         outTpl.type = source->type;
         outTpl.color = source->color;
@@ -107,19 +119,8 @@ SceneObject* TerrainStreamingSystem::createTerrainChunkForKey(Scene* scene, cons
         }
     }
 
-    // Fallback: find largest planet by mesh size
-    if (parentIdx < 0) {
-        size_t maxVerts = 0;
-        for (size_t i = 0; i < objects.size(); ++i) {
-            const auto& obj = objects[i];
-            if (!obj.meshRenderer) continue;
-            const auto& verts = obj.meshRenderer->getSourceVertices();
-            if (verts.size() > 1000 && glm::length(obj.scale) > 1000.0f && verts.size() > maxVerts) {
-                parentIdx = static_cast<int>(i);
-                maxVerts = verts.size();
-            }
-        }
-    }
+    // Only objects with explicit isPlanetRoot=true are valid terrain parents.
+    if (parentIdx < 0) return nullptr;
 
     SceneObject obj;
     obj.name = tpl.sourceName + "_chunk_f" + std::to_string(key.face)
@@ -164,20 +165,7 @@ int TerrainStreamingSystem::findPlanetRootIndex(Scene* scene) {
             return static_cast<int>(i);
         }
     }
-
-    // Fallback: find largest planet by mesh size
-    size_t maxVerts = 0;
-    int planetIdx = -1;
-    for (size_t i = 0; i < objects.size(); ++i) {
-        const auto& obj = objects[i];
-        if (!obj.meshRenderer) continue;
-        const auto& verts = obj.meshRenderer->getSourceVertices();
-        if (verts.size() > 1000 && glm::length(obj.scale) > 1000.0f && verts.size() > maxVerts) {
-            planetIdx = static_cast<int>(i);
-            maxVerts = verts.size();
-        }
-    }
-    return planetIdx;
+    return -1; // Only explicit isPlanetRoot property marks a terrain root
 }
 
 void TerrainStreamingSystem::addChunkAsChild(Scene* scene, SceneObject& chunk, int parentIdx) {
@@ -218,37 +206,27 @@ void TerrainStreamingSystem::ensureTerrainChunkKeysAndGrid(Scene* scene, WorldSy
         }
     }
 
-    if (!planetObj) {
-        size_t maxVertCount = 0;
-        for (auto& obj : scene->getObjectsMutable()) {
-            if (!obj.meshRenderer) continue;
-            const auto& verts = obj.meshRenderer->getSourceVertices();
-            if (verts.empty()) continue;
-            const float scale = glm::length(obj.scale);
-            if (verts.size() > 1000 && scale > 1000.0f && verts.size() > maxVertCount) {
-                planetObj = &obj;
-                maxVertCount = verts.size();
-            }
-        }
+    if (!planetObj) return; // Only explicit isPlanetRoot=true is a valid terrain root
+
+    // Tell WorldSystem the actual planet surface radius so updateVisibleChunks
+    // can project chunk positions onto the real surface (not onto the camera-distance sphere).
+    const float surfaceRadius = static_cast<float>(planetObj->scale.x);
+    if (surfaceRadius > 1.0f) {
+        worldSystem->setPlanetRadius(surfaceRadius);
     }
 
-    if (!planetObj) return;
-
-
-    // Lógica de visibilidad del mesh base:
-    // Si hay chunks residentes/visibles, liberar mesh base. Si no hay, restaurar mesh base.
-    bool hasChunks = false;
+    // Only release the base mesh once resident chunks cover the view.
+    // If no chunks are resident yet, keep the base mesh so the planet stays visible.
+    bool hasResidentChunks = false;
     if (worldSystem) {
-        const auto& visibleChunks = worldSystem->getVisibleChunks();
-        hasChunks = !visibleChunks.empty();
+        hasResidentChunks = worldSystem->getResidentChunkCount() > 0;
     }
-    // Ocultar SIEMPRE el mesh base del planeta para pruebas visuales
-    if (planetObj->meshRenderer) {
+    if (hasResidentChunks && planetObj->meshRenderer) {
         planetObj->meshRenderer->releaseMesh();
     }
 
-    int tilesPerFace = 16;  // Default: aumentado de 4 a 16 para mejor definición
-    int maxLod = 4;         // Default: aumentado de 2 a 4 para más niveles
+    int tilesPerFace = 16;
+    int maxLod = 4;
     if (planetObj->properties.is_object() && planetObj->properties.contains("terrainEditor")) {
         const auto& te = planetObj->properties["terrainEditor"];
         if (te.is_object()) {
@@ -489,13 +467,13 @@ void TerrainStreamingSystem::update(Scene* scene, WorldSystem* worldSystem, Plan
     worldSystem->updateLocalPositions(camera->position);
         
     // Extended view distance for better LOD transitions and less pop-in
-    float maxViewDistance = 60000.0f;  // Vista muy extendida para evitar pop-in
+    float maxViewDistance = 60000000.0f;  // 60 000 km view distance
     worldSystem->frustumCull(camera->position, camera->getViewMatrix(), maxViewDistance);
     
     // Aggressive chunk loading: load chunks en dirección de la cámara
     // Solo cargar chunks que estén en el hemisferio hacia el que mira la cámara
-    float loadDistance = 30000.0f;     // Load radius en dirección forward
-    float unloadDistance = 45000.0f;   // Only unload very far chunks
+    float loadDistance = 30000000.0f;    // 30 000 km load radius
+    float unloadDistance = 45000000.0f;  // 45 000 km unload radius
     
     // Pasar pointer a camera directamente sin extraer variables
     worldSystem->updateVisibleChunks(loadDistance, 0, camera);

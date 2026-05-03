@@ -140,6 +140,11 @@ public:
     void setPlanetCenter(Haruka::WorldPos center) { planetCenter = center; }
     /** @brief Returns the current planet center in world space. */
     Haruka::WorldPos getPlanetCenter() const { return planetCenter; }
+    /** @brief Sets the planet surface radius (world units). Used by updateVisibleChunks
+     *  to project chunk positions onto the actual planet surface instead of using the
+     *  camera-to-planet distance as a proxy radius. */
+    void setPlanetRadius(float r) { planetRadius = std::max(r, 1.0f); }
+    float getPlanetRadius() const { return planetRadius; }
     /** @brief Updates current visible chunk set from camera state. */
     void updateVisibleChunks(float viewDistanceKm, int lod, Camera* camera = nullptr);
 
@@ -171,12 +176,12 @@ private:
     std::vector<CelestialBody> celestialBodies;
     float lodDistances[4];
 
-    // Radios de cúpulas LOD (en unidades)
-    float domeRadius0 = 1000.0f;   // Máxima calidad
-    float domeRadius1 = 5000.0f;   // Media
-    float domeRadius2 = 20000.0f;  // Mínima
+    // LOD dome radii in metres (base values; updateVisibleChunks scales them by altitude)
+    float domeRadius0 =    1000000.0f; // High quality   (~1000 km)
+    float domeRadius1 =    5000000.0f; // Medium         (~5000 km)
+    float domeRadius2 =   20000000.0f; // Low / minimum  (~20000 km)
 
-    // Flag para indicar si solo se debe renderizar el mesh base
+    float planetRadius = 6371.0f;  // Surface radius in world units; set via setPlanetRadius()
     bool renderBaseMeshOnly = false;
 
     // Chunk streaming state

@@ -1,5 +1,6 @@
 #include "world_system.h"
 #include "camera.h"
+#include <algorithm>
 #include <cmath>
 #include <set>
 
@@ -148,6 +149,15 @@ void WorldSystem::updateVisibleChunks(float viewDistanceKm, int lod, Camera* cam
     const bool fixedGrid = (chunkGridTilesX > 0 && chunkGridTilesY > 0);
     const int keyLodBase = (chunkGridTilesX > 0 && chunkGridTilesY > 0) ? chunkGridLod : lodClamped;
 
+    // Adapt dome radii to camera altitude so they always cover the visible hemisphere.
+    // When the camera is outside the planet (camLen > planetRadius), chunks on the
+    // equatorial band have realDistance ≈ sqrt(altitude² + planetRadius²) which can
+    // exceed the hardcoded domeRadius2 and get silently dropped.
+    const float altitude = static_cast<float>(std::max(camLen - planetRadius, 1.0));
+    const float adaptedDome0 = std::max(domeRadius0, altitude * 0.15f);
+    const float adaptedDome1 = std::max(domeRadius1, altitude * 0.50f);
+    const float adaptedDome2 = std::max(domeRadius2, altitude + planetRadius * 2.0f);
+
     const double viewRatio = std::clamp(static_cast<double>(viewDistanceKm) / std::max(1.0, camLen), 0.05, 2.5);
     const double horizonDot = -0.8;
 
@@ -174,20 +184,22 @@ void WorldSystem::updateVisibleChunks(float viewDistanceKm, int lod, Camera* cam
                 const double dotv = glm::dot(dir, camDir);
                 if (dotv < horizonDot) continue;
 
-                glm::dvec3 chunkWorldPos = planetCenter + dir * camLen;
+                // Project onto the actual planet surface, not onto a sphere at the
+                // camera distance. This is the fix for chunks never loading when the
+                // camera is outside the planet (camLen >> planetRadius).
+                glm::dvec3 chunkWorldPos = planetCenter + dir * static_cast<double>(planetRadius);
                 double realDistance = glm::length(camera->position - chunkWorldPos);
 
-                // Lógica de cúpulas LOD
+                // LOD dome selection (radii adapted to camera altitude above planet)
                 int chunkLOD = -1;
-                if (realDistance < domeRadius0) {
-                    chunkLOD = 0; // Máxima calidad
-                } else if (realDistance < domeRadius1) {
-                    chunkLOD = 1; // Media
-                } else if (realDistance < domeRadius2) {
-                    chunkLOD = 2; // Mínima
+                if (realDistance < adaptedDome0) {
+                    chunkLOD = 0;
+                } else if (realDistance < adaptedDome1) {
+                    chunkLOD = 1;
+                } else if (realDistance < adaptedDome2) {
+                    chunkLOD = 2;
                 } else {
-                    // Demasiado lejos, no renderizar chunk
-                    continue;
+                    continue; // Beyond visible range
                 }
 
                 int lodOffset = 0;
