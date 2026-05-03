@@ -120,9 +120,14 @@ glm::mat4 SceneObject::getWorldTransform(const Scene* scene) const {
 }
 
 glm::dvec3 SceneObject::getWorldPosition(const Scene* scene) const {
-    glm::mat4 world = getWorldTransform(scene);
-    glm::vec4 origin = world * glm::vec4(0, 0, 0, 1);
-    return glm::dvec3(origin.x, origin.y, origin.z);
+    // Accumulate translation in double precision up the parent chain.
+    // Routing through mat4 (float32) loses ~8 km accuracy at 1.5e11 m world coordinates.
+    glm::dvec3 pos = position;
+    if (scene && parentIndex >= 0 && parentIndex < (int)scene->getObjects().size()) {
+        const auto& parent = scene->getObjects()[parentIndex];
+        pos = parent.getWorldPosition(scene) + pos;
+    }
+    return pos;
 }
 
 glm::dvec3 SceneObject::getWorldRotation(const Scene* scene) const {

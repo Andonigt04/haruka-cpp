@@ -215,13 +215,10 @@ void TerrainStreamingSystem::ensureTerrainChunkKeysAndGrid(Scene* scene, WorldSy
         worldSystem->setPlanetRadius(surfaceRadius);
     }
 
-    // Only release the base mesh once resident chunks cover the view.
-    // If no chunks are resident yet, keep the base mesh so the planet stays visible.
-    bool hasResidentChunks = false;
-    if (worldSystem) {
-        hasResidentChunks = worldSystem->getResidentChunkCount() > 0;
-    }
-    if (hasResidentChunks && planetObj->meshRenderer) {
+    // Hide the base sphere as soon as any chunks exist (tracked or resident).
+    // Keeping the base mesh while chunks render causes Z-fighting between the
+    // 48-segment sphere and the cube-sphere patches, which shows as ring artifacts.
+    if (worldSystem && worldSystem->getTrackedChunkCount() > 0 && planetObj->meshRenderer) {
         planetObj->meshRenderer->releaseMesh();
     }
 
