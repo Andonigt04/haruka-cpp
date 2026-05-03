@@ -38,10 +38,11 @@ namespace Haruka {
     
     /** @brief Converts a type string into an `ObjectType` enum value. */
     inline ObjectType stringToObjectType(const std::string& typeStr) {
-        if (typeStr == "Mesh") return ObjectType::MESH;
-        if (typeStr == "Cube") return ObjectType::MESH;
-        if (typeStr == "Sphere") return ObjectType::MESH;
-        if (typeStr == "Plane") return ObjectType::MESH;
+        if (typeStr == "Mesh")    return ObjectType::MESH;
+        if (typeStr == "Cube")    return ObjectType::MESH;
+        if (typeStr == "Sphere")  return ObjectType::MESH;
+        if (typeStr == "Plane")   return ObjectType::MESH;
+        if (typeStr == "Capsule") return ObjectType::MESH;
         if (typeStr == "Model") return ObjectType::MODEL;
         if (typeStr == "Light") return ObjectType::LIGHT;
         if (typeStr == "DirectionalLight") return ObjectType::DIRECTIONAL_LIGHT;
@@ -85,8 +86,42 @@ namespace Haruka {
     
     /** @brief Returns true for object types that represent lights. */
     inline bool isLightObjectType(ObjectType type) {
-        return type == ObjectType::LIGHT || 
-               type == ObjectType::DIRECTIONAL_LIGHT || 
+        return type == ObjectType::LIGHT ||
+               type == ObjectType::DIRECTIONAL_LIGHT ||
                type == ObjectType::SPOTLIGHT;
     }
+
+    /**
+     * @brief Identifies the procedural shape of a primitive mesh object.
+     *
+     * Stored as `properties["meshRenderer"]["meshType"]`. NONE means the object
+     * is not a built-in primitive and should be treated as a Model.
+     */
+    enum class PrimitiveMeshType {
+        NONE    = 0,
+        CUBE    = 1,
+        SPHERE  = 2,
+        CAPSULE = 3,
+        PLANE   = 4,
+    };
+
+    inline PrimitiveMeshType stringToPrimitiveMeshType(const std::string& s) {
+        if (s == "cube")    return PrimitiveMeshType::CUBE;
+        if (s == "sphere")  return PrimitiveMeshType::SPHERE;
+        if (s == "capsule") return PrimitiveMeshType::CAPSULE;
+        if (s == "plane")   return PrimitiveMeshType::PLANE;
+        return PrimitiveMeshType::NONE;
+    }
+
+    inline std::string primitiveMeshTypeToString(PrimitiveMeshType t) {
+        switch (t) {
+            case PrimitiveMeshType::CUBE:    return "cube";
+            case PrimitiveMeshType::SPHERE:  return "sphere";
+            case PrimitiveMeshType::CAPSULE: return "capsule";
+            case PrimitiveMeshType::PLANE:   return "plane";
+            default:                         return "";
+        }
+    }
+
+    inline bool isPrimitive(PrimitiveMeshType t) { return t != PrimitiveMeshType::NONE; }
 }

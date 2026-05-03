@@ -86,46 +86,50 @@ bool isTerrainChunkFacingCamera(const Haruka::SceneObject& obj, const glm::vec3&
 }
 
 void buildPrimitiveMeshFromProperties(Haruka::SceneObject& obj) {
-    if (!obj.meshRenderer) {
+    if (!obj.meshRenderer)
         obj.meshRenderer = std::make_shared<MeshRendererComponent>();
-    }
-    if (!obj.meshRenderer || obj.meshRenderer->isResident()) return;
+    if (obj.meshRenderer->isResident()) return;
     if (!obj.properties.contains("meshRenderer")) return;
 
     const auto& mr = obj.properties["meshRenderer"];
-    std::string meshType = mr.value("meshType", "");
+    Haruka::PrimitiveMeshType pmt = Haruka::stringToPrimitiveMeshType(mr.value("meshType", ""));
+    if (!Haruka::isPrimitive(pmt)) return;
+
     std::vector<glm::vec3> verts, norms;
     std::vector<unsigned int> indices;
 
-    if (meshType == "cube") {
-        float size = mr.value("size", 1.0f);
-        PrimitiveShapes::createCube(size, verts, norms, indices);
-    } else if (meshType == "sphere") {
-        float radius = mr.value("radius", 1.0f);
-        int segments = mr.value("segments", 32);
-        PrimitiveShapes::createSphere(radius, segments, segments, verts, norms, indices);
-    } else if (meshType == "capsule") {
-        float radius = mr.value("radius", 0.5f);
-        float height = mr.value("height", 2.0f);
-        int segments = mr.value("segments", 24);
-        int stacks = mr.value("stacks", 16);
-        PrimitiveShapes::createCapsule(radius, height, segments, stacks, verts, norms, indices);
-    } else if (meshType == "plane") {
-        float width = mr.value("width", 2.0f);
-        float height = mr.value("height", 2.0f);
-        int subdivisions = mr.value("subdivisions", 10);
-        PrimitiveShapes::createPlane(width, height, subdivisions, verts, norms, indices);
+    switch (pmt) {
+        case Haruka::PrimitiveMeshType::CUBE:
+            PrimitiveShapes::createCube(mr.value("size", 1.0f), verts, norms, indices);
+            break;
+        case Haruka::PrimitiveMeshType::SPHERE:
+            PrimitiveShapes::createSphere(
+                mr.value("radius", 1.0f),
+                mr.value("segments", 32), mr.value("segments", 32),
+                verts, norms, indices);
+            break;
+        case Haruka::PrimitiveMeshType::CAPSULE:
+            PrimitiveShapes::createCapsule(
+                mr.value("radius", 0.5f), mr.value("height", 2.0f),
+                mr.value("segments", 24), mr.value("stacks", 16),
+                verts, norms, indices);
+            break;
+        case Haruka::PrimitiveMeshType::PLANE:
+            PrimitiveShapes::createPlane(
+                mr.value("width", 2.0f), mr.value("height", 2.0f),
+                mr.value("subdivisions", 10),
+                verts, norms, indices);
+            break;
+        default: break;
     }
 
-    if (!verts.empty()) {
+    if (!verts.empty())
         obj.meshRenderer->setMesh(verts, norms, indices);
-    }
 }
 
 void maybeReleasePrimitiveMesh(Haruka::SceneObject& obj) {
-    if (obj.meshRenderer && obj.meshRenderer->isResident()) {
+    if (obj.meshRenderer && obj.meshRenderer->isResident())
         obj.meshRenderer->releaseMesh();
-    }
 }
 
 std::shared_ptr<Model> getOrLoadModel(const std::string& path) {
@@ -145,6 +149,21 @@ std::shared_ptr<Model> getOrLoadModel(const std::string& path) {
 
 void releaseModelFromCache(const std::string& path) {
     g_modelCache.erase(path);
+}
+
+// Decides whether an object is a primitive or a model and loads it accordingly.
+// Called once per object at scene load time and on demand by buildRenderQueue.
+void initSceneObjectMesh(Haruka::SceneObject& obj) {
+    Haruka::PrimitiveMeshType pmt = Haruka::PrimitiveMeshType::NONE;
+    if (obj.properties.contains("meshRenderer"))
+        pmt = Haruka::stringToPrimitiveMeshType(
+            obj.properties["meshRenderer"].value("meshType", ""));
+
+    if (Haruka::isPrimitive(pmt)) {
+        buildPrimitiveMeshFromProperties(obj);
+    } else if (!obj.modelPath.empty()) {
+        getOrLoadModel(obj.modelPath); // warms the cache; render path picks it up
+    }
 }
 
 bool isSphereInsideCameraFrustum(
@@ -455,6 +474,17 @@ void Application::init(Haruka::Scene& scene) {
     tryInit("Shader:bloomBlur",   [&]{ _bloomBlurShader   = std::make_unique<Shader>("shaders/screenquad.vert",   "shaders/bloom_blur.frag"); });
     tryInit("Shader:pointShadow", [&]{ _pointShadowShader = std::make_unique<Shader>("shaders/point_shadow.vert", "shaders/point_shadow.frag", "shaders/point_shadow.geom"); });
     tryInit("Shader:instancing",  [&]{ _instancingShader  = std::make_unique<Shader>("shaders/instancing.vert",   "shaders/instancing.frag"); });
+
+    // ── Scene mesh initialisation ────────────────────────────────────────────
+    // Eagerly build primitives and warm model cache for layers 1-3 (always
+    // resident). Layer 4-5 streaming objects are handled lazily in buildRenderQueue.
+    for (auto& obj : _currentScene->getObjectsMutable()) {
+        Haruka::ObjectType ot = Haruka::stringToObjectType(obj.type);
+        if (!Haruka::isRenderableObjectType(ot)) continue;
+        if (obj.renderLayer >= 4) continue; // handled by distance-based streaming
+        initSceneObjectMesh(obj);
+    }
+    rep.record("SceneMeshInit", StartupReport::OK);
 
     rep.printSummary();
     _diagFramesLeft = 5;  // trigger per-init diagnostics for the next 5 frames
