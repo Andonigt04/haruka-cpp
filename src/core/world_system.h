@@ -177,9 +177,9 @@ private:
     float lodDistances[4];
 
     // LOD dome radii in metres (base values; updateVisibleChunks scales them by altitude)
-    float domeRadius0 =    1000000.0f; // High quality   (~1000 km)
-    float domeRadius1 =    5000000.0f; // Medium         (~5000 km)
-    float domeRadius2 =   20000000.0f; // Low / minimum  (~20000 km)
+    float domeRadius0 =    1000.0f * Units::KM / Units::METER; // High quality   (~1000 km)
+    float domeRadius1 =    5000000.0f * Units::KM / Units::METER; // Medium         (~5000 km)
+    float domeRadius2 =   20000000.0f * Units::KM / Units::METER; // Low / minimum  (~20000 km)
 
     float planetRadius = 6371.0f;  // Surface radius in world units; set via setPlanetRadius()
     bool renderBaseMeshOnly = false;

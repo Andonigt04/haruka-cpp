@@ -48,13 +48,16 @@ std::vector<unsigned int> jsonToIndexArray(const nlohmann::json& j) {
 }
 
 glm::mat4 composeLocalTransform(const glm::dvec3& position, const glm::dvec3& rotation, const glm::dvec3& scale) {
-    glm::mat4 transform(1.0f);
-    transform = glm::translate(transform, glm::vec3(position));
-    transform = glm::rotate(transform, glm::radians((float)rotation.x), glm::vec3(1, 0, 0));
-    transform = glm::rotate(transform, glm::radians((float)rotation.y), glm::vec3(0, 1, 0));
-    transform = glm::rotate(transform, glm::radians((float)rotation.z), glm::vec3(0, 0, 1));
-    transform = glm::scale(transform, glm::vec3(scale));
-    return transform;
+    // Usar dmat4 para mantener precisión durante la composición
+    // (especialmente importante con valores en metros en lugar de km)
+    glm::dmat4 transform(1.0);
+    transform = glm::translate(transform, position);
+    transform = glm::rotate(transform, glm::radians(rotation.x), glm::dvec3(1, 0, 0));
+    transform = glm::rotate(transform, glm::radians(rotation.y), glm::dvec3(0, 1, 0));
+    transform = glm::rotate(transform, glm::radians(rotation.z), glm::dvec3(0, 0, 1));
+    transform = glm::scale(transform, scale);
+    // Convertir a float32 solo al final
+    return glm::mat4(transform);
 }
 
 void decomposeTransform(const glm::mat4& transform, glm::dvec3& position, glm::dvec3& rotation, glm::dvec3& scale) {

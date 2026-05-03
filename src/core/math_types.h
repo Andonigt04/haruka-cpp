@@ -64,17 +64,14 @@ namespace Haruka {
         constexpr double INTERGALACTIC_DISTANCE = 2.5e6 * LIGHT_YEAR;
         ///@}
 
-        /** @brief Render-space scale (1 unit = 1 m). */
-        constexpr double RENDER_M_PER_UNIT = 1.0;
-
         /** @brief Converts metres to render units. */
-        inline double mToRender(double m) { return m / RENDER_M_PER_UNIT; }
+        inline double mToRender(double m) { return m / METER; }
 
         /** @brief Converts kilometres to render units. */
-        inline double kmToRender(double km) { return km * KM / RENDER_M_PER_UNIT; }
+        inline double kmToRender(double km) { return km * KM / METER; }
 
-        inline glm::dvec3 kmToRender(const glm::dvec3& kmVec) { return kmVec * KM / RENDER_M_PER_UNIT; }
-        inline glm::vec3  kmToRender(const glm::vec3&  kmVec) { return kmVec * static_cast<float>(KM / RENDER_M_PER_UNIT); }
+        inline glm::dvec3 kmToRender(const glm::dvec3& kmVec) { return kmVec * KM / METER; }
+        inline glm::vec3  kmToRender(const glm::vec3&  kmVec) { return kmVec * static_cast<float>(KM / METER); }
     }
 };
 #endif
