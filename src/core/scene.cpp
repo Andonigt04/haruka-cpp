@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include "core/error_reporter.h"
+#include "core/events.h"
 #include <nlohmann/json.hpp>
 #include <dlfcn.h>
 #include "core/game_interface.h"
@@ -315,6 +316,22 @@ bool Scene::load(const std::string& filepath) {
             executeInitializer(filepath);
         }
 
+        // Notify engine of every loaded object so it can initialise GPU resources.
+        if (eventManager_) {
+            for (const auto& obj : objects) {
+                if (obj.name.find("_chunk_") != std::string::npos) continue;
+                nlohmann::json data = obj.properties;
+                data["fromLoad"]    = true;
+                data["parentIndex"] = obj.parentIndex;
+                if (!obj.modelPath.empty()) data["modelPath"] = obj.modelPath;
+                eventManager_->post(std::make_shared<ObjectEvent>(
+                    obj.name, obj.type, ObjectEvent::ActionType::Created, data));
+            }
+            eventManager_->post(std::make_shared<LogEvent>(
+                LogEvent::Level::Info,
+                "Scene loaded: " + sceneName + " (" + std::to_string(objects.size()) + " objects)"));
+        }
+
         in.close();
         return true;
     } catch (const std::exception& e) {
@@ -373,24 +390,6 @@ SceneObject Scene::parseSceneObject(const nlohmann::json& o) {
             }
             for (const auto& item : meshJson["indices"]) {
                 indices.push_back(item.get<unsigned int>());
-            }
-        } else {
-            std::string meshType = meshJson.value("meshType", "cube");
-            if (meshType == "sphere") {
-                float radius = meshJson.value("radius", 1.0f);
-                int segments = meshJson.value("segments", 32);
-                PrimitiveShapes::createSphere(radius, segments, segments, verts, norms, indices);
-            }
-            else if (meshType == "cube") {
-                float size = meshJson.value("size", 1.0f);
-                PrimitiveShapes::createCube(size, verts, norms, indices);
-            }
-            else if (meshType == "capsule") {
-                float radius = meshJson.value("radius", 0.5f);
-                float height = meshJson.value("height", 2.0f);
-                int segments = meshJson.value("segments", 24);
-                int stacks = meshJson.value("stacks", 16);
-                PrimitiveShapes::createCapsule(radius, height, segments, stacks, verts, norms, indices);
             }
         }
 

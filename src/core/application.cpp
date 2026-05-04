@@ -29,6 +29,7 @@
 #include "renderer/gpu_instancing.h"
 #include "physics/raycast_simple.h"
 #include "object_types.h"
+#include "core/primitive_types.h"
 #include "core/terrain_streaming_system.h"
 
 Haruka::GameInterface* gameInterface = nullptr;
@@ -122,6 +123,8 @@ void buildPrimitiveMeshFromProperties(Haruka::SceneObject& obj) {
             break;
         default: break;
     }
+    
+    if (!verts.empty()) {
 
     if (!verts.empty())
         obj.meshRenderer->setMesh(verts, norms, indices);
@@ -505,8 +508,25 @@ void Application::buildRenderQueue() {
         activeCamera = _camera.get();
     }
 
-    const double nearPlane = 0.1;            // 10 cm
-    const double farPlane = 300000000000.0;  // 300 billion m = 300 Gm (~2 AU)
+    // Dynamic near plane: scale with altitude above planet surface to reduce
+    // the far/near ratio, which directly controls depth-buffer precision.
+    // On the surface near stays 0.1 m (10 cm); at 400 km orbit near ≈ 400 m,
+    // giving a ratio of ~7.5e8 instead of 3e12 (dramatically less z-fighting).
+    double nearPlane = 0.1;
+    const double farPlane = 300000000000.0;  // 300 Gm (~2 AU)
+    if (activeCamera && scene) {
+        for (const auto& obj : scene->getObjects()) {
+            if (!obj.properties.is_object() || !obj.properties.contains("terrainEditor")) continue;
+            if (!obj.properties["terrainEditor"].value("isPlanetRoot", false)) continue;
+            glm::dvec3 planetCenter = obj.getWorldPosition(scene);
+            double planetRadius = std::max({std::abs(obj.scale.x), std::abs(obj.scale.y), std::abs(obj.scale.z)});
+            if (planetRadius < 1.0) break;
+            double altitude = std::max(0.0, glm::length(activeCamera->position - planetCenter) - planetRadius);
+            nearPlane = std::max(0.1, altitude * 0.001);
+            break;
+        }
+    }
+
     const double aspect = (_height > 0) ? static_cast<double>(_width) / static_cast<double>(_height) : (16.0 / 9.0);
 
     glm::dvec3 camPos(0.0);

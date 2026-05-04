@@ -24,6 +24,8 @@
 #include "core/components/model_component.h"
 #include "core/components/material_component.h"
 #include "components/mesh_renderer_component.h"
+#include "core/event_manager.h"
+#include "core/events.h"
 
 namespace Haruka
 {
@@ -75,6 +77,9 @@ namespace Haruka
         Scene(const std::string& name);
         ~Scene();
         
+        std::string sceneName;
+        std::string getInitializerPath() const { return initializerPath; }
+
         /** @brief Adds an object copy to the scene. */
         void addObject(const SceneObject& obj);
         /** @brief Removes object by name if present. */
@@ -91,16 +96,17 @@ namespace Haruka
         
         /** @brief Saves scene to file. */
         bool save(const std::string& filepath);
-        /** @brief Loads scene from file. */
+        /** @brief Loads scene from file, then posts ObjectEvent::Created for each loaded object. */
         bool load(const std::string& filepath);
-        
-        std::string sceneName;
 
-        std::string getInitializerPath() const { return initializerPath; }
-        
+        /** @brief Injects the event manager used for post-load notifications. */
+        void setEventManager(EventManager* mgr) { eventManager_ = mgr; }
+        EventManager* getEventManager() const    { return eventManager_; }
+
     private:
         std::vector<SceneObject> objects;
         std::string initializerPath;
+        EventManager* eventManager_ = nullptr;
 
         /** @brief Parses one scene object entry from JSON. */
         SceneObject parseSceneObject(const nlohmann::json& o);
