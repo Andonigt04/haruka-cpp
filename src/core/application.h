@@ -169,14 +169,14 @@ private:
     std::unique_ptr<SSAO> _ssaoSystem;
     std::unique_ptr<IBL> _iblSystem;
     std::unique_ptr<PointShadow> _pointShadowSystem;
-    std::unique_ptr<Haruka::WorldSystem> _worldSystem;
     std::unique_ptr<LightCuller> _lightCuller;
     std::unique_ptr<GPUInstancing> _instancing;
     std::unique_ptr<ComputePostProcess> _computePostProcess;
     std::unique_ptr<CascadedShadowMap> _cascadedShadow;
     std::unique_ptr<VirtualTexturing> _virtualTexturing;
-    std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
     std::unique_ptr<RaycastSimple> _raycastSystem;
+    std::unique_ptr<Haruka::WorldSystem> _worldSystem;
+    std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
     
     // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
@@ -244,8 +244,8 @@ private:
     int _iResidentChunks        = 0;
     int _iPendingChunkLoads     = 0;
     int _iPendingChunkEvictions = 0;
-    int _iResidentMemoryMB      = 0;
     int _iTrackedChunks         = 0;
+    int _iResidentMemoryMB      = 0;
     int _iMaxMemoryMB           = 0;
 };
 

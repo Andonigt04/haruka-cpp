@@ -212,11 +212,6 @@ void PlanetarySystem::update(double dt) {
     
     simulationTime += dt * timeScale;
     
-    // Modo seguro: no mutar la Scene del editor por frame desde gameplay.
-    // Esto evita invalidar punteros internos de panels/inspector y corrupción de heap.
-    // integrateOrbits(dt);
-    // updateWorldOrigin();
-    // syncSceneWithOrbits();
     applyPlanetaryPhysics(dt);
     updatePlayerOnPlanet();
     
