@@ -33,6 +33,11 @@ public:
     ~ChunkCache() = default;
     
     /**
+     * @brief Converts a PlanetChunkKey to a uint64_t hash.
+     */
+    static uint64_t keyToHash(const PlanetChunkKey& key);
+
+    /**
      * @brief Retrieves a cached chunk if available.
      * @param key Chunk identifier
      * @return Pointer to cached ChunkData, or nullptr if not in cache
@@ -146,11 +151,6 @@ private:
     size_t maxMemoryBytes;
     size_t currentMemoryBytes = 0;
     CacheStats stats;
-    
-    /**
-     * @brief Converts a PlanetChunkKey to a uint64_t hash.
-     */
-    static uint64_t keyToHash(const PlanetChunkKey& key);
     
     /**
      * @brief Evicts the least recently used chunk.
