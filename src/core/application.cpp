@@ -28,9 +28,12 @@
 #include "startup_report.h"
 #include "renderer/gpu_instancing.h"
 #include "physics/raycast_simple.h"
+#include "physics/physics_engine.h"
 #include "object_types.h"
 #include "core/primitive_types.h"
 #include "core/terrain_streaming_system.h"
+#include "core/scene_loader.h"
+#include "core/chunk_cache.h"
 
 Haruka::GameInterface* gameInterface = nullptr;
 
@@ -441,6 +444,22 @@ void Application::init(Haruka::Scene& scene) {
     tryInit("PlanetarySystem", [&]{ _planetarySystem        = std::make_unique<Haruka::PlanetarySystem>(); });
     tryInit("RaycastSystem",   [&]{ _raycastSystem          = std::make_unique<RaycastSimple>(); });
     tryInit("TerrainStream",   [&]{ _terrainStreamingSystem = std::make_unique<Haruka::TerrainStreamingSystem>(); });
+    tryInit("PhysicsEngine",   [&]{ _physicsEngine          = std::make_unique<Haruka::PhysicsEngine>(); });
+    
+    // Initialize chunk cache (256 MB default)
+    _chunkCache = std::make_unique<Haruka::ChunkCache>(256);
+    
+    // Register terrain streaming system as observer
+    if (_worldSystem && _terrainStreamingSystem) {
+        _worldSystem->registerSystem(_terrainStreamingSystem.get());
+        rep.record("RegisterTerrainStreaming", StartupReport::OK);
+    }
+    
+    // Initialize planetary physics
+    if (_physicsEngine && _worldSystem && _planetarySystem) {
+        _physicsEngine->initPlanetaryPhysics(_worldSystem.get(), _planetarySystem.get(), _raycastSystem.get());
+        rep.record("InitPlanetaryPhysics", StartupReport::OK);
+    }
 
     setupQuad();
     rep.record("ScreenQuad", StartupReport::OK);

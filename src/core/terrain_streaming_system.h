@@ -70,6 +70,22 @@ public:
         currentSeedGeneration++;  // Incrementar sin limpiar
     }
 
+    /**
+     * @brief Sets the maximum number of chunks to load per frame.
+     * 
+     * Higher values load chunks faster but may cause frame rate hitches.
+     * Typical range: 1-32 chunks per frame.
+     * 
+     * @param maxChunksPerFrame Maximum chunks to load per frame
+     */
+    void setMaxChunksPerFrame(int maxChunksPerFrame) {
+        this->maxChunksPerFrame = std::max(1, maxChunksPerFrame);
+    }
+
+    /**
+     * @brief Gets current load throughput setting.
+     */
+    int getMaxChunksPerFrame() const { return maxChunksPerFrame; }
 private:
     static constexpr size_t MAX_READY_CHUNKS_CACHED = 64;
 
@@ -89,6 +105,7 @@ private:
     uint64_t currentSceneVersion = 0;
     uint32_t lastCheckedSeed = 0;  // Detectar cambios de semilla
     uint32_t currentSeedGeneration = 0;  // Versión de semilla actual para invalidación
+    int maxChunksPerFrame = 16;  ///< Maximum chunks to load per frame
 
     static bool isTerrainChunkObject(const SceneObject& obj);
     static SceneObject* findTerrainChunkByKey(Scene* scene, const PlanetChunkKey& key);
@@ -108,6 +125,21 @@ private:
 
     void pollChunkGenerationJobs();
     void invalidateStaleChunkJobs(uint64_t newSceneVersion);
+
+    /**
+     * @brief Sorts chunks by priority (distance + LOD based).
+     * 
+     * Reorders the provided chunk vector so that chunks closest to the camera
+     * and with lower LOD are processed first.
+     * 
+     * @param chunks Vector of chunks to sort (will be modified in-place)
+     * @param cameraPos Camera world position
+     * @param planetCenter Planet center in world space
+     */
+    static void prioritizeChunks(
+        std::vector<PlanetChunkKey>& chunks,
+        const glm::dvec3& cameraPos,
+        const glm::dvec3& planetCenter);
 };
 
 } // namespace Haruka

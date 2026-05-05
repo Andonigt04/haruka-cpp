@@ -6,14 +6,7 @@
 
 namespace Haruka {
 
-WorldSystem::WorldSystem() : worldOrigin(0.0, 0.0, 0.0) {
-    // LOD distances - ajustados para editor (unidades pequeñas)
-    // La cámara está típicamente a 100-10000 unidades del planeta
-    lodDistances[0] = 100.0f;         // < 100 unidades = LOD 0 (máximo detalle)
-    lodDistances[1] = 500.0f;         // < 500 unidades = LOD 1
-    lodDistances[2] = 2000.0f;        // < 2000 unidades = LOD 2
-    lodDistances[3] = 10000.0f;       // < 10000 unidades = LOD 3
-}
+WorldSystem::WorldSystem() : worldOrigin(0.0, 0.0, 0.0) {}
 
 WorldSystem::~WorldSystem() {}
 
@@ -68,265 +61,6 @@ Haruka::WorldPos WorldSystem::getOrigin() const {
     return worldOrigin;
 }
 
-void WorldSystem::initComputeShaders() {
-    // Placeholder: CPU culling, no compute shader needed
-}
-
-void WorldSystem::setLODDistances(float lod0, float lod1, float lod2, float lod3) {
-    lodDistances[0] = lod0;
-    lodDistances[1] = lod1;
-    lodDistances[2] = lod2;
-    lodDistances[3] = lod3;
-}
-
-void WorldSystem::frustumCull(Haruka::WorldPos cameraPos, const glm::mat4& viewProj, float frustumDistance) {
-    (void)viewProj;
-    for (auto& body : celestialBodies) {
-        float distance = static_cast<float>(glm::length(body.worldPos - cameraPos));
-        
-        // Aumentar radio de "nearby chunks" a 5000 unidades
-        // Chunks dentro del frustum siempre son visibles
-        bool nearbyChunk = (distance < 5000.0f);
-        bool withinFrustum = (distance < frustumDistance + body.radius);
-        
-        if (nearbyChunk || withinFrustum) {
-            body.visible = 1;
-            
-            // Asignar LOD basado en distancia
-            // IMPORTANTE: Siempre mostrar algo, incluso si está muy lejos
-            if (distance < lodDistances[0]) {
-                body.lodLevel = 0;
-            } else if (distance < lodDistances[1]) {
-                body.lodLevel = 1;
-            } else if (distance < lodDistances[2]) {
-                body.lodLevel = 2;
-            } else {
-                // BUGFIX: En lugar de marcar como no visible, usar LOD 3 para distancias lejanas
-                body.lodLevel = 3;  // Máximo LOD lejano
-            }
-        } else {
-            body.visible = 0;
-        }
-    }
-}
-
-void WorldSystem::setChunkStreamingBudgets(size_t maxLoads, size_t maxEvicts, size_t maxResident, size_t maxMemoryMB) {
-    maxLoadsPerFrame = std::max<size_t>(1, maxLoads);
-    maxEvictsPerFrame = std::max<size_t>(1, maxEvicts);
-    maxResidentChunks = std::max<size_t>(64, maxResident);
-    maxMemoryBytes = std::max<size_t>(64 * 1024 * 1024, maxMemoryMB * 1024 * 1024);
-}
-
-void WorldSystem::setChunkGrid(int face, int lod, int tilesX, int tilesY, int maxLod) {
-    chunkGridFace = std::clamp(face, 0, 5);
-    chunkGridLod = std::max(0, lod);
-    chunkGridTilesX = std::max(0, tilesX);
-    chunkGridTilesY = std::max(0, tilesY);
-    chunkGridMaxLod = std::max(0, maxLod);
-}
-
-void WorldSystem::updateVisibleChunks(float viewDistanceKm, int lod, Camera* camera) {
-    chunkFrameCounter++;
-    visibleChunks.clear();
-    renderBaseMeshOnly = true; // Por defecto, solo mesh base
-
-    // Use camera position relative to planet center so the system works
-    // regardless of where the planet is in world space.
-    const glm::dvec3 camRelPos = camera->position - planetCenter;
-    const double camLen = glm::length(camRelPos);
-    if (camLen <= 1e-6) return;
-
-    glm::dvec3 camDir;
-    if (camera != nullptr && camLen > 1e-6) {
-        camDir = camRelPos / camLen;
-    } else {
-        return;
-    }
-
-    const int lodClamped = std::clamp(lod, 0, 16);
-    const int binsX = (chunkGridTilesX > 0) ? chunkGridTilesX : std::clamp(1 << std::min(8, 3 + lodClamped), 8, 256);
-    const int binsY = (chunkGridTilesY > 0) ? chunkGridTilesY : std::clamp(1 << std::min(8, 3 + lodClamped), 8, 256);
-    const bool fixedGrid = (chunkGridTilesX > 0 && chunkGridTilesY > 0);
-    const int keyLodBase = (chunkGridTilesX > 0 && chunkGridTilesY > 0) ? chunkGridLod : lodClamped;
-
-    // Adapt dome radii to camera altitude so they always cover the visible hemisphere.
-    // When the camera is outside the planet (camLen > planetRadius), chunks on the
-    // equatorial band have realDistance ≈ sqrt(altitude² + planetRadius²) which can
-    // exceed the hardcoded domeRadius2 and get silently dropped.
-    const float altitude = static_cast<float>(std::max(camLen - planetRadius, 1.0));
-    const float adaptedDome0 = std::max(domeRadius0, altitude * 0.15f);
-    const float adaptedDome1 = std::max(domeRadius1, altitude * 0.50f);
-    const float adaptedDome2 = std::max(domeRadius2, altitude + planetRadius * 2.0f);
-
-    const double viewRatio = std::clamp(static_cast<double>(viewDistanceKm) / std::max(1.0, camLen), 0.05, 2.5);
-    const double horizonDot = -0.8;
-
-    std::set<PlanetChunkKey> uniqueVisible;
-    const int firstFace = 0;
-    const int lastFace = 5;
-    for (int f = firstFace; f <= lastFace; ++f) {
-        for (int y = 0; y < binsY; ++y) {
-            const double v = ((static_cast<double>(y) + 0.5) / static_cast<double>(binsY)) * 2.0 - 1.0;
-            for (int x = 0; x < binsX; ++x) {
-                const double u = ((static_cast<double>(x) + 0.5) / static_cast<double>(binsX)) * 2.0 - 1.0;
-
-                glm::dvec3 cube;
-                switch (f) {
-                    case 0: cube = glm::dvec3( 1.0,  v, -u); break;
-                    case 1: cube = glm::dvec3(-1.0,  v,  u); break;
-                    case 2: cube = glm::dvec3( u,  1.0, -v); break;
-                    case 3: cube = glm::dvec3( u, -1.0,  v); break;
-                    case 4: cube = glm::dvec3( u,  v,  1.0); break;
-                    default:cube = glm::dvec3(-u,  v, -1.0); break;
-                }
-
-                glm::dvec3 dir = glm::normalize(cube);
-                const double dotv = glm::dot(dir, camDir);
-                if (dotv < horizonDot) continue;
-
-                // Project onto the actual planet surface, not onto a sphere at the
-                // camera distance. This is the fix for chunks never loading when the
-                // camera is outside the planet (camLen >> planetRadius).
-                glm::dvec3 chunkWorldPos = planetCenter + dir * static_cast<double>(planetRadius);
-                double realDistance = glm::length(camera->position - chunkWorldPos);
-
-                // LOD dome selection (radii adapted to camera altitude above planet)
-                int chunkLOD = -1;
-                if (realDistance < adaptedDome0) {
-                    chunkLOD = 0;
-                } else if (realDistance < adaptedDome1) {
-                    chunkLOD = 1;
-                } else if (realDistance < adaptedDome2) {
-                    chunkLOD = 2;
-                } else {
-                    continue; // Beyond visible range
-                }
-
-                int lodOffset = 0;
-                const int keyLod = chunkLOD; // Usar LOD según cúpula
-                const int keyX = x >> lodOffset;
-                const int keyY = y >> lodOffset;
-
-                PlanetChunkKey key{f, keyLod, keyX, keyY};
-                if (!uniqueVisible.insert(key).second) continue;
-                auto& st = chunkStates[key];
-                st.visible = true;
-                st.lastTouchedFrame = chunkFrameCounter;
-                st.distanceKm = static_cast<float>(realDistance / 1000.0);
-                visibleChunks.push_back(key);
-                renderBaseMeshOnly = false; // Hay al menos un chunk visible
-            }
-        }
-    }
-
-    for (auto& [_, st] : chunkStates) {
-        if (st.lastTouchedFrame != chunkFrameCounter) st.visible = false;
-    }
-}
-
-void WorldSystem::scheduleChunkStreaming() {
-    // =============================================================================
-    // CHUNK STREAMING SCHEDULER: Decidir qué chunks cargar/descargar cada frame
-    // =============================================================================
-    // POLÍTICA DE CARGA:
-    // - Cargar: Chunks visibles que NO están residentes (en memoria)
-    // - Límite: maxLoadsPerFrame (evitar stalls de GPU)
-    //
-    // POLÍTICA DE EVICCIÓN (LRU + Distance-based + Timeout):
-    // - Candidatos: Chunks residentes que NO son visibles (lejanos/fuera de vista)
-    // - Orden: 1) Chunks con timeout expirado (> 300 frames no usados)
-    //          2) lastTouchedFrame ascendente (menos reciente primero)
-    //          3) distanceKm descendente (más lejano primero)
-    // - Límites: maxResidentChunks Y/O maxMemoryBytes (lo que se alcance primero)
-    // - Max evicts: Aumenta si hay chunks cercanos pendientes de carga
-    // =============================================================================
-
-    pendingChunkLoads.clear();
-    pendingChunkEvictions.clear();
-
-    // FASE 1: Programar cargas de chunks visibles
-    for (const auto& key : visibleChunks) {
-        auto it = chunkStates.find(key);
-        if (it != chunkStates.end() && it->second.visible && !it->second.resident) {
-            if (pendingChunkLoads.size() < maxLoadsPerFrame) {
-                pendingChunkLoads.push_back(key);
-            }
-        }
-    }
-
-    // FASE 2: Identificar candidatos a evicción
-    size_t residentCount = 0;
-    std::vector<std::pair<PlanetChunkKey, PlanetChunkState>> evictionCandidates;
-    evictionCandidates.reserve(chunkStates.size());
-    
-    // Separar candidatos en prioritarios (viejos/lejanos) y normales
-    std::vector<std::pair<PlanetChunkKey, PlanetChunkState>> priorityEvictions;  // Chunks con timeout
-    
-    const uint64_t CHUNK_TIMEOUT_FRAMES = 300;  // Timeout de 300 frames (~5 segundos a 60FPS)
-    
-    for (const auto& [key, st] : chunkStates) {
-        if (!st.resident) continue;
-        residentCount++;
-        
-        // Solo considerar evicción de chunks que no son visibles
-        if (!st.visible) {
-            // Separar chunks con timeout en categoría prioritaria
-            if ((chunkFrameCounter - st.lastTouchedFrame) > CHUNK_TIMEOUT_FRAMES) {
-                priorityEvictions.push_back({key, st});
-            } else {
-                evictionCandidates.push_back({key, st});
-            }
-        }
-    }
-
-    // FASE 3: Determinar si hay presión de memoria o límite de chunks
-    bool overCount = residentCount > maxResidentChunks;
-    bool overMemory = residentMemoryBytes > maxMemoryBytes;
-    bool hasPendingLoads = !pendingChunkLoads.empty();
-    
-    if (overCount || overMemory || (hasPendingLoads && residentCount > maxResidentChunks * 0.8f)) {
-        // Si hay chunks cercanos pendientes, ser más agresivo con evicción
-        size_t maxEvicts = hasPendingLoads ? (maxEvictsPerFrame * 2) : maxEvictsPerFrame;
-        
-        // Primero descargar chunks con timeout expirado
-        std::sort(priorityEvictions.begin(), priorityEvictions.end(),
-                  [](const auto& a, const auto& b) {
-                      // Ordenar por distancia (más lejano primero)
-                      return a.second.distanceKm > b.second.distanceKm;
-                  });
-        
-        for (const auto& [key, st] : priorityEvictions) {
-            if (pendingChunkEvictions.size() >= maxEvicts) break;
-            pendingChunkEvictions.push_back(key);
-        }
-        
-        // Luego descargar chunks normales (LRU + distancia)
-        std::sort(evictionCandidates.begin(), evictionCandidates.end(),
-                  [](const auto& a, const auto& b) {
-                      // Prioridad 1: lastTouchedFrame (menos reciente = eliminar primero)
-                      if (a.second.lastTouchedFrame != b.second.lastTouchedFrame) {
-                          return a.second.lastTouchedFrame < b.second.lastTouchedFrame;
-                      }
-                      // Prioridad 2: distancia (más lejano = eliminar primero)
-                      return a.second.distanceKm > b.second.distanceKm;
-                  });
-
-        // Calcular cuánto hay que liberar
-        size_t bytesToFree = overMemory ? (residentMemoryBytes - maxMemoryBytes) : 0;
-        size_t countToFree = overCount ? (residentCount - maxResidentChunks) : 0;
-        
-        // Programar eviciones hasta alcanzar límites
-        for (size_t i = 0; i < evictionCandidates.size() && pendingChunkEvictions.size() < maxEvicts; ++i) {
-            pendingChunkEvictions.push_back(evictionCandidates[i].first);
-            bytesToFree = (bytesToFree >= evictionCandidates[i].second.bytesUsed) ? 
-                         (bytesToFree - evictionCandidates[i].second.bytesUsed) : 0;
-            if (countToFree > 0) countToFree--;
-            // Parar cuando se alcancen ambos límites
-            if (bytesToFree == 0 && countToFree == 0) break;
-        }
-    }
-}
-
 void WorldSystem::markChunkResident(const PlanetChunkKey& key, bool resident) {
     auto& st = chunkStates[key];
     if (resident && !st.resident) {
@@ -359,55 +93,63 @@ void WorldSystem::setChunkSize(const PlanetChunkKey& key, uint32_t bytes) {
     it->second.bytesUsed = bytes;
 }
 
-void WorldSystem::getNeighborLods(const PlanetChunkKey& key, int& outN, int& outS, int& outE, int& outW) const {
-    // =============================================================================
-    // Busca los LODs de los chunks vecinos (N, S, E, W) en el espacio cube-sphere.
-    // Si un vecino no existe, retorna el LOD actual como fallback (seguro).
-    //
-    // TOPOLOGY: En un cube-sphere, cada cara tiene su propio grid de chunks [0,tilesX) x [0,tilesY).
-    // - Y es vertical (vinculado a polos): puede cruzar límites de cara en Y
-    // - X es cilíndrico: puede wrappear dentro de la misma cara
-    // =============================================================================
-
-    // --- NORTE: decrementar Y ---
-    // Busca el vecino al norte (y-1)
-    {
-        PlanetChunkKey northKey = key;
-        northKey.y -= 1;
-        auto itN = chunkStates.find(northKey);
-        outN = (itN != chunkStates.end()) ? itN->first.lod : key.lod;
+bool WorldSystem::updateBody(const CelestialBody& updatedBody) {
+    // Find the body by name
+    CelestialBody* existingBody = findBody(updatedBody.name);
+    if (!existingBody) {
+        return false;  // Body not found
     }
+    
+    // Update atomically
+    *existingBody = updatedBody;
+    
+    // Notify all subscribers of the update
+    notifyBodyUpdated(updatedBody.name);
+    
+    return true;
+}
 
-    // --- SUR: incrementar Y ---
-    // Busca el vecino al sur (y+1)
-    {
-        PlanetChunkKey southKey = key;
-        southKey.y += 1;
-        auto itS = chunkStates.find(southKey);
-        outS = (itS != chunkStates.end()) ? itS->first.lod : key.lod;
-    }
-
-    // --- ESTE: incrementar X (con wrap-around cilíndrico) ---
-    // En cube-sphere, X es cilíndrico: [0, tilesPerFace) con envoltura
-    // NOTA: En esta implementación básica, los chunks no llevan info de tilesPerFace,
-    // así que no podemos hacer wrap-around. Se requeriría pasar tilesPerFace como parámetro.
-    {
-        PlanetChunkKey eastKey = key;
-        eastKey.x += 1;
-        // TODO: Implementar wrap-around si tilesPerFace fuera accesible
-        // if (eastKey.x >= tilesPerFace) eastKey.x = 0;
-        auto itE = chunkStates.find(eastKey);
-        outE = (itE != chunkStates.end()) ? itE->first.lod : key.lod;
-    }
-
-    // --- OESTE: decrementar X (con wrap-around cilíndrico) ---
-    {
-        PlanetChunkKey westKey = key;
-        westKey.x -= 1;
-        // TODO: Implementar wrap-around si tilesPerFace fuera accesible
-        // if (westKey.x < 0) westKey.x = tilesPerFace - 1;
-        auto itW = chunkStates.find(westKey);
-        outW = (itW != chunkStates.end()) ? itW->first.lod : key.lod;
+void WorldSystem::registerSystem(SystemSubscriber* subscriber) {
+    if (!subscriber) return;
+    
+    // Avoid duplicate registration
+    auto it = std::find(subscribers.begin(), subscribers.end(), subscriber);
+    if (it == subscribers.end()) {
+        subscribers.push_back(subscriber);
     }
 }
+
+void WorldSystem::unregisterSystem(SystemSubscriber* subscriber) {
+    if (!subscriber) return;
+    
+    auto it = std::find(subscribers.begin(), subscribers.end(), subscriber);
+    if (it != subscribers.end()) {
+        subscribers.erase(it);
+    }
+}
+
+void WorldSystem::notifyBodyUpdated(const std::string& bodyName) {
+    for (auto subscriber : subscribers) {
+        if (subscriber) {
+            subscriber->onBodyUpdated(bodyName);
+        }
+    }
+}
+
+void WorldSystem::notifyChunkLoaded(const PlanetChunkKey& chunkKey) {
+    for (auto subscriber : subscribers) {
+        if (subscriber) {
+            subscriber->onChunkLoaded(chunkKey);
+        }
+    }
+}
+
+void WorldSystem::notifyChunkEvicted(const PlanetChunkKey& chunkKey) {
+    for (auto subscriber : subscribers) {
+        if (subscriber) {
+            subscriber->onChunkEvicted(chunkKey);
+        }
+    }
+}
+
 } // namespace Haruka

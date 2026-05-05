@@ -31,7 +31,10 @@
 #include "io/asset_streamer.h"
 #include "debug_overlay.h"
 #include "physics/raycast_simple.h"
+#include "physics/physics_engine.h"
 #include "core/terrain_streaming_system.h"
+#include "core/scene_loader.h"
+#include "core/chunk_cache.h"
 
 class MotorInstance;
 
@@ -58,6 +61,10 @@ public:
     Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+    Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+    Haruka::ChunkCache* getChunkCache() { return _chunkCache.get(); }
+    Haruka::TerrainStreamingSystem* getTerrainStreamingSystem() { return _terrainStreamingSystem.get(); }
+    Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
     ///@}
 
     // Render quality/layers (global editor-configurable)
@@ -178,6 +185,8 @@ private:
     std::unique_ptr<Haruka::WorldSystem> _worldSystem;
     std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
+    std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+    std::unique_ptr<Haruka::ChunkCache> _chunkCache;
     
     // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
     RenderTarget* _editorTarget = nullptr;

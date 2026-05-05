@@ -40,6 +40,33 @@ struct CelestialBody
 
 namespace Haruka {
 
+/**
+ * @brief Interface for systems that need to react to entity changes.
+ * Implement this to subscribe to WorldSystem updates.
+ */
+class SystemSubscriber {
+public:
+    virtual ~SystemSubscriber() = default;
+    
+    /**
+     * @brief Called when a body is updated in the world system.
+     * @param bodyId The identifier/name of the updated body
+     */
+    virtual void onBodyUpdated(const std::string& bodyName) = 0;
+    
+    /**
+     * @brief Called when a chunk becomes resident (loaded).
+     * @param chunkKey The chunk that was loaded
+     */
+    virtual void onChunkLoaded(const PlanetChunkKey& chunkKey) = 0;
+    
+    /**
+     * @brief Called when a chunk is evicted (unloaded).
+     * @param chunkKey The chunk that was unloaded
+     */
+    virtual void onChunkEvicted(const PlanetChunkKey& chunkKey) = 0;
+};
+
 /** @brief Planet chunk identifier in cube-sphere space. */
 struct PlanetChunkKey {
     int face = 0;
@@ -94,6 +121,25 @@ public:
     void removeBody(const std::string& name);
     /** @brief Finds body by name and returns mutable non-owning pointer. */
     CelestialBody* findBody(const std::string& name);
+
+    /**
+     * @brief Updates a body atomically and notifies subscribers.
+     * @param updatedBody The updated body information
+     * @return true if update succeeded, false if body not found
+     */
+    bool updateBody(const CelestialBody& updatedBody);
+
+    /**
+     * @brief Registers a system as a subscriber to world changes.
+     * @param subscriber Pointer to system implementing SystemSubscriber
+     */
+    void registerSystem(SystemSubscriber* subscriber);
+
+    /**
+     * @brief Unregisters a system subscriber.
+     * @param subscriber Pointer to system to unregister
+     */
+    void unregisterSystem(SystemSubscriber* subscriber);
 
     /** @name Accessors */
     ///@{
@@ -174,6 +220,7 @@ private:
     Haruka::WorldPos worldOrigin;
     Haruka::WorldPos planetCenter{0.0, 0.0, 0.0};
     std::vector<CelestialBody> celestialBodies;
+    std::vector<SystemSubscriber*> subscribers;  ///< Systems subscribed to world changes
     float lodDistances[4];
 
     // LOD dome radii in metres (base values; updateVisibleChunks scales them by altitude)
@@ -200,6 +247,24 @@ private:
     int chunkGridTilesX = 0;
     int chunkGridTilesY = 0;
     int chunkGridMaxLod = 0;
+
+    /**
+     * @brief Notifies all subscribers that a body was updated.
+     * @param bodyName Name of the updated body
+     */
+    void notifyBodyUpdated(const std::string& bodyName);
+
+    /**
+     * @brief Notifies all subscribers that a chunk was loaded.
+     * @param chunkKey The loaded chunk
+     */
+    void notifyChunkLoaded(const PlanetChunkKey& chunkKey);
+
+    /**
+     * @brief Notifies all subscribers that a chunk was evicted.
+     * @param chunkKey The evicted chunk
+     */
+    void notifyChunkEvicted(const PlanetChunkKey& chunkKey);
 };
 }
 

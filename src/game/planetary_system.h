@@ -14,6 +14,8 @@
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
+#include <future>
+#include <map>
 
 namespace Haruka {
 
@@ -48,10 +50,6 @@ public:
         LayerSettings continents;
         LayerSettings macro;
         LayerSettings detail;
-
-        // legacy/internal (puedes mantenerlos o eliminarlos si ya no usas subdivisions directas)
-        int subdivisions = 4;
-        bool useGPU = true;
     };
 
     struct ChunkConfig {
@@ -60,7 +58,6 @@ public:
         int tileX = 0;
         int tileY = 0;
         int tilesPerFace = 1;
-        // Datos de costura (LOD adyacentes)
         int neighborLodN = 0;
         int neighborLodS = 0;
         int neighborLodE = 0;
@@ -132,12 +129,45 @@ public:
     const PlanetData* getPlanetData(const std::string& bodyName) const;
     const ChunkData* getChunkData(const std::string& bodyName, const ChunkConfig& chunk) const;
     
+    /**
+     * @brief Generates a chunk asynchronously using std::async.
+     * 
+     * This method returns a future that can be polled to check if generation is complete.
+     * Useful for streaming terrain without blocking the main thread.
+     * 
+     * @param config Planet configuration
+     * @param chunkCfg Chunk configuration
+     * @param bodyName Name of the planet body
+     * @return A future that resolves to ChunkData when generation is complete
+     */
+    std::future<ChunkData> generateChunkAsync(
+        const PlanetConfig& config,
+        const ChunkConfig& chunkCfg,
+        const std::string& bodyName);
+    
+    /**
+     * @brief Polls and processes completed chunk generation jobs.
+     * 
+     * This should be called once per frame to collect finished chunk data.
+     * It returns chunks that are ready to be uploaded to the GPU.
+     * 
+     * @return Vector of completed chunk data, empty if none are ready
+     */
+    std::vector<std::pair<ChunkConfig, ChunkData>> pollCompletedChunks();
+    
 private:
     Scene* scene = nullptr;
     WorldSystem* worldSystem = nullptr;
     std::unique_ptr<Character> player;
     std::unique_ptr<Terrain> terrain;
     std::unordered_map<std::string, PlanetData> detailedSurfaceData;
+    
+    // Async chunk generation tracking
+    struct AsyncChunkJob {
+        ChunkConfig config;
+        std::future<ChunkData> future;
+    };
+    std::vector<AsyncChunkJob> activeChunkJobs;  ///< In-progress chunk generation jobs
     
     CelestialBody* star = nullptr;
     std::vector<std::string> bodyNames;

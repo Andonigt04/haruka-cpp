@@ -122,4 +122,86 @@ void PhysicsEngine::broadPhaseAABB() {
     // Por ahora detectamos all-pairs (O(n²))
 }
 
+void PhysicsEngine::initPlanetaryPhysics(Haruka::WorldSystem* ws, Haruka::PlanetarySystem* ps, RaycastSimple* rs) {
+    worldSystem = ws;
+    planetarySystem = ps;
+    raycastSystem = rs;
+}
+
+double PhysicsEngine::calculateGravityAtPosition(const glm::dvec3& worldPos, glm::dvec3& outGravityDir) {
+    if (!worldSystem) {
+        outGravityDir = glm::dvec3(0.0, -1.0, 0.0);
+        return 9.81;  // Default Earth gravity
+    }
+    
+    glm::dvec3 totalGravity = glm::dvec3(0.0);
+    
+    // Sum gravity from all celestial bodies
+    const auto& bodies = worldSystem->getBodies();
+    for (const auto& body : bodies) {
+        totalGravity += calculateGravityContribution(body, worldPos);
+    }
+    
+    double magnitude = glm::length(totalGravity);
+    if (magnitude > 1e-6) {
+        outGravityDir = glm::normalize(totalGravity);
+    } else {
+        outGravityDir = glm::dvec3(0.0, -1.0, 0.0);
+        magnitude = 0.0;
+    }
+    
+    return magnitude;
+}
+
+glm::dvec3 PhysicsEngine::calculateGravityContribution(const CelestialBody& body, const glm::dvec3& worldPos) {
+    // Calculate vector from test position to body
+    glm::dvec3 delta = body.worldPos - worldPos;
+    double distance = glm::length(delta);
+    
+    // Avoid division by zero
+    if (distance < 1e-6) {
+        return glm::dvec3(0.0);
+    }
+    
+    // Newton's universal law of gravitation: F = G * m1 * m2 / r²
+    // Acceleration: a = F / m1 = G * m2 / r²
+    double acceleration = gravitationalConstant * body.mass / (distance * distance);
+    glm::dvec3 direction = glm::normalize(delta);
+    
+    return direction * acceleration;
+}
+
+bool PhysicsEngine::checkTerrainCollision(
+    const glm::dvec3& worldPos,
+    glm::dvec3* outCollisionPoint,
+    glm::dvec3* outCollisionNormal) {
+    
+    if (!raycastSystem || !worldSystem) {
+        return false;  // Cannot check collision without raycast system
+    }
+    
+    // Calculate gravity direction at this position
+    glm::dvec3 gravityDir;
+    calculateGravityAtPosition(worldPos, gravityDir);
+    
+    // Raycast downward (opposite to gravity direction)
+    glm::dvec3 rayDirection = -gravityDir;
+    double rayDistance = maxCollisionRaycastDistanceKm * 1000.0;  // Convert km to world units
+    
+    // Perform raycast
+    // This is a placeholder - actual implementation depends on RaycastSimple API
+    // For now, we return false to indicate no collision
+    
+    return false;
+}
+
+void PhysicsEngine::applyGravity(const glm::dvec3& worldPos, double deltaTime, glm::dvec3& inOutVelocity) {
+    glm::dvec3 gravityDir;
+    double gravityMagnitude = calculateGravityAtPosition(worldPos, gravityDir);
+    
+    // Apply gravitational acceleration: v += a * dt
+    glm::dvec3 gravityAcceleration = gravityDir * gravityMagnitude;
+    inOutVelocity += gravityAcceleration * deltaTime;
+}
+
 }
