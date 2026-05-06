@@ -84,7 +84,7 @@ bool LightCuller::isSphereInFrustum(const glm::vec3& center, float radius, const
 }
 
 std::vector<LightCuller::CulledLight> LightCuller::cullLights(
-    Haruka::Scene* scene,
+    Haruka::SceneManager* scene,
     const glm::mat4& viewMatrix,
     const glm::mat4& projMatrix,
     int maxLights) {
@@ -99,17 +99,27 @@ std::vector<LightCuller::CulledLight> LightCuller::cullLights(
     Frustum frustum = extractFrustum(viewProj);
     
     // Recolectar todas las luces de la escena
-    const auto& objects = scene->getObjects();
+    const auto& objects = scene->getAllObjects();
     std::vector<CulledLight> allLights;
     
     for (const auto& obj : objects) {
-        if (obj.type == "PointLight" || obj.type == "DirectionalLight" || obj.type == "Light") {
+        if (!obj) continue;
+        if (obj->type == "PointLight" || obj->type == "DirectionalLight" || obj->type == "Light") {
             CulledLight light;
-            light.position = glm::vec3(obj.getWorldPosition(scene));
-            light.color = glm::vec3(obj.color) * glm::vec3(obj.intensity);
+            light.position = glm::vec3(obj->position);
+
+            glm::vec3 color(1.0f);
+            if (obj->properties.contains("color") && obj->properties["color"].is_array() && obj->properties["color"].size() >= 3) {
+                color = glm::vec3(
+                    obj->properties["color"][0].get<float>(),
+                    obj->properties["color"][1].get<float>(),
+                    obj->properties["color"][2].get<float>());
+            }
+            float intensity = obj->properties.value("intensity", 1.0f);
+            light.color = color * intensity;
             
             // Calcular radio aproximado (30 unidades por defecto para point lights)
-            light.radius = 30.0f;
+            light.radius = obj->properties.value("radius", 30.0f);
             
             allLights.push_back(light);
         }

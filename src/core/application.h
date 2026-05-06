@@ -7,6 +7,7 @@
 #include <vector>
 #include <functional>
 #include <chrono>
+#include <algorithm>
 
 #include "tools/math_types.h"
 #include "core/world_system.h"
@@ -58,7 +59,7 @@ public:
     /** @name Accessors */
     ///@{
     Camera* getCamera() { return _camera.get(); }
-    Haruka::SceneManager* getCurrentScene() { return _currentScene.get(); }
+    Haruka::SceneManager* getCurrentScene() { return _currentScene; }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
     Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
@@ -102,11 +103,7 @@ public:
      * @note Performs internal copy into owned scene storage.
      */
     void onSceneChanged(Haruka::SceneManager* scene) {
-        if (!scene) {
-            _currentScene.reset();
-            return;
-        }
-        _currentScene = std::make_unique<Haruka::SceneManager>(*scene);
+        _currentScene = scene;
     }
     /**
      * @brief Callback invoked by `MotorInstance` when viewport camera changes.
@@ -163,7 +160,8 @@ private:
     int _height = 720;
 
     // Core systems
-    std::unique_ptr<Haruka::SceneManager> _currentScene;
+    Haruka::SceneManager* _currentScene = nullptr;
+    std::unique_ptr<Haruka::SceneManager> _ownedScene;
     std::unique_ptr<Camera> _camera;
     
     // Rendering pipeline

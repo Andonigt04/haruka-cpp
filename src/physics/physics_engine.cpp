@@ -4,9 +4,6 @@
 #include <algorithm>
 #include <cmath>
 
-
-namespace Haruka {
-
 PhysicsEngine::PhysicsEngine() {}
 
 PhysicsEngine::~PhysicsEngine() {}
@@ -153,7 +150,7 @@ double PhysicsEngine::calculateGravityAtPosition(const glm::dvec3& worldPos, glm
     return magnitude;
 }
 
-glm::dvec3 PhysicsEngine::calculateGravityContribution(const CelestialBody& body, const glm::dvec3& worldPos) {
+glm::dvec3 PhysicsEngine::calculateGravityContribution(const Haruka::CelestialBody& body, const glm::dvec3& worldPos) {
     // Calculate vector from test position to body
     glm::dvec3 delta = body.worldPos - worldPos;
     double distance = glm::length(delta);
@@ -202,6 +199,4 @@ void PhysicsEngine::applyGravity(const glm::dvec3& worldPos, double deltaTime, g
     // Apply gravitational acceleration: v += a * dt
     glm::dvec3 gravityAcceleration = gravityDir * gravityMagnitude;
     inOutVelocity += gravityAcceleration * deltaTime;
-}
-
 }

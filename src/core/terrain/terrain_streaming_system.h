@@ -3,9 +3,10 @@
 #include <queue>
 #include <future>
 #include <mutex>
+#include <chrono>
 #include <unordered_set>
-#include "game/planetary_system.h"
 #include "core/chunk_cache.h"
+#include "core/lod_system.h"
 #include "core/terrain/terrain_generator.h"
 #include "renderer/terrain_renderer.h"
 #include "tools/planetary_types.h"
@@ -40,12 +41,15 @@ namespace Haruka {
 
         // Chunks que están siendo generados actualmente
         std::unordered_set<uint64_t> m_pendingRequests;
+        std::mutex m_pendingMutex;
+        std::vector<std::future<void>> m_asyncTasks;
         
         // Resultados listos para ser inyectados en la escena
         std::vector<std::shared_ptr<ChunkData>> m_completedChunks;
         std::mutex m_resultMutex;
 
         void requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings);
+        void reapFinishedTasks();
     };
 
 }

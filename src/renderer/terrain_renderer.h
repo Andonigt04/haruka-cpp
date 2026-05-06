@@ -4,8 +4,8 @@
 #include <string>
 #include <mutex>
 #include <glad/glad.h>
-#include "game/planetary_system.h"
 #include "core/chunk_cache.h"
+#include "tools/math_types.h"
 
 namespace Haruka {
 

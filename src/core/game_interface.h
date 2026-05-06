@@ -14,6 +14,8 @@
 
 namespace Haruka {
 
+class SceneManager;
+
 /**
  * @brief ABI-friendly bridge for project-defined gameplay callbacks.
  *
@@ -22,7 +24,7 @@ namespace Haruka {
  */
 struct GameInterface {
     /** @brief Called once when the game session starts. */
-    typedef void (*OnInitFunc)(Scene* scene);
+    typedef void (*OnInitFunc)(SceneManager* scene);
     /** @brief Called every frame while the game is running. */
     typedef void (*OnUpdateFunc)(SDL_Window* window, float deltaTime);
     /** @brief Called once during shutdown. */
@@ -31,7 +33,7 @@ struct GameInterface {
     /** @brief Returns the active camera, if the game exposes one. */
     typedef Camera* (*GetCameraFunc)();
     /** @brief Returns the active scene, if the game exposes one. */
-    typedef Scene* (*GetSceneFunc)();
+    typedef SceneManager* (*GetSceneFunc)();
     
     /** @name Gameplay callbacks */
     ///@{

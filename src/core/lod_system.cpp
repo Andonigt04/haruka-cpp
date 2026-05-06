@@ -16,8 +16,9 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
     // Procesar las 6 caras del cubo-esfera
     for (int face = 0; face < 6; ++face) {
         // Crear un nodo raíz para cada cara (LOD 0)
-        PlanetChunkKey rootKey{ (uint8_t)face, 0, 0, 0 };
-        glm::dvec3 center = getCubeToSpherePos(face, 0.5, 0.5, radius) + planet->position;
+        const PlanetFace planetFace = static_cast<PlanetFace>(face);
+        PlanetChunkKey rootKey{ planetFace, 0, 0, 0 };
+        glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planet->position;
         
         LODNode root(rootKey, center, radius * 2.0);
         recursiveProcess(&root, cameraPos, update, radius);
@@ -96,7 +97,7 @@ void LODSystem::subdivide(LODNode* node, double radius) {
     }
 }
 
-glm::dvec3 LODSystem::getCubeToSpherePos(int face, double u, double v, double radius) {
+glm::dvec3 LODSystem::getCubeToSpherePos(PlanetFace face, double u, double v, double radius) {
     // 1. Convertir UV [0, 1] a Espacio Local del Cubo [-1, 1]
     double localX = (u * 2.0) - 1.0;
     double localY = (v * 2.0) - 1.0;
@@ -104,12 +105,12 @@ glm::dvec3 LODSystem::getCubeToSpherePos(int face, double u, double v, double ra
     // 2. Proyectar en la cara del cubo (Misma convención que en TerrainGenerator)
     glm::dvec3 p;
     switch (face) {
-        case 0: p = {  1.0,    localY, -localX }; break; // Front
-        case 1: p = { -1.0,    localY,  localX }; break; // Back
-        case 2: p = {  localX,  1.0,   -localY }; break; // Top
-        case 3: p = {  localX, -1.0,    localY }; break; // Bottom
-        case 4: p = {  localX,  localY,  1.0   }; break; // Right
-        case 5: p = { -localX,  localY, -1.0   }; break; // Left
+        case PlanetFace::FRONT: p = {  1.0,    localY, -localX }; break;
+        case PlanetFace::BACK: p = { -1.0,    localY,  localX }; break;
+        case PlanetFace::TOP: p = {  localX,  1.0,   -localY }; break;
+        case PlanetFace::BOTTOM: p = {  localX, -1.0,    localY }; break;
+        case PlanetFace::RIGHT: p = {  localX,  localY,  1.0   }; break;
+        case PlanetFace::LEFT: p = { -localX,  localY, -1.0   }; break;
     }
 
     // 3. Esferificación (Spherify) - Mapeo matemático para evitar distorsión

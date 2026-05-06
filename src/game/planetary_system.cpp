@@ -1,5 +1,11 @@
 #include "planetary_system.h"
 
+#include "core/chunk_cache.h"
+#include "core/lod_system.h"
+#include "core/terrain/terrain_generator.h"
+#include "core/terrain/terrain_streaming_system.h"
+#include "renderer/terrain_renderer.h"
+
 namespace Haruka {
 
 PlanetarySystem::PlanetarySystem() {}

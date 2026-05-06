@@ -1,4 +1,5 @@
 #include "world_system.h"
+#include "game/planetary_system.h"
 
 namespace Haruka {
 

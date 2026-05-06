@@ -20,12 +20,12 @@ namespace {
         // 2. Proyectar según la cara (Face: 0-5)
         glm::dvec3 p;
         switch (key.face) {
-            case 0: p = { 1.0,    localY, -localX }; break; // Front
-            case 1: p = { -1.0,   localY,  localX }; break; // Back
-            case 2: p = { localX,  1.0,   -localY }; break; // Top
-            case 3: p = { localX, -1.0,    localY }; break; // Bottom
-            case 4: p = { localX,  localY,  1.0 };    break; // Right
-            case 5: p = { -localX, localY, -1.0 };    break; // Left
+            case PlanetFace::FRONT: p = { 1.0,    localY, -localX }; break;
+            case PlanetFace::BACK: p = { -1.0,   localY,  localX }; break;
+            case PlanetFace::TOP: p = { localX,  1.0,   -localY }; break;
+            case PlanetFace::BOTTOM: p = { localX, -1.0,    localY }; break;
+            case PlanetFace::RIGHT: p = { localX,  localY,  1.0 };    break;
+            case PlanetFace::LEFT: p = { -localX, localY, -1.0 };    break;
         }
 
         // 3. Convertir cubo a esfera (Spherify) para evitar distorsión en las esquinas

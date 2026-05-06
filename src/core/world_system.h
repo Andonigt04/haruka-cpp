@@ -5,11 +5,12 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
-#include "game/planetary_system.h" // El World posee al PlanetarySystem
 #include "tools/planetary_types.h" // El World posee al PlanetaryTypes
 #include "tools/object_types.h" // Para ObjectType en CelestialBody
 
 namespace Haruka {
+
+    class PlanetarySystem;
 
     /**
      * @brief Representa una entidad macroscópica en el vacío del espacio.
@@ -19,6 +20,7 @@ namespace Haruka {
         ObjectType type;
         WorldPos worldPos;     // Posición en double (km)
         glm::vec3 velocity;    // km/s
+        double mass = 0.0;     // kg
         float radius;          // km
         glm::vec3 color;
         
@@ -54,6 +56,8 @@ namespace Haruka {
 
         // Getters de los sistemas especializados
         PlanetarySystem& getPlanetarySystem() { return *m_planetarySystem; }
+        const std::vector<CelestialBody>& getBodies() const { return m_bodies; }
+        std::vector<CelestialBody>& getBodies() { return m_bodies; }
 
     private:
         // Sistemas coordinados por el Mundo

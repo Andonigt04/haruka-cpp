@@ -89,7 +89,7 @@ public:
      * @param worldPos Test position in world space
      * @return Gravitational acceleration vector (m/s²)
      */
-    glm::dvec3 calculateGravityContribution(const CelestialBody& body, const glm::dvec3& worldPos);
+    glm::dvec3 calculateGravityContribution(const Haruka::CelestialBody& body, const glm::dvec3& worldPos);
     
     /**
      * @brief Checks if a position collides with terrain.
@@ -147,3 +147,7 @@ private:
     /** @brief Runs broad-phase AABB traversal/culling. */
     void broadPhaseAABB();
 };
+
+namespace Haruka {
+using PhysicsEngine = ::PhysicsEngine;
+}

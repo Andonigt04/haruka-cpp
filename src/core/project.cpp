@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <algorithm>
+#include <nlohmann/json.hpp>
 
 namespace fs = std::filesystem;
 
@@ -15,6 +16,7 @@ namespace Haruka
 
     bool Project::create(const std::string& path, const std::string& name) {
         projectPath = path;
+        config = ProjectConfig{};
         config.name = name;
         config.version = "0.1";
         config.engineVersion = "0.1";
@@ -69,13 +71,20 @@ namespace Haruka
         if (scenePath.find(".scene") == std::string::npos) {
             scenePath += ".scene";
         }
-        
-        config.scenes.push_back(scenePath);
+
+        if (std::find(config.scenes.begin(), config.scenes.end(), scenePath) == config.scenes.end()) {
+            config.scenes.push_back(scenePath);
+        }
         return save();
     }
 
     bool Project::removeScene(const std::string& sceneName) {
-        auto it = std::find(config.scenes.begin(), config.scenes.end(), sceneName);
+        std::string scenePath = sceneName;
+        if (scenePath.find(".scene") == std::string::npos) {
+            scenePath += ".scene";
+        }
+
+        auto it = std::find(config.scenes.begin(), config.scenes.end(), scenePath);
         if (it != config.scenes.end()) {
             config.scenes.erase(it);
             return save();
@@ -89,90 +98,47 @@ namespace Haruka
             HARUKA_MOTOR_ERROR(ErrorCode::FILE_NOT_FOUND, std::string("Cannot open project file: ") + filepath);
             return false;
         }
-        
-        // JSON parsing simple (manual)
-        std::string line;
-        while (std::getline(file, line)) {
-            // Parse name
-            if (line.find("\"name\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.name = line.substr(firstQuote, lastQuote - firstQuote);
+        try {
+            nlohmann::json data;
+            file >> data;
+
+            config.name = data.value("name", config.name);
+            config.version = data.value("version", config.version);
+            config.engineVersion = data.value("engineVersion", config.engineVersion);
+            config.startScene = data.value("startScene", config.startScene);
+            config.engineBinary = data.value("engineBinary", config.engineBinary);
+            config.editorBinary = data.value("editorBinary", config.editorBinary);
+            config.assetsPath = data.value("assetsPath", config.assetsPath);
+            config.outputPath = data.value("outputPath", config.outputPath);
+            config.shadersPath = data.value("shadersPath", config.shadersPath);
+
+            if (data.contains("scenes") && data["scenes"].is_array()) {
+                config.scenes.clear();
+                for (const auto& sceneEntry : data["scenes"]) {
+                    if (sceneEntry.is_string()) {
+                        config.scenes.push_back(sceneEntry.get<std::string>());
+                    }
+                }
             }
-            // Parse version
-            else if (line.find("\"version\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.version = line.substr(firstQuote, lastQuote - firstQuote);
+
+            if (data.contains("exportSettings") && data["exportSettings"].is_object()) {
+                const auto& exportData = data["exportSettings"];
+                config.exportSettings.author = exportData.value("author", config.exportSettings.author);
+                config.exportSettings.description = exportData.value("description", config.exportSettings.description);
+                config.exportSettings.defaultBuildType = exportData.value("defaultBuildType", config.exportSettings.defaultBuildType);
+                config.exportSettings.defaultPlatform = exportData.value("defaultPlatform", config.exportSettings.defaultPlatform);
+                config.exportSettings.includeDebugSymbols = exportData.value("includeDebugSymbols", config.exportSettings.includeDebugSymbols);
+                config.exportSettings.optimizeAssets = exportData.value("optimizeAssets", config.exportSettings.optimizeAssets);
+                config.exportSettings.stripUnusedContent = exportData.value("stripUnusedContent", config.exportSettings.stripUnusedContent);
+                config.exportSettings.compressAssets = exportData.value("compressAssets", config.exportSettings.compressAssets);
+                config.exportSettings.customBuildOutputPath = exportData.value("customBuildOutputPath", config.exportSettings.customBuildOutputPath);
+                config.exportSettings.customLaunchScript = exportData.value("customLaunchScript", config.exportSettings.customLaunchScript);
             }
-            // Parse startScene
-            else if (line.find("\"startScene\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.startScene = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"shadersPath\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.shadersPath = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"engineBinary\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.engineBinary = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"editorBinary\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.editorBinary = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"assetsPath\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.assetsPath = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            // Parse outputPath
-            else if (line.find("\"outputPath\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.outputPath = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            // Parse export settings
-            else if (line.find("\"author\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.exportSettings.author = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"description\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.exportSettings.description = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"defaultBuildType\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.exportSettings.defaultBuildType = line.substr(firstQuote, lastQuote - firstQuote);
-            }
-            else if (line.find("\"defaultPlatform\"") != std::string::npos) {
-                size_t start = line.find(":") + 1;
-                size_t firstQuote = line.find("\"", start) + 1;
-                size_t lastQuote = line.find("\"", firstQuote);
-                config.exportSettings.defaultPlatform = line.substr(firstQuote, lastQuote - firstQuote);
-            }
+        } catch (const std::exception& e) {
+            HARUKA_MOTOR_ERROR(ErrorCode::INVALID_PROJECT, std::string("Invalid project file: ") + e.what());
+            return false;
         }
-        
-        file.close();
+
         return true;
     }
 
@@ -182,36 +148,32 @@ namespace Haruka
             HARUKA_MOTOR_ERROR(ErrorCode::FILE_WRITE_ERROR, std::string("Cannot create project file: ") + filepath);
             return false;
         }
-        // Escribir JSON manual
-        file << "{\n";
-        file << "  \"name\": \"" << config.name << "\",\n";
-        file << "  \"version\": \"" << config.version << "\",\n";
-        file << "  \"engineVersion\": \"" << config.engineVersion << "\",\n";
-        file << "  \"startScene\": \"" << config.startScene << "\",\n";
-        file << "  \"engineBinary\": \"" << config.engineBinary << "\",\n";
-        file << "  \"editorBinary\": \"" << config.editorBinary << "\",\n";
-        file << "  \"scenes\": [\n";
-        for (size_t i = 0; i < config.scenes.size(); i++) {
-            file << "    \"" << config.scenes[i] << "\"";
-            if (i < config.scenes.size() - 1) file << ",";
-            file << "\n";
-        }
-        file << "  ],\n";
-        file << "  \"assetsPath\": \"" << config.assetsPath << "\",\n";
-        file << "  \"outputPath\": \"" << config.outputPath << "\",\n";
-        file << "  \"shadersPath\": \"" << config.shadersPath << "\",\n";
-        file << "  \"exportSettings\": {\n";
-        file << "    \"author\": \"" << config.exportSettings.author << "\",\n";
-        file << "    \"description\": \"" << config.exportSettings.description << "\",\n";
-        file << "    \"defaultBuildType\": \"" << config.exportSettings.defaultBuildType << "\",\n";
-        file << "    \"defaultPlatform\": \"" << config.exportSettings.defaultPlatform << "\",\n";
-        file << "    \"includeDebugSymbols\": " << (config.exportSettings.includeDebugSymbols ? "true" : "false") << ",\n";
-        file << "    \"optimizeAssets\": " << (config.exportSettings.optimizeAssets ? "true" : "false") << ",\n";
-        file << "    \"stripUnusedContent\": " << (config.exportSettings.stripUnusedContent ? "true" : "false") << ",\n";
-        file << "    \"compressAssets\": " << (config.exportSettings.compressAssets ? "true" : "false") << "\n";
-        file << "  }\n";
-        file << "}\n";
-        file.close();
+
+        nlohmann::json data;
+        data["name"] = config.name;
+        data["version"] = config.version;
+        data["engineVersion"] = config.engineVersion;
+        data["startScene"] = config.startScene;
+        data["engineBinary"] = config.engineBinary;
+        data["editorBinary"] = config.editorBinary;
+        data["scenes"] = config.scenes;
+        data["assetsPath"] = config.assetsPath;
+        data["outputPath"] = config.outputPath;
+        data["shadersPath"] = config.shadersPath;
+        data["exportSettings"] = {
+            {"author", config.exportSettings.author},
+            {"description", config.exportSettings.description},
+            {"defaultBuildType", config.exportSettings.defaultBuildType},
+            {"defaultPlatform", config.exportSettings.defaultPlatform},
+            {"includeDebugSymbols", config.exportSettings.includeDebugSymbols},
+            {"optimizeAssets", config.exportSettings.optimizeAssets},
+            {"stripUnusedContent", config.exportSettings.stripUnusedContent},
+            {"compressAssets", config.exportSettings.compressAssets},
+            {"customBuildOutputPath", config.exportSettings.customBuildOutputPath},
+            {"customLaunchScript", config.exportSettings.customLaunchScript}
+        };
+
+        file << data.dump(2) << '\n';
         return true;
     }
 }

@@ -4,7 +4,6 @@
  */
 #pragma once
 
-#include "core/world_system.h"
 #include "tools/planetary_types.h"
 #include <unordered_map>
 #include <list>

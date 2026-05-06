@@ -47,7 +47,7 @@ namespace Haruka {
         void subdivide(LODNode* node, double radius);
         
         // Helpers para calcular posiciones en la esfera
-        glm::dvec3 getCubeToSpherePos(int face, double u, double v, double radius);
+        glm::dvec3 getCubeToSpherePos(PlanetFace face, double u, double v, double radius);
     };
 
 } // namespace Haruka

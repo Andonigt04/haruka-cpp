@@ -4,7 +4,20 @@
 #include "renderer/terrain_renderer.h" // Para agregar/quitar de la escena
 
 namespace Haruka {
+    void TerrainStreamingSystem::reapFinishedTasks() {
+        for (auto it = m_asyncTasks.begin(); it != m_asyncTasks.end();) {
+            if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                it->get();
+                it = m_asyncTasks.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     void TerrainStreamingSystem::update(const std::vector<PlanetChunkKey>& requestedChunks, const nlohmann::json& planetSettings) {
+        reapFinishedTasks();
+
         for (const auto& key : requestedChunks) {
             uint64_t hash = ChunkCache::keyToHash(key); // Usamos tu función de hash
 
@@ -14,8 +27,11 @@ namespace Haruka {
             }
 
             // 2. ¿Ya lo estamos generando?
-            if (m_pendingRequests.find(hash) != m_pendingRequests.end()) {
-                continue; 
+            {
+                std::lock_guard<std::mutex> lock(m_pendingMutex);
+                if (m_pendingRequests.find(hash) != m_pendingRequests.end()) {
+                    continue;
+                }
             }
 
             // 3. No está. Pedir generación asíncrona.
@@ -25,20 +41,28 @@ namespace Haruka {
 
     void TerrainStreamingSystem::requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings) {
         uint64_t hash = ChunkCache::keyToHash(key);
-        m_pendingRequests.insert(hash);
+        {
+            std::lock_guard<std::mutex> lock(m_pendingMutex);
+            m_pendingRequests.insert(hash);
+        }
 
         // Lanzar hilo de trabajo
-        std::async(std::launch::async, [this, key, settings, hash]() {
+        m_asyncTasks.push_back(std::async(std::launch::async, [this, key, settings, hash]() {
             // Ejecutar el generador (Ruido Perlin/fBm)
             auto data = m_generator.generateChunk(key, settings, settings["radius"]);
 
             // Guardar resultado de forma segura
-            std::lock_guard<std::mutex> lock(m_resultMutex);
-            m_cache.addChunk(key, *data); // Guardar en caché para la próxima vez
-            m_completedChunks.push_back(data);
-            
-            // El hash se eliminaría de pending en el hilo principal para evitar race conditions
-        });
+            {
+                std::lock_guard<std::mutex> lock(m_resultMutex);
+                m_cache.addChunk(key, *data); // Guardar en caché para la próxima vez
+                m_completedChunks.push_back(data);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(m_pendingMutex);
+                m_pendingRequests.erase(hash);
+            }
+        }));
     }
 
     void TerrainStreamingSystem::processLODUpdate(const LODUpdate& update) {
@@ -60,10 +84,16 @@ namespace Haruka {
             if (data) {
                 // ¡HIT! El dato ya existe en RAM, lo mandamos directo a la GPU
                 m_renderer.addToScene(update.planetName, key, *data);
-            } else {
-                // ¡MISS! No está en RAM, hay que generarlo en un hilo
-                requestAsyncGeneration(key, update.planetName);
             }
         }
+    }
+
+    std::vector<std::shared_ptr<ChunkData>> TerrainStreamingSystem::getReadyChunks() {
+        reapFinishedTasks();
+
+        std::lock_guard<std::mutex> lock(m_resultMutex);
+        std::vector<std::shared_ptr<ChunkData>> ready;
+        ready.swap(m_completedChunks);
+        return ready;
     }
 }

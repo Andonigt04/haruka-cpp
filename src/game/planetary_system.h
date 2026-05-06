@@ -6,11 +6,15 @@
 #include <unordered_map>
 #include <nlohmann/json.hpp>
 #include "tools/math_types.h"
-#include "core/lod_system.h"
-#include "core/terrain/terrain_streaming_system.h"
-#include "renderer/terrain_renderer.h"
+#include "core/scene/scene_manager.h"
 
 namespace Haruka {
+
+class ChunkCache;
+class TerrainGenerator;
+class TerrainRenderer;
+class TerrainStreamingSystem;
+class LODSystem;
 
 class PlanetarySystem {
 public:
