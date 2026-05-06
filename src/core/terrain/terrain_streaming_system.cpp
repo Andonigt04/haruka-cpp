@@ -1,6 +1,6 @@
 #include "terrain_streaming_system.h"
 
-#include "lod_system.h" // Para LODUpdate
+#include "core/lod_system.h" // Para LODUpdate
 #include "renderer/terrain_renderer.h" // Para agregar/quitar de la escena
 
 namespace Haruka {

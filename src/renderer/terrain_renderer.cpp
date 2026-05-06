@@ -8,7 +8,7 @@ TerrainRenderer::~TerrainRenderer() {
     }
 }
 
-void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const PlanetarySystem::ChunkData& data) {
+void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
     std::lock_guard<std::mutex> lock(m_renderMutex);
     uint64_t hash = ChunkCache::keyToHash(key);
 
@@ -51,7 +51,7 @@ void TerrainRenderer::removeFromScene(const std::string& planetName, const Plane
     }
 }
 
-void TerrainRenderer::render(const glm::mat4& viewProjection, const glm::dvec3& cameraPos) {
+void TerrainRenderer::render(const Haruka::WorldPos& cameraPos) {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
     // Aquí deberías activar tu Shader de Planeta antes de este bucle

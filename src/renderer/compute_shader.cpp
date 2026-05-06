@@ -2,7 +2,7 @@
 
 #include <iostream>
 #include <fstream>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <sstream>
 #include <glm/gtc/type_ptr.hpp>
 

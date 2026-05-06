@@ -3,8 +3,8 @@
 #include <memory>
 #include <glm/glm.hpp>
 
-#include "scene/scene_manager.h" // Para leer terrainSettings
-#include "game/planetary_system.h" // Para PlanetChunkKey y ChunkData
+#include "core/scene/scene_manager.h" // Para leer terrainSettings
+#include "tools/planetary_types.h" // Para PlanetChunkKey y ChunkData
 
 namespace Haruka {
 
@@ -16,7 +16,7 @@ namespace Haruka {
          * @brief Genera la malla de un chunk específico.
          * Esta función debería ser agnóstica al hilo (Thread-safe).
          */
-        std::shared_ptr<PlanetarySystem::ChunkData> generateChunk(
+        std::shared_ptr<ChunkData> generateChunk(
             const PlanetChunkKey& key, 
             const nlohmann::json& settings,
             double planetRadius

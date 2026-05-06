@@ -12,7 +12,7 @@
 #include <fstream>
 #include <vector>
 #include <iostream>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 /**
  * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.

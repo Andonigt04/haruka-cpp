@@ -15,7 +15,7 @@
 #include <condition_variable>
 #include <functional>
 #include <glm/glm.hpp>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 /**
  * @brief On-demand asynchronous asset streaming service.

@@ -2,7 +2,7 @@
 
 #include "stb_image.h"
 #include <iostream>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 Texture::Texture(const char* path)
 {

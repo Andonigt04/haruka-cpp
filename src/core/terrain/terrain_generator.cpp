@@ -1,6 +1,6 @@
 #include "terrain_generator.h"
 
-#include "noise_generator.h" // Para generar ruido procedural
+#include "core/noise_generator.h" // Para generar ruido procedural
 
 
 namespace Haruka {
@@ -41,9 +41,9 @@ namespace {
         return glm::vec3(spherePos);
     }
 
-    std::shared_ptr<PlanetarySystem::ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) 
+    std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) 
     {
-        auto chunk = std::make_shared<PlanetarySystem::ChunkData>();
+        auto chunk = std::make_shared<ChunkData>();
         int res = settings["config"].value("chunkSize", 64);
         // Set global seed so calculateHeight can read it when only the
         // layers json is passed (no parent pointer available).

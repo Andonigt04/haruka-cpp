@@ -5,8 +5,10 @@
 #include <mutex>
 #include <unordered_set>
 #include "game/planetary_system.h"
-#include "chunk_cache.h"
-#include "terrain_generator.h"
+#include "core/chunk_cache.h"
+#include "core/terrain/terrain_generator.h"
+#include "renderer/terrain_renderer.h"
+#include "tools/planetary_types.h"
 
 namespace Haruka {
 
@@ -28,7 +30,7 @@ namespace Haruka {
         /**
          * @brief Recupera los chunks que ya terminaron de generarse.
          */
-        std::vector<std::shared_ptr<PlanetarySystem::ChunkData>> getReadyChunks();
+        std::vector<std::shared_ptr<ChunkData>> getReadyChunks();
 
 
     private:
@@ -40,7 +42,7 @@ namespace Haruka {
         std::unordered_set<uint64_t> m_pendingRequests;
         
         // Resultados listos para ser inyectados en la escena
-        std::vector<std::shared_ptr<PlanetarySystem::ChunkData>> m_completedChunks;
+        std::vector<std::shared_ptr<ChunkData>> m_completedChunks;
         std::mutex m_resultMutex;
 
         void requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings);

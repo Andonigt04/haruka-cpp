@@ -8,10 +8,10 @@
 #include <functional>
 #include <chrono>
 
-#include "math_types.h"
-#include "world_system.h"
-#include "camera.h"
-#include "scene.h"
+#include "tools/math_types.h"
+#include "core/world_system.h"
+#include "core/camera.h"
+#include "core/scene/scene_manager.h"
 #include "renderer/shader.h"
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
@@ -27,13 +27,13 @@
 #include "renderer/compute_postprocess.h"
 #include "renderer/cascaded_shadow.h"
 #include "renderer/virtual_texturing.h"
-#include "error_reporter.h"
+#include "tools/error_reporter.h"
 #include "io/asset_streamer.h"
-#include "debug_overlay.h"
+#include "tools/debug_overlay.h"
 #include "physics/raycast_simple.h"
 #include "physics/physics_engine.h"
-#include "core/terrain_streaming_system.h"
-#include "core/scene_loader.h"
+#include "core/terrain/terrain_streaming_system.h"
+#include "core/scene/scene_loader.h"
 #include "core/chunk_cache.h"
 
 class MotorInstance;
@@ -58,7 +58,7 @@ public:
     /** @name Accessors */
     ///@{
     Camera* getCamera() { return _camera.get(); }
-    Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
+    Haruka::SceneManager* getCurrentScene() { return _currentScene.get(); }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
     Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
@@ -101,12 +101,12 @@ public:
      * @brief Callback invoked by `MotorInstance` when active scene changes.
      * @note Performs internal copy into owned scene storage.
      */
-    void onSceneChanged(Haruka::Scene* scene) {
+    void onSceneChanged(Haruka::SceneManager* scene) {
         if (!scene) {
             _currentScene.reset();
             return;
         }
-        _currentScene = std::make_unique<Haruka::Scene>(*scene);
+        _currentScene = std::make_unique<Haruka::SceneManager>(*scene);
     }
     /**
      * @brief Callback invoked by `MotorInstance` when viewport camera changes.
@@ -127,7 +127,7 @@ public:
     /** @brief Starts runtime using a scene path bootstrap. */
     void run(const std::string& startScenePath);
     /** @brief Initializes systems from a scene instance. */
-    void init(Haruka::Scene& scene);
+    void init(Haruka::SceneManager& scene);
     /** @brief Creates runtime window resources (when applicable). */
     void create_window();
     /** @brief Initializes the OpenGL context, GLAD, and input callbacks. */
@@ -163,7 +163,7 @@ private:
     int _height = 720;
 
     // Core systems
-    std::unique_ptr<Haruka::Scene> _currentScene;
+    std::unique_ptr<Haruka::SceneManager> _currentScene;
     std::unique_ptr<Camera> _camera;
     
     // Rendering pipeline

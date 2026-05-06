@@ -9,7 +9,7 @@ class RenderTarget;
 class Camera;
 
 namespace Haruka {
-    class Scene;
+    class SceneManager;
 }
 
 /**
@@ -34,7 +34,7 @@ public:
     }
     
     /** @brief Stores the active scene pointer. */
-    void setScene(Haruka::Scene* scene) {
+    void setScene(Haruka::SceneManager* scene) {
         motorScene = scene;
     }
     
@@ -54,7 +54,7 @@ public:
     }
     
     /** @brief Returns the active scene pointer. */
-    Haruka::Scene* getScene() const {
+    Haruka::SceneManager* getScene() const {
         return motorScene;
     }
     
@@ -93,7 +93,7 @@ private:
     MotorInstance& operator=(const MotorInstance&) = delete;
 
     RenderTarget* motorRenderTarget = nullptr;
-    Haruka::Scene* motorScene = nullptr;
+    Haruka::SceneManager* motorScene = nullptr;
     Camera* motorCamera = nullptr;
     Application* motorApplication = nullptr;
     bool motorPlayMode = false;

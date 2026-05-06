@@ -9,7 +9,6 @@
  */
 #pragma once
 
-#include "scene.h"
 #include "camera.h"
 #include <SDL3/SDL.h>
 

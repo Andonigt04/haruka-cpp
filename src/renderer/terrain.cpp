@@ -3,7 +3,7 @@
 #include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <cmath>
 #include <algorithm>
 #include "stb_image.h"

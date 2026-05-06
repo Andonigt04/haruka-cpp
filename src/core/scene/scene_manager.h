@@ -2,6 +2,7 @@
 #include <string>
 #include <glm/glm.hpp>
 #include <unordered_map>
+#include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
 

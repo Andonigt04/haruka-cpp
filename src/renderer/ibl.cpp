@@ -3,7 +3,7 @@
 #include <iostream>
 #include <vector>
 #include <stb_image.h>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include "shader.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>

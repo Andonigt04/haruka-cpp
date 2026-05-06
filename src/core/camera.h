@@ -14,7 +14,7 @@
 #define CAMERA_H
 
 #include <glm/gtc/matrix_transform.hpp>
-#include "math_types.h"
+#include "tools/math_types.h"
 
 struct SDL_Window;
 

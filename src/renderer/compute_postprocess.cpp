@@ -1,7 +1,7 @@
 #include "compute_postprocess.h"
 #include <glm/glm.hpp>
 #include <iostream>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 ComputePostProcess::ComputePostProcess() {}
 

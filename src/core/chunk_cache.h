@@ -5,7 +5,7 @@
 #pragma once
 
 #include "core/world_system.h"
-#include "game/planetary_system.h"
+#include "tools/planetary_types.h"
 #include <unordered_map>
 #include <list>
 #include <memory>
@@ -42,7 +42,7 @@ public:
      * @param key Chunk identifier
      * @return Pointer to cached ChunkData, or nullptr if not in cache
      */
-    const PlanetarySystem::ChunkData* getChunk(const PlanetChunkKey& key);
+    const ChunkData* getChunk(const PlanetChunkKey& key);
     
     /**
      * @brief Adds a chunk to the cache.
@@ -52,7 +52,7 @@ public:
      * @param key Chunk identifier
      * @param data Chunk data to cache
      */
-    void addChunk(const PlanetChunkKey& key, const PlanetarySystem::ChunkData& data);
+    void addChunk(const PlanetChunkKey& key, const ChunkData& data);
     
     /**
      * @brief Removes a chunk from the cache.
@@ -119,7 +119,7 @@ private:
      * @brief Cache entry with metadata.
      */
     struct CacheEntry {
-        PlanetarySystem::ChunkData data;
+        ChunkData data;
         size_t sizeBytes = 0;
         // List iterator for LRU tracking (stored in separate member)
     };

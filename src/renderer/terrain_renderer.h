@@ -5,7 +5,7 @@
 #include <mutex>
 #include <glad/glad.h>
 #include "game/planetary_system.h"
-#include "chunk_cache.h"
+#include "core/chunk_cache.h"
 
 namespace Haruka {
 
@@ -23,13 +23,13 @@ namespace Haruka {
         ~TerrainRenderer();
 
         // Llamado por el StreamingSystem cuando un chunk está listo en RAM
-        void addToScene(const std::string& planetName, const PlanetChunkKey& key, const PlanetarySystem::ChunkData& data);
+        void addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data);
 
         // Llamado por el StreamingSystem cuando el LOD decide ocultar un chunk
         void removeFromScene(const std::string& planetName, const PlanetChunkKey& key);
 
         // El render principal que corre cada frame
-        void render(const glm::mat4& viewProjection, const glm::dvec3& cameraPos);
+        void render(const Haruka::WorldPos& cameraPos);
 
     private:
         // Usamos el hash de la llave para identificar la malla en la GPU

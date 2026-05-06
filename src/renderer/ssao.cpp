@@ -1,5 +1,5 @@
 #include "ssao.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <random>
 #include <iostream>
 

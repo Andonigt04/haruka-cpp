@@ -99,7 +99,7 @@
  * - Vertices are displaced along the sphere normal by the height value.
  * - Normals are recalculated from the displaced positions.
  * - The job runs on a background thread via `std::async`; result is a
- *   `PlanetarySystem::ChunkData` (vertices / normals / indices).
+ *   `ChunkData` (vertices / normals / indices).
  *
  * **Streaming** (`TerrainStreamingSystem`):
  * - `WorldSystem::updateVisibleChunks()` builds the visible set from camera
@@ -162,8 +162,8 @@
  */
 
 #include "core/application.h"
-#include "core/json.hpp"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <fstream>
 #include <stdexcept>

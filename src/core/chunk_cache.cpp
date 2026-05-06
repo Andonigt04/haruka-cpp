@@ -12,7 +12,7 @@ ChunkCache::ChunkCache(size_t maxMemoryMB)
     : maxMemoryBytes(std::max<size_t>(16 * 1024 * 1024, maxMemoryMB * 1024 * 1024)),
       currentMemoryBytes(0) {}
 
-const PlanetarySystem::ChunkData* ChunkCache::getChunk(const PlanetChunkKey& key) {
+const ChunkData* ChunkCache::getChunk(const PlanetChunkKey& key) {
     uint64_t hash = keyToHash(key);
     auto it = cache.find(hash);
     
@@ -28,7 +28,7 @@ const PlanetarySystem::ChunkData* ChunkCache::getChunk(const PlanetChunkKey& key
     return nullptr;
 }
 
-void ChunkCache::addChunk(const PlanetChunkKey& key, const PlanetarySystem::ChunkData& data) {
+void ChunkCache::addChunk(const PlanetChunkKey& key, const ChunkData& data) {
     uint64_t hash = keyToHash(key);
     
     // Calculate size of chunk data

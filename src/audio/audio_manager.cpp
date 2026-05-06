@@ -2,7 +2,7 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 namespace Haruka {
 

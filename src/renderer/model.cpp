@@ -2,7 +2,7 @@
 
 #include <iostream>
 #include "stb_image.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 void Model::Draw(Shader &shader) {
     for(unsigned int i = 0; i < meshes.size(); i++)

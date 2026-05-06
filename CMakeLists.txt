@@ -1,9 +1,9 @@
 cmake_minimum_required(VERSION 3.14)
 
-# Must be set before project() so -DENGINE_VERSION=x.x.x is picked up.
-set(ENGINE_VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
+# Must be set before project() so -DVERSION=x.x.x is picked up.
+set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
-project(HarukaEngine VERSION ${ENGINE_VERSION})
+project(HarukaEngine VERSION ${VERSION})
 
 set(OpenGL_GL_PREFERENCE GLVND)
 set(CMAKE_CXX_STANDARD 17)

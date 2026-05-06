@@ -10,7 +10,7 @@
 
 #include "renderer/mesh.h"
 #include "renderer/motor_instance.h"
-#include "world_system.h"
+#include "core/world_system.h"
 #include "renderer/shader.h"
 #include "renderer/model.h"
 #include "renderer/shadow.h"
@@ -23,23 +23,22 @@
 #include "renderer/render_target.h"
 #include "renderer/simple_mesh.h"
 #include "renderer/primitive_shapes.h"
-#include "project.h"
-#include "error_reporter.h"
-#include "startup_report.h"
+#include "core/project.h"
+#include "tools/error_reporter.h"
+#include "tools/startup_report.h"
 #include "renderer/gpu_instancing.h"
 #include "physics/raycast_simple.h"
 #include "physics/physics_engine.h"
-#include "object_types.h"
-#include "core/primitive_types.h"
-#include "core/terrain_streaming_system.h"
-#include "core/scene_loader.h"
+#include "tools/object_types.h"
+#include "core/terrain/terrain_streaming_system.h"
+#include "core/scene/scene_loader.h"
 #include "core/chunk_cache.h"
 
 Haruka::GameInterface* gameInterface = nullptr;
 
 namespace {
 std::vector<const Haruka::SceneObject*> g_sceneRenderQueue;
-Haruka::Scene* g_sceneForRender = nullptr;
+Haruka::SceneManager* g_sceneForRender = nullptr;
 std::unordered_map<std::string, std::shared_ptr<Model>> g_modelCache;
 
 bool isRenderDisabledByEditor(const Haruka::SceneObject& obj) {

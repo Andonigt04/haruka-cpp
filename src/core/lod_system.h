@@ -4,7 +4,7 @@
 #include <unordered_set>
 #include <memory>
 #include "scene/scene_manager.h"
-#include "game/planetary_system.h"
+#include "tools/planetary_types.h"
 
 namespace Haruka {
 

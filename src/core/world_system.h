@@ -1,271 +1,69 @@
-/**
- * @file world_system.h
- * @brief Celestial body registry, origin-shifting, LOD, and chunk streaming.
- *
- * `WorldSystem` maintains the list of `CelestialBody` objects in world space.
- * Because the engine uses double-precision world coordinates but single-precision
- * rendering, `toLocal()` converts any world position to camera-relative local
- * coordinates before upload to the GPU.
- *
- * Chunk streaming uses a priority queue (LRU + distance) with configurable
- * per-frame load/evict budgets and a resident-memory cap. The GPU compute
- * path (`initComputeShaders` / `frustumCull`) handles visibility in
- * `frustum_cull.comp`.
- */
-#ifndef WORLD_SYSTEM_H
-#define WORLD_SYSTEM_H
+#pragma once
 
-#include "math_types.h"
-#include "camera.h"
+#include "tools/math_types.h"
 #include <vector>
 #include <string>
 #include <memory>
-#include <algorithm>
-#include <map>
-#include <cstdint>
-
-struct CelestialBody
-{
-    Haruka::WorldPos worldPos;    ///< High-precision world-space position (km)
-    Haruka::LocalPos localPos;    ///< Camera-relative position cache (single precision)
-    glm::vec3 velocity;           ///< Velocity vector (km/s)
-    float radius;                 ///< Body radius (km)
-    float mass;                   ///< Mass (arbitrary units)
-    std::string name;
-    glm::vec3 color;              ///< Surface tint color
-    float emissionStrength;       ///< Emissive multiplier (0 = non-emissive)
-    uint32_t visible;             ///< GPU-visible flag set by frustum_cull.comp
-    uint32_t lodLevel;            ///< Current LOD level [0 = highest .. 3 = lowest]
-};
+#include <unordered_map>
+#include "game/planetary_system.h" // El World posee al PlanetarySystem
+#include "tools/planetary_types.h" // El World posee al PlanetaryTypes
+#include "tools/object_types.h" // Para ObjectType en CelestialBody
 
 namespace Haruka {
 
-/**
- * @brief Interface for systems that need to react to entity changes.
- * Implement this to subscribe to WorldSystem updates.
- */
-class SystemSubscriber {
-public:
-    virtual ~SystemSubscriber() = default;
-    
     /**
-     * @brief Called when a body is updated in the world system.
-     * @param bodyId The identifier/name of the updated body
+     * @brief Representa una entidad macroscópica en el vacío del espacio.
      */
-    virtual void onBodyUpdated(const std::string& bodyName) = 0;
-    
-    /**
-     * @brief Called when a chunk becomes resident (loaded).
-     * @param chunkKey The chunk that was loaded
-     */
-    virtual void onChunkLoaded(const PlanetChunkKey& chunkKey) = 0;
-    
-    /**
-     * @brief Called when a chunk is evicted (unloaded).
-     * @param chunkKey The chunk that was unloaded
-     */
-    virtual void onChunkEvicted(const PlanetChunkKey& chunkKey) = 0;
-};
-
-/** @brief Planet chunk identifier in cube-sphere space. */
-struct PlanetChunkKey {
-    int face = 0;
-    int lod = 0;
-    int x = 0;
-    int y = 0;
-
-    bool operator<(const PlanetChunkKey& other) const {
-        if (lod != other.lod) return lod < other.lod;
-        if (face != other.face) return face < other.face;
-        if (y != other.y) return y < other.y;
-        return x < other.x;
-    }
-};
-
-/** @brief Runtime state for one streamed chunk. */
-struct PlanetChunkState {
-    bool visible = false;
-    bool resident = false;
-    float distanceKm = 0.0f;
-    uint64_t lastTouchedFrame = 0;
-    uint32_t bytesUsed = 0;
-};
-
-/**
- * @brief Manages celestial body storage, origin shifting, and culling metadata.
- */
-class WorldSystem {
-public:
-    WorldSystem();
-    ~WorldSystem();
+    struct CelestialBody {
+        std::string name;
+        ObjectType type;
+        WorldPos worldPos;     // Posición en double (km)
+        glm::vec3 velocity;    // km/s
+        float radius;          // km
+        glm::vec3 color;
+        
+        // Propiedades de renderizado calculadas cada frame
+        LocalPos localPos;     // Posición relativa a la cámara (float)
+    };
 
     /**
-     * @brief Calcula los LODs de los vecinos inmediatos de un chunk.
-     * @param key Clave del chunk actual
-     * @param outN, outS, outE, outW Referencias de salida para los LODs vecinos
-     * @note Esqueleto, implementar lógica real según el mapa de chunks visibles.
+     * @brief El WorldSystem gestiona la escala del universo y el Floating Origin.
      */
-    void getNeighborLods(const PlanetChunkKey& key, int& outN, int& outS, int& outE, int& outW) const;
+    class WorldSystem {
+    public:
+        WorldSystem();
+        ~WorldSystem();
 
-    /** @brief Converts world-space position into local-space relative to reference. */
-    static Haruka::LocalPos toLocal(Haruka::WorldPos objectPos, Haruka::WorldPos referencePos);
+        void init();
+        
+        /**
+         * @brief Actualiza todo el universo.
+         */
+        void update(double dt, const glm::dvec3& cameraPos);
 
-    /** @brief Updates world origin anchor. */
-    void updateOrigin(Haruka::WorldPos newOrigin);
-    /** @brief Recomputes local positions for all registered bodies. */
-    void updateLocalPositions(Haruka::WorldPos cameraWorldPos);
+        /**
+         * @brief Convierte una posición global (double) a una relativa a la cámara (float)
+         * para evitar que los modelos tiemblen en la GPU.
+         */
+        glm::vec3 toLocal(const glm::dvec3& worldPos) const;
 
-    /** @brief Adds a celestial body copy to internal storage. */
-    void addBody(const CelestialBody& body);
-    /** @brief Removes celestial body by name if present. */
-    void removeBody(const std::string& name);
-    /** @brief Finds body by name and returns mutable non-owning pointer. */
-    CelestialBody* findBody(const std::string& name);
+        /**
+         * @brief Mueve el centro del universo matemático a la posición de la cámara.
+         */
+        void shiftOrigin(const glm::dvec3& newOrigin);
 
-    /**
-     * @brief Updates a body atomically and notifies subscribers.
-     * @param updatedBody The updated body information
-     * @return true if update succeeded, false if body not found
-     */
-    bool updateBody(const CelestialBody& updatedBody);
+        // Getters de los sistemas especializados
+        PlanetarySystem& getPlanetarySystem() { return *m_planetarySystem; }
 
-    /**
-     * @brief Registers a system as a subscriber to world changes.
-     * @param subscriber Pointer to system implementing SystemSubscriber
-     */
-    void registerSystem(SystemSubscriber* subscriber);
+    private:
+        // Sistemas coordinados por el Mundo
+        std::unique_ptr<PlanetarySystem> m_planetarySystem;
+        
+        // El "Floating Origin" (Punto 0,0,0 real en el espacio)
+        glm::dvec3 m_worldOrigin;
+        
+        // Lista de entidades macroscópicas (estrellas, estaciones, planetas)
+        std::vector<CelestialBody> m_bodies;
+    };
 
-    /**
-     * @brief Unregisters a system subscriber.
-     * @param subscriber Pointer to system to unregister
-     */
-    void unregisterSystem(SystemSubscriber* subscriber);
-
-    /** @name Accessors */
-    ///@{
-    const std::vector<CelestialBody>& getBodies() const;
-    size_t getBodyCount() const;
-    Haruka::WorldPos getOrigin() const;
-    ///@}
-
-    /** @brief Initializes compute resources for culling path. */
-    void initComputeShaders();
-    /** @brief Sets LOD transition distances. */
-    void setLODDistances(float lod0, float lod1, float lod2, float lod3);
-    /** @brief Executes frustum culling update for registered bodies. */
-    void frustumCull(Haruka::WorldPos cameraPos, const glm::mat4& viewProj, float frustumDistance);
-
-    /** @brief Sets chunk streaming budgets (loads/evicts/max resident count and memory in MB).
-     * 
-     * CHUNK EVICTION POLICY (automático en scheduleChunkStreaming):
-     * 
-     * DECISIÓN: Un chunk se descarga si:
-     * 1. Es residiente (está en memoria)
-     * 2. No es visible (out-of-view, lejano, fuera de frustum)
-     * 3. PRESIÓN DE MEMORIA:
-     *    - residentMemoryBytes > maxMemoryBytes
-     *    - Liberar chunks hasta bajar de límite
-     * 4. LÍMITE DE CHUNKS:
-     *    - getResidentChunkCount() > maxResidentChunks
-     *    - Liberar chunks hasta bajar de límite
-     * 5. PRIORIDAD LRU + DISTANCE:
-     *    - Eliminar primero: lastTouchedFrame más viejo (LRU)
-     *    - Tie-break: distanceKm más grande (distante)
-     *    - Suave: max maxEvictsPerFrame por frame
-     * 
-     * LÍMITES TÍPICOS:
-     * - maxLoadsPerFrame: 16 (cargar 16 chunks/frame máximo)
-     * - maxEvictsPerFrame: 16 (descargar 16 chunks/frame máximo)
-     * - maxResidentChunks: 256 (256 chunks máximo en memoria)
-     * - maxMemoryMB: 512 (512 MB máximo para chunks)
-     */
-    void setChunkStreamingBudgets(size_t maxLoadsPerFrame, size_t maxEvictsPerFrame, size_t maxResidentChunks, size_t maxMemoryMB = 512);
-    /** @brief Sets active chunk grid dimensions/key-space for visibility generation. */
-    void setChunkGrid(int face, int lod, int tilesX, int tilesY, int maxLod = 0);
-    /** @brief Sets the planet center in world space (default is origin). */
-    void setPlanetCenter(Haruka::WorldPos center) { planetCenter = center; }
-    /** @brief Returns the current planet center in world space. */
-    Haruka::WorldPos getPlanetCenter() const { return planetCenter; }
-    /** @brief Sets the planet surface radius (world units). Used by updateVisibleChunks
-     *  to project chunk positions onto the actual planet surface instead of using the
-     *  camera-to-planet distance as a proxy radius. */
-    void setPlanetRadius(float r) { planetRadius = std::max(r, 1.0f); }
-    float getPlanetRadius() const { return planetRadius; }
-    /** @brief Updates current visible chunk set from camera state. */
-    void updateVisibleChunks(float viewDistanceKm, int lod, Camera* camera = nullptr);
-
-    /**
-     * @brief Indica si se debe renderizar solo el mesh base (sin chunks detallados).
-     */
-    bool shouldRenderBaseMesh() const { return renderBaseMeshOnly; }
-    /** @brief Builds load/evict queues from current visibility and budgets. */
-    void scheduleChunkStreaming();
-    /** @brief Marks one chunk as resident/non-resident after upload/eviction. */
-    void markChunkResident(const PlanetChunkKey& key, bool resident = true);
-    /** @brief Stores CPU-side size for a chunk. */
-    void setChunkSize(const PlanetChunkKey& key, uint32_t bytes);
-
-    /** @name Chunk streaming queues */
-    ///@{
-    const std::vector<PlanetChunkKey>& getVisibleChunks() const { return visibleChunks; }
-    const std::vector<PlanetChunkKey>& getPendingLoads() const { return pendingChunkLoads; }
-    const std::vector<PlanetChunkKey>& getPendingEvictions() const { return pendingChunkEvictions; }
-    size_t getResidentChunkCount() const;
-    size_t getTrackedChunkCount() const { return chunkStates.size(); }
-    size_t getResidentMemoryMB() const { return residentMemoryBytes / (1024 * 1024); }
-    size_t getMaxMemoryMB() const { return maxMemoryBytes / (1024 * 1024); }
-    ///@}
-
-private:
-    Haruka::WorldPos worldOrigin;
-    Haruka::WorldPos planetCenter{0.0, 0.0, 0.0};
-    std::vector<CelestialBody> celestialBodies;
-    std::vector<SystemSubscriber*> subscribers;  ///< Systems subscribed to world changes
-    float lodDistances[4];
-
-    // LOD dome radii in metres (base values; updateVisibleChunks scales them by altitude)
-    float domeRadius0 =    1000.0f * Units::KM / Units::METER; // High quality   (~1000 km)
-    float domeRadius1 =    5000000.0f * Units::KM / Units::METER; // Medium         (~5000 km)
-    float domeRadius2 =   20000000.0f * Units::KM / Units::METER; // Low / minimum  (~20000 km)
-
-    float planetRadius = 6371.0f;  // Surface radius in world units; set via setPlanetRadius()
-    bool renderBaseMeshOnly = false;
-
-    // Chunk streaming state
-    std::map<PlanetChunkKey, PlanetChunkState> chunkStates;
-    std::vector<PlanetChunkKey> visibleChunks;
-    std::vector<PlanetChunkKey> pendingChunkLoads;
-    std::vector<PlanetChunkKey> pendingChunkEvictions;
-    size_t maxLoadsPerFrame = 16;
-    size_t maxEvictsPerFrame = 16;
-    size_t maxResidentChunks = 2048;
-    size_t maxMemoryBytes = 512 * 1024 * 1024;
-    size_t residentMemoryBytes = 0;
-    uint64_t chunkFrameCounter = 0;
-    int chunkGridFace = 0;
-    int chunkGridLod = 0;
-    int chunkGridTilesX = 0;
-    int chunkGridTilesY = 0;
-    int chunkGridMaxLod = 0;
-
-    /**
-     * @brief Notifies all subscribers that a body was updated.
-     * @param bodyName Name of the updated body
-     */
-    void notifyBodyUpdated(const std::string& bodyName);
-
-    /**
-     * @brief Notifies all subscribers that a chunk was loaded.
-     * @param chunkKey The loaded chunk
-     */
-    void notifyChunkLoaded(const PlanetChunkKey& chunkKey);
-
-    /**
-     * @brief Notifies all subscribers that a chunk was evicted.
-     * @param chunkKey The evicted chunk
-     */
-    void notifyChunkEvicted(const PlanetChunkKey& chunkKey);
-};
 }
-
-#endif

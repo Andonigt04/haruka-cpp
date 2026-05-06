@@ -1,5 +1,5 @@
 #include "render_target.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <iostream>
 
 RenderTarget::RenderTarget(unsigned int width, unsigned int height)

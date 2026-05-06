@@ -1,5 +1,5 @@
 #include "project.h"
-#include "error_reporter.h"
+#include "tools/error_reporter.h"
 
 #include <fstream>
 #include <filesystem>

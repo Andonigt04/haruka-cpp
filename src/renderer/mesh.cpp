@@ -1,7 +1,7 @@
 #include "mesh.h"
 
 #include <glad/glad.h>
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 
 // Constructor para modelos complejos (con texturas)
 Mesh::Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures) {
