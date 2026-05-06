@@ -24,7 +24,7 @@ public:
     ~MeshRendererComponent();
 
     /** @brief Replaces the current mesh and updates CPU/resident caches. */
-    void setMesh(const std::vector<glm::vec3>& vertices, const std::vector<glm::vec3>& normals, const std::vector<unsigned int>& indices);
+    void setMesh(const std::vector<glm::vec3>& vertices, const std::vector<glm::vec3>& normals, const std::vector<glm::vec3>& colors, const std::vector<unsigned int>& indices);
 
     /** @brief Releases the resident mesh from renderer/GPU memory. */
     void releaseMesh();
@@ -50,6 +50,8 @@ public:
     const std::vector<glm::vec3>& getSourceVertices() const { return sourceVertices; }
     /** @brief CPU source normals. */
     const std::vector<glm::vec3>& getSourceNormals() const { return sourceNormals; }
+    /** @brief CPU source colors. */
+    const std::vector<glm::vec3>& getSourceColors() const { return sourceColors; }
     /** @brief CPU source indices. */
     const std::vector<unsigned int>& getSourceIndices() const { return sourceIndices; }
     
@@ -61,5 +63,6 @@ private:
     int cachedTriangleCount = 0;
     std::vector<glm::vec3> sourceVertices;
     std::vector<glm::vec3> sourceNormals;
+    std::vector<glm::vec3> sourceColors;
     std::vector<unsigned int> sourceIndices;
 };

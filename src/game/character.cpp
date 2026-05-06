@@ -10,31 +10,31 @@
 namespace Haruka {
 
 namespace {
-glm::dvec3 safeNormalize(const glm::dvec3& v, const glm::dvec3& fallback) {
-    double len = glm::length(v);
-    if (len < 1e-9) return fallback;
-    return v / len;
-}
+    glm::dvec3 safeNormalize(const glm::dvec3& v, const glm::dvec3& fallback) {
+        double len = glm::length(v);
+        if (len < 1e-9) return fallback;
+        return v / len;
+    }
 
-void buildSurfaceBasis(
-    const glm::dvec3& gravityUp,
-    const glm::quat& cameraOrientation,
-    glm::dvec3& outUp,
-    glm::dvec3& outForward,
-    glm::dvec3& outRight
-) {
-    outUp = safeNormalize(gravityUp, glm::dvec3(0.0, 1.0, 0.0));
+    void buildSurfaceBasis(
+        const glm::dvec3& gravityUp,
+        const glm::quat& cameraOrientation,
+        glm::dvec3& outUp,
+        glm::dvec3& outForward,
+        glm::dvec3& outRight
+    ) {
+        outUp = safeNormalize(gravityUp, glm::dvec3(0.0, 1.0, 0.0));
 
-    glm::vec3 camForward3 = cameraOrientation * glm::vec3(0, 0, -1);
-    glm::dvec3 camForward = glm::dvec3(camForward3);
+        glm::vec3 camForward3 = cameraOrientation * glm::vec3(0, 0, -1);
+        glm::dvec3 camForward = glm::dvec3(camForward3);
 
-    // Proyectar la cámara sobre el plano tangente del planeta
-    outForward = camForward - outUp * glm::dot(camForward, outUp);
-    outForward = safeNormalize(outForward, glm::cross(glm::dvec3(0.0, 0.0, 1.0), outUp));
+        // Proyectar la cámara sobre el plano tangente del planeta
+        outForward = camForward - outUp * glm::dot(camForward, outUp);
+        outForward = safeNormalize(outForward, glm::cross(glm::dvec3(0.0, 0.0, 1.0), outUp));
 
-    outRight = glm::cross(outForward, outUp);
-    outRight = safeNormalize(outRight, glm::dvec3(1.0, 0.0, 0.0));
-}
+        outRight = glm::cross(outForward, outUp);
+        outRight = safeNormalize(outRight, glm::dvec3(1.0, 0.0, 0.0));
+    }
 }
 
 Character::Character(const glm::dvec3& position, const std::string& userId)
@@ -48,14 +48,17 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
     
     forward = glm::vec3(0, 0, -1);
     right = glm::vec3(1, 0, 0);
-    // Si planeta está en (0,0,0), es simplemente normalize(position)
-    double posLen = glm::length(position);
-    upDirection = posLen > 1e-6 ? (position / posLen) : glm::dvec3(0.0, 1.0, 0.0);
     
-    lastSyncPos = position;
-    lastSyncRot = glm::vec3(yaw, pitch, 0);
-    targetPosition = position;
-    targetRotation = glm::vec3(yaw, pitch, 0);
+    double posLen = glm::length(position);
+    upDirection = posLen > 1e-6 ? (position / posLen) : Haruka::WorldPos(0.0, 1.0, 0.0);
+    
+    // CORRECCIÓN: Convertir Euler (Pitch, Yaw, Roll) a Cuaternión
+    Haruka::Rotation initialRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+    
+    lastSyncPos = Haruka::WorldPos(position.x, position.y + currentHeight * 0.9, position.z);
+    lastSyncRot = initialRot;
+    targetPosition = lastSyncPos;
+    targetRotation = initialRot;
     
     std::cout << "[Character] Created" << (localPlayer ? " (local)" : " (remote)") << " at " 
               << position.x << ", " << position.y << ", " << position.z << std::endl;
@@ -64,20 +67,21 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
 Character::~Character() {}
 
 void Character::update(float deltaTime) {
-    // Sincronizar con física si existe
     if (physicsBody) {
         position = glm::dvec3(physicsBody->position);
         velocity = glm::dvec3(physicsBody->velocity);
     }
     
-    // Interpolación para jugadores remotos
+    // CORRECCIÓN: Interpolación correcta de Cuaterniones (Slerp) y extracción de Euler
     if (!localPlayer) {
-        position = glm::mix(position, targetPosition, deltaTime * interpolationSpeed);
+        position = glm::mix(position, targetPosition, (double)(deltaTime * interpolationSpeed));
         
-        float targetYaw = targetRotation.x;
-        float targetPitch = targetRotation.y;
-        yaw = glm::mix(yaw, targetYaw, deltaTime * interpolationSpeed);
-        pitch = glm::mix(pitch, targetPitch, deltaTime * interpolationSpeed);
+        Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+        Haruka::Rotation newRot = glm::slerp(currentRot, targetRotation, (double)(deltaTime * interpolationSpeed));
+        
+        glm::dvec3 euler = glm::eulerAngles(newRot);
+        pitch = glm::degrees(euler.x);
+        yaw = glm::degrees(euler.y);
     }
     
     checkGrounded();
@@ -86,7 +90,6 @@ void Character::update(float deltaTime) {
     if (localPlayer) {
         updateCamera();
         
-        // Sync con servidor
         syncTimer += deltaTime;
         if (syncTimer >= syncInterval && networkClient) {
             if (shouldSyncToServer()) {
@@ -96,7 +99,6 @@ void Character::update(float deltaTime) {
         }
     }
     
-    // Smooth crouching
     float targetHeight = crouched ? crouchingHeight : standingHeight;
     currentHeight += (targetHeight - currentHeight) * deltaTime * 10.0f;
 }
@@ -106,8 +108,8 @@ void Character::processInput(SDL_Window* /*window*/, float deltaTime) {
 
     float speed = sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
 
-    glm::dvec3 up, surfaceForward, surfaceRight;
-    glm::dquat camOrientation = camera ? camera->orientation : glm::dquat(1.0, 0.0, 0.0, 0.0);
+    Haruka::WorldPos up, surfaceForward, surfaceRight;
+    Haruka::Rotation camOrientation = camera ? camera->orientation : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
     buildSurfaceBasis(getEffectiveUp(), camOrientation, up, surfaceForward, surfaceRight);
 
     const bool* keys = SDL_GetKeyboardState(nullptr);
@@ -124,11 +126,11 @@ void Character::processInput(SDL_Window* /*window*/, float deltaTime) {
 }
 
 void Character::moveForward(float amount) {
-    position += glm::dvec3(forward) * (double)amount;
+    position += Haruka::WorldPos(forward) * (double)amount;
 }
 
 void Character::moveRight(float amount) {
-    position += glm::dvec3(right) * (double)amount;
+    position += Haruka::WorldPos(right) * (double)amount;
 }
 
 void Character::jump() {
@@ -155,7 +157,6 @@ void Character::rotate(float yawDelta, float pitchDelta) {
     if (minPitch > maxPitch) std::swap(minPitch, maxPitch);
     pitch = glm::clamp(pitch, minPitch, maxPitch);
     
-    // Update forward/right vectors
     glm::vec3 direction;
     direction.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
     direction.y = sin(glm::radians(pitch));
@@ -172,7 +173,6 @@ void Character::updateCamera() {
     glm::dvec3 cameraPos = position + up * (double)(currentHeight * 0.9f);
     camera->position = WorldPos(cameraPos.x, cameraPos.y, cameraPos.z);
 
-    // Orientación relativa al planeta (up local), para sensación humana sobre esfera
     glm::dvec3 referenceForward = glm::dvec3(0.0, 0.0, -1.0);
     if (std::abs(glm::dot(referenceForward, up)) > 0.95) {
         referenceForward = glm::dvec3(1.0, 0.0, 0.0);
@@ -227,28 +227,30 @@ void Character::checkGrounded() {
 }
 
 bool Character::shouldSyncToServer() {
-    float posDelta = glm::length(glm::dvec3(position) - lastSyncPos);
-    float rotDelta = glm::length(glm::vec3(yaw, pitch, 0) - lastSyncRot);
+    float posDelta = glm::length(position - lastSyncPos);
     
-    return posDelta > syncThreshold || rotDelta > syncThreshold;
+    // CORRECCIÓN: Compara cuaterniones de manera segura (Producto Punto)
+    Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+    float rotDelta = 1.0f - std::abs(glm::dot(currentRot, lastSyncRot)); 
+    
+    return posDelta > syncThreshold || rotDelta > (syncThreshold * 0.1f);
 }
 
 void Character::syncToServer() {
     if (!networkClient || !localPlayer) return;
     
-    networkClient->sendPositionUpdate(
-        glm::dvec3(position),
-        glm::vec3(yaw, pitch, 0)
-    );
+    Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+    
+    networkClient->sendPositionUpdate(position, currentRot);
     
     lastSyncPos = position;
-    lastSyncRot = glm::vec3(yaw, pitch, 0);
+    lastSyncRot = currentRot;
     
     std::cout << "[Character] Synced to server: " 
               << position.x << ", " << position.y << ", " << position.z << std::endl;
 }
 
-void Character::applyServerUpdate(const glm::dvec3& serverPos, const glm::vec3& serverRot) {
+void Character::applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot) {
     double distance = glm::length(serverPos - position);
     
     if (distance > 1.0) {

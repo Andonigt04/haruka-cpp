@@ -44,7 +44,7 @@ namespace Haruka {
     /**
      * @brief Tipos de primitivas para el MeshRenderer.
      */
-    enum class PrimitiveMeshType {
+    enum class PrimitiveType {
         NONE    = 0,
         CUBE    = 1,
         SPHERE  = 2,

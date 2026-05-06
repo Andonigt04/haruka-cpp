@@ -9,6 +9,7 @@
 #include "core/camera.h"
 #include "physics/physics_engine.h"
 #include "network/network_manager.h"
+#include "tools/math_types.h" // Para WorldPos y Rotation
 
 namespace Haruka {
 
@@ -62,7 +63,7 @@ public:
     ///@{
     void setNetworkClient(NetworkClient* client) { networkClient = client; }
     void syncToServer();
-    void applyServerUpdate(const glm::dvec3& serverPos, const glm::vec3& serverRot);
+    void applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot);
     ///@}
     
     /** @name State accessors */
@@ -127,10 +128,10 @@ private:
     float currentHeight = 0.0019f;
     
     // Network sync
-    glm::dvec3 lastSyncPos;
-    glm::vec3 lastSyncRot;
-    glm::dvec3 targetPosition;
-    glm::vec3 targetRotation;
+    Haruka::WorldPos lastSyncPos;
+    Haruka::Rotation lastSyncRot;
+    Haruka::WorldPos targetPosition;
+    Haruka::Rotation targetRotation;
     float syncThreshold = 0.1f;
     float syncInterval = 0.1f;
     float syncTimer = 0.0f;

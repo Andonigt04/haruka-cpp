@@ -17,7 +17,7 @@ namespace Haruka {
      */
     struct CelestialBody {
         std::string name;
-        ObjectType type;
+        Haruka::ObjectType type;
         WorldPos worldPos;     // Posición en double (km)
         glm::vec3 velocity;    // km/s
         double mass = 0.0;     // kg

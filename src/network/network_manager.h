@@ -10,6 +10,7 @@
 #include <memory>
 #include <functional>
 #include <map>
+#include "tools/math_types.h" // Para WorldPos y Rotation
 
 namespace Haruka {
 
@@ -28,8 +29,8 @@ struct PlayerData {
     std::string userId;
     std::string username;
     std::string email;
-    glm::dvec3 position;
-    glm::vec3 rotation;
+    Haruka::WorldPos position;
+    Haruka::Rotation rotation;
     std::string currentZone;
     uint64_t lastUpdate;
     bool verified;
@@ -45,7 +46,7 @@ struct ZoneInfo {
     int maxPlayers;
     float load; // 0.0 - 1.0
     bool active;
-    glm::dvec3 worldPosition;
+    Haruka::WorldPos worldPosition;
     double radius;
 };
 
@@ -86,7 +87,7 @@ public:
     /** @brief Sends player state payload to server. */
     void sendPlayerData(const PlayerData& data);
     /** @brief Sends position/rotation update payload. */
-    void sendPositionUpdate(glm::dvec3 pos, glm::vec3 rot);
+    void sendPositionUpdate(Haruka::WorldPos pos, Haruka::Rotation rot);
     /** @brief Handles one incoming message. */
     void handleMessage(const NetworkMessage& msg);
     /** @brief Sends a chat message payload. */
@@ -134,7 +135,7 @@ public:
     /** @name Cluster manager responsibilities */
     ///@{
     void registerZone(const ZoneInfo& zone);
-    std::string assignPlayerToZone(const std::string& userId, glm::dvec3 position);
+    std::string assignPlayerToZone(const std::string& userId, Haruka::WorldPos position);
     void balanceZones();
     std::vector<ZoneInfo> getActiveZones();
     ///@}
@@ -148,7 +149,7 @@ public:
     /** @name Anti-cheat responsibilities */
     ///@{
     void checkPlayerBehavior(const std::string& userId, const PlayerData& data);
-    bool validateMovement(glm::dvec3 oldPos, glm::dvec3 newPos, float deltaTime);
+    bool validateMovement(Haruka::WorldPos oldPos, Haruka::WorldPos newPos, float deltaTime);
     ///@}
     
     /** @name Relay responsibilities */

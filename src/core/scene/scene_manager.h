@@ -8,6 +8,8 @@
 #include <memory>
 #include <mutex>
 
+#include "tools/math_types.h"
+
 namespace Haruka {
 
     /**
@@ -22,8 +24,8 @@ namespace Haruka {
 
         // Transformación con precisión astronómica (double precision)
         // Vital para evitar el jittering en escalas de KM
-        glm::dvec3 position = glm::dvec3(0.0);
-        glm::dvec3 rotation = glm::dvec3(0.0);
+        Haruka::WorldPos position = Haruka::WorldPos(0.0);
+        Haruka::Rotation rotation = Haruka::Rotation(); // Euler angles en grados
         glm::dvec3 scale    = glm::dvec3(1.0);
 
         // Flags de sistema
@@ -90,6 +92,13 @@ namespace Haruka {
             // Registro por ID único (hash)
             uint64_t id = std::hash<std::string>{}(obj->name);
             m_idRegistry[id] = obj;
+        }
+
+        void removeObject(const std::string& name) {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_objects.erase(std::remove_if(m_objects.begin(), m_objects.end(),
+                [&](auto& obj) { return obj->name == name; }), m_objects.end());
+            m_registry.erase(name);
         }
 
         /**

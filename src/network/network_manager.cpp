@@ -33,7 +33,7 @@ void NetworkClient::sendPlayerData(const PlayerData& data) {
     std::cout << "[Client] Sending login" << std::endl;
 }
 
-void NetworkClient::sendPositionUpdate(glm::dvec3 pos, glm::vec3 rot) {
+void NetworkClient::sendPositionUpdate(Haruka::WorldPos pos, Haruka::Rotation rot) {
     if (!connected) return;
     
     NetworkMessage msg;
@@ -128,7 +128,7 @@ void NetworkServer::registerZone(const ZoneInfo& zone) {
     std::cout << "[CLUSTER] Registered zone: " << zone.zoneId << std::endl;
 }
 
-std::string NetworkServer::assignPlayerToZone(const std::string& userId, glm::dvec3 position) {
+std::string NetworkServer::assignPlayerToZone(const std::string& userId, Haruka::WorldPos position) {
     std::cout << "[CLUSTER] Assigning player " << userId << " to zone" << std::endl;
     return "zone_0";
 }
@@ -161,7 +161,7 @@ void NetworkServer::checkPlayerBehavior(const std::string& userId, const PlayerD
     std::cout << "[ANTICHEAT] Checking player: " << userId << std::endl;
 }
 
-bool NetworkServer::validateMovement(glm::dvec3 oldPos, glm::dvec3 newPos, float deltaTime) {
+bool NetworkServer::validateMovement(Haruka::WorldPos oldPos, Haruka::WorldPos newPos, float deltaTime) {
     double distance = glm::length(newPos - oldPos);
     double maxSpeed = 50.0;
     return distance / deltaTime < maxSpeed;
