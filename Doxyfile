@@ -12,12 +12,17 @@ CREATE_SUBDIRS         = YES
 #---------------------------------------------------------------------------
 # Input
 #---------------------------------------------------------------------------
-INPUT                  = src shaders
-FILE_PATTERNS          = *.h *.hpp *.cpp *.vert *.frag *.comp *.geom
+INPUT                  = src shaders README.md docs/guides/ANALISIS_SISTEMAS.md docs/guides/DIAGRAMAS_FLUJO.md docs/guides/PATRONES_USO.md docs/guides/GUIA_RAPIDA.md
+FILE_PATTERNS          = *.h *.hpp *.cpp *.vert *.frag *.comp *.geom *.md
 EXTENSION_MAPPING      = vert=C frag=C comp=C geom=C
 RECURSIVE              = YES
 EXCLUDE                = src/core/json.hpp
 EXCLUDE_PATTERNS       = */third_party/*
+
+#--------------------------------------------------------------------------
+# Markdown support
+#--------------------------------------------------------------------------
+MARKDOWN_SUPPORT       = YES
 
 #---------------------------------------------------------------------------
 # STL support
