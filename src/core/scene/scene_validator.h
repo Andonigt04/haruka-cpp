@@ -135,6 +135,32 @@ namespace Haruka {
             }
         }
 
+        static void validateVisualBlock(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
+            if (!obj.contains("components") || !obj["components"].is_object()) {
+                return;
+            }
+
+            const auto& components = obj["components"];
+            if (!components.contains("visual")) {
+                return;
+            }
+            if (!components["visual"].is_object()) {
+                result.addError(owner + ".components.visual debe ser un objeto.");
+                return;
+            }
+
+            const auto& visual = components["visual"];
+            if (visual.contains("mesh") && !visual["mesh"].is_string()) {
+                result.addError(owner + ".components.visual.mesh debe ser string.");
+            }
+            if (visual.contains("material") && !visual["material"].is_string()) {
+                result.addError(owner + ".components.visual.material debe ser string.");
+            }
+            if (visual.contains("shader") && !visual["shader"].is_string()) {
+                result.addError(owner + ".components.visual.shader debe ser string.");
+            }
+        }
+
         static bool hasInlineOrTemplateBlock(const nlohmann::json& obj, const nlohmann::json& fullData, const std::string& key) {
             if (obj.contains(key)) return true;
             if (!obj.contains("template")) return false;
@@ -195,6 +221,8 @@ namespace Haruka {
             if (obj.contains("properties") && !obj["properties"].is_object()) {
                 result.addError("Objeto '" + name + "'.properties debe ser un objeto.");
             }
+
+            validateVisualBlock(obj, result, "Objeto '" + name + "'");
 
             // Regla: Validación específica para Planetas
             if (obj.value("type", "") == "Planet") {

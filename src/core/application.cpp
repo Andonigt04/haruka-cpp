@@ -1,14 +1,96 @@
 #include "application.h"
 
 #include <iostream>
+#include <unordered_map>
 
 #include <SDL3/SDL.h>
 
+#include <glm/gtx/euler_angles.hpp>
+
 #include "renderer/motor_instance.h"
+#include "core/components/mesh_renderer_component.h"
+#include "renderer/model.h"
+#include "renderer/primitive_shapes.h"
+#include "core/scene/scene_render_policy.h"
 #include "tools/error_reporter.h"
 
 namespace {
-std::vector<const Haruka::SceneObject*> g_sceneRenderQueue;
+std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
+
+glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position));
+
+    glm::mat4 rotation = glm::eulerAngleXYZ(
+        glm::radians(static_cast<float>(obj.rotation.x)),
+        glm::radians(static_cast<float>(obj.rotation.y)),
+        glm::radians(static_cast<float>(obj.rotation.z))
+    );
+
+    transform *= rotation;
+    return glm::scale(transform, glm::vec3(obj.scale));
+}
+
+Model* getOrLoadModelCached(const std::string& path) {
+    static std::unordered_map<std::string, std::shared_ptr<Model>> modelCache;
+
+    auto it = modelCache.find(path);
+    if (it != modelCache.end()) {
+        return it->second.get();
+    }
+
+    auto model = std::make_shared<Model>(path);
+    Model* modelPtr = model.get();
+    modelCache.emplace(path, std::move(model));
+    return modelPtr;
+}
+
+SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
+    static std::unique_ptr<SimpleMesh> sphereMesh;
+    static std::unique_ptr<SimpleMesh> cubeMesh;
+    static std::unique_ptr<SimpleMesh> capsuleMesh;
+    static std::unique_ptr<SimpleMesh> planeMesh;
+
+    switch (primitive) {
+        case Haruka::PrimitiveType::CUBE:
+            if (!cubeMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createCube(1.0f, vertices, normals, indices);
+                cubeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return cubeMesh.get();
+        case Haruka::PrimitiveType::SPHERE:
+            if (!sphereMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createSphereLOD(1.0f, 24, 16, vertices, normals, indices);
+                sphereMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return sphereMesh.get();
+        case Haruka::PrimitiveType::CAPSULE:
+            if (!capsuleMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createCapsule(0.5f, 1.5f, 24, 12, vertices, normals, indices);
+                capsuleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return capsuleMesh.get();
+        case Haruka::PrimitiveType::PLANE:
+            if (!planeMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createPlane(1.0f, 1.0f, 1, vertices, normals, indices);
+                planeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return planeMesh.get();
+        default:
+            return nullptr;
+    }
+}
 }
 
 Application::Application() : _window(nullptr) {
@@ -110,24 +192,98 @@ void Application::buildRenderQueue() {
 
     if (!_currentScene) return;
 
-    const auto& objects = _currentScene->getAllObjects();
-    g_sceneRenderQueue.reserve(objects.size());
-
-    for (const auto& obj : objects) {
-        if (obj) g_sceneRenderQueue.push_back(obj.get());
-    }
+    g_sceneRenderQueue = buildSceneRenderQueue(*_currentScene);
 
     _iTotalDrawCalls = static_cast<int>(g_sceneRenderQueue.size());
     _iRenderedDrawCalls = _iTotalDrawCalls;
 }
 
 void Application::renderFrameContent() {
-    glViewport(0, 0, _window->getWidth(), _window->getHeight());
+    const uint32_t width = _window ? _window->getWidth() : 0u;
+    const uint32_t height = _window ? _window->getHeight() : 0u;
+
+    if (_editorTarget) {
+        _editorTarget->bindForWriting();
+    }
+
+    glViewport(0, 0, width, height);
     glClearColor(0.05f, 0.07f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
+    _iTotalDrawCalls = static_cast<int>(g_sceneRenderQueue.size());
+    _iRenderedDrawCalls = 0;
+    _iTotalVertices = 0;
+    _iTotalTriangles = 0;
+    _iRenderedVertices = 0;
+    _iRenderedTriangles = 0;
+
+    if (_currentScene && _camera) {
+        if (!_mainShader) {
+            _mainShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/simple.frag");
+        }
+
+        _mainShader->use();
+
+        const float aspect = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+        _mainShader->setMat4(1, _camera->getViewMatrix());
+        _mainShader->setMat4(2, _camera->getProjectionMatrix(aspect));
+
+        int renderedDrawCalls = 0;
+        int renderedVertices = 0;
+        int renderedTriangles = 0;
+
+        for (const auto& command : g_sceneRenderQueue) {
+            const auto* obj = command.object;
+            if (!obj) continue;
+
+            const glm::mat4 modelMatrix = getTransformMatrix(*obj);
+            _mainShader->setMat4(0, modelMatrix);
+
+            switch (command.kind) {
+                case Haruka::RenderKind::Model: {
+                    Model* model = getOrLoadModelCached(obj->modelPath);
+                    if (!model) break;
+                    model->Draw(*_mainShader);
+                    ++renderedDrawCalls;
+                    renderedVertices += model->getVertexCount();
+                    renderedTriangles += model->getTriangleCount();
+                    break;
+                }
+                case Haruka::RenderKind::MeshComponent: {
+                    if (!obj->meshRenderer || !obj->meshRenderer->isResident()) break;
+                    obj->meshRenderer->render(*_mainShader);
+                    ++renderedDrawCalls;
+                    renderedVertices += obj->meshRenderer->getResidentVertexCount();
+                    renderedTriangles += obj->meshRenderer->getResidentTriangleCount();
+                    break;
+                }
+                case Haruka::RenderKind::Primitive: {
+                    SimpleMesh* primitiveMesh = getPrimitiveMesh(command.primitive);
+                    if (!primitiveMesh) break;
+                    primitiveMesh->draw();
+                    ++renderedDrawCalls;
+                    renderedVertices += primitiveMesh->getVertexCount();
+                    renderedTriangles += primitiveMesh->getTriangleCount();
+                    break;
+                }
+                case Haruka::RenderKind::None:
+                    break;
+            }
+        }
+
+        _iRenderedDrawCalls = renderedDrawCalls;
+        _iRenderedVertices = renderedVertices;
+        _iRenderedTriangles = renderedTriangles;
+        _iTotalVertices = renderedVertices;
+        _iTotalTriangles = renderedTriangles;
+    }
+
     if (_imguiCallback) {
         _imguiCallback();
+    }
+
+    if (_editorTarget) {
+        _editorTarget->unbind();
     }
 }
 
@@ -222,6 +378,5 @@ void Application::run(const std::string& startScenePath) {
 
         // 5. Renderizar y Swap
         renderFrame();
-        _window->swapBuffers();
     }
 }

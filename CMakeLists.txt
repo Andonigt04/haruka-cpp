@@ -68,7 +68,7 @@ set(NFD_SOURCES
     ${THIRD_PARTY_DIR}/nativefiledialog/src/nfd_gtk.c
 )
 
-file(GLOB_RECURSE ENGINE_SOURCES "src/*.cpp")
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
 # --- 4. Main Target ---
 add_library(HarukaEngine SHARED
