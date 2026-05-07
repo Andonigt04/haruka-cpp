@@ -41,7 +41,8 @@ public:
     glm::mat4 getViewMatrix() const;
     /** @brief Returns projection matrix state. */
     glm::mat4 getProjectionMatrix() const;
-
+    /** @brief Returns projection matrix with specified aspect ratio. */
+    glm::mat4 getProjectionMatrix(float aspectRatio) const;
     /** @brief Applies mouse-delta rotation update. */
     void rotate(float deltaX, float deltaY);
     /** @brief Processes movement input from SDL keyboard state. */

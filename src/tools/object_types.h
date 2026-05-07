@@ -52,6 +52,24 @@ namespace Haruka {
         PLANE   = 4,
     };
 
+    inline PrimitiveType stringToPrimitiveType(const std::string& s) {
+        if (s == "Cube" || s == "cube") return PrimitiveType::CUBE;
+        if (s == "Sphere" || s == "sphere") return PrimitiveType::SPHERE;
+        if (s == "Capsule" || s == "capsule") return PrimitiveType::CAPSULE;
+        if (s == "Plane" || s == "plane") return PrimitiveType::PLANE;
+        return PrimitiveType::NONE;
+    }
+
+    inline std::string primitiveTypeToString(PrimitiveType type) {
+        switch (type) {
+            case PrimitiveType::CUBE: return "Cube";
+            case PrimitiveType::SPHERE: return "Sphere";
+            case PrimitiveType::CAPSULE: return "Capsule";
+            case PrimitiveType::PLANE: return "Plane";
+            default: return "None";
+        }
+    }
+
     // --- HELPERS DE CONVERSIÓN (Para carga de JSON) ---
 
     inline ObjectType stringToObjectType(const std::string& s) {

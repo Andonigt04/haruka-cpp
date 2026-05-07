@@ -5,6 +5,8 @@ namespace Haruka {
 
     WorldSystem::WorldSystem() : m_worldOrigin(0.0, 0.0, 0.0) {}
 
+    WorldSystem::~WorldSystem() = default;
+
     void WorldSystem::init() {
         m_planetarySystem = std::make_unique<PlanetarySystem>();
         m_planetarySystem->init();

@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <filesystem>
 
 namespace Haruka {
 
@@ -110,6 +111,52 @@ glm::dvec3 SceneLoader::parseDVec3(const nlohmann::json& j, const std::string& k
         return glm::dvec3(j[key][0], j[key][1], j[key][2]);
     }
     return defaultValue;
+}
+
+bool SceneManager::load(const std::string& filepath) {
+    clear();
+    m_name = std::filesystem::path(filepath).stem().string();
+    SceneLoader loader(*this);
+    return loader.loadFromFile(filepath);
+}
+
+bool SceneManager::save(const std::string& filepath) const {
+    nlohmann::json root;
+    root["sceneName"] = m_name;
+    root["version"] = "2.0";
+    root["objects"] = nlohmann::json::array();
+
+    for (const auto& objPtr : m_objects) {
+        if (!objPtr) continue;
+        const auto& obj = *objPtr;
+        nlohmann::json item;
+        item["name"] = obj.name;
+        item["type"] = obj.type;
+        item["template"] = obj.templateName;
+        item["position"] = {obj.position.x, obj.position.y, obj.position.z};
+        item["rotation"] = {obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w};
+        item["scale"] = {obj.scale.x, obj.scale.y, obj.scale.z};
+        item["flags"] = {
+            {"hasChunks", obj.hasChunks},
+            {"isPersistent", obj.isPersistent},
+            {"originShiftingTarget", obj.originShiftingTarget}
+        };
+        if (!obj.lodSettings.is_null() && !obj.lodSettings.empty()) item["lod"] = obj.lodSettings;
+        if (!obj.streamingSettings.is_null() && !obj.streamingSettings.empty()) item["streaming"] = obj.streamingSettings;
+        if (!obj.terrainSettings.is_null() && !obj.terrainSettings.empty()) item["terrainGenerator"] = obj.terrainSettings;
+        if (!obj.components.is_null() && !obj.components.empty()) item["components"] = obj.components;
+        if (!obj.properties.is_null() && !obj.properties.empty()) item["properties"] = obj.properties;
+        if (obj.parentIndex >= 0) item["parentIndex"] = obj.parentIndex;
+        if (!obj.childrenIndices.empty()) item["childrenIndices"] = obj.childrenIndices;
+        root["objects"].push_back(std::move(item));
+    }
+
+    std::ofstream out(filepath);
+    if (!out.is_open()) {
+        return false;
+    }
+    out << root.dump(4);
+    return true;
 }
 
 }

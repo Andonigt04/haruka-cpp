@@ -7,10 +7,17 @@
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
+#include <filesystem>
+#include <fstream>
+
+class MeshRendererComponent;
 
 #include "tools/math_types.h"
 
 namespace Haruka {
+
+    class EventManager;
+    class MaterialComponent;
 
     /**
      * @brief Representación unificada de cualquier entidad en el universo.
@@ -32,6 +39,22 @@ namespace Haruka {
         bool hasChunks = false;          // ¿Usa subdivisión QuadTree/Octree?
         bool isPersistent = false;       // ¿Debe estar siempre en RAM? (ej. el Sol)
         bool originShiftingTarget = false; // ¿Es un candidato para ser el centro del mundo?
+
+        // Compatibilidad con la UI antigua del editor.
+        struct LegacyFlags {
+            bool castLight = false;
+            bool isPersistent = false;
+            bool hasChunks = false;
+            bool originShiftingTarget = false;
+        };
+
+        std::shared_ptr<LegacyFlags> flags = std::make_shared<LegacyFlags>();
+        glm::dvec3 color = glm::dvec3(1.0);
+        double intensity = 1.0;
+        int renderLayer = 1;
+        std::string modelPath;
+        std::shared_ptr<MaterialComponent> material;
+        std::shared_ptr<MeshRendererComponent> meshRenderer;
 
         // Bloques de datos (JSON)
         // Se mantienen como JSON para que cada sistema (Streaming, Render, Física)
@@ -94,6 +117,33 @@ namespace Haruka {
             m_idRegistry[id] = obj;
         }
 
+        void setName(const std::string& name) { m_name = name; }
+        const std::string& getName() const { return m_name; }
+
+        void setEventManager(EventManager* eventManager) { m_eventManager = eventManager; }
+        EventManager* getEventManager() const { return m_eventManager; }
+
+        std::vector<SceneObject> getObjects() const {
+            std::vector<SceneObject> objects;
+            objects.reserve(m_objects.size());
+            for (const auto& obj : m_objects) {
+                if (obj) objects.push_back(*obj);
+            }
+            return objects;
+        }
+
+        std::vector<std::shared_ptr<SceneObject>>& getObjectsMutable() { return m_objects; }
+        const std::vector<std::shared_ptr<SceneObject>>& getObjectsMutable() const { return m_objects; }
+
+        std::shared_ptr<SceneObject> getObject(const std::string& name) { return getObjectByName(name); }
+        const std::shared_ptr<SceneObject> getObject(const std::string& name) const {
+            auto it = m_registry.find(name);
+            return (it != m_registry.end()) ? it->second : nullptr;
+        }
+
+        bool load(const std::string& filepath);
+        bool save(const std::string& filepath) const;
+
         void removeObject(const std::string& name) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_objects.erase(std::remove_if(m_objects.begin(), m_objects.end(),
@@ -130,6 +180,8 @@ namespace Haruka {
         std::vector<std::shared_ptr<SceneObject>> m_objects;
         std::unordered_map<std::string, std::shared_ptr<SceneObject>> m_registry;
         std::unordered_map<uint64_t, std::shared_ptr<SceneObject>> m_idRegistry;
+        std::string m_name = "Untitled";
+        EventManager* m_eventManager = nullptr;
         
         std::mutex m_mutex; // Para que el StreamingSystem pueda leer mientras el Loader carga
     };
