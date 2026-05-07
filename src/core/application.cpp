@@ -80,28 +80,29 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
     _window->setWidth(newWidth);
     _window->setHeight(newHeight);
 
+    uint32_t width = _window->getWidth();
+    uint32_t height = _window->getHeight();
+
     // 1. Actualizar el Viewport global de OpenGL
-    glViewport(0, 0, _window->getWidth(), _window->getHeight());
+    glViewport(0, 0, width, height);
 
     // 2. Recrear el G-Buffer (Esencial para Deferred Rendering)
     // El G-Buffer suele contener texturas de Albedo, Normales, Posición, etc.
-    _gBuffer = std::make_unique<GBuffer>(_window->getWidth(), _window->getHeight());
+    _gBuffer = std::make_unique<GBuffer>(width, height);
 
     // 3. Recrear buffers de Iluminación y Post-procesado
-    _hdr = std::make_unique<HDR>(_window->getWidth(), _window->getHeight());
-    _bloom = std::make_unique<Bloom>(_window->getWidth(), _window->getHeight());
-    
+    _hdr = std::make_unique<HDR>(width, height);
+    _bloom = std::make_unique<Bloom>(width, height);
+
     // 4. Recrear SSAO (requiere el nuevo tamaño para el ruido y samples)
     if (_ssao) {
-        _ssao = std::make_unique<SSAO>(_window->getWidth(), _window->getHeight());
+        _ssao = std::make_unique<SSAO>(width, height);
     }
 
     // 5. Actualizar la matriz de proyección de la cámara
     if (_camera) {
-        _camera->setAspectRatio((float)_window->getWidth() / (float)_window->getHeight());
+        _camera->setAspectRatio((float)width / (float)height);
     }
-
-    std::cout << "[Application] FBOs recreated: " << _window->getWidth() << "x" << _window->getHeight() << std::endl;
 }
 
 void Application::buildRenderQueue() {
@@ -188,9 +189,12 @@ void Application::cleanup() {
 }
 
 void Application::run(const std::string& startScenePath) {
+    uint32_t _width = 1280;
+    uint32_t _height = 720;
+
     // 1. Instanciar y configurar la ventana
     _window = std::make_unique<Haruka::Core::Window>(
-        Haruka::Core::WindowProps("Haruka Engine", _window->getWidth(), _window->getHeight())
+        Haruka::Core::WindowProps("Haruka Engine", _width, _height)
     );
     
     if (!_window->init()) {
