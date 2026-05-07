@@ -18,6 +18,47 @@ bool parseBoolField(const nlohmann::json& value, const char* key, bool defaultVa
     return defaultValue;
 }
 
+Haruka::Flags parseFlags(const nlohmann::json& value) {
+    Haruka::Flags flags;
+    if (value.is_object()) {
+        flags.hasChunks = parseBoolField(value, "hasChunks", flags.hasChunks);
+        flags.isPersistent = parseBoolField(value, "isPersistent", flags.isPersistent);
+        flags.originShiftingTarget = parseBoolField(value, "originShiftingTarget", flags.originShiftingTarget);
+        flags.castLight = parseBoolField(value, "castLight", flags.castLight);
+        return flags;
+    }
+
+    if (value.is_array() && value.size() == 4) {
+        flags.hasChunks = value[0].is_boolean() ? value[0].get<bool>() : flags.hasChunks;
+        flags.isPersistent = value[1].is_boolean() ? value[1].get<bool>() : flags.isPersistent;
+        flags.originShiftingTarget = value[2].is_boolean() ? value[2].get<bool>() : flags.originShiftingTarget;
+        flags.castLight = value[3].is_boolean() ? value[3].get<bool>() : flags.castLight;
+    }
+
+    return flags;
+}
+
+Haruka::Rotation parseRotation(const nlohmann::json& value) {
+    if (value.is_array()) {
+        if (value.size() == 4) {
+            const double x = value[0].get<double>();
+            const double y = value[1].get<double>();
+            const double z = value[2].get<double>();
+            const double w = value[3].get<double>();
+            return Haruka::Rotation(w, x, y, z);
+        }
+        if (value.size() == 3) {
+            return Haruka::Rotation(glm::radians(glm::dvec3(
+                value[0].get<double>(),
+                value[1].get<double>(),
+                value[2].get<double>()
+            )));
+        }
+    }
+
+    return Haruka::Rotation(1.0, 0.0, 0.0, 0.0);
+}
+
 TerrainLayerSettings parseTerrainLayer(const nlohmann::json& value) {
     TerrainLayerSettings layer;
     layer.freq = value.value("freq", 0.0);
@@ -169,7 +210,10 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
 
     // Lógica de Herencia: Si el objeto tiene un template, mezclamos los datos
     if (objJson.contains("template")) {
-        applyTemplate(mergedJson, objJson["template"]);
+        const std::string templateName = objJson.value("template", "");
+        if (!templateName.empty()) {
+            applyTemplate(mergedJson, templateName);
+        }
     }
 
     auto obj = std::make_shared<SceneObject>();
@@ -177,19 +221,16 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     // Asignación de campos básicos (ya validados por el SceneValidator)
     obj->name = mergedJson.at("name").get<std::string>();
     obj->type = mergedJson.at("type").get<std::string>();
+    obj->templateName = mergedJson.value("template", "");
     
     // Transformaciones
     obj->position = parseDVec3(mergedJson, "position", {0,0,0});
     obj->scale    = parseDVec3(mergedJson, "scale",    {1,1,1});
-    obj->rotation = parseDVec3(mergedJson, "rotation", {0,0,0});
+    obj->rotation = parseRotation(mergedJson.contains("rotation") ? mergedJson["rotation"] : nlohmann::json());
 
     // Flags block is mandatory - read from flags object and assign to struct
-    if (mergedJson.contains("flags") && mergedJson["flags"].is_object()) {
-        const auto& flags = mergedJson["flags"];
-        obj->flags.hasChunks = parseBoolField(flags, "hasChunks", obj->flags.hasChunks);
-        obj->flags.isPersistent = parseBoolField(flags, "isPersistent", obj->flags.isPersistent);
-        obj->flags.originShiftingTarget = parseBoolField(flags, "originShiftingTarget", obj->flags.originShiftingTarget);
-        obj->flags.castLight = parseBoolField(flags, "castLight", obj->flags.castLight);
+    if (mergedJson.contains("flags")) {
+        obj->flags = parseFlags(mergedJson["flags"]);
     }
 
     // Bloques de datos complejos
@@ -255,7 +296,12 @@ bool SceneManager::save(const std::string& filepath) const {
         item["position"] = {obj.position.x, obj.position.y, obj.position.z};
         item["rotation"] = {obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w};
         item["scale"] = {obj.scale.x, obj.scale.y, obj.scale.z};
-        item["flags"] = {obj.flags.hasChunks, obj.flags.isPersistent, obj.flags.originShiftingTarget, obj.flags.castLight};
+        item["flags"] = nlohmann::json::object({
+            {"hasChunks", obj.flags.hasChunks},
+            {"isPersistent", obj.flags.isPersistent},
+            {"originShiftingTarget", obj.flags.originShiftingTarget},
+            {"castLight", obj.flags.castLight}
+        });
         if (obj.lodSettings) item["lod"] = toJson(*obj.lodSettings);
         if (obj.streamingSettings) item["streaming"] = toJson(*obj.streamingSettings);
         if (obj.terrainSettings) item["terrainSettings"] = toJson(*obj.terrainSettings);

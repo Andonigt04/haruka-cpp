@@ -56,21 +56,39 @@ namespace Haruka {
             }
         }
 
+        static void validateRotationField(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
+            if (!obj.contains("rotation")) return;
+            if (!obj["rotation"].is_array()) {
+                result.addError(owner + ".'rotation' debe ser un array de 3 o 4 elementos.");
+                return;
+            }
+            const auto size = obj["rotation"].size();
+            if (size != 3 && size != 4) {
+                result.addError(owner + ".'rotation' debe ser un array de 3 o 4 elementos.");
+            }
+        }
+
         static void validateFlags(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
             // Flags block is mandatory
             if (!obj.contains("flags")) {
                 result.addError(owner + " debe tener un bloque 'flags' obligatorio.");
                 return;
             }
-            if (!obj["flags"].is_object()) {
+            if (obj["flags"].is_object()) {
+                const auto& flags = obj["flags"];
+                validateBoolField(flags, result, owner + ".flags", "hasChunks");
+                validateBoolField(flags, result, owner + ".flags", "isPersistent");
+                validateBoolField(flags, result, owner + ".flags", "originShiftingTarget");
+                validateBoolField(flags, result, owner + ".flags", "castLight");
+                return;
+            }
+            if (!obj["flags"].is_array()) {
                 result.addError(owner + ".flags debe ser un objeto.");
                 return;
             }
-            const auto& flags = obj["flags"];
-            validateBoolField(flags, result, owner + ".flags", "hasChunks");
-            validateBoolField(flags, result, owner + ".flags", "isPersistent");
-            validateBoolField(flags, result, owner + ".flags", "originShiftingTarget");
-            validateBoolField(flags, result, owner + ".flags", "castLight");
+            if (obj["flags"].size() != 4) {
+                result.addError(owner + ".flags debe tener 4 elementos booleanos.");
+            }
         }
 
         static void validateLodBlock(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
@@ -193,8 +211,8 @@ namespace Haruka {
 
             // Regla: Si usa template, el template debe existir
             if (obj.contains("template")) {
-                std::string tName = obj["template"];
-                if (!fullData.contains("templates") || !fullData["templates"].contains(tName)) {
+                std::string tName = obj.value("template", "");
+                if (!tName.empty() && (!fullData.contains("templates") || !fullData["templates"].contains(tName))) {
                     result.addError("Objeto '" + name + "' referencia a un template inexistente: " + tName);
                 }
             }
@@ -203,9 +221,7 @@ namespace Haruka {
             if (obj.contains("position")) {
                 validateArray3Field(obj, result, "Objeto '" + name + "'", "position");
             }
-            if (obj.contains("rotation")) {
-                validateArray3Field(obj, result, "Objeto '" + name + "'", "rotation");
-            }
+            validateRotationField(obj, result, "Objeto '" + name + "'");
             if (obj.contains("scale")) {
                 validateArray3Field(obj, result, "Objeto '" + name + "'", "scale");
             }

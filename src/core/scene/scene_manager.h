@@ -195,6 +195,14 @@ namespace Haruka {
         }
 
         /**
+         * @brief Thread-safe snapshot of current scene objects.
+         */
+        std::vector<std::shared_ptr<SceneObject>> getAllObjectsSnapshot() const {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return m_objects;
+        }
+
+        /**
          * @brief Limpia la escena actual.
          */
         void clear() {
@@ -211,7 +219,7 @@ namespace Haruka {
         std::string m_name = "Untitled";
         EventManager* m_eventManager = nullptr;
         
-        std::mutex m_mutex; // Para que el StreamingSystem pueda leer mientras el Loader carga
+        mutable std::mutex m_mutex; // Para que el StreamingSystem pueda leer mientras el Loader carga
     };
 
 } // namespace Haruka

@@ -207,7 +207,7 @@ void Application::renderFrameContent() {
     }
 
     glViewport(0, 0, width, height);
-    glClearColor(0.05f, 0.07f, 0.1f, 1.0f);
+    glClearColor(0.01f, 0.01f, 0.01f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     _iTotalDrawCalls = static_cast<int>(g_sceneRenderQueue.size());
@@ -218,15 +218,32 @@ void Application::renderFrameContent() {
     _iRenderedTriangles = 0;
 
     if (_currentScene && _camera) {
-        if (!_mainShader) {
-            _mainShader = std::make_unique<Shader>("shaders/simple.vert", "shaders/simple.frag");
+        const bool useFinalLook = getRenderFeatureHDR() || getRenderFeatureBloom() || getRenderFeatureSSAO() || getRenderFeatureIBL() || getRenderFeatureShadows();
+        if (!_mainShader || _mainShaderUsesFinalLook != useFinalLook) {
+            _mainShader = std::make_unique<Shader>(
+                "shaders/simple.vert",
+                useFinalLook ? "shaders/final.frag" : "shaders/preview.frag"
+            );
+            _mainShaderUsesFinalLook = useFinalLook;
         }
 
         _mainShader->use();
 
         const float aspect = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
-        _mainShader->setMat4(1, _camera->getViewMatrix());
+        const glm::vec3 cameraOrigin = glm::vec3(_camera->position);
+        const glm::mat4 viewNoTranslation = glm::mat4(glm::mat3(_camera->getViewMatrix()));
+        _mainShader->setMat4(1, viewNoTranslation);
         _mainShader->setMat4(2, _camera->getProjectionMatrix(aspect));
+
+        if (useFinalLook) {
+            _mainShader->setVec3("cameraPos", cameraOrigin);
+            _mainShader->setVec3("sunDirection", glm::normalize(glm::vec3(0.35f, 0.75f, 0.25f)));
+            _mainShader->setBool("enableHDR", getRenderFeatureHDR());
+            _mainShader->setBool("enableBloom", getRenderFeatureBloom());
+            _mainShader->setBool("enableSSAO", getRenderFeatureSSAO());
+            _mainShader->setBool("enableIBL", getRenderFeatureIBL());
+            _mainShader->setBool("enableShadows", getRenderFeatureShadows());
+        }
 
         int renderedDrawCalls = 0;
         int renderedVertices = 0;
@@ -236,8 +253,16 @@ void Application::renderFrameContent() {
             const auto* obj = command.object;
             if (!obj) continue;
 
-            const glm::mat4 modelMatrix = getTransformMatrix(*obj);
+            const glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), -cameraOrigin) * getTransformMatrix(*obj);
             _mainShader->setMat4(0, modelMatrix);
+
+            if (useFinalLook) {
+                glm::vec3 baseColor = glm::vec3(obj->color);
+                if (glm::length(baseColor) < 0.001f) {
+                    baseColor = glm::vec3(0.75f, 0.76f, 0.80f);
+                }
+                _mainShader->setVec3("baseColor", baseColor);
+            }
 
             switch (command.kind) {
                 case Haruka::RenderKind::Model: {

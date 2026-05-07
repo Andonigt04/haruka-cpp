@@ -72,6 +72,16 @@ public:
     // Render quality/layers (global editor-configurable)
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
     static int getRenderQualityPreset() { return s_renderQualityPreset; }
+    static void setRenderFeatureHDR(bool enabled) { s_enableHDR = enabled; }
+    static bool getRenderFeatureHDR() { return s_enableHDR; }
+    static void setRenderFeatureBloom(bool enabled) { s_enableBloom = enabled; }
+    static bool getRenderFeatureBloom() { return s_enableBloom; }
+    static void setRenderFeatureSSAO(bool enabled) { s_enableSSAO = enabled; }
+    static bool getRenderFeatureSSAO() { return s_enableSSAO; }
+    static void setRenderFeatureIBL(bool enabled) { s_enableIBL = enabled; }
+    static bool getRenderFeatureIBL() { return s_enableIBL; }
+    static void setRenderFeatureShadows(bool enabled) { s_enableShadows = enabled; }
+    static bool getRenderFeatureShadows() { return s_enableShadows; }
     static void setLayerMaxDistance(int layer, float distance) {
         if (layer < 1 || layer > 5) return;
         s_layerMaxDistance[layer] = std::max(0.0f, distance);
@@ -202,6 +212,7 @@ private:
     std::unique_ptr<Shader> _bloomBlurShader;
     std::unique_ptr<Shader> _pointShadowShader;
     std::unique_ptr<Shader> _instancingShader;
+    bool _mainShaderUsesFinalLook = false;
     
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;
@@ -223,6 +234,11 @@ private:
     void setupQuad();
 
     inline static int s_renderQualityPreset = 2; // 0=Low,1=Medium,2=High,3=Ultra
+    inline static bool s_enableHDR = true;
+    inline static bool s_enableBloom = true;
+    inline static bool s_enableSSAO = true;
+    inline static bool s_enableIBL = true;
+    inline static bool s_enableShadows = true;
     inline static float s_layerMaxDistance[6] = {
         0.0f,
         1.0e9f,  // layer 1: always
