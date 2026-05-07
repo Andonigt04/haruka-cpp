@@ -4,6 +4,115 @@
 #include <iostream>
 #include <filesystem>
 
+namespace {
+
+using Haruka::LODSettings;
+using Haruka::StreamingSettings;
+using Haruka::TerrainGeneratorSettings;
+using Haruka::TerrainLayerSettings;
+
+bool parseBoolField(const nlohmann::json& value, const char* key, bool defaultValue) {
+    if (value.contains(key) && value[key].is_boolean()) {
+        return value[key].get<bool>();
+    }
+    return defaultValue;
+}
+
+TerrainLayerSettings parseTerrainLayer(const nlohmann::json& value) {
+    TerrainLayerSettings layer;
+    layer.freq = value.value("freq", 0.0);
+    layer.octaves = value.value("octaves", 0);
+    layer.strength = value.value("strength", 0.0);
+    return layer;
+}
+
+LODSettings parseLodSettings(const nlohmann::json& value) {
+    LODSettings settings;
+    settings.type = value.value("type", "");
+    settings.maxDepth = value.value("maxDepth", 0);
+    settings.splitThreshold = value.value("splitThreshold", 0.0);
+    if (value.contains("thresholds") && value["thresholds"].is_array()) {
+        for (const auto& item : value["thresholds"]) {
+            if (item.is_number()) settings.thresholds.push_back(item.get<double>());
+        }
+    }
+    if (value.contains("assets") && value["assets"].is_array()) {
+        for (const auto& item : value["assets"]) {
+            if (item.is_string()) settings.assets.push_back(item.get<std::string>());
+        }
+    }
+    return settings;
+}
+
+StreamingSettings parseStreamingSettings(const nlohmann::json& value) {
+    StreamingSettings settings;
+    settings.mode = value.value("mode", "");
+    settings.priority = value.value("priority", "");
+    settings.enabled = value.value("enabled", true);
+    return settings;
+}
+
+TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
+    TerrainGeneratorSettings settings;
+    settings.type = value.value("type", "");
+    settings.shader = value.value("shader", "");
+    if (value.contains("config") && value["config"].is_object()) {
+        const auto& config = value["config"];
+        settings.seed = config.value("seed", 0);
+        settings.chunkSize = config.value("chunkSize", 0);
+        if (config.contains("layers") && config["layers"].is_object()) {
+            for (auto it = config["layers"].begin(); it != config["layers"].end(); ++it) {
+                if (it.value().is_object()) {
+                    settings.layers[it.key()] = parseTerrainLayer(it.value());
+                }
+            }
+        }
+    }
+    return settings;
+}
+
+nlohmann::json toJson(const LODSettings& settings) {
+    nlohmann::json value;
+    if (!settings.type.empty()) value["type"] = settings.type;
+    if (settings.maxDepth != 0) value["maxDepth"] = settings.maxDepth;
+    if (settings.splitThreshold != 0.0) value["splitThreshold"] = settings.splitThreshold;
+    if (!settings.thresholds.empty()) value["thresholds"] = settings.thresholds;
+    if (!settings.assets.empty()) value["assets"] = settings.assets;
+    return value;
+}
+
+nlohmann::json toJson(const StreamingSettings& settings) {
+    nlohmann::json value;
+    if (!settings.mode.empty()) value["mode"] = settings.mode;
+    if (!settings.priority.empty()) value["priority"] = settings.priority;
+    value["enabled"] = settings.enabled;
+    return value;
+}
+
+nlohmann::json toJson(const TerrainGeneratorSettings& settings) {
+    nlohmann::json value;
+    if (!settings.type.empty()) value["type"] = settings.type;
+    if (!settings.shader.empty()) value["shader"] = settings.shader;
+    nlohmann::json config;
+    if (settings.seed != 0) config["seed"] = settings.seed;
+    if (settings.chunkSize != 0) config["chunkSize"] = settings.chunkSize;
+    if (!settings.layers.empty()) {
+        nlohmann::json layers = nlohmann::json::object();
+        for (const auto& [name, layer] : settings.layers) {
+            nlohmann::json entry;
+            if (layer.freq != 0.0) entry["freq"] = layer.freq;
+            if (layer.octaves != 0) entry["octaves"] = layer.octaves;
+            if (layer.strength != 0.0) entry["strength"] = layer.strength;
+            layers[name] = entry;
+        }
+        config["layers"] = std::move(layers);
+    }
+    if (!config.empty()) value["config"] = std::move(config);
+    return value;
+}
+
+}
+
 namespace Haruka {
 
 bool SceneLoader::loadFromFile(const std::string& filepath) {
@@ -74,15 +183,25 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     obj->scale    = parseDVec3(mergedJson, "scale",    {1,1,1});
     obj->rotation = parseDVec3(mergedJson, "rotation", {0,0,0});
 
-    // Flags de sistema
-    if (mergedJson.contains("flags")) {
-        obj->hasChunks = mergedJson["flags"].value("hasChunks", false);
+    // Flags block is mandatory - read from flags object and assign to struct
+    if (mergedJson.contains("flags") && mergedJson["flags"].is_object()) {
+        const auto& flags = mergedJson["flags"];
+        obj->flags.hasChunks = parseBoolField(flags, "hasChunks", obj->flags.hasChunks);
+        obj->flags.isPersistent = parseBoolField(flags, "isPersistent", obj->flags.isPersistent);
+        obj->flags.originShiftingTarget = parseBoolField(flags, "originShiftingTarget", obj->flags.originShiftingTarget);
+        obj->flags.castLight = parseBoolField(flags, "castLight", obj->flags.castLight);
     }
 
     // Bloques de datos complejos
-    if (mergedJson.contains("lod"))              obj->lodSettings = mergedJson["lod"];
-    if (mergedJson.contains("streaming"))        obj->streamingSettings = mergedJson["streaming"];
-    if (mergedJson.contains("terrainGenerator")) obj->terrainSettings = mergedJson["terrainGenerator"];
+    if (mergedJson.contains("lod") && mergedJson["lod"].is_object()) {
+        obj->lodSettings = parseLodSettings(mergedJson["lod"]);
+    }
+    if (mergedJson.contains("streaming") && mergedJson["streaming"].is_object()) {
+        obj->streamingSettings = parseStreamingSettings(mergedJson["streaming"]);
+    }
+    if (mergedJson.contains("terrainGenerator") && mergedJson["terrainGenerator"].is_object()) {
+        obj->terrainSettings = parseTerrainSettings(mergedJson["terrainGenerator"]);
+    }
     if (mergedJson.contains("components"))       obj->components = mergedJson["components"];
     if (mergedJson.contains("properties"))       obj->properties = mergedJson["properties"];
 
@@ -136,14 +255,10 @@ bool SceneManager::save(const std::string& filepath) const {
         item["position"] = {obj.position.x, obj.position.y, obj.position.z};
         item["rotation"] = {obj.rotation.x, obj.rotation.y, obj.rotation.z, obj.rotation.w};
         item["scale"] = {obj.scale.x, obj.scale.y, obj.scale.z};
-        item["flags"] = {
-            {"hasChunks", obj.hasChunks},
-            {"isPersistent", obj.isPersistent},
-            {"originShiftingTarget", obj.originShiftingTarget}
-        };
-        if (!obj.lodSettings.is_null() && !obj.lodSettings.empty()) item["lod"] = obj.lodSettings;
-        if (!obj.streamingSettings.is_null() && !obj.streamingSettings.empty()) item["streaming"] = obj.streamingSettings;
-        if (!obj.terrainSettings.is_null() && !obj.terrainSettings.empty()) item["terrainGenerator"] = obj.terrainSettings;
+        item["flags"] = {obj.flags.hasChunks, obj.flags.isPersistent, obj.flags.originShiftingTarget, obj.flags.castLight};
+        if (obj.lodSettings) item["lod"] = toJson(*obj.lodSettings);
+        if (obj.streamingSettings) item["streaming"] = toJson(*obj.streamingSettings);
+        if (obj.terrainSettings) item["terrainGenerator"] = toJson(*obj.terrainSettings);
         if (!obj.components.is_null() && !obj.components.empty()) item["components"] = obj.components;
         if (!obj.properties.is_null() && !obj.properties.empty()) item["properties"] = obj.properties;
         if (obj.parentIndex >= 0) item["parentIndex"] = obj.parentIndex;

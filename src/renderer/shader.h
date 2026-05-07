@@ -105,22 +105,36 @@ private:
     // Loads baseDir+path+".spv", uploads as SPIR-V, specialises at "main", returns shader object.
     static GLuint loadSPV(GLenum type, const char* glslPath) {
         std::string spvPath = s_baseDir + glslPath + ".spv";
-
+        // Try SPIR-V first (installed .spv). If not present, fall back to
+        // compiling GLSL source at runtime for development convenience.
         std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
-        if (!f.is_open()) {
+        if (f.is_open()) {
+            auto byteSize = static_cast<std::streamsize>(f.tellg());
+            f.seekg(0, std::ios::beg);
+            std::vector<char> buf(byteSize);
+            f.read(buf.data(), byteSize);
+
+            GLuint shader = glCreateShader(type);
+            glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
+                           buf.data(), static_cast<GLsizei>(byteSize));
+            glSpecializeShader(shader, "main", 0, nullptr, nullptr);
+            checkErrors(shader, spvPath.c_str());
+            return shader;
+        }
+
+        // SPV not found -> try GLSL source (s_baseDir + glslPath)
+        std::string glslFullPath = s_baseDir + glslPath;
+        std::ifstream g(glslFullPath);
+        if (!g.is_open()) {
             HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED, "SPV not found: " + spvPath);
             return 0;
         }
-        auto byteSize = static_cast<std::streamsize>(f.tellg());
-        f.seekg(0, std::ios::beg);
-        std::vector<char> buf(byteSize);
-        f.read(buf.data(), byteSize);
-
+        std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
+        const char* srcPtr = src.c_str();
         GLuint shader = glCreateShader(type);
-        glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
-                       buf.data(), static_cast<GLsizei>(byteSize));
-        glSpecializeShader(shader, "main", 0, nullptr, nullptr);
-        checkErrors(shader, spvPath.c_str());
+        glShaderSource(shader, 1, &srcPtr, nullptr);
+        glCompileShader(shader);
+        checkErrors(shader, glslFullPath.c_str());
         return shader;
     }
 

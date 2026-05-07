@@ -24,6 +24,12 @@ namespace Haruka {
     /** @brief Quaternion rotation type used for double-precision orientation. */
     using Rotation = glm::dquat;
 
+    /** @brief Scale type used for double-precision scaling. */
+    using DScale = glm::dvec3;
+    
+    /** @brief Scale type used for single-precision scaling. */
+    using Scale = glm::vec3;
+
     /** @brief Unit and scale helpers for astrophysical distances. */
     namespace Units
     {

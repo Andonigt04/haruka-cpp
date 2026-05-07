@@ -4,6 +4,7 @@
 #include <string>
 #include <glm/glm.hpp>
 #include <unordered_map>
+#include <optional>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
@@ -18,6 +19,46 @@ namespace Haruka {
 
     class EventManager;
     class MaterialComponent;
+
+    struct LODLayerSettings {
+        double threshold = 0.0;
+        std::string asset;
+    };
+
+    struct Flags {
+        bool hasChunks = false;          // ¿Usa subdivisión QuadTree/Octree?
+        bool isPersistent = false;       // ¿Debe estar siempre en RAM? (ej. el Sol)
+        bool originShiftingTarget = false; // ¿Es un candidato para ser el centro del mundo?
+        bool castLight = false;          // ¿Se comporta como una luz emisiva?
+    };
+
+    struct LODSettings {
+        std::string type;
+        int maxDepth = 0;
+        double splitThreshold = 0.0;
+        std::vector<double> thresholds;
+        std::vector<std::string> assets;
+    };
+
+    struct StreamingSettings {
+        std::string mode;
+        std::string priority;
+        bool enabled = true;
+    };
+
+    struct TerrainLayerSettings {
+        double freq = 0.0;
+        int octaves = 0;
+        double strength = 0.0;
+    };
+
+    struct TerrainGeneratorSettings {
+        std::string type;
+        std::string shader;
+        int seed = 0;
+        int chunkSize = 0;
+        std::unordered_map<std::string, TerrainLayerSettings> layers;
+    };
 
     /**
      * @brief Representación unificada de cualquier entidad en el universo.
@@ -35,34 +76,21 @@ namespace Haruka {
         Haruka::Rotation rotation = Haruka::Rotation(); // Euler angles en grados
         glm::dvec3 scale    = glm::dvec3(1.0);
 
-        // Flags de sistema
-        bool hasChunks = false;          // ¿Usa subdivisión QuadTree/Octree?
-        bool isPersistent = false;       // ¿Debe estar siempre en RAM? (ej. el Sol)
-        bool originShiftingTarget = false; // ¿Es un candidato para ser el centro del mundo?
-
-        // Compatibilidad con la UI antigua del editor.
-        struct LegacyFlags {
-            bool castLight = false;
-            bool isPersistent = false;
-            bool hasChunks = false;
-            bool originShiftingTarget = false;
-        };
-
-        std::shared_ptr<LegacyFlags> flags = std::make_shared<LegacyFlags>();
+        
         glm::dvec3 color = glm::dvec3(1.0);
         double intensity = 1.0;
         int renderLayer = 1;
         std::string modelPath;
         std::shared_ptr<MaterialComponent> material;
         std::shared_ptr<MeshRendererComponent> meshRenderer;
-
-        // Bloques de datos (JSON)
-        // Se mantienen como JSON para que cada sistema (Streaming, Render, Física)
-        // extraiga solo lo que necesite sin sobrecargar este struct.
         
-        nlohmann::json lodSettings;      // Configuración de distancias o QuadTree
-        nlohmann::json streamingSettings;// Modo (Disk/Procedural) y prioridad
-        nlohmann::json terrainSettings;  // Capas de ruido, semilla, biomas
+        // Flags de sistema
+        Flags flags;
+        // Bloques tipados opcionales: solo existen cuando el tipo de objeto los necesita.
+        // El resto de metadatos sigue viviendo en JSON para compatibilidad y extensibilidad.
+        std::optional<LODSettings> lodSettings;      // Configuración de distancias o QuadTree
+        std::optional<StreamingSettings> streamingSettings;// Modo (Disk/Procedural) y prioridad
+        std::optional<TerrainGeneratorSettings> terrainSettings;  // Terreno procedural del objeto
         nlohmann::json components;       // Luces, scripts, colisionadores
         nlohmann::json properties;       // Metadatos extra (velocidad, facción, etc.)
 
