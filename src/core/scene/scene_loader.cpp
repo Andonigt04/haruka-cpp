@@ -199,8 +199,8 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     if (mergedJson.contains("streaming") && mergedJson["streaming"].is_object()) {
         obj->streamingSettings = parseStreamingSettings(mergedJson["streaming"]);
     }
-    if (mergedJson.contains("terrainGenerator") && mergedJson["terrainGenerator"].is_object()) {
-        obj->terrainSettings = parseTerrainSettings(mergedJson["terrainGenerator"]);
+    if (mergedJson.contains("terrainSettings") && mergedJson["terrainSettings"].is_object()) {
+        obj->terrainSettings = parseTerrainSettings(mergedJson["terrainSettings"]);
     }
     if (mergedJson.contains("components"))       obj->components = mergedJson["components"];
     if (mergedJson.contains("properties"))       obj->properties = mergedJson["properties"];
@@ -258,7 +258,7 @@ bool SceneManager::save(const std::string& filepath) const {
         item["flags"] = {obj.flags.hasChunks, obj.flags.isPersistent, obj.flags.originShiftingTarget, obj.flags.castLight};
         if (obj.lodSettings) item["lod"] = toJson(*obj.lodSettings);
         if (obj.streamingSettings) item["streaming"] = toJson(*obj.streamingSettings);
-        if (obj.terrainSettings) item["terrainGenerator"] = toJson(*obj.terrainSettings);
+        if (obj.terrainSettings) item["terrainSettings"] = toJson(*obj.terrainSettings);
         if (!obj.components.is_null() && !obj.components.empty()) item["components"] = obj.components;
         if (!obj.properties.is_null() && !obj.properties.empty()) item["properties"] = obj.properties;
         if (obj.parentIndex >= 0) item["parentIndex"] = obj.parentIndex;

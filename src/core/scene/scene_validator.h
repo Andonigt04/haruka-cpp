@@ -204,8 +204,8 @@ namespace Haruka {
                 if (!hasInlineOrTemplateBlock(obj, fullData, "streaming")) {
                     result.addError("El planeta '" + name + "' no define streaming ni lo hereda de su template.");
                 }
-                if (!hasInlineOrTemplateBlock(obj, fullData, "terrainGenerator")) {
-                    result.addWarning("El planeta '" + name + "' no define terrainGenerator ni lo hereda de su template.");
+                if (!hasInlineOrTemplateBlock(obj, fullData, "terrainSettings")) {
+                    result.addWarning("El planeta '" + name + "' no define terrainSettings ni lo hereda de su template.");
                 }
             }
         }
