@@ -29,6 +29,7 @@ public:
     float speed = 5.0f;           ///< Movement speed in km/s
     float sensitivity = 0.1f;     ///< Mouse rotation sensitivity (degrees per pixel)
     float zoom = 45.0f;           ///< Vertical FOV in degrees
+    float aspectRatio = 1.0f;     ///< Aspect ratio for projection matrix
 
     /** @brief Constructs camera at initial world-space position. */
     Camera(Haruka::WorldPos startPos);
@@ -47,6 +48,12 @@ public:
     void rotate(float deltaX, float deltaY);
     /** @brief Processes movement input from SDL keyboard state. */
     void processInput(SDL_Window* window, float deltaTime);
+
+    /** @brief Sets the projection matrix ratio. */
+    void setAspectRatio();
+    /** @brief Sets the aspect ratio for projection matrix calculations. */
+    void setAspectRatio(float ap) { aspectRatio = ap; }
+
     
     /** @brief Updates zoom/FOV from scroll input. */
     void ProcessMouseScroll(float yoffset);

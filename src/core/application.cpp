@@ -5,6 +5,7 @@
 #include <SDL3/SDL.h>
 
 #include "renderer/motor_instance.h"
+#include "tools/error_reporter.h"
 
 namespace {
 std::vector<const Haruka::SceneObject*> g_sceneRenderQueue;
@@ -40,11 +41,6 @@ void Application::setupQuad() {
     glBindVertexArray(0);
 }
 
-void Application::recreateFBOs(int newWidth, int newHeight) {
-    _width = std::max(1, newWidth);
-    _height = std::max(1, newHeight);
-}
-
 void Application::loadScene(const std::string& scenePath) {
     _ownedScene = std::make_unique<Haruka::SceneManager>();
     Haruka::SceneLoader loader(*_ownedScene);
@@ -57,42 +53,6 @@ void Application::loadScene(const std::string& scenePath) {
 
     _currentScene = _ownedScene.get();
     std::cout << "[Application] Using empty scene" << std::endl;
-}
-
-void Application::create_window() {
-    if (_window) return;
-
-    if (!SDL_WasInit(SDL_INIT_VIDEO) && !SDL_Init(SDL_INIT_VIDEO)) {
-        std::cerr << "[Application] Failed to initialize SDL video" << std::endl;
-        return;
-    }
-
-    _window = SDL_CreateWindow("Haruka Runtime", _width, _height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    if (!_window) {
-        std::cerr << "[Application] Failed to create window: " << SDL_GetError() << std::endl;
-    }
-}
-
-void Application::create_gl_context() {
-    if (!_window || _glContext) return;
-
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6);
-
-    _glContext = SDL_GL_CreateContext(_window);
-    if (!_glContext) {
-        std::cerr << "[Application] Failed to create GL context: " << SDL_GetError() << std::endl;
-        return;
-    }
-
-    if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress)) {
-        std::cerr << "[Application] Failed to initialize GLAD" << std::endl;
-        return;
-    }
-
-    glViewport(0, 0, _width, _height);
-    glEnable(GL_DEPTH_TEST);
 }
 
 void Application::init(Haruka::SceneManager& scene) {
@@ -116,6 +76,34 @@ void Application::init(Haruka::SceneManager& scene) {
     MotorInstance::getInstance().setCamera(_camera.get());
 }
 
+void Application::recreateFBOs(int newWidth, int newHeight) {
+    _window->setWidth(newWidth);
+    _window->setHeight(newHeight);
+
+    // 1. Actualizar el Viewport global de OpenGL
+    glViewport(0, 0, _window->getWidth(), _window->getHeight());
+
+    // 2. Recrear el G-Buffer (Esencial para Deferred Rendering)
+    // El G-Buffer suele contener texturas de Albedo, Normales, Posición, etc.
+    _gBuffer = std::make_unique<GBuffer>(_window->getWidth(), _window->getHeight());
+
+    // 3. Recrear buffers de Iluminación y Post-procesado
+    _hdr = std::make_unique<HDR>(_window->getWidth(), _window->getHeight());
+    _bloom = std::make_unique<Bloom>(_window->getWidth(), _window->getHeight());
+    
+    // 4. Recrear SSAO (requiere el nuevo tamaño para el ruido y samples)
+    if (_ssao) {
+        _ssao = std::make_unique<SSAO>(_window->getWidth(), _window->getHeight());
+    }
+
+    // 5. Actualizar la matriz de proyección de la cámara
+    if (_camera) {
+        _camera->setAspectRatio((float)_window->getWidth() / (float)_window->getHeight());
+    }
+
+    std::cout << "[Application] FBOs recreated: " << _window->getWidth() << "x" << _window->getHeight() << std::endl;
+}
+
 void Application::buildRenderQueue() {
     g_sceneRenderQueue.clear();
 
@@ -133,7 +121,7 @@ void Application::buildRenderQueue() {
 }
 
 void Application::renderFrameContent() {
-    glViewport(0, 0, _width, _height);
+    glViewport(0, 0, _window->getWidth(), _window->getHeight());
     glClearColor(0.05f, 0.07f, 0.1f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -153,8 +141,8 @@ void Application::renderFrame() {
     buildRenderQueue();
     renderFrameContent();
 
-    if (_window && _glContext) {
-        SDL_GL_SwapWindow(_window);
+    if (_window) {
+        _window->swapBuffers();
     }
 
     _fpsFrameCount++;
@@ -163,23 +151,6 @@ void Application::renderFrame() {
         _lastFps = static_cast<float>(_fpsFrameCount / _fpsLastTime);
         _fpsFrameCount = 0;
         _fpsLastTime = 0.0;
-    }
-}
-
-void Application::main_loop() {
-    bool running = true;
-
-    while (running) {
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            if (event.type == SDL_EVENT_QUIT) {
-                running = false;
-            } else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                recreateFBOs(event.window.data1, event.window.data2);
-            }
-        }
-
-        renderFrame();
     }
 }
 
@@ -207,13 +178,8 @@ void Application::cleanup() {
         quadVAO = 0;
     }
 
-    if (_glContext) {
-        SDL_GL_DestroyContext(_glContext);
-        _glContext = nullptr;
-    }
     if (_window) {
-        SDL_DestroyWindow(_window);
-        _window = nullptr;
+        _window->shutdown();
     }
 
     if (SDL_WasInit(SDL_INIT_VIDEO)) {
@@ -222,15 +188,36 @@ void Application::cleanup() {
 }
 
 void Application::run(const std::string& startScenePath) {
-    create_window();
-    create_gl_context();
-
-    loadScene(startScenePath);
-    if (!_currentScene) {
-        _ownedScene = std::make_unique<Haruka::SceneManager>();
-        _currentScene = _ownedScene.get();
+    // 1. Instanciar y configurar la ventana
+    _window = std::make_unique<Haruka::Core::Window>(
+        Haruka::Core::WindowProps("Haruka Engine", _window->getWidth(), _window->getHeight())
+    );
+    
+    if (!_window->init()) {
+        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
+        return;
     }
 
+    // 2. Inicializar lógica del motor
+    loadScene(startScenePath);
     init(*_currentScene);
-    main_loop();
+
+    bool running = true;
+    while (running) {
+        // Guardamos dimensiones actuales para detectar cambios después de los eventos
+        uint32_t lastWidth = _window->getWidth();
+        uint32_t lastHeight = _window->getHeight();
+
+        // 3. Procesar Eventos (Delegado a Window)
+        _window->pollEvents(running);
+
+        // 4. Detectar Redimensionado
+        if (_window->getWidth() != lastWidth || _window->getHeight() != lastHeight) {
+            recreateFBOs(_window->getWidth(), _window->getHeight());
+        }
+
+        // 5. Renderizar y Swap
+        renderFrame();
+        _window->swapBuffers();
+    }
 }

@@ -11,6 +11,7 @@
 
 #include "tools/math_types.h"
 #include "core/world_system.h"
+#include "core/window.h"
 #include "core/camera.h"
 #include "core/scene/scene_manager.h"
 #include "renderer/shader.h"
@@ -125,22 +126,15 @@ public:
     void run(const std::string& startScenePath);
     /** @brief Initializes systems from a scene instance. */
     void init(Haruka::SceneManager& scene);
-    /** @brief Creates runtime window resources (when applicable). */
-    void create_window();
-    /** @brief Initializes the OpenGL context, GLAD, and input callbacks. */
-    void create_gl_context();
     /** @brief Recreates all size-dependent FBOs when the viewport is resized. */
     void recreateFBOs(int newWidth, int newHeight);
     /** @brief Sets the viewport-owned FBO that the editor render path writes into.
      *  Must be called after recreateRenderTarget() on the viewport side. */
     void setEditorTarget(RenderTarget* rt) { _editorTarget = rt; }
-
     /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
     /** @brief Builds the render queue with frustum culling and LOD management. */
     void buildRenderQueue();
-    /** @brief Runs main loop until shutdown. */
-    void main_loop();
     /** @brief Renders one frame and updates timing state. */
     void renderFrame();
     /** @brief Frame rendering body (logic-only path). */
@@ -151,14 +145,10 @@ public:
 private:
     friend class MotorInstance;
     
-    static constexpr int MAX_LIGHTS = 256;
+    std::unique_ptr<Haruka::Core::Window> _window = nullptr;
     
-    // Window (set by viewport via MotorInstance friend access)
-    SDL_Window*   _window    = nullptr;
-    SDL_GLContext _glContext = nullptr;
-    int _width = 1280;
-    int _height = 720;
-
+    // TODO: quiero que desaparezca
+    static constexpr int MAX_LIGHTS = 256;
     // Core systems
     Haruka::SceneManager* _currentScene = nullptr;
     std::unique_ptr<Haruka::SceneManager> _ownedScene;
@@ -167,13 +157,13 @@ private:
     // Rendering pipeline
     std::unique_ptr<Shader> _mainShader;
     std::unique_ptr<Shader> _lampShader;
-    std::unique_ptr<Shadow> _shadowSystem;
-    std::unique_ptr<HDR> _hdrSystem;
-    std::unique_ptr<Bloom> _bloomSystem;
+    std::unique_ptr<Shadow> _shadow;
+    std::unique_ptr<HDR> _hdr;
+    std::unique_ptr<Bloom> _bloom;
     std::unique_ptr<GBuffer> _gBuffer;
-    std::unique_ptr<SSAO> _ssaoSystem;
-    std::unique_ptr<IBL> _iblSystem;
-    std::unique_ptr<PointShadow> _pointShadowSystem;
+    std::unique_ptr<SSAO> _ssao;
+    std::unique_ptr<IBL> _ibl;
+    std::unique_ptr<PointShadow> _pointShadow;
     std::unique_ptr<LightCuller> _lightCuller;
     std::unique_ptr<GPUInstancing> _instancing;
     std::unique_ptr<ComputePostProcess> _computePostProcess;
