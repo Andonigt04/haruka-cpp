@@ -33,6 +33,8 @@ namespace Haruka {
          */
         std::vector<std::shared_ptr<ChunkData>> getReadyChunks();
 
+        int getPendingCount() const { return static_cast<int>(m_pendingRequests.size()); }
+
 
     private:
         ChunkCache& m_cache;

@@ -37,10 +37,11 @@ void Camera::rotate(float deltaX, float deltaY) {
 }
 
 void Camera::processInput(SDL_Window* /*window*/, float deltaTime) {
-    double velocity = (double)speed * (double)deltaTime;
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    double multiplier = keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0;
+    double velocity = (double)speed * (double)deltaTime * multiplier;
     glm::vec3 right = glm::normalize(glm::cross(getFront(), getUp()));
 
-    const bool* keys = SDL_GetKeyboardState(nullptr);
     if (keys[SDL_SCANCODE_W])     position += Haruka::WorldPos(getFront()) * velocity;
     if (keys[SDL_SCANCODE_S])     position -= Haruka::WorldPos(getFront()) * velocity;
     if (keys[SDL_SCANCODE_A])     position -= Haruka::WorldPos(right) * velocity;

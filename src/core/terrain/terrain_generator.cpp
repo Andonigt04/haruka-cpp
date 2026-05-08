@@ -44,30 +44,36 @@ namespace {
     std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) 
     {
         auto chunk = std::make_shared<ChunkData>();
-        int res = settings["config"].value("chunkSize", 64);
-        // Set global seed so calculateHeight can read it when only the
-        // layers json is passed (no parent pointer available).
-        g_current_seed = settings["config"].value("seed", 42);
+        static const nlohmann::json kEmptyObj = nlohmann::json::object();
+        const auto& config = settings.contains("config") ? settings["config"] : kEmptyObj;
+        int res = config.value("chunkSize", 32);
+        g_current_seed = config.value("seed", 42);
         
         // Reservar memoria para optimizar
         chunk->vertices.reserve((res + 1) * (res + 1));
 
         // 1. Generar Vértices
+        const auto& layers = config.contains("layers") ? config["layers"] : kEmptyObj;
         for (int y = 0; y <= res; ++y) {
             for (int x = 0; x <= res; ++x) {
                 // Obtener posición base en la esfera unitaria
                 glm::vec3 posOnSphere = getLocalPosition(key, x, y, res);
-                
-                // Calcular altura procedural (Noise)
-                float height = calculateHeight(posOnSphere, settings["config"]["layers"]);
-                
-                // Posición final: (Dirección * (Radio + Elevación))
-                glm::vec3 finalPos = posOnSphere * (float(planetRadius) + height);
+
+                // height is a dimensionless fraction (strength ~0.05–0.1 = 5–10% of radius)
+                float height = calculateHeight(posOnSphere, layers);
+
+                // Scale by radius so strength values are always proportional to planet size
+                glm::vec3 finalPos = posOnSphere * (float(planetRadius) * (1.0f + height));
                 
                 chunk->vertices.push_back(finalPos);
                 // Aquí también podrías calcular normales y UVs
             }
         }
+
+        // Compute sphere-direction normals (good approximation for small height offsets)
+        chunk->normals.reserve(chunk->vertices.size());
+        for (const auto& v : chunk->vertices)
+            chunk->normals.push_back(glm::normalize(v));
 
         // 2. Generar Índices (Triángulos)
         for (int y = 0; y < res; ++y) {

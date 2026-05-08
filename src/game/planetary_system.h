@@ -31,13 +31,28 @@ public:
     };
 
     void init();
-    
-    /**
-     * @brief El corazón del sistema: actualiza órbitas y dispara el LOD/Streaming.
-     */
+
+    /** @brief Actualiza órbitas, LOD y streaming. */
     void update(double dt, const glm::dvec3& cameraPos);
 
     void addPlanet(const Planet& planet);
+
+    /** @brief Renderiza el terrain de un planeta (shader ya activo, UBO model ya subido). */
+    void renderPlanetTerrain(const std::string& planetName);
+
+    const std::vector<Planet>& getPlanets() const { return m_planets; }
+          std::vector<Planet>& getPlanets()       { return m_planets; }
+
+    void syncFromScene(const SceneManager& scene);
+
+    int getGPUChunkCount()    const;
+    int getPendingChunks()    const;
+    int getCachedChunks()     const;
+    int getCacheMemoryMB()    const;
+    int getCacheMaxMemoryMB() const;
+
+    struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
+    TerrainDrawStats getTerrainDrawStats() const;
 
 private:
     // Componentes del motor de terreno (Los "músculos")

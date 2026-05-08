@@ -49,13 +49,15 @@ namespace Haruka {
         CUBE    = 1,
         SPHERE  = 2,
         CAPSULE = 3,
-        PLANE   = 4,
+        CILINDER = 4,
+        PLANE   = 5,
     };
 
     inline PrimitiveType stringToPrimitiveType(const std::string& s) {
         if (s == "Cube" || s == "cube") return PrimitiveType::CUBE;
         if (s == "Sphere" || s == "sphere") return PrimitiveType::SPHERE;
         if (s == "Capsule" || s == "capsule") return PrimitiveType::CAPSULE;
+        if (s == "Cylinder" || s == "cylinder") return PrimitiveType::CILINDER;
         if (s == "Plane" || s == "plane") return PrimitiveType::PLANE;
         return PrimitiveType::NONE;
     }
@@ -65,6 +67,7 @@ namespace Haruka {
             case PrimitiveType::CUBE: return "Cube";
             case PrimitiveType::SPHERE: return "Sphere";
             case PrimitiveType::CAPSULE: return "Capsule";
+            case PrimitiveType::CILINDER: return "Cylinder";
             case PrimitiveType::PLANE: return "Plane";
             default: return "None";
         }

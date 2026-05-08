@@ -2,17 +2,43 @@
 
 #include <iostream>
 #include <unordered_map>
+#include <algorithm>
 
 #include <SDL3/SDL.h>
 
 #include <glm/gtx/euler_angles.hpp>
 
 #include "renderer/motor_instance.h"
+#include "game/planetary_system.h"
 #include "core/components/mesh_renderer_component.h"
 #include "renderer/model.h"
 #include "renderer/primitive_shapes.h"
 #include "core/scene/scene_render_policy.h"
 #include "tools/error_reporter.h"
+
+// std140-compatible structs mirroring the UBO declarations in the shaders.
+// Any change to the GLSL UBO layout must be reflected here.
+struct alignas(16) PerFrameUBOData {
+    glm::mat4 view;
+    glm::mat4 projection;
+    glm::vec3 cameraPos;      float _pad0;
+    glm::vec3 sunDirection;   float _pad1;
+    glm::vec3 sunLightColor;  float ambientStrength;
+    int enableHDR;
+    int enableBloom;
+    int enableSSAO;
+    int enableIBL;
+    int enableShadows;
+    int _pad3[3];
+};
+static_assert(sizeof(PerFrameUBOData) == 208, "PerFrameUBOData std140 size mismatch");
+
+struct alignas(16) PerObjectUBOData {
+    glm::mat4 model;
+    glm::vec4 baseColorAndPlanetRadius; // rgb=color, a=planetRadius
+    glm::vec4 planetCenterAndFlag;      // xyz=planetCenter, w=useProceduralTerrain
+};
+static_assert(sizeof(PerObjectUBOData) == 96, "PerObjectUBOData std140 size mismatch");
 
 namespace {
 std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
@@ -137,6 +163,58 @@ void Application::loadScene(const std::string& scenePath) {
     std::cout << "[Application] Using empty scene" << std::endl;
 }
 
+void Application::setEditorViewportSize(int w, int h) {
+    m_editorViewportW = w;
+    m_editorViewportH = h;
+}
+
+void Application::initPlanetarySystem() {
+    if (!_currentScene) return;
+
+    _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
+    _planetarySystem->init();
+
+    for (const auto& objPtr : _currentScene->getAllObjects()) {
+        if (!objPtr) continue;
+        const auto& obj = *objPtr;
+        if (!obj.terrainSettings && !obj.lodSettings && !obj.flags.hasChunks) {
+            std::string lo = obj.type;
+            std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
+            bool isPlanet = lo.find("planet") != std::string::npos
+                         || lo.find("celestialbody") != std::string::npos
+                         || lo.find("star") != std::string::npos;
+            if (!isPlanet) continue;
+        }
+
+        Haruka::PlanetarySystem::Planet planet;
+        planet.name     = obj.name;
+        planet.position = obj.position;
+        planet.radius   = std::max({obj.scale.x, obj.scale.y, obj.scale.z});
+
+        if (obj.terrainSettings) {
+            const auto& ts = *obj.terrainSettings;
+            planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+            planet.terrainSettings["config"]["seed"]      = ts.seed;
+            for (const auto& [name, layer] : ts.layers) {
+                planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
+                planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
+                planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
+            }
+        } else {
+            planet.terrainSettings["config"]["chunkSize"] = 32;
+            planet.terrainSettings["config"]["seed"]      = 42;
+            planet.terrainSettings["config"]["layers"]["continents"]["freq"]     = 1.0f;
+            planet.terrainSettings["config"]["layers"]["continents"]["octaves"]  = 6;
+            planet.terrainSettings["config"]["layers"]["continents"]["strength"] = 0.06f;
+            planet.terrainSettings["config"]["layers"]["mountains"]["freq"]      = 4.0f;
+            planet.terrainSettings["config"]["layers"]["mountains"]["octaves"]   = 8;
+            planet.terrainSettings["config"]["layers"]["mountains"]["strength"]  = 0.03f;
+        }
+
+        _planetarySystem->addPlanet(planet);
+    }
+}
+
 void Application::init(Haruka::SceneManager& scene) {
     _currentScene = &scene;
 
@@ -199,8 +277,8 @@ void Application::buildRenderQueue() {
 }
 
 void Application::renderFrameContent() {
-    const uint32_t width = _window ? _window->getWidth() : 0u;
-    const uint32_t height = _window ? _window->getHeight() : 0u;
+    const uint32_t width  = _window ? _window->getWidth()  : static_cast<uint32_t>(m_editorViewportW);
+    const uint32_t height = _window ? _window->getHeight() : static_cast<uint32_t>(m_editorViewportH);
 
     if (_editorTarget) {
         _editorTarget->bindForWriting();
@@ -210,15 +288,31 @@ void Application::renderFrameContent() {
     glClearColor(0.01f, 0.01f, 0.01f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    _iTotalDrawCalls = static_cast<int>(g_sceneRenderQueue.size());
+    _iTotalDrawCalls    = static_cast<int>(g_sceneRenderQueue.size());
     _iRenderedDrawCalls = 0;
-    _iTotalVertices = 0;
-    _iTotalTriangles = 0;
-    _iRenderedVertices = 0;
+    _iTotalVertices     = 0;
+    _iTotalTriangles    = 0;
+    _iRenderedVertices  = 0;
     _iRenderedTriangles = 0;
 
     if (_currentScene && _camera) {
-        const bool useFinalLook = getRenderFeatureHDR() || getRenderFeatureBloom() || getRenderFeatureSSAO() || getRenderFeatureIBL() || getRenderFeatureShadows();
+        // Lazy-create UBOs
+        if (m_uboPerFrame == 0) {
+            glGenBuffers(1, &m_uboPerFrame);
+            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
+            glBufferData(GL_UNIFORM_BUFFER, sizeof(PerFrameUBOData), nullptr, GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        }
+        if (m_uboPerObject == 0) {
+            glGenBuffers(1, &m_uboPerObject);
+            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
+            glBufferData(GL_UNIFORM_BUFFER, sizeof(PerObjectUBOData), nullptr, GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        }
+
+        const bool useFinalLook = getRenderFeatureHDR() || getRenderFeatureBloom()
+                                || getRenderFeatureSSAO() || getRenderFeatureIBL()
+                                || getRenderFeatureShadows();
         if (!_mainShader || _mainShaderUsesFinalLook != useFinalLook) {
             _mainShader = std::make_unique<Shader>(
                 "shaders/simple.vert",
@@ -228,41 +322,49 @@ void Application::renderFrameContent() {
         }
 
         _mainShader->use();
+        glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
+        glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_uboPerObject);
 
-        const float aspect = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
-        const glm::vec3 cameraOrigin = glm::vec3(_camera->position);
-        const glm::mat4 viewNoTranslation = glm::mat4(glm::mat3(_camera->getViewMatrix()));
-        _mainShader->setMat4(1, viewNoTranslation);
-        _mainShader->setMat4(2, _camera->getProjectionMatrix(aspect));
+        // Upload per-frame UBO
+        const float      aspect       = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+        const glm::vec3  cameraOrigin = glm::vec3(_camera->position);
 
-        if (useFinalLook) {
-            _mainShader->setVec3("cameraPos", cameraOrigin);
-            _mainShader->setVec3("sunDirection", glm::normalize(glm::vec3(0.35f, 0.75f, 0.25f)));
-            _mainShader->setBool("enableHDR", getRenderFeatureHDR());
-            _mainShader->setBool("enableBloom", getRenderFeatureBloom());
-            _mainShader->setBool("enableSSAO", getRenderFeatureSSAO());
-            _mainShader->setBool("enableIBL", getRenderFeatureIBL());
-            _mainShader->setBool("enableShadows", getRenderFeatureShadows());
-        }
+        PerFrameUBOData frameData{};
+        frameData.view            = glm::mat4(glm::mat3(_camera->getViewMatrix()));
+        frameData.projection      = _camera->getProjectionMatrix(aspect);
+        frameData.cameraPos       = cameraOrigin;
+        frameData.sunDirection    = glm::normalize(glm::vec3(0.35f, 0.75f, 0.25f));
+        frameData.sunLightColor   = glm::vec3(1.0f, 0.98f, 0.95f);
+        frameData.ambientStrength = 0.0f;
+        frameData.enableHDR       = (int)getRenderFeatureHDR();
+        frameData.enableBloom     = (int)getRenderFeatureBloom();
+        frameData.enableSSAO      = (int)getRenderFeatureSSAO();
+        frameData.enableIBL       = (int)getRenderFeatureIBL();
+        frameData.enableShadows   = (int)getRenderFeatureShadows();
+
+        glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
+        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerFrameUBOData), &frameData);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
         int renderedDrawCalls = 0;
-        int renderedVertices = 0;
+        int renderedVertices  = 0;
         int renderedTriangles = 0;
 
         for (const auto& command : g_sceneRenderQueue) {
             const auto* obj = command.object;
             if (!obj) continue;
 
-            const glm::mat4 modelMatrix = glm::translate(glm::mat4(1.0f), -cameraOrigin) * getTransformMatrix(*obj);
-            _mainShader->setMat4(0, modelMatrix);
+            glm::vec3 baseColor = glm::vec3(obj->color);
+            if (glm::length(baseColor) < 0.001f) baseColor = glm::vec3(0.75f, 0.76f, 0.80f);
 
-            if (useFinalLook) {
-                glm::vec3 baseColor = glm::vec3(obj->color);
-                if (glm::length(baseColor) < 0.001f) {
-                    baseColor = glm::vec3(0.75f, 0.76f, 0.80f);
-                }
-                _mainShader->setVec3("baseColor", baseColor);
-            }
+            PerObjectUBOData objData{};
+            objData.model                    = glm::translate(glm::mat4(1.0f), -cameraOrigin) * getTransformMatrix(*obj);
+            objData.baseColorAndPlanetRadius = glm::vec4(baseColor, 1.0f);
+            objData.planetCenterAndFlag      = glm::vec4(0.0f);
+
+            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
+            glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &objData);
+            glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
             switch (command.kind) {
                 case Haruka::RenderKind::Model: {
@@ -270,7 +372,7 @@ void Application::renderFrameContent() {
                     if (!model) break;
                     model->Draw(*_mainShader);
                     ++renderedDrawCalls;
-                    renderedVertices += model->getVertexCount();
+                    renderedVertices  += model->getVertexCount();
                     renderedTriangles += model->getTriangleCount();
                     break;
                 }
@@ -278,7 +380,7 @@ void Application::renderFrameContent() {
                     if (!obj->meshRenderer || !obj->meshRenderer->isResident()) break;
                     obj->meshRenderer->render(*_mainShader);
                     ++renderedDrawCalls;
-                    renderedVertices += obj->meshRenderer->getResidentVertexCount();
+                    renderedVertices  += obj->meshRenderer->getResidentVertexCount();
                     renderedTriangles += obj->meshRenderer->getResidentTriangleCount();
                     break;
                 }
@@ -287,7 +389,7 @@ void Application::renderFrameContent() {
                     if (!primitiveMesh) break;
                     primitiveMesh->draw();
                     ++renderedDrawCalls;
-                    renderedVertices += primitiveMesh->getVertexCount();
+                    renderedVertices  += primitiveMesh->getVertexCount();
                     renderedTriangles += primitiveMesh->getTriangleCount();
                     break;
                 }
@@ -297,10 +399,48 @@ void Application::renderFrameContent() {
         }
 
         _iRenderedDrawCalls = renderedDrawCalls;
-        _iRenderedVertices = renderedVertices;
+        _iRenderedVertices  = renderedVertices;
         _iRenderedTriangles = renderedTriangles;
-        _iTotalVertices = renderedVertices;
-        _iTotalTriangles = renderedTriangles;
+        _iTotalVertices     = renderedVertices;
+        _iTotalTriangles    = renderedTriangles;
+
+        // Terrain streaming: update LOD + render planet chunks
+        if (_planetarySystem) {
+            _planetarySystem->syncFromScene(*_currentScene);
+            _planetarySystem->update(0.016, glm::dvec3(_camera->position));
+
+            _iVisibleChunks         = _planetarySystem->getGPUChunkCount();
+            _iResidentChunks        = _planetarySystem->getCachedChunks();
+            _iPendingChunkLoads     = _planetarySystem->getPendingChunks();
+            _iPendingChunkEvictions = 0;
+            _iTrackedChunks         = _iVisibleChunks + _iResidentChunks;
+            _iResidentMemoryMB      = _planetarySystem->getCacheMemoryMB();
+            _iMaxMemoryMB           = _planetarySystem->getCacheMaxMemoryMB();
+
+            for (const auto& planet : _planetarySystem->getPlanets()) {
+                glm::vec3 planetCenter = glm::vec3(planet.position) - cameraOrigin;
+
+                PerObjectUBOData terrainObj{};
+                terrainObj.model                    = glm::translate(glm::mat4(1.0f), planetCenter);
+                terrainObj.baseColorAndPlanetRadius = glm::vec4(0.76f, 0.78f, 0.82f, (float)planet.radius);
+                terrainObj.planetCenterAndFlag      = glm::vec4(0.0f); // already in model space
+
+                glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
+                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &terrainObj);
+                glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+                _planetarySystem->renderPlanetTerrain(planet.name);
+            }
+
+            // Add terrain draw stats on top of regular object stats
+            const auto ts = _planetarySystem->getTerrainDrawStats();
+            _iRenderedDrawCalls += ts.draws;
+            _iRenderedVertices  += ts.vertices;
+            _iRenderedTriangles += ts.triangles;
+            _iTotalDrawCalls    = _iRenderedDrawCalls;
+            _iTotalVertices     = _iRenderedVertices;
+            _iTotalTriangles    = _iRenderedTriangles;
+        }
     }
 
     if (_imguiCallback) {
@@ -350,6 +490,9 @@ void Application::cleanup() {
     _planetarySystem.reset();
     _worldSystem.reset();
     _raycastSystem.reset();
+
+    if (m_uboPerFrame  != 0) { glDeleteBuffers(1, &m_uboPerFrame);  m_uboPerFrame  = 0; }
+    if (m_uboPerObject != 0) { glDeleteBuffers(1, &m_uboPerObject); m_uboPerObject = 0; }
 
     if (quadVBO != 0) {
         glDeleteBuffers(1, &quadVBO);

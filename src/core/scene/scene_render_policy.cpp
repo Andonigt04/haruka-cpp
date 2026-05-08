@@ -77,7 +77,12 @@ Haruka::RenderCommand classifyObject(const Haruka::SceneObject& obj) {
         return command;
     }
 
-    if (obj.terrainSettings || obj.lodSettings || obj.flags.hasChunks || containsInsensitive(typeLower, "planet") || containsInsensitive(typeLower, "celestialbody") || containsInsensitive(typeLower, "star") || containsInsensitive(typeLower, "satellite")) {
+    if (obj.terrainSettings || obj.lodSettings || obj.flags.hasChunks || containsInsensitive(typeLower, "planet") || containsInsensitive(typeLower, "celestialbody") || containsInsensitive(typeLower, "satellite")) {
+        // Terrain-streamed bodies: skip primitive sphere — TerrainRenderer supplies the geometry.
+        return command; // RenderKind::None
+    }
+
+    if (containsInsensitive(typeLower, "star")) {
         command.kind = Haruka::RenderKind::Primitive;
         command.primitive = Haruka::PrimitiveType::SPHERE;
         return command;

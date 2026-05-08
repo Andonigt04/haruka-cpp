@@ -5,23 +5,39 @@
  * Transforms position to world space (FragPos) and clip space.
  * Normal is corrected for non-uniform scaling via the inverse-transpose
  * of the model matrix.
- * Used with simple.frag (Blinn-Phong with PCF shadow + normal mapping).
+ * Used with final.frag / light_cube.frag.
  *
- * In:  aPos, aNormal
- * Out: Normal, FragPos → simple.frag
- * Uniforms (location-bound): model(0), view(1), projection(2)
+ * In:  aPos (loc 0), aNormal (loc 1)
+ * Out: Normal (loc 0), FragPos (loc 1)
+ * UBOs: PerFrameData (binding 0), PerObjectData (binding 1)
  */
 #version 450 core
 
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec3 aNormal;
+layout(location = 0) in vec3 aPos;
+layout(location = 1) in vec3 aNormal;
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
 
-layout(location = 0) uniform mat4 model;
-layout(location = 1) uniform mat4 view;
-layout(location = 2) uniform mat4 projection;
+layout(std140, binding = 0) uniform PerFrameData {
+    mat4 view;
+    mat4 projection;
+    vec3 cameraPos;      float _pad0;
+    vec3 sunDirection;   float _pad1;
+    vec3 sunLightColor;  float ambientStrength;
+    int  enableHDR;
+    int  enableBloom;
+    int  enableSSAO;
+    int  enableIBL;
+    int  enableShadows;
+    int  _pad3[3];
+};
+
+layout(std140, binding = 1) uniform PerObjectData {
+    mat4 model;
+    vec4 baseColorAndPlanetRadius; // rgb = base color, a = planet radius
+    vec4 planetCenterAndFlag;      // xyz = planet center, w = useProceduralTerrain (0/1)
+};
 
 void main() {
     vec4 worldPos = model * vec4(aPos, 1.0);

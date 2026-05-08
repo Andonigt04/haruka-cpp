@@ -74,7 +74,7 @@ namespace Haruka {
         // Vital para evitar el jittering en escalas de KM
         Haruka::WorldPos position = Haruka::WorldPos(0.0);
         Haruka::Rotation rotation = Haruka::Rotation(); // Euler angles en grados
-        glm::dvec3 scale    = glm::dvec3(1.0);
+        Haruka::DScale   scale    = Haruka::DScale(1.0);
 
         
         glm::dvec3 color = glm::dvec3(1.0);

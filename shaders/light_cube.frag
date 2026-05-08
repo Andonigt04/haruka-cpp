@@ -2,15 +2,14 @@
  * @file light_cube.frag
  * @brief Forward shading with optional procedural planet terrain albedo.
  *
- * When `useProceduralTerrain` is true, replaces the flat `lightColor` with a
- * biome blend computed from latitude, normalized height, and surface slope:
- *   sand → grass (height),  grass → rock (slope),  mix → snow (latitude + height).
+ * When planetCenterAndFlag.w > 0.5 (useProceduralTerrain), replaces the flat
+ * base color with a biome blend computed from latitude, normalized height, and
+ * surface slope: sand → grass (height), grass → rock (slope), mix → snow (latitude+height).
  * Noise from hash31() breaks up biome edges.
  *
- * In:  Normal, FragPos (from simple.vert)
- * Out: FragColor
- * Uniforms: lightColor, sunDirection, sunLightColor, ambientStrength,
- *           useProceduralTerrain, planetCenter, planetRadius
+ * In:  Normal (loc 0), FragPos (loc 1)
+ * Out: FragColor (loc 0)
+ * UBOs: PerFrameData (binding 0), PerObjectData (binding 1)
  */
 #version 450 core
 
@@ -19,13 +18,25 @@ layout(location = 1) in vec3 FragPos;
 
 layout(location = 0) out vec4 FragColor;
 
-layout(location = 3) uniform vec3  lightColor;
-layout(location = 4) uniform vec3  sunDirection;
-layout(location = 5) uniform vec3  sunLightColor;
-layout(location = 6) uniform float ambientStrength;
-layout(location = 7) uniform bool  useProceduralTerrain;
-layout(location = 8) uniform vec3  planetCenter;
-layout(location = 9) uniform float planetRadius;
+layout(std140, binding = 0) uniform PerFrameData {
+    mat4 view;
+    mat4 projection;
+    vec3 cameraPos;      float _pad0;
+    vec3 sunDirection;   float _pad1;
+    vec3 sunLightColor;  float ambientStrength;
+    int  enableHDR;
+    int  enableBloom;
+    int  enableSSAO;
+    int  enableIBL;
+    int  enableShadows;
+    int  _pad3[3];
+};
+
+layout(std140, binding = 1) uniform PerObjectData {
+    mat4 model;
+    vec4 baseColorAndPlanetRadius; // rgb = light color, a = planet radius
+    vec4 planetCenterAndFlag;      // xyz = planet center, w = useProceduralTerrain (0/1)
+};
 
 float hash31(vec3 p) {
     p = fract(p * 0.1031);
@@ -34,6 +45,9 @@ float hash31(vec3 p) {
 }
 
 vec3 terrainAlbedo(vec3 worldPos, vec3 N) {
+    vec3  planetCenter = planetCenterAndFlag.xyz;
+    float planetRadius = baseColorAndPlanetRadius.a;
+
     vec3  local    = worldPos - planetCenter;
     float r        = length(local);
     float safeR    = max(r, 1e-3);
@@ -62,8 +76,8 @@ void main() {
 
     float diff = max(dot(N, L), 0.0);
 
-    vec3 baseColor = lightColor;
-    if (useProceduralTerrain) {
+    vec3 baseColor = baseColorAndPlanetRadius.rgb;
+    if (planetCenterAndFlag.w > 0.5) {
         baseColor = terrainAlbedo(FragPos, N);
     }
 

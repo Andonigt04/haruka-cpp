@@ -69,7 +69,7 @@ public:
     Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
     ///@}
 
-    // Render quality/layers (global editor-configurable)
+    /** @brief Sets the render quality preset. */
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
     static int getRenderQualityPreset() { return s_renderQualityPreset; }
     static void setRenderFeatureHDR(bool enabled) { s_enableHDR = enabled; }
@@ -82,14 +82,18 @@ public:
     static bool getRenderFeatureIBL() { return s_enableIBL; }
     static void setRenderFeatureShadows(bool enabled) { s_enableShadows = enabled; }
     static bool getRenderFeatureShadows() { return s_enableShadows; }
+
+    /** @brief Sets the maximum distance for a render layer. */
     static void setLayerMaxDistance(int layer, float distance) {
         if (layer < 1 || layer > 5) return;
         s_layerMaxDistance[layer] = std::max(0.0f, distance);
     }
+    /** @brief Gets the maximum distance for a render layer. */
     static float getLayerMaxDistance(int layer) {
         if (layer < 1 || layer > 5) return 0.0f;
         return s_layerMaxDistance[layer];
     }
+    
     int getRenderedVertices()      const { return _iRenderedVertices; }
     int getRenderedTriangles()     const { return _iRenderedTriangles; }
     int getRenderedDrawCalls()     const { return _iRenderedDrawCalls; }
@@ -141,6 +145,10 @@ public:
     /** @brief Sets the viewport-owned FBO that the editor render path writes into.
      *  Must be called after recreateRenderTarget() on the viewport side. */
     void setEditorTarget(RenderTarget* rt) { _editorTarget = rt; }
+    /** @brief Sets the render size used in editor mode (when no Window exists). */
+    void setEditorViewportSize(int w, int h);
+    /** @brief Scans current scene and initialises PlanetarySystem with planet objects. */
+    void initPlanetarySystem();
     /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
     /** @brief Builds the render queue with frustum culling and LOD management. */
@@ -155,39 +163,61 @@ public:
 private:
     friend class MotorInstance;
     
+    /** @brief The main application window. */
     std::unique_ptr<Haruka::Core::Window> _window = nullptr;
-    
-    // TODO: quiero que desaparezca
-    static constexpr int MAX_LIGHTS = 256;
-    // Core systems
+    /** @brief The currently active scene. */
     Haruka::SceneManager* _currentScene = nullptr;
+    /** @brief The owned scene instance. */
     std::unique_ptr<Haruka::SceneManager> _ownedScene;
+    /** @brief The active camera instance. */
     std::unique_ptr<Camera> _camera;
     
-    // Rendering pipeline
+    /** @brief The main shader instance. */
     std::unique_ptr<Shader> _mainShader;
+    /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
+    /** @brief The shadow shader instance. */
     std::unique_ptr<Shadow> _shadow;
+    /** @brief The HDR shader instance. */
     std::unique_ptr<HDR> _hdr;
+    /** @brief The bloom shader instance. */
     std::unique_ptr<Bloom> _bloom;
+    /** @brief The G-buffer shader instance. */
     std::unique_ptr<GBuffer> _gBuffer;
+    /** @brief The SSAO shader instance. */
     std::unique_ptr<SSAO> _ssao;
+    /** @brief The IBL shader instance. */
     std::unique_ptr<IBL> _ibl;
+    /** @brief The point shadow shader instance. */
     std::unique_ptr<PointShadow> _pointShadow;
+    /** @brief The light culler instance. */
     std::unique_ptr<LightCuller> _lightCuller;
+    /** @brief The GPU instancing instance. */
     std::unique_ptr<GPUInstancing> _instancing;
+    /** @brief The compute post-process instance. */
     std::unique_ptr<ComputePostProcess> _computePostProcess;
+    /** @brief The cascaded shadow map instance. */
     std::unique_ptr<CascadedShadowMap> _cascadedShadow;
+    /** @brief The virtual texturing instance. */
     std::unique_ptr<VirtualTexturing> _virtualTexturing;
+    /** @brief The raycast system instance. */
     std::unique_ptr<RaycastSimple> _raycastSystem;
+    /** @brief The world system instance. */
     std::unique_ptr<Haruka::WorldSystem> _worldSystem;
+    /** @brief The planetary system instance. */
     std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
+    /** @brief The terrain streaming system instance. */
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
+    /** @brief The physics engine instance. */
     std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+    /** @brief The chunk cache instance. */
     std::unique_ptr<Haruka::ChunkCache> _chunkCache;
     
     // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
     RenderTarget* _editorTarget = nullptr;
+    // Editor viewport size (used when no _window exists).
+    int m_editorViewportW = 0;
+    int m_editorViewportH = 0;
     // Resets to 0 on each init(); renderFrameContent logs the first 5 frames per init.
     int _diagFramesLeft = 0;
 
@@ -219,26 +249,35 @@ private:
 
     float _exposure = 1.0f;
 
-    // Timing (chrono — platform-independent, survives SDL3 migration)
+    /** @brief Timing state for frame time and FPS calculation. Updated in renderFrame(). */
     std::chrono::time_point<std::chrono::high_resolution_clock> _frameStart;
     float _lastFrameTimeMs = 0.0f;
     float _lastFps         = 0.0f;
     uint64_t _fpsFrameCount  = 0;
     double   _fpsLastTime    = 0.0;
-    // Kept for Camera::processInput() compatibility
+
+    /** @brief The time elapsed since the last frame. */
     float deltaTime = 0.0f;
     
-    // Screen quad for post-processing
+    /** @brief The vertex array object for the screen quad. */
     unsigned int quadVAO = 0;
+    /** @brief The vertex buffer object for the screen quad. */
     unsigned int quadVBO = 0;
+    /** @brief Sets up the screen quad for post-processing. */
     void setupQuad();
 
+    // UBOs shared by all forward-rendering shaders (bindings 0 and 1)
+    unsigned int m_uboPerFrame  = 0;
+    unsigned int m_uboPerObject = 0;
+
+    /** @brief The render quality preset. */
     inline static int s_renderQualityPreset = 2; // 0=Low,1=Medium,2=High,3=Ultra
     inline static bool s_enableHDR = true;
     inline static bool s_enableBloom = true;
     inline static bool s_enableSSAO = true;
     inline static bool s_enableIBL = true;
     inline static bool s_enableShadows = true;
+
     inline static float s_layerMaxDistance[6] = {
         0.0f,
         1.0e9f,  // layer 1: always
@@ -247,6 +286,8 @@ private:
         900.0f,  // layer 4: buildings
         300.0f   // layer 5: small props
     };
+
+    /** @brief Statistics for rendered geometry. */
     int _iRenderedVertices      = 0;
     int _iRenderedTriangles     = 0;
     int _iRenderedDrawCalls     = 0;
