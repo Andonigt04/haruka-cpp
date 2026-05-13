@@ -67,13 +67,14 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
 Character::~Character() {}
 
 void Character::update(float deltaTime) {
-    if (physicsBody) {
+    if (physicsBody)
+    {
         position = glm::dvec3(physicsBody->position);
         velocity = glm::dvec3(physicsBody->velocity);
     }
     
-    // CORRECCIÓN: Interpolación correcta de Cuaterniones (Slerp) y extracción de Euler
-    if (!localPlayer) {
+    if (!localPlayer)
+    {
         position = glm::mix(position, targetPosition, (double)(deltaTime * interpolationSpeed));
         
         Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
@@ -87,15 +88,14 @@ void Character::update(float deltaTime) {
     checkGrounded();
     updateState();
     
-    if (localPlayer) {
+    if (localPlayer)
+    {
         updateCamera();
         
         syncTimer += deltaTime;
-        if (syncTimer >= syncInterval && networkClient) {
-            if (shouldSyncToServer()) {
-                syncToServer();
-                syncTimer = 0.0f;
-            }
+        if (syncTimer >= syncInterval)
+        {
+            syncTimer = 0.0f;
         }
     }
     
@@ -123,6 +123,9 @@ void Character::processInput(SDL_Window* /*window*/, float deltaTime) {
 
     sprint(keys[SDL_SCANCODE_LSHIFT]);
     crouch(keys[SDL_SCANCODE_LCTRL]);
+
+    if (onTransformChanged)
+        onTransformChanged(position, camOrientation);
 }
 
 void Character::moveForward(float amount) {
@@ -226,37 +229,4 @@ void Character::checkGrounded() {
     }
 }
 
-bool Character::shouldSyncToServer() {
-    float posDelta = glm::length(position - lastSyncPos);
-    
-    // CORRECCIÓN: Compara cuaterniones de manera segura (Producto Punto)
-    Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
-    float rotDelta = 1.0f - std::abs(glm::dot(currentRot, lastSyncRot)); 
-    
-    return posDelta > syncThreshold || rotDelta > (syncThreshold * 0.1f);
-}
-
-void Character::syncToServer() {
-    if (!networkClient || !localPlayer) return;
-    
-    Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
-    
-    networkClient->sendPositionUpdate(position, currentRot);
-    
-    lastSyncPos = position;
-    lastSyncRot = currentRot;
-    
-    std::cout << "[Character] Synced to server: " 
-              << position.x << ", " << position.y << ", " << position.z << std::endl;
-}
-
-void Character::applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot) {
-    double distance = glm::length(serverPos - position);
-    
-    if (distance > 1.0) {
-        targetPosition = serverPos;
-        targetRotation = serverRot;
-    }
-}
-
-}
+};

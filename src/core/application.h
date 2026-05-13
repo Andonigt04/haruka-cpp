@@ -9,6 +9,10 @@
 #include <chrono>
 #include <algorithm>
 
+#ifdef HARUKA_NETWORK
+    #include "include/dgs/client.h"
+#endif
+
 #include "tools/math_types.h"
 #include "core/world_system.h"
 #include "core/window.h"
@@ -135,6 +139,10 @@ public:
         _camera->speed = cam->speed;
         _camera->sensitivity = cam->sensitivity;
     }
+
+#ifdef HARUKA_NETWORK
+    void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
+#endif
 
     /** @brief Starts runtime using a scene path bootstrap. */
     void run(const std::string& startScenePath);
@@ -265,6 +273,10 @@ private:
     unsigned int quadVBO = 0;
     /** @brief Sets up the screen quad for post-processing. */
     void setupQuad();
+
+    #ifdef HARUKA_NETWORK
+        DGS::Client m_dgs;
+    #endif
 
     // UBOs shared by all forward-rendering shaders (bindings 0 and 1)
     unsigned int m_uboPerFrame  = 0;

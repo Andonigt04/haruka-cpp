@@ -115,7 +115,7 @@ namespace {
             );
 
             // Escalamos por la fuerza definida
-            finalHeight += continentMask * c.value("strength", 0.1f);
+            finalHeight += continentMask * c.value("strength", 0.003f);
         }
 
         // 2. Capa de MONTAÑAS (Detalle de alta frecuencia)
@@ -138,7 +138,7 @@ namespace {
                 // y las crestas afiladas.
                 mountValue = std::pow(std::abs(mountValue), 2.0f);
                 
-                finalHeight += mountValue * m.value("strength", 0.05f) * (continentMask + 0.1f);
+                finalHeight += mountValue * m.value("strength", 0.0015f) * (continentMask + 0.1f);
             }
         }
 

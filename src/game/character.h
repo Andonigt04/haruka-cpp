@@ -6,9 +6,9 @@
 
 #include <glm/glm.hpp>
 #include <memory>
+#include <functional>
 #include "core/camera.h"
 #include "physics/physics_engine.h"
-#include "network/network_manager.h"
 #include "tools/math_types.h" // Para WorldPos y Rotation
 
 namespace Haruka {
@@ -61,9 +61,9 @@ public:
     
     /** @name Network synchronization */
     ///@{
-    void setNetworkClient(NetworkClient* client) { networkClient = client; }
-    void syncToServer();
     void applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot);
+
+    std::function<void(const WorldPos&, const Rotation&)> onTransformChanged;
     ///@}
     
     /** @name State accessors */
@@ -100,7 +100,6 @@ private:
     
     std::unique_ptr<Camera> camera;
     std::shared_ptr<RigidBody> physicsBody;
-    NetworkClient* networkClient = nullptr;
     
     CharacterState state = CharacterState::IDLE;
     
@@ -143,8 +142,6 @@ private:
     void updateState();
     /** @brief Recomputes grounded state from physics/orientation. */
     void checkGrounded();
-    /** @brief Returns true when a network sync should be emitted. */
-    bool shouldSyncToServer();
 
     /** @brief Returns the current up vector used for movement basis. */
     glm::dvec3 getEffectiveUp() const;

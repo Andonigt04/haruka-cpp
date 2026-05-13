@@ -177,38 +177,23 @@ void Application::initPlanetarySystem() {
     for (const auto& objPtr : _currentScene->getAllObjects()) {
         if (!objPtr) continue;
         const auto& obj = *objPtr;
-        if (!obj.terrainSettings && !obj.lodSettings && !obj.flags.hasChunks) {
-            std::string lo = obj.type;
-            std::transform(lo.begin(), lo.end(), lo.begin(), ::tolower);
-            bool isPlanet = lo.find("planet") != std::string::npos
-                         || lo.find("celestialbody") != std::string::npos
-                         || lo.find("star") != std::string::npos;
-            if (!isPlanet) continue;
-        }
+
+        // Only stream terrain for objects that explicitly define terrainSettings with layers
+        if (!obj.terrainSettings || obj.terrainSettings->layers.empty()) continue;
+
+        const auto& ts = *obj.terrainSettings;
 
         Haruka::PlanetarySystem::Planet planet;
         planet.name     = obj.name;
         planet.position = obj.position;
         planet.radius   = std::max({obj.scale.x, obj.scale.y, obj.scale.z});
 
-        if (obj.terrainSettings) {
-            const auto& ts = *obj.terrainSettings;
-            planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
-            planet.terrainSettings["config"]["seed"]      = ts.seed;
-            for (const auto& [name, layer] : ts.layers) {
-                planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
-                planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
-                planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
-            }
-        } else {
-            planet.terrainSettings["config"]["chunkSize"] = 32;
-            planet.terrainSettings["config"]["seed"]      = 42;
-            planet.terrainSettings["config"]["layers"]["continents"]["freq"]     = 1.0f;
-            planet.terrainSettings["config"]["layers"]["continents"]["octaves"]  = 6;
-            planet.terrainSettings["config"]["layers"]["continents"]["strength"] = 0.06f;
-            planet.terrainSettings["config"]["layers"]["mountains"]["freq"]      = 4.0f;
-            planet.terrainSettings["config"]["layers"]["mountains"]["octaves"]   = 8;
-            planet.terrainSettings["config"]["layers"]["mountains"]["strength"]  = 0.03f;
+        planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+        planet.terrainSettings["config"]["seed"]      = ts.seed;
+        for (const auto& [name, layer] : ts.layers) {
+            planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
+            planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
+            planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
         }
 
         _planetarySystem->addPlanet(planet);
@@ -218,9 +203,9 @@ void Application::initPlanetarySystem() {
 void Application::init(Haruka::SceneManager& scene) {
     _currentScene = &scene;
 
-    if (!_camera) {
-        _camera = std::make_unique<Camera>(glm::vec3(0.0f, 0.0f, 5.0f));
-    }
+    #ifdef HARUKA_NETWORK
+        m_dgs.connect("head-server", 42424, "player1", "secret", "api", 8080);
+    #endif
 
     if (!_worldSystem) {
         _worldSystem = std::make_unique<Haruka::WorldSystem>();
@@ -229,6 +214,10 @@ void Application::init(Haruka::SceneManager& scene) {
 
     if (!_physicsEngine) {
         _physicsEngine = std::make_unique<Haruka::PhysicsEngine>();
+    }
+
+    if (!_camera) {
+        _camera = std::make_unique<Camera>(glm::vec3(0.0f, 0.0f, 5.0f));
     }
 
     MotorInstance::getInstance().setApplication(this);
@@ -476,8 +465,28 @@ void Application::renderFrame() {
     }
 }
 
+#ifdef HARUKA_NETWORK
+void Application::sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
+    if (!m_dgs.isConnected()) return;
+    int32_t cx = (int32_t)std::floor(pos.x / Haruka::Units::KM);
+    int32_t cy = (int32_t)std::floor(pos.y / Haruka::Units::KM);
+    int32_t cz = (int32_t)std::floor(pos.z / Haruka::Units::KM);
+    float localPos[3] = {
+        (float)(pos.x - cx * Haruka::Units::KM),
+        (float)(pos.y - cy * Haruka::Units::KM),
+        (float)(pos.z - cz * Haruka::Units::KM)
+    };
+    float rotF[4] = { (float)rot.x, (float)rot.y, (float)rot.z, (float)rot.w };
+    m_dgs.sendTransform(uuid, cx, cy, cz, localPos, rotF);
+}
+#endif
+
 void Application::cleanup() {
     g_sceneRenderQueue.clear();
+
+    #ifdef HARUKA_NETWORK
+        m_dgs.disconnect();
+    #endif
 
     MotorInstance::getInstance().clear();
 

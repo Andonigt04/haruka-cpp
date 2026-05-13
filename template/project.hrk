@@ -1,0 +1,23 @@
+{
+  "name": "Test",
+  "version": "0.1.0",
+  "engineVersion": "",
+  "startScene": "scenes/main.scene",
+  "engineBinary": "",
+  "editorBinary": "",
+  "scenes": [
+  ],
+  "assetsPath": "",
+  "outputPath": "",
+  "shadersPath": "",
+  "exportSettings": {
+    "author": "Andoni",
+    "description": "",
+    "defaultBuildType": "Debug",
+    "defaultPlatform": "Linux",
+    "includeDebugSymbols": false,
+    "optimizeAssets": true,
+    "stripUnusedContent": true,
+    "compressAssets": true
+  }
+}
