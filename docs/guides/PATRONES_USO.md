@@ -242,7 +242,7 @@ glm::vec3 WorldSystem::toLocal(const glm::dvec3& worldPos) const {
 ```glsl
 // shaders/terrain.vert
 
-#version 460
+#version 450
 
 // Entrada: vértice relativo al chunk (pequeño: -500 a +500)
 layout(location = 0) in vec3 aPosition;

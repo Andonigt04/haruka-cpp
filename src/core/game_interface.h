@@ -11,6 +11,7 @@
 
 #include "camera.h"
 #include <SDL3/SDL.h>
+#include <glm/glm.hpp>
 
 namespace Haruka {
 
@@ -34,14 +35,19 @@ struct GameInterface {
     typedef Camera* (*GetCameraFunc)();
     /** @brief Returns the active scene, if the game exposes one. */
     typedef SceneManager* (*GetSceneFunc)();
-    
+    /** @brief Called after the main scene pass — use to draw world-space overlays.
+     *  view/proj are the camera matrices for this frame. camPos is in world space. */
+    typedef void (*OnRenderWorldFunc)(const glm::mat4& view, const glm::mat4& proj,
+                                      const glm::vec3& camPos);
+
     /** @name Gameplay callbacks */
     ///@{
-    OnInitFunc onInit = nullptr;
-    OnUpdateFunc onUpdate = nullptr;
-    OnShutdownFunc onShutdown = nullptr;
-    GetCameraFunc getCamera = nullptr;
-    GetSceneFunc getScene = nullptr;
+    OnInitFunc       onInit        = nullptr;
+    OnUpdateFunc     onUpdate      = nullptr;
+    OnShutdownFunc   onShutdown    = nullptr;
+    GetCameraFunc    getCamera     = nullptr;
+    GetSceneFunc     getScene      = nullptr;
+    OnRenderWorldFunc onRenderWorld = nullptr;
     ///@}
     
     /** @name Metadata */

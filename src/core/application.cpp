@@ -3,8 +3,13 @@
 #include <iostream>
 #include <unordered_map>
 #include <algorithm>
+#include <csignal>
+#include <atomic>
 
 #include <SDL3/SDL.h>
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_opengl3.h>
 
 #include <glm/gtx/euler_angles.hpp>
 
@@ -15,6 +20,7 @@
 #include "renderer/primitive_shapes.h"
 #include "core/scene/scene_render_policy.h"
 #include "tools/error_reporter.h"
+#include "settings/settings_manager.h"
 
 // std140-compatible structs mirroring the UBO declarations in the shaders.
 // Any change to the GLSL UBO layout must be reflected here.
@@ -40,8 +46,28 @@ struct alignas(16) PerObjectUBOData {
 };
 static_assert(sizeof(PerObjectUBOData) == 96, "PerObjectUBOData std140 size mismatch");
 
+static std::atomic<bool> g_sigintReceived{false};
+static void handleSigint(int) { g_sigintReceived.store(true); }
+
 namespace {
 std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
+
+// GL-owning caches at namespace scope so cleanupGLStatics() can reset them
+// before the GL context is destroyed. Function-local statics would destruct
+// at program exit (after main() returns), which is after the context is gone.
+std::unordered_map<std::string, std::shared_ptr<Model>> g_modelCache;
+std::unique_ptr<SimpleMesh> g_sphereMesh;
+std::unique_ptr<SimpleMesh> g_cubeMesh;
+std::unique_ptr<SimpleMesh> g_capsuleMesh;
+std::unique_ptr<SimpleMesh> g_planeMesh;
+
+void cleanupGLStatics() {
+    g_modelCache.clear();
+    g_sphereMesh.reset();
+    g_cubeMesh.reset();
+    g_capsuleMesh.reset();
+    g_planeMesh.reset();
+}
 
 glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj) {
     glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position));
@@ -57,62 +83,55 @@ glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj) {
 }
 
 Model* getOrLoadModelCached(const std::string& path) {
-    static std::unordered_map<std::string, std::shared_ptr<Model>> modelCache;
-
-    auto it = modelCache.find(path);
-    if (it != modelCache.end()) {
+    auto it = g_modelCache.find(path);
+    if (it != g_modelCache.end()) {
         return it->second.get();
     }
 
     auto model = std::make_shared<Model>(path);
     Model* modelPtr = model.get();
-    modelCache.emplace(path, std::move(model));
+    g_modelCache.emplace(path, std::move(model));
     return modelPtr;
 }
 
 SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
-    static std::unique_ptr<SimpleMesh> sphereMesh;
-    static std::unique_ptr<SimpleMesh> cubeMesh;
-    static std::unique_ptr<SimpleMesh> capsuleMesh;
-    static std::unique_ptr<SimpleMesh> planeMesh;
-
     switch (primitive) {
         case Haruka::PrimitiveType::CUBE:
-            if (!cubeMesh) {
+            if (!g_cubeMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
                 PrimitiveShapes::createCube(1.0f, vertices, normals, indices);
-                cubeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                g_cubeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
-            return cubeMesh.get();
+            return g_cubeMesh.get();
         case Haruka::PrimitiveType::SPHERE:
-            if (!sphereMesh) {
+            if (!g_sphereMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
                 PrimitiveShapes::createSphereLOD(1.0f, 24, 16, vertices, normals, indices);
-                sphereMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                g_sphereMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
-            return sphereMesh.get();
+            return g_sphereMesh.get();
         case Haruka::PrimitiveType::CAPSULE:
-            if (!capsuleMesh) {
+            if (!g_capsuleMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
                 PrimitiveShapes::createCapsule(0.5f, 1.5f, 24, 12, vertices, normals, indices);
-                capsuleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                g_capsuleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
-            return capsuleMesh.get();
+            return g_capsuleMesh.get();
         case Haruka::PrimitiveType::PLANE:
-            if (!planeMesh) {
+            if (!g_planeMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
                 PrimitiveShapes::createPlane(1.0f, 1.0f, 1, vertices, normals, indices);
-                planeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                g_planeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
-            return planeMesh.get();
+            return g_planeMesh.get();
         default:
             return nullptr;
     }
@@ -200,12 +219,24 @@ void Application::initPlanetarySystem() {
     }
 }
 
+void Application::applyGraphicsSettings() {
+    const auto& g = Haruka::SettingsManager::get().graphics();
+
+    setRenderFeatureBloom(g.bloom);
+    setRenderFeatureSSAO(g.ssao);
+    setRenderFeatureShadows(g.shadowQuality != Haruka::Settings::ShadowQuality::Off);
+    setRenderQualityPreset(static_cast<int>(g.shadowQuality)); // 0=Off/Low..3=High
+
+    if (_camera)
+        _camera->zoom = g.fov;
+
+    if (_window)
+        SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
+}
+
 void Application::init(Haruka::SceneManager& scene) {
     _currentScene = &scene;
-
-    #ifdef HARUKA_NETWORK
-        m_dgs.connect("head-server", 42424, "player1", "secret", "api", 8080);
-    #endif
+    applyGraphicsSettings();
 
     if (!_worldSystem) {
         _worldSystem = std::make_unique<Haruka::WorldSystem>();
@@ -260,6 +291,24 @@ void Application::buildRenderQueue() {
     if (!_currentScene) return;
 
     g_sceneRenderQueue = buildSceneRenderQueue(*_currentScene);
+
+#ifdef HARUKA_NETWORK
+    m_ghostObjects.clear();
+    for (const auto& ghost : m_dgs.pollGhosts()) {
+        Haruka::SceneObject obj;
+        obj.name = "ghost_" + std::to_string(ghost.uuid);
+        obj.type = "Character";
+        obj.position = Haruka::WorldPos(
+            ghost.chunkX * Haruka::Units::KM + ghost.pos[0],
+            ghost.chunkY * Haruka::Units::KM + ghost.pos[1],
+            ghost.chunkZ * Haruka::Units::KM + ghost.pos[2]
+        );
+        m_ghostObjects.push_back(std::move(obj));
+    }
+    for (const auto& obj : m_ghostObjects) {
+        g_sceneRenderQueue.push_back({ &obj, Haruka::RenderKind::Primitive, Haruka::PrimitiveType::CAPSULE });
+    }
+#endif
 
     _iTotalDrawCalls = static_cast<int>(g_sceneRenderQueue.size());
     _iRenderedDrawCalls = _iTotalDrawCalls;
@@ -432,6 +481,14 @@ void Application::renderFrameContent() {
         }
     }
 
+    if (_gameInterface && _gameInterface->onRenderWorld && _camera) {
+        const float      aspect  = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
+        const glm::mat4  view    = _camera->getViewMatrix();
+        const glm::mat4  proj    = _camera->getProjectionMatrix(aspect);
+        const glm::vec3  camPos  = glm::vec3(_camera->position);
+        _gameInterface->onRenderWorld(view, proj, camPos);
+    }
+
     if (_imguiCallback) {
         _imguiCallback();
     }
@@ -449,19 +506,39 @@ void Application::renderFrame() {
     deltaTime = elapsed.count();
     _lastFrameTimeMs = deltaTime * 1000.0f;
 
+#ifdef HARUKA_NETWORK
+    if (_currentScene) {
+        for (const auto& transfer : m_dgs.pollEntities()) {
+            auto obj = std::make_shared<Haruka::SceneObject>();
+            obj->name = "entity_" + std::to_string(transfer.uuid);
+            obj->type = (transfer.type == DGS::ENT_PLAYER) ? "Character" :
+                        (transfer.type == DGS::ENT_NPC)    ? "Character" : "Spacecraft";
+            obj->position = Haruka::WorldPos(
+                transfer.chunkX * Haruka::Units::KM + transfer.pos[0],
+                transfer.chunkY * Haruka::Units::KM + transfer.pos[1],
+                transfer.chunkZ * Haruka::Units::KM + transfer.pos[2]
+            );
+            _currentScene->addLoadedObject(obj);
+        }
+    }
+#endif
+
+    // In standalone mode (run()), the main loop handles swap + FPS.
+    // In editor mode (no _window), renderFrame() is called externally
+    // and the editor manages the swap.
     buildRenderQueue();
     renderFrameContent();
 
-    if (_window) {
-        _window->swapBuffers();
-    }
+    if (!_window) return; // editor path — caller handles swap
+
+    _window->swapBuffers();
 
     _fpsFrameCount++;
     _fpsLastTime += deltaTime;
     if (_fpsLastTime >= 1.0) {
-        _lastFps = static_cast<float>(_fpsFrameCount / _fpsLastTime);
+        _lastFps      = static_cast<float>(_fpsFrameCount / _fpsLastTime);
         _fpsFrameCount = 0;
-        _fpsLastTime = 0.0;
+        _fpsLastTime   = 0.0;
     }
 }
 
@@ -479,14 +556,26 @@ void Application::sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos
     float rotF[4] = { (float)rot.x, (float)rot.y, (float)rot.z, (float)rot.w };
     m_dgs.sendTransform(uuid, cx, cy, cz, localPos, rotF);
 }
+
+void Application::sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text) {
+    if (!m_dgs.isConnected()) return;
+    m_dgs.sendChat(uuid, username, text);
+}
+
+std::vector<DGS::ChatMessage> Application::pollPlayerChats() {
+    return m_dgs.pollChats();
+}
 #endif
 
 void Application::cleanup() {
+    if (m_cleanedUp) return;
+    m_cleanedUp = true;
+
     g_sceneRenderQueue.clear();
 
-    #ifdef HARUKA_NETWORK
-        m_dgs.disconnect();
-    #endif
+#ifdef HARUKA_NETWORK
+    m_dgs.disconnect();
+#endif
 
     MotorInstance::getInstance().clear();
 
@@ -512,6 +601,48 @@ void Application::cleanup() {
         quadVAO = 0;
     }
 
+    // Release ALL GL-owned resources before the context is destroyed.
+    // Members not explicitly reset here would run their destructors AFTER
+    // _window->shutdown() destroys the GL context, corrupting the heap.
+    _mainShader.reset();
+    _lampShader.reset();
+    _geomShader.reset();
+    _ssaoShader.reset();
+    _lightShader.reset();
+    _compositeShader.reset();
+    _flatShader.reset();
+    _cascadeShadowShader.reset();
+    _bloomExtractShader.reset();
+    _bloomBlurShader.reset();
+    _pointShadowShader.reset();
+    _instancingShader.reset();
+
+    // Render-pipeline objects with GL resources in their destructors
+    _shadow.reset();
+    _hdr.reset();
+    _bloom.reset();
+    _gBuffer.reset();
+    _ssao.reset();
+    _ibl.reset();
+    _pointShadow.reset();
+    _lightCuller.reset();
+    _instancing.reset();
+    _computePostProcess.reset();
+    _cascadedShadow.reset();
+    _virtualTexturing.reset();
+
+    // Render targets (own FBOs / textures)
+    _lightingTarget.reset();
+    _bloomExtractTarget.reset();
+    _bloomPing.reset();
+    _bloomPong.reset();
+
+    // Primitive meshes (own VAOs / VBOs)
+    for (auto& lod : sphereLOD) lod.reset();
+
+    // Free GL-owning caches (model cache + primitive meshes created on demand)
+    cleanupGLStatics();
+
     if (_window) {
         _window->shutdown();
     }
@@ -525,35 +656,99 @@ void Application::run(const std::string& startScenePath) {
     uint32_t _width = 1280;
     uint32_t _height = 720;
 
-    // 1. Instanciar y configurar la ventana
     _window = std::make_unique<Haruka::Core::Window>(
         Haruka::Core::WindowProps("Haruka Engine", _width, _height)
     );
-    
     if (!_window->init()) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
         return;
     }
 
-    // 2. Inicializar lógica del motor
+    // ImGui — standalone runtime owns the context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplSDL3_InitForOpenGL(_window->getNativeWindow(), _window->getContext());
+    ImGui_ImplOpenGL3_Init("#version 450");
+
     loadScene(startScenePath);
     init(*_currentScene);
 
+    if (_gameInterface && _gameInterface->onInit) {
+        _gameInterface->onInit(_currentScene);
+    }
+
+    // Re-apply graphics settings after game code has loaded its .ini
+    applyGraphicsSettings();
+
+    std::signal(SIGINT,  handleSigint);
+    std::signal(SIGTERM, handleSigint);
+
     bool running = true;
     while (running) {
-        // Guardamos dimensiones actuales para detectar cambios después de los eventos
-        uint32_t lastWidth = _window->getWidth();
+        if (g_sigintReceived.load()) { running = false; continue; }
+        uint32_t lastWidth  = _window->getWidth();
         uint32_t lastHeight = _window->getHeight();
 
-        // 3. Procesar Eventos (Delegado a Window)
-        _window->pollEvents(running);
-
-        // 4. Detectar Redimensionado
-        if (_window->getWidth() != lastWidth || _window->getHeight() != lastHeight) {
-            recreateFBOs(_window->getWidth(), _window->getHeight());
+        // Poll events — forward to ImGui before processing game input
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            ImGui_ImplSDL3_ProcessEvent(&event);
+            if (event.type == SDL_EVENT_QUIT) running = false;
+            if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                m_editorViewportW = event.window.data1;
+                m_editorViewportH = event.window.data2;
+                glViewport(0, 0, event.window.data1, event.window.data2);
+            }
         }
 
-        // 5. Renderizar y Swap
-        renderFrame();
+        if (_window->getWidth() != lastWidth || _window->getHeight() != lastHeight)
+            recreateFBOs(_window->getWidth(), _window->getHeight());
+
+        // Start ImGui frame
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplSDL3_NewFrame();
+        ImGui::NewFrame();
+
+        if (_gameInterface && _gameInterface->onUpdate)
+            _gameInterface->onUpdate(_window->getNativeWindow(), deltaTime);
+
+        // Sync game camera → engine camera so renderFrameContent uses up-to-date matrices
+        if (_gameInterface && _gameInterface->getCamera) {
+            Camera* gameCam = _gameInterface->getCamera();
+            if (gameCam && _camera)
+                *_camera = *gameCam;
+        }
+
+        // 3D render pass (calls onRenderWorld inside renderFrameContent)
+        buildRenderQueue();
+        renderFrameContent();
+
+        // ImGui composite — draw all ImGui widgets over the 3D scene
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+        // Flush glthread and wait for GPU to finish before swap.
+        // Without this, glthread accumulates frame N+1 commands while the GPU
+        // is still processing frame N, overflowing the AMD CS command ring.
+        glFinish();
+
+        _window->swapBuffers();
+
+        // FPS tracking
+        _fpsFrameCount++;
+        _fpsLastTime += deltaTime;
+        if (_fpsLastTime >= 1.0) {
+            _lastFps      = static_cast<float>(_fpsFrameCount / _fpsLastTime);
+            _fpsFrameCount = 0;
+            _fpsLastTime   = 0.0;
+        }
     }
+
+    if (_gameInterface && _gameInterface->onShutdown)
+        _gameInterface->onShutdown();
+
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
 }

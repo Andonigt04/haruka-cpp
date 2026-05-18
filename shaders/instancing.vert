@@ -11,7 +11,7 @@
  * Out: FragPos, Normal, TexCoord, InstanceColor → instancing.frag
  * UBO: Matrices { view, projection }
  */
-#version 460 core
+#version 450 core
 
 // Vertex attributes del mesh base
 layout(location = 0) in vec3 position;

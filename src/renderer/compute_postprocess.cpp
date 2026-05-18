@@ -52,7 +52,7 @@ void ComputePostProcess::init(int width, int height) {
 
     // Compilar bloom shader
     const char* bloomSource = R"(
-#version 460 core
+#version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f, binding = 0) uniform image2D inputImg;
@@ -80,7 +80,7 @@ void main() {
 
     // Compilar tone mapping shader (ACES)
     const char* toneMappingSource = R"(
-#version 460 core
+#version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f, binding = 0) uniform image2D inputImg;
@@ -125,7 +125,7 @@ void main() {
 
     // Compilar color grading shader (in-place, rgba16f)
     const char* colorGradingSource = R"(
-#version 460 core
+#version 450 core
 layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(rgba16f, binding = 0) uniform image2D img;

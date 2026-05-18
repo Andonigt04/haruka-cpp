@@ -14,6 +14,7 @@ namespace Haruka::Core {
 
     bool Window::init() {
         if (!SDL_WasInit(SDL_INIT_VIDEO) && !SDL_Init(SDL_INIT_VIDEO)) {
+            std::cerr << "[SDL] Init failed: " << SDL_GetError() << std::endl;
             return false;
         }
 

@@ -103,29 +103,62 @@ void Character::update(float deltaTime) {
     currentHeight += (targetHeight - currentHeight) * deltaTime * 10.0f;
 }
 
-void Character::processInput(SDL_Window* /*window*/, float deltaTime) {
+void Character::processInput(SDL_Window* window, float deltaTime) {
     if (!localPlayer) return;
 
-    float speed = sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
+    // Mouse look — always active while window has relative mouse mode
+    if (window && SDL_GetWindowRelativeMouseMode(window)) {
+        float mx = 0.f, my = 0.f;
+        SDL_GetRelativeMouseState(&mx, &my);
+        if (mx != 0.f || my != 0.f)
+            rotate(mx, -my);
+    }
 
-    Haruka::WorldPos up, surfaceForward, surfaceRight;
-    Haruka::Rotation camOrientation = camera ? camera->orientation : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
-    buildSurfaceBasis(getEffectiveUp(), camOrientation, up, surfaceForward, surfaceRight);
+    if (m_bindings.empty()) return;
+    for (const auto& b : m_bindings) {
+        bool fire = false;
+        switch (b.trigger) {
+            case ActionTrigger::Performed:
+                fire = m_inputProvider.isPerformed && m_inputProvider.isPerformed(b.action);
+                break;
+            case ActionTrigger::Started:
+                fire = m_inputProvider.isStarted   && m_inputProvider.isStarted(b.action);
+                break;
+            case ActionTrigger::Canceled:
+                fire = m_inputProvider.isCanceled  && m_inputProvider.isCanceled(b.action);
+                break;
+        }
+        if (!fire) continue;
 
-    const bool* keys = SDL_GetKeyboardState(nullptr);
+        Input::ActionValue val = (m_inputProvider.readValue)
+            ? m_inputProvider.readValue(b.action)
+            : Input::ActionValue{ false };
 
-    if (keys[SDL_SCANCODE_W]) position += surfaceForward * (double)(speed * deltaTime);
-    if (keys[SDL_SCANCODE_S]) position -= surfaceForward * (double)(speed * deltaTime);
-    if (keys[SDL_SCANCODE_A]) position -= surfaceRight   * (double)(speed * deltaTime);
-    if (keys[SDL_SCANCODE_D]) position += surfaceRight   * (double)(speed * deltaTime);
+        b.callback(*this, deltaTime, val);
+    }
 
-    if (keys[SDL_SCANCODE_SPACE] && grounded) jump();
-
-    sprint(keys[SDL_SCANCODE_LSHIFT]);
-    crouch(keys[SDL_SCANCODE_LCTRL]);
+    Haruka::Rotation camOrientation = camera
+        ? camera->orientation
+        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
 
     if (onTransformChanged)
         onTransformChanged(position, camOrientation);
+}
+
+float Character::getSpeed() const {
+    return sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
+}
+
+void Character::move(glm::vec2 input, float deltaTime) {
+    Haruka::WorldPos up, surfaceForward, surfaceRight;
+    Haruka::Rotation camOri = camera
+        ? camera->orientation
+        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
+    buildSurfaceBasis(getEffectiveUp(), camOri, up, surfaceForward, surfaceRight);
+
+    float speed = getSpeed();
+    position += surfaceForward * (double)(input.y * speed * deltaTime);
+    position += surfaceRight   * (double)(input.x * speed * deltaTime);
 }
 
 void Character::moveForward(float amount) {

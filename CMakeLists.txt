@@ -147,8 +147,8 @@ add_dependencies(HarukaEngine HarukaShaders)
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)
 if(HARUKA_NETWORK)
-    target_compile_definitions(HarukaEngine PRIVATE HARUKA_NETWORK)
-    target_include_directories(HarukaEngine PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
+    target_compile_definitions(HarukaEngine PUBLIC HARUKA_NETWORK)
+    target_include_directories(HarukaEngine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
     target_link_libraries(HarukaEngine PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs/sdk/libdgs_client.a"
         OpenSSL::SSL

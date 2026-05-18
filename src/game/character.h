@@ -7,11 +7,31 @@
 #include <glm/glm.hpp>
 #include <memory>
 #include <functional>
+#include <vector>
 #include "core/camera.h"
 #include "physics/physics_engine.h"
-#include "tools/math_types.h" // Para WorldPos y Rotation
+#include "tools/math_types.h"
+#include "input/input_action.h"
 
 namespace Haruka {
+
+/** When an action callback fires. */
+enum class ActionTrigger {
+    Performed,    // every frame the action is active (held)
+    Started,      // first frame it becomes active
+    Canceled,     // first frame it stops being active
+};
+
+/**
+ * Input query functions injected from game code.
+ * Character never touches SettingsManager or SDL directly.
+ */
+struct CharacterInputProvider {
+    std::function<Input::ActionValue(const std::string&)> readValue;
+    std::function<bool(const std::string&)>               isPerformed;
+    std::function<bool(const std::string&)>               isStarted;
+    std::function<bool(const std::string&)>               isCanceled;
+};
 
 /** @brief Character locomotion and sync state machine. */
 enum class CharacterState {
@@ -89,7 +109,52 @@ public:
     
     void setFlightMode(bool enabled) { flightMode = enabled; }
 
+    // -- Input system --------------------------------------------------------
+
+    void setInputProvider(const CharacterInputProvider& p) { m_inputProvider = p; }
+
+    // Register a callback for any action/trigger combination.
+    // T must match the ActionValue type the action produces (bool, float, vec2, vec3).
+    // Use the value-less overload for simple button presses.
+    template<typename T>
+    void bindAction(const std::string& action, ActionTrigger trigger,
+                    std::function<void(Character&, float, T)> cb)
+    {
+        m_bindings.push_back({ action, trigger,
+            [cb](Character& c, float dt, const Input::ActionValue& v) {
+                if (const T* p = std::get_if<T>(&v)) cb(c, dt, *p);
+            }
+        });
+    }
+
+    // Value-less overload — for actions where you only care that it fired.
+    void bindAction(const std::string& action, ActionTrigger trigger,
+                    std::function<void(Character&, float)> cb)
+    {
+        m_bindings.push_back({ action, trigger,
+            [cb](Character& c, float dt, const Input::ActionValue&) { cb(c, dt); }
+        });
+    }
+
+    void clearBindings() { m_bindings.clear(); }
+
+    // Convenience movement method for use in bindAction callbacks.
+    // input.y = forward(-1..1), input.x = strafe(-1..1).
+    // Applies sprint/crouch speed automatically.
+    void move(glm::vec2 input, float deltaTime);
+
+    float getSpeed() const;
+
 private:
+    // Type-erased action binding
+    struct ActionBinding {
+        std::string action;
+        ActionTrigger trigger;
+        std::function<void(Character&, float, const Input::ActionValue&)> callback;
+    };
+
+    CharacterInputProvider       m_inputProvider;
+    std::vector<ActionBinding>   m_bindings;
     std::string userId;
     bool localPlayer = true;
     

@@ -9,7 +9,7 @@
  * In:  FragPos, Normal, InstanceColor (from instancing.vert)
  * Out: gPosition, gNormal, gAlbedoSpec, gEmissive
  */
-#version 460 core
+#version 450 core
 
 layout(location = 0) in vec3 FragPos;
 layout(location = 1) in vec3 Normal;

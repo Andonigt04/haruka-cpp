@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "engineVersion": "",
   "startScene": "scenes/main.scene",
-  "engineBinary": "",
+  "engineBinary": "/home/andoni/Documents/GitHub/opengl/haruka-cpp/build/0.5.0/bin/libHarukaEngine.so",
   "editorBinary": "",
   "scenes": [
   ],

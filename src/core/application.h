@@ -41,6 +41,7 @@
 #include "core/terrain/terrain_streaming_system.h"
 #include "core/scene/scene_loader.h"
 #include "core/chunk_cache.h"
+#include "core/game_interface.h"
 
 class MotorInstance;
 
@@ -86,6 +87,9 @@ public:
     static bool getRenderFeatureIBL() { return s_enableIBL; }
     static void setRenderFeatureShadows(bool enabled) { s_enableShadows = enabled; }
     static bool getRenderFeatureShadows() { return s_enableShadows; }
+
+    /** @brief Reads GraphicsSettings from SettingsManager and applies to all engine systems. */
+    void applyGraphicsSettings();
 
     /** @brief Sets the maximum distance for a render layer. */
     static void setLayerMaxDistance(int layer, float distance) {
@@ -142,7 +146,12 @@ public:
 
 #ifdef HARUKA_NETWORK
     void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
+    void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text);
+    std::vector<DGS::ChatMessage> pollPlayerChats();
 #endif
+
+    /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */
+    void setGameInterface(Haruka::GameInterface* gi) { _gameInterface = gi; }
 
     /** @brief Starts runtime using a scene path bootstrap. */
     void run(const std::string& startScenePath);
@@ -171,6 +180,20 @@ public:
 private:
     friend class MotorInstance;
     
+#ifdef HARUKA_NETWORK
+    DGS::Client m_dgs;
+    std::vector<Haruka::SceneObject> m_ghostObjects;
+
+    enum class LoginState { Idle, Show, Connecting, Failed, Done };
+    LoginState  m_loginState   = LoginState::Idle;
+    std::string m_loginEmail;
+    std::string m_loginUsername;
+    std::string m_loginError;
+
+    bool connectDGS(const std::string& email, const std::string& password);
+    void renderLoginScreen();
+#endif
+
     /** @brief The main application window. */
     std::unique_ptr<Haruka::Core::Window> _window = nullptr;
     /** @brief The currently active scene. */
@@ -237,7 +260,6 @@ private:
     
     // Primitives (LOD spheres for celestial bodies)
     std::unique_ptr<SimpleMesh> sphereLOD[4];
-    std::unique_ptr<SimpleMesh> _testCube;
     
     // Shaders (cached to avoid recreation every frame)
     std::unique_ptr<Shader> _geomShader;
@@ -254,6 +276,10 @@ private:
     
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;
+
+    // Optional game interface — used by standalone runtime (not editor)
+    Haruka::GameInterface* _gameInterface = nullptr;
+    bool m_cleanedUp = false;
 
     float _exposure = 1.0f;
 
@@ -273,10 +299,6 @@ private:
     unsigned int quadVBO = 0;
     /** @brief Sets up the screen quad for post-processing. */
     void setupQuad();
-
-    #ifdef HARUKA_NETWORK
-        DGS::Client m_dgs;
-    #endif
 
     // UBOs shared by all forward-rendering shaders (bindings 0 and 1)
     unsigned int m_uboPerFrame  = 0;

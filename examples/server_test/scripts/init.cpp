@@ -1,145 +1,308 @@
 #include "init.h"
-#include "player/controller/player_controller.h"
-#include "game_globals.h"
-#include "game/planetary_system.h"
+
 #include "game/character.h"
-#include "core/world_system.h"
 #include "core/camera.h"
-#include "renderer/primitive_shapes.h"
-#include "core/components/material_component.h"
-#include "core/components/mesh_renderer_component.h"
-#include <iostream>
+#include "settings/settings_manager.h"
+#include "ui/settings_panel.h"
+#include "ui/ui_system.h"
+#include "renderer/shader.h"
 #include <memory>
 #include <glm/glm.hpp>
+#include <imgui.h>
+#include <glad/glad.h>
 #ifdef HARUKA_NETWORK
 #include "network/dgs_bridge.h"
 #endif
 
-// Global state
-Camera* g_gameCamera = nullptr;
-Haruka::Character* g_playerCharacter = nullptr;
-GameLogic::PlayerController* g_playerController = nullptr;
-Haruka::PlanetarySystem* g_planetarySystem = nullptr;
-Haruka::WorldSystem* g_worldSystem = nullptr;
-Haruka::Scene* g_runtimeScene = nullptr;
+// 3x3 km room — chunks (-1,-1) to (1,1) in X and Z.
+// Player spawns at world center (0,0,0) = chunk (0,0,0), local (0,0,0).
+static constexpr double ROOM_HALF_EXTENT = 1500.0; // 1.5 km each side
+static constexpr uint32_t PLAYER_UUID    = 1;
+static const char*        PLAYER_NAME    = "player1";
 
-namespace {
-constexpr bool kEnableDetailedPlanetSurface = true;
-constexpr int kPlanetPreset = 0; // Sustituir por preset propio si es necesario
-constexpr int kPlanetSeed = 1337;
+static Camera*                            g_gameCamera      = nullptr;
+static Haruka::Character*                 g_playerCharacter = nullptr;
+static Haruka::SceneManager*              g_scene           = nullptr;
+static std::unique_ptr<Haruka::Character> g_playerOwned;
+
+// Chat state
+static char                     g_chatInput[256] = {};
+static std::vector<std::string> g_chatLog;
+static bool                     g_chatFocused    = false;
+
+// Settings
+static Haruka::UI::SettingsPanel g_settingsPanel;
+static bool                      g_showSettings = false;
+
+// World-space UI
+static Haruka::UI::UISystem              g_uiSystem;
+static std::unique_ptr<Shader>   g_panelShader;
+
+static void registerActions() {
+    auto& sm = Haruka::SettingsManager::get();
+
+    // Movement — WASD produces a vec2 (x=strafe, y=forward)
+    sm.registerAction("Move",    "Move",         "Movement",
+        Haruka::Input::Axis2DBinding{ SDL_SCANCODE_W, SDL_SCANCODE_S,
+                                      SDL_SCANCODE_A, SDL_SCANCODE_D });
+    sm.registerAction("Jump",    "Jump / Ascend","Movement", { SDL_SCANCODE_SPACE });
+    sm.registerAction("Descend", "Descend",      "Movement", { SDL_SCANCODE_LCTRL });
+    sm.registerAction("Sprint",  "Sprint",       "Movement", { SDL_SCANCODE_LSHIFT });
+
+    // Combat
+    sm.registerAction("Attack",  "Attack",  "Combat", { SDL_SCANCODE_F });
+    sm.registerAction("Block",   "Block",   "Combat", { SDL_SCANCODE_G });
+    sm.registerAction("Reload",  "Reload",  "Combat", { SDL_SCANCODE_R });
+
+    // UI
+    sm.registerAction("Chat",      "Open Chat", "UI", { SDL_SCANCODE_T });
+    sm.registerAction("Settings",  "Settings",  "UI", { SDL_SCANCODE_ESCAPE });
+    sm.registerAction("Inventory", "Inventory", "UI", { SDL_SCANCODE_I });
+    sm.registerAction("Map",       "Map",       "UI", { SDL_SCANCODE_M });
+    sm.registerAction("Interact",  "Interact",  "UI", { SDL_SCANCODE_E });
+    sm.registerAction("Quit",      "Quit",      "UI", { SDL_SCANCODE_F4 });
 }
 
-void gameOnInit(Haruka::Scene* scene) {
-    g_runtimeScene = scene;
+void gameOnInit(Haruka::SceneManager* scene) {
+    g_scene = scene;
+    g_playerOwned.reset();
 
-    if (g_playerController) {
-        delete g_playerController;
-        g_playerController = nullptr;
-    }
-    if (g_planetarySystem) {
-        delete g_planetarySystem;
-        g_planetarySystem = nullptr;
-    }
-    if (g_worldSystem) {
-        delete g_worldSystem;
-        g_worldSystem = nullptr;
-    }
-    
-    g_worldSystem = new Haruka::WorldSystem();
-    g_planetarySystem = new Haruka::PlanetarySystem();
-    g_planetarySystem->init(scene, g_worldSystem);
-    g_planetarySystem->setTimeScale(1.0);
-
-    const glm::dvec3 earthWorldPos(0.0, 0.0, 0.0);
-    glm::dvec3 playerSpawnDirection(0.0, 1.0, 0.0);
-    double playerSpawnHeightKm = 6373.0;
-
-    if (scene) {
-        if (auto* sunObj = scene->getObject("Sun")) {
-            glm::dvec3 toSun = glm::dvec3(sunObj->position) - earthWorldPos;
-            if (glm::length(toSun) > 1e-9) {
-                playerSpawnDirection = glm::normalize(toSun);
-            }
-        }
+    if (scene && !scene->getObject("Floor")) {
+        auto floor    = std::make_shared<Haruka::SceneObject>();
+        floor->name   = "Floor";
+        floor->type   = "Plane";
+        floor->position = Haruka::WorldPos(0.0, -0.1, 0.0);
+        floor->scale  = Haruka::DScale(ROOM_HALF_EXTENT, 1.0, ROOM_HALF_EXTENT);
+        scene->addLoadedObject(floor);
     }
 
-    Haruka::WorldPos playerPos = Haruka::WorldPos(earthWorldPos + playerSpawnDirection * playerSpawnHeightKm);
-    auto playerOwned = std::make_unique<Haruka::Character>(playerPos, "player1");
-    g_gameCamera = playerOwned->getCamera();
-    g_playerCharacter = playerOwned.get();
+    registerActions();
+    Haruka::SettingsManager::get().init("game_settings.ini");
 
-    if (scene) {
-        if (auto* playerObj = scene->getObject("Player")) {
-            playerObj->position = playerPos;
-        }
+    // Demo world-space panel — floating sign 3 m in front of spawn
+    {
+        Haruka::UI::UIWorldPanel::Desc d;
+        d.id             = "InfoPanel";
+        d.anchor.worldPos = glm::vec3(0.f, 1.5f, -3.f);
+        d.anchor.normal   = glm::vec3(0.f, 0.f,  1.f);   // faces +Z (toward player)
+        d.anchor.pivotNorm = glm::vec2(0.5f, 0.5f);
+        d.widthMeters    = 1.2f;
+        d.heightMeters   = 0.8f;
+        d.billboard      = Haruka::UI::UIBillboardMode::None;
+        d.interact.interactRange = 3.0f;
+        d.interact.requireLook   = true;
+        d.interact.onFocus   = []() { SDL_Log("InfoPanel focused"); };
+        d.interact.onUnfocus = []() { SDL_Log("InfoPanel unfocused"); };
+        d.interact.onInteract = [](glm::vec2 uv) {
+            SDL_Log("InfoPanel interacted at UV (%.2f, %.2f)", uv.x, uv.y);
+        };
+        g_uiSystem.addPanel(std::move(d));
     }
 
-    g_planetarySystem->setPlayer(std::move(playerOwned));
-    g_playerController = new GameLogic::PlayerController(g_playerCharacter);
+    g_panelShader = std::make_unique<Shader>(
+        "shaders/ui_world_panel.vert", "shaders/ui_world_panel.frag");
+
+    g_playerOwned     = std::make_unique<Haruka::Character>(Haruka::WorldPos(0.0, 0.0, 0.0), PLAYER_NAME);
+    g_gameCamera      = g_playerOwned->getCamera();
+    g_playerCharacter = g_playerOwned.get();
+    g_playerOwned->setFlightMode(true);
+
+    // Wire SettingsManager as the input provider
+    {
+        auto& sm = Haruka::SettingsManager::get();
+        Haruka::CharacterInputProvider provider;
+        provider.readValue   = [&sm](const std::string& a) { return sm.readValue(a); };
+        provider.isPerformed = [&sm](const std::string& a) { return sm.isPerformed(a); };
+        provider.isStarted   = [&sm](const std::string& a) { return sm.isStarted(a); };
+        provider.isCanceled  = [&sm](const std::string& a) { return sm.isCanceled(a); };
+        g_playerOwned->setInputProvider(provider);
+    }
+
+    // Bind behaviors — developer decides which action does what, with full freedom
+    using AT = Haruka::ActionTrigger;
+
+    // Move: vec2 action (WASD composite) → character.move()
+    g_playerOwned->bindAction<glm::vec2>("Move", AT::Performed,
+        [](Haruka::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
+
+    // Jump: button → jump() only while grounded
+    g_playerOwned->bindAction("Jump", AT::Started,
+        [](Haruka::Character& c, float) { if (c.isGrounded()) c.jump(); });
+
+    // Sprint: held → sprint on, released → sprint off
+    g_playerOwned->bindAction("Sprint", AT::Started,
+        [](Haruka::Character& c, float) { c.sprint(true); });
+    g_playerOwned->bindAction("Sprint", AT::Canceled,
+        [](Haruka::Character& c, float) { c.sprint(false); });
+
+    // Descend (crouch/fly down): same pattern
+    g_playerOwned->bindAction("Descend", AT::Started,
+        [](Haruka::Character& c, float) { c.crouch(true); });
+    g_playerOwned->bindAction("Descend", AT::Canceled,
+        [](Haruka::Character& c, float) { c.crouch(false); });
 
 #ifdef HARUKA_NETWORK
     g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
-        Haruka::Network::sendTransform(1, pos, rot);
+        Haruka::Network::sendTransform(PLAYER_UUID, pos, rot);
     };
 #endif
 }
 
-void gameOnUpdate(GLFWwindow* window, float deltaTime) {
-    if (g_playerCharacter && window) {
-        g_playerCharacter->processInput(window, deltaTime);
+void gameOnUpdate(SDL_Window* window, float deltaTime) {
+    // Retry each frame until Wayland compositor grants pointer lock
+    static bool s_mouseCaptured = false;
+    if (!s_mouseCaptured && window)
+        s_mouseCaptured = SDL_SetWindowRelativeMouseMode(window, true);
+
+    // Update input state
+    int numKeys = 0;
+    const bool* kbd = SDL_GetKeyboardState(&numKeys);
+    Haruka::SettingsManager::get().update(kbd);
+    auto& sm = Haruka::SettingsManager::get();
+
+    // Quit (F4)
+    if (sm.justPressed("Quit")) {
+        SDL_Event quitEvent{};
+        quitEvent.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quitEvent);
     }
 
-    if (g_planetarySystem) {
-        g_planetarySystem->update(deltaTime);
+    // Settings panel toggle (Escape)
+    if (sm.justPressed("Settings") && !g_chatFocused) {
+        g_showSettings = !g_showSettings;
+        SDL_SetWindowRelativeMouseMode(window, !g_showSettings);
     }
-
-    if (g_runtimeScene && g_playerCharacter) {
-        if (auto* playerObj = g_runtimeScene->getObject("Player")) {
-            playerObj->position = g_playerCharacter->getPosition();
+    if (g_showSettings) {
+        if (g_settingsPanel.render()) {
+            g_showSettings = false;
+            SDL_SetWindowRelativeMouseMode(window, true);
         }
+        return; // block game input while settings open
     }
-    
-    if (g_playerController) {
-        g_playerController->update(deltaTime);
+
+    // World-space UI: disabled temporarily to isolate GPU hang
+    // if (auto* p = g_uiSystem.panel("InfoPanel")) {
+    //     p->beginImGui(); ... p->endImGui();
+    // }
+
+    // Update panel interaction
+    if (g_gameCamera) {
+        glm::dvec3 pos3d = g_playerCharacter->getPosition();
+        glm::vec3 camPos = glm::vec3((float)pos3d.x, (float)pos3d.y, (float)pos3d.z);
+        glm::vec3 camFwd = g_gameCamera->getFront();
+        bool interact = sm.justPressed("Interact") && !g_chatFocused;
+        g_uiSystem.updateInteraction(camPos, camFwd, interact);
     }
+
+    // Update character physics/state and camera, then process input
+    if (g_playerOwned) {
+        g_playerOwned->update(deltaTime);
+        if (window && !g_chatFocused)
+            g_playerOwned->processInput(window, deltaTime);
+    }
+
+#ifdef HARUKA_NETWORK
+    // Drain incoming chat messages
+    for (const auto& msg : Haruka::Network::pollChats()) {
+        std::string line = std::string(msg.username) + ": " + std::string(msg.text);
+        g_chatLog.push_back(std::move(line));
+        if (g_chatLog.size() > 50) g_chatLog.erase(g_chatLog.begin());
+    }
+#endif
+
+    // Chat UI
+    ImGuiIO& io = ImGui::GetIO();
+    float chatW = 360.0f, chatH = 200.0f;
+    ImGui::SetNextWindowPos(ImVec2(10.0f, io.DisplaySize.y - chatH - 10.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(chatW, chatH), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.65f);
+    ImGui::Begin("##chat", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_NoScrollbar);
+
+    // Message history
+    float inputH = ImGui::GetFrameHeightWithSpacing() + 4.0f;
+    ImGui::BeginChild("##chatlog", ImVec2(0, chatH - inputH - 16.0f), false, ImGuiWindowFlags_NoScrollbar);
+    for (const auto& line : g_chatLog)
+        ImGui::TextWrapped("%s", line.c_str());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
+        ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+
+    ImGui::Separator();
+
+    // Input field — Enter to send, T to focus
+    bool sendPressed = false;
+    ImGui::SetNextItemWidth(chatW - 16.0f);
+    if (sm.justPressed("Chat") && !g_chatFocused) {
+        ImGui::SetKeyboardFocusHere();
+        g_chatFocused = true;
+    }
+    if (ImGui::InputText("##chatinput", g_chatInput, sizeof(g_chatInput),
+            ImGuiInputTextFlags_EnterReturnsTrue)) {
+        sendPressed = true;
+    }
+    g_chatFocused = ImGui::IsItemActive();
+
+    if (sendPressed && g_chatInput[0] != '\0') {
+#ifdef HARUKA_NETWORK
+        Haruka::Network::sendChat(PLAYER_UUID, PLAYER_NAME, g_chatInput);
+#endif
+        // Show own message immediately
+        g_chatLog.push_back(std::string(PLAYER_NAME) + ": " + g_chatInput);
+        if (g_chatLog.size() > 50) g_chatLog.erase(g_chatLog.begin());
+        g_chatInput[0] = '\0';
+        g_chatFocused  = false;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape) && g_chatFocused) {
+        g_chatFocused = false;
+        ImGui::SetWindowFocus(nullptr);
+    }
+
+    ImGui::End();
 }
 
-Camera* gameGetCamera() {
-    return g_gameCamera;
+Camera* gameGetCamera() { return g_gameCamera; }
+
+void gameOnRenderWorld(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& camPos) {
+    if (!g_panelShader) return;
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glDepthMask(GL_FALSE);
+
+    g_uiSystem.drawAll(*g_panelShader, view, proj, camPos);
+
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
 }
 
 void gameOnShutdown() {
-    if (g_playerController) {
-        delete g_playerController;
-        g_playerController = nullptr;
-    }
-    if (g_planetarySystem) {
-        delete g_planetarySystem;
-        g_planetarySystem = nullptr;
-    }
-    if (g_worldSystem) {
-        delete g_worldSystem;
-        g_worldSystem = nullptr;
-    }
-
+    // Destroy GL-owned resources while the context is still alive.
+    // g_uiSystem is a static — if we don't clear it here, UIWorldPanel's
+    // destructor (glDeleteBuffers, RenderTarget, etc.) runs after the GL
+    // context is gone, corrupting the heap.
+    g_uiSystem.removePanel("InfoPanel");
+    g_panelShader.reset();
+    g_playerOwned.reset();
     g_playerCharacter = nullptr;
-    g_gameCamera = nullptr;
-    g_runtimeScene = nullptr;
+    g_gameCamera      = nullptr;
+    g_scene           = nullptr;
 }
 
-Haruka::Scene* gameGetScene() {
-    return g_runtimeScene;
-}
+Haruka::SceneManager* gameGetScene() { return g_scene; }
 
 namespace GameLogic {
     Haruka::GameInterface gameInterface = {
-        .onInit = gameOnInit,
-        .onUpdate = gameOnUpdate,
-        .onShutdown = gameOnShutdown,
-        .getCamera = gameGetCamera,
-        .getScene = gameGetScene,
-        .name = "Game",
-        .version = "0.1.0"
+        .onInit          = gameOnInit,
+        .onUpdate        = gameOnUpdate,
+        .onShutdown      = gameOnShutdown,
+        .getCamera       = gameGetCamera,
+        .getScene        = gameGetScene,
+        .onRenderWorld   = gameOnRenderWorld,
+        .name            = "Server Test",
+        .version         = "0.1.0"
     };
 }
 

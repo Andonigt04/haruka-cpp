@@ -154,6 +154,13 @@ namespace DGS
         uint8_t  data[MAX_GHOST_DATA]; // payload opaco definido por el engine
     };
 
+    struct ChatMessage
+    {
+        uint32_t uuid;
+        char     username[32];
+        char     text[256];
+    };
+
     struct LogEntry
     {
         uint64_t   time_stamp;

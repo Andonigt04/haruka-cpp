@@ -75,18 +75,18 @@ public:
 
     /** @name Uniform helpers — name-based (GLSL) and location-based (SPIR-V) */
     ///@{
-    void setBool (const std::string& name, bool value)          const { glUniform1i (glGetUniformLocation(ID, name.c_str()), (int)value); }
-    void setInt  (const std::string& name, int value)           const { glUniform1i (glGetUniformLocation(ID, name.c_str()), value); }
-    void setFloat(const std::string& name, float value)         const { glUniform1f (glGetUniformLocation(ID, name.c_str()), value); }
-    void setVec2 (const std::string& name, const glm::vec2& v)  const { glUniform2fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]); }
-    void setVec2 (const std::string& name, float x, float y)    const { glUniform2f (glGetUniformLocation(ID, name.c_str()), x, y); }
-    void setVec3 (const std::string& name, const glm::vec3& v)  const { glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]); }
-    void setVec3 (const std::string& name, float x, float y, float z) const { glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z); }
-    void setVec4 (const std::string& name, const glm::vec4& v)  const { glUniform4fv(glGetUniformLocation(ID, name.c_str()), 1, &v[0]); }
-    void setVec4 (const std::string& name, float x, float y, float z, float w) const { glUniform4f(glGetUniformLocation(ID, name.c_str()), x, y, z, w); }
-    void setMat2 (const std::string& name, const glm::mat2& m)  const { glUniformMatrix2fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]); }
-    void setMat3 (const std::string& name, const glm::mat3& m)  const { glUniformMatrix3fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]); }
-    void setMat4 (const std::string& name, const glm::mat4& m)  const { glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &m[0][0]); }
+    void setBool (const std::string& name, bool value)          const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1i (l, (int)value); }
+    void setInt  (const std::string& name, int value)           const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1i (l, value); }
+    void setFloat(const std::string& name, float value)         const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1f (l, value); }
+    void setVec2 (const std::string& name, const glm::vec2& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform2fv(l, 1, &v[0]); }
+    void setVec2 (const std::string& name, float x, float y)    const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform2f (l, x, y); }
+    void setVec3 (const std::string& name, const glm::vec3& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform3fv(l, 1, &v[0]); }
+    void setVec3 (const std::string& name, float x, float y, float z) const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform3f(l, x, y, z); }
+    void setVec4 (const std::string& name, const glm::vec4& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform4fv(l, 1, &v[0]); }
+    void setVec4 (const std::string& name, float x, float y, float z, float w) const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform4f(l, x, y, z, w); }
+    void setMat2 (const std::string& name, const glm::mat2& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix2fv(l, 1, GL_FALSE, &m[0][0]); }
+    void setMat3 (const std::string& name, const glm::mat3& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix3fv(l, 1, GL_FALSE, &m[0][0]); }
+    void setMat4 (const std::string& name, const glm::mat4& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix4fv(l, 1, GL_FALSE, &m[0][0]); }
 
     // Location-based overloads for SPIR-V shaders where name lookup returns -1.
     void setBool (GLint loc, bool value)           const { glUniform1i (loc, (int)value); }
