@@ -11,7 +11,7 @@
 #include <imgui.h>
 #include <glad/glad.h>
 #ifdef HARUKA_NETWORK
-#include "network/dgs_bridge.h"
+#include "tools/dgs_bridge.h"
 #endif
 
 // 3x3 km room — chunks (-1,-1) to (1,1) in X and Z.
@@ -39,6 +39,10 @@ static bool                      g_showSettings = false;
 // World-space UI
 static Haruka::UI::UISystem              g_uiSystem;
 static std::unique_ptr<Shader>   g_panelShader;
+
+// Event-driven key state — updated by gameOnEvent so input works even when
+// SDL_GetKeyboardState returns zeros (Wayland remote without kb focus).
+static bool g_evtKeys[SDL_SCANCODE_COUNT] = {};
 
 static void registerActions() {
     auto& sm = Haruka::SettingsManager::get();
@@ -150,16 +154,40 @@ void gameOnInit(Haruka::SceneManager* scene) {
 #endif
 }
 
+bool gameOnEvent(const SDL_Event* e) {
+    if (!e) return false;
+
+    if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode < SDL_SCANCODE_COUNT) {
+        g_evtKeys[e->key.scancode] = true;
+        return false; // let ImGui also see key events
+    }
+    if (e->type == SDL_EVENT_KEY_UP && e->key.scancode < SDL_SCANCODE_COUNT) {
+        g_evtKeys[e->key.scancode] = false;
+        return false;
+    }
+    // Route mouse motion directly to character rotation (works without kb focus)
+    if (e->type == SDL_EVENT_MOUSE_MOTION && g_playerCharacter && !g_showSettings && !g_chatFocused) {
+        if (e->motion.xrel != 0.f || e->motion.yrel != 0.f)
+            g_playerCharacter->rotate((float)e->motion.xrel, -(float)e->motion.yrel);
+        return false;
+    }
+    return false;
+}
+
 void gameOnUpdate(SDL_Window* window, float deltaTime) {
     // Retry each frame until Wayland compositor grants pointer lock
     static bool s_mouseCaptured = false;
     if (!s_mouseCaptured && window)
         s_mouseCaptured = SDL_SetWindowRelativeMouseMode(window, true);
 
-    // Update input state
+    // Merge polled kbd state with event-driven state so either path works
     int numKeys = 0;
-    const bool* kbd = SDL_GetKeyboardState(&numKeys);
-    Haruka::SettingsManager::get().update(kbd);
+    const bool* polledKbd = SDL_GetKeyboardState(&numKeys);
+    bool mergedKbd[SDL_SCANCODE_COUNT] = {};
+    int mergeCount = (numKeys < SDL_SCANCODE_COUNT) ? numKeys : SDL_SCANCODE_COUNT;
+    for (int i = 0; i < mergeCount; ++i)
+        mergedKbd[i] = polledKbd[i] || g_evtKeys[i];
+    Haruka::SettingsManager::get().update(mergedKbd);
     auto& sm = Haruka::SettingsManager::get();
 
     // Quit (F4)
@@ -211,6 +239,33 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
         if (g_chatLog.size() > 50) g_chatLog.erase(g_chatLog.begin());
     }
 #endif
+
+    // Debug HUD — top-left overlay
+    {
+        int numKeys = 0;
+        const bool* kbd = SDL_GetKeyboardState(&numKeys);
+        ImGuiIO& io = ImGui::GetIO();
+        ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.55f);
+        ImGui::Begin("##debug", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+            ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_AlwaysAutoResize |
+            ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
+        if (g_playerCharacter) {
+            auto p = g_playerCharacter->getPosition();
+            ImGui::Text("pos  %.2f  %.2f  %.2f", (float)p.x, (float)p.y, (float)p.z);
+        }
+        bool locked = window && SDL_GetWindowRelativeMouseMode(window);
+        ImGui::Text("mouse lock: %s", locked ? "yes" : "no");
+        ImGui::Text("kbd[W]=%d S=%d A=%d D=%d",
+            kbd[SDL_SCANCODE_W], kbd[SDL_SCANCODE_S],
+            kbd[SDL_SCANCODE_A], kbd[SDL_SCANCODE_D]);
+        Uint32 winFlags = window ? SDL_GetWindowFlags(window) : 0;
+        ImGui::Text("win focus: kb=%d mouse=%d",
+            (int)!!(winFlags & SDL_WINDOW_INPUT_FOCUS),
+            (int)!!(winFlags & SDL_WINDOW_MOUSE_FOCUS));
+        ImGui::End();
+    }
 
     // Chat UI
     ImGuiIO& io = ImGui::GetIO();

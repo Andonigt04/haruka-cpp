@@ -716,10 +716,14 @@ void Application::run(const std::string& startScenePath) {
         uint32_t lastWidth  = _window->getWidth();
         uint32_t lastHeight = _window->getHeight();
 
-        // Poll events — forward to ImGui before processing game input
+        // Poll events — game gets first crack, then ImGui
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
-            ImGui_ImplSDL3_ProcessEvent(&event);
+            bool consumed = false;
+            if (_gameInterface && _gameInterface->onEvent)
+                consumed = _gameInterface->onEvent(&event);
+            if (!consumed)
+                ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) running = false;
             if (event.type == SDL_EVENT_WINDOW_RESIZED) {
                 m_editorViewportW = event.window.data1;

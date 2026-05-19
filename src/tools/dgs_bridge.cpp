@@ -1,6 +1,6 @@
 #ifdef HARUKA_NETWORK
 
-#include "network/dgs_bridge.h"
+#include "tools/dgs_bridge.h"
 #include "renderer/motor_instance.h"
 #include "core/application.h"
 

@@ -138,7 +138,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
         [](Haruka::Character& c, float) { c.crouch(true); });
     g_playerOwned->bindAction("Descend", AT::Canceled,
         [](Haruka::Character& c, float) { c.crouch(false); });
-//TODO: pasar las coords localmente
+// TODO: pasar las coords localmente
 #ifdef HARUKA_NETWORK
     g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
         Haruka::Network::sendTransform(PLAYER_UUID, pos, rot);
@@ -234,7 +234,7 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
     g_chatFocused = ImGui::IsItemActive();
 
     if (sendPressed && g_chatInput[0] != '\0') {
-//TODO: cambiar el network host como server pero sin el este network sistem de dgs o hacer modo de dgs para self hosted para futuro
+// TODO: cambiar el network host como server pero sin el este network sistem de dgs o hacer modo de dgs para self hosted para futuro
 #ifdef HARUKA_NETWORK
         Haruka::Network::sendChat(PLAYER_UUID, PLAYER_NAME, g_chatInput);
 #endif

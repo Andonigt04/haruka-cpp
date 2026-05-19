@@ -21,9 +21,9 @@
         {
             "name": "Floor",
             "type": "Plane",
-            "position": [ 0.0, 0.0, 0.0 ],
+            "position": [ 0.0, -0.05, 0.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
-            "scale": [ 60.0, 1.0, 60.0 ],
+            "scale": [ 30.5, 0.1, 30.5 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": {
                 "visual": { "mesh": "plane", "material": "ground_dirt" }
@@ -32,7 +32,7 @@
         {
             "name": "CrateA",
             "type": "Cube",
-            "position": [ 5.0, 0.5, -4.0 ],
+            "position": [ 5.0, 0.5, 0.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 1.0, 1.0, 1.0 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
@@ -41,7 +41,7 @@
         {
             "name": "CrateB",
             "type": "Cube",
-            "position": [ 5.0, 1.5, -4.0 ],
+            "position": [ 5.0, 1.5, 0.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 1.0, 1.0, 1.0 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
@@ -50,43 +50,43 @@
         {
             "name": "CrateC",
             "type": "Cube",
-            "position": [ 6.0, 0.5, -4.0 ],
+            "position": [ 6.2, 0.5, 1.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 1.0, 1.0, 1.0 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": { "visual": { "mesh": "cube", "material": "wood_crate" } }
         },
         {
-            "name": "PillarNW",
+            "name": "PillarA",
             "type": "Cube",
-            "position": [ -8.0, 2.0, -8.0 ],
+            "position": [ 8.0, 2.0, -3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.8, 4.0, 0.8 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
         },
         {
-            "name": "PillarNE",
+            "name": "PillarB",
             "type": "Cube",
-            "position": [ 8.0, 2.0, -8.0 ],
+            "position": [ 8.0, 2.0, 3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.8, 4.0, 0.8 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
         },
         {
-            "name": "PillarSW",
+            "name": "PillarC",
             "type": "Cube",
-            "position": [ -8.0, 2.0, 8.0 ],
+            "position": [ -8.0, 2.0, -3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.8, 4.0, 0.8 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
         },
         {
-            "name": "PillarSE",
+            "name": "PillarD",
             "type": "Cube",
-            "position": [ 8.0, 2.0, 8.0 ],
+            "position": [ -8.0, 2.0, 3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.8, 4.0, 0.8 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
@@ -95,7 +95,7 @@
         {
             "name": "Rock1",
             "type": "Sphere",
-            "position": [ -4.0, 0.4, 3.0 ],
+            "position": [ 7.0, 0.8, -2.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.8, 0.8, 0.8 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
@@ -104,7 +104,7 @@
         {
             "name": "Rock2",
             "type": "Sphere",
-            "position": [ -3.2, 0.3, 4.0 ],
+            "position": [ 8.0, 0.6, -3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
             "scale": [ 0.6, 0.6, 0.6 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
@@ -113,9 +113,9 @@
         {
             "name": "Barrel",
             "type": "Capsule",
-            "position": [ 2.0, 0.8, 5.0 ],
+            "position": [ 4.0, 0.45, 3.0 ],
             "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
-            "scale": [ 0.5, 0.8, 0.5 ],
+            "scale": [ 0.6, 0.6, 0.6 ],
             "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
             "components": { "visual": { "mesh": "capsule", "material": "metal_barrel" } }
         },

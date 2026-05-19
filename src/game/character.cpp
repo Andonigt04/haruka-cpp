@@ -109,7 +109,8 @@ void Character::update(float deltaTime) {
 void Character::processInput(SDL_Window* window, float deltaTime) {
     if (!localPlayer) return;
 
-    // Mouse look — always active while window has relative mouse mode
+    // Mouse look via SDL_GetRelativeMouseState — fallback for when the game
+    // does not forward SDL_EVENT_MOUSE_MOTION through GameInterface::onEvent.
     if (window && SDL_GetWindowRelativeMouseMode(window)) {
         float mx = 0.f, my = 0.f;
         SDL_GetRelativeMouseState(&mx, &my);
