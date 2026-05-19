@@ -28,7 +28,6 @@ Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pip
 
 ### 🎮 Game Systems
 - **3D Audio** — OpenAL positional audio with Doppler effects (Not fuly implemented)
-- **Scene Management** — Unified entity system supporting 15+ object types
 - **Component Architecture** — Scripts, materials, meshes attached to entities
 
 ---
