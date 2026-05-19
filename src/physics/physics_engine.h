@@ -33,6 +33,12 @@ struct CollisionInfo {
     glm::dvec3 normal;
 };
 
+/** @brief Axis-aligned static box for scene geometry collision. */
+struct StaticBox {
+    glm::dvec3 bmin;
+    glm::dvec3 bmax;
+};
+
 /**
  * @brief Main physics simulation coordinator.
  *
@@ -50,7 +56,12 @@ public:
     void removeBody(const std::string& name);
     /** @brief Returns body by name or null when missing. */
     std::shared_ptr<RigidBody> getBody(const std::string& name);
-    
+
+    /** @brief Registers a static AABB for scene geometry collision. */
+    void addStaticBox(const glm::dvec3& center, const glm::dvec3& halfExtents);
+    /** @brief Removes all static boxes (e.g. on scene reload). */
+    void clearStaticBoxes();
+
     /** @brief Advances simulation by one time step. */
     void update(double deltaTime);
     /** @brief Sets constant gravity acceleration. */
@@ -127,23 +138,26 @@ public:
 
 private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
+    std::vector<StaticBox>                  staticBoxes;
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
     std::unique_ptr<Octree> octree;
-    
+
     // Planetary physics members
     Haruka::WorldSystem* worldSystem = nullptr;
     Haruka::PlanetarySystem* planetarySystem = nullptr;
     RaycastSimple* raycastSystem = nullptr;
-    double gravitationalConstant = 6.67430e-11;  ///< Newton's gravitational constant
-    double maxCollisionRaycastDistanceKm = 1000.0;  ///< Max distance to check for terrain collision
-    
+    double gravitationalConstant = 6.67430e-11;
+    double maxCollisionRaycastDistanceKm = 1000.0;
+
     /** @brief Integrates external forces for all bodies. */
     void integrateForces(double dt);
     /** @brief Detects collisions and fills collision list. */
     void detectCollisions();
     /** @brief Resolves collision responses for detected contacts. */
     void resolveCollisions();
+    /** @brief Resolves sphere vs static AABB contacts. */
+    void resolveStaticCollisions();
     /** @brief Runs broad-phase AABB traversal/culling. */
     void broadPhaseAABB();
 };

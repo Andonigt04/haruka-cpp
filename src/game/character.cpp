@@ -69,7 +69,8 @@ Character::~Character() {}
 void Character::update(float deltaTime) {
     if (physicsBody)
     {
-        position = glm::dvec3(physicsBody->position);
+        // physicsBody->position is the sphere center; foot = center - (0, radius, 0)
+        position = glm::dvec3(physicsBody->position) - glm::dvec3(0.0, physicsBody->radius, 0.0);
         velocity = glm::dvec3(physicsBody->velocity);
     }
     
@@ -165,8 +166,10 @@ void Character::move(glm::vec2 input, float deltaTime) {
     buildSurfaceBasis(getEffectiveUp(), camOri, up, surfaceForward, surfaceRight);
 
     float speed = getSpeed();
-    position += surfaceForward * (double)(input.y * speed * deltaTime);
-    position += surfaceRight   * (double)(input.x * speed * deltaTime);
+    glm::dvec3 delta = surfaceForward * (double)(input.y * speed)
+                     + surfaceRight   * (double)(input.x * speed);
+    position += delta * (double)deltaTime;
+    velocity  = delta; // keep velocity in sync so updateState() reflects movement
 }
 
 void Character::moveForward(float amount) {

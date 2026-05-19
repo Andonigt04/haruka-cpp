@@ -4,6 +4,10 @@
 
 Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pipeline, physics engine, and procedural world generation.
 
+## Examples
+
+
+
 ## 🎯 Core Features
 
 ### 🖼️ Rendering
@@ -29,46 +33,6 @@ Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pip
 ### 🎮 Game Systems
 - **3D Audio** — OpenAL positional audio with Doppler effects (Not fuly implemented)
 - **Component Architecture** — Scripts, materials, meshes attached to entities
-
----
-
-## 📋 System Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│         APPLICATION / EDITOR                 │
-└────────────────┬──────────────────────────────┘
-                 │
-    ┌────────────▼──────────────┐
-    │  WorldSystem (Core)       │  ← Orchestrates all subsystems
-    │  - Floating Origin        │  ← Precision management
-    │  - Origin shifting        │  ← Dynamic world re-centering
-    └────────────┬──────────────┘
-                 │
-         ┌───────┴──────────┬──────────────┐
-         ▼                  ▼              ▼
-    ┌─────────────┐  ┌──────────────┐  ┌──────────────┐
-    │ Physics     │  │ Planetary    │  │ Audio        │
-    │ Engine      │  │ System       │  │ System       │
-    │ (RigidBody) │  │ (Terrain)    │  │ (OpenAL)     │
-    └─────────────┘  └──────────────┘  └──────────────┘
-                            │
-                    ┌───────┴───────┐
-                    ▼               ▼
-                ┌────────────┐  ┌──────────────┐
-                │ LOD System │  │ Streaming    │
-                │ (QuadTree) │  │ System       │
-                └────────────┘  └──────────────┘
-                    │               │
-                    └───────┬───────┘
-                            ▼
-                    ┌──────────────────┐
-                    │ Terrain          │
-                    │ - Cache          │
-                    │ - Generator      │
-                    │ - Renderer       │
-                    └──────────────────┘
-```
 
 ---
 

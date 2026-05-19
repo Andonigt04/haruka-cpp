@@ -2,11 +2,14 @@
 
 #include "game/character.h"
 #include "core/camera.h"
+#include "core/application.h"
+#include "renderer/motor_instance.h"
 #include "settings/settings_manager.h"
 #include "ui/settings_panel.h"
 #include "ui/ui_system.h"
 #include "renderer/shader.h"
 #include <memory>
+#include <algorithm>
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <glad/glad.h>
@@ -26,6 +29,7 @@ static Camera*                            g_gameCamera      = nullptr;
 static Haruka::Character*                 g_playerCharacter = nullptr;
 static Haruka::SceneManager*              g_scene           = nullptr;
 static std::unique_ptr<Haruka::Character> g_playerOwned;
+static std::shared_ptr<RigidBody>         g_playerBody;
 
 // Chat state
 static char                     g_chatInput[256] = {};
@@ -37,12 +41,22 @@ static Haruka::UI::SettingsPanel g_settingsPanel;
 static bool                      g_showSettings = false;
 
 // World-space UI
-static Haruka::UI::UISystem              g_uiSystem;
+static Haruka::UI::UISystem      g_uiSystem;
 static std::unique_ptr<Shader>   g_panelShader;
 
 // Event-driven key state — updated by gameOnEvent so input works even when
 // SDL_GetKeyboardState returns zeros (Wayland remote without kb focus).
-static bool g_evtKeys[SDL_SCANCODE_COUNT] = {};
+static bool  g_evtKeys[SDL_SCANCODE_COUNT] = {};
+static int   g_evtKeyCount   = 0;
+static int   g_evtMouseCount = 0;
+static float        g_mouseDx = 0.f, g_mouseDy = 0.f;
+static SDL_Scancode g_lastScancode = SDL_SCANCODE_UNKNOWN;
+static SDL_Keycode  g_lastKeycode  = SDLK_UNKNOWN;
+
+static PhysicsEngine* getEngine() {
+    Application* app = MotorInstance::getInstance().getApplication();
+    return app ? app->getPhysicsEngine() : nullptr;
+}
 
 static void registerActions() {
     auto& sm = Haruka::SettingsManager::get();
@@ -73,15 +87,6 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_scene = scene;
     g_playerOwned.reset();
 
-    if (scene && !scene->getObject("Floor")) {
-        auto floor    = std::make_shared<Haruka::SceneObject>();
-        floor->name   = "Floor";
-        floor->type   = "Plane";
-        floor->position = Haruka::WorldPos(0.0, -0.1, 0.0);        // -10 cm below spawn (metres)
-        floor->scale  = Haruka::DScale(ROOM_HALF_EXTENT, 1.0, ROOM_HALF_EXTENT); // 1.5 km × 1.5 km (metres)
-        scene->addLoadedObject(floor);
-    }
-
     registerActions();
     Haruka::SettingsManager::get().init("game_settings.ini");
 
@@ -111,7 +116,34 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_playerOwned     = std::make_unique<Haruka::Character>(Haruka::WorldPos(0.0, 0.0, 0.0), PLAYER_NAME);
     g_gameCamera      = g_playerOwned->getCamera();
     g_playerCharacter = g_playerOwned.get();
-    g_playerOwned->setFlightMode(true);
+    g_playerOwned->setFlightMode(false);
+
+    g_playerBody           = std::make_shared<RigidBody>();
+    g_playerBody->name     = "player";
+    g_playerBody->radius   = 0.4;
+    // Engine convention: position = sphere center, so start at (0, radius, 0)
+    g_playerBody->position = glm::dvec3(0.0, g_playerBody->radius, 0.0);
+    g_playerBody->velocity = glm::dvec3(0.0);
+    g_playerBody->mass     = 70.0;
+    g_playerOwned->setPhysicsBody(g_playerBody);
+
+    // Register player body + static scene geometry with the engine
+    if (PhysicsEngine* eng = getEngine()) {
+        eng->setGravity(glm::dvec3(0.0, -9.81, 0.0));
+        eng->addBody(g_playerBody);
+
+        eng->clearStaticBoxes();
+        if (g_scene) {
+            for (const auto& objPtr : g_scene->getAllObjects()) {
+                if (!objPtr) continue;
+                const std::string& t = objPtr->type;
+                if (t == "CelestialBody" || t == "Light" ||
+                    t == "Camera"        || t == "Empty") continue;
+                eng->addStaticBox(glm::dvec3(objPtr->position),
+                                  glm::dvec3(objPtr->scale) * 0.5);
+            }
+        }
+    }
 
     // Wire SettingsManager as the input provider
     {
@@ -131,21 +163,15 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_playerOwned->bindAction<glm::vec2>("Move", AT::Performed,
         [](Haruka::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
 
-    // Jump: button → jump() only while grounded
+    // Jump: physics impulse — works because physicsBody is now set
     g_playerOwned->bindAction("Jump", AT::Started,
-        [](Haruka::Character& c, float) { if (c.isGrounded()) c.jump(); });
+        [](Haruka::Character& c, float) { c.jump(); });
 
     // Sprint: held → sprint on, released → sprint off
     g_playerOwned->bindAction("Sprint", AT::Started,
         [](Haruka::Character& c, float) { c.sprint(true); });
     g_playerOwned->bindAction("Sprint", AT::Canceled,
         [](Haruka::Character& c, float) { c.sprint(false); });
-
-    // Descend (crouch/fly down): same pattern
-    g_playerOwned->bindAction("Descend", AT::Started,
-        [](Haruka::Character& c, float) { c.crouch(true); });
-    g_playerOwned->bindAction("Descend", AT::Canceled,
-        [](Haruka::Character& c, float) { c.crouch(false); });
 
 #ifdef HARUKA_NETWORK
     g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
@@ -159,16 +185,30 @@ bool gameOnEvent(const SDL_Event* e) {
 
     if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode < SDL_SCANCODE_COUNT) {
         g_evtKeys[e->key.scancode] = true;
-        return false; // let ImGui also see key events
+        g_lastScancode = e->key.scancode;
+        g_lastKeycode  = e->key.key;
+        ++g_evtKeyCount;
+        return false;
     }
     if (e->type == SDL_EVENT_KEY_UP && e->key.scancode < SDL_SCANCODE_COUNT) {
         g_evtKeys[e->key.scancode] = false;
         return false;
     }
-    // Route mouse motion directly to character rotation (works without kb focus)
-    if (e->type == SDL_EVENT_MOUSE_MOTION && g_playerCharacter && !g_showSettings && !g_chatFocused) {
-        if (e->motion.xrel != 0.f || e->motion.yrel != 0.f)
-            g_playerCharacter->rotate((float)e->motion.xrel, -(float)e->motion.yrel);
+    if (e->type == SDL_EVENT_MOUSE_MOTION) {
+        ++g_evtMouseCount;
+        float dx = (float)e->motion.xrel;
+        float dy = (float)e->motion.yrel;
+        // Wayland remote desktops often send absolute positions with xrel=yrel=0.
+        // Fall back to computing the delta from the previous absolute position.
+        static float s_lastAbsX = -1.f, s_lastAbsY = -1.f;
+        if (dx == 0.f && dy == 0.f && s_lastAbsX >= 0.f) {
+            dx = (float)e->motion.x - s_lastAbsX;
+            dy = (float)e->motion.y - s_lastAbsY;
+        }
+        s_lastAbsX = (float)e->motion.x;
+        s_lastAbsY = (float)e->motion.y;
+        g_mouseDx += dx;
+        g_mouseDy += dy;
         return false;
     }
     return false;
@@ -224,11 +264,42 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
         g_uiSystem.updateInteraction(camPos, camFwd, interact);
     }
 
-    // Update character physics/state and camera, then process input
+    // Physics step: gravity integration + sphere-sphere + sphere-AABB (static boxes)
+    if (PhysicsEngine* eng = getEngine())
+        eng->update((double)deltaTime);
+
+    // Update character state (physics, camera sync)
     if (g_playerOwned) {
         g_playerOwned->update(deltaTime);
-        if (window && !g_chatFocused)
-            g_playerOwned->processInput(window, deltaTime);
+    }
+
+    // Input: use the registered action system (SettingsManager already has
+    // the merged kbd state from above).
+    if (g_playerOwned && !g_chatFocused) {
+        // Always apply event-based mouse deltas first. On Wayland remote,
+        // SDL_GetWindowRelativeMouseMode can return true while the compositor
+        // never actually captured the pointer, leaving SDL_GetRelativeMouseState
+        // returning zeros. Using events avoids that false-positive entirely.
+        if (g_mouseDx != 0.f || g_mouseDy != 0.f) {
+            g_playerOwned->rotate(g_mouseDx, -g_mouseDy);
+            g_playerOwned->updateCamera();
+            // Drain SDL's hardware delta buffer so processInput doesn't double-rotate.
+            { float tx = 0.f, ty = 0.f; SDL_GetRelativeMouseState(&tx, &ty); }
+        }
+        g_mouseDx = g_mouseDy = 0.f;
+
+        // Fires all bindAction callbacks (Move→move(), Jump, Sprint)
+        // and calls updateCamera() once at the end.
+        g_playerOwned->processInput(window, deltaTime);
+
+        // Sync X/Z: move() changes character foot position; the engine body
+        // position is the sphere center, so center.x/z == foot.x/z. Y stays
+        // owned by the engine (gravity + static collision).
+        if (g_playerBody) {
+            auto pos = g_playerOwned->getPosition(); // foot position
+            g_playerBody->position.x = pos.x;
+            g_playerBody->position.z = pos.z;
+        }
     }
 
 #ifdef HARUKA_NETWORK
@@ -242,28 +313,72 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
 
     // Debug HUD — top-left overlay
     {
-        int numKeys = 0;
-        const bool* kbd = SDL_GetKeyboardState(&numKeys);
-        ImGuiIO& io = ImGui::GetIO();
+        Uint32 winFlags = window ? SDL_GetWindowFlags(window) : 0;
+        bool kbFocus    = !!(winFlags & SDL_WINDOW_INPUT_FOCUS);
+        bool mouseLock  = window && SDL_GetWindowRelativeMouseMode(window);
+
         ImGui::SetNextWindowPos(ImVec2(10.0f, 10.0f), ImGuiCond_Always);
-        ImGui::SetNextWindowBgAlpha(0.55f);
+        ImGui::SetNextWindowBgAlpha(0.70f);
         ImGui::Begin("##debug", nullptr,
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
             ImGuiWindowFlags_NoMove     | ImGuiWindowFlags_AlwaysAutoResize |
             ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoInputs);
+
+        // Position + per-frame delta (non-zero delta proves move() is firing)
         if (g_playerCharacter) {
-            auto p = g_playerCharacter->getPosition();
-            ImGui::Text("pos  %.2f  %.2f  %.2f", (float)p.x, (float)p.y, (float)p.z);
+            static glm::dvec3 s_prevPos{};
+            auto p    = g_playerCharacter->getPosition();
+            auto dp   = p - s_prevPos;
+            s_prevPos = p;
+            auto st   = g_playerCharacter->getState();
+            const char* stateStr[] = {"IDLE","WALK","RUN","JUMP","FALL","CROUCH"};
+            ImGui::Text("pos   %.3f  %.3f  %.3f", (float)p.x,  (float)p.y,  (float)p.z);
+            ImGui::Text("dpos  %.4f  %.4f  %.4f", (float)dp.x, (float)dp.y, (float)dp.z);
+            ImGui::Text("state %s  grnd=%d  spr=%d  crouch=%d",
+                stateStr[(int)st],
+                g_playerCharacter->isGrounded(),
+                g_playerCharacter->isSprinting(),
+                g_playerCharacter->isCrouching());
         }
-        bool locked = window && SDL_GetWindowRelativeMouseMode(window);
-        ImGui::Text("mouse lock: %s", locked ? "yes" : "no");
-        ImGui::Text("kbd[W]=%d S=%d A=%d D=%d",
-            kbd[SDL_SCANCODE_W], kbd[SDL_SCANCODE_S],
-            kbd[SDL_SCANCODE_A], kbd[SDL_SCANCODE_D]);
-        Uint32 winFlags = window ? SDL_GetWindowFlags(window) : 0;
-        ImGui::Text("win focus: kb=%d mouse=%d",
-            (int)!!(winFlags & SDL_WINDOW_INPUT_FOCUS),
-            (int)!!(winFlags & SDL_WINDOW_MOUSE_FOCUS));
+        ImGui::Separator();
+
+        // Input system state (SettingsManager — what the bindings actually see)
+        {
+            glm::vec2 move = sm.readValue<glm::vec2>("Move");
+            ImGui::Text("IS  Move=(%.1f,%.1f)  perf=%d  start=%d  cancel=%d",
+                move.x, move.y,
+                sm.isPerformed("Move"), sm.isStarted("Move"), sm.isCanceled("Move"));
+            ImGui::Text("IS  Sprint perf=%d  Jump perf=%d  Descend perf=%d",
+                sm.isPerformed("Sprint"), sm.isPerformed("Jump"), sm.isPerformed("Descend"));
+        }
+        ImGui::Separator();
+
+        // Raw sources for diagnosing why the input system may not see keys
+        {
+            int numKeys = 0;
+            const bool* kbd = SDL_GetKeyboardState(&numKeys);
+            ImGui::Text("poll W=%d S=%d A=%d D=%d  Shift=%d  Ctrl=%d",
+                kbd[SDL_SCANCODE_W], kbd[SDL_SCANCODE_S],
+                kbd[SDL_SCANCODE_A], kbd[SDL_SCANCODE_D],
+                kbd[SDL_SCANCODE_LSHIFT], kbd[SDL_SCANCODE_LCTRL]);
+            ImGui::Text("evnt W=%d S=%d A=%d D=%d  Shift=%d  Ctrl=%d",
+                (int)g_evtKeys[SDL_SCANCODE_W], (int)g_evtKeys[SDL_SCANCODE_S],
+                (int)g_evtKeys[SDL_SCANCODE_A], (int)g_evtKeys[SDL_SCANCODE_D],
+                (int)g_evtKeys[SDL_SCANCODE_LSHIFT], (int)g_evtKeys[SDL_SCANCODE_LCTRL]);
+        }
+        ImGui::Text("key_ev=%d  mouse_ev=%d  last=%s",
+            g_evtKeyCount, g_evtMouseCount, SDL_GetScancodeName(g_lastScancode));
+        ImGui::Text("mouse_dx=%.2f  mouse_dy=%.2f  chat=%d",
+            g_mouseDx, g_mouseDy, (int)g_chatFocused);
+        ImGui::Separator();
+        ImGui::Text("kb_focus=%d  mouse_focus=%d  ptr_lock=%d",
+            kbFocus,
+            (int)!!(winFlags & SDL_WINDOW_MOUSE_FOCUS),
+            (int)mouseLock);
+        if (!kbFocus)
+            ImGui::TextColored(ImVec4(1,0.4f,0.2f,1), ">> CLICK WINDOW FOR KEYBOARD <<");
+        if (g_chatFocused)
+            ImGui::TextColored(ImVec4(1,0.6f,0.1f,1), ">> CHAT FOCUSED — press Esc <<");
         ImGui::End();
     }
 
@@ -343,6 +458,7 @@ void gameOnShutdown() {
     g_uiSystem.removePanel("InfoPanel");
     g_panelShader.reset();
     g_playerOwned.reset();
+    g_playerBody.reset();
     g_playerCharacter = nullptr;
     g_gameCamera      = nullptr;
     g_scene           = nullptr;
@@ -358,6 +474,7 @@ namespace GameLogic {
         .getCamera       = gameGetCamera,
         .getScene        = gameGetScene,
         .onRenderWorld   = gameOnRenderWorld,
+        .onEvent         = gameOnEvent,
         .name            = "Server Test",
         .version         = "0.1.0"
     };

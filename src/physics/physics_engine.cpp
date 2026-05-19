@@ -32,6 +32,7 @@ void PhysicsEngine::update(double deltaTime) {
     broadPhaseAABB();
     detectCollisions();
     resolveCollisions();
+    resolveStaticCollisions();
 }
 
 void PhysicsEngine::integrateForces(double dt) {
@@ -98,25 +99,92 @@ void PhysicsEngine::detectCollisions() {
 }
 
 void PhysicsEngine::resolveCollisions() {
-    for (auto& collision : collisions) {
-        if (collision.bodyA->isKinematic && collision.bodyB->isKinematic) continue;
-        
-        // Separación elástica simple
-        double totalMass = collision.bodyA->mass + collision.bodyB->mass;
-        double ratio = collision.bodyA->mass / totalMass;
-        
-        if (!collision.bodyA->isKinematic) {
-            collision.bodyA->position -= collision.normal * collision.penetration * ratio;
-        }
-        if (!collision.bodyB->isKinematic) {
-            collision.bodyB->position += collision.normal * collision.penetration * (1.0 - ratio);
+    for (auto& col : collisions) {
+        bool aKin = col.bodyA->isKinematic;
+        bool bKin = col.bodyB->isKinematic;
+        if (aKin && bKin) continue;
+
+        if (aKin) {
+            // bodyA is static — bodyB absorbs all correction
+            col.bodyB->position += col.normal * col.penetration;
+            double vn = glm::dot(col.bodyB->velocity, col.normal);
+            if (vn < 0.0) col.bodyB->velocity -= col.normal * vn;
+        } else if (bKin) {
+            // bodyB is static — bodyA absorbs all correction
+            col.bodyA->position -= col.normal * col.penetration;
+            double vn = glm::dot(col.bodyA->velocity, -col.normal);
+            if (vn < 0.0) col.bodyA->velocity += col.normal * vn;
+        } else {
+            // Both dynamic — split by mass
+            double totalMass = col.bodyA->mass + col.bodyB->mass;
+            double ratioA = col.bodyB->mass / totalMass;
+            double ratioB = col.bodyA->mass / totalMass;
+            col.bodyA->position -= col.normal * col.penetration * ratioA;
+            col.bodyB->position += col.normal * col.penetration * ratioB;
         }
     }
 }
 
+void PhysicsEngine::addStaticBox(const glm::dvec3& center, const glm::dvec3& halfExtents) {
+    staticBoxes.push_back({ center - halfExtents, center + halfExtents });
+}
+
+void PhysicsEngine::clearStaticBoxes() {
+    staticBoxes.clear();
+}
+
 void PhysicsEngine::broadPhaseAABB() {
-    // Placeholder: en escala astronómica necesitarías BVH/Octree
-    // Por ahora detectamos all-pairs (O(n²))
+    if (!octree || bodies.empty()) return;
+    // Rebuild the octree each step so moved bodies are found correctly.
+    // Each body is re-inserted using its updated position from integrateForces().
+    for (auto& body : bodies) {
+        octree->remove(body);
+        octree->insert(body);
+    }
+}
+
+void PhysicsEngine::resolveStaticCollisions() {
+    for (auto& body : bodies) {
+        if (body->isKinematic) continue;
+
+        for (const auto& box : staticBoxes) {
+            // Sphere center (body->position IS the sphere center)
+            const glm::dvec3& c = body->position;
+            const double      r = body->radius;
+
+            // Closest point on AABB to sphere center
+            glm::dvec3 closest = glm::clamp(c, box.bmin, box.bmax);
+            glm::dvec3 diff    = c - closest;
+            double dist = glm::length(diff);
+
+            double penetration = r - dist;
+            if (penetration <= 0.0) continue;
+
+            glm::dvec3 normal;
+            if (dist < 1e-9) {
+                // Center is inside the box — push out on the minimum-penetration axis
+                double px = std::min(c.x - box.bmin.x, box.bmax.x - c.x);
+                double py = std::min(c.y - box.bmin.y, box.bmax.y - c.y);
+                double pz = std::min(c.z - box.bmin.z, box.bmax.z - c.z);
+                if (px <= py && px <= pz)
+                    normal = (c.x < (box.bmin.x + box.bmax.x) * 0.5) ? glm::dvec3(-1,0,0) : glm::dvec3(1,0,0);
+                else if (py <= px && py <= pz)
+                    normal = (c.y < (box.bmin.y + box.bmax.y) * 0.5) ? glm::dvec3(0,-1,0) : glm::dvec3(0,1,0);
+                else
+                    normal = (c.z < (box.bmin.z + box.bmax.z) * 0.5) ? glm::dvec3(0,0,-1) : glm::dvec3(0,0,1);
+                penetration = r + std::min({px, py, pz});
+            } else {
+                normal = diff / dist;
+            }
+
+            // Push body out of the box
+            body->position += normal * penetration;
+
+            // Cancel velocity component directed into the surface
+            double vn = glm::dot(body->velocity, normal);
+            if (vn < 0.0) body->velocity -= normal * vn;
+        }
+    }
 }
 
 void PhysicsEngine::initPlanetaryPhysics(Haruka::WorldSystem* ws, Haruka::PlanetarySystem* ps, RaycastSimple* rs) {

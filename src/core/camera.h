@@ -46,9 +46,6 @@ public:
     glm::mat4 getProjectionMatrix(float aspectRatio) const;
     /** @brief Applies mouse-delta rotation update. */
     void rotate(float deltaX, float deltaY);
-    /** @brief Processes movement input from SDL keyboard state. */
-    void processInput(SDL_Window* window, float deltaTime);
-
     /** @brief Sets the projection matrix ratio. */
     void setAspectRatio();
     /** @brief Sets the aspect ratio for projection matrix calculations. */

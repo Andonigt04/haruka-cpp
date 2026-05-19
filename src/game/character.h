@@ -105,6 +105,7 @@ public:
     bool isCrouching() const { return crouched; }
     bool isLocalPlayer() const { return localPlayer; }
     bool isInFlightMode() const { return flightMode; }
+    void setGrounded(bool g) { grounded = g; }
     ///@}
     
     void setFlightMode(bool enabled) { flightMode = enabled; }
@@ -144,6 +145,11 @@ public:
     void move(glm::vec2 input, float deltaTime);
 
     float getSpeed() const;
+
+    /** Sync camera position/orientation from current yaw/pitch/position.
+     *  Call after rotate() so the view matrix reflects the new direction
+     *  without waiting for the next update() tick. */
+    void updateCamera();
 
 private:
     // Type-erased action binding
@@ -202,8 +208,6 @@ private:
     float syncTimer = 0.0f;
     float interpolationSpeed = 5.0f;
     
-    /** @brief Updates the attached camera from current character state. */
-    void updateCamera();
     /** @brief Updates locomotion state from velocity/input context. */
     void updateState();
     /** @brief Recomputes grounded state from physics/orientation. */
