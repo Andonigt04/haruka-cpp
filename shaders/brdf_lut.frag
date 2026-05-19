@@ -1,6 +1,19 @@
-#version 460 core
-out vec2 FragColor;
-in vec2 TexCoords;
+/**
+ * @file brdf_lut.frag
+ * @brief Pre-integrates the GGX split-sum BRDF lookup table.
+ *
+ * Implements the split-sum approximation from Karis 2013 (Epic Games).
+ * For each (NdotV, roughness) texel, 1024 importance-sampled GGX microfacet
+ * directions are integrated to produce two scale/bias terms (A, B) stored in
+ * RG16F. ibl.frag reads this LUT to reconstruct the specular reflectance.
+ *
+ * TexCoords.x → NdotV,  TexCoords.y → roughness
+ * Out: FragColor.rg = (A, B) — Fresnel scale and bias
+ */
+#version 450 core
+
+layout(location = 0) out vec2 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
 const float PI = 3.14159265359;
 
@@ -27,8 +40,6 @@ vec2 IntegrateBRDF(float NdotV, float roughness)
 
     float A = 0.0;
     float B = 0.0;
-
-    vec3 N = vec3(0.0, 0.0, 1.0);
 
     for(uint i = 0u; i < SAMPLE_COUNT; ++i)
     {

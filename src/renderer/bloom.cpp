@@ -1,5 +1,5 @@
 #include "bloom.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <iostream>
 
 Bloom::Bloom(unsigned int width, unsigned int height) : width(width), height(height)

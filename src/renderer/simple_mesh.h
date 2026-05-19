@@ -1,3 +1,7 @@
+/**
+ * @file simple_mesh.h
+ * @brief Backward-compatibility `SimpleMesh` alias for `Mesh`.
+ */
 #ifndef SIMPLE_MESH_H
 #define SIMPLE_MESH_H
 

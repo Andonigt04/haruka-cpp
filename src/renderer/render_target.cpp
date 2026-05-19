@@ -1,5 +1,5 @@
 #include "render_target.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <iostream>
 
 RenderTarget::RenderTarget(unsigned int width, unsigned int height)
@@ -22,12 +22,17 @@ void RenderTarget::setupFramebuffer() {
     // Depth buffer
     glGenRenderbuffers(1, &rboDepth);
     glBindRenderbuffer(GL_RENDERBUFFER, rboDepth);
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, width, height);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rboDepth);
 
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "RenderTarget framebuffer incomplete!");
     }
+
+    // Initialize to transparent black — GL_RGBA16F left with nullptr data can
+    // contain NaN/Inf bit patterns on AMD VRAM, causing GPU faults when sampled.
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

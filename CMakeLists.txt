@@ -1,167 +1,181 @@
 cmake_minimum_required(VERSION 3.14)
-project(HarukaEngine)
+
+# Must be set before project() so -DVERSION=x.x.x is picked up.
+set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
+
+project(HarukaEngine VERSION ${VERSION})
 
 set(OpenGL_GL_PREFERENCE GLVND)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# ===== Optimization Flags =====
-if(MSVC)
-    # Visual Studio optimizations
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Oi /Ot /Oy /GL /fp:fast /arch:AVX2")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "/LTCG /OPT:REF /OPT:ICF")
-else()
-    # GCC/Clang optimizations
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -mtune=native -flto -ffast-math -fno-signed-zeros -fno-trapping-math")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "-O3 -flto")
-    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "-O3 -flto")
+if(NOT MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -flto -ffast-math")
 endif()
-
-# Default to Release build
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release)
-endif()
-
-include(FetchContent)
 
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
-set(GLAD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/glad")
-set(GLM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/glm")
-set(STB_DIR "${THIRD_PARTY_DIR}/stb")
-set(IMGUI_DIR "${THIRD_PARTY_DIR}/imgui")
-set(WEBSOCKETPP_DIR "${THIRD_PARTY_DIR}/websocketpp")
-set(OPENAL_DIR "${THIRD_PARTY_DIR}/OpenAL")
-set(JSON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/json")
-set(NFD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nativefiledialog")
+
+# Output layout: build/x.x.x/bin/ for .so and shaders.
+# haruka/CMakeLists.txt reads from here directly (no install step needed during dev).
+set(VERSION_DIR "${CMAKE_BINARY_DIR}/${PROJECT_VERSION}")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+
+# --- 1. System Dependencies ---
+find_package(PkgConfig   REQUIRED)
+find_package(SDL3        REQUIRED)
+find_package(OpenGL      REQUIRED)
+find_package(assimp      REQUIRED)
+find_package(OpenSSL     REQUIRED)
+find_package(OpenAL      REQUIRED)
+find_package(PostgreSQL  REQUIRED)
+pkg_check_modules(GTK3 REQUIRED IMPORTED_TARGET gtk+-3.0)
+
+# --- 2. Header-Only Fallback Macro ---
+macro(find_header_fallback NAME HEADER_FILE SUBDIR)
+    find_path(${NAME}_INCLUDE_DIR ${HEADER_FILE}
+        PATH_SUFFIXES ${SUBDIR}
+        PATHS ${THIRD_PARTY_DIR}/${SUBDIR}
+    )
+    if(${NAME}_INCLUDE_DIR)
+        message(STATUS "Found ${NAME}: ${${NAME}_INCLUDE_DIR}")
+        include_directories(${${NAME}_INCLUDE_DIR})
+    else()
+        message(FATAL_ERROR "${NAME} not found. Install the -devel package or place it in third_party/")
+    endif()
+endmacro()
+
+find_header_fallback(NLOHMANN_JSON "nlohmann/json.hpp" "json/include")
+find_header_fallback(GLM           "glm/glm.hpp"       "glm")
+find_header_fallback(STB           "stb_image.h"       "stb")
+
+# --- 3. Sources ---
+set(GLAD_SOURCE "${THIRD_PARTY_DIR}/glad/src/glad.c")
+
+set(IMGUI_SOURCES
+    ${THIRD_PARTY_DIR}/imgui/imgui.cpp
+    ${THIRD_PARTY_DIR}/imgui/imgui_draw.cpp
+    ${THIRD_PARTY_DIR}/imgui/imgui_tables.cpp
+    ${THIRD_PARTY_DIR}/imgui/imgui_widgets.cpp
+    ${THIRD_PARTY_DIR}/imgui/imgui_demo.cpp
+    ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl3.cpp
+    ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_opengl3.cpp
+)
 
 set(NFD_SOURCES
-    ${NFD_DIR}/src/nfd_common.c
-    ${NFD_DIR}/src/nfd_gtk.c
+    ${THIRD_PARTY_DIR}/nativefiledialog/src/nfd_common.c
+    ${THIRD_PARTY_DIR}/nativefiledialog/src/nfd_gtk.c
 )
 
-set(NFD_INCLUDE_DIRS "${NFD_DIR}/src/include")
-set(GTK3_INCLUDE_DIRS ${GTK3_INCLUDE_DIRS})
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
-find_package(glfw3 REQUIRED)
-find_package(assimp REQUIRED)
-find_package(OpenGL REQUIRED)
-find_package(OpenSSL REQUIRED)
-find_package(OpenAL REQUIRED)
-find_package(PostgreSQL REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
-
-include_directories(
-  src
-  ${GLAD_DIR}/include
-  ${GLM_DIR}
-  ${STB_DIR}
-  ${IMGUI_DIR}
-  ${IMGUI_DIR}/backends
-  ${ASSIMP_INCLUDE_DIRS}
-  ${WEBSOCKETPP_DIR}
-  ${OPENAL_INCLUDE_DIR}
-  ${PostgreSQL_INCLUDE_DIRS}
-  ${NLOHMANN_DIR}
-  ${JSON_DIR}/include
-  ${NFD_DIR}/src/include
-  ${GTK3_INCLUDE_DIRS}
-)
-
-file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/shaders" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
-
-# ImGui sources
-set(IMGUI_SOURCES
-    ${IMGUI_DIR}/imgui.cpp
-    ${IMGUI_DIR}/imgui_draw.cpp
-    ${IMGUI_DIR}/imgui_tables.cpp
-    ${IMGUI_DIR}/imgui_widgets.cpp
-    ${IMGUI_DIR}/imgui_demo.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
-    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
-)
-
-# Engine sources
-file(GLOB_RECURSE ENGINE_SOURCES 
-    "src/core/*.cpp" 
-    "src/renderer/*.cpp"
-    "src/io/*.cpp"
-    "src/physics/*.cpp"
-    "src/audio/*.cpp"
-    "src/game/*.cpp"
-    "src/network/*.cpp"
-    "src/database/*.cpp"
-)
-
-# Network sources (cliente + servidor)
-file(GLOB_RECURSE NETWORK_SOURCES
-    "src/network/*.cpp"
-)
-
-# Database sources
-file(GLOB_RECURSE DATABASE_SOURCES
-    "src/database/*.cpp"
-)
-
-set(GLAD_SOURCE "${GLAD_DIR}/src/glad.c")
-
-# ==== Librería compartida del Motor ====
+# --- 4. Main Target ---
 add_library(HarukaEngine SHARED
     ${ENGINE_SOURCES}
     ${GLAD_SOURCE}
     ${IMGUI_SOURCES}
-)
-
-# Enable optimizations for HarukaEngine
-set_target_properties(HarukaEngine PROPERTIES
-    INTERPROCEDURAL_OPTIMIZATION TRUE
-    POSITION_INDEPENDENT_CODE ON
-    VISIBILITY_INLINES_HIDDEN ON
+    ${NFD_SOURCES}
 )
 
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${THIRD_PARTY_DIR}/glad/include"
+    "${THIRD_PARTY_DIR}/imgui"
+    "${THIRD_PARTY_DIR}/imgui/backends"
+    "${THIRD_PARTY_DIR}/nativefiledialog/src/include"
 )
 
 target_link_libraries(HarukaEngine PUBLIC
-    glfw 
+    SDL3::SDL3
     OpenGL::GL
     assimp::assimp
     OpenSSL::Crypto
-    ${OPENAL_LIBRARY}
-    ${CMAKE_DL_LIBS}
+    OpenAL::OpenAL
     PostgreSQL::PostgreSQL
+    PkgConfig::GTK3
+    ${CMAKE_DL_LIBS}
 )
 
-install(TARGETS HarukaEngine
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+# --- 5. GLSL -> SPIR-V Shader Compilation ---
+find_program(GLSLC     glslc)
+find_program(GLSLANG_V glslangValidator)
+
+if(NOT GLSLC AND NOT GLSLANG_V)
+    message(FATAL_ERROR
+        "glslc or glslangValidator is required to compile SPIR-V shaders.\n"
+        "  Fedora/RHEL: sudo dnf install glslang\n"
+        "  Ubuntu/Deb:  sudo apt install glslang-tools")
+endif()
+
+set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+set(SHADER_OUT_DIR "${VERSION_DIR}/bin/shaders")
+file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
+
+file(GLOB SHADER_SOURCES
+    "${SHADER_SRC_DIR}/*.vert"
+    "${SHADER_SRC_DIR}/*.frag"
+    "${SHADER_SRC_DIR}/*.geom"
+    "${SHADER_SRC_DIR}/*.comp"
 )
 
-option(BUILD_RUNTIME "Build HarukaEngine" ON)
+set(SPIRV_OUTPUTS "")
+foreach(SRC ${SHADER_SOURCES})
+    get_filename_component(NAME ${SRC} NAME)
+    set(SPV     "${SHADER_OUT_DIR}/${NAME}.spv")
+    set(DST_SRC "${SHADER_OUT_DIR}/${NAME}")
 
-# ==== Install rules ====
+    if(GLSLC)
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${GLSLC} --target-env=opengl ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
+            DEPENDS ${SRC}
+            COMMENT "glslc  ${NAME} -> ${NAME}.spv"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${GLSLANG_V} -G ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
+            DEPENDS ${SRC}
+            COMMENT "glslangValidator  ${NAME} -> ${NAME}.spv"
+            VERBATIM)
+    endif()
+
+    list(APPEND SPIRV_OUTPUTS ${SPV})
+endforeach()
+
+add_custom_target(HarukaShaders ALL DEPENDS ${SPIRV_OUTPUTS})
+add_dependencies(HarukaEngine HarukaShaders)
+
+# --- 6b. DGS Network Client (optional) ---
+option(HARUKA_NETWORK "Enable DGS network client" OFF)
+if(HARUKA_NETWORK)
+    target_compile_definitions(HarukaEngine PUBLIC HARUKA_NETWORK)
+    target_include_directories(HarukaEngine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
+    target_link_libraries(HarukaEngine PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs/sdk/libdgs_client.a"
+        OpenSSL::SSL
+    )
+endif()
+
+# --- 6. Install Rules ---
+# cmake --install build --prefix <haruka/build>
+# Result: <prefix>/1.0.0/bin/libHarukaEngine.so
+#         <prefix>/1.0.0/bin/shaders/*.spv
+#         <prefix>/1.0.0/lib64/haruka-cpp/**.(h|cpp)
 include(GNUInstallDirs)
 
-install(TARGETS HarukaEngine LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS HarukaEngine
+        LIBRARY DESTINATION "${PROJECT_VERSION}/bin"
+        RUNTIME DESTINATION "${PROJECT_VERSION}/bin")
 
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/core"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/renderer"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/io"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/physics"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/audio"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/game"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/network"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/database"
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/engines/haruka-cpp"
-        FILES_MATCHING PATTERN "*.h" PATTERN "*.cpp"
-)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/shaders DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
+        DESTINATION "${PROJECT_VERSION}/lib64/haruka-cpp"
+        FILES_MATCHING
+        PATTERN "*.h"
+        PATTERN "*.hpp"
+        PATTERN "*.cpp")
 
-# ==== CPack ====
-set(CPACK_PACKAGE_NAME "HarukaEngine")
-set(CPACK_PACKAGE_VERSION "0.1.0")
-set(CPACK_GENERATOR "ZIP;DEB")
-set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Haruka")
-include(CPack)
+install(DIRECTORY "${SHADER_OUT_DIR}/"
+        DESTINATION "${PROJECT_VERSION}/bin/shaders"
+        FILES_MATCHING PATTERN "*.spv")

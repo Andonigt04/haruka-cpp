@@ -1,3 +1,7 @@
+/**
+ * @file ssao.h
+ * @brief Screen-space ambient occlusion — kernel generation, noise texture, and FBO.
+ */
 #pragma once
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -21,6 +25,10 @@ public:
 
     /** @brief Returns SSAO output texture id. */
     unsigned int getSSAOTexture() const { return ssaoColorBuffer; }
+    /** @brief Returns the hemisphere sample kernel (vec3[64]). */
+    const std::vector<glm::vec3>& getKernel() const { return ssaoKernel; }
+    /** @brief Returns the 4×4 noise texture id. */
+    unsigned int getNoiseTexture() const { return noiseTexture; }
 
 private:
     /** @brief Allocates framebuffer and textures. */

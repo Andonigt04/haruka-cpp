@@ -1,3 +1,7 @@
+/**
+ * @file motor_instance.h
+ * @brief Singleton bridge exposing active render target, scene, camera, and app to editor code.
+ */
 #pragma once
 
 class Application;
@@ -5,7 +9,7 @@ class RenderTarget;
 class Camera;
 
 namespace Haruka {
-    class Scene;
+    class SceneManager;
 }
 
 /**
@@ -30,7 +34,7 @@ public:
     }
     
     /** @brief Stores the active scene pointer. */
-    void setScene(Haruka::Scene* scene) {
+    void setScene(Haruka::SceneManager* scene) {
         motorScene = scene;
     }
     
@@ -50,7 +54,7 @@ public:
     }
     
     /** @brief Returns the active scene pointer. */
-    Haruka::Scene* getScene() const {
+    Haruka::SceneManager* getScene() const {
         return motorScene;
     }
     
@@ -68,12 +72,16 @@ public:
     bool isMotorActive() const {
         return motorScene != nullptr && motorRenderTarget != nullptr;
     }
-    
+
+    void setPlayMode(bool play) { motorPlayMode = play; }
+    bool isPlayMode() const     { return motorPlayMode; }
+
     /** @brief Clears non-owning runtime pointers. */
     void clear() {
         motorScene = nullptr;
         motorCamera = nullptr;
         motorApplication = nullptr;
+        motorPlayMode = false;
     }
 
 private:
@@ -85,7 +93,8 @@ private:
     MotorInstance& operator=(const MotorInstance&) = delete;
 
     RenderTarget* motorRenderTarget = nullptr;
-    Haruka::Scene* motorScene = nullptr;
+    Haruka::SceneManager* motorScene = nullptr;
     Camera* motorCamera = nullptr;
     Application* motorApplication = nullptr;
+    bool motorPlayMode = false;
 };

@@ -1,3 +1,7 @@
+/**
+ * @file spawn_system.h
+ * @brief Spawn points, respawn timers, and checkpoint management for gameplay.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

@@ -1,6 +1,6 @@
 #include "camera.h"
 
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 
 Camera::Camera(Haruka::WorldPos startPos)
     : position(startPos), orientation(glm::dvec3(0.0, 0.0, 0.0)), zoom(45.0f) {}
@@ -14,7 +14,13 @@ glm::vec3 Camera::getUp() const {
 }
 
 glm::mat4 Camera::getViewMatrix() const {
-    return glm::lookAt(Haruka::LocalPos(position), Haruka::LocalPos(position) + getFront(), getUp());
+    // Use double-precision lookAt so the forward direction (pos + front) doesn't
+    // get lost to float rounding at large world positions (e.g. 1.5e8 units).
+    // The resulting dmat4 is then narrowed to mat4 for the shader.
+    Haruka::WorldPos pos = position;
+    glm::dvec3 front = glm::dvec3(getFront());
+    glm::dvec3 up    = glm::dvec3(getUp());
+    return glm::mat4(glm::lookAt(pos, pos + front, up));
 }
 
 void Camera::rotate(float deltaX, float deltaY) {
@@ -30,16 +36,18 @@ void Camera::rotate(float deltaX, float deltaY) {
     orientation *= glm::angleAxis(yRad, pitchAxis);
 }
 
-void Camera::processInput(GLFWwindow* window, float deltaTime) {
-    double velocity = (double)speed * (double)deltaTime;
+void Camera::processInput(SDL_Window* /*window*/, float deltaTime) {
+    const bool* keys = SDL_GetKeyboardState(nullptr);
+    double multiplier = keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0;
+    double velocity = (double)speed * (double)deltaTime * multiplier;
     glm::vec3 right = glm::normalize(glm::cross(getFront(), getUp()));
-    
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) position += Haruka::WorldPos(getFront()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) position -= Haruka::WorldPos(getFront()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) position -= Haruka::WorldPos(right) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) position += Haruka::WorldPos(right) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS) position += Haruka::WorldPos(getUp()) * velocity;
-    if (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS) position -= Haruka::WorldPos(getUp()) * velocity;
+
+    if (keys[SDL_SCANCODE_W])     position += Haruka::WorldPos(getFront()) * velocity;
+    if (keys[SDL_SCANCODE_S])     position -= Haruka::WorldPos(getFront()) * velocity;
+    if (keys[SDL_SCANCODE_A])     position -= Haruka::WorldPos(right) * velocity;
+    if (keys[SDL_SCANCODE_D])     position += Haruka::WorldPos(right) * velocity;
+    if (keys[SDL_SCANCODE_SPACE]) position += Haruka::WorldPos(getUp()) * velocity;
+    if (keys[SDL_SCANCODE_LCTRL]) position -= Haruka::WorldPos(getUp()) * velocity;
 }
 
 void Camera::ProcessMouseScroll(float yoffset) {
@@ -49,5 +57,9 @@ void Camera::ProcessMouseScroll(float yoffset) {
 }
 
 glm::mat4 Camera::getProjectionMatrix() const {
-    return glm::perspective(glm::radians(zoom), 16.0f / 9.0f, 0.1f, 100.0f);
+    return glm::perspective(glm::radians(zoom), 16.0f / 9.0f, 0.1f, 300000000000.0f);
+}
+
+glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
+    return glm::perspective(glm::radians(zoom), aspectRatio, 0.1f, 300000000000.0f);
 }

@@ -1,58 +1,73 @@
-#version 460 core
+/**
+ * @file deferred_light.frag
+ * @brief Deferred lighting pass — resolves all lights from the GBuffer.
+ *
+ * Reads gPosition/gNormal/gAlbedoSpec/gEmissive and accumulates:
+ *   - Ambient (constant 0.1 * albedo)
+ *   - Directional light (position.length > 1000 = sun heuristic) with
+ *     cascaded shadow maps (PCF 3×3, up to 4 cascades)
+ *   - Point lights (up to 256) with quadratic attenuation
+ *   - Omnidirectional point shadow (PCF disk, 8 taps)
+ *   - Emissive contribution (* 0.5)
+ *
+ * In:  TexCoords (screen UV)
+ * Out: FragColor (HDR lit scene)
+ * Samplers: gPosition, gNormal, gAlbedoSpec, gEmissive, ssao,
+ *           pointShadowMap (cubemap), cascadeShadowMaps[4]
+ * UBO: Params, Matrices, Lights[256]
+ */
+#version 450 core
+
 #extension GL_ARB_gpu_shader_fp64 : enable
 
-out vec4 FragColor;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
-in vec2 TexCoords;
+layout(binding = 0) uniform sampler2D gPosition;
+layout(binding = 1) uniform sampler2D gNormal;
+layout(binding = 2) uniform sampler2D gAlbedoSpec;
+layout(binding = 3) uniform sampler2D gEmissive;
+layout(binding = 4) uniform sampler2D ssao;
+layout(binding = 5) uniform samplerCube prefilterMap;
+layout(binding = 6) uniform sampler2D brdfLUT;
+layout(binding = 7)  uniform sampler2DShadow cascadeShadowMaps[4];
+layout(binding = 11) uniform samplerCube    pointShadowMap;
 
-uniform sampler2D gPosition;
-uniform sampler2D gNormal;
-uniform sampler2D gAlbedoSpec;
-uniform sampler2D gEmissive;
-uniform sampler2D ssao;
-uniform samplerCube pointShadowMap;
-uniform sampler2DShadow cascadeShadowMaps[4];
+// locations 0-6: scalars / float array
+layout(location = 0) uniform vec3 viewPos;
+layout(location = 1) uniform int numCascades;
+layout(location = 2) uniform int numLights;
+layout(location = 3) uniform float cascadeSplits[4];   // [0]=3 [1]=4 [2]=5 [3]=6
+// locations 7-10: view mat4 (1 mat4 = 4 locations)
+layout(location = 7) uniform mat4 view;
+// locations 11-26: cascade matrices (4 mat4 = 16 locations)
+layout(location = 11) uniform mat4 cascadeLightSpaceMatrices[4];
+// locations 27-282: light positions, 283-538: light colors
+layout(location = 27)  uniform vec3 lightPositions[256];
+layout(location = 283) uniform vec3  lightColors[256];
+// location 539: point shadow far plane
+layout(location = 539) uniform float pointFarPlane;
 
-uniform vec3 viewPos;
-uniform mat4 view;
-uniform vec3 lightPos;
-uniform float farPlane;
-uniform mat4 cascadeLightSpaceMatrices[4];
-uniform float cascadeSplits[4];
-uniform int numCascades;
-
-struct Light {
-    vec3 position;
-    vec3 color;
-};
-uniform Light lights[256];  // Aumentado de 32 a 256
-uniform int numLights;
-
-const vec3 sampleOffsetDirections[8] = vec3[]
-(
-   vec3( 1,  1,  1), vec3( 1, -1,  1), vec3(-1, -1,  1), vec3(-1,  1,  1), 
-   vec3( 1,  1, -1), vec3( 1, -1, -1), vec3(-1, -1, -1), vec3(-1,  1, -1)
-);
-
-float ShadowCalculation(vec3 FragPos)
+float calcPointShadow(vec3 fragPos, vec3 lPos)
 {
-    vec3 fragToLight = FragPos - lightPos;
-    float currentDepth = length(fragToLight);
+    vec3 fragToLight = fragPos - lPos;
+    float currentDepth = length(fragToLight) / pointFarPlane;
+    float bias = 0.05;
+    float diskRadius = 0.05;
+
+    const vec3 dirs[8] = vec3[8](
+        vec3( 1, 0, 0), vec3(-1, 0, 0),
+        vec3( 0, 1, 0), vec3( 0,-1, 0),
+        vec3( 0, 0, 1), vec3( 0, 0,-1),
+        vec3( 1, 1, 0) * 0.7071, vec3(-1,-1, 0) * 0.7071
+    );
 
     float shadow = 0.0;
-    const float bias = 0.05;
-    const int samples = 8;
-    const float diskRadius = 0.01;
-
-    for(int i = 0; i < samples; ++i)
-    {
-        float closestDepth = texture(pointShadowMap, normalize(fragToLight + sampleOffsetDirections[i] * diskRadius)).r;
-        closestDepth *= farPlane;
-        if(currentDepth - bias > closestDepth)
-            shadow += 1.0;
+    for (int s = 0; s < 8; ++s) {
+        float closest = texture(pointShadowMap, fragToLight + dirs[s] * diskRadius).r;
+        shadow += currentDepth - bias > closest ? 1.0 : 0.0;
     }
-    shadow /= float(samples);
-    return shadow;
+    return shadow / 8.0;
 }
 
 int getCascadeIndex(float viewDepth)
@@ -96,49 +111,59 @@ void main()
     vec3 Albedo  = texture(gAlbedoSpec, TexCoords).rgb;
     float Spec   = texture(gAlbedoSpec, TexCoords).a;
     vec3 Emissive = texture(gEmissive, TexCoords).rgb;
-    float AO = 1.0;
 
     vec3 viewDir = normalize(viewPos - FragPos);
     float viewDepth = -(view * vec4(FragPos, 1.0)).z;
 
+    // ===== IBL AMBIENT =====
+    float AO       = texture(ssao, TexCoords).r;
+    float roughness = 1.0 - Spec;
+    float NdotV    = max(dot(Normal, viewDir), 0.0);
+    vec3  R        = reflect(-viewDir, Normal);
+
+    vec3 diffuseIBL  = textureLod(prefilterMap, Normal, 4.0).rgb;
+    vec3 specularIBL = textureLod(prefilterMap, R, roughness * 4.0).rgb;
+    vec2 brdf        = texture(brdfLUT, vec2(NdotV, roughness)).rg;
+
+    vec3 ambient = (diffuseIBL * Albedo + specularIBL * (0.04 * brdf.x + brdf.y)) * AO;
+
     // ===== DIRECT LIGHTING =====
-    vec3 lighting = vec3(0.0);
-    
-    // Ambient
-    vec3 ambient = 0.1 * Albedo * AO;
-    lighting += ambient;
+    vec3 lighting = ambient;
 
     for(int i = 0; i < numLights; ++i)
     {
         // Detectar si es DirectionalLight (posición muy lejana, > 1000)
-        float dist = length(lights[i].position);
-        
+        float dist = length(lightPositions[i]);
+
         if (dist > 1000.0) {
             // === DIRECTIONAL LIGHT (Sun) ===
-            vec3 lightDir = normalize(lights[i].position);
+            vec3 lightDir = normalize(lightPositions[i]);
             float diff = max(dot(Normal, lightDir), 0.0);
             float visibility = calculateCascadedVisibility(FragPos, Normal, lightDir, viewDepth);
 
             vec3 halfwayDir = normalize(lightDir + viewDir);
             float spec = pow(max(dot(Normal, halfwayDir), 0.0), 32.0) * Spec;
 
-            vec3 radiance = lights[i].color;
+            vec3 radiance = lightColors[i];
 
             lighting += visibility * (diff * Albedo + spec * vec3(0.5)) * radiance;
         } else {
             // === POINT LIGHT ===
-            vec3 lightDir = normalize(lights[i].position - FragPos);
+            vec3 lightDir = normalize(lightPositions[i] - FragPos);
             float diff = max(dot(Normal, lightDir), 0.0);
 
             vec3 halfwayDir = normalize(lightDir + viewDir);
             float spec = pow(max(dot(Normal, halfwayDir), 0.0), 32.0) * Spec;
 
-            float distance = length(lights[i].position - FragPos);
+            float distance = length(lightPositions[i] - FragPos);
             float attenuation = 1.0 / (distance * distance + 0.001);
 
-            vec3 radiance = lights[i].color * attenuation;
+            vec3 radiance = lightColors[i] * attenuation;
 
-            lighting += (diff * Albedo + spec * vec3(0.5)) * radiance;
+            float shadow = pointFarPlane > 0.0
+                ? calcPointShadow(FragPos, lightPositions[i])
+                : 0.0;
+            lighting += (1.0 - shadow) * (diff * Albedo + spec * vec3(0.5)) * radiance;
         }
     }
     

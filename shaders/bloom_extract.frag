@@ -1,16 +1,28 @@
-#version 460 core
-out vec4 FragColor;
+/**
+ * @file bloom_extract.frag
+ * @brief Extracts bright pixels for the bloom pipeline.
+ *
+ * Computes perceptual luminance using BT.709 coefficients
+ * (0.2126 R + 0.7152 G + 0.0722 B). Pixels above `threshold` pass through;
+ * others are zeroed. The result is fed into bloom_blur.frag.
+ *
+ * In:  TexCoords
+ * Out: FragColor — original color if bright, black otherwise
+ * Sampler: scene (HDR render target)
+ * Uniforms: threshold (location 0)
+ */
+#version 450 core
 
-in vec2 TexCoords;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
-uniform sampler2D scene;
-uniform float threshold;
+layout(binding = 0) uniform sampler2D scene;
+layout(location = 0) uniform float threshold;
 
 void main()
 {
     vec3 color = texture(scene, TexCoords).rgb;
     float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    
     if(brightness > threshold)
         FragColor = vec4(color, 1.0);
     else

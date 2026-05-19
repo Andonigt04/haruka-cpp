@@ -1,19 +1,33 @@
-#version 460 core
-out vec4 FragColor;
+/**
+ * @file ibl.frag
+ * @brief Image-Based Lighting ambient contribution pass.
+ *
+ * Reads the GBuffer and computes the diffuse IBL ambient term using the
+ * Fresnel-Schlick roughness approximation. Metallic surfaces contribute less
+ * diffuse (kD suppressed). Result is blended additively over deferred lighting.
+ *
+ * In:  TexCoords (screen UV)
+ * Out: FragColor (HDR ambient contribution)
+ * Samplers: gPosition, gNormal, gAlbedoSpec (metallic in .a),
+ *           irradianceMap, prefilterMap, brdfLUT, envMap
+ * UBO: Params { viewPos }
+ */
+#version 450 core
 
-in vec2 TexCoords;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec2 TexCoords;
 
-uniform sampler2D gPosition;
-uniform sampler2D gNormal;
-uniform sampler2D gAlbedoSpec;
-uniform samplerCube irradianceMap;
-uniform samplerCube prefilterMap;
-uniform sampler2D brdfLUT;
+layout(set = 0, binding = 0) uniform sampler2D gPosition;
+layout(set = 0, binding = 1) uniform sampler2D gNormal;
+layout(set = 0, binding = 2) uniform sampler2D gAlbedoSpec;
+layout(set = 0, binding = 3) uniform samplerCube irradianceMap;
+layout(set = 0, binding = 4) uniform samplerCube prefilterMap; // reserved — specular IBL not yet implemented
+layout(set = 0, binding = 5) uniform sampler2D brdfLUT;        // reserved — specular IBL not yet implemented
+layout(set = 0, binding = 6) uniform samplerCube envMap;       // reserved — specular IBL not yet implemented
 
-uniform vec3 viewPos;
-uniform samplerCube envMap;
-
-const float PI = 3.14159265359;
+layout(set = 0, binding = 7) uniform Params {
+    vec3 viewPos;
+};
 
 vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness)
 {

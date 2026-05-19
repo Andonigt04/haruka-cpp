@@ -1,8 +1,12 @@
+/**
+ * @file light_culler.h
+ * @brief Dynamic light culler — frustum/distance/range rejection before GPU upload.
+ */
 #pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
-#include "core/scene.h"
+#include "core/scene/scene_manager.h"
 
 /**
  * @brief Dynamic light culling helper.
@@ -32,7 +36,7 @@ public:
      * @return Filtered light set ready for GPU upload.
      */
     std::vector<CulledLight> cullLights(
-        Haruka::Scene* scene,
+        Haruka::SceneManager* scene,
         const glm::mat4& viewMatrix,
         const glm::mat4& projMatrix,
         int maxLights = 256

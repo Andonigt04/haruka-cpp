@@ -1,3 +1,7 @@
+/**
+ * @file point_shadow.h
+ * @brief Omnidirectional point-light shadow map using a depth cubemap.
+ */
 #pragma once
 #include <glad/glad.h>
 #include <glm/glm.hpp>

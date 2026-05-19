@@ -11,10 +11,12 @@ MeshRendererComponent::~MeshRendererComponent() = default;
 // Actualiza tanto recurso residente como copia fuente en CPU.
 void MeshRendererComponent::setMesh(const std::vector<glm::vec3>& vertices,
                                     const std::vector<glm::vec3>& normals,
+                                    const std::vector<glm::vec3>& colors,
                                     const std::vector<unsigned int>& indices) {
     mesh = std::make_shared<SimpleMesh>(vertices, normals, indices);
     sourceVertices = vertices;
     sourceNormals = normals;
+    sourceColors = colors;
     sourceIndices = indices;
     cachedVertexCount = static_cast<int>(vertices.size());
     cachedTriangleCount = static_cast<int>(indices.size() / 3);

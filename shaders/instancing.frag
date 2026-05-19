@@ -1,36 +1,29 @@
-#version 460 core
+/**
+ * @file instancing.frag
+ * @brief GBuffer output for GPU-instanced objects.
+ *
+ * Writes instance color as albedo, reconstructed normal, and world position
+ * into the deferred GBuffer so instanced objects participate in IBL, shadows,
+ * and SSAO exactly like non-instanced geometry.
+ *
+ * In:  FragPos, Normal, InstanceColor (from instancing.vert)
+ * Out: gPosition, gNormal, gAlbedoSpec, gEmissive
+ */
+#version 450 core
 
-in vec3 FragPos;
-in vec3 Normal;
-in vec2 TexCoord;
-in vec4 InstanceColor;
+layout(location = 0) in vec3 FragPos;
+layout(location = 1) in vec3 Normal;
+layout(location = 3) in vec4 InstanceColor;
 
-out vec4 FragColor;
+layout(location = 0) out vec3 gPosition;
+layout(location = 1) out vec3 gNormal;
+layout(location = 2) out vec4 gAlbedoSpec;
+layout(location = 3) out vec3 gEmissive;
 
-uniform sampler2D texture_diffuse1;
-uniform vec3 viewPos;
-uniform vec3 lightPos;
-uniform vec3 lightColor;
-
-void main() {
-    // Ambient
-    float ambientStrength = 0.3;
-    vec3 ambient = ambientStrength * InstanceColor.rgb;
-    
-    // Diffuse
-    vec3 norm = normalize(Normal);
-    vec3 lightDir = normalize(lightPos - FragPos);
-    float diff = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse = diff * lightColor;
-    
-    // Specular
-    float specularStrength = 0.5;
-    vec3 viewDir = normalize(viewPos - FragPos);
-    vec3 reflectDir = reflect(-lightDir, norm);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), 32.0);
-    vec3 specular = specularStrength * spec * lightColor;
-    
-    vec3 result = (ambient + diffuse + specular) * InstanceColor.rgb;
-    
-    FragColor = vec4(result, InstanceColor.a);
+void main()
+{
+    gPosition    = FragPos;
+    gNormal      = normalize(Normal);
+    gAlbedoSpec  = vec4(InstanceColor.rgb, 0.3);
+    gEmissive    = vec3(0.0);
 }

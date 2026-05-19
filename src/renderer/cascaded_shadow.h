@@ -1,3 +1,7 @@
+/**
+ * @file cascaded_shadow.h
+ * @brief 4-cascade directional shadow map system with PCF and smooth transitions.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

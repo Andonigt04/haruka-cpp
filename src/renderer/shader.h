@@ -1,3 +1,7 @@
+/**
+ * @file shader.h
+ * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries (OpenGL 4.6).
+ */
 #ifndef SHADER_H
 #define SHADER_H
 
@@ -6,193 +10,165 @@
 
 #include <string>
 #include <fstream>
-#include <sstream>
+#include <vector>
 #include <iostream>
+#include "tools/error_reporter.h"
 
+/**
+ * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
+ *
+ * Paths passed to constructors are the original GLSL paths; the class appends
+ * ".spv" and resolves them relative to the base directory set via setBaseDir().
+ * Requires OpenGL 4.6 (GL_ARB_gl_spirv — core since 4.6).
+ *
+ * Call Shader::setBaseDir(SDL_GetBasePath()) once at application init so the
+ * .spv files are found regardless of the process working directory.
+ */
 class Shader {
 public:
     unsigned int ID;
 
     /**
-     * @brief Builds a shader program from vertex/fragment paths.
-     * @param vertexPath Vertex shader source path.
-     * @param fragmentPath Fragment shader source path.
-     * @param geometryPath Optional geometry shader source path.
+     * @brief Sets the root directory prepended to every shader path.
+     * Must be called before constructing any Shader (typically in Application::init).
+     * Trailing separator is added automatically.
      */
-    Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr)
-    {
-        std::string vertexCode;
-        std::string fragmentCode;
-        std::string geometryCode;
-        std::ifstream vShaderFile;
-        std::ifstream fShaderFile;
-        std::ifstream gShaderFile;
-        // ifstream execptions
-        vShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        fShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        gShaderFile.exceptions (std::ifstream::failbit | std::ifstream::badbit);
-        // 1. Lee los archivos desde vertexPath y fragmentPath...
-        try
-        {
-            // reads the shader files
-            vShaderFile.open(vertexPath);
-            fShaderFile.open(fragmentPath);
-            std::stringstream vShaderStream, fShaderStream;
+    static void setBaseDir(const char* dir) {
+        if (!dir) { s_baseDir.clear(); return; }
+        s_baseDir = dir;
+        if (!s_baseDir.empty() && s_baseDir.back() != '/' && s_baseDir.back() != '\\')
+            s_baseDir += '/';
+    }
 
-            // read file's buffer contents into streams
-            vShaderStream << vShaderFile.rdbuf();
-            fShaderStream << fShaderFile.rdbuf();
+    /** @brief Builds a program from vertex + fragment (+ optional geometry) SPIR-V. */
+    Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr) {
+        GLuint vert = loadSPV(GL_VERTEX_SHADER,   vertexPath);
+        GLuint frag = loadSPV(GL_FRAGMENT_SHADER, fragmentPath);
+        GLuint geom = geometryPath ? loadSPV(GL_GEOMETRY_SHADER, geometryPath) : 0;
 
-            // close file handlers
-            vShaderFile.close();
-            fShaderFile.close();
-
-            // convert stream into string
-            vertexCode = vShaderStream.str();
-            fragmentCode = fShaderStream.str();	
-
-            if (geometryPath != nullptr)
-            {
-                gShaderFile.open(geometryPath);
-                std::stringstream gShaderStream;
-                gShaderStream << gShaderFile.rdbuf();
-                gShaderFile.close();
-                geometryCode = gShaderStream.str();
-            }
-        }
-        catch (std::ifstream::failure& e)
-        {
-            std::cout << "ERROR::SHADER::FILE_NOT_SUCCESSFULLY_READ: " << e.what() << std::endl;
-        }
-        const char* vShaderCode = vertexCode.c_str();
-        const char* fShaderCode = fragmentCode.c_str();
-
-        unsigned int vertex, fragment;
-
-        // vertex shader
-        vertex = glCreateShader(GL_VERTEX_SHADER);
-        glShaderSource(vertex, 1, &vShaderCode, NULL);
-        glCompileShader(vertex);
-        checkCompileErrors(vertex, "VERTEX");
-
-        // fragment shader
-        fragment = glCreateShader(GL_FRAGMENT_SHADER);
-        glShaderSource(fragment, 1, &fShaderCode, NULL);
-        glCompileShader(fragment);
-        checkCompileErrors(fragment, "FRAGMENT");
-
-        // geometry shader
-        unsigned int geometry;
-        if (geometryPath != nullptr)
-        {
-            const char* gShaderCode = geometryCode.c_str();
-            geometry = glCreateShader(GL_GEOMETRY_SHADER);
-            glShaderSource(geometry, 1, &gShaderCode, NULL);
-            glCompileShader(geometry);
-            checkCompileErrors(geometry, "GEOMETRY");
-        }
-
-        // link shader Program
         ID = glCreateProgram();
-        glAttachShader(ID, vertex);
-        glAttachShader(ID, fragment);
-        if (geometryPath != nullptr)
-            glAttachShader(ID, geometry);
+        glAttachShader(ID, vert);
+        glAttachShader(ID, frag);
+        if (geom) glAttachShader(ID, geom);
         glLinkProgram(ID);
+        checkErrors(ID, "PROGRAM");
 
-        glDeleteShader(vertex);
-        glDeleteShader(fragment);
-        if (geometryPath != nullptr)
-            glDeleteShader(geometry);
+        glDeleteShader(vert);
+        glDeleteShader(frag);
+        if (geom) glDeleteShader(geom);
+    }
+
+    /** @brief Builds a program from a single compute SPIR-V. */
+    explicit Shader(const char* computePath) {
+        GLuint comp = loadSPV(GL_COMPUTE_SHADER, computePath);
+
+        ID = glCreateProgram();
+        glAttachShader(ID, comp);
+        glLinkProgram(ID);
+        checkErrors(ID, "PROGRAM");
+
+        glDeleteShader(comp);
     }
 
     /** @brief Binds the program for subsequent draw calls. */
-    void use() { 
-        glUseProgram(ID); 
-    }
+    void use() { glUseProgram(ID); }
 
-    /** @name Uniform helpers */
+    /** @name Uniform helpers — name-based (GLSL) and location-based (SPIR-V) */
     ///@{
-    // ------------------------------------------------------------------------
-    void setBool(const std::string &name, bool value)
-    {
-        glUniform1i(glGetUniformLocation(ID, name.c_str()), (int)value);
-    }
-    // ------------------------------------------------------------------------
-    void setInt(const std::string &name, int value) const
-    { 
-        glUniform1i(glGetUniformLocation(ID, name.c_str()), value); 
-    }
-    // ------------------------------------------------------------------------
-    void setFloat(const std::string &name, float value) const
-    { 
-        glUniform1f(glGetUniformLocation(ID, name.c_str()), value); 
-    }
-    // ------------------------------------------------------------------------
-    void setVec2(const std::string &name, const glm::vec2 &value) const
-    { 
-        glUniform2fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
-    }
-    void setVec2(const std::string &name, float x, float y) const
-    { 
-        glUniform2f(glGetUniformLocation(ID, name.c_str()), x, y); 
-    }
-    // ------------------------------------------------------------------------
-    void setVec3(const std::string &name, const glm::vec3 &value) const
-    { 
-        glUniform3fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
-    }
-    void setVec3(const std::string &name, float x, float y, float z) const
-    { 
-        glUniform3f(glGetUniformLocation(ID, name.c_str()), x, y, z); 
-    }
-    // ------------------------------------------------------------------------
-    void setVec4(const std::string &name, const glm::vec4 &value) const
-    { 
-        glUniform4fv(glGetUniformLocation(ID, name.c_str()), 1, &value[0]); 
-    }
-    void setVec4(const std::string &name, float x, float y, float z, float w) 
-    { 
-        glUniform4f(glGetUniformLocation(ID, name.c_str()), x, y, z, w); 
-    }
-    // ------------------------------------------------------------------------
-    void setMat2(const std::string &name, const glm::mat2 &mat) const
-    {
-        glUniformMatrix2fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
-    }
-    // ------------------------------------------------------------------------
-    void setMat3(const std::string &name, const glm::mat3 &mat) const
-    {
-        glUniformMatrix3fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
-    }
-    // ------------------------------------------------------------------------
-    void setMat4(const std::string &name, const glm::mat4 &mat) const
-    {
-        glUniformMatrix4fv(glGetUniformLocation(ID, name.c_str()), 1, GL_FALSE, &mat[0][0]);
-    }
+    void setBool (const std::string& name, bool value)          const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1i (l, (int)value); }
+    void setInt  (const std::string& name, int value)           const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1i (l, value); }
+    void setFloat(const std::string& name, float value)         const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1f (l, value); }
+    void setVec2 (const std::string& name, const glm::vec2& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform2fv(l, 1, &v[0]); }
+    void setVec2 (const std::string& name, float x, float y)    const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform2f (l, x, y); }
+    void setVec3 (const std::string& name, const glm::vec3& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform3fv(l, 1, &v[0]); }
+    void setVec3 (const std::string& name, float x, float y, float z) const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform3f(l, x, y, z); }
+    void setVec4 (const std::string& name, const glm::vec4& v)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform4fv(l, 1, &v[0]); }
+    void setVec4 (const std::string& name, float x, float y, float z, float w) const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform4f(l, x, y, z, w); }
+    void setMat2 (const std::string& name, const glm::mat2& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix2fv(l, 1, GL_FALSE, &m[0][0]); }
+    void setMat3 (const std::string& name, const glm::mat3& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix3fv(l, 1, GL_FALSE, &m[0][0]); }
+    void setMat4 (const std::string& name, const glm::mat4& m)  const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniformMatrix4fv(l, 1, GL_FALSE, &m[0][0]); }
+
+    // Location-based overloads for SPIR-V shaders where name lookup returns -1.
+    void setBool (GLint loc, bool value)           const { glUniform1i (loc, (int)value); }
+    void setInt  (GLint loc, int value)            const { glUniform1i (loc, value); }
+    void setFloat(GLint loc, float value)          const { glUniform1f (loc, value); }
+    void setVec2 (GLint loc, const glm::vec2& v)   const { glUniform2fv(loc, 1, &v[0]); }
+    void setVec3 (GLint loc, const glm::vec3& v)   const { glUniform3fv(loc, 1, &v[0]); }
+    void setVec4 (GLint loc, const glm::vec4& v)   const { glUniform4fv(loc, 1, &v[0]); }
+    void setMat3 (GLint loc, const glm::mat3& m)   const { glUniformMatrix3fv(loc, 1, GL_FALSE, &m[0][0]); }
+    void setMat4 (GLint loc, const glm::mat4& m)   const { glUniformMatrix4fv(loc, 1, GL_FALSE, &m[0][0]); }
     ///@}
+
 private:
-    /** @brief Reports compile/link diagnostics to stdout. */
-    void checkCompileErrors(GLuint shader, std::string type)
-    {
-        GLint success;
-        GLchar infoLog[1024];
-        if(type != "PROGRAM")
+    inline static std::string s_baseDir;
+
+    // Loads a shader, preferring GLSL source over SPIR-V.
+    //
+    // Priority:
+    //   1. GLSL source (baseDir+path) — present in dev builds, reliable on all drivers.
+    //   2. SPIR-V binary (baseDir+path+".spv") — production builds that ship only .spv.
+    //
+    // Background: GL_ARB_gl_spirv / glSpecializeShader on AMD RadeonSI (mesa) has
+    // incomplete support and can produce silently-invalid programs or hang. A draw
+    // call with an invalid program causes a GPU fault which blocks all subsequent
+    // GL calls. Compiling from GLSL source avoids this entirely.
+    static GLuint loadSPV(GLenum type, const char* glslPath) {
+        // 1. GLSL source — try first; always present during development.
+        std::string glslFullPath = s_baseDir + glslPath;
         {
-            glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-            if(!success)
-            {
-                glGetShaderInfoLog(shader, 1024, NULL, infoLog);
-                std::cout << "ERROR::SHADER_COMPILATION_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            std::ifstream g(glslFullPath);
+            if (g.is_open()) {
+                std::string src((std::istreambuf_iterator<char>(g)),
+                                std::istreambuf_iterator<char>());
+                const char* srcPtr = src.c_str();
+                GLuint shader = glCreateShader(type);
+                glShaderSource(shader, 1, &srcPtr, nullptr);
+                glCompileShader(shader);
+                checkErrors(shader, glslFullPath.c_str());
+                return shader;
             }
         }
-        else
+
+        // 2. SPIR-V binary — used only when GLSL source is absent (production).
+        std::string spvPath = s_baseDir + glslPath + ".spv";
         {
-            glGetProgramiv(shader, GL_LINK_STATUS, &success);
-            if(!success)
-            {
-                glGetProgramInfoLog(shader, 1024, NULL, infoLog);
-                std::cout << "ERROR::PROGRAM_LINKING_ERROR of type: " << type << "\n" << infoLog << "\n -- --------------------------------------------------- -- " << std::endl;
+            std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
+            if (f.is_open()) {
+                auto byteSize = static_cast<std::streamsize>(f.tellg());
+                f.seekg(0, std::ios::beg);
+                std::vector<char> buf(byteSize);
+                f.read(buf.data(), byteSize);
+
+                GLuint shader = glCreateShader(type);
+                glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
+                               buf.data(), static_cast<GLsizei>(byteSize));
+                glSpecializeShader(shader, "main", 0, nullptr, nullptr);
+                checkErrors(shader, spvPath.c_str());
+                return shader;
+            }
+        }
+
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            "Shader not found: " + glslFullPath + " (or " + spvPath + ")");
+        return 0;
+    }
+
+    static void checkErrors(GLuint object, const char* label) {
+        GLint ok = GL_TRUE;
+        char log[1024];
+        if (glIsProgram(object)) {
+            glGetProgramiv(object, GL_LINK_STATUS, &ok);
+            if (!ok) {
+                glGetProgramInfoLog(object, sizeof(log), nullptr, log);
+                HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+                    std::string("link error [") + label + "]: " + log);
+            }
+        } else {
+            glGetShaderiv(object, GL_COMPILE_STATUS, &ok);
+            if (!ok) {
+                glGetShaderInfoLog(object, sizeof(log), nullptr, log);
+                HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+                    std::string("specialize error [") + label + "]: " + log);
             }
         }
     }

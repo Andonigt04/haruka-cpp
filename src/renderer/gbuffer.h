@@ -1,3 +1,7 @@
+/**
+ * @file gbuffer.h
+ * @brief Deferred rendering G-buffer (position, normal, albedo/spec, emissive, depth).
+ */
 #pragma once
 #include <glad/glad.h>
 

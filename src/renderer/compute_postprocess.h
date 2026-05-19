@@ -1,3 +1,7 @@
+/**
+ * @file compute_postprocess.h
+ * @brief Compute-shader post-processing pipeline (bloom, tone mapping, color grading).
+ */
 #pragma once
 
 #include <glm/glm.hpp>
@@ -49,10 +53,9 @@ public:
         ToneMapMode mode = TONE_ACES
     );
 
-    /** @brief Applies color grading to a texture. */
+    /** @brief Applies color grading in-place to an RGBA16F texture. */
     void colorGradingCompute(
-        GLuint inputTexture,
-        GLuint outputTexture,
+        GLuint texture,
         float saturation = 1.0f,
         float contrast = 1.0f,
         float brightness = 0.0f
@@ -89,6 +92,7 @@ private:
 
     int screenWidth = 0;
     int screenHeight = 0;
+    bool initialized = false;
     int localGroupSize = 8;  // 8x8 compute groups
 
     ComputeStats stats;

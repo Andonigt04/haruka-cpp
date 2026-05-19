@@ -1,3 +1,7 @@
+/**
+ * @file transform_component.h
+ * @brief Double-precision spatial transform component (position, rotation, scale).
+ */
 #pragma once
 
 #include "../component.h"

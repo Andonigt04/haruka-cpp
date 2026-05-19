@@ -1,3 +1,7 @@
+/**
+ * @file bloom.h
+ * @brief Bloom post-processing buffer pair (bright-pass + blurred textures).
+ */
 #pragma once
 #include <glad/glad.h>
 

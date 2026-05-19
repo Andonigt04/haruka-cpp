@@ -1,3 +1,7 @@
+/**
+ * @file gpu_instancing.h
+ * @brief SSBO-backed GPU instancing with double-precision support for astronomical scenes.
+ */
 #pragma once
 
 #include <glm/glm.hpp>

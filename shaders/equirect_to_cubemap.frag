@@ -1,8 +1,21 @@
-#version 460 core
-out vec4 FragColor;
-in vec3 WorldPos;
+/**
+ * @file equirect_to_cubemap.frag
+ * @brief Converts an equirectangular HDR panorama to a cubemap face.
+ *
+ * For each fragment the cube-local WorldPos is normalized and converted to
+ * spherical (phi, theta) coordinates via atan2/asin, then remapped to [0,1]
+ * UV to sample the equirectangular texture.
+ *
+ * In:  WorldPos (cube vertex in local space)
+ * Out: FragColor (cubemap face color)
+ * Sampler: equirectangularMap (2D equirectangular HDR)
+ */
+#version 450 core
 
-uniform sampler2D equirectangularMap;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec3 WorldPos;
+
+layout(set = 0, binding = 0) uniform sampler2D equirectangularMap;
 
 const vec2 invAtan = vec2(0.1591, 0.3183);
 vec2 SampleSphericalMap(vec3 v)

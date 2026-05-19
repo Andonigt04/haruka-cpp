@@ -1,9 +1,29 @@
-#version 460 core
-out vec4 FragColor;
-in vec3 WorldPos;
+/**
+ * @file prefilter_env.frag
+ * @brief Pre-filters the environment cubemap for specular IBL.
+ *
+ * Implements the split-sum specular pre-integration (Karis 2013).
+ * For each roughness mip level, 1024 GGX importance-sampled directions
+ * are used to compute the weighted average radiance. The mip level of the
+ * environment sample is selected from the sample's PDF to reduce variance.
+ * Result is stored in a pre-filtered cubemap; ibl.frag reads it for the
+ * specular reflection term.
+ *
+ * In:  WorldPos (cube direction)
+ * Out: FragColor (pre-filtered radiance for this roughness level)
+ * Sampler: environmentMap (HDR cubemap)
+ * UBO: Params { roughness }
+ */
+#version 450 core
 
-uniform samplerCube environmentMap;
-uniform float roughness;
+layout(location = 0) out vec4 FragColor;
+layout(location = 0) in vec3 WorldPos;
+
+layout(set = 0, binding = 0) uniform samplerCube environmentMap;
+
+layout(set = 0, binding = 1) uniform Params {
+    float roughness;
+};
 
 const float PI = 3.14159265359;
 

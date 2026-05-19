@@ -2,14 +2,22 @@
 #define APPLICATION_H
 
 #include <glad/glad.h>
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 #include <memory>
 #include <vector>
+#include <functional>
+#include <chrono>
+#include <algorithm>
 
-#include "math_types.h"
-#include "world_system.h"
-#include "camera.h"
-#include "scene.h"
+#ifdef HARUKA_NETWORK
+    #include "include/dgs/client.h"
+#endif
+
+#include "tools/math_types.h"
+#include "core/world_system.h"
+#include "core/window.h"
+#include "core/camera.h"
+#include "core/scene/scene_manager.h"
 #include "renderer/shader.h"
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
@@ -25,11 +33,15 @@
 #include "renderer/compute_postprocess.h"
 #include "renderer/cascaded_shadow.h"
 #include "renderer/virtual_texturing.h"
-#include "error_reporter.h"
+#include "tools/error_reporter.h"
 #include "io/asset_streamer.h"
-#include "debug_overlay.h"
+#include "tools/debug_overlay.h"
 #include "physics/raycast_simple.h"
-#include "core/terrain_streaming_system.h"
+#include "physics/physics_engine.h"
+#include "core/terrain/terrain_streaming_system.h"
+#include "core/scene/scene_loader.h"
+#include "core/chunk_cache.h"
+#include "core/game_interface.h"
 
 class MotorInstance;
 
@@ -53,49 +65,68 @@ public:
     /** @name Accessors */
     ///@{
     Camera* getCamera() { return _camera.get(); }
-    Haruka::Scene* getCurrentScene() { return _currentScene.get(); }
+    Haruka::SceneManager* getCurrentScene() { return _currentScene; }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+    Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+    Haruka::ChunkCache* getChunkCache() { return _chunkCache.get(); }
+    Haruka::TerrainStreamingSystem* getTerrainStreamingSystem() { return _terrainStreamingSystem.get(); }
+    Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
     ///@}
 
-    // Render quality/layers (global editor-configurable)
+    /** @brief Sets the render quality preset. */
     static void setRenderQualityPreset(int preset) { s_renderQualityPreset = std::clamp(preset, 0, 3); }
     static int getRenderQualityPreset() { return s_renderQualityPreset; }
+    static void setRenderFeatureHDR(bool enabled) { s_enableHDR = enabled; }
+    static bool getRenderFeatureHDR() { return s_enableHDR; }
+    static void setRenderFeatureBloom(bool enabled) { s_enableBloom = enabled; }
+    static bool getRenderFeatureBloom() { return s_enableBloom; }
+    static void setRenderFeatureSSAO(bool enabled) { s_enableSSAO = enabled; }
+    static bool getRenderFeatureSSAO() { return s_enableSSAO; }
+    static void setRenderFeatureIBL(bool enabled) { s_enableIBL = enabled; }
+    static bool getRenderFeatureIBL() { return s_enableIBL; }
+    static void setRenderFeatureShadows(bool enabled) { s_enableShadows = enabled; }
+    static bool getRenderFeatureShadows() { return s_enableShadows; }
+
+    /** @brief Reads GraphicsSettings from SettingsManager and applies to all engine systems. */
+    void applyGraphicsSettings();
+
+    /** @brief Sets the maximum distance for a render layer. */
     static void setLayerMaxDistance(int layer, float distance) {
         if (layer < 1 || layer > 5) return;
         s_layerMaxDistance[layer] = std::max(0.0f, distance);
     }
+    /** @brief Gets the maximum distance for a render layer. */
     static float getLayerMaxDistance(int layer) {
         if (layer < 1 || layer > 5) return 0.0f;
         return s_layerMaxDistance[layer];
     }
-    static int getLastRenderedVertices() { return s_lastRenderedVertices; }
-    static int getLastRenderedTriangles() { return s_lastRenderedTriangles; }
-    static int getLastRenderedDrawCalls() { return s_lastRenderedDrawCalls; }
-    static int getLastTotalVertices() { return s_lastTotalVertices; }
-    static int getLastTotalTriangles() { return s_lastTotalTriangles; }
-    static int getLastTotalDrawCalls() { return s_lastTotalDrawCalls; }
-    static int getLastVisibleChunks() { return s_lastVisibleChunks; }
-    static int getLastResidentChunks() { return s_lastResidentChunks; }
-    static int getLastPendingChunkLoads() { return s_lastPendingChunkLoads; }
-    static int getLastPendingChunkEvictions() { return s_lastPendingChunkEvictions; }
-    static int getLastResidentMemoryMB() { return s_lastResidentMemoryMB; }
-    static int getLastTrackedChunks() { return s_lastTrackedChunks; }
-    static int getLastMaxMemoryMB() { return s_lastMaxMemoryMB; }
+    
+    int getRenderedVertices()      const { return _iRenderedVertices; }
+    int getRenderedTriangles()     const { return _iRenderedTriangles; }
+    int getRenderedDrawCalls()     const { return _iRenderedDrawCalls; }
+    int getTotalVertices()         const { return _iTotalVertices; }
+    int getTotalTriangles()        const { return _iTotalTriangles; }
+    int getTotalDrawCalls()        const { return _iTotalDrawCalls; }
+    int getVisibleChunks()         const { return _iVisibleChunks; }
+    int getResidentChunks()        const { return _iResidentChunks; }
+    int getPendingChunkLoads()     const { return _iPendingChunkLoads; }
+    int getPendingChunkEvictions() const { return _iPendingChunkEvictions; }
+    int getResidentMemoryMB()      const { return _iResidentMemoryMB; }
+    int getTrackedChunks()         const { return _iTrackedChunks; }
+    int getMaxMemoryMB()           const { return _iMaxMemoryMB; }
 
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
+
+    void setImGuiRenderCallback(std::function<void()> cb) { _imguiCallback = std::move(cb); }
     
     /**
      * @brief Callback invoked by `MotorInstance` when active scene changes.
      * @note Performs internal copy into owned scene storage.
      */
-    void onSceneChanged(Haruka::Scene* scene) {
-        if (!scene) {
-            _currentScene.reset();
-            return;
-        }
-        _currentScene = std::make_unique<Haruka::Scene>(*scene);
+    void onSceneChanged(Haruka::SceneManager* scene) {
+        _currentScene = scene;
     }
     /**
      * @brief Callback invoked by `MotorInstance` when viewport camera changes.
@@ -113,18 +144,32 @@ public:
         _camera->sensitivity = cam->sensitivity;
     }
 
+#ifdef HARUKA_NETWORK
+    void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
+    void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text);
+    std::vector<DGS::ChatMessage> pollPlayerChats();
+#endif
+
+    /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */
+    void setGameInterface(Haruka::GameInterface* gi) { _gameInterface = gi; }
+
     /** @brief Starts runtime using a scene path bootstrap. */
     void run(const std::string& startScenePath);
     /** @brief Initializes systems from a scene instance. */
-    void init(Haruka::Scene& scene);
-    /** @brief Creates runtime window resources (when applicable). */
-    void create_window();
+    void init(Haruka::SceneManager& scene);
+    /** @brief Recreates all size-dependent FBOs when the viewport is resized. */
+    void recreateFBOs(int newWidth, int newHeight);
+    /** @brief Sets the viewport-owned FBO that the editor render path writes into.
+     *  Must be called after recreateRenderTarget() on the viewport side. */
+    void setEditorTarget(RenderTarget* rt) { _editorTarget = rt; }
+    /** @brief Sets the render size used in editor mode (when no Window exists). */
+    void setEditorViewportSize(int w, int h);
+    /** @brief Scans current scene and initialises PlanetarySystem with planet objects. */
+    void initPlanetarySystem();
     /** @brief Loads scene data from disk path. */
     void loadScene(const std::string& scenePath);
-    /** @brief Renders current scene using optional override shader. */
-    void renderScene(Shader* shader = nullptr);
-    /** @brief Runs main loop until shutdown. */
-    void main_loop();
+    /** @brief Builds the render queue with frustum culling and LOD management. */
+    void buildRenderQueue();
     /** @brief Renders one frame and updates timing state. */
     void renderFrame();
     /** @brief Frame rendering body (logic-only path). */
@@ -135,40 +180,83 @@ public:
 private:
     friend class MotorInstance;
     
-    static constexpr int MAX_LIGHTS = 256;
-    
-    // Window (set by viewport via MotorInstance friend access)
-    GLFWwindow* _window = nullptr;
-    int _width = 1280;
-    int _height = 720;
+#ifdef HARUKA_NETWORK
+    DGS::Client m_dgs;
+    std::vector<Haruka::SceneObject> m_ghostObjects;
 
-    // Core systems
-    std::unique_ptr<Haruka::Scene> _currentScene;
+    enum class LoginState { Idle, Show, Connecting, Failed, Done };
+    LoginState  m_loginState   = LoginState::Idle;
+    std::string m_loginEmail;
+    std::string m_loginUsername;
+    std::string m_loginError;
+
+    bool connectDGS(const std::string& email, const std::string& password);
+    void renderLoginScreen();
+#endif
+
+    /** @brief The main application window. */
+    std::unique_ptr<Haruka::Core::Window> _window = nullptr;
+    /** @brief The currently active scene. */
+    Haruka::SceneManager* _currentScene = nullptr;
+    /** @brief The owned scene instance. */
+    std::unique_ptr<Haruka::SceneManager> _ownedScene;
+    /** @brief The active camera instance. */
     std::unique_ptr<Camera> _camera;
     
-    // Rendering pipeline
+    /** @brief The main shader instance. */
     std::unique_ptr<Shader> _mainShader;
+    /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
-    std::unique_ptr<Shadow> _shadowSystem;
-    std::unique_ptr<HDR> _hdrSystem;
-    std::unique_ptr<Bloom> _bloomSystem;
+    /** @brief The shadow shader instance. */
+    std::unique_ptr<Shadow> _shadow;
+    /** @brief The HDR shader instance. */
+    std::unique_ptr<HDR> _hdr;
+    /** @brief The bloom shader instance. */
+    std::unique_ptr<Bloom> _bloom;
+    /** @brief The G-buffer shader instance. */
     std::unique_ptr<GBuffer> _gBuffer;
-    std::unique_ptr<SSAO> _ssaoSystem;
-    std::unique_ptr<IBL> _iblSystem;
-    std::unique_ptr<PointShadow> _pointShadowSystem;
-    std::unique_ptr<Haruka::WorldSystem> _worldSystem;
+    /** @brief The SSAO shader instance. */
+    std::unique_ptr<SSAO> _ssao;
+    /** @brief The IBL shader instance. */
+    std::unique_ptr<IBL> _ibl;
+    /** @brief The point shadow shader instance. */
+    std::unique_ptr<PointShadow> _pointShadow;
+    /** @brief The light culler instance. */
     std::unique_ptr<LightCuller> _lightCuller;
+    /** @brief The GPU instancing instance. */
     std::unique_ptr<GPUInstancing> _instancing;
+    /** @brief The compute post-process instance. */
     std::unique_ptr<ComputePostProcess> _computePostProcess;
+    /** @brief The cascaded shadow map instance. */
     std::unique_ptr<CascadedShadowMap> _cascadedShadow;
+    /** @brief The virtual texturing instance. */
     std::unique_ptr<VirtualTexturing> _virtualTexturing;
-    std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
+    /** @brief The raycast system instance. */
     std::unique_ptr<RaycastSimple> _raycastSystem;
+    /** @brief The world system instance. */
+    std::unique_ptr<Haruka::WorldSystem> _worldSystem;
+    /** @brief The planetary system instance. */
+    std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
+    /** @brief The terrain streaming system instance. */
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
+    /** @brief The physics engine instance. */
+    std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+    /** @brief The chunk cache instance. */
+    std::unique_ptr<Haruka::ChunkCache> _chunkCache;
     
+    // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
+    RenderTarget* _editorTarget = nullptr;
+    // Editor viewport size (used when no _window exists).
+    int m_editorViewportW = 0;
+    int m_editorViewportH = 0;
+    // Resets to 0 on each init(); renderFrameContent logs the first 5 frames per init.
+    int _diagFramesLeft = 0;
+
     // Render targets
     std::unique_ptr<RenderTarget> _lightingTarget;
     std::unique_ptr<RenderTarget> _bloomExtractTarget;
+    std::unique_ptr<RenderTarget> _bloomPing;
+    std::unique_ptr<RenderTarget> _bloomPong;
     
     // Primitives (LOD spheres for celestial bodies)
     std::unique_ptr<SimpleMesh> sphereLOD[4];
@@ -180,17 +268,50 @@ private:
     std::unique_ptr<Shader> _compositeShader;
     std::unique_ptr<Shader> _flatShader;
     std::unique_ptr<Shader> _cascadeShadowShader;
+    std::unique_ptr<Shader> _bloomExtractShader;
+    std::unique_ptr<Shader> _bloomBlurShader;
+    std::unique_ptr<Shader> _pointShadowShader;
+    std::unique_ptr<Shader> _instancingShader;
+    bool _mainShaderUsesFinalLook = false;
     
-    // Timing
+    // ImGui injection callback (set by editor viewport)
+    std::function<void()> _imguiCallback;
+
+    // Optional game interface — used by standalone runtime (not editor)
+    Haruka::GameInterface* _gameInterface = nullptr;
+    bool m_cleanedUp = false;
+
+    float _exposure = 1.0f;
+
+    /** @brief Timing state for frame time and FPS calculation. Updated in renderFrame(). */
+    std::chrono::time_point<std::chrono::high_resolution_clock> _frameStart;
+    float _lastFrameTimeMs = 0.0f;
+    float _lastFps         = 0.0f;
+    uint64_t _fpsFrameCount  = 0;
+    double   _fpsLastTime    = 0.0;
+
+    /** @brief The time elapsed since the last frame. */
     float deltaTime = 0.0f;
-    float lastFrame = 0.0f;
     
-    // Screen quad for post-processing
+    /** @brief The vertex array object for the screen quad. */
     unsigned int quadVAO = 0;
+    /** @brief The vertex buffer object for the screen quad. */
     unsigned int quadVBO = 0;
+    /** @brief Sets up the screen quad for post-processing. */
     void setupQuad();
 
+    // UBOs shared by all forward-rendering shaders (bindings 0 and 1)
+    unsigned int m_uboPerFrame  = 0;
+    unsigned int m_uboPerObject = 0;
+
+    /** @brief The render quality preset. */
     inline static int s_renderQualityPreset = 2; // 0=Low,1=Medium,2=High,3=Ultra
+    inline static bool s_enableHDR = true;
+    inline static bool s_enableBloom = true;
+    inline static bool s_enableSSAO = true;
+    inline static bool s_enableIBL = true;
+    inline static bool s_enableShadows = true;
+
     inline static float s_layerMaxDistance[6] = {
         0.0f,
         1.0e9f,  // layer 1: always
@@ -199,19 +320,21 @@ private:
         900.0f,  // layer 4: buildings
         300.0f   // layer 5: small props
     };
-    inline static int s_lastRenderedVertices = 0;
-    inline static int s_lastRenderedTriangles = 0;
-    inline static int s_lastRenderedDrawCalls = 0;
-    inline static int s_lastTotalVertices = 0;
-    inline static int s_lastTotalTriangles = 0;
-    inline static int s_lastTotalDrawCalls = 0;
-    inline static int s_lastVisibleChunks = 0;
-    inline static int s_lastResidentChunks = 0;
-    inline static int s_lastPendingChunkLoads = 0;
-    inline static int s_lastPendingChunkEvictions = 0;
-    inline static int s_lastResidentMemoryMB = 0;
-    inline static int s_lastTrackedChunks = 0;
-    inline static int s_lastMaxMemoryMB = 0;
+
+    /** @brief Statistics for rendered geometry. */
+    int _iRenderedVertices      = 0;
+    int _iRenderedTriangles     = 0;
+    int _iRenderedDrawCalls     = 0;
+    int _iTotalVertices         = 0;
+    int _iTotalTriangles        = 0;
+    int _iTotalDrawCalls        = 0;
+    int _iVisibleChunks         = 0;
+    int _iResidentChunks        = 0;
+    int _iPendingChunkLoads     = 0;
+    int _iPendingChunkEvictions = 0;
+    int _iTrackedChunks         = 0;
+    int _iResidentMemoryMB      = 0;
+    int _iMaxMemoryMB           = 0;
 };
 
 #endif

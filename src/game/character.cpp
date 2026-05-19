@@ -1,6 +1,6 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "character.h"
-#include <GLFW/glfw3.h>
+#include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <iostream>
@@ -10,31 +10,31 @@
 namespace Haruka {
 
 namespace {
-glm::dvec3 safeNormalize(const glm::dvec3& v, const glm::dvec3& fallback) {
-    double len = glm::length(v);
-    if (len < 1e-9) return fallback;
-    return v / len;
-}
+    glm::dvec3 safeNormalize(const glm::dvec3& v, const glm::dvec3& fallback) {
+        double len = glm::length(v);
+        if (len < 1e-9) return fallback;
+        return v / len;
+    }
 
-void buildSurfaceBasis(
-    const glm::dvec3& gravityUp,
-    const glm::quat& cameraOrientation,
-    glm::dvec3& outUp,
-    glm::dvec3& outForward,
-    glm::dvec3& outRight
-) {
-    outUp = safeNormalize(gravityUp, glm::dvec3(0.0, 1.0, 0.0));
+    void buildSurfaceBasis(
+        const glm::dvec3& gravityUp,
+        const glm::quat& cameraOrientation,
+        glm::dvec3& outUp,
+        glm::dvec3& outForward,
+        glm::dvec3& outRight
+    ) {
+        outUp = safeNormalize(gravityUp, glm::dvec3(0.0, 1.0, 0.0));
 
-    glm::vec3 camForward3 = cameraOrientation * glm::vec3(0, 0, -1);
-    glm::dvec3 camForward = glm::dvec3(camForward3);
+        glm::vec3 camForward3 = cameraOrientation * glm::vec3(0, 0, -1);
+        glm::dvec3 camForward = glm::dvec3(camForward3);
 
-    // Proyectar la cámara sobre el plano tangente del planeta
-    outForward = camForward - outUp * glm::dot(camForward, outUp);
-    outForward = safeNormalize(outForward, glm::cross(glm::dvec3(0.0, 0.0, 1.0), outUp));
+        // Proyectar la cámara sobre el plano tangente del planeta
+        outForward = camForward - outUp * glm::dot(camForward, outUp);
+        outForward = safeNormalize(outForward, glm::cross(glm::dvec3(0.0, 0.0, 1.0), outUp));
 
-    outRight = glm::cross(outForward, outUp);
-    outRight = safeNormalize(outRight, glm::dvec3(1.0, 0.0, 0.0));
-}
+        outRight = glm::cross(outForward, outUp);
+        outRight = safeNormalize(outRight, glm::dvec3(1.0, 0.0, 0.0));
+    }
 }
 
 Character::Character(const glm::dvec3& position, const std::string& userId)
@@ -48,14 +48,17 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
     
     forward = glm::vec3(0, 0, -1);
     right = glm::vec3(1, 0, 0);
-    // Si planeta está en (0,0,0), es simplemente normalize(position)
-    double posLen = glm::length(position);
-    upDirection = posLen > 1e-6 ? (position / posLen) : glm::dvec3(0.0, 1.0, 0.0);
     
-    lastSyncPos = position;
-    lastSyncRot = glm::vec3(yaw, pitch, 0);
-    targetPosition = position;
-    targetRotation = glm::vec3(yaw, pitch, 0);
+    double posLen = glm::length(position);
+    upDirection = posLen > 1e-6 ? (position / posLen) : Haruka::WorldPos(0.0, 1.0, 0.0);
+    
+    // CORRECCIÓN: Convertir Euler (Pitch, Yaw, Roll) a Cuaternión
+    Haruka::Rotation initialRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+    
+    lastSyncPos = Haruka::WorldPos(position.x, position.y + currentHeight * 0.9, position.z);
+    lastSyncRot = initialRot;
+    targetPosition = lastSyncPos;
+    targetRotation = initialRot;
     
     std::cout << "[Character] Created" << (localPlayer ? " (local)" : " (remote)") << " at " 
               << position.x << ", " << position.y << ", " << position.z << std::endl;
@@ -64,84 +67,114 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
 Character::~Character() {}
 
 void Character::update(float deltaTime) {
-    // Sincronizar con física si existe
-    if (physicsBody) {
+    if (physicsBody)
+    {
         position = glm::dvec3(physicsBody->position);
         velocity = glm::dvec3(physicsBody->velocity);
     }
     
-    // Interpolación para jugadores remotos
-    if (!localPlayer) {
-        position = glm::mix(position, targetPosition, deltaTime * interpolationSpeed);
+    if (!localPlayer)
+    {
+        position = glm::mix(position, targetPosition, (double)(deltaTime * interpolationSpeed));
         
-        float targetYaw = targetRotation.x;
-        float targetPitch = targetRotation.y;
-        yaw = glm::mix(yaw, targetYaw, deltaTime * interpolationSpeed);
-        pitch = glm::mix(pitch, targetPitch, deltaTime * interpolationSpeed);
+        Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+        Haruka::Rotation newRot = glm::slerp(currentRot, targetRotation, (double)(deltaTime * interpolationSpeed));
+        
+        glm::dvec3 euler = glm::eulerAngles(newRot);
+        pitch = glm::degrees(euler.x);
+        yaw = glm::degrees(euler.y);
     }
     
     checkGrounded();
     updateState();
     
-    if (localPlayer) {
+    if (localPlayer)
+    {
+        // Keep camera in sync even when processInput() is skipped (chat open,
+        // no window focus). processInput() will call updateCamera() again after
+        // applying input, producing a zero-lag result on frames where it runs.
         updateCamera();
-        
-        // Sync con servidor
+
         syncTimer += deltaTime;
-        if (syncTimer >= syncInterval && networkClient) {
-            if (shouldSyncToServer()) {
-                syncToServer();
-                syncTimer = 0.0f;
-            }
+        if (syncTimer >= syncInterval)
+        {
+            syncTimer = 0.0f;
         }
     }
     
-    // Smooth crouching
     float targetHeight = crouched ? crouchingHeight : standingHeight;
     currentHeight += (targetHeight - currentHeight) * deltaTime * 10.0f;
 }
 
-void Character::processInput(GLFWwindow* window, float deltaTime) {
+void Character::processInput(SDL_Window* window, float deltaTime) {
     if (!localPlayer) return;
-    
-    // Movement
-    float speed = sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
 
-    glm::dvec3 up, surfaceForward, surfaceRight;
-    glm::dquat camOrientation = camera ? camera->orientation : glm::dquat(1.0, 0.0, 0.0, 0.0);
-    buildSurfaceBasis(getEffectiveUp(), camOrientation, up, surfaceForward, surfaceRight);
-    
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) {
-        position += surfaceForward * (double)(speed * deltaTime);
+    // Mouse look via SDL_GetRelativeMouseState — fallback for when the game
+    // does not forward SDL_EVENT_MOUSE_MOTION through GameInterface::onEvent.
+    if (window && SDL_GetWindowRelativeMouseMode(window)) {
+        float mx = 0.f, my = 0.f;
+        SDL_GetRelativeMouseState(&mx, &my);
+        if (mx != 0.f || my != 0.f)
+            rotate(mx, -my);
     }
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) {
-        position -= surfaceForward * (double)(speed * deltaTime);
+
+    if (m_bindings.empty()) return;
+    for (const auto& b : m_bindings) {
+        bool fire = false;
+        switch (b.trigger) {
+            case ActionTrigger::Performed:
+                fire = m_inputProvider.isPerformed && m_inputProvider.isPerformed(b.action);
+                break;
+            case ActionTrigger::Started:
+                fire = m_inputProvider.isStarted   && m_inputProvider.isStarted(b.action);
+                break;
+            case ActionTrigger::Canceled:
+                fire = m_inputProvider.isCanceled  && m_inputProvider.isCanceled(b.action);
+                break;
+        }
+        if (!fire) continue;
+
+        Input::ActionValue val = (m_inputProvider.readValue)
+            ? m_inputProvider.readValue(b.action)
+            : Input::ActionValue{ false };
+
+        b.callback(*this, deltaTime, val);
     }
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) {
-        position -= surfaceRight * (double)(speed * deltaTime);
-    }
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) {
-        position += surfaceRight * (double)(speed * deltaTime);
-    }
-    
-    // Jump
-    if (glfwGetKey(window, GLFW_KEY_SPACE) == GLFW_PRESS && grounded) {
-        jump();
-    }
-    
-    // Sprint
-    sprint(glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS);
-    
-    // Crouch
-    crouch(glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS);
+
+    Haruka::Rotation camOrientation = camera
+        ? camera->orientation
+        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
+
+    if (onTransformChanged)
+        onTransformChanged(position, camOrientation);
+
+    // Update camera AFTER movement and rotation are applied so the sync
+    // in Application::run() copies a fully-current position/orientation.
+    updateCamera();
+}
+
+float Character::getSpeed() const {
+    return sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
+}
+
+void Character::move(glm::vec2 input, float deltaTime) {
+    Haruka::WorldPos up, surfaceForward, surfaceRight;
+    Haruka::Rotation camOri = camera
+        ? camera->orientation
+        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
+    buildSurfaceBasis(getEffectiveUp(), camOri, up, surfaceForward, surfaceRight);
+
+    float speed = getSpeed();
+    position += surfaceForward * (double)(input.y * speed * deltaTime);
+    position += surfaceRight   * (double)(input.x * speed * deltaTime);
 }
 
 void Character::moveForward(float amount) {
-    position += glm::dvec3(forward) * (double)amount;
+    position += Haruka::WorldPos(forward) * (double)amount;
 }
 
 void Character::moveRight(float amount) {
-    position += glm::dvec3(right) * (double)amount;
+    position += Haruka::WorldPos(right) * (double)amount;
 }
 
 void Character::jump() {
@@ -168,7 +201,6 @@ void Character::rotate(float yawDelta, float pitchDelta) {
     if (minPitch > maxPitch) std::swap(minPitch, maxPitch);
     pitch = glm::clamp(pitch, minPitch, maxPitch);
     
-    // Update forward/right vectors
     glm::vec3 direction;
     direction.x = cos(glm::radians(yaw)) * cos(glm::radians(pitch));
     direction.y = sin(glm::radians(pitch));
@@ -185,7 +217,6 @@ void Character::updateCamera() {
     glm::dvec3 cameraPos = position + up * (double)(currentHeight * 0.9f);
     camera->position = WorldPos(cameraPos.x, cameraPos.y, cameraPos.z);
 
-    // Orientación relativa al planeta (up local), para sensación humana sobre esfera
     glm::dvec3 referenceForward = glm::dvec3(0.0, 0.0, -1.0);
     if (std::abs(glm::dot(referenceForward, up)) > 0.95) {
         referenceForward = glm::dvec3(1.0, 0.0, 0.0);
@@ -239,35 +270,4 @@ void Character::checkGrounded() {
     }
 }
 
-bool Character::shouldSyncToServer() {
-    float posDelta = glm::length(glm::dvec3(position) - lastSyncPos);
-    float rotDelta = glm::length(glm::vec3(yaw, pitch, 0) - lastSyncRot);
-    
-    return posDelta > syncThreshold || rotDelta > syncThreshold;
-}
-
-void Character::syncToServer() {
-    if (!networkClient || !localPlayer) return;
-    
-    networkClient->sendPositionUpdate(
-        glm::dvec3(position),
-        glm::vec3(yaw, pitch, 0)
-    );
-    
-    lastSyncPos = position;
-    lastSyncRot = glm::vec3(yaw, pitch, 0);
-    
-    std::cout << "[Character] Synced to server: " 
-              << position.x << ", " << position.y << ", " << position.z << std::endl;
-}
-
-void Character::applyServerUpdate(const glm::dvec3& serverPos, const glm::vec3& serverRot) {
-    double distance = glm::length(serverPos - position);
-    
-    if (distance > 1.0) {
-        targetPosition = serverPos;
-        targetRotation = serverRot;
-    }
-}
-
-}
+};

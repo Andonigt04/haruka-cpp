@@ -1,12 +1,37 @@
+/**
+ * @file character.h
+ * @brief Player/NPC controller with camera, physics body, and network sync hooks.
+ */
 #pragma once
 
 #include <glm/glm.hpp>
 #include <memory>
+#include <functional>
+#include <vector>
 #include "core/camera.h"
 #include "physics/physics_engine.h"
-#include "network/network_manager.h"
+#include "tools/math_types.h"
+#include "input/input_action.h"
 
 namespace Haruka {
+
+/** When an action callback fires. */
+enum class ActionTrigger {
+    Performed,    // every frame the action is active (held)
+    Started,      // first frame it becomes active
+    Canceled,     // first frame it stops being active
+};
+
+/**
+ * Input query functions injected from game code.
+ * Character never touches SettingsManager or SDL directly.
+ */
+struct CharacterInputProvider {
+    std::function<Input::ActionValue(const std::string&)> readValue;
+    std::function<bool(const std::string&)>               isPerformed;
+    std::function<bool(const std::string&)>               isStarted;
+    std::function<bool(const std::string&)>               isCanceled;
+};
 
 /** @brief Character locomotion and sync state machine. */
 enum class CharacterState {
@@ -30,8 +55,8 @@ public:
     
     /** @brief Advances movement, camera, and sync state. */
     void update(float deltaTime);
-    /** @brief Processes keyboard/mouse input from GLFW window. */
-    void processInput(GLFWwindow* window, float deltaTime);
+    /** @brief Processes keyboard/mouse input from SDL window. */
+    void processInput(SDL_Window* window, float deltaTime);
     
     /** @name Movement controls */
     ///@{
@@ -56,9 +81,9 @@ public:
     
     /** @name Network synchronization */
     ///@{
-    void setNetworkClient(NetworkClient* client) { networkClient = client; }
-    void syncToServer();
-    void applyServerUpdate(const glm::dvec3& serverPos, const glm::vec3& serverRot);
+    void applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot);
+
+    std::function<void(const WorldPos&, const Rotation&)> onTransformChanged;
     ///@}
     
     /** @name State accessors */
@@ -84,7 +109,52 @@ public:
     
     void setFlightMode(bool enabled) { flightMode = enabled; }
 
+    // -- Input system --------------------------------------------------------
+
+    void setInputProvider(const CharacterInputProvider& p) { m_inputProvider = p; }
+
+    // Register a callback for any action/trigger combination.
+    // T must match the ActionValue type the action produces (bool, float, vec2, vec3).
+    // Use the value-less overload for simple button presses.
+    template<typename T>
+    void bindAction(const std::string& action, ActionTrigger trigger,
+                    std::function<void(Character&, float, T)> cb)
+    {
+        m_bindings.push_back({ action, trigger,
+            [cb](Character& c, float dt, const Input::ActionValue& v) {
+                if (const T* p = std::get_if<T>(&v)) cb(c, dt, *p);
+            }
+        });
+    }
+
+    // Value-less overload — for actions where you only care that it fired.
+    void bindAction(const std::string& action, ActionTrigger trigger,
+                    std::function<void(Character&, float)> cb)
+    {
+        m_bindings.push_back({ action, trigger,
+            [cb](Character& c, float dt, const Input::ActionValue&) { cb(c, dt); }
+        });
+    }
+
+    void clearBindings() { m_bindings.clear(); }
+
+    // Convenience movement method for use in bindAction callbacks.
+    // input.y = forward(-1..1), input.x = strafe(-1..1).
+    // Applies sprint/crouch speed automatically.
+    void move(glm::vec2 input, float deltaTime);
+
+    float getSpeed() const;
+
 private:
+    // Type-erased action binding
+    struct ActionBinding {
+        std::string action;
+        ActionTrigger trigger;
+        std::function<void(Character&, float, const Input::ActionValue&)> callback;
+    };
+
+    CharacterInputProvider       m_inputProvider;
+    std::vector<ActionBinding>   m_bindings;
     std::string userId;
     bool localPlayer = true;
     
@@ -95,15 +165,14 @@ private:
     
     std::unique_ptr<Camera> camera;
     std::shared_ptr<RigidBody> physicsBody;
-    NetworkClient* networkClient = nullptr;
     
     CharacterState state = CharacterState::IDLE;
     
-    // Movement parameters
-    float walkSpeed = 0.05f;
-    float runSpeed = 0.12f;
-    float crouchSpeed = 0.02f;
-    float jumpForce = 0.03f;
+    // Movement parameters (meters / second)
+    float walkSpeed = 1.5f;
+    float runSpeed = 4.0f;
+    float crouchSpeed = 0.6f;
+    float jumpForce = 5.0f;
     float mouseSensitivity = 0.1f;
     
     float yaw = -90.0f;
@@ -118,15 +187,16 @@ private:
     bool crouched = false;
     bool flightMode = false;
     
-    float standingHeight = 0.0019f;
-    float crouchingHeight = 0.0012f;
-    float currentHeight = 0.0019f;
+    // Character capsule height (meters)
+    float standingHeight = 1.9f;
+    float crouchingHeight = 1.2f;
+    float currentHeight = 1.9f;
     
     // Network sync
-    glm::dvec3 lastSyncPos;
-    glm::vec3 lastSyncRot;
-    glm::dvec3 targetPosition;
-    glm::vec3 targetRotation;
+    Haruka::WorldPos lastSyncPos;
+    Haruka::Rotation lastSyncRot;
+    Haruka::WorldPos targetPosition;
+    Haruka::Rotation targetRotation;
     float syncThreshold = 0.1f;
     float syncInterval = 0.1f;
     float syncTimer = 0.0f;
@@ -138,8 +208,6 @@ private:
     void updateState();
     /** @brief Recomputes grounded state from physics/orientation. */
     void checkGrounded();
-    /** @brief Returns true when a network sync should be emitted. */
-    bool shouldSyncToServer();
 
     /** @brief Returns the current up vector used for movement basis. */
     glm::dvec3 getEffectiveUp() const;

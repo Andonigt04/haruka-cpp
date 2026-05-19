@@ -1,3 +1,7 @@
+/**
+ * @file script_component.h
+ * @brief Script path reference component — associates a script file with a scene object.
+ */
 #pragma once
 #include "../component.h"
 #include <string>

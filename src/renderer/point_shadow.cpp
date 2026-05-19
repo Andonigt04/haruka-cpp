@@ -1,5 +1,5 @@
 #include "point_shadow.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <iostream>
 
 PointShadow::PointShadow(unsigned int resolution) : resolution(resolution)

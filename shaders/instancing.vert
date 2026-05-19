@@ -1,4 +1,17 @@
-#version 460 core
+/**
+ * @file instancing.vert
+ * @brief GPU-instanced vertex shader.
+ *
+ * Each instance supplies its own model matrix (locations 3-6, mat4 occupies
+ * 4 attribute slots), per-instance color (loc 7), and scale (loc 8).
+ * Normal is corrected for non-uniform scaling via inverse-transpose.
+ *
+ * In (per-vertex):   position, normal, texCoord
+ * In (per-instance): model (mat4), instanceColor, instanceScale
+ * Out: FragPos, Normal, TexCoord, InstanceColor → instancing.frag
+ * UBO: Matrices { view, projection }
+ */
+#version 450 core
 
 // Vertex attributes del mesh base
 layout(location = 0) in vec3 position;
@@ -10,15 +23,15 @@ layout(location = 3) in mat4 model;      // Columnas 3,4,5,6
 layout(location = 7) in vec4 instanceColor;
 layout(location = 8) in vec3 instanceScale;
 
-// Uniforms
-uniform mat4 view;
-uniform mat4 projection;
+// locations 0-3: view mat4, 4-7: projection mat4
+layout(location = 0) uniform mat4 view;
+layout(location = 4) uniform mat4 projection;
 
 // Output
-out vec3 FragPos;
-out vec3 Normal;
-out vec2 TexCoord;
-out vec4 InstanceColor;
+layout(location = 0) out vec3 FragPos;
+layout(location = 1) out vec3 Normal;
+layout(location = 2) out vec2 TexCoord;
+layout(location = 3) out vec4 InstanceColor;
 
 void main() {
     // Transformar posición a world space con instancing

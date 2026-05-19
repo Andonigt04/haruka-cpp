@@ -1,3 +1,7 @@
+/**
+ * @file hdr.h
+ * @brief HDR framebuffer with color and bright-pass attachments for tone mapping.
+ */
 #pragma once
 
 #include <glad/glad.h>

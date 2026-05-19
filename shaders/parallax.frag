@@ -1,34 +1,47 @@
-#version 460 core
-out vec4 FragColor;
+/**
+ * @file parallax.frag
+ * @brief PBR (Cook-Torrance) with Parallax Occlusion Mapping.
+ *
+ * Uses the AO texture channel as a height map to drive steep parallax
+ * occlusion mapping (8–32 layers adapted to view angle, with linear
+ * interpolation between the last two depth layers). Lighting uses the
+ * same Cook-Torrance BRDF as pbr.frag (GGX NDF, Smith-GGX geometry,
+ * Schlick Fresnel). Tone mapped via Reinhard + gamma 2.2.
+ *
+ * In:  TexCoord, Normal, FragPos, Tangent, Bitangent, TBN
+ * Out: FragColor (LDR)
+ * Samplers: diffuse, normal, metallic_roughness, ao (also height), emissive
+ * UBO: Lights[4], Params { viewPos, numLights, heightScale }
+ */
+#version 450 core
 
-in vec2 TexCoord;
-in vec3 Normal;
-in vec3 FragPos;
-in vec3 Tangent;
-in vec3 Bitangent;
-in mat3 TBN;
+layout(location = 0) in vec2 TexCoord;
+layout(location = 1) in vec3 Normal;
+layout(location = 2) in vec3 FragPos;
+layout(location = 3) in vec3 Tangent;
+layout(location = 4) in vec3 Bitangent;
+layout(location = 0) out vec4 FragColor;
 
-uniform vec3 viewPos;
+layout(set = 0, binding = 0) uniform sampler2D texture_diffuse1;
+layout(set = 0, binding = 1) uniform sampler2D texture_normal1;
+layout(set = 0, binding = 2) uniform sampler2D texture_metallic_roughness1;
+layout(set = 0, binding = 3) uniform sampler2D texture_ao1;
+layout(set = 0, binding = 4) uniform sampler2D texture_emissive1;
 
-struct Material
-{
-    sampler2D texture_diffuse1;
-    sampler2D texture_normal1;
-    sampler2D texture_metallic_roughness1;
-    sampler2D texture_ao1;
-    sampler2D texture_emissive1;
-};
-
-struct Light
-{
+struct Light {
     vec3 position;
     vec3 color;
 };
 
-uniform Material material;
-uniform Light lights[4];
-uniform int numLights;
-uniform float heightScale;
+layout(set = 0, binding = 5) uniform Lights {
+    Light lights[4];
+};
+
+layout(set = 0, binding = 6) uniform Params {
+    vec3 viewPos;
+    int numLights;
+    float heightScale;
+};
 
 const float PI = 3.14159265359;
 
@@ -47,19 +60,19 @@ vec2 ParallaxMapping(vec2 texCoords, vec3 viewDir)
     vec2 deltaTexCoords = P / numLayers;
     
     vec2 currentTexCoords = texCoords;
-    float currentDepthMapValue = texture(material.texture_ao1, currentTexCoords).r;
+    float currentDepthMapValue = texture(texture_ao1, currentTexCoords).r;
     
     while(currentLayerDepth < currentDepthMapValue)
     {
         currentTexCoords -= deltaTexCoords;
-        currentDepthMapValue = texture(material.texture_ao1, currentTexCoords).r;
+        currentDepthMapValue = texture(texture_ao1, currentTexCoords).r;
         currentLayerDepth += layerDepth;
     }
     
     // Interpolación entre dos capas
     vec2 prevTexCoords = currentTexCoords + deltaTexCoords;
     float afterDepth = currentDepthMapValue - currentLayerDepth;
-    float beforeDepth = texture(material.texture_ao1, prevTexCoords).r - currentLayerDepth + layerDepth;
+    float beforeDepth = texture(texture_ao1, prevTexCoords).r - currentLayerDepth + layerDepth;
     float weight = afterDepth / (afterDepth - beforeDepth);
     vec2 finalTexCoords = prevTexCoords * weight + currentTexCoords * (1.0 - weight);
     
@@ -121,20 +134,20 @@ void main()
     vec2 parallaxTexCoords = ParallaxMapping(TexCoord, viewDirTangent);
     
     // Cargar texturas
-    vec4 albedoTex = texture(material.texture_diffuse1, parallaxTexCoords);
+    vec4 albedoTex = texture(texture_diffuse1, parallaxTexCoords);
     vec3 albedo = (length(albedoTex.rgb) > 0.01) ? pow(albedoTex.rgb, vec3(2.2)) : vec3(0.5);
     
-    vec3 normalMap = texture(material.texture_normal1, parallaxTexCoords).rgb;
+    vec3 normalMap = texture(texture_normal1, parallaxTexCoords).rgb;
     normalMap = (length(normalMap) > 0.1) ? (normalMap * 2.0 - 1.0) : vec3(0.0, 0.0, 1.0);
     
-    vec3 metallicRoughness = texture(material.texture_metallic_roughness1, parallaxTexCoords).rgb;
+    vec3 metallicRoughness = texture(texture_metallic_roughness1, parallaxTexCoords).rgb;
     float metallic = (length(metallicRoughness) > 0.01) ? metallicRoughness.b : 0.0;
     float roughness = (length(metallicRoughness) > 0.01) ? metallicRoughness.g : 0.5;
     
-    float ao = texture(material.texture_ao1, parallaxTexCoords).r;
+    float ao = texture(texture_ao1, parallaxTexCoords).r;
     ao = (ao > 0.01) ? ao : 1.0;
     
-    vec3 emissive = texture(material.texture_emissive1, parallaxTexCoords).rgb;
+    vec3 emissive = texture(texture_emissive1, parallaxTexCoords).rgb;
     
     // Normal - CAMBIAR DE "vec3 N" a "vec3 normalN"
     vec3 normalN = normalize(TBN * normalMap);

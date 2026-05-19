@@ -1,10 +1,12 @@
+/**
+ * @file octree.h
+ * @brief Double-precision octree for broad-phase physics queries (AABB, rigid-body lookup).
+ */
 #pragma once
 
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
-
-namespace Haruka {
 
 /** @brief Axis-aligned bounding box used by octree nodes. */
 struct AABB {
@@ -87,5 +89,3 @@ public:
 private:
     std::unique_ptr<OctreeNode> root;
 };
-
-}

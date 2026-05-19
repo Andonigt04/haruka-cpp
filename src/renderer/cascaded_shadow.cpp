@@ -1,5 +1,5 @@
 #include "cascaded_shadow.h"
-#include "core/error_reporter.h"
+#include "tools/error_reporter.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
 #include <cmath>

@@ -1,8 +1,10 @@
+/**
+ * @file buffer_objects.h
+ * @brief RAII wrappers for OpenGL VBO, VAO, and IBO objects.
+ */
 #pragma once
 #include <glad/glad.h>
 #include <vector>
-
-#pragma once
 
 /** @brief OpenGL vertex buffer RAII wrapper. */
 class VertexBuffer {

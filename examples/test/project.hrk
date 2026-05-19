@@ -1,0 +1,23 @@
+{
+  "name": "Test",
+  "version": "0.1.0",
+  "engineVersion": "",
+  "startScene": "scenes/main.scene",
+  "engineBinary": "/home/andoni/Documents/GitHub/opengl/haruka-cpp/build/0.6.0/bin/libHarukaEngine.so",
+  "editorBinary": "",
+  "scenes": [
+  ],
+  "assetsPath": "",
+  "outputPath": "",
+  "shadersPath": "",
+  "exportSettings": {
+    "author": "Andoni",
+    "description": "",
+    "defaultBuildType": "Debug",
+    "defaultPlatform": "Linux",
+    "includeDebugSymbols": false,
+    "optimizeAssets": true,
+    "stripUnusedContent": true,
+    "compressAssets": true
+  }
+}

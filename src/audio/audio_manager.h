@@ -1,3 +1,7 @@
+/**
+ * @file audio_manager.h
+ * @brief OpenAL audio subsystem singleton — device/context, buffer cache, and 3D source pool.
+ */
 #pragma once
 
 #include <AL/al.h>

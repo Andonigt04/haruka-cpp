@@ -1,3 +1,7 @@
+/**
+ * @file mesh_lod.h
+ * @brief Mesh LOD manager — generates and selects simplified variants by camera distance.
+ */
 #pragma once
 
 #include <glm/glm.hpp>
