@@ -1,0 +1,159 @@
+{
+    "sceneName": "ServerTest",
+    "version": "2.0",
+    "objects": [
+        {
+            "name": "Sun",
+            "type": "CelestialBody",
+            "position": [ 500.0, 800.0, 500.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 50.0, 50.0, 50.0 ],
+            "flags": { "castLight": true, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": {
+                "light": {
+                    "color": [ 1.0, 0.95, 0.85 ],
+                    "intensity": 3000.0,
+                    "range": 1000000.0
+                },
+                "visual": { "mesh": "sphere_high_poly", "material": "sun_surface_emissive", "shader": "star_corona_vfx" }
+            }
+        },
+        {
+            "name": "Floor",
+            "type": "Plane",
+            "position": [ 0.0, 0.0, 0.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 60.0, 1.0, 60.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": {
+                "visual": { "mesh": "plane", "material": "ground_dirt" }
+            }
+        },
+        {
+            "name": "CrateA",
+            "type": "Cube",
+            "position": [ 5.0, 0.5, -4.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 1.0, 1.0, 1.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "wood_crate" } }
+        },
+        {
+            "name": "CrateB",
+            "type": "Cube",
+            "position": [ 5.0, 1.5, -4.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 1.0, 1.0, 1.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "wood_crate" } }
+        },
+        {
+            "name": "CrateC",
+            "type": "Cube",
+            "position": [ 6.0, 0.5, -4.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 1.0, 1.0, 1.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "wood_crate" } }
+        },
+        {
+            "name": "PillarNW",
+            "type": "Cube",
+            "position": [ -8.0, 2.0, -8.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.8, 4.0, 0.8 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
+        },
+        {
+            "name": "PillarNE",
+            "type": "Cube",
+            "position": [ 8.0, 2.0, -8.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.8, 4.0, 0.8 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
+        },
+        {
+            "name": "PillarSW",
+            "type": "Cube",
+            "position": [ -8.0, 2.0, 8.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.8, 4.0, 0.8 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
+        },
+        {
+            "name": "PillarSE",
+            "type": "Cube",
+            "position": [ 8.0, 2.0, 8.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.8, 4.0, 0.8 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "stone_pillar" } }
+        },
+        {
+            "name": "Rock1",
+            "type": "Sphere",
+            "position": [ -4.0, 0.4, 3.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.8, 0.8, 0.8 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "sphere", "material": "stone_rough" } }
+        },
+        {
+            "name": "Rock2",
+            "type": "Sphere",
+            "position": [ -3.2, 0.3, 4.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.6, 0.6, 0.6 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "sphere", "material": "stone_rough" } }
+        },
+        {
+            "name": "Barrel",
+            "type": "Capsule",
+            "position": [ 2.0, 0.8, 5.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.5, 0.8, 0.5 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "capsule", "material": "metal_barrel" } }
+        },
+        {
+            "name": "WallNorth",
+            "type": "Cube",
+            "position": [ 0.0, 2.5, -15.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 30.0, 5.0, 0.4 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "concrete_wall" } }
+        },
+        {
+            "name": "WallSouth",
+            "type": "Cube",
+            "position": [ 0.0, 2.5, 15.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 30.0, 5.0, 0.4 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "concrete_wall" } }
+        },
+        {
+            "name": "WallEast",
+            "type": "Cube",
+            "position": [ 15.0, 2.5, 0.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.4, 5.0, 30.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "concrete_wall" } }
+        },
+        {
+            "name": "WallWest",
+            "type": "Cube",
+            "position": [ -15.0, 2.5, 0.0 ],
+            "rotation": [ 0.0, 0.0, 0.0, 1.0 ],
+            "scale": [ 0.4, 5.0, 30.0 ],
+            "flags": { "castLight": false, "hasChunks": false, "isPersistent": true, "originShiftingTarget": false },
+            "components": { "visual": { "mesh": "cube", "material": "concrete_wall" } }
+        }
+    ]
+}

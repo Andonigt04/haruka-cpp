@@ -106,8 +106,12 @@ private:
     // UBO for PanelTransform block (binding 0)
     unsigned int m_ubo = 0;
 
-    // Previous FBO binding saved across begin/end
-    int m_savedFBO = 0;
+    // Set by beginImGui(), cleared by draw() — triggers GL barrier only when needed
+    mutable bool m_fboDirtyThisFrame = false;
+
+    // Previous FBO binding and viewport saved across begin/end
+    int m_savedFBO         = 0;
+    int m_savedViewport[4] = {};
 };
 
 } // namespace Haruka::UI

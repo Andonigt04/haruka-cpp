@@ -168,11 +168,11 @@ private:
     
     CharacterState state = CharacterState::IDLE;
     
-    // Movement parameters
-    float walkSpeed = 0.05f;
-    float runSpeed = 0.12f;
-    float crouchSpeed = 0.02f;
-    float jumpForce = 0.03f;
+    // Movement parameters (meters / second)
+    float walkSpeed = 1.5f;
+    float runSpeed = 4.0f;
+    float crouchSpeed = 0.6f;
+    float jumpForce = 5.0f;
     float mouseSensitivity = 0.1f;
     
     float yaw = -90.0f;
@@ -187,9 +187,10 @@ private:
     bool crouched = false;
     bool flightMode = false;
     
-    float standingHeight = 0.0019f;
-    float crouchingHeight = 0.0012f;
-    float currentHeight = 0.0019f;
+    // Character capsule height (meters)
+    float standingHeight = 1.9f;
+    float crouchingHeight = 1.2f;
+    float currentHeight = 1.9f;
     
     // Network sync
     Haruka::WorldPos lastSyncPos;

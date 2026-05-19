@@ -10,10 +10,6 @@
 #include <glm/glm.hpp>
 #include <imgui.h>
 #include <glad/glad.h>
-#ifdef HARUKA_NETWORK
-#include "network/dgs_bridge.h"
-#endif
-
 // 3x3 km room — chunks (-1,-1) to (1,1) in X and Z.
 // Player spawns at world center (0,0,0) = chunk (0,0,0), local (0,0,0).
 // All scene coordinates are in METRES (Units::METER = 1.0, Units::KM = 1000.0).
@@ -142,7 +138,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
         [](Haruka::Character& c, float) { c.crouch(true); });
     g_playerOwned->bindAction("Descend", AT::Canceled,
         [](Haruka::Character& c, float) { c.crouch(false); });
-
+//TODO: pasar las coords localmente
 #ifdef HARUKA_NETWORK
     g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
         Haruka::Network::sendTransform(PLAYER_UUID, pos, rot);
@@ -203,15 +199,6 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
             g_playerOwned->processInput(window, deltaTime);
     }
 
-#ifdef HARUKA_NETWORK
-    // Drain incoming chat messages
-    for (const auto& msg : Haruka::Network::pollChats()) {
-        std::string line = std::string(msg.username) + ": " + std::string(msg.text);
-        g_chatLog.push_back(std::move(line));
-        if (g_chatLog.size() > 50) g_chatLog.erase(g_chatLog.begin());
-    }
-#endif
-
     // Chat UI
     ImGuiIO& io = ImGui::GetIO();
     float chatW = 360.0f, chatH = 200.0f;
@@ -247,6 +234,7 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
     g_chatFocused = ImGui::IsItemActive();
 
     if (sendPressed && g_chatInput[0] != '\0') {
+//TODO: cambiar el network host como server pero sin el este network sistem de dgs o hacer modo de dgs para self hosted para futuro
 #ifdef HARUKA_NETWORK
         Haruka::Network::sendChat(PLAYER_UUID, PLAYER_NAME, g_chatInput);
 #endif

@@ -374,11 +374,14 @@ void Application::renderFrameContent() {
         frameData.sunDirection    = glm::normalize(glm::vec3(0.35f, 0.75f, 0.25f));
         frameData.sunLightColor   = glm::vec3(1.0f, 0.98f, 0.95f);
         frameData.ambientStrength = 0.0f;
-        frameData.enableHDR       = (int)getRenderFeatureHDR();
-        frameData.enableBloom     = (int)getRenderFeatureBloom();
-        frameData.enableSSAO      = (int)getRenderFeatureSSAO();
-        frameData.enableIBL       = (int)getRenderFeatureIBL();
-        frameData.enableShadows   = (int)getRenderFeatureShadows();
+        // Only advertise a feature if its GPU resources are actually allocated.
+        // Enabling a flag without the corresponding FBO/texture bound causes
+        // undefined behaviour in final.frag (samples from empty texture units).
+        frameData.enableHDR       = (int)(getRenderFeatureHDR()     && _hdr    != nullptr);
+        frameData.enableBloom     = (int)(getRenderFeatureBloom()   && _bloom  != nullptr);
+        frameData.enableSSAO      = (int)(getRenderFeatureSSAO()    && _ssao   != nullptr);
+        frameData.enableIBL       = (int)(getRenderFeatureIBL()     && _ibl    != nullptr);
+        frameData.enableShadows   = (int)(getRenderFeatureShadows() && _shadow != nullptr);
 
         glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
         glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerFrameUBOData), &frameData);
@@ -664,6 +667,23 @@ void Application::run(const std::string& startScenePath) {
         return;
     }
 
+    // GL debug output — catches driver errors and shader compile failures.
+    // Synchronous mode ensures the callback fires at the exact offending call.
+    glEnable(GL_DEBUG_OUTPUT);
+    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+    glDebugMessageCallback(
+        [](GLenum /*src*/, GLenum type, GLuint /*id*/, GLenum severity,
+           GLsizei /*len*/, const GLchar* msg, const void*) {
+            if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
+            const char* lvl = (type == GL_DEBUG_TYPE_ERROR) ? "ERROR"
+                            : (severity == GL_DEBUG_SEVERITY_HIGH) ? "HIGH"
+                            : (severity == GL_DEBUG_SEVERITY_MEDIUM) ? "MEDIUM" : "LOW";
+            fprintf(stderr, "[GL %s] %s\n", lvl, msg);
+        }, nullptr);
+    // Suppress performance notifications — only keep errors/warnings
+    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE,
+                          GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
+
     // ImGui — standalone runtime owns the context
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -687,6 +707,12 @@ void Application::run(const std::string& startScenePath) {
     bool running = true;
     while (running) {
         if (g_sigintReceived.load()) { running = false; continue; }
+
+        auto now = std::chrono::high_resolution_clock::now();
+        deltaTime        = std::chrono::duration<float>(now - _frameStart).count();
+        _lastFrameTimeMs = deltaTime * 1000.0f;
+        _frameStart      = now;
+
         uint32_t lastWidth  = _window->getWidth();
         uint32_t lastHeight = _window->getHeight();
 
@@ -728,10 +754,7 @@ void Application::run(const std::string& startScenePath) {
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
-        // Flush glthread and wait for GPU to finish before swap.
-        // Without this, glthread accumulates frame N+1 commands while the GPU
-        // is still processing frame N, overflowing the AMD CS command ring.
-        glFinish();
+        glFlush();
 
         _window->swapBuffers();
 

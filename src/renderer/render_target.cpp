@@ -29,6 +29,11 @@ void RenderTarget::setupFramebuffer() {
         HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "RenderTarget framebuffer incomplete!");
     }
 
+    // Initialize to transparent black — GL_RGBA16F left with nullptr data can
+    // contain NaN/Inf bit patterns on AMD VRAM, causing GPU faults when sampled.
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 

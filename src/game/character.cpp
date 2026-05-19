@@ -90,8 +90,11 @@ void Character::update(float deltaTime) {
     
     if (localPlayer)
     {
+        // Keep camera in sync even when processInput() is skipped (chat open,
+        // no window focus). processInput() will call updateCamera() again after
+        // applying input, producing a zero-lag result on frames where it runs.
         updateCamera();
-        
+
         syncTimer += deltaTime;
         if (syncTimer >= syncInterval)
         {
@@ -143,6 +146,10 @@ void Character::processInput(SDL_Window* window, float deltaTime) {
 
     if (onTransformChanged)
         onTransformChanged(position, camOrientation);
+
+    // Update camera AFTER movement and rotation are applied so the sync
+    // in Application::run() copies a fully-current position/orientation.
+    updateCamera();
 }
 
 float Character::getSpeed() const {

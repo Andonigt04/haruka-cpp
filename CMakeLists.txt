@@ -122,17 +122,20 @@ file(GLOB SHADER_SOURCES
 set(SPIRV_OUTPUTS "")
 foreach(SRC ${SHADER_SOURCES})
     get_filename_component(NAME ${SRC} NAME)
-    set(SPV "${SHADER_OUT_DIR}/${NAME}.spv")
+    set(SPV     "${SHADER_OUT_DIR}/${NAME}.spv")
+    set(DST_SRC "${SHADER_OUT_DIR}/${NAME}")
 
     if(GLSLC)
         add_custom_command(OUTPUT ${SPV}
             COMMAND ${GLSLC} --target-env=opengl ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
             DEPENDS ${SRC}
             COMMENT "glslc  ${NAME} -> ${NAME}.spv"
             VERBATIM)
     else()
         add_custom_command(OUTPUT ${SPV}
             COMMAND ${GLSLANG_V} -G ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
             DEPENDS ${SRC}
             COMMENT "glslangValidator  ${NAME} -> ${NAME}.spv"
             VERBATIM)

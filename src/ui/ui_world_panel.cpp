@@ -34,6 +34,9 @@ UIWorldPanel::UIWorldPanel(Desc desc)
     , m_windowId("##wp_" + m_desc.id)
 {
     m_fbo = std::make_unique<RenderTarget>(m_desc.fboWidth, m_desc.fboHeight);
+    // The constructor's glClear() writes to the color texture; mark dirty so
+    // the first draw() emits a memory barrier before reading it back.
+    m_fboDirtyThisFrame = true;
 
     glGenBuffers(1, &m_ubo);
     glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
@@ -46,7 +49,9 @@ UIWorldPanel::UIWorldPanel(Desc desc)
 // ── ImGui render pass ────────────────────────────────────────────────────────
 
 void UIWorldPanel::beginImGui() {
+    m_fboDirtyThisFrame = true;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &m_savedFBO);
+    glGetIntegerv(GL_VIEWPORT, m_savedViewport);
     m_fbo->bindForWriting();
     glClearColor(0.f, 0.f, 0.f, 0.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -61,6 +66,8 @@ void UIWorldPanel::beginImGui() {
 void UIWorldPanel::endImGui() {
     ImGui::End();
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)m_savedFBO);
+    glViewport(m_savedViewport[0], m_savedViewport[1],
+               m_savedViewport[2], m_savedViewport[3]);
 }
 
 // ── World-space draw ──────────────────────────────────────────────────────────
@@ -84,6 +91,14 @@ void UIWorldPanel::draw(Shader& shader, const glm::mat4& view, const glm::mat4& 
     glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PanelUBOData), &uboData);
     glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_ubo);
 
+    // Only emit barrier if beginImGui() wrote to colorTexture this frame.
+    // An unconditional glTextureBarrier() stalls the AMD glthread even when
+    // the FBO hasn't been touched, causing a hang in the render loop.
+    if (m_fboDirtyThisFrame) {
+        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+        m_fboDirtyThisFrame = false;
+    }
+
     // Bind FBO color texture to unit 1 (matches layout(binding=1) sampler)
     m_fbo->bindForReading(1);
 
@@ -91,6 +106,10 @@ void UIWorldPanel::draw(Shader& shader, const glm::mat4& view, const glm::mat4& 
     glBindVertexArray(m_vao);
     glDrawElements(GL_TRIANGLES, m_indexCount, GL_UNSIGNED_INT, nullptr);
     glBindVertexArray(0);
+
+    // Unbind UBO binding 0 so subsequent passes don't accidentally read PanelTransform
+    // data instead of whatever they expect at binding 0 (e.g. PerFrameUBO).
+    glBindBufferBase(GL_UNIFORM_BUFFER, 0, 0);
 }
 
 // ── Raycast ──────────────────────────────────────────────────────────────────

@@ -102,40 +102,55 @@ public:
 private:
     inline static std::string s_baseDir;
 
-    // Loads baseDir+path+".spv", uploads as SPIR-V, specialises at "main", returns shader object.
+    // Loads a shader, preferring GLSL source over SPIR-V.
+    //
+    // Priority:
+    //   1. GLSL source (baseDir+path) — present in dev builds, reliable on all drivers.
+    //   2. SPIR-V binary (baseDir+path+".spv") — production builds that ship only .spv.
+    //
+    // Background: GL_ARB_gl_spirv / glSpecializeShader on AMD RadeonSI (mesa) has
+    // incomplete support and can produce silently-invalid programs or hang. A draw
+    // call with an invalid program causes a GPU fault which blocks all subsequent
+    // GL calls. Compiling from GLSL source avoids this entirely.
     static GLuint loadSPV(GLenum type, const char* glslPath) {
-        std::string spvPath = s_baseDir + glslPath + ".spv";
-        // Try SPIR-V first (installed .spv). If not present, fall back to
-        // compiling GLSL source at runtime for development convenience.
-        std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
-        if (f.is_open()) {
-            auto byteSize = static_cast<std::streamsize>(f.tellg());
-            f.seekg(0, std::ios::beg);
-            std::vector<char> buf(byteSize);
-            f.read(buf.data(), byteSize);
-
-            GLuint shader = glCreateShader(type);
-            glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
-                           buf.data(), static_cast<GLsizei>(byteSize));
-            glSpecializeShader(shader, "main", 0, nullptr, nullptr);
-            checkErrors(shader, spvPath.c_str());
-            return shader;
-        }
-
-        // SPV not found -> try GLSL source (s_baseDir + glslPath)
+        // 1. GLSL source — try first; always present during development.
         std::string glslFullPath = s_baseDir + glslPath;
-        std::ifstream g(glslFullPath);
-        if (!g.is_open()) {
-            HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED, "SPV not found: " + spvPath);
-            return 0;
+        {
+            std::ifstream g(glslFullPath);
+            if (g.is_open()) {
+                std::string src((std::istreambuf_iterator<char>(g)),
+                                std::istreambuf_iterator<char>());
+                const char* srcPtr = src.c_str();
+                GLuint shader = glCreateShader(type);
+                glShaderSource(shader, 1, &srcPtr, nullptr);
+                glCompileShader(shader);
+                checkErrors(shader, glslFullPath.c_str());
+                return shader;
+            }
         }
-        std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
-        const char* srcPtr = src.c_str();
-        GLuint shader = glCreateShader(type);
-        glShaderSource(shader, 1, &srcPtr, nullptr);
-        glCompileShader(shader);
-        checkErrors(shader, glslFullPath.c_str());
-        return shader;
+
+        // 2. SPIR-V binary — used only when GLSL source is absent (production).
+        std::string spvPath = s_baseDir + glslPath + ".spv";
+        {
+            std::ifstream f(spvPath, std::ios::binary | std::ios::ate);
+            if (f.is_open()) {
+                auto byteSize = static_cast<std::streamsize>(f.tellg());
+                f.seekg(0, std::ios::beg);
+                std::vector<char> buf(byteSize);
+                f.read(buf.data(), byteSize);
+
+                GLuint shader = glCreateShader(type);
+                glShaderBinary(1, &shader, GL_SHADER_BINARY_FORMAT_SPIR_V,
+                               buf.data(), static_cast<GLsizei>(byteSize));
+                glSpecializeShader(shader, "main", 0, nullptr, nullptr);
+                checkErrors(shader, spvPath.c_str());
+                return shader;
+            }
+        }
+
+        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
+            "Shader not found: " + glslFullPath + " (or " + spvPath + ")");
+        return 0;
     }
 
     static void checkErrors(GLuint object, const char* label) {
