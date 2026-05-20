@@ -292,13 +292,16 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
         // and calls updateCamera() once at the end.
         g_playerOwned->processInput(window, deltaTime);
 
-        // Sync X/Z: move() changes character foot position; the engine body
-        // position is the sphere center, so center.x/z == foot.x/z. Y stays
-        // owned by the engine (gravity + static collision).
+        // Sync X/Z back to the physics body so gravity integration next frame
+        // doesn't overwrite the WASD displacement. Y stays owned by physics.
+        // Zero horizontal velocity — X/Z movement is position-driven each frame,
+        // not velocity-driven, so old velocity must not carry over (prevents sliding).
         if (g_playerBody) {
-            auto pos = g_playerOwned->getPosition(); // foot position
+            auto pos = g_playerOwned->getPosition();
             g_playerBody->position.x = pos.x;
             g_playerBody->position.z = pos.z;
+            g_playerBody->velocity.x = 0.0;
+            g_playerBody->velocity.z = 0.0;
         }
     }
 

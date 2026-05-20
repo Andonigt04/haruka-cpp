@@ -71,12 +71,19 @@ vec3 terrainAlbedo(vec3 worldPos, vec3 N) {
 }
 
 void main() {
+    vec3 baseColor = baseColorAndPlanetRadius.rgb;
+
+    // Emissive stars: full brightness, no shading
+    if (planetCenterAndFlag.w > 1.5) {
+        FragColor = vec4(baseColor, 1.0);
+        return;
+    }
+
     vec3 N = normalize(Normal);
     vec3 L = normalize(sunDirection);
 
     float diff = max(dot(N, L), 0.0);
 
-    vec3 baseColor = baseColorAndPlanetRadius.rgb;
     if (planetCenterAndFlag.w > 0.5) {
         baseColor = terrainAlbedo(FragPos, N);
     }

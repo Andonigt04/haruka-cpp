@@ -80,8 +80,10 @@ namespace Haruka {
         if (s == "model")    return ObjectType::MODEL;
         if (s == "mesh")     return ObjectType::MESH;
         if (s == "light")    return ObjectType::LIGHT;
-        if (s == "star")     return ObjectType::STAR;
-        if (s == "camera")   return ObjectType::CAMERA;
+        if (s == "star")           return ObjectType::STAR;
+        if (s == "CelestialBody")  return ObjectType::STAR;
+        if (s == "celestialbody")  return ObjectType::STAR;
+        if (s == "camera")         return ObjectType::CAMERA;
         return ObjectType::UNKNOWN;
     }
 

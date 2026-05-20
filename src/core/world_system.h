@@ -11,6 +11,7 @@
 namespace Haruka {
 
     class PlanetarySystem;
+    class SceneManager;
 
     /**
      * @brief Representa una entidad macroscópica en el vacío del espacio.
@@ -58,6 +59,22 @@ namespace Haruka {
         PlanetarySystem& getPlanetarySystem() { return *m_planetarySystem; }
         const std::vector<CelestialBody>& getBodies() const { return m_bodies; }
         std::vector<CelestialBody>& getBodies() { return m_bodies; }
+
+        /** Reads CelestialBody/Star objects from the scene into m_bodies. */
+        void syncFromScene(const SceneManager& scene);
+
+        /**
+         * Returns the combined normalized light direction summed from all stars,
+         * weighted by 1/distance². observerPos uses double precision.
+         * Falls back to (0,1,0) if no stars are registered.
+         */
+        glm::vec3 getDominantLightDirection(const glm::dvec3& observerPos) const;
+
+        /**
+         * Returns the blended light color from all stars weighted by 1/distance².
+         * Falls back to (1,1,1) if no stars are registered.
+         */
+        glm::vec3 getDominantLightColor(const glm::dvec3& observerPos) const;
 
     private:
         // Sistemas coordinados por el Mundo

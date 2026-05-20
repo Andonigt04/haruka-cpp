@@ -37,12 +37,18 @@ layout(std140, binding = 1) uniform PerObjectData {
 };
 
 void main() {
+    vec3 baseColor = baseColorAndPlanetRadius.rgb;
+
+    // Emissive stars: render at full brightness, no shading
+    if (planetCenterAndFlag.w > 1.5) {
+        FragColor = vec4(baseColor, 1.0);
+        return;
+    }
+
     vec3 N = normalize(Normal);
-    vec3 L = normalize(-sunDirection);
+    vec3 L = normalize(sunDirection);
     vec3 V = normalize(cameraPos - FragPos);
     vec3 H = normalize(L + V);
-
-    vec3 baseColor = baseColorAndPlanetRadius.rgb;
 
     float ndl  = max(dot(N, L), 0.0);
     float spec = pow(max(dot(N, H), 0.0), 48.0);

@@ -19,6 +19,7 @@
 #include "renderer/model.h"
 #include "renderer/primitive_shapes.h"
 #include "core/scene/scene_render_policy.h"
+#include "tools/object_types.h"
 #include "tools/error_reporter.h"
 #include "settings/settings_manager.h"
 
@@ -174,11 +175,13 @@ void Application::loadScene(const std::string& scenePath) {
 
     if (!scenePath.empty() && loader.loadFromFile(scenePath)) {
         _currentScene = _ownedScene.get();
+        if (_worldSystem) _worldSystem->syncFromScene(*_currentScene);
         std::cout << "[Application] Scene loaded: " << scenePath << std::endl;
         return;
     }
 
     _currentScene = _ownedScene.get();
+    if (_worldSystem) _worldSystem->syncFromScene(*_currentScene);
     std::cout << "[Application] Using empty scene" << std::endl;
 }
 
@@ -242,6 +245,7 @@ void Application::init(Haruka::SceneManager& scene) {
         _worldSystem = std::make_unique<Haruka::WorldSystem>();
         _worldSystem->init();
     }
+    _worldSystem->syncFromScene(scene);
 
     if (!_physicsEngine) {
         _physicsEngine = std::make_unique<Haruka::PhysicsEngine>();
@@ -371,9 +375,19 @@ void Application::renderFrameContent() {
         frameData.view            = glm::mat4(glm::mat3(_camera->getViewMatrix()));
         frameData.projection      = _camera->getProjectionMatrix(aspect);
         frameData.cameraPos       = cameraOrigin;
-        frameData.sunDirection    = glm::normalize(glm::vec3(0.35f, 0.75f, 0.25f));
-        frameData.sunLightColor   = glm::vec3(1.0f, 0.98f, 0.95f);
-        frameData.ambientStrength = 0.0f;
+        // Sun direction and color come from the WorldSystem (supports multiple stars).
+        // Lazy sync in case the scene was loaded before the WorldSystem was ready.
+        if (_worldSystem && _currentScene && _worldSystem->getBodies().empty())
+            _worldSystem->syncFromScene(*_currentScene);
+
+        if (_worldSystem && !_worldSystem->getBodies().empty())
+            frameData.sunDirection  = _worldSystem->getDominantLightDirection(glm::dvec3(cameraOrigin));
+        else
+            frameData.sunDirection  = glm::vec3(-0.55f, 0.69f, -0.41f); // reasonable fallback
+        frameData.sunLightColor = (_worldSystem && !_worldSystem->getBodies().empty())
+            ? _worldSystem->getDominantLightColor(glm::dvec3(cameraOrigin))
+            : glm::vec3(1.0f, 0.98f, 0.95f);
+        frameData.ambientStrength = 0.15f;
         // Only advertise a feature if its GPU resources are actually allocated.
         // Enabling a flag without the corresponding FBO/texture bound causes
         // undefined behaviour in final.frag (samples from empty texture units).
@@ -398,10 +412,23 @@ void Application::renderFrameContent() {
             glm::vec3 baseColor = glm::vec3(obj->color);
             if (glm::length(baseColor) < 0.001f) baseColor = glm::vec3(0.75f, 0.76f, 0.80f);
 
+            const bool isStar = (Haruka::stringToObjectType(obj->type) == Haruka::ObjectType::STAR)
+                                 || obj->flags.castLight;
+
+            // Stars emit from their light component color, not the default object color.
+            if (isStar && obj->components.contains("light")) {
+                const auto& lc = obj->components["light"];
+                if (lc.contains("color") && lc["color"].is_array() && lc["color"].size() >= 3)
+                    baseColor = glm::vec3(lc["color"][0].get<float>(),
+                                         lc["color"][1].get<float>(),
+                                         lc["color"][2].get<float>());
+            }
+
             PerObjectUBOData objData{};
             objData.model                    = glm::translate(glm::mat4(1.0f), -cameraOrigin) * getTransformMatrix(*obj);
             objData.baseColorAndPlanetRadius = glm::vec4(baseColor, 1.0f);
-            objData.planetCenterAndFlag      = glm::vec4(0.0f);
+            // w = 0: normal, 1: procedural terrain, 2: emissive star (no diffuse shading)
+            objData.planetCenterAndFlag      = glm::vec4(0.0f, 0.0f, 0.0f, isStar ? 2.0f : 0.0f);
 
             glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
             glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &objData);
