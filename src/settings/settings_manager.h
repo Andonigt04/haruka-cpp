@@ -13,7 +13,7 @@ class SettingsManager {
 public:
     static SettingsManager& get();
 
-    void init(const std::string& iniPath = "game_settings.ini");
+    void init(const std::string& iniPath = "imgui.ini");
 
     // -- Action registration --------------------------------------------------
 

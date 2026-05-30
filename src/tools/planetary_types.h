@@ -32,17 +32,27 @@ namespace Haruka {
     /**
      * @brief Contiene los datos físicos de la malla generada.
      */
+    enum class TerrainMode : uint8_t {
+        Procedural = 0,  // fBm noise auto-generation
+        Manual     = 1,  // flat sphere, editable via future editor
+    };
+
     struct ChunkData {
-        std::vector<glm::vec3> vertices;
+        std::vector<glm::vec3> vertices;  // relative to chunkCenter (float-safe)
+        std::vector<glm::vec3> morphTargets; // decimated (parent-LOD) position per vertex, for CDLOD geomorphing
         std::vector<glm::vec3> normals;
+        std::vector<glm::vec2> uvs;       // per-face UV [0,1]^2
         std::vector<glm::vec3> colors;
         std::vector<unsigned int> indices;
-        
+
         PlanetChunkKey key;
         std::string planetName;
+        glm::dvec3  chunkCenter{0.0};     // absolute world-space center (double)
+        double      planetRadius = 1.0;   // metres, for the renderer's morph-band calc
+        TerrainMode terrainMode = TerrainMode::Procedural;
 
         size_t getSizeBytes() const {
-            return (vertices.size() + normals.size() + colors.size()) * sizeof(glm::vec3) + 
+            return (vertices.size() + morphTargets.size() + normals.size() + colors.size()) * sizeof(glm::vec3) +
                    indices.size() * sizeof(unsigned int);
         }
     };

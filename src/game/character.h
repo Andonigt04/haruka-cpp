@@ -99,7 +99,12 @@ public:
     void setState(CharacterState newState) { state = newState; }
     void setUpDirection(const glm::dvec3& newUp) { upDirection = newUp; }
     void setPitchLimits(float minPitchDeg, float maxPitchDeg) { minPitch = minPitchDeg; maxPitch = maxPitchDeg; }
-    
+    /** @brief Sets movement speeds in m/s (walk, run/sprint, crouch). */
+    void setMoveSpeeds(float walk, float run, float crouch) {
+        walkSpeed = walk; runSpeed = run; crouchSpeed = crouch;
+    }
+    float getWalkSpeed() const { return walkSpeed; }
+
     bool isGrounded() const { return grounded; }
     bool isSprinting() const { return sprinting; }
     bool isCrouching() const { return crouched; }

@@ -50,7 +50,7 @@ namespace Haruka {
         std::vector<std::shared_ptr<ChunkData>> m_completedChunks;
         std::mutex m_resultMutex;
 
-        void requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings);
+        void requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings, const std::string& planetName);
         void reapFinishedTasks();
     };
 

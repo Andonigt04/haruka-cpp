@@ -38,7 +38,7 @@ public:
     void addPlanet(const Planet& planet);
 
     /** @brief Renderiza el terrain de un planeta (shader ya activo, UBO model ya subido). */
-    void renderPlanetTerrain(const std::string& planetName);
+    void renderPlanetTerrain(const std::string& planetName, const glm::dvec3& cameraPos);
 
     const std::vector<Planet>& getPlanets() const { return m_planets; }
           std::vector<Planet>& getPlanets()       { return m_planets; }
@@ -53,6 +53,13 @@ public:
 
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
+
+    /**
+     * @brief Returns the terrain height (in metres) above the reference sphere
+     *        surface at the given world position, for the nearest planet.
+     *        Returns 0 if no planet is found or terrain settings are missing.
+     */
+    double sampleTerrainHeight(const glm::dvec3& worldPos) const;
 
 private:
     // Componentes del motor de terreno (Los "músculos")

@@ -17,10 +17,21 @@ namespace Haruka {
          * Esta función debería ser agnóstica al hilo (Thread-safe).
          */
         std::shared_ptr<ChunkData> generateChunk(
-            const PlanetChunkKey& key, 
+            const PlanetChunkKey& key,
             const nlohmann::json& settings,
             double planetRadius
         );
+
+        /**
+         * @brief Returns the terrain height offset (in metres) above the
+         *        reference sphere surface at the given unit-sphere direction.
+         * @param sphereDir  Normalised direction on the unit sphere.
+         * @param settings   Planet terrain settings JSON (same format used by generateChunk).
+         * @param planetRadius Planet radius in metres.
+         */
+        float sampleHeightAt(const glm::vec3& sphereDir,
+                             const nlohmann::json& settings,
+                             double planetRadius);
 
     private:
         // Métodos internos para calcular ruido (Noise)

@@ -12,12 +12,15 @@ float NoiseGenerator::lerp(float a, float b, float t) {
 }
 
 int NoiseGenerator::hash(int x, int y, int z, int seed) {
+    // Use x/y/z directly (not >> 2) so adjacent lattice cells produce distinct
+    // gradients. The >> 2 shift mapped 4 consecutive integers to the same value,
+    // making cells 4x coarser than intended and producing near-flat noise.
     int h = seed;
-    h ^= 61 ^ (x >> 2);
+    h ^= 61 ^ x;
     h += (h << 3);
     h ^= (h >> 4);
-    h += (h << 3) ^ (y >> 2);
-    h += (h << 3) ^ (z >> 2);
+    h += (h << 3) ^ y;
+    h += (h << 3) ^ z;
     h ^= (h >> 4);
     h += (h << 3);
     return h & 0x7fffffff;
@@ -75,19 +78,21 @@ float NoiseGenerator::fBm(
     float lacunarity,
     float scale
 ) {
+    if (octaves <= 0) return 0.0f;
+
     float value = 0.0f;
     float amplitude = 1.0f;
     float frequency = 1.0f;
     float maxValue = 0.0f;
-    
+
     for (int i = 0; i < octaves; ++i) {
         value += perlin3D(pos, seed + i, scale * frequency) * amplitude;
         maxValue += amplitude;
-        
+
         amplitude *= persistence;
         frequency *= lacunarity;
     }
-    
+
     return value / maxValue;
 }
 

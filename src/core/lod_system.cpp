@@ -14,85 +14,152 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
     double radius = planet->scale.x; // Asumimos escala uniforme para el radio
 
     // Procesar las 6 caras del cubo-esfera
+    const glm::dvec3 planetPos = planet->position;
+    // Camera direction from planet center (unit vector toward camera).
+    const glm::dvec3 camDir = glm::normalize(cameraPos - planetPos);
+    const double camDist    = glm::length(cameraPos - planetPos);
+
+    // Dynamic face culling: at ground level only the face the camera stands on
+    // and its immediate neighbours (dot > 0) should be processed.  Showing
+    // side faces whose centre is 90° away from the camera causes all six
+    // faces to render as a visible "cube" box around the viewer.
+    // As the camera climbs away from the surface the cone widens so that the
+    // full visible hemisphere (dot > -0.5) is shown from space.
+    // Transition: surface (camDist == radius) → threshold = 0.1
+    //             orbit   (camDist == 2*radius) → threshold = -0.5
+    const double t            = glm::clamp((camDist - radius) / radius, 0.0, 1.0);
+    const double dotThreshold = glm::mix(0.1, -0.5, t);
+
     for (int face = 0; face < 6; ++face) {
-        // Crear un nodo raíz para cada cara (LOD 0)
         const PlanetFace planetFace = static_cast<PlanetFace>(face);
         PlanetChunkKey rootKey{ planetFace, 0, 0, 0 };
-        glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planet->position;
-        
+        glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
+
+        const glm::dvec3 faceNormal = glm::normalize(center - planetPos);
+        if (glm::dot(faceNormal, camDir) < dotThreshold) continue;
+
         LODNode root(rootKey, center, radius * 2.0);
-        recursiveProcess(&root, cameraPos, update, radius);
+        recursiveProcess(&root, cameraPos, update, radius, planetPos);
     }
 
-    // Calcular chunksToUnload (Estaban antes, pero no ahora)
-    for (uint64_t oldHash : m_lastFrameChunks) {
-        if (m_currentFrameChunks.find(oldHash) == m_currentFrameChunks.end()) {
-            // Reconstruir key (o podrías guardar keys en lugar de hashes)
-            // Para simplificar, aquí el StreamingSystem debería recibir los hashes a descargar
-        }
+    // 2:1 balance: ningún chunk vecino puede diferir en más de 1 nivel de LOD.
+    // Sin esto, dos chunks adyacentes con diferencia ≥2 niveles dejan un escalón
+    // recto que el morph (que solo salva 1 nivel) no puede cerrar.
+    balanceLeaves();
+
+    // Diff contra el frame anterior para load/keep/unload.
+    for (auto& [hash, key] : m_currentFrameChunks) {
+        if (m_lastFrameChunks.count(hash)) update.chunksToKeep.push_back(key);
+        else                               update.chunksToLoad.push_back(key);
+    }
+    for (auto& [hash, key] : m_lastFrameChunks) {
+        if (!m_currentFrameChunks.count(hash))
+            update.chunksToUnload.push_back(key);
     }
 
     m_lastFrameChunks = m_currentFrameChunks;
     return update;
 }
 
-void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius) {
-    double dist = glm::distance(cameraPos, node->center);
-    uint64_t hash = ChunkCache::keyToHash(node->key);
+// Encuentra la hoja (en m_currentFrameChunks) que cubre la celda (face,lod,x,y),
+// subiendo por los ancestros hasta la raíz. Devuelve false si ninguna existe.
+bool LODSystem::findCoveringLeaf(PlanetFace face, int lod, uint32_t x, uint32_t y,
+                                 PlanetChunkKey& out) const {
+    for (int l = lod; l >= 0; --l) {
+        uint32_t ax = x >> (lod - l);
+        uint32_t ay = y >> (lod - l);
+        PlanetChunkKey k{ face, (uint8_t)l, ax, ay };
+        auto it = m_currentFrameChunks.find(ChunkCache::keyToHash(k));
+        if (it != m_currentFrameChunks.end()) { out = it->second; return true; }
+    }
+    return false;
+}
 
-    // CRITERIO DE SUBDIVISIÓN
-    if (dist < node->size * m_splitFactor && node->key.lod < m_maxLOD) {
-        subdivide(node, radius);
-        for (auto& child : node->children) {
-            recursiveProcess(child.get(), cameraPos, update, radius);
-        }
-    } else {
-        // Es un nodo hoja: registrar para renderizar
-        m_currentFrameChunks.insert(hash);
-        
-        if (m_lastFrameChunks.count(hash)) {
-            update.chunksToKeep.push_back(node->key);
-        } else {
-            update.chunksToLoad.push_back(node->key);
+// Sustituye una hoja por sus 4 hijos en el conjunto de hojas.
+void LODSystem::subdivideLeafKey(const PlanetChunkKey& k) {
+    m_currentFrameChunks.erase(ChunkCache::keyToHash(k));
+    int nl = k.lod + 1;
+    for (int i = 0; i < 4; ++i) {
+        PlanetChunkKey c{ k.face, (uint8_t)nl, k.x * 2 + (i % 2), k.y * 2 + (i / 2) };
+        m_currentFrameChunks[ChunkCache::keyToHash(c)] = c;
+    }
+}
+
+void LODSystem::balanceLeaves() {
+    const int dx[4] = { -1, 1, 0, 0 };
+    const int dy[4] = { 0, 0, -1, 1 };
+
+    bool changed = true;
+    int  guard   = 0;
+    while (changed && guard++ < 128) {
+        changed = false;
+        // Snapshot de las hojas actuales (vamos a modificar el mapa al subdividir).
+        std::vector<PlanetChunkKey> leaves;
+        leaves.reserve(m_currentFrameChunks.size());
+        for (auto& [h, k] : m_currentFrameChunks) leaves.push_back(k);
+
+        for (const auto& L : leaves) {
+            // Puede haber dejado de ser hoja en esta misma pasada.
+            if (!m_currentFrameChunks.count(ChunkCache::keyToHash(L))) continue;
+
+            const int n = 1 << L.lod;
+            for (int d = 0; d < 4; ++d) {
+                long nx = (long)L.x + dx[d];
+                long ny = (long)L.y + dy[d];
+                if (nx < 0 || ny < 0 || nx >= n || ny >= n) continue; // cross-face: omitido
+
+                PlanetChunkKey cover;
+                if (!findCoveringLeaf(L.face, L.lod, (uint32_t)nx, (uint32_t)ny, cover)) continue;
+
+                if ((int)L.lod - (int)cover.lod > 1) {
+                    subdivideLeafKey(cover); // acerca el vecino un nivel; el while repite hasta ≤1
+                    changed = true;
+                }
+            }
         }
     }
 }
 
-void LODSystem::subdivide(LODNode* node, double radius) {
+void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos) {
+    // Use the distance from camera to the SURFACE of the planet in the chunk's
+    // direction rather than to the chunk center.  This allows side faces to
+    // subdivide near the horizon even though their centers are far away.
+    const glm::dvec3 chunkDir    = glm::normalize(node->center - planetPos);
+    const glm::dvec3 surfacePoint = planetPos + chunkDir * radius;
+    double dist = glm::distance(cameraPos, surfacePoint);
+    uint64_t hash = ChunkCache::keyToHash(node->key);
+
+    if (dist < node->size * m_splitFactor && node->key.lod < m_maxLOD) {
+        subdivide(node, radius, planetPos);
+        for (auto& child : node->children) {
+            recursiveProcess(child.get(), cameraPos, update, radius, planetPos);
+        }
+    } else {
+        // Nodo hoja: solo registrar. El load/keep/unload se calcula tras el
+        // balanceo 2:1 en updatePlanetLOD (las hojas pueden subdividirse luego).
+        m_currentFrameChunks[hash] = node->key;
+    }
+}
+
+void LODSystem::subdivide(LODNode* node, double radius, const glm::dvec3& planetPos) {
     node->isSubdivided = true;
-    
+
     int nextLOD = node->key.lod + 1;
-    double childSize = node->size * 0.5; // El tamaño visual se reduce a la mitad
-    
-    // Al aumentar el LOD, la grilla se duplica. 
-    // Un chunk en (x=1, y=0) genera hijos en x={2,3} e y={0,1}
+    double childSize = node->size * 0.5;
+
     uint32_t baseX = node->key.x * 2;
     uint32_t baseY = node->key.y * 2;
-
-    // Total de chunks a lo largo de un eje para este nuevo nivel de LOD (2^nextLOD)
     double chunksPerAxis = std::pow(2.0, nextLOD);
 
     for (int i = 0; i < 4; ++i) {
-        // Calcular offset para cada uno de los 4 cuadrantes (00, 10, 01, 11)
         uint32_t cx = baseX + (i % 2);
         uint32_t cy = baseY + (i / 2);
 
-        // Calcular el centro UV de este hijo en la cara del cubo
-        // Sumamos 0.5 para apuntar al centro exacto del chunk, no a su esquina
         double u = (double(cx) + 0.5) / chunksPerAxis;
         double v = (double(cy) + 0.5) / chunksPerAxis;
 
-        // Calcular la posición 3D real en la superficie del planeta
-        glm::dvec3 childCenter = getCubeToSpherePos(node->key.face, u, v, radius);
-        
-        // ¡Importante! Si la posición del planeta no es (0,0,0), debemos sumarla
-        // Asumiendo que radius ya considera la escala, aquí solo es posición relativa.
-        // En `updatePlanetLOD` deberías sumar `planet->position` al final si manejas coordenadas globales.
-
-        // Crear la llave del hijo
+        glm::dvec3 childCenter = getCubeToSpherePos(node->key.face, u, v, radius) + planetPos;
         PlanetChunkKey childKey = { node->key.face, (uint8_t)nextLOD, cx, cy };
-
-        // Instanciar el nodo hijo
         node->children[i] = std::make_unique<LODNode>(childKey, childCenter, childSize);
     }
 }

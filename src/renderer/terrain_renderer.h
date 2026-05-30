@@ -4,6 +4,7 @@
 #include <string>
 #include <mutex>
 #include <glad/glad.h>
+#include <glm/glm.hpp>
 #include "core/chunk_cache.h"
 #include "tools/math_types.h"
 
@@ -14,12 +15,18 @@ namespace Haruka {
         struct RenderMesh {
             GLuint vao = 0;
             GLuint vbo = 0;
+            GLuint mbo = 0;   // morph-target buffer (CDLOD)
             GLuint nbo = 0;
+            GLuint uvo = 0;   // UV buffer
             GLuint ebo = 0;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
             std::string planetName;
+            glm::dvec3  chunkCenter{0.0};
+            int         terrainMode = 0;  // 0=Procedural, 1=Manual
+            int         lod = 0;          // chunk LOD level, for morph-band calc
+            double      planetRadius = 1.0;
         };
 
         TerrainRenderer() = default;
@@ -35,7 +42,7 @@ namespace Haruka {
         void render(const Haruka::WorldPos& cameraPos);
 
         // Render de un planeta específico (el caller ya subió el UBO model matrix)
-        void renderPlanet(const std::string& planetName);
+        void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
 
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
 

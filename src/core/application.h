@@ -116,6 +116,11 @@ public:
     int getTrackedChunks()         const { return _iTrackedChunks; }
     int getMaxMemoryMB()           const { return _iMaxMemoryMB; }
 
+    /** @brief Terrain height (metres above reference sphere) at a world position. */
+    double getTerrainHeightAt(const glm::dvec3& worldPos) const {
+        return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
+    }
+
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
@@ -148,6 +153,11 @@ public:
     void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
     void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text);
     std::vector<DGS::ChatMessage> pollPlayerChats();
+    bool connectDGS(const std::string& headHost, int headPort,
+                    const std::string& email,    const std::string& password,
+                    const std::string& apiHost = "", int apiPort = 0);
+    bool isNetworkConnected() const;
+    int  getGhostCount()      const;
 #endif
 
     /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */
@@ -190,7 +200,6 @@ private:
     std::string m_loginUsername;
     std::string m_loginError;
 
-    bool connectDGS(const std::string& email, const std::string& password);
     void renderLoginScreen();
 #endif
 
@@ -205,6 +214,8 @@ private:
     
     /** @brief The main shader instance. */
     std::unique_ptr<Shader> _mainShader;
+    /** @brief Dedicated planet terrain shader. */
+    std::unique_ptr<Shader> _planetShader;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */

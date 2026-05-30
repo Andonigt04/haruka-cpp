@@ -1,4 +1,4 @@
-# HarukaEngine (v0.5.0)
+# HarukaEngine (v6)
 
 **C++17 / OpenGL 4.6** real-time 3D engine for space exploration, planetary terrain generation, and game development.
 
@@ -99,7 +99,7 @@ cmake --build build -j$(nproc)
 
 ```
 build/
-└── 0.5.0/
+└── 6/
     ├── bin/
     │   ├── libHarukaEngine.so          ← Shared library
     │   └── shaders/
@@ -167,7 +167,7 @@ Chunks are **generated asynchronously** using multi-octave Perlin noise and cach
 
 ## 📝 Status & Roadmap
 
-**Current Version:** 0.5.0 — Deferred renderer, terrain streaming, physics foundation
+**Current Version:** 6 — Deferred renderer, terrain streaming, physics foundation
 
 ---
 

@@ -176,12 +176,14 @@ void Application::loadScene(const std::string& scenePath) {
     if (!scenePath.empty() && loader.loadFromFile(scenePath)) {
         _currentScene = _ownedScene.get();
         if (_worldSystem) _worldSystem->syncFromScene(*_currentScene);
+        initPlanetarySystem();
         std::cout << "[Application] Scene loaded: " << scenePath << std::endl;
         return;
     }
 
     _currentScene = _ownedScene.get();
     if (_worldSystem) _worldSystem->syncFromScene(*_currentScene);
+    initPlanetarySystem();
     std::cout << "[Application] Using empty scene" << std::endl;
 }
 
@@ -196,11 +198,17 @@ void Application::initPlanetarySystem() {
     _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
     _planetarySystem->init();
 
+    // Wire up planetary physics so gravity and terrain collision use real planet data.
+    if (_physicsEngine)
+        _physicsEngine->initPlanetaryPhysics(
+            _worldSystem.get(),
+            _planetarySystem.get(),
+            _raycastSystem.get());
+
     for (const auto& objPtr : _currentScene->getAllObjects()) {
         if (!objPtr) continue;
         const auto& obj = *objPtr;
 
-        // Only stream terrain for objects that explicitly define terrainSettings with layers
         if (!obj.terrainSettings || obj.terrainSettings->layers.empty()) continue;
 
         const auto& ts = *obj.terrainSettings;
@@ -252,7 +260,13 @@ void Application::init(Haruka::SceneManager& scene) {
     }
 
     if (!_camera) {
-        _camera = std::make_unique<Camera>(glm::vec3(0.0f, 0.0f, 5.0f));
+        glm::vec3 camStart(0.0f, 0.0f, 5.0f);
+        for (const auto& objPtr : scene.getAllObjects()) {
+            if (!objPtr || objPtr->type != "Camera") continue;
+            camStart = glm::vec3(objPtr->position);
+            break;
+        }
+        _camera = std::make_unique<Camera>(camStart);
     }
 
     MotorInstance::getInstance().setApplication(this);
@@ -362,6 +376,12 @@ void Application::renderFrameContent() {
             );
             _mainShaderUsesFinalLook = useFinalLook;
         }
+        if (!_planetShader) {
+            _planetShader = std::make_unique<Shader>(
+                "shaders/planet.vert",
+                "shaders/planet.frag"
+            );
+        }
 
         _mainShader->use();
         glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
@@ -387,7 +407,7 @@ void Application::renderFrameContent() {
         frameData.sunLightColor = (_worldSystem && !_worldSystem->getBodies().empty())
             ? _worldSystem->getDominantLightColor(glm::dvec3(cameraOrigin))
             : glm::vec3(1.0f, 0.98f, 0.95f);
-        frameData.ambientStrength = 0.15f;
+        frameData.ambientStrength = 0.25f;
         // Only advertise a feature if its GPU resources are actually allocated.
         // Enabling a flag without the corresponding FBO/texture bound causes
         // undefined behaviour in final.frag (samples from empty texture units).
@@ -400,6 +420,10 @@ void Application::renderFrameContent() {
         glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
         glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerFrameUBOData), &frameData);
         glBindBuffer(GL_UNIFORM_BUFFER, 0);
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
 
         int renderedDrawCalls = 0;
         int renderedVertices  = 0;
@@ -485,20 +509,40 @@ void Application::renderFrameContent() {
             _iResidentMemoryMB      = _planetarySystem->getCacheMemoryMB();
             _iMaxMemoryMB           = _planetarySystem->getCacheMaxMemoryMB();
 
-            for (const auto& planet : _planetarySystem->getPlanets()) {
-                glm::vec3 planetCenter = glm::vec3(planet.position) - cameraOrigin;
+            if (_planetShader) {
+                _planetShader->use();
+                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
+                glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_uboPerObject);
+            }
 
+            // Ensure correct GL state for terrain pass
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LEQUAL);  // near/far=0.1/3e11 collapses NDC_z to ~1.0 for km-range terrain
+            glDepthMask(GL_TRUE);
+            glEnable(GL_CULL_FACE);
+            glCullFace(GL_BACK);
+            glFrontFace(GL_CCW);
+            glDisable(GL_BLEND);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+            // Bind default FBO in case a previous pass left a custom one bound
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+            for (const auto& planet : _planetarySystem->getPlanets()) {
                 PerObjectUBOData terrainObj{};
-                terrainObj.model                    = glm::translate(glm::mat4(1.0f), planetCenter);
+                terrainObj.model                    = glm::mat4(1.0f);
                 terrainObj.baseColorAndPlanetRadius = glm::vec4(0.76f, 0.78f, 0.82f, (float)planet.radius);
-                terrainObj.planetCenterAndFlag      = glm::vec4(0.0f); // already in model space
+                terrainObj.planetCenterAndFlag      = glm::vec4(0.0f);
 
                 glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
                 glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &terrainObj);
                 glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
-                _planetarySystem->renderPlanetTerrain(planet.name);
+                _planetarySystem->renderPlanetTerrain(planet.name, glm::dvec3(_camera->position));
             }
+
+            // Restore main shader for subsequent rendering
+            _mainShader->use();
 
             // Add terrain draw stats on top of regular object stats
             const auto ts = _planetarySystem->getTerrainDrawStats();
@@ -595,6 +639,17 @@ void Application::sendPlayerChat(uint32_t uuid, const std::string& username, con
 std::vector<DGS::ChatMessage> Application::pollPlayerChats() {
     return m_dgs.pollChats();
 }
+
+bool Application::connectDGS(const std::string& headHost, int headPort,
+                               const std::string& email,    const std::string& password,
+                               const std::string& apiHost,  int apiPort) {
+    return m_dgs.connect(headHost, headPort, email, password,
+                         apiHost.empty() ? headHost : apiHost,
+                         apiPort <= 0   ? headPort + 1 : apiPort);
+}
+
+bool Application::isNetworkConnected() const { return m_dgs.isConnected(); }
+int  Application::getGhostCount()      const { return (int)m_ghostObjects.size(); }
 #endif
 
 void Application::cleanup() {
@@ -635,6 +690,7 @@ void Application::cleanup() {
     // Members not explicitly reset here would run their destructors AFTER
     // _window->shutdown() destroys the GL context, corrupting the heap.
     _mainShader.reset();
+    _planetShader.reset();
     _lampShader.reset();
     _geomShader.reset();
     _ssaoShader.reset();
@@ -737,6 +793,7 @@ void Application::run(const std::string& startScenePath) {
 
         auto now = std::chrono::high_resolution_clock::now();
         deltaTime        = std::chrono::duration<float>(now - _frameStart).count();
+        deltaTime        = std::min(deltaTime, 0.1f); // cap: network stalls can't explode physics
         _lastFrameTimeMs = deltaTime * 1000.0f;
         _frameStart      = now;
 

@@ -72,6 +72,13 @@ void Character::update(float deltaTime) {
         // physicsBody->position is the sphere center; foot = center - (0, radius, 0)
         position = glm::dvec3(physicsBody->position) - glm::dvec3(0.0, physicsBody->radius, 0.0);
         velocity = glm::dvec3(physicsBody->velocity);
+
+        // In flight mode gravity must not accumulate: zero the vertical velocity
+        // so the physics engine can't drag the character downward.
+        if (flightMode) {
+            physicsBody->velocity.y = 0.0;
+            velocity.y = 0.0;
+        }
     }
     
     if (!localPlayer)
@@ -255,7 +262,15 @@ glm::dvec3 Character::getEffectiveUp() const {
 
 void Character::updateState() {
     float horizontalSpeed = glm::length(glm::vec2(velocity.x, velocity.z));
-    
+
+    if (flightMode) {
+        if (horizontalSpeed > 0.1f)
+            state = sprinting ? CharacterState::RUNNING : CharacterState::WALKING;
+        else
+            state = CharacterState::IDLE;
+        return;
+    }
+
     if (!grounded) {
         state = velocity.y > 0 ? CharacterState::JUMPING : CharacterState::FALLING;
     } else if (crouched) {
@@ -268,6 +283,7 @@ void Character::updateState() {
 }
 
 void Character::checkGrounded() {
+    if (flightMode) { grounded = true; return; }
     if (physicsBody) {
         grounded = (physicsBody->velocity.y < 0.1f && physicsBody->velocity.y > -0.1f);
     }

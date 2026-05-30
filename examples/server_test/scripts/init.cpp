@@ -88,7 +88,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_playerOwned.reset();
 
     registerActions();
-    Haruka::SettingsManager::get().init("game_settings.ini");
+    Haruka::SettingsManager::get().init("imgui.ini");
 
     // Demo world-space panel — floating sign 3 m in front of spawn
     {
@@ -177,6 +177,27 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
         Haruka::Network::sendTransform(PLAYER_UUID, pos, rot);
     };
+
+    // Auto-connect if DGS_HOST / DGS_USER / DGS_PASS env vars are set.
+    {
+        const char* host  = std::getenv("DGS_HOST");
+        const char* portS = std::getenv("DGS_PORT");
+        const char* user  = std::getenv("DGS_USER");
+        const char* pass  = std::getenv("DGS_PASS");
+        const char* ahost = std::getenv("DGS_API_HOST");
+        const char* aportS= std::getenv("DGS_API_PORT");
+        if (host && user && pass) {
+            Application* app = MotorInstance::getInstance().getApplication();
+            if (app) {
+                int hp = portS  ? std::atoi(portS)  : 42424;
+                int ap = aportS ? std::atoi(aportS) : 8080;
+                bool ok = app->connectDGS(host, hp, user, pass,
+                                          ahost ? ahost : "", ap);
+                SDL_Log("[DGS] Connecting to %s:%d as %s → %s",
+                        host, hp, user, ok ? "OK" : "FAILED");
+            }
+        }
+    }
 #endif
 }
 
@@ -382,6 +403,18 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
             ImGui::TextColored(ImVec4(1,0.4f,0.2f,1), ">> CLICK WINDOW FOR KEYBOARD <<");
         if (g_chatFocused)
             ImGui::TextColored(ImVec4(1,0.6f,0.1f,1), ">> CHAT FOCUSED — press Esc <<");
+#ifdef HARUKA_NETWORK
+        ImGui::Separator();
+        {
+            Application* dgsApp = MotorInstance::getInstance().getApplication();
+            bool dgsOk = dgsApp && dgsApp->isNetworkConnected();
+            int  ghosts = dgsApp ? dgsApp->getGhostCount() : 0;
+            if (dgsOk)
+                ImGui::TextColored(ImVec4(0.2f,1,0.3f,1), "DGS: connected  ghosts=%d", ghosts);
+            else
+                ImGui::TextColored(ImVec4(0.6f,0.6f,0.6f,1), "DGS: offline (set DGS_HOST/USER/PASS)");
+        }
+#endif
         ImGui::End();
     }
 

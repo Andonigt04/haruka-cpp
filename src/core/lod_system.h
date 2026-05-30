@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <memory>
 #include "scene/scene_manager.h"
 #include "tools/planetary_types.h"
@@ -39,13 +40,18 @@ namespace Haruka {
         double m_splitFactor;
         int m_maxLOD;
 
-        // Estado persistente para saber qué estaba cargado en el frame anterior
-        std::unordered_set<uint64_t> m_lastFrameChunks;
-        std::unordered_set<uint64_t> m_currentFrameChunks;
+        // hash → key, para poder reconstruir la key al hacer unload
+        std::unordered_map<uint64_t, PlanetChunkKey> m_lastFrameChunks;
+        std::unordered_map<uint64_t, PlanetChunkKey> m_currentFrameChunks;
 
-        void recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius);
-        void subdivide(LODNode* node, double radius);
-        
+        void recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos);
+        void subdivide(LODNode* node, double radius, const glm::dvec3& planetPos);
+
+        // 2:1 LOD balance sobre el conjunto de hojas (m_currentFrameChunks).
+        void balanceLeaves();
+        bool findCoveringLeaf(PlanetFace face, int lod, uint32_t x, uint32_t y, PlanetChunkKey& out) const;
+        void subdivideLeafKey(const PlanetChunkKey& k);
+
         // Helpers para calcular posiciones en la esfera
         glm::dvec3 getCubeToSpherePos(PlanetFace face, double u, double v, double radius);
     };

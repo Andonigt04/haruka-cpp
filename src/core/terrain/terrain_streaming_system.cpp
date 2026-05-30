@@ -18,46 +18,40 @@ namespace Haruka {
     void TerrainStreamingSystem::update(const std::vector<PlanetChunkKey>& requestedChunks, const nlohmann::json& planetSettings) {
         reapFinishedTasks();
 
+        const std::string planetName = planetSettings.value("planetName", std::string{});
         for (const auto& key : requestedChunks) {
-            uint64_t hash = ChunkCache::keyToHash(key); // Usamos tu función de hash
+            uint64_t hash = ChunkCache::keyToHash(key);
 
-            // 1. ¿Está en caché?
-            if (m_cache.hasChunk(key)) {
-                continue; // Ya está listo, no hacemos nada
-            }
+            if (m_cache.hasChunk(key)) continue;
 
-            // 2. ¿Ya lo estamos generando?
             {
                 std::lock_guard<std::mutex> lock(m_pendingMutex);
-                if (m_pendingRequests.find(hash) != m_pendingRequests.end()) {
-                    continue;
-                }
+                if (m_pendingRequests.count(hash)) continue;
             }
 
-            // 3. No está. Pedir generación asíncrona.
-            requestAsyncGeneration(key, planetSettings);
+            requestAsyncGeneration(key, planetSettings, planetName);
         }
     }
 
-    void TerrainStreamingSystem::requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings) {
+    void TerrainStreamingSystem::requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings, const std::string& planetName) {
         uint64_t hash = ChunkCache::keyToHash(key);
         {
             std::lock_guard<std::mutex> lock(m_pendingMutex);
             m_pendingRequests.insert(hash);
         }
 
-        // Lanzar hilo de trabajo
-        m_asyncTasks.push_back(std::async(std::launch::async, [this, key, settings, hash]() {
-            // Ejecutar el generador (Ruido Perlin/fBm)
+        m_asyncTasks.push_back(std::async(std::launch::async, [this, key, settings, hash, planetName]() {
             auto data = m_generator.generateChunk(key, settings, settings["radius"]);
+            data->key        = key;
+            data->planetName = planetName;
 
-            // Guardar resultado de forma segura
+            // addChunk has its own lock; don't hold resultMutex while it runs.
+            m_cache.addChunk(key, *data);
+
             {
                 std::lock_guard<std::mutex> lock(m_resultMutex);
-                m_cache.addChunk(key, *data); // Guardar en caché para la próxima vez
                 m_completedChunks.push_back(data);
             }
-
             {
                 std::lock_guard<std::mutex> lock(m_pendingMutex);
                 m_pendingRequests.erase(hash);

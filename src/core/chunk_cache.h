@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <cstddef>
 
 namespace Haruka {
@@ -147,6 +148,7 @@ private:
     std::list<PlanetChunkKey> lruOrder;  ///< LRU ordering (front = oldest)
     std::unordered_map<uint64_t, std::list<PlanetChunkKey>::iterator> keyToIterator;  ///< Map to iterators
     
+    mutable std::mutex m_mutex;
     size_t maxMemoryBytes;
     size_t currentMemoryBytes = 0;
     CacheStats stats;

@@ -61,9 +61,6 @@ public:
     
     /** @brief Returns normalized height sample. */
     float getHeightNormalized(int x, int z) const;
-    bool isPatchVisible(const glm::vec2& patchCenter, const Camera* camera);
-    glm::mat4 calculateProjectionMatrix(float aspectRatio);
-    bool isInsideFrustum(const glm::vec3& point, const Camera* camera);
 
 private:
     int size;

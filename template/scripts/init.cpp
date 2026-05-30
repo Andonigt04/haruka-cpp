@@ -1,136 +1,166 @@
 #include "init.h"
-#include "player/controller/player_controller.h"
-#include "game_globals.h"
-#include "game/planetary_system.h"
+
 #include "game/character.h"
-#include "core/world_system.h"
 #include "core/camera.h"
-#include "renderer/primitive_shapes.h"
-#include "core/components/material_component.h"
-#include "core/components/mesh_renderer_component.h"
-#include <iostream>
+#include "core/application.h"
+#include "renderer/motor_instance.h"
+#include "settings/settings_manager.h"
+#include <SDL3/SDL.h>
 #include <memory>
+#include <cstdlib>
 #include <glm/glm.hpp>
 
-// Global state
-Camera* g_gameCamera = nullptr;
-Haruka::Character* g_playerCharacter = nullptr;
-GameLogic::PlayerController* g_playerController = nullptr;
-Haruka::PlanetarySystem* g_planetarySystem = nullptr;
-Haruka::WorldSystem* g_worldSystem = nullptr;
-Haruka::Scene* g_runtimeScene = nullptr;
+static Camera*                            g_camera      = nullptr;
+static Haruka::Character*                 g_player      = nullptr;
+static Haruka::SceneManager*              g_scene       = nullptr;
+static std::unique_ptr<Haruka::Character> g_playerOwned;
 
-namespace {
-constexpr bool kEnableDetailedPlanetSurface = true;
-constexpr int kPlanetPreset = 0; // Sustituir por preset propio si es necesario
-constexpr int kPlanetSeed = 1337;
+static void registerActions() {
+    auto& sm = Haruka::SettingsManager::get();
+    sm.registerAction("Move",    "Move",    "Movement",
+        Haruka::Input::Axis2DBinding{ SDL_SCANCODE_W, SDL_SCANCODE_S,
+                                      SDL_SCANCODE_A, SDL_SCANCODE_D });
+    sm.registerAction("Jump",    "Jump",    "Movement", { SDL_SCANCODE_SPACE });
+    sm.registerAction("Sprint",  "Sprint",  "Movement", { SDL_SCANCODE_LSHIFT });
+    sm.registerAction("Quit",    "Quit",    "UI",       { SDL_SCANCODE_ESCAPE });
 }
 
-void gameOnInit(Haruka::Scene* scene) {
-    g_runtimeScene = scene;
+void gameOnInit(Haruka::SceneManager* scene) {
+    g_scene = scene;
 
-    if (g_playerController) {
-        delete g_playerController;
-        g_playerController = nullptr;
-    }
-    if (g_planetarySystem) {
-        delete g_planetarySystem;
-        g_planetarySystem = nullptr;
-    }
-    if (g_worldSystem) {
-        delete g_worldSystem;
-        g_worldSystem = nullptr;
-    }
-    
-    g_worldSystem = new Haruka::WorldSystem();
-    g_planetarySystem = new Haruka::PlanetarySystem();
-    g_planetarySystem->init(scene, g_worldSystem);
-    g_planetarySystem->setTimeScale(1.0);
+    registerActions();
+    Haruka::SettingsManager::get().init("imgui.ini");
 
-    const glm::dvec3 earthWorldPos(0.0, 0.0, 0.0);
-    glm::dvec3 playerSpawnDirection(0.0, 1.0, 0.0);
-    double playerSpawnHeightKm = 6373.0;
+    // Player name and spawn position from env vars, then scene object, then defaults.
+    const char* envName = std::getenv("PLAYER_NAME");
+    std::string playerName = envName ? envName : "player";
 
+    glm::dvec3 spawnPos(0.0, 0.0, 0.0);
     if (scene) {
-        if (auto* sunObj = scene->getObject("Sun")) {
-            glm::dvec3 toSun = glm::dvec3(sunObj->position) - earthWorldPos;
-            if (glm::length(toSun) > 1e-9) {
-                playerSpawnDirection = glm::normalize(toSun);
-            }
+        for (const auto& obj : scene->getAllObjects()) {
+            if (!obj || obj->name != "Player") continue;
+            spawnPos = glm::dvec3(obj->position);
+            break;
         }
     }
+    const char* px = std::getenv("SPAWN_X");
+    const char* py = std::getenv("SPAWN_Y");
+    const char* pz = std::getenv("SPAWN_Z");
+    if (px) spawnPos.x = std::atof(px);
+    if (py) spawnPos.y = std::atof(py);
+    if (pz) spawnPos.z = std::atof(pz);
 
-    Haruka::WorldPos playerPos = Haruka::WorldPos(earthWorldPos + playerSpawnDirection * playerSpawnHeightKm);
-    auto playerOwned = std::make_unique<Haruka::Character>(playerPos, "player1");
-    g_gameCamera = playerOwned->getCamera();
-    g_playerCharacter = playerOwned.get();
+    g_playerOwned = std::make_unique<Haruka::Character>(
+        Haruka::WorldPos(spawnPos), playerName);
+    g_camera = g_playerOwned->getCamera();
+    g_player = g_playerOwned.get();
 
-    if (scene) {
-        if (auto* playerObj = scene->getObject("Player")) {
-            playerObj->position = playerPos;
+    // Wire input
+    {
+        auto& sm = Haruka::SettingsManager::get();
+        Haruka::CharacterInputProvider provider;
+        provider.readValue   = [&sm](const std::string& a) { return sm.readValue(a); };
+        provider.isPerformed = [&sm](const std::string& a) { return sm.isPerformed(a); };
+        provider.isStarted   = [&sm](const std::string& a) { return sm.isStarted(a); };
+        provider.isCanceled  = [&sm](const std::string& a) { return sm.isCanceled(a); };
+        g_playerOwned->setInputProvider(provider);
+    }
+
+    using AT = Haruka::ActionTrigger;
+    g_playerOwned->bindAction<glm::vec2>("Move", AT::Performed,
+        [](Haruka::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
+    g_playerOwned->bindAction("Jump",   AT::Started,
+        [](Haruka::Character& c, float) { c.jump(); });
+    g_playerOwned->bindAction("Sprint", AT::Started,
+        [](Haruka::Character& c, float) { c.sprint(true); });
+    g_playerOwned->bindAction("Sprint", AT::Canceled,
+        [](Haruka::Character& c, float) { c.sprint(false); });
+}
+
+// Event-driven input state for Wayland / remote desktop compatibility
+static bool  g_evtKeys[SDL_SCANCODE_COUNT] = {};
+static float g_mouseDx = 0.f, g_mouseDy = 0.f;
+
+bool gameOnEvent(const SDL_Event* e) {
+    if (!e) return false;
+    if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode < SDL_SCANCODE_COUNT) {
+        g_evtKeys[e->key.scancode] = true;
+        return false;
+    }
+    if (e->type == SDL_EVENT_KEY_UP && e->key.scancode < SDL_SCANCODE_COUNT) {
+        g_evtKeys[e->key.scancode] = false;
+        return false;
+    }
+    if (e->type == SDL_EVENT_MOUSE_MOTION) {
+        float dx = (float)e->motion.xrel;
+        float dy = (float)e->motion.yrel;
+        static float s_lastX = -1.f, s_lastY = -1.f;
+        if (dx == 0.f && dy == 0.f && s_lastX >= 0.f) {
+            dx = (float)e->motion.x - s_lastX;
+            dy = (float)e->motion.y - s_lastY;
         }
+        s_lastX = (float)e->motion.x;
+        s_lastY = (float)e->motion.y;
+        g_mouseDx += dx;
+        g_mouseDy += dy;
+        return false;
     }
-
-    g_planetarySystem->setPlayer(std::move(playerOwned));
-    g_playerController = new GameLogic::PlayerController(g_playerCharacter);
+    return false;
 }
 
-void gameOnUpdate(GLFWwindow* window, float deltaTime) {
-    if (g_playerCharacter && window) {
-        g_playerCharacter->processInput(window, deltaTime);
+void gameOnUpdate(SDL_Window* window, float deltaTime) {
+    static bool s_raised = false;
+    if (!s_raised && window) { SDL_RaiseWindow(window); s_raised = true; }
+
+    static bool s_mouseLocked = false;
+    if (!s_mouseLocked && window)
+        s_mouseLocked = SDL_SetWindowRelativeMouseMode(window, true);
+
+    // Merge polled + event-driven keyboard state
+    int numKeys = 0;
+    const bool* polled = SDL_GetKeyboardState(&numKeys);
+    bool merged[SDL_SCANCODE_COUNT] = {};
+    int n = (numKeys < SDL_SCANCODE_COUNT) ? numKeys : SDL_SCANCODE_COUNT;
+    for (int i = 0; i < n; ++i)
+        merged[i] = polled[i] || g_evtKeys[i];
+    Haruka::SettingsManager::get().update(merged);
+
+    auto& sm = Haruka::SettingsManager::get();
+    if (sm.justPressed("Quit")) {
+        SDL_Event quit{};
+        quit.type = SDL_EVENT_QUIT;
+        SDL_PushEvent(&quit);
     }
 
-    if (g_planetarySystem) {
-        g_planetarySystem->update(deltaTime);
-    }
+    if (!g_playerOwned) return;
 
-    if (g_runtimeScene && g_playerCharacter) {
-        if (auto* playerObj = g_runtimeScene->getObject("Player")) {
-            playerObj->position = g_playerCharacter->getPosition();
-        }
+    if (g_mouseDx != 0.f || g_mouseDy != 0.f) {
+        g_playerOwned->rotate(g_mouseDx, -g_mouseDy);
+        g_playerOwned->updateCamera();
+        { float tx = 0.f, ty = 0.f; SDL_GetRelativeMouseState(&tx, &ty); }
     }
-    
-    if (g_playerController) {
-        g_playerController->update(deltaTime);
-    }
+    g_mouseDx = g_mouseDy = 0.f;
+
+    g_playerOwned->update(deltaTime);
+    g_playerOwned->processInput(window, deltaTime);
 }
 
-Camera* gameGetCamera() {
-    return g_gameCamera;
-}
+Camera* gameGetCamera() { return g_camera; }
 
 void gameOnShutdown() {
-    if (g_playerController) {
-        delete g_playerController;
-        g_playerController = nullptr;
-    }
-    if (g_planetarySystem) {
-        delete g_planetarySystem;
-        g_planetarySystem = nullptr;
-    }
-    if (g_worldSystem) {
-        delete g_worldSystem;
-        g_worldSystem = nullptr;
-    }
-
-    g_playerCharacter = nullptr;
-    g_gameCamera = nullptr;
-    g_runtimeScene = nullptr;
-}
-
-Haruka::Scene* gameGetScene() {
-    return g_runtimeScene;
+    g_playerOwned.reset();
+    g_player  = nullptr;
+    g_camera  = nullptr;
+    g_scene   = nullptr;
 }
 
 namespace GameLogic {
     Haruka::GameInterface gameInterface = {
-        .onInit = gameOnInit,
-        .onUpdate = gameOnUpdate,
+        .onInit     = gameOnInit,
+        .onUpdate   = gameOnUpdate,
         .onShutdown = gameOnShutdown,
-        .getCamera = gameGetCamera,
-        .getScene = gameGetScene,
-        .name = "Game",
-        .version = "0.1.0"
+        .getCamera  = gameGetCamera,
+        .onEvent    = gameOnEvent,
     };
 }
 
