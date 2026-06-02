@@ -5,6 +5,7 @@
 #include "core/terrain/terrain_generator.h"
 #include "core/terrain/terrain_streaming_system.h"
 #include "renderer/terrain_renderer.h"
+#include "renderer/water_renderer.h"
 
 namespace Haruka {
 
@@ -16,6 +17,7 @@ void PlanetarySystem::init() {
     m_cache = std::make_unique<ChunkCache>(512);
     m_generator = std::make_unique<TerrainGenerator>();
     m_renderer = std::make_unique<TerrainRenderer>();
+    m_waterRenderer = std::make_unique<WaterRenderer>();
     
     // El streaming necesita a los otros tres
     m_streaming = std::make_unique<TerrainStreamingSystem>(*m_cache, *m_generator, *m_renderer);
@@ -37,15 +39,31 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // 1. Mover los planetas en sus órbitas
     updateOrbits(dt);
 
-    // 2. Para cada planeta, actualizar su terreno
-    for (auto& planet : m_planets) {
-        auto planetProxy = std::make_shared<SceneObject>();
-        planetProxy->name = planet.name;
-        planetProxy->position = planet.position;
-        planetProxy->scale = glm::dvec3(planet.radius);
+    // Keep the per-planet LOD-throttle state sized to the planet list.
+    if (m_lastLODCamPos.size() != m_planets.size())
+        m_lastLODCamPos.assign(m_planets.size(), glm::dvec3(1e300));
 
-        // A. ¿Qué chunks deben verse?
-        LODUpdate update = m_lod->updatePlanetLOD(planetProxy, cameraPos);
+    // 2. Para cada planeta, actualizar su terreno
+    for (size_t pi = 0; pi < m_planets.size(); ++pi) {
+        auto& planet = m_planets[pi];
+
+        // Throttle: el quadtree solo cambia al cruzar una frontera de split, así
+        // que saltamos el rebuild (con allocs) cuando la cámara apenas se movió
+        // desde el último recompute. Los chunks ya en GPU siguen renderizándose.
+        const double finest = (planet.radius * 2.0) / double(1u << 16);
+        const double moveThresh = std::max(0.5, finest * 0.125);
+        if (!m_forceLOD && glm::length(cameraPos - m_lastLODCamPos[pi]) < moveThresh)
+            continue;
+        m_lastLODCamPos[pi] = cameraPos;
+
+        SceneObject planetProxy;                 // pila, sin make_shared por frame
+        planetProxy.name = planet.name;
+        planetProxy.position = planet.position;
+        planetProxy.scale = glm::dvec3(planet.radius);
+
+        // A. ¿Qué chunks deben verse? (firma toma shared_ptr → deleter no-op)
+        LODUpdate update = m_lod->updatePlanetLOD(
+            std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), cameraPos);
 
         // B. Generar chunks nuevos (async) pasando settings del planeta
         nlohmann::json streamSettings = planet.terrainSettings;
@@ -59,11 +77,13 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // C. Cargar desde caché a GPU y descargar lo que ya no se ve
         m_streaming->processLODUpdate(update);
     }
+    m_forceLOD = false;
 
     // 3. Recoger chunks terminados y subirlos a la GPU
     auto readyChunks = m_streaming->getReadyChunks();
     for (auto& chunk : readyChunks) {
         m_renderer->addToScene(chunk->planetName, chunk->key, *chunk);
+        if (m_waterRenderer) m_waterRenderer->addToScene(chunk->planetName, chunk->key, *chunk);
     }
 }
 
@@ -74,6 +94,7 @@ void PlanetarySystem::updateOrbits(double dt) {
 
 void PlanetarySystem::addPlanet(const Planet& planet) {
     m_planets.push_back(planet);
+    m_forceLOD = true; // recompute LOD next update so the new planet appears at once
 }
 
 void PlanetarySystem::syncFromScene(const SceneManager& scene) {
@@ -87,8 +108,31 @@ void PlanetarySystem::syncFromScene(const SceneManager& scene) {
     }
 }
 
+void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
+    if (m_renderer)      m_renderer->setCullMatrix(camRelViewProj);
+    if (m_waterRenderer) m_waterRenderer->setCullMatrix(camRelViewProj);
+}
+
 void PlanetarySystem::renderPlanetTerrain(const std::string& planetName, const glm::dvec3& cameraPos) {
-    if (m_renderer) m_renderer->renderPlanet(planetName, cameraPos);
+    if (!m_renderer) return;
+    for (const auto& p : m_planets)
+        if (p.name == planetName) { m_renderer->setPlanetCenter(p.position); break; }
+    m_renderer->renderPlanet(planetName, cameraPos);
+}
+
+void PlanetarySystem::renderPlanetWater(const std::string& planetName, const glm::dvec3& cameraPos) {
+    if (!m_waterRenderer) return;
+    for (const auto& p : m_planets)
+        if (p.name == planetName) {
+            m_waterRenderer->setPlanetCenter(p.position);
+            m_waterRenderer->setPlanetRadius(p.radius);
+            break;
+        }
+    m_waterRenderer->renderPlanet(planetName, cameraPos);
+}
+
+int PlanetarySystem::getGPUWaterChunkCount() const {
+    return m_waterRenderer ? m_waterRenderer->getGPUMeshCount() : 0;
 }
 
 int PlanetarySystem::getGPUChunkCount()    const { return m_renderer  ? m_renderer->getGPUMeshCount()              : 0; }
@@ -101,6 +145,20 @@ PlanetarySystem::TerrainDrawStats PlanetarySystem::getTerrainDrawStats() const {
     if (!m_renderer) return {};
     const auto s = m_renderer->getDrawStats();
     return { s.draws, s.vertices, s.triangles };
+}
+
+bool PlanetarySystem::getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const {
+    if (m_planets.empty()) return false;
+    const Planet* nearest = nullptr;
+    double bestDist = 1e300;
+    for (const auto& p : m_planets) {
+        double d = glm::length(p.position - worldPos);
+        if (d < bestDist) { bestDist = d; nearest = &p; }
+    }
+    if (!nearest) return false;
+    outCenter    = nearest->position;
+    outSeaRadius = nearest->radius; // sea level = elevation 0 = planet radius
+    return true;
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {

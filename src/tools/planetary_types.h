@@ -45,11 +45,20 @@ namespace Haruka {
         std::vector<glm::vec3> colors;
         std::vector<unsigned int> indices;
 
+        // Malla del cascarón de agua (a nivel del mar, sin desplazamiento de olas
+        // — el oleaje Gerstner se aplica en el vertex shader). Solo se rellena
+        // cuando hasOcean. Posiciones relativas al MISMO chunkCenter que el terreno.
+        std::vector<glm::vec3> waterVertices;
+        std::vector<glm::vec3> waterNormals;   // radial outward (esfera lisa)
+        std::vector<unsigned int> waterIndices;
+
         PlanetChunkKey key;
         std::string planetName;
         glm::dvec3  chunkCenter{0.0};     // absolute world-space center (double)
         double      planetRadius = 1.0;   // metres, for the renderer's morph-band calc
         TerrainMode terrainMode = TerrainMode::Procedural;
+        float       minElevation = 0.0f;  // km, lowest terrain elevation in this chunk
+        bool        hasOcean = false;     // true if any vertex is below sea level (elev < 0)
 
         size_t getSizeBytes() const {
             return (vertices.size() + morphTargets.size() + normals.size() + colors.size()) * sizeof(glm::vec3) +

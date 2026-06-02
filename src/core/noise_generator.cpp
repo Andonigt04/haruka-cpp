@@ -35,28 +35,37 @@ float NoiseGenerator::grad(int hash, float x, float y, float z) {
 
 float NoiseGenerator::perlin3D(const glm::vec3& pos, int seed, float scale) {
     glm::vec3 p = pos * scale;
-    
-    int xi = (int)std::floor(p.x) & 255;
-    int yi = (int)std::floor(p.y) & 255;
-    int zi = (int)std::floor(p.z) & 255;
-    
-    float xf = p.x - std::floor(p.x);
-    float yf = p.y - std::floor(p.y);
-    float zf = p.z - std::floor(p.z);
-    
+
+    // Cell origin as full integers (NO premature & 255 — that wrapped 255→0 at
+    // every 256-cell boundary, so one cube corner hashed index 255 and its
+    // neighbour index 0: unrelated gradients → a hard discontinuity / cliff there.
+    // High octaves (scale·lacunarity^i) easily exceed 256, so these cliffs peppered
+    // the terrain. We mask each corner index INDIVIDUALLY and consistently below.)
+    int x0 = (int)std::floor(p.x);
+    int y0 = (int)std::floor(p.y);
+    int z0 = (int)std::floor(p.z);
+
+    float xf = p.x - (float)x0;
+    float yf = p.y - (float)y0;
+    float zf = p.z - (float)z0;
+
     float u = smoothstep(xf);
     float v = smoothstep(yf);
     float w = smoothstep(zf);
-    
+
+    // Mask each corner's integer index separately so x0 and x0+1 wrap coherently.
+    int xi = x0 & 255, yi = y0 & 255, zi = z0 & 255;
+    int xj = (x0 + 1) & 255, yj = (y0 + 1) & 255, zj = (z0 + 1) & 255;
+
     // Calcular gradientes en 8 esquinas del cubo
     float g000 = grad(hash(xi, yi, zi, seed), xf, yf, zf);
-    float g100 = grad(hash(xi + 1, yi, zi, seed), xf - 1.0f, yf, zf);
-    float g010 = grad(hash(xi, yi + 1, zi, seed), xf, yf - 1.0f, zf);
-    float g110 = grad(hash(xi + 1, yi + 1, zi, seed), xf - 1.0f, yf - 1.0f, zf);
-    float g001 = grad(hash(xi, yi, zi + 1, seed), xf, yf, zf - 1.0f);
-    float g101 = grad(hash(xi + 1, yi, zi + 1, seed), xf - 1.0f, yf, zf - 1.0f);
-    float g011 = grad(hash(xi, yi + 1, zi + 1, seed), xf, yf - 1.0f, zf - 1.0f);
-    float g111 = grad(hash(xi + 1, yi + 1, zi + 1, seed), xf - 1.0f, yf - 1.0f, zf - 1.0f);
+    float g100 = grad(hash(xj, yi, zi, seed), xf - 1.0f, yf, zf);
+    float g010 = grad(hash(xi, yj, zi, seed), xf, yf - 1.0f, zf);
+    float g110 = grad(hash(xj, yj, zi, seed), xf - 1.0f, yf - 1.0f, zf);
+    float g001 = grad(hash(xi, yi, zj, seed), xf, yf, zf - 1.0f);
+    float g101 = grad(hash(xj, yi, zj, seed), xf - 1.0f, yf, zf - 1.0f);
+    float g011 = grad(hash(xi, yj, zj, seed), xf, yf - 1.0f, zf - 1.0f);
+    float g111 = grad(hash(xj, yj, zj, seed), xf - 1.0f, yf - 1.0f, zf - 1.0f);
     
     // Interpolar
     float n00 = lerp(g000, g100, u);

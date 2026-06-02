@@ -1,7 +1,7 @@
 Media->Terreno con soporte de biomas para mas immersion.
 Media->Terrain generator con colores?
 Alta->Pasar todo a metrica de M, y que la transferencia a dgs sea coherente
-Alta->Planeta generado con chunks y terreno seed de manera correcta.
+Alta->terreno seed de manera correcta.
 Baja->?Water physics like particles and wind flows invisble points at desire point. This means the server will likely not gonna "fill" all the area with does points but, it will make a system where it tells where its needed, as example if does points tell there is a storm will tell the details (direction, force, size, ¿duration? maybe when it fills like to disapier) not where the points are.
 Baja->?AUDIO
 Muy-Baja->Hacer el test local host como server o stand alone 

@@ -18,6 +18,7 @@
 #include "core/window.h"
 #include "core/camera.h"
 #include "core/scene/scene_manager.h"
+#include "core/scene/scene_render_policy.h"
 #include "renderer/shader.h"
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
@@ -121,6 +122,17 @@ public:
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
     }
 
+    /** @brief Mean sea surface for the nearest planet. Returns false if none. */
+    bool getSeaSurfaceAt(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const {
+        return _planetarySystem ? _planetarySystem->getSeaSurface(worldPos, outCenter, outSeaRadius) : false;
+    }
+
+    /** @brief Current framebuffer height in pixels (editor viewport or window). */
+    int getWindowHeight() const {
+        if (m_editorViewportH > 0) return m_editorViewportH;
+        return _window ? (int)_window->getHeight() : 0;
+    }
+
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
@@ -216,6 +228,8 @@ private:
     std::unique_ptr<Shader> _mainShader;
     /** @brief Dedicated planet terrain shader. */
     std::unique_ptr<Shader> _planetShader;
+    /** @brief Dedicated planet ocean shader. */
+    std::unique_ptr<Shader> _waterShader;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */
@@ -333,6 +347,18 @@ private:
     };
 
     /** @brief Statistics for rendered geometry. */
+    // Cached static render queue (rebuilt only when the scene object set changes).
+    std::vector<Haruka::RenderCommand> m_staticRenderQueue;
+    size_t m_renderQueueObjCount = (size_t)-1;
+    bool   m_renderQueueDirty = true;
+
+    // GPU frame time (ms) measured with a GL timer query; the real metric for a
+    // GPU-bound scene (the CPU profiler can't see GPU cost).
+    unsigned int m_gpuTimerQuery[2] = {0, 0};
+    bool  m_gpuTimerIssued[2] = {false, false}; // query has been glEndQuery'd at least once
+    int   m_gpuTimerFrame = 0;
+    float m_lastGpuMs = 0.0f;
+
     int _iRenderedVertices      = 0;
     int _iRenderedTriangles     = 0;
     int _iRenderedDrawCalls     = 0;

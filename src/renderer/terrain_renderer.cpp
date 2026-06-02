@@ -25,6 +25,22 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     mesh.lod         = data.key.lod;
     mesh.planetRadius = data.planetRadius;
 
+    // Real bounding sphere from the surface vertices (skip the skirt verts, which
+    // hang far below and would bloat the radius). AABB centre + farthest corner.
+    {
+        const size_t surfCount = data.morphTargets.size() ? data.morphTargets.size()
+                                                           : data.vertices.size();
+        glm::vec3 mn( 1e30f), mx(-1e30f);
+        for (size_t i = 0; i < surfCount && i < data.vertices.size(); ++i) {
+            mn = glm::min(mn, data.vertices[i]);
+            mx = glm::max(mx, data.vertices[i]);
+        }
+        if (mx.x >= mn.x) {
+            mesh.bsCenter = (mn + mx) * 0.5f;
+            mesh.bsRadius = glm::length(mx - mesh.bsCenter);
+        }
+    }
+
     glGenVertexArrays(1, &mesh.vao);
     glBindVertexArray(mesh.vao);
 
@@ -118,12 +134,73 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     // the chunk-center-distance band [size*sf, 2*size*sf]; morph in its upper half.
     const double splitFactor = 1.0;
 
+    // Extract 6 frustum planes from the camera-relative VP (Gribb-Hartmann) once.
+    glm::vec4 planes[6];
+    if (m_cullEnabled) {
+        const glm::mat4& m = m_cullVP;
+        // row = m[col][row] in glm (column-major); build planes in world (cam-rel) space.
+        for (int i = 0; i < 4; ++i) planes[0][i] = m[i][3] + m[i][0]; // left
+        for (int i = 0; i < 4; ++i) planes[1][i] = m[i][3] - m[i][0]; // right
+        for (int i = 0; i < 4; ++i) planes[2][i] = m[i][3] + m[i][1]; // bottom
+        for (int i = 0; i < 4; ++i) planes[3][i] = m[i][3] - m[i][1]; // top
+        for (int i = 0; i < 4; ++i) planes[4][i] = m[i][3] + m[i][2]; // near
+        for (int i = 0; i < 4; ++i) planes[5][i] = m[i][3] - m[i][2]; // far
+        for (int p = 0; p < 6; ++p) planes[p] /= glm::length(glm::vec3(planes[p]));
+    }
+
+    // Horizon-cull setup (occlusion-cone test, "3D Engine Design for Virtual
+    // Globes", Cozzi/Ring). A chunk past the planet's curvature is hidden: it is
+    // both beyond the horizon angle (cos = R/d) AND farther than the horizon
+    // distance sqrt(d²−R²). R uses each chunk's planetRadius minus a margin so
+    // tall relief near the limb is never wrongly culled.
+    glm::dvec3 camFromCenter = glm::dvec3(cameraPos) - m_planetCenter;
+    double     camDist       = glm::length(camFromCenter);
+    glm::dvec3 camDir        = camDist > 1.0 ? camFromCenter / camDist : glm::dvec3(0,1,0);
+
+    int drawn = 0;
     for (auto& [hash, mesh] : m_gpuMeshes) {
         if (!mesh.isReady || mesh.planetName != planet) continue;
 
         // Distance to the chunk CENTRE (on the reference sphere → height-independent).
         glm::dvec3 toCenter = mesh.chunkCenter - glm::dvec3(cameraPos);
         glm::vec3  offset    = glm::vec3(toCenter);
+
+        // Horizon cull: hide chunks beyond the planet's curvature. occR uses the
+        // chunk's planetRadius minus a generous margin for the tallest peaks
+        // (~11 km) + slack. Only engages when the camera is clearly ABOVE that
+        // shell — at/near ground level the horizon is metres away and the test
+        // would wrongly cull nearby visible chunks.
+        if (m_hasPlanetCenter) {
+            double occR = mesh.planetRadius - 15000.0;
+            if (occR > 1.0 && camDist > occR + 2000.0) {
+                glm::dvec3 chunkFromCenter = mesh.chunkCenter - m_planetCenter;
+                double cl = glm::length(chunkFromCenter);
+                if (cl > 1e-6) {
+                    double cosChunk    = glm::dot(camDir, chunkFromCenter / cl);
+                    double cosHorizon  = occR / camDist;
+                    double horizonDist = std::sqrt(camDist*camDist - occR*occR);
+                    double chunkDist   = glm::length(toCenter);
+                    if (cosChunk < cosHorizon && chunkDist > horizonDist) continue;
+                }
+            }
+        }
+
+        // Frustum cull against the REAL bounding sphere (centre at terrain
+        // elevation, radius from actual vertices) so visible chunks are never
+        // wrongly culled. Falls back to a node-size estimate if not computed.
+        if (m_cullEnabled) {
+            glm::vec3 c = offset + mesh.bsCenter;
+            float radius = mesh.bsRadius > 0.0f
+                         ? mesh.bsRadius * 1.1f
+                         : (float)(mesh.planetRadius * 2.0 / double(1u << mesh.lod));
+            bool inside = true;
+            for (int p = 0; p < 6; ++p) {
+                float d = planes[p].x*c.x + planes[p].y*c.y + planes[p].z*c.z + planes[p].w;
+                if (d < -radius) { inside = false; break; }
+            }
+            if (!inside) continue;
+        }
+
         glUniform3fv(locOffset, 1, &offset[0]);
         glUniform1i(locMode, mesh.terrainMode);
 
@@ -138,8 +215,10 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
 
         glBindVertexArray(mesh.vao);
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        ++drawn;
     }
     glBindVertexArray(0);
+    m_lastDrawn = drawn;
 }
 
 TerrainRenderer::DrawStats TerrainRenderer::getDrawStats() const {

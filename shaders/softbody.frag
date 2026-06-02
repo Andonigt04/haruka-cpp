@@ -1,0 +1,46 @@
+/**
+ * @file softbody.frag
+ * @brief XPBD softbody shading — two-sided Lambert + sun specular.
+ */
+#version 450 core
+
+layout(location = 0) out vec4 FragColor;
+
+layout(location = 0) in vec3 Normal;
+layout(location = 1) in vec3 FragPos;
+
+layout(location = 15) uniform vec3 u_color;
+
+layout(std140, binding = 0) uniform PerFrameData {
+    mat4 view;
+    mat4 projection;
+    vec3 _cameraPos;     float _pad0;
+    vec3 sunDirection;   float _pad1;
+    vec3 sunLightColor;  float ambientStrength;
+    int  enableHDR;
+};
+
+void main() {
+    vec3 N = normalize(Normal);
+    // Two-sided: flip the normal to face the camera (cloth/jelly viewed from any side).
+    vec3 V = normalize(-FragPos);
+    if (dot(N, V) < 0.0) N = -N;
+
+    vec3 L = normalize(sunDirection);
+    vec3 H = normalize(L + V);
+
+    float ndl  = max(dot(N, L), 0.0);
+    float spec = pow(max(dot(N, H), 0.0), 48.0);
+
+    vec3 color = ambientStrength * u_color
+               + 0.85 * ndl * sunLightColor * u_color
+               + sunLightColor * 0.25 * spec;
+
+    if (enableHDR != 0) {
+        color = color / (color + vec3(1.0));
+        color = pow(color, vec3(1.0 / 2.2));
+    } else {
+        color = clamp(color, 0.0, 1.0);
+    }
+    FragColor = vec4(color, 1.0);
+}

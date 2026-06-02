@@ -102,12 +102,14 @@ namespace {
             return glm::vec3(absP - chunkCenter_local);
         };
 
+        float minElevKm = 1e30f;
         for (int y = 0; y <= res; ++y) {
             for (int x = 0; x <= res; ++x) {
                 glm::vec3 posOnSphere = getLocalPosition(key, x, y, res);
 
-                float height = 0.0f;
-                if (!isManual) height = calculateHeight(posOnSphere, layers) * kmToFraction;
+                float elevKm = isManual ? 0.0f : calculateHeight(posOnSphere, layers); // km
+                float height = elevKm * kmToFraction;                                   // fracción del radio
+                if (elevKm < minElevKm) minElevKm = elevKm;
 
                 glm::dvec3 absPos = glm::dvec3(posOnSphere) * (planetRadius * (1.0 + double(height)));
                 chunk->vertices.push_back(glm::vec3(absPos - chunkCenter_local));
@@ -115,27 +117,41 @@ namespace {
                 chunk->uvs.push_back(glm::vec2(float(x) * invRes, float(y) * invRes));
             }
         }
+        chunk->minElevation = (minElevKm < 1e29f) ? minElevKm : 0.0f;
+        chunk->hasOcean     = (chunk->minElevation < 0.0f); // nivel del mar = elevación 0
 
-        // Normales REALES del terreno por diferencias centrales de posición.
-        // Sin esto las normales apuntan radialmente (esfera lisa) y la luz no
-        // muestra el relieve → todo se ve plano/mal iluminado. Para los vértices
-        // del borde se muestrea el anillo vecino (localPosAt) y así no hay
-        // discontinuidad de iluminación entre chunks.
+        // Normales ANALÍTICAS con epsilon FIJO en espacio mundial. Clave para no
+        // tener costuras de iluminación entre chunks de distinto LOD: la normal es
+        // función solo de la posición esférica (no del espaciado de vértices del
+        // chunk), así dos chunks vecinos evalúan EXACTAMENTE la misma normal en el
+        // borde compartido. (Antes se usaba el spacing del chunk → fino y grueso
+        // discrepaban → línea oscura en cada borde.)
         {
-            auto vpos = [&](int i, int j) -> glm::vec3 {
-                if (i >= 0 && i <= res && j >= 0 && j <= res)
-                    return chunk->vertices[i + j * (res + 1)];
-                return localPosAt(i, j); // anillo exterior
+            // eps angular fijo (~ pocos metros sobre la esfera), igual para todo LOD.
+            const float epsAng = float(2.0 / planetRadius); // ~2 m de arco
+            // Altura (fracción del radio) en una dirección esférica unitaria.
+            auto heightAt = [&](const glm::vec3& dir) -> float {
+                return isManual ? 0.0f : calculateHeight(dir, layers) * kmToFraction;
+            };
+            // Posición desplazada (planet-local, relativa a chunkCenter_local).
+            auto dispAt = [&](const glm::vec3& dir) -> glm::dvec3 {
+                glm::dvec3 d = glm::normalize(glm::dvec3(dir));
+                return d * (planetRadius * (1.0 + double(heightAt(glm::vec3(d))))) - chunkCenter_local;
             };
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
-                    glm::vec3 dxv = vpos(x + 1, y) - vpos(x - 1, y);
-                    glm::vec3 dyv = vpos(x, y + 1) - vpos(x, y - 1);
-                    glm::vec3 n = glm::cross(dxv, dyv);
-                    float len = glm::length(n);
-                    glm::vec3 outward = getLocalPosition(key, x, y, res);
-                    n = (len > 1e-12f) ? n / len : outward;
-                    if (glm::dot(n, outward) < 0.0f) n = -n; // orientar hacia afuera
+                    glm::vec3 sph = getLocalPosition(key, x, y, res); // dir unitaria
+                    // Dos tangentes ortogonales a la dirección esférica.
+                    glm::vec3 ref = (std::abs(sph.y) < 0.9f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
+                    glm::vec3 t1 = glm::normalize(glm::cross(ref, sph));
+                    glm::vec3 t2 = glm::normalize(glm::cross(sph, t1));
+                    // Muestreo central a ±epsAng a lo largo de cada tangente.
+                    glm::dvec3 px = dispAt(sph + t1 * epsAng) - dispAt(sph - t1 * epsAng);
+                    glm::dvec3 py = dispAt(sph + t2 * epsAng) - dispAt(sph - t2 * epsAng);
+                    glm::dvec3 nd = glm::cross(px, py);
+                    double len = glm::length(nd);
+                    glm::vec3 n = (len > 1e-12) ? glm::vec3(nd / len) : sph;
+                    if (glm::dot(n, sph) < 0.0f) n = -n; // hacia afuera
                     chunk->normals[x + y * (res + 1)] = n;
                 }
             }
@@ -187,13 +203,15 @@ namespace {
         // Skirt depth: enough to cover the maximum terrain height variation so
         // adjacent chunks at different LODs don't leave visible cracks, but not
         // so deep that they become visible "walls" at ground level.
-        // Con el morph CDLOD por vértice los bordes de chunks vecinos coinciden,
-        // así que los skirts solo cubren residuos diminutos. Profundidad ∝ al
-        // espaciado de vértices del chunk (no un valor fijo enorme que se vería
-        // como pared). nodeSize = radio*2/2^lod ; spacing = nodeSize/res.
+        // Skirt depth CAPPED to a small absolute value. Scaling with vtxSpacing
+        // made low-LOD chunks (huge nodeSize) hang skirts hundreds of metres deep,
+        // which look like a "mountain wall" at chunk borders while a neighbour is
+        // still streaming in. The morph already aligns neighbour edges, so the
+        // skirt only needs to cover sub-pixel cracks: a few metres is plenty, and
+        // we clamp so it never dominates the view.
         const double nodeSize = planetRadius * 2.0 / double(1u << key.lod);
         const float  vtxSpacing = float(nodeSize / double(res));
-        const float  skirtDepth = std::max(5.0f, vtxSpacing * 4.0f);
+        const float  skirtDepth = glm::clamp(vtxSpacing * 0.5f, 1.0f, 30.0f);
 
         const int mainCount = (res + 1) * (res + 1);
 
@@ -249,6 +267,35 @@ namespace {
         for (int y = 0; y < res; ++y)
             addSkirtQuad(y*(res+1)+res, (y+1)*(res+1)+res, sR+y, sR+y+1);
 
+        // --- Malla de agua (cascarón a nivel del mar) ---
+        // Solo si el chunk toca océano. Rejilla (res+1)² sobre la esfera al radio
+        // del planeta (elevación 0), normales radiales. El oleaje se hace en el
+        // shader, así que la base es lisa. Sin skirts (la esfera es suave).
+        if (chunk->hasOcean) {
+            const int wcount = (res + 1) * (res + 1);
+            chunk->waterVertices.reserve(wcount);
+            chunk->waterNormals.reserve(wcount);
+            for (int y = 0; y <= res; ++y) {
+                for (int x = 0; x <= res; ++x) {
+                    glm::vec3 sph = getLocalPosition(key, x, y, res); // dir unitaria
+                    glm::dvec3 wp = glm::dvec3(sph) * planetRadius;   // nivel del mar
+                    chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
+                    chunk->waterNormals.push_back(sph);
+                }
+            }
+            for (int y = 0; y < res; ++y) {
+                for (int x = 0; x < res; ++x) {
+                    int i = x + y * (res + 1);
+                    chunk->waterIndices.push_back(i);
+                    chunk->waterIndices.push_back(i + 1);
+                    chunk->waterIndices.push_back(i + res + 1);
+                    chunk->waterIndices.push_back(i + 1);
+                    chunk->waterIndices.push_back(i + res + 2);
+                    chunk->waterIndices.push_back(i + res + 1);
+                }
+            }
+        }
+
         return chunk;
     }
 
@@ -284,30 +331,55 @@ namespace {
             cFreq = layers["continents"].value("freq", cFreq);
             cOct  = layers["continents"].value("octaves", cOct);
         }
-        float mFreq = 4.5f; int mOct = 8;
+        // Mountain frequency must be HIGH for visible relief: at freq 4.5 a ridge
+        // spans ~8900 km (wavelength = circumference/freq) → a 6 km bump over
+        // 8900 km is a 0.04% slope, i.e. flat. freq 200 → ~200 km ridges (Andes/
+        // Himalaya scale) with real, climbable slopes. Default raised accordingly.
+        float mFreq = 200.0f; int mOct = 8;
         if (layers.contains("mountains")) {
-            mFreq = layers["mountains"].value("freq", mFreq);
+            // Honour an explicit scene value, but reject the old tiny defaults that
+            // produce flat terrain (anything < 40 is continental-scale, not mountains).
+            float v = layers["mountains"].value("freq", mFreq);
+            mFreq = (v < 40.0f) ? 200.0f : v;
             mOct  = layers["mountains"].value("octaves", mOct);
         }
 
         // 1. Continentes → elevación base asimétrica (océano profundo / tierra baja).
         float cont = NoiseGenerator::fBm(pos, seed, cOct, 0.5f, 2.0f, cFreq);
         float s = cont / A;                                  // ~[-1, 1]
-        float elev = (s < 0.0f) ? s * 5.0f : s * 1.0f;        // océano ~-5km, tierra ~+1km
+        const float landHeight = 1.0f;   // km, altura continental
+        const float oceanDepth = 5.0f;   // km, fondo oceánico
+        float elev;
+        if (s >= 0.0f) {
+            elev = s * landHeight;       // tierra: sube suave
+        } else {
+            // Plataforma continental: transición C1 (sin quiebre de pendiente en la
+            // costa). Hermite en t=-s∈[0,1] con d(0)=0, d'(0)=landHeight (igual
+            // gradiente que la tierra → sin acantilado costero) y d(1)=oceanDepth,
+            // d'(1)=0 (llanura abisal plana). Antes la pendiente saltaba 1→5 en la
+            // costa creando un "borde de continente" abrupto.
+            float t  = glm::clamp(-s, 0.0f, 1.0f);
+            float d  = oceanDepth * (3.0f*t*t - 2.0f*t*t*t)
+                     + landHeight * (t - 2.0f*t*t + t*t*t);
+            elev = -d;
+        }
 
         float landMask  = glm::clamp(cont / 0.1f, 0.0f, 1.0f);
         float oceanMask = glm::clamp(-cont / 0.1f, 0.0f, 1.0f);
 
         // 2. Cinturones tectónicos (baja frecuencia): dónde se concentran
-        //    cordilleras y fosas, como los bordes de placas reales.
+        //    cordilleras. Umbral relajado (-0.15..0.20) → ~45% del planeta tiene
+        //    relieve montañoso, no solo franjas estrechas. Antes (0.05..0.30) solo
+        //    cubría 16% → la mayoría de la tierra salía lisa y no se veían montañas.
         float belt     = NoiseGenerator::fBm(pos, seed + 55, 4, 0.5f, 2.0f, 2.0f);
-        float beltMask = sstep(0.05f, 0.30f, belt);
+        float beltMask = sstep(-0.15f, 0.20f, belt);
 
-        // 3. Cordilleras (ridged) sobre tierra y solo en cinturones → picos +10km.
+        // 3. Cordilleras (ridged) sobre tierra. Exponente 2 (antes 4): crestas más
+        //    anchas y visibles, no picos afilados aislados. +6 km de altura.
         float mn    = NoiseGenerator::fBm(pos, seed + 123, mOct, 0.5f, 2.1f, mFreq);
         float ridge = glm::clamp(1.0f - std::fabs(mn / A), 0.0f, 1.0f);
-        ridge = std::pow(ridge, 4.0f);                        // afilar crestas
-        elev += ridge * 10.0f * landMask * beltMask;
+        ridge = std::pow(ridge, 2.0f);                        // crestas anchas
+        elev += ridge * 6.0f * landMask * beltMask;
 
         // 4. Fosas oceánicas (ridged) en cinturones → hasta ~-11km.
         float tr     = NoiseGenerator::fBm(pos, seed + 99, 6, 0.5f, 2.1f, 3.0f);

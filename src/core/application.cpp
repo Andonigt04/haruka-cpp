@@ -21,6 +21,7 @@
 #include "core/scene/scene_render_policy.h"
 #include "tools/object_types.h"
 #include "tools/error_reporter.h"
+#include "tools/profiler.h"
 #include "settings/settings_manager.h"
 
 // std140-compatible structs mirroring the UBO declarations in the shaders.
@@ -304,11 +305,23 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
 }
 
 void Application::buildRenderQueue() {
-    g_sceneRenderQueue.clear();
+    HARUKA_PROFILE("buildRenderQueue");
 
-    if (!_currentScene) return;
+    if (!_currentScene) { g_sceneRenderQueue.clear(); return; }
 
-    g_sceneRenderQueue = buildSceneRenderQueue(*_currentScene);
+    // Cache the STATIC scene classification (kind/lod per object), which only
+    // changes when the object set changes — not every frame. The expensive part
+    // is the per-object string lowercasing + substring matching; transforms are
+    // read live from the shared_ptr at draw time, so movement still updates.
+    const size_t objCount = _currentScene->getAllObjects().size();
+    if (m_renderQueueDirty || objCount != m_renderQueueObjCount) {
+        m_staticRenderQueue = buildSceneRenderQueue(*_currentScene);
+        m_renderQueueObjCount = objCount;
+        m_renderQueueDirty = false;
+    }
+    // Copy the cached static prefix (reuses g_sceneRenderQueue's buffer after the
+    // first frame — no realloc), then append per-frame network ghosts below.
+    g_sceneRenderQueue = m_staticRenderQueue;
 
 #ifdef HARUKA_NETWORK
     m_ghostObjects.clear();
@@ -333,8 +346,31 @@ void Application::buildRenderQueue() {
 }
 
 void Application::renderFrameContent() {
+    // Editor path calls this externally (no standalone loop) → reset here.
+    // Standalone loop resets at its own frame boundary so game.onUpdate is measured.
+    if (_editorTarget) Haruka::Profiler::get().newFrame();
+    HARUKA_PROFILE("renderFrameContent");
     const uint32_t width  = _window ? _window->getWidth()  : static_cast<uint32_t>(m_editorViewportW);
     const uint32_t height = _window ? _window->getHeight() : static_cast<uint32_t>(m_editorViewportH);
+
+    // --- GPU timer (double-buffered TIME_ELAPSED query) ---
+    // Measures real GPU work per frame — the metric the CPU profiler can't see.
+    // We read the PREVIOUS frame's result (already finished) to avoid a stall.
+    if (m_gpuTimerQuery[0] == 0) glGenQueries(2, m_gpuTimerQuery);
+    int prev = m_gpuTimerFrame ^ 1;
+    // Only query a buffer that has actually been closed with glEndQuery before;
+    // otherwise the id is "invalid or active" (GL_INVALID_OPERATION) on early frames.
+    if (m_gpuTimerIssued[prev]) {
+        GLint avail = 0;
+        glGetQueryObjectiv(m_gpuTimerQuery[prev], GL_QUERY_RESULT_AVAILABLE, &avail);
+        if (avail) {
+            GLuint64 ns = 0;
+            glGetQueryObjectui64v(m_gpuTimerQuery[prev], GL_QUERY_RESULT, &ns);
+            m_lastGpuMs = (float)(ns / 1.0e6);
+            Haruka::Profiler::get().add("GPU (frame)", m_lastGpuMs);
+        }
+    }
+    glBeginQuery(GL_TIME_ELAPSED, m_gpuTimerQuery[m_gpuTimerFrame]);
 
     if (_editorTarget) {
         _editorTarget->bindForWriting();
@@ -380,6 +416,12 @@ void Application::renderFrameContent() {
             _planetShader = std::make_unique<Shader>(
                 "shaders/planet.vert",
                 "shaders/planet.frag"
+            );
+        }
+        if (!_waterShader) {
+            _waterShader = std::make_unique<Shader>(
+                "shaders/water.vert",
+                "shaders/water.frag"
             );
         }
 
@@ -429,6 +471,7 @@ void Application::renderFrameContent() {
         int renderedVertices  = 0;
         int renderedTriangles = 0;
 
+        { HARUKA_PROFILE("scene.objects.draw");
         for (const auto& command : g_sceneRenderQueue) {
             const auto* obj = command.object;
             if (!obj) continue;
@@ -489,6 +532,7 @@ void Application::renderFrameContent() {
                     break;
             }
         }
+        } // scene.objects.draw
 
         _iRenderedDrawCalls = renderedDrawCalls;
         _iRenderedVertices  = renderedVertices;
@@ -498,8 +542,11 @@ void Application::renderFrameContent() {
 
         // Terrain streaming: update LOD + render planet chunks
         if (_planetarySystem) {
-            _planetarySystem->syncFromScene(*_currentScene);
-            _planetarySystem->update(0.016, glm::dvec3(_camera->position));
+            {
+                HARUKA_PROFILE("planetary.update(LOD+stream)");
+                _planetarySystem->syncFromScene(*_currentScene);
+                _planetarySystem->update(deltaTime > 0.0f ? deltaTime : 0.016, glm::dvec3(_camera->position));
+            }
 
             _iVisibleChunks         = _planetarySystem->getGPUChunkCount();
             _iResidentChunks        = _planetarySystem->getCachedChunks();
@@ -528,6 +575,14 @@ void Application::renderFrameContent() {
             // Bind default FBO in case a previous pass left a custom one bound
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
+            {
+            HARUKA_PROFILE("terrain.draw");
+            // Camera-relative view-projection for frustum culling (matches the
+            // shader's projection * mat3(view) — view rotation only, no translation).
+            const float aspectC = (height > 0u) ? (float)width / (float)height : 1.0f;
+            glm::mat4 camRelVP = _camera->getProjectionMatrix(aspectC)
+                               * glm::mat4(glm::mat3(_camera->getViewMatrix()));
+            _planetarySystem->setTerrainCullMatrix(camRelVP);
             for (const auto& planet : _planetarySystem->getPlanets()) {
                 PerObjectUBOData terrainObj{};
                 terrainObj.model                    = glm::mat4(1.0f);
@@ -539,6 +594,48 @@ void Application::renderFrameContent() {
                 glBindBuffer(GL_UNIFORM_BUFFER, 0);
 
                 _planetarySystem->renderPlanetTerrain(planet.name, glm::dvec3(_camera->position));
+            }
+            }
+
+            // --- Water pass (ocean shell, after terrain) ---
+            if (_waterShader) {
+                HARUKA_PROFILE("water.draw");
+                _waterShader->use();
+                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
+                glEnable(GL_DEPTH_TEST);
+                glDepthFunc(GL_LEQUAL);
+                glDepthMask(GL_TRUE);
+                glEnable(GL_CULL_FACE);
+                glCullFace(GL_BACK);
+                glFrontFace(GL_CCW);
+                glEnable(GL_BLEND);
+                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+                glUniform1f(14, (float)(SDL_GetTicks() / 1000.0)); // u_time
+
+                const glm::dvec3 camD = glm::dvec3(_camera->position);
+                for (const auto& planet : _planetarySystem->getPlanets()) {
+                    // Camera-anchored tangent basis for the Gerstner waves. Global
+                    // per planet/frame → seam-free across all water chunks.
+                    glm::dvec3 up = camD - planet.position;
+                    double upLen = glm::length(up);
+                    up = (upLen > 1e-9) ? up / upLen : glm::dvec3(0.0, 1.0, 0.0);
+                    glm::dvec3 ref = (std::abs(up.y) < 0.99) ? glm::dvec3(0,1,0) : glm::dvec3(1,0,0);
+                    glm::dvec3 T = glm::normalize(glm::cross(ref, up));
+                    glm::dvec3 B = glm::cross(up, T);
+
+                    glm::vec3 upf(up), Tf(T), Bf(B);
+                    glUniform3fv(15, 1, &upf[0]);
+                    glUniform3fv(16, 1, &Tf[0]);
+                    glUniform3fv(17, 1, &Bf[0]);
+                    // Wind: constant for now. Future storm system drives these per region.
+                    glUniform2f(18, 1.0f, 0.0f); // u_windDir (tangent plane)
+                    glUniform1f(19, 1.0f);       // u_windStrength
+                    glUniform1i(20, 1);          // u_waterQuality (0=spec,1=sky refl) — settings hook
+
+                    _planetarySystem->renderPlanetWater(planet.name, camD);
+                }
+                glDisable(GL_BLEND);
             }
 
             // Restore main shader for subsequent rendering
@@ -570,6 +667,11 @@ void Application::renderFrameContent() {
     if (_editorTarget) {
         _editorTarget->unbind();
     }
+
+    // GPU timer end — must match the glBeginQuery at the top of this function.
+    glEndQuery(GL_TIME_ELAPSED);
+    m_gpuTimerIssued[m_gpuTimerFrame] = true;
+    m_gpuTimerFrame ^= 1;
 }
 
 void Application::renderFrame() {
@@ -819,13 +921,19 @@ void Application::run(const std::string& startScenePath) {
         if (_window->getWidth() != lastWidth || _window->getHeight() != lastHeight)
             recreateFBOs(_window->getWidth(), _window->getHeight());
 
+        // Snapshot last frame's profiler sections at the TRUE frame boundary so
+        // the game update (physics: PBF/XPBD/shallow-water) is measured too.
+        Haruka::Profiler::get().newFrame();
+
         // Start ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
         ImGui::NewFrame();
 
-        if (_gameInterface && _gameInterface->onUpdate)
+        if (_gameInterface && _gameInterface->onUpdate) {
+            HARUKA_PROFILE("game.onUpdate");
             _gameInterface->onUpdate(_window->getNativeWindow(), deltaTime);
+        }
 
         // Sync game camera → engine camera so renderFrameContent uses up-to-date matrices
         if (_gameInterface && _gameInterface->getCamera) {
