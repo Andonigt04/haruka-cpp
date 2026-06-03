@@ -45,6 +45,7 @@
 #include "core/game_interface.h"
 
 class MotorInstance;
+namespace Haruka { class DeformationField; }
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -121,6 +122,18 @@ public:
     double getTerrainHeightAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
     }
+
+    /** @brief Edits the terrain (dig crater / build) at a world position. */
+    void editTerrain(const glm::dvec3& worldPos, double radius, double strength, bool dig) {
+        if (_planetarySystem) _planetarySystem->editTerrain(worldPos, radius, strength, dig);
+    }
+
+    /** @brief Terrain-edit field for save/restore (null if no planetary system). */
+    Haruka::DeformationField* getDeformationField() {
+        return _planetarySystem ? _planetarySystem->deformationField() : nullptr;
+    }
+    /** @brief Regenerates all terrain chunks (after restoring saved edits). */
+    void rebuildTerrain() { if (_planetarySystem) _planetarySystem->invalidateAllChunks(); }
 
     /** @brief Mean sea surface for the nearest planet. Returns false if none. */
     bool getSeaSurfaceAt(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const {

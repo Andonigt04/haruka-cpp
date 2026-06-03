@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <nlohmann/json.hpp>
+#include "core/modules.h"
 #include "tools/math_types.h"
 #include "core/scene/scene_manager.h"
 
@@ -16,6 +17,7 @@ class TerrainRenderer;
 class WaterRenderer;
 class TerrainStreamingSystem;
 class LODSystem;
+class DeformationField;
 
 class PlanetarySystem {
 public:
@@ -64,6 +66,29 @@ public:
     TerrainDrawStats getTerrainDrawStats() const;
 
     /**
+     * @brief Applies a terrain edit (dig/crater/build) at a world position and
+     *        regenerates the affected chunks so the mesh updates immediately.
+     * @param worldPos centre of the edit
+     * @param radius   metres of influence
+     * @param strength metres of displacement (positive); dig=true subtracts.
+     */
+    void editTerrain(const glm::dvec3& worldPos, double radius, double strength, bool dig);
+
+    /** @brief The terrain-edit field (null until init, or always null if the
+     *  DEFORM module is compiled out). For save/restore of edits. */
+    DeformationField* deformationField() {
+#ifdef HARUKA_MOD_DEFORM
+        return m_deform.get();
+#else
+        return nullptr;
+#endif
+    }
+
+    /** @brief Drops all GPU terrain chunks so they regenerate (e.g. after bulk
+     *  restoring deformation brushes from a save). */
+    void invalidateAllChunks();
+
+    /**
      * @brief Returns the terrain height (in metres) above the reference sphere
      *        surface at the given world position, for the nearest planet.
      *        Returns 0 if no planet is found or terrain settings are missing.
@@ -84,6 +109,9 @@ private:
     std::unique_ptr<WaterRenderer> m_waterRenderer;
     std::unique_ptr<TerrainStreamingSystem> m_streaming;
     std::unique_ptr<LODSystem> m_lod;
+#ifdef HARUKA_MOD_DEFORM
+    std::unique_ptr<DeformationField> m_deform; // player terrain edits
+#endif
 
     // Datos del universo
     std::vector<Planet> m_planets;

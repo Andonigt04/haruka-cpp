@@ -3,8 +3,12 @@
 
 namespace Haruka {
 
-LODSystem::LODSystem(double splitFactor, int maxLOD) 
+LODSystem::LODSystem(double splitFactor, int maxLOD)
     : m_splitFactor(splitFactor), m_maxLOD(maxLOD) {}
+
+void LODSystem::forgetChunk(const PlanetChunkKey& key) {
+    m_lastFrameChunks.erase(ChunkCache::keyToHash(key));
+}
 
 LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos) {
     LODUpdate update;

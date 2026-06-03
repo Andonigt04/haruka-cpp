@@ -68,7 +68,87 @@ set(NFD_SOURCES
     ${THIRD_PARTY_DIR}/nativefiledialog/src/nfd_gtk.c
 )
 
+# --- 3b. Build-time modules (MODULES=1011...) ---
+# Bitmask string, one char per module, in this FIXED order. '1'=on, '0'=off.
+# Absent/short string → missing positions default ON. See docs/guides/PLAN_MODULOS_BUILD.md.
+set(HARUKA_MODULE_LIST
+    FLUIDS      # 0: ocean + shallow-water + PBF + hybrid
+    DEFORM      # 1: terrain deformation field
+    SOFTBODY    # 2: XPBD cloth/jelly/wind
+    NETWORK     # 3: DGS client
+    AUDIO       # 4: audio manager
+    PARTICLES   # 5: reserved (particle system)
+    TERRAIN     # 6: planetary terrain (default-ON; off = no planet)
+    POSTFX      # 7: bloom/ssao/hdr/ibl
+    SHADOWS     # 8: shadow maps
+)
+set(MODULES "" CACHE STRING "Per-module on/off bitmask, e.g. 101101111")
+
+list(LENGTH HARUKA_MODULE_LIST _mod_count)
+set(_module_defines "")
+math(EXPR _last "${_mod_count} - 1")
+foreach(_i RANGE ${_last})
+    list(GET HARUKA_MODULE_LIST ${_i} _mod)
+    string(LENGTH "${MODULES}" _mlen)
+    set(_bit "1") # default ON
+    if(_i LESS _mlen)
+        string(SUBSTRING "${MODULES}" ${_i} 1 _bit)
+    endif()
+    if(_bit STREQUAL "0")
+        set(HARUKA_MOD_${_mod} OFF)
+    else()
+        set(HARUKA_MOD_${_mod} ON)
+        string(APPEND _module_defines "#define HARUKA_MOD_${_mod} 1\n")
+    endif()
+    message(STATUS "  module ${_mod} = ${HARUKA_MOD_${_mod}}")
+endforeach()
+
+# --- Module dependencies ---
+# "<MOD>_REQUIRES" lists modules that MOD needs. If MOD is ON but a requirement
+# is OFF, auto-enable the requirement (with a warning) so the build stays valid.
+set(PARTICLES_REQUIRES FLUIDS)   # the particle system reuses the PBF solver
+# (DEFORM, SOFTBODY, AUDIO, NETWORK are self-contained — no requirements.)
+
+foreach(_mod ${HARUKA_MODULE_LIST})
+    if(HARUKA_MOD_${_mod})
+        foreach(_dep ${${_mod}_REQUIRES})
+            if(NOT HARUKA_MOD_${_dep})
+                message(WARNING "Module ${_mod} requires ${_dep}; auto-enabling ${_dep}.")
+                set(HARUKA_MOD_${_dep} ON)
+                string(APPEND _module_defines "#define HARUKA_MOD_${_dep} 1\n")
+            endif()
+        endforeach()
+    endif()
+endforeach()
+
+# Generate the single source of truth header used by #ifdef across the code.
+# Written INTO the source tree (src/core/) so any consumer that includes
+# ENGINE_ROOT/src (e.g. the game) sees it without extra include paths.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules.h.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/modules.h"
+    @ONLY)
+
+# Collect sources, then drop the ones belonging to OFF modules.
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+
+# Per-module source patterns to exclude when the module is OFF.
+if(NOT HARUKA_MOD_DEFORM)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "core/terrain/deformation_field\\.cpp$")
+endif()
+if(NOT HARUKA_MOD_SOFTBODY)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/xpbd/.*\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/softbody_renderer\\.cpp$")
+endif()
+if(NOT HARUKA_MOD_FLUIDS)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/fluid/.*\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/water_renderer\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/shallow_water_renderer\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/fluid_renderer\\.cpp$")
+endif()
+if(NOT HARUKA_MOD_AUDIO)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "audio/.*\\.cpp$")
+endif()
 
 # --- 4. Main Target ---
 add_library(HarukaEngine SHARED
@@ -78,6 +158,7 @@ add_library(HarukaEngine SHARED
     ${NFD_SOURCES}
 )
 
+
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${THIRD_PARTY_DIR}/glad/include"
@@ -85,6 +166,14 @@ target_include_directories(HarukaEngine PUBLIC
     "${THIRD_PARTY_DIR}/imgui/backends"
     "${THIRD_PARTY_DIR}/nativefiledialog/src/include"
 )
+
+# zstd for save/asset compression (codec). System lib via pkg-config, fallback to find_library.
+pkg_check_modules(ZSTD libzstd)
+if(NOT ZSTD_FOUND)
+    find_library(ZSTD_LIB NAMES zstd)
+else()
+    set(ZSTD_LIB ${ZSTD_LIBRARIES})
+endif()
 
 target_link_libraries(HarukaEngine PUBLIC
     SDL3::SDL3
@@ -94,6 +183,7 @@ target_link_libraries(HarukaEngine PUBLIC
     OpenAL::OpenAL
     PostgreSQL::PostgreSQL
     PkgConfig::GTK3
+    ${ZSTD_LIB}
     ${CMAKE_DL_LIBS}
 )
 
@@ -146,6 +236,13 @@ endforeach()
 
 add_custom_target(HarukaShaders ALL DEPENDS ${SPIRV_OUTPUTS})
 add_dependencies(HarukaEngine HarukaShaders)
+
+# --- 6a. mapc: map compiler tool (.scene -> .hmap) ---
+add_executable(mapc tools/mapc.cpp)
+target_link_libraries(mapc PRIVATE HarukaEngine)
+set_target_properties(mapc PROPERTIES
+    BUILD_RPATH   "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN")
 
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)

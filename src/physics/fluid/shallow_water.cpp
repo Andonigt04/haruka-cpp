@@ -176,4 +176,38 @@ void ShallowWaterSim::substep(float dt) {
         }
 }
 
+void ShallowWaterSim::collectOverflowEdges(float dropThresh, std::vector<Overflow>& out) const {
+    out.clear();
+    const int dx[4] = { -1, 1, 0, 0 };
+    const int dy[4] = { 0, 0, -1, 1 };
+    for (int j = 0; j < m_n; ++j) {
+        for (int i = 0; i < m_n; ++i) {
+            int c = idx(i, j);
+            float w = m_water[c];
+            if (w < 0.05f) continue;                 // needs real water to spill
+            float surf = m_terrain[c] + w;           // water surface height here
+            // Find the neighbour with the biggest surface drop (steepest spill).
+            int   bestN = -1; float bestDrop = dropThresh;
+            for (int d = 0; d < 4; ++d) {
+                int ni = i + dx[d], nj = j + dy[d];
+                if (ni < 0 || nj < 0 || ni >= m_n || nj >= m_n) continue;
+                int nc = idx(ni, nj);
+                float nsurf = m_terrain[nc] + m_water[nc];
+                float drop = surf - nsurf;
+                if (drop > bestDrop) { bestDrop = drop; bestN = d; }
+            }
+            if (bestN < 0) continue;                 // no steep edge → not a waterfall
+            Overflow o;
+            o.worldPos = worldPosAt(i, j) + m_up * double(m_terrain[c] + w);
+            glm::dvec3 nd = m_tan * double(dx[bestN]) + m_bit * double(dy[bestN]);
+            double nl = glm::length(nd);
+            o.flowDir  = (nl > 1e-9) ? nd / nl : m_tan;
+            o.drop     = bestDrop;
+            // Spill rate proxy: water depth × cell area / second (bounded).
+            o.rate     = glm::clamp(w, 0.0f, 2.0f) * float(m_dx * m_dx);
+            out.push_back(o);
+        }
+    }
+}
+
 } // namespace Haruka::fluid

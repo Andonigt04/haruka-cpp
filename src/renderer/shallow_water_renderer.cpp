@@ -19,10 +19,14 @@ void ShallowWaterRenderer::ensureGL() {
     glGenBuffers(1, &m_ebo);
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)0);
+    // Vertex: pos(3) + normal(3) + alpha(1) = 7 floats. Alpha (loc 2) drives the
+    // depth-based edge fade in softbody.frag (u_alphaMode), softening the grid.
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6*sizeof(float), (void*)(3*sizeof(float)));
+    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)(3*sizeof(float)));
     glEnableVertexAttribArray(1);
+    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)(6*sizeof(float)));
+    glEnableVertexAttribArray(2);
     glBindVertexArray(0);
     m_init = true;
 }
@@ -47,7 +51,7 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     // Build vertex grid (only used cells matter, but a full grid keeps indexing
     // simple; cells without water collapse to terrain and are skipped in tris).
     m_verts.clear();
-    m_verts.resize(size_t(n) * n * 6, 0.0f);
+    m_verts.resize(size_t(n) * n * 7, 0.0f);
     std::vector<glm::vec3> pos(size_t(n) * n);
     for (int j = 0; j < n; ++j)
         for (int i = 0; i < n; ++i)
@@ -62,9 +66,15 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
             glm::vec3 nrm = glm::cross(dz, dx);
             float l = glm::length(nrm);
             nrm = (l > 1e-8f) ? nrm/l : glm::vec3(up);
-            int b = (j*n+i)*6;
+            // Opacity fades with water depth so thin boundary water (the cells that
+            // make the river look "square") dissolves into a smooth, depth-following
+            // waterline instead of a hard grid edge. Deeper water reads as solid.
+            float depth = m_sim->waterAt(i, j);
+            float alpha = glm::smoothstep(0.02f, 0.30f, depth) * 0.85f;
+            int b = (j*n+i)*7;
             m_verts[b+0]=pos[j*n+i].x; m_verts[b+1]=pos[j*n+i].y; m_verts[b+2]=pos[j*n+i].z;
             m_verts[b+3]=nrm.x; m_verts[b+4]=nrm.y; m_verts[b+5]=nrm.z;
+            m_verts[b+6]=alpha;
         }
 
     // Triangles only for quads where at least one corner holds water.
@@ -89,6 +99,7 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     const GLint locColor = 15;
     glm::vec3 waterCol(0.10f, 0.35f, 0.55f);
     glUniform3fv(locColor, 1, &waterCol[0]);
+    glUniform1f(16, 1.0f); // u_alphaMode: use the per-vertex depth alpha
 
     GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
     glDisable(GL_CULL_FACE);

@@ -1,9 +1,13 @@
 #include "planetary_system.h"
 
+#include "core/modules.h"
 #include "core/chunk_cache.h"
 #include "core/lod_system.h"
 #include "core/terrain/terrain_generator.h"
 #include "core/terrain/terrain_streaming_system.h"
+#ifdef HARUKA_MOD_DEFORM
+#include "core/terrain/deformation_field.h"
+#endif
 #include "renderer/terrain_renderer.h"
 #include "renderer/water_renderer.h"
 
@@ -18,6 +22,10 @@ void PlanetarySystem::init() {
     m_generator = std::make_unique<TerrainGenerator>();
     m_renderer = std::make_unique<TerrainRenderer>();
     m_waterRenderer = std::make_unique<WaterRenderer>();
+#ifdef HARUKA_MOD_DEFORM
+    m_deform = std::make_unique<DeformationField>();
+    m_generator->setDeformationField(m_deform.get());
+#endif
     
     // El streaming necesita a los otros tres
     m_streaming = std::make_unique<TerrainStreamingSystem>(*m_cache, *m_generator, *m_renderer);
@@ -181,7 +189,58 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
 
     // Build settings JSON the same way streaming does (config lives under terrainSettings).
     nlohmann::json settings = nearest->terrainSettings;
+    settings["planetOffsetX"] = nearest->position.x;
+    settings["planetOffsetY"] = nearest->position.y;
+    settings["planetOffsetZ"] = nearest->position.z;
     return double(m_generator->sampleHeightAt(sphereDir, settings, nearest->radius));
+}
+
+void PlanetarySystem::invalidateAllChunks() {
+    // Drop every GPU chunk + cache entry + LOD memory so the next update fully
+    // regenerates the terrain (applying whatever brushes are now in the field).
+    if (!m_renderer) return;
+    // A sphere centred on each planet large enough to cover the whole planet.
+    for (const auto& p : m_planets) {
+        auto keys = m_renderer->invalidateSphere(p.position, p.radius * 4.0);
+        for (const auto& k : keys) {
+            if (m_cache) m_cache->removeChunk(k);
+            if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
+            if (m_lod) m_lod->forgetChunk(k);
+        }
+    }
+    m_forceLOD = true;
+}
+
+void PlanetarySystem::editTerrain(const glm::dvec3& worldPos, double radius, double strength, bool dig) {
+#ifdef HARUKA_MOD_DEFORM
+    if (!m_deform) return;
+
+    DeformationField::Brush b;
+    b.center   = worldPos;
+    b.radius   = radius;
+    b.strength = strength;
+    b.type     = dig ? DeformationField::Type::Subtract : DeformationField::Type::Add;
+    m_deform->addBrush(b);
+
+    // Invalidate GPU chunks overlapping the edit (plus margin) and drop them from
+    // the cache so streaming regenerates them with the new edit applied. A small
+    // margin covers chunks whose centre is just outside but whose mesh reaches in.
+    const double margin = radius * 1.5 + 8.0;
+    if (m_renderer) {
+        auto keys = m_renderer->invalidateSphere(worldPos, margin);
+        for (const auto& k : keys) {
+            if (m_cache) m_cache->removeChunk(k);
+            if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
+            // Forget it in the LOD so next update treats it as LOAD (re-upload),
+            // not KEEP (which only refreshes the now-empty cache → chunk vanishes).
+            if (m_lod) m_lod->forgetChunk(k);
+        }
+    }
+    // Force the LOD to recompute next update so the freed chunks are re-requested.
+    m_forceLOD = true;
+#else
+    (void)worldPos; (void)radius; (void)strength; (void)dig;
+#endif
 }
 
 }

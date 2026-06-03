@@ -90,6 +90,21 @@ public:
     const glm::dvec3& anchor() const { return m_anchor; }
     const glm::dvec3& up()     const { return m_up; }
 
+    /** @brief One overflow point: a wet cell spilling over a steep terrain drop. */
+    struct Overflow {
+        glm::dvec3 worldPos;   // world position of the spilling cell surface
+        glm::dvec3 flowDir;    // unit world direction of the spill (downhill)
+        float      rate;       // spill volume rate proxy (m³/s)
+        float      drop;       // terrain height drop over the edge (m)
+    };
+    /**
+     * @brief Finds cells whose water spills over a steep edge (waterfall sources).
+     * A cell qualifies when it holds water AND a 4-neighbour has a terrain drop
+     * greater than dropThresh metres. Used by the hybrid coupler to spawn PBF
+     * cascade particles (lake overflow → waterfall). Cheap: one grid pass.
+     */
+    void collectOverflowEdges(float dropThresh, std::vector<Overflow>& out) const;
+
 private:
     int idx(int i, int j) const { return j * m_n + i; }
     void substep(float dt);

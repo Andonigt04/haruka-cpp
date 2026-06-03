@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <csignal>
 #include <atomic>
+#include <filesystem>
+#include <cstring>
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -170,10 +172,38 @@ void Application::setupQuad() {
     glBindVertexArray(0);
 }
 
-void Application::loadScene(const std::string& scenePath) {
+// Resolve a map reference to an actual file. Accepts a full path (used as-is) or
+// a bare name/path without extension. Dev: prefer the readable .scene; release:
+// fall back to the packed .hmap. So init.cpp can ask for "scenes/main" and it
+// works in both modes.
+static std::string resolveScenePath(const std::string& ref) {
+    namespace fs = std::filesystem;
+    if (ref.empty()) return ref;
+    // Already a concrete file that exists → use it.
+    if (fs::exists(ref)) return ref;
+    // Has an explicit extension we recognise but doesn't exist → try the sibling.
+    auto tryExt = [&](const std::string& base) -> std::string {
+        if (fs::exists(base + ".scene")) return base + ".scene"; // dev first
+        if (fs::exists(base + ".hmap"))  return base + ".hmap";  // release
+        return {};
+    };
+    // Strip a known extension to get the base name.
+    std::string base = ref;
+    for (const char* e : { ".scene", ".hmap" }) {
+        size_t n = std::strlen(e);
+        if (base.size() >= n && base.compare(base.size()-n, n, e) == 0) {
+            base = base.substr(0, base.size()-n); break;
+        }
+    }
+    std::string found = tryExt(base);
+    return found.empty() ? ref : found;
+}
+
+void Application::loadScene(const std::string& scenePathRef) {
     _ownedScene = std::make_unique<Haruka::SceneManager>();
     Haruka::SceneLoader loader(*_ownedScene);
 
+    const std::string scenePath = resolveScenePath(scenePathRef);
     if (!scenePath.empty() && loader.loadFromFile(scenePath)) {
         _currentScene = _ownedScene.get();
         if (_worldSystem) _worldSystem->syncFromScene(*_currentScene);
@@ -219,12 +249,21 @@ void Application::initPlanetarySystem() {
         planet.position = obj.position;
         planet.radius   = std::max({obj.scale.x, obj.scale.y, obj.scale.z});
 
-        planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
-        planet.terrainSettings["config"]["seed"]      = ts.seed;
-        for (const auto& [name, layer] : ts.layers) {
-            planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
-            planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
-            planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
+        // Pass the FULL unfiltered config (every layer param the scene authored),
+        // not just the 3 typed fields. Falls back to the typed subset if a scene
+        // somehow lacks rawConfig (older saves).
+        if (!ts.rawConfig.is_null() && ts.rawConfig.is_object()) {
+            planet.terrainSettings["config"] = ts.rawConfig;
+            if (!planet.terrainSettings["config"].contains("chunkSize"))
+                planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+        } else {
+            planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+            planet.terrainSettings["config"]["seed"]      = ts.seed;
+            for (const auto& [name, layer] : ts.layers) {
+                planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
+                planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
+                planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
+            }
         }
 
         _planetarySystem->addPlanet(planet);

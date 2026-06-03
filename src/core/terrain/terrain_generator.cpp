@@ -1,6 +1,10 @@
 #include "terrain_generator.h"
 #include "tools/planetary_types.h"
 #include "core/noise_generator.h"
+#include "core/modules.h"
+#ifdef HARUKA_MOD_DEFORM
+#include "core/terrain/deformation_field.h"
+#endif
 #include <cstdio>
 
 
@@ -91,13 +95,34 @@ namespace {
         float invRes = 1.0f / float(res);
         const float kmToFraction = float(1000.0 / planetRadius);
 
+        // World offset of this planet (to place vertices in absolute world space
+        // for sampling the deformation field, which lives in world coordinates).
+        const glm::dvec3 planetOffset(
+            settings.value("planetOffsetX", 0.0),
+            settings.value("planetOffsetY", 0.0),
+            settings.value("planetOffsetZ", 0.0));
+        (void)planetOffset; // only used by the DEFORM module
+        // Procedural elevation (km) along a sphere direction, INCLUDING player edits
+        // (the deformation field). Single source of truth so render and collision
+        // agree (getTerrainHeightAt uses the same path via sampleHeightAt).
+        auto elevKmAt = [&](const glm::vec3& sph) -> float {
+            float e = isManual ? 0.0f : calculateHeight(sph, layers); // km
+#ifdef HARUKA_MOD_DEFORM
+            if (m_deform && !m_deform->empty()) {
+                // Vertex world pos at the *procedural* surface, then sample edits.
+                glm::dvec3 surfW = glm::dvec3(sph) * (planetRadius * (1.0 + double(e * kmToFraction))) + planetOffset;
+                e += float(m_deform->sample(surfW) * 0.001); // metres → km
+            }
+#endif
+            return e;
+        };
+
         // Posición local (relativa a chunkCenter_local) para CUALQUIER índice de
         // rejilla i,j — incluso fuera de [0,res]. Se usa para los vértices y para
         // muestrear el anillo vecino al calcular normales en los bordes (sin costuras).
         auto localPosAt = [&](int i, int j) -> glm::vec3 {
             glm::vec3 sph = getLocalPosition(key, i, j, res);
-            float h = 0.0f;
-            if (!isManual) h = calculateHeight(sph, layers) * kmToFraction;
+            float h = elevKmAt(sph) * kmToFraction;
             glm::dvec3 absP = glm::dvec3(sph) * (planetRadius * (1.0 + double(h)));
             return glm::vec3(absP - chunkCenter_local);
         };
@@ -107,8 +132,8 @@ namespace {
             for (int x = 0; x <= res; ++x) {
                 glm::vec3 posOnSphere = getLocalPosition(key, x, y, res);
 
-                float elevKm = isManual ? 0.0f : calculateHeight(posOnSphere, layers); // km
-                float height = elevKm * kmToFraction;                                   // fracción del radio
+                float elevKm = elevKmAt(posOnSphere);          // km (procedural + edits)
+                float height = elevKm * kmToFraction;          // fracción del radio
                 if (elevKm < minElevKm) minElevKm = elevKm;
 
                 glm::dvec3 absPos = glm::dvec3(posOnSphere) * (planetRadius * (1.0 + double(height)));
@@ -129,14 +154,12 @@ namespace {
         {
             // eps angular fijo (~ pocos metros sobre la esfera), igual para todo LOD.
             const float epsAng = float(2.0 / planetRadius); // ~2 m de arco
-            // Altura (fracción del radio) en una dirección esférica unitaria.
-            auto heightAt = [&](const glm::vec3& dir) -> float {
-                return isManual ? 0.0f : calculateHeight(dir, layers) * kmToFraction;
-            };
-            // Posición desplazada (planet-local, relativa a chunkCenter_local).
+            // Posición desplazada (planet-local) usando elevKmAt → incluye las
+            // deformaciones, así las paredes de un cráter tienen normal correcta.
             auto dispAt = [&](const glm::vec3& dir) -> glm::dvec3 {
                 glm::dvec3 d = glm::normalize(glm::dvec3(dir));
-                return d * (planetRadius * (1.0 + double(heightAt(glm::vec3(d))))) - chunkCenter_local;
+                float h = elevKmAt(glm::vec3(d)) * kmToFraction;
+                return d * (planetRadius * (1.0 + double(h))) - chunkCenter_local;
             };
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
@@ -307,8 +330,21 @@ namespace {
         const auto& config = settings.contains("config") ? settings["config"] : kEmpty;
         g_current_seed = config.value("seed", 42);
         const auto& layers = config.contains("layers") ? config["layers"] : kEmpty;
-        const float kmToFraction = float(1000.0 / planetRadius);
-        return calculateHeight(sphereDir, layers) * kmToFraction * float(planetRadius);
+        // Procedural height in metres above the reference sphere.
+        float metres = calculateHeight(sphereDir, layers) * float(planetRadius) * float(1000.0 / planetRadius);
+
+        // Add player edits (same as the mesh) so collision/water/aim match what is
+        // drawn. Single source of truth: dig a hole → you fall into it.
+#ifdef HARUKA_MOD_DEFORM
+        if (m_deform && !m_deform->empty()) {
+            glm::dvec3 offset(settings.value("planetOffsetX", 0.0),
+                              settings.value("planetOffsetY", 0.0),
+                              settings.value("planetOffsetZ", 0.0));
+            glm::dvec3 surfW = glm::dvec3(glm::normalize(sphereDir)) * (planetRadius + double(metres)) + offset;
+            metres += float(m_deform->sample(surfW));
+        }
+#endif
+        return metres;
     }
 
     // smoothstep auxiliar (Hermite) usado por el modelo de elevación.
@@ -319,45 +355,56 @@ namespace {
 
     float TerrainGenerator::calculateHeight(const glm::vec3& pos, const nlohmann::json& layers) {
         // Modelo de elevación REALISTA tipo Tierra. Devuelve km.
-        // Rango ~[-11, +11] km. Verificado numéricamente: picos >6km ~2% (cordilleras
-        // concentradas, no por todo el planeta), fosas <-8km ~0.4%, ~50% océano.
-        // Las amplitudes (km) están hardcodeadas para dar escala real; la escena
-        // controla freq/octaves/seed.
+        // TOTALMENTE data-driven: cada amplitud/frecuencia/octava sale de la escena
+        // (layers["..."]) con DEFAULTS = los valores afinados que dan el terreno
+        // bueno actual. Una escena vacía → terreno por defecto correcto; una escena
+        // que define parámetros → los respeta. Unidades de altura/profundidad en km.
         int seed = layers.value("seed", g_current_seed);
         const float A = 0.45f; // amplitud típica del fBm normalizado
 
-        float cFreq = 1.2f; int cOct = 6;
-        if (layers.contains("continents")) {
-            cFreq = layers["continents"].value("freq", cFreq);
-            cOct  = layers["continents"].value("octaves", cOct);
-        }
-        // Mountain frequency must be HIGH for visible relief: at freq 4.5 a ridge
-        // spans ~8900 km (wavelength = circumference/freq) → a 6 km bump over
-        // 8900 km is a 0.04% slope, i.e. flat. freq 200 → ~200 km ridges (Andes/
-        // Himalaya scale) with real, climbable slopes. Default raised accordingly.
-        float mFreq = 200.0f; int mOct = 8;
-        if (layers.contains("mountains")) {
-            // Honour an explicit scene value, but reject the old tiny defaults that
-            // produce flat terrain (anything < 40 is continental-scale, not mountains).
-            float v = layers["mountains"].value("freq", mFreq);
-            mFreq = (v < 40.0f) ? 200.0f : v;
-            mOct  = layers["mountains"].value("octaves", mOct);
-        }
+        // Helper: lee layers[name][key] o devuelve def. Tolera capa ausente.
+        auto P = [&](const char* name, const char* key, float def) -> float {
+            if (layers.contains(name) && layers[name].is_object())
+                return layers[name].value(key, def);
+            return def;
+        };
+        auto Pi = [&](const char* name, const char* key, int def) -> int {
+            if (layers.contains(name) && layers[name].is_object())
+                return layers[name].value(key, def);
+            return def;
+        };
 
-        // 1. Continentes → elevación base asimétrica (océano profundo / tierra baja).
+        // --- Parámetros (escena → default) ---
+        // continents: forma base tierra/océano.
+        const float cFreq      = P("continents", "freq", 1.2f);
+        const int   cOct       = Pi("continents", "octaves", 6);
+        const float landHeight = P("continents", "landHeight", 1.0f); // km tierra
+        const float oceanDepth = P("continents", "oceanDepth", 5.0f); // km fondo
+        // mountains: cordilleras. freq alta = cordilleras estrechas y visibles.
+        float       mFreq      = P("mountains", "freq", 200.0f);
+        if (mFreq < 40.0f) mFreq = 200.0f; // guarda: <40 = escala continental (plano)
+        const int   mOct       = Pi("mountains", "octaves", 8);
+        const float mHeight    = P("mountains", "strength", 6.0f);    // km pico
+        const float mSharp     = P("mountains", "sharpness", 2.0f);   // exp ridge
+        // belt: dónde se agrupan las cordilleras (cobertura).
+        const float beltFreq   = P("belt", "freq", 2.0f);
+        const float beltLo     = P("belt", "lo", -0.15f);
+        const float beltHi     = P("belt", "hi",  0.20f);
+        // trench: fosas oceánicas.
+        const float trDepth    = P("trench", "strength", 6.0f);       // km
+        // detail: relieve fino de superficie.
+        const float dFreq      = P("detail", "freq", 20000.0f);
+        const float dStr       = P("detail", "strength", 0.05f);
+        const int   dOct       = Pi("detail", "octaves", 10);
+
+        // 1. Continentes → elevación base asimétrica con plataforma continental C1.
         float cont = NoiseGenerator::fBm(pos, seed, cOct, 0.5f, 2.0f, cFreq);
         float s = cont / A;                                  // ~[-1, 1]
-        const float landHeight = 1.0f;   // km, altura continental
-        const float oceanDepth = 5.0f;   // km, fondo oceánico
         float elev;
         if (s >= 0.0f) {
-            elev = s * landHeight;       // tierra: sube suave
+            elev = s * landHeight;
         } else {
-            // Plataforma continental: transición C1 (sin quiebre de pendiente en la
-            // costa). Hermite en t=-s∈[0,1] con d(0)=0, d'(0)=landHeight (igual
-            // gradiente que la tierra → sin acantilado costero) y d(1)=oceanDepth,
-            // d'(1)=0 (llanura abisal plana). Antes la pendiente saltaba 1→5 en la
-            // costa creando un "borde de continente" abrupto.
+            // Hermite C1: misma pendiente que la tierra en la costa, plano al fondo.
             float t  = glm::clamp(-s, 0.0f, 1.0f);
             float d  = oceanDepth * (3.0f*t*t - 2.0f*t*t*t)
                      + landHeight * (t - 2.0f*t*t + t*t*t);
@@ -367,33 +414,22 @@ namespace {
         float landMask  = glm::clamp(cont / 0.1f, 0.0f, 1.0f);
         float oceanMask = glm::clamp(-cont / 0.1f, 0.0f, 1.0f);
 
-        // 2. Cinturones tectónicos (baja frecuencia): dónde se concentran
-        //    cordilleras. Umbral relajado (-0.15..0.20) → ~45% del planeta tiene
-        //    relieve montañoso, no solo franjas estrechas. Antes (0.05..0.30) solo
-        //    cubría 16% → la mayoría de la tierra salía lisa y no se veían montañas.
-        float belt     = NoiseGenerator::fBm(pos, seed + 55, 4, 0.5f, 2.0f, 2.0f);
-        float beltMask = sstep(-0.15f, 0.20f, belt);
+        // 2. Cinturones tectónicos.
+        float belt     = NoiseGenerator::fBm(pos, seed + 55, 4, 0.5f, 2.0f, beltFreq);
+        float beltMask = sstep(beltLo, beltHi, belt);
 
-        // 3. Cordilleras (ridged) sobre tierra. Exponente 2 (antes 4): crestas más
-        //    anchas y visibles, no picos afilados aislados. +6 km de altura.
+        // 3. Cordilleras (ridged) sobre tierra.
         float mn    = NoiseGenerator::fBm(pos, seed + 123, mOct, 0.5f, 2.1f, mFreq);
         float ridge = glm::clamp(1.0f - std::fabs(mn / A), 0.0f, 1.0f);
-        ridge = std::pow(ridge, 2.0f);                        // crestas anchas
-        elev += ridge * 6.0f * landMask * beltMask;
+        ridge = std::pow(ridge, mSharp);
+        elev += ridge * mHeight * landMask * beltMask;
 
-        // 4. Fosas oceánicas (ridged) en cinturones → hasta ~-11km.
+        // 4. Fosas oceánicas (ridged) en cinturones.
         float tr     = NoiseGenerator::fBm(pos, seed + 99, 6, 0.5f, 2.1f, 3.0f);
         float trench = std::pow(glm::clamp(1.0f - std::fabs(tr / A), 0.0f, 1.0f), 6.0f);
-        elev -= trench * 6.0f * oceanMask * beltMask;
+        elev -= trench * trDepth * oceanMask * beltMask;
 
-        // 5. Detalle de alta frecuencia (relieve fino a ras de superficie).
-        float dFreq = 20000.0f, dStr = 0.05f; int dOct = 10;
-        if (layers.contains("detail")) {
-            const auto& d = layers["detail"];
-            dFreq = d.value("freq", dFreq);
-            dStr  = d.value("strength", dStr);
-            dOct  = d.value("octaves", dOct);
-        }
+        // 5. Detalle de alta frecuencia.
         float detail = NoiseGenerator::fBm(pos, seed + 777, dOct, 0.5f, 2.0f, dFreq);
         elev += detail * dStr * glm::clamp(cont + 0.3f, 0.0f, 1.0f);
 

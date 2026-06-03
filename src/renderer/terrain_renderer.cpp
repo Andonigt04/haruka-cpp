@@ -20,6 +20,7 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     mesh.indexCount  = (uint32_t)data.indices.size();
     mesh.vertexCount = (uint32_t)data.vertices.size();
     mesh.planetName  = planetName;
+    mesh.key         = key;
     mesh.chunkCenter = data.chunkCenter;
     mesh.terrainMode = static_cast<int>(data.terrainMode);
     mesh.lod         = data.key.lod;
@@ -243,6 +244,26 @@ TerrainRenderer::DrawStats TerrainRenderer::getDrawStatsForPlanet(const std::str
         s.triangles  += (int)(mesh.indexCount / 3);
     }
     return s;
+}
+
+std::vector<PlanetChunkKey> TerrainRenderer::invalidateSphere(const glm::dvec3& center, double radius) {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    std::vector<PlanetChunkKey> hit;
+    for (auto it = m_gpuMeshes.begin(); it != m_gpuMeshes.end();) {
+        RenderMesh& m = it->second;
+        // Mesh bounding sphere in world space: chunkCenter + bsCenter, radius bsRadius.
+        glm::dvec3 c = m.chunkCenter + glm::dvec3(m.bsCenter);
+        double r = (m.bsRadius > 0.0f) ? (double)m.bsRadius
+                                       : m.planetRadius * 2.0 / double(1u << m.lod);
+        if (glm::length(c - center) < radius + r) {
+            hit.push_back(m.key);
+            cleanupMesh(m);
+            it = m_gpuMeshes.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return hit;
 }
 
 void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {

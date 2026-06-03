@@ -23,6 +23,7 @@ namespace Haruka {
             uint32_t vertexCount = 0;
             bool isReady = false;
             std::string planetName;
+            PlanetChunkKey key{};         // identity, for invalidation on terrain edit
             glm::dvec3  chunkCenter{0.0};
             int         terrainMode = 0;  // 0=Procedural, 1=Manual
             int         lod = 0;          // chunk LOD level, for morph-band calc
@@ -61,6 +62,11 @@ namespace Haruka {
 
         /** @brief Planet center (world, double) for horizon culling. Per planet, before renderPlanet. */
         void setPlanetCenter(const glm::dvec3& c) { m_planetCenter = c; m_hasPlanetCenter = true; }
+
+        /** @brief Removes GPU meshes whose bounding sphere overlaps (center,radius)
+         *  and returns their chunk keys, so the caller can drop them from the cache
+         *  and let streaming regenerate them (with the new terrain edit applied). */
+        std::vector<PlanetChunkKey> invalidateSphere(const glm::dvec3& center, double radius);
 
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
         int getLastDrawnCount() const { return m_lastDrawn; }

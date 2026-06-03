@@ -8,9 +8,16 @@
 
 namespace Haruka {
 
+    class DeformationField;
+
     class TerrainGenerator {
     public:
         TerrainGenerator() = default;
+
+        /** @brief Player-edit layer (craters/dig/build). Non-owning; may be null.
+         *  Read from worker threads during generateChunk → must outlive generation
+         *  and only be mutated on the main thread between frames. */
+        void setDeformationField(const DeformationField* f) { m_deform = f; }
 
         /**
          * @brief Genera la malla de un chunk específico.
@@ -39,6 +46,8 @@ namespace Haruka {
         
         // Convierte coordenadas de Chunk (X,Y) a posición 3D en la cara del cubo
         glm::vec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
+
+        const DeformationField* m_deform = nullptr;
     };
 
 }

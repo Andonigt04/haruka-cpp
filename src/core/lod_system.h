@@ -26,6 +26,15 @@ namespace Haruka {
          */
         LODUpdate updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos);
 
+        /**
+         * @brief Forgets a chunk from the "last frame" set so the next update
+         * re-classifies it as chunksToLoad (not chunksToKeep). Used after a terrain
+         * edit invalidates a chunk: keep-only would call cache.getChunk (now empty)
+         * and never re-upload to GPU → the chunk would vanish. Forgetting it forces
+         * a reload.
+         */
+        void forgetChunk(const PlanetChunkKey& key);
+
     private:
         struct LODNode {
             PlanetChunkKey key;

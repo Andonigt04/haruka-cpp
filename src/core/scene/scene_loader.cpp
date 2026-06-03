@@ -1,8 +1,10 @@
 #include "scene_loader.h"
+#include "io/blob_codec.h"
 
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <cstring>
 
 namespace {
 
@@ -101,6 +103,7 @@ TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
         const auto& config = value["config"];
         settings.seed = config.value("seed", 0);
         settings.chunkSize = config.value("chunkSize", 0);
+        settings.rawConfig = config; // keep the full, unfiltered config
         if (config.contains("layers") && config["layers"].is_object()) {
             for (auto it = config["layers"].begin(); it != config["layers"].end(); ++it) {
                 if (it.value().is_object()) {
@@ -156,19 +159,33 @@ nlohmann::json toJson(const TerrainGeneratorSettings& settings) {
 
 namespace Haruka {
 
-bool SceneLoader::loadFromFile(const std::string& filepath) {
-    std::ifstream file(filepath);
-    if (!file.is_open()) {
-        std::cerr << "[Loader] Error: No se pudo abrir " << filepath << std::endl;
-        return false;
-    }
+// Map obfuscation key. The .hmap codec uses this; ships in the binary (same
+// honest scope as saves: stops casual reading/editing, not strong DRM).
+static const char* kMapKey = "haruka.map.v1";
 
+bool SceneLoader::loadFromFile(const std::string& filepath) {
     nlohmann::json data;
-    try {
-        file >> data;
-    } catch (const std::exception& e) {
-        std::cerr << "[Loader] Error JSON: " << e.what() << std::endl;
-        return false;
+
+    // A packed .hmap is binary (zstd+XOR). A .scene is plain JSON text. Decide by
+    // extension; for any other path try plain text first, then packed.
+    auto endsWith = [](const std::string& s, const char* suf) {
+        size_t n = std::strlen(suf);
+        return s.size() >= n && s.compare(s.size() - n, n, suf) == 0;
+    };
+
+    if (endsWith(filepath, ".hmap")) {
+        if (!loadPacked(filepath, data)) return false;
+    } else {
+        std::ifstream file(filepath);
+        if (!file.is_open()) {
+            std::cerr << "[Loader] Error: No se pudo abrir " << filepath << std::endl;
+            return false;
+        }
+        try { file >> data; }
+        catch (const std::exception& e) {
+            std::cerr << "[Loader] Error JSON: " << e.what() << std::endl;
+            return false;
+        }
     }
 
     // 1. Validar antes de hacer nada
@@ -186,6 +203,44 @@ bool SceneLoader::loadFromFile(const std::string& filepath) {
     parseObjects(data["objects"]);
 
     return true;
+}
+
+bool SceneLoader::loadPacked(const std::string& filepath, nlohmann::json& out) {
+    std::ifstream f(filepath, std::ios::binary);
+    if (!f.is_open()) {
+        std::cerr << "[Loader] Error: No se pudo abrir " << filepath << std::endl;
+        return false;
+    }
+    Haruka::codec::Bytes blob((std::istreambuf_iterator<char>(f)),
+                               std::istreambuf_iterator<char>());
+    std::string text;
+    if (!Haruka::codec::decodeString(blob, kMapKey, text)) {
+        std::cerr << "[Loader] Error: .hmap corrupto o clave incorrecta" << std::endl;
+        return false;
+    }
+    try { out = nlohmann::json::parse(text); }
+    catch (const std::exception& e) {
+        std::cerr << "[Loader] Error JSON en .hmap: " << e.what() << std::endl;
+        return false;
+    }
+    return true;
+}
+
+// Packs a plain .scene JSON file into an obfuscated .hmap. Used by the `mapc` tool.
+bool SceneLoader::packToFile(const std::string& sceneJsonPath, const std::string& outHmapPath) {
+    std::ifstream in(sceneJsonPath);
+    if (!in.is_open()) return false;
+    std::string text((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    // Validate it's parseable JSON before packing.
+    try { (void)nlohmann::json::parse(text); } catch (...) { return false; }
+
+    Haruka::codec::Bytes blob = Haruka::codec::encodeString(text, kMapKey);
+    if (blob.empty()) return false;
+    std::ofstream out(outHmapPath, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+    out.write(reinterpret_cast<const char*>(blob.data()), (std::streamsize)blob.size());
+    return out.good();
 }
 
 void SceneLoader::parseTemplates(const nlohmann::json& data) {

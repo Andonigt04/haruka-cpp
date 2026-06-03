@@ -8,9 +8,11 @@
 
 layout(location = 0) in vec3 aPos;     // camera-relative position
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in float aAlpha;  // per-vertex opacity (water depth fade); 0 when attrib unbound
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
+layout(location = 2) out float Alpha;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -24,5 +26,6 @@ layout(std140, binding = 0) uniform PerFrameData {
 void main() {
     FragPos = aPos;
     Normal  = aNormal;
+    Alpha   = aAlpha;
     gl_Position = projection * mat4(mat3(view)) * vec4(aPos, 1.0);
 }

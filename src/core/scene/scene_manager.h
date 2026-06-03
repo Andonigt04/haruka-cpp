@@ -58,6 +58,11 @@ namespace Haruka {
         int seed = 0;
         int chunkSize = 0;
         std::unordered_map<std::string, TerrainLayerSettings> layers;
+        // Raw "config" JSON straight from the scene, UNFILTERED. The typed fields
+        // above are a convenience subset; rawConfig preserves every parameter
+        // (landHeight, oceanDepth, sharpness, belt, trench, future sandbox keys…)
+        // so the generator/editor see exactly what the scene authored.
+        nlohmann::json rawConfig;
     };
 
     /**
