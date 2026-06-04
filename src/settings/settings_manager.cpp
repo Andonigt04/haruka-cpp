@@ -88,6 +88,9 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "VSync"))          g.vsync          = atoi(val) != 0;
     else if (!strcmp(key, "SSAO"))           g.ssao           = atoi(val) != 0;
     else if (!strcmp(key, "Bloom"))          g.bloom          = atoi(val) != 0;
+    else if (!strcmp(key, "BloomThreshold")) g.bloomThreshold = (float)atof(val);
+    else if (!strcmp(key, "BloomStrength"))  g.bloomStrength  = (float)atof(val);
+    else if (!strcmp(key, "WaterQuality"))   g.waterQuality   = (Settings::WaterQuality)atoi(val);
     else if (!strcmp(key, "MotionBlur"))     g.motionBlur     = atoi(val) != 0;
     else if (!strcmp(key, "MasterVolume"))   a.masterVolume   = (float)atof(val);
     else if (!strcmp(key, "MusicVolume"))    a.musicVolume    = (float)atof(val);
@@ -106,6 +109,9 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("VSync=%d\n",          g.vsync     ? 1 : 0);
     buf->appendf("SSAO=%d\n",           g.ssao      ? 1 : 0);
     buf->appendf("Bloom=%d\n",          g.bloom     ? 1 : 0);
+    buf->appendf("BloomThreshold=%.2f\n", g.bloomThreshold);
+    buf->appendf("BloomStrength=%.2f\n",  g.bloomStrength);
+    buf->appendf("WaterQuality=%d\n",   (int)g.waterQuality);
     buf->appendf("MotionBlur=%d\n",     g.motionBlur ? 1 : 0);
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);
@@ -203,7 +209,10 @@ void SettingsManager::registerAction(const std::string& name,
 
 void SettingsManager::update(const bool* kbd) {
     for (auto& a : m_actions) {
-        if (!isGroupEnabled(a.group)) {
+        // While the rebind UI is capturing a key, no action may fire — otherwise the
+        // key being bound would also run its current action (and ESC would close the
+        // panel instead of cancelling the bind). Treat exactly like a disabled group.
+        if (m_capturing || !isGroupEnabled(a.group)) {
             // Force inactive — keep prevValue as-is so canceled fires correctly
             a.prevValue = a.value;
             a.value     = std::visit([](const auto& src) -> Input::ActionValue {

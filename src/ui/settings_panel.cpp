@@ -9,9 +9,24 @@
 
 namespace Haruka::UI {
 
-static const char* texQualityNames[]  = { "Low", "Medium", "High", "Ultra" };
-static const char* shadowQualNames[]  = { "Off",  "Low",   "Medium", "High" };
-static const char* aaNames[]          = { "None", "FXAA",  "TAA" };
+void SettingsPanel::beginRebind(const std::string& action, int slotIndex) {
+    m_rebindingAction = action;
+    m_rebindIndex     = slotIndex;
+    m_waitingForKey   = true;
+    SettingsManager::get().setCapturing(true); // freeze all actions until a key lands
+}
+
+void SettingsPanel::cancelRebind() {
+    m_rebindingAction.clear();
+    m_rebindIndex   = -1;
+    m_waitingForKey = false;
+    SettingsManager::get().setCapturing(false);
+}
+
+static const char* texQualityNames[]   = { "Low", "Medium", "High", "Ultra" };
+static const char* shadowQualNames[]   = { "Off",  "Low",   "Medium", "High" };
+static const char* aaNames[]           = { "None", "FXAA",  "TAA" };
+static const char* waterQualityNames[] = { "Low", "Medium", "High", "Ultra" };
 
 bool SettingsPanel::render() {
     auto& sm = SettingsManager::get();
@@ -52,7 +67,7 @@ bool SettingsPanel::render() {
     if (ImGui::IsKeyPressed(ImGuiKey_Escape) && !m_waitingForKey)
         close = true;
 
-    if (close) { m_rebindingAction.clear(); m_waitingForKey = false; }
+    if (close) cancelRebind(); // also clears the capture flag
 
     ImGui::End();
     return close;
@@ -74,18 +89,41 @@ void SettingsPanel::tabGraphics() {
     if (ImGui::Combo("Shadow Quality", &sq, shadowQualNames, 4))
         g.shadowQuality = (Settings::ShadowQuality)sq;
 
+    int wq = (int)g.waterQuality;
+    if (ImGui::Combo("Water Quality", &wq, waterQualityNames, 4))
+        g.waterQuality = (Settings::WaterQuality)wq;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("River / shallow-water grid density. Applies to water created after the change.");
+
     int aa = (int)g.antialiasing;
     if (ImGui::Combo("Anti-aliasing", &aa, aaNames, 3))
         g.antialiasing = (Settings::AntialiasingMode)aa;
+    if (aa == (int)Settings::AntialiasingMode::TAA)
+        ImGui::TextDisabled("  TAA not implemented yet — falls back to no AA.");
 
     ImGui::SliderFloat("FOV", &g.fov, 60.0f, 120.0f, "%.0f°");
     ImGui::SliderFloat("Render Scale", &g.renderScale, 0.5f, 2.0f, "%.2f");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Renders the 3D scene at this fraction of the window and "
+                          "upscales. <1 = big GPU savings; UI stays sharp.");
 
     ImGui::SeparatorText("Post-processing");
     ImGui::Checkbox("VSync",        &g.vsync);
     ImGui::Checkbox("SSAO",         &g.ssao);
+    if (g.ssao)
+        ImGui::TextDisabled("  SSAO needs a G-buffer (forward path) — not composed yet.");
     ImGui::Checkbox("Bloom",        &g.bloom);
+    if (g.bloom) {
+        ImGui::Indent();
+        ImGui::SliderFloat("Bloom Threshold", &g.bloomThreshold, 0.0f, 1.5f, "%.2f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Luminance above which pixels glow. Lower = more of the scene blooms.");
+        ImGui::SliderFloat("Bloom Strength",  &g.bloomStrength,  0.0f, 2.0f, "%.2f");
+        ImGui::Unindent();
+    }
     ImGui::Checkbox("Motion Blur",  &g.motionBlur);
+    if (g.motionBlur)
+        ImGui::TextDisabled("  Motion Blur not implemented yet.");
 
     ImGui::SeparatorText("Audio");
     ImGui::SliderFloat("Master Volume", &a.masterVolume, 0.0f, 1.0f);
@@ -98,7 +136,8 @@ void SettingsPanel::tabGraphics() {
 void SettingsPanel::tabControls() {
     auto& sm = SettingsManager::get();
 
-    // While waiting for a key press, capture from SDL
+    // While waiting for a key press, capture from SDL. SettingsManager is in
+    // capture mode (set by beginRebind) so no action fires from this keypress.
     if (m_waitingForKey) {
         ImGui::TextColored(ImVec4(1,1,0,1), "Press a key to bind to \"%s\"  (Escape = cancel)",
                            m_rebindingAction.c_str());
@@ -109,11 +148,21 @@ void SettingsPanel::tabControls() {
             if (!kbd[i]) continue;
             SDL_Scancode sc = (SDL_Scancode)i;
             if (sc == SDL_SCANCODE_ESCAPE) {
-                m_rebindingAction.clear();
-                m_waitingForKey = false;
+                cancelRebind(); // cancel, keep current binding
+            } else if (m_rebindIndex >= 0) {
+                // Replace a specific slot (works for axis bindings too, where the
+                // slot count is fixed and appending would be discarded).
+                if (auto* act = sm.findAction(m_rebindingAction)) {
+                    auto keys = act->keys();
+                    if (m_rebindIndex < (int)keys.size()) {
+                        keys[m_rebindIndex] = sc;
+                        sm.setBindings(m_rebindingAction, keys);
+                    }
+                }
+                cancelRebind();
             } else {
-                sm.addBinding(m_rebindingAction, sc);
-                m_waitingForKey = false;
+                sm.addBinding(m_rebindingAction, sc); // append (Direct actions)
+                cancelRebind();
             }
             break;
         }
@@ -148,10 +197,12 @@ void SettingsPanel::tabControls() {
                 ImGui::PushID((int)i);
 
                 ImGui::SmallButton(kname);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                    beginRebind(action->name, (int)i);  // rebind THIS slot
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
                     sm.removeBinding(action->name, keys[i]);
                 if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Right-click to remove");
+                    ImGui::SetTooltip("Left-click to rebind, right-click to remove");
 
                 ImGui::PopID();
                 if (i + 1 < keys.size()) ImGui::SameLine(0, 4);
@@ -161,10 +212,8 @@ void SettingsPanel::tabControls() {
             ImGui::TableSetColumnIndex(2);
             ImGui::PushID(action->name.c_str());
 
-            if (ImGui::SmallButton("+ Add")) {
-                m_rebindingAction = action->name;
-                m_waitingForKey   = true;
-            }
+            if (ImGui::SmallButton("+ Add"))
+                beginRebind(action->name, -1); // append a new key (Direct actions)
             ImGui::SameLine(0, 6);
             if (ImGui::SmallButton("Clear"))
                 sm.setBindings(action->name, {});

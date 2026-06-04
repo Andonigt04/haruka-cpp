@@ -1,5 +1,8 @@
 #include "planetary_system.h"
 
+#include <algorithm>
+#include <cmath>
+#include <utility>
 #include "core/modules.h"
 #include "core/chunk_cache.h"
 #include "core/lod_system.h"
@@ -80,12 +83,38 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         streamSettings["planetOffsetX"] = planet.position.x;
         streamSettings["planetOffsetY"] = planet.position.y;
         streamSettings["planetOffsetZ"] = planet.position.z;
-        m_streaming->update(update.chunksToLoad, streamSettings);
+
+        // Ordenar los chunks deseados de MÁS CERCANO a más lejano al jugador, para
+        // que el streaming los genere/cargue en ese orden (cercanos primero).
+        {
+            const glm::dvec3 pPos = planet.position;
+            const double     pRad = planet.radius;
+            std::vector<std::pair<double, PlanetChunkKey>> byDist;
+            byDist.reserve(update.chunksToLoad.size());
+            for (const auto& k : update.chunksToLoad) {
+                const double cpa = std::pow(2.0, (double)k.lod); // chunks por eje en este LOD
+                const double u = (double(k.x) + 0.5) / cpa;
+                const double v = (double(k.y) + 0.5) / cpa;
+                const glm::dvec3 c = m_lod->getCubeToSpherePos(k.face, u, v, pRad) + pPos;
+                const glm::dvec3 d = c - cameraPos;
+                byDist.emplace_back(glm::dot(d, d), k);
+            }
+            std::sort(byDist.begin(), byDist.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            std::vector<PlanetChunkKey> sorted;
+            sorted.reserve(byDist.size());
+            for (auto& p : byDist) sorted.push_back(p.second);
+            m_streaming->setDesiredChunks(std::move(sorted), streamSettings);
+        }
 
         // C. Cargar desde caché a GPU y descargar lo que ya no se ve
         m_streaming->processLODUpdate(update);
     }
     m_forceLOD = false;
+
+    // Despachar generación pendiente (cercanos primero) CADA frame, aunque el LOD
+    // esté en throttle por estar quieto → los chunks lejanos siguen entrando.
+    m_streaming->pump();
 
     // 3. Recoger chunks terminados y subirlos a la GPU
     auto readyChunks = m_streaming->getReadyChunks();

@@ -4,6 +4,8 @@
 #include <future>
 #include <mutex>
 #include <chrono>
+#include <thread>
+#include <algorithm>
 #include <unordered_set>
 #include "core/chunk_cache.h"
 #include "core/lod_system.h"
@@ -19,9 +21,22 @@ namespace Haruka {
             : m_cache(cache), m_generator(generator), m_renderer(renderer) {}
 
         /**
-         * @brief Procesa las peticiones del LOD.
+         * @brief Registra el conjunto de chunks deseados, ORDENADO de más cercano a
+         *        más lejano al jugador. Reemplaza el set anterior y lanza el pump.
+         *
+         * El streaming no genera todo de golpe: mantiene esta cola y, cada frame,
+         * despacha sólo los más cercanos que falten hasta el límite de concurrencia
+         * (pump()). Así los chunks cercanos se generan/cargan primero y los lejanos
+         * van entrando después, sin saturar de hilos.
          */
-        void update(const std::vector<PlanetChunkKey>& requestedChunks, const nlohmann::json& planetSettings);
+        void setDesiredChunks(std::vector<PlanetChunkKey> sortedNearToFar,
+                              const nlohmann::json& planetSettings);
+
+        /**
+         * @brief Despacha generación de los chunks pendientes más cercanos hasta el
+         *        presupuesto de concurrencia. Llamar cada frame (barato si no hay nada).
+         */
+        void pump();
 
         /**
          * @brief Aplica los cambios de LOD a la escena (Agregar/Quitar chunks).
@@ -45,6 +60,19 @@ namespace Haruka {
         std::unordered_set<uint64_t> m_pendingRequests;
         std::mutex m_pendingMutex;
         std::vector<std::future<void>> m_asyncTasks;
+
+        // Cola de deseo ordenada (cercano→lejano) + ajustes, para el pump por frame.
+        std::vector<PlanetChunkKey> m_desiredChunks;
+        nlohmann::json m_desiredSettings;
+        std::string m_desiredPlanetName;
+        std::mutex m_desiredMutex;
+        // Chunks cuya generación lanzó excepción → no reintentar (evita spin + stall).
+        std::unordered_set<uint64_t> m_failedChunks; // protegido por m_pendingMutex
+        // Máximo de generaciones en vuelo a la vez (cercanos primero). 0 = sin límite.
+        // Por defecto SIN límite: igual que el streaming original (sin huecos); el
+        // orden cercano→lejano lo da el sort en PlanetarySystem. Subir >0 sólo si se
+        // quiere limitar hilos (con el erase exception-safe ya no puede causar stall).
+        size_t m_maxInFlight = 0;
         
         // Resultados listos para ser inyectados en la escena
         std::vector<std::shared_ptr<ChunkData>> m_completedChunks;

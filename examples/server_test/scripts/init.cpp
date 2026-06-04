@@ -116,7 +116,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_playerOwned     = std::make_unique<Haruka::Character>(Haruka::WorldPos(0.0, 0.0, 0.0), PLAYER_NAME);
     g_gameCamera      = g_playerOwned->getCamera();
     g_playerCharacter = g_playerOwned.get();
-    g_playerOwned->setFlightMode(false);
+    g_playerOwned->setFlightMode(true);
 
     g_playerBody           = std::make_shared<RigidBody>();
     g_playerBody->name     = "player";

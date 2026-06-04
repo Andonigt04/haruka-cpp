@@ -17,6 +17,9 @@ private:
     // Rebind state
     std::string   m_rebindingAction; // empty = not rebinding
     bool          m_waitingForKey = false;
+    int           m_rebindIndex   = -1; // slot to replace; -1 = append a new key
+    void beginRebind(const std::string& action, int slotIndex); // -1 = append
+    void cancelRebind();
 };
 
 } // namespace Haruka::UI

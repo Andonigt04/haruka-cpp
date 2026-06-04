@@ -7,7 +7,7 @@ namespace Haruka {
     void TerrainStreamingSystem::reapFinishedTasks() {
         for (auto it = m_asyncTasks.begin(); it != m_asyncTasks.end();) {
             if (it->wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-                it->get();
+                try { it->get(); } catch (...) { /* failure already handled in-task */ }
                 it = m_asyncTasks.erase(it);
             } else {
                 ++it;
@@ -15,21 +15,37 @@ namespace Haruka {
         }
     }
 
-    void TerrainStreamingSystem::update(const std::vector<PlanetChunkKey>& requestedChunks, const nlohmann::json& planetSettings) {
+    void TerrainStreamingSystem::setDesiredChunks(std::vector<PlanetChunkKey> sortedNearToFar,
+                                                  const nlohmann::json& planetSettings) {
+        {
+            std::lock_guard<std::mutex> lock(m_desiredMutex);
+            m_desiredChunks     = std::move(sortedNearToFar);
+            m_desiredSettings   = planetSettings;
+            m_desiredPlanetName = planetSettings.value("planetName", std::string{});
+        }
+        pump();
+    }
+
+    void TerrainStreamingSystem::pump() {
         reapFinishedTasks();
 
-        const std::string planetName = planetSettings.value("planetName", std::string{});
-        for (const auto& key : requestedChunks) {
-            uint64_t hash = ChunkCache::keyToHash(key);
+        std::lock_guard<std::mutex> dlock(m_desiredMutex);
+        if (m_desiredChunks.empty()) return;
 
-            if (m_cache.hasChunk(key)) continue;
-
+        for (const auto& key : m_desiredChunks) { // ya viene cercano→lejano
+            // Respetar el presupuesto de concurrencia (cercanos primero).
             {
                 std::lock_guard<std::mutex> lock(m_pendingMutex);
-                if (m_pendingRequests.count(hash)) continue;
+                if (m_maxInFlight != 0 && m_pendingRequests.size() >= m_maxInFlight) break;
             }
-
-            requestAsyncGeneration(key, planetSettings, planetName);
+            uint64_t hash = ChunkCache::keyToHash(key);
+            if (m_cache.hasChunk(key)) continue; // ya generado en RAM
+            {
+                std::lock_guard<std::mutex> lock(m_pendingMutex);
+                if (m_pendingRequests.count(hash)) continue; // ya en vuelo
+                if (m_failedChunks.count(hash))    continue; // generación falló antes → no reintentar en bucle
+            }
+            requestAsyncGeneration(key, m_desiredSettings, m_desiredPlanetName);
         }
     }
 
@@ -41,20 +57,30 @@ namespace Haruka {
         }
 
         m_asyncTasks.push_back(std::async(std::launch::async, [this, key, settings, hash, planetName]() {
-            auto data = m_generator.generateChunk(key, settings, settings["radius"]);
-            data->key        = key;
-            data->planetName = planetName;
+            bool ok = false;
+            try {
+                auto data = m_generator.generateChunk(key, settings, settings["radius"]);
+                data->key        = key;
+                data->planetName = planetName;
 
-            // addChunk has its own lock; don't hold resultMutex while it runs.
-            m_cache.addChunk(key, *data);
+                // addChunk has its own lock; don't hold resultMutex while it runs.
+                m_cache.addChunk(key, *data);
 
-            {
-                std::lock_guard<std::mutex> lock(m_resultMutex);
-                m_completedChunks.push_back(data);
+                {
+                    std::lock_guard<std::mutex> lock(m_resultMutex);
+                    m_completedChunks.push_back(data);
+                }
+                ok = true;
+            } catch (...) {
+                // A throwing chunk must NOT leak its in-flight slot — that would
+                // eventually fill the budget and stall ALL streaming (visible as
+                // permanent holes / GPU count frozen). Mark it failed so we don't
+                // spin retrying it, and always release the slot below.
             }
             {
                 std::lock_guard<std::mutex> lock(m_pendingMutex);
-                m_pendingRequests.erase(hash);
+                m_pendingRequests.erase(hash);   // ALWAYS release the slot
+                if (!ok) m_failedChunks.insert(hash);
             }
         }));
     }

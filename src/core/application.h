@@ -146,6 +146,12 @@ public:
         return _window ? (int)_window->getHeight() : 0;
     }
 
+    /** @brief Current framebuffer width in pixels (editor viewport or window). */
+    int getWindowWidth() const {
+        if (m_editorViewportW > 0) return m_editorViewportW;
+        return _window ? (int)_window->getWidth() : 0;
+    }
+
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
@@ -255,6 +261,20 @@ private:
     std::unique_ptr<GBuffer> _gBuffer;
     /** @brief The SSAO shader instance. */
     std::unique_ptr<SSAO> _ssao;
+    /** @brief Offscreen HDR scene target for the standalone post-processing stack
+     *  (render-scale source + bloom/fxaa input). Sized to renderScale*window. */
+    std::unique_ptr<HDR> _postScene;
+    int m_postW = 0, m_postH = 0;          // current _postScene dimensions
+    unsigned int m_sceneTargetFBO = 0;     // FBO the scene passes render into this frame
+    bool m_postActive = false;             // standalone post stack engaged this frame
+    // Bloom ping-pong targets (own FBOs — the Bloom class isn't ping-pong shaped).
+    // Reuses the existing _bloomExtractShader / _bloomBlurShader members below.
+    unsigned int m_bloomFBO[2] = {0, 0};
+    unsigned int m_bloomTex[2] = {0, 0};
+    int m_bloomW = 0, m_bloomH = 0;
+    /** @brief Bright-pass + separable blur of a scene color texture; returns the
+     *  blurred bloom texture id. Used by the standalone post composite. */
+    unsigned int renderBloom(unsigned int srcColorTex);
     /** @brief The IBL shader instance. */
     std::unique_ptr<IBL> _ibl;
     /** @brief The point shadow shader instance. */

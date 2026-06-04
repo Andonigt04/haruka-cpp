@@ -20,6 +20,7 @@
 #include "core/components/mesh_renderer_component.h"
 #include "renderer/model.h"
 #include "renderer/primitive_shapes.h"
+#include "renderer/texture.h"
 #include "core/scene/scene_render_policy.h"
 #include "tools/object_types.h"
 #include "tools/error_reporter.h"
@@ -283,6 +284,16 @@ void Application::applyGraphicsSettings() {
 
     if (_window)
         SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
+
+    // Texture quality → anisotropic filtering + mip LOD bias. Low trades sharpness
+    // for fill-rate (positive bias = blurrier mips); Ultra = max anisotropy, sharp.
+    // Applies to textures loaded after this call (see Texture::setQuality).
+    switch (g.textureQuality) {
+        case Haruka::Settings::TextureQuality::Low:    Texture::setQuality(1.0f,  +1.0f); break;
+        case Haruka::Settings::TextureQuality::Medium: Texture::setQuality(4.0f,   0.0f); break;
+        case Haruka::Settings::TextureQuality::High:   Texture::setQuality(8.0f,   0.0f); break;
+        case Haruka::Settings::TextureQuality::Ultra:  Texture::setQuality(16.0f, -0.5f); break;
+    }
 }
 
 void Application::init(Haruka::SceneManager& scene) {
@@ -384,6 +395,68 @@ void Application::buildRenderQueue() {
     _iRenderedDrawCalls = _iTotalDrawCalls;
 }
 
+unsigned int Application::renderBloom(unsigned int srcColorTex) {
+    const int bw = m_postW, bh = m_postH;
+    // (Re)create the two ping-pong color targets when the size changes.
+    if (m_bloomFBO[0] == 0 || m_bloomW != bw || m_bloomH != bh) {
+        if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); glDeleteTextures(2, m_bloomTex); }
+        glGenFramebuffers(2, m_bloomFBO);
+        glGenTextures(2, m_bloomTex);
+        for (int i = 0; i < 2; ++i) {
+            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
+            glBindTexture(GL_TEXTURE_2D, m_bloomTex[i]);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bw, bh, 0, GL_RGBA, GL_FLOAT, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
+        }
+        m_bloomW = bw; m_bloomH = bh;
+    }
+    if (quadVAO == 0) setupQuad();
+    if (!_bloomExtractShader)
+        _bloomExtractShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_extract.frag");
+    if (!_bloomBlurShader)
+        _bloomBlurShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_blur.frag");
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glViewport(0, 0, bw, bh);
+    glBindVertexArray(quadVAO);
+
+    // 1. Bright-pass: scene color -> tex[0].
+    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
+    _bloomExtractShader->use();
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, srcColorTex);
+    glUniform1f(0, Haruka::SettingsManager::get().graphics().bloomThreshold); // luminance threshold
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    // 2. Separable Gaussian: N iterations of horizontal+vertical, ping-ponging
+    //    tex[1] <-> tex[0]. Result ends up in tex[0].
+    _bloomBlurShader->use();
+    unsigned int src = m_bloomTex[0];
+    const int iterations = 5;
+    for (int i = 0; i < iterations; ++i) {
+        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]); // horizontal -> tex[1]
+        glUniform1i(0, 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, src);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]); // vertical -> tex[0]
+        glUniform1i(0, 0);
+        glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        src = m_bloomTex[0];
+    }
+
+    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
+    return m_bloomTex[0];
+}
+
 void Application::renderFrameContent() {
     // Editor path calls this externally (no standalone loop) → reset here.
     // Standalone loop resets at its own frame boundary so game.onUpdate is measured.
@@ -415,7 +488,30 @@ void Application::renderFrameContent() {
         _editorTarget->bindForWriting();
     }
 
-    glViewport(0, 0, width, height);
+    // --- Standalone post-processing target ---------------------------------
+    // Route the 3D scene through an offscreen HDR target when any screen-space
+    // effect or non-1.0 render scale is active. With everything off this stays
+    // false → the scene renders straight to the screen exactly as before. The
+    // editor path (its own _editorTarget) is never rerouted.
+    const auto& gpost  = Haruka::SettingsManager::get().graphics();
+    const float rscale = std::min(std::max(gpost.renderScale, 0.5f), 2.0f);
+    const bool  wantFXAA = (gpost.antialiasing == Haruka::Settings::AntialiasingMode::FXAA);
+    const bool  wantBloom = gpost.bloom;
+    const int   renderW  = std::max(1, (int)(width  * rscale));
+    const int   renderH  = std::max(1, (int)(height * rscale));
+    m_postActive = !_editorTarget && (rscale != 1.0f || wantFXAA || wantBloom);
+    m_sceneTargetFBO = 0;
+    if (m_postActive) {
+        if (!_postScene || m_postW != renderW || m_postH != renderH) {
+            _postScene = std::make_unique<HDR>((unsigned)renderW, (unsigned)renderH);
+            m_postW = renderW; m_postH = renderH;
+        }
+        _postScene->bindForWriting();
+        m_sceneTargetFBO = _postScene->getFBO();
+    }
+
+    glViewport(0, 0, m_postActive ? (uint32_t)renderW : width,
+                     m_postActive ? (uint32_t)renderH : height);
     glClearColor(0.01f, 0.01f, 0.01f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -611,8 +707,11 @@ void Application::renderFrameContent() {
             glDisable(GL_BLEND);
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
-            // Bind default FBO in case a previous pass left a custom one bound
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            // Bind the scene target (the offscreen post target when active, else
+            // the default FBO) in case a previous pass left a custom one bound.
+            glBindFramebuffer(GL_FRAMEBUFFER, m_sceneTargetFBO);
+            if (m_postActive)
+                glViewport(0, 0, (uint32_t)m_postW, (uint32_t)m_postH);
 
             {
             HARUKA_PROFILE("terrain.draw");
@@ -697,6 +796,45 @@ void Application::renderFrameContent() {
         const glm::mat4  proj    = _camera->getProjectionMatrix(aspect);
         const glm::vec3  camPos  = glm::vec3(_camera->position);
         _gameInterface->onRenderWorld(view, proj, camPos);
+    }
+
+    // --- Post-processing composite -----------------------------------------
+    // Resolve the offscreen scene target to the screen: upscales the render-scaled
+    // image and applies the present-time effects (FXAA, and later bloom). With
+    // FXAA off and scale 1.0 the scene never took this path (m_postActive false).
+    if (m_postActive && _postScene) {
+        if (quadVAO == 0) setupQuad();
+        if (!_compositeShader)
+            _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert",
+                                                        "shaders/post_present.frag");
+
+        // Build the blurred bloom texture first (it rebinds FBOs/viewport).
+        unsigned int bloomTex = 0;
+        if (wantBloom) bloomTex = renderBloom(_postScene->getColorTexture());
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glViewport(0, 0, width, height);
+        glDisable(GL_DEPTH_TEST);
+        glDisable(GL_BLEND);
+
+        _compositeShader->use();
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, _postScene->getColorTexture());
+        if (wantBloom) {
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, bloomTex);
+        }
+        glUniform1i(0, wantFXAA ? 1 : 0);                                 // u_fxaa
+        glUniform2f(1, 1.0f / (float)m_postW, 1.0f / (float)m_postH);     // u_texel
+        glUniform1i(2, wantBloom ? 1 : 0);                               // u_bloom
+        glUniform1f(3, gpost.bloomStrength);                            // u_bloomStrength
+
+        glBindVertexArray(quadVAO);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glBindVertexArray(0);
+
+        glActiveTexture(GL_TEXTURE0); // leave unit 0 active for following passes
+        glEnable(GL_DEPTH_TEST);
     }
 
     if (_imguiCallback) {
@@ -841,6 +979,9 @@ void Application::cleanup() {
     _cascadeShadowShader.reset();
     _bloomExtractShader.reset();
     _bloomBlurShader.reset();
+    if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); m_bloomFBO[0] = m_bloomFBO[1] = 0; }
+    if (m_bloomTex[0]) { glDeleteTextures(2, m_bloomTex);     m_bloomTex[0] = m_bloomTex[1] = 0; }
+    _postScene.reset();
     _pointShadowShader.reset();
     _instancingShader.reset();
 
@@ -951,6 +1092,12 @@ void Application::run(const std::string& startScenePath) {
                 ImGui_ImplSDL3_ProcessEvent(&event);
             if (event.type == SDL_EVENT_QUIT) running = false;
             if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                // Update the window's stored size so getWidth()/getHeight() reflect
+                // reality — otherwise the recreateFBOs() check below never fires and
+                // the scene keeps rendering at the old resolution (viewport, FBOs and
+                // camera aspect all stay stale).
+                _window->setWidth(event.window.data1);
+                _window->setHeight(event.window.data2);
                 m_editorViewportW = event.window.data1;
                 m_editorViewportH = event.window.data2;
                 glViewport(0, 0, event.window.data1, event.window.data2);

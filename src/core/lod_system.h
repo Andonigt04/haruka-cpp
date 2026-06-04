@@ -35,6 +35,10 @@ namespace Haruka {
          */
         void forgetChunk(const PlanetChunkKey& key);
 
+        /** @brief Mapea (cara, u,v ∈ [0,1], radio) a una posición en la esfera
+         *  (planet-local). Matemática pura — útil para ordenar chunks por distancia. */
+        static glm::dvec3 getCubeToSpherePos(PlanetFace face, double u, double v, double radius);
+
     private:
         struct LODNode {
             PlanetChunkKey key;
@@ -61,8 +65,6 @@ namespace Haruka {
         bool findCoveringLeaf(PlanetFace face, int lod, uint32_t x, uint32_t y, PlanetChunkKey& out) const;
         void subdivideLeafKey(const PlanetChunkKey& k);
 
-        // Helpers para calcular posiciones en la esfera
-        glm::dvec3 getCubeToSpherePos(PlanetFace face, double u, double v, double radius);
     };
 
 } // namespace Haruka

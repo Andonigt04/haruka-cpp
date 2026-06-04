@@ -232,8 +232,9 @@ bool SceneLoader::packToFile(const std::string& sceneJsonPath, const std::string
     if (!in.is_open()) return false;
     std::string text((std::istreambuf_iterator<char>(in)),
                       std::istreambuf_iterator<char>());
-    // Validate it's parseable JSON before packing.
-    try { (void)nlohmann::json::parse(text); } catch (...) { return false; }
+    // Validate it's parseable JSON before packing (accept() checks syntax without
+    // building the DOM and returns a bool, so there's no nodiscard to ignore).
+    if (!nlohmann::json::accept(text)) return false;
 
     Haruka::codec::Bytes blob = Haruka::codec::encodeString(text, kMapKey);
     if (blob.empty()) return false;

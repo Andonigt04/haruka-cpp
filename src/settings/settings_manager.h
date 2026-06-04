@@ -70,6 +70,12 @@ public:
     void addBinding    (const std::string& action, SDL_Scancode key);
     void removeBinding (const std::string& action, SDL_Scancode key);
 
+    // While capturing (the rebind UI is waiting for a key), update() forces every
+    // action inactive so the key being bound doesn't also trigger its gameplay/UI
+    // action (e.g. pressing 'I' to bind shouldn't open the inventory).
+    void setCapturing(bool c) { m_capturing = c; }
+    bool isCapturing() const  { return m_capturing; }
+
     // -- Data access ----------------------------------------------------------
 
     Input::InputAction*       findAction(const std::string& name);
@@ -93,6 +99,7 @@ private:
 
     std::vector<Input::InputAction>  m_actions;
     std::unordered_set<std::string>  m_disabledGroups;
+    bool                             m_capturing = false; // rebind UI waiting for a key
 
     static const Input::ActionValue  s_nullValue;
 
