@@ -23,6 +23,7 @@ namespace Haruka {
             GLuint vao = 0;
             GLuint vbo = 0;   // positions (relative to chunkCenter)
             GLuint nbo = 0;   // radial normals
+            GLuint pbo = 0;   // per-vertex water level (km): 0=océano, >0=lago
             GLuint ebo = 0;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;

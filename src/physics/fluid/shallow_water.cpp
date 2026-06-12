@@ -97,6 +97,9 @@ float ShallowWaterSim::surfaceAlongUpAtWorld(const glm::dvec3& wp) const {
     int cj = int((z + half) / m_dx + 0.5);
     if (ci < 0 || cj < 0 || ci >= m_n || cj >= m_n) return -1e9f;
     int c = idx(ci, cj);
+    // Guard contra el TAMAÑO real (no solo m_n): si la sim quedó vacía/movida
+    // (m_n>0 pero vectores sin datos), no accedas fuera de rango → trata como seco.
+    if (c < 0 || c >= (int)m_terrain.size() || c >= (int)m_water.size()) return -1e9f;
     return m_terrain[c] + m_water[c];
 }
 

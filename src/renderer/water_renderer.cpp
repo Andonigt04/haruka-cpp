@@ -42,6 +42,16 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
         glEnableVertexAttribArray(1);
     }
 
+    // Atributo 2: nivel de agua por vértice (0=océano, >0=lago). Si no viene
+    // (malla v1), el atributo queda deshabilitado → el shader lo lee como 0 = océano.
+    if (!data.waterParams.empty()) {
+        glGenBuffers(1, &mesh.pbo);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.pbo);
+        glBufferData(GL_ARRAY_BUFFER, data.waterParams.size() * sizeof(glm::vec2), data.waterParams.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr); // x=nivel, y=profundidad
+        glEnableVertexAttribArray(2);
+    }
+
     glGenBuffers(1, &mesh.ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER, data.waterIndices.size() * sizeof(unsigned int), data.waterIndices.data(), GL_STATIC_DRAW);
@@ -82,6 +92,12 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         for (int p = 0; p < 6; ++p) planes[p] /= glm::length(glm::vec3(planes[p]));
     }
 
+    // Two-sided: the ocean shell must be visible from BELOW too (underwater) — with
+    // back-face culling (inherited from the terrain pass) you'd see nothing once the
+    // camera dips under the surface. Restore the cull state after.
+    GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
+    glDisable(GL_CULL_FACE);
+
     // Horizon-cull setup (see TerrainRenderer).
     glm::dvec3 camFromCenter = glm::dvec3(cameraPos) - m_planetCenter;
     double     camDist       = glm::length(camFromCenter);
@@ -119,12 +135,14 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
     }
     glBindVertexArray(0);
+    if (cullWas) glEnable(GL_CULL_FACE);
 }
 
 void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
     if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
     if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
+    if (mesh.pbo) glDeleteBuffers(1, &mesh.pbo);
     if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
 }
 

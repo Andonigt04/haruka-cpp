@@ -45,12 +45,13 @@ namespace Haruka {
      * @brief Tipos de primitivas para el MeshRenderer.
      */
     enum class PrimitiveType {
-        NONE    = 0,
-        CUBE    = 1,
-        SPHERE  = 2,
-        CAPSULE = 3,
+        NONE     = 0,
+        CUBE     = 1,
+        SPHERE   = 2,
+        CAPSULE  = 3,
         CILINDER = 4,
-        PLANE   = 5,
+        PLANE    = 5,
+        TRIANGLE = 6,
     };
 
     inline PrimitiveType stringToPrimitiveType(const std::string& s) {

@@ -79,6 +79,28 @@ void SettingsPanel::tabGraphics() {
     auto& g = SettingsManager::get().graphics();
     auto& a = SettingsManager::get().audio();
 
+    ImGui::SeparatorText("Performance");
+    if (ImGui::Button("Laptop / Low preset")) {
+        Settings::applyLowPreset(g);
+        if (auto* app = MotorInstance::getInstance().getApplication())
+            app->applyGraphicsSettings();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("High / Default preset")) {
+        Settings::applyHighPreset(g);
+        if (auto* app = MotorInstance::getInstance().getApplication())
+            app->applyGraphicsSettings();
+    }
+    {
+        // 0 = uncapped; expose as 0/30/60/120/144 via a slider that snaps.
+        int fps = g.maxFps;
+        if (ImGui::SliderInt("FPS Cap", &fps, 0, 240, fps == 0 ? "Uncapped" : "%d"))
+            g.maxFps = fps;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Caps frame rate to save battery/heat on laptops. "
+                              "0 = uncapped. Applies live.");
+    }
+
     ImGui::SeparatorText("Rendering");
 
     int tq = (int)g.textureQuality;
@@ -88,6 +110,13 @@ void SettingsPanel::tabGraphics() {
     int sq = (int)g.shadowQuality;
     if (ImGui::Combo("Shadow Quality", &sq, shadowQualNames, 4))
         g.shadowQuality = (Settings::ShadowQuality)sq;
+
+    int tq2 = (int)g.terrainQuality;
+    if (ImGui::Combo("Terrain Quality", &tq2, waterQualityNames, 4))
+        g.terrainQuality = (Settings::TerrainQuality)tq2;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("LOD detail. Lower = fewer/larger chunks = much cheaper "
+                          "(CPU/GPU/RAM). Applies live.");
 
     int wq = (int)g.waterQuality;
     if (ImGui::Combo("Water Quality", &wq, waterQualityNames, 4))
@@ -103,6 +132,11 @@ void SettingsPanel::tabGraphics() {
 
     ImGui::SliderFloat("FOV", &g.fov, 60.0f, 120.0f, "%.0f°");
     ImGui::SliderFloat("Render Scale", &g.renderScale, 0.5f, 2.0f, "%.2f");
+
+    ImGui::SliderInt("Chunk Memory (MB)", &g.chunkMemoryMB, 64, 4096);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Terrain chunk cache budget. More = less regeneration when "
+                          "backtracking (less CPU), but more RAM.");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Renders the 3D scene at this fraction of the window and "
                           "upscales. <1 = big GPU savings; UI stays sharp.");

@@ -105,4 +105,97 @@ float NoiseGenerator::fBm(
     return value / maxValue;
 }
 
+// ---------------------------------------------------------------------------
+// Variantes CON derivada analítica (gradiente exacto, sin diferencias finitas).
+// ---------------------------------------------------------------------------
+
+float NoiseGenerator::gradd(int hash, float x, float y, float z, glm::vec3& outCoef) {
+    // grad() es LINEAL en (x,y,z): result = su·u + sv·v con u,v dos de los ejes.
+    // Su gradiente es por tanto un vector de coeficientes constante.
+    int h = hash & 15;
+    float u = h < 8 ? x : y;
+    float v = h < 8 ? y : z;
+    float su = (h & 1) == 0 ? 1.0f : -1.0f;
+    float sv = (h & 2) == 0 ? 1.0f : -1.0f;
+    outCoef = glm::vec3(0.0f);
+    if (h < 8) { outCoef.x = su; outCoef.y = sv; } // u=x, v=y
+    else       { outCoef.y = su; outCoef.z = sv; } // u=y, v=z
+    return su * u + sv * v;
+}
+
+float NoiseGenerator::perlin3D_d(const glm::vec3& pos, glm::vec3& outGrad, int seed, float scale) {
+    glm::vec3 p = pos * scale;
+
+    int x0 = (int)std::floor(p.x);
+    int y0 = (int)std::floor(p.y);
+    int z0 = (int)std::floor(p.z);
+
+    float xf = p.x - (float)x0;
+    float yf = p.y - (float)y0;
+    float zf = p.z - (float)z0;
+
+    // Fade cúbico (3t²-2t³) y su derivada (6t-6t²), igual que smoothstep().
+    float su = smoothstep(xf), sv = smoothstep(yf), sw = smoothstep(zf);
+    float dsu = 6.0f * xf * (1.0f - xf);
+    float dsv = 6.0f * yf * (1.0f - yf);
+    float dsw = 6.0f * zf * (1.0f - zf);
+
+    const int cx[2] = { x0 & 255, (x0 + 1) & 255 };
+    const int cy[2] = { y0 & 255, (y0 + 1) & 255 };
+    const int cz[2] = { z0 & 255, (z0 + 1) & 255 };
+    const float wx[2] = { 1.0f - su, su }, dwx[2] = { -dsu, dsu };
+    const float wy[2] = { 1.0f - sv, sv }, dwy[2] = { -dsv, dsv };
+    const float wz[2] = { 1.0f - sw, sw }, dwz[2] = { -dsw, dsw };
+
+    // Interpolación trilineal en forma separable: n = Σ V_ijk · wx·wy·wz.
+    // Cada V_ijk es lineal en (xf,yf,zf) → ∂V = coef constante (gc).
+    float n = 0.0f;
+    glm::vec3 dn(0.0f);
+    for (int i = 0; i < 2; ++i)
+    for (int j = 0; j < 2; ++j)
+    for (int k = 0; k < 2; ++k) {
+        glm::vec3 gc;
+        float V = gradd(hash(cx[i], cy[j], cz[k], seed),
+                        xf - (float)i, yf - (float)j, zf - (float)k, gc);
+        float wxyz = wx[i] * wy[j] * wz[k];
+        n   += V * wxyz;
+        // ∂n/∂xf = gc.x·(w) + V·(dwx·wy·wz), análogo en y,z.
+        dn.x += gc.x * wxyz + V * dwx[i] * wy[j] * wz[k];
+        dn.y += gc.y * wxyz + V * wx[i] * dwy[j] * wz[k];
+        dn.z += gc.z * wxyz + V * wx[i] * wy[j] * dwz[k];
+    }
+
+    // Cadena: xf = pos·scale → ∂/∂pos = ∂/∂xf · scale.
+    outGrad = dn * scale;
+    return n;
+}
+
+float NoiseGenerator::fBm_d(
+    const glm::vec3& pos,
+    glm::vec3& outGrad,
+    int seed,
+    int octaves,
+    float persistence,
+    float lacunarity,
+    float scale
+) {
+    if (octaves <= 0) { outGrad = glm::vec3(0.0f); return 0.0f; }
+
+    float value = 0.0f, maxValue = 0.0f, amplitude = 1.0f, frequency = 1.0f;
+    glm::vec3 grad(0.0f);
+
+    for (int i = 0; i < octaves; ++i) {
+        glm::vec3 gn;
+        float n = perlin3D_d(pos, gn, seed + i, scale * frequency);
+        value += n * amplitude;
+        grad  += gn * amplitude;
+        maxValue += amplitude;
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+
+    outGrad = grad / maxValue;
+    return value / maxValue;
+}
+
 }

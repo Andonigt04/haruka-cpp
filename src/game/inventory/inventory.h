@@ -20,10 +20,13 @@ namespace Haruka {
 struct ItemDef {
     std::string id;                 // unique key, e.g. "wood"
     std::string name;               // display name, e.g. "Wood"
+    std::string type;               // categoría: herramienta/comida/metal/gema/estacion/...
     int   maxStack = 99;            // how many fit in one slot (1 = non-stackable)
-    std::string iconPath;           // optional UI icon asset
-    // Free-form tags/values the game interprets (tool, food value, damage…).
+    std::string iconPath;           // optional UI icon/preview asset (2D)
+    // Free-form tags/values the game interprets (tool, food value, damage, pureza…).
     std::unordered_map<std::string, float> stats;
+    std::vector<std::string> tags;  // usos/etiquetas (construccion, polvora, magia…)
+    std::string modelPath;          // optional 3D model (.glb) — colocar/equipar/preview 3D
 
     float stat(const std::string& k, float def = 0.0f) const {
         auto it = stats.find(k);
@@ -51,13 +54,15 @@ private:
     std::unordered_map<std::string, ItemDef> m_defs;
 };
 
-/** @brief One slot: an item id and a count. Empty when id is "" or count <= 0. */
+/** @brief One slot: item id + count + pureza (0=Impuro..4=Único, universal). Los
+ *  stacks separan por id Y pureza (distinta calidad = stack aparte). */
 struct ItemStack {
     std::string id;
-    int count = 0;
+    int count  = 0;
+    int pureza = 1;   // 0=Impuro 1=Común 2=No común 3=Raro 4=Único
 
     bool empty() const { return id.empty() || count <= 0; }
-    void clear() { id.clear(); count = 0; }
+    void clear() { id.clear(); count = 0; pureza = 1; }
 };
 
 /**
@@ -75,14 +80,17 @@ public:
     const ItemStack& slot(int i) const { return m_slots[i]; }
     ItemStack&       slot(int i)       { return m_slots[i]; }
 
-    /** @brief Adds `count` of `id`; returns the amount that did NOT fit. */
-    int add(const std::string& id, int count);
+    /** @brief Adds `count` de `id` con `pureza`; devuelve lo que NO cupo. Apila por id+pureza. */
+    int add(const std::string& id, int count, int pureza = 1);
 
-    /** @brief Removes up to `count` of `id`; returns how many were actually removed. */
+    /** @brief Quita hasta `count` de `id` (cualquier pureza); devuelve lo retirado. */
     int remove(const std::string& id, int count);
 
-    /** @brief Total count of `id` across all slots. */
+    /** @brief Total de `id` en todas las purezas. */
     int countOf(const std::string& id) const;
+
+    /** @brief Pureza media (ponderada por cantidad) de `id`; 1 (Común) si no hay. */
+    float avgPureza(const std::string& id) const;
 
     /** @brief Moves/swaps/merges the stack in slot `from` onto slot `to`. */
     void moveSlot(int from, int to);

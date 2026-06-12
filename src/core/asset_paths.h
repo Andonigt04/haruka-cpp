@@ -36,6 +36,12 @@ public:
 #endif
     }
 
+    /** @brief Root prefix for game data files (materials.json, etc.). Dev usa el
+     *  symlink build/bin/assets → ../../assets; release lo empaqueta bajo assets/. */
+    static std::string data() {
+        return "assets/data/";
+    }
+
     /** @brief True when built for distribution (packed assets, no sources). */
     static constexpr bool isRelease() {
 #ifdef HARUKA_RELEASE

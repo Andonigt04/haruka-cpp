@@ -43,6 +43,12 @@ public:
         for (const auto& mesh : meshes) total += mesh.getTriangleCount();
         return total;
     }
+
+    /** @brief AABB del modelo (espacio del modelo, ya con las transforms de nodos
+     *  aplicadas). Para colisión: caja ajustada al modelo, sin tunear a mano. */
+    bool      hasBounds()  const { return m_hasBounds; }
+    glm::vec3 boundsMin()  const { return m_min; }
+    glm::vec3 boundsMax()  const { return m_max; }
 private:
     std::vector<Mesh> meshes;
     std::string directory;
@@ -51,12 +57,16 @@ private:
     Assimp::Importer importer;
     const aiScene* scene = nullptr;
 
+    glm::vec3 m_min{0.0f}, m_max{0.0f}; // AABB acumulada al cargar
+    bool      m_hasBounds = false;
+
     /** @brief Parses model file and initializes node traversal. */
     void loadModel(std::string const &path);
-    /** @brief Recursively processes one Assimp node hierarchy branch. */
-    void processNode(aiNode *node, const aiScene *scene);
-    /** @brief Converts one Assimp mesh into engine `Mesh`. */
-    Mesh processMesh(aiMesh *mesh, const aiScene *scene);
+    /** @brief Recursively processes one Assimp node hierarchy branch, acumulando la
+     *  transform del nodo (escala/posición de cada parte del modelo). */
+    void processNode(aiNode *node, const aiScene *scene, const glm::mat4& parentTransform);
+    /** @brief Converts one Assimp mesh into engine `Mesh`, aplicando la transform del nodo. */
+    Mesh processMesh(aiMesh *mesh, const aiScene *scene, const glm::mat4& transform);
     /** @brief Loads material textures by semantic type with deduplication. */
     std::vector<MeshTexture> loadMaterialTextures(aiMaterial *mat, aiTextureType type, std::string typeName);
 };

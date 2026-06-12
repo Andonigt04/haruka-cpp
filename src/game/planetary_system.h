@@ -8,6 +8,9 @@
 #include "core/modules.h"
 #include "tools/math_types.h"
 #include "core/scene/scene_manager.h"
+#include "core/terrain/terrain_sample.h"     // WorldGenParams (terreno)
+
+class Texture; // global (renderer/texture.h) — NO está en namespace Haruka
 
 namespace Haruka {
 
@@ -15,6 +18,7 @@ class ChunkCache;
 class TerrainGenerator;
 class TerrainRenderer;
 class WaterRenderer;
+class FloatingIslandRenderer;
 class TerrainStreamingSystem;
 class LODSystem;
 class DeformationField;
@@ -46,6 +50,14 @@ public:
     /** @brief Renderiza el océano de un planeta (shader de agua ya activo). */
     void renderPlanetWater(const std::string& planetName, const glm::dvec3& cameraPos);
 
+    /** @brief Renderiza las islas flotantes (reusa el shader de planeta, ya activo). */
+    void renderPlanetIslands(const std::string& planetName, const glm::dvec3& cameraPos);
+
+    /** @brief Datos del planeta v2 activo (el que tiene props/recursos) para que el JUEGO
+     *  genere su sistema de recursos. center/radius/seed/relief. false si no hay. Los
+     *  recursos (árboles/rocas/minerales) son del juego, no del motor. */
+    bool getActivePlanet(glm::dvec3& center, double& radius, uint32_t& seed, float& reliefStrength) const;
+
     /** @brief Sets camera-relative VP for frustum culling terrain+water chunks. */
     void setTerrainCullMatrix(const glm::mat4& camRelViewProj);
 
@@ -61,6 +73,10 @@ public:
     int getCachedChunks()     const;
     int getCacheMemoryMB()    const;
     int getCacheMaxMemoryMB() const;
+    /** @brief Sets the chunk cache memory budget (MB). Evicts immediately if over. */
+    void setCacheMaxMemoryMB(int mb);
+    /** @brief Tunes terrain LOD detail (lower = fewer chunks = cheaper). */
+    void setLODParams(double splitFactor, int maxLOD);
 
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
@@ -107,6 +123,22 @@ private:
     std::unique_ptr<TerrainGenerator> m_generator;
     std::unique_ptr<TerrainRenderer> m_renderer;
     std::unique_ptr<WaterRenderer> m_waterRenderer;
+    std::unique_ptr<FloatingIslandRenderer> m_islandRenderer;
+    bool       m_islandsGenerated = false;
+    glm::dvec3 m_islandGenCamDir{0.0}; // dirección cámara en la última (re)generación de islas
+
+    // (Los recursos —árboles/rocas/minerales/cosecha— se movieron al juego: Survival
+    //  ResourceSystem. El motor solo expone el planeta activo vía getActivePlanet.)
+
+    // Texturas de bioma del terreno (OPCIONALES, declaradas en la escena
+    // terrainSettings.textures). Sin config → terreno procedural. El tier de
+    // resolución se elige por TextureQuality. Cargadas/bindeadas aquí (no en el engine core).
+    std::unique_ptr<Texture> m_texSandAlbedo,  m_texSandNormal;
+    std::unique_ptr<Texture> m_texGrassAlbedo;
+    std::unique_ptr<Texture> m_texLandAlbedo,  m_texLandNormal;
+    int         m_texTier = -1;        // tier cargado (px); -1 = aún no
+    std::string m_texDir;              // dir base de la última carga
+    void bindTerrainTextures(const Planet& planet); // carga diferida + bind + uniforms
     std::unique_ptr<TerrainStreamingSystem> m_streaming;
     std::unique_ptr<LODSystem> m_lod;
 #ifdef HARUKA_MOD_DEFORM

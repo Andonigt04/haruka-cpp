@@ -104,13 +104,18 @@ public:
         walkSpeed = walk; runSpeed = run; crouchSpeed = crouch;
     }
     float getWalkSpeed() const { return walkSpeed; }
+    // Jump impulse (m/s). Also reused as the ascend/descend speed in flight mode.
+    void  setJumpForce(float f) { jumpForce = f; }
+    float getJumpForce() const  { return jumpForce; }
 
     bool isGrounded() const { return grounded; }
     bool isSprinting() const { return sprinting; }
     bool isCrouching() const { return crouched; }
     bool isLocalPlayer() const { return localPlayer; }
     bool isInFlightMode() const { return flightMode; }
-    void setGrounded(bool g) { grounded = g; }
+    // Called by the game's surface constraint each frame; marks grounding as
+    // externally managed so checkGrounded() stops using the (sphere-wrong) Y test.
+    void setGrounded(bool g) { grounded = g; m_externalGround = true; }
     ///@}
     
     void setFlightMode(bool enabled) { flightMode = enabled; }
@@ -194,6 +199,7 @@ private:
     glm::dvec3 upDirection = glm::dvec3(0.0, 1.0, 0.0);
     
     bool grounded = false;
+    bool m_externalGround = false; // grounded managed by the game's surface constraint
     bool sprinting = false;
     bool crouched = false;
     bool flightMode = false;

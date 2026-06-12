@@ -81,6 +81,7 @@ set(HARUKA_MODULE_LIST
     TERRAIN     # 6: planetary terrain (default-ON; off = no planet)
     POSTFX      # 7: bloom/ssao/hdr/ibl
     SHADOWS     # 8: shadow maps
+    PHYSICS     # 9: rigid-body physics engine + colliders (default-ON; off = no PhysicsEngine)
 )
 set(MODULES "" CACHE STRING "Per-module on/off bitmask, e.g. 101101111")
 
@@ -106,8 +107,8 @@ endforeach()
 # --- Module dependencies ---
 # "<MOD>_REQUIRES" lists modules that MOD needs. If MOD is ON but a requirement
 # is OFF, auto-enable the requirement (with a warning) so the build stays valid.
-set(PARTICLES_REQUIRES FLUIDS)   # the particle system reuses the PBF solver
-# (DEFORM, SOFTBODY, AUDIO, NETWORK are self-contained — no requirements.)
+# (PARTICLES = sistema de efectos GL_POINTS standalone, sin dependencias.
+#  DEFORM, SOFTBODY, AUDIO, NETWORK son self-contained — no requirements.)
 
 foreach(_mod ${HARUKA_MODULE_LIST})
     if(HARUKA_MOD_${_mod})
@@ -148,6 +149,14 @@ if(NOT HARUKA_MOD_FLUIDS)
 endif()
 if(NOT HARUKA_MOD_AUDIO)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "audio/.*\\.cpp$")
+endif()
+if(NOT HARUKA_MOD_PHYSICS)
+    # Solo el motor de físicas. octree.cpp/raycast_simple.cpp se quedan (los usan
+    # scene_manager y main, no son exclusivos de físicas).
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/physics_engine\\.cpp$")
+endif()
+if(NOT HARUKA_MOD_PARTICLES)
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/particle_system\\.cpp$")
 endif()
 
 # --- 4. Main Target ---

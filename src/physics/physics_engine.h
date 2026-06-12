@@ -39,6 +39,15 @@ struct StaticBox {
     glm::dvec3 bmax;
 };
 
+/** @brief Caja ORIENTADA estática (objetos colocados: mesas, props…). center/halfExtents
+ *  en mundo + rot (local→mundo, ortonormal). Caja ajustada al modelo, orientada a la
+ *  superficie. */
+struct StaticOBB {
+    glm::dvec3 center;
+    glm::dvec3 halfExtents;
+    glm::dmat3 rot;
+};
+
 /**
  * @brief Main physics simulation coordinator.
  *
@@ -61,6 +70,19 @@ public:
     void addStaticBox(const glm::dvec3& center, const glm::dvec3& halfExtents);
     /** @brief Removes all static boxes (e.g. on scene reload). */
     void clearStaticBoxes();
+
+    /** @brief Registra/limpia cajas orientadas de objetos colocados (mesas, estaciones). */
+    void addPlacedOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
+    void clearPlacedOBBs();
+
+    /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
+     *  regeneran al moverse, independiente de los objetos colocados. */
+    void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
+    void clearPropOBBs();
+    /** @brief Empuja una esfera fuera de los OBB colocados (te subes encima o te frena).
+     *  Devuelve el centro corregido; pone grounded=true si el empuje fue a favor de 'up'. */
+    glm::dvec3 resolveSphere(const glm::dvec3& center, double radius,
+                             const glm::dvec3& up, bool& grounded) const;
 
     /** @brief Advances simulation by one time step. */
     void update(double deltaTime);
@@ -139,6 +161,8 @@ public:
 private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
     std::vector<StaticBox>                  staticBoxes;
+    std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
+    std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
     std::unique_ptr<Octree> octree;

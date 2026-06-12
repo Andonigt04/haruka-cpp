@@ -13,6 +13,14 @@
 #endif
 #include "renderer/terrain_renderer.h"
 #include "renderer/water_renderer.h"
+#include "renderer/floating_island_renderer.h"
+#include "renderer/texture.h"
+#include "core/terrain/floating_islands.h"
+#include "core/terrain/terrain_sampler_v2.h"
+#include "settings/settings_manager.h"
+#include <glad/glad.h>
+#include <filesystem>
+#include <chrono>
 
 namespace Haruka {
 
@@ -21,10 +29,11 @@ PlanetarySystem::~PlanetarySystem() {}
 
 void PlanetarySystem::init() {
     // Inicializamos los subsistemas una sola vez
-    m_cache = std::make_unique<ChunkCache>(512);
+    m_cache = std::make_unique<ChunkCache>(384); // override por GraphicsSettings.chunkMemoryMB
     m_generator = std::make_unique<TerrainGenerator>();
     m_renderer = std::make_unique<TerrainRenderer>();
     m_waterRenderer = std::make_unique<WaterRenderer>();
+    m_islandRenderer = std::make_unique<FloatingIslandRenderer>();
 #ifdef HARUKA_MOD_DEFORM
     m_deform = std::make_unique<DeformationField>();
     m_generator->setDeformationField(m_deform.get());
@@ -53,6 +62,36 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // Keep the per-planet LOD-throttle state sized to the planet list.
     if (m_lastLODCamPos.size() != m_planets.size())
         m_lastLODCamPos.assign(m_planets.size(), glm::dvec3(1e300));
+
+    // Islas flotantes (genVersion>=2): streaming-lite. Regenera el casquete de
+    // islas alrededor de la cámara cuando esta se mueve lo bastante → islas
+    // descubribles al explorar, sin generar millones en todo el planeta.
+    if (m_islandRenderer) {
+        for (const auto& planet : m_planets) {
+            const auto& cfg = planet.terrainSettings.contains("config")
+                            ? planet.terrainSettings["config"] : planet.terrainSettings;
+            if (cfg.value("genVersion", 1) < 2) continue;
+            glm::dvec3 up = cameraPos - glm::dvec3(planet.position);
+            double ul = glm::length(up);
+            if (ul < 1.0) break;
+            glm::dvec3 camDir = up / ul;
+            const float angRadius = 0.03f; // ~190 km de casquete
+            if (m_islandsGenerated &&
+                glm::dot(camDir, m_islandGenCamDir) > std::cos(angRadius * 0.4)) break; // apenas se movió
+            uint32_t seed = (uint32_t)cfg.value("seed", 42);
+            WorldGenParams W = deriveWorldParams(seed, planet.radius);
+            W.reliefStrength = cfg.value("reliefStrength", 1.0f);
+            auto islands = generateFloatingIslandsNear(seed, glm::dvec3(planet.position),
+                                                       planet.radius, W, camDir, angRadius);
+            m_islandRenderer->setIslands(std::move(islands));
+            m_islandGenCamDir  = camDir;
+            m_islandsGenerated = true;
+            break; // un planeta con islas por ahora
+        }
+    }
+
+    // (Los props/recursos los genera ahora el JUEGO — Survival ResourceSystem — usando
+    //  getActivePlanet() + el sampler de terreno del motor.)
 
     // 2. Para cada planeta, actualizar su terreno
     for (size_t pi = 0; pi < m_planets.size(); ++pi) {
@@ -116,9 +155,14 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // esté en throttle por estar quieto → los chunks lejanos siguen entrando.
     m_streaming->pump();
 
-    // 3. Recoger chunks terminados y subirlos a la GPU
+    // 3. Recoger chunks terminados y subirlos a la GPU — SOLO si siguen visibles.
+    //    Un chunk cuya generación async terminó DESPUÉS de salir de la vista ya fue
+    //    "descargado" por el diff del LOD mientras se generaba; si lo subiéramos
+    //    igual quedaría en GPU para siempre (terreno apilado + coste creciente).
+    //    Se queda en la caché y reaparece vía processLODUpdate si vuelves.
     auto readyChunks = m_streaming->getReadyChunks();
     for (auto& chunk : readyChunks) {
+        if (m_lod && !m_lod->isVisible(chunk->key)) continue;
         m_renderer->addToScene(chunk->planetName, chunk->key, *chunk);
         if (m_waterRenderer) m_waterRenderer->addToScene(chunk->planetName, chunk->key, *chunk);
     }
@@ -143,6 +187,28 @@ void PlanetarySystem::syncFromScene(const SceneManager& scene) {
             break;
         }
     }
+
+    // (Las islas flotantes se generan en update(), cerca de la cámara: streaming-lite.)
+}
+
+void PlanetarySystem::renderPlanetIslands(const std::string& planetName, const glm::dvec3& cameraPos) {
+    (void)planetName;
+    if (m_islandRenderer) m_islandRenderer->render(cameraPos);
+}
+
+bool PlanetarySystem::getActivePlanet(glm::dvec3& center, double& radius,
+                                     uint32_t& seed, float& reliefStrength) const {
+    for (const auto& planet : m_planets) {
+        const auto& cfg = planet.terrainSettings.contains("config")
+                        ? planet.terrainSettings["config"] : planet.terrainSettings;
+        if (cfg.value("genVersion", 1) < 2) continue;   // solo planetas v2 tienen recursos
+        center         = glm::dvec3(planet.position);
+        radius         = planet.radius;
+        seed           = (uint32_t)cfg.value("seed", 42);
+        reliefStrength = cfg.value("reliefStrength", 1.0f);
+        return true;
+    }
+    return false;
 }
 
 void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
@@ -150,10 +216,57 @@ void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
     if (m_waterRenderer) m_waterRenderer->setCullMatrix(camRelViewProj);
 }
 
+// Texturas de bioma OPCIONALES, declaradas en la escena:
+//   terrainSettings.config.textures = { "dir": "assets/textures/terrain" }
+// Convención de tiers (la genera tools/gen_texture_tiers.sh):
+//   <dir>/512, <dir>/1024 (base) y <dir>_hd/2048 (pack HD). Tier por TextureQuality,
+//   con fallback a 1024. Sin config → procedural (u_hasTex=0). El engine core no
+//   sabe de texturas; esto vive en el sistema de terreno.
+void PlanetarySystem::bindTerrainTextures(const Planet& planet) {
+    namespace fs = std::filesystem;
+    const auto& cfg = planet.terrainSettings.contains("config")
+                    ? planet.terrainSettings["config"] : planet.terrainSettings;
+
+    std::string dir;
+    if (cfg.contains("textures") && cfg["textures"].is_object())
+        dir = cfg["textures"].value("dir", std::string{});
+
+    if (dir.empty()) { glUniform1i(23, 0); return; } // sin texturas → procedural
+
+    const int q    = (int)Haruka::SettingsManager::get().graphics().textureQuality;
+    const int tier = (q <= 0) ? 512 : (q >= 3) ? 2048 : 1024;
+    if (tier != m_texTier || dir != m_texDir) {
+        std::string sub = (tier == 2048) ? (dir + "_hd/2048/")
+                                         : (dir + "/" + std::to_string(tier) + "/");
+        if (!fs::exists(sub + "sand_albedo.png")) sub = dir + "/1024/"; // fallback
+        auto load = [&](const char* n) -> std::unique_ptr<Texture> {
+            std::string p = sub + n;
+            return fs::exists(p) ? std::make_unique<Texture>(p.c_str()) : nullptr;
+        };
+        m_texSandAlbedo  = load("sand_albedo.png");
+        m_texSandNormal  = load("sand_normal.png");
+        m_texGrassAlbedo = load("grass_albedo.png");
+        m_texLandAlbedo  = load("land_albedo.png");
+        m_texLandNormal  = load("land_normal.png");
+        m_texTier = tier; m_texDir = dir;
+    }
+    bool has = m_texSandAlbedo && m_texGrassAlbedo && m_texLandAlbedo;
+    if (has) {
+        m_texSandAlbedo->use(4);  glUniform1i(21, 4);
+        if (m_texSandNormal) { m_texSandNormal->use(5); glUniform1i(22, 5); }
+        m_texGrassAlbedo->use(6); glUniform1i(24, 6);
+        m_texLandAlbedo->use(7);  glUniform1i(25, 7);
+        if (m_texLandNormal) { m_texLandNormal->use(8); glUniform1i(26, 8); }
+    }
+    glUniform1i(23, has ? 1 : 0);
+}
+
 void PlanetarySystem::renderPlanetTerrain(const std::string& planetName, const glm::dvec3& cameraPos) {
     if (!m_renderer) return;
+    const Planet* planet = nullptr;
     for (const auto& p : m_planets)
-        if (p.name == planetName) { m_renderer->setPlanetCenter(p.position); break; }
+        if (p.name == planetName) { m_renderer->setPlanetCenter(p.position); planet = &p; break; }
+    if (planet) bindTerrainTextures(*planet);
     m_renderer->renderPlanet(planetName, cameraPos);
 }
 
@@ -177,6 +290,13 @@ int PlanetarySystem::getPendingChunks()    const { return m_streaming ? m_stream
 int PlanetarySystem::getCachedChunks()     const { return m_cache     ? (int)m_cache->getChunkCount()               : 0; }
 int PlanetarySystem::getCacheMemoryMB()    const { return m_cache     ? (int)m_cache->getMemoryUsageMB()            : 0; }
 int PlanetarySystem::getCacheMaxMemoryMB() const { return m_cache     ? (int)m_cache->getMaxMemoryMB()              : 0; }
+void PlanetarySystem::setCacheMaxMemoryMB(int mb) { if (m_cache) m_cache->setMaxMemory((size_t)std::max(16, mb)); }
+void PlanetarySystem::setLODParams(double splitFactor, int maxLOD) {
+    if (!m_lod) return;
+    if (m_lod->getSplitFactor() == splitFactor && m_lod->getMaxLOD() == maxLOD) return;
+    m_lod->setParams(splitFactor, maxLOD);
+    m_forceLOD = true; // re-evaluate the quadtree next update
+}
 
 PlanetarySystem::TerrainDrawStats PlanetarySystem::getTerrainDrawStats() const {
     if (!m_renderer) return {};

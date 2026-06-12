@@ -14,6 +14,11 @@ namespace Haruka {
     public:
         TerrainGenerator() = default;
 
+        // Scales the noise octave counts used per vertex (lower = cheaper chunk
+        // generation, slightly smoother terrain). Driven by terrainQuality.
+        // 1.0 = full detail. Applies to chunks generated after the change.
+        static inline float s_detailScale = 1.0f;
+
         /** @brief Player-edit layer (craters/dig/build). Non-owning; may be null.
          *  Read from worker threads during generateChunk → must outlive generation
          *  and only be mutated on the main thread between frames. */
@@ -45,7 +50,7 @@ namespace Haruka {
         float calculateHeight(const glm::vec3& posOnSphere, const nlohmann::json& layers);
         
         // Convierte coordenadas de Chunk (X,Y) a posición 3D en la cara del cubo
-        glm::vec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
+        glm::dvec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
 
         const DeformationField* m_deform = nullptr;
     };

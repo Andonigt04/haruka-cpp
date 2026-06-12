@@ -18,13 +18,16 @@
  */
 #version 450 core
 
-layout(location = 0) in vec3 aPos;     // sea-level position relative to chunk centre
-layout(location = 1) in vec3 aNormal;  // radial outward (sphere normal at sea level)
+layout(location = 0) in vec3  aPos;        // sea-level position relative to chunk centre
+layout(location = 1) in vec3  aNormal;     // radial outward (sphere normal at sea level)
+layout(location = 2) in vec2 aWaterParam; // x = nivel (km, 0=océano) · y = profundidad (m)
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
 layout(location = 2) out float WaveHeight; // signed crest height (m)
 layout(location = 3) out float Foam;       // 0..1 from Gerstner Jacobian (crest pinching)
+layout(location = 4) out float IsLake;     // 1 = lago, 0 = océano (para el fragment)
+layout(location = 5) out float Depth;      // profundidad del agua (m): orilla≈0
 
 layout(location = 10) uniform vec3  u_chunkOffset;   // chunkCentre - cameraPos
 layout(location = 14) uniform float u_time;          // seconds
@@ -61,6 +64,10 @@ void main() {
     float baseAng = atan(u_windDir.y, u_windDir.x);
     float windAmp = clamp(u_windStrength, 0.05, 4.0);
 
+    // Lago = agua calmada: oleaje casi nulo (rizos mm) frente al oleaje oceánico.
+    bool  isLake    = (aWaterParam.x > 0.0);
+    float waveScale = isLake ? 0.04 : 1.0;
+
     vec3  disp = vec3(0.0);              // tangent-space displacement (x=T, y=up, z=B)
     vec3  nrm  = vec3(0.0, 1.0, 0.0);    // tangent-space normal accumulator
     float crest = 0.0;
@@ -79,7 +86,7 @@ void main() {
         float k   = 6.28318530718 / WAVELEN[i];   // spatial frequency
         // Distance fade: full amplitude until 400× wavelength, gone by 1200×.
         float fade = 1.0 - smoothstep(WAVELEN[i] * 400.0, WAVELEN[i] * 1200.0, camDist);
-        float A   = AMP[i] * windAmp * fade;
+        float A   = AMP[i] * windAmp * fade * waveScale;
         if (A < 1e-4) continue;
         float w   = sqrt(GRAV * k);                // deep-water dispersion
         float Q   = STEEP[i] / (k * A * float(NUM_WAVES)); // keep crests from looping
@@ -121,5 +128,7 @@ void main() {
     Normal     = N;
     FragPos    = pos;
     WaveHeight = crest;
+    IsLake     = isLake ? 1.0 : 0.0;
+    Depth      = aWaterParam.y;
     gl_Position = projection * mat4(mat3(view)) * vec4(pos, 1.0);
 }

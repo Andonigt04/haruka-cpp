@@ -17,6 +17,7 @@
 
 #include "renderer/motor_instance.h"
 #include "game/planetary_system.h"
+#include "core/terrain/terrain_generator.h"
 #include "core/components/mesh_renderer_component.h"
 #include "renderer/model.h"
 #include "renderer/primitive_shapes.h"
@@ -65,6 +66,8 @@ std::unique_ptr<SimpleMesh> g_sphereMesh;
 std::unique_ptr<SimpleMesh> g_cubeMesh;
 std::unique_ptr<SimpleMesh> g_capsuleMesh;
 std::unique_ptr<SimpleMesh> g_planeMesh;
+std::unique_ptr<SimpleMesh> g_cylinderMesh;
+std::unique_ptr<SimpleMesh> g_triangleMesh;
 
 void cleanupGLStatics() {
     g_modelCache.clear();
@@ -72,10 +75,15 @@ void cleanupGLStatics() {
     g_cubeMesh.reset();
     g_capsuleMesh.reset();
     g_planeMesh.reset();
+    g_cylinderMesh.reset();
+    g_triangleMesh.reset();
 }
 
-glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj) {
-    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position));
+glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos) {
+    // Camera-relativo en DOBLE precisión: la resta posición-cámara se hace en double y
+    // SOLO el offset (pequeño cerca de la cámara) se pasa a float. Evita el jitter de
+    // ~0.5 m que aparecía al castear posiciones de superficie (millones de m) a float.
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position - camPos));
 
     glm::mat4 rotation = glm::eulerAngleXYZ(
         glm::radians(static_cast<float>(obj.rotation.x)),
@@ -88,6 +96,7 @@ glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj) {
 }
 
 Model* getOrLoadModelCached(const std::string& path) {
+    if (path.empty()) return nullptr;   // item sin modelo (p.ej. minerales) → no cargar ""
     auto it = g_modelCache.find(path);
     if (it != g_modelCache.end()) {
         return it->second.get();
@@ -137,6 +146,24 @@ SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
                 g_planeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
             return g_planeMesh.get();
+        case Haruka::PrimitiveType::CILINDER:
+            if (!g_cylinderMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createCylinder(0.5f, 1.0f, 24, vertices, normals, indices);
+                g_cylinderMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return g_cylinderMesh.get();
+        case Haruka::PrimitiveType::TRIANGLE:
+            if (!g_triangleMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                PrimitiveShapes::createTriangle(0.5f, vertices, normals, indices);
+                g_triangleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return g_triangleMesh.get();
         default:
             return nullptr;
     }
@@ -149,6 +176,16 @@ Application::Application() : _window(nullptr) {
 
 Application::~Application() {
     cleanup();
+}
+
+// Bounds (AABB) de un modelo — consulta de ASSET (Application posee la caché de modelos).
+// No es lógica de colisión: el módulo de físicas usa estos bounds para su collider.
+bool Application::getModelBounds(const std::string& path, glm::vec3& outMin, glm::vec3& outMax) {
+    Model* m = getOrLoadModelCached(path);
+    if (!m || !m->hasBounds()) return false;
+    outMin = m->boundsMin();
+    outMax = m->boundsMax();
+    return true;
 }
 
 void Application::setupQuad() {
@@ -231,11 +268,13 @@ void Application::initPlanetarySystem() {
     _planetarySystem->init();
 
     // Wire up planetary physics so gravity and terrain collision use real planet data.
+#ifdef HARUKA_MOD_PHYSICS
     if (_physicsEngine)
         _physicsEngine->initPlanetaryPhysics(
             _worldSystem.get(),
             _planetarySystem.get(),
             _raycastSystem.get());
+#endif
 
     for (const auto& objPtr : _currentScene->getAllObjects()) {
         if (!objPtr) continue;
@@ -285,6 +324,21 @@ void Application::applyGraphicsSettings() {
     if (_window)
         SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
 
+    // Chunk cache memory budget.
+    if (_planetarySystem)
+        _planetarySystem->setCacheMaxMemoryMB(g.chunkMemoryMB);
+
+    // Terrain LOD detail: lower = fewer/larger chunks = cheaper (CPU/GPU/RAM).
+    // Also scales the per-vertex noise octaves (cheaper chunk generation).
+    if (_planetarySystem) {
+        switch (g.terrainQuality) {
+            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 16); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
+            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 18); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
+            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 20); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 22); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+        }
+    }
+
     // Texture quality → anisotropic filtering + mip LOD bias. Low trades sharpness
     // for fill-rate (positive bias = blurrier mips); Ultra = max anisotropy, sharp.
     // Applies to textures loaded after this call (see Texture::setQuality).
@@ -306,9 +360,11 @@ void Application::init(Haruka::SceneManager& scene) {
     }
     _worldSystem->syncFromScene(scene);
 
+#ifdef HARUKA_MOD_PHYSICS
     if (!_physicsEngine) {
         _physicsEngine = std::make_unique<Haruka::PhysicsEngine>();
     }
+#endif
 
     if (!_camera) {
         glm::vec3 camStart(0.0f, 0.0f, 5.0f);
@@ -396,7 +452,10 @@ void Application::buildRenderQueue() {
 }
 
 unsigned int Application::renderBloom(unsigned int srcColorTex) {
-    const int bw = m_postW, bh = m_postH;
+    // Bloom runs at HALF resolution: ~4x fewer pixels through the blur ping-pong
+    // for a near-identical look (bloom is low-frequency). The composite samples it
+    // at full-res UV and linear-upscales.
+    const int bw = std::max(1, m_postW / 2), bh = std::max(1, m_postH / 2);
     // (Re)create the two ping-pong color targets when the size changes.
     if (m_bloomFBO[0] == 0 || m_bloomW != bw || m_bloomH != bh) {
         if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); glDeleteTextures(2, m_bloomTex); }
@@ -627,7 +686,7 @@ void Application::renderFrameContent() {
             }
 
             PerObjectUBOData objData{};
-            objData.model                    = glm::translate(glm::mat4(1.0f), -cameraOrigin) * getTransformMatrix(*obj);
+            objData.model                    = getTransformMatrix(*obj, _camera->position);
             objData.baseColorAndPlanetRadius = glm::vec4(baseColor, 1.0f);
             // w = 0: normal, 1: procedural terrain, 2: emissive star (no diffuse shading)
             objData.planetCenterAndFlag      = glm::vec4(0.0f, 0.0f, 0.0f, isStar ? 2.0f : 0.0f);
@@ -691,10 +750,53 @@ void Application::renderFrameContent() {
             _iResidentMemoryMB      = _planetarySystem->getCacheMemoryMB();
             _iMaxMemoryMB           = _planetarySystem->getCacheMaxMemoryMB();
 
+            // --- SHADOW PASS (sol): los casters del juego (props) proyectan profundidad a
+            // un depth map; el terreno lo recibe. Todo camera-relativo (cámara en origen).
+            glm::mat4 lightSpace(1.0f);
+            bool shadowsOn = false;
+            // Lee el ajuste EN VIVO (config panel + guardado): 0=Off,1=Low,2=Medium,3=High.
+            int sq = (int)Haruka::SettingsManager::get().graphics().shadowQuality;
+            if (_camera && _gameInterface && _gameInterface->onRenderShadow && sq > 0) {
+                unsigned res = (sq == 1) ? 1024u : (sq == 2) ? 2048u : 4096u; // resolución por calidad
+                if (!_shadow || _shadow->shadowWidth != res) _shadow = std::make_unique<Shadow>(res, res);
+                glm::vec3 sunDir = glm::normalize(frameData.sunDirection); // hacia el sol
+                glm::vec3 lup = (std::abs(sunDir.y) < 0.95f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
+                // Área AJUSTADA alrededor del jugador → más resolución por metro (nitidez).
+                // ±42 m: a 4096 ≈ 2 cm/texel (antes ±75 → 3.7 cm, se veían pixels).
+                const float D = 90.0f, S = 42.0f;
+                glm::mat4 lView = glm::lookAt(sunDir * D, glm::vec3(0.0f), lup); // luz desde el sol
+                glm::mat4 lProj = glm::ortho(-S, S, -S, S, 1.0f, 2.0f * D);
+                lightSpace = lProj * lView;
+
+                _shadow->bindForWriting();
+                glViewport(0, 0, _shadow->shadowWidth, _shadow->shadowHeight);
+                glClear(GL_DEPTH_BUFFER_BIT);
+                glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_CULL_FACE);
+                _gameInterface->onRenderShadow(lightSpace, glm::vec3(_camera->position));
+                shadowsOn = true;
+                glBindFramebuffer(GL_FRAMEBUFFER, m_sceneTargetFBO);
+                glViewport(0, 0, m_postActive ? (uint32_t)m_postW : width,
+                                 m_postActive ? (uint32_t)m_postH : height);
+            }
+
             if (_planetShader) {
                 _planetShader->use();
                 glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
                 glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_uboPerObject);
+                // Niebla on/off desde la config (consola: fog 0|1). Persiste para el
+                // pase de islas (reusa el mismo shader).
+                glUniform1i(15, Haruka::SettingsManager::get().graphics().fog ? 1 : 0);
+                // Sombras: bind del depth map + matriz de luz (el terreno las recibe).
+                if (shadowsOn && _shadow) {
+                    glActiveTexture(GL_TEXTURE5);
+                    glBindTexture(GL_TEXTURE_2D, _shadow->depthMap);
+                    glUniform1i(34, 5);
+                    glUniformMatrix4fv(30, 1, GL_FALSE, &lightSpace[0][0]);
+                    glUniform1i(35, 1);
+                    glActiveTexture(GL_TEXTURE0);
+                } else {
+                    glUniform1i(35, 0);
+                }
             }
 
             // Ensure correct GL state for terrain pass
@@ -725,7 +827,10 @@ void Application::renderFrameContent() {
                 PerObjectUBOData terrainObj{};
                 terrainObj.model                    = glm::mat4(1.0f);
                 terrainObj.baseColorAndPlanetRadius = glm::vec4(0.76f, 0.78f, 0.82f, (float)planet.radius);
-                terrainObj.planetCenterAndFlag      = glm::vec4(0.0f);
+                // xyz = (cámara − centro del planeta) en double→float (preciso). El
+                // shader reconstruye relPos = FragPos + esto → altura/pendiente/clima.
+                terrainObj.planetCenterAndFlag      = glm::vec4(
+                    glm::vec3(glm::dvec3(_camera->position) - planet.position), 0.0f);
 
                 glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
                 glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &terrainObj);
@@ -734,6 +839,23 @@ void Application::renderFrameContent() {
                 _planetarySystem->renderPlanetTerrain(planet.name, glm::dvec3(_camera->position));
             }
             }
+
+            
+            // --- Floating islands pass (reuse planet shader, opaque, after terrain) ---
+            if (_planetShader) {
+                HARUKA_PROFILE("islands.draw");
+                _planetShader->use();
+                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
+                glUniform1f(12, 0.0f); // u_morphFactor = 0 (islas no morphean)
+                glUniform1i(11, 0);    // u_terrainMode = procedural
+                glDisable(GL_CULL_FACE); // two-sided: el winding del blob puede variar
+                for (const auto& planet : _planetarySystem->getPlanets())
+                    _planetarySystem->renderPlanetIslands(planet.name, glm::dvec3(_camera->position));
+                glEnable(GL_CULL_FACE);
+            }
+
+            // (Los recursos —árboles/rocas/minerales— los dibuja el JUEGO en onRenderWorld;
+            //  son contenido del juego, no del motor.)
 
             // --- Water pass (ocean shell, after terrain) ---
             if (_waterShader) {
@@ -946,7 +1068,9 @@ void Application::cleanup() {
     _currentScene = nullptr;
     _ownedScene.reset();
 
+#ifdef HARUKA_MOD_PHYSICS
     _physicsEngine.reset();
+#endif
     _terrainStreamingSystem.reset();
     _chunkCache.reset();
     _planetarySystem.reset();
@@ -1139,6 +1263,17 @@ void Application::run(const std::string& startScenePath) {
         glFlush();
 
         _window->swapBuffers();
+
+        // Frame-rate cap (battery/heat on laptops; 0 = uncapped). With vsync on,
+        // swapBuffers already blocks to refresh — this only caps below that.
+        int maxFps = Haruka::SettingsManager::get().graphics().maxFps;
+        if (maxFps > 0) {
+            const double targetNs = 1.0e9 / (double)maxFps;
+            const double workNs = std::chrono::duration<double, std::nano>(
+                std::chrono::high_resolution_clock::now() - _frameStart).count();
+            if (workNs < targetNs)
+                SDL_DelayNS((Uint64)(targetNs - workNs));
+        }
 
         // FPS tracking
         _fpsFrameCount++;

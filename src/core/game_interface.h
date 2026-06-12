@@ -39,6 +39,9 @@ struct GameInterface {
      *  view/proj are the camera matrices for this frame. camPos is in world space. */
     typedef void (*OnRenderWorldFunc)(const glm::mat4& view, const glm::mat4& proj,
                                       const glm::vec3& camPos);
+    /** @brief Pase de sombra: el juego dibuja sus casters (props) en profundidad desde la
+     *  luz. lightSpace = ortho*view del sol (camera-relativo). camPos para el offset. */
+    typedef void (*OnRenderShadowFunc)(const glm::mat4& lightSpace, const glm::vec3& camPos);
     /** @brief Called for every SDL event before ImGui processes it.
      *  Return true to mark the event as consumed (engine won't process it further). */
     typedef bool (*OnEventFunc)(const SDL_Event* event);
@@ -51,6 +54,7 @@ struct GameInterface {
     GetCameraFunc    getCamera     = nullptr;
     GetSceneFunc     getScene      = nullptr;
     OnRenderWorldFunc onRenderWorld = nullptr;
+    OnRenderShadowFunc onRenderShadow = nullptr;
     OnEventFunc      onEvent       = nullptr;
     ///@}
     

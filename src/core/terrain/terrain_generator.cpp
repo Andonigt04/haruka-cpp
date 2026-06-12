@@ -1,6 +1,9 @@
 #include "terrain_generator.h"
 #include "tools/planetary_types.h"
 #include "core/noise_generator.h"
+#include "core/terrain/terrain_sampler_v2.h"
+#include <algorithm>
+#include <mutex>
 #include "core/modules.h"
 #ifdef HARUKA_MOD_DEFORM
 #include "core/terrain/deformation_field.h"
@@ -10,13 +13,30 @@
 
 namespace Haruka {
 
+// Cachea los WorldGenParams del v2 por seed (deriveWorldParams hace una calibración
+// CDF de ~2k muestras; no queremos repetirla en cada chunk). Recalcula solo si la
+// seed cambia. Protegido por mutex porque generateChunk corre en hilos worker.
+static WorldGenParams getWorldParamsCached(uint32_t seed, double planetRadius) {
+    static std::mutex     mtx;
+    static bool           valid = false;
+    static uint32_t       cachedSeed = 0;
+    static WorldGenParams cached;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!valid || cachedSeed != seed) {
+        cached = deriveWorldParams(seed, planetRadius);
+        cachedSeed = seed;
+        valid = true;
+    }
+    return cached;
+}
+
 // Global (thread-local) seed used by calculateHeight when the JSON node
 // passed doesn't provide direct access to the parent config object.
 namespace {
     thread_local int g_current_seed = 42;
 }
 
-    glm::vec3 TerrainGenerator::getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize) {
+    glm::dvec3 TerrainGenerator::getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize) {
         // u, v in [0,1] for the whole face.
         // At LOD d there are 2^d chunks per axis; chunk (key.x, key.y) covers
         // u in [key.x/2^d, (key.x+1)/2^d], v in [key.y/2^d, (key.y+1)/2^d].
@@ -52,7 +72,7 @@ namespace {
         spherePos.y = p.y * sqrt(1.0 - z2 / 2.0 - x2 / 2.0 + z2 * x2 / 3.0);
         spherePos.z = p.z * sqrt(1.0 - x2 / 2.0 - y2 / 2.0 + x2 * y2 / 3.0);
 
-        return glm::vec3(spherePos);
+        return glm::dvec3(spherePos);
     }
 
     std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) 
@@ -102,11 +122,30 @@ namespace {
             settings.value("planetOffsetY", 0.0),
             settings.value("planetOffsetZ", 0.0));
         (void)planetOffset; // only used by the DEFORM module
+
+        // Generación v2 (rediseño A→B con normal analítica). Opt-in por escena:
+        // terrainSettings.config.genVersion >= 2. Por defecto = v1 (sin cambios).
+        const int  genVersion = config.value("genVersion", 1);
+        const bool useV2 = (genVersion >= 2) && !isManual;
+        WorldGenParams wgp = useV2
+            ? getWorldParamsCached((uint32_t)g_current_seed, planetRadius)
+            : WorldGenParams{};
+        wgp.reliefStrength = config.value("reliefStrength", 1.0f); // parámetro de escena
+        // ¿Está activo el deform? Si lo está, la normal vuelve a diferencias finitas
+        // (para que los cráteres tengan normal correcta); si no, normal analítica v2.
+        bool deformActive = false;
+#ifdef HARUKA_MOD_DEFORM
+        deformActive = (m_deform && !m_deform->empty());
+#endif
+        const bool useAnalyticNormal = useV2 && !deformActive;
+
         // Procedural elevation (km) along a sphere direction, INCLUDING player edits
         // (the deformation field). Single source of truth so render and collision
         // agree (getTerrainHeightAt uses the same path via sampleHeightAt).
         auto elevKmAt = [&](const glm::vec3& sph) -> float {
-            float e = isManual ? 0.0f : calculateHeight(sph, layers); // km
+            float e = isManual ? 0.0f
+                    : (useV2 ? sampleTerrainV2(sph, wgp, planetRadius).elevKm
+                             : calculateHeight(sph, layers)); // km
 #ifdef HARUKA_MOD_DEFORM
             if (m_deform && !m_deform->empty()) {
                 // Vertex world pos at the *procedural* surface, then sample edits.
@@ -121,25 +160,34 @@ namespace {
         // rejilla i,j — incluso fuera de [0,res]. Se usa para los vértices y para
         // muestrear el anillo vecino al calcular normales en los bordes (sin costuras).
         auto localPosAt = [&](int i, int j) -> glm::vec3 {
-            glm::vec3 sph = getLocalPosition(key, i, j, res);
-            float h = elevKmAt(sph) * kmToFraction;
-            glm::dvec3 absP = glm::dvec3(sph) * (planetRadius * (1.0 + double(h)));
+            glm::dvec3 dir = getLocalPosition(key, i, j, res);     // dir en DOUBLE (sin escalones)
+            float h = elevKmAt(glm::vec3(dir)) * kmToFraction;
+            glm::dvec3 absP = dir * (planetRadius * (1.0 + double(h)));
             return glm::vec3(absP - chunkCenter_local);
         };
 
         float minElevKm = 1e30f;
         for (int y = 0; y <= res; ++y) {
             for (int x = 0; x <= res; ++x) {
-                glm::vec3 posOnSphere = getLocalPosition(key, x, y, res);
+                glm::dvec3 dir = getLocalPosition(key, x, y, res); // dir en DOUBLE (sin escalones)
+                glm::vec3 posOnSphere = glm::vec3(dir);            // float: ruido/normales/uv (les basta)
 
                 float elevKm = elevKmAt(posOnSphere);          // km (procedural + edits)
                 float height = elevKm * kmToFraction;          // fracción del radio
                 if (elevKm < minElevKm) minElevKm = elevKm;
 
-                glm::dvec3 absPos = glm::dvec3(posOnSphere) * (planetRadius * (1.0 + double(height)));
+                glm::dvec3 absPos = dir * (planetRadius * (1.0 + double(height)));
                 chunk->vertices.push_back(glm::vec3(absPos - chunkCenter_local));
                 chunk->normals.push_back(posOnSphere); // placeholder; recomputado abajo
-                chunk->uvs.push_back(glm::vec2(float(x) * invRes, float(y) * invRes));
+                // uv.x = shoreFactor (cercanía a CUALQUIER agua: mar y lagos), para
+                // pintar arena en las orillas. uv.y = v (libre). v1 → uv normal.
+                float shore = 0.0f;
+                if (useV2) {
+                    TerrainSample ts = sampleTerrainV2(posOnSphere, wgp, planetRadius);
+                    float aboveKm = ts.elevKm - ts.waterLevelKm; // km sobre el agua aplicable
+                    shore = 1.0f - glm::clamp(aboveKm / 0.016f, 0.0f, 1.0f); // playa ~0–16 m
+                }
+                chunk->uvs.push_back(glm::vec2(useV2 ? shore : float(x) * invRes, float(y) * invRes));
             }
         }
         chunk->minElevation = (minElevKm < 1e29f) ? minElevKm : 0.0f;
@@ -164,6 +212,12 @@ namespace {
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
                     glm::vec3 sph = getLocalPosition(key, x, y, res); // dir unitaria
+                    // v2 sin deform: normal ANALÍTICA (gradiente exacto) → sin pinchos
+                    // y seam-safe (función solo de la dirección, igual que la FD fija).
+                    if (useAnalyticNormal) {
+                        chunk->normals[x + y * (res + 1)] = sampleTerrainV2(sph, wgp, planetRadius).normal;
+                        continue;
+                    }
                     // Dos tangentes ortogonales a la dirección esférica.
                     glm::vec3 ref = (std::abs(sph.y) < 0.9f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
                     glm::vec3 t1 = glm::normalize(glm::cross(ref, sph));
@@ -290,31 +344,116 @@ namespace {
         for (int y = 0; y < res; ++y)
             addSkirtQuad(y*(res+1)+res, (y+1)*(res+1)+res, sR+y, sR+y+1);
 
-        // --- Malla de agua (cascarón a nivel del mar) ---
+        // --- Malla de agua v2: océano (nivel 0) + lagos (nivel local L) ---
+        // Nivel POR VÉRTICE: océano a 0, lago a su L. Se propaga el nivel del lago
+        // un anillo hacia la orilla para que la lámina quede plana (sin cuña).
+        if (useV2) {
+            const int side = res + 1;
+            const int wcount = side * side;
+            const float NOLVL = -1e30f;
+            std::vector<float>   levelKm((size_t)wcount, NOLVL);
+            std::vector<float>   elevKmArr((size_t)wcount, 0.0f); // elev terreno (para profundidad)
+            std::vector<uint8_t> wet((size_t)wcount, 0);
+            bool anyWet = false;
+            for (int y = 0; y <= res; ++y) {
+                for (int x = 0; x <= res; ++x) {
+                    glm::vec3 sph = getLocalPosition(key, x, y, res);
+                    TerrainSample ts = sampleTerrainV2(sph, wgp, planetRadius);
+                    size_t i = (size_t)(x + y * side);
+                    elevKmArr[i] = ts.elevKm;
+                    if (ts.isWater()) {
+                        wet[i] = 1; anyWet = true;
+                        levelKm[i] = ts.waterLevelKm; // océano 0, lago L
+                    }
+                }
+            }
+            if (anyWet) {
+                // Propagar el nivel a vértices secos vecinos de agua (orilla plana).
+                std::vector<float> lvl = levelKm;
+                for (int y = 0; y <= res; ++y)
+                for (int x = 0; x <= res; ++x) {
+                    size_t i = (size_t)(x + y * side);
+                    if (levelKm[i] > NOLVL) continue;
+                    float best = NOLVL;
+                    auto consider = [&](int xx, int yy){
+                        if (xx<0||yy<0||xx>res||yy>res) return;
+                        float v = levelKm[(size_t)(xx + yy*side)];
+                        if (v > best) best = v;
+                    };
+                    consider(x-1,y); consider(x+1,y); consider(x,y-1); consider(x,y+1);
+                    lvl[i] = (best > NOLVL) ? best : 0.0f;
+                }
+                chunk->waterVertices.reserve(wcount);
+                chunk->waterNormals.reserve(wcount);
+                chunk->waterParams.reserve(wcount);
+                for (int y = 0; y <= res; ++y) {
+                    for (int x = 0; x <= res; ++x) {
+                        glm::dvec3 dir = getLocalPosition(key, x, y, res); // DOUBLE
+                        size_t i = (size_t)(x + y * side);
+                        float L = (lvl[i] > NOLVL) ? lvl[i] : 0.0f;
+                        glm::dvec3 wp = dir * (planetRadius * (1.0 + double(L) * double(kmToFraction)));
+                        chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
+                        chunk->waterNormals.push_back(glm::vec3(dir));
+                        // profundidad del agua (m): nivel − terreno. ~0 en la orilla.
+                        float depthM = glm::max(0.0f, (L - elevKmArr[i]) * 1000.0f);
+                        chunk->waterParams.push_back(glm::vec2(L, depthM));
+                    }
+                }
+                for (int y = 0; y < res; ++y)
+                for (int x = 0; x < res; ++x) {
+                    int i = x + y * side;
+                    bool cellWet = wet[i] || wet[i+1] || wet[i+side] || wet[i+side+1];
+                    if (!cellWet) continue;
+                    chunk->waterIndices.push_back(i);
+                    chunk->waterIndices.push_back(i + 1);
+                    chunk->waterIndices.push_back(i + side);
+                    chunk->waterIndices.push_back(i + 1);
+                    chunk->waterIndices.push_back(i + side + 1);
+                    chunk->waterIndices.push_back(i + side);
+                }
+                chunk->hasOcean = true; // reusa el flag: el renderer sube la malla de agua
+            }
+        }
+        // --- Malla de agua v1 (cascarón a nivel del mar) ---
         // Solo si el chunk toca océano. Rejilla (res+1)² sobre la esfera al radio
         // del planeta (elevación 0), normales radiales. El oleaje se hace en el
         // shader, así que la base es lisa. Sin skirts (la esfera es suave).
-        if (chunk->hasOcean) {
-            const int wcount = (res + 1) * (res + 1);
+        else if (chunk->hasOcean) {
+            const int side = res + 1;
+            const int wcount = side * side;
             chunk->waterVertices.reserve(wcount);
             chunk->waterNormals.reserve(wcount);
+            // Per-vertex "below sea level" flag so we emit water ONLY where the
+            // terrain dips under sea level — not a full sheet over the whole chunk.
+            // That kills both the chunk-aligned "square" coastline AND the sea
+            // bleeding through the land (z-fighting). The coastline now follows the
+            // terrain at vertex resolution.
+            std::vector<uint8_t> belowSea((size_t)wcount, 0);
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
-                    glm::vec3 sph = getLocalPosition(key, x, y, res); // dir unitaria
-                    glm::dvec3 wp = glm::dvec3(sph) * planetRadius;   // nivel del mar
+                    glm::dvec3 dir = getLocalPosition(key, x, y, res); // DOUBLE
+                    glm::vec3 sph = glm::vec3(dir);
+                    glm::dvec3 wp = dir * planetRadius;                // nivel del mar
                     chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
                     chunk->waterNormals.push_back(sph);
+                    belowSea[(size_t)(x + y * side)] = (elevKmAt(sph) < 0.0f) ? 1 : 0;
                 }
             }
             for (int y = 0; y < res; ++y) {
                 for (int x = 0; x < res; ++x) {
-                    int i = x + y * (res + 1);
+                    int i = x + y * side;
+                    // Emit the cell if ANY corner is below sea level — extends water
+                    // one cell under the shore (occluded by terrain), so there's no
+                    // gap right at the waterline.
+                    bool wet = belowSea[i] || belowSea[i + 1]
+                            || belowSea[i + side] || belowSea[i + side + 1];
+                    if (!wet) continue;
                     chunk->waterIndices.push_back(i);
                     chunk->waterIndices.push_back(i + 1);
-                    chunk->waterIndices.push_back(i + res + 1);
+                    chunk->waterIndices.push_back(i + side);
                     chunk->waterIndices.push_back(i + 1);
-                    chunk->waterIndices.push_back(i + res + 2);
-                    chunk->waterIndices.push_back(i + res + 1);
+                    chunk->waterIndices.push_back(i + side + 1);
+                    chunk->waterIndices.push_back(i + side);
                 }
             }
         }
@@ -330,8 +469,17 @@ namespace {
         const auto& config = settings.contains("config") ? settings["config"] : kEmpty;
         g_current_seed = config.value("seed", 42);
         const auto& layers = config.contains("layers") ? config["layers"] : kEmpty;
-        // Procedural height in metres above the reference sphere.
-        float metres = calculateHeight(sphereDir, layers) * float(planetRadius) * float(1000.0 / planetRadius);
+        // Procedural height in metres above the reference sphere. v2 (opt-in por
+        // escena) usa el mismo sampler que el render → colisión = geometría.
+        const int genVersion = config.value("genVersion", 1);
+        float metres;
+        if (genVersion >= 2) {
+            WorldGenParams wgp = getWorldParamsCached((uint32_t)g_current_seed, planetRadius);
+            wgp.reliefStrength = config.value("reliefStrength", 1.0f); // parámetro de escena
+            metres = sampleTerrainV2(sphereDir, wgp, planetRadius).elevKm * 1000.0f;
+        } else {
+            metres = calculateHeight(sphereDir, layers) * float(planetRadius) * float(1000.0 / planetRadius);
+        }
 
         // Add player edits (same as the mesh) so collision/water/aim match what is
         // drawn. Single source of truth: dig a hole → you fall into it.
@@ -381,9 +529,15 @@ namespace {
         const float landHeight = P("continents", "landHeight", 1.0f); // km tierra
         const float oceanDepth = P("continents", "oceanDepth", 5.0f); // km fondo
         // mountains: cordilleras. freq alta = cordilleras estrechas y visibles.
-        float       mFreq      = P("mountains", "freq", 200.0f);
-        if (mFreq < 40.0f) mFreq = 200.0f; // guarda: <40 = escala continental (plano)
-        const int   mOct       = Pi("mountains", "octaves", 8);
+        float       mFreq      = P("mountains", "freq", 800.0f);
+        if (mFreq < 40.0f) mFreq = 800.0f; // guarda: <40 = escala continental (plano).
+                                           // 800 ≈ cordilleras de ~50 km, pendiente ~27°
+                                           // (visibles desde el suelo). 200 daba domos
+                                           // continentales de ~9° = se percibían como llano.
+        const int   mOct       = std::max(2, (int)(Pi("mountains", "octaves", 6) * s_detailScale));
+        // 6 octavas (no 8): las 2 octavas ridged más finas (~270 m) creaban un campo
+        // de conos afilados ("pinchos") al diferenciar la normal a 2 m. Con 6 la octava
+        // más fina es ~1,2 km → cordilleras suaves sin pinchos.
         const float mHeight    = P("mountains", "strength", 6.0f);    // km pico
         const float mSharp     = P("mountains", "sharpness", 2.0f);   // exp ridge
         // belt: dónde se agrupan las cordilleras (cobertura).
@@ -395,7 +549,7 @@ namespace {
         // detail: relieve fino de superficie.
         const float dFreq      = P("detail", "freq", 20000.0f);
         const float dStr       = P("detail", "strength", 0.05f);
-        const int   dOct       = Pi("detail", "octaves", 10);
+        const int   dOct       = std::max(2, (int)(Pi("detail", "octaves", 8) * s_detailScale));
 
         // 1. Continentes → elevación base asimétrica con plataforma continental C1.
         float cont = NoiseGenerator::fBm(pos, seed, cOct, 0.5f, 2.0f, cFreq);
@@ -429,9 +583,12 @@ namespace {
         float trench = std::pow(glm::clamp(1.0f - std::fabs(tr / A), 0.0f, 1.0f), 6.0f);
         elev -= trench * trDepth * oceanMask * beltMask;
 
-        // 5. Detalle de alta frecuencia.
-        float detail = NoiseGenerator::fBm(pos, seed + 777, dOct, 0.5f, 2.0f, dFreq);
-        elev += detail * dStr * glm::clamp(cont + 0.3f, 0.0f, 1.0f);
+        // 5. Detalle de superficie. SOLO ruge la tierra YA emergida: el fade por
+        // elevación lo lleva a 0 en la línea de costa, así el ruido fino nunca
+        // empuja celdas bajo el nivel del mar → no hay "mar" disperso en la costa.
+        float detail     = NoiseGenerator::fBm(pos, seed + 777, dOct, 0.5f, 2.0f, dFreq);
+        float detailFade = sstep(0.0f, 0.15f, elev); // 0 en/bajo el mar, pleno sobre ~150 m
+        elev += detail * dStr * landMask * detailFade;
 
         return elev; // km
     }

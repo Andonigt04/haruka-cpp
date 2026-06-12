@@ -25,7 +25,11 @@ public:
     static void createCapsule(float radius, float height, int sectors, int stacks, std::vector<glm::vec3>& vertices, std::vector<glm::vec3>& normals, std::vector<unsigned int>& indices);
     /** @brief Generates a plane mesh. */
     static void createPlane(float width, float height, int subdivisions, std::vector<glm::vec3>& vertices, std::vector<glm::vec3>& normals, std::vector<unsigned int>& indices);
-    
+    /** @brief Generates a cylinder mesh (capped, Y-axis), radius + full height. */
+    static void createCylinder(float radius, float height, int sectors, std::vector<glm::vec3>& vertices, std::vector<glm::vec3>& normals, std::vector<unsigned int>& indices);
+    /** @brief Generates a flat equilateral-ish triangle (XY plane, two-sided). */
+    static void createTriangle(float size, std::vector<glm::vec3>& vertices, std::vector<glm::vec3>& normals, std::vector<unsigned int>& indices);
+
     /** @name Mesh-compatible overloads */
     ///@{
     static void createSphereVertex(float radius, int sectors, int stacks, std::vector<Vertex>& vertices, std::vector<unsigned int>& indices);

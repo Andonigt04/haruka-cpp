@@ -18,6 +18,8 @@ layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 layout(location = 2) in float WaveHeight;
 layout(location = 3) in float Foam;
+layout(location = 4) in float IsLake;   // 1 = lago (agua dulce), 0 = océano
+layout(location = 5) in float Depth;    // profundidad del agua (m): orilla≈0
 
 layout(location = 20) uniform int u_waterQuality;
 
@@ -32,6 +34,9 @@ layout(std140, binding = 0) uniform PerFrameData {
 
 const vec3 DEEP_COLOR    = vec3(0.015, 0.07, 0.14);
 const vec3 SHALLOW_COLOR = vec3(0.05, 0.28, 0.40);
+// Lago (agua dulce): más turquesa/verde y menos profundo que el océano.
+const vec3 LAKE_DEEP     = vec3(0.04, 0.16, 0.18);
+const vec3 LAKE_SHALLOW  = vec3(0.12, 0.40, 0.42);
 
 // Cheap analytic sky: horizon haze → zenith blue, plus a soft sun halo.
 vec3 skyColor(vec3 dir, vec3 sunDir) {
@@ -55,7 +60,13 @@ void main() {
     float fresnel = 0.02 + 0.98 * pow(1.0 - ndv, 5.0);
 
     // Body colour: deeper looking straight down, lighter at grazing angle.
-    vec3 body = mix(DEEP_COLOR, SHALLOW_COLOR, ndv);
+    // Lago vs océano: paleta de agua dulce (turquesa) si IsLake.
+    vec3 deep    = mix(DEEP_COLOR,    LAKE_DEEP,    IsLake);
+    vec3 shallow = mix(SHALLOW_COLOR, LAKE_SHALLOW, IsLake);
+    // Color por PROFUNDIDAD real: turquesa en el bajío → azul oscuro en lo hondo.
+    // (+ un poco de aclarado por ángulo rasante para el brillo del horizonte.)
+    float shallowF = exp(-Depth * 0.10);            // 1 en la orilla, →0 a ~20-30 m
+    vec3 body = mix(deep, shallow, max(shallowF, ndv * 0.35));
 
     vec3 color = body;
 
@@ -79,10 +90,14 @@ void main() {
 
     color += ambientStrength * body;
 
-    // Foam: Gerstner-Jacobian (crest folds) + tall crests.
-    float crestFoam = smoothstep(1.2, 2.2, WaveHeight);
-    float foam = clamp(max(Foam, crestFoam), 0.0, 1.0);
-    color = mix(color, vec3(0.85, 0.92, 0.97), foam * 0.7);
+    // Espuma de ORILLA: banda blanca donde el agua es muy somera (Depth→0),
+    // modulada por el oleaje (las crestas empujan la espuma). Vale para mar y lago.
+    float shoreFoam = (1.0 - smoothstep(0.0, 2.2, Depth))
+                    * (0.55 + 0.45 * smoothstep(-0.4, 1.0, WaveHeight));
+    // Foam de cresta (Gerstner-Jacobian + crestas altas): casi nula en lagos calmos.
+    float crestFoam = smoothstep(1.2, 2.2, WaveHeight) * (1.0 - 0.9 * IsLake);
+    float foam = clamp(max(max(Foam * (1.0 - 0.9 * IsLake), crestFoam), shoreFoam), 0.0, 1.0);
+    color = mix(color, vec3(0.85, 0.92, 0.97), foam * 0.75);
 
     if (enableHDR != 0) {
         color = color / (color + vec3(1.0));

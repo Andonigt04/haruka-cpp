@@ -133,6 +133,65 @@ void PhysicsEngine::clearStaticBoxes() {
     staticBoxes.clear();
 }
 
+void PhysicsEngine::addPlacedOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot) {
+    placedOBBs.push_back({ center, halfExtents, rot });
+}
+
+void PhysicsEngine::clearPlacedOBBs() {
+    placedOBBs.clear();
+}
+
+void PhysicsEngine::addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot) {
+    propOBBs.push_back({ center, halfExtents, rot });
+}
+
+void PhysicsEngine::clearPropOBBs() {
+    propOBBs.clear();
+}
+
+glm::dvec3 PhysicsEngine::resolveSphere(const glm::dvec3& center0, double radius,
+                                        const glm::dvec3& up, bool& grounded) const {
+    glm::dvec3 center = center0;
+    auto process = [&](const std::vector<StaticOBB>& list) {
+        for (const auto& b : list) {
+            // Broad-phase: salta cajas lejanas (clave con cientos de props).
+            glm::dvec3 dd = center - b.center;
+            double maxR = radius + glm::length(b.halfExtents) + 0.5;
+            if (glm::dot(dd, dd) > maxR * maxR) continue;
+
+            // Centro de la esfera al espacio LOCAL del OBB (rot ortonormal → inv = transpose).
+            glm::dvec3 lp = glm::transpose(b.rot) * (center - b.center);
+            const glm::dvec3& he = b.halfExtents;
+            glm::dvec3 cp = glm::clamp(lp, -he, he);
+            glm::dvec3 d  = lp - cp;
+            double dist2  = glm::dot(d, d);
+
+            glm::dvec3 newlp = lp;
+            if (dist2 <= 1e-12) {                       // centro DENTRO → empuja por la cara más cercana
+                double px = he.x - std::abs(lp.x);
+                double py = he.y - std::abs(lp.y);
+                double pz = he.z - std::abs(lp.z);
+                double m  = std::min({ px, py, pz });
+                if      (m == px) newlp.x = (lp.x >= 0.0 ? he.x + radius : -he.x - radius);
+                else if (m == py) newlp.y = (lp.y >= 0.0 ? he.y + radius : -he.y - radius);
+                else              newlp.z = (lp.z >= 0.0 ? he.z + radius : -he.z - radius);
+            } else if (dist2 < radius * radius) {       // la esfera roza la caja → empuja por la normal
+                double dist = std::sqrt(dist2);
+                newlp = cp + (dist > 1e-9 ? d / dist : glm::dvec3(0, 1, 0)) * radius;
+            } else {
+                continue;                               // no toca
+            }
+
+            glm::dvec3 newCenter = b.center + b.rot * newlp;
+            if (glm::dot(newCenter - center, up) > 0.3 * radius) grounded = true; // apoyado encima
+            center = newCenter;
+        }
+    };
+    process(placedOBBs);
+    process(propOBBs);
+    return center;
+}
+
 void PhysicsEngine::broadPhaseAABB() {
     if (!octree || bodies.empty()) return;
     // Rebuild the octree each step so moved bodies are found correctly.

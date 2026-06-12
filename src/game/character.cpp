@@ -69,8 +69,13 @@ Character::~Character() {}
 void Character::update(float deltaTime) {
     if (physicsBody)
     {
-        // physicsBody->position is the sphere center; foot = center - (0, radius, 0)
-        position = glm::dvec3(physicsBody->position) - glm::dvec3(0.0, physicsBody->radius, 0.0);
+        // physicsBody->position is the body centre; foot = centre - up*radius.
+        // up es RADIAL (hacia fuera del planeta), no (0,1,0): si no, lejos del polo
+        // norte el pie queda desplazado de lado → el jugador se "traba" al andar.
+        glm::dvec3 up = glm::dvec3(getEffectiveUp());
+        double ul = glm::length(up);
+        up = (ul > 1e-6) ? up / ul : glm::dvec3(0.0, 1.0, 0.0);
+        position = glm::dvec3(physicsBody->position) - up * (double)physicsBody->radius;
         velocity = glm::dvec3(physicsBody->velocity);
 
         // In flight mode gravity must not accumulate: zero the vertical velocity
@@ -176,7 +181,10 @@ void Character::move(glm::vec2 input, float deltaTime) {
     glm::dvec3 delta = surfaceForward * (double)(input.y * speed)
                      + surfaceRight   * (double)(input.x * speed);
     position += delta * (double)deltaTime;
-    velocity  = delta; // keep velocity in sync so updateState() reflects movement
+    // Conserva la componente RADIAL de la velocidad (salto/gravedad) — solo reemplaza la
+    // horizontal — para no matar el salto al moverse a la vez.
+    glm::dvec3 u = glm::dvec3(up);
+    velocity = delta + u * glm::dot(velocity, u);
 }
 
 void Character::moveForward(float amount) {
@@ -189,7 +197,11 @@ void Character::moveRight(float amount) {
 
 void Character::jump() {
     if (grounded && physicsBody) {
-        physicsBody->velocity.y = jumpForce;
+        // Impulso RADIAL (hacia fuera del planeta), no en world-Y: en una esfera el "arriba"
+        // varía. La constraint del juego integra esta velocidad (gravedad) → arco de salto.
+        glm::dvec3 up = glm::dvec3(getEffectiveUp());
+        physicsBody->velocity = up * (double)jumpForce;
+        velocity = physicsBody->velocity;
         grounded = false;
     }
 }
@@ -284,6 +296,10 @@ void Character::updateState() {
 
 void Character::checkGrounded() {
     if (flightMode) { grounded = true; return; }
+    // If the game manages grounding via a surface constraint (the local player on a
+    // planet), trust it — the world-Y velocity test below is wrong on a sphere/slope
+    // (up is radial, not +Y) and would report FALLING while standing on a slope.
+    if (m_externalGround) return;
     if (physicsBody) {
         grounded = (physicsBody->velocity.y < 0.1f && physicsBody->velocity.y > -0.1f);
     }

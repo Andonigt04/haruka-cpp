@@ -10,6 +10,10 @@ void LODSystem::forgetChunk(const PlanetChunkKey& key) {
     m_lastFrameChunks.erase(ChunkCache::keyToHash(key));
 }
 
+bool LODSystem::isVisible(const PlanetChunkKey& key) const {
+    return m_currentFrameChunks.count(ChunkCache::keyToHash(key)) > 0;
+}
+
 LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos) {
     LODUpdate update;
     update.planetName = planet->name;

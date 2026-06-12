@@ -14,6 +14,7 @@
 #endif
 
 #include "tools/math_types.h"
+#include "core/modules.h"      // HARUKA_MOD_* (gating de subsistemas opcionales)
 #include "core/world_system.h"
 #include "core/window.h"
 #include "core/camera.h"
@@ -70,7 +71,13 @@ public:
     Haruka::SceneManager* getCurrentScene() { return _currentScene; }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+#ifdef HARUKA_MOD_PHYSICS
     Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+#endif
+
+    /** @brief AABB de un modelo (lo carga/cachea si hace falta). Para colisión de props
+     *  colocados: caja ajustada al modelo. Devuelve false si no se pudo. */
+    bool getModelBounds(const std::string& path, glm::vec3& outMin, glm::vec3& outMax);
     Haruka::ChunkCache* getChunkCache() { return _chunkCache.get(); }
     Haruka::TerrainStreamingSystem* getTerrainStreamingSystem() { return _terrainStreamingSystem.get(); }
     Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
@@ -298,7 +305,9 @@ private:
     /** @brief The terrain streaming system instance. */
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
     /** @brief The physics engine instance. */
+#ifdef HARUKA_MOD_PHYSICS
     std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+#endif
     /** @brief The chunk cache instance. */
     std::unique_ptr<Haruka::ChunkCache> _chunkCache;
     

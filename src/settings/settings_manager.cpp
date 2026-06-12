@@ -91,6 +91,9 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "BloomThreshold")) g.bloomThreshold = (float)atof(val);
     else if (!strcmp(key, "BloomStrength"))  g.bloomStrength  = (float)atof(val);
     else if (!strcmp(key, "WaterQuality"))   g.waterQuality   = (Settings::WaterQuality)atoi(val);
+    else if (!strcmp(key, "TerrainQuality")) g.terrainQuality = (Settings::TerrainQuality)atoi(val);
+    else if (!strcmp(key, "ChunkMemoryMB"))  g.chunkMemoryMB  = atoi(val);
+    else if (!strcmp(key, "MaxFps"))         g.maxFps         = atoi(val);
     else if (!strcmp(key, "MotionBlur"))     g.motionBlur     = atoi(val) != 0;
     else if (!strcmp(key, "MasterVolume"))   a.masterVolume   = (float)atof(val);
     else if (!strcmp(key, "MusicVolume"))    a.musicVolume    = (float)atof(val);
@@ -112,6 +115,9 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("BloomThreshold=%.2f\n", g.bloomThreshold);
     buf->appendf("BloomStrength=%.2f\n",  g.bloomStrength);
     buf->appendf("WaterQuality=%d\n",   (int)g.waterQuality);
+    buf->appendf("TerrainQuality=%d\n", (int)g.terrainQuality);
+    buf->appendf("ChunkMemoryMB=%d\n",  g.chunkMemoryMB);
+    buf->appendf("MaxFps=%d\n",         g.maxFps);
     buf->appendf("MotionBlur=%d\n",     g.motionBlur ? 1 : 0);
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);

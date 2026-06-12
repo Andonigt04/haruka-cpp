@@ -79,7 +79,7 @@ set_target_properties(${PROJECT_NAME}Exe PROPERTIES
     BUILD_RPATH              "${BIN_DIR}"
     INSTALL_RPATH            "$ORIGIN")
 
-# Copy engine + shaders + scenes to bin/ on every build
+# Copy engine + shaders + scenes + assets to bin/ on every build
 add_custom_command(TARGET ${PROJECT_NAME}Exe POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
         "${ENGINE_BUILD_DIR}/libHarukaEngine.so"
@@ -90,9 +90,15 @@ add_custom_command(TARGET ${PROJECT_NAME}Exe POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/scenes"
         "${BIN_DIR}/scenes"
+    # Datos del juego (assets/data/materials.json, assets/textures/, ...).
+    # Resueltos en runtime con AssetPaths::data() = "assets/data/".
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        "${BIN_DIR}/assets"
     VERBATIM)
 
 install(TARGETS ${PROJECT_NAME}Exe RUNTIME DESTINATION .)
 install(FILES     "${ENGINE_BUILD_DIR}/libHarukaEngine.so" DESTINATION .)
 install(DIRECTORY "${ENGINE_BUILD_DIR}/shaders"            DESTINATION .)
 install(DIRECTORY scenes                                   DESTINATION .)
+install(DIRECTORY assets                                   DESTINATION .)

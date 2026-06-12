@@ -449,3 +449,64 @@ void PrimitiveShapes::createSphereVertex(float radius, int sectors, int stacks, 
         }
     }
 }
+void PrimitiveShapes::createCylinder(float radius, float height, int sectors,
+                                     std::vector<glm::vec3>& vertices,
+                                     std::vector<glm::vec3>& normals,
+                                     std::vector<unsigned int>& indices)
+{
+    vertices.clear(); normals.clear(); indices.clear();
+    const float h = height * 0.5f;
+    const float twoPi = glm::two_pi<float>();
+
+    // --- Side wall ---
+    for (int i = 0; i <= sectors; ++i) {
+        float a = twoPi * (float)i / (float)sectors;
+        float cx = std::cos(a), sz = std::sin(a);
+        glm::vec3 n(cx, 0.0f, sz);
+        vertices.push_back({ radius * cx,  h, radius * sz }); normals.push_back(n); // top (2i)
+        vertices.push_back({ radius * cx, -h, radius * sz }); normals.push_back(n); // bot (2i+1)
+    }
+    for (int i = 0; i < sectors; ++i) {
+        unsigned int t0 = 2 * i, b0 = 2 * i + 1, t1 = 2 * (i + 1), b1 = 2 * (i + 1) + 1;
+        indices.insert(indices.end(), { t0, b0, t1,  t1, b0, b1 });
+    }
+
+    // --- Caps (triangle fans) ---
+    auto cap = [&](float y, const glm::vec3& n, bool flip) {
+        unsigned int center = (unsigned int)vertices.size();
+        vertices.push_back({ 0.0f, y, 0.0f }); normals.push_back(n);
+        unsigned int ring0 = (unsigned int)vertices.size();
+        for (int i = 0; i <= sectors; ++i) {
+            float a = twoPi * (float)i / (float)sectors;
+            vertices.push_back({ radius * std::cos(a), y, radius * std::sin(a) });
+            normals.push_back(n);
+        }
+        for (int i = 0; i < sectors; ++i) {
+            unsigned int a = ring0 + i, b = ring0 + i + 1;
+            if (flip) indices.insert(indices.end(), { center, b, a });
+            else      indices.insert(indices.end(), { center, a, b });
+        }
+    };
+    cap( h, glm::vec3(0, 1, 0), false);  // top
+    cap(-h, glm::vec3(0,-1, 0), true);   // bottom
+}
+
+void PrimitiveShapes::createTriangle(float size,
+                                     std::vector<glm::vec3>& vertices,
+                                     std::vector<glm::vec3>& normals,
+                                     std::vector<unsigned int>& indices)
+{
+    vertices.clear(); normals.clear(); indices.clear();
+    // Equilateral triangle in the XY plane (size = circumradius), drawn two-sided.
+    const glm::vec3 v0( 0.0f,             size,       0.0f);
+    const glm::vec3 v1(-0.8660254f*size, -0.5f*size,  0.0f);
+    const glm::vec3 v2( 0.8660254f*size, -0.5f*size,  0.0f);
+
+    vertices.push_back(v0); vertices.push_back(v1); vertices.push_back(v2);
+    for (int i = 0; i < 3; ++i) normals.push_back({0, 0, 1});
+    indices.insert(indices.end(), { 0, 1, 2 });           // front (+Z)
+
+    vertices.push_back(v0); vertices.push_back(v2); vertices.push_back(v1);
+    for (int i = 0; i < 3; ++i) normals.push_back({0, 0, -1});
+    indices.insert(indices.end(), { 3, 4, 5 });           // back (-Z)
+}

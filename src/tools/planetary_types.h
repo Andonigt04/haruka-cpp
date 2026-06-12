@@ -50,6 +50,7 @@ namespace Haruka {
         // cuando hasOcean. Posiciones relativas al MISMO chunkCenter que el terreno.
         std::vector<glm::vec3> waterVertices;
         std::vector<glm::vec3> waterNormals;   // radial outward (esfera lisa)
+        std::vector<glm::vec2> waterParams;    // por vértice: x = nivel (km, 0=océano), y = profundidad del agua (m, para orilla/color)
         std::vector<unsigned int> waterIndices;
 
         PlanetChunkKey key;

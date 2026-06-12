@@ -21,6 +21,12 @@ namespace Haruka {
     public:
         LODSystem(double splitFactor = 1.5, int maxLOD = 12);
 
+        /** @brief Tunes LOD aggressiveness (lower = fewer chunks = cheaper). Takes
+         *  effect on the next recompute. */
+        void   setParams(double splitFactor, int maxLOD) { m_splitFactor = splitFactor; m_maxLOD = maxLOD; }
+        double getSplitFactor() const { return m_splitFactor; }
+        int    getMaxLOD()      const { return m_maxLOD; }
+
         /**
          * @brief Analiza un objeto planetario y genera las órdenes de streaming.
          */
@@ -34,6 +40,11 @@ namespace Haruka {
          * a reload.
          */
         void forgetChunk(const PlanetChunkKey& key);
+
+        /** @brief True if the key is in the current visible set. Used to drop chunks
+         *  whose async generation finished AFTER they left view (otherwise they pile
+         *  up on the GPU forever — overlapping terrain + growing cost). */
+        bool isVisible(const PlanetChunkKey& key) const;
 
         /** @brief Mapea (cara, u,v ∈ [0,1], radio) a una posición en la esfera
          *  (planet-local). Matemática pura — útil para ordenar chunks por distancia. */
