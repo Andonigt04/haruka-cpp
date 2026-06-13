@@ -31,7 +31,12 @@ Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pip
 - **Terrain Raycast** — Ground detection for procedural planet surfaces
 
 ### 🎮 Game Systems
-- **3D Audio** — OpenAL positional audio with Doppler effects (Not fuly implemented)
+- **3D Audio** — OpenAL listener (camera) + **world sound sources** (persistent positional emitters) + one-shot SFX, with **terrain occlusion** (a source behind a hill is muffled). `propagation(from,to)` is a shared 0..1 query used for playback **and** logically (AI "hears" the player → stealth). Device selection in-settings (input/output, SDL3). Full propagation through openings (portal pathfinding) is planned.
+- **Voice input (optional)** — Mic capture (SDL3) + **Vosk** offline speech-to-text with a restricted grammar; used by the game for voice-cast abilities. Compiles without Vosk (stub).
+- **i18n / Locale** — `assets/lang/<code>.json` key→string, `TR("key")` resolution, base-language fallback. Languages auto-detected; modular per-language assets (`assets/voice/<code>`, `assets/audio/<code>`).
+- **Terrain editing** — Deformation field (dig / build / **flatten/level**, sphere or oriented-box footprint) over procedural terrain, with chunk re-streaming.
+- **Particles** — GL_POINTS additive radiant system (trails, impacts).
+- **Settings** — Persisted graphics/audio/controls/language; rebindable input actions; in-game panel (tabs).
 - **Component Architecture** — Scripts, materials, meshes attached to entities
 
 ---
@@ -72,6 +77,7 @@ sudo cmake --install third_party/SDL/build
 | **glslang** | GLSL → SPIR-V shader compilation (build-time) |
 | **assimp-devel** | 3D model loading (OBJ, FBX, GLTF) |
 | **openal-soft-devel** | 3D positional audio |
+| **vosk-api-devel** | *(optional)* offline speech-to-text for voice input. Without it the voice module compiles as a stub. |
 | **postgresql-devel** | Player/world persistence |
 | **openssl-devel** | WebSocket TLS |
 | **gtk3-devel** | File dialogs |
@@ -110,6 +116,45 @@ build/
     └── include/
         └── Haruka/                     ← Public headers
 ```
+
+### Modules (build-time)
+
+The engine is split into optional modules toggled by a bitmask. CMake generates
+`src/core/modules.h` (`#define HARUKA_MOD_<NAME> 1`) and excludes the sources of
+disabled modules. Order of the bitmask = the list below.
+
+| Bit | Module | Purpose |
+|-----|--------|---------|
+| 0 | `FLUIDS` | ocean + shallow-water + PBF particles (hybrid water) |
+| 1 | `DEFORM` | terrain deformation field (dig / build / flatten) |
+| 2 | `SOFTBODY` | XPBD cloth / jelly / wind |
+| 3 | `NETWORK` | DGS network client |
+| 4 | `AUDIO` | 3D audio: `audio_manager` (API + listener + world sources + propagation) → `audio_loader` (buffers) + `audio_system` (OpenAL backend) |
+| 5 | `PARTICLES` | particle system |
+| 6 | `TERRAIN` | planetary terrain (default-ON; off = no planet) |
+| 7 | `POSTFX` | bloom / SSAO / HDR / IBL |
+| 8 | `SHADOWS` | shadow maps |
+| 9 | `PHYSICS` | rigid-body physics + colliders (default-ON) |
+
+```bash
+# All modules ON (default)
+cmake -B build -DVERSION=6
+
+# Custom mask (1 char per module, in list order): e.g. fluids+deform off
+cmake -B build -DVERSION=6 -DMODULES=0011111111
+```
+
+> ⚠️ Configuring with `-DMODULES=...` rewrites `src/core/modules.h` in the source
+> tree (via `configure_file`). The game (`Survival`) must be built with the **same**
+> mask — its `build.sh` keeps engine + game in sync from one place.
+
+### Shaders (engine vs game)
+
+Engine shaders live in `haruka-cpp/shaders/` and are compiled to `.spv` (+ GLSL copy) at
+build time. **Game-specific shaders live in the game repo** (e.g. `Survival/shaders/`) and are
+compiled by the game's build into the same runtime `shaders/` dir, coexisting by name. Each
+shader is compiled **once** by its owner — the game copies (does not recompile) the engine's
+shaders. So adding a game shader never touches the engine.
 
 ---
 

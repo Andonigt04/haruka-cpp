@@ -90,6 +90,23 @@ public:
      */
     void editTerrain(const glm::dvec3& worldPos, double radius, double strength, bool dig);
 
+    /**
+     * @brief Nivela (aplana) el terreno hacia una altura objetivo en un radio. El centro
+     *        queda exactamente a targetHeightM y los bordes mezclan suavemente.
+     * @param targetHeightM elevación destino en metros sobre la esfera de referencia.
+     */
+    void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeightM);
+
+    /**
+     * @brief Nivela con la HUELLA (caja orientada) de un objeto en vez de un círculo:
+     *        el área aplanada tiene el tamaño/forma/orientación del objeto colocado.
+     * @param halfExtents medias extensiones de la huella (m), en el espacio de rot.
+     * @param rot         orientación de la caja (columnas = ejes locales del objeto).
+     * @param band        ancho de transición del borde (m).
+     */
+    void levelTerrainBox(const glm::dvec3& center, const glm::dvec3& halfExtents,
+                         const glm::dmat3& rot, double targetHeightM, double band);
+
     /** @brief The terrain-edit field (null until init, or always null if the
      *  DEFORM module is compiled out). For save/restore of edits. */
     DeformationField* deformationField() {
@@ -118,6 +135,9 @@ public:
     bool getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const;
 
 private:
+    // Invalida/regenera los chunks que toca una edición de terreno (centro + radio).
+    void invalidateEditedChunks(const glm::dvec3& center, double radius);
+
     // Componentes del motor de terreno (Los "músculos")
     std::unique_ptr<ChunkCache> m_cache;
     std::unique_ptr<TerrainGenerator> m_generator;

@@ -17,6 +17,17 @@ namespace Haruka::Core {
             std::cerr << "[SDL] Init failed: " << SDL_GetError() << std::endl;
             return false;
         }
+        // Audio OPCIONAL (micro de voz + efectos + enumeración de dispositivos en Config).
+        // No debe tumbar el arranque si no hay tarjeta de sonido (servidor/headless).
+        if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+            std::cerr << "[SDL] audio no disponible: " << SDL_GetError()
+                      << " (sin micro/efectos)" << std::endl;
+        } else {
+            int ri = 0, ro = 0;
+            if (SDL_AudioDeviceID* a = SDL_GetAudioRecordingDevices(&ri)) SDL_free(a);
+            if (SDL_AudioDeviceID* a = SDL_GetAudioPlaybackDevices(&ro))  SDL_free(a);
+            std::cerr << "[SDL] audio OK — entradas: " << ri << ", salidas: " << ro << std::endl;
+        }
 
         // Configuración de OpenGL
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);

@@ -2,10 +2,13 @@
 #include "settings/settings_manager.h"
 #include "renderer/motor_instance.h"
 #include "core/application.h"
+#include "core/locale.h"
 
 #include <imgui.h>
 #include <SDL3/SDL.h>
 #include <cstring>
+#include <filesystem>
+#include <string>
 
 namespace Haruka::UI {
 
@@ -46,8 +49,10 @@ bool SettingsPanel::render() {
     }
 
     if (ImGui::BeginTabBar("##settingsTabs")) {
-        if (ImGui::BeginTabItem("Graphics"))  { tabGraphics(); ImGui::EndTabItem(); }
-        if (ImGui::BeginTabItem("Controls"))  { tabControls(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(TR("settings.graphics").c_str())) { tabGraphics(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(TR("settings.audio").c_str()))    { tabAudio();    ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(TR("settings.language").c_str())) { tabLanguage(); ImGui::EndTabItem(); }
+        if (ImGui::BeginTabItem(TR("settings.controls").c_str())) { tabControls(); ImGui::EndTabItem(); }
         ImGui::EndTabBar();
     }
 
@@ -77,7 +82,6 @@ bool SettingsPanel::render() {
 
 void SettingsPanel::tabGraphics() {
     auto& g = SettingsManager::get().graphics();
-    auto& a = SettingsManager::get().audio();
 
     ImGui::SeparatorText("Performance");
     if (ImGui::Button("Laptop / Low preset")) {
@@ -158,11 +162,68 @@ void SettingsPanel::tabGraphics() {
     ImGui::Checkbox("Motion Blur",  &g.motionBlur);
     if (g.motionBlur)
         ImGui::TextDisabled("  Motion Blur not implemented yet.");
+}
 
-    ImGui::SeparatorText("Audio");
-    ImGui::SliderFloat("Master Volume", &a.masterVolume, 0.0f, 1.0f);
-    ImGui::SliderFloat("Music Volume",  &a.musicVolume,  0.0f, 1.0f);
-    ImGui::SliderFloat("SFX Volume",    &a.sfxVolume,    0.0f, 1.0f);
+// ── Audio tab ────────────────────────────────────────────────────────────────
+// Dispositivos = combo con los que enumera SDL3. Guarda el NOMBRE (vacío = predeterminado);
+// el juego (voz/OpenAL) abre el dispositivo por nombre. Cambia en caliente al guardar.
+static void deviceCombo(const char* label, bool recording, std::string& sel) {
+    int count = 0;
+    SDL_AudioDeviceID* ids = recording ? SDL_GetAudioRecordingDevices(&count)
+                                       : SDL_GetAudioPlaybackDevices(&count);
+    const char* preview = sel.empty() ? "Predeterminado del sistema" : sel.c_str();
+    if (ImGui::BeginCombo(label, preview)) {
+        if (ImGui::Selectable("Predeterminado del sistema", sel.empty())) sel.clear();
+        for (int i = 0; i < count; ++i) {
+            const char* name = SDL_GetAudioDeviceName(ids[i]);
+            if (!name) continue;
+            bool chosen = (sel == name);
+            if (ImGui::Selectable(name, chosen)) sel = name;
+        }
+        ImGui::EndCombo();
+    }
+    if (ids) SDL_free(ids);
+}
+
+void SettingsPanel::tabAudio() {
+    auto& a = SettingsManager::get().audio();
+
+    ImGui::SeparatorText("Dispositivos");
+    deviceCombo("Entrada (micro)",  /*recording*/true,  a.inputDevice);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Micrófono para conjurar por voz.");
+    deviceCombo("Salida (altavoz)", /*recording*/false, a.outputDevice);
+    ImGui::TextDisabled("El cambio se aplica al Guardar.");
+
+    ImGui::SeparatorText(TR("audio.volume").c_str());
+    ImGui::SliderFloat(TR("audio.master").c_str(), &a.masterVolume, 0.0f, 1.0f);
+    ImGui::SliderFloat(TR("audio.music").c_str(),  &a.musicVolume,  0.0f, 1.0f);
+    ImGui::SliderFloat(TR("audio.sfx").c_str(),    &a.sfxVolume,    0.0f, 1.0f);
+}
+
+// ── Language tab (i18n) ──────────────────────────────────────────────────────
+// SOLO selección entre los idiomas INSTALADOS (los que tienen assets/lang/<c>.json). La
+// gestión modular (instalar/quitar idiomas, voz y audio) se hace en el LAUNCHER, no aquí.
+void SettingsPanel::tabLanguage() {
+    auto& sm  = SettingsManager::get();
+    auto& loc = Locale::get();
+
+    static bool s_scanned = false;
+    if (!s_scanned) { loc.scan(); s_scanned = true; }
+
+    std::string curName = sm.language();
+    for (const auto& l : loc.available()) if (l.code == sm.language()) curName = l.name;
+    if (ImGui::BeginCombo(TR("language.active").c_str(), curName.c_str())) {
+        for (const auto& l : loc.available()) {           // solo idiomas instalados
+            bool sel = (l.code == sm.language());
+            if (ImGui::Selectable((l.name + "  (" + l.code + ")").c_str(), sel)) {
+                sm.language() = l.code;
+                loc.load(l.code);   // aplica al instante (la UI usa TR())
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", TR("language.managedInLauncher").c_str());
 }
 
 // ── Controls tab ─────────────────────────────────────────────────────────────

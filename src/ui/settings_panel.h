@@ -13,6 +13,8 @@ public:
 private:
     void tabGraphics();
     void tabControls();
+    void tabAudio();
+    void tabLanguage();
 
     // Rebind state
     std::string   m_rebindingAction; // empty = not rebinding

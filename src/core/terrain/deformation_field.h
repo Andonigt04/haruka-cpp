@@ -31,9 +31,20 @@ public:
 
     struct Brush {
         glm::dvec3 center{0.0};  // world-absolute
-        double     radius = 1.0; // metres
+        double     radius = 1.0; // esfera: radio (m). caja: ancho de transición del borde.
         double     strength = 0.0; // metres of displacement at the centre (signed)
         Type       type = Type::Subtract;
+        double     targetHeight = 0.0; // Flatten: elevación (m) hacia la que se nivela
+        // Forma de CAJA orientada (footprint de un objeto). Si box=true, el área afectada
+        // es la huella halfExtents (en el espacio de rot) en vez de un círculo de radius.
+        bool       box = false;
+        glm::dvec3 halfExtents{0.0}; // medias extensiones de la caja (m), en local
+        glm::dmat3 rot{1.0};         // orientación de la caja (columnas = ejes locales)
+
+        // Peso 0..1 del pincel en un punto (1 en el núcleo → 0 fuera). Esfera o caja.
+        double weight(const glm::dvec3& worldPos) const;
+        // Radio conservador del AABB (para indexado en rejilla / invalidación de chunks).
+        double aabbRadius() const;
     };
 
     /** @brief Adds a brush and returns its index (for later removal/persistence). */
@@ -46,8 +57,13 @@ public:
     int count() const { return (int)m_brushes.size(); }
     const std::vector<Brush>& brushes() const { return m_brushes; }
 
-    /** @brief Signed displacement (metres) at a world position. 0 if no brush. */
+    /** @brief Signed displacement (metres) at a world position. 0 if no brush.
+     *  Solo Add/Subtract (Flatten necesita la altura base → usar applyHeight). */
     double sample(const glm::dvec3& worldPos) const;
+
+    /** @brief Altura final (m) tras aplicar TODAS las brushes a una altura procedural base.
+     *  Add/Subtract suman/restan; Flatten mezcla hacia targetHeight. Usar en el generador. */
+    double applyHeight(const glm::dvec3& worldPos, double baseHeightM) const;
 
     /** @brief True if any brush overlaps the sphere (center,radius) — for marking
      *  which chunks need regenerating after an edit. */

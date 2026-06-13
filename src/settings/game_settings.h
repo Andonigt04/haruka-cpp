@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 namespace Haruka::Settings {
 
 enum class TextureQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
@@ -65,6 +67,10 @@ struct AudioSettings {
     float masterVolume = 1.0f;
     float musicVolume  = 0.6f;
     float sfxVolume    = 1.0f;
+    // Dispositivos elegidos (NOMBRE; vacío = predeterminado del sistema). input = micro
+    // (voz/conjuros), output = altavoces (efectos/propagación).
+    std::string inputDevice;
+    std::string outputDevice;
 };
 
 } // namespace Haruka::Settings

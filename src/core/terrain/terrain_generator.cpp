@@ -150,7 +150,7 @@ namespace {
             if (m_deform && !m_deform->empty()) {
                 // Vertex world pos at the *procedural* surface, then sample edits.
                 glm::dvec3 surfW = glm::dvec3(sph) * (planetRadius * (1.0 + double(e * kmToFraction))) + planetOffset;
-                e += float(m_deform->sample(surfW) * 0.001); // metres → km
+                e = float(m_deform->applyHeight(surfW, double(e) * 1000.0) * 0.001); // m→km (aditivo + nivelado)
             }
 #endif
             return e;
@@ -489,7 +489,7 @@ namespace {
                               settings.value("planetOffsetY", 0.0),
                               settings.value("planetOffsetZ", 0.0));
             glm::dvec3 surfW = glm::dvec3(glm::normalize(sphereDir)) * (planetRadius + double(metres)) + offset;
-            metres += float(m_deform->sample(surfW));
+            metres = float(m_deform->applyHeight(surfW, double(metres))); // aditivo + nivelado
         }
 #endif
         return metres;

@@ -80,6 +80,17 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     char key[64] = {}, val[64] = {};
     if (sscanf(line, "%63[^=]=%63s", key, val) != 2) return;
 
+    // Valor COMPLETO (con espacios) para nombres de dispositivo: todo tras el primer '='.
+    auto fullValue = [&]() -> std::string {
+        const char* eq = strchr(line, '=');
+        std::string s = eq ? std::string(eq + 1) : std::string();
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+        return s;
+    };
+    if      (!strcmp(key, "InputDevice"))    { a.inputDevice  = fullValue(); return; }
+    else if (!strcmp(key, "OutputDevice"))   { a.outputDevice = fullValue(); return; }
+    else if (!strcmp(key, "Language"))       { sm.language()  = fullValue(); return; }
+
     if      (!strcmp(key, "TextureQuality")) g.textureQuality = (Settings::TextureQuality)atoi(val);
     else if (!strcmp(key, "ShadowQuality"))  g.shadowQuality  = (Settings::ShadowQuality)atoi(val);
     else if (!strcmp(key, "Antialiasing"))   g.antialiasing   = (Settings::AntialiasingMode)atoi(val);
@@ -122,6 +133,9 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);
     buf->appendf("SFXVolume=%.2f\n",    a.sfxVolume);
+    if (!a.inputDevice.empty())  buf->appendf("InputDevice=%s\n",  a.inputDevice.c_str());
+    if (!a.outputDevice.empty()) buf->appendf("OutputDevice=%s\n", a.outputDevice.c_str());
+    buf->appendf("Language=%s\n", SettingsManager::get().language().c_str());
     buf->appendf("\n");
 }
 

@@ -370,26 +370,64 @@ void PlanetarySystem::editTerrain(const glm::dvec3& worldPos, double radius, dou
     b.strength = strength;
     b.type     = dig ? DeformationField::Type::Subtract : DeformationField::Type::Add;
     m_deform->addBrush(b);
-
-    // Invalidate GPU chunks overlapping the edit (plus margin) and drop them from
-    // the cache so streaming regenerates them with the new edit applied. A small
-    // margin covers chunks whose centre is just outside but whose mesh reaches in.
-    const double margin = radius * 1.5 + 8.0;
-    if (m_renderer) {
-        auto keys = m_renderer->invalidateSphere(worldPos, margin);
-        for (const auto& k : keys) {
-            if (m_cache) m_cache->removeChunk(k);
-            if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
-            // Forget it in the LOD so next update treats it as LOAD (re-upload),
-            // not KEEP (which only refreshes the now-empty cache → chunk vanishes).
-            if (m_lod) m_lod->forgetChunk(k);
-        }
-    }
-    // Force the LOD to recompute next update so the freed chunks are re-requested.
-    m_forceLOD = true;
+    invalidateEditedChunks(worldPos, radius);
 #else
     (void)worldPos; (void)radius; (void)strength; (void)dig;
 #endif
+}
+
+void PlanetarySystem::levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeightM) {
+#ifdef HARUKA_MOD_DEFORM
+    if (!m_deform) return;
+
+    DeformationField::Brush b;
+    b.center       = worldPos;
+    b.radius       = radius;
+    b.type         = DeformationField::Type::Flatten;
+    b.targetHeight = targetHeightM;   // el área se aplana hacia esta elevación
+    m_deform->addBrush(b);
+    invalidateEditedChunks(worldPos, radius);
+#else
+    (void)worldPos; (void)radius; (void)targetHeightM;
+#endif
+}
+
+void PlanetarySystem::levelTerrainBox(const glm::dvec3& center, const glm::dvec3& halfExtents,
+                                      const glm::dmat3& rot, double targetHeightM, double band) {
+#ifdef HARUKA_MOD_DEFORM
+    if (!m_deform) return;
+
+    DeformationField::Brush b;
+    b.center       = center;
+    b.type         = DeformationField::Type::Flatten;
+    b.targetHeight = targetHeightM;
+    b.box          = true;            // huella del objeto (no un círculo)
+    b.halfExtents  = halfExtents;
+    b.rot          = rot;
+    b.radius       = band;            // ancho de transición del borde
+    m_deform->addBrush(b);
+    invalidateEditedChunks(center, glm::length(halfExtents) + band);
+#else
+    (void)center; (void)halfExtents; (void)rot; (void)targetHeightM; (void)band;
+#endif
+}
+
+void PlanetarySystem::invalidateEditedChunks(const glm::dvec3& center, double radius) {
+    // Invalida los chunks GPU que toca la edición (+margen) y los quita de la caché para
+    // que el streaming los regenere con la edición aplicada. El margen cubre chunks cuyo
+    // centro queda justo fuera pero cuya malla llega al área editada.
+    const double margin = radius * 1.5 + 8.0;
+    if (m_renderer) {
+        auto keys = m_renderer->invalidateSphere(center, margin);
+        for (const auto& k : keys) {
+            if (m_cache) m_cache->removeChunk(k);
+            if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
+            // Olvídalo en el LOD: el próximo update lo trata como LOAD (re-subir), no KEEP
+            // (que solo refresca la caché ya vacía → el chunk desaparece).
+            if (m_lod) m_lod->forgetChunk(k);
+        }
+    }
+    m_forceLOD = true; // recomputa el LOD el próximo update → re-pide los chunks liberados
 }
 
 }

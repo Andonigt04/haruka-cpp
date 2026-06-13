@@ -90,6 +90,9 @@ public:
     const Settings::GraphicsSettings& graphics() const { return m_graphics; }
     const Settings::AudioSettings&    audio()    const { return m_audio;    }
 
+    std::string&       language()       { return m_language; }   // código i18n ("es","en"…)
+    const std::string& language() const { return m_language; }
+
     void save();
 
 private:
@@ -105,6 +108,7 @@ private:
 
     Settings::GraphicsSettings  m_graphics;
     Settings::AudioSettings     m_audio;
+    std::string                 m_language = "es";   // idioma por defecto
     std::string                 m_iniPath;
 };
 

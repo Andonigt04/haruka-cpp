@@ -1,352 +1,112 @@
-#include "audio_manager.h"
-#include <iostream>
-#include <fstream>
-#include <cstring>
-#include "tools/error_reporter.h"
+#include "audio/audio_manager.h"
+
+#include "core/application.h"
+#include "game/planetary_system.h"
+#include "renderer/motor_instance.h"
+
+#include <glm/glm.hpp>
 
 namespace Haruka {
 
-// ============ AudioBuffer ============
-AudioBuffer::AudioBuffer(const std::string& filepath) {
-    if (filepath.find(".wav") != std::string::npos) {
-        loadWAV(filepath);
-    } else if (filepath.find(".ogg") != std::string::npos) {
-        loadOGG(filepath);
-    } else {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Unsupported audio format: " + filepath);
-    }
-}
+AudioManager& AudioManager::get() { static AudioManager m; return m; }
 
-AudioBuffer::~AudioBuffer() {
-    if (bufferId) {
-        alDeleteBuffers(1, &bufferId);
-    }
-}
-
-bool AudioBuffer::loadWAV(const std::string& filepath) {
-    std::ifstream file(filepath, std::ios::binary);
-    if (!file.is_open()) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "Cannot open audio file: " + filepath);
-        return false;
-    }
-    
-    // Parse WAV header
-    char chunkId[4];
-    uint32_t chunkSize;
-    char format[4];
-    
-    file.read(chunkId, 4);
-    if (std::strncmp(chunkId, "RIFF", 4) != 0) {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Not a WAV file (missing RIFF): " + filepath);
-        return false;
-    }
-    
-    file.read((char*)&chunkSize, 4);
-    file.read(format, 4);
-    
-    if (std::strncmp(format, "WAVE", 4) != 0) {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "Not a WAVE format: " + filepath);
-        return false;
-    }
-    
-    // Find fmt chunk
-    char subchunkId[4];
-    uint32_t subchunkSize;
-    uint16_t audioFormat;
-    uint16_t numChannels;
-    uint32_t sampleRate;
-    uint32_t byteRate;
-    uint16_t blockAlign;
-    uint16_t bitsPerSample;
-    
-    file.read(subchunkId, 4);
-    file.read((char*)&subchunkSize, 4);
-    file.read((char*)&audioFormat, 2);
-    file.read((char*)&numChannels, 2);
-    file.read((char*)&sampleRate, 4);
-    file.read((char*)&byteRate, 4);
-    file.read((char*)&blockAlign, 2);
-    file.read((char*)&bitsPerSample, 2);
-    
-    // Find data chunk
-    file.read(subchunkId, 4);
-    while (std::strncmp(subchunkId, "data", 4) != 0 && !file.eof()) {
-        file.read((char*)&subchunkSize, 4);
-        file.seekg(subchunkSize, std::ios::cur);
-        file.read(subchunkId, 4);
-    }
-    
-    if (file.eof()) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "No data chunk found in: " + filepath);
-        return false;
-    }
-    
-    uint32_t dataSize;
-    file.read((char*)&dataSize, 4);
-    
-    std::vector<char> data(dataSize);
-    file.read(data.data(), dataSize);
-    file.close();
-    
-    // Determine format
-    ALenum alFormat;
-    if (numChannels == 1 && bitsPerSample == 8) alFormat = AL_FORMAT_MONO8;
-    else if (numChannels == 1 && bitsPerSample == 16) alFormat = AL_FORMAT_MONO16;
-    else if (numChannels == 2 && bitsPerSample == 8) alFormat = AL_FORMAT_STEREO8;
-    else if (numChannels == 2 && bitsPerSample == 16) alFormat = AL_FORMAT_STEREO16;
-    else {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID,
-            "Unsupported WAV format: " + std::to_string(numChannels) + " channels, "
-            + std::to_string(bitsPerSample) + " bits");
-        return false;
-    }
-    
-    // Create buffer
-    alGenBuffers(1, &bufferId);
-    alBufferData(bufferId, alFormat, data.data(), dataSize, sampleRate);
-    
-    ALenum error = alGetError();
-    if (error != AL_NO_ERROR) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED,
-            "OpenAL error loading '" + filepath + "': " + std::to_string(error));
-        return false;
-    }
-
-    std::cout << "[Audio] Loaded: " << filepath << std::endl;
-    return true;
-}
-
-bool AudioBuffer::loadOGG(const std::string& filepath) {
-    HARUKA_AUDIO_ERROR(ErrorCode::ASSET_FORMAT_INVALID, "OGG loading not implemented: " + filepath);
-    return false;
-}
-
-// ============ AudioManager ============
-AudioManager::AudioManager() {}
-
-AudioManager::~AudioManager() {
-    shutdown();
-}
-
-bool AudioManager::init() {
-    device = alcOpenDevice(nullptr);
-    if (!device) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_INIT_FAILED, "Failed to open OpenAL device");
-        return false;
-    }
-
-    context = alcCreateContext(device, nullptr);
-    if (!context || !alcMakeContextCurrent(context)) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_INIT_FAILED, "Failed to create OpenAL context");
-        alcCloseDevice(device);
-        return false;
-    }
-    
-    // Preallocate sources
-    sources.resize(32);
-    for (int i = 0; i < 32; i++) {
-        alGenSources(1, &sources[i].sourceId);
-        freeSources.push_back(i);
-    }
-    
-    std::cout << "[Audio] Initialized (" << sources.size() << " sources)" << std::endl;
-    return true;
+bool AudioManager::init(const std::string& outputDevice) {
+    return m_sys.init(outputDevice);
 }
 
 void AudioManager::shutdown() {
-    for (auto& source : sources) {
-        if (source.sourceId) {
-            alDeleteSources(1, &source.sourceId);
-        }
+    for (auto& [id, w] : m_world) m_sys.voiceDestroy(w.voice);
+    m_world.clear();
+    m_loader.clear();
+    m_sys.shutdown();
+}
+
+void AudioManager::setListener(const glm::dvec3& pos, const glm::dvec3& fwd, const glm::dvec3& up) {
+    m_listenerPos = pos;   // las fuentes se colocan RELATIVAS (sin jitter float a 1 UA)
+    m_sys.setListenerOrientation(glm::normalize(glm::vec3(fwd)), glm::normalize(glm::vec3(up)));
+}
+
+// 0 = tapado (terreno en medio), 1 = línea libre. Muestrea el segmento from↔to bajo la
+// superficie del planeta. Playback Y consulta lógica (IA/sigilo). Aquí entrarán los portales.
+float AudioManager::propagation(const glm::dvec3& from, const glm::dvec3& to) const {
+    Application* app = MotorInstance::getInstance().getApplication();
+    auto* ps = app ? app->getPlanetarySystem() : nullptr;
+    if (!app || !ps) return 1.0f;
+    glm::dvec3 center; double radius; uint32_t sd; float rl;
+    if (!ps->getActivePlanet(center, radius, sd, rl)) return 1.0f;
+
+    const int N = 8;
+    int blocked = 0;
+    for (int i = 1; i < N; ++i) {
+        glm::dvec3 p = glm::mix(from, to, (double)i / N);
+        double surf = radius + app->getTerrainHeightAt(p);
+        if (glm::length(p - center) < surf - 0.5) ++blocked;
     }
-    sources.clear();
-    buffers.clear();
-    
-    if (context) {
-        alcMakeContextCurrent(nullptr);
-        alcDestroyContext(context);
-    }
-    if (device) {
-        alcCloseDevice(device);
-    }
-    
-    std::cout << "[Audio] Shutdown" << std::endl;
+    return 1.0f - (float)blocked / (float)(N - 1);
 }
 
-void AudioManager::setListenerPosition(const glm::vec3& pos) {
-    alListener3f(AL_POSITION, pos.x, pos.y, pos.z);
+void AudioManager::playTone(const glm::dvec3& pos, float freq, float dur, float volume,
+                            const glm::vec3& timbre) {
+    if (!m_sys.ok()) return;
+    uint32_t buf = m_loader.tone(freq, dur, timbre, /*loop*/false);
+    float gain = volume * (0.15f + 0.85f * propagation(pos, m_listenerPos));  // nunca 0 (difracción)
+    m_sys.playOneShot(buf, glm::vec3(pos - m_listenerPos), gain);
 }
 
-void AudioManager::setListenerVelocity(const glm::vec3& vel) {
-    alListener3f(AL_VELOCITY, vel.x, vel.y, vel.z);
+void AudioManager::playSound(const glm::dvec3& pos, const std::string& path, float volume) {
+    if (!m_sys.ok()) return;
+    uint32_t buf = m_loader.file(path);
+    if (!buf) return;
+    float gain = volume * (0.15f + 0.85f * propagation(pos, m_listenerPos));
+    m_sys.playOneShot(buf, glm::vec3(pos - m_listenerPos), gain);
 }
 
-void AudioManager::setListenerOrientation(const glm::vec3& forward, const glm::vec3& up) {
-    ALfloat orientation[] = { forward.x, forward.y, forward.z, up.x, up.y, up.z };
-    alListenerfv(AL_ORIENTATION, orientation);
+AudioManager::SourceId AudioManager::addSourceFile(const glm::dvec3& pos, const std::string& path,
+                                                   float volume) {
+    if (!m_sys.ok()) return 0;
+    uint32_t buf = m_loader.file(path);
+    if (!buf) return 0;
+    uint32_t voice = m_sys.voiceCreate();
+    if (!voice) return 0;
+    float gain = volume * (0.15f + 0.85f * propagation(pos, m_listenerPos));
+    m_sys.voicePlay(voice, buf, glm::vec3(pos - m_listenerPos), gain, /*loop*/true);
+    SourceId id = m_nextId++;
+    m_world[id] = { pos, voice, volume };
+    return id;
 }
 
-bool AudioManager::loadSound(const std::string& name, const std::string& filepath) {
-    auto buffer = std::make_shared<AudioBuffer>(filepath);
-    if (buffer->isLoaded()) {
-        buffers[name] = buffer;
-        return true;
-    }
-    return false;
+AudioManager::SourceId AudioManager::addSource(const glm::dvec3& pos, float freq, float volume,
+                                               const glm::vec3& timbre) {
+    if (!m_sys.ok()) return 0;
+    uint32_t buf   = m_loader.tone(freq, 0.6f, timbre, /*loop*/true);
+    uint32_t voice = m_sys.voiceCreate();
+    if (!voice) return 0;
+    float gain = volume * (0.15f + 0.85f * propagation(pos, m_listenerPos));
+    m_sys.voicePlay(voice, buf, glm::vec3(pos - m_listenerPos), gain, /*loop*/true);
+    SourceId id = m_nextId++;
+    m_world[id] = { pos, voice, volume };
+    return id;
 }
 
-int AudioManager::allocateSource() {
-    if (freeSources.empty()) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED, "No free audio sources available");
-        return -1;
-    }
-    
-    int sourceId = freeSources.back();
-    freeSources.pop_back();
-    return sourceId;
+void AudioManager::setSourcePosition(SourceId id, const glm::dvec3& pos) {
+    auto it = m_world.find(id);
+    if (it != m_world.end()) it->second.pos = pos;
 }
 
-void AudioManager::freeSource(int sourceId) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        alSourceStop(sources[sourceId].sourceId);
-        freeSources.push_back(sourceId);
-    }
+void AudioManager::removeSource(SourceId id) {
+    auto it = m_world.find(id);
+    if (it == m_world.end()) return;
+    m_sys.voiceDestroy(it->second.voice);
+    m_world.erase(it);
 }
 
-int AudioManager::playSound(const std::string& name, const glm::vec3& position,
-                            bool loop, float gain, float pitch) {
-    auto it = buffers.find(name);
-    if (it == buffers.end()) {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_NOT_FOUND, "Sound not found: '" + name + "'");
-        return -1;
-    }
-    
-    int sourceId = allocateSource();
-    if (sourceId < 0) return -1;
-    
-    AudioSource& source = sources[sourceId];
-    source.position = position;
-    source.gain = gain * masterVolume;
-    source.pitch = pitch;
-    source.looping = loop;
-    source.positional = true;
-    
-    alSourcei(source.sourceId, AL_BUFFER, it->second->getBufferId());
-    alSourcef(source.sourceId, AL_PITCH, pitch);
-    alSourcef(source.sourceId, AL_GAIN, gain * masterVolume);
-    alSource3f(source.sourceId, AL_POSITION, position.x, position.y, position.z);
-    alSource3f(source.sourceId, AL_VELOCITY, 0, 0, 0);
-    alSourcei(source.sourceId, AL_LOOPING, loop ? AL_TRUE : AL_FALSE);
-    
-    alSourcePlay(source.sourceId);
-    
-    checkALError("playSound");
-    return sourceId;
-}
-
-int AudioManager::playSound2D(const std::string& name, bool loop, float gain) {
-    auto it = buffers.find(name);
-    if (it == buffers.end()) {
-        HARUKA_AUDIO_ERROR(ErrorCode::ASSET_NOT_FOUND, "Sound not found: '" + name + "'");
-        return -1;
-    }
-    
-    int sourceId = allocateSource();
-    if (sourceId < 0) return -1;
-    
-    AudioSource& source = sources[sourceId];
-    source.gain = gain * masterVolume;
-    source.looping = loop;
-    source.positional = false;
-    
-    alSourcei(source.sourceId, AL_BUFFER, it->second->getBufferId());
-    alSourcef(source.sourceId, AL_GAIN, gain * masterVolume);
-    alSourcei(source.sourceId, AL_SOURCE_RELATIVE, AL_TRUE);
-    alSource3f(source.sourceId, AL_POSITION, 0, 0, 0);
-    alSourcei(source.sourceId, AL_LOOPING, loop ? AL_TRUE : AL_FALSE);
-    
-    alSourcePlay(source.sourceId);
-    
-    checkALError("playSound2D");
-    return sourceId;
-}
-
-void AudioManager::stopSource(int sourceId) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        alSourceStop(sources[sourceId].sourceId);
-        freeSource(sourceId);
+void AudioManager::update() {
+    if (!m_sys.ok()) return;
+    // Fuentes persistentes: recoloca (relativo al oído) y reatenúa por propagación cada frame.
+    for (auto& [id, w] : m_world) {
+        m_sys.voiceSetPos(w.voice, glm::vec3(w.pos - m_listenerPos));
+        m_sys.voiceSetGain(w.voice, w.gain * (0.15f + 0.85f * propagation(w.pos, m_listenerPos)));
     }
 }
 
-void AudioManager::pauseSource(int sourceId) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        alSourcePause(sources[sourceId].sourceId);
-    }
-}
-
-void AudioManager::resumeSource(int sourceId) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        alSourcePlay(sources[sourceId].sourceId);
-    }
-}
-
-void AudioManager::setSourcePosition(int sourceId, const glm::vec3& pos) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        sources[sourceId].position = pos;
-        alSource3f(sources[sourceId].sourceId, AL_POSITION, pos.x, pos.y, pos.z);
-    }
-}
-
-void AudioManager::setSourceVelocity(int sourceId, const glm::vec3& vel) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        sources[sourceId].velocity = vel;
-        alSource3f(sources[sourceId].sourceId, AL_VELOCITY, vel.x, vel.y, vel.z);
-    }
-}
-
-void AudioManager::setSourceGain(int sourceId, float gain) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        sources[sourceId].gain = gain;
-        alSourcef(sources[sourceId].sourceId, AL_GAIN, gain * masterVolume);
-    }
-}
-
-void AudioManager::setSourcePitch(int sourceId, float pitch) {
-    if (sourceId >= 0 && sourceId < (int)sources.size()) {
-        sources[sourceId].pitch = pitch;
-        alSourcef(sources[sourceId].sourceId, AL_PITCH, pitch);
-    }
-}
-
-void AudioManager::setMasterVolume(float volume) {
-    masterVolume = glm::clamp(volume, 0.0f, 1.0f);
-    
-    for (auto& source : sources) {
-        if (source.sourceId) {
-            alSourcef(source.sourceId, AL_GAIN, source.gain * masterVolume);
-        }
-    }
-}
-
-void AudioManager::update(float deltaTime) {
-    // Check finished sources
-    for (size_t i = 0; i < sources.size(); i++) {
-        if (sources[i].sourceId && !sources[i].looping) {
-            ALint state;
-            alGetSourcei(sources[i].sourceId, AL_SOURCE_STATE, &state);
-            if (state == AL_STOPPED) {
-                freeSource(i);
-            }
-        }
-    }
-}
-
-void AudioManager::checkALError(const char* operation) {
-    ALenum error = alGetError();
-    if (error != AL_NO_ERROR) {
-        HARUKA_AUDIO_ERROR(ErrorCode::AUDIO_LOAD_FAILED,
-            std::string("OpenAL error in ") + operation + ": " + std::to_string(error));
-    }
-}
-
-}
+} // namespace Haruka

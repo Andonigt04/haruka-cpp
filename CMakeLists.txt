@@ -218,6 +218,20 @@ file(GLOB SHADER_SOURCES
     "${SHADER_SRC_DIR}/*.comp"
 )
 
+# No compiles los shaders de un módulo apagado (su renderer también está excluido → no se usan).
+if(NOT HARUKA_MOD_FLUIDS)
+    list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(fluid_[^/]*|water)\\.(vert|frag)$")
+endif()
+if(NOT HARUKA_MOD_PARTICLES)
+    list(FILTER SHADER_SOURCES EXCLUDE REGEX "/particle\\.(vert|frag)$")
+endif()
+if(NOT HARUKA_MOD_SHADOWS)
+    list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(shadow|point_shadow)\\.(vert|frag|geom)$")
+endif()
+if(NOT HARUKA_MOD_SOFTBODY)
+    list(FILTER SHADER_SOURCES EXCLUDE REGEX "/softbody\\.(vert|frag)$")
+endif()
+
 set(SPIRV_OUTPUTS "")
 foreach(SRC ${SHADER_SOURCES})
     get_filename_component(NAME ${SRC} NAME)

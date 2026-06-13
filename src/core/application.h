@@ -135,6 +135,17 @@ public:
         if (_planetarySystem) _planetarySystem->editTerrain(worldPos, radius, strength, dig);
     }
 
+    /** @brief Nivela el terreno hacia una altura objetivo (m) en un radio. */
+    void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeightM) {
+        if (_planetarySystem) _planetarySystem->levelTerrain(worldPos, radius, targetHeightM);
+    }
+
+    /** @brief Nivela con la huella (caja orientada) de un objeto: tamaño/forma del objeto. */
+    void levelTerrainBox(const glm::dvec3& center, const glm::dvec3& halfExtents,
+                         const glm::dmat3& rot, double targetHeightM, double band) {
+        if (_planetarySystem) _planetarySystem->levelTerrainBox(center, halfExtents, rot, targetHeightM, band);
+    }
+
     /** @brief Terrain-edit field for save/restore (null if no planetary system). */
     Haruka::DeformationField* getDeformationField() {
         return _planetarySystem ? _planetarySystem->deformationField() : nullptr;
