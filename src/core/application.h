@@ -45,8 +45,10 @@
 #include "core/chunk_cache.h"
 #include "core/game_interface.h"
 
-class MotorInstance;
+namespace Haruka { namespace Renderer { class MotorInstance; } } using Haruka::Renderer::MotorInstance;
 namespace Haruka { class DeformationField; }
+
+namespace Haruka { namespace Core {
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -120,6 +122,7 @@ public:
     int getVisibleChunks()         const { return _iVisibleChunks; }
     int getResidentChunks()        const { return _iResidentChunks; }
     int getPendingChunkLoads()     const { return _iPendingChunkLoads; }
+    int getQueuedChunkLoads()      const { return _iQueuedChunks; }
     int getPendingChunkEvictions() const { return _iPendingChunkEvictions; }
     int getResidentMemoryMB()      const { return _iResidentMemoryMB; }
     int getTrackedChunks()         const { return _iTrackedChunks; }
@@ -174,6 +177,10 @@ public:
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
     void setImGuiRenderCallback(std::function<void()> cb) { _imguiCallback = std::move(cb); }
+
+    /** @brief Requests a clean (no-HUD) PNG screenshot of the next rendered frame.
+     *  Empty path → screenshots/shot_<timestamp>.png. Standalone runtime only. */
+    void requestScreenshot(const std::string& path = "");
     
     /**
      * @brief Callback invoked by `MotorInstance` when active scene changes.
@@ -237,7 +244,7 @@ public:
     void cleanup();
 
 private:
-    friend class MotorInstance;
+    friend class Haruka::Renderer::MotorInstance;
     
 #ifdef HARUKA_NETWORK
     DGS::Client m_dgs;
@@ -359,6 +366,12 @@ private:
     Haruka::GameInterface* _gameInterface = nullptr;
     bool m_cleanedUp = false;
 
+    // Screenshot: captured at the end of the 3D pass (before ImGui) for a clean
+    // world frame with no HUD. See requestScreenshot() / captureScreenshotIfPending().
+    bool m_screenshotPending = false;
+    std::string m_screenshotPath;
+    void captureScreenshotIfPending(int width, int height);
+
     float _exposure = 1.0f;
 
     /** @brief Timing state for frame time and FPS calculation. Updated in renderFrame(). */
@@ -421,10 +434,15 @@ private:
     int _iVisibleChunks         = 0;
     int _iResidentChunks        = 0;
     int _iPendingChunkLoads     = 0;
+    int _iQueuedChunks          = 0;
     int _iPendingChunkEvictions = 0;
     int _iTrackedChunks         = 0;
     int _iResidentMemoryMB      = 0;
     int _iMaxMemoryMB           = 0;
 };
 
+}} // namespace Haruka::Core
+
+using Haruka::Core::Application;                 // back-compat alias (migration)
+namespace Haruka { using Core::Application; }
 #endif

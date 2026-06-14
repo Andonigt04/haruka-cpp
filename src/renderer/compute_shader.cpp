@@ -6,6 +6,8 @@
 #include <sstream>
 #include <glm/gtc/type_ptr.hpp>
 
+namespace Haruka { namespace Renderer {
+
 ComputeShader::ComputeShader(const std::string& computePath)
 {
     std::string computeCode = readFile(computePath);
@@ -93,3 +95,5 @@ GLint ComputeShader::getUniformLocation(const std::string& name) const
 {
     return glGetUniformLocation(ID, name.c_str());
 }
+
+}} // namespace Haruka::Renderer

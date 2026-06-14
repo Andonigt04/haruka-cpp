@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+namespace Haruka { namespace Physics {
+
 PhysicsEngine::PhysicsEngine() {}
 
 PhysicsEngine::~PhysicsEngine() {}
@@ -38,12 +40,22 @@ void PhysicsEngine::update(double deltaTime) {
 void PhysicsEngine::integrateForces(double dt) {
     for (auto& body : bodies) {
         if (body->isKinematic) continue;
-        
+
         // Gravedad
         body->acceleration = gravity;
-        
+
         // Velocity Verlet
         body->velocity += body->acceleration * dt;
+
+        // Arrastre AERODINÁMICO (solo cuerpos dinámicos = conjunto acotado cerca del
+        // juego → O(cuerpos), sin coste global). Resistencia del aire (amortigua hacia
+        // 0) + empuje del viento (cuadrático con la velocidad relativa). Suave.
+        body->velocity *= (1.0 - std::min(m_airDamp * dt, 0.5));
+        glm::dvec3 vRel = m_wind - body->velocity;
+        double rel = glm::length(vRel);
+        if (rel > 1e-6)
+            body->velocity += vRel * std::min(m_windCoef * rel * dt, 0.20);
+
         body->position += body->velocity * dt;
     }
 }
@@ -327,3 +339,5 @@ void PhysicsEngine::applyGravity(const glm::dvec3& worldPos, double deltaTime, g
     glm::dvec3 gravityAcceleration = gravityDir * gravityMagnitude;
     inOutVelocity += gravityAcceleration * deltaTime;
 }
+
+}} // namespace Haruka::Physics

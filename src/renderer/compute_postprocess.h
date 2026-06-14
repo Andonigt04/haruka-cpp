@@ -9,6 +9,8 @@
 #include <memory>
 #include <string>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Compute-shader based post-processing pipeline.
  *
@@ -102,3 +104,9 @@ private:
     /** @brief Dispatches a compute shader over the given dimensions. */
     void dispatchCompute(GLuint shader, int width, int height);
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::ComputePostProcess;
+namespace Haruka { using Renderer::ComputePostProcess; }

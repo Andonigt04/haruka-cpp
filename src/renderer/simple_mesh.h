@@ -11,6 +11,8 @@
  * Legacy code can continue using `SimpleMesh` while implementation lives in `Mesh`.
  */
 #include "mesh.h"
-using SimpleMesh = Mesh;
+namespace Haruka { namespace Renderer { using SimpleMesh = Mesh; } }
+using SimpleMesh = Haruka::Renderer::SimpleMesh;   // back-compat (== Mesh)
+namespace Haruka { using Renderer::SimpleMesh; }
 
 #endif

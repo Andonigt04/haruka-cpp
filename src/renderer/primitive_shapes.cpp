@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 
+namespace Haruka { namespace Renderer {
+
 void PrimitiveShapes::createSphere(float radius, int sectors, int stacks, std::vector<glm::vec3>& vertices, std::vector<glm::vec3>& normals, std::vector<unsigned int>& indices) {
     vertices.clear();
     normals.clear();
@@ -510,3 +512,6 @@ void PrimitiveShapes::createTriangle(float size,
     for (int i = 0; i < 3; ++i) normals.push_back({0, 0, -1});
     indices.insert(indices.end(), { 3, 4, 5 });           // back (-Z)
 }
+
+
+}} // namespace Haruka::Renderer

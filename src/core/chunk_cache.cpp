@@ -27,6 +27,16 @@ const ChunkData* ChunkCache::getChunk(const PlanetChunkKey& key) {
     return nullptr;
 }
 
+bool ChunkCache::getChunkCopy(const PlanetChunkKey& key, ChunkData& out) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = cache.find(keyToHash(key));
+    if (it == cache.end()) { stats.misses++; return false; }
+    stats.hits++;
+    updateLRUOrder(key);
+    out = it->second.data;   // COPY under the lock → safe from concurrent rehash/evict
+    return true;
+}
+
 void ChunkCache::addChunk(const PlanetChunkKey& key, const ChunkData& data) {
     std::lock_guard<std::mutex> lock(m_mutex);
     uint64_t hash = keyToHash(key);

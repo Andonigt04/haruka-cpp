@@ -39,6 +39,10 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3  sunDirection; float _pad1;
     vec3  sunLightColor; float ambientStrength;
     int   enableHDR;
+    int   _enableBloom; int _enableSSAO; int _enableIBL; int _enableShadows;
+    int   _pad3a; int _pad3b; int _pad3c;
+    vec3  moonDirection;  float moonIntensity;   // 2ª luz (luna)
+    vec3  moonLightColor; float _pad4;
 };
 
 // Per-object UBO (binding 1). Para el terreno: u_planetRelCam.xyz = (cameraPos −
@@ -195,9 +199,14 @@ void main() {
         }
     }
 
+    // Luz de luna (2ª luz): difusa tenue azulada → la noche no es negra cuando la
+    // Luna está alta. Sin sombras (es luz suave de relleno).
+    float ndlMoon = max(dot(N, normalize(moonDirection)), 0.0);
+
     vec3 color = ambientStrength * baseColor
                + 0.7 * ndl * sunLightColor * baseColor * (1.0 - 0.85 * shadow)
-               + sunLightColor * 0.12 * spec * (1.0 - shadow);
+               + sunLightColor * 0.12 * spec * (1.0 - shadow)
+               + moonLightColor * moonIntensity * ndlMoon * baseColor;
 
     // Niebla atmosférica: da profundidad y un horizonte claro, y disimula el LOD
     // lejano. Color grisáceo (dieselpunk sombrío). FOG_DENSITY = qué tan pronto cierra.

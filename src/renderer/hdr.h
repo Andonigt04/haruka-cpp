@@ -6,6 +6,8 @@
 
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief HDR framebuffer wrapper with color and bright attachments.
  */
@@ -38,3 +40,8 @@ private:
     unsigned int rboDepth;
     unsigned int width, height;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::HDR;
+namespace Haruka { using Renderer::HDR; }

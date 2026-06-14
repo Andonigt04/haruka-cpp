@@ -9,6 +9,8 @@
 #include <memory>
 #include "mesh.h"
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Mesh optimization utilities for LOD and index/vertex cleanup.
  */
@@ -98,3 +100,9 @@ private:
 
     Stats stats;
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::MeshOptimizer;
+namespace Haruka { using Renderer::MeshOptimizer; }

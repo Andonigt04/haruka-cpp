@@ -14,6 +14,12 @@
 #include "mesh.h"
 #include "shader.h"
 
+// Engine renderer types live in Haruka::Renderer (sub-namespace migration). Crucially this
+// keeps the engine `Model` symbol as `Haruka::Renderer::Model`, so it no longer collides with
+// Vosk's exported `Model` class (the collision crashed voice shutdown). Back-compat `using`s at
+// the bottom keep existing unqualified references compiling during the migration.
+namespace Haruka { namespace Renderer {
+
 /** @brief Loads texture resource from model directory context. */
 unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene);
 
@@ -70,4 +76,13 @@ private:
     /** @brief Loads material textures by semantic type with deduplication. */
     std::vector<MeshTexture> loadMaterialTextures(aiMaterial *mat, aiTextureType type, std::string typeName);
 };
+
+}} // namespace Haruka::Renderer
+
+// --- Back-compat aliases (temporary, during the namespace migration) ---
+// Let existing unqualified `Model` / `Haruka::Model` references keep compiling. The exported
+// symbol is now Haruka::Renderer::Model (no Vosk collision); these are names, not new symbols.
+using Haruka::Renderer::Model;
+using Haruka::Renderer::TextureFromFile;
+namespace Haruka { using Renderer::Model; }
 #endif

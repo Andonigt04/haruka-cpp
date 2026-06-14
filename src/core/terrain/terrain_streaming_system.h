@@ -49,6 +49,9 @@ namespace Haruka {
         std::vector<std::shared_ptr<ChunkData>> getReadyChunks();
 
         int getPendingCount() const { return static_cast<int>(m_pendingRequests.size()); }
+        // Chunks still WAITING in the desired queue (not yet dispatched async). The real
+        // backlog: getPendingCount() is only the few in-flight, so loading screens must add this.
+        int getQueuedCount()  const { return static_cast<int>(m_desiredChunks.size()); }
 
 
     private:

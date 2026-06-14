@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <mutex>
 #include <glad/glad.h>
@@ -68,6 +69,18 @@ namespace Haruka {
          *  and let streaming regenerate them (with the new terrain edit applied). */
         std::vector<PlanetChunkKey> invalidateSphere(const glm::dvec3& center, double radius);
 
+        /** @brief Como invalidateSphere pero SIN borrar las mallas: las marca "stale". La malla
+         *  vieja se sigue dibujando hasta que el chunk regenerado llega a addToScene, que entonces
+         *  la REEMPLAZA (en vez de saltarla). Evita el agujero al deformar terreno. */
+        std::vector<PlanetChunkKey> markStaleSphere(const glm::dvec3& center, double radius);
+
+        /** @brief Marks a chunk STALE without removing it: it keeps DRAWING until its
+         *  replacement is ready (same key via addToScene, or its area gets covered by
+         *  finer/coarser resident chunks). This is the dig "no-hole" swap generalised
+         *  to all streaming/LOD reloads — the old mesh never disappears before the new
+         *  one exists. No-op if the chunk isn't currently resident. */
+        void markStale(const PlanetChunkKey& key);
+
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
         int getLastDrawnCount() const { return m_lastDrawn; }
 
@@ -78,6 +91,7 @@ namespace Haruka {
     private:
         // Usamos el hash de la llave para identificar la malla en la GPU
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
+        std::unordered_set<uint64_t>             m_stale;   // chunks a REEMPLAZAR en addToScene
         mutable std::mutex m_renderMutex;
 
         glm::mat4  m_cullVP{1.0f};
@@ -87,6 +101,11 @@ namespace Haruka {
         int        m_lastDrawn = 0;
 
         void cleanupMesh(RenderMesh& mesh);
+
+        /** @brief After adding chunk `key`, drop any STALE mesh whose area is now
+         *  covered: finer descendants of `key` (merge), or the stale parent of `key`
+         *  once all 4 of its children are resident (subdivide). Caller holds the lock. */
+        void purgeStaleCoveredBy(const PlanetChunkKey& key);
     };
 
-}
+} // namespace Haruka

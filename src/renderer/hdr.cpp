@@ -3,6 +3,8 @@
 
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 HDR::HDR(unsigned int width, unsigned int height) : width(width), height(height)
 {
     setupFramebuffer();
@@ -70,3 +72,5 @@ HDR::~HDR()
     glDeleteTextures(1, &brightTexture);
     glDeleteRenderbuffers(1, &rboDepth);
 }
+
+}} // namespace Haruka::Renderer

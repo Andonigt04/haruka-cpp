@@ -13,12 +13,23 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
 
     std::lock_guard<std::mutex> lock(m_renderMutex);
     uint64_t hash = ChunkCache::keyToHash(key);
-    if (m_gpuMeshes.count(hash)) return;
+    // Igual que el terreno: si ya existe lo saltamos, SALVO que esté "stale" → lo
+    // reemplazamos en el sitio (sin agujero). Si no existía pero estaba marcado
+    // stale (raro), limpiamos la marca.
+    bool stale = m_stale.count(hash) != 0;
+    if (m_gpuMeshes.count(hash)) {
+        if (!stale) return;
+        cleanupMesh(m_gpuMeshes[hash]);
+        m_stale.erase(hash);
+    } else if (stale) {
+        m_stale.erase(hash);
+    }
 
     RenderMesh mesh;
     mesh.indexCount  = (uint32_t)data.waterIndices.size();
     mesh.vertexCount = (uint32_t)data.waterVertices.size();
     mesh.planetName  = planetName;
+    mesh.key         = key;
     mesh.chunkCenter = data.chunkCenter;
     {
         double nodeSz = data.planetRadius * 2.0 / double(1u << key.lod);
@@ -58,6 +69,7 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
+    purgeStaleCoveredBy(key);   // retira agua stale ya cubierta por esta
     glBindVertexArray(0);
 }
 
@@ -70,6 +82,50 @@ void WaterRenderer::removeFromScene(const std::string& planetName, const PlanetC
         cleanupMesh(it->second);
         m_gpuMeshes.erase(it);
     }
+    m_stale.erase(hash);
+}
+
+void WaterRenderer::markStale(const PlanetChunkKey& key) {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    uint64_t hash = ChunkCache::keyToHash(key);
+    if (m_gpuMeshes.count(hash)) m_stale.insert(hash);
+}
+
+void WaterRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
+    // CALLER HOLDS m_renderMutex. Misma lógica que TerrainRenderer.
+    // (1) SUBDIVIDE: padre stale + 4 hijos residentes no-stale → fuera el padre.
+    if (key.lod > 0) {
+        PlanetChunkKey parent{ key.face, (uint8_t)(key.lod - 1), key.x >> 1, key.y >> 1 };
+        uint64_t ph = ChunkCache::keyToHash(parent);
+        if (m_stale.count(ph) && m_gpuMeshes.count(ph)) {
+            const uint8_t  cl = (uint8_t)(parent.lod + 1);
+            const uint32_t bx = parent.x * 2, by = parent.y * 2;
+            const PlanetChunkKey kids[4] = {
+                { parent.face, cl, bx,     by     }, { parent.face, cl, bx + 1, by     },
+                { parent.face, cl, bx,     by + 1 }, { parent.face, cl, bx + 1, by + 1 },
+            };
+            bool allReady = true;
+            for (const auto& kk : kids) {
+                uint64_t kh = ChunkCache::keyToHash(kk);
+                auto it = m_gpuMeshes.find(kh);
+                // Nota: un hijo de agua puede no existir si esa celda no toca océano;
+                // solo exigimos que los que existan no estén stale.
+                if (it != m_gpuMeshes.end() && (!it->second.isReady || m_stale.count(kh))) { allReady = false; break; }
+            }
+            if (allReady) { cleanupMesh(m_gpuMeshes[ph]); m_gpuMeshes.erase(ph); m_stale.erase(ph); }
+        }
+    }
+    // (2) MERGE: 'key' grueso cubre cualquier agua stale más fina de su área → fuera.
+    std::vector<uint64_t> drop;
+    for (auto& [h, mesh] : m_gpuMeshes) {
+        if (!m_stale.count(h)) continue;
+        const PlanetChunkKey& s = mesh.key;
+        if (s.face == key.face && s.lod > key.lod) {
+            uint32_t shift = (uint32_t)(s.lod - key.lod);
+            if ((s.x >> shift) == key.x && (s.y >> shift) == key.y) drop.push_back(h);
+        }
+    }
+    for (uint64_t h : drop) { cleanupMesh(m_gpuMeshes[h]); m_gpuMeshes.erase(h); m_stale.erase(h); }
 }
 
 void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldPos& cameraPos) {
@@ -146,4 +202,4 @@ void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
 }
 
-}
+} // namespace Haruka

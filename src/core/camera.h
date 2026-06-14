@@ -16,6 +16,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "tools/math_types.h"
 
+namespace Haruka { namespace Core {
+
 struct SDL_Window;
 
 /**
@@ -55,4 +57,9 @@ public:
     /** @brief Updates zoom/FOV from scroll input. */
     void ProcessMouseScroll(float yoffset);
 };
+
+}} // namespace Haruka::Core
+
+using Haruka::Core::Camera;
+namespace Haruka { using Core::Camera; }
 #endif

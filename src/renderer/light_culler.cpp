@@ -2,6 +2,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 
+namespace Haruka { namespace Renderer {
+
 LightCuller::LightCuller() {}
 
 LightCuller::Frustum LightCuller::extractFrustum(const glm::mat4& viewProj) {
@@ -159,3 +161,6 @@ std::vector<LightCuller::CulledLight> LightCuller::cullLights(
     
     return result;
 }
+
+
+}} // namespace Haruka::Renderer

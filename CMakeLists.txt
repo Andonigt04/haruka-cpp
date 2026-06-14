@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 # Must be set before project() so -DVERSION=x.x.x is picked up.
-set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
+set(VERSION "1.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
 project(HarukaEngine VERSION ${VERSION})
 
@@ -280,9 +280,9 @@ endif()
 
 # --- 6. Install Rules ---
 # cmake --install build --prefix <haruka/build>
-# Result: <prefix>/1.0.0/bin/libHarukaEngine.so
-#         <prefix>/1.0.0/bin/shaders/*.spv
-#         <prefix>/1.0.0/lib64/haruka-cpp/**.(h|cpp)
+# Result: <prefix>/1.0/bin/libHarukaEngine.so
+#         <prefix>/1.0/bin/shaders/*.spv
+#         <prefix>/1.0/lib64/haruka-cpp/**.(h|cpp)
 include(GNUInstallDirs)
 
 install(TARGETS HarukaEngine

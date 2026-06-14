@@ -1,6 +1,7 @@
 #pragma once
 
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <mutex>
 #include <glad/glad.h>
@@ -29,6 +30,7 @@ namespace Haruka {
             uint32_t vertexCount = 0;
             bool isReady = false;
             std::string planetName;
+            PlanetChunkKey key{};          // identity, for stale-coverage purge
             glm::dvec3  chunkCenter{0.0};
             float       cullRadius = 0.0f; // bounding-sphere radius for frustum cull
         };
@@ -38,6 +40,11 @@ namespace Haruka {
 
         void addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data);
         void removeFromScene(const std::string& planetName, const PlanetChunkKey& key);
+
+        /** @brief Like TerrainRenderer::markStale — keep drawing the old water mesh
+         *  until its replacement is ready/covered, so the ocean never flickers a hole
+         *  on reload. No-op if the chunk isn't resident. */
+        void markStale(const PlanetChunkKey& key);
 
         /** Renders this planet's ocean. Caller binds the water shader + UBO first. */
         void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
@@ -52,7 +59,9 @@ namespace Haruka {
 
     private:
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
+        std::unordered_set<uint64_t>             m_stale;   // mallas a REEMPLAZAR/cubrir
         mutable std::mutex m_renderMutex;
+        void purgeStaleCoveredBy(const PlanetChunkKey& key); // caller holds the lock
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};
@@ -61,4 +70,5 @@ namespace Haruka {
         void cleanupMesh(RenderMesh& mesh);
     };
 
-}
+} // namespace Haruka
+

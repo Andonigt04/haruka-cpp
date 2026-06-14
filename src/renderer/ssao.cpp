@@ -3,6 +3,8 @@
 #include <random>
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 SSAO::SSAO(unsigned int width, unsigned int height)
     : width(width), height(height) {
     setupSamples();
@@ -84,3 +86,5 @@ SSAO::~SSAO() {
     glDeleteTextures(1, &ssaoColorBuffer);
     glDeleteTextures(1, &noiseTexture);
 }
+
+}} // namespace Haruka::Renderer

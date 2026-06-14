@@ -78,4 +78,4 @@ void FloatingIslandRenderer::render(const Haruka::WorldPos& cameraPos) {
     glBindVertexArray(0);
 }
 
-}
+} // namespace Haruka

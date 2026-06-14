@@ -15,7 +15,7 @@
 #include <memory>
 #include "tools/math_types.h"
 
-class Shader;
+namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
 namespace Haruka {
 namespace fluid { class PBFSolver; }
@@ -63,3 +63,4 @@ private:
 };
 
 } // namespace Haruka
+

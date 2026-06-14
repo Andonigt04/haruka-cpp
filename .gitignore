@@ -6,3 +6,5 @@ docs/doxygen.log
 docs/doxygen.xml
 docs/latex/
 docs/html/
+docs/theme/node_modules
+docs/theme/package-lock.json

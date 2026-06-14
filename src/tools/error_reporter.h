@@ -19,6 +19,8 @@
 #include <sstream>
 #include <chrono>
 
+namespace Haruka { namespace Tools {
+
 /**
  * @brief Structured error reporting utility.
  *
@@ -232,3 +234,12 @@ private:
 
 #define HARUKA_ASSET_ERROR(code, message) \
     ErrorReporter::report(ErrorComponent::ASSET_LOADER, code, message, __FILE__, __LINE__, __FUNCTION__)
+
+
+}} // namespace Haruka::Tools
+
+using Haruka::Tools::ErrorComponent;
+using Haruka::Tools::ErrorCode;
+using Haruka::Tools::ErrorInfo;
+using Haruka::Tools::ErrorReporter;
+namespace Haruka { using Tools::ErrorComponent; using Tools::ErrorCode; using Tools::ErrorInfo; using Tools::ErrorReporter; }

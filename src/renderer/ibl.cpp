@@ -8,6 +8,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
+namespace Haruka { namespace Renderer {
+
 IBL::IBL() {
     setupCubemap();
     generateDefaultSky();
@@ -351,3 +353,5 @@ void IBL::bindBRDFLUT(unsigned int textureUnit) {
     glActiveTexture(GL_TEXTURE0 + textureUnit);
     glBindTexture(GL_TEXTURE_2D, brdfLUT);
 }
+
+}} // namespace Haruka::Renderer

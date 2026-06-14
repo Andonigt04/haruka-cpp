@@ -103,3 +103,9 @@ PREDEFINED             =
 #---------------------------------------------------------------------------
 ALPHABETICAL_INDEX     = YES
 COLS_IN_ALPHA_INDEX    = 3
+
+# --- Godot-like Tailwind theme (added) ---
+HTML_HEADER            = docs/header.html
+HTML_FOOTER            = docs/footer.html
+HTML_EXTRA_STYLESHEET  = docs/theme/haruka.css
+HTML_COLORSTYLE        = DARK

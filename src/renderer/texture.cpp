@@ -5,6 +5,8 @@
 #include <algorithm>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 float Texture::s_maxAnisotropy = 1.0f;
 float Texture::s_lodBias       = 0.0f;
 
@@ -61,6 +63,8 @@ void Texture::use(unsigned int unit)
 }
 
 void Texture::cleanup()
-{ 
+{
     glDeleteTextures(1, &ID);
 }
+
+}} // namespace Haruka::Renderer

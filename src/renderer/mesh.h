@@ -12,6 +12,8 @@
 #include <glad/glad.h>
 #include "shader.h"
 
+namespace Haruka { namespace Renderer {
+
 /** @brief Interleaved vertex layout used by complex mesh path. */
 #pragma pack(push, 1)
 struct Vertex {
@@ -86,4 +88,11 @@ private:
                          const std::vector<unsigned int>& indices);
 };
 
+}} // namespace Haruka::Renderer
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Renderer::Vertex;
+using Haruka::Renderer::MeshTexture;
+using Haruka::Renderer::Mesh;
+namespace Haruka { using Renderer::Vertex; using Renderer::MeshTexture; using Renderer::Mesh; }
 #endif

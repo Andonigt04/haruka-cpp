@@ -11,12 +11,11 @@
 #include <filesystem>
 #include <fstream>
 
-class MeshRendererComponent;
-
 #include "tools/math_types.h"
 
 namespace Haruka {
 
+    class MeshRendererComponent;
     class EventManager;
     class MaterialComponent;
 

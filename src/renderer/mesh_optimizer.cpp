@@ -3,6 +3,8 @@
 #include <unordered_map>
 #include <cmath>
 
+namespace Haruka { namespace Renderer {
+
 MeshOptimizer::MeshOptimizer() : stats{0, 0, 0, 0, 0.0f, 0.0f} {}
 
 bool MeshOptimizer::areVerticesSimilar(
@@ -168,3 +170,6 @@ MeshOptimizer::OptimizedMesh MeshOptimizer::decimate(
     
     return result;
 }
+
+
+}} // namespace Haruka::Renderer

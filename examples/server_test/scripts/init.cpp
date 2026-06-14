@@ -512,7 +512,7 @@ namespace GameLogic {
         .onRenderWorld   = gameOnRenderWorld,
         .onEvent         = gameOnEvent,
         .name            = "Server Test",
-        .version         = "0.1.0"
+        .version         = "0.2"
     };
 }
 

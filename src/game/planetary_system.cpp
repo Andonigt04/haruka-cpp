@@ -146,8 +146,30 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             m_streaming->setDesiredChunks(std::move(sorted), streamSettings);
         }
 
-        // C. Cargar desde caché a GPU y descargar lo que ya no se ve
+        // C. Cargar desde caché a GPU (la descarga es DIFERIDA, abajo)
         m_streaming->processLODUpdate(update);
+
+        // El streaming solo sube el TERRENO desde caché. El AGUA debe seguir la
+        // MISMA vida que el terreno (subirse desde caché aquí también), o al
+        // recargar un chunk vuelve el terreno pero no el agua → mallas de agua
+        // desincronizadas/huérfanas que se solapan (los "blobs"). addToScene se
+        // auto-salta si ya está, así que reañadir es barato.
+        if (m_waterRenderer && m_cache)
+            for (const auto& k : update.chunksToLoad) {
+                ChunkData wd;
+                if (m_cache->getChunkCopy(k, wd))
+                    m_waterRenderer->addToScene(planet.name, k, wd);
+            }
+
+        // Lo que sale de vista NO se borra: se marca STALE (sigue dibujándose). El
+        // renderer lo retira solo cuando su área queda cubierta por el reemplazo
+        // (padre al fusionar, o los 4 hijos al subdividir) vía purgeStaleCoveredBy.
+        // Así nunca hay un agujero entre quitar el viejo y subir el nuevo — el mismo
+        // mecanismo "sin hueco" que ya usaba el dig, ahora general para todo el LOD.
+        for (const auto& k : update.chunksToUnload) {
+            m_renderer->markStale(k);
+            if (m_waterRenderer) m_waterRenderer->markStale(k);
+        }
     }
     m_forceLOD = false;
 
@@ -287,6 +309,7 @@ int PlanetarySystem::getGPUWaterChunkCount() const {
 
 int PlanetarySystem::getGPUChunkCount()    const { return m_renderer  ? m_renderer->getGPUMeshCount()              : 0; }
 int PlanetarySystem::getPendingChunks()    const { return m_streaming ? m_streaming->getPendingCount()              : 0; }
+int PlanetarySystem::getQueuedChunks()     const { return m_streaming ? m_streaming->getQueuedCount()               : 0; }
 int PlanetarySystem::getCachedChunks()     const { return m_cache     ? (int)m_cache->getChunkCount()               : 0; }
 int PlanetarySystem::getCacheMemoryMB()    const { return m_cache     ? (int)m_cache->getMemoryUsageMB()            : 0; }
 int PlanetarySystem::getCacheMaxMemoryMB() const { return m_cache     ? (int)m_cache->getMaxMemoryMB()              : 0; }
@@ -413,17 +436,16 @@ void PlanetarySystem::levelTerrainBox(const glm::dvec3& center, const glm::dvec3
 }
 
 void PlanetarySystem::invalidateEditedChunks(const glm::dvec3& center, double radius) {
-    // Invalida los chunks GPU que toca la edición (+margen) y los quita de la caché para
-    // que el streaming los regenere con la edición aplicada. El margen cubre chunks cuyo
-    // centro queda justo fuera pero cuya malla llega al área editada.
+    // Marca los chunks GPU que toca la edición (+margen) como STALE (NO los borra → la malla
+    // vieja se sigue viendo, sin agujero) y los quita de la caché para regenerarlos con la
+    // edición. Al llegar el chunk regenerado, addToScene REEMPLAZA la malla vieja sin parón.
     const double margin = radius * 1.5 + 8.0;
     if (m_renderer) {
-        auto keys = m_renderer->invalidateSphere(center, margin);
+        auto keys = m_renderer->markStaleSphere(center, margin);
         for (const auto& k : keys) {
             if (m_cache) m_cache->removeChunk(k);
             if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
-            // Olvídalo en el LOD: el próximo update lo trata como LOAD (re-subir), no KEEP
-            // (que solo refresca la caché ya vacía → el chunk desaparece).
+            // Olvídalo en el LOD: el próximo update lo re-pide (LOAD) → regenera y reemplaza.
             if (m_lod) m_lod->forgetChunk(k);
         }
     }

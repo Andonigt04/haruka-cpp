@@ -38,4 +38,5 @@ namespace Haruka {
         void cleanup();
     };
 
-}
+} // namespace Haruka
+

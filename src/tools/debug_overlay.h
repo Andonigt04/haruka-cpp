@@ -18,6 +18,8 @@
 #include <map>
 #include <glm/glm.hpp>
 
+namespace Haruka { namespace Tools {
+
 /**
  * @brief Real-time performance and diagnostics overlay.
  *
@@ -142,3 +144,10 @@ private:
     glm::vec4 colorWarning = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f);  // Amarillo
     glm::vec4 colorCritical = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Rojo
 };
+
+
+}} // namespace Haruka::Tools
+
+using Haruka::Tools::FrameMetrics;
+using Haruka::Tools::DebugOverlay;
+namespace Haruka { using Tools::FrameMetrics; using Tools::DebugOverlay; }

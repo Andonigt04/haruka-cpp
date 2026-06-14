@@ -17,6 +17,8 @@
 #include <glm/glm.hpp>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace IO {
+
 /**
  * @brief On-demand asynchronous asset streaming service.
  *
@@ -173,3 +175,12 @@ private:
     // Callbacks
     AssetLoadedCallback assetLoadedCallback = nullptr;
 };
+
+
+}} // namespace Haruka::IO
+
+using Haruka::IO::AssetType;
+using Haruka::IO::Asset;
+using Haruka::IO::StreamRequest;
+using Haruka::IO::AssetStreamer;
+namespace Haruka { using IO::AssetType; using IO::Asset; using IO::StreamRequest; using IO::AssetStreamer; }

@@ -17,7 +17,7 @@
 #include "physics/xpbd/softbody.h"
 #include "tools/math_types.h"
 
-class Shader;
+namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
 namespace Haruka {
 
@@ -53,3 +53,4 @@ private:
 };
 
 } // namespace Haruka
+

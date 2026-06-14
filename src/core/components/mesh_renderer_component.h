@@ -10,7 +10,9 @@
 #include <string>
 #include "renderer/simple_mesh.h"
 
-class Shader;
+namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
+
+namespace Haruka {
 
 /**
  * @brief Simple mesh renderer with source-data cache.
@@ -66,3 +68,6 @@ private:
     std::vector<glm::vec3> sourceColors;
     std::vector<unsigned int> sourceIndices;
 };
+
+} // namespace Haruka
+using Haruka::MeshRendererComponent;   // back-compat alias (migration)

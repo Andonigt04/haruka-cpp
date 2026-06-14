@@ -12,7 +12,7 @@
 #include "shader.h"
 #include "texture.h"
 
-class Camera;
+namespace Haruka { namespace Core { class Camera; } } using Haruka::Core::Camera;
 
 namespace Haruka {
 
@@ -76,6 +76,6 @@ private:
     int patchSize = 64;
 };
 
-}
+} // namespace Haruka
 
 #endif

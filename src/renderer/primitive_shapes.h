@@ -10,6 +10,8 @@
 #include <vector>
 #include "mesh.h"
 
+namespace Haruka { namespace Renderer {
+
 class PrimitiveShapes
 {
 public:
@@ -39,4 +41,9 @@ public:
 private:
     PrimitiveShapes() = default;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::PrimitiveShapes;
+namespace Haruka { using Renderer::PrimitiveShapes; }
 #endif

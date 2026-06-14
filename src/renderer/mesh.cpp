@@ -4,6 +4,8 @@
 #include <glad/glad.h>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 // Constructor para modelos complejos (con texturas)
 Mesh::Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures) {
     if (vertex.empty()) {
@@ -194,3 +196,5 @@ void Mesh::setupSimpleMesh(const std::vector<glm::vec3>& vertices,
 
     glBindVertexArray(0);
 }
+
+}} // namespace Haruka::Renderer

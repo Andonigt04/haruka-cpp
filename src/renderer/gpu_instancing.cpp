@@ -1,6 +1,8 @@
 #include "gpu_instancing.h"
 #include <glm/gtc/matrix_transform.hpp>
 
+namespace Haruka { namespace Renderer {
+
 GPUInstancing::GPUInstancing(PrecisionMode mode) : precisionMode(mode) {}
 
 GPUInstancing::~GPUInstancing() {
@@ -162,3 +164,6 @@ void GPUInstancing::clear() {
     instancesFloat.clear();
     bufferDirty = true;
 }
+
+
+}} // namespace Haruka::Renderer

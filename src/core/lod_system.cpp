@@ -21,30 +21,20 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
 
     double radius = planet->scale.x; // Asumimos escala uniforme para el radio
 
-    // Procesar las 6 caras del cubo-esfera
     const glm::dvec3 planetPos = planet->position;
-    // Camera direction from planet center (unit vector toward camera).
-    const glm::dvec3 camDir = glm::normalize(cameraPos - planetPos);
-    const double camDist    = glm::length(cameraPos - planetPos);
 
-    // Dynamic face culling: at ground level only the face the camera stands on
-    // and its immediate neighbours (dot > 0) should be processed.  Showing
-    // side faces whose centre is 90° away from the camera causes all six
-    // faces to render as a visible "cube" box around the viewer.
-    // As the camera climbs away from the surface the cone widens so that the
-    // full visible hemisphere (dot > -0.5) is shown from space.
-    // Transition: surface (camDist == radius) → threshold = 0.1
-    //             orbit   (camDist == 2*radius) → threshold = -0.5
-    const double t            = glm::clamp((camDist - radius) / radius, 0.0, 1.0);
-    const double dotThreshold = glm::mix(0.1, -0.5, t);
-
+    // RESIDENCIA DEL PLANETA ENTERO: procesamos las 6 caras del cubo-esfera SIN
+    // descartar ninguna. El quadtree mantiene las caras lejanas gruesas (no se
+    // subdividen porque están lejos), así que TODO el planeta queda representado
+    // como hojas finas-cerca + gruesas-lejos, una por zona (sin solape). Qué se
+    // DIBUJA lo decide por chunk el horizon+frustum cull preciso del render
+    // (TerrainRenderer/WaterRenderer), y el caché LRU lo mantiene residente
+    // mientras haya presupuesto de memoria. Así girar o mirar a la cara opuesta
+    // NUNCA recarga terreno (antes el face-cull la descargaba y regeneraba).
     for (int face = 0; face < 6; ++face) {
         const PlanetFace planetFace = static_cast<PlanetFace>(face);
         PlanetChunkKey rootKey{ planetFace, 0, 0, 0 };
         glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
-
-        const glm::dvec3 faceNormal = glm::normalize(center - planetPos);
-        if (glm::dot(faceNormal, camDir) < dotThreshold) continue;
 
         LODNode root(rootKey, center, radius * 2.0);
         recursiveProcess(&root, cameraPos, update, radius, planetPos);
@@ -128,6 +118,19 @@ void LODSystem::balanceLeaves() {
     }
 }
 
+// Altitude-based LOD ceiling: far from the planet (orbit / space) we DON'T subdivide to fine
+// detail — the whole planet loads as a few coarse chunks (mountain-level, cheap). Near the
+// surface the full m_maxLOD is allowed. `alt` is the camera altitude in planet RADII.
+static int altitudeMaxLOD(double camDist, double radius, int hardMax) {
+    double alt = (radius > 1e-9) ? std::max(0.0, (camDist - radius) / radius) : 0.0;
+    if (alt < 0.02) return hardMax;                    // ~near surface: full detail
+    if (alt < 0.08) return std::max(hardMax - 3, 7);   // low flight
+    if (alt < 0.25) return 6;                           // high flight
+    if (alt < 1.0)  return 5;                           // low orbit
+    if (alt < 4.0)  return 4;                           // orbit: whole planet, coarse
+    return 3;                                           // deep space: coarsest
+}
+
 void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos) {
     // Use the distance from camera to the SURFACE of the planet in the chunk's
     // direction rather than to the chunk center.  This allows side faces to
@@ -137,7 +140,10 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     double dist = glm::distance(cameraPos, surfacePoint);
     uint64_t hash = ChunkCache::keyToHash(node->key);
 
-    if (dist < node->size * m_splitFactor && node->key.lod < m_maxLOD) {
+    // Cap subdivision by camera altitude so a distant view shows the WHOLE planet cheaply.
+    const int camMaxLOD = altitudeMaxLOD(glm::distance(cameraPos, planetPos), radius, m_maxLOD);
+
+    if (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD) {
         subdivide(node, radius, planetPos);
         for (auto& child : node->children) {
             recursiveProcess(child.get(), cameraPos, update, radius, planetPos);

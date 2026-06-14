@@ -35,6 +35,10 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 sunDirection;    float _pad1;
     vec3 sunLightColor;   float ambientStrength;
     int  enableHDR;
+    int  _enableBloom; int _enableSSAO; int _enableIBL; int _enableShadows;
+    int  _pad3a; int _pad3b; int _pad3c;
+    vec3 moonDirection;  float moonIntensity;
+    vec3 moonLightColor; float _pad4;
 };
 
 void main() {

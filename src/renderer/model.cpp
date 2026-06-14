@@ -4,6 +4,8 @@
 #include "stb_image.h"
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 // Assimp es row-major; glm column-major → transpone al convertir.
 static glm::mat4 aiToGlm(const aiMatrix4x4& m) {
     return glm::mat4(
@@ -245,3 +247,5 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
         std::string("Failed to load texture: ") + path);
     return 0;
 }
+
+}} // namespace Haruka::Renderer

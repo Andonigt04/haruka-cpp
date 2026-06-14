@@ -1,12 +1,8 @@
-# HarukaEngine (v6)
+# HarukaEngine (v1.0)
 
 **C++17 / OpenGL 4.6** real-time 3D engine for space exploration, planetary terrain generation, and game development.
 
 Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pipeline, physics engine, and procedural world generation.
-
-## Examples
-
-
 
 ## 🎯 Core Features
 
@@ -31,7 +27,8 @@ Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pip
 - **Terrain Raycast** — Ground detection for procedural planet surfaces
 
 ### 🎮 Game Systems
-- **3D Audio** — OpenAL listener (camera) + **world sound sources** (persistent positional emitters) + one-shot SFX, with **terrain occlusion** (a source behind a hill is muffled). `propagation(from,to)` is a shared 0..1 query used for playback **and** logically (AI "hears" the player → stealth). Device selection in-settings (input/output, SDL3). Full propagation through openings (portal pathfinding) is planned.
+- **3D Audio** — OpenAL listener (camera) + **world sound sources** (persistent positional emitters) + one-shot SFX. Device selection in-settings (input/output, SDL3).
+- **Propagation / nav** (`core/propagation.*`) — finds the path A→B **around walls** (placed OBB colliders) and through openings + **terrain occlusion**; `through()` returns a 0..1 throughput (playback **and** logical: AI "hears" the player → stealth), `path()` returns the waypoints. **Shared** by audio (sound routes around walls) and by **curving spells** (serpenteante projectiles follow the same path).
 - **Voice input (optional)** — Mic capture (SDL3) + **Vosk** offline speech-to-text with a restricted grammar; used by the game for voice-cast abilities. Compiles without Vosk (stub).
 - **i18n / Locale** — `assets/lang/<code>.json` key→string, `TR("key")` resolution, base-language fallback. Languages auto-detected; modular per-language assets (`assets/voice/<code>`, `assets/audio/<code>`).
 - **Terrain editing** — Deformation field (dig / build / **flatten/level**, sphere or oriented-box footprint) over procedural terrain, with chunk re-streaming.
@@ -96,7 +93,7 @@ sudo cmake --install third_party/SDL/build
 
 ### Quick Start
 
-```bash                     # VERSION defaults to 1.0.0
+```bash                     # VERSION defaults to 1.0
 cmake -B build -DVERSION=XX.XX.XX  -DHARUKA_NETWORK=ON/OFF # explicit version
 cmake --build build -j$(nproc)
 ```
@@ -138,10 +135,10 @@ disabled modules. Order of the bitmask = the list below.
 
 ```bash
 # All modules ON (default)
-cmake -B build -DVERSION=6
+cmake -B build -DVERSION=1.0
 
 # Custom mask (1 char per module, in list order): e.g. fluids+deform off
-cmake -B build -DVERSION=6 -DMODULES=0011111111
+cmake -B build -DVERSION=1.0 -DMODULES=0011111111
 ```
 
 > ⚠️ Configuring with `-DMODULES=...` rewrites `src/core/modules.h` in the source
@@ -212,13 +209,18 @@ Chunks are **generated asynchronously** using multi-octave Perlin noise and cach
 
 ## 📝 Status & Roadmap
 
-**Current Version:** 6 — Deferred renderer, terrain streaming, physics foundation
+**Current Version:** 1.0 — Deferred renderer, terrain streaming, physics foundation
 
 ---
 
 ## 📄 License
 
+**Haruka Source-Available License v1.0** — © 2026 Andoni García Torres. See [LICENSE](../LICENSE.md).
 
+Free to view, study, modify, and use for **non-commercial** purposes; **commercial use needs
+written permission**. Any improvement built using the engine is **licensed back** to the author
+(grant-back). Third-party components (DGS, Dear ImGui, GLAD, GLM, SDL3, OpenAL, …) keep their
+own licenses.
 
 ---
 

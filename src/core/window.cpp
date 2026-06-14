@@ -1,5 +1,8 @@
 #include "window.h"
 
+#include <cstring>
+#include <string>
+
 namespace Haruka::Core {
 
     Window::Window(const WindowProps& props) {
@@ -19,14 +22,35 @@ namespace Haruka::Core {
         }
         // Audio OPCIONAL (micro de voz + efectos + enumeración de dispositivos en Config).
         // No debe tumbar el arranque si no hay tarjeta de sonido (servidor/headless).
-        if (!SDL_WasInit(SDL_INIT_AUDIO) && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
-            std::cerr << "[SDL] audio no disponible: " << SDL_GetError()
-                      << " (sin micro/efectos)" << std::endl;
-        } else {
+        bool audioOk = SDL_WasInit(SDL_INIT_AUDIO) || SDL_InitSubSystem(SDL_INIT_AUDIO);
+        if (!audioOk) {
+            // El driver por defecto falló → prueba cada driver compilado explícitamente
+            // (pipewire/pulseaudio/alsa…). Arregla el caso "SDL eligió un driver que no va".
+            std::string firstErr = SDL_GetError();
+            int nd = SDL_GetNumAudioDrivers();
+            for (int i = 0; i < nd && !audioOk; ++i) {
+                const char* drv = SDL_GetAudioDriver(i);
+                if (!drv || !std::strcmp(drv, "dummy") || !std::strcmp(drv, "disk")) continue;
+                SDL_SetHint(SDL_HINT_AUDIO_DRIVER, drv);
+                if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+                    audioOk = true;
+                    std::cerr << "[SDL] audio: driver por defecto falló, usando '" << drv << "'\n";
+                }
+            }
+            if (!audioOk) {
+                std::cerr << "[SDL] audio no disponible: " << firstErr << " (sin micro/efectos)\n"
+                          << "[SDL] drivers compilados (" << nd << "):";
+                for (int i = 0; i < nd; ++i) std::cerr << ' ' << SDL_GetAudioDriver(i);
+                std::cerr << "\n[SDL]   solo dummy/disk → SDL3 sin backends (reinstala "
+                             "pipewire/pulseaudio/alsa -devel y recompila SDL3).\n";
+            }
+        }
+        if (audioOk) {
             int ri = 0, ro = 0;
             if (SDL_AudioDeviceID* a = SDL_GetAudioRecordingDevices(&ri)) SDL_free(a);
             if (SDL_AudioDeviceID* a = SDL_GetAudioPlaybackDevices(&ro))  SDL_free(a);
-            std::cerr << "[SDL] audio OK — entradas: " << ri << ", salidas: " << ro << std::endl;
+            std::cerr << "[SDL] audio OK (" << (SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?")
+                      << ") — entradas: " << ri << ", salidas: " << ro << std::endl;
         }
 
         // Configuración de OpenGL

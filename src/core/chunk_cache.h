@@ -43,6 +43,14 @@ public:
      * @return Pointer to cached ChunkData, or nullptr if not in cache
      */
     const ChunkData* getChunk(const PlanetChunkKey& key);
+
+    /**
+     * @brief Copies a cached chunk into `out` while holding the cache lock.
+     * @return true if found. Use this (not getChunk) when the data is consumed AFTER the
+     *  call: getChunk returns a pointer INTO the map, which a concurrent addChunk
+     *  (async generation → insert/rehash/evict) can invalidate → use-after-free.
+     */
+    bool getChunkCopy(const PlanetChunkKey& key, ChunkData& out);
     
     /**
      * @brief Adds a chunk to the cache.

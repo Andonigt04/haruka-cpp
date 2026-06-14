@@ -13,8 +13,16 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     std::lock_guard<std::mutex> lock(m_renderMutex);
     uint64_t hash = ChunkCache::keyToHash(key);
 
-    // Si ya existe, no lo volvemos a crear
-    if (m_gpuMeshes.count(hash)) return;
+    // Si ya existe: lo saltamos, SALVO que esté "stale" (deformado) → lo reemplazamos en el
+    // sitio (limpiar la malla vieja y crear la nueva) sin que haya habido agujero entremedias.
+    bool stale = m_stale.count(hash) != 0;
+    if (m_gpuMeshes.count(hash)) {
+        if (!stale) return;
+        cleanupMesh(m_gpuMeshes[hash]);
+        m_stale.erase(hash);
+    } else if (stale) {
+        m_stale.erase(hash);
+    }
 
     RenderMesh mesh;
     mesh.indexCount  = (uint32_t)data.indices.size();
@@ -87,6 +95,9 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
 
+    // Retira mallas STALE cuya área ya cubre esta recién añadida (sin agujero).
+    purgeStaleCoveredBy(key);
+
     glBindVertexArray(0);
 }
 
@@ -98,6 +109,50 @@ void TerrainRenderer::removeFromScene(const std::string& planetName, const Plane
         cleanupMesh(m_gpuMeshes[hash]);
         m_gpuMeshes.erase(hash);
     }
+    m_stale.erase(hash);
+}
+
+void TerrainRenderer::markStale(const PlanetChunkKey& key) {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    uint64_t hash = ChunkCache::keyToHash(key);
+    if (m_gpuMeshes.count(hash)) m_stale.insert(hash); // sigue dibujándose hasta cubrirse
+}
+
+void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
+    // CALLER HOLDS m_renderMutex.
+    // (1) SUBDIVIDE: 'key' es un hijo fino. Si su PADRE está stale y los 4 hijos ya
+    //     están residentes y NO-stale, el padre ya está cubierto → fuera.
+    if (key.lod > 0) {
+        PlanetChunkKey parent{ key.face, (uint8_t)(key.lod - 1), key.x >> 1, key.y >> 1 };
+        uint64_t ph = ChunkCache::keyToHash(parent);
+        if (m_stale.count(ph) && m_gpuMeshes.count(ph)) {
+            const uint8_t  cl = (uint8_t)(parent.lod + 1);
+            const uint32_t bx = parent.x * 2, by = parent.y * 2;
+            const PlanetChunkKey kids[4] = {
+                { parent.face, cl, bx,     by     }, { parent.face, cl, bx + 1, by     },
+                { parent.face, cl, bx,     by + 1 }, { parent.face, cl, bx + 1, by + 1 },
+            };
+            bool allReady = true;
+            for (const auto& kk : kids) {
+                uint64_t kh = ChunkCache::keyToHash(kk);
+                auto it = m_gpuMeshes.find(kh);
+                if (it == m_gpuMeshes.end() || !it->second.isReady || m_stale.count(kh)) { allReady = false; break; }
+            }
+            if (allReady) { cleanupMesh(m_gpuMeshes[ph]); m_gpuMeshes.erase(ph); m_stale.erase(ph); }
+        }
+    }
+    // (2) MERGE: 'key' es grueso. Cualquier malla stale MÁS FINA dentro de su área ya
+    //     queda cubierta por 'key' → fuera.
+    std::vector<uint64_t> drop;
+    for (auto& [h, mesh] : m_gpuMeshes) {
+        if (!m_stale.count(h)) continue;
+        const PlanetChunkKey& s = mesh.key;
+        if (s.face == key.face && s.lod > key.lod) {
+            uint32_t shift = (uint32_t)(s.lod - key.lod);
+            if ((s.x >> shift) == key.x && (s.y >> shift) == key.y) drop.push_back(h);
+        }
+    }
+    for (uint64_t h : drop) { cleanupMesh(m_gpuMeshes[h]); m_gpuMeshes.erase(h); m_stale.erase(h); }
 }
 
 void TerrainRenderer::render(const Haruka::WorldPos& cameraPos) {
@@ -266,6 +321,21 @@ std::vector<PlanetChunkKey> TerrainRenderer::invalidateSphere(const glm::dvec3& 
     return hit;
 }
 
+std::vector<PlanetChunkKey> TerrainRenderer::markStaleSphere(const glm::dvec3& center, double radius) {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    std::vector<PlanetChunkKey> hit;
+    for (auto& [hash, m] : m_gpuMeshes) {
+        glm::dvec3 c = m.chunkCenter + glm::dvec3(m.bsCenter);
+        double r = (m.bsRadius > 0.0f) ? (double)m.bsRadius
+                                       : m.planetRadius * 2.0 / double(1u << m.lod);
+        if (glm::length(c - center) < radius + r) {
+            m_stale.insert(hash);   // se reemplaza cuando regenere; mientras tanto SE SIGUE DIBUJANDO
+            hit.push_back(m.key);
+        }
+    }
+    return hit;
+}
+
 void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
     if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
@@ -274,4 +344,4 @@ void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
 }
 
-}
+} // namespace Haruka

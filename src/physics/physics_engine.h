@@ -12,6 +12,8 @@
 #include "core/world_system.h"
 #include "game/planetary_system.h"
 
+namespace Haruka { namespace Physics {
+
 class RaycastSimple;
 
 /** @brief Rigid body simulation record used by the physics engine. */
@@ -73,6 +75,8 @@ public:
 
     /** @brief Registra/limpia cajas orientadas de objetos colocados (mesas, estaciones). */
     void addPlacedOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
+    // Obstáculos colocados (paredes/estructuras) — para navegación/propagación (sonido, conjuros).
+    const std::vector<StaticOBB>& getPlacedOBBs() const { return placedOBBs; }
     void clearPlacedOBBs();
 
     /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
@@ -90,6 +94,11 @@ public:
     void setGravity(glm::dvec3 g) { gravity = g; }
     /** @brief Returns current gravity acceleration. */
     glm::dvec3 getGravity() const { return gravity; }
+
+    /** @brief Sets the ambient WIND velocity (m/s) used for aerodynamic drag. The
+     *  atmosphere (WorldSystem) provides it; the engine applies it per active body
+     *  in integrateForces (O(bodies), inherentemente localizado — sin coste global). */
+    void setWind(const glm::dvec3& windVel) { m_wind = windVel; }
     
     /** @brief Returns collision events from last update. */
     const std::vector<CollisionInfo>& getCollisions() const { return collisions; }
@@ -165,6 +174,14 @@ private:
     std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
+
+    // Arrastre aerodinámico: viento ambiente (m/s) + coeficientes SUAVES (la
+    // resistencia del aire amortigua hacia 0; el viento empuja sutilmente). Valores
+    // pequeños para no zarandear al jugador; afecta sobre todo a objetos sueltos.
+    glm::dvec3 m_wind{0.0};
+    double     m_airDamp  = 0.10;  // amortiguación del aire (1/s) hacia velocidad 0
+    double     m_windCoef = 0.010; // acoplamiento cuadrático con la vel. relativa al viento
+
     std::unique_ptr<Octree> octree;
 
     // Planetary physics members
@@ -186,6 +203,15 @@ private:
     void broadPhaseAABB();
 };
 
+}} // namespace Haruka::Physics
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Physics::RigidBody;
+using Haruka::Physics::CollisionInfo;
+using Haruka::Physics::StaticBox;
+using Haruka::Physics::StaticOBB;
+using Haruka::Physics::PhysicsEngine;
 namespace Haruka {
-using PhysicsEngine = ::PhysicsEngine;
+    using Physics::RigidBody; using Physics::CollisionInfo; using Physics::StaticBox;
+    using Physics::StaticOBB; using Physics::PhysicsEngine;
 }

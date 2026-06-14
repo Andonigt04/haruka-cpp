@@ -8,6 +8,8 @@
 #include <glm/glm.hpp>
 #include <string>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Image-based lighting precomputation helper.
  *
@@ -61,3 +63,8 @@ private:
     unsigned int cubeVAO = 0, cubeVBO = 0;
     unsigned int quadVAO = 0, quadVBO = 0;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::IBL;
+namespace Haruka { using Renderer::IBL; }

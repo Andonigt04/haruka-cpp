@@ -86,10 +86,11 @@ namespace Haruka {
     }
 
     void TerrainStreamingSystem::processLODUpdate(const LODUpdate& update) {
-        // 1. ELIMINAR de la GPU lo que ya no es visible
-        for (const auto& key : update.chunksToUnload) {
-            m_renderer.removeFromScene(update.planetName, key);
-        }
+        // NOTA: la DESCARGA de GPU (chunksToUnload) ya NO se hace aquí. La gestiona
+        // el PlanetarySystem de forma DIFERIDA: no quita el chunk viejo hasta que su
+        // reemplazo de LOD (padre al fusionar, o los 4 hijos al subdividir) está
+        // residente en GPU → evita el agujero/parpadeo al recargar y que los props
+        // floten sobre terreno momentáneamente ausente.
 
         // 2. REFRESCAR en la Caché lo que se mantiene (para que el LRU no lo borre)
         for (const auto& key : update.chunksToKeep) {
@@ -98,13 +99,11 @@ namespace Haruka {
 
         // 3. CARGAR lo nuevo a la GPU
         for (const auto& key : update.chunksToLoad) {
-            // Intentamos sacar el dato de la Caché (RAM)
-            const auto* data = m_cache.getChunk(key);
-            
-            if (data) {
-                // ¡HIT! El dato ya existe en RAM, lo mandamos directo a la GPU
-                m_renderer.addToScene(update.planetName, key, *data);
-            }
+            // Copy out of the cache UNDER ITS LOCK (not a raw pointer): a concurrent async
+            // addChunk (insert/rehash/evict) would otherwise dangle the pointer → crash.
+            ChunkData data;
+            if (m_cache.getChunkCopy(key, data))
+                m_renderer.addToScene(update.planetName, key, data);
         }
     }
 

@@ -7,6 +7,8 @@
 
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /** @brief Basic 2D texture wrapper. */
 class Texture {
 public:
@@ -38,4 +40,9 @@ private:
     static float s_maxAnisotropy; // 1 = isotropic
     static float s_lodBias;       // 0 = no bias
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::Texture;                 // back-compat alias (migration)
+namespace Haruka { using Renderer::Texture; }
 #endif

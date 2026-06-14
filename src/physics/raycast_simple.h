@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace Haruka { namespace Physics {
+
 /**
  * @brief Lightweight ray-triangle raycasting utility.
  *
@@ -77,3 +79,11 @@ private:
                               float& distance,
                               glm::vec3& hitPoint);
 };
+
+
+}} // namespace Haruka::Physics
+
+using Haruka::Physics::RaycastHit;
+using Haruka::Physics::RaycastTriangle;
+using Haruka::Physics::RaycastSimple;
+namespace Haruka { using Physics::RaycastHit; using Physics::RaycastTriangle; using Physics::RaycastSimple; }

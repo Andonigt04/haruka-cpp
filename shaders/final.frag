@@ -28,6 +28,8 @@ layout(std140, binding = 0) uniform PerFrameData {
     int  enableIBL;
     int  enableShadows;
     int  _pad3[3];
+    vec3 moonDirection;  float moonIntensity;   // 2ª luz (luna)
+    vec3 moonLightColor; float _pad4;
 };
 
 layout(std140, binding = 1) uniform PerObjectData {
@@ -62,7 +64,11 @@ void main() {
     if (enableShadows == 0) diffuse    *= 1.08;
     if (enableBloom   == 0) highlights *= 0.55;
 
-    vec3 color = ambient + diffuse + highlights;
+    // Luz de luna (2ª luz): difusa tenue azulada para los objetos de noche.
+    float ndlMoon = max(dot(N, normalize(moonDirection)), 0.0);
+    vec3  moonlight = moonLightColor * moonIntensity * ndlMoon * baseColor;
+
+    vec3 color = ambient + diffuse + highlights + moonlight;
     if (enableHDR != 0) {
         color = color / (color + vec3(1.0));
         color = pow(color, vec3(1.0 / 2.2));

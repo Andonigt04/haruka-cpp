@@ -14,6 +14,8 @@
 #include <iostream>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
  *
@@ -180,4 +182,10 @@ private:
         }
     }
 };
+
+}} // namespace Haruka::Renderer
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Renderer::Shader;
+namespace Haruka { using Renderer::Shader; }
 #endif

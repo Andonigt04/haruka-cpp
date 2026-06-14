@@ -8,6 +8,8 @@
 #include <glad/glad.h>
 #include <vector>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Cascaded directional shadow map system.
  *
@@ -80,3 +82,9 @@ private:
     /** @brief Allocates resources for one cascade. */
     void createShadowMap(int cascade);
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::CascadedShadowMap;
+namespace Haruka { using Renderer::CascadedShadowMap; }

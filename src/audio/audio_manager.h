@@ -9,6 +9,7 @@
  */
 #include <cstdint>
 #include <string>
+#include <vector>
 #include <unordered_map>
 #include <glm/glm.hpp>
 
@@ -24,6 +25,10 @@ public:
     bool init(const std::string& outputDevice = "");
     void shutdown();
     bool available() const { return m_sys.ok(); }
+
+    // Dispositivos de SALIDA según OpenAL (la salida va por OpenAL, no por SDL). El nombre
+    // sirve tal cual para init()/alcOpenDevice. Vacío = solo el predeterminado.
+    static std::vector<std::string> playbackDevices();
 
     void setListener(const glm::dvec3& pos, const glm::dvec3& fwd, const glm::dvec3& up);
 
@@ -51,7 +56,12 @@ private:
     AudioLoader m_loader;
     glm::dvec3  m_listenerPos{0.0};
 
-    struct World { glm::dvec3 pos; uint32_t voice; float gain; };
+    // gainBase = volumen pedido; gainCached = volumen ya con propagación (se recalcula a ratos,
+    // no cada frame — el pathfind es caro). listenerAtCalc/recalcIn controlan cuándo recalcular.
+    struct World {
+        glm::dvec3 pos; uint32_t voice; float gainBase;
+        float gainCached = 1.0f; int recalcIn = 0; glm::dvec3 listenerAtCalc{0.0};
+    };
     std::unordered_map<SourceId, World> m_world;
     SourceId m_nextId = 1;
 };

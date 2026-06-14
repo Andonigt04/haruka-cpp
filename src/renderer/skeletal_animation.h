@@ -23,7 +23,7 @@
 #include <map>
 #include <memory>
 
-class Shader;
+namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
 namespace Haruka {
 
@@ -150,3 +150,4 @@ private:
 };
 
 } // namespace Haruka
+

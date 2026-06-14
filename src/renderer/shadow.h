@@ -8,6 +8,8 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Directional shadow map wrapper.
  *
@@ -37,4 +39,9 @@ private:
     /** @brief Allocates FBO/texture objects. */
     void setupFramebuffer();
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::Shadow;
+namespace Haruka { using Renderer::Shadow; }
 #endif

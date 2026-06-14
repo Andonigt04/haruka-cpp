@@ -5,6 +5,8 @@
 #pragma once
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Deferred shading geometry buffer wrapper.
  *
@@ -43,3 +45,8 @@ private:
     unsigned int rboDepth = 0;
     unsigned int width, height;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::GBuffer;
+namespace Haruka { using Renderer::GBuffer; }

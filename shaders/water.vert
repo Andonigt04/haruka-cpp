@@ -44,6 +44,10 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 sunDirection;    float _pad1;
     vec3 sunLightColor;   float ambientStrength;
     int  enableHDR;
+    int  _enableBloom; int _enableSSAO; int _enableIBL; int _enableShadows;
+    int  _pad3a; int _pad3b; int _pad3c;
+    vec3 moonDirection;  float moonIntensity;
+    vec3 moonLightColor; float _pad4;
 };
 
 const int   NUM_WAVES = 6;
@@ -51,8 +55,10 @@ const float GRAV      = 9.81;
 
 // Per-wave: wavelength (m), amplitude (m), steepness, direction angle offset (rad).
 const float WAVELEN[NUM_WAVES] = float[](120.0, 73.0, 41.0, 23.0, 13.0, 7.0);
-const float AMP[NUM_WAVES]     = float[](1.6,   1.0,  0.55, 0.30, 0.16, 0.08);
-const float STEEP[NUM_WAVES]   = float[](0.85,  0.80, 0.75, 0.70, 0.60, 0.50);
+// Amplitudes (m) — oleaje calmado (~mitad) para un mar realista, no embravecido.
+// El sistema de mareas (fase/posición de la luna) escalará esto en runtime vía u_windStrength.
+const float AMP[NUM_WAVES]     = float[](0.8,   0.5,  0.28, 0.15, 0.08, 0.05);
+const float STEEP[NUM_WAVES]   = float[](0.75,  0.70, 0.65, 0.60, 0.50, 0.42);
 const float ANGOFF[NUM_WAVES]  = float[](0.0,  0.55, -0.6,  1.1, -1.3,  0.9);
 
 void main() {

@@ -30,6 +30,10 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3  sunDirection; float _pad1;
     vec3  sunLightColor; float ambientStrength;
     int   enableHDR;
+    int   _enableBloom; int _enableSSAO; int _enableIBL; int _enableShadows;
+    int   _pad3a; int _pad3b; int _pad3c;
+    vec3  moonDirection;  float moonIntensity;   // 2ª luz (luna)
+    vec3  moonLightColor; float _pad4;
 };
 
 const vec3 DEEP_COLOR    = vec3(0.015, 0.07, 0.14);
@@ -84,9 +88,19 @@ void main() {
     float ndl = max(dot(N, L), 0.0);
     color += sunLightColor * body * ndl * 0.25;
 
+    // Luz de luna: aporte difuso azulado + un brillo especular suave (reflejo lunar
+    // en el agua) → el mar nocturno no queda negro y tiene un destello plateado.
+    vec3  ML       = normalize(moonDirection);
+    float ndlMoon  = max(dot(N, ML), 0.0);
+    vec3  HM       = normalize(ML + V);
+    float specMoon = pow(max(dot(N, HM), 0.0), 300.0);
+    color += moonLightColor * moonIntensity * (body * ndlMoon + vec3(specMoon) * 0.6);
+
     // Sun specular glint.
-    float spec = pow(max(dot(N, H), 0.0), 256.0);
-    color += sunLightColor * spec * 1.5;
+    // Sun specular glint — más cerrado y tenue (el brillo anterior era demasiado
+    // drástico/irreal): reflejo de sol puntual, no un fogonazo en todo el mar.
+    float spec = pow(max(dot(N, H), 0.0), 400.0);
+    color += sunLightColor * spec * 0.45;
 
     color += ambientStrength * body;
 

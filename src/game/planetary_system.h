@@ -9,8 +9,9 @@
 #include "tools/math_types.h"
 #include "core/scene/scene_manager.h"
 #include "core/terrain/terrain_sample.h"     // WorldGenParams (terreno)
+#include "tools/planetary_types.h"           // PlanetChunkKey (descarga diferida)
 
-class Texture; // global (renderer/texture.h) — NO está en namespace Haruka
+namespace Haruka { namespace Renderer { class Texture; } } using Haruka::Renderer::Texture;
 
 namespace Haruka {
 
@@ -69,7 +70,8 @@ public:
     void syncFromScene(const SceneManager& scene);
 
     int getGPUChunkCount()    const;
-    int getPendingChunks()    const;
+    int getPendingChunks()    const;  // chunks generating async (in-flight, few)
+    int getQueuedChunks()     const;  // chunks still queued to generate (the real backlog)
     int getCachedChunks()     const;
     int getCacheMemoryMB()    const;
     int getCacheMaxMemoryMB() const;

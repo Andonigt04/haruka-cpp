@@ -10,7 +10,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
-class Shader; // global (renderer/shader.h)
+namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
 namespace Haruka {
 

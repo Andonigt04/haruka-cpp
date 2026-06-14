@@ -29,7 +29,7 @@ struct GraphicsSettings {
     float           bloomThreshold  = 0.8f; // luma above which pixels bloom
     float           bloomStrength   = 0.7f; // additive bloom intensity
     bool            motionBlur      = false;
-    bool            fog             = true;  // niebla atmosférica del terreno (consola: fog 0|1)
+    bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
     int             chunkMemoryMB   = 384;  // terrain chunk cache memory budget (MB). 512 en preset High.
     int             maxFps          = 0;    // frame-rate cap (0 = uncapped)
 };

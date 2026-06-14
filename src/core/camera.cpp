@@ -2,6 +2,8 @@
 
 #include <SDL3/SDL.h>
 
+namespace Haruka { namespace Core {
+
 Camera::Camera(Haruka::WorldPos startPos)
     : position(startPos), orientation(glm::dvec3(0.0, 0.0, 0.0)), zoom(45.0f) {}
 
@@ -51,3 +53,6 @@ glm::mat4 Camera::getProjectionMatrix() const {
 glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
     return glm::perspective(glm::radians(zoom), aspectRatio, 0.1f, 300000000000.0f);
 }
+
+
+}} // namespace Haruka::Core
