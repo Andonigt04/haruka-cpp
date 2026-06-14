@@ -215,7 +215,7 @@ Chunks are **generated asynchronously** using multi-octave Perlin noise and cach
 
 ## 📄 License
 
-**Haruka Source-Available License v1.0** — © 2026 Andoni García Torres. See [LICENSE](../LICENSE.md).
+**Haruka Source-Available License v1.0** — © 2026 Andoni García Torres. See [LICENSE](LICENSE.md).
 
 Free to view, study, modify, and use for **non-commercial** purposes; **commercial use needs
 written permission**. Any improvement built using the engine is **licensed back** to the author
