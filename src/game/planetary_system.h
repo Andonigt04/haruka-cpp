@@ -10,6 +10,7 @@
 #include "core/scene/scene_manager.h"
 #include "core/terrain/terrain_sample.h"     // WorldGenParams (terreno)
 #include "tools/planetary_types.h"           // PlanetChunkKey (descarga diferida)
+#include "core/lod_system.h"                  // LODUpdate (cache del último set)
 
 namespace Haruka { namespace Renderer { class Texture; } } using Haruka::Renderer::Texture;
 
@@ -35,6 +36,7 @@ public:
         Haruka::WorldPos position;
         double radius;
         nlohmann::json terrainSettings; // Semilla, capas de ruido, etc.
+        bool isHome = false;            // planeta del jugador (flags.originShiftingTarget)
         // Aquí podrías añadir parámetros orbitales (semi-eje mayor, etc.)
     };
 
@@ -68,6 +70,13 @@ public:
           std::vector<Planet>& getPlanets()       { return m_planets; }
 
     void syncFromScene(const SceneManager& scene);
+
+    /** @brief Construye TODOS los cuerpos celestes desde la escena: planetas (los
+     *  que tienen terrainSettings → terreno por chunks/LOD) y cuerpos con geometría
+     *  PROCEDURAL (p.ej. la Luna: esfera + cráteres, vía properties.proceduralMesh).
+     *  Punto de entrada único — toda la interpretación escena→cuerpos vive aquí, no
+     *  en Application. Requiere contexto GL (genera mallas). */
+    void buildFromScene(SceneManager& scene);
 
     int getGPUChunkCount()    const;
     int getPendingChunks()    const;  // chunks generating async (in-flight, few)
@@ -163,6 +172,14 @@ private:
     void bindTerrainTextures(const Planet& planet); // carga diferida + bind + uniforms
     std::unique_ptr<TerrainStreamingSystem> m_streaming;
     std::unique_ptr<LODSystem> m_lod;
+    // Último set deseado por planeta. Cuando el LOD está en THROTTLE (cámara quieta)
+    // NO recalculamos, pero SÍ reprocesamos este último set para SUBIR a GPU lo que
+    // se haya generado mientras tanto (si no, los chunks no aparecen hasta moverte).
+    std::vector<LODUpdate> m_lastUpdates;
+    // Ventana de "catch-up": solo subimos lo recién generado mientras haya generación
+    // activa (+1 s de margen). Cuando todo está cargado y la cámara quieta, el
+    // catch-up se apaga → sin el pico periódico de subida.
+    int m_catchupGrace = 0;
 #ifdef HARUKA_MOD_DEFORM
     std::unique_ptr<DeformationField> m_deform; // player terrain edits
 #endif
@@ -177,6 +194,13 @@ private:
     // first frame / new planet.
     std::vector<glm::dvec3> m_lastLODCamPos;
     bool m_forceLOD = true;
+
+    // Predicción de movimiento: velocidad suavizada de la cámara para PEDIR chunks
+    // por delante del jugador (lookahead) → menos pop-in al moverse/volar rápido. El
+    // render usa la cámara REAL; solo el LOD/streaming mira el punto adelantado.
+    glm::dvec3 m_prevCamPos{0.0};
+    glm::dvec3 m_camVel{0.0};
+    bool       m_havePrevCam = false;
 
     void updateOrbits(double dt);
 };

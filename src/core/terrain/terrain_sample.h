@@ -45,6 +45,12 @@ namespace Haruka {
     struct WorldGenParams {
         uint32_t seed = 0;
 
+        // --- Perfil del cuerpo (gobierna TODO el sampler) ---
+        // 0 = terran (continentes/montañas/océano/lagos), 1 = moon (cráteres, gris,
+        // SIN mar), 2 = gas (bandas suaves, sin relieve duro). Lo fija la escena vía
+        // terrainSettings.config.profile ("terran"/"moon"/"gas").
+        int profile = 0;
+
         // --- Etapa 1: geografía (ruido A, binario base) ---
         float oceanFraction = 0.60f;  ///< fracción de superficie que es mar  (hash seed, ~[0.45,0.75])
         float seaThreshold  = 0.0f;   ///< umbral de continentalidad (c0) que produce oceanFraction

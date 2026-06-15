@@ -46,6 +46,9 @@ namespace Haruka {
          *  on reload. No-op if the chunk isn't resident. */
         void markStale(const PlanetChunkKey& key);
 
+        /** @brief True si la malla de agua del chunk ya está subida en GPU. */
+        bool isResident(const PlanetChunkKey& key) const;
+
         /** Renders this planet's ocean. Caller binds the water shader + UBO first. */
         void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
 

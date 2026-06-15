@@ -14,7 +14,8 @@ bool LODSystem::isVisible(const PlanetChunkKey& key) const {
     return m_currentFrameChunks.count(ChunkCache::keyToHash(key)) > 0;
 }
 
-LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos) {
+LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos,
+                                    const ResidencyFn& isResident) {
     LODUpdate update;
     update.planetName = planet->name;
     m_currentFrameChunks.clear();
@@ -37,7 +38,7 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
         glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
 
         LODNode root(rootKey, center, radius * 2.0);
-        recursiveProcess(&root, cameraPos, update, radius, planetPos);
+        recursiveProcess(&root, cameraPos, update, radius, planetPos, isResident);
     }
 
     // 2:1 balance: ningún chunk vecino puede diferir en más de 1 nivel de LOD.
@@ -124,14 +125,14 @@ void LODSystem::balanceLeaves() {
 static int altitudeMaxLOD(double camDist, double radius, int hardMax) {
     double alt = (radius > 1e-9) ? std::max(0.0, (camDist - radius) / radius) : 0.0;
     if (alt < 0.02) return hardMax;                    // ~near surface: full detail
-    if (alt < 0.08) return std::max(hardMax - 3, 7);   // low flight
-    if (alt < 0.25) return 6;                           // high flight
-    if (alt < 1.0)  return 5;                           // low orbit
-    if (alt < 4.0)  return 4;                           // orbit: whole planet, coarse
-    return 3;                                           // deep space: coarsest
+    if (alt < 0.08) return std::max(hardMax - 2, 10);  // low flight
+    if (alt < 0.25) return 8;                           // high flight
+    if (alt < 1.0)  return 7;                           // low orbit (antes 5 → solo ~39 chunks: muy bloqueado)
+    if (alt < 4.0)  return 5;                           // orbit: planeta entero, más detalle
+    return 4;                                           // deep space: coarsest
 }
 
-void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos) {
+void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident) {
     // Use the distance from camera to the SURFACE of the planet in the chunk's
     // direction rather than to the chunk center.  This allows side faces to
     // subdivide near the horizon even though their centers are far away.
@@ -141,12 +142,40 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     uint64_t hash = ChunkCache::keyToHash(node->key);
 
     // Cap subdivision by camera altitude so a distant view shows the WHOLE planet cheaply.
-    const int camMaxLOD = altitudeMaxLOD(glm::distance(cameraPos, planetPos), radius, m_maxLOD);
+    const double camDist = glm::distance(cameraPos, planetPos);
+    const int camMaxLOD = altitudeMaxLOD(camDist, radius, m_maxLOD);
 
-    if (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD) {
+    // SUELO de LOD: el planeta ENTERO se subdivide hasta m_minLOD (todas las ~1536 piezas
+    // base cargadas), PERO solo cuando estás CERCA de él (alt < ~1.5 radios). Sin este
+    // gate, los planetas LEJANOS (Luna/Júpiter, simples puntos en el cielo) también se
+    // forzarían a 1536 chunks cada uno → 3×1536 satura generación/memoria y no carga nada.
+    const double camAlt = (radius > 1e-9) ? (camDist / radius - 1.0) : 1e9; // en radios
+    const bool belowMin = (node->key.lod < m_minLOD) && (camAlt < 1.5);
+    const bool distSplit = (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD);
+    bool wantSplit = belowMin || distSplit;
+
+    // CARGA PROGRESIVA (grueso→fino, sin huecos negros): solo bajamos un nivel si este
+    // nodo YA está residente (dibujándose) o ya tenía hijos residentes de un frame
+    // previo. Así nunca pedimos chunks finos sin tener antes el grueso encima: siempre
+    // hay algo dibujado mientras el detalle llega, y refina nivel a nivel. Sin predicado
+    // (isResident=nullptr) → comportamiento clásico (subdivide directo al objetivo).
+    if (wantSplit && isResident) {
+        const uint8_t  cl = (uint8_t)(node->key.lod + 1);
+        const uint32_t bx = node->key.x * 2, by = node->key.y * 2;
+        const bool childIn = isResident({ node->key.face, cl, bx,     by     })
+                          || isResident({ node->key.face, cl, bx + 1, by     })
+                          || isResident({ node->key.face, cl, bx,     by + 1 })
+                          || isResident({ node->key.face, cl, bx + 1, by + 1 });
+        if (!isResident(node->key) && !childIn) {
+            wantSplit = false;             // aún no está el grueso → espera
+            update.residencyLimited = true; // el llamador debe recalcular hasta refinar
+        }
+    }
+
+    if (wantSplit) {
         subdivide(node, radius, planetPos);
         for (auto& child : node->children) {
-            recursiveProcess(child.get(), cameraPos, update, radius, planetPos);
+            recursiveProcess(child.get(), cameraPos, update, radius, planetPos, isResident);
         }
     } else {
         // Nodo hoja: solo registrar. El load/keep/unload se calcula tras el

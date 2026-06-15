@@ -335,7 +335,7 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
     }
 #endif
 
-    // Debug HUD — top-left overlay
+    //Debug HUD — top-left overlay
     {
         Uint32 winFlags = window ? SDL_GetWindowFlags(window) : 0;
         bool kbFocus    = !!(winFlags & SDL_WINDOW_INPUT_FOCUS);
@@ -366,43 +366,6 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
         }
         ImGui::Separator();
 
-        // Input system state (SettingsManager — what the bindings actually see)
-        {
-            glm::vec2 move = sm.readValue<glm::vec2>("Move");
-            ImGui::Text("IS  Move=(%.1f,%.1f)  perf=%d  start=%d  cancel=%d",
-                move.x, move.y,
-                sm.isPerformed("Move"), sm.isStarted("Move"), sm.isCanceled("Move"));
-            ImGui::Text("IS  Sprint perf=%d  Jump perf=%d  Descend perf=%d",
-                sm.isPerformed("Sprint"), sm.isPerformed("Jump"), sm.isPerformed("Descend"));
-        }
-        ImGui::Separator();
-
-        // Raw sources for diagnosing why the input system may not see keys
-        {
-            int numKeys = 0;
-            const bool* kbd = SDL_GetKeyboardState(&numKeys);
-            ImGui::Text("poll W=%d S=%d A=%d D=%d  Shift=%d  Ctrl=%d",
-                kbd[SDL_SCANCODE_W], kbd[SDL_SCANCODE_S],
-                kbd[SDL_SCANCODE_A], kbd[SDL_SCANCODE_D],
-                kbd[SDL_SCANCODE_LSHIFT], kbd[SDL_SCANCODE_LCTRL]);
-            ImGui::Text("evnt W=%d S=%d A=%d D=%d  Shift=%d  Ctrl=%d",
-                (int)g_evtKeys[SDL_SCANCODE_W], (int)g_evtKeys[SDL_SCANCODE_S],
-                (int)g_evtKeys[SDL_SCANCODE_A], (int)g_evtKeys[SDL_SCANCODE_D],
-                (int)g_evtKeys[SDL_SCANCODE_LSHIFT], (int)g_evtKeys[SDL_SCANCODE_LCTRL]);
-        }
-        ImGui::Text("key_ev=%d  mouse_ev=%d  last=%s",
-            g_evtKeyCount, g_evtMouseCount, SDL_GetScancodeName(g_lastScancode));
-        ImGui::Text("mouse_dx=%.2f  mouse_dy=%.2f  chat=%d",
-            g_mouseDx, g_mouseDy, (int)g_chatFocused);
-        ImGui::Separator();
-        ImGui::Text("kb_focus=%d  mouse_focus=%d  ptr_lock=%d",
-            kbFocus,
-            (int)!!(winFlags & SDL_WINDOW_MOUSE_FOCUS),
-            (int)mouseLock);
-        if (!kbFocus)
-            ImGui::TextColored(ImVec4(1,0.4f,0.2f,1), ">> CLICK WINDOW FOR KEYBOARD <<");
-        if (g_chatFocused)
-            ImGui::TextColored(ImVec4(1,0.6f,0.1f,1), ">> CHAT FOCUSED — press Esc <<");
 #ifdef HARUKA_NETWORK
         ImGui::Separator();
         {
@@ -417,7 +380,7 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
 #endif
         ImGui::End();
     }
-
+    
     // Chat UI
     ImGuiIO& io = ImGui::GetIO();
     float chatW = 360.0f, chatH = 200.0f;

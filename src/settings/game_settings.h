@@ -30,8 +30,8 @@ struct GraphicsSettings {
     float           bloomStrength   = 0.7f; // additive bloom intensity
     bool            motionBlur      = false;
     bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
-    int             chunkMemoryMB   = 384;  // terrain chunk cache memory budget (MB). 512 en preset High.
-    int             maxFps          = 0;    // frame-rate cap (0 = uncapped)
+    int             chunkMemoryMB   = 2048;  // terrain chunk cache memory budget (MB). 512 en preset High.
+    int             maxFps          = 60;    // frame-rate cap (0 = uncapped)
 };
 
 // One-click presets. "Low/Laptop" trades quality for frame time + battery/heat;

@@ -69,7 +69,9 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
-    purgeStaleCoveredBy(key);   // retira agua stale ya cubierta por esta
+    // El agua NO se autopurga: su borrado lo dirige el TerrainRenderer (callback
+    // onChunkRemoved) para que agua y terreno cubran SIEMPRE lo mismo (sin huecos
+    // de océano ni mallas de agua huérfanas). Aquí solo reemplazamos si era stale.
     glBindVertexArray(0);
 }
 
@@ -83,6 +85,12 @@ void WaterRenderer::removeFromScene(const std::string& planetName, const PlanetC
         m_gpuMeshes.erase(it);
     }
     m_stale.erase(hash);
+}
+
+bool WaterRenderer::isResident(const PlanetChunkKey& key) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    auto it = m_gpuMeshes.find(ChunkCache::keyToHash(key));
+    return it != m_gpuMeshes.end() && it->second.isReady;
 }
 
 void WaterRenderer::markStale(const PlanetChunkKey& key) {
@@ -163,10 +171,12 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
 
     for (auto& [hash, mesh] : m_gpuMeshes) {
         if (!mesh.isReady || mesh.planetName != planet) continue;
-        glm::vec3 offset = glm::vec3(mesh.chunkCenter - glm::dvec3(cameraPos));
+        // chunkCenter es PLANET-LOCAL → sumamos el centro ACTUAL (cuerpos móviles).
+        glm::dvec3 worldChunkCenter = mesh.chunkCenter + m_planetCenter;
+        glm::vec3 offset = glm::vec3(worldChunkCenter - glm::dvec3(cameraPos));
 
         if (horizonOn) {
-            glm::dvec3 chunkFromCenter = mesh.chunkCenter - m_planetCenter;
+            glm::dvec3 chunkFromCenter = mesh.chunkCenter; // ya relativo al centro
             double cl = glm::length(chunkFromCenter);
             if (cl > 1e-6) {
                 double cosChunk    = glm::dot(camDir, chunkFromCenter / cl);

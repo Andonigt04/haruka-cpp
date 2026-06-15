@@ -274,6 +274,10 @@ private:
     std::unique_ptr<Shader> _planetShader;
     /** @brief Dedicated planet ocean shader. */
     std::unique_ptr<Shader> _waterShader;
+    /** @brief Atmospheric sky background shader (fullscreen). */
+    std::unique_ptr<Shader> _skyShader;
+    /** @brief Empty VAO for the attribute-less fullscreen sky triangle. */
+    unsigned int _skyVAO = 0;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */

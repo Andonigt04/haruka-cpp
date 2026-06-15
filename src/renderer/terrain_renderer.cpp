@@ -108,8 +108,23 @@ void TerrainRenderer::removeFromScene(const std::string& planetName, const Plane
     if (m_gpuMeshes.count(hash)) {
         cleanupMesh(m_gpuMeshes[hash]);
         m_gpuMeshes.erase(hash);
+        if (m_onRemoved) m_onRemoved(key);   // espejo: quita también su agua
     }
     m_stale.erase(hash);
+}
+
+bool TerrainRenderer::isResident(const PlanetChunkKey& key) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    auto it = m_gpuMeshes.find(ChunkCache::keyToHash(key));
+    return it != m_gpuMeshes.end() && it->second.isReady;
+}
+
+void TerrainRenderer::residentHashes(std::unordered_set<uint64_t>& out) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    out.clear();
+    out.reserve(m_gpuMeshes.size());
+    for (const auto& [h, mesh] : m_gpuMeshes)
+        if (mesh.isReady) out.insert(h);
 }
 
 void TerrainRenderer::markStale(const PlanetChunkKey& key) {
@@ -138,21 +153,29 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
                 auto it = m_gpuMeshes.find(kh);
                 if (it == m_gpuMeshes.end() || !it->second.isReady || m_stale.count(kh)) { allReady = false; break; }
             }
-            if (allReady) { cleanupMesh(m_gpuMeshes[ph]); m_gpuMeshes.erase(ph); m_stale.erase(ph); }
+            if (allReady) {
+                PlanetChunkKey pk = m_gpuMeshes[ph].key;
+                cleanupMesh(m_gpuMeshes[ph]); m_gpuMeshes.erase(ph); m_stale.erase(ph);
+                if (m_onRemoved) m_onRemoved(pk);   // espejo: quita su agua
+            }
         }
     }
     // (2) MERGE: 'key' es grueso. Cualquier malla stale MÁS FINA dentro de su área ya
     //     queda cubierta por 'key' → fuera.
-    std::vector<uint64_t> drop;
+    std::vector<PlanetChunkKey> drop;
     for (auto& [h, mesh] : m_gpuMeshes) {
         if (!m_stale.count(h)) continue;
         const PlanetChunkKey& s = mesh.key;
         if (s.face == key.face && s.lod > key.lod) {
             uint32_t shift = (uint32_t)(s.lod - key.lod);
-            if ((s.x >> shift) == key.x && (s.y >> shift) == key.y) drop.push_back(h);
+            if ((s.x >> shift) == key.x && (s.y >> shift) == key.y) drop.push_back(s);
         }
     }
-    for (uint64_t h : drop) { cleanupMesh(m_gpuMeshes[h]); m_gpuMeshes.erase(h); m_stale.erase(h); }
+    for (const auto& dk : drop) {
+        uint64_t h = ChunkCache::keyToHash(dk);
+        cleanupMesh(m_gpuMeshes[h]); m_gpuMeshes.erase(h); m_stale.erase(h);
+        if (m_onRemoved) m_onRemoved(dk);   // espejo: quita su agua
+    }
 }
 
 void TerrainRenderer::render(const Haruka::WorldPos& cameraPos) {
@@ -217,8 +240,11 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     for (auto& [hash, mesh] : m_gpuMeshes) {
         if (!mesh.isReady || mesh.planetName != planet) continue;
 
-        // Distance to the chunk CENTRE (on the reference sphere → height-independent).
-        glm::dvec3 toCenter = mesh.chunkCenter - glm::dvec3(cameraPos);
+        // chunkCenter es PLANET-LOCAL (relativo al centro del planeta) → sumamos el
+        // centro ACTUAL del planeta para obtener su posición en el mundo. Así el
+        // planeta puede MOVERSE (orbitar) sin regenerar chunks: solo cambia el centro.
+        glm::dvec3 worldChunkCenter = mesh.chunkCenter + m_planetCenter;
+        glm::dvec3 toCenter = worldChunkCenter - glm::dvec3(cameraPos);
         glm::vec3  offset    = glm::vec3(toCenter);
 
         // Horizon cull: hide chunks beyond the planet's curvature. occR uses the
@@ -229,7 +255,7 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
         if (m_hasPlanetCenter) {
             double occR = mesh.planetRadius - 15000.0;
             if (occR > 1.0 && camDist > occR + 2000.0) {
-                glm::dvec3 chunkFromCenter = mesh.chunkCenter - m_planetCenter;
+                glm::dvec3 chunkFromCenter = mesh.chunkCenter; // ya es relativo al centro
                 double cl = glm::length(chunkFromCenter);
                 if (cl > 1e-6) {
                     double cosChunk    = glm::dot(camDir, chunkFromCenter / cl);
@@ -306,8 +332,8 @@ std::vector<PlanetChunkKey> TerrainRenderer::invalidateSphere(const glm::dvec3& 
     std::vector<PlanetChunkKey> hit;
     for (auto it = m_gpuMeshes.begin(); it != m_gpuMeshes.end();) {
         RenderMesh& m = it->second;
-        // Mesh bounding sphere in world space: chunkCenter + bsCenter, radius bsRadius.
-        glm::dvec3 c = m.chunkCenter + glm::dvec3(m.bsCenter);
+        // Bounding sphere en MUNDO: chunkCenter es planet-local → + centro del planeta.
+        glm::dvec3 c = m.chunkCenter + m_planetCenter + glm::dvec3(m.bsCenter);
         double r = (m.bsRadius > 0.0f) ? (double)m.bsRadius
                                        : m.planetRadius * 2.0 / double(1u << m.lod);
         if (glm::length(c - center) < radius + r) {
@@ -325,7 +351,7 @@ std::vector<PlanetChunkKey> TerrainRenderer::markStaleSphere(const glm::dvec3& c
     std::lock_guard<std::mutex> lock(m_renderMutex);
     std::vector<PlanetChunkKey> hit;
     for (auto& [hash, m] : m_gpuMeshes) {
-        glm::dvec3 c = m.chunkCenter + glm::dvec3(m.bsCenter);
+        glm::dvec3 c = m.chunkCenter + m_planetCenter + glm::dvec3(m.bsCenter);
         double r = (m.bsRadius > 0.0f) ? (double)m.bsRadius
                                        : m.planetRadius * 2.0 / double(1u << m.lod);
         if (glm::length(c - center) < radius + r) {

@@ -86,6 +86,16 @@ namespace Haruka {
          *  no hay Luna (entonces no hay 2ª luz). */
         bool getMoonLight(const glm::dvec3& observer, glm::vec3& outDir, float& outIntensity) const;
 
+        /** @brief Fija el planeta ACTIVO (centro+radio) que usan atmósfera/día-noche/
+         *  luna/viento. Lo pasa Application desde el PlanetarySystem REAL (el de
+         *  WorldSystem está vacío). Sin esto, todo lo celeste cae a sus fallbacks. */
+        void setActivePlanet(const glm::dvec3& center, double radius) {
+            m_planetCenter = center; m_planetRadius = radius; m_hasActivePlanet = true;
+        }
+        /** @brief Avanza la mecánica celeste un frame: órbita del Sol (día/noche),
+         *  órbita de la Luna, marea y tiempo atmosférico. Lo llama el render. */
+        void advanceCelestial(double dt);
+
         // --- Atmósfera ---
         /** @brief Elevación solar: dot(arriba_local, dirección_al_Sol). 1=mediodía,
          *  0=horizonte, <0=noche. 1.0 si no hay planeta. */
@@ -133,6 +143,12 @@ namespace Haruka {
 
         // Tiempo de la atmósfera (s) para la deriva/ráfagas del viento.
         double        m_atmoTime = 0.0;
+
+        // Planeta ACTIVO real (lo fija Application; el m_planetarySystem propio está
+        // vacío). Lo usan atmósfera/día-noche/luna/viento/marea.
+        glm::dvec3    m_planetCenter{0.0};
+        double        m_planetRadius = 0.0;
+        bool          m_hasActivePlanet = false;
     };
 
 }

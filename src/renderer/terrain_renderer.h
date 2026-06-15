@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <string>
 #include <mutex>
+#include <functional>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include "core/chunk_cache.h"
@@ -81,6 +82,18 @@ namespace Haruka {
          *  one exists. No-op if the chunk isn't currently resident. */
         void markStale(const PlanetChunkKey& key);
 
+        /** @brief True si la malla del chunk ya está subida y lista en GPU. */
+        bool isResident(const PlanetChunkKey& key) const;
+        /** @brief Copia (bajo UN solo lock) los hashes de los chunks residentes+listos.
+         *  Para que el LOD consulte residencia miles de veces SIN re-bloquear el mutex
+         *  por nodo (evita la contención que disparaba el update a ~900 ms). */
+        void residentHashes(std::unordered_set<uint64_t>& out) const;
+
+        /** @brief Callback invoked whenever a terrain mesh is actually DELETED from the
+         *  GPU (unload or stale-purge). The water renderer mirrors terrain exactly by
+         *  removing its matching chunk here → water never diverges (no holes, no blobs). */
+        void setOnChunkRemoved(std::function<void(const PlanetChunkKey&)> cb) { m_onRemoved = std::move(cb); }
+
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
         int getLastDrawnCount() const { return m_lastDrawn; }
 
@@ -92,6 +105,7 @@ namespace Haruka {
         // Usamos el hash de la llave para identificar la malla en la GPU
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
         std::unordered_set<uint64_t>             m_stale;   // chunks a REEMPLAZAR en addToScene
+        std::function<void(const PlanetChunkKey&)> m_onRemoved; // espejo del agua
         mutable std::mutex m_renderMutex;
 
         glm::mat4  m_cullVP{1.0f};

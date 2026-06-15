@@ -181,11 +181,88 @@ WorldGenParams deriveWorldParams(uint32_t seed, double planetRadius) {
     return W;
 }
 
+// ====================== Perfil LUNA (cráteres, sin mar) ======================
+// Cuerpo gris y árido: base suave sobre la esfera (mares/tierras altas) + varias
+// capas de CRÁTERES (cuenca + borde elevado). Todo con autodiff (ValD) → normales
+// correctas. elev SIEMPRE > 0 (clamp) → el generador no emite agua. Se streamea por
+// chunks/LOD EXACTAMENTE igual que un planeta (misma estructura).
+static TerrainSample sampleMoon(const glm::vec3& dir, const WorldGenParams& W, double R) {
+    ValD elev = fbmD(dir, (int)W.seed + 11, 4, 0.5f, 2.0f, 3.0f) * 0.20f + 1.20f; // ~1.0–1.4 km
+
+    struct CL { float density, soff, rmin, rmax, ddiv; };
+    const CL layers[] = {
+        {  35.0f, 1.0f, 1.5f, 5.0f, 9.0f },   // cráteres grandes
+        { 110.0f, 2.0f, 0.4f, 1.6f, 7.0f },   // medianos
+        { 320.0f, 3.0f, 0.10f, 0.5f, 6.0f },  // pequeños
+    };
+    for (const CL& L : layers) {
+        glm::vec3 cc; uint32_t ch;
+        nearestLakeCell(dir, L.density, W.seed ^ (uint32_t)(L.soff * 2654435761u), cc, ch);
+        float rKm   = glm::mix(L.rmin, L.rmax, hash01(ch));
+        float depth = rKm / L.ddiv;
+        float rAng  = rKm * 1000.0f / (float)R;
+        if (rAng < 1e-6f) continue;
+        ValD cosd = { glm::dot(dir, cc), cc };
+        ValD dAng = acosD(cosd);
+        ValD bowl = smoothstepD(rAng, 0.0f, dAng) * (-depth);                  // cuenca
+        ValD rim  = (smoothstepD(rAng * 0.72f, rAng, dAng)
+                   - smoothstepD(rAng, rAng * 1.30f, dAng)) * (depth * 0.45f); // borde elevado
+        elev = elev + bowl + rim;
+    }
+    elev = clampD(elev, 0.05f, 1000.0f); // nunca bajo la esfera → sin agua
+
+    glm::vec3 G    = elev.g;
+    glm::vec3 Gtan = G - glm::dot(G, dir) * dir;
+    float     rho  = (float)R + 1000.0f * elev.v;
+    glm::vec3 nd   = rho * dir - 1000.0f * Gtan;
+    glm::vec3 normal = glm::length(nd) > 1e-9f ? glm::normalize(nd) : dir;
+    if (glm::dot(normal, dir) < 0.0f) normal = -normal;
+
+    TerrainSample s;
+    s.landMask     = 1.0f;
+    s.elevKm       = elev.v;
+    s.normal       = normal;
+    s.continentId  = 0;
+    s.wetness      = 0.0f;
+    s.climate      = 0.4f;
+    s.waterType    = WaterType::None;
+    s.waterLevelKm = -1e30f;
+    return s;
+}
+
+// ====================== Perfil GAS (gigante gaseoso) =========================
+// Esfera LISA (sin relieve duro), apenas una ondulación mínima. Las bandas son de
+// COLOR (en el shader). Sin agua. Se streamea como cualquier planeta.
+static TerrainSample sampleGas(const glm::vec3& dir, const WorldGenParams& W, double R) {
+    ValD elev = fbmD(dir, (int)W.seed + 7, 3, 0.5f, 2.0f, 6.0f) * 0.05f + 0.50f; // casi liso
+    glm::vec3 G    = elev.g;
+    glm::vec3 Gtan = G - glm::dot(G, dir) * dir;
+    float     rho  = (float)R + 1000.0f * elev.v;
+    glm::vec3 nd   = rho * dir - 1000.0f * Gtan;
+    glm::vec3 normal = glm::length(nd) > 1e-9f ? glm::normalize(nd) : dir;
+    if (glm::dot(normal, dir) < 0.0f) normal = -normal;
+
+    TerrainSample s;
+    s.landMask     = 1.0f;
+    s.elevKm       = elev.v;
+    s.normal       = normal;
+    s.continentId  = 0;
+    s.wetness      = 0.0f;
+    s.climate      = 0.5f;
+    s.waterType    = WaterType::None;
+    s.waterLevelKm = -1e30f;
+    return s;
+}
+
 TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, double planetRadius) {
     const glm::vec3 dir = glm::normalize(dirIn);
     const int   seed    = (int)W.seed;
     const double R      = planetRadius;
     const float  kmToM  = 1000.0f;
+
+    // Perfil del cuerpo: cada uno genera su superficie. terran (0) sigue abajo.
+    if (W.profile == 1) return sampleMoon(dir, W, R);
+    if (W.profile == 2) return sampleGas(dir, W, R);
 
     // ===================== A — geografía (binario gate) =====================
     ValD c = fbmD(dir, seed, 6, 0.5f, 2.0f, W.continentFreqA); // continentalness ~[-1,1]

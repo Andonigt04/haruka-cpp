@@ -149,8 +149,20 @@ void main() {
     float slope    = clamp(1.0 - dot(Ngeo, up), 0.0, 1.0); // 0 llano … 1 vertical
     float climate  = clamp(1.0 - abs(up.y), 0.0, 1.0);     // 0 polos … 1 ecuador
 
+    float bodyProfile = u_planetRelCam.w;  // 0 terran · 1 luna · 2 gas
     vec3 baseColor;
-    if (u_terrainMode == 1) {
+    if (bodyProfile > 1.5) {
+        // GAS (Júpiter): bandas horizontales por latitud, tonos cálidos.
+        float n    = noised(FragPos * 0.0015).x;
+        float band = sin(up.y * 16.0 + n * 4.0) * 0.5 + 0.5;
+        baseColor  = mix(vec3(0.60, 0.46, 0.34), vec3(0.86, 0.77, 0.61), band);
+    } else if (bodyProfile > 0.5) {
+        // LUNA: regolito gris; suelos de cráter (poca pendiente) más oscuros y
+        // bordes/laderas algo más claros → relieve legible.
+        float g   = 0.52 + 0.05 * noised(FragPos * 0.02).x;
+        g        *= mix(0.78, 1.06, slope);
+        baseColor = vec3(g, g, g * 1.03);
+    } else if (u_terrainMode == 1) {
         baseColor = vec3(0.30, 0.30, 0.38);                // modo manual: tinte neutro
     } else if (u_hasTex == 1) {
         // Bioma TEXTURIZADO (triplanar): hierba → tierra seca → roca → nieve,

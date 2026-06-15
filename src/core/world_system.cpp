@@ -10,7 +10,7 @@ namespace Haruka {
 // marear. (Futuro: exponer como ajuste.)
 static constexpr double kDayLengthSeconds = 240.0;
 // Periodo orbital de la Luna (s). Más lento que el día → se mueve por el cielo.
-static constexpr double kMoonPeriodSeconds = 600.0;
+static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva visible pero suave
 
     WorldSystem::WorldSystem() : m_worldOrigin(0.0, 0.0, 0.0) {}
 
@@ -33,22 +33,24 @@ static constexpr double kMoonPeriodSeconds = 600.0;
         // 2. ACTUALIZAR SUBSISTEMAS
         // Pasamos la cámara y una matriz de vista-proyección (calculada con toLocal)
         m_planetarySystem->update(dt, cameraPos);
+    }
 
-        // 3. CICLO DÍA/NOCHE: orbitar el Sol alrededor del planeta.
-        updateDayNight(dt);
-        // 4. LUNA: orbita alrededor del planeta (si el juego la creó).
+    void WorldSystem::advanceCelestial(double dt) {
+        // La mecánica celeste corre cada frame desde el render (no desde update(),
+        // que no se llama) y usa el planeta REAL fijado vía setActivePlanet().
+        if (!m_hasActivePlanet) return;
+        updateDayNight(dt); // órbita del Sol → día/noche + luz/sombras
+        // La Luna YA puede orbitar: sus chunks son planet-local y el renderer les suma
+        // el centro ACTUAL del planeta cada frame → mover el cuerpo no rompe el
+        // streaming (no se regeneran chunks, solo se trasladan).
         updateMoon(dt);
-        // 5. MAREA: alineación Sol–Luna → amplitud del oleaje.
-        updateTide();
-        // 6. ATMÓSFERA: avanza el tiempo (deriva de dirección + ráfagas de viento).
-        m_atmoTime += dt;
+        updateTide();       // marea (alineación Sol–Luna)
+        m_atmoTime += dt;   // deriva/ráfagas del viento
     }
 
     float WorldSystem::getSunElevation(const glm::dvec3& observer) const {
-        if (!m_planetarySystem) return 1.0f;
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) return 1.0f;
-        glm::dvec3 up = observer - pc; double ul = glm::length(up);
+        if (!m_hasActivePlanet) return 1.0f;
+        glm::dvec3 up = observer - m_planetCenter; double ul = glm::length(up);
         if (ul < 1e-9) return 1.0f;
         up /= ul;
         glm::vec3 sunDir = getDominantLightDirection(observer); // hacia el Sol
@@ -56,9 +58,8 @@ static constexpr double kMoonPeriodSeconds = 600.0;
     }
 
     glm::vec3 WorldSystem::getSkyColor(const glm::dvec3& observer) const {
-        if (!m_planetarySystem) return glm::vec3(0.005f);
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) return glm::vec3(0.005f);
+        if (!m_hasActivePlanet) return glm::vec3(0.005f);
+        const glm::dvec3 pc = m_planetCenter; const double pr = m_planetRadius;
         glm::dvec3 up = observer - pc; double ul = glm::length(up);
         if (ul < 1e-9) return glm::vec3(0.005f);
         up /= ul;
@@ -79,9 +80,8 @@ static constexpr double kMoonPeriodSeconds = 600.0;
     }
 
     glm::vec3 WorldSystem::getWind(const glm::dvec3& worldPos) const {
-        if (!m_planetarySystem) return glm::vec3(0.0f);
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) return glm::vec3(0.0f);
+        if (!m_hasActivePlanet) return glm::vec3(0.0f);
+        const glm::dvec3 pc = m_planetCenter; const double pr = m_planetRadius;
         glm::dvec3 up = worldPos - pc; double ul = glm::length(up);
         if (ul < 1e-9) return glm::vec3(0.0f);
         up /= ul;
@@ -101,9 +101,8 @@ static constexpr double kMoonPeriodSeconds = 600.0;
     }
 
     void WorldSystem::updateTide() {
-        if (!m_planetarySystem) { m_tideFactor = 1.0f; return; }
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) { m_tideFactor = 1.0f; return; }
+        if (!m_hasActivePlanet) { m_tideFactor = 1.0f; return; }
+        const glm::dvec3 pc = m_planetCenter;
 
         // Dirección al Sol (primera estrella) y a la Luna (objeto de escena).
         const CelestialBody* sun = nullptr;
@@ -123,11 +122,10 @@ static constexpr double kMoonPeriodSeconds = 600.0;
     }
 
     void WorldSystem::updateMoon(double dt) {
-        if (!m_scene || !m_planetarySystem) return;
+        if (!m_scene || !m_hasActivePlanet) return;
         auto moon = m_scene->getObject("Moon");
         if (!moon) return;
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) return;
+        const glm::dvec3 pc = m_planetCenter;
 
         if (!m_moonInit) { m_moonOffset0 = glm::dvec3(moon->position) - pc; m_moonInit = true; }
         m_moonAngle += dt * (2.0 * M_PI / kMoonPeriodSeconds);
@@ -140,9 +138,8 @@ static constexpr double kMoonPeriodSeconds = 600.0;
     }
 
     void WorldSystem::updateDayNight(double dt) {
-        if (!m_planetarySystem) return;
-        glm::dvec3 pc; double pr; uint32_t sd; float rl;
-        if (!m_planetarySystem->getActivePlanet(pc, pr, sd, rl)) return;
+        if (!m_hasActivePlanet) return;
+        const glm::dvec3 pc = m_planetCenter;
 
         // Localiza el Sol (primera estrella). Guarda su offset inicial al planeta.
         CelestialBody* sun = nullptr;
@@ -191,8 +188,9 @@ static constexpr double kMoonPeriodSeconds = 600.0;
         m_bodies.clear();
         for (const auto& objPtr : scene.getAllObjects()) {
             if (!objPtr) continue;
-            ObjectType ot = stringToObjectType(objPtr->type);
-            if (ot != ObjectType::STAR && !objPtr->flags.castLight) continue;
+            // Solo los cuerpos que EMITEN luz cuentan como fuente (sol). Un
+            // CelestialBody no emisor (la Luna) NO entra aquí → no actúa como 2º sol.
+            if (!objPtr->flags.castLight) continue;
 
             CelestialBody body;
             body.name     = objPtr->name;

@@ -10,9 +10,12 @@ namespace Haruka {
 
     class DeformationField;
 
+    class GpuHeightfield; // generador GPU (compute), usado SOLO en el hilo principal
+
     class TerrainGenerator {
     public:
         TerrainGenerator() = default;
+        ~TerrainGenerator(); // out-of-line por unique_ptr<GpuHeightfield> incompleto
 
         // Scales the noise octave counts used per vertex (lower = cheaper chunk
         // generation, slightly smoother terrain). Driven by terrainQuality.
@@ -31,8 +34,24 @@ namespace Haruka {
         std::shared_ptr<ChunkData> generateChunk(
             const PlanetChunkKey& key,
             const nlohmann::json& settings,
-            double planetRadius
+            double planetRadius,
+            bool mainThread = false,                       // (reservado)
+            const std::vector<float>*     preElev   = nullptr, // GPU: elev km del grid
+            const std::vector<glm::vec3>* preNormal = nullptr, // GPU: normales del grid
+            const std::vector<float>*     preWater  = nullptr  // GPU: nivel de agua km (0=mar,>0=lago)
         );
+
+        // ---- Orquestación GPU asíncrona (hilo principal) ----
+        /** @brief ¿Hay slot GPU libre para despachar un chunk? */
+        bool gpuHasFreeSlot();
+        /** @brief Despacha el cómputo GPU (elev+normal) de un chunk (NO bloquea).
+         *  Devuelve el id de slot, o -1 si no procede (no terran/sin GL/sin slot). */
+        int  gpuDispatch(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius);
+        /** @brief Si el slot GPU terminó, lee elev+normal (GL, hilo principal) y libera
+         *  el slot → true. Si aún computa, false. El ENSAMBLADO de la malla (CPU) lo
+         *  hace luego generateChunk(...,preElev,preNormal) en un worker. */
+        bool gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec3>& outNormal,
+                            std::vector<float>& outWater);
 
         /**
          * @brief Returns the terrain height offset (in metres) above the
@@ -53,6 +72,7 @@ namespace Haruka {
         glm::dvec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
 
         const DeformationField* m_deform = nullptr;
+        std::unique_ptr<GpuHeightfield> m_gpu; // lazy; solo hilo principal (gpuTerrain)
     };
 
 }

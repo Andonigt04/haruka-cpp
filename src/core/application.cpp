@@ -107,38 +107,9 @@ void Application::initPlanetarySystem() {
             _raycastSystem.get());
 #endif
 
-    for (const auto& objPtr : _currentScene->getAllObjects()) {
-        if (!objPtr) continue;
-        const auto& obj = *objPtr;
-
-        if (!obj.terrainSettings || obj.terrainSettings->layers.empty()) continue;
-
-        const auto& ts = *obj.terrainSettings;
-
-        Haruka::PlanetarySystem::Planet planet;
-        planet.name     = obj.name;
-        planet.position = obj.position;
-        planet.radius   = std::max({obj.scale.x, obj.scale.y, obj.scale.z});
-
-        // Pass the FULL unfiltered config (every layer param the scene authored),
-        // not just the 3 typed fields. Falls back to the typed subset if a scene
-        // somehow lacks rawConfig (older saves).
-        if (!ts.rawConfig.is_null() && ts.rawConfig.is_object()) {
-            planet.terrainSettings["config"] = ts.rawConfig;
-            if (!planet.terrainSettings["config"].contains("chunkSize"))
-                planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
-        } else {
-            planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
-            planet.terrainSettings["config"]["seed"]      = ts.seed;
-            for (const auto& [name, layer] : ts.layers) {
-                planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
-                planet.terrainSettings["config"]["layers"][name]["octaves"]  = layer.octaves;
-                planet.terrainSettings["config"]["layers"][name]["strength"] = layer.strength;
-            }
-        }
-
-        _planetarySystem->addPlanet(planet);
-    }
+    // Toda la interpretación escena→cuerpos celestes (planetas con terreno + cuerpos
+    // con malla procedural como la Luna) vive en PlanetarySystem.
+    _planetarySystem->buildFromScene(*_currentScene);
 }
 
 void Application::applyGraphicsSettings() {

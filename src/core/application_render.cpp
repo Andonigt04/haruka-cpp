@@ -245,12 +245,65 @@ void Application::renderFrameContent() {
 
     glViewport(0, 0, m_postActive ? (uint32_t)renderW : width,
                      m_postActive ? (uint32_t)renderH : height);
+    // Mecánica celeste: el WorldSystem usa el planeta REAL (su PlanetarySystem propio
+    // está vacío). Le pasamos centro/radio del planeta activo y avanzamos día/noche +
+    // luna + marea + viento cada frame (WorldSystem::update no se llama).
+    if (_worldSystem && _planetarySystem) {
+        glm::dvec3 pc; double pr; uint32_t psd; float prl;
+        if (_planetarySystem->getActivePlanet(pc, pr, psd, prl))
+            _worldSystem->setActivePlanet(pc, pr);
+        _worldSystem->advanceCelestial(deltaTime > 0.0f ? (double)deltaTime : 0.016);
+    }
+
     // Cielo atmosférico: color por elevación solar + altitud (azul de día → cálido al
     // amanecer/atardecer → oscuro de noche → negro en el espacio). Fallback oscuro.
     glm::vec3 sky(0.01f);
     if (_worldSystem && _camera) sky = _worldSystem->getSkyColor(glm::dvec3(_camera->position));
     glClearColor(sky.r, sky.g, sky.b, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    // Pase de cielo procedural (gradiente + sol + estrellas) como FONDO: triángulo
+    // fullscreen SIN escribir profundidad → el terreno/objetos se pintan encima.
+    if (_worldSystem && _camera && _planetarySystem) {
+        glm::dvec3 pc; double pr; uint32_t psd; float prl;
+        if (_planetarySystem->getActivePlanet(pc, pr, psd, prl)) {
+            if (!_skyShader)
+                _skyShader = std::make_unique<Shader>("shaders/sky.vert", "shaders/sky.frag");
+            if (_skyVAO == 0) glGenVertexArrays(1, &_skyVAO);
+
+            const glm::dvec3 camD = glm::dvec3(_camera->position);
+            glm::dvec3 up = camD - pc; double ul = glm::length(up);
+            up = (ul > 1e-9) ? up / ul : glm::dvec3(0, 1, 0);
+            glm::vec3 sunDir  = _worldSystem->getDominantLightDirection(camD);
+            glm::vec3 sunCol  = _worldSystem->getDominantLightColor(camD);
+            float     sunElev = (float)glm::dot(glm::dvec3(sunDir), up);
+            float     alt     = (float)(ul - pr);
+            float     atmo    = 1.0f - glm::smoothstep(0.0f, (float)(pr * 0.02), alt);
+
+            float aspectS = (float)(m_postActive ? renderW : width)
+                          / (float)(m_postActive ? renderH : height);
+            glm::mat4 viewRot  = glm::mat4(glm::mat3(_camera->getViewMatrix()));
+            glm::mat4 invVPRot = glm::inverse(_camera->getProjectionMatrix(aspectS) * viewRot);
+
+            _skyShader->use();
+            glm::vec3 upf = glm::vec3(up);
+            glUniformMatrix4fv(0, 1, GL_FALSE, &invVPRot[0][0]); // mat4 → locations 0..3
+            glUniform3fv(4, 1, &sunDir[0]);
+            glUniform3fv(5, 1, &upf[0]);
+            glUniform3fv(6, 1, &sunCol[0]);
+            glUniform1f(7, sunElev);
+            glUniform1f(8, atmo);
+
+            GLboolean depthWas = glIsEnabled(GL_DEPTH_TEST);
+            glDisable(GL_DEPTH_TEST);
+            glDepthMask(GL_FALSE);
+            glBindVertexArray(_skyVAO);
+            glDrawArrays(GL_TRIANGLES, 0, 3);
+            glBindVertexArray(0);
+            glDepthMask(GL_TRUE);
+            if (depthWas) glEnable(GL_DEPTH_TEST);
+        }
+    }
 
     _iTotalDrawCalls    = static_cast<int>(g_sceneRenderQueue.size());
     _iRenderedDrawCalls = 0;
@@ -365,8 +418,10 @@ void Application::renderFrameContent() {
             const auto* obj = command.object;
             if (!obj) continue;
 
-            const bool isStar = (Haruka::stringToObjectType(obj->type) == Haruka::ObjectType::STAR)
-                                 || obj->flags.castLight;
+            // "Emisivo" (estrella, sin sombreado) = el cuerpo EMITE luz. Así un
+            // CelestialBody que NO emite (la Luna) queda SOMBREADO por el Sol → se
+            // ven sus cráteres y fases, en vez de salir a pleno brillo.
+            const bool isStar = obj->flags.castLight;
 
             // Distance LOD/cull for scene objects (they have no chunk LOD like terrain):
             // skip far props/models so they don't cost draw calls at any range. Scale-aware
@@ -536,8 +591,16 @@ void Application::renderFrameContent() {
                 terrainObj.baseColorAndPlanetRadius = glm::vec4(0.76f, 0.78f, 0.82f, (float)planet.radius);
                 // xyz = (camera − planet center) in double→float (precise). The
                 // shader reconstructs relPos = FragPos + this → height/slope/climate.
+                // w = PERFIL del cuerpo (0 terran · 1 luna · 2 gas) → coloreado por tipo.
+                float prof = 0.0f;
+                {
+                    const auto& cfg = planet.terrainSettings.contains("config")
+                                    ? planet.terrainSettings["config"] : planet.terrainSettings;
+                    const std::string ps = cfg.value("profile", std::string("terran"));
+                    prof = (ps == "moon") ? 1.0f : (ps == "gas") ? 2.0f : 0.0f;
+                }
                 terrainObj.planetCenterAndFlag      = glm::vec4(
-                    glm::vec3(glm::dvec3(_camera->position) - planet.position), 0.0f);
+                    glm::vec3(glm::dvec3(_camera->position) - planet.position), prof);
 
                 glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
                 glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &terrainObj);
@@ -571,10 +634,10 @@ void Application::renderFrameContent() {
                 glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
                 glEnable(GL_DEPTH_TEST);
                 glDepthFunc(GL_LEQUAL);
-                // Transparent water must NOT write depth: it depth-TESTS (terrain in front
-                // still occludes it) but writing depth would clip whatever is drawn AFTER it
-                // (the game's props/resources in onRenderWorld) at the waterline → "water cuts
-                // objects". Restored to GL_TRUE right after the pass.
+                // El agua NO escribe profundidad: depth-TESTA (el terreno por delante la
+                // ocluye) pero no escribe, para que el TERRENO bajo el agua se siga viendo
+                // y no quede tapado por el océano. (Los "cubos" de transición de LOD se
+                // atacarán con morph/skirt del agua, no escondiendo el terreno.)
                 glDepthMask(GL_FALSE);
                 glEnable(GL_CULL_FACE);
                 glCullFace(GL_BACK);

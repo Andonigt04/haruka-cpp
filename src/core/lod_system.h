@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <memory>
+#include <functional>
 #include "scene/scene_manager.h"
 #include "tools/planetary_types.h"
 
@@ -15,6 +16,11 @@ namespace Haruka {
         std::vector<PlanetChunkKey> chunksToLoad;
         std::vector<PlanetChunkKey> chunksToKeep;
         std::vector<PlanetChunkKey> chunksToUnload;
+        // true si la carga PROGRESIVA bloqueó alguna subdivisión porque el chunk grueso
+        // aún no está residente (quiero afinar pero el grueso carga). El llamador debe
+        // seguir recalculando el LOD (saltarse el throttle) hasta que deje de estarlo →
+        // si no, con la cámara quieta el planeta se queda en grueso para siempre.
+        bool residencyLimited = false;
     };
 
     class LODSystem {
@@ -27,10 +33,23 @@ namespace Haruka {
         double getSplitFactor() const { return m_splitFactor; }
         int    getMaxLOD()      const { return m_maxLOD; }
 
+        /** @brief LOD MÍNIMO del planeta entero (suelo): todas las caras se subdividen
+         *  hasta este nivel SIEMPRE, sin importar la distancia ni la altitud → el planeta
+         *  completo está siempre cargado a este detalle base (≈ 6·4^minLOD chunks), y la
+         *  cámara refina por encima. minLOD=4 ≈ 1536 piezas; 3 ≈ 384. */
+        void setMinLOD(int minLOD) { m_minLOD = minLOD; }
+        int  getMinLOD() const { return m_minLOD; }
+
         /**
          * @brief Analiza un objeto planetario y genera las órdenes de streaming.
          */
-        LODUpdate updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos);
+        // 'isResident' (opcional): predicado que dice si un chunk ya está en GPU. Si se
+        // pasa, el LOD CARGA PROGRESIVAMENTE: solo subdivide un nodo cuando él mismo (o
+        // sus hijos) ya está residente → siempre hay un chunk grueso dibujado mientras
+        // los finos generan (sin huecos negros) y la carga sube grueso→fino suavemente.
+        using ResidencyFn = std::function<bool(const PlanetChunkKey&)>;
+        LODUpdate updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos,
+                                  const ResidencyFn& isResident = nullptr);
 
         /**
          * @brief Forgets a chunk from the "last frame" set so the next update
@@ -63,12 +82,13 @@ namespace Haruka {
 
         double m_splitFactor;
         int m_maxLOD;
+        int m_minLOD = 4; // suelo: el planeta entero siempre a ≥ este LOD (≈1536 chunks)
 
         // hash → key, para poder reconstruir la key al hacer unload
         std::unordered_map<uint64_t, PlanetChunkKey> m_lastFrameChunks;
         std::unordered_map<uint64_t, PlanetChunkKey> m_currentFrameChunks;
 
-        void recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos);
+        void recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident);
         void subdivide(LODNode* node, double radius, const glm::dvec3& planetPos);
 
         // 2:1 LOD balance sobre el conjunto de hojas (m_currentFrameChunks).

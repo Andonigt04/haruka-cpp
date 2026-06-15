@@ -2,7 +2,9 @@
 #include "tools/planetary_types.h"
 #include "core/noise_generator.h"
 #include "core/terrain/terrain_sampler_v2.h"
+#include "core/terrain/gpu_heightfield.h"
 #include <algorithm>
+#include <functional>
 #include <mutex>
 #include "core/modules.h"
 #ifdef HARUKA_MOD_DEFORM
@@ -12,6 +14,8 @@
 
 
 namespace Haruka {
+
+TerrainGenerator::~TerrainGenerator() = default;
 
 // Cachea los WorldGenParams del v2 por seed (deriveWorldParams hace una calibración
 // CDF de ~2k muestras; no queremos repetirla en cada chunk). Recalcula solo si la
@@ -75,7 +79,9 @@ namespace {
         return glm::dvec3(spherePos);
     }
 
-    std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) 
+    std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius, bool mainThread,
+                                                               const std::vector<float>* preElev, const std::vector<glm::vec3>* preNormal,
+                                                               const std::vector<float>* preWater)
     {
         auto chunk = std::make_shared<ChunkData>();
         static const nlohmann::json kEmptyObj = nlohmann::json::object();
@@ -98,17 +104,15 @@ namespace {
 
         // Chunk center: sphere direction of the face-center vertex, scaled to planet radius.
         // Stored as double for the model-matrix translation (keeps per-vertex floats small).
-        // chunkCenter_local: planet-local position of chunk center (for vertex subtraction).
-        // chunk->chunkCenter: world-space (adds planet offset), used by renderer for u_chunkOffset.
+        // chunkCenter_local: posición PLANET-LOCAL del centro del chunk (para restar a
+        // los vértices). chunk->chunkCenter se guarda TAMBIÉN planet-local (sin offset):
+        // el renderer le suma el centro ACTUAL del planeta → el cuerpo puede MOVERSE
+        // (orbitar) sin regenerar chunks. (Los vértices ya son planet-local.)
         glm::dvec3 chunkCenter_local;
         {
             glm::dvec3 centerDir = glm::dvec3(getLocalPosition(key, res / 2, res / 2, res));
             chunkCenter_local    = glm::normalize(centerDir) * planetRadius;
-            chunk->chunkCenter   = chunkCenter_local + glm::dvec3(
-                settings.value("planetOffsetX", 0.0),
-                settings.value("planetOffsetY", 0.0),
-                settings.value("planetOffsetZ", 0.0)
-            );
+            chunk->chunkCenter   = chunkCenter_local; // PLANET-LOCAL
         }
 
         const auto& layers = config.contains("layers") ? config["layers"] : kEmptyObj;
@@ -131,6 +135,8 @@ namespace {
             ? getWorldParamsCached((uint32_t)g_current_seed, planetRadius)
             : WorldGenParams{};
         wgp.reliefStrength = config.value("reliefStrength", 1.0f); // parámetro de escena
+        { const std::string pr = config.value("profile", std::string("terran"));
+          wgp.profile = (pr == "moon") ? 1 : (pr == "gas") ? 2 : 0; }
         // ¿Está activo el deform? Si lo está, la normal vuelve a diferencias finitas
         // (para que los cráteres tengan normal correcta); si no, normal analítica v2.
         bool deformActive = false;
@@ -138,6 +144,24 @@ namespace {
         deformActive = (m_deform && !m_deform->empty());
 #endif
         const bool useAnalyticNormal = useV2 && !deformActive;
+
+        // === Camino GPU (opt-in: config.gpuTerrain) — incremento de la migración ===
+        // El streaming asíncrono ya calculó elevación+normal del grid en compute
+        // (Perlin portado, paridad ✓) y los pasa AQUÍ (preElev/preNormal). Las ramas
+        // de abajo los USAN en vez de muestrear el ruido en CPU. Todo guardado tras
+        // useGpu → sin GPU (preElev=null) el camino CPU es idéntico.
+        (void)mainThread;
+        const int vtxN = (res + 1) * (res + 1);
+        const bool useGpu = (useV2 && !deformActive && wgp.profile == 0 &&
+                             preElev && preNormal && preWater &&
+                             (int)preElev->size() == vtxN && (int)preNormal->size() == vtxN &&
+                             (int)preWater->size() == vtxN);
+        static const std::vector<float>     s_emptyF;
+        static const std::vector<glm::vec3> s_emptyN;
+        const std::vector<float>&     gpuElevKm   = useGpu ? *preElev   : s_emptyF;
+        const std::vector<glm::vec3>& gpuNormal   = useGpu ? *preNormal : s_emptyN;
+        const std::vector<float>&     gpuWaterKm  = useGpu ? *preWater  : s_emptyF;
+        auto gridIdx = [res](int x, int y) { return (size_t)(x + y * (res + 1)); };
 
         // Procedural elevation (km) along a sphere direction, INCLUDING player edits
         // (the deformation field). Single source of truth so render and collision
@@ -166,13 +190,36 @@ namespace {
             return glm::vec3(absP - chunkCenter_local);
         };
 
+        // Hundir bajo el mar los ISLOTES sub-celda a LOD grueso → no asoman como motas
+        // marrones/huecos en el mar a distancia (aliasing del terreno). Decisión SOLO
+        // por posición (igual que la normal analítica) para que dos chunks vecinos —de
+        // cualquier LOD— tomen EXACTAMENTE la misma decisión en el borde compartido (sin
+        // costuras): si la elevación REGIONAL (baja frecuencia, sin detalle fino) es
+        // oceánica pero el detalle fino apenas emerge, es un islote sub-celda → al mar.
+        // 'seaBiasKm' (cuánto detalle fino se perdona) escala con el espaciado del chunk
+        // → a ras de suelo ≈0 (no toca nada) y el islote emerge al acercarte.
+        const double nodeSizeM_   = planetRadius * 2.0 / double(1u << key.lod);
+        const float  vtxSpacingM_ = float(nodeSizeM_ / double(res));
+        const float  seaBiasKm    = glm::min(0.15f, vtxSpacingM_ * 0.03f / 1000.0f);
+        auto adjElevKm = [&](int gx, int gy) -> float {
+            float e = gpuElevKm[gridIdx(gx, gy)];
+            if (e <= 0.0f || e >= seaBiasKm) return e;     // ya en el mar o claramente tierra
+            glm::vec3 sph = glm::vec3(getLocalPosition(key, gx, gy, res));
+            // Continente de baja frecuencia (misma fBm que el sampler): si la región
+            // está por DEBAJO del umbral de mar, el detalle fino que asoma es un islote
+            // sub-celda → al mar. Posición-only → idéntico en chunks vecinos (sin costuras).
+            float cont = NoiseGenerator::fBm(sph, (int)wgp.seed, 6, 0.5f, 2.0f, wgp.continentFreqA);
+            return (cont <= wgp.seaThreshold) ? -0.001f : e;
+        };
+
         float minElevKm = 1e30f;
         for (int y = 0; y <= res; ++y) {
             for (int x = 0; x <= res; ++x) {
                 glm::dvec3 dir = getLocalPosition(key, x, y, res); // dir en DOUBLE (sin escalones)
                 glm::vec3 posOnSphere = glm::vec3(dir);            // float: ruido/normales/uv (les basta)
 
-                float elevKm = elevKmAt(posOnSphere);          // km (procedural + edits)
+                // Elevación: GPU (compute, con hundido de islotes) si useGpu, si no CPU.
+                float elevKm = useGpu ? adjElevKm(x, y) : elevKmAt(posOnSphere);
                 float height = elevKm * kmToFraction;          // fracción del radio
                 if (elevKm < minElevKm) minElevKm = elevKm;
 
@@ -182,7 +229,11 @@ namespace {
                 // uv.x = shoreFactor (cercanía a CUALQUIER agua: mar y lagos), para
                 // pintar arena en las orillas. uv.y = v (libre). v1 → uv normal.
                 float shore = 0.0f;
-                if (useV2) {
+                if (useGpu) {
+                    // Orilla relativa al agua aplicable (mar 0 o lago L). Playa ~0–16 m.
+                    float wl = std::max(gpuWaterKm[gridIdx(x, y)], 0.0f);
+                    shore = 1.0f - glm::clamp((elevKm - wl) / 0.016f, 0.0f, 1.0f);
+                } else if (useV2) {
                     TerrainSample ts = sampleTerrainV2(posOnSphere, wgp, planetRadius);
                     float aboveKm = ts.elevKm - ts.waterLevelKm; // km sobre el agua aplicable
                     shore = 1.0f - glm::clamp(aboveKm / 0.016f, 0.0f, 1.0f); // playa ~0–16 m
@@ -211,6 +262,8 @@ namespace {
             };
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
+                    // GPU: normal ya calculada en el compute (eps fijo → seam-safe).
+                    if (useGpu) { chunk->normals[gridIdx(x, y)] = gpuNormal[gridIdx(x, y)]; continue; }
                     glm::vec3 sph = getLocalPosition(key, x, y, res); // dir unitaria
                     // v2 sin deform: normal ANALÍTICA (gradiente exacto) → sin pinchos
                     // y seam-safe (función solo de la dirección, igual que la FD fija).
@@ -344,6 +397,41 @@ namespace {
         for (int y = 0; y < res; ++y)
             addSkirtQuad(y*(res+1)+res, (y+1)*(res+1)+res, sR+y, sR+y+1);
 
+        // Skirt de agua: faldón vertical en los bordes MOJADOS del chunk, colgando
+        // hacia el centro del planeta. Tapa las grietas T-junction entre LODs vecinos
+        // (donde un chunk fino tiene más vértices en el borde que el grueso) y las que
+        // abre el oleaje del shader al desplazar de forma distinta cada LOD. Solo en
+        // bordes con agua → no cuelga "paredes" de agua en tierra seca. El agua se
+        // dibuja two-sided (cull off), así que el winding del faldón es indiferente.
+        // El faldón es ~mitad del espaciado (suelo 8 m para cubrir el desplazamiento
+        // de las olas, techo 40 m para no colgar muros en LODs gruesos).
+        auto buildWaterSkirt = [&](int side, const std::function<bool(int,int)>& cellWet) {
+            const float wSkirt = glm::clamp(vtxSpacing * 0.5f, 8.0f, 40.0f);
+            const bool  hasParams = !chunk->waterParams.empty();
+            const int   mainCount = (int)chunk->waterVertices.size();
+            std::vector<int> skirtOf((size_t)mainCount, -1);
+            auto skirtVtx = [&](int mainIdx) -> int {
+                if (skirtOf[mainIdx] >= 0) return skirtOf[mainIdx];
+                int s = (int)chunk->waterVertices.size();
+                glm::vec3 n = chunk->waterNormals[mainIdx];
+                chunk->waterVertices.push_back(chunk->waterVertices[mainIdx] - n * wSkirt);
+                chunk->waterNormals.push_back(n);
+                if (hasParams) chunk->waterParams.push_back(chunk->waterParams[mainIdx]);
+                skirtOf[mainIdx] = s;
+                return s;
+            };
+            auto edge = [&](int a, int b) {
+                int sa = skirtVtx(a), sb = skirtVtx(b);
+                chunk->waterIndices.push_back(a);  chunk->waterIndices.push_back(b);  chunk->waterIndices.push_back(sb);
+                chunk->waterIndices.push_back(a);  chunk->waterIndices.push_back(sb); chunk->waterIndices.push_back(sa);
+            };
+            const int r = side - 1; // = res
+            for (int x = 0; x < r; ++x) if (cellWet(x, 0))     edge(x, x + 1);                     // borde inferior
+            for (int x = 0; x < r; ++x) if (cellWet(x, r - 1)) edge(r*side + x, r*side + x + 1);   // borde superior
+            for (int y = 0; y < r; ++y) if (cellWet(0, y))     edge(y*side, (y + 1)*side);         // borde izquierdo
+            for (int y = 0; y < r; ++y) if (cellWet(r - 1, y)) edge(y*side + r, (y + 1)*side + r); // borde derecho
+        };
+
         // --- Malla de agua v2: océano (nivel 0) + lagos (nivel local L) ---
         // Nivel POR VÉRTICE: océano a 0, lago a su L. Se propaga el nivel del lago
         // un anillo hacia la orilla para que la lámina quede plana (sin cuña).
@@ -357,14 +445,26 @@ namespace {
             bool anyWet = false;
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
-                    glm::vec3 sph = getLocalPosition(key, x, y, res);
-                    TerrainSample ts = sampleTerrainV2(sph, wgp, planetRadius);
                     size_t i = (size_t)(x + y * side);
-                    elevKmArr[i] = ts.elevKm;
-                    if (ts.isWater()) {
-                        wet[i] = 1; anyWet = true;
-                        levelKm[i] = ts.waterLevelKm; // océano 0, lago L
+                    float e, wl; bool isW;
+                    if (useGpu) {
+                        e = adjElevKm(x, y);            // misma elevación (con hundido de islotes) que el terreno
+                        float gw = gpuWaterKm[gridIdx(x, y)];
+                        wl = (gw > 0.0f) ? gw : 0.0f;   // mar 0, lago L (= waterLevelKm)
+                        isW = e < wl;                   // mar: e<0; lago: e<L (== isWater())
+                    } else {
+                        glm::vec3 sph = getLocalPosition(key, x, y, res);
+                        TerrainSample ts = sampleTerrainV2(sph, wgp, planetRadius);
+                        e = ts.elevKm; wl = ts.waterLevelKm; isW = ts.isWater();
                     }
+                    // Un vértice BAJO el nivel del mar es OCÉANO (nivel 0) aunque caiga
+                    // dentro de un sello de lago (gw>0): el lago solo aplica en TIERRA
+                    // (e>=0). Sin esto, mar+lago solapados marcaban el punto como lago
+                    // (nivel L>0) → parche de agua ELEVADO sobre el mar y huecos en la
+                    // lámina (el seabed marrón asomaba) = "mar roto" en océano abierto.
+                    if (e < 0.0f) { wl = 0.0f; isW = true; }
+                    elevKmArr[i] = e;
+                    if (isW) { wet[i] = 1; anyWet = true; levelKm[i] = wl; } // océano 0, lago L
                 }
             }
             if (anyWet) {
@@ -399,11 +499,28 @@ namespace {
                         chunk->waterParams.push_back(glm::vec2(L, depthM));
                     }
                 }
+                // Emisión de celdas de agua, limpia en TODO el rango de LOD:
+                //   · OCÉANO (nivel 0): emite si CUALQUIER esquina está bajo el mar →
+                //     costa sin huecos (el terreno ocluye el agua que sobra).
+                //   · LAGO (nivel L>0): los lagos son features FINOS (0.1–2 km). A LOD
+                //     grueso un lago es sub-celda → emitirlo da confeti/charcos falsos o,
+                //     si exiges celda completa, bordes DENTADOS (triángulos). Solución:
+                //     los lagos SOLO se dibujan cuando el chunk es lo bastante fino para
+                //     resolverlos (vtxSpacing < umbral), y ahí con any-corner → bordes
+                //     SUAVES. A LOD grueso no hay lago (terreno limpio); aparece, ya
+                //     suave, al acercarte. levelKm: 0=océano, >0=lago, NOLVL=seco.
+                const bool lakesAllowed = (vtxSpacingM_ < 250.0f);
+                auto isOcean = [&](int idx){ return wet[idx] && levelKm[(size_t)idx] == 0.0f; };
+                auto cellEmits = [&](int i)->bool {
+                    bool anyOcean = isOcean(i) || isOcean(i+1) || isOcean(i+side) || isOcean(i+side+1);
+                    if (anyOcean) return true;                     // océano: any-corner (costa sin huecos)
+                    if (!lakesAllowed) return false;               // LOD grueso: sin lagos → terreno limpio
+                    return wet[i] || wet[i+1] || wet[i+side] || wet[i+side+1]; // lago fino: any-corner (suave)
+                };
                 for (int y = 0; y < res; ++y)
                 for (int x = 0; x < res; ++x) {
                     int i = x + y * side;
-                    bool cellWet = wet[i] || wet[i+1] || wet[i+side] || wet[i+side+1];
-                    if (!cellWet) continue;
+                    if (!cellEmits(i)) continue;
                     chunk->waterIndices.push_back(i);
                     chunk->waterIndices.push_back(i + 1);
                     chunk->waterIndices.push_back(i + side);
@@ -411,6 +528,8 @@ namespace {
                     chunk->waterIndices.push_back(i + side + 1);
                     chunk->waterIndices.push_back(i + side);
                 }
+                // Faldón en los mismos bordes que sí emiten agua.
+                buildWaterSkirt(side, [&](int cx, int cy) { return cellEmits(cx + cy * side); });
                 chunk->hasOcean = true; // reusa el flag: el renderer sube la malla de agua
             }
         }
@@ -436,7 +555,8 @@ namespace {
                     glm::dvec3 wp = dir * planetRadius;                // nivel del mar
                     chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
                     chunk->waterNormals.push_back(sph);
-                    belowSea[(size_t)(x + y * side)] = (elevKmAt(sph) < 0.0f) ? 1 : 0;
+                    float ek = useGpu ? gpuElevKm[gridIdx(x, y)] : elevKmAt(sph);
+                    belowSea[(size_t)(x + y * side)] = (ek < 0.0f) ? 1 : 0;
                 }
             }
             for (int y = 0; y < res; ++y) {
@@ -456,6 +576,11 @@ namespace {
                     chunk->waterIndices.push_back(i + side);
                 }
             }
+            // Faldón en bordes mojados (celda mojada si cualquier esquina < nivel del mar).
+            buildWaterSkirt(side, [&](int cx, int cy) {
+                int i = cx + cy * side;
+                return belowSea[i] || belowSea[i+1] || belowSea[i+side] || belowSea[i+side+1];
+            });
         }
 
         return chunk;
@@ -476,6 +601,8 @@ namespace {
         if (genVersion >= 2) {
             WorldGenParams wgp = getWorldParamsCached((uint32_t)g_current_seed, planetRadius);
             wgp.reliefStrength = config.value("reliefStrength", 1.0f); // parámetro de escena
+            { const std::string pr = config.value("profile", std::string("terran"));
+              wgp.profile = (pr == "moon") ? 1 : (pr == "gas") ? 2 : 0; }
             metres = sampleTerrainV2(sphereDir, wgp, planetRadius).elevKm * 1000.0f;
         } else {
             metres = calculateHeight(sphereDir, layers) * float(planetRadius) * float(1000.0 / planetRadius);
@@ -591,5 +718,49 @@ namespace {
         elev += detail * dStr * landMask * detailFade;
 
         return elev; // km
+    }
+
+    // ---- Orquestación GPU asíncrona (hilo principal) ----
+    // Saca de la config los parámetros del compute. Devuelve false si el chunk NO es
+    // elegible para GPU (no gpuTerrain / no v2 / perfil != terran).
+    static bool gpuParamsFromSettings(const nlohmann::json& settings, double radius,
+                                      GpuHeightfield::Params& p, int& res) {
+        static const nlohmann::json kE = nlohmann::json::object();
+        const auto& config = settings.contains("config") ? settings["config"] : kE;
+        if (config.value("genVersion", 1) < 2)        return false;
+        if (!config.value("gpuTerrain", false))       return false;
+        if (config.value("profile", std::string("terran")) != "terran") return false;
+        p.seed   = config.value("seed", 42);
+        res      = config.value("chunkSize", 32);
+        p.reliefStrength = config.value("reliefStrength", 1.0f);
+        WorldGenParams wgp = getWorldParamsCached((uint32_t)p.seed, radius);
+        p.continentFreqA = wgp.continentFreqA;
+        p.seaThreshold   = wgp.seaThreshold;
+        p.voronoiDensity = wgp.voronoiDensity;
+        p.lakeDensity    = wgp.lakeDensity;
+        p.lakeMaxProb    = wgp.lakeMaxProb;
+        p.radius         = radius;
+        return true;
+    }
+
+    bool TerrainGenerator::gpuHasFreeSlot() {
+        if (!m_gpu) m_gpu = std::make_unique<GpuHeightfield>();
+        return m_gpu->hasFreeSlot();
+    }
+
+    int TerrainGenerator::gpuDispatch(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius) {
+        if (!m_gpu) m_gpu = std::make_unique<GpuHeightfield>();
+        GpuHeightfield::Params p; int res;
+        if (!gpuParamsFromSettings(settings, planetRadius, p, res)) return -1;
+        std::vector<glm::vec3> dirs((size_t)(res + 1) * (res + 1));
+        for (int y = 0; y <= res; ++y)
+            for (int x = 0; x <= res; ++x)
+                dirs[(size_t)(x + y * (res + 1))] = glm::vec3(getLocalPosition(key, x, y, res));
+        return m_gpu->dispatchAsync(dirs, p);
+    }
+
+    bool TerrainGenerator::gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec3>& outNormal,
+                                          std::vector<float>& outWater) {
+        return m_gpu && m_gpu->tryHarvest(slot, outElev, outNormal, outWater);
     }
 }
