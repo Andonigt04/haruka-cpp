@@ -286,5 +286,5 @@ own licenses.
 
 ---
 
-**Last Updated:** 19 May 2026 | **OpenGL 4.6** | **C++17/20**
+**Last Updated:** 15 June 2026 | **OpenGL 4.6** | **C++17/20**
 
