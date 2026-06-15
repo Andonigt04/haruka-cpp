@@ -7,7 +7,7 @@ name: CI
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ opengl ]
   pull_request:
   workflow_dispatch:
 
