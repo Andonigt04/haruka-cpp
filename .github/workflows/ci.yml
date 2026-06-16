@@ -1,4 +1,4 @@
-name: CI
+e: CI
 
 on:
   push:
@@ -25,7 +25,14 @@ jobs:
           - { name: network,     modules: "",           network: "ON"  }
 
     steps:
+      - name: Fix git safe directory
+        run: |
+          mkdir -p /__w/haruka-cpp/haruka-cpp
+          git config --global --add safe.directory /__w/haruka-cpp/haruka-cpp || true
+
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -34,11 +41,7 @@ jobs:
             assimp-devel openssl-devel openal-soft-devel postgresql-devel \
             gtk3-devel glm-devel glslang mesa-libGL-devel \
             wayland-devel wayland-protocols-devel \
-            libxkbcommon-devel mesa-libEGL-devel
-
-      - name: Checkout submodules manually
-        run: |
-          git submodule update --init --recursive
+            libxkbcommon-devel mesa-libEGL-devel libzstd-devel
 
       - name: Cache SDL3
         id: cache-sdl
