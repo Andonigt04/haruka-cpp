@@ -25,52 +25,42 @@ jobs:
           - { name: network,     modules: "",           network: "ON"  }
 
     steps:
-      - name: Fix git safe directory
-        run: |
-          mkdir -p /__w/haruka-cpp/haruka-cpp
-          git config --global --add safe.directory /__w/haruka-cpp/haruka-cpp || true
-
+      # 1. El checkout se ejecuta de forma nativa en Ubuntu (funciona perfecto con submódulos)
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: |
-          sudo dnf install -y --setopt=install_weak_deps=False \
-            cmake ninja-build g++ pkg-config git \
-            assimp-devel openssl-devel openal-soft-devel postgresql-devel \
-            gtk3-devel glm-devel glslang mesa-libGL-devel \
-            wayland-devel wayland-protocols-devel \
-            libxkbcommon-devel mesa-libEGL-devel libzstd-devel
-
-      - name: Cache SDL3
-        id: cache-sdl
-        uses: actions/cache@v4
+      # 2. Compilamos e instalamos dentro de Fedora usando Docker de forma manual por pasos
+      - name: Install dependencies & Build Engine
+        uses: addnab/docker-run-action@v3
         with:
-          path: ~/sdl3-install
-          key: sdl3-${{ runner.os }}-v1
+          image: fedora:latest
+          options: -v ${{ github.workspace }}:/__w/haruka-cpp/haruka-cpp -w /__w/haruka-cpp/haruka-cpp
+          run: |
+            # Instalar dependencias en Fedora
+            dnf install -y --setopt=install_weak_deps=False \
+              cmake ninja-build g++ pkg-config git \
+              assimp-devel openssl-devel openal-soft-devel postgresql-devel \
+              gtk3-devel glm-devel glslang mesa-libGL-devel \
+              wayland-devel wayland-protocols-devel \
+              libxkbcommon-devel mesa-libEGL-devel libzstd-devel
 
-      - name: Build & install SDL3
-        if: steps.cache-sdl.outputs.cache-hit != 'true'
-        run: |
-          git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
-          cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3-install" \
-            -DSDL_X11=OFF \
-            -DSDL_WAYLAND=ON
-          cmake --build /tmp/SDL/build -j"$(nproc)"
-          cmake --install /tmp/SDL/build
+            # Clonar y compilar SDL3 de forma local para el contenedor
+            git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
+            cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="/tmp/sdl3-install" \
+              -DSDL_X11=OFF \
+              -DSDL_WAYLAND=ON
+            cmake --build /tmp/SDL/build -j"$(nproc)"
+            cmake --install /tmp/SDL/build
 
-      - name: Configure
-        working-directory: .
-        run: >
-          cmake -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DMODULES="${{ matrix.modules }}"
-          -DHARUKA_NETWORK=${{ matrix.network }}
-          -DCMAKE_PREFIX_PATH="$HOME/sdl3-install"
+            # Configurar el motor Haruka
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DMODULES="${{ matrix.modules }}" \
+              -DHARUKA_NETWORK=${{ matrix.network }} \
+              -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
 
-      - name: Build engine
-        working-directory: .
-        run: cmake --build build -j"$(nproc)" --target HarukaEngine
+            # Compilar el motor
+            cmake --build build -j"$(nproc)" --target HarukaEngine
