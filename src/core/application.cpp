@@ -123,8 +123,10 @@ void Application::applyGraphicsSettings() {
     if (_camera)
         _camera->zoom = g.fov;
 
-    if (_window)
+    if (_window) {
         SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
+        _window->setWindowMode(static_cast<int>(g.windowMode)); // windowed / borderless / fullscreen
+    }
 
     // Chunk cache memory budget.
     if (_planetarySystem)

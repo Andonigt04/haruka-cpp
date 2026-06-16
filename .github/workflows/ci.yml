@@ -1,10 +1,5 @@
 name: CI
 
-# Builds the Haruka engine across several build-time module configurations.
-# The module matrix is the point: it proves the modules really isolate (each
-# combo below is verified to build) and that disabling one doesn't rot the rest.
-# All configs here have been confirmed to compile locally.
-
 on:
   push:
     branches: [ opengl ]
@@ -14,31 +9,31 @@ on:
 jobs:
   engine:
     name: Engine · ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: fedora-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # MODULES bitmask order: FLUIDS DEFORM SOFTBODY NETWORK AUDIO PARTICLES
-          #                        TERRAIN POSTFX SHADOWS PHYSICS  ('' = all ON)
           - { name: all-modules, modules: "",           network: "OFF" }
-          - { name: minimal,     modules: "0000101001", network: "OFF" } # AUDIO+TERRAIN+PHYSICS
-          - { name: no-audio,    modules: "1111011111", network: "OFF" } # AUDIO off → isolation
-          - { name: no-postfx,   modules: "1111111011", network: "OFF" } # POSTFX off → isolation
-          - { name: network,     modules: "",           network: "ON"  } # DGS client path
+          - { name: minimal,     modules: "0000101001", network: "OFF" }
+          - { name: no-audio,    modules: "1111011111", network: "OFF" }
+          - { name: no-postfx,   modules: "1111111011", network: "OFF" }
+          - { name: network,     modules: "",           network: "ON"  }
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo dnf update
+          sudo dnf install -y --no-install-recommends \
             cmake ninja-build g++ pkg-config \
-            libassimp-dev libssl-dev libopenal-dev libpq-dev \
-            libgtk-3-dev libglm-dev glslang-tools libgl1-mesa-dev
+            assimp-devel openssl-devel openal-soft-devel postgresql-devel \
+            gtk3-devel glm glslang mesa-libGL-devel \
+            # Wayland dependencies (Required for SDL3 Wayland backend)
+            wayland-devel wayland-protocols-devel \
+            libxkbcommon-devel mesa-libEGL-devel
 
-      # SDL3 is not in the Ubuntu repos yet → build + install from source (cached).
       - name: Cache SDL3
         id: cache-sdl
         uses: actions/cache@v4
@@ -51,7 +46,10 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
           cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/sdl3-install"
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3-install" \
+            -DSDL_X11=OFF \
+            -DSDL_WAYLAND=ON
           cmake --build /tmp/SDL/build -j"$(nproc)"
           cmake --install /tmp/SDL/build
 
@@ -66,4 +64,4 @@ jobs:
 
       - name: Build engine
         working-directory: .
-        run: cmake --build build -j"$(nproc)" --target HarukaEngine
+        run: cmake --build build -j"$(nproc)" --target HarukaEngine   

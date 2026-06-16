@@ -22,10 +22,15 @@ namespace Haruka {
         uint8_t lod;
         uint32_t x;
         uint32_t y;
+        // Identidad del CUERPO celeste (Tierra/Luna/Júpiter…). Sin esto, dos cuerpos con
+        // el mismo (face,lod,x,y) colisionaban en la caché/renderer compartidos. Default 0
+        // → las construcciones antiguas siguen compilando; las claves DERIVADas (hijos/
+        // padre) deben propagar `body` explícitamente. (LOD v2 — fase F1.)
+        uint16_t body = 0;
 
         // Necesario para usarlo como clave en std::unordered_map
         bool operator==(const PlanetChunkKey& other) const {
-            return face == other.face && lod == other.lod && x == other.x && y == other.y;
+            return body == other.body && face == other.face && lod == other.lod && x == other.x && y == other.y;
         }
     };
 
@@ -61,9 +66,14 @@ namespace Haruka {
         float       minElevation = 0.0f;  // km, lowest terrain elevation in this chunk
         bool        hasOcean = false;     // true if any vertex is below sea level (elev < 0)
 
+        // Tamaño REAL en RAM (todos los arrays). Lo usa la caché LRU para su presupuesto:
+        // si subestima (omitir uvs/morph/agua), retiene MUCHOS más chunks que el cap y se
+        // come toda la RAM. Incluye terreno + agua + uvs/params.
         size_t getSizeBytes() const {
-            return (vertices.size() + morphTargets.size() + normals.size() + colors.size()) * sizeof(glm::vec3) +
-                   indices.size() * sizeof(unsigned int);
+            return (vertices.size() + morphTargets.size() + normals.size() + colors.size()
+                    + waterVertices.size() + waterNormals.size()) * sizeof(glm::vec3)
+                 + (uvs.size() + waterParams.size()) * sizeof(glm::vec2)
+                 + (indices.size() + waterIndices.size()) * sizeof(unsigned int);
         }
     };
 

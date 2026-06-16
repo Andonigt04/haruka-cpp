@@ -139,23 +139,6 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     for (size_t pi = 0; pi < m_planets.size(); ++pi) {
         auto& planet = m_planets[pi];
 
-        // DIAG (throttled ~2 s, también en reposo): deseados(load+keep) del ÚLTIMO
-        // update vs gpu/cache/pend/queued. Si deseados >> gpu con pend=0 y queued=0
-        // estando quieto → algo no se sube / se queda fuera (no completa el planeta).
-        if ((s_lf % 120) == 0 && pi < m_lastUpdates.size()) {
-            const auto& u = m_lastUpdates[pi];
-            const double alt = (glm::length(cameraPos - glm::dvec3(planet.position)) - planet.radius)
-                             / std::max(1.0, planet.radius);
-            fprintf(stderr, "[LOD] '%s' alt=%.3f deseados=%zu (load%zu+keep%zu) gpu=%d cache=%d pend=%d queued=%d\n",
-                    planet.name.c_str(), alt,
-                    u.chunksToLoad.size() + u.chunksToKeep.size(),
-                    u.chunksToLoad.size(), u.chunksToKeep.size(),
-                    m_renderer ? m_renderer->getGPUMeshCount() : -1,
-                    m_cache ? (int)m_cache->getChunkCount() : -1,
-                    m_streaming ? m_streaming->getPendingCount() : -1,
-                    m_streaming ? m_streaming->getQueuedCount() : -1);
-        }
-
         // Throttle: el quadtree solo cambia al cruzar una frontera de split, así
         // que saltamos el rebuild (con allocs) cuando la cámara apenas se movió
         // desde el último recompute. Los chunks ya en GPU siguen renderizándose.
@@ -202,8 +185,10 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         static std::unordered_set<uint64_t> s_resident; // reusa buffer entre frames
         if (m_renderer) m_renderer->residentHashes(s_resident);
         auto residentFn = [](const PlanetChunkKey& k) { return s_resident.count(ChunkCache::keyToHash(k)) != 0; };
+        // bodyId = índice del planeta (estable en la sesión) → estampado en todas las
+        // claves del cuerpo para que Tierra/Luna/Júpiter no colisionen en caché/renderer.
         LODUpdate update = m_lod->updatePlanetLOD(
-            std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), lodCamPos, residentFn);
+            std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), lodCamPos, residentFn, (uint16_t)pi);
         m_lastUpdates[pi] = update; // para el catch-up en throttle
 
         // B. Generar chunks nuevos (async) pasando settings del planeta
@@ -613,30 +598,55 @@ bool PlanetarySystem::getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outC
     return true;
 }
 
-double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
-    if (!m_generator || m_planets.empty()) return 0.0;
+Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos) const {
+    Haruka::TerrainSample s; // por defecto: elev 0
+    if (!m_generator || m_planets.empty()) return s;
 
-    // Find the nearest planet to the query position.
+    // Planeta más cercano al punto.
     const Planet* nearest = nullptr;
     double bestDist = 1e300;
     for (const auto& p : m_planets) {
         double d = glm::length(p.position - worldPos);
         if (d < bestDist) { bestDist = d; nearest = &p; }
     }
-    if (!nearest) return 0.0;
+    if (!nearest) return s;
 
-    // Direction from planet center to the query point (unit sphere direction).
     glm::dvec3 dir = worldPos - nearest->position;
     double len = glm::length(dir);
-    if (len < 1e-9) return 0.0;
+    if (len < 1e-9) return s;
     glm::vec3 sphereDir = glm::vec3(dir / len);
 
-    // Build settings JSON the same way streaming does (config lives under terrainSettings).
+    // Settings como en el streaming (config bajo terrainSettings).
     nlohmann::json settings = nearest->terrainSettings;
     settings["planetOffsetX"] = nearest->position.x;
     settings["planetOffsetY"] = nearest->position.y;
     settings["planetOffsetZ"] = nearest->position.z;
-    return double(m_generator->sampleHeightAt(sphereDir, settings, nearest->radius));
+    return m_generator->sampleSurfaceAt(sphereDir, settings, nearest->radius);
+}
+
+double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
+    return double(sampleSurface(worldPos).elevKm) * 1000.0; // metros (canónico)
+}
+
+bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const {
+    // MISMA selección que getActivePlanet (home, si no el primer v2) y MISMA construcción
+    // de params que el sampler del motor → el juego usa estos en vez de re-derivar.
+    const Planet* home = nullptr;
+    for (const auto& p : m_planets) {
+        const auto& cfg = p.terrainSettings.contains("config") ? p.terrainSettings["config"] : p.terrainSettings;
+        if (cfg.value("genVersion", 1) < 2) continue;
+        if (p.isHome) { home = &p; break; }
+        if (!home) home = &p;
+    }
+    if (!home) return false;
+    const auto& cfg = home->terrainSettings.contains("config") ? home->terrainSettings["config"] : home->terrainSettings;
+    uint32_t seed = (uint32_t)cfg.value("seed", 42);
+    out = Haruka::deriveWorldParams(seed, home->radius);
+    out.reliefStrength = cfg.value("reliefStrength", 1.0f);
+    { const std::string pr = cfg.value("profile", std::string("terran"));
+      out.profile = (pr == "moon") ? 1 : (pr == "gas") ? 2 : 0; }
+    outRadius = home->radius;
+    return true;
 }
 
 void PlanetarySystem::invalidateAllChunks() {

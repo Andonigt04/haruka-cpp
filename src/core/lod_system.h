@@ -48,8 +48,10 @@ namespace Haruka {
         // sus hijos) ya está residente → siempre hay un chunk grueso dibujado mientras
         // los finos generan (sin huecos negros) y la carga sube grueso→fino suavemente.
         using ResidencyFn = std::function<bool(const PlanetChunkKey&)>;
+        // 'bodyId' identifica el cuerpo celeste → se estampa en TODAS las claves que el
+        // árbol produce, para que cuerpos distintos no colisionen en caché/renderer.
         LODUpdate updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos,
-                                  const ResidencyFn& isResident = nullptr);
+                                  const ResidencyFn& isResident = nullptr, uint16_t bodyId = 0);
 
         /**
          * @brief Forgets a chunk from the "last frame" set so the next update
@@ -83,6 +85,7 @@ namespace Haruka {
         double m_splitFactor;
         int m_maxLOD;
         int m_minLOD = 4; // suelo: el planeta entero siempre a ≥ este LOD (≈1536 chunks)
+        uint16_t m_currentBody = 0; // cuerpo de la pasada actual (estampa todas las claves)
 
         // hash → key, para poder reconstruir la key al hacer unload
         std::unordered_map<uint64_t, PlanetChunkKey> m_lastFrameChunks;

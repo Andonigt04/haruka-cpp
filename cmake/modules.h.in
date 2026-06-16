@@ -3,7 +3,7 @@
  * @brief Build-time module switches. A module is ON iff its macro is defined.
  *
  * Controlled by -DMODULES=10110... (see CMakeLists.txt HARUKA_MODULE_LIST and
- * docs/guides/PLAN_MODULOS_BUILD.md). Guard module-specific code with
+ * docs/MODULES.md). Guard module-specific code with
  *   #ifdef HARUKA_MOD_<NAME>
  * Both the engine and the game must be built with the same MODULES value.
  */

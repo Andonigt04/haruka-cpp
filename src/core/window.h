@@ -35,6 +35,10 @@ namespace Haruka::Core {
         uint32_t setWidth(uint32_t w) { m_data.width = w; return m_data.width; }
         uint32_t setHeight(uint32_t h) { m_data.height = h; return m_data.height; }
 
+        // Aplica el modo de ventana: 0=Windowed (con borde), 1=Borderless (sin borde a
+        // pantalla completa), 2=Fullscreen (SDL). Seguro de llamar en runtime.
+        void setWindowMode(int mode);
+
     private:
         SDL_Window* m_window = nullptr;
         SDL_GLContext m_glContext = nullptr;

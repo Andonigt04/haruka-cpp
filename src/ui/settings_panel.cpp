@@ -34,6 +34,7 @@ static const char* texQualityNames[]   = { "Low", "Medium", "High", "Ultra" };
 static const char* shadowQualNames[]   = { "Off",  "Low",   "Medium", "High" };
 static const char* aaNames[]           = { "None", "FXAA",  "TAA" };
 static const char* waterQualityNames[] = { "Low", "Medium", "High", "Ultra" };
+static const char* windowModeNames[]   = { "Windowed", "Borderless", "Fullscreen" };
 
 bool SettingsPanel::render() {
     auto& sm = SettingsManager::get();
@@ -108,6 +109,14 @@ void SettingsPanel::tabGraphics() {
     }
 
     ImGui::SeparatorText(TR("gfx.rendering").c_str());
+
+    // Modo de ventana: se aplica al instante (sin esperar a Guardar) para verlo en vivo.
+    int wm = (int)g.windowMode;
+    if (ImGui::Combo(TR("gfx.windowMode").c_str(), &wm, windowModeNames, 3)) {
+        g.windowMode = (Settings::WindowMode)wm;
+        if (auto* app = MotorInstance::getInstance().getApplication())
+            app->applyGraphicsSettings();
+    }
 
     int tq = (int)g.textureQuality;
     if (ImGui::Combo(TR("gfx.textureQuality").c_str(), &tq, texQualityNames, 4))

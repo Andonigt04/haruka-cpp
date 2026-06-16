@@ -41,11 +41,10 @@ void ChunkCache::addChunk(const PlanetChunkKey& key, const ChunkData& data) {
     std::lock_guard<std::mutex> lock(m_mutex);
     uint64_t hash = keyToHash(key);
 
-    size_t chunkSizeBytes = 0;
-    chunkSizeBytes += data.vertices.size() * sizeof(glm::vec3);
-    chunkSizeBytes += data.normals.size() * sizeof(glm::vec3);
-    chunkSizeBytes += data.colors.size() * sizeof(glm::vec3);
-    chunkSizeBytes += data.indices.size() * sizeof(unsigned int);
+    // Tamaño REAL (todos los arrays: terreno + agua + uvs/morph). Antes contaba solo
+    // vertices+normals+colors+indices → subestimaba ~2.6× → la caché retenía mucho más
+    // que el cap y se comía toda la RAM. Fuente única: ChunkData::getSizeBytes().
+    size_t chunkSizeBytes = data.getSizeBytes();
 
     auto existing = cache.find(hash);
     if (existing != cache.end()) {
@@ -104,12 +103,16 @@ void ChunkCache::setMaxMemory(size_t newMaxMemoryMB) {
 }
 
 uint64_t ChunkCache::keyToHash(const PlanetChunkKey& key) {
-    uint64_t hash = 0;
-    hash |= (static_cast<uint64_t>(key.face) & 0x7);
-    hash |= ((static_cast<uint64_t>(key.lod) & 0x1F) << 3);
-    hash |= ((static_cast<uint64_t>(key.x) & 0xFFF) << 8);
-    hash |= ((static_cast<uint64_t>(key.y) & 0xFFF) << 20);
-    return hash;
+    // Empaquetado EXACTO (es identidad, no un hash con colisiones): face(3) | lod(5) |
+    // x(23) | y(23) | body(10) = 64 bits. x/y de 23 bits cubren hasta LOD 23 (antes 12
+    // bits → colisión a LOD>12). body en los 10 bits altos → cuerpos nunca colisionan.
+    uint64_t h = 0;
+    h |=  (static_cast<uint64_t>(key.face) & 0x7);
+    h |= ((static_cast<uint64_t>(key.lod)  & 0x1F)     << 3);
+    h |= ((static_cast<uint64_t>(key.x)    & 0x7FFFFF) << 8);
+    h |= ((static_cast<uint64_t>(key.y)    & 0x7FFFFF) << 31);
+    h |= ((static_cast<uint64_t>(key.body) & 0x3FF)    << 54);
+    return h;
 }
 
 bool ChunkCache::evictLRU() {

@@ -52,6 +52,14 @@ namespace Haruka {
          */
         void processLODUpdate(const LODUpdate& update);
 
+        /** @brief (F7) Presupuesto de SUBIDAS a GPU para este frame. El PlanetarySystem
+         *  lo resetea cada frame; processLODUpdate sube como mucho ese nº de chunks y deja
+         *  el resto para frames siguientes → reparte la ráfaga de carga (sin picos de ms). */
+        void setUploadBudget(int n) { m_uploadBudget = n; }
+        /** @brief Consume 1 del presupuesto de subida; false si agotado (no subas). Para
+         *  que el agua del PlanetarySystem comparta el MISMO presupuesto que el terreno. */
+        bool tryConsumeUpload() { if (m_uploadBudget <= 0) return false; --m_uploadBudget; return true; }
+
         /**
          * @brief Recupera los chunks que ya terminaron de generarse.
          */
@@ -95,6 +103,7 @@ namespace Haruka {
         // orden cercano→lejano lo da el sort en PlanetarySystem. Subir >0 sólo si se
         // quiere limitar hilos (con el erase exception-safe ya no puede causar stall).
         size_t m_maxInFlight = 0;
+        int    m_uploadBudget = 1000000; // F7: subidas a GPU restantes este frame (sin cap si no se resetea)
         
         // Resultados listos para ser inyectados en la escena
         std::vector<std::shared_ptr<ChunkData>> m_completedChunks;

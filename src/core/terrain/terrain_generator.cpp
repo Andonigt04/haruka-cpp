@@ -586,40 +586,49 @@ namespace {
         return chunk;
     }
 
-    float TerrainGenerator::sampleHeightAt(const glm::vec3& sphereDir,
-                                            const nlohmann::json& settings,
-                                            double planetRadius)
+    TerrainSample TerrainGenerator::sampleSurfaceAt(const glm::vec3& sphereDir,
+                                                    const nlohmann::json& settings,
+                                                    double planetRadius)
     {
         static const nlohmann::json kEmpty = nlohmann::json::object();
         const auto& config = settings.contains("config") ? settings["config"] : kEmpty;
         g_current_seed = config.value("seed", 42);
         const auto& layers = config.contains("layers") ? config["layers"] : kEmpty;
-        // Procedural height in metres above the reference sphere. v2 (opt-in por
-        // escena) usa el mismo sampler que el render → colisión = geometría.
+
+        // Muestreo procedural (mismo sampler que el render v2 → colisión = geometría).
         const int genVersion = config.value("genVersion", 1);
-        float metres;
+        TerrainSample s;
         if (genVersion >= 2) {
             WorldGenParams wgp = getWorldParamsCached((uint32_t)g_current_seed, planetRadius);
             wgp.reliefStrength = config.value("reliefStrength", 1.0f); // parámetro de escena
             { const std::string pr = config.value("profile", std::string("terran"));
               wgp.profile = (pr == "moon") ? 1 : (pr == "gas") ? 2 : 0; }
-            metres = sampleTerrainV2(sphereDir, wgp, planetRadius).elevKm * 1000.0f;
+            s = sampleTerrainV2(sphereDir, wgp, planetRadius);
         } else {
-            metres = calculateHeight(sphereDir, layers) * float(planetRadius) * float(1000.0 / planetRadius);
+            s.elevKm = calculateHeight(sphereDir, layers); // v1: ya en km (·1000 = metros)
         }
 
-        // Add player edits (same as the mesh) so collision/water/aim match what is
-        // drawn. Single source of truth: dig a hole → you fall into it.
+        // Ediciones del jugador (deform): MISMA fuente que la malla → cavar un agujero y
+        // caer en él. Se aplica a la elevación final (única verdad: render/colisión/agua).
 #ifdef HARUKA_MOD_DEFORM
         if (m_deform && !m_deform->empty()) {
             glm::dvec3 offset(settings.value("planetOffsetX", 0.0),
                               settings.value("planetOffsetY", 0.0),
                               settings.value("planetOffsetZ", 0.0));
+            float metres = s.elevKm * 1000.0f;
             glm::dvec3 surfW = glm::dvec3(glm::normalize(sphereDir)) * (planetRadius + double(metres)) + offset;
-            metres = float(m_deform->applyHeight(surfW, double(metres))); // aditivo + nivelado
+            s.elevKm = float(m_deform->applyHeight(surfW, double(metres))) * 0.001f; // m→km
         }
 #endif
-        return metres;
+        return s;
+    }
+
+    // Wrapper: altura en metros sobre la esfera de referencia (= sampleSurfaceAt().elevKm·1000).
+    float TerrainGenerator::sampleHeightAt(const glm::vec3& sphereDir,
+                                            const nlohmann::json& settings,
+                                            double planetRadius)
+    {
+        return sampleSurfaceAt(sphereDir, settings, planetRadius).elevKm * 1000.0f;
     }
 
     // smoothstep auxiliar (Hermite) usado por el modelo de elevación.

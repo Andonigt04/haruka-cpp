@@ -185,20 +185,32 @@ namespace Haruka {
         //    chunksToKeep y NUNCA se sube → queda en caché pero no en GPU (lo que
         //    pasaba: 327 cacheados, 6 en GPU). addToScene es idempotente (salta los
         //    ya residentes), así que esto solo sube los que faltan.
+        // PRESUPUESTO DE FRAME (F7): subir un chunk = copia pesada (getChunkCopy ~150 KB)
+        // + creación de buffers GPU. En una ráfaga (carga inicial / fly-in) había CIENTOS
+        // por frame → pico de >1500 ms. Capamos cuántos se suben por frame; los que faltan
+        // se suben en frames siguientes (processLODUpdate se vuelve a llamar). isResident
+        // refresca gratis (no consume presupuesto), así que lo ya subido no cuenta.
         for (const auto& key : update.chunksToKeep) {
             if (m_renderer.isResident(key)) { m_cache.getChunk(key); continue; } // ya en GPU: solo refresca LRU
+            if (m_uploadBudget <= 0) return;                                      // presupuesto agotado → el resto, otro frame
             ChunkData data;
-            if (m_cache.getChunkCopy(key, data))
+            if (m_cache.getChunkCopy(key, data)) {
                 m_renderer.addToScene(update.planetName, key, data); // sube el que falta
+                --m_uploadBudget;
+            }
         }
 
         // 3. CARGAR lo nuevo a la GPU
         for (const auto& key : update.chunksToLoad) {
+            if (m_renderer.isResident(key)) continue;       // ya subido (idempotente): gratis
+            if (m_uploadBudget <= 0) return;                // presupuesto agotado
             // Copy out of the cache UNDER ITS LOCK (not a raw pointer): a concurrent async
             // addChunk (insert/rehash/evict) would otherwise dangle the pointer → crash.
             ChunkData data;
-            if (m_cache.getChunkCopy(key, data))
+            if (m_cache.getChunkCopy(key, data)) {
                 m_renderer.addToScene(update.planetName, key, data);
+                --m_uploadBudget;
+            }
         }
     }
 

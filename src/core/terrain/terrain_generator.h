@@ -5,6 +5,7 @@
 
 #include "core/scene/scene_manager.h" // Para leer terrainSettings
 #include "tools/planetary_types.h" // Para PlanetChunkKey y ChunkData
+#include "core/terrain/terrain_sample.h" // TerrainSample (muestreo canónico)
 
 namespace Haruka {
 
@@ -63,6 +64,18 @@ namespace Haruka {
         float sampleHeightAt(const glm::vec3& sphereDir,
                              const nlohmann::json& settings,
                              double planetRadius);
+
+        /**
+         * @brief Muestreo CANÓNICO de superficie (F3): devuelve el TerrainSample
+         *        completo (elevación, agua, wetness, clima…) con las MISMAS ediciones
+         *        (deform) que aplica el render. Es la "única verdad" en CPU: colisión,
+         *        puntería, agua y siembra de recursos deben pasar por aquí (o por los
+         *        params que expone el motor) en vez de re-muestrear por su cuenta.
+         *        sampleHeightAt() es ahora un wrapper de este (devuelve elevKm·1000).
+         */
+        TerrainSample sampleSurfaceAt(const glm::vec3& sphereDir,
+                                      const nlohmann::json& settings,
+                                      double planetRadius);
 
     private:
         // Métodos internos para calcular ruido (Noise)

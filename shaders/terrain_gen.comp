@@ -149,6 +149,17 @@ float terranElevKm(vec3 dir, out float outWaterKm) {
 
     float seaT     = ssf(c0, c0 - 0.5, c);
     float seaDepth = seaT * (-5.0);
+    // Batimetría: relieve submarino (dorsales/montes + fosas) sobre el gradiente liso,
+    // para que el lecho tenga relieve como la tierra (no un cuenco plano). Gateado por
+    // seaT → ~0 en la costa (plataforma somera) y crece mar adentro. MISMO código que la
+    // CPU (terrain_sampler_v2.cpp) para mantener paridad render↔colisión.
+    float oreg   = fBm(dir, seed + 211, 4, 0.5, 2.0, 3.0);
+    float oMask  = ssf(0.05, 0.30, oreg);
+    float omn    = fBm(dir, seed + 311, 5, 0.5, 2.1, 600.0);
+    float ona    = omn * (1.0 / A_NORM);
+    float oform  = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);   // dorsales (ridged)
+    float oceanRelief = (oform - 0.5) * oMask * 3.0;            // km, [-1.5,1.5] segun máscara
+    seaDepth = min(seaDepth + oceanRelief * seaT, -0.02);       // siempre bajo el mar
     float landT    = ssf(c0, c0 + 0.3, c);
     float landBase = landT * 1.0;
 

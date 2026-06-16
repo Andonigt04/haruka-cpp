@@ -275,6 +275,16 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
     // Rama MAR: profundidad crece según c baja de c0 (curva anclada a 0 en costa).
     ValD seaT     = smoothstepD(c0, c0 - 0.5f, c);          // 0 costa → 1 abismo
     ValD seaDepth = seaT * (-5.0f);                          // km (oceanDepth ~5)
+    // Batimetría: relieve submarino (dorsales/montes + fosas) sobre el gradiente liso →
+    // el lecho tiene relieve como la tierra (no un cuenco plano). Gateado por seaT (~0 en
+    // la costa, crece mar adentro). MISMO cálculo que el compute GPU (terrain_gen.comp).
+    ValD oreg   = fbmD(dir, seed + 211, 4, 0.5f, 2.0f, 3.0f);
+    ValD oMask  = smoothstepD(0.05f, 0.30f, oreg);
+    ValD omn    = fbmD(dir, seed + 311, 5, 0.5f, 2.1f, 600.0f);
+    ValD ona    = omn * (1.0f / A_NORM);
+    ValD oform  = powD(clampD(konst(1.0f) - absD(ona), 0.0f, 1.0f), 1.5f); // dorsales
+    ValD oceanRelief = (oform - konst(0.5f)) * oMask * 3.0f;               // km [-1.5,1.5]
+    seaDepth = clampD(seaDepth + oceanRelief * seaT, -1e9f, -0.02f);       // siempre bajo el mar
 
     // Rama TIERRA: base que sube desde la costa.
     ValD landT    = smoothstepD(c0, c0 + 0.3f, c);          // 0 costa → 1 tierra adentro

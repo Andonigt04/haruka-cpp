@@ -139,17 +139,13 @@ private:
     // We use a custom hash for PlanetChunkKey to use unordered_map
     struct ChunkKeyHash {
         size_t operator()(const PlanetChunkKey& key) const {
-            // Combine face, lod, x, y into a single hash
-            return ((static_cast<size_t>(key.face) << 24) |
-                    (static_cast<size_t>(key.lod) << 16) |
-                    (static_cast<size_t>(key.x) << 8) |
-                    (static_cast<size_t>(key.y)));
+            return static_cast<size_t>(ChunkCache::keyToHash(key)); // empaquetado exacto (incluye body)
         }
     };
-    
+
     struct ChunkKeyEqual {
         bool operator()(const PlanetChunkKey& a, const PlanetChunkKey& b) const {
-            return a.face == b.face && a.lod == b.lod && a.x == b.x && a.y == b.y;
+            return a == b; // operator== incluye body
         }
     };
     

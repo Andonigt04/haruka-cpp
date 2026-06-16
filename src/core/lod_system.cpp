@@ -15,9 +15,10 @@ bool LODSystem::isVisible(const PlanetChunkKey& key) const {
 }
 
 LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet, const glm::dvec3& cameraPos,
-                                    const ResidencyFn& isResident) {
+                                    const ResidencyFn& isResident, uint16_t bodyId) {
     LODUpdate update;
     update.planetName = planet->name;
+    m_currentBody = bodyId;  // se estampa en todas las claves de esta pasada
     m_currentFrameChunks.clear();
 
     double radius = planet->scale.x; // Asumimos escala uniforme para el radio
@@ -34,7 +35,7 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
     // NUNCA recarga terreno (antes el face-cull la descargaba y regeneraba).
     for (int face = 0; face < 6; ++face) {
         const PlanetFace planetFace = static_cast<PlanetFace>(face);
-        PlanetChunkKey rootKey{ planetFace, 0, 0, 0 };
+        PlanetChunkKey rootKey{ planetFace, 0, 0, 0, m_currentBody };
         glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
 
         LODNode root(rootKey, center, radius * 2.0);
@@ -67,7 +68,7 @@ bool LODSystem::findCoveringLeaf(PlanetFace face, int lod, uint32_t x, uint32_t 
     for (int l = lod; l >= 0; --l) {
         uint32_t ax = x >> (lod - l);
         uint32_t ay = y >> (lod - l);
-        PlanetChunkKey k{ face, (uint8_t)l, ax, ay };
+        PlanetChunkKey k{ face, (uint8_t)l, ax, ay, m_currentBody };
         auto it = m_currentFrameChunks.find(ChunkCache::keyToHash(k));
         if (it != m_currentFrameChunks.end()) { out = it->second; return true; }
     }
@@ -79,7 +80,7 @@ void LODSystem::subdivideLeafKey(const PlanetChunkKey& k) {
     m_currentFrameChunks.erase(ChunkCache::keyToHash(k));
     int nl = k.lod + 1;
     for (int i = 0; i < 4; ++i) {
-        PlanetChunkKey c{ k.face, (uint8_t)nl, k.x * 2 + (i % 2), k.y * 2 + (i / 2) };
+        PlanetChunkKey c{ k.face, (uint8_t)nl, k.x * 2 + (i % 2), k.y * 2 + (i / 2), k.body };
         m_currentFrameChunks[ChunkCache::keyToHash(c)] = c;
     }
 }
@@ -162,10 +163,11 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     if (wantSplit && isResident) {
         const uint8_t  cl = (uint8_t)(node->key.lod + 1);
         const uint32_t bx = node->key.x * 2, by = node->key.y * 2;
-        const bool childIn = isResident({ node->key.face, cl, bx,     by     })
-                          || isResident({ node->key.face, cl, bx + 1, by     })
-                          || isResident({ node->key.face, cl, bx,     by + 1 })
-                          || isResident({ node->key.face, cl, bx + 1, by + 1 });
+        const uint16_t bd = node->key.body;
+        const bool childIn = isResident({ node->key.face, cl, bx,     by,     bd })
+                          || isResident({ node->key.face, cl, bx + 1, by,     bd })
+                          || isResident({ node->key.face, cl, bx,     by + 1, bd })
+                          || isResident({ node->key.face, cl, bx + 1, by + 1, bd });
         if (!isResident(node->key) && !childIn) {
             wantSplit = false;             // aún no está el grueso → espera
             update.residencyLimited = true; // el llamador debe recalcular hasta refinar
@@ -202,7 +204,7 @@ void LODSystem::subdivide(LODNode* node, double radius, const glm::dvec3& planet
         double v = (double(cy) + 0.5) / chunksPerAxis;
 
         glm::dvec3 childCenter = getCubeToSpherePos(node->key.face, u, v, radius) + planetPos;
-        PlanetChunkKey childKey = { node->key.face, (uint8_t)nextLOD, cx, cy };
+        PlanetChunkKey childKey = { node->key.face, (uint8_t)nextLOD, cx, cy, node->key.body };
         node->children[i] = std::make_unique<LODNode>(childKey, childCenter, childSize);
     }
 }

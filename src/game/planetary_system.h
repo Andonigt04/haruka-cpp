@@ -139,6 +139,16 @@ public:
      */
     double sampleTerrainHeight(const glm::dvec3& worldPos) const;
 
+    /** @brief (F3) Muestreo CANÓNICO de superficie en una posición de mundo: devuelve
+     *  el TerrainSample completo (elev, agua, wetness, clima…) del planeta más cercano,
+     *  con deform aplicado. Colisión, puntería, agua y siembra deben usar ESTO. */
+    Haruka::TerrainSample sampleSurface(const glm::dvec3& worldPos) const;
+
+    /** @brief (F3) Params EXACTOS del generador para el planeta ACTIVO (home): seed +
+     *  reliefStrength + profile + radio. Fuente única de params → el juego no re-deriva
+     *  los suyos (evita divergencias, p.ej. el profile). Devuelve false si no hay planeta. */
+    bool getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const;
+
     /**
      * @brief Mean sea surface for the nearest planet (sea level = planet radius).
      * @return true if a planet was found.

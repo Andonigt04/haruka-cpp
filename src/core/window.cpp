@@ -76,6 +76,40 @@ namespace Haruka::Core {
         return true;
     }
 
+    void Window::setWindowMode(int mode) {
+        if (!m_window) return;
+        switch (mode) {
+            case 2: // Fullscreen (pantalla completa de SDL — desktop fullscreen)
+                SDL_SetWindowFullscreen(m_window, true);
+                break;
+            case 1: { // Borderless: sin borde cubriendo el escritorio (windowed fullscreen)
+                SDL_SetWindowFullscreen(m_window, false);
+                SDL_SetWindowBordered(m_window, false);
+                SDL_DisplayID disp = SDL_GetDisplayForWindow(m_window);
+                SDL_Rect b;
+                if (SDL_GetDisplayBounds(disp, &b)) {
+                    SDL_SetWindowPosition(m_window, b.x, b.y);
+                    SDL_SetWindowSize(m_window, b.w, b.h);
+                }
+                break;
+            }
+            case 0: // Windowed: ventana normal con borde
+            default:
+                SDL_SetWindowFullscreen(m_window, false);
+                SDL_SetWindowBordered(m_window, true);
+                break;
+        }
+        // Sincroniza el tamaño REAL en píxeles → m_data + viewport (por si el evento
+        // de resize aún no ha llegado este frame).
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels(m_window, &w, &h);
+        if (w > 0 && h > 0) {
+            m_data.width  = (uint32_t)w;
+            m_data.height = (uint32_t)h;
+            glViewport(0, 0, w, h);
+        }
+    }
+
     void Window::pollEvents(bool& running) {
         SDL_Event event;
         while (SDL_PollEvent(&event)) {

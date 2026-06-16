@@ -138,14 +138,15 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
     // (1) SUBDIVIDE: 'key' es un hijo fino. Si su PADRE está stale y los 4 hijos ya
     //     están residentes y NO-stale, el padre ya está cubierto → fuera.
     if (key.lod > 0) {
-        PlanetChunkKey parent{ key.face, (uint8_t)(key.lod - 1), key.x >> 1, key.y >> 1 };
+        PlanetChunkKey parent{ key.face, (uint8_t)(key.lod - 1), key.x >> 1, key.y >> 1, key.body };
         uint64_t ph = ChunkCache::keyToHash(parent);
         if (m_stale.count(ph) && m_gpuMeshes.count(ph)) {
             const uint8_t  cl = (uint8_t)(parent.lod + 1);
             const uint32_t bx = parent.x * 2, by = parent.y * 2;
+            const uint16_t bd = parent.body;
             const PlanetChunkKey kids[4] = {
-                { parent.face, cl, bx,     by     }, { parent.face, cl, bx + 1, by     },
-                { parent.face, cl, bx,     by + 1 }, { parent.face, cl, bx + 1, by + 1 },
+                { parent.face, cl, bx,     by,     bd }, { parent.face, cl, bx + 1, by,     bd },
+                { parent.face, cl, bx,     by + 1, bd }, { parent.face, cl, bx + 1, by + 1, bd },
             };
             bool allReady = true;
             for (const auto& kk : kids) {
@@ -166,7 +167,7 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
     for (auto& [h, mesh] : m_gpuMeshes) {
         if (!m_stale.count(h)) continue;
         const PlanetChunkKey& s = mesh.key;
-        if (s.face == key.face && s.lod > key.lod) {
+        if (s.body == key.body && s.face == key.face && s.lod > key.lod) {
             uint32_t shift = (uint32_t)(s.lod - key.lod);
             if ((s.x >> shift) == key.x && (s.y >> shift) == key.y) drop.push_back(s);
         }
