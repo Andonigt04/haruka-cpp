@@ -26,8 +26,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -37,6 +35,10 @@ jobs:
             gtk3-devel glm-devel glslang mesa-libGL-devel \
             wayland-devel wayland-protocols-devel \
             libxkbcommon-devel mesa-libEGL-devel
+
+      - name: Checkout submodules manually
+        run: |
+          git submodule update --init --recursive
 
       - name: Cache SDL3
         id: cache-sdl
