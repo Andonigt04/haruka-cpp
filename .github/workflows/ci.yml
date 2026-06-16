@@ -10,9 +10,6 @@ jobs:
   engine:
     name: Engine · ${{ matrix.name }}
     runs-on: ubuntu-latest
-    
-    container:
-      image: fedora:latest
 
     strategy:
       fail-fast: false
@@ -25,17 +22,18 @@ jobs:
           - { name: network,     modules: "",           network: "ON"  }
 
     steps:
-      # 1. El checkout se ejecuta de forma nativa en Ubuntu (funciona perfecto con submódulos)
+      # 1. El checkout se ejecuta nativo en Ubuntu con todas las de la ley. Descargará submódulos sin rechistar.
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2. Compilamos e instalamos dentro de Fedora usando Docker de forma manual por pasos
-      - name: Install dependencies & Build Engine
+      # 2. Levantamos un contenedor de Fedora aislado solo para ejecutar los comandos de compilación.
+      - name: Build inside Fedora Container
         uses: addnab/docker-run-action@v3
         with:
           image: fedora:latest
-          options: -v ${{ github.workspace }}:/__w/haruka-cpp/haruka-cpp -w /__w/haruka-cpp/haruka-cpp
+          # Mapeamos la carpeta del código de Ubuntu dentro de Fedora
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
           run: |
             # Instalar dependencias en Fedora
             dnf install -y --setopt=install_weak_deps=False \
@@ -45,7 +43,7 @@ jobs:
               wayland-devel wayland-protocols-devel \
               libxkbcommon-devel mesa-libEGL-devel libzstd-devel
 
-            # Clonar y compilar SDL3 de forma local para el contenedor
+            # Clonar e instalar SDL3 de forma interna en el contenedor
             git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
             cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
@@ -62,5 +60,5 @@ jobs:
               -DHARUKA_NETWORK=${{ matrix.network }} \
               -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
 
-            # Compilar el motor
+            # Compilar el objetivo final
             cmake --build build -j"$(nproc)" --target HarukaEngine
