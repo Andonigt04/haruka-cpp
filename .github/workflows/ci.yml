@@ -9,7 +9,11 @@ on:
 jobs:
   engine:
     name: Engine · ${{ matrix.name }}
-    runs-on: fedora-latest
+    runs-on: ubuntu-latest
+    
+    container:
+      image: fedora:latest
+
     strategy:
       fail-fast: false
       matrix:
@@ -25,12 +29,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo dnf update
+          sudo dnf update -y
           sudo dnf install -y --no-install-recommends \
-            cmake ninja-build g++ pkg-config \
+            cmake ninja-build g++ pkg-config git \
             assimp-devel openssl-devel openal-soft-devel postgresql-devel \
             gtk3-devel glm glslang mesa-libGL-devel \
-            # Wayland dependencies (Required for SDL3 Wayland backend)
             wayland-devel wayland-protocols-devel \
             libxkbcommon-devel mesa-libEGL-devel
 
@@ -64,4 +67,4 @@ jobs:
 
       - name: Build engine
         working-directory: .
-        run: cmake --build build -j"$(nproc)" --target HarukaEngine   
+        run: cmake --build build -j"$(nproc)" --target HarukaEngine

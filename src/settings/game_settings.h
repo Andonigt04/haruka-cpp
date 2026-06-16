@@ -19,7 +19,7 @@ enum class FoliageQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
 enum class WindowMode : int { Windowed = 0, Borderless = 1, Fullscreen = 2 };
 
 struct GraphicsSettings {
-    WindowMode      windowMode      = WindowMode::Windowed;
+    WindowMode      windowMode      = WindowMode::Fullscreen;
     TextureQuality  textureQuality  = TextureQuality::High;
     ShadowQuality   shadowQuality   = ShadowQuality::Medium;
     AntialiasingMode antialiasing   = AntialiasingMode::TAA;
