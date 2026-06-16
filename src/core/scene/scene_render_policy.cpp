@@ -47,6 +47,14 @@ bool hasVisualMeshPrimitive(const Haruka::SceneObject& obj, Haruka::PrimitiveTyp
         primitive = Haruka::PrimitiveType::PLANE;
         return true;
     }
+    if (lower.find("cylinder") != std::string::npos || lower.find("cilinder") != std::string::npos) {
+        primitive = Haruka::PrimitiveType::CILINDER;
+        return true;
+    }
+    if (lower.find("triangle") != std::string::npos) {
+        primitive = Haruka::PrimitiveType::TRIANGLE;
+        return true;
+    }
 
     return false;
 }

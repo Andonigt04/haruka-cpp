@@ -3,6 +3,8 @@
 #include <cmath>
 #include <algorithm>
 
+namespace Haruka { namespace Renderer {
+
 VirtualTexturing::VirtualTexturing() {}
 
 VirtualTexturing::~VirtualTexturing() {
@@ -219,3 +221,6 @@ void VirtualTexturing::makeRoomInCache(size_t neededBytes) {
         }
     }
 }
+
+
+}} // namespace Haruka::Renderer

@@ -2,6 +2,8 @@
 
 #include <SDL3/SDL.h>
 
+namespace Haruka { namespace Core {
+
 Camera::Camera(Haruka::WorldPos startPos)
     : position(startPos), orientation(glm::dvec3(0.0, 0.0, 0.0)), zoom(45.0f) {}
 
@@ -36,19 +38,7 @@ void Camera::rotate(float deltaX, float deltaY) {
     orientation *= glm::angleAxis(yRad, pitchAxis);
 }
 
-void Camera::processInput(SDL_Window* /*window*/, float deltaTime) {
-    const bool* keys = SDL_GetKeyboardState(nullptr);
-    double multiplier = keys[SDL_SCANCODE_LSHIFT] ? 10.0 : 1.0;
-    double velocity = (double)speed * (double)deltaTime * multiplier;
-    glm::vec3 right = glm::normalize(glm::cross(getFront(), getUp()));
 
-    if (keys[SDL_SCANCODE_W])     position += Haruka::WorldPos(getFront()) * velocity;
-    if (keys[SDL_SCANCODE_S])     position -= Haruka::WorldPos(getFront()) * velocity;
-    if (keys[SDL_SCANCODE_A])     position -= Haruka::WorldPos(right) * velocity;
-    if (keys[SDL_SCANCODE_D])     position += Haruka::WorldPos(right) * velocity;
-    if (keys[SDL_SCANCODE_SPACE]) position += Haruka::WorldPos(getUp()) * velocity;
-    if (keys[SDL_SCANCODE_LCTRL]) position -= Haruka::WorldPos(getUp()) * velocity;
-}
 
 void Camera::ProcessMouseScroll(float yoffset) {
     zoom -= (float)yoffset;
@@ -63,3 +53,6 @@ glm::mat4 Camera::getProjectionMatrix() const {
 glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
     return glm::perspective(glm::radians(zoom), aspectRatio, 0.1f, 300000000000.0f);
 }
+
+
+}} // namespace Haruka::Core

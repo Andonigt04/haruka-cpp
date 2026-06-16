@@ -10,6 +10,7 @@
 namespace Haruka::Network {
     void sendTransform(uint32_t uuid, const WorldPos& pos, const Rotation& rot);
     void sendChat(uint32_t uuid, const std::string& username, const std::string& text);
+    
     std::vector<DGS::ChatMessage> pollChats();
 }
 

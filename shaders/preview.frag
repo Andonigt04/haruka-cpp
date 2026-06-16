@@ -5,16 +5,46 @@ layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 
+layout(std140, binding = 0) uniform PerFrameData {
+    mat4 view;
+    mat4 projection;
+    vec3 cameraPos;      float _pad0;
+    vec3 sunDirection;   float _pad1;
+    vec3 sunLightColor;  float ambientStrength;
+    int  enableHDR;
+    int  enableBloom;
+    int  enableSSAO;
+    int  enableIBL;
+    int  enableShadows;
+    int  _pad3[3];
+    vec3 moonDirection;  float moonIntensity;
+    vec3 moonLightColor; float _pad4;
+};
+
+layout(std140, binding = 1) uniform PerObjectData {
+    mat4 model;
+    vec4 baseColorAndPlanetRadius;
+    vec4 planetCenterAndFlag;
+};
+
 void main() {
+    vec3 baseColor = baseColorAndPlanetRadius.rgb;
+    if (dot(baseColor, baseColor) < 0.001)
+        baseColor = vec3(0.72, 0.74, 0.78);
+
+    // Emissive stars: render at full brightness, no shading
+    if (planetCenterAndFlag.w > 1.5) {
+        FragColor = vec4(baseColor, 1.0);
+        return;
+    }
+
     vec3 n = normalize(Normal);
+    vec3 L = normalize(sunDirection);
+    float ndl = max(dot(n, L), 0.0);
 
-    // Preview lighting: stable and independent from UBO/textures.
-    vec3 lightDir = normalize(vec3(-0.35, -0.80, -0.45));
-    float ndl = max(dot(n, -lightDir), 0.0);
+    float ambient = max(ambientStrength, 0.15);
+    vec3 color = ambient * baseColor
+               + (1.0 - ambient) * ndl * sunLightColor * baseColor;
 
-    vec3 baseColor = vec3(0.72, 0.74, 0.78);
-    vec3 ambient = 0.30 * baseColor;
-    vec3 diffuse = 0.70 * ndl * baseColor;
-
-    FragColor = vec4(ambient + diffuse, 1.0);
+    FragColor = vec4(color, 1.0);
 }

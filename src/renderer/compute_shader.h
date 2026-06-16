@@ -9,6 +9,8 @@
 #include <string>
 #include <glm/glm.hpp>
 
+namespace Haruka { namespace Renderer {
+
 class ComputeShader
 {
 public:
@@ -35,4 +37,9 @@ private:
     std::string readFile(const std::string& filePath);
     GLint getUniformLocation(const std::string& name) const;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::ComputeShader;
+namespace Haruka { using Renderer::ComputeShader; }
 #endif

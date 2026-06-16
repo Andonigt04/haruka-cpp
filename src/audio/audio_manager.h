@@ -1,127 +1,69 @@
-/**
- * @file audio_manager.h
- * @brief OpenAL audio subsystem singleton — device/context, buffer cache, and 3D source pool.
- */
 #pragma once
-
-#include <AL/al.h>
-#include <AL/alc.h>
-#include <glm/glm.hpp>
+/**
+ * @file audio/audio_manager.h
+ * @brief API de audio de alto nivel (módulo AUDIO). Orquesta AudioSystem (backend OpenAL) y
+ *        AudioLoader (buffers). Mantiene el listener (cámara), las FUENTES del mundo (emisores
+ *        persistentes) y la PROPAGACIÓN (cuánta señal llega de A a B; oclusión por terreno hoy,
+ *        portales/puertas en el futuro). propagation() sirve para el playback Y como consulta
+ *        lógica (IA: ¿oye al jugador? → sigilo).
+ */
+#include <cstdint>
 #include <string>
 #include <vector>
-#include <map>
-#include <memory>
+#include <unordered_map>
+#include <glm/glm.hpp>
+
+#include "audio/audio_system.h"
+#include "audio/audio_loader.h"
 
 namespace Haruka {
 
-/** @brief OpenAL source state tracked by the manager. */
-struct AudioSource {
-    ALuint sourceId = 0;
-    glm::vec3 position = glm::vec3(0.0f);
-    glm::vec3 velocity = glm::vec3(0.0f);
-    float gain = 1.0f;
-    float pitch = 1.0f;
-    bool looping = false;
-    bool positional = true;
-};
-
-/**
- * @brief Loaded audio buffer resource wrapper.
- *
- * Owns one OpenAL buffer and loads it from WAV/OGG disk assets.
- */
-class AudioBuffer {
-public:
-    /** @brief Loads an audio file into an OpenAL buffer. */
-    AudioBuffer(const std::string& filepath);
-    ~AudioBuffer();
-    
-    /** @brief OpenAL buffer handle. */
-    ALuint getBufferId() const { return bufferId; }
-    /** @brief Returns true when the buffer has been loaded successfully. */
-    bool isLoaded() const { return bufferId != 0; }
-
-private:
-    ALuint bufferId = 0;
-    /** @brief Loads a WAV file from disk into the buffer. */
-    bool loadWAV(const std::string& filepath);
-    /** @brief Loads an OGG file from disk into the buffer. */
-    bool loadOGG(const std::string& filepath);
-};
-
-/**
- * @brief Audio subsystem singleton (device/context, buffers, and source pool).
- */
 class AudioManager {
 public:
-    static AudioManager& getInstance() {
-        static AudioManager instance;
-        return instance;
-    }
-    
-    /** @brief Initializes the OpenAL device/context and source pool. */
-    bool init();
-    /** @brief Releases OpenAL resources and clears managed audio state. */
+    static AudioManager& get();
+
+    bool init(const std::string& outputDevice = "");
     void shutdown();
-    
-    /** @name Listener state */
-    ///@{
-    void setListenerPosition(const glm::vec3& pos);
-    void setListenerVelocity(const glm::vec3& vel);
-    void setListenerOrientation(const glm::vec3& forward, const glm::vec3& up);
-    ///@}
-    
-    /** @brief Loads a named sound buffer into the manager cache. */
-    bool loadSound(const std::string& name, const std::string& filepath);
-    
-    /** @name Playback helpers */
-    ///@{
-    int playSound(const std::string& name, const glm::vec3& position = glm::vec3(0.0f), 
-                  bool loop = false, float gain = 1.0f, float pitch = 1.0f);
-    int playSound2D(const std::string& name, bool loop = false, float gain = 1.0f);
-    ///@}
-    
-    /** @name Source control */
-    ///@{
-    void stopSource(int sourceId);
-    void pauseSource(int sourceId);
-    void resumeSource(int sourceId);
-    
-    void setSourcePosition(int sourceId, const glm::vec3& pos);
-    void setSourceVelocity(int sourceId, const glm::vec3& vel);
-    void setSourceGain(int sourceId, float gain);
-    void setSourcePitch(int sourceId, float pitch);
-    ///@}
-    
-    /** @name Master output */
-    ///@{
-    void setMasterVolume(float volume);
-    float getMasterVolume() const { return masterVolume; }
-    ///@}
-    
-    /** @brief Updates listener/source state for 3D audio calculations. */
-    void update(float deltaTime);
+    bool available() const { return m_sys.ok(); }
+
+    // Dispositivos de SALIDA según OpenAL (la salida va por OpenAL, no por SDL). El nombre
+    // sirve tal cual para init()/alcOpenDevice. Vacío = solo el predeterminado.
+    static std::vector<std::string> playbackDevices();
+
+    void setListener(const glm::dvec3& pos, const glm::dvec3& fwd, const glm::dvec3& up);
+
+    // One-shot posicional (impactos, etc.). Atenuado por propagación.
+    void playTone(const glm::dvec3& pos, float freq, float dur, float volume,
+                  const glm::vec3& timbre = {1, 1, 1});
+    // One-shot desde un FICHERO (WAV). Para audio espacial usa WAV mono.
+    void playSound(const glm::dvec3& pos, const std::string& path, float volume);
+
+    // Fuente persistente que emite desde un sitio (hoguera, máquina…). Handle (0 = fallo).
+    using SourceId = uint32_t;
+    SourceId addSource(const glm::dvec3& pos, float freq, float volume,
+                       const glm::vec3& timbre = {1, 1, 1});
+    SourceId addSourceFile(const glm::dvec3& pos, const std::string& path, float volume);
+    void     setSourcePosition(SourceId id, const glm::dvec3& pos);
+    void     removeSource(SourceId id);
+
+    // Cuánta señal llega de 'from' a 'to' (0 tapado .. 1 libre). Playback + consulta IA (sigilo).
+    float propagation(const glm::dvec3& from, const glm::dvec3& to) const;
+
+    void update();   // recoloca/atenúa las fuentes persistentes cada frame
 
 private:
-    AudioManager();
-    ~AudioManager();
-    
-    ALCdevice* device = nullptr;
-    ALCcontext* context = nullptr;
-    
-    std::map<std::string, std::shared_ptr<AudioBuffer>> buffers;
-    std::vector<AudioSource> sources;
-    std::vector<int> freeSources;
-    
-    float masterVolume = 1.0f;
-    
-    /** @brief Allocates an available source slot. */
-    int allocateSource();
-    /** @brief Returns a source slot to the free pool. */
-    void freeSource(int sourceId);
-    
-    /** @brief Reports OpenAL errors for a specific operation. */
-    void checkALError(const char* operation);
+    AudioSystem m_sys;
+    AudioLoader m_loader;
+    glm::dvec3  m_listenerPos{0.0};
+
+    // gainBase = volumen pedido; gainCached = volumen ya con propagación (se recalcula a ratos,
+    // no cada frame — el pathfind es caro). listenerAtCalc/recalcIn controlan cuándo recalcular.
+    struct World {
+        glm::dvec3 pos; uint32_t voice; float gainBase;
+        float gainCached = 1.0f; int recalcIn = 0; glm::dvec3 listenerAtCalc{0.0};
+    };
+    std::unordered_map<SourceId, World> m_world;
+    SourceId m_nextId = 1;
 };
 
-}
+} // namespace Haruka

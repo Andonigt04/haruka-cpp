@@ -3,6 +3,8 @@
 #include <imgui.h>
 #include <iostream>
 
+namespace Haruka { namespace Tools {
+
 void DebugOverlay::init() {
     lastFrameTime = std::chrono::high_resolution_clock::now();
     fpsHistory.resize(120);  // Últimos 120 frames
@@ -235,3 +237,6 @@ void DebugOverlay::renderGraphs() {
     ImGui::Separator();
     renderStandard();
 }
+
+
+}} // namespace Haruka::Tools

@@ -4,13 +4,16 @@
  */
 #pragma once
 
-class Application;
-class RenderTarget;
-class Camera;
+namespace Haruka { namespace Core { class Application; class Camera; } }
+using Haruka::Core::Application;
+using Haruka::Core::Camera;
+namespace Haruka { namespace Renderer { class RenderTarget; } } using Haruka::Renderer::RenderTarget;
 
 namespace Haruka {
     class SceneManager;
 }
+
+namespace Haruka { namespace Renderer {
 
 /**
  * @brief Singleton bridge between the editor and the running motor/runtime.
@@ -19,7 +22,7 @@ namespace Haruka {
  * to editor and scripting code without transferring ownership.
  */
 class MotorInstance {
-    friend class Application;
+    friend class Haruka::Core::Application;
     
 public:
     /** @brief Returns the singleton instance. */
@@ -98,3 +101,8 @@ private:
     Application* motorApplication = nullptr;
     bool motorPlayMode = false;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::MotorInstance;             // back-compat alias (migration)
+namespace Haruka { using Renderer::MotorInstance; }

@@ -7,6 +7,8 @@
 #include <glm/glm.hpp>
 #include <vector>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Screen-space ambient occlusion resources and sample generation.
  */
@@ -45,3 +47,8 @@ private:
     
     unsigned int width, height;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::SSAO;
+namespace Haruka { using Renderer::SSAO; }

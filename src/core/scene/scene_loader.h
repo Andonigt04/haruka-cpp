@@ -15,11 +15,21 @@ namespace Haruka {
         SceneLoader(SceneManager& manager) : m_manager(manager) {}
 
         /**
-         * @brief Punto de entrada principal para cargar el archivo .scene
+         * @brief Carga una escena. Acepta .scene (JSON texto, dev) o .hmap
+         *        (empaquetado/ofuscado, release). Decide por la extensión.
          */
         bool loadFromFile(const std::string& filepath);
 
+        /**
+         * @brief Empaqueta un .scene legible → .hmap ofuscado (lo usa la
+         *        herramienta `mapc`). Estático: no necesita un SceneManager.
+         */
+        static bool packToFile(const std::string& sceneJsonPath,
+                               const std::string& outHmapPath);
+
     private:
+        bool loadPacked(const std::string& filepath, nlohmann::json& out);
+
         SceneManager& m_manager;
         nlohmann::json m_templates;
 

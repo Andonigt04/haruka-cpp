@@ -2,6 +2,8 @@
 #include "tools/error_reporter.h"
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 GBuffer::GBuffer(unsigned int width, unsigned int height)
     : width(width), height(height) {
     setupFramebuffer();
@@ -83,3 +85,5 @@ GBuffer::~GBuffer() {
     glDeleteTextures(1, &gEmissive);
     glDeleteRenderbuffers(1, &rboDepth);
 }
+
+}} // namespace Haruka::Renderer

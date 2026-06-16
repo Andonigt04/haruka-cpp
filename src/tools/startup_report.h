@@ -3,6 +3,8 @@
 #include <vector>
 #include <cstdio>
 
+namespace Haruka { namespace Tools {
+
 /**
  * Collects per-system init results during Application::init(), then prints
  * a clean summary (clear screen + table) showing failures and skips.
@@ -89,3 +91,9 @@ private:
     StartupReport() = default;
     std::vector<Entry> entries;
 };
+
+
+}} // namespace Haruka::Tools
+
+using Haruka::Tools::StartupReport;
+namespace Haruka { using Tools::StartupReport; }

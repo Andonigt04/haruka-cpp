@@ -2,7 +2,18 @@
 
 #include "stb_image.h"
 #include <iostream>
+#include <algorithm>
 #include "tools/error_reporter.h"
+
+namespace Haruka { namespace Renderer {
+
+float Texture::s_maxAnisotropy = 1.0f;
+float Texture::s_lodBias       = 0.0f;
+
+void Texture::setQuality(float maxAnisotropy, float lodBias) {
+    s_maxAnisotropy = (maxAnisotropy < 1.0f) ? 1.0f : maxAnisotropy;
+    s_lodBias       = lodBias;
+}
 
 Texture::Texture(const char* path)
 {
@@ -14,6 +25,16 @@ Texture::Texture(const char* path)
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    // Texture-quality params (GraphicsSettings::textureQuality). Anisotropy and a
+    // mip LOD bias are the cheap, visible knobs — no re-upload needed.
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_LOD_BIAS, s_lodBias);
+    if (s_maxAnisotropy > 1.0f) {
+        float maxSupported = 1.0f;
+        glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxSupported);
+        glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY,
+                        std::min(s_maxAnisotropy, maxSupported));
+    }
 
     unsigned char *data = stbi_load(path, &width, &height, &nrChannels, 0);
 
@@ -42,6 +63,8 @@ void Texture::use(unsigned int unit)
 }
 
 void Texture::cleanup()
-{ 
+{
     glDeleteTextures(1, &ID);
 }
+
+}} // namespace Haruka::Renderer

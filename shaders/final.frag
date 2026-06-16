@@ -28,6 +28,8 @@ layout(std140, binding = 0) uniform PerFrameData {
     int  enableIBL;
     int  enableShadows;
     int  _pad3[3];
+    vec3 moonDirection;  float moonIntensity;   // 2ª luz (luna)
+    vec3 moonLightColor; float _pad4;
 };
 
 layout(std140, binding = 1) uniform PerObjectData {
@@ -37,12 +39,18 @@ layout(std140, binding = 1) uniform PerObjectData {
 };
 
 void main() {
+    vec3 baseColor = baseColorAndPlanetRadius.rgb;
+
+    // Emissive stars: render at full brightness, no shading
+    if (planetCenterAndFlag.w > 1.5) {
+        FragColor = vec4(baseColor, 1.0);
+        return;
+    }
+
     vec3 N = normalize(Normal);
-    vec3 L = normalize(-sunDirection);
+    vec3 L = normalize(sunDirection);
     vec3 V = normalize(cameraPos - FragPos);
     vec3 H = normalize(L + V);
-
-    vec3 baseColor = baseColorAndPlanetRadius.rgb;
 
     float ndl  = max(dot(N, L), 0.0);
     float spec = pow(max(dot(N, H), 0.0), 48.0);
@@ -56,7 +64,11 @@ void main() {
     if (enableShadows == 0) diffuse    *= 1.08;
     if (enableBloom   == 0) highlights *= 0.55;
 
-    vec3 color = ambient + diffuse + highlights;
+    // Luz de luna (2ª luz): difusa tenue azulada para los objetos de noche.
+    float ndlMoon = max(dot(N, normalize(moonDirection)), 0.0);
+    vec3  moonlight = moonLightColor * moonIntensity * ndlMoon * baseColor;
+
+    vec3 color = ambient + diffuse + highlights + moonlight;
     if (enableHDR != 0) {
         color = color / (color + vec3(1.0));
         color = pow(color, vec3(1.0 / 2.2));

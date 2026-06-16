@@ -10,6 +10,8 @@
 #include <memory>
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Efficient GPU instancing helper with double-precision support.
  *
@@ -116,3 +118,11 @@ private:
     /** @brief Configures VAO/VBO layout for instanced rendering. */
     void setupInstanceBuffer();
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::InstanceDataDouble;
+using Haruka::Renderer::InstanceDataFloat;
+using Haruka::Renderer::GPUInstancing;
+namespace Haruka { using Renderer::InstanceDataDouble; using Renderer::InstanceDataFloat; using Renderer::GPUInstancing; }

@@ -1,1 +1,32 @@
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/audio/audio_loader.h:7: warning: Unsupported xml/html tag <idioma> found
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/asset_paths.h:7: warning: Unsupported xml/html tag <exe> found
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/asset_paths.h:9: warning: Unsupported xml/html tag <exe> found
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/locale.h' at line 8)
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/locale.h' at line 5)
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/modules.h:6: warning: explicit link request to 'ifdef' could not be resolved
 /home/andoni/Documents/GitHub/opengl/haruka-cpp/docs/guides/GUIA_RAPIDA.md:17: warning: unable to resolve reference to 'troubleshooting-rápido' for \ref command
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/terrain/floating_islands.h:57: warning: The following parameters of Haruka::generateFloatingIslandsNear(uint32_t seed, const glm::dvec3 &planetCenter, double planetRadius, const WorldGenParams &W, const glm::dvec3 &camDir, float angRadius) are not documented:
+  parameter 'seed'
+  parameter 'planetCenter'
+  parameter 'planetRadius'
+  parameter 'W'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/core/noise_generator.h:60: warning: The following parameters of Haruka::NoiseGenerator::fBm_d(const glm::vec3 &pos, glm::vec3 &outGrad, int seed=0, int octaves=4, float persistence=0.5f, float lacunarity=2.0f, float scale=1.0f) are not documented:
+  parameter 'pos'
+  parameter 'seed'
+  parameter 'octaves'
+  parameter 'persistence'
+  parameter 'lacunarity'
+  parameter 'scale'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/game/planetary_system.h:87: warning: The following parameter of Haruka::PlanetarySystem::editTerrain(const glm::dvec3 &worldPos, double radius, double strength, bool dig) is not documented:
+  parameter 'dig'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/game/planetary_system.h:94: warning: The following parameters of Haruka::PlanetarySystem::levelTerrain(const glm::dvec3 &worldPos, double radius, double targetHeightM) are not documented:
+  parameter 'worldPos'
+  parameter 'radius'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/game/planetary_system.h:103: warning: The following parameters of Haruka::PlanetarySystem::levelTerrainBox(const glm::dvec3 &center, const glm::dvec3 &halfExtents, const glm::dmat3 &rot, double targetHeightM, double band) are not documented:
+  parameter 'center'
+  parameter 'targetHeightM'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/ui/ui_world_panel.h:20: warning: Unsupported xml/html tag <caller> found
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/physics/xpbd/softbody.h:52: warning: The following parameter of Haruka::xpbd::makeBox(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &size, int nx, int ny, int nz, float totalMass, float edgeCompliance=0.001f, float volumeCompliance=0.0f) is not documented:
+  parameter 'volumeCompliance'
+/home/andoni/Documents/GitHub/opengl/haruka-cpp/src/physics/xpbd/softbody.h:32: warning: The following parameter of Haruka::xpbd::makeCloth(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &right, const glm::vec3 &down, int nx, int ny, float totalMass, bool pinTopRow, float compliance=0.0f, float bendCompliance=0.02f) is not documented:
+  parameter 'bendCompliance'

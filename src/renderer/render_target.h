@@ -5,6 +5,8 @@
 #pragma once
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Color render target wrapper (FBO + color texture + depth RBO).
  */
@@ -34,3 +36,8 @@ private:
     unsigned int rboDepth = 0;
     unsigned int width, height;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::RenderTarget;
+namespace Haruka { using Renderer::RenderTarget; }

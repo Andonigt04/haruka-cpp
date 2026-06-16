@@ -4,7 +4,7 @@
 # Project
 #---------------------------------------------------------------------------
 PROJECT_NAME           = "HarukaEngine"
-PROJECT_NUMBER         = 0.5.0
+PROJECT_NUMBER         = 6
 PROJECT_BRIEF          = "OpenGL C++17 game engine"
 OUTPUT_DIRECTORY       = docs
 CREATE_SUBDIRS         = YES
@@ -103,3 +103,9 @@ PREDEFINED             =
 #---------------------------------------------------------------------------
 ALPHABETICAL_INDEX     = YES
 COLS_IN_ALPHA_INDEX    = 3
+
+# --- Godot-like Tailwind theme (added) ---
+HTML_HEADER            = docs/header.html
+HTML_FOOTER            = docs/footer.html
+HTML_EXTRA_STYLESHEET  = docs/theme/haruka.css
+HTML_COLORSTYLE        = DARK

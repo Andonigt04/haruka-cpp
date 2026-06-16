@@ -3,6 +3,8 @@
 #include <iostream>
 #include <algorithm>
 
+namespace Haruka { namespace Physics {
+
 OctreeNode::OctreeNode(AABB bounds, int depth)
     : bounds(bounds), depth(depth) {
     for (int i = 0; i < 8; i++) {
@@ -117,3 +119,6 @@ void Octree::getNearbodies(std::shared_ptr<RigidBody> body, std::vector<std::sha
 void Octree::rebuild() {
     // Reconstruir octree (útil después de actualizar muchos cuerpos)
 }
+
+
+}} // namespace Haruka::Physics

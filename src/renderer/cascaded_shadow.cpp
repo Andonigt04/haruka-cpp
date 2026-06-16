@@ -6,6 +6,8 @@
 #include <limits>
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 CascadedShadowMap::CascadedShadowMap() {}
 
 CascadedShadowMap::~CascadedShadowMap() {
@@ -200,3 +202,6 @@ CascadedShadowMap::CascadeInfo CascadedShadowMap::getCascadeInfo(int cascade) co
     }
     return CascadeInfo{zNear, zFar, glm::mat4(1.0f)};
 }
+
+
+}} // namespace Haruka::Renderer

@@ -8,6 +8,8 @@
 #include <vector>
 #include <memory>
 
+namespace Haruka { namespace Physics {
+
 /** @brief Axis-aligned bounding box used by octree nodes. */
 struct AABB {
     glm::dvec3 min;
@@ -89,3 +91,10 @@ public:
 private:
     std::unique_ptr<OctreeNode> root;
 };
+
+}} // namespace Haruka::Physics
+
+using Haruka::Physics::AABB;
+using Haruka::Physics::OctreeNode;
+using Haruka::Physics::Octree;
+namespace Haruka { using Physics::AABB; using Physics::OctreeNode; using Physics::Octree; }

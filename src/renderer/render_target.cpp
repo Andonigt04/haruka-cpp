@@ -2,6 +2,8 @@
 #include "tools/error_reporter.h"
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 RenderTarget::RenderTarget(unsigned int width, unsigned int height)
     : width(width), height(height) {
     setupFramebuffer();
@@ -56,3 +58,5 @@ RenderTarget::~RenderTarget() {
     glDeleteTextures(1, &colorTexture);
     glDeleteRenderbuffers(1, &rboDepth);
 }
+
+}} // namespace Haruka::Renderer

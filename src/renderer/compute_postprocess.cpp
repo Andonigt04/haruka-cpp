@@ -3,6 +3,8 @@
 #include <iostream>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 ComputePostProcess::ComputePostProcess() {}
 
 ComputePostProcess::~ComputePostProcess() {
@@ -249,3 +251,6 @@ void ComputePostProcess::processAll(
     toneMappingCompute(outputTexture, outputTexture, exposure, toneMode);
     colorGradingCompute(outputTexture, saturation, contrast, brightness);
 }
+
+
+}} // namespace Haruka::Renderer

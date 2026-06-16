@@ -6,6 +6,8 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Omnidirectional point-light shadow map wrapper.
  */
@@ -35,3 +37,8 @@ private:
     unsigned int depthCubemap = 0;
     unsigned int resolution;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::PointShadow;
+namespace Haruka { using Renderer::PointShadow; }

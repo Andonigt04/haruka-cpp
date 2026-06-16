@@ -1,5 +1,8 @@
 #include "window.h"
 
+#include <cstring>
+#include <string>
+
 namespace Haruka::Core {
 
     Window::Window(const WindowProps& props) {
@@ -16,6 +19,38 @@ namespace Haruka::Core {
         if (!SDL_WasInit(SDL_INIT_VIDEO) && !SDL_Init(SDL_INIT_VIDEO)) {
             std::cerr << "[SDL] Init failed: " << SDL_GetError() << std::endl;
             return false;
+        }
+        // Audio OPCIONAL (micro de voz + efectos + enumeración de dispositivos en Config).
+        // No debe tumbar el arranque si no hay tarjeta de sonido (servidor/headless).
+        bool audioOk = SDL_WasInit(SDL_INIT_AUDIO) || SDL_InitSubSystem(SDL_INIT_AUDIO);
+        if (!audioOk) {
+            // El driver por defecto falló → prueba cada driver compilado explícitamente
+            // (pipewire/pulseaudio/alsa…). Arregla el caso "SDL eligió un driver que no va".
+            std::string firstErr = SDL_GetError();
+            int nd = SDL_GetNumAudioDrivers();
+            for (int i = 0; i < nd && !audioOk; ++i) {
+                const char* drv = SDL_GetAudioDriver(i);
+                if (!drv || !std::strcmp(drv, "dummy") || !std::strcmp(drv, "disk")) continue;
+                SDL_SetHint(SDL_HINT_AUDIO_DRIVER, drv);
+                if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+                    audioOk = true;
+                    std::cerr << "[SDL] audio: driver por defecto falló, usando '" << drv << "'\n";
+                }
+            }
+            if (!audioOk) {
+                std::cerr << "[SDL] audio no disponible: " << firstErr << " (sin micro/efectos)\n"
+                          << "[SDL] drivers compilados (" << nd << "):";
+                for (int i = 0; i < nd; ++i) std::cerr << ' ' << SDL_GetAudioDriver(i);
+                std::cerr << "\n[SDL]   solo dummy/disk → SDL3 sin backends (reinstala "
+                             "pipewire/pulseaudio/alsa -devel y recompila SDL3).\n";
+            }
+        }
+        if (audioOk) {
+            int ri = 0, ro = 0;
+            if (SDL_AudioDeviceID* a = SDL_GetAudioRecordingDevices(&ri)) SDL_free(a);
+            if (SDL_AudioDeviceID* a = SDL_GetAudioPlaybackDevices(&ro))  SDL_free(a);
+            std::cerr << "[SDL] audio OK (" << (SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?")
+                      << ") — entradas: " << ri << ", salidas: " << ro << std::endl;
         }
 
         // Configuración de OpenGL
@@ -39,6 +74,40 @@ namespace Haruka::Core {
         glEnable(GL_DEPTH_TEST);
 
         return true;
+    }
+
+    void Window::setWindowMode(int mode) {
+        if (!m_window) return;
+        switch (mode) {
+            case 2: // Fullscreen (pantalla completa de SDL — desktop fullscreen)
+                SDL_SetWindowFullscreen(m_window, true);
+                break;
+            case 1: { // Borderless: sin borde cubriendo el escritorio (windowed fullscreen)
+                SDL_SetWindowFullscreen(m_window, false);
+                SDL_SetWindowBordered(m_window, false);
+                SDL_DisplayID disp = SDL_GetDisplayForWindow(m_window);
+                SDL_Rect b;
+                if (SDL_GetDisplayBounds(disp, &b)) {
+                    SDL_SetWindowPosition(m_window, b.x, b.y);
+                    SDL_SetWindowSize(m_window, b.w, b.h);
+                }
+                break;
+            }
+            case 0: // Windowed: ventana normal con borde
+            default:
+                SDL_SetWindowFullscreen(m_window, false);
+                SDL_SetWindowBordered(m_window, true);
+                break;
+        }
+        // Sincroniza el tamaño REAL en píxeles → m_data + viewport (por si el evento
+        // de resize aún no ha llegado este frame).
+        int w = 0, h = 0;
+        SDL_GetWindowSizeInPixels(m_window, &w, &h);
+        if (w > 0 && h > 0) {
+            m_data.width  = (uint32_t)w;
+            m_data.height = (uint32_t)h;
+            glViewport(0, 0, w, h);
+        }
     }
 
     void Window::pollEvents(bool& running) {

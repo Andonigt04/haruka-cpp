@@ -2,6 +2,8 @@
 #include <glm/gtc/constants.hpp>
 #include <iostream>
 
+namespace Haruka { namespace Physics {
+
 void RaycastSimple::rebuildTriangleCache() {
     triangles.clear();
     for (const auto& [_, tris] : meshTriangles) {
@@ -125,3 +127,6 @@ RaycastHit RaycastSimple::raycast(const glm::vec3& origin,
     hit.hit = (hitTriangleIndex >= 0);
     return hit;
 }
+
+
+}} // namespace Haruka::Physics

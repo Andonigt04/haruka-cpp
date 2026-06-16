@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.14)
 
-set(VERSION "0.6.0" CACHE STRING "HarukaEngine build version to link against")
-project(ServerTest VERSION 0.1.0)
+set(VERSION "1.0" CACHE STRING "HarukaEngine build version to link against")
+project(ServerTest VERSION 0.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

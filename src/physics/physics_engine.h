@@ -12,6 +12,8 @@
 #include "core/world_system.h"
 #include "game/planetary_system.h"
 
+namespace Haruka { namespace Physics {
+
 class RaycastSimple;
 
 /** @brief Rigid body simulation record used by the physics engine. */
@@ -33,6 +35,21 @@ struct CollisionInfo {
     glm::dvec3 normal;
 };
 
+/** @brief Axis-aligned static box for scene geometry collision. */
+struct StaticBox {
+    glm::dvec3 bmin;
+    glm::dvec3 bmax;
+};
+
+/** @brief Caja ORIENTADA estática (objetos colocados: mesas, props…). center/halfExtents
+ *  en mundo + rot (local→mundo, ortonormal). Caja ajustada al modelo, orientada a la
+ *  superficie. */
+struct StaticOBB {
+    glm::dvec3 center;
+    glm::dvec3 halfExtents;
+    glm::dmat3 rot;
+};
+
 /**
  * @brief Main physics simulation coordinator.
  *
@@ -50,13 +67,38 @@ public:
     void removeBody(const std::string& name);
     /** @brief Returns body by name or null when missing. */
     std::shared_ptr<RigidBody> getBody(const std::string& name);
-    
+
+    /** @brief Registers a static AABB for scene geometry collision. */
+    void addStaticBox(const glm::dvec3& center, const glm::dvec3& halfExtents);
+    /** @brief Removes all static boxes (e.g. on scene reload). */
+    void clearStaticBoxes();
+
+    /** @brief Registra/limpia cajas orientadas de objetos colocados (mesas, estaciones). */
+    void addPlacedOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
+    // Obstáculos colocados (paredes/estructuras) — para navegación/propagación (sonido, conjuros).
+    const std::vector<StaticOBB>& getPlacedOBBs() const { return placedOBBs; }
+    void clearPlacedOBBs();
+
+    /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
+     *  regeneran al moverse, independiente de los objetos colocados. */
+    void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
+    void clearPropOBBs();
+    /** @brief Empuja una esfera fuera de los OBB colocados (te subes encima o te frena).
+     *  Devuelve el centro corregido; pone grounded=true si el empuje fue a favor de 'up'. */
+    glm::dvec3 resolveSphere(const glm::dvec3& center, double radius,
+                             const glm::dvec3& up, bool& grounded) const;
+
     /** @brief Advances simulation by one time step. */
     void update(double deltaTime);
     /** @brief Sets constant gravity acceleration. */
     void setGravity(glm::dvec3 g) { gravity = g; }
     /** @brief Returns current gravity acceleration. */
     glm::dvec3 getGravity() const { return gravity; }
+
+    /** @brief Sets the ambient WIND velocity (m/s) used for aerodynamic drag. The
+     *  atmosphere (WorldSystem) provides it; the engine applies it per active body
+     *  in integrateForces (O(bodies), inherentemente localizado — sin coste global). */
+    void setWind(const glm::dvec3& windVel) { m_wind = windVel; }
     
     /** @brief Returns collision events from last update. */
     const std::vector<CollisionInfo>& getCollisions() const { return collisions; }
@@ -127,27 +169,49 @@ public:
 
 private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
+    std::vector<StaticBox>                  staticBoxes;
+    std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
+    std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
+
+    // Arrastre aerodinámico: viento ambiente (m/s) + coeficientes SUAVES (la
+    // resistencia del aire amortigua hacia 0; el viento empuja sutilmente). Valores
+    // pequeños para no zarandear al jugador; afecta sobre todo a objetos sueltos.
+    glm::dvec3 m_wind{0.0};
+    double     m_airDamp  = 0.10;  // amortiguación del aire (1/s) hacia velocidad 0
+    double     m_windCoef = 0.010; // acoplamiento cuadrático con la vel. relativa al viento
+
     std::unique_ptr<Octree> octree;
-    
+
     // Planetary physics members
     Haruka::WorldSystem* worldSystem = nullptr;
     Haruka::PlanetarySystem* planetarySystem = nullptr;
     RaycastSimple* raycastSystem = nullptr;
-    double gravitationalConstant = 6.67430e-11;  ///< Newton's gravitational constant
-    double maxCollisionRaycastDistanceKm = 1000.0;  ///< Max distance to check for terrain collision
-    
+    double gravitationalConstant = 6.67430e-11;
+    double maxCollisionRaycastDistanceKm = 1000.0;
+
     /** @brief Integrates external forces for all bodies. */
     void integrateForces(double dt);
     /** @brief Detects collisions and fills collision list. */
     void detectCollisions();
     /** @brief Resolves collision responses for detected contacts. */
     void resolveCollisions();
+    /** @brief Resolves sphere vs static AABB contacts. */
+    void resolveStaticCollisions();
     /** @brief Runs broad-phase AABB traversal/culling. */
     void broadPhaseAABB();
 };
 
+}} // namespace Haruka::Physics
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Physics::RigidBody;
+using Haruka::Physics::CollisionInfo;
+using Haruka::Physics::StaticBox;
+using Haruka::Physics::StaticOBB;
+using Haruka::Physics::PhysicsEngine;
 namespace Haruka {
-using PhysicsEngine = ::PhysicsEngine;
+    using Physics::RigidBody; using Physics::CollisionInfo; using Physics::StaticBox;
+    using Physics::StaticOBB; using Physics::PhysicsEngine;
 }

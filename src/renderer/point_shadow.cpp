@@ -2,6 +2,8 @@
 #include "tools/error_reporter.h"
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 PointShadow::PointShadow(unsigned int resolution) : resolution(resolution)
 {
     setupFramebuffer();
@@ -65,3 +67,5 @@ PointShadow::~PointShadow()
     glDeleteFramebuffers(1, &FBO);
     glDeleteTextures(1, &depthCubemap);
 }
+
+}} // namespace Haruka::Renderer

@@ -3,6 +3,8 @@
 
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 Shadow::Shadow(unsigned int width, unsigned int height) : shadowWidth(width), shadowHeight(height)
 {
     setupFramebuffer();
@@ -61,3 +63,6 @@ Shadow::~Shadow()
     glDeleteFramebuffers(1, &depthMapFBO);
     glDeleteTextures(1, &depthMap);
 }
+
+
+}} // namespace Haruka::Renderer

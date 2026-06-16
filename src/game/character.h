@@ -99,12 +99,23 @@ public:
     void setState(CharacterState newState) { state = newState; }
     void setUpDirection(const glm::dvec3& newUp) { upDirection = newUp; }
     void setPitchLimits(float minPitchDeg, float maxPitchDeg) { minPitch = minPitchDeg; maxPitch = maxPitchDeg; }
-    
+    /** @brief Sets movement speeds in m/s (walk, run/sprint, crouch). */
+    void setMoveSpeeds(float walk, float run, float crouch) {
+        walkSpeed = walk; runSpeed = run; crouchSpeed = crouch;
+    }
+    float getWalkSpeed() const { return walkSpeed; }
+    // Jump impulse (m/s). Also reused as the ascend/descend speed in flight mode.
+    void  setJumpForce(float f) { jumpForce = f; }
+    float getJumpForce() const  { return jumpForce; }
+
     bool isGrounded() const { return grounded; }
     bool isSprinting() const { return sprinting; }
     bool isCrouching() const { return crouched; }
     bool isLocalPlayer() const { return localPlayer; }
     bool isInFlightMode() const { return flightMode; }
+    // Called by the game's surface constraint each frame; marks grounding as
+    // externally managed so checkGrounded() stops using the (sphere-wrong) Y test.
+    void setGrounded(bool g) { grounded = g; m_externalGround = true; }
     ///@}
     
     void setFlightMode(bool enabled) { flightMode = enabled; }
@@ -145,6 +156,11 @@ public:
 
     float getSpeed() const;
 
+    /** Sync camera position/orientation from current yaw/pitch/position.
+     *  Call after rotate() so the view matrix reflects the new direction
+     *  without waiting for the next update() tick. */
+    void updateCamera();
+
 private:
     // Type-erased action binding
     struct ActionBinding {
@@ -183,6 +199,7 @@ private:
     glm::dvec3 upDirection = glm::dvec3(0.0, 1.0, 0.0);
     
     bool grounded = false;
+    bool m_externalGround = false; // grounded managed by the game's surface constraint
     bool sprinting = false;
     bool crouched = false;
     bool flightMode = false;
@@ -202,8 +219,6 @@ private:
     float syncTimer = 0.0f;
     float interpolationSpeed = 5.0f;
     
-    /** @brief Updates the attached camera from current character state. */
-    void updateCamera();
     /** @brief Updates locomotion state from velocity/input context. */
     void updateState();
     /** @brief Recomputes grounded state from physics/orientation. */

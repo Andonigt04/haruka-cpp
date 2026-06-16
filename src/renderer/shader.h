@@ -14,6 +14,8 @@
 #include <iostream>
 #include "tools/error_reporter.h"
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief OpenGL shader program loaded from pre-compiled SPIR-V binaries.
  *
@@ -100,7 +102,14 @@ public:
     ///@}
 
 private:
+    // In release the shader paths ("shaders/x.vert") are rooted under assets/;
+    // in dev the base is empty so they resolve next to the exe. AssetPaths owns
+    // the dev/release switch.
+#ifdef HARUKA_RELEASE
+    inline static std::string s_baseDir = "assets/";
+#else
     inline static std::string s_baseDir;
+#endif
 
     // Loads a shader, preferring GLSL source over SPIR-V.
     //
@@ -173,4 +182,10 @@ private:
         }
     }
 };
+
+}} // namespace Haruka::Renderer
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Renderer::Shader;
+namespace Haruka { using Renderer::Shader; }
 #endif

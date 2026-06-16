@@ -12,6 +12,8 @@
 #include <glad/glad.h>
 #include "shader.h"
 
+namespace Haruka { namespace Renderer {
+
 /** @brief Interleaved vertex layout used by complex mesh path. */
 #pragma pack(push, 1)
 struct Vertex {
@@ -42,17 +44,24 @@ public:
     std::vector<Vertex>       vertex;
     std::vector<unsigned int> index;
     std::vector<MeshTexture>  textures;
-    unsigned int VAO;
+    unsigned int VAO = 0;
 
     /** @brief Constructs mesh from full vertex/material data. */
     Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures);
-    
+
     /** @brief Constructs mesh from simple geometry buffers. */
     Mesh(const std::vector<glm::vec3>& vertices,
          const std::vector<glm::vec3>& normals,
          const std::vector<unsigned int>& indices);
-    
+
     ~Mesh();
+
+    // Posee handles GL → NO copiable (una copia compartiría VAO/VBO y el destructor del
+    // temporal los borraría → "non-gen name" al hacer bind). Solo MOVIBLE: roba los handles.
+    Mesh(const Mesh&)            = delete;
+    Mesh& operator=(const Mesh&) = delete;
+    Mesh(Mesh&& o) noexcept;
+    Mesh& operator=(Mesh&& o) noexcept;
 
     /** @brief Issues draw call using associated textures and shader bindings. */
     void Draw(Shader &shader);
@@ -66,7 +75,7 @@ public:
     int getTriangleCount() const { return static_cast<int>(index.size() / 3); }
 
 private:
-    unsigned int VBO, EBO;
+    unsigned int VBO = 0, EBO = 0;
     GLuint nbo = 0;  // Normal buffer para geometria simple
     bool isSimpleGeometry = false;
     int simpleVertexCount = 0;
@@ -79,4 +88,11 @@ private:
                          const std::vector<unsigned int>& indices);
 };
 
+}} // namespace Haruka::Renderer
+
+// Back-compat aliases during the namespace migration.
+using Haruka::Renderer::Vertex;
+using Haruka::Renderer::MeshTexture;
+using Haruka::Renderer::Mesh;
+namespace Haruka { using Renderer::Vertex; using Renderer::MeshTexture; using Renderer::Mesh; }
 #endif

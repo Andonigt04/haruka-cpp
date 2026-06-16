@@ -14,10 +14,12 @@
 #endif
 
 #include "tools/math_types.h"
+#include "core/modules.h"      // HARUKA_MOD_* (gating de subsistemas opcionales)
 #include "core/world_system.h"
 #include "core/window.h"
 #include "core/camera.h"
 #include "core/scene/scene_manager.h"
+#include "core/scene/scene_render_policy.h"
 #include "renderer/shader.h"
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
@@ -43,7 +45,10 @@
 #include "core/chunk_cache.h"
 #include "core/game_interface.h"
 
-class MotorInstance;
+namespace Haruka { namespace Renderer { class MotorInstance; } } using Haruka::Renderer::MotorInstance;
+namespace Haruka { class DeformationField; }
+
+namespace Haruka { namespace Core {
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -68,7 +73,13 @@ public:
     Haruka::SceneManager* getCurrentScene() { return _currentScene; }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+#ifdef HARUKA_MOD_PHYSICS
     Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+#endif
+
+    /** @brief AABB de un modelo (lo carga/cachea si hace falta). Para colisión de props
+     *  colocados: caja ajustada al modelo. Devuelve false si no se pudo. */
+    bool getModelBounds(const std::string& path, glm::vec3& outMin, glm::vec3& outMax);
     Haruka::ChunkCache* getChunkCache() { return _chunkCache.get(); }
     Haruka::TerrainStreamingSystem* getTerrainStreamingSystem() { return _terrainStreamingSystem.get(); }
     Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
@@ -111,15 +122,65 @@ public:
     int getVisibleChunks()         const { return _iVisibleChunks; }
     int getResidentChunks()        const { return _iResidentChunks; }
     int getPendingChunkLoads()     const { return _iPendingChunkLoads; }
+    int getQueuedChunkLoads()      const { return _iQueuedChunks; }
     int getPendingChunkEvictions() const { return _iPendingChunkEvictions; }
     int getResidentMemoryMB()      const { return _iResidentMemoryMB; }
     int getTrackedChunks()         const { return _iTrackedChunks; }
     int getMaxMemoryMB()           const { return _iMaxMemoryMB; }
 
+    /** @brief Terrain height (metres above reference sphere) at a world position. */
+    double getTerrainHeightAt(const glm::dvec3& worldPos) const {
+        return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
+    }
+
+    /** @brief Edits the terrain (dig crater / build) at a world position. */
+    void editTerrain(const glm::dvec3& worldPos, double radius, double strength, bool dig) {
+        if (_planetarySystem) _planetarySystem->editTerrain(worldPos, radius, strength, dig);
+    }
+
+    /** @brief Nivela el terreno hacia una altura objetivo (m) en un radio. */
+    void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeightM) {
+        if (_planetarySystem) _planetarySystem->levelTerrain(worldPos, radius, targetHeightM);
+    }
+
+    /** @brief Nivela con la huella (caja orientada) de un objeto: tamaño/forma del objeto. */
+    void levelTerrainBox(const glm::dvec3& center, const glm::dvec3& halfExtents,
+                         const glm::dmat3& rot, double targetHeightM, double band) {
+        if (_planetarySystem) _planetarySystem->levelTerrainBox(center, halfExtents, rot, targetHeightM, band);
+    }
+
+    /** @brief Terrain-edit field for save/restore (null if no planetary system). */
+    Haruka::DeformationField* getDeformationField() {
+        return _planetarySystem ? _planetarySystem->deformationField() : nullptr;
+    }
+    /** @brief Regenerates all terrain chunks (after restoring saved edits). */
+    void rebuildTerrain() { if (_planetarySystem) _planetarySystem->invalidateAllChunks(); }
+
+    /** @brief Mean sea surface for the nearest planet. Returns false if none. */
+    bool getSeaSurfaceAt(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const {
+        return _planetarySystem ? _planetarySystem->getSeaSurface(worldPos, outCenter, outSeaRadius) : false;
+    }
+
+    /** @brief Current framebuffer height in pixels (editor viewport or window). */
+    int getWindowHeight() const {
+        if (m_editorViewportH > 0) return m_editorViewportH;
+        return _window ? (int)_window->getHeight() : 0;
+    }
+
+    /** @brief Current framebuffer width in pixels (editor viewport or window). */
+    int getWindowWidth() const {
+        if (m_editorViewportW > 0) return m_editorViewportW;
+        return _window ? (int)_window->getWidth() : 0;
+    }
+
     CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
     Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
     void setImGuiRenderCallback(std::function<void()> cb) { _imguiCallback = std::move(cb); }
+
+    /** @brief Requests a clean (no-HUD) PNG screenshot of the next rendered frame.
+     *  Empty path → screenshots/shot_<timestamp>.png. Standalone runtime only. */
+    void requestScreenshot(const std::string& path = "");
     
     /**
      * @brief Callback invoked by `MotorInstance` when active scene changes.
@@ -148,6 +209,11 @@ public:
     void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
     void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text);
     std::vector<DGS::ChatMessage> pollPlayerChats();
+    bool connectDGS(const std::string& headHost, int headPort,
+                    const std::string& email,    const std::string& password,
+                    const std::string& apiHost = "", int apiPort = 0);
+    bool isNetworkConnected() const;
+    int  getGhostCount()      const;
 #endif
 
     /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */
@@ -178,7 +244,7 @@ public:
     void cleanup();
 
 private:
-    friend class MotorInstance;
+    friend class Haruka::Renderer::MotorInstance;
     
 #ifdef HARUKA_NETWORK
     DGS::Client m_dgs;
@@ -190,7 +256,6 @@ private:
     std::string m_loginUsername;
     std::string m_loginError;
 
-    bool connectDGS(const std::string& email, const std::string& password);
     void renderLoginScreen();
 #endif
 
@@ -205,6 +270,14 @@ private:
     
     /** @brief The main shader instance. */
     std::unique_ptr<Shader> _mainShader;
+    /** @brief Dedicated planet terrain shader. */
+    std::unique_ptr<Shader> _planetShader;
+    /** @brief Dedicated planet ocean shader. */
+    std::unique_ptr<Shader> _waterShader;
+    /** @brief Atmospheric sky background shader (fullscreen). */
+    std::unique_ptr<Shader> _skyShader;
+    /** @brief Empty VAO for the attribute-less fullscreen sky triangle. */
+    unsigned int _skyVAO = 0;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */
@@ -217,6 +290,20 @@ private:
     std::unique_ptr<GBuffer> _gBuffer;
     /** @brief The SSAO shader instance. */
     std::unique_ptr<SSAO> _ssao;
+    /** @brief Offscreen HDR scene target for the standalone post-processing stack
+     *  (render-scale source + bloom/fxaa input). Sized to renderScale*window. */
+    std::unique_ptr<HDR> _postScene;
+    int m_postW = 0, m_postH = 0;          // current _postScene dimensions
+    unsigned int m_sceneTargetFBO = 0;     // FBO the scene passes render into this frame
+    bool m_postActive = false;             // standalone post stack engaged this frame
+    // Bloom ping-pong targets (own FBOs — the Bloom class isn't ping-pong shaped).
+    // Reuses the existing _bloomExtractShader / _bloomBlurShader members below.
+    unsigned int m_bloomFBO[2] = {0, 0};
+    unsigned int m_bloomTex[2] = {0, 0};
+    int m_bloomW = 0, m_bloomH = 0;
+    /** @brief Bright-pass + separable blur of a scene color texture; returns the
+     *  blurred bloom texture id. Used by the standalone post composite. */
+    unsigned int renderBloom(unsigned int srcColorTex);
     /** @brief The IBL shader instance. */
     std::unique_ptr<IBL> _ibl;
     /** @brief The point shadow shader instance. */
@@ -240,7 +327,9 @@ private:
     /** @brief The terrain streaming system instance. */
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
     /** @brief The physics engine instance. */
+#ifdef HARUKA_MOD_PHYSICS
     std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+#endif
     /** @brief The chunk cache instance. */
     std::unique_ptr<Haruka::ChunkCache> _chunkCache;
     
@@ -280,6 +369,12 @@ private:
     // Optional game interface — used by standalone runtime (not editor)
     Haruka::GameInterface* _gameInterface = nullptr;
     bool m_cleanedUp = false;
+
+    // Screenshot: captured at the end of the 3D pass (before ImGui) for a clean
+    // world frame with no HUD. See requestScreenshot() / captureScreenshotIfPending().
+    bool m_screenshotPending = false;
+    std::string m_screenshotPath;
+    void captureScreenshotIfPending(int width, int height);
 
     float _exposure = 1.0f;
 
@@ -322,6 +417,18 @@ private:
     };
 
     /** @brief Statistics for rendered geometry. */
+    // Cached static render queue (rebuilt only when the scene object set changes).
+    std::vector<Haruka::RenderCommand> m_staticRenderQueue;
+    size_t m_renderQueueObjCount = (size_t)-1;
+    bool   m_renderQueueDirty = true;
+
+    // GPU frame time (ms) measured with a GL timer query; the real metric for a
+    // GPU-bound scene (the CPU profiler can't see GPU cost).
+    unsigned int m_gpuTimerQuery[2] = {0, 0};
+    bool  m_gpuTimerIssued[2] = {false, false}; // query has been glEndQuery'd at least once
+    int   m_gpuTimerFrame = 0;
+    float m_lastGpuMs = 0.0f;
+
     int _iRenderedVertices      = 0;
     int _iRenderedTriangles     = 0;
     int _iRenderedDrawCalls     = 0;
@@ -331,10 +438,15 @@ private:
     int _iVisibleChunks         = 0;
     int _iResidentChunks        = 0;
     int _iPendingChunkLoads     = 0;
+    int _iQueuedChunks          = 0;
     int _iPendingChunkEvictions = 0;
     int _iTrackedChunks         = 0;
     int _iResidentMemoryMB      = 0;
     int _iMaxMemoryMB           = 0;
 };
 
+}} // namespace Haruka::Core
+
+using Haruka::Core::Application;                 // back-compat alias (migration)
+namespace Haruka { using Core::Application; }
 #endif

@@ -8,6 +8,8 @@
 #include <vector>
 #include "core/scene/scene_manager.h"
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Dynamic light culling helper.
  *
@@ -63,3 +65,9 @@ private:
     int totalLights = 0;
     int culledLights = 0;
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::LightCuller;
+namespace Haruka { using Renderer::LightCuller; }

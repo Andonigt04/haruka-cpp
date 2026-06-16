@@ -1,7 +1,10 @@
 #include "mesh.h"
 
+#include <utility>
 #include <glad/glad.h>
 #include "tools/error_reporter.h"
+
+namespace Haruka { namespace Renderer {
 
 // Constructor para modelos complejos (con texturas)
 Mesh::Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures) {
@@ -29,10 +32,31 @@ Mesh::Mesh(const std::vector<glm::vec3>& vertices,
 }
 
 Mesh::~Mesh() {
-    glDeleteBuffers(1, &VBO);
-    if (nbo != 0) glDeleteBuffers(1, &nbo);
-    glDeleteBuffers(1, &EBO);
-    glDeleteVertexArrays(1, &VAO);
+    if (VBO) glDeleteBuffers(1, &VBO);
+    if (nbo) glDeleteBuffers(1, &nbo);
+    if (EBO) glDeleteBuffers(1, &EBO);
+    if (VAO) glDeleteVertexArrays(1, &VAO);
+}
+
+Mesh::Mesh(Mesh&& o) noexcept
+    : vertex(std::move(o.vertex)), index(std::move(o.index)), textures(std::move(o.textures)),
+      VAO(o.VAO), VBO(o.VBO), EBO(o.EBO), nbo(o.nbo),
+      isSimpleGeometry(o.isSimpleGeometry), simpleVertexCount(o.simpleVertexCount) {
+    o.VAO = o.VBO = o.EBO = o.nbo = 0; // el origen ya no posee los handles
+}
+
+Mesh& Mesh::operator=(Mesh&& o) noexcept {
+    if (this != &o) {
+        if (VBO) glDeleteBuffers(1, &VBO);
+        if (nbo) glDeleteBuffers(1, &nbo);
+        if (EBO) glDeleteBuffers(1, &EBO);
+        if (VAO) glDeleteVertexArrays(1, &VAO);
+        vertex = std::move(o.vertex); index = std::move(o.index); textures = std::move(o.textures);
+        VAO = o.VAO; VBO = o.VBO; EBO = o.EBO; nbo = o.nbo;
+        isSimpleGeometry = o.isSimpleGeometry; simpleVertexCount = o.simpleVertexCount;
+        o.VAO = o.VBO = o.EBO = o.nbo = 0;
+    }
+    return *this;
 }
 
 void Mesh::Draw(Shader &shader) 
@@ -172,3 +196,5 @@ void Mesh::setupSimpleMesh(const std::vector<glm::vec3>& vertices,
 
     glBindVertexArray(0);
 }
+
+}} // namespace Haruka::Renderer

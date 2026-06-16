@@ -1,0 +1,118 @@
+@tailwind utilities;
+
+/* ------------------------------------------------------------------ *
+ * Haruka Engine — Doxygen theme
+ * Plain CSS (always emitted) overriding Doxygen's generated markup with the
+ * documentation palette. Tailwind utilities (above) are used only by the
+ * custom navbar in header.html. Preflight is disabled (see tailwind.config.js).
+ * ------------------------------------------------------------------ */
+
+:root,
+html {
+  --g-bg:      #1f232b;
+  --g-surface: #282d38;
+  --g-panel:   #232833;
+  --g-border:  #3a4150;
+  --g-fg:      #c7ccd6;
+  --g-muted:   #8b93a3;
+  --g-heading: #ffffff;
+  --g-blue:    #478cbf;
+  --g-blue-hi: #5fb0ef;
+  --g-link:    #6cb5ff;
+
+  /* Map Doxygen's own CSS custom properties onto the palette so the
+     stock stylesheet inherits the theme even where we don't override elements. */
+  --primary-color:        var(--g-blue);
+  --primary-dark-color:   var(--g-blue-hi);
+  --primary-light-color:  var(--g-blue-hi);
+  --page-background-color: var(--g-bg);
+  --page-foreground-color: var(--g-fg);
+  --page-secondary-foreground-color: var(--g-muted);
+  --separator-color:      var(--g-border);
+  --nav-background-color: var(--g-surface);
+  --nav-foreground-color: var(--g-fg);
+  --header-background-color: var(--g-surface);
+  --code-background:      var(--g-panel);
+  --fragment-background:  var(--g-panel);
+  --fragment-foreground:  var(--g-fg);
+}
+
+html, body {
+  background-color: var(--g-bg) !important;
+  color: var(--g-fg) !important;
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+}
+
+/* Top title area / navbar */
+#titlearea,
+.sm-dox, #main-menu, .navpath ul {
+  background: var(--g-surface) !important;
+  border-color: var(--g-border) !important;
+}
+
+#projectname { color: var(--g-heading) !important; font-weight: 700; }
+#projectbrief { color: var(--g-muted) !important; }
+
+/* Headings + links */
+h1, h2, h3, h4, h5, h6,
+.title, div.summary, .memtitle, .groupheader {
+  color: var(--g-heading) !important;
+}
+.memtitle, div.groupHeader { border-color: var(--g-border) !important; }
+a, a:visited, .el { color: var(--g-link) !important; text-decoration: none; }
+a:hover { color: var(--g-blue-hi) !important; }
+
+/* Sidebar tree */
+#nav-tree, #side-nav, .ui-resizable {
+  background: var(--g-surface) !important;
+}
+#nav-tree .label { color: var(--g-fg) !important; }
+#nav-tree .selected,
+#nav-tree a:hover { background: var(--g-blue) !important; color: #fff !important; }
+#nav-tree .selected a, #nav-tree .selected .label { color: #fff !important; }
+
+/* Content area */
+#doc-content, .contents { background: var(--g-bg) !important; }
+
+/* Member / declaration tables */
+.memberdecls, .memSeparator,
+table.doxtable, .directory, .markdownTable {
+  border-color: var(--g-border) !important;
+}
+.memItemLeft, .memItemRight, .memTemplItemLeft, .memTemplItemRight,
+.memdesc, .mdescLeft, .mdescRight {
+  background: var(--g-panel) !important;
+  border-color: var(--g-border) !important;
+}
+.memproto, .memname {
+  background: var(--g-surface) !important;
+  color: var(--g-heading) !important;
+  border-color: var(--g-border) !important;
+}
+.memdoc { background: var(--g-panel) !important; border-color: var(--g-border) !important; }
+
+/* Code / fragments */
+div.fragment, pre.fragment, code, .computeroutput, tt {
+  background: var(--g-panel) !important;
+  color: var(--g-fg) !important;
+  border-color: var(--g-border) !important;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+}
+span.keyword, span.keywordtype, span.keywordflow { color: var(--g-blue-hi) !important; }
+span.comment   { color: var(--g-muted) !important; }
+span.stringliteral { color: #b5e08c !important; }
+span.preprocessor  { color: #d8a657 !important; }
+
+/* Tables + zebra rows */
+.directory tr.even, tr.even, .markdownTableRowEven { background: var(--g-panel) !important; }
+.directory td, td.entry { color: var(--g-fg) !important; }
+
+/* Search box */
+#MSearchBox, #MSearchField, .left img { background: var(--g-panel) !important; }
+#MSearchField { color: var(--g-fg) !important; }
+
+/* Footer */
+.navpath, address.footer { color: var(--g-muted) !important; }
+
+/* Custom top bar injected by header.html */
+.haruka-topbar a { transition: color .15s ease, background-color .15s ease; }

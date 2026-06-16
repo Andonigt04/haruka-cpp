@@ -2,6 +2,8 @@
 #include <glad/glad.h>
 #include <algorithm>
 
+namespace Haruka { namespace Renderer {
+
 MeshLOD::MeshLOD() {}
 
 MeshLOD::~MeshLOD() {
@@ -118,3 +120,6 @@ MeshLOD::LODStats MeshLOD::getStats() const {
 
     return stats;
 }
+
+
+}} // namespace Haruka::Renderer

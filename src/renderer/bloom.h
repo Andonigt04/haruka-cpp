@@ -5,6 +5,8 @@
 #pragma once
 #include <glad/glad.h>
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Bloom post-processing buffer pair.
  *
@@ -38,3 +40,8 @@ private:
     unsigned int rboDepth;
     unsigned int width, height;
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::Bloom;
+namespace Haruka { using Renderer::Bloom; }

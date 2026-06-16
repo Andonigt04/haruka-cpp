@@ -3,7 +3,9 @@
 #include "renderer/simple_mesh.h"
 #include "imgui.h"
 
-MeshRendererComponent::MeshRendererComponent() 
+namespace Haruka {
+
+MeshRendererComponent::MeshRendererComponent()
     : mesh(nullptr), meshPath(""), materialPath("") {}
 
 MeshRendererComponent::~MeshRendererComponent() = default;
@@ -49,3 +51,4 @@ void MeshRendererComponent::renderInspector() {
         materialPath = matBuffer;
     }
 }
+}  // namespace Haruka

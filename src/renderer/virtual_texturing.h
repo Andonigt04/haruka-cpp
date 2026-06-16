@@ -13,7 +13,7 @@
 #include <unordered_map>
 #include <string>
 
-// Custom hash para glm::uvec2
+// Custom hash para glm::uvec2 — GLOBAL ::std specialization, must stay OUTSIDE Haruka.
 namespace std {
     template<>
     struct hash<glm::uvec2> {
@@ -22,6 +22,8 @@ namespace std {
         }
     };
 }
+
+namespace Haruka { namespace Renderer {
 
 /**
  * @brief Page-based virtual texturing system.
@@ -133,3 +135,11 @@ private:
     /** @brief Ensures memory budget remains within configured limits. */
     void makeRoomInCache(size_t neededBytes);
 };
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::PageRequest;
+using Haruka::Renderer::VTConfig;
+using Haruka::Renderer::VirtualTexturing;
+namespace Haruka { using Renderer::PageRequest; using Renderer::VTConfig; using Renderer::VirtualTexturing; }

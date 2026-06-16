@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <cstddef>
 
 namespace Haruka {
@@ -42,6 +43,14 @@ public:
      * @return Pointer to cached ChunkData, or nullptr if not in cache
      */
     const ChunkData* getChunk(const PlanetChunkKey& key);
+
+    /**
+     * @brief Copies a cached chunk into `out` while holding the cache lock.
+     * @return true if found. Use this (not getChunk) when the data is consumed AFTER the
+     *  call: getChunk returns a pointer INTO the map, which a concurrent addChunk
+     *  (async generation → insert/rehash/evict) can invalidate → use-after-free.
+     */
+    bool getChunkCopy(const PlanetChunkKey& key, ChunkData& out);
     
     /**
      * @brief Adds a chunk to the cache.
@@ -130,23 +139,20 @@ private:
     // We use a custom hash for PlanetChunkKey to use unordered_map
     struct ChunkKeyHash {
         size_t operator()(const PlanetChunkKey& key) const {
-            // Combine face, lod, x, y into a single hash
-            return ((static_cast<size_t>(key.face) << 24) |
-                    (static_cast<size_t>(key.lod) << 16) |
-                    (static_cast<size_t>(key.x) << 8) |
-                    (static_cast<size_t>(key.y)));
+            return static_cast<size_t>(ChunkCache::keyToHash(key)); // empaquetado exacto (incluye body)
         }
     };
-    
+
     struct ChunkKeyEqual {
         bool operator()(const PlanetChunkKey& a, const PlanetChunkKey& b) const {
-            return a.face == b.face && a.lod == b.lod && a.x == b.x && a.y == b.y;
+            return a == b; // operator== incluye body
         }
     };
     
     std::list<PlanetChunkKey> lruOrder;  ///< LRU ordering (front = oldest)
     std::unordered_map<uint64_t, std::list<PlanetChunkKey>::iterator> keyToIterator;  ///< Map to iterators
     
+    mutable std::mutex m_mutex;
     size_t maxMemoryBytes;
     size_t currentMemoryBytes = 0;
     CacheStats stats;

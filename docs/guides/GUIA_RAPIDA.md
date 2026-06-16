@@ -514,4 +514,4 @@ Si tienes dudas sobre:
 ---
 
 **Última actualización**: 6 de Mayo de 2026
-**Versión del código**: haruka-cpp v0.5.0
+**Versión del código**: haruka-cpp v6

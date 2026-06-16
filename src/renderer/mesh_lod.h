@@ -10,6 +10,8 @@
 #include <glad/glad.h>
 #include "mesh_optimizer.h"
 
+namespace Haruka { namespace Renderer {
+
 /**
  * @brief Mesh level-of-detail manager.
  *
@@ -64,3 +66,9 @@ private:
     void setupGL(LODLevel& level);
 };
 
+
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::MeshLOD;
+namespace Haruka { using Renderer::MeshLOD; }

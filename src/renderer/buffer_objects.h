@@ -6,6 +6,8 @@
 #include <glad/glad.h>
 #include <vector>
 
+namespace Haruka { namespace Renderer {
+
 /** @brief OpenGL vertex buffer RAII wrapper. */
 class VertexBuffer {
 public:
@@ -64,3 +66,10 @@ public:
     /** @brief Binds the buffer to GL_ELEMENT_ARRAY_BUFFER. */
     void bind() const { glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ID); }
 };
+
+}} // namespace Haruka::Renderer
+
+using Haruka::Renderer::VertexBuffer;
+using Haruka::Renderer::VertexArray;
+using Haruka::Renderer::IndexBuffer;
+namespace Haruka { using Renderer::VertexBuffer; using Renderer::VertexArray; using Renderer::IndexBuffer; }

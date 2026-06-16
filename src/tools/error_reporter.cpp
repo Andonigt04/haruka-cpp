@@ -1,5 +1,7 @@
 #include "error_reporter.h"
 
+namespace Haruka { namespace Tools {
+
 std::string ErrorInfo::getComponentName() const {
     switch (component) {
         case ErrorComponent::MOTOR: return "MOTOR";
@@ -102,3 +104,6 @@ std::string ErrorInfo::toString() const {
     
     return ss.str();
 }
+
+
+}} // namespace Haruka::Tools

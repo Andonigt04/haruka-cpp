@@ -31,6 +31,8 @@ layout(std140, binding = 0) uniform PerFrameData {
     int  enableIBL;
     int  enableShadows;
     int  _pad3[3];
+    vec3 moonDirection;  float moonIntensity;
+    vec3 moonLightColor; float _pad4;
 };
 
 layout(std140, binding = 1) uniform PerObjectData {

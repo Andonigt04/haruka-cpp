@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [ opengl ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  engine:
+    name: Engine · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: all-modules, modules: "",           network: "OFF" }
+          - { name: minimal,     modules: "0000101001", network: "OFF" }
+          - { name: no-audio,    modules: "1111011111", network: "OFF" }
+          - { name: no-postfx,   modules: "1111111011", network: "OFF" }
+          - { name: network,     modules: "",           network: "ON"  }
+
+    steps:
+      # 1. El checkout se ejecuta nativo en Ubuntu con todas las de la ley. Descargará submódulos sin rechistar.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # 2. Levantamos un contenedor de Fedora aislado solo para ejecutar los comandos de compilación.
+      - name: Build inside Fedora Container
+        uses: addnab/docker-run-action@v3
+        with:
+          image: fedora:latest
+          # Mapeamos la carpeta del código de Ubuntu dentro de Fedora
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            # Instalar dependencias en Fedora
+            dnf install -y --setopt=install_weak_deps=False \
+              cmake ninja-build g++ pkg-config git \
+              assimp-devel openssl-devel openal-soft-devel postgresql-devel \
+              gtk3-devel glm-devel glslang mesa-libGL-devel \
+              wayland-devel wayland-protocols-devel \
+              libxkbcommon-devel mesa-libEGL-devel libzstd-devel
+
+            # Clonar e instalar SDL3 de forma interna en el contenedor
+            git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
+            cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="/tmp/sdl3-install" \
+              -DSDL_X11=OFF \
+              -DSDL_WAYLAND=ON
+            cmake --build /tmp/SDL/build -j"$(nproc)"
+            cmake --install /tmp/SDL/build
+
+            # Configurar el motor Haruka
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DMODULES="${{ matrix.modules }}" \
+              -DHARUKA_NETWORK=${{ matrix.network }} \
+              -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
+
+            # Compilar el objetivo final
+            cmake --build build -j"$(nproc)" --target HarukaEngine

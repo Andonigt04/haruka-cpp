@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <algorithm>
 
+namespace Haruka { namespace IO {
+
 namespace fs = std::filesystem;
 
 AssetStreamer::AssetStreamer() {}
@@ -313,3 +315,6 @@ AssetStreamer::StreamStats AssetStreamer::getStats() const {
 
     return stats;
 }
+
+
+}} // namespace Haruka::IO

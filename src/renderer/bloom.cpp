@@ -2,6 +2,8 @@
 #include "tools/error_reporter.h"
 #include <iostream>
 
+namespace Haruka { namespace Renderer {
+
 Bloom::Bloom(unsigned int width, unsigned int height) : width(width), height(height)
 {
     setupFramebuffer();
@@ -60,3 +62,5 @@ Bloom::~Bloom()
     glDeleteTextures(1, &brightTexture);
     glDeleteTextures(1, &blurredTexture);
 }
+
+}} // namespace Haruka::Renderer
