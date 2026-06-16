@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo dnf update -y
-          sudo dnf install -y --no-install-recommends \
+          sudo dnf install -y --setopt=install_weak_deps=False \
             cmake ninja-build g++ pkg-config git \
             assimp-devel openssl-devel openal-soft-devel postgresql-devel \
             gtk3-devel glm glslang mesa-libGL-devel \
