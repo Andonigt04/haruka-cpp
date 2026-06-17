@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - opengl
 
 permissions:
   contents: read
@@ -31,9 +32,11 @@ jobs:
 
       - name: Compilar Doxygen
         run: |
-          sed -i 's/^PROJECT_NUMBER.*/PROJECT_NUMBER = 1.0.0+b${{ github.run_number }}/' Doxyfile
-          sed -i 's/^# HarukaEngine.*/# HarukaEngine (v1.0.0+b${{ github.run_number }})/' README.md
+          BRANCH_NAME=$(echo ${{ github.ref }} | sed 's|refs/heads/||')
           
+          sed -i "s/^PROJECT_NUMBER.*/PROJECT_NUMBER = 1.0.0 ($BRANCH_NAME-b${{ github.run_number }})/" Doxyfile
+          sed -i "s/^# HarukaEngine.*/# HarukaEngine (v1.0.0-$BRANCH_NAME-b${{ github.run_number }})/" README.md
+
           doxygen Doxyfile # Asegúrate de que este es el nombre de tu archivo
 
       - name: Configurar Pages
