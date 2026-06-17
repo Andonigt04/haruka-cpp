@@ -2,6 +2,7 @@
 build/
 
 docs/doxygen_warn.log
+docs/doxygen_warnings.log
 docs/doxygen.log
 docs/doxygen.xml
 docs/latex/
