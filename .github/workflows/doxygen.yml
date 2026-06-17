@@ -43,7 +43,7 @@ jobs:
       - name: Subir artefacto
         uses: actions/upload-pages-artifact@v3
         with:
-          path: 'html'
+          path: 'docs/html'
 
       - name: Desplegar en GitHub Pages
         id: deployment
