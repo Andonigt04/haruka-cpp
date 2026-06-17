@@ -14,12 +14,11 @@
  * C++17 / OpenGL 4.6 runtime for space exploration, deferred rendering, and
  * procedural planetary terrain.
  *
- * The source tree is documented in parallel with the Markdown guides:
- * - `README.md`
- * - `docs/guides/ANALISIS_SISTEMAS.md`
- * - `docs/guides/DIAGRAMAS_FLUJO.md`
- * - `docs/guides/PATRONES_USO.md`
- * - `docs/guides/GUIA_RAPIDA.md`
+ *  * @section sec_docs Documentation map
+ * - @subpage analisis_sistemas "Análisis de Sistemas" — Architecture breakdown.
+ * - @subpage diagramas_flujo "Diagramas de Flujo" — Execution and data-flow diagrams.
+ * - @subpage patrones_uso "Patrones de Uso" — Implementation patterns and code examples.
+ * - @subpage guia_rapida "Guía Rápida" — Quick reference and debugging tips.
  *
  * @section sec_overview Overview
  *

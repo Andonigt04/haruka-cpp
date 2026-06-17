@@ -1,5 +1,28 @@
 cmake_minimum_required(VERSION 3.14)
 
+if(DEFINED ENV{GITHUB_RUN_NUMBER})
+    set(HARUKA_BUILD_NUMBER $ENV{GITHUB_RUN_NUMBER})
+else()
+    set(HARUKA_BUILD_NUMBER "local")
+endif()
+
+execute_process(
+    COMMAND git rev-parse --short HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    OUTPUT_VARIABLE HARUKA_BUILD_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+
+if(NOT HARUKA_BUILD_HASH)
+    set(HARUKA_BUILD_HASH "unknown")
+endif()
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h"
+)
+
 # Must be set before project() so -DVERSION=x.x.x is picked up.
 set(VERSION "1.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
@@ -169,6 +192,7 @@ add_library(HarukaEngine SHARED
 
 
 target_include_directories(HarukaEngine PUBLIC
+    "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${THIRD_PARTY_DIR}/glad/include"
     "${THIRD_PARTY_DIR}/imgui"

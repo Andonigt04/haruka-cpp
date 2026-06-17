@@ -1,4 +1,4 @@
-# Diagramas de Flujo y Arquitectura
+/** @page diagramas_flujo Diagramas de Flujo
 
 ## 1. Relación de Propiedad entre Sistemas
 

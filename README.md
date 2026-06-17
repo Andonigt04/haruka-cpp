@@ -1,4 +1,4 @@
-# HarukaEngine (v1.0)
+# HarukaEngine (v1.0.0)
 
 **C++17 / OpenGL 4.6** real-time 3D engine for space exploration, planetary terrain generation, and game development.
 

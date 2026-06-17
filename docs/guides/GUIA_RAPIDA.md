@@ -1,22 +1,4 @@
-# Guía Rápida y Referencia Cruzada
-
-## 📑 Índice Rápido por Tema
-
-### 🎯 Quiero...
-
-#### ...entender cómo funciona el sistema
-→ [ANALISIS_SISTEMAS.md](ANALISIS_SISTEMAS.md) (Conceptos fundamentales)
-
-#### ...ver cómo interactúan los sistemas
-→ [DIAGRAMAS_FLUJO.md](DIAGRAMAS_FLUJO.md) (Flujos y relaciones)
-
-#### ...implementar una característica
-→ [PATRONES_USO.md](PATRONES_USO.md) (Ejemplos de código)
-
-#### ...debuggear un problema
-→ [#Troubleshooting](#troubleshooting-rápido) (Soluciones comunes)
-
----
+/** @page guia_rapida Guía Rápida
 
 ## 🔑 Conceptos Clave
 
