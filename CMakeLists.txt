@@ -23,7 +23,6 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h"
 )
 
-# Must be set before project() so -DVERSION=x.x.x is picked up.
 set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
 project(HarukaEngine VERSION ${VERSION})
@@ -306,7 +305,6 @@ endif()
 
 # --- 6. Install Rules ---
 # Only install the engine's standalone layout when this project is top-level.
-# When consumed via FetchContent (e.g. Survival), the parent project owns dist.
 if(PROJECT_IS_TOP_LEVEL)
     include(GNUInstallDirs)
 
