@@ -3,7 +3,7 @@ name: Deploy Doxygen to GitHub Pages
 on:
   push:
     branches:
-      - opengl
+      - main
 
 permissions:
   contents: read
