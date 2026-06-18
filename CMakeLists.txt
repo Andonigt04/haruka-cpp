@@ -19,7 +19,7 @@ if(NOT HARUKA_BUILD_HASH)
 endif()
 
 configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/version.h.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.h.in"
     "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h"
 )
 
