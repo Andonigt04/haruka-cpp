@@ -24,7 +24,7 @@ configure_file(
 )
 
 # Must be set before project() so -DVERSION=x.x.x is picked up.
-set(VERSION "1.0" CACHE STRING "Engine version (used as build/install subdirectory)")
+set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
 project(HarukaEngine VERSION ${VERSION})
 
@@ -38,12 +38,9 @@ endif()
 
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
 
-# Output layout: build/x.x.x/bin/ for .so and shaders.
-# haruka/CMakeLists.txt reads from here directly (no install step needed during dev).
-set(VERSION_DIR "${CMAKE_BINARY_DIR}/${PROJECT_VERSION}")
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${VERSION_DIR}/bin")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 
 # --- 1. System Dependencies ---
 find_package(PkgConfig   REQUIRED)
@@ -232,8 +229,6 @@ if(NOT GLSLC AND NOT GLSLANG_V)
 endif()
 
 set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
-set(SHADER_OUT_DIR "${VERSION_DIR}/bin/shaders")
-file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
 
 file(GLOB SHADER_SOURCES
     "${SHADER_SRC_DIR}/*.vert"
@@ -310,16 +305,16 @@ endif()
 include(GNUInstallDirs)
 
 install(TARGETS HarukaEngine
-        LIBRARY DESTINATION "${PROJECT_VERSION}/bin"
-        RUNTIME DESTINATION "${PROJECT_VERSION}/bin")
+        LIBRARY DESTINATION "bin"
+        RUNTIME DESTINATION "bin")
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
-        DESTINATION "${PROJECT_VERSION}/lib64/haruka-cpp"
+        DESTINATION "lib64/haruka-cpp"
         FILES_MATCHING
         PATTERN "*.h"
         PATTERN "*.hpp"
         PATTERN "*.cpp")
 
 install(DIRECTORY "${SHADER_OUT_DIR}/"
-        DESTINATION "${PROJECT_VERSION}/bin/shaders"
+        DESTINATION "bin/shaders"
         FILES_MATCHING PATTERN "*.spv")
