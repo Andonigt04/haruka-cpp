@@ -191,6 +191,9 @@ add_library(HarukaEngine SHARED
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${NLOHMANN_JSON_INCLUDE_DIR}"
+    "${GLM_INCLUDE_DIR}"
+    "${STB_INCLUDE_DIR}"
     "${THIRD_PARTY_DIR}/glad/include"
     "${THIRD_PARTY_DIR}/imgui"
     "${THIRD_PARTY_DIR}/imgui/backends"
