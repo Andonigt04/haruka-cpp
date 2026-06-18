@@ -305,23 +305,23 @@ if(HARUKA_NETWORK)
 endif()
 
 # --- 6. Install Rules ---
-# cmake --install build --prefix <haruka/build>
-# Result: <prefix>/1.0/bin/libHarukaEngine.so
-#         <prefix>/1.0/bin/shaders/*.spv
-#         <prefix>/1.0/lib64/haruka-cpp/**.(h|cpp)
-include(GNUInstallDirs)
+# Only install the engine's standalone layout when this project is top-level.
+# When consumed via FetchContent (e.g. Survival), the parent project owns dist.
+if(PROJECT_IS_TOP_LEVEL)
+    include(GNUInstallDirs)
 
-install(TARGETS HarukaEngine
+    install(TARGETS HarukaEngine
         LIBRARY DESTINATION "bin"
         RUNTIME DESTINATION "bin")
 
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
         DESTINATION "lib64/haruka-cpp"
         FILES_MATCHING
         PATTERN "*.h"
         PATTERN "*.hpp"
         PATTERN "*.cpp")
 
-install(DIRECTORY "${SHADER_OUT_DIR}/"
+    install(DIRECTORY "${SHADER_OUT_DIR}/"
         DESTINATION "bin/shaders"
         FILES_MATCHING PATTERN "*.spv")
+endif()
