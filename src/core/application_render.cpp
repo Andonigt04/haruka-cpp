@@ -20,6 +20,7 @@
 #include "tools/profiler.h"
 #include "settings/settings_manager.h"
 #include "io/image_writer.h"
+#include "core/asset_paths.h"
 
 #include <vector>
 #include <string>
@@ -270,6 +271,11 @@ void Application::renderFrameContent() {
             if (!_skyShader)
                 _skyShader = std::make_unique<Shader>("shaders/sky.vert", "shaders/sky.frag");
             if (_skyVAO == 0) glGenVertexArrays(1, &_skyVAO);
+            // Si el shader de cielo no linkó, NO seguimos: fijar sus uniforms (locations
+            // 0..8) con otro programa bound corrompería el estado (los GL_INVALID_OPERATION
+            // sobre planetCenterAndFlag/moonDirection/etc). El cielo se salta y el resto
+            // renderiza normal (el clearColor ya dejó un fondo de respaldo).
+            if (!_skyShader->linked()) goto skySkip;
 
             const glm::dvec3 camD = glm::dvec3(_camera->position);
             glm::dvec3 up = camD - pc; double ul = glm::length(up);

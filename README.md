@@ -205,11 +205,13 @@ cmake -B build -DVERSION=1.0 -DMODULES=0011111111
 
 ### Shaders (engine vs game)
 
-Engine shaders live in `haruka-cpp/shaders/` and are compiled to `.spv` (+ GLSL copy) at
-build time. **Game-specific shaders live in the game repo** (e.g. `Survival/shaders/`) and are
-compiled by the game's build into the same runtime `shaders/` dir, coexisting by name. Each
-shader is compiled **once** by its owner — the game copies (does not recompile) the engine's
-shaders. So adding a game shader never touches the engine.
+Engine shaders live in `haruka-cpp/assets/shaders/` (the engine's own `assets/` root — also
+where engine-provided **default** textures/fonts would go) and are compiled to `.spv` (+ GLSL
+copy) at build time into the runtime `assets/shaders/` dir. **Game-specific shaders live in the
+game repo** and the game's build compiles them into the **same** `assets/shaders/` dir,
+coexisting by name. Each shader is compiled **once** by its owner. So adding a game shader
+never touches the engine. (Runtime path resolution: `AssetPaths::shaders()` → `assets/shaders/`,
+identical in dev and release.)
 
 ---
 

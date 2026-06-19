@@ -75,6 +75,15 @@ public:
     /** @brief Binds the program for subsequent draw calls. */
     void use() { glUseProgram(ID); }
 
+    /** @brief True solo si el programa existe Y linkó OK. getID()!=0 NO basta (el handle
+     *  se crea aunque el link falle) → usar esto antes de fijar uniforms/dibujar para no
+     *  corromper el estado del programa anterior con un glUseProgram a uno inválido. */
+    bool linked() const {
+        if (ID == 0) return false;
+        GLint ok = GL_FALSE; glGetProgramiv(ID, GL_LINK_STATUS, &ok);
+        return ok == GL_TRUE;
+    }
+
     /** @name Uniform helpers — name-based (GLSL) and location-based (SPIR-V) */
     ///@{
     void setBool (const std::string& name, bool value)          const { GLint l = glGetUniformLocation(ID, name.c_str()); if (l >= 0) glUniform1i (l, (int)value); }
@@ -102,14 +111,11 @@ public:
     ///@}
 
 private:
-    // In release the shader paths ("shaders/x.vert") are rooted under assets/;
-    // in dev the base is empty so they resolve next to the exe. AssetPaths owns
-    // the dev/release switch.
-#ifdef HARUKA_RELEASE
+    // Layout UNIFICADO dev==release: los paths ("shaders/x.vert") se enraízan SIEMPRE
+    // bajo assets/ → en ambos casos resuelven a "assets/shaders/x.vert" relativo al exe.
+    // Así dev y release usan la MISMA estructura (sin el clásico "va en dev, rota en
+    // release"). El build debe dejar los shaders en <exe>/assets/shaders/ en ambos.
     inline static std::string s_baseDir = "assets/";
-#else
-    inline static std::string s_baseDir;
-#endif
 
     // Loads a shader, preferring GLSL source over SPIR-V.
     //

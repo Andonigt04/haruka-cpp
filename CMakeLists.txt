@@ -230,9 +230,12 @@ if(NOT GLSLC AND NOT GLSLANG_V)
         "  Ubuntu/Deb:  sudo apt install glslang-tools")
 endif()
 
-set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders")
+# Fuentes de shaders del motor bajo assets/ (raíz de assets del motor: aquí también
+# irían texturas/fuentes por defecto que el motor traiga de serie). El runtime los busca
+# en assets/shaders/ (AssetPaths::shaders()), así que source e install coinciden.
+set(SHADER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/assets/shaders")
 if(NOT SHADER_OUT_DIR)
-    set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/shaders")
+    set(SHADER_OUT_DIR "${CMAKE_BINARY_DIR}/assets/shaders")
 endif()
 file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
 
@@ -320,6 +323,6 @@ if(PROJECT_IS_TOP_LEVEL)
         PATTERN "*.cpp")
 
     install(DIRECTORY "${SHADER_OUT_DIR}/"
-        DESTINATION "bin/shaders"
+        DESTINATION "bin/assets/shaders"
         FILES_MATCHING PATTERN "*.spv")
 endif()

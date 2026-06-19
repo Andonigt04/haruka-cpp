@@ -31,6 +31,7 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
     mesh.planetName  = planetName;
     mesh.key         = key;
     mesh.chunkCenter = data.chunkCenter;
+    mesh.planetRadius = data.planetRadius;
     {
         double nodeSz = data.planetRadius * 2.0 / double(1u << key.lod);
         mesh.cullRadius = (float)(nodeSz * 0.9);
@@ -61,6 +62,16 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
         glBufferData(GL_ARRAY_BUFFER, data.waterParams.size() * sizeof(glm::vec2), data.waterParams.data(), GL_STATIC_DRAW);
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr); // x=nivel, y=profundidad
         glEnableVertexAttribArray(2);
+    }
+
+    // Atributo 3: morph target CDLOD (posición en el LOD padre). Si no viene, el
+    // atributo queda deshabilitado y el shader no morfa (mix con factor 0 da igual).
+    if (!data.waterMorphTargets.empty()) {
+        glGenBuffers(1, &mesh.mbo);
+        glBindBuffer(GL_ARRAY_BUFFER, mesh.mbo);
+        glBufferData(GL_ARRAY_BUFFER, data.waterMorphTargets.size() * sizeof(glm::vec3), data.waterMorphTargets.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+        glEnableVertexAttribArray(3);
     }
 
     glGenBuffers(1, &mesh.ebo);
@@ -198,6 +209,21 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         }
 
         glUniform3fv(locOffset, 1, &offset[0]);
+
+        // Morph CDLOD (mismo cálculo que el terreno → agua y terreno transicionan a la
+        // vez): mezcla en la mitad alta de la banda de visibilidad del chunk.
+        {
+            const double splitFactor = 1.0;
+            double dist     = glm::length(glm::dvec3(offset));
+            double nodeSize = mesh.planetRadius * 2.0 / double(1u << mesh.key.lod);
+            double low      = nodeSize * splitFactor;
+            double high     = nodeSize * splitFactor * 2.0;
+            double t        = (high > low) ? (dist - low) / (high - low) : 0.0;
+            double morph    = (t - 0.5) / 0.5;
+            morph = morph < 0.0 ? 0.0 : (morph > 1.0 ? 1.0 : morph);
+            glUniform1f(12, (float)morph); // u_morphFactor (misma location que el terreno)
+        }
+
         glBindVertexArray(mesh.vao);
         glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
     }
@@ -210,6 +236,7 @@ void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
     if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
     if (mesh.pbo) glDeleteBuffers(1, &mesh.pbo);
+    if (mesh.mbo) glDeleteBuffers(1, &mesh.mbo);
     if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
 }
 

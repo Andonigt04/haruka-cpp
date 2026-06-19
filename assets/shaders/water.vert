@@ -21,6 +21,7 @@
 layout(location = 0) in vec3  aPos;        // sea-level position relative to chunk centre
 layout(location = 1) in vec3  aNormal;     // radial outward (sphere normal at sea level)
 layout(location = 2) in vec2 aWaterParam; // x = nivel (km, 0=océano) · y = profundidad (m)
+layout(location = 3) in vec3  aMorphTarget; // CDLOD: posición en el LOD padre (decimado)
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
@@ -30,6 +31,7 @@ layout(location = 4) out float IsLake;     // 1 = lago, 0 = océano (para el fra
 layout(location = 5) out float Depth;      // profundidad del agua (m): orilla≈0
 
 layout(location = 10) uniform vec3  u_chunkOffset;   // chunkCentre - cameraPos
+layout(location = 12) uniform float u_morphFactor;   // 0=detalle, 1=forma del padre (CDLOD, misma location que el terreno)
 layout(location = 14) uniform float u_time;          // seconds
 layout(location = 15) uniform vec3  u_waveUp;        // radial up at camera surface point
 layout(location = 16) uniform vec3  u_waveTangent;   // tangent basis (global per frame)
@@ -62,7 +64,11 @@ const float STEEP[NUM_WAVES]   = float[](0.75,  0.70, 0.65, 0.60, 0.50, 0.42);
 const float ANGOFF[NUM_WAVES]  = float[](0.0,  0.55, -0.6,  1.1, -1.3,  0.9);
 
 void main() {
-    vec3 camRelPos = u_chunkOffset + aPos;
+    // CDLOD: la lámina se "aplana" hacia la forma del LOD padre antes del cambio de
+    // nivel → sin salto de teselación (igual que el terreno). El faldón lleva su propio
+    // morph = su posición, así no se mueve.
+    vec3 basePos   = mix(aPos, aMorphTarget, u_morphFactor);
+    vec3 camRelPos = u_chunkOffset + basePos;
 
     // 2D position in the camera-anchored tangent plane.
     vec2 horiz = vec2(dot(camRelPos, u_waveTangent), dot(camRelPos, u_waveBitangent));

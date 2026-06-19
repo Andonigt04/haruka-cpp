@@ -132,6 +132,11 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
 
     // 2. Para cada planeta, actualizar su terreno
     static int s_lf = 0; ++s_lf; // contador de frames (para escalonar el catch-up)
+    // F7 — PRESUPUESTO DE SUBIDAS POR FRAME: subir un chunk (terreno o agua) = copia
+    // pesada + buffers GPU. En una ráfaga (carga inicial / fly-in) eran CIENTOS por frame
+    // → pico de >1500 ms. Limitamos cuántos se suben por frame (terreno + agua comparten
+    // este presupuesto); el resto entra en frames siguientes → carga repartida, sin picos.
+    if (m_streaming) m_streaming->setUploadBudget(48);
     // Si hay chunks generándose/encolados, mantén la ventana de catch-up abierta (~1 s).
     if (m_streaming && (m_streaming->getPendingCount() + m_streaming->getQueuedCount()) > 0)
         m_catchupGrace = 60;
@@ -160,10 +165,11 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             // está). Sin esto los chunks no aparecen hasta moverte; haciéndolo cada
             // frame costaba ~45 ms (copiaba todo el agua siempre).
             if (m_catchupGrace > 0 && (s_lf % 3) == 0) {
-                m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (ya filtra por residencia)
+                m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (ya filtra por residencia + presupuesto)
                 if (m_waterRenderer && m_cache)
                     for (const auto& k : m_lastUpdates[pi].chunksToKeep) {
-                        if (m_waterRenderer->isResident(k)) continue; // ya en GPU → no recopiar
+                        if (m_waterRenderer->isResident(k)) continue;   // ya en GPU → no recopiar
+                        if (!m_streaming->tryConsumeUpload()) break;     // presupuesto de frame agotado
                         ChunkData wd;
                         if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
                     }
@@ -232,6 +238,8 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // auto-salta si ya está, así que reañadir es barato.
         if (m_waterRenderer && m_cache)
             for (const auto& k : update.chunksToLoad) {
+                if (m_waterRenderer->isResident(k)) continue;       // ya en GPU → gratis
+                if (!m_streaming->tryConsumeUpload()) break;         // presupuesto de frame agotado
                 ChunkData wd;
                 if (m_cache->getChunkCopy(k, wd))
                     m_waterRenderer->addToScene(planet.name, k, wd);

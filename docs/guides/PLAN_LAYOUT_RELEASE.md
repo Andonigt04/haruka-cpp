@@ -6,10 +6,10 @@
 
 ## 0. Estado actual (DEV) — no cambiar todavía
 ```
-Survival/build/bin/
-├── survival              exe
+build/bin/
+├── executable              exe
 ├── libHarukaEngine.so    motor
-├── libSurvival.so        lógica juego
+├── libGame.so        lógica juego
 ├── mapc                  herramienta dev (NO va en release)
 ├── shaders/              .spv + fuentes .vert/.frag (legibles)
 └── scenes/               .scene JSON (legibles)

@@ -54,6 +54,7 @@ namespace Haruka {
         // — el oleaje Gerstner se aplica en el vertex shader). Solo se rellena
         // cuando hasOcean. Posiciones relativas al MISMO chunkCenter que el terreno.
         std::vector<glm::vec3> waterVertices;
+        std::vector<glm::vec3> waterMorphTargets; // CDLOD: posición del agua en el LOD padre (decimado), para geomorph sin popping
         std::vector<glm::vec3> waterNormals;   // radial outward (esfera lisa)
         std::vector<glm::vec2> waterParams;    // por vértice: x = nivel (km, 0=océano), y = profundidad del agua (m, para orilla/color)
         std::vector<unsigned int> waterIndices;
@@ -71,7 +72,7 @@ namespace Haruka {
         // come toda la RAM. Incluye terreno + agua + uvs/params.
         size_t getSizeBytes() const {
             return (vertices.size() + morphTargets.size() + normals.size() + colors.size()
-                    + waterVertices.size() + waterNormals.size()) * sizeof(glm::vec3)
+                    + waterVertices.size() + waterMorphTargets.size() + waterNormals.size()) * sizeof(glm::vec3)
                  + (uvs.size() + waterParams.size()) * sizeof(glm::vec2)
                  + (indices.size() + waterIndices.size()) * sizeof(unsigned int);
         }

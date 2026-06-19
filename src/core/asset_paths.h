@@ -18,13 +18,10 @@ namespace Haruka {
 
 class AssetPaths {
 public:
-    /** @brief Root prefix for shader files (with trailing separator). */
+    /** @brief Root prefix for shader files (with trailing separator). Layout UNIFICADO
+     *  dev==release: shaders SIEMPRE bajo assets/shaders/ (sin split dev/release). */
     static std::string shaders() {
-#ifdef HARUKA_RELEASE
         return "assets/shaders/";
-#else
-        return "shaders/";
-#endif
     }
 
     /** @brief Root prefix + directory for map/scene files. */

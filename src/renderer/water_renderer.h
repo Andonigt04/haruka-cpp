@@ -25,6 +25,7 @@ namespace Haruka {
             GLuint vbo = 0;   // positions (relative to chunkCenter)
             GLuint nbo = 0;   // radial normals
             GLuint pbo = 0;   // per-vertex water level (km): 0=océano, >0=lago
+            GLuint mbo = 0;   // CDLOD morph target (posición en el LOD padre)
             GLuint ebo = 0;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
@@ -33,6 +34,7 @@ namespace Haruka {
             PlanetChunkKey key{};          // identity, for stale-coverage purge
             glm::dvec3  chunkCenter{0.0};
             float       cullRadius = 0.0f; // bounding-sphere radius for frustum cull
+            double      planetRadius = 1.0; // para el factor de morph CDLOD (igual que el terreno)
         };
 
         WaterRenderer() = default;

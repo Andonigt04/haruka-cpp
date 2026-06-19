@@ -30,7 +30,7 @@ layout(std140, binding = 0) uniform PerFrameData {
     int  enableSSAO;
     int  enableIBL;
     int  enableShadows;
-    int  _pad3[3];
+    int  _pad3a; int _pad3b; int _pad3c; // 3 ints SUELTOS (no array: std140 daría stride 16 → desalinea moon)
     vec3 moonDirection;  float moonIntensity;
     vec3 moonLightColor; float _pad4;
 };

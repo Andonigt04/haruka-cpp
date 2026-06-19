@@ -410,13 +410,16 @@ namespace {
             const bool  hasParams = !chunk->waterParams.empty();
             const int   mainCount = (int)chunk->waterVertices.size();
             std::vector<int> skirtOf((size_t)mainCount, -1);
+            const bool hasMorph = !chunk->waterMorphTargets.empty();
             auto skirtVtx = [&](int mainIdx) -> int {
                 if (skirtOf[mainIdx] >= 0) return skirtOf[mainIdx];
                 int s = (int)chunk->waterVertices.size();
                 glm::vec3 n = chunk->waterNormals[mainIdx];
-                chunk->waterVertices.push_back(chunk->waterVertices[mainIdx] - n * wSkirt);
+                glm::vec3 sv = chunk->waterVertices[mainIdx] - n * wSkirt;
+                chunk->waterVertices.push_back(sv);
                 chunk->waterNormals.push_back(n);
                 if (hasParams) chunk->waterParams.push_back(chunk->waterParams[mainIdx]);
+                if (hasMorph)  chunk->waterMorphTargets.push_back(sv); // el faldón no morfa
                 skirtOf[mainIdx] = s;
                 return s;
             };
@@ -430,6 +433,28 @@ namespace {
             for (int x = 0; x < r; ++x) if (cellWet(x, r - 1)) edge(r*side + x, r*side + x + 1);   // borde superior
             for (int y = 0; y < r; ++y) if (cellWet(0, y))     edge(y*side, (y + 1)*side);         // borde izquierdo
             for (int y = 0; y < r; ++y) if (cellWet(r - 1, y)) edge(y*side + r, (y + 1)*side + r); // borde derecho
+        };
+
+        // Morph CDLOD del AGUA: para cada vértice del grid, su posición en el LOD padre
+        // (malla decimada a media resolución, bilineal entre índices PAR) → el shader
+        // mezcla pos↔morph según distancia, igual que el terreno, así la lámina no
+        // "salta" de teselación al cambiar de LOD. Llamar ANTES del skirt (que apila su
+        // propio morph identidad). 'side' = res+1; el grid tiene side² vértices.
+        auto buildWaterMorph = [&](int side) {
+            const int rr = side - 1; // res
+            const int n  = side * side;
+            chunk->waterMorphTargets.resize((size_t)n);
+            auto wvidx = [side](int x, int y) { return x + y * side; };
+            for (int y = 0; y <= rr; ++y)
+            for (int x = 0; x <= rr; ++x) {
+                int x0 = x & ~1, x1 = std::min(x0 + 2, rr);
+                int y0 = y & ~1, y1 = std::min(y0 + 2, rr);
+                float fx = (x1 > x0) ? float(x - x0) / float(x1 - x0) : 0.0f;
+                float fy = (y1 > y0) ? float(y - y0) / float(y1 - y0) : 0.0f;
+                glm::vec3 a = glm::mix(chunk->waterVertices[wvidx(x0,y0)], chunk->waterVertices[wvidx(x1,y0)], fx);
+                glm::vec3 b = glm::mix(chunk->waterVertices[wvidx(x0,y1)], chunk->waterVertices[wvidx(x1,y1)], fx);
+                chunk->waterMorphTargets[wvidx(x,y)] = glm::mix(a, b, fy);
+            }
         };
 
         // --- Malla de agua v2: océano (nivel 0) + lagos (nivel local L) ---
@@ -528,6 +553,7 @@ namespace {
                     chunk->waterIndices.push_back(i + side + 1);
                     chunk->waterIndices.push_back(i + side);
                 }
+                buildWaterMorph(side);  // CDLOD del agua (antes del skirt)
                 // Faldón en los mismos bordes que sí emiten agua.
                 buildWaterSkirt(side, [&](int cx, int cy) { return cellEmits(cx + cy * side); });
                 chunk->hasOcean = true; // reusa el flag: el renderer sube la malla de agua
@@ -576,6 +602,7 @@ namespace {
                     chunk->waterIndices.push_back(i + side);
                 }
             }
+            buildWaterMorph(side);  // CDLOD del agua (antes del skirt)
             // Faldón en bordes mojados (celda mojada si cualquier esquina < nivel del mar).
             buildWaterSkirt(side, [&](int cx, int cy) {
                 int i = cx + cy * side;
