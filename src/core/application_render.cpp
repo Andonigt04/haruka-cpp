@@ -271,12 +271,11 @@ void Application::renderFrameContent() {
             if (!_skyShader)
                 _skyShader = std::make_unique<Shader>("shaders/sky.vert", "shaders/sky.frag");
             if (_skyVAO == 0) glGenVertexArrays(1, &_skyVAO);
-            // Si el shader de cielo no linkó, NO seguimos: fijar sus uniforms (locations
-            // 0..8) con otro programa bound corrompería el estado (los GL_INVALID_OPERATION
-            // sobre planetCenterAndFlag/moonDirection/etc). El cielo se salta y el resto
-            // renderiza normal (el clearColor ya dejó un fondo de respaldo).
-            if (!_skyShader->linked()) goto skySkip;
-
+            // Solo dibujamos el cielo si su shader LINKÓ. Si no, fijar sus uniforms
+            // (locations 0..8) con otro programa bound corrompería el estado (los
+            // GL_INVALID_OPERATION sobre planetCenterAndFlag/moonDirection/etc). Saltarlo
+            // → el resto renderiza normal (el clearColor dejó un fondo de respaldo).
+            if (_skyShader->linked()) {
             const glm::dvec3 camD = glm::dvec3(_camera->position);
             glm::dvec3 up = camD - pc; double ul = glm::length(up);
             up = (ul > 1e-9) ? up / ul : glm::dvec3(0, 1, 0);
@@ -308,6 +307,7 @@ void Application::renderFrameContent() {
             glBindVertexArray(0);
             glDepthMask(GL_TRUE);
             if (depthWas) glEnable(GL_DEPTH_TEST);
+            } // if (_skyShader->linked())
         }
     }
 

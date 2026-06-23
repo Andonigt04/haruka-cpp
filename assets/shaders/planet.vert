@@ -20,6 +20,7 @@ layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
 layout(location = 2) in vec2 aUV;
 layout(location = 3) in vec3 aMorphTarget;
+layout(location = 4) in vec3 aMorphNormal; // normal del LOD padre (CDLOD)
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
@@ -45,7 +46,9 @@ void main() {
     vec3 morphedPos = mix(aPos, aMorphTarget, u_morphFactor);
     vec3 camRelPos  = u_chunkOffset + morphedPos;
     FragPos  = camRelPos;
-    Normal   = normalize(aNormal);
+    // La normal se morpha igual que la posición → el chunk aplanado hacia el padre usa la
+    // normal del padre, así el sombreado casa con la geometría (sin escalón de normales).
+    Normal   = normalize(mix(aNormal, aMorphNormal, u_morphFactor));
     TexCoord = aUV;
     gl_Position = projection * mat4(mat3(view)) * vec4(camRelPos, 1.0);
 }

@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <vector>
 #include <mutex>
 #include <functional>
 #include <glad/glad.h>
@@ -19,6 +20,7 @@ namespace Haruka {
             GLuint vbo = 0;
             GLuint mbo = 0;   // morph-target buffer (CDLOD)
             GLuint nbo = 0;
+            GLuint nmbo = 0;  // morph-NORMAL buffer (CDLOD): normal del LOD padre
             GLuint uvo = 0;   // UV buffer
             GLuint ebo = 0;
             uint32_t indexCount  = 0;
@@ -65,6 +67,23 @@ namespace Haruka {
         /** @brief Planet center (world, double) for horizon culling. Per planet, before renderPlanet. */
         void setPlanetCenter(const glm::dvec3& c) { m_planetCenter = c; m_hasPlanetCenter = true; }
 
+        /** @brief Conjunto de HOJAS deseadas del LOD para un planeta (partición balanceada que
+         *  calcula LODSystem = chunksToKeep ∪ chunksToLoad). El render dibuja, por cada hoja, el
+         *  chunk residente más fino disponible (la hoja si está, si no su ancestro más cercano).
+         *  Así NO se necesita la cadena entera residente: cerca se llega al fino en cuanto su
+         *  hoja carga, y los intermedios sobrantes no se dibujan (sin "láminas" de overlap).
+         *  Llamar cada frame antes de renderPlanet. */
+        void setDesiredLeaves(const std::string& planet, std::vector<PlanetChunkKey> leaves) {
+            std::lock_guard<std::mutex> lock(m_renderMutex);
+            m_desiredLeaves[planet] = std::move(leaves);
+        }
+
+        /** @brief splitFactor REAL del LODSystem. La banda de morph CDLOD debe terminar (=1)
+         *  justo en la frontera de fusión (2·nodeSize·splitFactor); si el renderer asume otro
+         *  splitFactor que el LOD, los chunks se morphan (suavizan) a la distancia equivocada
+         *  → parches lisos donde el terreno fino debería verse, o popping al fusionar. */
+        void setSplitFactor(double sf) { if (sf > 1e-3) m_splitFactor = sf; }
+
         /** @brief Removes GPU meshes whose bounding sphere overlaps (center,radius)
          *  and returns their chunk keys, so the caller can drop them from the cache
          *  and let streaming regenerate them (with the new terrain edit applied). */
@@ -97,6 +116,24 @@ namespace Haruka {
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
         int getLastDrawnCount() const { return m_lastDrawn; }
 
+        // --- Validación de invariantes del LOD (diagnóstico) ------------------------------
+        // Recomputa el conjunto de chunks que CUBREN el planeta (la misma selección de
+        // cobertura que el dibujo, pero SIN culling → independiente de hacia dónde mires) y
+        // comprueba que forman una teselación correcta del quadtree. Reporta:
+        //  - overlaps: un chunk dibujado tiene un ANCESTRO también dibujado (doble malla).
+        //  - holes:    un área de una cara no la cubre ningún chunk (hueco).
+        //  - balance:  dos chunks vecinos difieren en MÁS de 1 nivel de LOD (escalón).
+        // Todo a 0 = LOD correcto este frame. Las muestras señalan UN caso de cada tipo.
+        struct LODReport {
+            int drawn = 0, overlaps = 0, holes = 0, balance = 0;
+            int overlapsByBody[16] = {0}; // overlaps por cuerpo (body 0 = planeta principal)
+            int drawnByBody[16]    = {0};
+            bool hasOverlap = false, hasHole = false, hasBalance = false;
+            PlanetChunkKey sampleOverlap{}, sampleHole{}, sampleBalance{};
+            bool valid() const { return overlaps == 0 && holes == 0 && balance == 0; }
+        };
+        LODReport validateCoverage() const;
+
         struct DrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
         DrawStats getDrawStats() const;
         DrawStats getDrawStatsForPlanet(const std::string& planet) const;
@@ -108,6 +145,8 @@ namespace Haruka {
         std::function<void(const PlanetChunkKey&)> m_onRemoved; // espejo del agua
         mutable std::mutex m_renderMutex;
 
+        double     m_splitFactor = 1.0; // sincronizado con el LODSystem vía setSplitFactor
+        std::unordered_map<std::string, std::vector<PlanetChunkKey>> m_desiredLeaves; // hojas LOD por planeta
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};

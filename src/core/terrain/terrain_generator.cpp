@@ -86,7 +86,7 @@ namespace {
         auto chunk = std::make_shared<ChunkData>();
         static const nlohmann::json kEmptyObj = nlohmann::json::object();
         const auto& config = settings.contains("config") ? settings["config"] : kEmptyObj;
-        int res = config.value("chunkSize", 32);
+        int res = config.value("chunkSize", 24); // 24 (antes 32): ~53% de RAM por chunk
         g_current_seed = config.value("seed", 42);
         
         const int vtxCount  = (res + 1) * (res + 1);
@@ -296,6 +296,7 @@ namespace {
         {
             auto vidx = [res](int x, int y) { return x + y * (res + 1); };
             chunk->morphTargets.resize(chunk->vertices.size());
+            chunk->morphNormals.resize(chunk->vertices.size());
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
                     int x0 = x & ~1, x1 = std::min(x0 + 2, res);
@@ -309,6 +310,17 @@ namespace {
                     glm::vec3 a = glm::mix(v00, v10, fx);
                     glm::vec3 b = glm::mix(v01, v11, fx);
                     chunk->morphTargets[vidx(x, y)] = glm::mix(a, b, fy);
+
+                    // Normal decimada (mismo esquema) → al aplanar el chunk hacia el padre
+                    // su normal también va a la del padre, así el sombreado casa con la
+                    // geometría morfada (sin esto: rectángulo plano con normales "bumpy").
+                    glm::vec3 n00 = chunk->normals[vidx(x0, y0)];
+                    glm::vec3 n10 = chunk->normals[vidx(x1, y0)];
+                    glm::vec3 n01 = chunk->normals[vidx(x0, y1)];
+                    glm::vec3 n11 = chunk->normals[vidx(x1, y1)];
+                    glm::vec3 na = glm::mix(n00, n10, fx);
+                    glm::vec3 nb = glm::mix(n01, n11, fx);
+                    chunk->morphNormals[vidx(x, y)] = glm::normalize(glm::mix(na, nb, fy));
                 }
             }
         }
@@ -341,7 +353,18 @@ namespace {
         // we clamp so it never dominates the view.
         const double nodeSize = planetRadius * 2.0 / double(1u << key.lod);
         const float  vtxSpacing = float(nodeSize / double(res));
-        const float  skirtDepth = glm::clamp(vtxSpacing * 0.5f, 1.0f, 30.0f);
+        // Skirt ADAPTATIVO: la grieta T-junction entre un chunk y su vecino de 1 LOD de
+        // diferencia ≈ variación de altura sobre un espaciado de vértice → escala con el
+        // espaciado Y con el relieve local del chunk (en pendientes fuertes una grieta supera
+        // de largo cualquier tope fijo). Antes era clamp(spacing*0.5, 1, 30) → al bajar
+        // chunkSize (spacing mayor) y en laderas, 30 m se quedaba corto → AGUJEROS (cielo
+        // colándose). Ahora: el mayor de (spacing) y (15% del relieve del chunk), cap alto.
+        // El faldón cuelga HACIA DENTRO, tapado por el chunk vecino → más profundo no se ve.
+        // Profundidad MODESTA: la grieta entre vecinos (≤1 LOD por el balance 2:1) ≈ 1
+        // espaciado de vértice de variación. Cae radialmente (oculto), así que no hace falta
+        // pasarse: 200 m exponía MUROS cuando un borde quedaba al aire. Escala con el
+        // espaciado (cubre el aumento de chunkSize) con tope bajo.
+        const float skirtDepth = glm::clamp(vtxSpacing * 0.8f, 2.0f, 50.0f);
 
         const int mainCount = (res + 1) * (res + 1);
 
@@ -352,10 +375,15 @@ namespace {
             glm::vec3 v  = chunk->vertices[mainIdx];
             glm::vec3 n  = chunk->normals[mainIdx];
             glm::vec2 uv = chunk->uvs[mainIdx];
-            glm::vec3 sv = v - n * skirtDepth;
+            // El faldón cae RADIALMENTE (hacia el centro del planeta), NO por la normal del
+            // vértice: en una pendiente la normal apunta de lado → con profundidad grande el
+            // skirt asomaba como aletas. El radial siempre queda por DEBAJO del terreno → oculto.
+            glm::vec3 radial = glm::vec3(glm::normalize(chunkCenter_local + glm::dvec3(v)));
+            glm::vec3 sv = v - radial * skirtDepth;
             chunk->vertices.push_back(sv);
             chunk->morphTargets.push_back(sv); // skirts don't morph
             chunk->normals.push_back(n);
+            chunk->morphNormals.push_back(n);  // skirts no morphan → su propia normal
             chunk->uvs.push_back(uv);
         };
 
@@ -767,7 +795,7 @@ namespace {
         if (!config.value("gpuTerrain", false))       return false;
         if (config.value("profile", std::string("terran")) != "terran") return false;
         p.seed   = config.value("seed", 42);
-        res      = config.value("chunkSize", 32);
+        res      = config.value("chunkSize", 24); // 24 (antes 32): ~53% de RAM por chunk
         p.reliefStrength = config.value("reliefStrength", 1.0f);
         WorldGenParams wgp = getWorldParamsCached((uint32_t)p.seed, radius);
         p.continentFreqA = wgp.continentFreqA;

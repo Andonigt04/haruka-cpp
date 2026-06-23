@@ -213,13 +213,13 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         // Morph CDLOD (mismo cálculo que el terreno → agua y terreno transicionan a la
         // vez): mezcla en la mitad alta de la banda de visibilidad del chunk.
         {
-            const double splitFactor = 1.0;
+            const double splitFactor = m_splitFactor; // sincronizado con el LOD (no hardcodear 1.0)
             double dist     = glm::length(glm::dvec3(offset));
             double nodeSize = mesh.planetRadius * 2.0 / double(1u << mesh.key.lod);
             double low      = nodeSize * splitFactor;
             double high     = nodeSize * splitFactor * 2.0;
             double t        = (high > low) ? (dist - low) / (high - low) : 0.0;
-            double morph    = (t - 0.5) / 0.5;
+            double morph    = (t - 0.6) / 0.4; // 40% superior (igual que el terreno)
             morph = morph < 0.0 ? 0.0 : (morph > 1.0 ? 1.0 : morph);
             glUniform1f(12, (float)morph); // u_morphFactor (misma location que el terreno)
         }

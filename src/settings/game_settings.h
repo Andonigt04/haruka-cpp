@@ -35,7 +35,7 @@ struct GraphicsSettings {
     float           bloomStrength   = 0.7f; // additive bloom intensity
     bool            motionBlur      = false;
     bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
-    int             chunkMemoryMB   = 2048;  // terrain chunk cache memory budget (MB). 512 en preset High.
+    int             chunkMemoryMB   = 0;     // terrain chunk cache budget (MB). 0 = AUTO (25% de la RAM del sistema, acotado 512–4096). Presets pueden fijar un valor explícito.
     int             maxFps          = 60;    // frame-rate cap (0 = uncapped)
 };
 

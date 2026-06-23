@@ -32,6 +32,13 @@ public:
     ///@}
     
     GLuint getID() const { return ID; }
+    /** @brief True solo si el programa linkó OK (getID()!=0 NO basta: el handle existe
+     *  aunque el link falle, p.ej. si no se encontró el fichero del shader). */
+    bool linked() const {
+        if (ID == 0) return false;
+        GLint ok = GL_FALSE; glGetProgramiv(ID, GL_LINK_STATUS, &ok);
+        return ok == GL_TRUE;
+    }
 private:
     GLuint ID;
     std::string readFile(const std::string& filePath);

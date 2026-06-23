@@ -92,6 +92,14 @@ public:
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
 
+    /** @brief Valida los invariantes del LOD este frame (cobertura sin huecos/solapes,
+     *  balance 2:1) y devuelve un resumen legible. Para el comando de consola `lodcheck`. */
+    std::string validateLOD() const;
+    /** @brief Modo vigilancia: si está activo, update() valida cada frame y avisa por
+     *  stderr SOLO cuando el LOD es inválido (throttled). Para `lodcheck watch`. */
+    void setLODValidateWatch(bool on) { m_lodWatch = on; }
+    bool getLODValidateWatch() const { return m_lodWatch; }
+
     /**
      * @brief Applies a terrain edit (dig/crater/build) at a world position and
      *        regenerates the affected chunks so the mesh updates immediately.
@@ -204,6 +212,7 @@ private:
     // first frame / new planet.
     std::vector<glm::dvec3> m_lastLODCamPos;
     bool m_forceLOD = true;
+    bool m_lodWatch = false; // valida el LOD cada frame y avisa al volverse inválido
 
     // Predicción de movimiento: velocidad suavizada de la cámara para PEDIR chunks
     // por delante del jugador (lookahead) → menos pop-in al moverse/volar rápido. El

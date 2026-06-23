@@ -290,20 +290,28 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
     ValD landT    = smoothstepD(c0, c0 + 0.3f, c);          // 0 costa → 1 tierra adentro
     ValD landBase = landT * 1.0f;                            // km (landHeight ~1)
 
+    // Colinas de frecuencia MEDIA en TODA la tierra → relieve "normal" ondulado. Antes el
+    // terreno era BIMODAL (llano de 1km o cresta ridged de 7.5km, sin nada intermedio); esto
+    // rellena el tramo medio. fBm suave (NO ridged) → laderas redondeadas. Gateado por landT
+    // (costa→0). MISMO código que el compute GPU (terrain_gen.comp) → paridad render↔colisión.
+    ValD hmn        = fbmD(dir, seed + 77, 5, 0.5f, 2.0f, 300.0f); // freq alta → onda ~130km, VISIBLE
+    ValD hills      = hmn * (1.0f / A_NORM);                 // ~[-1,1]
+    ValD hillRelief = hills * landT * 1.1f;                  // km, ondulado ±~1.1
+
     // Régimen (fase 1): dónde hay montañas (vs llano/montículo).
     ValD reg     = fbmD(dir, seed + 55, 4, 0.5f, 2.0f, 2.0f);
-    // Máscara con cobertura decente (ni todo llano ni todo montaña).
-    ValD mtnMask = smoothstepD(0.06f, 0.22f, reg);
+    // Máscara ANCHA + más cobertura: las montañas emergen GRADUALMENTE de las colinas y hay
+    // MÁS zonas con picos (antes 0.06→0.22 estrecha → salto llano↔cresta; ahora -0.05→0.30).
+    ValD mtnMask = smoothstepD(-0.05f, 0.30f, reg);
 
-    // Montañas RIDGED con MASA: exponente bajo (1.2) → laderas anchas con cresta
-    // DEFINIDA (cordillera), no fina ni aplanada. 5 octavas → sin spikes finos
-    // (limpio). Sin billow (que daba mesetas). Altura prominente.
+    // Montañas RIDGED con MASA: exponente 1.3 → cresta definida. 5 octavas → sin spikes finos.
+    // Pico 6.5 km (prominente) apoyado sobre las colinas → relieve continuo costa→colina→pico.
     ValD mn     = fbmD(dir, seed + 123, 5, 0.5f, 2.1f, 800.0f);
     ValD na     = mn * (1.0f / A_NORM);
-    ValD form   = powD(clampD(konst(1.0f) - absD(na), 0.0f, 1.0f), 1.2f); // cresta definida, con masa
-    ValD mountains = form * mtnMask * (7.5f * W.reliefStrength); // km. reliefStrength = parámetro de escena
+    ValD form   = powD(clampD(konst(1.0f) - absD(na), 0.0f, 1.0f), 1.3f); // cresta definida, con masa
+    ValD mountains = form * mtnMask * (6.5f * W.reliefStrength); // km. reliefStrength = parámetro de escena
 
-    ValD landRelief = landBase + mountains;
+    ValD landRelief = landBase + hillRelief + mountains;
 
     // Fusión costa: mar ↔ tierra por landMask (suave).
     ValD elev = mixD(seaDepth, landRelief, landMask);       // km

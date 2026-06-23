@@ -3,7 +3,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <utility>
+#if defined(_WIN32)
+  #include <windows.h>
+#else
+  #include <unistd.h>
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include "core/modules.h"
@@ -136,7 +142,10 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // pesada + buffers GPU. En una ráfaga (carga inicial / fly-in) eran CIENTOS por frame
     // → pico de >1500 ms. Limitamos cuántos se suben por frame (terreno + agua comparten
     // este presupuesto); el resto entra en frames siguientes → carga repartida, sin picos.
-    if (m_streaming) m_streaming->setUploadBudget(48);
+    // 24 (no 48): cada subida = VAO+5 VBOs terreno (+ malla de agua) ≈ 1–3 ms en mesa/AMD.
+    // 24/frame mantiene el peor frame del fly-in bajo control (~1 frame) sin que se note la
+    // carga repartida (24×60 = 1440 chunks/s → la Tierra ~1000 entra en <1 s).
+    if (m_streaming) m_streaming->setUploadBudget(24);
     // Si hay chunks generándose/encolados, mantén la ventana de catch-up abierta (~1 s).
     if (m_streaming && (m_streaming->getPendingCount() + m_streaming->getQueuedCount()) > 0)
         m_catchupGrace = 60;
@@ -257,6 +266,21 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     }
     m_forceLOD = false;
 
+    // Pasa al renderer el set de HOJAS deseadas de cada planeta (keep ∪ load del último LOD).
+    // El render dibuja, por hoja, el chunk residente más fino (hoja o ancestro) → desacopla el
+    // detalle de tener la cadena entera residente. Se hace CADA frame (también en throttle, con
+    // el último update) para que el set esté siempre vigente.
+    if (m_renderer) {
+        for (const auto& up : m_lastUpdates) {
+            if (up.planetName.empty()) continue;
+            std::vector<PlanetChunkKey> leaves;
+            leaves.reserve(up.chunksToKeep.size() + up.chunksToLoad.size());
+            leaves.insert(leaves.end(), up.chunksToKeep.begin(), up.chunksToKeep.end());
+            leaves.insert(leaves.end(), up.chunksToLoad.begin(), up.chunksToLoad.end());
+            m_renderer->setDesiredLeaves(up.planetName, std::move(leaves));
+        }
+    }
+
     // Despachar generación pendiente (cercanos primero) CADA frame, aunque el LOD
     // esté en throttle por estar quieto → los chunks lejanos siguen entrando.
     m_streaming->pump();
@@ -285,9 +309,61 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         auto it = wantedByPlanet.find(chunk->planetName);
         if (it != wantedByPlanet.end() &&
             !it->second.count(ChunkCache::keyToHash(chunk->key))) continue; // ya no se desea
+        if (m_renderer->isResident(chunk->key)) continue; // ya subido (idempotente) → no gastar presupuesto
+        // F7: este camino (integrar chunks RECIÉN generados) también cuenta contra el
+        // presupuesto de subidas/frame. En un fly-in terminan ~m_maxInFlight+kSlots a la
+        // vez → volcarlos TODOS clavaba 150–200 ms (creación de buffers GL terreno+agua).
+        // Lo que no entre queda en CACHÉ (addChunk ya corrió en el worker) → processLODUpdate
+        // lo sube en frames siguientes (filtra por residencia). Cap compartido = sin picos.
+        if (!m_streaming->tryConsumeUpload()) break;
         m_renderer->addToScene(chunk->planetName, chunk->key, *chunk);
         if (m_waterRenderer) m_waterRenderer->addToScene(chunk->planetName, chunk->key, *chunk);
     }
+
+    // Modo vigilancia del LOD: valida cada frame y avisa SOLO al volverse inválido (o al
+    // recuperarse), throttled, para no spamear. Activar con `lodcheck watch`.
+    if (m_lodWatch && m_renderer) {
+        static bool s_wasInvalid = false;
+        auto rep = m_renderer->validateCoverage();
+        if (!rep.valid() && !s_wasInvalid) {
+            fprintf(stderr, "[LODwatch] INVALIDO: dibujados=%d overlaps=%d holes=%d balance=%d"
+                            " (muestra hole face=%d lod=%d)\n",
+                    rep.drawn, rep.overlaps, rep.holes, rep.balance,
+                    rep.hasHole ? (int)rep.sampleHole.face : -1,
+                    rep.hasHole ? (int)rep.sampleHole.lod  : -1);
+        } else if (rep.valid() && s_wasInvalid) {
+            fprintf(stderr, "[LODwatch] OK de nuevo (dibujados=%d)\n", rep.drawn);
+        }
+        s_wasInvalid = !rep.valid();
+    }
+}
+
+std::string PlanetarySystem::validateLOD() const {
+    if (!m_renderer) return "LOD: renderer no listo";
+    const auto r = m_renderer->validateCoverage();
+    char buf[640];
+    int n = snprintf(buf, sizeof(buf),
+        "[LOD] %s | dibujados=%d  overlaps=%d  holes=%d  balance=%d",
+        r.valid() ? "OK" : "INVALIDO", r.drawn, r.overlaps, r.holes, r.balance);
+    auto append = [&](const char* tag, bool has, const PlanetChunkKey& k) {
+        if (has && n < (int)sizeof(buf))
+            n += snprintf(buf + n, sizeof(buf) - n,
+                          "\n  %s: body=%d face=%d lod=%d x=%u y=%u",
+                          tag, (int)k.body, (int)k.face, (int)k.lod, k.x, k.y);
+    };
+    append("overlap", r.hasOverlap, r.sampleOverlap);
+    append("hole",    r.hasHole,    r.sampleHole);
+    append("balance", r.hasBalance, r.sampleBalance);
+    std::string s(buf);
+    // Desglose de overlaps por cuerpo (body 0 = planeta donde caminas; otros = lejanos).
+    for (int b = 0; b < 16; ++b)
+        if (r.overlapsByBody[b] > 0) {
+            char bb[96];
+            snprintf(bb, sizeof(bb), "\n  body %d: overlaps=%d (de %d dibujados)",
+                     b, r.overlapsByBody[b], r.drawnByBody[b]);
+            s += bb;
+        }
+    return s;
 }
 
 void PlanetarySystem::updateOrbits(double dt) {
@@ -373,9 +449,9 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
             if (!ts.rawConfig.is_null() && ts.rawConfig.is_object()) {
                 planet.terrainSettings["config"] = ts.rawConfig;
                 if (!planet.terrainSettings["config"].contains("chunkSize"))
-                    planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+                    planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 24;
             } else {
-                planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 32;
+                planet.terrainSettings["config"]["chunkSize"] = ts.chunkSize > 0 ? ts.chunkSize : 24;
                 planet.terrainSettings["config"]["seed"]      = ts.seed;
                 for (const auto& [name, layer] : ts.layers) {
                     planet.terrainSettings["config"]["layers"][name]["freq"]     = layer.freq;
@@ -501,6 +577,13 @@ bool PlanetarySystem::getActivePlanet(glm::dvec3& center, double& radius,
 void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
     if (m_renderer)      m_renderer->setCullMatrix(camRelViewProj);
     if (m_waterRenderer) m_waterRenderer->setCullMatrix(camRelViewProj);
+    // Sincroniza el splitFactor del morph cada frame (independiente del orden de init y del
+    // early-return de setLODParams) → la banda de morph siempre casa con el LOD real.
+    if (m_lod) {
+        const double sf = m_lod->getSplitFactor();
+        if (m_renderer)      m_renderer->setSplitFactor(sf);
+        if (m_waterRenderer) m_waterRenderer->setSplitFactor(sf);
+    }
 }
 
 // Texturas de bioma OPCIONALES, declaradas en la escena:
@@ -578,11 +661,48 @@ int PlanetarySystem::getQueuedChunks()     const { return m_streaming ? m_stream
 int PlanetarySystem::getCachedChunks()     const { return m_cache     ? (int)m_cache->getChunkCount()               : 0; }
 int PlanetarySystem::getCacheMemoryMB()    const { return m_cache     ? (int)m_cache->getMemoryUsageMB()            : 0; }
 int PlanetarySystem::getCacheMaxMemoryMB() const { return m_cache     ? (int)m_cache->getMaxMemoryMB()              : 0; }
-void PlanetarySystem::setCacheMaxMemoryMB(int mb) { if (m_cache) m_cache->setMaxMemory((size_t)std::max(16, mb)); }
+// RAM física total del sistema en MB (0 si no se puede determinar).
+static size_t systemTotalRAMMB() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX s{}; s.dwLength = sizeof(s);
+    if (GlobalMemoryStatusEx(&s)) return (size_t)(s.ullTotalPhys / (1024ull * 1024ull));
+    return 0;
+#else
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long psize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psize > 0)
+        return (size_t)((double)pages * (double)psize / (1024.0 * 1024.0));
+    return 0;
+#endif
+}
+
+void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
+    if (!m_cache) return;
+    int resolved = mb;
+    if (mb <= 0) {
+        // AUTO (mb<=0): el presupuesto de la cache de terreno = fracción de la RAM TOTAL,
+        // acotado. El terreno es regenerable, así que puede ocupar bastante, pero hay que
+        // dejar sitio al SO, driver GPU, caches de modelos/texturas y la lógica del juego.
+        // 25% de la RAM, suelo 512 MB (que cargue algo en equipos pequeños), techo 8192 MB
+        // (en equipos grandes el 25% sí compensa para explorar sin regenerar; el techo solo
+        // evita que un servidor con cientos de GB dedique decenas de GB a terreno).
+        const size_t ram = systemTotalRAMMB();
+        size_t budget = ram ? (ram / 4) : 1024;          // 25% o 1 GB si no se sabe
+        budget = std::clamp<size_t>(budget, 512, 8192);
+        resolved = (int)budget;
+        fprintf(stderr, "[ChunkCache] Auto: RAM total=%zu MB → presupuesto cache terreno=%d MB\n",
+                ram, resolved);
+    }
+    m_cache->setMaxMemory((size_t)std::max(16, resolved));
+}
 void PlanetarySystem::setLODParams(double splitFactor, int maxLOD) {
     if (!m_lod) return;
     if (m_lod->getSplitFactor() == splitFactor && m_lod->getMaxLOD() == maxLOD) return;
     m_lod->setParams(splitFactor, maxLOD);
+    // El renderer calcula la banda de morph CDLOD con el splitFactor → debe ser el MISMO que
+    // el LOD o los chunks se suavizan a la distancia equivocada (parches lisos / popping).
+    if (m_renderer)      m_renderer->setSplitFactor(splitFactor);
+    if (m_waterRenderer) m_waterRenderer->setSplitFactor(splitFactor);
     m_forceLOD = true; // re-evaluate the quadtree next update
 }
 

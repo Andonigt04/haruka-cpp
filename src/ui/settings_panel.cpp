@@ -145,7 +145,10 @@ void SettingsPanel::tabGraphics() {
     ImGui::SliderFloat(TR("gfx.fov").c_str(), &g.fov, 60.0f, 120.0f, "%.0f°");
     ImGui::SliderFloat(TR("gfx.renderScale").c_str(), &g.renderScale, 0.5f, 2.0f, "%.2f");
 
-    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 64, 4096);
+    // 0 = Auto (presupuesto = 25% de la RAM del sistema, acotado). El format string muestra
+    // "Auto" en 0 (sin %d) y "%d MB" en cualquier otro valor → el usuario puede forzarlo.
+    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 0, 8192,
+                     g.chunkMemoryMB == 0 ? "Auto" : "%d MB");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("gfx.chunkMemory.tip").c_str());
 
     ImGui::SeparatorText(TR("gfx.postProcessing").c_str());

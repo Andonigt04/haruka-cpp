@@ -46,6 +46,7 @@ namespace Haruka {
         std::vector<glm::vec3> vertices;  // relative to chunkCenter (float-safe)
         std::vector<glm::vec3> morphTargets; // decimated (parent-LOD) position per vertex, for CDLOD geomorphing
         std::vector<glm::vec3> normals;
+        std::vector<glm::vec3> morphNormals; // decimated (parent-LOD) normal por vértice → se mezcla con la posición en el morph CDLOD (si no, el chunk aplanado conserva normales bumpy → escalón de sombreado)
         std::vector<glm::vec2> uvs;       // per-face UV [0,1]^2
         std::vector<glm::vec3> colors;
         std::vector<unsigned int> indices;
@@ -71,7 +72,7 @@ namespace Haruka {
         // si subestima (omitir uvs/morph/agua), retiene MUCHOS más chunks que el cap y se
         // come toda la RAM. Incluye terreno + agua + uvs/params.
         size_t getSizeBytes() const {
-            return (vertices.size() + morphTargets.size() + normals.size() + colors.size()
+            return (vertices.size() + morphTargets.size() + normals.size() + morphNormals.size() + colors.size()
                     + waterVertices.size() + waterMorphTargets.size() + waterNormals.size()) * sizeof(glm::vec3)
                  + (uvs.size() + waterParams.size()) * sizeof(glm::vec2)
                  + (indices.size() + waterIndices.size()) * sizeof(unsigned int);

@@ -1,5 +1,6 @@
 #include "gpu_heightfield.h"
 #include "renderer/compute_shader.h"
+#include "core/asset_paths.h" // AssetPaths::shaders() (ruta canónica de shaders)
 
 namespace Haruka {
 
@@ -18,8 +19,18 @@ GpuHeightfield::~GpuHeightfield() {
 bool GpuHeightfield::ensureShader() {
     if (m_failed) return false;
     if (!m_shader) {
-        m_shader = std::make_unique<Haruka::Renderer::ComputeShader>("shaders/terrain_gen.comp");
-        if (m_shader->getID() == 0) { m_failed = true; return false; }
+        // AssetPaths::shaders() = "assets/shaders/" → ComputeShader (que NO aplica el
+        // base de Shader) encuentra el fichero tras mover los shaders a assets/. Sin esto
+        // buscaba "shaders/terrain_gen.comp" (inexistente) → compute vacío → sin terreno.
+        m_shader = std::make_unique<Haruka::Renderer::ComputeShader>(
+            Haruka::AssetPaths::shaders() + "terrain_gen.comp");
+        // OJO: getID()!=0 NO basta — el handle se crea aunque el LINK falle. Usar
+        // linked() (GL_LINK_STATUS) o el compute se "usa" sin linkar → glDispatchCompute
+        // "no active compute shader" cada frame + sin terreno. Si falló, marcamos failed.
+        if (!m_shader->linked()) {
+            fprintf(stderr, "[GpuHeightfield] terrain_gen.comp NO linkó → terreno GPU deshabilitado\n");
+            m_failed = true; return false;
+        }
     }
     return true;
 }

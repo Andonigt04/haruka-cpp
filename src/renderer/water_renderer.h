@@ -61,12 +61,16 @@ namespace Haruka {
         /** @brief Planet center (world) + radius for horizon culling. */
         void setPlanetCenter(const glm::dvec3& c) { m_planetCenter = c; m_hasPlanetCenter = true; }
         void setPlanetRadius(double r) { m_planetRadius = r; }
+        /** @brief splitFactor REAL del LODSystem (igual que el terreno) para que la banda de
+         *  morph CDLOD del agua termine en la frontera de fusión correcta. */
+        void setSplitFactor(double sf) { if (sf > 1e-3) m_splitFactor = sf; }
 
     private:
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
         std::unordered_set<uint64_t>             m_stale;   // mallas a REEMPLAZAR/cubrir
         mutable std::mutex m_renderMutex;
         void purgeStaleCoveredBy(const PlanetChunkKey& key); // caller holds the lock
+        double     m_splitFactor = 1.0; // sincronizado con el LODSystem
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};
