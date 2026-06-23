@@ -300,9 +300,10 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
 
     // Régimen (fase 1): dónde hay montañas (vs llano/montículo).
     ValD reg     = fbmD(dir, seed + 55, 4, 0.5f, 2.0f, 2.0f);
-    // Máscara ANCHA + más cobertura: las montañas emergen GRADUALMENTE de las colinas y hay
-    // MÁS zonas con picos (antes 0.06→0.22 estrecha → salto llano↔cresta; ahora -0.05→0.30).
-    ValD mtnMask = smoothstepD(-0.05f, 0.30f, reg);
+    // Máscara ESTRECHA: montañas CONCENTRADAS en regiones (cordilleras), no esparcidas como
+    // montículos por toda la tierra (antes -0.05→0.30 cubría casi todo → ruido de montaña en
+    // todas partes). MISMO valor que el compute GPU.
+    ValD mtnMask = smoothstepD(0.12f, 0.36f, reg);
 
     // Montañas RIDGED con MASA: exponente 1.3 → cresta definida. 5 octavas → sin spikes finos.
     // Pico 6.5 km (prominente) apoyado sobre las colinas → relieve continuo costa→colina→pico.
