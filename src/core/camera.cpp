@@ -47,11 +47,11 @@ void Camera::ProcessMouseScroll(float yoffset) {
 }
 
 glm::mat4 Camera::getProjectionMatrix() const {
-    return glm::perspective(glm::radians(zoom), 16.0f / 9.0f, 0.1f, 300000000000.0f);
+    return glm::perspective(glm::radians(zoom), 16.0f / 9.0f, m_nearPlane, 300000000000.0f);
 }
 
 glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
-    return glm::perspective(glm::radians(zoom), aspectRatio, 0.1f, 300000000000.0f);
+    return glm::perspective(glm::radians(zoom), aspectRatio, m_nearPlane, 300000000000.0f);
 }
 
 

@@ -6,6 +6,18 @@ namespace Haruka {
 LODSystem::LODSystem(double splitFactor, int maxLOD)
     : m_splitFactor(splitFactor), m_maxLOD(maxLOD) {}
 
+void LODSystem::setCullMatrix(const glm::mat4& m) {
+    // Gribb-Hartmann: extrae los 6 planos del frustum del cam-rel VP (igual que el renderer).
+    for (int i = 0; i < 4; ++i) m_cullPlanes[0][i] = m[i][3] + m[i][0]; // left
+    for (int i = 0; i < 4; ++i) m_cullPlanes[1][i] = m[i][3] - m[i][0]; // right
+    for (int i = 0; i < 4; ++i) m_cullPlanes[2][i] = m[i][3] + m[i][1]; // bottom
+    for (int i = 0; i < 4; ++i) m_cullPlanes[3][i] = m[i][3] - m[i][1]; // top
+    for (int i = 0; i < 4; ++i) m_cullPlanes[4][i] = m[i][3] + m[i][2]; // near
+    for (int i = 0; i < 4; ++i) m_cullPlanes[5][i] = m[i][3] - m[i][2]; // far
+    for (int p = 0; p < 6; ++p) m_cullPlanes[p] /= glm::length(glm::vec3(m_cullPlanes[p]));
+    m_hasCull = true;
+}
+
 void LODSystem::forgetChunk(const PlanetChunkKey& key) {
     m_lastFrameChunks.erase(ChunkCache::keyToHash(key));
 }
@@ -24,6 +36,7 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
     double radius = planet->scale.x; // Asumimos escala uniforme para el radio
 
     const glm::dvec3 planetPos = planet->position;
+    m_curCamPos = cameraPos; m_curPlanetPos = planetPos; m_curRadius = radius; // para balanceLeaves
 
     // RESIDENCIA DEL PLANETA ENTERO: procesamos las 6 caras del cubo-esfera SIN
     // descartar ninguna. El quadtree mantiene las caras lejanas gruesas (no se
@@ -85,6 +98,20 @@ void LODSystem::subdivideLeafKey(const PlanetChunkKey& k) {
     }
 }
 
+bool LODSystem::leafVisibleForBalance(const PlanetChunkKey& k) const {
+    if (!m_screenSpace || !m_hasCull) return true; // baseline: balance global (como antes)
+    const double cpa = std::pow(2.0, (double)k.lod);
+    const double u = (double(k.x) + 0.5) / cpa, v = (double(k.y) + 0.5) / cpa;
+    const glm::dvec3 center = getCubeToSpherePos(k.face, u, v, m_curRadius) + m_curPlanetPos;
+    const glm::vec3  c = glm::vec3(center - m_curCamPos);
+    const float r = (float)(m_curRadius * 2.0 / cpa); // tamaño del nodo
+    for (int p = 0; p < 6; ++p) {
+        const glm::vec4& pl = m_cullPlanes[p];
+        if (pl.x*c.x + pl.y*c.y + pl.z*c.z + pl.w < -r) return false; // fuera del frustum
+    }
+    return true;
+}
+
 void LODSystem::balanceLeaves() {
     const int dx[4] = { -1, 1, 0, 0 };
     const int dy[4] = { 0, 0, -1, 1 };
@@ -112,6 +139,10 @@ void LODSystem::balanceLeaves() {
                 if (!findCoveringLeaf(L.face, L.lod, (uint32_t)nx, (uint32_t)ny, cover)) continue;
 
                 if ((int)L.lod - (int)cover.lod > 1) {
+                    // NO cascadear hacia hojas invisibles (fuera del frustum): no se dibujan,
+                    // así que su "grieta" con el vecino fino no se ve → evita la explosión de
+                    // chunks en el borde del frustum (el acantilado de LOD = pico de ms).
+                    if (!leafVisibleForBalance(cover)) continue;
                     subdivideLeafKey(cover); // acerca el vecino un nivel; el while repite hasta ≤1
                     changed = true;
                 }
@@ -125,12 +156,16 @@ void LODSystem::balanceLeaves() {
 // surface the full m_maxLOD is allowed. `alt` is the camera altitude in planet RADII.
 static int altitudeMaxLOD(double camDist, double radius, int hardMax) {
     double alt = (radius > 1e-9) ? std::max(0.0, (camDist - radius) / radius) : 0.0;
-    if (alt < 0.02) return hardMax;                    // ~near surface: full detail
-    if (alt < 0.08) return std::max(hardMax - 2, 10);  // low flight
-    if (alt < 0.25) return 8;                           // high flight
-    if (alt < 1.0)  return 7;                           // low orbit (antes 5 → solo ~39 chunks: muy bloqueado)
-    if (alt < 4.0)  return 5;                           // orbit: planeta entero, más detalle
-    return 4;                                           // deep space: coarsest
+    // Tope RELATIVO a hardMax en vuelo bajo-medio (antes había topes FIJOS a 8/7 → costa a
+    // bloques al volar/mirar en picado). Relativo = escala con la calidad y mantiene detalle
+    // de costa desde altura, sin reventar el espacio profundo (sigue grueso, gratis).
+    if (alt < 0.02) return hardMax;                    // ~superficie: detalle completo
+    if (alt < 0.08) return std::max(hardMax - 2, 11);  // vuelo bajo
+    if (alt < 0.20) return std::max(hardMax - 4, 10);  // vuelo medio (antes 8 fijo → bloques)
+    if (alt < 0.60) return std::max(hardMax - 6, 9);   // vuelo alto
+    if (alt < 2.0)  return 7;                           // órbita baja
+    if (alt < 6.0)  return 5;                           // órbita
+    return 4;                                            // espacio profundo: el más grueso
 }
 
 void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident) {
@@ -152,7 +187,43 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     // forzarían a 1536 chunks cada uno → 3×1536 satura generación/memoria y no carga nada.
     const double camAlt = (radius > 1e-9) ? (camDist / radius - 1.0) : 1e9; // en radios
     const bool belowMin = (node->key.lod < m_minLOD) && (camAlt < 1.5);
-    const bool distSplit = (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD);
+
+    bool distSplit;
+    if (m_screenSpace) {
+        // F1: subdivide mientras el chunk PROYECTE más de m_targetPx px en pantalla. SIN tope
+        // por altitud → a distancia se vuelve grueso PORQUE proyecta poco, no por un hack.
+        // F2: pero SOLO si el nodo es VISIBLE (frustum + horizonte). Si no, no refinar → acota
+        // el recompute a la vista (sin esto subdivide la esfera entera = cientos de ms en CPU).
+        bool visible = true;
+        if (m_hasCull) {
+            // Frustum (cam-rel): esfera del nodo (centro = node->center, radio ≈ node->size).
+            const glm::vec3 c = glm::vec3(node->center - cameraPos);
+            const float r = (float)node->size;
+            for (int p = 0; p < 6; ++p) {
+                const glm::vec4& pl = m_cullPlanes[p];
+                if (pl.x*c.x + pl.y*c.y + pl.z*c.z + pl.w < -r) { visible = false; break; }
+            }
+            // Horizonte: nodo tras la curvatura del planeta (occR = radio − margen para picos).
+            if (visible) {
+                const double occR = radius - 15000.0;
+                if (occR > 1.0 && camDist > occR + 2000.0) {
+                    const glm::dvec3 camDir = (cameraPos - planetPos) / camDist;
+                    const double cosChunk   = glm::dot(camDir, chunkDir); // chunkDir = dir del nodo
+                    const double cosHorizon = occR / camDist;
+                    const double nodeDist   = glm::length(node->center - cameraPos);
+                    const double horizonDist = std::sqrt(camDist*camDist - occR*occR);
+                    // margen por tamaño angular del nodo (no descartar gruesos parciales)
+                    const double angMargin = node->size / radius;
+                    if (cosChunk < cosHorizon - angMargin && nodeDist > horizonDist + node->size)
+                        visible = false;
+                }
+            }
+        }
+        const double screenSize = (dist > 1.0) ? node->size * m_screenK / dist : 1e30;
+        distSplit = visible && (screenSize > m_targetPx) && (node->key.lod < m_maxLOD);
+    } else {
+        distSplit = (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD);
+    }
     bool wantSplit = belowMin || distSplit;
 
     // CARGA PROGRESIVA (grueso→fino, sin huecos negros): solo bajamos un nivel si este

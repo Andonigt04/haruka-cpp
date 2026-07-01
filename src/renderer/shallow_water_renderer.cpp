@@ -77,12 +77,20 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
             m_verts[b+6]=alpha;
         }
 
-    // Triangles only for quads where at least one corner holds water.
+    // Triangles only for quads where at least one corner holds water POR ENCIMA del mar.
+    // F5.3: las celdas a/bajo el nivel del mar las dibujan los chunks de océano (Gerstner) →
+    // aquí se saltan para que no haya DOBLE lámina en la costa. Sin océano acoplado
+    // (seaLevel=-1e9) se dibuja todo como antes.
+    const float sea    = m_sim->seaLevelAlongUp();
+    const float seaEps = 0.15f; // margen sobre el mar (las celdas fijadas al mar quedan ~en seaLevel)
+    auto inlandWet = [&](int i, int j) {
+        return m_sim->hasWaterAt(i,j) && m_sim->surfaceAt(i,j) > sea + seaEps;
+    };
     m_indices.clear();
     for (int j = 0; j + 1 < n; ++j)
         for (int i = 0; i + 1 < n; ++i) {
-            bool wet = m_sim->hasWaterAt(i,j) || m_sim->hasWaterAt(i+1,j)
-                    || m_sim->hasWaterAt(i,j+1) || m_sim->hasWaterAt(i+1,j+1);
+            bool wet = inlandWet(i,j) || inlandWet(i+1,j)
+                    || inlandWet(i,j+1) || inlandWet(i+1,j+1);
             if (!wet) continue;
             unsigned int a=j*n+i, b=j*n+i+1, c=(j+1)*n+i, d=(j+1)*n+i+1;
             m_indices.insert(m_indices.end(), {a,c,b, b,c,d});

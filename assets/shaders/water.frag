@@ -23,6 +23,18 @@ layout(location = 5) in float Depth;    // profundidad del agua (m): orilla≈0
 
 layout(location = 20) uniform int u_waterQuality;
 
+// COSTA PER-PÍXEL (océano): evalúa la elevación del terreno EN EL PÍXEL (mismo ruido que el
+// generador → paridad) para recortar la orilla exacta a cualquier distancia, sin el aliasing de
+// celda de la malla. Gateado por DISTANCIA: cerca usa el Depth per-vértice (refleja el cavar, LOD
+// fino); lejos usa esto (nítido, donde no hay deformación visible). Params del planeta activo.
+layout(location = 22) uniform vec3  u_planetRelCam;   // cameraPos - planetCenter
+layout(location = 23) uniform int   u_seed;
+layout(location = 24) uniform float u_continentFreqA;
+layout(location = 25) uniform float u_reliefStrength;
+layout(location = 26) uniform float u_invRadius;
+layout(location = 27) uniform float u_seaThreshold;
+layout(location = 28) uniform int   u_pxCoast;        // 1 = costa per-píxel activa (params válidos)
+
 layout(std140, binding = 0) uniform PerFrameData {
     mat4  view;
     mat4  projection;
@@ -35,6 +47,54 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3  moonDirection;  float moonIntensity;   // 2ª luz (luna)
     vec3  moonLightColor; float _pad4;
 };
+
+// ===== Ruido Perlin 3D — PORT EXACTO de terrain_gen.comp (paridad costa↔terreno) =====
+int  nHash(int x, int y, int z, int seed) {
+    int h = seed; h ^= 61 ^ x; h += (h << 3); h ^= (h >> 4);
+    h += (h << 3) ^ y; h += (h << 3) ^ z; h ^= (h >> 4); h += (h << 3); return h & 0x7fffffff;
+}
+float nGrad(int hash, float x, float y, float z) {
+    int h = hash & 15; float u = h < 8 ? x : y; float v = h < 8 ? y : z;
+    return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
+}
+float nFade(float t) { return t * t * (3.0 - 2.0 * t); }
+float nLerp(float a, float b, float t) { return a + (b - a) * t; }
+float perlin3D(vec3 pos, int seed, float scale) {
+    vec3 p = pos * scale;
+    int x0 = int(floor(p.x)), y0 = int(floor(p.y)), z0 = int(floor(p.z));
+    float xf = p.x - float(x0), yf = p.y - float(y0), zf = p.z - float(z0);
+    float u = nFade(xf), v = nFade(yf), w = nFade(zf);
+    int xi = x0 & 255, yi = y0 & 255, zi = z0 & 255;
+    int xj = (x0 + 1) & 255, yj = (y0 + 1) & 255, zj = (z0 + 1) & 255;
+    float g000 = nGrad(nHash(xi, yi, zi, seed), xf,       yf,       zf);
+    float g100 = nGrad(nHash(xj, yi, zi, seed), xf - 1.0, yf,       zf);
+    float g010 = nGrad(nHash(xi, yj, zi, seed), xf,       yf - 1.0, zf);
+    float g110 = nGrad(nHash(xj, yj, zi, seed), xf - 1.0, yf - 1.0, zf);
+    float g001 = nGrad(nHash(xi, yi, zj, seed), xf,       yf,       zf - 1.0);
+    float g101 = nGrad(nHash(xj, yi, zj, seed), xf - 1.0, yf,       zf - 1.0);
+    float g011 = nGrad(nHash(xi, yj, zj, seed), xf,       yf - 1.0, zf - 1.0);
+    float g111 = nGrad(nHash(xj, yj, zj, seed), xf - 1.0, yf - 1.0, zf - 1.0);
+    float n00 = nLerp(g000, g100, u), n10 = nLerp(g010, g110, u);
+    float n0  = nLerp(n00, n10, v);
+    float n01 = nLerp(g001, g101, u), n11 = nLerp(g011, g111, u);
+    float n1  = nLerp(n01, n11, v);
+    return nLerp(n0, n1, w);
+}
+float fBmW(vec3 pos, int seed, int octaves, float persistence, float lacunarity, float scale) {
+    if (octaves <= 0) return 0.0;
+    float value = 0.0, amplitude = 1.0, frequency = 1.0, maxValue = 0.0;
+    for (int i = 0; i < octaves; ++i) {
+        value += perlin3D(pos, seed + i, scale * frequency) * amplitude;
+        maxValue += amplitude; amplitude *= persistence; frequency *= lacunarity;
+    }
+    return value / maxValue;
+}
+float ssfW(float e0, float e1, float x) {
+    float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t);
+}
+
+// (La costa per-píxel usa SOLO el continente fBmW de 6 octavas, inline en main → barato. La
+//  elevación completa con batimetría/montañas no hace falta: no cambia DÓNDE está la costa.)
 
 const vec3 DEEP_COLOR    = vec3(0.015, 0.07, 0.14);
 const vec3 SHALLOW_COLOR = vec3(0.05, 0.28, 0.40);
@@ -53,6 +113,35 @@ vec3 skyColor(vec3 dir, vec3 sunDir) {
 }
 
 void main() {
+    // Recorte de costa por PROFUNDIDAD con signo (negativa sobre tierra), SIN depender del depth
+    // buffer. En vez de un discard DURO en Depth=0 —que a distancia aliasa la orilla en un patrón
+    // de puntos/halftone (una celda de agua ≈ 1 píxel entra/sale de golpe)— usamos una RAMPA de
+    // alpha suave en los primeros decímetros: el agua se FUNDE con el lecho → orilla anti-aliasada.
+    // Descartamos solo lo claramente seco (tierra) para ahorrar relleno.
+    // Recorte de costa. CERCA = Depth per-vértice (refleja el cavar/deformación, y el LOD ya es
+    // fino). LEJOS y solo en OCÉANO = elevación del terreno evaluada POR PÍXEL (orilla exacta, sin
+    // el aliasing de celda de la malla). Mezcla por distancia → seguro con el cavar (cerca nunca
+    // usa el ruido base) y nítido en órbita (donde no hay deformación visible).
+    // Costa per-píxel. Peso SUAVE por profundidad (coastW) en vez de un gate duro → sin círculos
+    // (el gate duro creaba isóbatas circulares visibles). coastW llega a 0 a ~2 km de profundidad,
+    // ANTES del borde de evaluación (3 km) → ese borde es INVISIBLE (peso ya 0) y el agua profunda
+    // SIEMPRE se ve (coastW=0 → clipDepth=Depth). Solo lejos (>4km) y solo océano (cerca/lagos =
+    // per-vértice, refleja el cavar). Continente 6-oct = barato. Params verificados correctos.
+    float clipDepth = Depth;
+    if (u_pxCoast == 1 && IsLake < 0.5) {
+        float camDist = length(FragPos);
+        if (camDist > 4000.0 && abs(Depth) < 3000.0) {
+            vec3 dir = normalize(FragPos + u_planetRelCam);
+            float c = fBmW(dir, u_seed, 6, 0.5, 2.0, u_continentFreqA);
+            float baseDepth = ((u_seaThreshold + 0.013) - c) * 2000.0; // >0 mar, <0 tierra
+            float farW   = smoothstep(4000.0, 22000.0, camDist);
+            float coastW = 1.0 - smoothstep(0.0, 2000.0, abs(Depth)); // suave → 0 antes del borde
+            clipDepth = mix(Depth, baseDepth, farW * coastW);
+        }
+    }
+    if (clipDepth <= 0.0) discard;
+    float shoreAlpha = 1.0;
+
     vec3 N = normalize(Normal);
     vec3 V = normalize(-FragPos);   // camera at origin in cam-relative space
     vec3 L = normalize(sunDirection);
@@ -120,6 +209,6 @@ void main() {
         color = clamp(color, 0.0, 1.0);
     }
 
-    float alpha = mix(0.80, 1.0, max(fresnel, foam));
+    float alpha = mix(0.80, 1.0, max(fresnel, foam)) * shoreAlpha;
     FragColor = vec4(color, alpha);
 }

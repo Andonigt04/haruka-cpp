@@ -136,10 +136,13 @@ void Application::applyGraphicsSettings() {
     // Also scales the per-vertex noise octaves (cheaper chunk generation).
     if (_planetarySystem) {
         switch (g.terrainQuality) {
-            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 16); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
-            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 18); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
-            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 20); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
-            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 22); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            // maxLOD bajado ~2 niveles (16/18/20/22 → 14/16/17/18): con chunkSize=24 el espaciado
+            // de vértices fino pasa de ~0.5-2 m a ~2-8 m (low-poly), y baja RAM + profundidad de
+            // cadena LOD (menos overlaps). Ajustable en vivo con el comando `terrainq`.
+            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 14); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
+            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 16); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
+            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 17); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 18); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
         }
     }
 

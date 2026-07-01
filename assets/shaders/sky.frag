@@ -58,16 +58,14 @@ void main()
     float glowLow  = 1.0 - smoothstep(0.0, 0.35, abs(t)); // ceñido al horizonte
     sky = mix(sky, vec3(0.95, 0.45, 0.22), twilight * glowAz * glowLow * 0.9);
 
-    // Halo difuso alrededor del sol durante el día (dispersión de Mie suave).
-    sky += u_sunColor * pow(sunAmt, 8.0) * 0.35 * day;
+    // Halo difuso alrededor del sol — SOLO dentro de la atmósfera (dispersión de Mie). En el
+    // espacio (atmo=0) no hay halo → así el Sol se ve IGUAL dentro y fuera (su cuerpo es la
+    // corona-objeto emisiva; el cielo ya NO dibuja un disco solar aparte que se veía distinto
+    // contra cielo azul vs negro = "dos soles/diferentes").
+    sky += u_sunColor * pow(sunAmt, 8.0) * 0.35 * day * u_atmo;
 
-    // --- Disco solar ---
-    // ~0.53° de diámetro angular ≈ cos(0.0046 rad) ≈ 0.99999; lo ensanchamos
-    // un poco para que sea visible y con borde suave.
+    // disc solo para ATENUAR estrellas cerca del Sol (el cuerpo del Sol lo dibuja la corona-objeto).
     float disc = smoothstep(0.9994, 0.9998, dot(dir, u_sunDir));
-    // El disco solo brilla si el sol está sobre el horizonte del observador.
-    float sunUp = smoothstep(-0.02, 0.04, u_sunElev);
-    sky = mix(sky, u_sunColor * 6.0, disc * sunUp);
 
     // --- Estrellas (noche + espacio) ---
     float starVis = (1.0 - day) * (1.0 - 0.6 * disc); // ocultas por el día y el sol
@@ -82,8 +80,8 @@ void main()
     // --- Mezcla a espacio negro según grosor de atmósfera ---
     vec3 spaceC = vec3(0.004, 0.004, 0.010);
     vec3 outC   = mix(spaceC, sky, u_atmo);
-    // Las estrellas y el sol persisten en el espacio (no se atenúan con u_atmo).
-    outC += u_sunColor * 6.0 * disc * (1.0 - u_atmo);
+    // (El cuerpo del Sol = corona-objeto emisiva, se dibuja en el pase de objetos sobre este
+    //  fondo, igual dentro y fuera de la atmósfera → sin "dos soles".)
 
     FragColor = vec4(outC, 1.0);
 }

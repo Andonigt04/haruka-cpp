@@ -36,8 +36,9 @@ layout(location = 14) uniform float u_time;          // seconds
 layout(location = 15) uniform vec3  u_waveUp;        // radial up at camera surface point
 layout(location = 16) uniform vec3  u_waveTangent;   // tangent basis (global per frame)
 layout(location = 17) uniform vec3  u_waveBitangent;
-layout(location = 18) uniform vec2  u_windDir;       // wind direction in tangent plane (unit)
+layout(location = 18) uniform vec2  u_windDir;       // wind/current direction in tangent plane (unit)
 layout(location = 19) uniform float u_windStrength;  // 0..N, scales amplitude/chop
+layout(location = 21) uniform float u_tideHeight;    // F5.4: nivel de marea (m), desplazamiento radial del mar
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -130,12 +131,18 @@ void main() {
 
     // World-space displaced position.
     vec3 worldDisp = u_waveTangent * disp.x + u_waveUp * disp.y + u_waveBitangent * disp.z;
+    // F5.4: NIVEL de marea → desplazamiento radial del MAR (no lagos), el océano "respira".
+    worldDisp += u_waveUp * (u_tideHeight * (isLake ? 0.0 : 1.0));
     vec3 pos = camRelPos + worldDisp;
 
     // World-space normal from tangent-space accumulator.
     vec3 N = normalize(u_waveTangent * nrm.x + u_waveUp * nrm.y + u_waveBitangent * nrm.z);
     // Guard: keep it pointing outward (use sea-level radial normal as reference).
     if (dot(N, normalize(aNormal)) < 0.0) N = -N;
+    // A DISTANCIA aplana la normal hacia el radial (plano): las olas sub-píxel hacían MOIRÉ de
+    // especular (rizos circulares). Cerca = olas completas; >~10 km = mar liso, sin moiré.
+    float flatten = smoothstep(6000.0, 22000.0, camDist);
+    N = normalize(mix(N, normalize(aNormal), flatten));
 
     Normal     = N;
     FragPos    = pos;

@@ -312,7 +312,10 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
     ValD form   = powD(clampD(konst(1.0f) - absD(na), 0.0f, 1.0f), 1.3f); // cresta definida, con masa
     ValD mountains = form * mtnMask * (6.5f * W.reliefStrength); // km. reliefStrength = parámetro de escena
 
-    ValD landRelief = landBase + hillRelief + mountains;
+    // La TIERRA nunca bajo el nivel del mar (las colinas la hundían bajo 0 → la esfera de
+    // océano de órbita la tapaba → continentes disueltos en islas). Clamp a +10 m. MISMO que
+    // el compute GPU.
+    ValD landRelief = clampD(landBase + hillRelief + mountains, 0.01f, 1e30f);
 
     // Fusión costa: mar ↔ tierra por landMask (suave).
     ValD elev = mixD(seaDepth, landRelief, landMask);       // km

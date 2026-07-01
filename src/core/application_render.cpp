@@ -256,6 +256,23 @@ void Application::renderFrameContent() {
         _worldSystem->advanceCelestial(deltaTime > 0.0f ? (double)deltaTime : 0.016);
     }
 
+    // NEAR PLANE DINÁMICO: pegado a cualquier superficie (alt ≤ 2 km) near=0.1 (precisión cercana
+    // para terreno/objetos/ítem en mano). En órbita el near sube con la altitud → la precisión del
+    // depth lejano mejora ~millones× → se acaba el z-fight agua↔lecho desde el espacio. Usa el
+    // planeta MÁS CERCANO (no el home) para no recortar superficies cercanas en un sobrevuelo.
+    if (_camera && _planetarySystem) {
+        const glm::dvec3 camD = glm::dvec3(_camera->position);
+        double nearestAlt = 1e30;
+        for (const auto& pl : _planetarySystem->getPlanets()) {
+            double a = glm::length(camD - pl.position) - pl.radius;
+            if (a < nearestAlt) nearestAlt = a;
+        }
+        float dynNear = 0.1f;
+        if (nearestAlt > 2000.0)
+            dynNear = glm::clamp((float)((nearestAlt - 2000.0) * 0.05), 0.1f, (float)(nearestAlt * 0.5));
+        _camera->setNearPlane(dynNear);
+    }
+
     // Cielo atmosférico: color por elevación solar + altitud (azul de día → cálido al
     // amanecer/atardecer → oscuro de noche → negro en el espacio). Fallback oscuro.
     glm::vec3 sky(0.01f);
@@ -385,7 +402,9 @@ void Application::renderFrameContent() {
         {
             float el  = _worldSystem ? _worldSystem->getSunElevation(glm::dvec3(cameraOrigin)) : 1.0f;
             float day = glm::smoothstep(-0.10f, 0.25f, el);
-            frameData.ambientStrength = glm::mix(0.04f, 0.28f, day);
+            // Suelo nocturno subido (0.04→0.11): el lado noche era casi negro → parecía "media
+            // planeta sin dibujar". Ahora se ve TENUE (luz de estrellas/cielo), sigue siendo noche.
+            frameData.ambientStrength = glm::mix(0.11f, 0.28f, day);
         }
         // Viento atmosférico → arrastre aerodinámico de la física (por cuerpo, barato).
         if (_physicsEngine && _worldSystem)
@@ -588,9 +607,12 @@ void Application::renderFrameContent() {
             // Camera-relative view-projection for frustum culling (matches the
             // shader's projection * mat3(view) — view rotation only, no translation).
             const float aspectC = (height > 0u) ? (float)width / (float)height : 1.0f;
-            glm::mat4 camRelVP = _camera->getProjectionMatrix(aspectC)
-                               * glm::mat4(glm::mat3(_camera->getViewMatrix()));
+            glm::mat4 projC    = _camera->getProjectionMatrix(aspectC);
+            glm::mat4 camRelVP = projC * glm::mat4(glm::mat3(_camera->getViewMatrix()));
             _planetarySystem->setTerrainCullMatrix(camRelVP);
+            // LOD v3 F1: px por (unidad de mundo / distancia) = altura/(2·tan(fovY/2)).
+            // proj[1][1] = 1/tan(fovY/2). Lo usa el split por error en pantalla.
+            _planetarySystem->setLODScreenK((double)height * 0.5 * (double)projC[1][1]);
             for (const auto& planet : _planetarySystem->getPlanets()) {
                 PerObjectUBOData terrainObj{};
                 terrainObj.model                    = glm::mat4(1.0f);
@@ -653,12 +675,31 @@ void Application::renderFrameContent() {
 
                 glUniform1f(14, (float)(SDL_GetTicks() / 1000.0)); // u_time
 
+                // Costa per-píxel (océano lejano): params del generador del planeta activo (los
+                // mismos que el terreno → paridad). u_pxCoast=1 si válidos.
+                Haruka::WorldGenParams wgp; double wgpR = 0.0;
+                const bool havePxCoast = _planetarySystem->getActivePlanetParams(wgp, wgpR);
+
                 const glm::dvec3 camD = glm::dvec3(_camera->position);
                 for (const auto& planet : _planetarySystem->getPlanets()) {
-                    // Camera-anchored tangent basis for the Gerstner waves. Global
-                    // per planet/frame → seam-free across all water chunks.
                     glm::dvec3 up = camD - planet.position;
                     double upLen = glm::length(up);
+                    const double waterAlt = (planet.radius > 1e-9)
+                        ? (upLen - planet.radius) / planet.radius : 0.0;
+
+                    // Solo planetas con OCÉANO (perfil "terran"). Júpiter/gas → sin agua.
+                    const auto& wcfg = planet.terrainSettings.contains("config")
+                        ? planet.terrainSettings["config"] : planet.terrainSettings;
+                    const bool planetHasOcean = wcfg.value("profile", std::string("terran")) == "terran";
+                    if (!planetHasOcean) continue;
+
+                    // LOD v3 F4: FUERA la esfera de océano. Con F1 (error en pantalla) el agua por
+                    // chunks se ve fina a TODA distancia (costa exacta, sub-píxel lejos) → la esfera
+                    // ("pegote" + discard analítico de continentes) era un camuflaje innecesario y
+                    // ya no se dibuja. El agua es SOLO chunks (honesta, sigue la forma del terreno).
+
+                    // --- AGUA por chunks (oleaje Gerstner + físicas) a TODA distancia ---
+                    // (WaterRenderer salta los chunks lejos del jugador → esos los cubre la esfera).
                     up = (upLen > 1e-9) ? up / upLen : glm::dvec3(0.0, 1.0, 0.0);
                     glm::dvec3 ref = (std::abs(up.y) < 0.99) ? glm::dvec3(0,1,0) : glm::dvec3(1,0,0);
                     glm::dvec3 T = glm::normalize(glm::cross(ref, up));
@@ -668,9 +709,34 @@ void Application::renderFrameContent() {
                     glUniform3fv(15, 1, &upf[0]);
                     glUniform3fv(16, 1, &Tf[0]);
                     glUniform3fv(17, 1, &Bf[0]);
+
+                    // Costa per-píxel: dir = posición relativa al centro del planeta + params.
+                    glm::vec3 relCam = glm::vec3(camD - planet.position);
+                    glUniform3fv(22, 1, &relCam[0]); // u_planetRelCam
+                    if (havePxCoast) {
+                        glUniform1i(23, (int)wgp.seed);
+                        glUniform1f(24, wgp.continentFreqA);
+                        glUniform1f(25, wgp.reliefStrength);
+                        glUniform1f(26, (float)(planet.radius > 1e-9 ? 1.0 / planet.radius : 0.0));
+                        glUniform1f(27, wgp.seaThreshold);
+                        glUniform1i(28, 1);  // u_pxCoast
+                    } else {
+                        glUniform1i(28, 0);
+                    }
                     // Oleaje = MAREA (alineación Sol–Luna) × VIENTO atmosférico (ráfagas):
                     // marea viva + ráfaga = mar picado; marea muerta sin viento = calmo.
-                    glUniform2f(18, 1.0f, 0.0f); // u_windDir (tangent plane)
+                    // CORRIENTE (F5.4): u_windDir = dirección del viento/corriente proyectada al
+                    // plano tangente → el oleaje VIAJA en esa dirección (flujo visible). Si está
+                    // en calma, una deriva lenta para que el mar nunca se vea estático.
+                    glm::vec2 curDir(1.0f, 0.0f);
+                    if (_worldSystem) {
+                        glm::dvec3 w = glm::dvec3(_worldSystem->getWind(camD));
+                        glm::vec2 cd((float)glm::dot(w, T), (float)glm::dot(w, B));
+                        float cl = glm::length(cd);
+                        if (cl > 1e-3f) curDir = cd / cl;
+                        else { float a = (float)(SDL_GetTicks() / 1000.0) * 0.02f; curDir = glm::vec2(cosf(a), sinf(a)); }
+                    }
+                    glUniform2f(18, curDir.x, curDir.y); // u_windDir (corriente, plano tangente)
                     const float tide = _worldSystem ? _worldSystem->getTideFactor() : 1.0f;
                     float windF = 1.0f;
                     if (_worldSystem) {
@@ -678,10 +744,9 @@ void Application::renderFrameContent() {
                         windF = glm::clamp(0.55f + ws * 0.10f, 0.5f, 1.6f);
                     }
                     glUniform1f(19, tide * windF); // u_windStrength (marea × viento)
-                    // Water quality drops with altitude: from orbit/space the cheap path
-                    // (no sky reflection) — you can't see the detail and it must stay cheap.
-                    const double waterAlt = (planet.radius > 1e-9)
-                        ? (upLen - planet.radius) / planet.radius : 0.0;
+                    // NIVEL de marea (m): el mar sube/baja siguiendo a la Luna → "respira".
+                    glUniform1f(21, _worldSystem ? _worldSystem->getTideHeight(camD) : 0.0f); // u_tideHeight
+                    // Reflejo de cielo solo cerca (más caro); lejos solo especular.
                     glUniform1i(20, waterAlt < 0.05 ? 1 : 0); // 0=spec only, 1=sky refl (near)
 
                     _planetarySystem->renderPlanetWater(planet.name, camD);

@@ -89,6 +89,13 @@ public:
     /** @brief Tunes terrain LOD detail (lower = fewer chunks = cheaper). */
     void setLODParams(double splitFactor, int maxLOD);
 
+    // LOD v3 F1: split por error en pantalla (conmutable). Ver docs/guides/PLAN_LOD_V3.md.
+    void   setLODScreenSpace(bool on);
+    bool   getLODScreenSpace() const;
+    void   setLODScreenK(double k);   // px por (mundo/dist=1); desde la cámara, por frame
+    void   setLODTargetPx(double px); // subdivide si el chunk proyecta > px
+    double getLODTargetPx() const;
+
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
 

@@ -1,5 +1,6 @@
 #include <cmath>
 #include "water_renderer.h"
+#include "terrain_renderer.h" // drawnHashesFor: sincroniza el agua con el set dibujado del terreno
 #include <cstdio>
 
 namespace Haruka {
@@ -181,8 +182,67 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
     const double occR        = m_planetRadius - 15000.0;
     const bool   horizonOn   = m_hasPlanetCenter && occR > 1.0 && camDist > occR + 2000.0;
 
+    // COBERTURA PROPIA DEL AGUA: dibuja el nivel de agua MÁS FINO residente de cada zona
+    // (como el primer check del terreno, pero entre mallas de AGUA). Así el agua se ve a
+    // CUALQUIER distancia donde haya agua cargada — no depende de que el terreno dibuje ahí un
+    // nivel que generó agua (a media distancia el terreno grueso infrasamplea el río/lago y se
+    // quedaba sin agua). El agua gruesa que asome sobre tierra seca la TAPA el terreno por
+    // delante (depth test: el terreno seco está por encima del nivel del mar).
+    auto waterResident = [&](const PlanetChunkKey& k) -> bool {
+        auto it = m_gpuMeshes.find(ChunkCache::keyToHash(k));
+        return it != m_gpuMeshes.end() && it->second.isReady;
+    };
+
+    // SELECCIÓN TOP-DOWN sin huecos — la MISMA que el terreno (TerrainRenderer::buildDrawSet),
+    // pero con residencia de AGUA. Antes el agua usaba "dibuja todo salvo lo cubierto por 4 hijos"
+    // → dejaba HUECOS y desajustes de LOD ("la costa se corta / falta"). Ahora: desde la raíz de
+    // cada cara baja si los 4 hijos cubren con agua residente; si no, dibuja el nodo de agua
+    // residente de ese cuadrante. Partición exacta de las hojas deseadas (0 huecos, 0 solapes).
+    // Donde no hay agua (tierra) simplemente no se dibuja (no hay malla → canCover false).
+    std::unordered_set<uint64_t> drawn;
+    {
+        auto dit = m_desiredLeaves.find(planet);
+        if (dit != m_desiredLeaves.end() && !dit->second.empty()) {
+            auto H    = [](const PlanetChunkKey& k){ return ChunkCache::keyToHash(k); };
+            auto kids = [](const PlanetChunkKey& n, PlanetChunkKey c[4]){
+                const uint8_t cl=(uint8_t)(n.lod+1); const uint32_t bx=n.x*2, by=n.y*2; const uint16_t bd=n.body;
+                c[0]={n.face,cl,bx,by,bd};   c[1]={n.face,cl,bx+1,by,bd};
+                c[2]={n.face,cl,bx,by+1,bd}; c[3]={n.face,cl,bx+1,by+1,bd};
+            };
+            std::unordered_set<uint64_t> internal;
+            std::unordered_set<uint16_t> bodies;
+            for (const auto& lf : dit->second) {
+                bodies.insert(lf.body);
+                PlanetChunkKey a = lf;
+                while (a.lod > 0) { a = {a.face,(uint8_t)(a.lod-1),a.x>>1,a.y>>1,a.body}; internal.insert(H(a)); }
+            }
+            std::unordered_map<uint64_t,char> memo;
+            std::function<bool(const PlanetChunkKey&)> canCover = [&](const PlanetChunkKey& n)->bool{
+                const uint64_t h=H(n); auto m=memo.find(h); if(m!=memo.end()) return m->second!=0;
+                bool res;
+                if (waterResident(n))         res=true;
+                else if (internal.count(h)) { PlanetChunkKey c[4]; kids(n,c);
+                                              res = canCover(c[0])&&canCover(c[1])&&canCover(c[2])&&canCover(c[3]); }
+                else                          res=false;
+                memo[h]=res?1:0; return res;
+            };
+            std::function<void(const PlanetChunkKey&)> emit = [&](const PlanetChunkKey& n){
+                if (!canCover(n)) return;
+                if (internal.count(H(n))) {
+                    PlanetChunkKey c[4]; kids(n,c);
+                    if (canCover(c[0])&&canCover(c[1])&&canCover(c[2])&&canCover(c[3])) {
+                        emit(c[0]); emit(c[1]); emit(c[2]); emit(c[3]); return;
+                    }
+                }
+                drawn.insert(H(n));
+            };
+            for (uint16_t bd : bodies) for (int f=0; f<6; ++f) emit({(PlanetFace)f,0,0,0,bd});
+        }
+    }
+
     for (auto& [hash, mesh] : m_gpuMeshes) {
         if (!mesh.isReady || mesh.planetName != planet) continue;
+        if (!drawn.count(hash)) continue; // solo el agua de la partición top-down (sin huecos/solapes)
         // chunkCenter es PLANET-LOCAL → sumamos el centro ACTUAL (cuerpos móviles).
         glm::dvec3 worldChunkCenter = mesh.chunkCenter + m_planetCenter;
         glm::vec3 offset = glm::vec3(worldChunkCenter - glm::dvec3(cameraPos));
@@ -193,9 +253,14 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
             if (cl > 1e-6) {
                 double cosChunk    = glm::dot(camDir, chunkFromCenter / cl);
                 double cosHorizon  = occR / camDist;
-                double horizonDist = std::sqrt(camDist*camDist - occR*occR);
+                double horizonDist = std::sqrt(camDist*camDist - occR*occR > 0.0
+                                               ? camDist*camDist - occR*occR : 0.0);
                 double chunkDist   = glm::length(glm::dvec3(offset));
-                if (cosChunk < cosHorizon && chunkDist > horizonDist) continue;
+                // MARGEN por tamaño de chunk (MISMO que el terreno) → si no, el agua se recortaba
+                // ANTES que el terreno cerca del horizonte/limbo → "el mar falta en un lado".
+                double nodeSize  = mesh.planetRadius * 2.0 / double(1u << mesh.key.lod);
+                double angMargin = nodeSize / mesh.planetRadius;
+                if (cosChunk < cosHorizon - angMargin && chunkDist > horizonDist + nodeSize) continue;
             }
         }
 

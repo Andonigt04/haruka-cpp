@@ -121,7 +121,8 @@ vec3 biomeColor(float altitude, float slope, float climate, vec3 wp) {
     c = mix(c, BIOME_ROCK, smoothstep(0.70,   0.90,   slope));       // roca SOLO en laderas muy empinadas
     float snow = smoothstep(0.74, 0.95, coldness) * (1.0 - smoothstep(0.86, 0.97, slope));
     c = mix(c, BIOME_SNOW, snow);                                    // nieve solo muy fría/alta
-    float v = noised(wp * 0.4).x;
+    // Detalle fino de brillo SOLO cerca (lejos, wp enorme → alta freq en pantalla → motea).
+    float v = noised(wp * 0.4).x * (1.0 - smoothstep(2500.0, 9000.0, length(wp)));
     return c * (0.94 + 0.10 * v);
 }
 
@@ -149,6 +150,13 @@ void main() {
     float slope    = clamp(1.0 - dot(Ngeo, up), 0.0, 1.0); // 0 llano … 1 vertical
     float climate  = clamp(1.0 - abs(up.y), 0.0, 1.0);     // 0 polos … 1 ecuador
 
+    // Factor de ORILLA per-PÍXEL: arena en la costa por ALTITUD (suave, continua) + ruido que
+    // ROMPE la línea → costa ONDULADA. Antes la arena se gateaba con TexCoord.x (shoreFactor
+    // POR-VÉRTICE): a baja resolución (chunk grueso) se interpolaba RECTO entre vértices →
+    // borde poligonal "que parte el terreno". Por píxel + ruido = orilla natural a cualquier LOD.
+    float aShore  = altitude + (noised(FragPos * 0.004).x - 0.5) * 90.0; // ±~45 m de ruido
+    float shoreF  = 1.0 - smoothstep(0.0, 35.0, aShore);                 // 1 en la costa → 0 a ~35 m
+
     float bodyProfile = u_planetRelCam.w;  // 0 terran · 1 luna · 2 gas
     vec3 baseColor;
     if (bodyProfile > 1.5) {
@@ -157,9 +165,8 @@ void main() {
         float band = sin(up.y * 16.0 + n * 4.0) * 0.5 + 0.5;
         baseColor  = mix(vec3(0.60, 0.46, 0.34), vec3(0.86, 0.77, 0.61), band);
     } else if (bodyProfile > 0.5) {
-        // LUNA: regolito gris; suelos de cráter (poca pendiente) más oscuros y
-        // bordes/laderas algo más claros → relieve legible.
-        float g   = 0.52 + 0.05 * noised(FragPos * 0.02).x;
+        // LUNA: regolito gris oscuro (albedo realista ~0.12-0.3).
+        float g   = 0.30 + 0.05 * noised(FragPos * 0.02).x;
         g        *= mix(0.78, 1.06, slope);
         baseColor = vec3(g, g, g * 1.03);
     } else if (u_terrainMode == 1) {
@@ -176,12 +183,17 @@ void main() {
         col = mix(col, BIOME_ROCK, smoothstep(2800.0, 4400.0, aN));                    // roca muy alto
         float snow = smoothstep(0.74, 0.95, coldness) * (1.0 - smoothstep(0.86, 0.97, slope));
         col = mix(col, BIOME_SNOW, snow);                                              // nieve
-        float sandW = TexCoord.x * (1.0 - smoothstep(0.45, 0.7, slope));               // arena en orillas
+        float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));               // arena en orillas
         col = mix(col, triplanarAlbedo(u_sandAlbedo, FragPos, Ngeo, 0.7), sandW);
+        // A DISTANCIA las texturas triplanar (coords relativas a cámara, enormes) ALIASEAN →
+        // moteado (y se cuela por la costa del océano lejano). Fundimos al color de bioma
+        // PLANO (sin textura) lejos → terreno liso a distancia, detalle solo cerca.
+        float farFade = smoothstep(2500.0, 9000.0, length(FragPos));
+        col = mix(col, biomeColor(altitude, slope, climate, FragPos), farFade);
         baseColor = col;
     } else {
         baseColor = biomeColor(altitude, slope, climate, FragPos);   // procedural (sin texturas)
-        float sandW = TexCoord.x * (1.0 - smoothstep(0.45, 0.7, slope));
+        float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
         baseColor = mix(baseColor, BIOME_SAND, sandW);
     }
 

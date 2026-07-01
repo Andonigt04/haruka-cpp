@@ -47,9 +47,19 @@ namespace Haruka {
         std::vector<glm::vec3> morphTargets; // decimated (parent-LOD) position per vertex, for CDLOD geomorphing
         std::vector<glm::vec3> normals;
         std::vector<glm::vec3> morphNormals; // decimated (parent-LOD) normal por vértice → se mezcla con la posición en el morph CDLOD (si no, el chunk aplanado conserva normales bumpy → escalón de sombreado)
-        std::vector<glm::vec2> uvs;       // per-face UV [0,1]^2
+        // #4 EMPAQUETADO: al final de la generación las normales se EMPAQUETAN aquí
+        // (INT_2_10_10_10, 4B vs 12B) y los arrays vec3 de arriba se LIBERAN → la cache y la
+        // VRAM guardan lo pequeño. El render sube estos. (Las vec3 solo existen durante la gen.)
+        std::vector<uint32_t> normalsPacked, morphNormalsPacked;
+        std::vector<glm::vec2> uvs;       // per-face UV [0,1]^2 (solo durante la gen; luego empaquetadas)
+        std::vector<uint32_t> uvsPacked;  // #4: uv en half-float ×2 (4B vs 8B), uv∈[0,1] → precisión de sobra
         std::vector<glm::vec3> colors;
+        // Índices del terreno: topología FIJA por resolución → idénticos en todos los chunks del
+        // mismo res. Al final de la generación se REGISTRAN en SharedIndexTable (una vez por
+        // indexCount) y este vector se LIBERA → la caché RAM no duplica ~3456 índices/chunk. El
+        // render los lee de SharedIndexTable vía `indexCount`. (Idea del EBO compartido, en RAM.)
         std::vector<unsigned int> indices;
+        uint32_t indexCount = 0;   // nº de índices (se conserva tras liberar `indices`)
 
         // Malla del cascarón de agua (a nivel del mar, sin desplazamiento de olas
         // — el oleaje Gerstner se aplica en el vertex shader). Solo se rellena
@@ -75,6 +85,7 @@ namespace Haruka {
             return (vertices.size() + morphTargets.size() + normals.size() + morphNormals.size() + colors.size()
                     + waterVertices.size() + waterMorphTargets.size() + waterNormals.size()) * sizeof(glm::vec3)
                  + (uvs.size() + waterParams.size()) * sizeof(glm::vec2)
+                 + (normalsPacked.size() + morphNormalsPacked.size() + uvsPacked.size()) * sizeof(uint32_t) // #4 empaquetado
                  + (indices.size() + waterIndices.size()) * sizeof(unsigned int);
         }
     };

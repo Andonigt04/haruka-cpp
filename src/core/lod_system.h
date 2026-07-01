@@ -40,6 +40,23 @@ namespace Haruka {
         void setMinLOD(int minLOD) { m_minLOD = minLOD; }
         int  getMinLOD() const { return m_minLOD; }
 
+        // --- LOD v3 F1: split por ERROR EN PANTALLA (conmutable; OFF = baseline distancia) ---
+        // Un nodo se subdivide hasta que su tamaño proyecta ≤ targetPx en pantalla. Acotado por
+        // la resolución (no por el mundo) y SIN tope por altitud (ese era el hack que volvía
+        // grueso a distancia). screenK = viewportH / (2·tan(fovY/2)) (px por unidad/dist=1),
+        // se fija por frame desde la cámara. Ver docs/guides/PLAN_LOD_V3.md.
+        void   setScreenSpaceLOD(bool on) { m_screenSpace = on; }
+        bool   getScreenSpaceLOD() const  { return m_screenSpace; }
+        void   setScreenK(double k)       { if (k > 1.0) m_screenK = k; }
+        void   setTargetPx(double px)     { if (px > 1.0) m_targetPx = px; }
+        double getTargetPx() const        { return m_targetPx; }
+
+        // F2: frustum (cam-rel VP) para ACOTAR el recompute. En modo screen-space, los nodos
+        // fuera de la vista o tras el horizonte NO se refinan (si no, el LOD subdivide la
+        // esfera ENTERA en CPU = pico de cientos de ms; el horizon cull del render no ayuda
+        // aquí, eso es solo en el dibujo). Se fija por frame (1 frame de desfase: irrelevante).
+        void setCullMatrix(const glm::mat4& camRelViewProj);
+
         /**
          * @brief Analiza un objeto planetario y genera las órdenes de streaming.
          */
@@ -85,6 +102,17 @@ namespace Haruka {
         double m_splitFactor;
         int m_maxLOD;
         int m_minLOD = 4; // suelo: el planeta entero siempre a ≥ este LOD (≈1536 chunks)
+        bool   m_screenSpace = true;  // F1 por DEFECTO (mata el tope por altitud). `lodscreen off` vuelve a baseline.
+        double m_screenK     = 935.0; // px por (unidad de mundo / distancia); se fija por frame
+        double m_targetPx    = 320.0; // subdivide si el chunk proyecta > este tamaño (px)
+        glm::vec4 m_cullPlanes[6];    // F2: 6 planos del frustum (cam-rel) para acotar el recompute
+        bool   m_hasCull = false;
+        glm::dvec3 m_curCamPos{0.0}, m_curPlanetPos{0.0}; // estado del frame para balanceLeaves
+        double m_curRadius = 1.0;
+        // True si la hoja es VISIBLE (frustum). El balance 2:1 NO cascadea hacia hojas
+        // invisibles (fuera del frustum) → evita la explosión de chunks en el borde del
+        // frustum (acantilado de LOD que el balance intentaba suavizar = pico de cientos de ms).
+        bool leafVisibleForBalance(const PlanetChunkKey& k) const;
         uint16_t m_currentBody = 0; // cuerpo de la pasada actual (estampa todas las claves)
 
         // hash → key, para poder reconstruir la key al hacer unload

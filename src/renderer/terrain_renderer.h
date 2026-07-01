@@ -26,6 +26,7 @@ namespace Haruka {
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
+            int  framesUndrawn = 0;       // frames seguidos sin dibujarse → purga GPU al pasar el margen
             std::string planetName;
             PlanetChunkKey key{};         // identity, for invalidation on terrain edit
             glm::dvec3  chunkCenter{0.0};
@@ -108,6 +109,15 @@ namespace Haruka {
          *  por nodo (evita la contención que disparaba el update a ~900 ms). */
         void residentHashes(std::unordered_set<uint64_t>& out) const;
 
+        /** @brief Hashes que el terreno DIBUJÓ para un planeta el último renderPlanet (hojas +
+         *  fallbacks). El agua se sincroniza con esto (dibuja el agua de los MISMOS chunks) →
+         *  nunca pinta agua de un ancestro grueso sobre tierra seca (diamantes flotantes).
+         *  Sin lock: solo se toca en el hilo de render (terreno antes que agua, secuencial). */
+        const std::unordered_set<uint64_t>* drawnHashesFor(const std::string& planet) const {
+            auto it = m_drawnByPlanet.find(planet);
+            return it != m_drawnByPlanet.end() ? &it->second : nullptr;
+        }
+
         /** @brief Callback invoked whenever a terrain mesh is actually DELETED from the
          *  GPU (unload or stale-purge). The water renderer mirrors terrain exactly by
          *  removing its matching chunk here → water never diverges (no holes, no blobs). */
@@ -134,6 +144,15 @@ namespace Haruka {
         };
         LODReport validateCoverage() const;
 
+        // Selección de dibujo TOP-DOWN sin solapes: parte de la raíz de cada cara y baja a los
+        // hijos SOLO si todo el subárbol hasta las hojas deseadas está residente; si falta algún
+        // fino, dibuja el nodo grueso residente (coarsest fallback). Partición exacta → 0 overlaps,
+        // 0 holes (con la raíz residente). La usan renderPlanet Y validateCoverage (miden lo mismo).
+        void buildDrawSet(const std::string& planet,
+                          std::unordered_set<uint64_t>& outHashes,
+                          std::vector<PlanetChunkKey>* outKeys,
+                          std::unordered_set<uint16_t>* outBodies = nullptr) const;
+
         struct DrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
         DrawStats getDrawStats() const;
         DrawStats getDrawStatsForPlanet(const std::string& planet) const;
@@ -141,12 +160,17 @@ namespace Haruka {
     private:
         // Usamos el hash de la llave para identificar la malla en la GPU
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
+        // EBO COMPARTIDO por nº de índices: los índices son topología fija por res → idénticos
+        // en todos los chunks de ese res. Un EBO por indexCount, reusado → ahorra VRAM (no un
+        // EBO por chunk). Clave = indexCount; valor = handle GL. Se liberan en el destructor.
+        std::unordered_map<uint32_t, GLuint>     m_sharedEBO;
         std::unordered_set<uint64_t>             m_stale;   // chunks a REEMPLAZAR en addToScene
         std::function<void(const PlanetChunkKey&)> m_onRemoved; // espejo del agua
         mutable std::mutex m_renderMutex;
 
         double     m_splitFactor = 1.0; // sincronizado con el LODSystem vía setSplitFactor
-        std::unordered_map<std::string, std::vector<PlanetChunkKey>> m_desiredLeaves; // hojas LOD por planeta
+        std::unordered_map<std::string, std::vector<PlanetChunkKey>> m_desiredLeaves;  // hojas LOD por planeta
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_drawnByPlanet; // hashes dibujados (para el agua)
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};

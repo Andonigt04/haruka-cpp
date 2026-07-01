@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <string>
+#include <vector>
 #include <mutex>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -10,6 +11,8 @@
 #include "tools/math_types.h"
 
 namespace Haruka {
+
+    class TerrainRenderer; // el agua se sincroniza con el set dibujado del terreno
 
     /**
      * @brief Renders the planetary ocean shell.
@@ -30,6 +33,7 @@ namespace Haruka {
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
+            int  framesUndrawn = 0;        // purga GPU al pasar el margen sin dibujarse
             std::string planetName;
             PlanetChunkKey key{};          // identity, for stale-coverage purge
             glm::dvec3  chunkCenter{0.0};
@@ -65,12 +69,28 @@ namespace Haruka {
          *  morph CDLOD del agua termine en la frontera de fusión correcta. */
         void setSplitFactor(double sf) { if (sf > 1e-3) m_splitFactor = sf; }
 
+        /** @brief Hojas deseadas del LOD (igual que TerrainRenderer): el agua dibuja, por hoja,
+         *  el chunk de agua residente más fino (hoja o ancestro). Antes dibujaba TODOS los
+         *  niveles residentes → solape/láminas de agua. Los chunks secos (sin malla de agua)
+         *  simplemente no encuentran agua al subir → no se dibuja agua ahí (correcto). */
+        void setDesiredLeaves(const std::string& planet, std::vector<PlanetChunkKey> leaves) {
+            std::lock_guard<std::mutex> lock(m_renderMutex);
+            m_desiredLeaves[planet] = std::move(leaves);
+        }
+
+        /** @brief Renderer de terreno con el que SINCRONIZARSE: el agua dibuja el agua de los
+         *  MISMOS chunks que dibuja el terreno (no busca su propio ancestro de agua, que pintaba
+         *  agua gruesa sobre tierra seca = diamantes flotantes). */
+        void setTerrainRenderer(const TerrainRenderer* t) { m_terrain = t; }
+
     private:
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
         std::unordered_set<uint64_t>             m_stale;   // mallas a REEMPLAZAR/cubrir
         mutable std::mutex m_renderMutex;
         void purgeStaleCoveredBy(const PlanetChunkKey& key); // caller holds the lock
         double     m_splitFactor = 1.0; // sincronizado con el LODSystem
+        const TerrainRenderer* m_terrain = nullptr; // fuente del set dibujado para sincronizar
+        std::unordered_map<std::string, std::vector<PlanetChunkKey>> m_desiredLeaves; // hojas LOD por planeta (fallback)
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};

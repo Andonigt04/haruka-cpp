@@ -81,6 +81,12 @@ namespace Haruka {
          *  cuadratura. 1.0 si no hay Luna. El render del agua lo pasa a u_windStrength. */
         float getTideFactor() const { return m_tideFactor; }
 
+        /** @brief NIVEL de marea (metros, con signo) en el observador: el bulto de marea sigue a
+         *  la Luna (y al Sol, ~0.46×). Pleamar cuando la Luna está en el cénit o el nadir,
+         *  bajamar en el horizonte. El render lo suma radialmente a la lámina del océano para que
+         *  el mar "respire" (sube/baja). Amplitud suave (~±0.7 m). 0 si no hay planeta/Luna. */
+        float getTideHeight(const glm::dvec3& observer) const;
+
         /** @brief Luz de luna para el observador dado. outDir = dirección HACIA la Luna,
          *  outIntensity = brillo según la FASE (llena≈máx, nueva≈0). Devuelve false si
          *  no hay Luna (entonces no hay 2ª luz). */

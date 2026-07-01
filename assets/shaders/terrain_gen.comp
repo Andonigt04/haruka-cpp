@@ -181,7 +181,11 @@ float terranElevKm(vec3 dir, out float outWaterKm) {
     float form    = pow(clamp(1.0 - abs(na), 0.0, 1.0), 1.3); // cresta definida
     float mountains = form * mtnMask * (6.5 * u_reliefStrength); // km, picos prominentes
 
-    float elev = mix(seaDepth, landBase + hillRelief + mountains, landMask);
+    // La TIERRA nunca por debajo del nivel del mar (las colinas podían hundirla bajo 0 →
+    // la esfera de océano de órbita la tapaba y los continentes se "disolvían" en islas).
+    // Clamp a +10 m garantiza que landMask>0.5 quede SIEMPRE sobre el mar.
+    float landRelief = max(landBase + hillRelief + mountains, 0.01); // km (≥10 m)
+    float elev = mix(seaDepth, landRelief, landMask);
 
     // --- Lagos (sellos de la seed, gateados por wetness del continente) ---
     outWaterKm = 0.0; // mar por defecto

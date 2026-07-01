@@ -89,6 +89,10 @@ public:
 
     const glm::dvec3& anchor() const { return m_anchor; }
     const glm::dvec3& up()     const { return m_up; }
+    // F5.3: último nivel del mar aplicado (up-relativo). El render salta las celdas cuya
+    // SUPERFICIE (terreno+agua) está a/bajo este nivel → esas las dibuja el océano (sin doble lámina).
+    float seaLevelAlongUp() const { return m_seaLevelAlongUp; }
+    float surfaceAt(int i, int j) const { return m_terrain[idx(i,j)] + m_water[idx(i,j)]; }
 
     /** @brief One overflow point: a wet cell spilling over a steep terrain drop. */
     struct Overflow {
@@ -114,6 +118,7 @@ private:
     double m_span = 0.0;
     glm::dvec3 m_anchor{0.0}, m_tan{1,0,0}, m_bit{0,0,1}, m_up{0,1,0};
 
+    float  m_seaLevelAlongUp = -1e9f; // F5.3: nivel del mar aplicado (-1e9 = sin océano acoplado)
     std::vector<float> m_terrain;  // elevation (m) along up at each cell
     std::vector<float> m_water;    // water depth (m)
     // Outgoing flux per cell to L,R,B,T neighbours (m³/s-ish, pipe model units).

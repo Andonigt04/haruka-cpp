@@ -47,6 +47,7 @@ void PlanetarySystem::init() {
     m_generator = std::make_unique<TerrainGenerator>();
     m_renderer = std::make_unique<TerrainRenderer>();
     m_waterRenderer = std::make_unique<WaterRenderer>();
+    m_waterRenderer->setTerrainRenderer(m_renderer.get()); // agua sincronizada con el terreno
     // El agua espeja al terreno: cuando el terreno borra un chunk (descarga o purga
     // de stale), borramos su agua → agua y terreno cubren SIEMPRE lo mismo.
     m_renderer->setOnChunkRemoved([this](const PlanetChunkKey& k) {
@@ -277,6 +278,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             leaves.reserve(up.chunksToKeep.size() + up.chunksToLoad.size());
             leaves.insert(leaves.end(), up.chunksToKeep.begin(), up.chunksToKeep.end());
             leaves.insert(leaves.end(), up.chunksToLoad.begin(), up.chunksToLoad.end());
+            if (m_waterRenderer) m_waterRenderer->setDesiredLeaves(up.planetName, leaves); // copia
             m_renderer->setDesiredLeaves(up.planetName, std::move(leaves));
         }
     }
@@ -355,14 +357,20 @@ std::string PlanetarySystem::validateLOD() const {
     append("hole",    r.hasHole,    r.sampleHole);
     append("balance", r.hasBalance, r.sampleBalance);
     std::string s(buf);
-    // Desglose de overlaps por cuerpo (body 0 = planeta donde caminas; otros = lejanos).
-    for (int b = 0; b < 16; ++b)
-        if (r.overlapsByBody[b] > 0) {
-            char bb[96];
-            snprintf(bb, sizeof(bb), "\n  body %d: overlaps=%d (de %d dibujados)",
-                     b, r.overlapsByBody[b], r.drawnByBody[b]);
-            s += bb;
-        }
+    // Desglose por cuerpo: distancia/radio/dibujados → revela si un cuerpo lejano (Júpiter)
+    // se está sobre-subdividiendo y aparece como "bolas" flotando. body index = pi.
+    for (size_t pi = 0; pi < m_planets.size() && pi < 16; ++pi) {
+        const auto& p = m_planets[pi];
+        const double distKm   = glm::length(m_prevCamPos - p.position) / 1000.0;
+        const double radKm    = p.radius / 1000.0;
+        const double altKm    = (glm::length(m_prevCamPos - p.position) - p.radius) / 1000.0;
+        char bb[192];
+        snprintf(bb, sizeof(bb),
+                 "\n  body %zu '%s': R=%.0fkm dist=%.0fkm alt=%.0fkm dibujados=%d overlaps=%d",
+                 pi, p.name.c_str(), radKm, distKm, altKm,
+                 (pi < 16 ? r.drawnByBody[pi] : 0), (pi < 16 ? r.overlapsByBody[pi] : 0));
+        s += bb;
+    }
     return s;
 }
 
@@ -577,6 +585,7 @@ bool PlanetarySystem::getActivePlanet(glm::dvec3& center, double& radius,
 void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
     if (m_renderer)      m_renderer->setCullMatrix(camRelViewProj);
     if (m_waterRenderer) m_waterRenderer->setCullMatrix(camRelViewProj);
+    if (m_lod)           m_lod->setCullMatrix(camRelViewProj); // F2: acota el recompute del LOD a la vista
     // Sincroniza el splitFactor del morph cada frame (independiente del orden de init y del
     // early-return de setLODParams) → la banda de morph siempre casa con el LOD real.
     if (m_lod) {
@@ -683,12 +692,12 @@ void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
         // AUTO (mb<=0): el presupuesto de la cache de terreno = fracción de la RAM TOTAL,
         // acotado. El terreno es regenerable, así que puede ocupar bastante, pero hay que
         // dejar sitio al SO, driver GPU, caches de modelos/texturas y la lógica del juego.
-        // 25% de la RAM, suelo 512 MB (que cargue algo en equipos pequeños), techo 8192 MB
-        // (en equipos grandes el 25% sí compensa para explorar sin regenerar; el techo solo
+        // 33% de la RAM, suelo 512 MB (que cargue algo en equipos pequeños), techo 16384 MB
+        // (en equipos grandes la fracción sí compensa para explorar sin regenerar; el techo solo
         // evita que un servidor con cientos de GB dedique decenas de GB a terreno).
         const size_t ram = systemTotalRAMMB();
-        size_t budget = ram ? (ram / 4) : 1024;          // 25% o 1 GB si no se sabe
-        budget = std::clamp<size_t>(budget, 512, 8192);
+        size_t budget = ram ? (ram / 3) : 1024;          // 33% o 1 GB si no se sabe (subido de 25%)
+        budget = std::clamp<size_t>(budget, 512, 16384); // techo 16 GB (subido de 8): con índices
         resolved = (int)budget;
         fprintf(stderr, "[ChunkCache] Auto: RAM total=%zu MB → presupuesto cache terreno=%d MB\n",
                 ram, resolved);
@@ -705,6 +714,12 @@ void PlanetarySystem::setLODParams(double splitFactor, int maxLOD) {
     if (m_waterRenderer) m_waterRenderer->setSplitFactor(splitFactor);
     m_forceLOD = true; // re-evaluate the quadtree next update
 }
+
+void PlanetarySystem::setLODScreenSpace(bool on) { if (m_lod) { m_lod->setScreenSpaceLOD(on); m_forceLOD = true; } }
+bool PlanetarySystem::getLODScreenSpace() const { return m_lod && m_lod->getScreenSpaceLOD(); }
+void PlanetarySystem::setLODScreenK(double k) { if (m_lod) m_lod->setScreenK(k); }
+void PlanetarySystem::setLODTargetPx(double px) { if (m_lod) { m_lod->setTargetPx(px); m_forceLOD = true; } }
+double PlanetarySystem::getLODTargetPx() const { return m_lod ? m_lod->getTargetPx() : 0.0; }
 
 PlanetarySystem::TerrainDrawStats PlanetarySystem::getTerrainDrawStats() const {
     if (!m_renderer) return {};

@@ -3,9 +3,12 @@
 #include "core/noise_generator.h"
 #include "core/terrain/terrain_sampler_v2.h"
 #include "core/terrain/gpu_heightfield.h"
+#include "core/terrain/shared_index_table.h" // índices compartidos por res (ahorro RAM caché)
 #include <algorithm>
+#include <cmath>     // std::lround (#4 empaquetado de posiciones)
 #include <functional>
 #include <mutex>
+#include <glm/gtc/packing.hpp> // #4 packSnorm3x10_1x2 (empaquetar normales)
 #include "core/modules.h"
 #ifdef HARUKA_MOD_DEFORM
 #include "core/terrain/deformation_field.h"
@@ -434,7 +437,11 @@ namespace {
         // El faldón es ~mitad del espaciado (suelo 8 m para cubrir el desplazamiento
         // de las olas, techo 40 m para no colgar muros en LODs gruesos).
         auto buildWaterSkirt = [&](int side, const std::function<bool(int,int)>& cellWet) {
-            const float wSkirt = glm::clamp(vtxSpacing * 0.5f, 8.0f, 40.0f);
+            // Skirt del agua MÍNIMO: el recorte por profundidad con signo tapa la costa y el
+            // morph CDLOD alinea los bordes entre LODs → el faldón grande (antes 8–40m) solo
+            // colgaba visible en cada borde de chunk = streaks verticales a distancia. Ahora
+            // tope bajo: solo tapa grietas sub-píxel sin asomar.
+            const float wSkirt = glm::clamp(vtxSpacing * 0.15f, 0.5f, 6.0f);
             const bool  hasParams = !chunk->waterParams.empty();
             const int   mainCount = (int)chunk->waterVertices.size();
             std::vector<int> skirtOf((size_t)mainCount, -1);
@@ -547,8 +554,14 @@ namespace {
                         glm::dvec3 wp = dir * (planetRadius * (1.0 + double(L) * double(kmToFraction)));
                         chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
                         chunk->waterNormals.push_back(glm::vec3(dir));
-                        // profundidad del agua (m): nivel − terreno. ~0 en la orilla.
-                        float depthM = glm::max(0.0f, (L - elevKmArr[i]) * 1000.0f);
+                        // profundidad del agua (m): nivel − terreno. CON SIGNO (negativa sobre
+                        // tierra) → el shader descarta donde ≤0 y la lámina se recorta en el
+                        // contorno EXACTO del nivel del mar (sub-celda, por píxel) SIN depender
+                        // del depth buffer (que falla a distancia). Antes clampeada a ≥0 +
+                        // any-corner = agua sobre tierra "tapada por el terreno" (dependía del
+                        // depth → se colaba lejos). El interp lineal de la profundidad con signo
+                        // cruza 0 en la costa → contorno suave a CUALQUIER LOD.
+                        float depthM = (L - elevKmArr[i]) * 1000.0f;
                         chunk->waterParams.push_back(glm::vec2(L, depthM));
                     }
                 }
@@ -601,7 +614,16 @@ namespace {
             // That kills both the chunk-aligned "square" coastline AND the sea
             // bleeding through the land (z-fighting). The coastline now follows the
             // terrain at vertex resolution.
-            std::vector<uint8_t> belowSea((size_t)wcount, 0);
+            // Emisión con MARGEN sobre el nivel del mar: emitimos las celdas cuya esquina está
+            // bajo el mar O hasta +kEmitMarginKm por encima → la geometría de agua es CONTINUA a
+            // través de la costa (no celdas-sliver sueltas que a distancia salen como PUNTOS/
+            // halftone). El recorte EXACTO del contorno lo hace el discard por-píxel (water.frag,
+            // Depth con signo); la geometría del margen sobre tierra se descarta ahí. Sin gen nueva
+            // NO se ve (la malla de agua está cacheada → mundo nuevo para regenerar).
+            const float kEmitMarginKm = 0.0f; // solo celdas mojadas (el margen daba geometría continua
+                                              // PERO cerca, con el recorte per-vértice, hacía círculos
+                                              // → peor trato que los puntos lejanos. Sin margen.)
+            std::vector<uint8_t> nearSea((size_t)wcount, 0);
             for (int y = 0; y <= res; ++y) {
                 for (int x = 0; x <= res; ++x) {
                     glm::dvec3 dir = getLocalPosition(key, x, y, res); // DOUBLE
@@ -610,17 +632,16 @@ namespace {
                     chunk->waterVertices.push_back(glm::vec3(wp - chunkCenter_local));
                     chunk->waterNormals.push_back(sph);
                     float ek = useGpu ? gpuElevKm[gridIdx(x, y)] : elevKmAt(sph);
-                    belowSea[(size_t)(x + y * side)] = (ek < 0.0f) ? 1 : 0;
+                    nearSea[(size_t)(x + y * side)] = (ek < kEmitMarginKm) ? 1 : 0;
                 }
             }
             for (int y = 0; y < res; ++y) {
                 for (int x = 0; x < res; ++x) {
                     int i = x + y * side;
-                    // Emit the cell if ANY corner is below sea level — extends water
-                    // one cell under the shore (occluded by terrain), so there's no
-                    // gap right at the waterline.
-                    bool wet = belowSea[i] || belowSea[i + 1]
-                            || belowSea[i + side] || belowSea[i + side + 1];
+                    // Emit the cell if ANY corner is near/below sea level (con margen) → costa
+                    // continua; el discard por-píxel recorta el contorno exacto del nivel del mar.
+                    bool wet = nearSea[i] || nearSea[i + 1]
+                            || nearSea[i + side] || nearSea[i + side + 1];
                     if (!wet) continue;
                     chunk->waterIndices.push_back(i);
                     chunk->waterIndices.push_back(i + 1);
@@ -634,9 +655,35 @@ namespace {
             // Faldón en bordes mojados (celda mojada si cualquier esquina < nivel del mar).
             buildWaterSkirt(side, [&](int cx, int cy) {
                 int i = cx + cy * side;
-                return belowSea[i] || belowSea[i+1] || belowSea[i+side] || belowSea[i+side+1];
+                return nearSea[i] || nearSea[i+1] || nearSea[i+side] || nearSea[i+side+1];
             });
         }
+
+        // #4 EMPAQUETADO: normales y morphNormals → INT_2_10_10_10 (4B vs 12B). Se hace al FINAL
+        // (ya rellenas, incluidos skirts) y se LIBERAN las vec3 → la cache y la VRAM guardan lo
+        // pequeño (−16 B/vértice). 10 bits/comp normalizado = sobra para normales.
+        {
+            chunk->normalsPacked.resize(chunk->normals.size());
+            for (size_t i = 0; i < chunk->normals.size(); ++i)
+                chunk->normalsPacked[i] = glm::packSnorm3x10_1x2(glm::vec4(chunk->normals[i], 0.0f));
+            chunk->morphNormalsPacked.resize(chunk->morphNormals.size());
+            for (size_t i = 0; i < chunk->morphNormals.size(); ++i)
+                chunk->morphNormalsPacked[i] = glm::packSnorm3x10_1x2(glm::vec4(chunk->morphNormals[i], 0.0f));
+            std::vector<glm::vec3>().swap(chunk->normals);      // libera la RAM de las vec3
+            std::vector<glm::vec3>().swap(chunk->morphNormals);
+
+            chunk->uvsPacked.resize(chunk->uvs.size());          // uv → half-float ×2
+            for (size_t i = 0; i < chunk->uvs.size(); ++i)
+                chunk->uvsPacked[i] = glm::packHalf2x16(chunk->uvs[i]);
+            std::vector<glm::vec2>().swap(chunk->uvs);
+        }
+
+        // Índices = topología fija por res → se REGISTRAN una vez en la tabla compartida y se
+        // LIBERA la copia por-chunk (la caché RAM no duplica ~3456 índices/chunk). El render los
+        // lee de SharedIndexTable vía indexCount. (waterIndices NO: son condicionales por celda.)
+        chunk->indexCount = (uint32_t)chunk->indices.size();
+        SharedIndexTable::get().registerOnce(chunk->indexCount, chunk->indices);
+        std::vector<unsigned int>().swap(chunk->indices);
 
         return chunk;
     }

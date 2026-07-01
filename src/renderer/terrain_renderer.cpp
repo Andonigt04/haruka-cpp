@@ -1,4 +1,5 @@
 #include "terrain_renderer.h"
+#include "core/terrain/shared_index_table.h" // índices compartidos por res
 #include <cstdio>
 #include <cstdlib>     // std::abs
 #include <functional>  // std::function (recursión de covered())
@@ -9,6 +10,7 @@ TerrainRenderer::~TerrainRenderer() {
     for (auto& pair : m_gpuMeshes) {
         cleanupMesh(pair.second);
     }
+    for (auto& [ic, ebo] : m_sharedEBO) if (ebo) glDeleteBuffers(1, &ebo); // EBOs compartidos
 }
 
 void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
@@ -27,7 +29,9 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     }
 
     RenderMesh mesh;
-    mesh.indexCount  = (uint32_t)data.indices.size();
+    // indexCount conservado tras liberar `indices`; fallback a indices.size() si un chunk no pasó
+    // por el generador (p.ej. carga directa) y aún lleva sus índices.
+    mesh.indexCount  = data.indexCount ? data.indexCount : (uint32_t)data.indices.size();
     mesh.vertexCount = (uint32_t)data.vertices.size();
     mesh.planetName  = planetName;
     mesh.key         = key;
@@ -36,8 +40,7 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     mesh.lod         = data.key.lod;
     mesh.planetRadius = data.planetRadius;
 
-    // Real bounding sphere from the surface vertices (skip the skirt verts, which
-    // hang far below and would bloat the radius). AABB centre + farthest corner.
+    // Bounding sphere de los vértices de superficie (sin skirts, que cuelgan y la inflarían).
     {
         const size_t surfCount = data.morphTargets.size() ? data.morphTargets.size()
                                                            : data.vertices.size();
@@ -55,7 +58,7 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     glGenVertexArrays(1, &mesh.vao);
     glBindVertexArray(mesh.vao);
 
-    // Attr 0: positions (relative to chunkCenter)
+    // Attr 0: positions (float, relativo a chunkCenter)
     glGenBuffers(1, &mesh.vbo);
     glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
     glBufferData(GL_ARRAY_BUFFER, data.vertices.size() * sizeof(glm::vec3), data.vertices.data(), GL_STATIC_DRAW);
@@ -71,38 +74,56 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
         glEnableVertexAttribArray(3);
     }
 
-    // Attr 1: normals
-    if (!data.normals.empty()) {
+    // Attr 1: normals — EMPAQUETADAS (#4): INT_2_10_10_10 (4B). El shader lee `vec3 aNormal`
+    // y GL des-empaqueta normalizado (xyz) → sin cambios en el shader.
+    if (!data.normalsPacked.empty()) {
         glGenBuffers(1, &mesh.nbo);
         glBindBuffer(GL_ARRAY_BUFFER, mesh.nbo);
-        glBufferData(GL_ARRAY_BUFFER, data.normals.size() * sizeof(glm::vec3), data.normals.data(), GL_STATIC_DRAW);
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+        glBufferData(GL_ARRAY_BUFFER, data.normalsPacked.size() * sizeof(uint32_t), data.normalsPacked.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(1, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(1);
     }
 
-    // Attr 4: morph-target normals (CDLOD) → la normal se mezcla con la posición en el
-    // shader; sin esto el chunk aplanado por morph conserva normales bumpy → escalón.
-    if (!data.morphNormals.empty()) {
+    // Attr 4: morph-target normals (CDLOD), también empaquetadas.
+    if (!data.morphNormalsPacked.empty()) {
         glGenBuffers(1, &mesh.nmbo);
         glBindBuffer(GL_ARRAY_BUFFER, mesh.nmbo);
-        glBufferData(GL_ARRAY_BUFFER, data.morphNormals.size() * sizeof(glm::vec3), data.morphNormals.data(), GL_STATIC_DRAW);
-        glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
+        glBufferData(GL_ARRAY_BUFFER, data.morphNormalsPacked.size() * sizeof(uint32_t), data.morphNormalsPacked.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(4, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(4);
     }
 
-    // Attr 2: UVs
-    if (!data.uvs.empty()) {
+    // Attr 2: UVs — half-float (#4): 2× half (4B vs 8B). El shader lee `vec2 aUV` (auto-convert).
+    if (!data.uvsPacked.empty()) {
         glGenBuffers(1, &mesh.uvo);
         glBindBuffer(GL_ARRAY_BUFFER, mesh.uvo);
-        glBufferData(GL_ARRAY_BUFFER, data.uvs.size() * sizeof(glm::vec2), data.uvs.data(), GL_STATIC_DRAW);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr);
+        glBufferData(GL_ARRAY_BUFFER, data.uvsPacked.size() * sizeof(uint32_t), data.uvsPacked.data(), GL_STATIC_DRAW);
+        glVertexAttribPointer(2, 2, GL_HALF_FLOAT, GL_FALSE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(2);
     }
 
-    // EBO
-    glGenBuffers(1, &mesh.ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, data.indices.size() * sizeof(unsigned int), data.indices.data(), GL_STATIC_DRAW);
+    // EBO COMPARTIDO: los índices son topología FIJA por nº de índices (grid + skirts del
+    // mismo res) → idénticos en TODOS los chunks de ese res. Un único EBO por indexCount,
+    // reusado por todos → ahorra ~6·res²·4 B × miles de chunks en VRAM. El VAO (ligado abajo)
+    // recuerda este EBO; cleanupMesh NO lo borra (es compartido; se liberan en el destructor).
+    {
+        uint32_t ic = mesh.indexCount; // (indexCount conservado o fallback a indices.size())
+        auto it = m_sharedEBO.find(ic);
+        if (it == m_sharedEBO.end()) {
+            // Datos: tabla compartida (camino normal) o los índices propios del chunk (fallback).
+            const std::vector<unsigned int>* idx = SharedIndexTable::get().find(ic);
+            const unsigned int* src = idx ? idx->data()
+                                          : (data.indices.empty() ? nullptr : data.indices.data());
+            GLuint ebo = 0;
+            glGenBuffers(1, &ebo);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, ic * sizeof(unsigned int), src, GL_STATIC_DRAW);
+            it = m_sharedEBO.emplace(ic, ebo).first;
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second); // ligarlo al VAO actual
+        }
+        mesh.ebo = it->second; // referencia (NO se posee → no se borra en cleanupMesh)
+    }
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
@@ -258,21 +279,7 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     // MÁS FINO disponible: la hoja si está, si no su ancestro residente más cercano (fallback
     // sin hueco). Así cerca llegas al fino en cuanto su hoja carga, sin niveles intermedios.
     std::unordered_set<uint64_t> drawnHashes;
-    {
-        auto dit = m_desiredLeaves.find(planet);
-        if (dit != m_desiredLeaves.end()) {
-            drawnHashes.reserve(dit->second.size());
-            for (PlanetChunkKey k : dit->second) {
-                while (true) {
-                    uint64_t h = ChunkCache::keyToHash(k);
-                    auto it = m_gpuMeshes.find(h);
-                    if (it != m_gpuMeshes.end() && it->second.isReady) { drawnHashes.insert(h); break; }
-                    if (k.lod == 0) break;                 // ni la raíz está → nada que dibujar aquí
-                    k = { k.face, (uint8_t)(k.lod - 1), k.x >> 1, k.y >> 1, k.body }; // sube al padre
-                }
-            }
-        }
-    }
+    buildDrawSet(planet, drawnHashes, nullptr); // partición top-down sin solapes (0 overlaps, 0 holes)
 
     int drawn = 0;
     for (auto& [hash, mesh] : m_gpuMeshes) {
@@ -353,6 +360,7 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     }
     glBindVertexArray(0);
     m_lastDrawn = drawn;
+    m_drawnByPlanet[planet] = std::move(drawnHashes); // el agua se sincroniza con esto
 }
 
 TerrainRenderer::DrawStats TerrainRenderer::getDrawStats() const {
@@ -414,6 +422,70 @@ std::vector<PlanetChunkKey> TerrainRenderer::markStaleSphere(const glm::dvec3& c
     return hit;
 }
 
+void TerrainRenderer::buildDrawSet(const std::string& planet,
+                                   std::unordered_set<uint64_t>& outHashes,
+                                   std::vector<PlanetChunkKey>* outKeys,
+                                   std::unordered_set<uint16_t>* outBodies) const {
+    auto dit = m_desiredLeaves.find(planet);
+    if (dit == m_desiredLeaves.end() || dit->second.empty()) return;
+    const auto& leaves = dit->second;
+
+    auto H      = [](const PlanetChunkKey& k){ return ChunkCache::keyToHash(k); };
+    auto parent = [](const PlanetChunkKey& k){ return PlanetChunkKey{k.face,(uint8_t)(k.lod-1),k.x>>1,k.y>>1,k.body}; };
+    auto kids   = [](const PlanetChunkKey& n, PlanetChunkKey c[4]){
+        const uint8_t cl=(uint8_t)(n.lod+1); const uint32_t bx=n.x*2, by=n.y*2; const uint16_t bd=n.body;
+        c[0]={n.face,cl,bx,by,bd};   c[1]={n.face,cl,bx+1,by,bd};
+        c[2]={n.face,cl,bx,by+1,bd}; c[3]={n.face,cl,bx+1,by+1,bd};
+    };
+    auto residentReady = [&](const PlanetChunkKey& k)->bool{
+        auto it = m_gpuMeshes.find(H(k));
+        return it != m_gpuMeshes.end() && it->second.isReady;
+    };
+
+    // Hojas deseadas + sus ancestros (nodos "internos" que SÍ deben subdividirse).
+    std::unordered_set<uint64_t> internal;
+    std::unordered_set<uint16_t> bodies;
+    internal.reserve(leaves.size() * 2);
+    for (const PlanetChunkKey& lf : leaves) {
+        bodies.insert(lf.body);
+        PlanetChunkKey a = lf;
+        while (a.lod > 0) { a = parent(a); internal.insert(H(a)); }
+    }
+
+    // canCover(n): ¿el área de n tiene cobertura por ALGÚN residente (a cualquier resolución)?
+    // residente a cualquier nivel basta → NO exige la raíz residente (en superficie los chunks de
+    // cara completa lod0 no se generan). Atraviesa internos no-residentes buscando descendientes.
+    std::unordered_map<uint64_t,char> memo;
+    std::function<bool(const PlanetChunkKey&)> canCover = [&](const PlanetChunkKey& n)->bool{
+        const uint64_t h = H(n);
+        auto m = memo.find(h); if (m != memo.end()) return m->second != 0;
+        bool res;
+        if (residentReady(n))        res = true;              // n cubre su área
+        else if (internal.count(h)) { PlanetChunkKey c[4]; kids(n,c);
+                                      res = canCover(c[0]) && canCover(c[1]) && canCover(c[2]) && canCover(c[3]); }
+        else                         res = false;             // hoja deseada no residente → hueco real
+        memo[h] = res ? 1 : 0; return res;
+    };
+
+    // emit(n): baja a los hijos si TODOS cubren (→ detalle más fino); si no, dibuja n (residente
+    // garantizado). Atraviesa raíces/internos no-residentes. Dibuja n XOR sus hijos → sin solapes.
+    std::function<void(const PlanetChunkKey&)> emit = [&](const PlanetChunkKey& n){
+        if (!canCover(n)) return;                             // hueco real: nada residente en esta área
+        if (internal.count(H(n))) {
+            PlanetChunkKey c[4]; kids(n,c);
+            if (canCover(c[0]) && canCover(c[1]) && canCover(c[2]) && canCover(c[3])) {
+                emit(c[0]); emit(c[1]); emit(c[2]); emit(c[3]); return;
+            }
+        }
+        const uint64_t h = H(n); // canCover(n) && (hoja || algún hijo sin cobertura) ⟹ residente(n)
+        if (outHashes.insert(h).second && outKeys) outKeys->push_back(n);
+    };
+
+    for (uint16_t bd : bodies)
+        for (int f = 0; f < 6; ++f) emit({(PlanetFace)f, 0, 0, 0, bd});
+    if (outBodies) *outBodies = std::move(bodies);
+}
+
 TerrainRenderer::LODReport TerrainRenderer::validateCoverage() const {
     std::lock_guard<std::mutex> lock(m_renderMutex);
     LODReport r;
@@ -424,24 +496,17 @@ TerrainRenderer::LODReport TerrainRenderer::validateCoverage() const {
         return it != m_gpuMeshes.end() && it->second.isReady;
     };
 
-    // 1. Conjunto DIBUJADO = MISMA selección que renderPlanet: por cada hoja deseada, el chunk
-    //    residente más fino (hoja o ancestro más cercano). SIN culling (valida la teselación).
+    // 1. Conjunto DIBUJADO = MISMA selección que renderPlanet (buildDrawSet, partición top-down).
+    //    SIN culling (valida la teselación completa, incluido el lado oculto).
     std::unordered_set<uint64_t> drawn;
     std::vector<PlanetChunkKey>  drawnKeys;
     std::unordered_set<uint16_t> bodies;
     for (const auto& [planet, leaves] : m_desiredLeaves) {
-        for (PlanetChunkKey k : leaves) {
-            while (true) {
-                if (residentReady(k)) {
-                    uint64_t h = H(k);
-                    if (drawn.insert(h).second) { drawnKeys.push_back(k); bodies.insert(k.body); }
-                    break;
-                }
-                if (k.lod == 0) break;
-                k = { k.face, (uint8_t)(k.lod - 1), k.x >> 1, k.y >> 1, k.body };
-            }
-        }
+        std::unordered_set<uint16_t> b;
+        buildDrawSet(planet, drawn, &drawnKeys, &b);
+        bodies.insert(b.begin(), b.end());
     }
+    (void)residentReady;
     r.drawn = (int)drawnKeys.size();
     for (const auto& k : drawnKeys) if (k.body < 16) r.drawnByBody[k.body]++;
 
@@ -513,7 +578,7 @@ void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
     if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
     if (mesh.nmbo) glDeleteBuffers(1, &mesh.nmbo);
     if (mesh.uvo) glDeleteBuffers(1, &mesh.uvo);
-    if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
+    // mesh.ebo NO se borra: es el EBO COMPARTIDO por res (lo libera el destructor).
 }
 
 } // namespace Haruka
