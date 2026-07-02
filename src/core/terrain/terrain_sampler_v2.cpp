@@ -319,6 +319,11 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
 
     // Fusión costa: mar ↔ tierra por landMask (suave).
     ValD elev = mixD(seaDepth, landRelief, landMask);       // km
+    // COSTA PURA POR landMask (baja freq, estable entre LODs): clamp de AMBOS lados. landMask>0.5
+    // tierra (≥+5mm), landMask<0.5 océano (≤−5mm) → sin charcos ni islotes sub-celda que floten
+    // entre LODs (flicker). Condición IDÉNTICA a la GPU (terrain_gen.comp) y water.frag oceanElevKm.
+    if (landMask.v > 0.5f) elev = clampD(elev,  0.005f,  1e30f);
+    else                   elev = clampD(elev, -1e30f, -0.005f);
 
     // ---- Continente + wetness (necesario para gatear los lagos) ----
     int   continentId = -1;

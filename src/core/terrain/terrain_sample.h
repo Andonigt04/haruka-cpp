@@ -65,8 +65,9 @@ namespace Haruka {
         float reliefStrength = 1.0f;  ///< intensidad del relieve montañoso (1 = ~7.5 km pico). Parámetro de escena: config.reliefStrength.
 
         // --- Etapa 2.5: hidrología (lagos sembrados por la seed) ---
-        float lakeDensity = 150.0f;  ///< densidad de la rejilla de sellos de lago (más alto = lagos más juntos)
-        float lakeMaxProb = 0.5f;    ///< prob. máx. de que un sello sea lago (se multiplica por wetness)
+        float lakeDensity = 120.0f;  ///< densidad de la rejilla de sellos de lago (más alto = lagos más juntos)
+        float lakeMaxProb = 0.15f;   ///< prob. máx. de que un sello sea lago (×wetness). BAJADO 0.5→0.15:
+                                     ///< a 0.5 salían DEMASIADOS lagos ("círculos" por toda la tierra baja).
     };
 
     /**

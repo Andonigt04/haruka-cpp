@@ -11,9 +11,11 @@ namespace Haruka::Core {
         std::string title;
         uint32_t width;
         uint32_t height;
+        std::string iconPath; // PNG del icono de la ventana (vacío = sin icono)
 
-        WindowProps(const std::string& t = "Haruka Engine", uint32_t w = 1280, uint32_t h = 720)
-            : title(t), width(w), height(h) {}
+        WindowProps(const std::string& t = "Haruka Engine", uint32_t w = 1280, uint32_t h = 720,
+                    const std::string& icon = "")
+            : title(t), width(w), height(h), iconPath(icon) {}
     };
 
     class Window {
@@ -46,6 +48,7 @@ namespace Haruka::Core {
         struct WindowData {
             std::string title;
             uint32_t width, height;
+            std::string iconPath;
         } m_data;
     };
 }

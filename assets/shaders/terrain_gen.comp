@@ -186,6 +186,11 @@ float terranElevKm(vec3 dir, out float outWaterKm) {
     // Clamp a +10 m garantiza que landMask>0.5 quede SIEMPRE sobre el mar.
     float landRelief = max(landBase + hillRelief + mountains, 0.01); // km (≥10 m)
     float elev = mix(seaDepth, landRelief, landMask);
+    // COSTA PURA POR landMask (baja freq, ESTABLE entre LODs): clamp de AMBOS lados → landMask>0.5
+    // tierra (≥+5mm), landMask<0.5 océano (≤−5mm). Quita los charcos (tierra baja) Y los islotes
+    // sub-celda del lado mar que el morph CDLOD hacía flipar → sin panales/flicker. Paridad con
+    // water.frag oceanElevKm y terrain_sampler_v2.cpp.
+    elev = (landMask > 0.5) ? max(elev, 0.005) : min(elev, -0.005);
 
     // --- Lagos (sellos de la seed, gateados por wetness del continente) ---
     outWaterKm = 0.0; // mar por defecto

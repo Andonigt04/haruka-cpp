@@ -29,6 +29,8 @@ layout(location = 2) out float WaveHeight; // signed crest height (m)
 layout(location = 3) out float Foam;       // 0..1 from Gerstner Jacobian (crest pinching)
 layout(location = 4) out float IsLake;     // 1 = lago, 0 = océano (para el fragment)
 layout(location = 5) out float Depth;      // profundidad del agua (m): orilla≈0
+layout(location = 6) out vec3  WorldDir;   // dirección RADIAL (planeta→vértice), PRECISA (para costa
+                                           // per-píxel: evita el float32 de FragPos+planetRelCam)
 
 layout(location = 10) uniform vec3  u_chunkOffset;   // chunkCentre - cameraPos
 layout(location = 12) uniform float u_morphFactor;   // 0=detalle, 1=forma del padre (CDLOD, misma location que el terreno)
@@ -58,9 +60,10 @@ const float GRAV      = 9.81;
 
 // Per-wave: wavelength (m), amplitude (m), steepness, direction angle offset (rad).
 const float WAVELEN[NUM_WAVES] = float[](120.0, 73.0, 41.0, 23.0, 13.0, 7.0);
-// Amplitudes (m) — oleaje calmado (~mitad) para un mar realista, no embravecido.
-// El sistema de mareas (fase/posición de la luna) escalará esto en runtime vía u_windStrength.
-const float AMP[NUM_WAVES]     = float[](0.8,   0.5,  0.28, 0.15, 0.08, 0.05);
+// Amplitudes (m) — oleaje VIVO pero no embravecido (~1.6× vs el calmado previo, que a
+// distancia/marea baja se veía casi plano). El sistema de mareas escala esto en runtime
+// vía u_windStrength; con marea viva el oleaje sube más.
+const float AMP[NUM_WAVES]     = float[](1.3,   0.8,  0.45, 0.25, 0.13, 0.08);
 const float STEEP[NUM_WAVES]   = float[](0.75,  0.70, 0.65, 0.60, 0.50, 0.42);
 const float ANGOFF[NUM_WAVES]  = float[](0.0,  0.55, -0.6,  1.1, -1.3,  0.9);
 
@@ -129,6 +132,13 @@ void main() {
     float detJ = Jxx * Jzz - Jxz * Jxz;       // <1 where crests pinch, <0 = fold
     Foam = clamp(1.0 - detJ, 0.0, 1.0);
 
+    // CLAMP DEL VALLE DE LA OLA: en agua fina el valle (disp.y<0) dipeaba por DEBAJO del lecho →
+    // el fragmento de agua quedaba detrás del fondo → el z-test lo descartaba → HUECOS de agua (los
+    // "círculos donde el agua no se renderiza") que se movían con la ola. Clampamos el valle a ~85%
+    // de la profundidad (aWaterParam.y, m) → el agua NUNCA atraviesa el fondo (sin huecos) y las
+    // CRESTAS siguen subiendo → el oleaje SIGUE VIÉNDOSE. En lo hondo no toca (profundidad >> ola).
+    disp.y = max(disp.y, -aWaterParam.y * 0.85);
+
     // World-space displaced position.
     vec3 worldDisp = u_waveTangent * disp.x + u_waveUp * disp.y + u_waveBitangent * disp.z;
     // F5.4: NIVEL de marea → desplazamiento radial del MAR (no lagos), el océano "respira".
@@ -149,5 +159,6 @@ void main() {
     WaveHeight = crest;
     IsLake     = isLake ? 1.0 : 0.0;
     Depth      = aWaterParam.y;
+    WorldDir   = aNormal;   // radial sea-level (planeta→vértice), precisa para la costa per-píxel
     gl_Position = projection * mat4(mat3(view)) * vec4(pos, 1.0);
 }

@@ -1,7 +1,9 @@
 #include "window.h"
+#include "stb_image.h"
 
 #include <cstring>
 #include <string>
+#include <filesystem>
 
 namespace Haruka::Core {
 
@@ -9,6 +11,18 @@ namespace Haruka::Core {
         m_data.title = props.title;
         m_data.width = props.width;
         m_data.height = props.height;
+        m_data.iconPath = props.iconPath;
+    }
+
+    // Carga un PNG (RGBA) como icono de la ventana. Silencioso si el archivo no existe.
+    static void applyWindowIcon(SDL_Window* win, const std::string& path) {
+        if (path.empty() || !std::filesystem::exists(path)) return;
+        int w = 0, h = 0, ch = 0;
+        unsigned char* px = stbi_load(path.c_str(), &w, &h, &ch, 4); // fuerza RGBA
+        if (!px) { std::cerr << "[Window] icono no cargado: " << path << "\n"; return; }
+        SDL_Surface* surf = SDL_CreateSurfaceFrom(w, h, SDL_PIXELFORMAT_RGBA32, px, w * 4);
+        if (surf) { SDL_SetWindowIcon(win, surf); SDL_DestroySurface(surf); }
+        stbi_image_free(px);
     }
 
     Window::~Window() {
@@ -62,6 +76,7 @@ namespace Haruka::Core {
                                    SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
         
         if (!m_window) return false;
+        applyWindowIcon(m_window, m_data.iconPath);   // icono de la ventana (si existe el PNG)
 
         m_glContext = SDL_GL_CreateContext(m_window);
         if (!m_glContext) return false;

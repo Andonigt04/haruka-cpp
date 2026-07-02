@@ -38,6 +38,18 @@ void PhysicsEngine::update(double deltaTime) {
 }
 
 void PhysicsEngine::integrateForces(double dt) {
+    // Nivel del mar del planeta activo (esfera de radio seaR). La TIERRA siempre está por
+    // encima del nivel del mar → un cuerpo por debajo de esta esfera está en una cuenca
+    // oceánica = sumergido. Se usa para el empuje de Arquímedes de los cuerpos dinámicos.
+    bool       haveSea = false;
+    glm::dvec3 seaCenter(0.0);
+    double     seaR = 0.0;
+    if (worldSystem && worldSystem->hasActivePlanet()) {
+        haveSea   = true;
+        seaCenter = worldSystem->getActivePlanetCenter();
+        seaR      = worldSystem->getActivePlanetRadius();
+    }
+
     for (auto& body : bodies) {
         if (body->isKinematic) continue;
 
@@ -55,6 +67,29 @@ void PhysicsEngine::integrateForces(double dt) {
         double rel = glm::length(vRel);
         if (rel > 1e-6)
             body->velocity += vRel * std::min(m_windCoef * rel * dt, 0.20);
+
+        // --- BUOYANCY (empuje de Arquímedes) + arrastre de agua para cuerpos SUMERGIDOS ---
+        // f = fracción sumergida: 0 cuando el cuerpo apenas toca la superficie por arriba
+        // (dist = seaR+radio), 1 cuando está totalmente bajo el agua (dist ≤ seaR−radio).
+        // Empuje hacia el radial +up escala con f y con la razón de densidades (buoyRatio>1 →
+        // flota); arrastre fuerte amortigua la velocidad → el objeto se ASIENTA flotando en la
+        // superficie (equilibrio a f≈1/buoyRatio) en vez de oscilar. up radial ≈ world-up cerca
+        // del jugador (donde la gravedad plana -Y ya apunta hacia el planeta).
+        if (haveSea && body->radius > 1e-4) {
+            glm::dvec3 rel2 = body->position - seaCenter;
+            double dist = glm::length(rel2);
+            double r    = body->radius;
+            if (dist > 1e-6 && dist < seaR + r) {
+                glm::dvec3 up = rel2 / dist;
+                double f = glm::clamp((seaR + r - dist) / (2.0 * r), 0.0, 1.0);
+                if (f > 0.0) {
+                    double g = glm::length(gravity);
+                    const double buoyRatio = 1.1;                 // agua/objeto (>1 = flota)
+                    body->velocity += up * (f * g * buoyRatio * dt);   // Arquímedes
+                    body->velocity -= body->velocity * (1.0 - std::exp(-3.0 * f * dt)); // arrastre
+                }
+            }
+        }
 
         body->position += body->velocity * dt;
     }

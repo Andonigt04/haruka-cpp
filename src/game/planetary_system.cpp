@@ -146,7 +146,9 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // 24 (no 48): cada subida = VAO+5 VBOs terreno (+ malla de agua) ≈ 1–3 ms en mesa/AMD.
     // 24/frame mantiene el peor frame del fly-in bajo control (~1 frame) sin que se note la
     // carga repartida (24×60 = 1440 chunks/s → la Tierra ~1000 entra en <1 s).
-    if (m_streaming) m_streaming->setUploadBudget(24);
+    if (m_streaming) m_streaming->setUploadBudget(40); // subido de 24: el agua sube por detrás del
+                                                       // terreno (mismo presupuesto) → más margen para
+                                                       // que alcance su LOD y no salga en diamantes.
     // Si hay chunks generándose/encolados, mantén la ventana de catch-up abierta (~1 s).
     if (m_streaming && (m_streaming->getPendingCount() + m_streaming->getQueuedCount()) > 0)
         m_catchupGrace = 60;
@@ -166,7 +168,13 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // en grueso para siempre (p.ej. 6 caras raíz al spawn).
         // Mientras la carga progresiva esté a medias, recalcula para afinar — pero solo
         // cada 4 frames (no cada uno) para repartir el coste del rebuild del quadtree.
-        const bool refining = (pi < m_lastUpdates.size() && m_lastUpdates[pi].residencyLimited);
+        // TAMBIÉN refinamos mientras haya chunks EN VUELO (catchupGrace>0, se pone a 60 cuando
+        // hay pendientes/encolados): sin esto, la cascada grueso→fino se ESTANCABA entre oleadas
+        // con la cámara quieta (residencyLimited parpadea a false al llegar un nivel, antes de
+        // pedir el siguiente) → al spawnear estático aparecías con COLISIÓN pero SIN VISUAL hasta
+        // que el cine movía la cámara y forzaba el recompute. Ahora la cascada se completa sola.
+        const bool refining = (pi < m_lastUpdates.size() && m_lastUpdates[pi].residencyLimited)
+                           || (m_catchupGrace > 0);
         const bool refineNow = refining && ((s_lf % 4) == 0);
         if (!m_forceLOD && !refineNow && moved < moveThresh) {
             // Cámara quieta: NO recalculamos el LOD (caro). Solo de vez en cuando
@@ -174,16 +182,20 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             // generado (idempotente, comprobando residencia → sin recopiar lo que ya
             // está). Sin esto los chunks no aparecen hasta moverte; haciéndolo cada
             // frame costaba ~45 ms (copiaba todo el agua siempre).
-            if (m_catchupGrace > 0 && (s_lf % 3) == 0) {
-                m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (ya filtra por residencia + presupuesto)
-                if (m_waterRenderer && m_cache)
-                    for (const auto& k : m_lastUpdates[pi].chunksToKeep) {
-                        if (m_waterRenderer->isResident(k)) continue;   // ya en GPU → no recopiar
-                        if (!m_streaming->tryConsumeUpload()) break;     // presupuesto de frame agotado
-                        ChunkData wd;
-                        if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
-                    }
-            }
+            if (m_catchupGrace > 0 && (s_lf % 3) == 0)
+                m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (filtra por residencia + presupuesto)
+            // AGUA: catch-up SIEMPRE estando quieto (cada 4 frames), NO solo durante la ventana de
+            // gracia. La subida del agua va por DETRÁS del terreno (mismo presupuesto, terreno
+            // primero); si paraba al expirar la gracia se quedaba a un LOD GRUESO sobre el terreno
+            // fino → el agua salía en DIAMANTES/tiles (celdas mojadas gruesas). Ahora sube el backlog
+            // hasta alcanzar el LOD del terreno. Idempotente (salta lo residente) → barato al día.
+            if (m_waterRenderer && m_cache && (s_lf % 4) == 0)
+                for (const auto& k : m_lastUpdates[pi].chunksToKeep) {
+                    if (m_waterRenderer->isResident(k)) continue;   // ya en GPU → no recopiar
+                    if (!m_streaming->tryConsumeUpload()) break;     // presupuesto de frame agotado
+                    ChunkData wd;
+                    if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
+                }
             continue;
         }
         m_lastLODCamPos[pi] = lodCamPos;

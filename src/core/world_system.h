@@ -98,6 +98,11 @@ namespace Haruka {
         void setActivePlanet(const glm::dvec3& center, double radius) {
             m_planetCenter = center; m_planetRadius = radius; m_hasActivePlanet = true;
         }
+        /** @brief Planeta activo (centro/radio en METROS, mismas unidades que las posiciones
+         *  de física). Radio = nivel del mar (esfera de referencia). Para buoyancy/oclusión. */
+        bool       hasActivePlanet()        const { return m_hasActivePlanet; }
+        glm::dvec3 getActivePlanetCenter()  const { return m_planetCenter; }
+        double     getActivePlanetRadius()  const { return m_planetRadius; }
         /** @brief Avanza la mecánica celeste un frame: órbita del Sol (día/noche),
          *  órbita de la Luna, marea y tiempo atmosférico. Lo llama el render. */
         void advanceCelestial(double dt);

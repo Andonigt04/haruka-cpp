@@ -719,6 +719,10 @@ void Application::renderFrameContent() {
                         glUniform1f(25, wgp.reliefStrength);
                         glUniform1f(26, (float)(planet.radius > 1e-9 ? 1.0 / planet.radius : 0.0));
                         glUniform1f(27, wgp.seaThreshold);
+                        // u_pxCoast ACTIVO (opción B): la costa per-píxel ahora usa la elevación
+                        // EXACTA del terreno (water.frag oceanElevKm ≡ terranElevKm) → orilla real
+                        // elev=0 a cualquier distancia, sin la faceta de celda de la malla y sin los
+                        // "discos" de antes (que venían de usar una elevación simplificada, no exacta).
                         glUniform1i(28, 1);  // u_pxCoast
                     } else {
                         glUniform1i(28, 0);
@@ -741,7 +745,7 @@ void Application::renderFrameContent() {
                     float windF = 1.0f;
                     if (_worldSystem) {
                         float ws = glm::length(_worldSystem->getWind(camD));
-                        windF = glm::clamp(0.55f + ws * 0.10f, 0.5f, 1.6f);
+                        windF = glm::clamp(0.85f + ws * 0.10f, 0.8f, 1.8f);
                     }
                     glUniform1f(19, tide * windF); // u_windStrength (marea × viento)
                     // NIVEL de marea (m): el mar sube/baja siguiendo a la Luna → "respira".

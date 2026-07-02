@@ -20,6 +20,7 @@ layout(location = 2) in float WaveHeight;
 layout(location = 3) in float Foam;
 layout(location = 4) in float IsLake;   // 1 = lago (agua dulce), 0 = océano
 layout(location = 5) in float Depth;    // profundidad del agua (m): orilla≈0
+layout(location = 6) in vec3  WorldDir; // radial (planeta→frag), preciso — para la costa per-píxel
 
 layout(location = 20) uniform int u_waterQuality;
 
@@ -93,8 +94,44 @@ float ssfW(float e0, float e1, float x) {
     float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t);
 }
 
-// (La costa per-píxel usa SOLO el continente fBmW de 6 octavas, inline en main → barato. La
-//  elevación completa con batimetría/montañas no hace falta: no cambia DÓNDE está la costa.)
+// Elevación TERRAN oceánica EXACTA (km, <0 mar / >0 tierra) = PORT LITERAL de terranElevKm de
+// terrain_gen.comp SIN lagos ni deformación (los lagos van por su malla; la deformación/cavar la
+// refleja el Depth per-vértice cerca). Como fBmW≡fBm y ssfW≡ssf, esto da la MISMA costa que el
+// terreno → costa per-píxel EXACTA, sin "discos" (el fallo antiguo era usar (seaThreshold+0.013)−c,
+// una versión simplificada que no casaba). Coste: 6 fBm/píxel → gateado a la franja de costa.
+const float A_NORM = 0.45;
+float oceanElevKm(vec3 dir) {
+    int seed = u_seed;
+    float c  = fBmW(dir, seed, 6, 0.5, 2.0, u_continentFreqA);
+    float c0 = u_seaThreshold;
+    float landMask = ssfW(c0 - 0.04, c0 + 0.04, c);
+    float seaT     = ssfW(c0, c0 - 0.5, c);
+    float seaDepth = seaT * (-5.0);
+    float oreg  = fBmW(dir, seed + 211, 4, 0.5, 2.0, 3.0);
+    float oMask = ssfW(0.05, 0.30, oreg);
+    float omn   = fBmW(dir, seed + 311, 5, 0.5, 2.1, 600.0);
+    float ona   = omn * (1.0 / A_NORM);
+    float oform = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);
+    float oceanRelief = (oform - 0.5) * oMask * 3.0;
+    seaDepth = min(seaDepth + oceanRelief * seaT, -0.02);
+    float landT    = ssfW(c0, c0 + 0.3, c);
+    float landBase = landT * 1.0;
+    float hmn   = fBmW(dir, seed + 77, 5, 0.5, 2.0, 300.0);
+    float hillRelief = (hmn * (1.0 / A_NORM)) * landT * 1.1;
+    float reg     = fBmW(dir, seed + 55, 4, 0.5, 2.0, 2.0);
+    float mtnMask = ssfW(0.12, 0.36, reg);
+    float mn      = fBmW(dir, seed + 123, 5, 0.5, 2.1, 800.0);
+    float form    = pow(clamp(1.0 - abs(mn * (1.0 / A_NORM)), 0.0, 1.0), 1.3);
+    float mountains  = form * mtnMask * (6.5 * u_reliefStrength);
+    float landRelief = max(landBase + hillRelief + mountains, 0.01);
+    float elev = mix(seaDepth, landRelief, landMask);
+    // COSTA PURA POR landMask (continente de baja freq, ESTABLE entre LODs) → clamp de AMBOS lados:
+    // landMask>0.5 = tierra (≥+5mm), landMask<0.5 = océano (≤−5mm). Elimina islotes/charcos sub-celda
+    // JUSTO al nivel del mar que el morph CDLOD hacía flipar tierra↔agua entre LODs → SIN panales/
+    // flicker. La costa queda en la línea landMask=0.5 (suave, 6-oct). Lagos = sistema aparte.
+    elev = (landMask > 0.5) ? max(elev, 0.005) : min(elev, -0.005);
+    return elev;
+}
 
 const vec3 DEEP_COLOR    = vec3(0.015, 0.07, 0.14);
 const vec3 SHALLOW_COLOR = vec3(0.05, 0.28, 0.40);
@@ -127,17 +164,20 @@ void main() {
     // ANTES del borde de evaluación (3 km) → ese borde es INVISIBLE (peso ya 0) y el agua profunda
     // SIEMPRE se ve (coastW=0 → clipDepth=Depth). Solo lejos (>4km) y solo océano (cerca/lagos =
     // per-vértice, refleja el cavar). Continente 6-oct = barato. Params verificados correctos.
+    // COSTA PER-PÍXEL EXACTA (opción B). CERCA = Depth per-vértice (refleja el cavar/deformación).
+    // A partir de ~150 m = elevación del terreno EVALUADA POR PÍXEL con la MISMA función que el
+    // terreno (oceanElevKm) → la orilla es la curva REAL elev=0, no la malla facetada por celda.
+    // Como la paridad es EXACTA, la mezcla per-vértice↔per-píxel es continua (sin discos, sin
+    // escalones). Solo se evalúa en la franja de costa (|Depth| pequeño) por coste (6 fBm/píxel).
     float clipDepth = Depth;
-    if (u_pxCoast == 1 && IsLake < 0.5) {
-        float camDist = length(FragPos);
-        if (camDist > 4000.0 && abs(Depth) < 3000.0) {
-            vec3 dir = normalize(FragPos + u_planetRelCam);
-            float c = fBmW(dir, u_seed, 6, 0.5, 2.0, u_continentFreqA);
-            float baseDepth = ((u_seaThreshold + 0.013) - c) * 2000.0; // >0 mar, <0 tierra
-            float farW   = smoothstep(4000.0, 22000.0, camDist);
-            float coastW = 1.0 - smoothstep(0.0, 2000.0, abs(Depth)); // suave → 0 antes del borde
-            clipDepth = mix(Depth, baseDepth, farW * coastW);
-        }
+    if (u_pxCoast == 1 && IsLake < 0.5 && abs(Depth) < 2500.0) {
+        vec3  dir     = normalize(WorldDir);              // radial PRECISO (no float32 a escala planeta)
+        float pxDepth = -oceanElevKm(dir) * 1000.0;       // profundidad con signo (>0 mar, <0 tierra)
+        // farW APRETADO (40→220 m): a partir de ~220 m manda el per-píxel exacto → descarta el agua
+        // GRUESA sobre tierra (celdas de agua a LOD grueso sobre terreno fino) que dejaba blobs. Muy
+        // cerca (<40 m, donde cavas) manda la malla per-vértice. Con dir preciso, paridad exacta.
+        float farW    = smoothstep(40.0, 220.0, length(FragPos));
+        clipDepth = mix(Depth, pxDepth, farW);
     }
     if (clipDepth <= 0.0) discard;
     float shoreAlpha = 1.0;
@@ -183,13 +223,16 @@ void main() {
     float ndlMoon  = max(dot(N, ML), 0.0);
     vec3  HM       = normalize(ML + V);
     float specMoon = pow(max(dot(N, HM), 0.0), 300.0);
-    color += moonLightColor * moonIntensity * (body * ndlMoon + vec3(specMoon) * 0.6);
+    color += moonLightColor * moonIntensity * (body * ndlMoon + vec3(specMoon) * 0.3);
 
     // Sun specular glint.
     // Sun specular glint — más cerrado y tenue (el brillo anterior era demasiado
     // drástico/irreal): reflejo de sol puntual, no un fogonazo en todo el mar.
+    // Glint del sol ACOTADO: a distancia la normal se aplana a radial → el glint se ensancha a una
+    // región grande; con sunLightColor HDR reventaba a BLANCO + bloom (mancha). Bajado 0.45→0.18 y
+    // CLAMP a 0.6 → destello visible sin fogonazo blanco.
     float spec = pow(max(dot(N, H), 0.0), 400.0);
-    color += sunLightColor * spec * 0.45;
+    color += min(sunLightColor * spec * 0.18, vec3(0.6));
 
     color += ambientStrength * body;
 
@@ -209,6 +252,16 @@ void main() {
         color = clamp(color, 0.0, 1.0);
     }
 
-    float alpha = mix(0.80, 1.0, max(fresnel, foam)) * shoreAlpha;
+    // El AGUA es el medio TRANSLÚCIDO (no la cámara): se ve el LECHO A TRAVÉS, teñido por el color
+    // del agua (alpha-blend sobre el terreno ya dibujado). Confinado a CERCA + SOMERO:
+    //  · nearF: solo a < ~150 m (donde estás nadando/en la orilla); a distancia OPACA para que el
+    //    lecho grueso NO asome en halftone (el bug de los círculos marrones era translucidez lejana).
+    //  · shallow: aguas someras claras (ves la arena); lo HONDO opaco (azul denso, realista).
+    // Así "ves a través del agua" donde importa, sin ensuciar el mar lejano.
+    float camDistW = length(FragPos);
+    float nearF    = 1.0 - smoothstep(150.0, 800.0, camDistW);   // 1 muy cerca → 0 lejos
+    float shallowW = 1.0 - smoothstep(0.0, 12.0, Depth);          // 1 somero → 0 hondo
+    float minA     = mix(1.0, 0.55, nearF * shallowW);           // ves el fondo, pero el agua sigue leyéndose como MAR (no barro)
+    float alpha    = mix(minA, 1.0, max(fresnel, foam)) * shoreAlpha;
     FragColor = vec4(color, alpha);
 }

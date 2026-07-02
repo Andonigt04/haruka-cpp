@@ -58,7 +58,10 @@ layout(std140, binding = 1) uniform PerObjectData {
 // El relieve de < ~8 m NO va en la geometría (aliasaría las normales del vértice
 // = pinchos); aquí vive POR PÍXEL en la iluminación → detalle sin pinchos.
 // DETAIL_STRENGTH: súbelo/bájalo si el relieve fino se ve flojo/exagerado.
-const float DETAIL_STRENGTH = 0.0; // detalle procedural OFF (las texturas darán el relieve)
+const float DETAIL_STRENGTH = 0.10; // relieve fino por píxel. BAJADO de 0.22: a 0.22 la normal se
+                                    // perturbaba tanto que de noche daba MANCHAS NEGRAS (normal lejos
+                                    // de la Luna) y "desnivel disparado". 0.10 = definición sutil sin
+                                    // eso. Gateado por distancia (transición ancha → sin anillo).
 
 float hash1(vec3 p) {
     p = fract(p * 0.3183099 + 0.1);
@@ -94,10 +97,15 @@ vec4 noised(vec3 x) {
 // Perturba la normal con relieve fino (2 octavas ~2 m y ~0.8 m). Mismo marco
 // que el damero (FragPos en metros) → escala real, sin geometría.
 vec3 applyDetailNormal(vec3 N, vec3 wp) {
+    // Gate por DISTANCIA: relieve fino solo CERCA. Lejos las celdas de ~1-2 m son sub-píxel →
+    // aliasarían (shimmer) — por eso estaba OFF; con el gate se puede tener sin ese problema.
+    // wp = FragPos = posición relativa a cámara → length(wp) = distancia a cámara.
+    float nearW = 1.0 - smoothstep(40.0, 600.0, length(wp)); // transición ANCHA → sin anillo visible
+    if (nearW < 0.01) return N;
     vec3 g = noised(wp * 0.5).yzw            // celdas de ~2 m
            + noised(wp * 1.25).yzw * 0.5;    // celdas de ~0.8 m (media amplitud)
     vec3 gTan = g - dot(g, N) * N;           // solo la parte tangencial inclina la normal
-    return normalize(N - DETAIL_STRENGTH * gTan);
+    return normalize(N - DETAIL_STRENGTH * nearW * gTan);
 }
 
 // --- Material de bioma (Etapa 4A) — paleta dieselpunk sombría (TERROSA) ---

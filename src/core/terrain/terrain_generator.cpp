@@ -203,16 +203,16 @@ namespace {
         // → a ras de suelo ≈0 (no toca nada) y el islote emerge al acercarte.
         const double nodeSizeM_   = planetRadius * 2.0 / double(1u << key.lod);
         const float  vtxSpacingM_ = float(nodeSizeM_ / double(res));
-        const float  seaBiasKm    = glm::min(0.15f, vtxSpacingM_ * 0.03f / 1000.0f);
+        // HUNDIDO DE ISLOTES DESACTIVADO: escalaba con el LOD (seaBias hasta ~150 m) y a LOD grueso
+        // HUNDÍA AL MAR puntos sueltos hasta decenas de metros sobre el nivel del mar en zonas que
+        // el continente marca como océano → carvaba las LLANURAS COSTERAS en un moteado de DIAMANTES
+        // de agua sobre tierra (el "agua en el terreno" que reportó el usuario). Ahora agua = terreno
+        // por debajo del nivel del mar, SIN excepciones → terreno y agua TOTALMENTE consistentes, sin
+        // agua sobre tierra. (Islotes sub-celda pueden reaparecer como motas finas de tierra en el mar
+        // a distancia; es un mal MENOR y más natural que el agua sobre tierra. Reactivar con cuidado
+        // —cap de seaBias mucho menor o test de "rodeado de océano"— si molestan.)
         auto adjElevKm = [&](int gx, int gy) -> float {
-            float e = gpuElevKm[gridIdx(gx, gy)];
-            if (e <= 0.0f || e >= seaBiasKm) return e;     // ya en el mar o claramente tierra
-            glm::vec3 sph = glm::vec3(getLocalPosition(key, gx, gy, res));
-            // Continente de baja frecuencia (misma fBm que el sampler): si la región
-            // está por DEBAJO del umbral de mar, el detalle fino que asoma es un islote
-            // sub-celda → al mar. Posición-only → idéntico en chunks vecinos (sin costuras).
-            float cont = NoiseGenerator::fBm(sph, (int)wgp.seed, 6, 0.5f, 2.0f, wgp.continentFreqA);
-            return (cont <= wgp.seaThreshold) ? -0.001f : e;
+            return gpuElevKm[gridIdx(gx, gy)];
         };
 
         float minElevKm = 1e30f;
@@ -576,17 +576,48 @@ namespace {
                 //     SUAVES. A LOD grueso no hay lago (terreno limpio); aparece, ya
                 //     suave, al acercarte. levelKm: 0=océano, >0=lago, NOLVL=seco.
                 const bool lakesAllowed = (vtxSpacingM_ < 250.0f);
-                auto isOcean = [&](int idx){ return wet[idx] && levelKm[(size_t)idx] == 0.0f; };
+                // MARGEN OCEÁNICO escalado por LOD: emitimos también las celdas de TIERRA cercana al
+                // mar (elev < oceanMarginKm, ~1 celda de subida) → la banda de costa tiene geometría
+                // CONTINUA a cualquier LOD (a LOD grueso la costa es más fina que la celda y quedaban
+                // huecos → puntos). El recorte PER-PÍXEL EXACTO (water.frag oceanElevKm) descarta lo
+                // que de verdad es tierra → la costa sale LISA sin inundar (antes inundaba porque el
+                // recorte era per-vértice facetado; ahora es exacto). Cerca (spacing→0) margen→0.
+                const float oceanMarginKm = std::min(vtxSpacingM_ * 0.06f / 1000.0f, 0.12f);
+                auto isOcean = [&](int idx){
+                    // Océano real (nivel 0) O tierra costera dentro del margen (para geometría continua).
+                    return (wet[idx] && levelKm[(size_t)idx] == 0.0f) || elevKmArr[(size_t)idx] < oceanMarginKm;
+                };
                 auto cellEmits = [&](int i)->bool {
                     bool anyOcean = isOcean(i) || isOcean(i+1) || isOcean(i+side) || isOcean(i+side+1);
-                    if (anyOcean) return true;                     // océano: any-corner (costa sin huecos)
+                    if (anyOcean) return true;                     // océano + margen: banda continua
                     if (!lakesAllowed) return false;               // LOD grueso: sin lagos → terreno limpio
                     return wet[i] || wet[i+1] || wet[i+side] || wet[i+side+1]; // lago fino: any-corner (suave)
                 };
+                // Pasada 1: marca qué celdas emiten agua.
+                std::vector<uint8_t> emit((size_t)(res * res), 0);
+                for (int y = 0; y < res; ++y)
+                for (int x = 0; x < res; ++x)
+                    emit[(size_t)(x + y * res)] = cellEmits(x + y * side) ? 1 : 0;
+                auto emitAt = [&](int cx, int cy) {
+                    return (cx >= 0 && cy >= 0 && cx < res && cy < res) && emit[(size_t)(cx + cy * res)];
+                };
+                // Pasada 2: EROSIÓN de celdas de agua AISLADAS (sin vecina 4-conexa) → quita el
+                // MOTEADO de diamantes sueltos que deja el hundido de islotes (adjElevKm) sobre
+                // plataformas cerca del nivel del mar. El mar/costa reales (conectados, y los
+                // islotes hundidos DENTRO del océano) se mantienen. NO erosionamos celdas de
+                // BORDE del chunk (su vecina puede estar en el chunk contiguo → evita costuras).
+                // SOLO a LOD fino/medio: a LOD GRUESO (órbita) la costa del agua sale en celdas
+                // dispersas (aliasing sub-píxel), y erosionarlas dejaría HUECOS = puntos negros
+                // sobre el lado noche. A LOD grueso dejamos las celdas (costa azul gruesa, sin huecos).
+                const bool erodeLOD = (vtxSpacingM_ < 250.0f);
                 for (int y = 0; y < res; ++y)
                 for (int x = 0; x < res; ++x) {
+                    if (!emit[(size_t)(x + y * res)]) continue;
+                    const bool border = (x == 0 || y == 0 || x == res - 1 || y == res - 1);
+                    if (erodeLOD && !border && !emitAt(x - 1, y) && !emitAt(x + 1, y)
+                                 && !emitAt(x, y - 1) && !emitAt(x, y + 1))
+                        continue;                      // mota aislada interior (solo LOD fino) → fuera
                     int i = x + y * side;
-                    if (!cellEmits(i)) continue;
                     chunk->waterIndices.push_back(i);
                     chunk->waterIndices.push_back(i + 1);
                     chunk->waterIndices.push_back(i + side);

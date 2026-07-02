@@ -147,7 +147,7 @@ void SettingsPanel::tabGraphics() {
 
     // 0 = Auto (presupuesto = 25% de la RAM del sistema, acotado). El format string muestra
     // "Auto" en 0 (sin %d) y "%d MB" en cualquier otro valor → el usuario puede forzarlo.
-    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 0, 8192,
+    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 0, 24576,
                      g.chunkMemoryMB == 0 ? "Auto" : "%d MB");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("gfx.chunkMemory.tip").c_str());
 

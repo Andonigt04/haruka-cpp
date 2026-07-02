@@ -136,13 +136,16 @@ void Application::applyGraphicsSettings() {
     // Also scales the per-vertex noise octaves (cheaper chunk generation).
     if (_planetarySystem) {
         switch (g.terrainQuality) {
-            // maxLOD bajado ~2 niveles (16/18/20/22 → 14/16/17/18): con chunkSize=24 el espaciado
-            // de vértices fino pasa de ~0.5-2 m a ~2-8 m (low-poly), y baja RAM + profundidad de
-            // cadena LOD (menos overlaps). Ajustable en vivo con el comando `terrainq`.
-            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 14); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
-            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 16); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
-            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 17); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
-            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 18); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            // chunkSize=96 (scene): la malla de AGUA usa esta res y a 96 la costa lejana queda
+            // CONTINUA (a 64 aliasaba en tiles = "el círculo"; a 48 en celdas/discos). El coste es
+            // RAM de caché (96²=9216 quads/chunk); con 32GB no es problema si el cap de chunkMemory
+            // está alto (0=Auto → ~33% RAM). maxLOD 15/17/18/19. Ajuste en vivo con `terrainq`.
+            // Ver perf_terrain_chunksize_rootcause (memoria). Fix definitivo pendiente = decouplar
+            // la res del agua del terreno (agua fina + terreno más barato).
+            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 15); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
+            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 17); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
+            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 18); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 19); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
         }
     }
 
@@ -313,7 +316,8 @@ void Application::run(const std::string& startScenePath) {
     uint32_t _height = 720;
 
     _window = std::make_unique<Haruka::Core::Window>(
-        Haruka::Core::WindowProps("Haruka Engine", _width, _height)
+        // Título de la ventana = nombre del juego; icono desde assets/icons/icon.png (si existe).
+        Haruka::Core::WindowProps("Survival", _width, _height, "assets/icons/icon.png")
     );
     if (!_window->init()) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");

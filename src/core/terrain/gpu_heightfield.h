@@ -32,7 +32,7 @@ public:
     struct Params {
         int   seed = 0;
         float continentFreqA = 1.2f, reliefStrength = 1.0f, seaThreshold = 0.0f;
-        float voronoiDensity = 1.0f, lakeDensity = 150.0f, lakeMaxProb = 0.5f;
+        float voronoiDensity = 1.0f, lakeDensity = 120.0f, lakeMaxProb = 0.15f; // lakeMaxProb 0.5→0.15 (menos lagos)
         double radius = 1.0;
     };
 

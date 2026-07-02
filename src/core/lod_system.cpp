@@ -220,7 +220,24 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
             }
         }
         const double screenSize = (dist > 1.0) ? node->size * m_screenK / dist : 1e30;
-        distSplit = visible && (screenSize > m_targetPx) && (node->key.lod < m_maxLOD);
+        // HISTÉRESIS (banda muerta) para matar el POPPING al saltar/jitear/moverte un poco cerca
+        // de una frontera de LOD: si los hijos finos YA están residentes (el nodo se dibuja
+        // PARTIDO), no lo fusionamos hasta que proyecte NOTABLEMENTE menos (0.72·targetPx). Sin
+        // esto, un cambio mínimo de distancia (un salto) cruza el umbral una y otra vez → el chunk
+        // fino se DESCARGA y se RECARGA en bucle = "aparecen cosas diferentes". Estado = residencia
+        // (persiste entre frames en el renderer; el árbol de nodos se reconstruye cada frame).
+        double thrPx = m_targetPx;
+        if (isResident) {
+            const uint8_t  cl = (uint8_t)(node->key.lod + 1);
+            const uint32_t bx = node->key.x * 2, by = node->key.y * 2;
+            const uint16_t bd = node->key.body;
+            const bool childRes = isResident({ node->key.face, cl, bx,     by,     bd })
+                               || isResident({ node->key.face, cl, bx + 1, by,     bd })
+                               || isResident({ node->key.face, cl, bx,     by + 1, bd })
+                               || isResident({ node->key.face, cl, bx + 1, by + 1, bd });
+            if (childRes) thrPx = m_targetPx * 0.72;   // ya partido → banda muerta al fusionar
+        }
+        distSplit = visible && (screenSize > thrPx) && (node->key.lod < m_maxLOD);
     } else {
         distSplit = (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD);
     }
