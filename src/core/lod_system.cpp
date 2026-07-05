@@ -51,8 +51,7 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
         PlanetChunkKey rootKey{ planetFace, 0, 0, 0, m_currentBody };
         glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
 
-        LODNode root(rootKey, center, radius * 2.0);
-        recursiveProcess(&root, cameraPos, update, radius, planetPos, isResident);
+        recursiveProcess(rootKey, center, radius * 2.0, cameraPos, update, radius, planetPos, isResident);
     }
 
     // 2:1 balance: ningún chunk vecino puede diferir en más de 1 nivel de LOD.
@@ -168,14 +167,15 @@ static int altitudeMaxLOD(double camDist, double radius, int hardMax) {
     return 4;                                            // espacio profundo: el más grueso
 }
 
-void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident) {
+void LODSystem::recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& center, double size,
+                                 const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident) {
     // Use the distance from camera to the SURFACE of the planet in the chunk's
     // direction rather than to the chunk center.  This allows side faces to
     // subdivide near the horizon even though their centers are far away.
-    const glm::dvec3 chunkDir    = glm::normalize(node->center - planetPos);
+    const glm::dvec3 chunkDir    = glm::normalize(center - planetPos);
     const glm::dvec3 surfacePoint = planetPos + chunkDir * radius;
     double dist = glm::distance(cameraPos, surfacePoint);
-    uint64_t hash = ChunkCache::keyToHash(node->key);
+    uint64_t hash = ChunkCache::keyToHash(key);
 
     // Cap subdivision by camera altitude so a distant view shows the WHOLE planet cheaply.
     const double camDist = glm::distance(cameraPos, planetPos);
@@ -186,7 +186,7 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     // gate, los planetas LEJANOS (Luna/Júpiter, simples puntos en el cielo) también se
     // forzarían a 1536 chunks cada uno → 3×1536 satura generación/memoria y no carga nada.
     const double camAlt = (radius > 1e-9) ? (camDist / radius - 1.0) : 1e9; // en radios
-    const bool belowMin = (node->key.lod < m_minLOD) && (camAlt < 1.5);
+    const bool belowMin = (key.lod < m_minLOD) && (camAlt < 1.5);
 
     bool distSplit;
     if (m_screenSpace) {
@@ -196,12 +196,18 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
         // el recompute a la vista (sin esto subdivide la esfera entera = cientos de ms en CPU).
         bool visible = true;
         if (m_hasCull) {
-            // Frustum (cam-rel): esfera del nodo (centro = node->center, radio ≈ node->size).
-            const glm::vec3 c = glm::vec3(node->center - cameraPos);
-            const float r = (float)node->size;
+            // Frustum (cam-rel): esfera del nodo (centro = center, radio ≈ size).
+            const glm::vec3 c = glm::vec3(center - cameraPos);
+            const float r = (float)size;
+            // GUARD-BAND: para el REFINAMIENTO/residencia (no el dibujo) ensanchamos el frustum un
+            // halo angular (~12°) → los chunks justo fuera de la vista SIGUEN refinados y residentes.
+            // Sin esto, al GIRAR EN SITIO los chunks que sales de vista se evictan (12 frames) y al
+            // volver a mirarlos hay que regenerarlos → "el terreno desaparece al girar". El dibujo
+            // sigue estricto (terrain_renderer), así que no se dibuja nada de más: solo se mantiene vivo.
+            const float guard = glm::length(c) * 0.22f; // ≈12° de halo alrededor del frustum
             for (int p = 0; p < 6; ++p) {
                 const glm::vec4& pl = m_cullPlanes[p];
-                if (pl.x*c.x + pl.y*c.y + pl.z*c.z + pl.w < -r) { visible = false; break; }
+                if (pl.x*c.x + pl.y*c.y + pl.z*c.z + pl.w < -(r + guard)) { visible = false; break; }
             }
             // Horizonte: nodo tras la curvatura del planeta (occR = radio − margen para picos).
             if (visible) {
@@ -210,16 +216,16 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
                     const glm::dvec3 camDir = (cameraPos - planetPos) / camDist;
                     const double cosChunk   = glm::dot(camDir, chunkDir); // chunkDir = dir del nodo
                     const double cosHorizon = occR / camDist;
-                    const double nodeDist   = glm::length(node->center - cameraPos);
+                    const double nodeDist   = glm::length(center - cameraPos);
                     const double horizonDist = std::sqrt(camDist*camDist - occR*occR);
                     // margen por tamaño angular del nodo (no descartar gruesos parciales)
-                    const double angMargin = node->size / radius;
-                    if (cosChunk < cosHorizon - angMargin && nodeDist > horizonDist + node->size)
+                    const double angMargin = size / radius;
+                    if (cosChunk < cosHorizon - angMargin && nodeDist > horizonDist + size)
                         visible = false;
                 }
             }
         }
-        const double screenSize = (dist > 1.0) ? node->size * m_screenK / dist : 1e30;
+        const double screenSize = (dist > 1.0) ? size * m_screenK / dist : 1e30;
         // HISTÉRESIS (banda muerta) para matar el POPPING al saltar/jitear/moverte un poco cerca
         // de una frontera de LOD: si los hijos finos YA están residentes (el nodo se dibuja
         // PARTIDO), no lo fusionamos hasta que proyecte NOTABLEMENTE menos (0.72·targetPx). Sin
@@ -228,18 +234,30 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
         // (persiste entre frames en el renderer; el árbol de nodos se reconstruye cada frame).
         double thrPx = m_targetPx;
         if (isResident) {
-            const uint8_t  cl = (uint8_t)(node->key.lod + 1);
-            const uint32_t bx = node->key.x * 2, by = node->key.y * 2;
-            const uint16_t bd = node->key.body;
-            const bool childRes = isResident({ node->key.face, cl, bx,     by,     bd })
-                               || isResident({ node->key.face, cl, bx + 1, by,     bd })
-                               || isResident({ node->key.face, cl, bx,     by + 1, bd })
-                               || isResident({ node->key.face, cl, bx + 1, by + 1, bd });
+            const uint8_t  cl = (uint8_t)(key.lod + 1);
+            const uint32_t bx = key.x * 2, by = key.y * 2;
+            const uint16_t bd = key.body;
+            const bool childRes = isResident({ key.face, cl, bx,     by,     bd })
+                               || isResident({ key.face, cl, bx + 1, by,     bd })
+                               || isResident({ key.face, cl, bx,     by + 1, bd })
+                               || isResident({ key.face, cl, bx + 1, by + 1, bd });
             if (childRes) thrPx = m_targetPx * 0.72;   // ya partido → banda muerta al fusionar
         }
-        distSplit = visible && (screenSize > thrPx) && (node->key.lod < m_maxLOD);
+        // BIAS DE COSTA: si la línea de mar cae dentro de la HUELLA del chunk (|distToCoast| < ~size),
+        // baja el umbral → se subdivide más en la orilla = triángulos finos, sin la línea de agua
+        // dentada. La banda encoge con el chunk (size) → el refinamiento se concentra en la costa y
+        // se detiene solo. Gate de distancia REDUCIDO 60km→20km (2026-07-05): mirando A LO LARGO
+        // de la costa (vista al mar), 60 km de orilla refinada 2.5× reventaba el recompute (29ms) +
+        // buildDrawSet (6.6ms) + streaming → "el terreno desaparece al mirar al mar/girar". A distancia
+        // el recorte de la línea de agua es PER-PÍXEL en el shader (oceanElevKm), NO depende del LOD de
+        // la malla → bajar el refinamiento lejano NO dienta la costa (sigue exacta). Órbita/coste intactos.
+        if (m_coastFn && key.lod < m_maxLOD && dist < 20000.0) {
+            const double dc = std::abs(m_coastFn(chunkDir));   // |dist a la costa| (m)
+            if (dc < size * 1.2 + 100.0) thrPx *= m_coastRefine;
+        }
+        distSplit = visible && (screenSize > thrPx) && (key.lod < m_maxLOD);
     } else {
-        distSplit = (dist < node->size * m_splitFactor && node->key.lod < camMaxLOD);
+        distSplit = (dist < size * m_splitFactor && key.lod < camMaxLOD);
     }
     bool wantSplit = belowMin || distSplit;
 
@@ -249,51 +267,40 @@ void LODSystem::recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LOD
     // hay algo dibujado mientras el detalle llega, y refina nivel a nivel. Sin predicado
     // (isResident=nullptr) → comportamiento clásico (subdivide directo al objetivo).
     if (wantSplit && isResident) {
-        const uint8_t  cl = (uint8_t)(node->key.lod + 1);
-        const uint32_t bx = node->key.x * 2, by = node->key.y * 2;
-        const uint16_t bd = node->key.body;
-        const bool childIn = isResident({ node->key.face, cl, bx,     by,     bd })
-                          || isResident({ node->key.face, cl, bx + 1, by,     bd })
-                          || isResident({ node->key.face, cl, bx,     by + 1, bd })
-                          || isResident({ node->key.face, cl, bx + 1, by + 1, bd });
-        if (!isResident(node->key) && !childIn) {
+        const uint8_t  cl = (uint8_t)(key.lod + 1);
+        const uint32_t bx = key.x * 2, by = key.y * 2;
+        const uint16_t bd = key.body;
+        const bool childIn = isResident({ key.face, cl, bx,     by,     bd })
+                          || isResident({ key.face, cl, bx + 1, by,     bd })
+                          || isResident({ key.face, cl, bx,     by + 1, bd })
+                          || isResident({ key.face, cl, bx + 1, by + 1, bd });
+        if (!isResident(key) && !childIn) {
             wantSplit = false;             // aún no está el grueso → espera
             update.residencyLimited = true; // el llamador debe recalcular hasta refinar
         }
     }
 
     if (wantSplit) {
-        subdivide(node, radius, planetPos);
-        for (auto& child : node->children) {
-            recursiveProcess(child.get(), cameraPos, update, radius, planetPos, isResident);
+        // SIN ALLOCS: en vez de crear 4 LODNode con make_unique (el árbol se tiraba entero cada
+        // recompute → ~miles de alloc/free = el muro de planetary.update al moverte), calculamos
+        // cada hijo (key/center/size) al vuelo y recursamos directo. El árbol vive solo en la pila.
+        const int      nextLOD = key.lod + 1;
+        const double   childSize = size * 0.5;
+        const uint32_t baseX = key.x * 2, baseY = key.y * 2;
+        const double   chunksPerAxis = std::pow(2.0, nextLOD);
+        for (int i = 0; i < 4; ++i) {
+            uint32_t cx = baseX + (i % 2);
+            uint32_t cy = baseY + (i / 2);
+            double u = (double(cx) + 0.5) / chunksPerAxis;
+            double v = (double(cy) + 0.5) / chunksPerAxis;
+            glm::dvec3 childCenter = getCubeToSpherePos(key.face, u, v, radius) + planetPos;
+            PlanetChunkKey childKey = { key.face, (uint8_t)nextLOD, cx, cy, key.body };
+            recursiveProcess(childKey, childCenter, childSize, cameraPos, update, radius, planetPos, isResident);
         }
     } else {
         // Nodo hoja: solo registrar. El load/keep/unload se calcula tras el
         // balanceo 2:1 en updatePlanetLOD (las hojas pueden subdividirse luego).
-        m_currentFrameChunks[hash] = node->key;
-    }
-}
-
-void LODSystem::subdivide(LODNode* node, double radius, const glm::dvec3& planetPos) {
-    node->isSubdivided = true;
-
-    int nextLOD = node->key.lod + 1;
-    double childSize = node->size * 0.5;
-
-    uint32_t baseX = node->key.x * 2;
-    uint32_t baseY = node->key.y * 2;
-    double chunksPerAxis = std::pow(2.0, nextLOD);
-
-    for (int i = 0; i < 4; ++i) {
-        uint32_t cx = baseX + (i % 2);
-        uint32_t cy = baseY + (i / 2);
-
-        double u = (double(cx) + 0.5) / chunksPerAxis;
-        double v = (double(cy) + 0.5) / chunksPerAxis;
-
-        glm::dvec3 childCenter = getCubeToSpherePos(node->key.face, u, v, radius) + planetPos;
-        PlanetChunkKey childKey = { node->key.face, (uint8_t)nextLOD, cx, cy, node->key.body };
-        node->children[i] = std::make_unique<LODNode>(childKey, childCenter, childSize);
+        m_currentFrameChunks[hash] = key;
     }
 }
 

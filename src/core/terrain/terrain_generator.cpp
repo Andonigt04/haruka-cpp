@@ -881,6 +881,7 @@ namespace {
         p.voronoiDensity = wgp.voronoiDensity;
         p.lakeDensity    = wgp.lakeDensity;
         p.lakeMaxProb    = wgp.lakeMaxProb;
+        p.coastWidth     = wgp.coastWidth;
         p.radius         = radius;
         return true;
     }
@@ -898,6 +899,13 @@ namespace {
         for (int y = 0; y <= res; ++y)
             for (int x = 0; x <= res; ++x)
                 dirs[(size_t)(x + y * (res + 1))] = glm::vec3(getLocalPosition(key, x, y, res));
+        // Espaciado de vértices (m) = arco entre dos vértices adyacentes × radio → eps de la normal
+        // LOD-aware: la normal representa la geometría a ESTA resolución, no ruido sub-vértice (pinchos).
+        if (res >= 1) {
+            glm::vec3 d0 = glm::normalize(dirs[0]);
+            glm::vec3 d1 = glm::normalize(dirs[1]);
+            p.vertexSpacingM = glm::length(d1 - d0) * (float)planetRadius;
+        }
         return m_gpu->dispatchAsync(dirs, p);
     }
 

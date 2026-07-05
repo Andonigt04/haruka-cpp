@@ -35,4 +35,12 @@ namespace Haruka {
      */
     WorldGenParams deriveWorldParams(uint32_t seed, double planetRadius);
 
+    /**
+     * @brief Distancia con signo a la línea de costa (m), LIGERA (~5 fBm, sin relieve/lagos).
+     *        >0 tierra adentro · 0 costa · <0 mar. Misma fórmula que sampleTerrainV2 (paridad).
+     *        Para el BIAS DE COSTA del LOD (subdividir más en la orilla) sin pagar el sampler completo.
+     *        Cuerpos sin mar (moon/gas) devuelven un valor grande (sin costa).
+     */
+    float coastDistanceMeters(const glm::vec3& dir, const WorldGenParams& W, double planetRadius);
+
 } // namespace Haruka

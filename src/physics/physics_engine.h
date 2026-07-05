@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <functional>
 #include "octree.h"
 #include "core/world_system.h"
 #include "game/planetary_system.h"
@@ -24,6 +25,7 @@ struct RigidBody {
     double mass;
     double radius;
     bool isKinematic = false;
+    bool inWater = false;   // estado agua↔aire para disparar el splash SOLO al ENTRAR (no cada frame)
     std::string name;
 };
 
@@ -91,6 +93,13 @@ public:
     /** @brief Advances simulation by one time step. */
     void update(double deltaTime);
     /** @brief Sets constant gravity acceleration. */
+    /** @brief Callback de SPLASH: se dispara cuando un cuerpo dinámico CRUZA la superficie del mar
+     *  hacia dentro con velocidad de entrada apreciable. (pos superficie, velocidad de impacto,
+     *  radio). El juego lo engancha para emitir partículas PBF → acopla rígidos↔fluido. */
+    void setWaterEntryCallback(std::function<void(const glm::dvec3&, const glm::dvec3&, double)> cb) {
+        m_onWaterEntry = std::move(cb);
+    }
+
     void setGravity(glm::dvec3 g) { gravity = g; }
     /** @brief Returns current gravity acceleration. */
     glm::dvec3 getGravity() const { return gravity; }
@@ -178,6 +187,7 @@ private:
     // Arrastre aerodinámico: viento ambiente (m/s) + coeficientes SUAVES (la
     // resistencia del aire amortigua hacia 0; el viento empuja sutilmente). Valores
     // pequeños para no zarandear al jugador; afecta sobre todo a objetos sueltos.
+    std::function<void(const glm::dvec3&, const glm::dvec3&, double)> m_onWaterEntry; // splash al entrar al agua
     glm::dvec3 m_wind{0.0};
     double     m_airDamp  = 0.10;  // amortiguación del aire (1/s) hacia velocidad 0
     double     m_windCoef = 0.010; // acoplamiento cuadrático con la vel. relativa al viento

@@ -37,6 +37,10 @@ struct GraphicsSettings {
     bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
     int             chunkMemoryMB   = 0;     // terrain chunk cache budget (MB). 0 = AUTO (25% de la RAM del sistema, acotado 512–4096). Presets pueden fijar un valor explícito.
     int             maxFps          = 60;    // frame-rate cap (0 = uncapped)
+    // LOD adaptativo (calidad máxima que aguante el HW; degrada solo bajo carga). El usuario puede
+    // SOBREPONERSE: adaptiveLOD=false + lodTargetPx>0 fija un detalle manual (px del split screen-space).
+    bool            adaptiveLOD     = true;  // false = targetPx fijo (manual o el del preset)
+    int             lodTargetPx     = 0;     // 0 = automático (preset/adaptativo); >0 = override manual del usuario (px)
 };
 
 // One-click presets. "Low/Laptop" trades quality for frame time + battery/heat;

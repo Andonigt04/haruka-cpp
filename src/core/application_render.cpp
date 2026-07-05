@@ -719,13 +719,15 @@ void Application::renderFrameContent() {
                         glUniform1f(25, wgp.reliefStrength);
                         glUniform1f(26, (float)(planet.radius > 1e-9 ? 1.0 / planet.radius : 0.0));
                         glUniform1f(27, wgp.seaThreshold);
-                        // u_pxCoast ACTIVO (opción B): la costa per-píxel ahora usa la elevación
-                        // EXACTA del terreno (water.frag oceanElevKm ≡ terranElevKm) → orilla real
-                        // elev=0 a cualquier distancia, sin la faceta de celda de la malla y sin los
-                        // "discos" de antes (que venían de usar una elevación simplificada, no exacta).
-                        glUniform1i(28, 1);  // u_pxCoast
+                        // Costa PER-PÍXEL exacta (opción B) — recorta el agua al contorno real de la
+                        // costa. SIEMPRE-ON (antes solo Medium+): en LOW el agua salía por chunks
+                        // enteros = "rectángulos azules". La GPU está ociosa (todo el cuello es CPU),
+                        // así que el coste (~10 fBm/píxel en la franja de costa con distToCoast) sobra.
+                        glUniform1i(28, 1); // u_pxCoast (paridad oceanElevKm↔terreno exacta vía distToCoast)
+                        glUniform1f(30, wgp.coastWidth); // u_coastWidth (escala rampas costa, paridad seed)
                     } else {
                         glUniform1i(28, 0);
+                        glUniform1f(30, 1.0f);
                     }
                     // Oleaje = MAREA (alineación Sol–Luna) × VIENTO atmosférico (ráfagas):
                     // marea viva + ráfaga = mar picado; marea muerta sin viento = calmo.

@@ -1,6 +1,8 @@
 #include "planetary_system.h"
+#include "tools/profiler.h"   // HARUKA_PROFILE (sub-scopes de planetary.update: lod.recompute / lod.stream)
 
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
@@ -76,6 +78,28 @@ void PlanetarySystem::init() {
 void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     m_simulationTime += dt;
 
+    // LOD ADAPTATIVO: ajusta el targetPx hacia la mejor calidad que el frame sostiene. Afina
+    // mientras hay holgura de tiempo, engorda solo si se pasa del presupuesto → el LOD degrada
+    // SOLO bajo carga (petición del usuario: "mejor calidad según hardware"). Reacciona al tiempo
+    // de frame TOTAL, así se auto-corrige aunque el cuello no sea el terreno.
+    if (m_adaptiveLOD && m_lodBudgetMs > 0.0 && m_lod && dt > 1e-5) {
+        double frameMs = glm::clamp(dt * 1000.0, 0.5, 200.0);          // recorta outliers (hitches/pausa)
+        // EWMA LENTA (0.04): promedia ~varios segundos → NO reacciona a picos transitorios (un giro,
+        // un frame de streaming). Solo la carga SOSTENIDA mueve el LOD → el detalle no "respira" al girar.
+        m_lodEwmaMs = (m_lodEwmaMs <= 0.0) ? frameMs : glm::mix(m_lodEwmaMs, frameMs, 0.04);
+        m_lodAdjustAccum += dt;
+        if (m_lodAdjustAccum >= 1.0) {                                 // ajusta 1×/s
+            m_lodAdjustAccum = 0.0;
+            double px = m_lod->getTargetPx();
+            const double b = m_lodBudgetMs;
+            // Histéresis ANCHA (±30%): solo ajusta con desvío claro y sostenido → sin oscilación fina.
+            if      (m_lodEwmaMs > b * 1.30) px *= 1.06;               // muy pasado → engorda un poco
+            else if (m_lodEwmaMs < b * 0.70) px *= 0.95;               // holgura clara → afina
+            px = glm::clamp(px, m_lodMinPx, m_lodMaxPx);
+            if (std::abs(px - m_lod->getTargetPx()) > 0.5) { m_lod->setTargetPx(px); m_forceLOD = true; }
+        }
+    }
+
     // PREDICCIÓN DE MOVIMIENTO (lookahead): estima la velocidad de la cámara y evalúa
     // el LOD/streaming en un punto ADELANTADO → los chunks se generan ANTES de llegar
     // (menos pop-in al moverse/volar rápido y en el fly-in cinemático). El render usa
@@ -106,6 +130,8 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         m_lastLODCamPos.assign(m_planets.size(), glm::dvec3(1e300));
     if (m_lastUpdates.size() != m_planets.size())
         m_lastUpdates.assign(m_planets.size(), LODUpdate{});
+    if (m_lastLODFrame.size() != m_planets.size())
+        m_lastLODFrame.assign(m_planets.size(), -1000);
 
     // Islas flotantes (genVersion>=2): streaming-lite. Regenera el casquete de
     // islas alrededor de la cámara cuando esta se mueve lo bastante → islas
@@ -146,13 +172,21 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // 24 (no 48): cada subida = VAO+5 VBOs terreno (+ malla de agua) ≈ 1–3 ms en mesa/AMD.
     // 24/frame mantiene el peor frame del fly-in bajo control (~1 frame) sin que se note la
     // carga repartida (24×60 = 1440 chunks/s → la Tierra ~1000 entra en <1 s).
-    if (m_streaming) m_streaming->setUploadBudget(40); // subido de 24: el agua sube por detrás del
-                                                       // terreno (mismo presupuesto) → más margen para
-                                                       // que alcance su LOD y no salga en diamantes.
+    // TIME-BOX de subidas (antes: count=40): cada subida cuesta 2–3 ms (VAO+VBOs+malla de
+    // agua), así que un count de 40 producía picos de ~100 ms (los stalls de 112 ms que medía
+    // el profiler en planetary.update al entrar en zona nueva). Ahora acotamos por TIEMPO de
+    // pared: hasta 5 ms de subidas por frame (y un techo de count alto como salvaguarda). El
+    // resto del backlog entra en frames siguientes → sin picos, carga repartida. 5 ms mantiene
+    // el frame por debajo de ~16 ms incluso subiendo; el agua comparte el mismo presupuesto.
+    if (m_streaming) m_streaming->beginUploadFrame(/*count*/256, /*msBudget*/5.0);
     // Si hay chunks generándose/encolados, mantén la ventana de catch-up abierta (~1 s).
     if (m_streaming && (m_streaming->getPendingCount() + m_streaming->getQueuedCount()) > 0)
         m_catchupGrace = 60;
     else if (m_catchupGrace > 0) --m_catchupGrace;
+    // ¿Recalculó el LOD de cada planeta ESTE frame? En throttle (cámara quieta o entre recomputes)
+    // las hojas deseadas NO cambian → no hace falta re-enviarlas al renderer (evita invalidar el
+    // draw-set cacheado y reconstruirlo idéntico). Solo re-enviamos donde recompute realmente corrió.
+    std::vector<char> leavesChanged(m_planets.size(), 0);
     for (size_t pi = 0; pi < m_planets.size(); ++pi) {
         auto& planet = m_planets[pi];
 
@@ -176,7 +210,21 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         const bool refining = (pi < m_lastUpdates.size() && m_lastUpdates[pi].residencyLimited)
                            || (m_catchupGrace > 0);
         const bool refineNow = refining && ((s_lf % 4) == 0);
-        if (!m_forceLOD && !refineNow && moved < moveThresh) {
+        // THROTTLE TEMPORAL: al moverte a ritmo normal el LOD recalculaba CADA frame (rebuild del
+        // quadtree con allocs por nodo = hasta ~14ms → el muro de planetary.update moviéndote).
+        // Recalcula como mucho cada 2 frames; en un SALTO grande (teleport/descenso) recalcula ya.
+        // Los chunks residentes se siguen dibujando entre recomputes → pop-in mínimo, ~mitad de coste.
+        const bool bigJump  = moved > moveThresh * 16.0;
+        const bool frameDue = (s_lf - m_lastLODFrame[pi]) >= 2;
+        // GIRO DE CÁMARA: el LOD refina SOLO dentro del frustum (F2), así que al ROTAR (sin
+        // trasladar) la zona recién revelada se queda con el set del recompute viejo → grueso/
+        // vacío = "el terreno desaparece al mover la cámara". El recompute ya es baratísimo
+        // (~1ms, sin allocs), así que recalculamos también cuando la vista cambia lo bastante.
+        float dVP = 0.0f;
+        for (int a = 0; a < 4; ++a) for (int b = 0; b < 4; ++b)
+            dVP += std::fabs(m_curCullVP[a][b] - m_lastRecomputeCullVP[a][b]);
+        const bool viewChanged = dVP > 0.02f;
+        if (!m_forceLOD && !refineNow && !viewChanged && (moved < moveThresh || (!frameDue && !bigJump))) {
             // Cámara quieta: NO recalculamos el LOD (caro). Solo de vez en cuando
             // (cada ~6 frames) reprocesamos el último set para SUBIR lo recién
             // generado (idempotente, comprobando residencia → sin recopiar lo que ya
@@ -199,6 +247,8 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             continue;
         }
         m_lastLODCamPos[pi] = lodCamPos;
+        m_lastLODFrame[pi]  = s_lf;   // marca el frame de este recompute (throttle temporal)
+        m_lastRecomputeCullVP = m_curCullVP; // vista con la que se refinó → detecta giros posteriores
 
         SceneObject planetProxy;                 // pila, sin make_shared por frame
         planetProxy.name = planet.name;
@@ -213,11 +263,40 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         static std::unordered_set<uint64_t> s_resident; // reusa buffer entre frames
         if (m_renderer) m_renderer->residentHashes(s_resident);
         auto residentFn = [](const PlanetChunkKey& k) { return s_resident.count(ChunkCache::keyToHash(k)) != 0; };
+        // BIAS DE COSTA del LOD para ESTE planeta: la orilla se subdivide más (triángulos finos, sin
+        // línea de agua dentada). Solo se evalúa en el planeta bajo la cámara (gate dist<60 km en el
+        // LOD), así que basta la W de este planeta. W cacheada por seed (deriveWorldParams calibra CDF).
+        {
+            const auto& cfg = planet.terrainSettings.contains("config") ? planet.terrainSettings["config"] : planet.terrainSettings;
+            if (cfg.value("genVersion", 1) >= 2 && cfg.value("profile", std::string("terran")) == "terran") {
+                const uint32_t seed = (uint32_t)cfg.value("seed", 42);
+                const double   rad  = planet.radius;
+                static std::unordered_map<uint32_t, WorldGenParams> s_wpCache;
+                auto it = s_wpCache.find(seed);
+                if (it == s_wpCache.end()) {
+                    WorldGenParams W = deriveWorldParams(seed, rad);
+                    W.reliefStrength = cfg.value("reliefStrength", 1.0f); W.profile = 0;
+                    it = s_wpCache.emplace(seed, W).first;
+                }
+                const WorldGenParams W = it->second;
+                m_lod->setCoastBias([W, rad](const glm::dvec3& dir){
+                    return (double)coastDistanceMeters(glm::vec3(dir), W, rad);
+                }, 0.4);
+            } else {
+                m_lod->setCoastBias(nullptr);
+            }
+        }
         // bodyId = índice del planeta (estable en la sesión) → estampado en todas las
         // claves del cuerpo para que Tierra/Luna/Júpiter no colisionen en caché/renderer.
-        LODUpdate update = m_lod->updatePlanetLOD(
-            std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), lodCamPos, residentFn, (uint16_t)pi);
+        LODUpdate update;
+        {
+            HARUKA_PROFILE("lod.recompute"); // recursiveProcess + balanceo 2:1 (explota si hay mucha costa en vista)
+            update = m_lod->updatePlanetLOD(
+                std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), lodCamPos, residentFn, (uint16_t)pi);
+        }
         m_lastUpdates[pi] = update; // para el catch-up en throttle
+        leavesChanged[pi] = 1;      // recompute corrió → hojas potencialmente nuevas → re-enviar
+        HARUKA_PROFILE("lod.stream"); // resto de la iteración: sort + setDesiredChunks + processLODUpdate + agua + unload
 
         // B. Generar chunks nuevos (async) pasando settings del planeta
         nlohmann::json streamSettings = planet.terrainSettings;
@@ -284,8 +363,13 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // detalle de tener la cadena entera residente. Se hace CADA frame (también en throttle, con
     // el último update) para que el set esté siempre vigente.
     if (m_renderer) {
-        for (const auto& up : m_lastUpdates) {
+        for (size_t pi = 0; pi < m_lastUpdates.size(); ++pi) {
+            const auto& up = m_lastUpdates[pi];
             if (up.planetName.empty()) continue;
+            // Solo re-enviar si el LOD recalculó este frame (hojas nuevas). En throttle las hojas
+            // son idénticas a las ya enviadas → re-enviarlas invalidaría el draw-set cacheado del
+            // renderer para reconstruirlo IGUAL. El renderer ya conserva el último set.
+            if (pi < leavesChanged.size() && !leavesChanged[pi]) continue;
             std::vector<PlanetChunkKey> leaves;
             leaves.reserve(up.chunksToKeep.size() + up.chunksToLoad.size());
             leaves.insert(leaves.end(), up.chunksToKeep.begin(), up.chunksToKeep.end());
@@ -386,14 +470,107 @@ std::string PlanetarySystem::validateLOD() const {
     return s;
 }
 
-void PlanetarySystem::updateOrbits(double dt) {
-    // Aquí mueves las posiciones de m_planets usando Kepler o integración Euler
-    // Por ahora, podrías dejarlos estáticos o con una rotación simple
+double PlanetarySystem::benchDrawSet(int iters, int* outDrawn) const {
+    if (!m_renderer || iters < 1) { if (outDrawn) *outDrawn = 0; return 0.0; }
+    std::vector<double> ns; ns.reserve(iters);
+    std::unordered_set<uint64_t> out;
+    for (int i = 0; i < iters; ++i) {
+        out.clear();
+        auto t0 = std::chrono::high_resolution_clock::now();
+        m_renderer->buildDrawSet("TestPlanet", out, nullptr);
+        auto t1 = std::chrono::high_resolution_clock::now();
+        ns.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count());
+    }
+    if (outDrawn) *outDrawn = (int)out.size();
+    std::sort(ns.begin(), ns.end());
+    return ns[ns.size() / 2]; // mediana ns/llamada
+}
+
+bool PlanetarySystem::checkDrawSetMatchesReference(int iters, double* outNsOpt, double* outNsRef,
+                                                   int* outDrawn) const {
+    if (!m_renderer) return false;
+    std::unordered_set<uint64_t> opt, ref;
+    m_renderer->buildDrawSet("TestPlanet", opt, nullptr);
+    m_renderer->buildDrawSetReference("TestPlanet", ref, nullptr);
+    if (outDrawn) *outDrawn = (int)opt.size();
+    if (iters > 0) {
+        std::vector<double> a, b; a.reserve(iters); b.reserve(iters);
+        std::unordered_set<uint64_t> tmp;
+        for (int i = 0; i < iters; ++i) {
+            tmp.clear(); auto t0 = std::chrono::high_resolution_clock::now();
+            m_renderer->buildDrawSet("TestPlanet", tmp, nullptr);
+            auto t1 = std::chrono::high_resolution_clock::now();
+            a.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count());
+            tmp.clear(); auto t2 = std::chrono::high_resolution_clock::now();
+            m_renderer->buildDrawSetReference("TestPlanet", tmp, nullptr);
+            auto t3 = std::chrono::high_resolution_clock::now();
+            b.push_back(std::chrono::duration<double, std::nano>(t3 - t2).count());
+        }
+        std::sort(a.begin(), a.end()); std::sort(b.begin(), b.end());
+        if (outNsOpt) *outNsOpt = a[a.size() / 2];
+        if (outNsRef) *outNsRef = b[b.size() / 2];
+    }
+    return opt == ref; // MISMO conjunto exacto
+}
+
+void PlanetarySystem::updateOrbits(double /*dt*/) {
+    // ÓRBITA KEPLER ANALÍTICA: la posición es función del TIEMPO ABSOLUTO (m_simulationTime), no una
+    // integración incremental → SIN deriva ni inestabilidad (la órbita cierra exacta cada periodo).
+    // Resolvemos la CADENA DE PADRES RECURSIVAMENTE (memoizada) → el orden en m_planets da igual y
+    // funciona multinivel: Luna orbita Tierra que orbita Sol, sin lag. `done` marca lo ya resuelto
+    // este frame (y corta ciclos: un padre en su propio linaje usa la posición actual).
+    const size_t n = m_planets.size();
+    std::vector<char> done(n, 0);
+    std::function<glm::dvec3(size_t)> resolve = [&](size_t i) -> glm::dvec3 {
+        Planet& p = m_planets[i];
+        if (done[i]) return glm::dvec3(p.position);
+        done[i] = 1; // marca ANTES de recursar (guard de ciclos)
+        if (p.orbitParent >= 0 && (size_t)p.orbitParent < n && p.orbitPeriod > 0.0 && (size_t)p.orbitParent != i) {
+            const glm::dvec3 focus = resolve((size_t)p.orbitParent); // el padre PRIMERO
+            const double e = glm::clamp(p.orbitEcc, 0.0, 0.99);
+            const double M = p.orbitPhase + 2.0 * 3.14159265358979323846 * (m_simulationTime / p.orbitPeriod);
+            double E = M; // Kepler M = E − e·sinE por Newton
+            for (int it = 0; it < 8; ++it) E -= (E - e * std::sin(E) - M) / (1.0 - e * std::cos(E));
+            const double x = p.orbitA * (std::cos(E) - e);
+            const double y = p.orbitA * std::sqrt(std::max(0.0, 1.0 - e * e)) * std::sin(E);
+            p.position = focus + p.orbitU * x + p.orbitV * y;
+        }
+        return glm::dvec3(p.position);
+    };
+    for (size_t i = 0; i < n; ++i) resolve(i);
 }
 
 void PlanetarySystem::addPlanet(const Planet& planet) {
     m_planets.push_back(planet);
     m_forceLOD = true; // recompute LOD next update so the new planet appears at once
+}
+
+bool PlanetarySystem::setPlanetOrbit(const std::string& planetName, const std::string& parentName,
+                                     double period, double ecc) {
+    int pi = -1, par = -1;
+    for (size_t k = 0; k < m_planets.size(); ++k) {
+        if (m_planets[k].name == planetName) pi  = (int)k;
+        if (m_planets[k].name == parentName) par = (int)k;
+    }
+    if (pi < 0) return false;
+    Planet& pl = m_planets[(size_t)pi];
+    if (parentName.empty() || period <= 0.0 || par < 0 || par == pi) { // DETENER
+        pl.orbitParent = -1; pl.orbitPeriod = 0.0; return true;
+    }
+    const glm::dvec3 focus = m_planets[(size_t)par].position;
+    glm::dvec3 rel = glm::dvec3(pl.position) - focus;
+    double dist = glm::length(rel);
+    if (dist < 1e-6) return false;
+    const double e = glm::clamp(ecc, 0.0, 0.9);
+    glm::dvec3 u = rel / dist;
+    glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+    glm::dvec3 v = glm::normalize(glm::cross(axis, u));
+    pl.orbitParent = par; pl.orbitEcc = e; pl.orbitA = dist / std::max(1.0 - e, 1e-3);
+    pl.orbitPeriod = period;
+    // fase para que M=0 (periastro) AHORA, arrancando desde la posición actual sin salto.
+    pl.orbitPhase = -2.0 * 3.14159265358979323846 * (m_simulationTime / period);
+    pl.orbitU = u; pl.orbitV = v;
+    return true;
 }
 
 // Malla de Luna: esfera base (unidad) + desplazamiento de cráteres deterministas
@@ -451,6 +628,11 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
     // Un planeta ES un cuerpo celeste: un solo recorrido decide, por objeto, qué
     // representación necesita — terreno por chunks (si trae terrainSettings) y/o
     // una malla procedural propia (si trae properties.proceduralMesh). No se separan.
+    // ÓRBITAS (opt-in): un objeto con la propiedad "orbitParent" (nombre de otro cuerpo) y
+    // "orbitPeriod" (s) orbitará con Kepler analítico. a/u/v/fase se derivan de su posición INICIAL
+    // en la escena (arranca ahí, en el periastro). Sin esas props → estático (retrocompatible).
+    struct OrbitIntent { size_t planetIdx; std::string parent; double period, ecc; };
+    std::vector<OrbitIntent> orbitIntents;
     for (auto& objPtr : scene.getObjectsMutable()) {
         if (!objPtr) continue;
         auto& obj = *objPtr;
@@ -480,6 +662,12 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
                 }
             }
             addPlanet(planet);
+            // ¿Orbita? (propiedades de la escena) → intención a resolver cuando estén TODOS.
+            std::string op = obj.getProperty<std::string>("orbitParent", std::string{});
+            double per = (double)obj.getProperty<float>("orbitPeriod", 0.0f);
+            if (!op.empty() && per > 0.0)
+                orbitIntents.push_back({ m_planets.size() - 1, op, per,
+                                         (double)obj.getProperty<float>("orbitEcc", 0.0f) });
         }
 
         // (2) MALLA procedural propia (cuerpo sin terreno): p.ej. la Luna con
@@ -494,6 +682,34 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
             fprintf(stderr, "[PlanetarySystem] Procedural mesh attached to celestial body '%s'\n", obj.name.c_str());
         }
     }
+
+    // Resuelve las órbitas: nombre del padre → índice; deriva a/u/v/fase de la posición INICIAL de
+    // la escena (arranca en el periastro a lo largo del radial inicial; plano ~horizontal del padre).
+    for (const auto& oi : orbitIntents) {
+        int parentIdx = -1;
+        for (size_t k = 0; k < m_planets.size(); ++k)
+            if (m_planets[k].name == oi.parent) { parentIdx = (int)k; break; }
+        if (parentIdx < 0 || parentIdx == (int)oi.planetIdx) continue; // padre no hallado o self
+        Planet& pl = m_planets[oi.planetIdx];
+        const glm::dvec3 focus = m_planets[(size_t)parentIdx].position;
+        glm::dvec3 rel = glm::dvec3(pl.position) - focus;
+        double dist = glm::length(rel);
+        if (dist < 1e-6) continue;
+        const double e = glm::clamp(oi.ecc, 0.0, 0.9);
+        glm::dvec3 u = rel / dist;                                   // radial inicial = eje del periastro
+        glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+        glm::dvec3 v = glm::normalize(glm::cross(axis, u));          // perpendicular (plano ~horizontal)
+        pl.orbitParent = parentIdx;
+        pl.orbitEcc    = e;
+        pl.orbitA      = dist / std::max(1.0 - e, 1e-3);            // periastro (E=0) = dist inicial
+        pl.orbitPeriod = oi.period;
+        pl.orbitPhase  = 0.0;
+        pl.orbitU = u; pl.orbitV = v;
+        fprintf(stderr, "[orbit] '%s' orbita '%s': a=%.3e e=%.2f T=%.1fs\n",
+                pl.name.c_str(), oi.parent.c_str(), pl.orbitA, e, pl.orbitPeriod);
+    }
+
+    // (Órbitas por defecto: NO se auto-cablean aquí — WorldSystem ya gestiona Luna+día/noche. Ver notas.)
 
     // --- TEST DE PARIDAD GPU↔CPU (una vez) ---
     // Antes de meter el generador GPU en el pipeline hay que confirmar que el Perlin
@@ -530,7 +746,7 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
             GpuHeightfield::Params gp;
             gp.seed = (int)seed; gp.continentFreqA = W.continentFreqA; gp.reliefStrength = relief;
             gp.seaThreshold = W.seaThreshold; gp.voronoiDensity = W.voronoiDensity;
-            gp.lakeDensity = W.lakeDensity; gp.lakeMaxProb = W.lakeMaxProb; gp.radius = p.radius;
+            gp.lakeDensity = W.lakeDensity; gp.lakeMaxProb = W.lakeMaxProb; gp.coastWidth = W.coastWidth; gp.radius = p.radius;
             std::vector<float> ge, gw; std::vector<glm::vec3> gn;
             if (gpu.generate(dirs, gp, ge, gn, gw)
                 && ge.size() == dirs.size()) {
@@ -595,6 +811,7 @@ bool PlanetarySystem::getActivePlanet(glm::dvec3& center, double& radius,
 }
 
 void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
+    m_curCullVP = camRelViewProj; // guardado para detectar GIRO de cámara (recompute del LOD al rotar)
     if (m_renderer)      m_renderer->setCullMatrix(camRelViewProj);
     if (m_waterRenderer) m_waterRenderer->setCullMatrix(camRelViewProj);
     if (m_lod)           m_lod->setCullMatrix(camRelViewProj); // F2: acota el recompute del LOD a la vista
@@ -669,7 +886,15 @@ void PlanetarySystem::renderPlanetWater(const std::string& planetName, const glm
             m_waterRenderer->setPlanetRadius(p.radius);
             break;
         }
-    m_waterRenderer->renderPlanet(planetName, cameraPos);
+    if (m_waterRenderer->getSingleOcean())
+        m_waterRenderer->renderSingleOcean(planetName, cameraPos); // superficie única (test)
+    else
+        m_waterRenderer->renderPlanet(planetName, cameraPos);      // mallas de agua por-chunk
+}
+void PlanetarySystem::setWaterSingleOcean(bool on) { if (m_waterRenderer) m_waterRenderer->setSingleOcean(on); }
+bool PlanetarySystem::getWaterSingleOcean() const  { return m_waterRenderer && m_waterRenderer->getSingleOcean(); }
+void PlanetarySystem::setWaterFluidSampler(std::function<bool(const glm::dvec3&, float&, float&)> f) {
+    if (m_waterRenderer) m_waterRenderer->setFluidSampler(std::move(f)); // F5.1: océano sigue a la sim
 }
 
 int PlanetarySystem::getGPUWaterChunkCount() const {
@@ -708,11 +933,18 @@ void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
         // (en equipos grandes la fracción sí compensa para explorar sin regenerar; el techo solo
         // evita que un servidor con cientos de GB dedique decenas de GB a terreno).
         const size_t ram = systemTotalRAMMB();
-        size_t budget = ram ? (ram / 3) : 1024;          // 33% o 1 GB si no se sabe (subido de 25%)
-        budget = std::clamp<size_t>(budget, 512, 16384); // techo 16 GB (subido de 8): con índices
+        size_t budget = ram ? (ram / 4) : 1024;          // 25%: conserva lo ya cargado (menos regenerar)
+        budget = std::clamp<size_t>(budget, 512, 10240); // sin pasarse (deja sitio a VRAM/SO)
         resolved = (int)budget;
         fprintf(stderr, "[ChunkCache] Auto: RAM total=%zu MB → presupuesto cache terreno=%d MB\n",
                 ram, resolved);
+    }
+    // SEGURIDAD (memoria): la cache de terreno NUNCA debe pasar de ~50% de la RAM total, aunque el
+    // ajuste manual lo pida (p.ej. 24 GB en una máquina de 32 GB llenaba TODA la RAM → thrashing).
+    // Hay que dejar sitio al SO, driver GPU (los pools de malla), modelos/texturas y la lógica.
+    {
+        const size_t ram = systemTotalRAMMB();
+        if (ram > 0) resolved = std::min<int>(resolved, (int)(ram * 3 / 10)); // ≤30% RAM (deja sitio a VRAM/SO)
     }
     m_cache->setMaxMemory((size_t)std::max(16, resolved));
 }
@@ -727,11 +959,41 @@ void PlanetarySystem::setLODParams(double splitFactor, int maxLOD) {
     m_forceLOD = true; // re-evaluate the quadtree next update
 }
 
+void PlanetarySystem::setTerrainBatching(bool on) {
+    if (m_renderer)      m_renderer->setBatching(on);
+    if (m_waterRenderer) m_waterRenderer->setBatching(on); // el toggle cubre terreno + agua
+}
+bool PlanetarySystem::getTerrainBatching() const  { return m_renderer && m_renderer->getBatching(); }
+
 void PlanetarySystem::setLODScreenSpace(bool on) { if (m_lod) { m_lod->setScreenSpaceLOD(on); m_forceLOD = true; } }
 bool PlanetarySystem::getLODScreenSpace() const { return m_lod && m_lod->getScreenSpaceLOD(); }
-void PlanetarySystem::setLODScreenK(double k) { if (m_lod) m_lod->setScreenK(k); }
+void PlanetarySystem::setLODScreenK(double k) {
+    if (!m_lod) return;
+    m_lod->setScreenK(k);
+    // CDLOD morph EN SCREEN-SPACE: el split decide por targetPx (screenK·size/dist), así que la BANDA
+    // de morph del renderer debe usar el MISMO criterio o se desalinea. splitFactor efectivo del morph
+    // = screenK/targetPx → la banda [nodeSize·sf, 2·nodeSize·sf] coincide con la frontera de merge REAL.
+    // Antes el morph usaba el splitFactor fijo (0.70, criterio de DISTANCIA) mientras el split era
+    // screen-space → el chunk quedaba morphado al PADRE (hundido) sobre casi todo su rango visible →
+    // la malla se hundía bajo la colisión analítica = "doble terreno / props flotando".
+    if (m_lod->getScreenSpaceLOD()) {
+        const double tpx = m_lod->getTargetPx();
+        const double eff = (tpx > 1.0 && k > 1.0) ? (k / tpx) : m_lod->getSplitFactor();
+        if (m_renderer)      m_renderer->setSplitFactor(eff);
+        if (m_waterRenderer) m_waterRenderer->setSplitFactor(eff);
+    }
+}
 void PlanetarySystem::setLODTargetPx(double px) { if (m_lod) { m_lod->setTargetPx(px); m_forceLOD = true; } }
 double PlanetarySystem::getLODTargetPx() const { return m_lod ? m_lod->getTargetPx() : 0.0; }
+void PlanetarySystem::setLODBudget(double budgetMs, double minPx, double maxPx) {
+    m_lodBudgetMs = budgetMs;
+    m_lodMinPx = std::min(minPx, maxPx);
+    m_lodMaxPx = std::max(minPx, maxPx);
+    // Arranca en la cota GRUESA (segura): el controlador afina hacia abajo si hay holgura. Así
+    // nunca empezamos con un frame reventado por pedir demasiado detalle de golpe.
+    if (m_lod && budgetMs > 0.0) { m_lod->setTargetPx(m_lodMaxPx); m_forceLOD = true; }
+    m_lodEwmaMs = 0.0; m_lodAdjustAccum = 0.0;
+}
 
 PlanetarySystem::TerrainDrawStats PlanetarySystem::getTerrainDrawStats() const {
     if (!m_renderer) return {};

@@ -82,12 +82,23 @@ void PhysicsEngine::integrateForces(double dt) {
             if (dist > 1e-6 && dist < seaR + r) {
                 glm::dvec3 up = rel2 / dist;
                 double f = glm::clamp((seaR + r - dist) / (2.0 * r), 0.0, 1.0);
+                // SPLASH: al CRUZAR la superficie hacia dentro (aire→agua) con velocidad de entrada
+                // apreciable → dispara el callback UNA vez (no cada frame, por el flag inWater). El
+                // juego emite partículas PBF ahí → el impacto salpica.
+                if (f > 0.05 && !body->inWater) {
+                    double vDown = -glm::dot(body->velocity, up); // componente hacia el agua (m/s)
+                    if (vDown > 1.5 && m_onWaterEntry)
+                        m_onWaterEntry(seaCenter + up * seaR, body->velocity, r);
+                    body->inWater = true;
+                }
                 if (f > 0.0) {
                     double g = glm::length(gravity);
                     const double buoyRatio = 1.1;                 // agua/objeto (>1 = flota)
                     body->velocity += up * (f * g * buoyRatio * dt);   // Arquímedes
                     body->velocity -= body->velocity * (1.0 - std::exp(-3.0 * f * dt)); // arrastre
                 }
+            } else {
+                body->inWater = false; // fuera del agua → rearma el splash para la próxima entrada
             }
         }
 

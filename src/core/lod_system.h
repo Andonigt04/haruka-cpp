@@ -51,6 +51,15 @@ namespace Haruka {
         void   setTargetPx(double px)     { if (px > 1.0) m_targetPx = px; }
         double getTargetPx() const        { return m_targetPx; }
 
+        // --- BIAS DE COSTA: subdividir MÁS donde el chunk cruza la línea de mar (elev≈0) ---
+        // Los triángulos gruesos en la orilla hacían la línea de agua DENTADA (facetas). Con esto,
+        // un chunk cuya costa cae dentro de su huella (|distToCoast| < size·k) usa un targetPx menor
+        // (×coastRefine) → se subdivide ~1-2 niveles más SOLO en la franja costera (coste acotado).
+        // coastFn(dir) = |distancia a la costa| en metros (misma función que el terreno); nula = sin bias.
+        void setCoastBias(std::function<double(const glm::dvec3&)> coastFn, double refine = 0.4) {
+            m_coastFn = std::move(coastFn); m_coastRefine = (refine > 0.05 && refine < 1.0) ? refine : 0.4;
+        }
+
         // F2: frustum (cam-rel VP) para ACOTAR el recompute. En modo screen-space, los nodos
         // fuera de la vista o tras el horizonte NO se refinan (si no, el LOD subdivide la
         // esfera ENTERA en CPU = pico de cientos de ms; el horizon cull del render no ayuda
@@ -89,15 +98,8 @@ namespace Haruka {
         static glm::dvec3 getCubeToSpherePos(PlanetFace face, double u, double v, double radius);
 
     private:
-        struct LODNode {
-            PlanetChunkKey key;
-            glm::dvec3 center;
-            double size;
-            bool isSubdivided = false;
-            std::unique_ptr<LODNode> children[4];
-
-            LODNode(PlanetChunkKey k, glm::dvec3 c, double s) : key(k), center(c), size(s) {}
-        };
+        // (El antiguo LODNode heap-alocado se eliminó: recursiveProcess ahora recursa por VALOR
+        //  key/center/size, sin construir un árbol en el heap cada recompute → sin alloc/free churn.)
 
         double m_splitFactor;
         int m_maxLOD;
@@ -105,6 +107,8 @@ namespace Haruka {
         bool   m_screenSpace = true;  // F1 por DEFECTO (mata el tope por altitud). `lodscreen off` vuelve a baseline.
         double m_screenK     = 935.0; // px por (unidad de mundo / distancia); se fija por frame
         double m_targetPx    = 320.0; // subdivide si el chunk proyecta > este tamaño (px)
+        std::function<double(const glm::dvec3&)> m_coastFn; // |distToCoast| m (bias de costa); vacía = off
+        double m_coastRefine = 0.4;   // factor de targetPx en chunks costeros (más fino)
         glm::vec4 m_cullPlanes[6];    // F2: 6 planos del frustum (cam-rel) para acotar el recompute
         bool   m_hasCull = false;
         glm::dvec3 m_curCamPos{0.0}, m_curPlanetPos{0.0}; // estado del frame para balanceLeaves
@@ -119,8 +123,8 @@ namespace Haruka {
         std::unordered_map<uint64_t, PlanetChunkKey> m_lastFrameChunks;
         std::unordered_map<uint64_t, PlanetChunkKey> m_currentFrameChunks;
 
-        void recursiveProcess(LODNode* node, const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident);
-        void subdivide(LODNode* node, double radius, const glm::dvec3& planetPos);
+        void recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& center, double size,
+                              const glm::dvec3& cameraPos, LODUpdate& update, double radius, const glm::dvec3& planetPos, const ResidencyFn& isResident);
 
         // 2:1 LOD balance sobre el conjunto de hojas (m_currentFrameChunks).
         void balanceLeaves();

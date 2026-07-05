@@ -39,6 +39,12 @@ namespace Haruka {
             // so a sea-level estimate wrongly culls visible chunks.
             glm::vec3   bsCenter{0.0f};   // sphere centre, relative to chunkCenter
             float       bsRadius = 0.0f;  // sphere radius (metres)
+            // BATCHING (pool): si poolSlot>=0, la geometría vive en un POOL compartido
+            // (un VAO por vertexCount) y se dibuja con glDrawElementsBaseVertex → sin
+            // rebind de VAO por chunk (el coste dominante de terrain.draw). Si poolSlot<0,
+            // usa sus buffers propios (vao/vbo…) — camino legacy, intacto.
+            int32_t     poolSlot = -1;
+            uint32_t    poolKey  = 0;     // = vertexCount (clave del pool)
         };
 
         TerrainRenderer() = default;
@@ -77,6 +83,7 @@ namespace Haruka {
         void setDesiredLeaves(const std::string& planet, std::vector<PlanetChunkKey> leaves) {
             std::lock_guard<std::mutex> lock(m_renderMutex);
             m_desiredLeaves[planet] = std::move(leaves);
+            m_drawSetDirty[planet] = 1;   // invalida el cache del draw set (hojas nuevas)
         }
 
         /** @brief splitFactor REAL del LODSystem. La banda de morph CDLOD debe terminar (=1)
@@ -126,6 +133,13 @@ namespace Haruka {
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
         int getLastDrawnCount() const { return m_lastDrawn; }
 
+        /** @brief Activa/desactiva el BATCHING por pool (glDrawElementsBaseVertex sin rebind de
+         *  VAO por chunk). Afecta a las SUBIDAS nuevas: los chunks ya residentes siguen en su
+         *  modo hasta que se recargan (muévete para que la zona se repueble). OFF = camino legacy
+         *  por chunk (fallback seguro si el pool renderizara mal). */
+        void setBatching(bool b) { std::lock_guard<std::mutex> lk(m_renderMutex); m_batching = b; }
+        bool getBatching() const { return m_batching; }
+
         // --- Validación de invariantes del LOD (diagnóstico) ------------------------------
         // Recomputa el conjunto de chunks que CUBREN el planeta (la misma selección de
         // cobertura que el dibujo, pero SIN culling → independiente de hacia dónde mires) y
@@ -153,6 +167,13 @@ namespace Haruka {
                           std::vector<PlanetChunkKey>* outKeys,
                           std::unordered_set<uint16_t>* outBodies = nullptr) const;
 
+        // Implementación de REFERENCIA (algoritmo original, más lento) — solo para el banco de
+        // pruebas: buildDrawSet (optimizado) debe producir EXACTAMENTE el mismo conjunto que este.
+        void buildDrawSetReference(const std::string& planet,
+                                   std::unordered_set<uint64_t>& outHashes,
+                                   std::vector<PlanetChunkKey>* outKeys,
+                                   std::unordered_set<uint16_t>* outBodies = nullptr) const;
+
         struct DrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
         DrawStats getDrawStats() const;
         DrawStats getDrawStatsForPlanet(const std::string& planet) const;
@@ -164,6 +185,44 @@ namespace Haruka {
         // en todos los chunks de ese res. Un EBO por indexCount, reusado → ahorra VRAM (no un
         // EBO por chunk). Clave = indexCount; valor = handle GL. Se liberan en el destructor.
         std::unordered_map<uint32_t, GLuint>     m_sharedEBO;
+
+        // --- BATCHING: pool de geometría por vertexCount ---------------------------------
+        // Todos los chunks del MISMO vertexCount comparten un VAO + 5 buffers (pos/morph/
+        // normal/morphNormal/uv), en SLOTS de tamaño fijo (vertexCount vértices cada uno).
+        // Dibujar = glDrawElementsBaseVertex(baseVertex = slot*vertexCount) → un solo VAO
+        // bind para todos → mata el coste de rebind por chunk. Free-list de slots (sin
+        // fragmentación: todos los slots son del mismo tamaño). Crece x2 cuando se llena.
+        struct ChunkPool {
+            GLuint   vao = 0;
+            GLuint   posVBO = 0, morphVBO = 0, normVBO = 0, morphNormVBO = 0, uvVBO = 0;
+            GLuint   ebo = 0;            // EBO compartido por indexCount (reusa m_sharedEBO)
+            uint32_t vertexCount = 0;
+            uint32_t indexCount  = 0;
+            uint32_t capacity    = 0;   // nº de slots
+            std::vector<uint32_t> freeSlots;
+            // MultiDrawIndirect: buffers de comandos + datos por-draw (se rellenan cada frame con
+            // los chunks visibles de ESTE pool → una sola glMultiDrawElementsIndirect por pool).
+            GLuint   cmdBuf   = 0;       // GL_DRAW_INDIRECT_BUFFER
+            GLuint   drawSSBO = 0;       // DrawItem[] (binding 7), 1 por comando (gl_DrawID)
+            uint32_t drawBufCap = 0;     // capacidad actual (en elementos) de cmdBuf/drawSSBO
+        };
+        // std430 (coincide con el SSBO de planet.vert) y comando indirecto estándar.
+        struct GpuDrawItem { float offMorph[4]; int32_t mode[4]; };                 // 32 B
+        struct GpuDrawCmd  { uint32_t count, instanceCount, firstIndex, baseVertex, baseInstance; }; // 20 B
+        // Scratch reutilizado entre frames (por pool) → sin allocs por frame.
+        std::unordered_map<uint32_t, std::vector<GpuDrawCmd>>  m_scratchCmds;
+        std::unordered_map<uint32_t, std::vector<GpuDrawItem>> m_scratchItems;
+        std::unordered_map<uint32_t, ChunkPool>  m_pools;   // clave = vertexCount
+        bool m_batching = true;   // ON por defecto (validado por captura: pool renderiza correcto);
+                                  // consola `terrainpool off` = fallback per-chunk legacy si hiciera falta
+
+        /** @brief Devuelve (creando si hace falta) el pool para ese vertexCount/indexCount. */
+        ChunkPool& getOrCreatePool(uint32_t vertexCount, uint32_t indexCount);
+        /** @brief Duplica la capacidad del pool preservando los slots ya subidos (copia GPU→GPU). */
+        void growPool(ChunkPool& p);
+        /** @brief (Re)configura los atributos del VAO del pool tras crear/recrear sus buffers. */
+        void setupPoolVAO(ChunkPool& p);
+
         std::unordered_set<uint64_t>             m_stale;   // chunks a REEMPLAZAR en addToScene
         std::function<void(const PlanetChunkKey&)> m_onRemoved; // espejo del agua
         mutable std::mutex m_renderMutex;
@@ -171,11 +230,26 @@ namespace Haruka {
         double     m_splitFactor = 1.0; // sincronizado con el LODSystem vía setSplitFactor
         std::unordered_map<std::string, std::vector<PlanetChunkKey>> m_desiredLeaves;  // hojas LOD por planeta
         std::unordered_map<std::string, std::unordered_set<uint64_t>> m_drawnByPlanet; // hashes dibujados (para el agua)
+
+        // CACHE del draw set (buildDrawSet es CARO: partición del quadtree con recursión + sets
+        // hash → decenas de miles de ops/frame). Solo cambia si cambian las hojas deseadas
+        // (setDesiredLeaves → m_drawSetDirty) o el conjunto residente (add/remove → m_residentVersion).
+        // Reusado entre frames cuando nada cambió → terrain.draw baja mucho quieto/asentado.
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_drawSetCache;
+        std::unordered_map<std::string, uint64_t>                     m_drawSetCacheVer; // m_residentVersion del build
+        std::unordered_map<std::string, char>                         m_drawSetDirty;    // hojas cambiadas
+        uint64_t m_residentVersion = 0; // ++ en cada insert/erase de m_gpuMeshes
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};
         bool       m_hasPlanetCenter = false;
         int        m_lastDrawn = 0;
+        int        m_ageTick   = 0; // contador para la pasada de eviction (envejecer+purgar residentes)
+        // Tope duro de mallas residentes → acota RAM/VRAM ante picos de streaming (fly-in/órbita).
+        // Generoso sobre el set visible normal (~1500-4000); más allá se dibuja el ancestro grueso.
+        static constexpr int kMaxResidentChunks = 12000; // subido de 8000: con la ventana de eviction
+                                    // larga (girar sin perder terreno) hace falta sitio para el ENTORNO
+                                    // del jugador quieto en varias direcciones. ~0.5 MB/chunk, dentro del budget.
 
         void cleanupMesh(RenderMesh& mesh);
 

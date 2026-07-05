@@ -16,7 +16,7 @@
  * directions and amplitude. A sparse storm/wind system can drive these per
  * region without touching this shader.
  */
-#version 450 core
+#version 460 core   // gl_DrawID (core 4.6) para MultiDrawIndirect del agua
 
 layout(location = 0) in vec3  aPos;        // sea-level position relative to chunk centre
 layout(location = 1) in vec3  aNormal;     // radial outward (sphere normal at sea level)
@@ -34,6 +34,10 @@ layout(location = 6) out vec3  WorldDir;   // dirección RADIAL (planeta→vért
 
 layout(location = 10) uniform vec3  u_chunkOffset;   // chunkCentre - cameraPos
 layout(location = 12) uniform float u_morphFactor;   // 0=detalle, 1=forma del padre (CDLOD, misma location que el terreno)
+// MultiDrawIndirect del agua: por cada draw del batch, offset+morph vienen de este SSBO por gl_DrawID.
+layout(location = 40) uniform int u_batched;         // 1 = leer offset/morph del SSBO
+struct WDrawItem { vec4 offMorph; };                 // xyz=offset, w=morph
+layout(std430, binding = 7) readonly buffer WDrawSSBO { WDrawItem uItems[]; };
 layout(location = 14) uniform float u_time;          // seconds
 layout(location = 15) uniform vec3  u_waveUp;        // radial up at camera surface point
 layout(location = 16) uniform vec3  u_waveTangent;   // tangent basis (global per frame)
@@ -71,8 +75,12 @@ void main() {
     // CDLOD: la lámina se "aplana" hacia la forma del LOD padre antes del cambio de
     // nivel → sin salto de teselación (igual que el terreno). El faldón lleva su propio
     // morph = su posición, así no se mueve.
-    vec3 basePos   = mix(aPos, aMorphTarget, u_morphFactor);
-    vec3 camRelPos = u_chunkOffset + basePos;
+    // Datos por-draw: en batched (MultiDrawIndirect) vienen del SSBO por gl_DrawID.
+    vec3  off   = u_chunkOffset;
+    float morph = u_morphFactor;
+    if (u_batched == 1) { WDrawItem d = uItems[gl_DrawID]; off = d.offMorph.xyz; morph = d.offMorph.w; }
+    vec3 basePos   = mix(aPos, aMorphTarget, morph);
+    vec3 camRelPos = off + basePos;
 
     // 2D position in the camera-anchored tangent plane.
     vec2 horiz = vec2(dot(camRelPos, u_waveTangent), dot(camRelPos, u_waveBitangent));
@@ -104,7 +112,7 @@ void main() {
         float fade = 1.0 - smoothstep(WAVELEN[i] * 400.0, WAVELEN[i] * 1200.0, camDist);
         float A   = AMP[i] * windAmp * fade * waveScale;
         if (A < 1e-4) continue;
-        float w   = sqrt(GRAV * k);                // deep-water dispersion
+        float w   = sqrt(GRAV * k) * 0.55;         // deep-water dispersion, amansado (x0.55: se veía demasiado rápido)
         float Q   = STEEP[i] / (k * A * float(NUM_WAVES)); // keep crests from looping
 
         float phase = k * dot(D, horiz) - w * u_time;
@@ -130,7 +138,10 @@ void main() {
     }
 
     float detJ = Jxx * Jzz - Jxz * Jxz;       // <1 where crests pinch, <0 = fold
-    Foam = clamp(1.0 - detJ, 0.0, 1.0);
+    // Espuma SOLO en pliegues reales de cresta (detJ→0), no en toda la ondulación: antes
+    // Foam=1-detJ disparaba espuma en cuanto detJ bajaba de 1 → rayas blancas rizadas por
+    // TODO el mar abierto (se veía sucio). Gate duro: 0 hasta detJ~0.35, sube al doblarse.
+    Foam = 1.0 - smoothstep(0.0, 0.35, detJ);
 
     // CLAMP DEL VALLE DE LA OLA: en agua fina el valle (disp.y<0) dipeaba por DEBAJO del lecho →
     // el fragmento de agua quedaba detrás del fondo → el z-test lo descartaba → HUECOS de agua (los

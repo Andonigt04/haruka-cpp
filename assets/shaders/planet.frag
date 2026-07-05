@@ -13,8 +13,11 @@ layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 layout(location = 2) in vec2 TexCoord;
-
-layout(location = 11) uniform int u_terrainMode;
+// El modo lo fija el VERTEX shader (draw normal: uniform loc 11; batched/MultiDraw: SSBO por
+// gl_DrawID). Así el frag es idéntico en ambos caminos sin depender de gl_DrawID (no disponible
+// aquí). #define para no tocar cada uso de u_terrainMode del cuerpo.
+layout(location = 3) flat in int vMode;
+#define u_terrainMode vMode
 layout(location = 15) uniform int u_fogEnabled; // 1 = niebla on (config consola: fog)
 
 // Texturas de bioma (Fase 4A). u_hasTex=0 → color procedural (fallback).
@@ -96,11 +99,12 @@ vec4 noised(vec3 x) {
 
 // Perturba la normal con relieve fino (2 octavas ~2 m y ~0.8 m). Mismo marco
 // que el damero (FragPos en metros) → escala real, sin geometría.
-vec3 applyDetailNormal(vec3 N, vec3 wp) {
+vec3 applyDetailNormal(vec3 N, vec3 wp, float camDist) {
     // Gate por DISTANCIA: relieve fino solo CERCA. Lejos las celdas de ~1-2 m son sub-píxel →
     // aliasarían (shimmer) — por eso estaba OFF; con el gate se puede tener sin ese problema.
-    // wp = FragPos = posición relativa a cámara → length(wp) = distancia a cámara.
-    float nearW = 1.0 - smoothstep(40.0, 600.0, length(wp)); // transición ANCHA → sin anillo visible
+    // wp = posición MUNDO (relativa al centro del planeta) → estable al moverse (no "nada").
+    // camDist se pasa aparte (length(FragPos)) para el gate de distancia.
+    float nearW = 1.0 - smoothstep(40.0, 600.0, camDist); // transición ANCHA → sin anillo visible
     if (nearW < 0.01) return N;
     vec3 g = noised(wp * 0.5).yzw            // celdas de ~2 m
            + noised(wp * 1.25).yzw * 0.5;    // celdas de ~0.8 m (media amplitud)
@@ -119,7 +123,9 @@ const vec3 BIOME_SNOW  = vec3(0.74, 0.74, 0.71); // nieve sucia (no blanco puro)
 // Color de superficie por altura (m s.n.m.), pendiente (0 llano…1 vertical) y
 // clima (0 frío/polos…1 cálido/ecuador). La TIERRA es verde por defecto; roca y
 // nieve solo aparecen MUY alto o en laderas empinadas → no un planeta gris.
-vec3 biomeColor(float altitude, float slope, float climate, vec3 wp) {
+vec3 biomeColor(float altitude, float slope, float climate, vec3 wp, float camDist) {
+    // wp = posición MUNDO (relativa al centro del planeta) → el moteado de bioma queda ANCLADO al
+    // terreno (no "nada" al moverse). camDist aparte para el fundido lejano.
     // Rompe las bandas de contorno: ruido grande sobre la altura usada en los biomas.
     float aN = altitude + (noised(wp * 0.006).x - 0.5) * 700.0;
     float coldness = clamp((1.0 - climate) * 0.6 + altitude / 6000.0, 0.0, 1.0);
@@ -129,8 +135,9 @@ vec3 biomeColor(float altitude, float slope, float climate, vec3 wp) {
     c = mix(c, BIOME_ROCK, smoothstep(0.70,   0.90,   slope));       // roca SOLO en laderas muy empinadas
     float snow = smoothstep(0.74, 0.95, coldness) * (1.0 - smoothstep(0.86, 0.97, slope));
     c = mix(c, BIOME_SNOW, snow);                                    // nieve solo muy fría/alta
-    // Detalle fino de brillo SOLO cerca (lejos, wp enorme → alta freq en pantalla → motea).
-    float v = noised(wp * 0.4).x * (1.0 - smoothstep(2500.0, 9000.0, length(wp)));
+    // Detalle fino de brillo SOLO cerca (gate por distancia a cámara, no por length(wp) que ahora
+    // es planet-scale y siempre enorme).
+    float v = noised(wp * 0.4).x * (1.0 - smoothstep(2500.0, 9000.0, camDist));
     return c * (0.94 + 0.10 * v);
 }
 
@@ -162,8 +169,8 @@ void main() {
     // ROMPE la línea → costa ONDULADA. Antes la arena se gateaba con TexCoord.x (shoreFactor
     // POR-VÉRTICE): a baja resolución (chunk grueso) se interpolaba RECTO entre vértices →
     // borde poligonal "que parte el terreno". Por píxel + ruido = orilla natural a cualquier LOD.
-    float aShore  = altitude + (noised(FragPos * 0.004).x - 0.5) * 90.0; // ±~45 m de ruido
-    float shoreF  = 1.0 - smoothstep(0.0, 35.0, aShore);                 // 1 en la costa → 0 a ~35 m
+    float aShore  = altitude + (noised(FragPos * 0.004).x - 0.5) * 55.0; // ±~27 m de ruido (bajado de 90 → menos moteado arena/hierba)
+    float shoreF  = 1.0 - smoothstep(0.0, 22.0, aShore);                 // banda de arena MÁS FINA (35→22 m): menos "manchas" en llanos costeros
 
     float bodyProfile = u_planetRelCam.w;  // 0 terran · 1 luna · 2 gas
     vec3 baseColor;
@@ -182,7 +189,7 @@ void main() {
     } else if (u_hasTex == 1) {
         // Bioma TEXTURIZADO (triplanar): hierba → tierra seca → roca → nieve,
         // + arena en TODA orilla (uv.x = shoreFactor del generador).
-        float aN = altitude + (noised(FragPos * 0.006).x - 0.5) * 700.0; // rompe bandas
+        float aN = altitude + (noised(relPos * 0.006).x - 0.5) * 700.0; // rompe bandas (mundo-estable)
         float coldness = clamp((1.0 - climate) * 0.6 + altitude / 6000.0, 0.0, 1.0);
         vec3 col = triplanarAlbedo(u_grassAlbedo, FragPos, Ngeo, 0.5);                 // hierba (base)
         col = mix(col, triplanarAlbedo(u_landAlbedo, FragPos, Ngeo, 0.5),
@@ -197,16 +204,16 @@ void main() {
         // moteado (y se cuela por la costa del océano lejano). Fundimos al color de bioma
         // PLANO (sin textura) lejos → terreno liso a distancia, detalle solo cerca.
         float farFade = smoothstep(2500.0, 9000.0, length(FragPos));
-        col = mix(col, biomeColor(altitude, slope, climate, FragPos), farFade);
+        col = mix(col, biomeColor(altitude, slope, climate, relPos, length(FragPos)), farFade);
         baseColor = col;
     } else {
-        baseColor = biomeColor(altitude, slope, climate, FragPos);   // procedural (sin texturas)
+        baseColor = biomeColor(altitude, slope, climate, relPos, length(FragPos)); // procedural (mundo-estable)
         float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
         baseColor = mix(baseColor, BIOME_SAND, sandW);
     }
 
     // Normal del vértice (analítica, sin pinchos) + detalle fino 1–2 m por píxel.
-    vec3 N = applyDetailNormal(Ngeo, FragPos);
+    vec3 N = applyDetailNormal(Ngeo, relPos, length(FragPos));
     vec3 L = normalize(sunDirection);
     vec3 V = normalize(-FragPos);
     vec3 H = normalize(L + V);

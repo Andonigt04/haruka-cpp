@@ -295,6 +295,17 @@ set_target_properties(mapc PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 
+# --- 6a-bis. haruka_tests: banco de pruebas HEADLESS (LOD/sampler/órbitas, sin ventana/GL) ---
+# Subsistemas puros-CPU dirigidos con entrada sintética + verificación de invariantes → depurar a
+# pequeña escala, determinista y rápido, sin cargar un planeta entero. `ctest` o `./bin/haruka_tests`.
+add_executable(haruka_tests tests/haruka_tests.cpp)
+target_link_libraries(haruka_tests PRIVATE HarukaEngine)
+set_target_properties(haruka_tests PROPERTIES
+    BUILD_RPATH   "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN")
+enable_testing()
+add_test(NAME haruka_tests COMMAND haruka_tests)
+
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)
 if(HARUKA_NETWORK)

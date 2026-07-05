@@ -142,11 +142,34 @@ void Application::applyGraphicsSettings() {
             // está alto (0=Auto → ~33% RAM). maxLOD 15/17/18/19. Ajuste en vivo con `terrainq`.
             // Ver perf_terrain_chunksize_rootcause (memoria). Fix definitivo pendiente = decouplar
             // la res del agua del terreno (agua fina + terreno más barato).
-            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 15); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
-            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 17); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
-            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 18); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
-            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 19); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            // LOD ADAPTATIVO: el preset fija el PRESUPUESTO de frame (1000/fpsObjetivo RX 6600: low 300 /
+            // mid 260 / high 160 / ultra 100) y las COTAS de calidad [fino,grueso]. El targetPx se ajusta
+            // solo hacia la mejor calidad que ese presupuesto sostiene; solo engorda (menos detalle) si el
+            // frame se pasa. Así el LOD degrada SOLO bajo carga (no es un tope fijo agresivo).
+            // Cota GRUESA (maxPx) ACOTADA a un LOD que NUNCA muestre triángulos grandes: coarsear más
+            // allá de esto NO sube FPS cuando el cuello es CPU (GPU ociosa) — solo degrada el detalle en
+            // balde. Rango ESTRECHO min↔max → el adaptativo apenas oscila (sin "respirar" de detalle al
+            // girar). Bajo carga real el terreno se queda fino; solo baja un pelín, sin verse facetado.
+            // Rangos afinados con el barrido de calidad del harness (test_quality_sweep): la curva
+            // calidad/targetPx va en ESCALONES; el salto grande de detalle está en ~280 (700-380 no
+            // gana nada). Bajamos el rango para ALCANZAR ese escalón → casi el doble de detalle por
+            // ~1 ms, sin desperdiciar LOD en la zona plana. El adaptativo engorda hacia el max bajo carga.
+            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 15); _planetarySystem->setLODBudget(1000.0/300.0, 280.0, 400.0); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
+            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 17); _planetarySystem->setLODBudget(1000.0/260.0, 240.0, 340.0); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
+            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 18); _planetarySystem->setLODBudget(1000.0/160.0, 180.0, 280.0); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
+            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 19); _planetarySystem->setLODBudget(1000.0/100.0, 140.0, 220.0); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
         }
+        // OVERRIDE DE USUARIO (opción persistente): el preset fija el presupuesto adaptativo, pero el
+        // usuario puede sobreponerse — adaptiveLOD=false congela el auto-ajuste, y lodTargetPx>0 fija un
+        // detalle manual (px del split screen-space). Así "calidad automática según HW" es el default,
+        // pero quien quiera manda el valor a mano.
+        _planetarySystem->setAdaptiveLOD(g.adaptiveLOD);
+        if (g.lodTargetPx > 0) _planetarySystem->setLODTargetPx((double)g.lodTargetPx);
+        // CLAVE (perf): el LOD por defecto es SCREEN-SPACE (splitea si el chunk proyecta > targetPx).
+        // Antes targetPx era FIJO a 320 para TODOS los presets → Low dibujaba los mismos ~1500 chunks
+        // que Ultra → los presets NO cambiaban el nº de draws (el cuello es CPU draw-calls, GPU ociosa).
+        // Ahora targetPx sube en Low (chunks más grandes en pantalla = MENOS draws = más FPS) y baja en
+        // Ultra (más detalle). Runtime, sin mundo nuevo. Ajuste fino en vivo: `lodscreen on <px>`.
     }
 
     // Texture quality → anisotropic filtering + mip LOD bias. Low trades sharpness

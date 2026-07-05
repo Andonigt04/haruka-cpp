@@ -28,6 +28,8 @@ layout(location = 5) uniform float u_seaThreshold;  // c0 (debe coincidir con la
 layout(location = 6) uniform float u_voronoiDensity; // wetness (continentes)
 layout(location = 7) uniform float u_lakeDensity;    // densidad de sellos de lago
 layout(location = 8) uniform float u_lakeMaxProb;    // prob. máx. de lago
+layout(location = 9) uniform float u_coastWidth;     // factor de ancho de costa (seed): escala las rampas distToCoast
+layout(location = 10) uniform float u_vertexSpacingM; // separación entre vértices del chunk (m) → eps de la normal (LOD-aware)
 
 // ===================== Perlin 3D — PORT EXACTO de NoiseGenerator =====================
 // hash/grad/fade idénticos al C++ (enteros 32-bit con wrap 2's-complement = GLSL int).
@@ -90,6 +92,75 @@ float ssf(float e0, float e1, float x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// ===== FASE 4: Perlin con GRADIENTE ANALÍTICO — PORT EXACTO de NoiseGenerator::perlin3D_d/fBm_d =====
+// nGrad + su coeficiente de gradiente (grad es lineal en x,y,z).
+float nGradD(int hash, float x, float y, float z, out vec3 coef) {
+    int h = hash & 15;
+    float u = h < 8 ? x : y;
+    float v = h < 8 ? y : z;
+    float su = (h & 1) == 0 ? 1.0 : -1.0;
+    float sv = (h & 2) == 0 ? 1.0 : -1.0;
+    coef = vec3(0.0);
+    if (h < 8) { coef.x = su; coef.y = sv; } else { coef.y = su; coef.z = sv; }
+    return su * u + sv * v;
+}
+// Perlin 3D con derivada analítica (valor + ∂/∂pos). Forma separable (idéntica a perlin3D_d C++).
+float perlin3D_d(vec3 pos, out vec3 outGrad, int seed, float scale) {
+    vec3 p = pos * scale;
+    int x0 = int(floor(p.x)), y0 = int(floor(p.y)), z0 = int(floor(p.z));
+    float xf = p.x - float(x0), yf = p.y - float(y0), zf = p.z - float(z0);
+    float su = nFade(xf), sv = nFade(yf), sw = nFade(zf);
+    float dsu = 6.0 * xf * (1.0 - xf), dsv = 6.0 * yf * (1.0 - yf), dsw = 6.0 * zf * (1.0 - zf);
+    int cxA[2] = int[2](x0 & 255, (x0 + 1) & 255);
+    int cyA[2] = int[2](y0 & 255, (y0 + 1) & 255);
+    int czA[2] = int[2](z0 & 255, (z0 + 1) & 255);
+    float wx[2] = float[2](1.0 - su, su), dwx[2] = float[2](-dsu, dsu);
+    float wy[2] = float[2](1.0 - sv, sv), dwy[2] = float[2](-dsv, dsv);
+    float wz[2] = float[2](1.0 - sw, sw), dwz[2] = float[2](-dsw, dsw);
+    float n = 0.0; vec3 dn = vec3(0.0);
+    for (int i = 0; i < 2; ++i)
+    for (int j = 0; j < 2; ++j)
+    for (int k = 0; k < 2; ++k) {
+        vec3 gc;
+        float V = nGradD(nHash(cxA[i], cyA[j], czA[k], seed), xf - float(i), yf - float(j), zf - float(k), gc);
+        float wxyz = wx[i] * wy[j] * wz[k];
+        n    += V * wxyz;
+        dn.x += gc.x * wxyz + V * dwx[i] * wy[j] * wz[k];
+        dn.y += gc.y * wxyz + V * wx[i] * dwy[j] * wz[k];
+        dn.z += gc.z * wxyz + V * wx[i] * wy[j] * dwz[k];
+    }
+    outGrad = dn * scale;
+    return n;
+}
+// Gradiente del fBm (acumula ∂/∂pos por octava, normalizado). Solo el gradiente (el valor lo da fBm()).
+vec3 fBmGrad(vec3 pos, int seed, int octaves, float persistence, float lacunarity, float scale) {
+    float amplitude = 1.0, frequency = 1.0, maxValue = 0.0;
+    vec3 grad = vec3(0.0);
+    for (int i = 0; i < octaves; ++i) {
+        vec3 gn;
+        perlin3D_d(pos, gn, seed + i, scale * frequency);
+        grad += gn * amplitude;
+        maxValue += amplitude;
+        amplitude *= persistence;
+        frequency *= lacunarity;
+    }
+    return grad / maxValue;
+}
+
+// distToCoast (metros, con signo: >0 tierra, <0 mar) a la línea de costa (c=c0). Gradiente tangencial
+// de la continentalidad por DIFERENCIAS FINITAS. CLAVE: fórmula/epsilon IDÉNTICOS en los 3 sitios
+// (este compute GPU, terrain_sampler_v2.cpp CPU-colisión, water.frag costa) → paridad exacta. Da un
+// campo con gradiente REAL aunque el continente sea plano (c≈c0, ∇c≈0 en valor pero distToCoast no)
+// → gatear el relieve por él sube la tierra / baja el lecho SIEMPRE desde la orilla (rompe el llano).
+float distToCoastWorld(vec3 dir, float c, float c0) {
+    // FASE 4: gradiente ANALÍTICO (fBmGrad) en vez de 4 fBm por diferencias finitas → paridad con CPU.
+    vec3 g3   = fBmGrad(dir, u_seed, 6, 0.5, 2.0, u_continentFreqA);   // ∂c/∂dir
+    vec3 gtan = g3 - dot(g3, dir) * dir;                              // parte tangencial
+    float gmag = length(gtan); // |∇_tangente c|
+    float ddir = (c - c0) / max(gmag, 1e-5);                 // distancia en unidades de dir
+    return ddir / max(u_invRadius, 1e-20);                   // → metros (· planetRadius)
+}
+
 // ===== Hash entero + Voronoi + lagos — PORT EXACTO del sampler C++ =====
 uint  uhash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 uint  uhash2(uint a, uint b) { return uhash(a ^ (uhash(b) + 0x9e3779b9u)); }
@@ -147,34 +218,35 @@ float terranElevKm(vec3 dir, out float outWaterKm) {
     float band = 0.04;
     float landMask = ssf(c0 - band, c0 + band, c);
 
-    float seaT     = ssf(c0, c0 - 0.5, c);
-    float seaDepth = seaT * (-5.0);
-    // Batimetría: relieve submarino (dorsales/montes + fosas) sobre el gradiente liso,
-    // para que el lecho tenga relieve como la tierra (no un cuenco plano). Gateado por
-    // seaT → ~0 en la costa (plataforma somera) y crece mar adentro. MISMO código que la
-    // CPU (terrain_sampler_v2.cpp) para mantener paridad render↔colisión.
+    // distToCoast (m, con signo): el relieve sube/baja SIEMPRE desde la orilla aunque el continente
+    // sea plano (rompe el llano tostado + los rectángulos de agua). Paridad exacta en los 3 sitios.
+    float dc = distToCoastWorld(dir, c, c0);
+
+    // LECHO — BATIMETRÍA: PLATAFORMA continental somera → TALUD → LLANURA ABISAL (perfil por distToCoast)
+    // + montes/dorsales solo mar adentro. MISMA fórmula que terrain_sampler_v2.cpp y water.frag (paridad).
+    float off    = -dc;                                        // metros mar adentro (>0)
+    float shelfD = ssf(0.0,                    3000.0 * u_coastWidth, off);
+    float slopeD = ssf(3000.0 * u_coastWidth,  12000.0 * u_coastWidth, off);
+    float abyssD = ssf(12000.0 * u_coastWidth, 45000.0 * u_coastWidth, off);
+    float seaDepth = shelfD * (-0.18) + slopeD * (-3.6) + abyssD * (-1.0); // km, -0.18→-4.78
     float oreg   = fBm(dir, seed + 211, 4, 0.5, 2.0, 3.0);
     float oMask  = ssf(0.05, 0.30, oreg);
     float omn    = fBm(dir, seed + 311, 5, 0.5, 2.1, 600.0);
     float ona    = omn * (1.0 / A_NORM);
     float oform  = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);   // dorsales (ridged)
-    float oceanRelief = (oform - 0.5) * oMask * 3.0;            // km, [-1.5,1.5] segun máscara
-    seaDepth = min(seaDepth + oceanRelief * seaT, -0.02);       // siempre bajo el mar
-    float landT    = ssf(c0, c0 + 0.3, c);
-    float landBase = landT * 1.0;
+    float oceanRelief = (oform - 0.5) * oMask * 1.6;           // km, montes/fosas del lecho
+    seaDepth = min(seaDepth + oceanRelief * slopeD, -0.02);    // relieve solo mar adentro
 
-    // Colinas de frecuencia MEDIA en TODA la tierra → relieve "normal" ondulado. Antes el
-    // terreno era BIMODAL (llano de 1km o cresta ridged de 7.5km, sin nada intermedio); esto
-    // rellena el tramo medio. fBm suave (NO ridged) → laderas redondeadas. Gateado por landT
-    // (costa→0). MISMO código que la CPU (terrain_sampler_v2.cpp) para paridad render↔colisión.
-    float hmn   = fBm(dir, seed + 77, 5, 0.5, 2.0, 300.0); // freq alta → onda ~130km, VISIBLE
+    // TIERRA: sube en pendiente desde la orilla por distToCoast (rampa por seed) → sin meseta plana.
+    float landRamp = ssf(0.0, 1500.0 * u_coastWidth, dc);
+    float landBase = landRamp * 1.0;
+    // Colinas de frecuencia media, onduladas desde la costa (gateadas por landRamp → entran en la orilla).
+    float hmn   = fBm(dir, seed + 77, 5, 0.5, 2.0, 300.0);
     float hills = hmn * (1.0 / A_NORM);                 // ~[-1,1]
-    float hillRelief = hills * landT * 1.1;             // km, ondulado ±~1.1
+    float hillRelief = hills * landRamp * 1.3;          // km, ondulado
 
+    // Montañas: cordilleras cohesionadas (máscara propia, independiente de la costa).
     float reg     = fBm(dir, seed + 55, 4, 0.5, 2.0, 2.0);
-    // Máscara ESTRECHA: las montañas se concentran en regiones (cordilleras cohesionadas),
-    // no esparcidas como montículos por toda la tierra. Antes -0.05→0.30 cubría casi todo →
-    // ruido de montaña en todas partes = "muchos montículos" + cordillera defectuosa.
     float mtnMask = ssf(0.12, 0.36, reg);
     float mn      = fBm(dir, seed + 123, 5, 0.5, 2.1, 800.0);
     float na      = mn * (1.0 / A_NORM);
@@ -226,12 +298,15 @@ void main() {
     elev_out[idx]  = terranElevKm(dir, waterKm);
     water_out[idx] = waterKm;
 
-    // Normal GEOMÉTRICA: posiciones desplazadas de 4 vecinos (eps angular fijo ~2 m
-    // de arco → autoconsistente entre LODs) y producto vectorial de las tangentes.
+    // Normal GEOMÉTRICA: posiciones desplazadas de 4 vecinos y producto vectorial de las tangentes.
+    // FASE 4 — eps = ESPACIADO DE VÉRTICES del chunk (LOD-aware), no un ~2 m fijo: así la normal
+    // representa la geometría a ESTA resolución y NO capta ruido sub-vértice → mata los PINCHOS de
+    // shading (la normal fina no casaba con los triángulos grandes). El relieve < espaciado lo pone
+    // applyDetailNormal per-píxel. Suelo de 2 m para no degenerar en chunks finísimos.
     vec3 ref = (abs(dir.y) < 0.99) ? vec3(0,1,0) : vec3(1,0,0);
     vec3 T = normalize(cross(ref, dir));
     vec3 B = cross(dir, T);
-    float eps = max(u_invRadius * 2.0, 1e-7);
+    float eps = max(max(u_vertexSpacingM, 2.0) * u_invRadius, 1e-7);
     vec3 dTp = normalize(dir + T * eps), dTm = normalize(dir - T * eps);
     vec3 dBp = normalize(dir + B * eps), dBm = normalize(dir - B * eps);
     vec3 pTp = dTp * (1.0 + frac(terranElevKm(dTp)));

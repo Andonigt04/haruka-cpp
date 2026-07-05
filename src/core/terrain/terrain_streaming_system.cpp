@@ -192,24 +192,26 @@ namespace Haruka {
         // refresca gratis (no consume presupuesto), así que lo ya subido no cuenta.
         for (const auto& key : update.chunksToKeep) {
             if (m_renderer.isResident(key)) { m_cache.getChunk(key); continue; } // ya en GPU: solo refresca LRU
-            if (m_uploadBudget <= 0) return;                                      // presupuesto agotado → el resto, otro frame
+            if (!tryConsumeUpload()) return;                                      // presupuesto (count o tiempo) agotado → el resto, otro frame
             ChunkData data;
             if (m_cache.getChunkCopy(key, data)) {
                 m_renderer.addToScene(update.planetName, key, data); // sube el que falta
-                --m_uploadBudget;
+            } else {
+                ++m_uploadBudget; // no se subió nada (no estaba en caché) → devuelve el crédito
             }
         }
 
         // 3. CARGAR lo nuevo a la GPU
         for (const auto& key : update.chunksToLoad) {
             if (m_renderer.isResident(key)) continue;       // ya subido (idempotente): gratis
-            if (m_uploadBudget <= 0) return;                // presupuesto agotado
+            if (!tryConsumeUpload()) return;                // presupuesto (count o tiempo) agotado
             // Copy out of the cache UNDER ITS LOCK (not a raw pointer): a concurrent async
             // addChunk (insert/rehash/evict) would otherwise dangle the pointer → crash.
             ChunkData data;
             if (m_cache.getChunkCopy(key, data)) {
                 m_renderer.addToScene(update.planetName, key, data);
-                --m_uploadBudget;
+            } else {
+                ++m_uploadBudget; // no se subió nada (no estaba en caché) → devuelve el crédito
             }
         }
     }

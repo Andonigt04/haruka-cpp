@@ -56,9 +56,26 @@ namespace Haruka {
          *  lo resetea cada frame; processLODUpdate sube como mucho ese nº de chunks y deja
          *  el resto para frames siguientes → reparte la ráfaga de carga (sin picos de ms). */
         void setUploadBudget(int n) { m_uploadBudget = n; }
-        /** @brief Consume 1 del presupuesto de subida; false si agotado (no subas). Para
-         *  que el agua del PlanetarySystem comparta el MISMO presupuesto que el terreno. */
-        bool tryConsumeUpload() { if (m_uploadBudget <= 0) return false; --m_uploadBudget; return true; }
+        /** @brief (NUEVO) Presupuesto de TIEMPO de pared para subidas este frame (ms).
+         *  El presupuesto por COUNT no acota el pico: cada subida cuesta 2–3 ms (VAO+VBOs
+         *  +malla de agua), así que 40 subidas = ~100 ms de stall (los picos de 112 ms del
+         *  profiler). Time-box: cortamos las subidas al pasarnos de este presupuesto, suba
+         *  lo que suba → el peor frame queda acotado y el resto entra en frames siguientes.
+         *  Se debe llamar 1×/frame ANTES de las subidas para fijar el deadline. */
+        void beginUploadFrame(int count, double msBudget) {
+            m_uploadBudget   = count;
+            m_uploadDeadline = std::chrono::steady_clock::now()
+                             + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                   std::chrono::duration<double, std::milli>(msBudget));
+            m_uploadTimeBoxed = true;
+        }
+        /** @brief Consume 1 del presupuesto de subida; false si agotado (por COUNT o por
+         *  TIEMPO). Para que el agua del PlanetarySystem comparta el mismo presupuesto. */
+        bool tryConsumeUpload() {
+            if (m_uploadBudget <= 0) return false;
+            if (m_uploadTimeBoxed && std::chrono::steady_clock::now() >= m_uploadDeadline) return false;
+            --m_uploadBudget; return true;
+        }
 
         /**
          * @brief Recupera los chunks que ya terminaron de generarse.
@@ -104,6 +121,8 @@ namespace Haruka {
         // quiere limitar hilos (con el erase exception-safe ya no puede causar stall).
         size_t m_maxInFlight = 0;
         int    m_uploadBudget = 1000000; // F7: subidas a GPU restantes este frame (sin cap si no se resetea)
+        std::chrono::steady_clock::time_point m_uploadDeadline{}; // time-box de subidas (ver beginUploadFrame)
+        bool   m_uploadTimeBoxed = false;                        // el time-box sólo aplica si se llamó beginUploadFrame
         
         // Resultados listos para ser inyectados en la escena
         std::vector<std::shared_ptr<ChunkData>> m_completedChunks;

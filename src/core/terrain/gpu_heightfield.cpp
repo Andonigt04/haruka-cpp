@@ -74,6 +74,8 @@ void GpuHeightfield::uploadAndDispatch(Buffers& b, const std::vector<glm::vec3>&
     glUniform1f(6, p.voronoiDensity);
     glUniform1f(7, p.lakeDensity);
     glUniform1f(8, p.lakeMaxProb);
+    glUniform1f(9, p.coastWidth);
+    glUniform1f(10, p.vertexSpacingM);
 
     glDispatchCompute((GLuint)((n + 63) / 64), 1, 1);
 }

@@ -33,6 +33,8 @@ public:
         int   seed = 0;
         float continentFreqA = 1.2f, reliefStrength = 1.0f, seaThreshold = 0.0f;
         float voronoiDensity = 1.0f, lakeDensity = 120.0f, lakeMaxProb = 0.15f; // lakeMaxProb 0.5→0.15 (menos lagos)
+        float coastWidth = 1.0f; // factor de ancho de costa (seed): escala rampas distToCoast
+        float vertexSpacingM = 2.0f; // separación entre vértices del chunk (m) → eps de la normal (LOD-aware, mata pinchos)
         double radius = 1.0;
     };
 
@@ -42,7 +44,9 @@ public:
                   std::vector<float>& outWaterKm);
 
     // ---- Camino ASÍNCRONO (fences) ----
-    static constexpr int kSlots = 8; // chunks GPU en vuelo a la vez
+    static constexpr int kSlots = 16; // chunks GPU en vuelo a la vez (subido de 8: genera ~2× más
+                                      // rápido → el primer vistazo a un ángulo nuevo tarda la mitad;
+                                      // el compute es barato/GPU ociosa, los buffers extra son pequeños)
 
     /** @brief ¿Hay algún slot libre para despachar? */
     bool hasFreeSlot() const;

@@ -147,6 +147,20 @@ inline float regionalElevKm(const glm::vec3& dir, const WorldGenParams& W) {
     return (t * t * (3.0f - 2.0f * t)) * 1.0f; // landHeight ~1 km
 }
 
+// distToCoast (m, con signo: >0 tierra, <0 mar) a la línea de costa (c=c0). FASE 4: gradiente
+// ANALÍTICO (fBm_d) en vez de 4 fBm por diferencias finitas → 1 evaluación (perf) + sin el epsilon.
+// gmag = |gradiente TANGENCIAL| de la continentalidad. MISMA fórmula que terrain_gen.comp y water.frag
+// (fBmGrad portado) → paridad exacta (verificable con `haruka_tests parity`). `R` = radio (m).
+inline float distToCoastWorld(const glm::vec3& dir, float c, float c0,
+                              const WorldGenParams& W, float R) {
+    glm::vec3 g3;
+    NoiseGenerator::fBm_d(dir, g3, (int)W.seed, 6, 0.5f, 2.0f, W.continentFreqA); // ∂c/∂dir analítico
+    glm::vec3 gtan = g3 - glm::dot(g3, dir) * dir;   // parte tangencial (quita la componente radial)
+    float gmag = glm::length(gtan);
+    float ddir = (c - c0) / std::max(gmag, 1e-5f);
+    return ddir * R; // → metros
+}
+
 } // namespace
 
 WorldGenParams deriveWorldParams(uint32_t seed, double planetRadius) {
@@ -162,6 +176,10 @@ WorldGenParams deriveWorldParams(uint32_t seed, double planetRadius) {
 
     // Proporción mar/tierra: la elige la seed, acotada (nunca mundo degenerado).
     W.oceanFraction = glm::mix(0.45f, 0.75f, hash01(seed ^ 0x85EBCA6Bu));
+
+    // ANCHO de costa por seed: costa corta/acantilado (0.35) ↔ larga/playa gradual (2.5). Escala las
+    // rampas de distToCoast (tierra/lecho). Cada mundo tiene su carácter de costa.
+    W.coastWidth = glm::mix(0.35f, 2.5f, hash01(seed ^ 0xC0A57Du));
 
     // Calibrar seaThreshold = cuantil oceanFraction de la continentalidad (CDF empírica).
     // Garantiza el ratio exacto sea cual sea la distribución del ruido.
@@ -254,6 +272,20 @@ static TerrainSample sampleGas(const glm::vec3& dir, const WorldGenParams& W, do
     return s;
 }
 
+float coastDistanceMeters(const glm::vec3& dirIn, const WorldGenParams& W, double planetRadius) {
+    if (W.profile != 0) return 1e9f;   // moon/gas: sin mar → sin costa
+    const glm::vec3 dir = glm::normalize(dirIn);
+    // Continentalidad (misma fBm que el gate A). 1 fBm.
+    const float c  = NoiseGenerator::fBm(dir, (int)W.seed, 6, 0.5f, 2.0f, W.continentFreqA);
+    const float c0 = W.seaThreshold;
+    // EARLY-OUT: si el chunk está claramente lejos de la línea de costa (|c-c0| grande), su distToCoast
+    // es de decenas/cientos de km → jamás cae dentro de la huella de ningún chunk → nos saltamos el
+    // gradiente (4 fBm). Umbral holgado (0.15) → seguro (a |c-c0|=0.15 la costa está a ~90+ km).
+    if (std::fabs(c - c0) > 0.15f) return (c > c0 ? 1.0f : -1.0f) * 1e6f;
+    // Solo en la FRANJA costera: distToCoast exacto por gradiente. +4 fBm (raro → coste acotado).
+    return distToCoastWorld(dir, c, c0, W, (float)planetRadius);
+}
+
 TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, double planetRadius) {
     const glm::vec3 dir = glm::normalize(dirIn);
     const int   seed    = (int)W.seed;
@@ -271,32 +303,41 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
 
     ValD landMask = smoothstepD(c0 - band, c0 + band, c); // 0 mar … 1 tierra
 
-    // ===================== B — relieve (gateado por A) ======================
-    // Rama MAR: profundidad crece según c baja de c0 (curva anclada a 0 en costa).
-    ValD seaT     = smoothstepD(c0, c0 - 0.5f, c);          // 0 costa → 1 abismo
-    ValD seaDepth = seaT * (-5.0f);                          // km (oceanDepth ~5)
-    // Batimetría: relieve submarino (dorsales/montes + fosas) sobre el gradiente liso →
-    // el lecho tiene relieve como la tierra (no un cuenco plano). Gateado por seaT (~0 en
-    // la costa, crece mar adentro). MISMO cálculo que el compute GPU (terrain_gen.comp).
+    // ===================== B — relieve (gateado por distToCoast) ======================
+    // distToCoast (m, con signo) — MISMA fórmula que terrain_gen.comp/water.frag → paridad EXACTA del
+    // VALOR (colisión↔visual). El relieve sube/baja SIEMPRE desde la orilla aunque el continente sea
+    // plano → rompe el llano tostado + los rectángulos de agua. (La derivada del ramp NO entra en el
+    // ValD → la normal de COLISIÓN es aprox. cerca de la costa; la normal VISIBLE la calcula la GPU.)
+    const float dc = distToCoastWorld(dir, c.v, c0, W, R);
+    auto sstep = [](float e0, float e1, float x){ float t = glm::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f); return t * t * (3.0f - 2.0f * t); };
+    const float cwL = 1500.0f * W.coastWidth;  // rampa tierra (m), escalada por seed
+    const float cwS = 2000.0f * W.coastWidth;  // rampa lecho (m)
+
+    // Rama MAR — BATIMETRÍA realista por distToCoast (m mar adentro = -dc): PLATAFORMA continental
+    // somera → TALUD (caída) → LLANURA ABISAL. Perfil suave (función de dc, konst en el ValD) + montes/
+    // dorsales solo mar adentro. MISMA fórmula en terrain_gen.comp y water.frag (paridad exacta).
+    const float off    = -dc;                                    // metros mar adentro (>0)
+    const float shelfD = sstep(0.0f,             3000.0f * W.coastWidth, off); // plataforma (0→1)
+    const float slopeD = sstep(3000.0f * W.coastWidth, 12000.0f * W.coastWidth, off); // talud (0→1)
+    const float abyssD = sstep(12000.0f * W.coastWidth, 45000.0f * W.coastWidth, off); // hacia abisal
+    const float bathyKm = shelfD * (-0.18f) + slopeD * (-3.6f) + abyssD * (-1.0f); // -0.18→-4.78 km
+    ValD seaDepth = konst(bathyKm);
     ValD oreg   = fbmD(dir, seed + 211, 4, 0.5f, 2.0f, 3.0f);
     ValD oMask  = smoothstepD(0.05f, 0.30f, oreg);
     ValD omn    = fbmD(dir, seed + 311, 5, 0.5f, 2.1f, 600.0f);
     ValD ona    = omn * (1.0f / A_NORM);
-    ValD oform  = powD(clampD(konst(1.0f) - absD(ona), 0.0f, 1.0f), 1.5f); // dorsales
-    ValD oceanRelief = (oform - konst(0.5f)) * oMask * 3.0f;               // km [-1.5,1.5]
-    seaDepth = clampD(seaDepth + oceanRelief * seaT, -1e9f, -0.02f);       // siempre bajo el mar
+    ValD oform  = powD(clampD(konst(1.0f) - absD(ona), 0.0f, 1.0f), 1.5f); // dorsales (ridged)
+    ValD oceanRelief = (oform - konst(0.5f)) * oMask * 1.6f;               // km, montes/fosas del lecho
+    seaDepth = clampD(seaDepth + oceanRelief * slopeD, -1e9f, -0.02f);     // relieve solo mar adentro (no en plataforma)
 
-    // Rama TIERRA: base que sube desde la costa.
-    ValD landT    = smoothstepD(c0, c0 + 0.3f, c);          // 0 costa → 1 tierra adentro
-    ValD landBase = landT * 1.0f;                            // km (landHeight ~1)
+    // Rama TIERRA: sube desde la orilla por distToCoast (rampa por seed) → sin meseta plana.
+    const float landRamp = sstep(0.0f, cwL, dc);
+    ValD landBase = konst(landRamp * 1.0f);                 // km (landHeight ~1)
 
-    // Colinas de frecuencia MEDIA en TODA la tierra → relieve "normal" ondulado. Antes el
-    // terreno era BIMODAL (llano de 1km o cresta ridged de 7.5km, sin nada intermedio); esto
-    // rellena el tramo medio. fBm suave (NO ridged) → laderas redondeadas. Gateado por landT
-    // (costa→0). MISMO código que el compute GPU (terrain_gen.comp) → paridad render↔colisión.
+    // Colinas de frecuencia media, onduladas desde la costa (gateadas por landRamp).
     ValD hmn        = fbmD(dir, seed + 77, 5, 0.5f, 2.0f, 300.0f); // freq alta → onda ~130km, VISIBLE
     ValD hills      = hmn * (1.0f / A_NORM);                 // ~[-1,1]
-    ValD hillRelief = hills * landT * 1.1f;                  // km, ondulado ±~1.1
+    ValD hillRelief = hills * (landRamp * 1.3f);            // km, ondulado
 
     // Régimen (fase 1): dónde hay montañas (vs llano/montículo).
     ValD reg     = fbmD(dir, seed + 55, 4, 0.5f, 2.0f, 2.0f);

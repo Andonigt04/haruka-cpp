@@ -55,6 +55,7 @@ namespace Haruka {
         float oceanFraction = 0.60f;  ///< fracción de superficie que es mar  (hash seed, ~[0.45,0.75])
         float seaThreshold  = 0.0f;   ///< umbral de continentalidad (c0) que produce oceanFraction
         float coastBandKm   = 0.005f; ///< medio-ancho de la banda costa del smoothstep (km). Pequeño pero NUNCA 0 (0 = acantilado = aliasa)
+        float coastWidth    = 1.0f;   ///< factor de ANCHO de costa (hash seed, ~[0.35,2.5]): escala las rampas distToCoast → costa corta/acantilado (bajo) ↔ larga/playa gradual (alto)
 
         // Escala de continentes — UN solo factor s∈[0,1] (hash seed) gobierna los tres:
         int   continentCount = 5;     ///< nº de continentes  (~[3,8])

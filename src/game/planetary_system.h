@@ -4,6 +4,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <functional>
 #include <nlohmann/json.hpp>
 #include "core/modules.h"
 #include "tools/math_types.h"
@@ -37,7 +38,17 @@ public:
         double radius;
         nlohmann::json terrainSettings; // Semilla, capas de ruido, etc.
         bool isHome = false;            // planeta del jugador (flags.originShiftingTarget)
-        // Aquí podrías añadir parámetros orbitales (semi-eje mayor, etc.)
+
+        // --- ÓRBITA (Kepler ANALÍTICO): posición = función del tiempo → ESTABLE (sin deriva de
+        // integración) y depurable. orbitParent = índice del cuerpo central (Sol) en m_planets, o -1
+        // (estático). Plano orbital = base ortonormal (u,v); foco en el cuerpo padre. ---
+        int    orbitParent = -1;          // índice del cuerpo central en m_planets (-1 = estático)
+        double orbitA      = 0.0;         // semi-eje mayor (m)
+        double orbitEcc    = 0.0;         // excentricidad [0,1) (0 = círculo)
+        double orbitPeriod = 0.0;         // periodo (s); <=0 = no orbita
+        double orbitPhase  = 0.0;         // anomalía media en t=0 (rad)
+        glm::dvec3 orbitU  = glm::dvec3(1, 0, 0); // eje del periastro (plano orbital)
+        glm::dvec3 orbitV  = glm::dvec3(0, 0, 1); // eje perpendicular en el plano (sentido del avance)
     };
 
     void init();
@@ -46,6 +57,12 @@ public:
     void update(double dt, const glm::dvec3& cameraPos);
 
     void addPlanet(const Planet& planet);
+
+    /** @brief Fija/activa la órbita (Kepler) de un planeta alrededor de otro, en RUNTIME (consola o
+     *  escena). a/u/v/fase se derivan de la posición ACTUAL (arranca ahí, en el periastro). period<=0
+     *  o parentName vacío/no-hallado = DETIENE la órbita (queda estático). Devuelve false si no existe. */
+    bool setPlanetOrbit(const std::string& planetName, const std::string& parentName,
+                        double periodSeconds, double ecc = 0.0);
 
     /** @brief Renderiza el terrain de un planeta (shader ya activo, UBO model ya subido). */
     void renderPlanetTerrain(const std::string& planetName, const glm::dvec3& cameraPos);
@@ -89,12 +106,32 @@ public:
     /** @brief Tunes terrain LOD detail (lower = fewer chunks = cheaper). */
     void setLODParams(double splitFactor, int maxLOD);
 
+    // Batching de terreno (pool + glDrawElementsBaseVertex): reduce el coste CPU de
+    // terrain.draw (rebind de VAO por chunk). Conmutable en runtime (consola: terrainpool).
+    void   setTerrainBatching(bool on);
+    bool   getTerrainBatching() const;
+
+    // Superficie única de océano (test, `oceanshell`) en vez de mallas de agua por-chunk.
+    void   setWaterSingleOcean(bool on);
+    bool   getWaterSingleOcean() const;
+    // F5.1: callback que el juego provee para que el océano único siga a la sim de fluidos cerca del jugador.
+    void   setWaterFluidSampler(std::function<bool(const glm::dvec3&, float&, float&)> f);
+
     // LOD v3 F1: split por error en pantalla (conmutable). Ver docs/guides/PLAN_LOD_V3.md.
     void   setLODScreenSpace(bool on);
     bool   getLODScreenSpace() const;
     void   setLODScreenK(double k);   // px por (mundo/dist=1); desde la cámara, por frame
     void   setLODTargetPx(double px); // subdivide si el chunk proyecta > px
     double getLODTargetPx() const;
+
+    /** @brief LOD ADAPTATIVO por presupuesto de frame. El targetPx se ajusta solo: AFINA
+     *  (mejor calidad) mientras el frame va sobrado de tiempo y solo ENGORDA (menos detalle)
+     *  si el frame se pasa del presupuesto. Así se da la mejor calidad que el hardware sostiene
+     *  y el LOD solo degrada bajo carga. budgetMs = presupuesto de frame del preset (1000/fpsObjetivo);
+     *  [minPx,maxPx] = cota de calidad (min = más fino/mejor, max = más grueso/seguro). budgetMs<=0 desactiva. */
+    void   setLODBudget(double budgetMs, double minPx, double maxPx);
+    void   setAdaptiveLOD(bool on) { m_adaptiveLOD = on; }
+    bool   getAdaptiveLOD() const  { return m_adaptiveLOD; }
 
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
@@ -106,6 +143,16 @@ public:
      *  stderr SOLO cuando el LOD es inválido (throttled). Para `lodcheck watch`. */
     void setLODValidateWatch(bool on) { m_lodWatch = on; }
     bool getLODValidateWatch() const { return m_lodWatch; }
+
+    /** @brief DIAGNÓSTICO/bench: cronometra buildDrawSet (el cuello CPU #1 del frame) `iters`
+     *  veces sobre el estado actual y devuelve el mediano de ns/llamada. `outDrawn` recibe el
+     *  tamaño del draw-set (chunks dibujados). Solo para el banco de pruebas. */
+    double benchDrawSet(int iters, int* outDrawn) const;
+
+    /** @brief DIAGNÓSTICO/test: compara el buildDrawSet OPTIMIZADO con el de REFERENCIA sobre el
+     *  estado actual. Devuelve true si producen el MISMO conjunto (garantía de equivalencia). Los
+     *  medianos ns/llamada de cada uno salen por outNsOpt/outNsRef si != null. */
+    bool checkDrawSetMatchesReference(int iters, double* outNsOpt, double* outNsRef, int* outDrawn) const;
 
     /**
      * @brief Applies a terrain edit (dig/crater/build) at a world position and
@@ -218,8 +265,19 @@ private:
     // barely moved since the last recompute. Per-planet last cam pos; force on
     // first frame / new planet.
     std::vector<glm::dvec3> m_lastLODCamPos;
+    std::vector<int>        m_lastLODFrame; // frame del último recompute por planeta (throttle temporal)
+    glm::mat4 m_curCullVP{1.0f};            // cull VP del frame actual (para detectar giro de cámara)
+    glm::mat4 m_lastRecomputeCullVP{0.0f};  // cull VP con que se hizo el último recompute (giro → recompute)
     bool m_forceLOD = true;
     bool m_lodWatch = false; // valida el LOD cada frame y avisa al volverse inválido
+
+    // LOD ADAPTATIVO por presupuesto de frame (ver setLODBudget).
+    bool   m_adaptiveLOD   = true;
+    double m_lodBudgetMs   = 0.0;    // 0 = desactivado (targetPx fijo)
+    double m_lodMinPx      = 200.0;  // cota fina (mejor calidad)
+    double m_lodMaxPx      = 900.0;  // cota gruesa (seguro bajo carga)
+    double m_lodEwmaMs     = 0.0;    // tiempo de frame suavizado (EWMA)
+    double m_lodAdjustAccum = 0.0;   // temporizador entre ajustes
 
     // Predicción de movimiento: velocidad suavizada de la cámara para PEDIR chunks
     // por delante del jugador (lookahead) → menos pop-in al moverse/volar rápido. El
