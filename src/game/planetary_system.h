@@ -136,6 +136,16 @@ public:
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
 
+    // Telemetría de los pools de geometría del terreno (blindaje del fix "buffer fijo"). Para el
+    // banco de pruebas: asertar VRAM acotada y growCount==0. Espejo de TerrainRenderer::PoolStats.
+    struct TerrainPoolStats {
+        int      poolCount = 0;
+        size_t   totalSlots = 0, usedSlots = 0, vramBytes = 0;
+        uint32_t maxPoolCap = 0;
+        uint64_t growCount = 0;
+    };
+    TerrainPoolStats getTerrainPoolStats() const;
+
     /** @brief Valida los invariantes del LOD este frame (cobertura sin huecos/solapes,
      *  balance 2:1) y devuelve un resumen legible. Para el comando de consola `lodcheck`. */
     std::string validateLOD() const;
@@ -153,6 +163,19 @@ public:
      *  estado actual. Devuelve true si producen el MISMO conjunto (garantía de equivalencia). Los
      *  medianos ns/llamada de cada uno salen por outNsOpt/outNsRef si != null. */
     bool checkDrawSetMatchesReference(int iters, double* outNsOpt, double* outNsRef, int* outDrawn) const;
+
+    /** @brief DIAGNÓSTICO/test del gating de invalidación: ¿el draw-set CACHEADO que se dibuja
+     *  coincide con un rebuild fresco? Delata si noteResidencyChange se saltó un bump necesario
+     *  (cache rancio → huecos). Llamar en punto quiescente. */
+    bool checkCachedDrawSetFresh() const;
+
+    /** @brief DIAGNÓSTICO del gating: fracción de cambios de residencia que SÍ invalidaron el
+     *  draw-set (estaban en la clausura). Menos = más reconstrucciones evitadas al moverse. */
+    void residencyGatingStats(uint64_t& changes, uint64_t& bumps) const;
+    // Diagnóstico del delta-splice del draw-set: frames aplicados por splice vs rebuild completo.
+    void drawSetDeltaStats(uint64_t& applied, uint64_t& full) const;
+    // Micro-bench: coste de un rebuild COMPLETO vs un splice de 1 nodo sobre el draw-set actual.
+    void benchDrawSetSplice(int iters, double* nsFull, double* nsSplice, size_t* drawn) const;
 
     /**
      * @brief Applies a terrain edit (dig/crater/build) at a world position and

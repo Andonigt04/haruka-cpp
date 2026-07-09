@@ -99,10 +99,20 @@ void WaterRenderer::growPool(WaterPool& p) {
 }
 
 void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
-    if (!data.hasOcean || data.waterVertices.empty() || data.waterIndices.empty()) return;
+    uint64_t hash = ChunkCache::keyToHash(key);
+    if (!data.hasOcean || data.waterVertices.empty() || data.waterIndices.empty()) {
+        // Este chunk NO tiene agua (tierra). Lo MEMORIZAMOS: sin esto, el catch-up del agua reintenta
+        // CADA pasada (getChunkCopy pesado + addToScene) para cada chunk de tierra de chunksToKeep —la
+        // mayoría del mundo— porque nunca queda "residente" → churn perpetuo (era el grueso de
+        // lod.catchup ~5ms). Con la marca, el catch-up lo salta. Cota de memoria: se limpia si crece.
+        std::lock_guard<std::mutex> lock(m_renderMutex);
+        if (m_noWater.size() > 40000) m_noWater.clear();   // cota (el veredicto se recalcula al revisitar)
+        m_noWater.insert(hash);
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(m_renderMutex);
-    uint64_t hash = ChunkCache::keyToHash(key);
+    m_noWater.erase(hash);   // ahora SÍ tiene agua (regeneración/edición) → deja de estar marcado
     // Igual que el terreno: si ya existe lo saltamos, SALVO que esté "stale" → lo
     // reemplazamos en el sitio (sin agujero). Si no existía pero estaba marcado
     // stale (raro), limpiamos la marca.
@@ -239,6 +249,19 @@ bool WaterRenderer::isResident(const PlanetChunkKey& key) const {
     std::lock_guard<std::mutex> lock(m_renderMutex);
     auto it = m_gpuMeshes.find(ChunkCache::keyToHash(key));
     return it != m_gpuMeshes.end() && it->second.isReady;
+}
+
+void WaterRenderer::residentHashes(std::unordered_set<uint64_t>& out) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    out.clear();
+    out.reserve(m_gpuMeshes.size());
+    for (const auto& [h, mesh] : m_gpuMeshes)
+        if (mesh.isReady) out.insert(h);
+}
+
+void WaterRenderer::noWaterHashes(std::unordered_set<uint64_t>& out) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    out = m_noWater;   // copia bajo lock (snapshot para el catch-up sin re-bloquear por chunk)
 }
 
 void WaterRenderer::markStale(const PlanetChunkKey& key) {
@@ -398,6 +421,12 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
     for (auto& [k, v] : m_scratchItems) v.clear();
     GLuint boundVao = 0;
 
+    // Sub-scopes de perfil: renderPlanet no tenía ninguno → water.draw era una caja negra de ~3.5ms.
+    // Separa (1) el SELECT (CPU: recorrer el draw-set + morph/cull + armar cmd/item por chunk), (2)
+    // el UPLOAD del indirecto (glBufferData STREAM×2/pool), (3) el DRAW (glMultiDraw; el reloj CPU
+    // aquí incluye stalls de sync del driver → si domina, el cuello es GPU/fragmento, no CPU).
+    {
+    HARUKA_PROFILE("water.select");
     // Iteramos el DRAW SET (~cientos). Los chunks pooled se ACUMULAN por pool y se emiten con
     // UNA glMultiDrawElementsIndirect (tras el bucle); si batching OFF o legacy, draw inline.
     for (uint64_t hash : drawn) {

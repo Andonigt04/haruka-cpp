@@ -2,10 +2,37 @@
 #include "core/terrain/shared_index_table.h" // índices compartidos por res
 #include "tools/profiler.h"                   // HARUKA_PROFILE (sub-scopes de terrain.draw)
 #include <cstdio>
-#include <cstdlib>     // std::abs
+#include <cstdlib>     // std::abs, getenv
 #include <functional>  // std::function (recursión de covered())
+#include <chrono>      // micro-bench del splice
+#include <algorithm>   // std::max
 
 namespace Haruka {
+
+namespace {
+    // Inverso EXACTO de ChunkCache::keyToHash (empaquetado, no hash con colisiones):
+    // face(3) | lod(5) | x(23) | y(23) | body(10).
+    inline PlanetChunkKey hashToKey(uint64_t h) {
+        PlanetChunkKey k;
+        k.face = (PlanetFace)(h & 0x7);
+        k.lod  = (uint8_t)((h >> 3) & 0x1F);
+        k.x    = (uint32_t)((h >> 8) & 0x7FFFFF);
+        k.y    = (uint32_t)((h >> 31) & 0x7FFFFF);
+        k.body = (uint16_t)((h >> 54) & 0x3FF);
+        return k;
+    }
+    // Ancestro de k reducido al nivel `lod` (lod <= k.lod). Misma cara/cuerpo.
+    inline PlanetChunkKey ancestorAtLod(const PlanetChunkKey& k, uint8_t lod) {
+        uint32_t shift = (uint32_t)(k.lod - lod);
+        return { k.face, lod, k.x >> shift, k.y >> shift, k.body };
+    }
+    // ¿a es ancestro-o-igual de b? (a cubre el área de b)
+    inline bool isAncestorOrEqual(const PlanetChunkKey& a, const PlanetChunkKey& b) {
+        if (a.body != b.body || a.face != b.face || a.lod > b.lod) return false;
+        uint32_t shift = (uint32_t)(b.lod - a.lod);
+        return (b.x >> shift) == a.x && (b.y >> shift) == a.y;
+    }
+}
 
 TerrainRenderer::~TerrainRenderer() {
     for (auto& pair : m_gpuMeshes) {
@@ -102,7 +129,7 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
         mesh.vao      = 0;               // sin buffers propios
         mesh.isReady  = true;
         m_gpuMeshes[hash] = mesh;
-        ++m_residentVersion;             // invalida el cache del draw set (nuevo residente)
+        noteResidencyChange(hash);       // invalida el draw-set SOLO si el chunk está en la clausura
         purgeStaleCoveredBy(key);        // retira mallas stale ya cubiertas (sin agujero)
         return;
     }
@@ -179,7 +206,7 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
-    ++m_residentVersion;   // invalida el cache del draw set (nuevo residente)
+    noteResidencyChange(hash);   // invalida el draw-set SOLO si el chunk está en la clausura
 
     // Retira mallas STALE cuya área ya cubre esta recién añadida (sin agujero).
     purgeStaleCoveredBy(key);
@@ -194,7 +221,7 @@ void TerrainRenderer::removeFromScene(const std::string& planetName, const Plane
     if (m_gpuMeshes.count(hash)) {
         cleanupMesh(m_gpuMeshes[hash]);
         m_gpuMeshes.erase(hash);
-        ++m_residentVersion;                 // invalida el cache del draw set (residente retirado)
+        noteResidencyChange(hash);           // invalida el draw-set SOLO si el chunk está en la clausura
         if (m_onRemoved) m_onRemoved(key);   // espejo: quita también su agua
     }
     m_stale.erase(hash);
@@ -244,7 +271,7 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
             if (allReady) {
                 PlanetChunkKey pk = m_gpuMeshes[ph].key;
                 cleanupMesh(m_gpuMeshes[ph]); m_gpuMeshes.erase(ph); m_stale.erase(ph);
-                ++m_residentVersion;
+                noteResidencyChange(ph);
                 if (m_onRemoved) m_onRemoved(pk);   // espejo: quita su agua
             }
         }
@@ -263,7 +290,7 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
     for (const auto& dk : drop) {
         uint64_t h = ChunkCache::keyToHash(dk);
         cleanupMesh(m_gpuMeshes[h]); m_gpuMeshes.erase(h); m_stale.erase(h);
-        ++m_residentVersion;
+        noteResidencyChange(h);
         if (m_onRemoved) m_onRemoved(dk);   // espejo: quita su agua
     }
 }
@@ -354,13 +381,30 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     auto  verIt = m_drawSetCacheVer.find(planet);
     const bool verOk = (verIt != m_drawSetCacheVer.end() && verIt->second == m_residentVersion);
     auto  cacheIt = m_drawSetCache.find(planet);
-    if (dirty || !verOk || cacheIt == m_drawSetCache.end()) {
+    const bool haveCache = (cacheIt != m_drawSetCache.end());
+    // Frame en que SOLO cambió la residencia (hojas iguales, hay cache): intentamos el DELTA-SPLICE
+    // (re-emitir solo los subárboles tocados) en vez de reconstruir todo. Si el delta no aplica
+    // (grande / sin fallback residente) caemos al rebuild completo.
+    bool applied = false;
+    if (!dirty && !verOk && haveCache) {
+        HARUKA_PROFILE("terrain.drawset.delta"); // coste del splice (debería ser « rebuild completo)
+        if (applyDrawSetDelta(planet)) {
+            m_drawSetCacheVer[planet] = m_residentVersion;
+            applied = true;
+            ++m_dbgDeltaApplied;
+        }
+    }
+    if (!applied && (dirty || !verOk || !haveCache)) {
         HARUKA_PROFILE("terrain.drawset"); // solo acumula en frames de REBUILD → delata si el coste es el rebuild
+        if (!dirty && haveCache) ++m_dbgDeltaFull; // era elegible para delta pero cayó al rebuild
         std::unordered_set<uint64_t> fresh;
         buildDrawSet(planet, fresh, nullptr);    // partición top-down sin solapes (0 overlaps, 0 holes)
         cacheIt = m_drawSetCache.insert_or_assign(planet, std::move(fresh)).first;
         m_drawSetCacheVer[planet] = m_residentVersion;
         m_drawSetDirty[planet]    = 0;
+        m_pendingDelta[planet].clear(); // el fresco ya refleja la residencia actual → deltas obsoletos
+    } else {
+        cacheIt = m_drawSetCache.find(planet); // applyDrawSetDelta mutó el cache in-place
     }
     const std::unordered_set<uint64_t>& drawnHashes = cacheIt->second;
 
@@ -579,7 +623,7 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
             cleanupMesh(it->second);
             m_gpuMeshes.erase(it);
             m_stale.erase(h);
-            ++m_residentVersion;
+            noteResidencyChange(h);
             if (m_onRemoved) m_onRemoved(pk); // espejo: quita su agua
         }
     }
@@ -619,10 +663,11 @@ std::vector<PlanetChunkKey> TerrainRenderer::invalidateSphere(const glm::dvec3& 
         double r = (m.bsRadius > 0.0f) ? (double)m.bsRadius
                                        : m.planetRadius * 2.0 / double(1u << m.lod);
         if (glm::length(c - center) < radius + r) {
+            const uint64_t h = it->first; // capturar antes de borrar el iterador
             hit.push_back(m.key);
             cleanupMesh(m);
             it = m_gpuMeshes.erase(it);
-            ++m_residentVersion;
+            noteResidencyChange(h);
         } else {
             ++it;
         }
@@ -643,6 +688,113 @@ std::vector<PlanetChunkKey> TerrainRenderer::markStaleSphere(const glm::dvec3& c
         }
     }
     return hit;
+}
+
+bool TerrainRenderer::debugCachedDrawSetIsFresh(const std::string& planet) const {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    auto it = m_drawSetCache.find(planet);
+    if (it == m_drawSetCache.end()) return true;   // nada cacheado aún → nada que validar
+    std::unordered_set<uint64_t> fresh;
+    buildDrawSet(planet, fresh, nullptr);
+    return it->second == fresh;
+}
+
+void TerrainRenderer::benchDrawSetSplice(const std::string& planet, int iters,
+                                         double* nsFull, double* nsSplice, size_t* drawn) {
+    std::lock_guard<std::mutex> lock(m_renderMutex);
+    if (nsFull) *nsFull = 0; if (nsSplice) *nsSplice = 0; if (drawn) *drawn = 0;
+    // Asegurar un cache válido de base.
+    auto cIt = m_drawSetCache.find(planet);
+    if (cIt == m_drawSetCache.end()) {
+        std::unordered_set<uint64_t> fresh;
+        buildDrawSet(planet, fresh, nullptr);
+        cIt = m_drawSetCache.insert_or_assign(planet, std::move(fresh)).first;
+        m_drawSetCacheVer[planet] = m_residentVersion; m_drawSetDirty[planet] = 0;
+    }
+    if (drawn) *drawn = cIt->second.size();
+    using clk = std::chrono::high_resolution_clock;
+    // FULL: buildDrawSet completo en un temporal.
+    {
+        std::unordered_set<uint64_t> tmp; tmp.reserve(cIt->second.size());
+        auto t0 = clk::now();
+        for (int i = 0; i < iters; ++i) { tmp.clear(); buildDrawSet(planet, tmp, nullptr); }
+        auto t1 = clk::now();
+        if (nsFull) *nsFull = std::chrono::duration<double, std::nano>(t1 - t0).count() / std::max(1, iters);
+    }
+    // SPLICE: un cambio sintético de 1 nodo (una hoja residente) → applyDrawSetDelta, restaurando el
+    // cache/pending entre iteraciones para medir siempre el mismo trabajo.
+    uint64_t victim = 0;
+    auto lsIt = m_leafSet.find(planet);
+    if (lsIt != m_leafSet.end()) {
+        for (uint64_t h : lsIt->second) {
+            auto git = m_gpuMeshes.find(h);
+            if (git != m_gpuMeshes.end() && git->second.isReady) { victim = h; break; }
+        }
+    }
+    if (victim) {
+        const std::unordered_set<uint64_t> savedCache   = cIt->second;
+        auto savedPending = m_pendingDelta.count(planet) ? m_pendingDelta[planet] : std::unordered_set<uint64_t>{};
+        auto t0 = clk::now();
+        for (int i = 0; i < iters; ++i) {
+            m_drawSetCache[planet] = savedCache;
+            m_pendingDelta[planet] = { victim };
+            applyDrawSetDelta(planet);
+        }
+        auto t1 = clk::now();
+        if (nsSplice) *nsSplice = std::chrono::duration<double, std::nano>(t1 - t0).count() / std::max(1, iters);
+        m_drawSetCache[planet]   = savedCache;      // restaurar estado
+        m_pendingDelta[planet]   = savedPending;
+    }
+}
+
+void TerrainRenderer::rebuildClosureForPlanet(const std::string& planet) {
+    // CALLER HOLDS m_renderMutex. Clausura = hojas ∪ ancestros ∪ raíces de cara (por cuerpo). Es el
+    // conjunto EXACTO de nodos cuya residencia puede alterar buildDrawSet (ver comentario en el .h).
+    // Coste: como el pase de construcción de buildDrawSet (early-out de trie) → barato; solo corre
+    // al cambiar las hojas (throttleado).
+    auto& clo = m_closureByPlanet[planet];
+    clo.clear();
+    // Sets PRECOMPUTADOS para emitSubtree (estáticos hasta el próximo cambio de hojas): hojas y nodos
+    // internos (ancestros de hojas). Antes buildDrawSet reconstruía el trie de internos CADA frame;
+    // ahora se hace aquí (solo al cambiar hojas, throttleado) y el delta/emit lo reusa.
+    auto& leafSet = m_leafSet[planet]; leafSet.clear();
+    auto& intSet  = m_intSet[planet];  intSet.clear();
+    auto dit = m_desiredLeaves.find(planet);
+    if (dit != m_desiredLeaves.end()) {
+        const auto& leaves = dit->second;
+        clo.reserve(leaves.size() * 4);
+        leafSet.reserve(leaves.size());
+        intSet.reserve(leaves.size() * 2);
+        std::unordered_set<uint16_t> bodies;
+        for (const PlanetChunkKey& lf : leaves) {
+            bodies.insert(lf.body);
+            uint64_t lh = ChunkCache::keyToHash(lf);
+            clo.insert(lh);                                      // la hoja
+            leafSet.insert(lh);
+            PlanetChunkKey a = lf;                               // sus ancestros (early-out de trie)
+            while (a.lod > 0) {
+                a = { a.face, (uint8_t)(a.lod - 1), a.x >> 1, a.y >> 1, a.body };
+                uint64_t ah = ChunkCache::keyToHash(a);
+                intSet.insert(ah);
+                if (!clo.insert(ah).second) break;               // ya estaba → arriba también
+            }
+        }
+        for (uint16_t bd : bodies) {                            // raíces de cara (por si se generaran a lod0)
+            m_bodyToPlanet[bd] = planet;                        // routing de noteResidencyChange
+            for (int f = 0; f < 6; ++f)
+                clo.insert(ChunkCache::keyToHash({ (PlanetFace)f, 0, 0, 0, bd }));
+        }
+    }
+    rebuildClosureAll();
+}
+
+void TerrainRenderer::rebuildClosureAll() {
+    // CALLER HOLDS m_renderMutex. Unión de todas las clausuras por planeta (pocos planetas).
+    m_closureAll.clear();
+    size_t total = 0;
+    for (const auto& [p, s] : m_closureByPlanet) total += s.size();
+    m_closureAll.reserve(total);
+    for (const auto& [p, s] : m_closureByPlanet) m_closureAll.insert(s.begin(), s.end());
 }
 
 void TerrainRenderer::buildDrawSet(const std::string& planet,
@@ -682,65 +834,188 @@ void TerrainRenderer::buildDrawSet(const std::string& planet,
         }
     }
 
-    // CAMINO LENTO (falta ≥1 hoja fina): partición top-down coarsest-fallback. Idéntico resultado
-    // que buildDrawSetReference pero con MENOS ops hash: un SOLO mapa `node` (bits por nodo) funde
-    // los antiguos `internal` + `memo` → 1 búsqueda por nodo en vez de 2; y la recursión es estática
-    // (sin std::function → mejor inlining). El grueso del coste eran esas ops de tabla hash.
-    // (Se probó cachear la residencia por nodo — NO ayudó: la memoización DONE ya da 1 residentReady
-    //  por nodo VISITADO, y precalcularla la llamaría sobre nodos que el && de canCover cortocircuita.)
-    static constexpr uint8_t INT = 1;  // nodo interno (ancestro de alguna hoja) → puede subdividirse
-    static constexpr uint8_t DONE = 2; // cover ya calculado (memo)
-    static constexpr uint8_t COV = 4;  // resultado de cover
-    std::unordered_map<uint64_t,uint8_t> node;
+    // CAMINO LENTO (falta ≥1 hoja fina): partición top-down coarsest-fallback vía emitSubtree, que
+    // usa los sets PRECOMPUTADOS (m_leafSet/m_intSet, estáticos entre cambios de hojas → sin
+    // reconstruir el trie de internos cada frame). Emitimos cada raíz de cara; el mismo emitSubtree
+    // lo reusa el delta-splice para re-emitir solo subárboles tocados. Mismo resultado que la
+    // referencia (verificado por el banco: OK==).
     std::unordered_set<uint16_t> bodies;
-    node.reserve(leaves.size() * 4);
-    for (const PlanetChunkKey& lf : leaves) {
-        bodies.insert(lf.body);
-        PlanetChunkKey a = lf;
-        // Early-out de trie: al topar un ancestro YA marcado INT, todos los suyos también lo están
-        // (siempre subimos hasta la raíz) → paramos. Coste total = nº de internos DISTINTOS, no
-        // Σ(profundidades). La raíz, compartida por todas las hojas, se marca 1 vez y no 246.
-        while (a.lod > 0) { a = parent(a); uint8_t& e = node[H(a)]; if (e & INT) break; e |= INT; }
+    for (const PlanetChunkKey& lf : leaves) bodies.insert(lf.body);
+
+    auto lsIt = m_leafSet.find(planet);
+    auto isIt = m_intSet.find(planet);
+    // Fallback: si por alguna ruta no se precomputaron (setDesiredLeaves siempre los construye), los
+    // armamos localmente aquí para no divergir nunca del contrato de la función.
+    std::unordered_set<uint64_t> leafLocal, intLocal;
+    const std::unordered_set<uint64_t>* leafSet;
+    const std::unordered_set<uint64_t>* intSet;
+    if (lsIt != m_leafSet.end() && isIt != m_intSet.end()) {
+        leafSet = &lsIt->second; intSet = &isIt->second;
+    } else {
+        leafLocal.reserve(leaves.size()); intLocal.reserve(leaves.size() * 2);
+        for (const PlanetChunkKey& lf : leaves) {
+            leafLocal.insert(H(lf));
+            PlanetChunkKey a = lf;
+            while (a.lod > 0) { a = parent(a); if (!intLocal.insert(H(a)).second) break; }
+        }
+        leafSet = &leafLocal; intSet = &intLocal;
     }
 
-    // canCover(n): ¿el área de n la cubre ALGÚN residente (a cualquier resolución)? Residente a
-    // cualquier nivel basta (no exige la raíz residente). Memoiza en `node` (bit DONE/COV).
+    std::unordered_map<uint64_t,uint8_t> memo; // canCover memoizado, compartido entre raíces
+    memo.reserve(leaves.size() * 2);
+    for (uint16_t bd : bodies)
+        for (int f = 0; f < 6; ++f)
+            emitSubtree(*leafSet, *intSet, {(PlanetFace)f, 0, 0, 0, bd}, outHashes, outKeys, memo);
+    if (outBodies) *outBodies = std::move(bodies);
+}
+
+// Emite (partición top-down coarsest-fallback) el subárbol de `root`, añadiendo los nodos DIBUJADOS
+// a outHashes/outKeys. Usa los sets PRECOMPUTADOS (leaf/int) → no reconstruye el trie. `memo` cachea
+// canCover (bits DONE/COV) entre llamadas. Es el núcleo COMPARTIDO por buildDrawSet (todas las raíces)
+// y applyDrawSetDelta (solo los subárboles tocados). emit(root) depende SOLO de la residencia bajo
+// root → re-emitirlo aislado es correcto-por-construcción (las celdas del quadtree anidan o son
+// disjuntas). Sin std::function (recursión estática por parámetro self → mejor inlining).
+void TerrainRenderer::emitSubtree(const std::unordered_set<uint64_t>& leafSet,
+                                  const std::unordered_set<uint64_t>& intSet,
+                                  const PlanetChunkKey& root,
+                                  std::unordered_set<uint64_t>& outHashes,
+                                  std::vector<PlanetChunkKey>* outKeys,
+                                  std::unordered_map<uint64_t, uint8_t>& memo) const {
+    static constexpr uint8_t DONE = 2, COV = 4;
+    auto H    = [](const PlanetChunkKey& k){ return ChunkCache::keyToHash(k); };
+    auto kids = [](const PlanetChunkKey& n, PlanetChunkKey c[4]){
+        const uint8_t cl=(uint8_t)(n.lod+1); const uint32_t bx=n.x*2, by=n.y*2; const uint16_t bd=n.body;
+        c[0]={n.face,cl,bx,by,bd};   c[1]={n.face,cl,bx+1,by,bd};
+        c[2]={n.face,cl,bx,by+1,bd}; c[3]={n.face,cl,bx+1,by+1,bd};
+    };
+    auto residentReady = [&](const PlanetChunkKey& k)->bool{
+        auto it = m_gpuMeshes.find(H(k));
+        return it != m_gpuMeshes.end() && it->second.isReady;
+    };
+    // canCover(n): ¿el área de n la cubre ALGÚN residente (a cualquier resolución)? residente basta;
+    // interno no-residente → todos los hijos deben cubrir; hoja/nodo desconocido no-residente → hueco.
     auto canCover = [&](auto&& self, const PlanetChunkKey& n)->bool{
         const uint64_t h = H(n);
-        auto it = node.find(h);
-        const uint8_t v = (it != node.end()) ? it->second : 0;
-        if (v & DONE) return (v & COV) != 0;
+        auto it = memo.find(h);
+        if (it != memo.end() && (it->second & DONE)) return (it->second & COV) != 0;
         bool res;
-        if (residentReady(n))   res = true;                   // n cubre su área
-        else if (v & INT)     { PlanetChunkKey c[4]; kids(n,c); // interno no-residente → mira hijos
-                                res = self(self,c[0]) && self(self,c[1]) && self(self,c[2]) && self(self,c[3]); }
-        else                    res = false;                  // hoja deseada no residente → hueco real
-        // self(...) pudo rehashar `node` (invalida `it`) → re-acceder por operator[]. Conserva INT.
-        uint8_t& slot = node[h];
-        slot = (uint8_t)((slot & INT) | DONE | (res ? COV : 0));
+        if (residentReady(n))       res = true;
+        else if (intSet.count(h)) { PlanetChunkKey c[4]; kids(n,c);
+                                    res = self(self,c[0]) && self(self,c[1]) && self(self,c[2]) && self(self,c[3]); }
+        else                        res = false;
+        memo[h] = (uint8_t)(DONE | (res ? COV : 0));
         return res;
     };
-
-    // emit(n): baja a los hijos si TODOS cubren (→ detalle más fino); si no, dibuja n (residente
-    // garantizado). Atraviesa raíces/internos no-residentes. Dibuja n XOR sus hijos → sin solapes.
     auto emit = [&](auto&& self, const PlanetChunkKey& n)->void{
         if (!canCover(canCover, n)) return;                   // hueco real: nada residente en esta área
         const uint64_t h = H(n);
-        auto it = node.find(h);
-        if (it != node.end() && (it->second & INT)) {
+        if (intSet.count(h)) {                                // interno → ¿subdividir?
             PlanetChunkKey c[4]; kids(n,c);
             if (canCover(canCover,c[0]) && canCover(canCover,c[1]) &&
                 canCover(canCover,c[2]) && canCover(canCover,c[3])) {
                 self(self,c[0]); self(self,c[1]); self(self,c[2]); self(self,c[3]); return;
             }
         }
-        // canCover(n) && (hoja || algún hijo sin cobertura) ⟹ residente(n)
+        // canCover(n) && (hoja || algún hijo sin cobertura) ⟹ residente(n) → se dibuja n
+        (void)leafSet;
         if (outHashes.insert(h).second && outKeys) outKeys->push_back(n);
     };
+    emit(emit, root);
+}
 
-    for (uint16_t bd : bodies)
-        for (int f = 0; f < 6; ++f) emit(emit, {(PlanetFace)f, 0, 0, 0, bd});
-    if (outBodies) *outBodies = std::move(bodies);
+// Aplica por SPLICE los cambios de residencia pendientes al draw-set cacheado, en vez de reconstruir
+// todo. Devuelve false si conviene el rebuild completo (delta grande, sin ancestro residente, o falta
+// el cache/sets). Correcto-por-construcción: para cada nodo cambiado K se re-emite el subárbol MÍNIMO
+// que puede cambiar, y como emit(R) depende solo de la residencia bajo R (celdas del quadtree anidan
+// o son disjuntas) sustituir las celdas viejas de R por emit(R) preserva EXACTO la partición.
+//   Re-raíz R por nodo cambiado K (con la residencia YA aplicada en m_gpuMeshes). A = nodo DIBUJADO
+//   que cubre K (ÚNICO por partición: subir desde K, primer dibujado). Con la raíz residente (nuestra
+//   invariante) SIEMPRE existe.
+//     • A más GRUESO que K (A.lod < K.lod): re-emitir A. ADD → puede subdividir hacia K; REMOVE bajo
+//       un A grueso = no-op (A sigue grueso) pero re-emitir A es seguro (mismo A). R = A.
+//     • A == K (K es una celda dibujada):
+//         – K residente (refresco/ADD de esa celda): R = K (puede subdividir).
+//         – K NO residente (REMOVE de la celda): R = ancestro RESIDENTE más cercano (la re-partición
+//           propaga hacia arriba y para en el primer residente). Sin él → rebuild completo.
+//   Así R es SIEMPRE un nodo dibujado (A) o un ancestro residente (B) → nunca dibuja en un hueco
+//   (evita divergir de la referencia).
+bool TerrainRenderer::applyDrawSetDelta(const std::string& planet) {
+    // CALLER HOLDS m_renderMutex.
+    static const bool kNoDelta = (getenv("HARUKA_NO_DELTA") != nullptr); // diagnóstico: fuerza rebuild completo
+    if (kNoDelta) return false;
+    auto pdIt = m_pendingDelta.find(planet);
+    if (pdIt == m_pendingDelta.end() || pdIt->second.empty()) return true; // nada que aplicar
+    auto& pending = pdIt->second;
+    if (pending.size() > kMaxDeltaSplice) return false;                    // demasiado → rebuild completo
+
+    auto cacheIt = m_drawSetCache.find(planet);
+    if (cacheIt == m_drawSetCache.end()) return false;                     // sin base → rebuild
+    auto lsIt = m_leafSet.find(planet); auto isIt = m_intSet.find(planet);
+    if (lsIt == m_leafSet.end() || isIt == m_intSet.end()) return false;
+    std::unordered_set<uint64_t>& cache = cacheIt->second;
+    const std::unordered_set<uint64_t>& leafSet = lsIt->second;
+    const std::unordered_set<uint64_t>& intSet  = isIt->second;
+
+    auto residentReady = [&](const PlanetChunkKey& k)->bool{
+        auto it = m_gpuMeshes.find(ChunkCache::keyToHash(k));
+        return it != m_gpuMeshes.end() && it->second.isReady;
+    };
+
+    // 1) Re-raíces (dedup por conjunto).
+    std::unordered_set<uint64_t> rootHashes;
+    for (uint64_t h : pending) {
+        PlanetChunkKey K = hashToKey(h);
+        // A = nodo DIBUJADO que cubre K (subir desde K, primer dibujado del cache).
+        PlanetChunkKey A{}; bool haveA = false;
+        for (int L = (int)K.lod; L >= 0 && !haveA; --L) {
+            PlanetChunkKey anc = ancestorAtLod(K, (uint8_t)L);
+            if (cache.count(ChunkCache::keyToHash(anc))) { A = anc; haveA = true; }
+        }
+        if (!haveA) return false;                                         // sin cobertura dibujada → rebuild
+        PlanetChunkKey R;
+        if (A.lod < K.lod) {
+            R = A;                                                        // K bajo una celda gruesa dibujada
+        } else if (residentReady(K)) {
+            R = K;                                                        // celda dibujada K residente → refinar
+        } else {
+            // REMOVE de la celda dibujada K → ancestro residente más cercano (propagación hacia arriba).
+            bool haveB = false;
+            for (int L = (int)K.lod - 1; L >= 0 && !haveB; --L) {
+                PlanetChunkKey anc = ancestorAtLod(K, (uint8_t)L);
+                if (residentReady(anc)) { R = anc; haveB = true; }
+            }
+            if (!haveB) return false;                                     // sin fallback residente → rebuild
+        }
+        rootHashes.insert(ChunkCache::keyToHash(R));
+    }
+
+    // Dedup: si una re-raíz es descendiente de otra, la ancestro ya la cubre → descartar la fina.
+    std::vector<PlanetChunkKey> roots;
+    roots.reserve(rootHashes.size());
+    for (uint64_t rh : rootHashes) {
+        PlanetChunkKey R = hashToKey(rh);
+        bool coveredByAncestor = false;
+        for (int L = (int)R.lod - 1; L >= 0 && !coveredByAncestor; --L)
+            if (rootHashes.count(ChunkCache::keyToHash(ancestorAtLod(R, (uint8_t)L)))) coveredByAncestor = true;
+        if (!coveredByAncestor) roots.push_back(R);
+    }
+
+    // 2) Quitar del cache todas las celdas dibujadas dentro del área de alguna re-raíz.
+    std::vector<uint64_t> remove;
+    for (uint64_t h : cache) {
+        PlanetChunkKey k = hashToKey(h);
+        for (const PlanetChunkKey& R : roots)
+            if (isAncestorOrEqual(R, k)) { remove.push_back(h); break; }
+    }
+    for (uint64_t h : remove) cache.erase(h);
+
+    // 3) Re-emitir cada re-raíz (partición coarsest-fallback) sobre la residencia ACTUAL.
+    std::unordered_map<uint64_t, uint8_t> memo;
+    for (const PlanetChunkKey& R : roots)
+        emitSubtree(leafSet, intSet, R, cache, nullptr, memo);
+
+    pending.clear();
+    return true;
 }
 
 // Algoritmo de REFERENCIA (el original) — lo usa el banco para verificar que buildDrawSet produce
@@ -940,7 +1215,20 @@ TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCoun
     ChunkPool p;
     p.vertexCount = vertexCount;
     p.indexCount  = indexCount;
-    p.capacity    = 1024;                        // slots iniciales (crece x2 al llenarse)
+    // BUFFER FIJO: reservamos UNA vez a la capacidad máxima real y NO volvemos a reasignar nunca. Antes
+    // la capacidad nacía en 1024 y crecía por DUPLICACIÓN (growPool = glBufferData nuevo + copia + delete):
+    // cada duplicación reorpheaba el pool ENTERO (cientos de MB→GB), un `glBufferData` síncrono en el hilo
+    // de render = stall de cientos de ms = el "terreno desaparece al girar/mirar mar" (RenderDoc 22: 2.76 GB
+    // subidos en 1 frame con GPU ociosa). Con capacidad fija: 1 sola reserva acotada, cero realloc en runtime,
+    // VRAM plana. Los chunks entran solo por glBufferSubData (ya era así).
+    //
+    // BLINDAJE MULTI-TOPOLOGÍA: el pool DOMINANTE (el primero, la rejilla CDLOD uniforme bajo el jugador —
+    // kMaxResidentChunks acota el total residente, cabe entero) recibe la capacidad completa; los pools
+    // SECUNDARIOS (otro planeta con distinto chunkSize, islas, cuevas) reciben kSecondaryPoolSlots. Así la
+    // VRAM NO se multiplica por nº de vertexCount distintos (era el agujero: N topologías × 12000 slots ≈
+    // N×2GB). Si una topología secundaria se vuelve dominante (aterrizas ahí) y llena su pool, growPool
+    // dispara (raro) y lo registra en m_poolGrowCount. Vigilar #pools con HARUKA_POOL_DBG.
+    p.capacity    = m_pools.empty() ? (uint32_t)kMaxResidentChunks : kSecondaryPoolSlots;
     glGenVertexArrays(1, &p.vao);
     const size_t n = (size_t)vertexCount * p.capacity;
     auto mkbuf = [&](GLuint& b, size_t bytes) {
@@ -974,6 +1262,12 @@ TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCoun
     p.freeSlots.reserve(p.capacity);
     for (uint32_t s = p.capacity; s-- > 0; ) p.freeSlots.push_back(s); // slot 0 al final → se usa primero
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (getenv("HARUKA_POOL_DBG")) {
+        size_t bytesPos = (size_t)vertexCount * p.capacity * sizeof(glm::vec3);
+        fprintf(stderr, "[POOL-NEW] vc=%u ic=%u cap=%u  pos=%.1fMB total5=%.1fMB  #pools=%zu\n",
+                vertexCount, indexCount, p.capacity, bytesPos/1048576.0,
+                (size_t)vertexCount*p.capacity*(12+12+4+4+4)/1048576.0, m_pools.size()+1);
+    }
     return m_pools.emplace(vertexCount, std::move(p)).first->second;
 }
 
@@ -981,6 +1275,16 @@ void TerrainRenderer::growPool(ChunkPool& p) {
     const uint32_t oldCap = p.capacity;
     const uint32_t newCap = oldCap * 2;
     const size_t   vc     = p.vertexCount;
+    // VÁLVULA DE SEGURIDAD: con capacidad fija esto NO debería dispararse en el caso normal (1
+    // topología dominante ≤ kMaxResidentChunks). Si dispara = una topología secundaria se volvió
+    // dominante (transición de planeta) o la suposición se rompió → un realloc gigante = REGRESIÓN
+    // del stall que arreglamos. Lo contamos y GRITAMOS siempre (no solo con env var) para detectarlo.
+    ++m_poolGrowCount;
+    fprintf(stderr, "[POOL-GROW!] vc=%zu %u->%u total=%.1fMB — realloc GIGANTE en hilo de render "
+                    "(posible hitch). growCount=%llu. Si es recurrente, subir la capacidad de este "
+                    "pool o revisar la suposición de topología única.\n",
+            vc, oldCap, newCap, (double)((size_t)vc*newCap*kPoolBytesPerVertex)/1048576.0,
+            (unsigned long long)m_poolGrowCount);
     auto regrow = [&](GLuint& buf, size_t elem) {
         GLuint nb = 0;
         glGenBuffers(1, &nb);
@@ -1003,6 +1307,21 @@ void TerrainRenderer::growPool(ChunkPool& p) {
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_COPY_READ_BUFFER, 0);
     glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
+}
+
+TerrainRenderer::PoolStats TerrainRenderer::poolStats() const {
+    std::lock_guard<std::mutex> lk(m_renderMutex);
+    PoolStats st;
+    st.poolCount = (int)m_pools.size();
+    st.growCount = m_poolGrowCount;
+    for (const auto& [vc, p] : m_pools) {
+        const size_t slots = p.capacity;
+        st.totalSlots += slots;
+        st.usedSlots  += slots - p.freeSlots.size();
+        st.vramBytes  += (size_t)p.capacity * p.vertexCount * kPoolBytesPerVertex;
+        if (p.capacity > st.maxPoolCap) st.maxPoolCap = p.capacity;
+    }
+    return st;
 }
 
 } // namespace Haruka

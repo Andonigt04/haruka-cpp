@@ -59,6 +59,13 @@ namespace Haruka {
 
         /** @brief True si la malla de agua del chunk ya está subida en GPU. */
         bool isResident(const PlanetChunkKey& key) const;
+        /** @brief Copia (bajo UN solo lock) los hashes de las mallas de agua residentes+listas.
+         *  Para consultar residencia de miles de chunks SIN re-bloquear el mutex por chunk (el
+         *  catch-up del agua lo hacía por-chunk → miles de locks/frame = el coste de lod.catchup). */
+        void residentHashes(std::unordered_set<uint64_t>& out) const;
+        /** @brief Copia (bajo UN lock) los hashes de chunks SIN agua (tierra) que addToScene rechazó.
+         *  El catch-up del agua los salta → no re-copia/reintenta chunks de tierra cada pasada. */
+        void noWaterHashes(std::unordered_set<uint64_t>& out) const;
 
         /** Renders this planet's ocean. Caller binds the water shader + UBO first. */
         void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
@@ -91,6 +98,7 @@ namespace Haruka {
     private:
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
         std::unordered_set<uint64_t>             m_stale;   // mallas a REEMPLAZAR/cubrir
+        std::unordered_set<uint64_t>             m_noWater; // chunks de TIERRA (sin océano) → el catch-up los salta
         mutable std::mutex m_renderMutex;
         void purgeStaleCoveredBy(const PlanetChunkKey& key); // caller holds the lock
         double     m_splitFactor = 1.0; // sincronizado con el LODSystem

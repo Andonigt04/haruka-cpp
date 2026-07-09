@@ -123,7 +123,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     m_prevCamPos = cameraPos; m_havePrevCam = true;
 
     // 1. Mover los planetas en sus órbitas
-    updateOrbits(dt);
+    { HARUKA_PROFILE("lod.orbits"); updateOrbits(dt); }
 
     // Keep the per-planet LOD-throttle state sized to the planet list.
     if (m_lastLODCamPos.size() != m_planets.size())
@@ -137,6 +137,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // islas alrededor de la cámara cuando esta se mueve lo bastante → islas
     // descubribles al explorar, sin generar millones en todo el planeta.
     if (m_islandRenderer) {
+        HARUKA_PROFILE("lod.islands");
         for (const auto& planet : m_planets) {
             const auto& cfg = planet.terrainSettings.contains("config")
                             ? planet.terrainSettings["config"] : planet.terrainSettings;
@@ -187,6 +188,20 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // las hojas deseadas NO cambian → no hace falta re-enviarlas al renderer (evita invalidar el
     // draw-set cacheado y reconstruirlo idéntico). Solo re-enviamos donde recompute realmente corrió.
     std::vector<char> leavesChanged(m_planets.size(), 0);
+    // Snapshot de la residencia del AGUA UNA vez/frame (un solo lock) → los catch-up consultan miles
+    // de chunks SIN re-bloquear el mutex por chunk (era el grueso de lod.catchup: 5.89ms). addToScene
+    // es idempotente, así que el snapshot puede quedar algo obsoleto dentro del frame sin problema.
+    static std::unordered_set<uint64_t> s_waterResident, s_waterNoOcean;
+    if (m_waterRenderer) {
+        m_waterRenderer->residentHashes(s_waterResident);
+        m_waterRenderer->noWaterHashes(s_waterNoOcean); // chunks de tierra → saltar (no re-copiar)
+    }
+    // El catch-up salta un chunk si su agua YA está en GPU o si NO tiene agua (tierra). Sin el 2º,
+    // reintentaba getChunkCopy+addToScene sobre cada chunk de tierra cada 4 frames (churn = lod.catchup).
+    auto waterSkip = [&](const PlanetChunkKey& k) {
+        uint64_t h = ChunkCache::keyToHash(k);
+        return s_waterResident.count(h) != 0 || s_waterNoOcean.count(h) != 0;
+    };
     for (size_t pi = 0; pi < m_planets.size(); ++pi) {
         auto& planet = m_planets[pi];
 
@@ -224,7 +239,17 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         for (int a = 0; a < 4; ++a) for (int b = 0; b < 4; ++b)
             dVP += std::fabs(m_curCullVP[a][b] - m_lastRecomputeCullVP[a][b]);
         const bool viewChanged = dVP > 0.02f;
-        if (!m_forceLOD && !refineNow && !viewChanged && (moved < moveThresh || (!frameDue && !bigJump))) {
+        // THROTTLE del recompute (incluido el GIRO): antes `viewChanged` disparaba recompute CADA
+        // frame (el comentario asumía ~1ms). Con miles de chunks de costa el recompute es ~11ms →
+        // rotar/moverte reconstruía el quadtree ENTERO cada frame = el muro de planetary.update
+        // (31ms/32fps). Ahora TAMBIÉN el giro respeta el intervalo de 2 frames (frameDue); el
+        // guard-band de 12° (recursiveProcess) ya mantiene residentes los chunks justo fuera de vista,
+        // así que 1 frame de latencia al girar no revela terreno grueso/vacío. bigJump/forceLOD siguen
+        // recalculando de inmediato (teleport/descenso).
+        const bool doRecompute = m_forceLOD || refineNow || bigJump
+                              || ((viewChanged || moved >= moveThresh) && frameDue);
+        if (!doRecompute) {
+            HARUKA_PROFILE("lod.catchup"); // subida de backlog de agua (crea mallas GL) en throttle
             // Cámara quieta: NO recalculamos el LOD (caro). Solo de vez en cuando
             // (cada ~6 frames) reprocesamos el último set para SUBIR lo recién
             // generado (idempotente, comprobando residencia → sin recopiar lo que ya
@@ -239,7 +264,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             // hasta alcanzar el LOD del terreno. Idempotente (salta lo residente) → barato al día.
             if (m_waterRenderer && m_cache && (s_lf % 4) == 0)
                 for (const auto& k : m_lastUpdates[pi].chunksToKeep) {
-                    if (m_waterRenderer->isResident(k)) continue;   // ya en GPU → no recopiar
+                    if (waterSkip(k)) continue;                 // ya en GPU → no recopiar (snapshot, sin lock)
                     if (!m_streaming->tryConsumeUpload()) break;     // presupuesto de frame agotado
                     ChunkData wd;
                     if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
@@ -339,7 +364,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // auto-salta si ya está, así que reañadir es barato.
         if (m_waterRenderer && m_cache)
             for (const auto& k : update.chunksToLoad) {
-                if (m_waterRenderer->isResident(k)) continue;       // ya en GPU → gratis
+                if (waterSkip(k)) continue;                     // ya en GPU → gratis (snapshot, sin lock)
                 if (!m_streaming->tryConsumeUpload()) break;         // presupuesto de frame agotado
                 ChunkData wd;
                 if (m_cache->getChunkCopy(k, wd))
@@ -363,6 +388,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // detalle de tener la cadena entera residente. Se hace CADA frame (también en throttle, con
     // el último update) para que el set esté siempre vigente.
     if (m_renderer) {
+        HARUKA_PROFILE("lod.desired"); // setDesiredLeaves (+ closure/leaf/int sets) por planeta
         for (size_t pi = 0; pi < m_lastUpdates.size(); ++pi) {
             const auto& up = m_lastUpdates[pi];
             if (up.planetName.empty()) continue;
@@ -381,7 +407,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
 
     // Despachar generación pendiente (cercanos primero) CADA frame, aunque el LOD
     // esté en throttle por estar quieto → los chunks lejanos siguen entrando.
-    m_streaming->pump();
+    { HARUKA_PROFILE("lod.pump"); m_streaming->pump(); }
 
     // 3. Recoger chunks terminados y subirlos a la GPU — SOLO si siguen deseados.
     //    Un chunk cuya generación async terminó DESPUÉS de salir de la vista ya fue
@@ -395,6 +421,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     //    de los demás planetas (p.ej. la Tierra) se descartaban y NO aparecían
     //    hasta moverte (recompute del LOD). En su lugar comprobamos el set deseado
     //    del planeta CORRECTO (chunksToLoad ∪ chunksToKeep de su último LODUpdate).
+    HARUKA_PROFILE("lod.upload"); // subida a GPU de chunks recién generados (crea buffers GL = caro)
     std::unordered_map<std::string, std::unordered_set<uint64_t>> wantedByPlanet;
     for (const auto& up : m_lastUpdates) {
         if (up.planetName.empty()) continue;
@@ -511,6 +538,24 @@ bool PlanetarySystem::checkDrawSetMatchesReference(int iters, double* outNsOpt, 
         if (outNsRef) *outNsRef = b[b.size() / 2];
     }
     return opt == ref; // MISMO conjunto exacto
+}
+
+bool PlanetarySystem::checkCachedDrawSetFresh() const {
+    return m_renderer ? m_renderer->debugCachedDrawSetIsFresh("TestPlanet") : true;
+}
+
+void PlanetarySystem::residencyGatingStats(uint64_t& changes, uint64_t& bumps) const {
+    changes = bumps = 0;
+    if (m_renderer) m_renderer->debugResidencyStats(changes, bumps);
+}
+
+void PlanetarySystem::drawSetDeltaStats(uint64_t& applied, uint64_t& full) const {
+    applied = full = 0;
+    if (m_renderer) m_renderer->debugDeltaStats(applied, full);
+}
+
+void PlanetarySystem::benchDrawSetSplice(int iters, double* nsFull, double* nsSplice, size_t* drawn) const {
+    if (m_renderer) m_renderer->benchDrawSetSplice("TestPlanet", iters, nsFull, nsSplice, drawn);
 }
 
 void PlanetarySystem::updateOrbits(double /*dt*/) {
@@ -770,15 +815,16 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
 }
 
 void PlanetarySystem::syncFromScene(const SceneManager& scene) {
+    HARUKA_PROFILE("lod.sync");
+    // Antes: O(planetas × TODOS los objetos de escena) con std::string-compares CADA frame → con
+    // miles de props colocados escaneaba decenas de miles de strings/frame (parte del self-time de
+    // planetary.update). Ahora O(planetas) vía el registro por nombre de SceneManager (hash O(1)).
     for (auto& planet : m_planets) {
-        for (const auto& objPtr : scene.getAllObjects()) {
-            if (!objPtr || objPtr->name != planet.name) continue;
-            planet.position = objPtr->position;
-            planet.radius   = std::max({objPtr->scale.x, objPtr->scale.y, objPtr->scale.z});
-            break;
-        }
+        auto obj = scene.getObject(planet.name);
+        if (!obj) continue;
+        planet.position = obj->position;
+        planet.radius   = std::max({obj->scale.x, obj->scale.y, obj->scale.z});
     }
-
     // (Las islas flotantes se generan en update(), cerca de la cámara: streaming-lite.)
 }
 
@@ -999,6 +1045,12 @@ PlanetarySystem::TerrainDrawStats PlanetarySystem::getTerrainDrawStats() const {
     if (!m_renderer) return {};
     const auto s = m_renderer->getDrawStats();
     return { s.draws, s.vertices, s.triangles };
+}
+
+PlanetarySystem::TerrainPoolStats PlanetarySystem::getTerrainPoolStats() const {
+    if (!m_renderer) return {};
+    const auto s = m_renderer->poolStats();
+    return { s.poolCount, s.totalSlots, s.usedSlots, s.vramBytes, s.maxPoolCap, s.growCount };
 }
 
 bool PlanetarySystem::getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const {

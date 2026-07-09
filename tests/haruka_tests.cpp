@@ -27,6 +27,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include "game/planetary_system.h"
+#include "renderer/terrain_renderer.h"   // PoolStats / poolVramCeil / kMaxResidentChunks (tests de pool)
 #include "core/terrain/terrain_sampler_v2.h"
 #include "core/terrain/gpu_heightfield.h"
 #include "renderer/shader.h"
@@ -106,15 +107,17 @@ struct GLContext {
 // Un planeta terran v2 de prueba (radio pequeño → pocos niveles, test rápido). gpu=true usa el
 // CAMINO REAL del juego (compute GPU, terrain_gen.comp desde build/shaders). gpu=false usa el
 // fallback CPU async — que HOY corrompe el heap bajo churn (hallazgo del harness; ver notas).
-static PlanetarySystem::Planet makeTestPlanet(double radius, uint32_t seed, bool gpu) {
+static PlanetarySystem::Planet makeTestPlanet(double radius, uint32_t seed, bool gpu,
+                                              int chunkSize = 24, const char* name = "TestPlanet",
+                                              bool isHome = true) {
     PlanetarySystem::Planet p;
-    p.name = "TestPlanet";
+    p.name = name;
     p.position = WorldPos(0.0);
     p.radius = radius;
-    p.isHome = true;
+    p.isHome = isHome;
     nlohmann::json cfg;
     cfg["genVersion"] = 2; cfg["gpuTerrain"] = gpu; cfg["profile"] = "terran";
-    cfg["seed"] = seed; cfg["chunkSize"] = 24; cfg["reliefStrength"] = 1.0;
+    cfg["seed"] = seed; cfg["chunkSize"] = chunkSize; cfg["reliefStrength"] = 1.0;
     p.terrainSettings = nlohmann::json::object();
     p.terrainSettings["config"] = cfg;
     p.terrainSettings["radius"] = radius;
@@ -255,6 +258,115 @@ static void test_drawset_bench(TerrainDrawGL* gl) {
     if (bestRef < 1e17)
         std::printf("    → speedup en el caso de más carga (drawn=%d): %.2fx (%.1f→%.1f us)\n",
                     reprDrawn, bestRef / bestOpt, bestRef / 1000.0, bestOpt / 1000.0);
+    // DELTA-SPLICE: coste de re-emitir 1 subárbol vs reconstruir todo el draw-set (el caso de
+    // moverte+streaming, donde antes se reconstruía completo CADA frame con residencia cambiando).
+    double nsFull = 0, nsSplice = 0; size_t drawnN = 0;
+    ps.benchDrawSetSplice(200, &nsFull, &nsSplice, &drawnN);
+    if (nsSplice > 0)
+        std::printf("    → splice (1 nodo) vs rebuild completo [drawn=%zu]: %.1f us vs %.1f us = %.1fx más barato\n",
+                    drawnN, nsSplice / 1000.0, nsFull / 1000.0, nsFull / nsSplice);
+}
+
+// ------------------------------------------------------------------ TEST: gating del cache del draw-set
+// Valida que condicionar m_residentVersion a "chunk en la clausura" NO deja el draw-set CACHEADO
+// rancio: tras mover+asentar en varias posiciones, el conjunto cacheado (el que se dibuja) debe
+// coincidir con un rebuild fresco. Si el gate se saltara un bump necesario → mismatch aquí (y huecos
+// en el juego que validateCoverage no vería por recomputar siempre fresco). Correr: ./haruka_tests gating
+static void test_drawset_cache_gating(TerrainDrawGL* gl) {
+    beginTest("drawset_cache_gating");
+    PlanetarySystem ps;
+    ps.init();
+    ps.setTerrainBatching(false);
+    ps.addPlanet(makeTestPlanet(5000.0, 777, true));
+
+    struct Stop { glm::dvec3 cam, look; };
+    const Stop stops[] = {
+        {{0, 0, 5000.0 + 400.0}, {0, 0, -1}},          // acercándose
+        {{0, 0, 5000.0 + 90.0},  {0, 0, -1}},          // muy cerca → refina (streaming IN)
+        {{300, 0, 5000.0 + 90.0},{-0.3, 0, -1}},       // desplazamiento lateral → evict + load
+        {{0, 0, 5000.0 + 800.0}, {0, 0, -1}},          // alejándose → merge (streaming coarsen)
+    };
+    bool allFresh = true, allValid = true;
+    for (const auto& s : stops) {
+        driveEngine(ps, s.cam, s.look, 40, gl);
+        settle(ps, s.cam, s.look, gl);                  // punto quiescente (sin async en vuelo)
+        driveEngine(ps, s.cam, s.look, 1, gl);          // un render más → cache al día con la residencia
+        const bool fresh = ps.checkCachedDrawSetFresh();
+        std::string rep = ps.validateLOD();
+        const bool valid = rep.find("holes=0") != std::string::npos
+                        && rep.find("overlaps=0") != std::string::npos;
+        std::printf("    cam.z=%.0f  cache %s  cobertura %s\n", s.cam.z,
+                    fresh ? "FRESCO" : "¡RANCIO!", valid ? "ok" : "¡MAL!");
+        allFresh = allFresh && fresh;
+        allValid = allValid && valid;
+    }
+    CHECK(allFresh, "el draw-set CACHEADO (gateado) coincide con el fresco tras mover+asentar");
+    CHECK(allValid, "cobertura sin huecos/solapes en todas las paradas");
+    uint64_t changes = 0, bumps = 0;
+    ps.residencyGatingStats(changes, bumps);
+    if (changes > 0)
+        std::printf("    gating: %llu/%llu cambios de residencia invalidaron el draw-set (%.0f%% evitados)\n",
+                    (unsigned long long)bumps, (unsigned long long)changes,
+                    100.0 * (double)(changes - bumps) / (double)changes);
+}
+
+// ------------------------------------------------------------------ TEST: delta-splice del draw-set
+// Valida el DELTA-SPLICE (re-emitir solo los subárboles tocados en vez de reconstruir todo) en el
+// caso CALIENTE: cámara en MOVIMIENTO continuo + streaming (residencia cambia casi cada frame). Tras
+// CADA frame comprueba que el draw-set CACHEADO (actualizado por splice) == un buildDrawSet FRESCO y
+// que la cobertura no tiene huecos/solapes. Como addToScene se drena en update() (no en workers), no
+// hay carrera entre render y el chequeo. Si el splice divergiera aunque fuese 1 frame → lo pilla aquí.
+// También exige que el splice SÍ se aplicara (no que cayera siempre al rebuild). Correr: delta
+static void test_drawset_delta_streaming(TerrainDrawGL* gl) {
+    beginTest("drawset_delta_streaming");
+    PlanetarySystem ps;
+    ps.init();
+    ps.setTerrainBatching(false);
+    const double R = 1.5e6;                          // planeta grande → LOD profundo (mucho churn)
+    ps.addPlanet(makeTestPlanet(R, 31337, true));
+
+    // Trayectoria continua: descenso + deriva lateral (refina+evicta = adds y removes en el draw-set).
+    int badFresh = 0, badCover = 0, frames = 0;
+    auto step = [&](const glm::dvec3& cam, const glm::dvec3& look) {
+        driveEngine(ps, cam, look, 1, gl);           // update()+render() reales; cache al día con residencia
+        ++frames;
+        if (!ps.checkCachedDrawSetFresh()) ++badFresh;   // cache (splice) == fresco?
+        std::string rep = ps.validateLOD();
+        if (rep.find("holes=0") == std::string::npos ||
+            rep.find("overlaps=0") == std::string::npos) ++badCover;
+    };
+    // Descenso desde 4 km a 80 m sobre un punto de la cara, mirando abajo-adelante.
+    for (int i = 0; i < 240; ++i) {
+        double t = i / 239.0;
+        double alt = 4000.0 * (1.0 - t) + 80.0 * t;
+        double x = 900.0 * t;                        // deriva lateral → evicta lo que dejas atrás
+        step({x, 0.0, R + alt}, glm::normalize(glm::dvec3(-0.25, 0.0, -1.0)));
+    }
+    // Deriva lateral sostenida cerca de superficie (streaming IN por delante, OUT por detrás).
+    for (int i = 0; i < 160; ++i) {
+        double x = 900.0 + 12.0 * i;
+        step({x, 0.0, R + 80.0}, glm::normalize(glm::dvec3(-0.25, 0.0, -1.0)));
+    }
+
+    uint64_t applied = 0, full = 0;
+    ps.drawSetDeltaStats(applied, full);
+    // Asentar al final → converge a cobertura correcta (los blips-MAL de arriba son huecos
+    // TRANSITORIOS de streaming del propio algoritmo de referencia, NO del splice: se dan igual con
+    // el delta apagado, y `fresco-MAL` demuestra que el cache por splice == el fresco cada frame).
+    const glm::dvec3 endCam(900.0 + 12.0 * 159, 0.0, R + 80.0);
+    const glm::dvec3 endLook = glm::normalize(glm::dvec3(-0.25, 0.0, -1.0));
+    settle(ps, endCam, endLook, gl);
+    driveEngine(ps, endCam, endLook, 1, gl);
+    std::string finalRep = ps.validateLOD();
+    const bool finalClean = finalRep.find("holes=0") != std::string::npos
+                         && finalRep.find("overlaps=0") != std::string::npos;
+    std::printf("    frames=%d  fresco-MAL=%d  cobertura-MAL(mov,transitorio)=%d  splice=%llu  rebuild=%llu  final=%s\n",
+                frames, badFresh, badCover,
+                (unsigned long long)applied, (unsigned long long)full, finalClean ? "limpio" : "¡MAL!");
+    CHECK(badFresh == 0,   "el draw-set por SPLICE == fresco en TODOS los frames en movimiento (delta correcto)");
+    CHECK(ps.checkCachedDrawSetFresh(), "cache por splice == fresco tras asentar");
+    CHECK(finalClean,      "cobertura sin huecos/solapes tras asentar");
+    CHECK(applied > 0,     "el delta-splice SÍ se aplicó (no cayó siempre al rebuild completo)");
 }
 
 // ------------------------------------------------------------------ TEST: sampler determinista (real)
@@ -416,7 +528,7 @@ static void test_stress(TerrainDrawGL* gl, WaterDrawGL* wgl) {
                 "coord", "chunks", "tris", "agua", "upd_ms", "terr_ms", "agua_ms", "cobertura");
     bool anyValid = true;
     for (const auto& s : scns) {
-        PlanetarySystem ps; ps.init(); ps.setTerrainBatching(false);
+        PlanetarySystem ps; ps.init(); ps.setTerrainBatching(getenv("HARUKA_POOL_DBG") ? true : false);
         ps.addPlanet(makeTestPlanet(R, 4242, true));
         const glm::dvec3 cam = s.dir * (R + s.alt);
         settle(ps, cam, s.look, gl, /*stableN*/20, /*max*/1500);
@@ -450,6 +562,108 @@ static void test_stress(TerrainDrawGL* gl, WaterDrawGL* wgl) {
                     tUpd / N, tDraw / N, tWater / N, cov ? "ok" : "HUECOS/SOLAPE");
     }
     CHECK(anyValid, "cobertura válida (sin huecos/solapes) en TODAS las coordenadas");
+}
+
+// vértices por chunk para un chunkSize dado: rejilla (cs+1)² + faldas 4·(cs+1). Debe COINCIDIR con
+// terrain_generator.cpp (vtxCount + skirtVtxCount) → así el test predice el vertexCount del pool.
+static inline uint32_t vcForChunkSize(int cs) { return (uint32_t)((cs + 1) * (cs + 1) + 4 * (cs + 1)); }
+
+// ------------------------------------------------------------------ POOL: capacidad fija, sin realloc gigante
+// BLINDAJE del fix "buffer fijo persistente": el pool de geometría del terreno reserva su VRAM UNA vez
+// a capacidad máxima y NO vuelve a reasignar. Antes crecía por DUPLICACIÓN (glBufferData de cientos de
+// MB→GB en el hilo de render = el stall "el terreno desaparece al girar/mirar mar", RenderDoc 22: 2.76 GB
+// en 1 frame). Con streaming pesado (fly-in a suelo en planeta grande → miles de chunks, muy por encima
+// del viejo umbral de 1024 que disparaba el primer realloc) verificamos que growPool NUNCA dispara y que
+// la VRAM del pool queda EXACTA y acotada a la reserva fija.
+static void test_pool_fixed_no_grow(TerrainDrawGL* gl) {
+    beginTest("pool_capacidad_fija_sin_realloc");
+    PlanetarySystem ps;
+    ps.init();
+    ps.setTerrainBatching(true);   // camino POOL (el que arreglamos); OFF sería legacy per-chunk
+    const int cs = 24;
+    const uint32_t vc = vcForChunkSize(cs);
+    const double R = 2.0e6;        // 2000 km → LOD profundo → miles de chunks residentes al bajar a suelo
+    ps.addPlanet(makeTestPlanet(R, 4242, /*gpu*/true, cs));
+
+    // CHURN real: entra desde el espacio, baja a suelo (llena el pool), sube y vuelve a bajar. Es
+    // justo el pico de streaming donde el viejo pool duplicaba y reasignaba.
+    const glm::dvec3 pole(0, 1, 0), look(1, 0, -0.2);
+    driveEngine(ps, pole * (R * 2.0), glm::dvec3(0, -1, 0), 40, gl);   // espacio
+    settle(ps, pole * (R + 3000.0), glm::dvec3(0, -1, 0.2), gl, 15, 1200); // vuelo bajo
+    settle(ps, pole * (R + 2.0),    look,                  gl, 20, 1500); // suelo (pico de chunks)
+    driveEngine(ps, pole * (R * 1.5), glm::dvec3(0, -1, 0), 30, gl);   // vuelve a subir
+    settle(ps, pole * (R + 2.0),    look,                  gl, 15, 1200); // baja otra vez
+
+    auto st = ps.getTerrainPoolStats();
+    int gpuChunks = ps.getGPUChunkCount();
+    std::printf("    pools=%d  used=%zu/%zu slots  maxCap=%u  vram=%.1fMB  grow=%llu  gpuChunks=%d\n",
+                st.poolCount, st.usedSlots, st.totalSlots, st.maxPoolCap,
+                st.vramBytes / 1048576.0, (unsigned long long)st.growCount, gpuChunks);
+
+    CHECK(st.growCount == 0, "growPool NUNCA disparó (cero reasignaciones gigantes = sin el stall)");
+    CHECK(gpuChunks > 0, "el churn dejó chunks residentes en el pool");
+    CHECK(st.poolCount == 1, "1 sola topología → 1 solo pool (rejilla CDLOD uniforme)");
+    // Discriminador FIJO-vs-DUPLICADO: la reserva es la capacidad máxima desde el 1er chunk, aunque
+    // solo haya ~cientos residentes. El viejo pool (nacía en 1024, ×2 al llenarse) mostraría cap=1024
+    // con este nº de chunks; ver maxCap==kMaxResidentChunks lo distingue sin depender de la escala.
+    CHECK(st.maxPoolCap == (uint32_t)TerrainRenderer::kMaxResidentChunks,
+          "capacidad FIJA a kMaxResidentChunks desde la 1ª reserva (no creció desde 1024)");
+    CHECK(st.maxPoolCap > (uint32_t)gpuChunks,
+          "capacidad reservada >> chunks vivos (VRAM plana, no ajustada al pico por realloc)");
+    CHECK(st.usedSlots <= st.totalSlots, "slots usados <= reservados (invariante de free-list)");
+    CHECK(st.usedSlots == (size_t)gpuChunks, "cada chunk residente ocupa exactamente 1 slot del pool");
+    const size_t vramExact = (size_t)TerrainRenderer::kMaxResidentChunks * vc * TerrainRenderer::kPoolBytesPerVertex;
+    CHECK(st.vramBytes == vramExact, "VRAM del pool = reserva fija exacta (plana, no crece con el nº de chunks)");
+    CHECK(st.vramBytes <= TerrainRenderer::poolVramCeil(st.poolCount, vc), "VRAM dentro del techo teórico");
+}
+
+// ------------------------------------------------------------------ POOL: multi-topología acotada
+// Segundo agujero de correctitud del fix: si aparecen VARIAS topologías (vertexCount distintos —
+// p.ej. dos planetas con distinto chunkSize, o islas/cuevas), cada pool reservaba kMaxResidentChunks
+// → la VRAM se MULTIPLICABA por nº de topologías (~N×2GB). El blindaje da capacidad completa solo al
+// pool DOMINANTE (el primero) y kSecondaryPoolSlots a los demás. Con dos planetas de chunkSize distinto
+// verificamos que, aunque haya 2 pools, la VRAM total queda ACOTADA (no 2× el pool grande).
+static void test_pool_multitopology_bounded(TerrainDrawGL* gl) {
+    beginTest("pool_multitopologia_acotada");
+    PlanetarySystem ps;
+    ps.init();
+    ps.setTerrainBatching(true);
+    const int csA = 24, csB = 16;
+    const uint32_t vcMax = std::max(vcForChunkSize(csA), vcForChunkSize(csB));
+    const double R = 3.0e5; // 300 km cada uno
+    // A (home) en el origen; B (distinto chunkSize → OTRA topología) 700 km más allá en +z. La cámara se
+    // sitúa a medio camino, cerca de AMBAS superficies, para que las dos transmitan chunks a la vez.
+    ps.addPlanet(makeTestPlanet(R, 111, true, csA, "TestPlanet", /*isHome*/true));
+    auto pb = makeTestPlanet(R, 222, true, csB, "PlanetB", /*isHome*/false);
+    pb.position = WorldPos(0.0, 0.0, 7.0e5);
+    ps.addPlanet(pb);
+
+    const glm::dvec3 cam(0.0, 0.0, 3.5e5);     // punto medio: ~50 km sobre el polo de A y bajo el de B
+    settle(ps, cam, glm::dvec3(0, 0, 1),  gl, 15, 1500);   // mira a B
+    driveEngine(ps, cam, glm::dvec3(0, 0, -1), 60, gl);    // y a A (ambas quedan residentes)
+
+    auto st = ps.getTerrainPoolStats();
+    std::printf("    pools=%d  used=%zu/%zu slots  maxCap=%u  vram=%.1fMB  grow=%llu\n",
+                st.poolCount, st.usedSlots, st.totalSlots, st.maxPoolCap,
+                st.vramBytes / 1048576.0, (unsigned long long)st.growCount);
+
+    CHECK(st.growCount == 0, "growPool NUNCA disparó con 2 topologías");
+    CHECK(st.maxPoolCap <= (uint32_t)TerrainRenderer::kMaxResidentChunks, "ningún pool excede el tope global");
+    CHECK(st.vramBytes <= TerrainRenderer::poolVramCeil(st.poolCount, vcMax),
+          "VRAM total ACOTADA por el techo (dominante lleno + secundarios acotados), no N× el pool grande");
+    if (st.poolCount >= 2) {
+        // Prueba fuerte del blindaje: si CADA pool reservara el tope global, totalSlots sería
+        // poolCount×kMaxResidentChunks. Con el cap secundario debe ser mucho menor.
+        const size_t naive = (size_t)st.poolCount * TerrainRenderer::kMaxResidentChunks;
+        const size_t bound = (size_t)TerrainRenderer::kMaxResidentChunks
+                           + (size_t)(st.poolCount - 1) * TerrainRenderer::kSecondaryPoolSlots;
+        CHECK(st.totalSlots <= bound, "los pools secundarios usan el cap reducido (VRAM no se multiplica)");
+        CHECK(st.totalSlots <  naive, "totalSlots < poolCount×tope-global (el agujero multi-topología está tapado)");
+        std::printf("    2+ topologías materializadas → bound verificado (naive=%zu, real=%zu)\n",
+                    naive, st.totalSlots);
+    } else {
+        std::printf("    (solo 1 pool residente: B no transmitió; bound multi-topología trivialmente OK)\n");
+    }
 }
 
 // ------------------------------------------------------------------ SWEEP: calidad vs coste (targetPx)
@@ -505,7 +719,8 @@ int main(int argc, char** argv) {
     if (want("sampler")) test_sampler_determinism();
 
     const bool wantGL = want("lod") || want("engine") || want("parity") || want("gpu") || want("orbit")
-                     || want("stress") || want("quality") || want("sweep") || want("drawset") || want("bench");
+                     || want("stress") || want("quality") || want("sweep") || want("drawset")
+                     || want("bench") || want("gating") || want("delta") || want("pool");
     if (wantGL) {
         GLContext glc;
         if (!glc.ok) { std::printf("  \033[33mSKIP\033[0m tests GPU: no hay contexto GL headless disponible\n"); }
@@ -520,6 +735,12 @@ int main(int argc, char** argv) {
                 test_engine_rotate_keeps_terrain(&draw);
             }
             if (want("drawset") || want("bench")) test_drawset_bench(&draw);
+            if (want("drawset") || want("gating")) test_drawset_cache_gating(&draw);
+            if (want("drawset") || want("delta"))  test_drawset_delta_streaming(&draw);
+            if (want("pool")) {
+                test_pool_fixed_no_grow(&draw);
+                test_pool_multitopology_bounded(&draw);
+            }
             if (want("stress")) test_stress(&draw, &water);
             if (want("stress") || want("quality") || want("sweep")) test_quality_sweep(&draw);
         }

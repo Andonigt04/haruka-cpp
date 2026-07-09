@@ -251,7 +251,14 @@ void LODSystem::recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& ce
         // buildDrawSet (6.6ms) + streaming → "el terreno desaparece al mirar al mar/girar". A distancia
         // el recorte de la línea de agua es PER-PÍXEL en el shader (oceanElevKm), NO depende del LOD de
         // la malla → bajar el refinamiento lejano NO dienta la costa (sigue exacta). Órbita/coste intactos.
-        if (m_coastFn && key.lod < m_maxLOD && dist < 20000.0) {
+        // OPTIMIZACIÓN (sin cambio de salida): el sesgo de costa solo puede VOLTEAR la decisión de
+        // split cuando screenSize cae en la banda (thrPx·coastRefine, thrPx]. Si screenSize > thrPx el
+        // nodo se subdivide igual; si screenSize ≤ thrPx·coastRefine no se subdivide ni con el sesgo →
+        // en ambos casos m_coastFn (hasta 5 fBm/nodo) es INÚTIL. Cerca del mar hay MILES de nodos
+        // dentro de 20km → gatearlo a la banda mata el grueso de lod.recompute (era el pico de 13-27ms
+        // al mirar a lo largo de la costa). También exige `visible` (invisible ⇒ distSplit=false igual).
+        if (m_coastFn && visible && key.lod < m_maxLOD && dist < 20000.0
+            && screenSize > thrPx * m_coastRefine && screenSize <= thrPx) {
             const double dc = std::abs(m_coastFn(chunkDir));   // |dist a la costa| (m)
             if (dc < size * 1.2 + 100.0) thrPx *= m_coastRefine;
         }

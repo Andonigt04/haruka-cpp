@@ -1,3 +1,14 @@
+# Updates
+- **DGS implementacion completa** con networkLib y gestion de objetos de juego con fisicas lo integre directamente el juego y el motor lo admita y que tenga cierto layout para el network de **DGS** como *lib*. **Fisicas** a nivel de servidor como lib para que el anticheat lo valide y asi esten en tanto local(cliente), como server. Plantear como se implementara a nivel de server el sistema de guilds titles, shop/traiding, chat etc..., de forma coherente y mas o menos unificada sin agrandar codigo de **DGS** sin que otro proyecto lo tenga si, no lo necesita.
+- **RHI Basico**, con intencion de hacer que funcione y un test de **Vulkan** basico de creacion basica y *resize* de la ventana.
+- Terreno con seleccion de texturas en bioma *segun inclinacion* (para hacer que la inclinacion de la montaña sea roca); hacer que como tal tenga diferentes tipos de texturas como tierra o hierva si es que tiene, o nieve sobre la tierra....
+- Sistema de fisicas unificado para vehiculos, monstruos o jugadores
+- Creacion de caminos por construccion de mallas trozo de tierra lo aplanas en el suelo se "sobrepone" al terreno en la posicion, *como poner grava sobre tierra*.
+- Implementacion de Guilds/Parties/Allience/Groups/....
+
+
+---
+
 Incoherencia en el objectType y renderKind
 
 ---
@@ -41,9 +52,5 @@ add `namespace Haruka { using Sub::X; … }` back-compat, fix forward-decls (`cl
 ---
 
 # Render issues (reported) — TODO
-1. **Water cuts/clips objects.** The ocean shell intersects props/objects at the waterline (depth/
-   transparency/order). Objects partially submerged get sliced by the water surface.
-2. **Procedural props (trees/rocks) render inconsistently** — sometimes visible, sometimes not / look
-   wrong. Likely frustum culling or the altitude-LOD cap / scatter visibility vs camera.
-3. **Normal (placed) scene objects have NO LOD** — they draw at full detail at any distance (no
+1. **Normal (placed) scene objects have NO LOD** — they draw at full detail at any distance (no
    distance cull / impostor), unlike terrain. Need a distance-based cull/LOD for scene Models.

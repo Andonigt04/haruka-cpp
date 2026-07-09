@@ -84,6 +84,7 @@ namespace Haruka {
             std::lock_guard<std::mutex> lock(m_renderMutex);
             m_desiredLeaves[planet] = std::move(leaves);
             m_drawSetDirty[planet] = 1;   // invalida el cache del draw set (hojas nuevas)
+            rebuildClosureForPlanet(planet); // clausura nueva → gate de m_residentVersion al día
         }
 
         /** @brief splitFactor REAL del LODSystem. La banda de morph CDLOD debe terminar (=1)
@@ -158,6 +159,18 @@ namespace Haruka {
         };
         LODReport validateCoverage() const;
 
+        // TEST del gating de m_residentVersion: ¿el draw-set CACHEADO (el que de verdad se dibuja,
+        // actualizado solo cuando sube m_residentVersion) coincide con un buildDrawSet FRESCO? Si el
+        // gate se saltara un bump necesario, el cache quedaría rancio y esto lo delataría. true si aún
+        // no hay nada cacheado. Llamar en punto quiescente (sin async en vuelo).
+        bool debugCachedDrawSetIsFresh(const std::string& planet) const;
+        // Micro-bench NO destructivo: cronometra un buildDrawSet COMPLETO vs un applyDrawSetDelta con
+        // un cambio de 1 nodo, sobre el draw-set actual. Salva y restaura cache/pending. Devuelve los
+        // ns/iter en *nsFull/*nsSplice y el tamaño del draw-set en *drawn. Para cuantificar el ahorro.
+        void benchDrawSetSplice(const std::string& planet, int iters,
+                                double* nsFull, double* nsSplice, size_t* drawn);
+        void debugResidencyStats(uint64_t& changes, uint64_t& bumps) const { changes = m_dbgResChanges; bumps = m_dbgResBumps; }
+
         // Selección de dibujo TOP-DOWN sin solapes: parte de la raíz de cada cara y baja a los
         // hijos SOLO si todo el subárbol hasta las hojas deseadas está residente; si falta algún
         // fino, dibuja el nodo grueso residente (coarsest fallback). Partición exacta → 0 overlaps,
@@ -178,6 +191,39 @@ namespace Haruka {
         DrawStats getDrawStats() const;
         DrawStats getDrawStatsForPlanet(const std::string& planet) const;
 
+        // --- Telemetría de los pools de geometría (blindaje del fix "buffer fijo") ------------
+        // Expuesto para el banco de pruebas (y `terrainpool` en consola): permite ASERTAR que la
+        // VRAM del terreno está ACOTADA y que growPool (el realloc gigante que causaba el stall
+        // "el terreno desaparece al girar") NO dispara en el caso normal.
+        struct PoolStats {
+            int      poolCount = 0;    // nº de topologías distintas residentes (= nº de pools)
+            size_t   totalSlots = 0;   // suma de capacidades reservadas
+            size_t   usedSlots = 0;    // slots ocupados (capacity - freeSlots) sumados
+            size_t   vramBytes = 0;    // VRAM reservada por TODOS los pools (5 VBOs, sin EBO compartido)
+            uint32_t maxPoolCap = 0;   // capacidad del pool más grande (debe ser <= kMaxResidentChunks)
+            uint64_t growCount = 0;    // veces que growPool ha disparado en toda la vida (DEBE ser 0)
+        };
+        PoolStats poolStats() const;
+
+        // --- Constantes de dimensionado de los pools (públicas: tests + consola) --------------
+        // Tope duro de mallas residentes → acota RAM/VRAM ante picos de streaming (fly-in/órbita).
+        // Generoso sobre el set visible normal (~1500-4000); más allá se dibuja el ancestro grueso.
+        static constexpr int      kMaxResidentChunks = 12000;
+        static constexpr size_t   kPoolBytesPerVertex = 12 + 12 + 4 + 4 + 4; // pos+morph(vec3) + norm+morphNorm+uv(u32) = 36 B
+        // Capacidad de un pool SECUNDARIO (topología no-dominante: otro planeta con distinto chunkSize,
+        // islas flotantes, cuevas...). El pool DOMINANTE (el primero creado) recibe kMaxResidentChunks.
+        static constexpr uint32_t kSecondaryPoolSlots = 4096;
+
+        // Cota TEÓRICA de VRAM de pools (bytes) para asertar en tests: el pool dominante a capacidad
+        // completa + (n-1) pools secundarios acotados, todos con `vc` vértices. Con vcMax = el mayor
+        // vertexCount observado, es un techo válido para cualquier mezcla de topologías.
+        static size_t poolVramCeil(int poolCount, uint32_t vcMax) {
+            const size_t bpv = kPoolBytesPerVertex;
+            size_t ceil = (size_t)kMaxResidentChunks * vcMax * bpv;                 // pool dominante
+            if (poolCount > 1) ceil += (size_t)(poolCount - 1) * kSecondaryPoolSlots * vcMax * bpv;
+            return ceil;
+        }
+
     private:
         // Usamos el hash de la llave para identificar la malla en la GPU
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
@@ -191,7 +237,9 @@ namespace Haruka {
         // normal/morphNormal/uv), en SLOTS de tamaño fijo (vertexCount vértices cada uno).
         // Dibujar = glDrawElementsBaseVertex(baseVertex = slot*vertexCount) → un solo VAO
         // bind para todos → mata el coste de rebind por chunk. Free-list de slots (sin
-        // fragmentación: todos los slots son del mismo tamaño). Crece x2 cuando se llena.
+        // fragmentación: todos los slots son del mismo tamaño). CAPACIDAD FIJA reservada UNA
+        // vez (ver getOrCreatePool): NO crece en runtime en el caso normal (1 topología). growPool
+        // queda solo como VÁLVULA DE SEGURIDAD ruidosa (ver m_poolGrowCount) para transiciones raras.
         struct ChunkPool {
             GLuint   vao = 0;
             GLuint   posVBO = 0, morphVBO = 0, normVBO = 0, morphNormVBO = 0, uvVBO = 0;
@@ -238,18 +286,74 @@ namespace Haruka {
         std::unordered_map<std::string, std::unordered_set<uint64_t>> m_drawSetCache;
         std::unordered_map<std::string, uint64_t>                     m_drawSetCacheVer; // m_residentVersion del build
         std::unordered_map<std::string, char>                         m_drawSetDirty;    // hojas cambiadas
-        uint64_t m_residentVersion = 0; // ++ en cada insert/erase de m_gpuMeshes
+        uint64_t m_residentVersion = 0; // ++ SOLO cuando cambia la residencia de un nodo de la CLAUSURA
+
+        // --- DELTA-SPLICE del draw-set (evita rebuild completo al moverte+stream) -----------------
+        // buildDrawSet completo es O(hojas): re-camina TODAS las hojas cada frame en que el streaming
+        // entregue algún chunk. Pero un cambio de residencia de un nodo K SOLO puede alterar el
+        // draw-set en el subárbol del nodo DIBUJADO que cubre K (las celdas del quadtree anidan o son
+        // disjuntas → re-emitir ese subárbol y sustituir sus celdas viejas preserva EXACTO la
+        // partición). Así, en frames de solo-streaming (hojas sin cambiar), re-emitimos únicamente los
+        // pocos subárboles tocados en vez de todo. Correcto-por-construcción: emit(subárbol) depende
+        // solo de la residencia bajo ese subárbol (demostrado igual que la clausura). Fallback a
+        // rebuild completo si el delta es grande o no hay ancestro residente.
+        // Conjuntos PRECOMPUTADOS por planeta (estáticos entre cambios de hojas → los usa emitSubtree
+        // sin reconstruir el trie cada frame): hojas deseadas y nodos internos (ancestros de hojas).
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_leafSet;  // hojas deseadas (hash)
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_intSet;   // nodos internos (ancestros)
+        // Cambios de residencia PENDIENTES de aplicar por planeta (nodos de la clausura que cambiaron
+        // desde el último build). Se consumen en renderPlanet (splice) y se vacían.
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_pendingDelta;
+        std::unordered_map<uint16_t, std::string> m_bodyToPlanet; // routing de noteResidencyChange (body→planeta)
+        static constexpr size_t kMaxDeltaSplice = 96; // más cambios que esto en un frame → rebuild completo
+        // Emite (partición top-down coarsest-fallback) el subárbol de `root` usando los sets
+        // precomputados; añade los nodos DIBUJADOS a out. `memo` cachea canCover entre raíces.
+        void emitSubtree(const std::unordered_set<uint64_t>& leafSet,
+                         const std::unordered_set<uint64_t>& intSet,
+                         const PlanetChunkKey& root,
+                         std::unordered_set<uint64_t>& outHashes,
+                         std::vector<PlanetChunkKey>* outKeys,
+                         std::unordered_map<uint64_t, uint8_t>& memo) const;
+        // Aplica los cambios pendientes por splice de subárboles. Devuelve false si hay que recurrir
+        // al rebuild completo (delta grande / sin ancestro residente). CALLER tiene lock.
+        bool applyDrawSetDelta(const std::string& planet);
+
+        // CLAUSURA del draw-set = hojas deseadas ∪ todos sus ancestros ∪ raíces de cara. buildDrawSet
+        // SOLO lee la residencia de nodos de la clausura (demostrado: canCover solo consulta nodos que
+        // la recursión visita, y todos están en la clausura) → un cambio de residencia FUERA de la
+        // clausura NO puede alterar el draw-set. Por eso m_residentVersion solo sube si el chunk que
+        // cambió está en m_closureAll → evita reconstruir por evicciones lejanas/purgas/cargas no
+        // deseadas al moverse. Se reconstruye cuando cambian las hojas (setDesiredLeaves, throttleado).
+        std::unordered_map<std::string, std::unordered_set<uint64_t>> m_closureByPlanet;
+        std::unordered_set<uint64_t> m_closureAll; // unión de todas las clausuras (test de pertenencia O(1))
+        void rebuildClosureForPlanet(const std::string& planet); // clausura del planeta + m_closureAll (CALLER tiene lock)
+        void rebuildClosureAll();                  // recomputa m_closureAll = ∪ m_closureByPlanet (CALLER tiene lock)
+        void noteResidencyChange(uint64_t hash) {  // ++version SOLO si el nodo está en la clausura
+            ++m_dbgResChanges;
+            if (m_closureAll.count(hash)) {
+                ++m_residentVersion; ++m_dbgResBumps;
+                // Ruta el nodo cambiado a su planeta (por body) → pendiente de splice. face(3)|lod(5)|
+                // x(23)|y(23)|body(10): el body está en los 10 bits altos (>>54).
+                uint16_t body = (uint16_t)((hash >> 54) & 0x3FF);
+                auto pit = m_bodyToPlanet.find(body);
+                if (pit != m_bodyToPlanet.end()) m_pendingDelta[pit->second].insert(hash);
+            }
+        }
+        // Diagnóstico del gating: cambios de residencia TOTALES vs los que sí invalidaron (en clausura).
+        mutable uint64_t m_dbgResChanges = 0, m_dbgResBumps = 0;
+        // Diagnóstico del delta-splice: frames en que se aplicó por splice vs los que cayeron al
+        // rebuild completo (delta grande / sin fallback / hojas nuevas).
+        mutable uint64_t m_dbgDeltaApplied = 0, m_dbgDeltaFull = 0;
+    public:
+        void debugDeltaStats(uint64_t& applied, uint64_t& full) const { applied = m_dbgDeltaApplied; full = m_dbgDeltaFull; }
+    private:
         glm::mat4  m_cullVP{1.0f};
         bool       m_cullEnabled = false;
         glm::dvec3 m_planetCenter{0.0};
         bool       m_hasPlanetCenter = false;
         int        m_lastDrawn = 0;
         int        m_ageTick   = 0; // contador para la pasada de eviction (envejecer+purgar residentes)
-        // Tope duro de mallas residentes → acota RAM/VRAM ante picos de streaming (fly-in/órbita).
-        // Generoso sobre el set visible normal (~1500-4000); más allá se dibuja el ancestro grueso.
-        static constexpr int kMaxResidentChunks = 12000; // subido de 8000: con la ventana de eviction
-                                    // larga (girar sin perder terreno) hace falta sitio para el ENTORNO
-                                    // del jugador quieto en varias direcciones. ~0.5 MB/chunk, dentro del budget.
+        uint64_t   m_poolGrowCount = 0; // válvula de seguridad: veces que growPool ha reasignado (debe ser 0)
 
         void cleanupMesh(RenderMesh& mesh);
 
