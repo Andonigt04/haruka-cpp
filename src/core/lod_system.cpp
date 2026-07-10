@@ -1,5 +1,6 @@
 #include "lod_system.h"
 #include "chunk_cache.h" // Para usar keyToHash
+#include "tools/profiler.h" // sub-scopes de lod.recompute: tree (recursión) vs balance (2:1)
 
 namespace Haruka {
 
@@ -46,18 +47,21 @@ LODUpdate LODSystem::updatePlanetLOD(const std::shared_ptr<SceneObject>& planet,
     // (TerrainRenderer/WaterRenderer), y el caché LRU lo mantiene residente
     // mientras haya presupuesto de memoria. Así girar o mirar a la cara opuesta
     // NUNCA recarga terreno (antes el face-cull la descargaba y regeneraba).
-    for (int face = 0; face < 6; ++face) {
-        const PlanetFace planetFace = static_cast<PlanetFace>(face);
-        PlanetChunkKey rootKey{ planetFace, 0, 0, 0, m_currentBody };
-        glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
+    {
+        HARUKA_PROFILE("tree"); // recursión top-down por las 6 caras (frustum/horizonte/split)
+        for (int face = 0; face < 6; ++face) {
+            const PlanetFace planetFace = static_cast<PlanetFace>(face);
+            PlanetChunkKey rootKey{ planetFace, 0, 0, 0, m_currentBody };
+            glm::dvec3 center = getCubeToSpherePos(planetFace, 0.5, 0.5, radius) + planetPos;
 
-        recursiveProcess(rootKey, center, radius * 2.0, cameraPos, update, radius, planetPos, isResident);
+            recursiveProcess(rootKey, center, radius * 2.0, cameraPos, update, radius, planetPos, isResident);
+        }
     }
 
     // 2:1 balance: ningún chunk vecino puede diferir en más de 1 nivel de LOD.
     // Sin esto, dos chunks adyacentes con diferencia ≥2 niveles dejan un escalón
     // recto que el morph (que solo salva 1 nivel) no puede cerrar.
-    balanceLeaves();
+    { HARUKA_PROFILE("balance"); balanceLeaves(); } // while 2:1 (findCoveringLeaf O(lod) por vecino)
 
     // Diff contra el frame anterior para load/keep/unload.
     for (auto& [hash, key] : m_currentFrameChunks) {
@@ -188,6 +192,20 @@ void LODSystem::recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& ce
     const double camAlt = (radius > 1e-9) ? (camDist / radius - 1.0) : 1e9; // en radios
     const bool belowMin = (key.lod < m_minLOD) && (camAlt < 1.5);
 
+    // RESIDENCIA DE LOS 4 HIJOS: la MISMA consulta la necesitan la HISTÉRESIS de fusión (screenSpace)
+    // Y la CARGA PROGRESIVA (más abajo, ambos modos). Antes se calculaba DOS veces (hasta 8 lookups
+    // hash/nodo); ahora UNA sola vez → 4. Output-idéntico (mismas claves). isResident nulo = sin gate.
+    bool childAny = false;
+    if (isResident) {
+        const uint8_t  cl = (uint8_t)(key.lod + 1);
+        const uint32_t bx = key.x * 2, by = key.y * 2;
+        const uint16_t bd = key.body;
+        childAny = isResident({ key.face, cl, bx,     by,     bd })
+                || isResident({ key.face, cl, bx + 1, by,     bd })
+                || isResident({ key.face, cl, bx,     by + 1, bd })
+                || isResident({ key.face, cl, bx + 1, by + 1, bd });
+    }
+
     bool distSplit;
     if (m_screenSpace) {
         // F1: subdivide mientras el chunk PROYECTE más de m_targetPx px en pantalla. SIN tope
@@ -233,16 +251,7 @@ void LODSystem::recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& ce
         // fino se DESCARGA y se RECARGA en bucle = "aparecen cosas diferentes". Estado = residencia
         // (persiste entre frames en el renderer; el árbol de nodos se reconstruye cada frame).
         double thrPx = m_targetPx;
-        if (isResident) {
-            const uint8_t  cl = (uint8_t)(key.lod + 1);
-            const uint32_t bx = key.x * 2, by = key.y * 2;
-            const uint16_t bd = key.body;
-            const bool childRes = isResident({ key.face, cl, bx,     by,     bd })
-                               || isResident({ key.face, cl, bx + 1, by,     bd })
-                               || isResident({ key.face, cl, bx,     by + 1, bd })
-                               || isResident({ key.face, cl, bx + 1, by + 1, bd });
-            if (childRes) thrPx = m_targetPx * 0.72;   // ya partido → banda muerta al fusionar
-        }
+        if (childAny) thrPx = m_targetPx * 0.72;   // ya partido → banda muerta al fusionar
         // BIAS DE COSTA: si la línea de mar cae dentro de la HUELLA del chunk (|distToCoast| < ~size),
         // baja el umbral → se subdivide más en la orilla = triángulos finos, sin la línea de agua
         // dentada. La banda encoge con el chunk (size) → el refinamiento se concentra en la costa y
@@ -274,14 +283,8 @@ void LODSystem::recursiveProcess(const PlanetChunkKey& key, const glm::dvec3& ce
     // hay algo dibujado mientras el detalle llega, y refina nivel a nivel. Sin predicado
     // (isResident=nullptr) → comportamiento clásico (subdivide directo al objetivo).
     if (wantSplit && isResident) {
-        const uint8_t  cl = (uint8_t)(key.lod + 1);
-        const uint32_t bx = key.x * 2, by = key.y * 2;
-        const uint16_t bd = key.body;
-        const bool childIn = isResident({ key.face, cl, bx,     by,     bd })
-                          || isResident({ key.face, cl, bx + 1, by,     bd })
-                          || isResident({ key.face, cl, bx,     by + 1, bd })
-                          || isResident({ key.face, cl, bx + 1, by + 1, bd });
-        if (!isResident(key) && !childIn) {
+        // childAny (residencia de los 4 hijos) ya se calculó arriba → reutilizado sin re-hashear.
+        if (!isResident(key) && !childAny) {
             wantSplit = false;             // aún no está el grueso → espera
             update.residencyLimited = true; // el llamador debe recalcular hasta refinar
         }

@@ -1,5 +1,6 @@
 .vscode/
 build/
+test/vk_resize/build/
 
 docs/doxygen_warn.log
 docs/doxygen_warnings.log

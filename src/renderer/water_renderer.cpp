@@ -509,6 +509,7 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
             glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
         }
     }
+    } // fin scope "water.select"
 
     // --- MultiDrawIndirect: una llamada por pool con todos sus chunks de agua visibles ---------
     if (m_batching) {

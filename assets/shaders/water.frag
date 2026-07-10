@@ -344,8 +344,13 @@ void main() {
     float shoreFoam = (1.0 - smoothstep(0.0, 2.2, shoreDepthM))
                     * (0.55 + 0.45 * smoothstep(-0.4, 1.0, WaveHeight));
     // Foam de cresta (Gerstner-Jacobian + crestas altas): casi nula en lagos calmos.
-    float crestFoam = smoothstep(1.2, 2.2, WaveHeight) * (1.0 - 0.9 * IsLake);
-    float foam = clamp(max(max(Foam * (1.0 - 0.9 * IsLake), crestFoam), shoreFoam), 0.0, 1.0);
+    // DESVANECIDO CON DISTANCIA (igual que la normal se aplana en water.vert): la rejilla del océano
+    // (192²) no resuelve las olas cortas (7-41 m) a distancia → el Jacobiano/WaveHeight per-vértice
+    // ALIASA → motas de espuma "aleatorias" sin relación con el oleaje visible. La espuma de OLA solo
+    // es fiable cerca; la de ORILLA (por profundidad, shoreFoam) es estable y se mantiene a cualquier dist.
+    float waveFoamFade = 1.0 - smoothstep(400.0, 2000.0, length(FragPos));
+    float crestFoam = smoothstep(1.2, 2.2, WaveHeight) * (1.0 - 0.9 * IsLake) * waveFoamFade;
+    float foam = clamp(max(max(Foam * (1.0 - 0.9 * IsLake) * waveFoamFade, crestFoam), shoreFoam), 0.0, 1.0);
     color = mix(color, vec3(0.85, 0.92, 0.97), foam * 0.75);
 
     if (enableHDR != 0) {

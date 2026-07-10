@@ -1,6 +1,8 @@
 # Updates
 - **DGS implementacion completa** con networkLib y gestion de objetos de juego con fisicas lo integre directamente el juego y el motor lo admita y que tenga cierto layout para el network de **DGS** como *lib*. **Fisicas** a nivel de servidor como lib para que el anticheat lo valide y asi esten en tanto local(cliente), como server. Plantear como se implementara a nivel de server el sistema de guilds titles, shop/traiding, chat etc..., de forma coherente y mas o menos unificada sin agrandar codigo de **DGS** sin que otro proyecto lo tenga si, no lo necesita.
+  - **PLAN CERRADO (v2):** ver `docs/guides/PLAN_DGS_ANTICHEAT.md`. Arquitectura = DGS genérico + **módulo de reglas POR PROYECTO** (física+casting) cargado por `dlopen` (ABI C `dgs_game_module_v1`), compilado estático en cliente (predicción) y `.so` para el DGS (validación). DGS real en `~/Documents/GitHub/dgs/`. Anti-cheat: movimiento + objetos/props (via `EntityState`) + magia (sin aprendizaje) + world-edit como "cómo+dónde" (`PKT_WORLD_DELTA`). Cambios+optimizaciones del DGS listados. Empezar por **F0** (ABI+host dlopen+esqueleto libsurvival_rules). *Decisión pendiente: hacer ahora vs esperar.*
 - **RHI Basico**, con intencion de hacer que funcione y un test de **Vulkan** basico de creacion basica y *resize* de la ventana.
+  - **SPIKE HECHO (2026-07-10):** `tests/vk_resize/` (standalone, no toca el motor) — SDL3+Vulkan+ImGui con recreación robusta de swapchain en Wayland (gotchas: currentExtent=0xFFFFFFFF, recrear por evento SDL no solo OUT_OF_DATE). **Probado: resize funciona limpio** (~37 recreaciones sin crash/errores). Conclusión: Vulkan es viable → NO hace falta RHI-solo-GL primero. *La migración RHI completa (1399 llamadas GL) queda diferida: NO ayuda a perf (GPU ociosa, CPU-bound) y no hay driver concreto aún.* Falta: instalar `vulkan-validation-layers` para cerrar el veredicto.
 - Terreno con seleccion de texturas en bioma *segun inclinacion* (para hacer que la inclinacion de la montaña sea roca); hacer que como tal tenga diferentes tipos de texturas como tierra o hierva si es que tiene, o nieve sobre la tierra....
 - Sistema de fisicas unificado para vehiculos, monstruos o jugadores
 - Creacion de caminos por construccion de mallas trozo de tierra lo aplanas en el suelo se "sobrepone" al terreno en la posicion, *como poner grava sobre tierra*.
@@ -54,3 +56,32 @@ add `namespace Haruka { using Sub::X; … }` back-compat, fix forward-decls (`cl
 # Render issues (reported) — TODO
 1. **Normal (placed) scene objects have NO LOD** — they draw at full detail at any distance (no
    distance cull / impostor), unlike terrain. Need a distance-based cull/LOD for scene Models.
+
+---
+
+# Agua — PENDIENTE (no OK, aparcado 2026-07-10)
+La espuma de cresta per-vértice del cascarón de océano (rejilla 192²) aliasa/interpola sobre triángulos
+grandes → manchas/"triángulos" blancos random sin relación con el oleaje. Fade por distancia (400-2000m,
+water.frag) mejoró pero NO lo resuelve. Real fix pendiente: foam en fragment-space (ruido) o bajar la
+dependencia per-vértice del oleaje en el cascarón. Perf: `water.draw` ~3ms fragment-bound con pantalla llena
+de mar (sky-reflect+SSS+foam+spec+oceanElevKm per-píxel). Ver memoria perf_cpu_bound_2026-07 (saga agua).
+
+---
+
+# Perf (ms) — pendientes (2026-07-10, ver memoria perf_cpu_bound_2026-07)
+Frame CPU-bound, GPU ociosa. Mucho mejor tras la saga (frames de 46ms → 12-30ms), pero quedan cuellos:
+
+- **LOD en frames de RECOMPUTE (~22ms, el peor caso, en la COSTA mirando al mar).** Desglose medido:
+  `lod.recompute` 8.6ms (= `tree` 4.8 recursión + `balance` 2.4 balanceo 2:1) · `lod.stream` 5.1 · `lod.desired`
+  4.7 (rebuild de clausura). Ya no hay un único dominante → micro-opts seguros dan poco. **Palanca real = el
+  CONTEO DE CHUNKS** (res 8-9k en la costa) que infla recompute+stream+desired+drawset a la vez → subir targetPx
+  / reducir reach de costa (VISUAL, requiere OK). Alternativa grande: recompute en hilo worker (GPU ociosa 42ms).
+- **`water.draw` ~3.1ms — AHORA el cuello #1 en frames sin recompute** (mirando al mar, pantalla llena de agua →
+  fragment-bound: el shader de océano hace sky-reflect + SSS + foam + spec sol/luna + `oceanElevKm` per-píxel).
+  Pendiente: expandir los sub-scopes `water.build/upload/drawcall` en el HUD para saber si es build (CPU, al
+  moverse) o drawcall (GPU/fill). Fixes listos: bajar densidad de la rejilla del océano con distancia, o gatear
+  efectos del shader lejos.
+- **`lod.catchup` ~5ms en frames de throttle** (subida de backlog de agua/terreno quieto). Mi memoria decía ~0;
+  reasomó. Menor prioridad (frame barato) pero recorte fácil.
+- **Micro-opt A1 hecha** (dedup de residencia en recursiveProcess, 8→4 lookups): output-idéntico, bajó ~3ms el
+  frame pero NO por donde se predijo (lod.recompute casi igual; el ahorro salió en stream/varianza).
