@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include "rhi/rhi_types.h"
 #include "shader.h"
 #include "texture.h"
 
@@ -21,6 +22,7 @@ struct TerrainPatch {
     glm::vec2 offset;
     int lod;
     unsigned int VAO, VBO, EBO;
+    Haruka::RHI::BufferHandle hVbo, hEbo;   // buffers RHI (VAO sigue GL)
     unsigned int indexCount;
 };
 

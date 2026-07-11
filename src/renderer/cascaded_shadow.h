@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 #include <glad/glad.h>
 #include <vector>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -75,6 +76,7 @@ public:
 private:
     std::vector<GLuint> shadowMapTextures;
     std::vector<GLuint> shadowMapFramebuffers;
+    std::vector<Haruka::RHI::RenderPassHandle> m_passes;   // ruta RHI (ids GL cacheados arriba)
     std::vector<CascadeInfo> cascades;
 
     float zNear, zFar, lambda;

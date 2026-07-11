@@ -1,5 +1,6 @@
 #include "softbody_renderer.h"
 #include "shader.h"
+#include "rhi/rhi_device.h"
 #include <glm/glm.hpp>
 
 namespace Haruka {
@@ -7,10 +8,11 @@ namespace Haruka {
 SoftBodyRenderer::~SoftBodyRenderer() { clear(); }
 
 void SoftBodyRenderer::clear() {
+    RHI::Device* dev = RHI::device();
     for (auto& e : m_entries) {
+        if (dev && RHI::valid(e.hVbo)) { dev->destroy(e.hVbo); dev->destroy(e.hEbo); }
+        else { if (e.vbo) glDeleteBuffers(1, &e.vbo); if (e.ebo) glDeleteBuffers(1, &e.ebo); }
         if (e.vao) glDeleteVertexArrays(1, &e.vao);
-        if (e.vbo) glDeleteBuffers(1, &e.vbo);
-        if (e.ebo) glDeleteBuffers(1, &e.ebo);
     }
     m_entries.clear();
 }
@@ -27,14 +29,23 @@ void SoftBodyRenderer::add(const xpbd::SoftBodyHandle& handle, xpbd::XPBDSolver*
     e.solver = solver;
     e.color  = color;
     glGenVertexArrays(1, &e.vao);
-    glGenBuffers(1, &e.vbo);
-    glGenBuffers(1, &e.ebo);
-
     glBindVertexArray(e.vao);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, e.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 handle.renderIndices.size() * sizeof(unsigned int),
-                 handle.renderIndices.data(), GL_STATIC_DRAW);
+
+    if (RHI::Device* dev = RHI::device()) {
+        // EBO estático (índices de render) + VBO Stream (posiciones re-subidas cada frame).
+        e.hEbo = dev->createBuffer(RHI::BufferUsage::Index, handle.renderIndices.size() * sizeof(unsigned int),
+                                   handle.renderIndices.data());
+        e.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+        e.ebo = dev->nativeBuffer(e.hEbo); e.vbo = dev->nativeBuffer(e.hVbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, e.ebo);
+    } else {
+        glGenBuffers(1, &e.vbo);
+        glGenBuffers(1, &e.ebo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, e.ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                     handle.renderIndices.size() * sizeof(unsigned int),
+                     handle.renderIndices.data(), GL_STATIC_DRAW);
+    }
 
     glBindBuffer(GL_ARRAY_BUFFER, e.vbo);
     // pos(3) + normal(3)
@@ -79,11 +90,15 @@ void SoftBodyRenderer::uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos) 
         e.cpuVerts[i*6+3] = n.x;         e.cpuVerts[i*6+4] = n.y;         e.cpuVerts[i*6+5] = n.z;
     }
 
-    glBindVertexArray(e.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, e.vbo);
-    glBufferData(GL_ARRAY_BUFFER, e.cpuVerts.size() * sizeof(float),
-                 e.cpuVerts.data(), GL_DYNAMIC_DRAW);
-    glBindVertexArray(0);
+    if (RHI::Device* dev = RHI::device()) {
+        dev->uploadBuffer(e.hVbo, e.cpuVerts.size() * sizeof(float), e.cpuVerts.data());
+    } else {
+        glBindVertexArray(e.vao);
+        glBindBuffer(GL_ARRAY_BUFFER, e.vbo);
+        glBufferData(GL_ARRAY_BUFFER, e.cpuVerts.size() * sizeof(float),
+                     e.cpuVerts.data(), GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
+    }
 }
 
 void SoftBodyRenderer::render(const Haruka::WorldPos& cameraPos) {

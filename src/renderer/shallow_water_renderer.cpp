@@ -1,22 +1,33 @@
 #include "shallow_water_renderer.h"
 #include "shader.h"
 #include "physics/fluid/shallow_water.h"
+#include "rhi/rhi_device.h"
 #include <glm/glm.hpp>
 
 namespace Haruka {
 
 ShallowWaterRenderer::~ShallowWaterRenderer() {
+    if (RHI::valid(m_vboH)) {
+        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_vboH); dev->destroy(m_eboH); }
+    } else {
+        if (m_vbo) glDeleteBuffers(1, &m_vbo);
+        if (m_ebo) glDeleteBuffers(1, &m_ebo);
+    }
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
-    if (m_vbo) glDeleteBuffers(1, &m_vbo);
-    if (m_ebo) glDeleteBuffers(1, &m_ebo);
 }
 
 void ShallowWaterRenderer::ensureGL() {
     if (m_init) return;
     m_shader = std::make_unique<Shader>("shaders/softbody.vert", "shaders/softbody.frag");
     glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glGenBuffers(1, &m_ebo);
+    if (RHI::Device* dev = RHI::device()) {
+        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+        m_eboH = dev->createBuffer(RHI::BufferUsage::Index,  0, nullptr, RHI::BufferMemory::Stream);
+        m_vbo = dev->nativeBuffer(m_vboH); m_ebo = dev->nativeBuffer(m_eboH);
+    } else {
+        glGenBuffers(1, &m_vbo);
+        glGenBuffers(1, &m_ebo);
+    }
     glBindVertexArray(m_vao);
     glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
     // Vertex: pos(3) + normal(3) + alpha(1) = 7 floats. Alpha (loc 2) drives the
@@ -98,10 +109,16 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     if (m_indices.empty()) return;
 
     glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_indices.size()*sizeof(unsigned int), m_indices.data(), GL_DYNAMIC_DRAW);
+    if (RHI::Device* dev = RHI::device()) {
+        dev->uploadBuffer(m_vboH, m_verts.size()*sizeof(float), m_verts.data());
+        dev->uploadBuffer(m_eboH, m_indices.size()*sizeof(unsigned int), m_indices.data());
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);   // asegura el binding EBO en el VAO
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_indices.size()*sizeof(unsigned int), m_indices.data(), GL_DYNAMIC_DRAW);
+    }
 
     m_shader->use();
     const GLint locColor = 15;

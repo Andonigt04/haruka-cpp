@@ -5,6 +5,7 @@
 #pragma once
 
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 #include <glm/glm.hpp>
 #include <string>
 
@@ -59,6 +60,9 @@ private:
     unsigned int irradianceMap = 0;
     unsigned int prefilterMap = 0;
     unsigned int brdfLUT = 0;
+    // Handles RHI de los mapas + geometría. captureFBO/RBO y el render por-cara siguen GL.
+    Haruka::RHI::TextureHandle hEnv, hIrradiance, hPrefilter, hBrdf;
+    Haruka::RHI::BufferHandle  hCubeBuf, hQuadBuf;
 
     unsigned int cubeVAO = 0, cubeVBO = 0;
     unsigned int quadVAO = 0, quadVBO = 0;

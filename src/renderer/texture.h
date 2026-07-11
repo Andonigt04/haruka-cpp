@@ -6,6 +6,7 @@
 #define TEXTURE_H
 
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -39,6 +40,10 @@ public:
 private:
     static float s_maxAnisotropy; // 1 = isotropic
     static float s_lodBias;       // 0 = no bias
+
+    // Handle del RHI cuando la textura se crea a través del device (ID = id GL nativo del handle).
+    // Vacío (id 0) si se cargó por la ruta de compatibilidad GL directa (sin device).
+    Haruka::RHI::TextureHandle m_handle;
 };
 
 }} // namespace Haruka::Renderer

@@ -347,6 +347,27 @@ void Application::run(const std::string& startScenePath) {
         return;
     }
 
+    // RHI: crea el device sobre la ventana. La Window ya creó y activó el contexto GL, así que
+    // el backend GL lo ADOPTA (no crea uno segundo). Lo publicamos como device global para que
+    // los wrappers (Texture, …) lo usen. Cuando el backend Vulkan exista, aquí se elegiría.
+    const Haruka::RHI::Backend requestedBackend = Haruka::RHI::Backend::OpenGL; // futuro: config/CLI
+    _device = Haruka::RHI::Device::create(requestedBackend, _window->getNativeWindow());
+    Haruka::RHI::setDevice(_device.get());
+
+    // Log del backend ACTIVO vs SOLICITADO → deja claro si corre directo o cayó al fallback.
+    if (_device) {
+        auto beName = [](Haruka::RHI::Backend b) {
+            return b == Haruka::RHI::Backend::OpenGL ? "OpenGL" : "Vulkan";
+        };
+        if (_device->backend() == requestedBackend)
+            std::fprintf(stderr, "[RHI] Backend activo: %s (solicitado, sin fallback).\n", beName(_device->backend()));
+        else
+            std::fprintf(stderr, "[RHI] Backend activo: %s (FALLBACK desde %s).\n",
+                         beName(_device->backend()), beName(requestedBackend));
+    } else {
+        std::fprintf(stderr, "[RHI] No hay device — el motor correrá por las rutas GL directas de compatibilidad.\n");
+    }
+
     // GL debug output — catches driver errors and shader compile failures.
     // Synchronous mode ensures the callback fires at the exact offending call.
     glEnable(GL_DEBUG_OUTPUT);

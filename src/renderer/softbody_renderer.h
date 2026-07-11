@@ -14,6 +14,7 @@
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
+#include "rhi/rhi_types.h"
 #include "physics/xpbd/softbody.h"
 #include "tools/math_types.h"
 
@@ -42,6 +43,7 @@ private:
         xpbd::XPBDSolver*    solver = nullptr;
         glm::vec3            color{0.8f};
         GLuint vao = 0, vbo = 0, ebo = 0;
+        Haruka::RHI::BufferHandle hVbo, hEbo;   // VBO Stream + EBO estático (RHI); VAO sigue GL
         std::vector<float> cpuVerts; // interleaved pos(3)+normal(3)
         bool initialized = false;
     };

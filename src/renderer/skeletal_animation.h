@@ -22,6 +22,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
@@ -58,6 +59,7 @@ public:
     void draw() const;
 private:
     unsigned int m_vao = 0, m_vbo = 0, m_ebo = 0, m_indexCount = 0;
+    Haruka::RHI::BufferHandle m_vboH, m_eboH;   // handles RHI (buffers; VAO sigue GL)
 };
 
 /** @brief Modelo riggeado: mallas con skinning + mapa de huesos. Conserva el aiScene. */

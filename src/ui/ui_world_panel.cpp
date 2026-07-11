@@ -1,5 +1,6 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "ui/ui_world_panel.h"
+#include "rhi/rhi_device.h"
 
 #include <glad/glad.h>
 #include <imgui.h>
@@ -24,9 +25,15 @@ struct PanelUBOData {
 
 UIWorldPanel::~UIWorldPanel() {
     if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
-    if (m_vbo) { glDeleteBuffers(1, &m_vbo);      m_vbo = 0; }
-    if (m_ebo) { glDeleteBuffers(1, &m_ebo);      m_ebo = 0; }
-    if (m_ubo) { glDeleteBuffers(1, &m_ubo);      m_ubo = 0; }
+    if (RHI::valid(m_vboH)) {
+        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_vboH); dev->destroy(m_eboH); dev->destroy(m_uboH); }
+        m_vboH = m_eboH = m_uboH = {};
+        m_vbo = m_ebo = m_ubo = 0;
+    } else {
+        if (m_vbo) { glDeleteBuffers(1, &m_vbo); m_vbo = 0; }
+        if (m_ebo) { glDeleteBuffers(1, &m_ebo); m_ebo = 0; }
+        if (m_ubo) { glDeleteBuffers(1, &m_ubo); m_ubo = 0; }
+    }
 }
 
 UIWorldPanel::UIWorldPanel(Desc desc)
@@ -38,10 +45,15 @@ UIWorldPanel::UIWorldPanel(Desc desc)
     // the first draw() emits a memory barrier before reading it back.
     m_fboDirtyThisFrame = true;
 
-    glGenBuffers(1, &m_ubo);
-    glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
-    glBufferData(GL_UNIFORM_BUFFER, sizeof(PanelUBOData), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    if (RHI::Device* dev = RHI::device()) {
+        m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PanelUBOData), nullptr, RHI::BufferMemory::Dynamic);
+        m_ubo = dev->nativeBuffer(m_uboH);
+    } else {
+        glGenBuffers(1, &m_ubo);
+        glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
+        glBufferData(GL_UNIFORM_BUFFER, sizeof(PanelUBOData), nullptr, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    }
 
     rebuildMesh();
 }
@@ -215,22 +227,35 @@ void UIWorldPanel::rebuildMesh() {
         }
     }
 
-    // Upload
+    // Upload (malla dinámica: buffers Stream reasignados por uploadBuffer cada rebuild).
+    RHI::Device* dev = RHI::device();
     if (m_vao == 0) {
         glGenVertexArrays(1, &m_vao);
-        glGenBuffers(1, &m_vbo);
-        glGenBuffers(1, &m_ebo);
+        if (dev) {
+            m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+            m_eboH = dev->createBuffer(RHI::BufferUsage::Index,  0, nullptr, RHI::BufferMemory::Stream);
+            m_vbo = dev->nativeBuffer(m_vboH); m_ebo = dev->nativeBuffer(m_eboH);
+        } else {
+            glGenBuffers(1, &m_vbo);
+            glGenBuffers(1, &m_ebo);
+        }
     }
 
     glBindVertexArray(m_vao);
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(PanelVert)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indices.size() * sizeof(unsigned int)),
-                 indices.data(), GL_DYNAMIC_DRAW);
+    if (dev) {
+        dev->uploadBuffer(m_vboH, verts.size() * sizeof(PanelVert), verts.data());
+        dev->uploadBuffer(m_eboH, indices.size() * sizeof(unsigned int), indices.data());
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);   // liga el EBO al VAO
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(PanelVert)),
+                     verts.data(), GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indices.size() * sizeof(unsigned int)),
+                     indices.data(), GL_DYNAMIC_DRAW);
+    }
 
     // pos = attrib 0
     glEnableVertexAttribArray(0);

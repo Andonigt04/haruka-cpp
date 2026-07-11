@@ -11,6 +11,7 @@
 #include <glm/glm.hpp>
 #include <glad/glad.h>
 #include "shader.h"
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -75,8 +76,10 @@ public:
     int getTriangleCount() const { return static_cast<int>(index.size() / 3); }
 
 private:
-    unsigned int VBO = 0, EBO = 0;
+    unsigned int VBO = 0, EBO = 0;    // ids GL nativos (cache; el owner es el device en ruta RHI)
     GLuint nbo = 0;  // Normal buffer para geometria simple
+    // Handles RHI de los buffers (vacíos en ruta de compatibilidad GL directa).
+    Haruka::RHI::BufferHandle m_vbo, m_ebo, m_nbo;
     bool isSimpleGeometry = false;
     int simpleVertexCount = 0;
     

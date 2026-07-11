@@ -4,6 +4,15 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
+
+namespace { // Libera los buffers de un patch: por el RHI si son suyos, o GL directo.
+    void freePatchBuffers(Haruka::TerrainPatch& p) {
+        using namespace Haruka;
+        if (RHI::valid(p.hVbo)) { if (RHI::Device* dev = RHI::device()) { dev->destroy(p.hVbo); dev->destroy(p.hEbo); } p.hVbo = p.hEbo = {}; }
+        else { if (p.VBO) glDeleteBuffers(1, &p.VBO); if (p.EBO) glDeleteBuffers(1, &p.EBO); }
+    }
+}
 #include <cmath>
 #include <algorithm>
 #include "stb_image.h"
@@ -19,8 +28,7 @@ Terrain::Terrain(int size, float scale)
 Terrain::~Terrain() {
     for (auto& patch : patches) {
         if (patch.VAO) glDeleteVertexArrays(1, &patch.VAO);
-        if (patch.VBO) glDeleteBuffers(1, &patch.VBO);
-        if (patch.EBO) glDeleteBuffers(1, &patch.EBO);
+        freePatchBuffers(patch);
     }
 }
 
@@ -232,16 +240,22 @@ void Terrain::createPatch(int startX, int startZ, int lod) {
     patch.indexCount = indices.size();
     
     glGenVertexArrays(1, &patch.VAO);
-    glGenBuffers(1, &patch.VBO);
-    glGenBuffers(1, &patch.EBO);
-    
     glBindVertexArray(patch.VAO);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
-    
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+
+    if (RHI::Device* dev = RHI::device()) {
+        patch.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertices.size() * sizeof(float), vertices.data());
+        patch.hEbo = dev->createBuffer(RHI::BufferUsage::Index,  indices.size() * sizeof(unsigned int), indices.data());
+        patch.VBO = dev->nativeBuffer(patch.hVbo); patch.EBO = dev->nativeBuffer(patch.hEbo);
+        glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
+    } else {
+        glGenBuffers(1, &patch.VBO);
+        glGenBuffers(1, &patch.EBO);
+        glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
+        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
+    }
     
     // Position
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
@@ -288,8 +302,7 @@ void Terrain::render(Shader& shader, const Camera* camera) {
     for (auto& u : updates) {
         TerrainPatch& p = patches[u.idx];
         if (p.VAO) glDeleteVertexArrays(1, &p.VAO);
-        if (p.VBO) glDeleteBuffers(1, &p.VBO);
-        if (p.EBO) glDeleteBuffers(1, &p.EBO);
+        freePatchBuffers(p);
         glm::vec2 off = p.offset;
         createPatch(off.x, off.y, u.newLod); // appends to patches
         patches[u.idx] = patches.back();     // copy new data into slot

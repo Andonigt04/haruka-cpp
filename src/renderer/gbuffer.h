@@ -4,6 +4,7 @@
  */
 #pragma once
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -37,6 +38,7 @@ public:
 private:
     void setupFramebuffer();
 
+    Haruka::RHI::RenderPassHandle m_pass;
     unsigned int gBufferFBO = 0;
     unsigned int gPosition = 0;
     unsigned int gNormal = 0;

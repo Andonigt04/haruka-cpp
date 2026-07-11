@@ -13,6 +13,7 @@
 #include <vector>
 #include <iostream>
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -44,6 +45,18 @@ public:
 
     /** @brief Builds a program from vertex + fragment (+ optional geometry) SPIR-V. */
     Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr) {
+        // Ruta RHI: el device crea el pipeline (GLSL-first en GL) y exponemos su programa nativo.
+        if (Haruka::RHI::Device* dev = Haruka::RHI::device()) {
+            std::string vp = s_baseDir + vertexPath, fp = s_baseDir + fragmentPath, gp;
+            Haruka::RHI::PipelineDesc d;
+            d.vertexPath = vp.c_str();
+            d.fragmentPath = fp.c_str();
+            if (geometryPath) { gp = s_baseDir + geometryPath; d.geometryPath = gp.c_str(); }
+            m_pipe = dev->createPipeline(d);
+            ID = dev->nativeProgram(m_pipe);
+            return;
+        }
+        // Fallback (editor/headless sin device): GL directo, comportamiento idéntico al previo.
         GLuint vert = loadSPV(GL_VERTEX_SHADER,   vertexPath);
         GLuint frag = loadSPV(GL_FRAGMENT_SHADER, fragmentPath);
         GLuint geom = geometryPath ? loadSPV(GL_GEOMETRY_SHADER, geometryPath) : 0;
@@ -62,6 +75,14 @@ public:
 
     /** @brief Builds a program from a single compute SPIR-V. */
     explicit Shader(const char* computePath) {
+        if (Haruka::RHI::Device* dev = Haruka::RHI::device()) {
+            std::string cp = s_baseDir + computePath;
+            Haruka::RHI::PipelineDesc d;
+            d.computePath = cp.c_str();
+            m_pipe = dev->createPipeline(d);
+            ID = dev->nativeProgram(m_pipe);
+            return;
+        }
         GLuint comp = loadSPV(GL_COMPUTE_SHADER, computePath);
 
         ID = glCreateProgram();
@@ -111,6 +132,10 @@ public:
     ///@}
 
 private:
+    // Handle del pipeline RHI cuando el shader se crea vía device (ID = programa GL nativo).
+    // Vacío si se usó la ruta de compatibilidad GL directa. El device libera el pipeline al cerrar.
+    Haruka::RHI::PipelineHandle m_pipe;
+
     // Layout UNIFICADO dev==release: los paths ("shaders/x.vert") se enraízan SIEMPRE
     // bajo assets/ → en ambos casos resuelven a "assets/shaders/x.vert" relativo al exe.
     // Así dev y release usan la MISMA estructura (sin el clásico "va en dev, rota en

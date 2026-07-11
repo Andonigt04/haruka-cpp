@@ -1,21 +1,31 @@
 #include "fluid_renderer.h"
 #include "shader.h"
 #include "physics/fluid/pbf_solver.h"
+#include "rhi/rhi_device.h"
 
 namespace Haruka {
 
 FluidRenderer::~FluidRenderer() {
-    if (m_vao) glDeleteVertexArrays(1, &m_vao);
-    if (m_vbo) glDeleteBuffers(1, &m_vbo);
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_particleBuf)) dev->destroy(m_particleBuf);
+        if (RHI::valid(m_quadBuf))     dev->destroy(m_quadBuf);
+        if (RHI::valid(m_depthPass))     dev->destroy(m_depthPass);
+        if (RHI::valid(m_smoothPass[0])) dev->destroy(m_smoothPass[0]);
+        if (RHI::valid(m_smoothPass[1])) dev->destroy(m_smoothPass[1]);
+        if (RHI::valid(m_sceneCopyPass)) dev->destroy(m_sceneCopyPass);
+    } else {
+        if (m_vbo) glDeleteBuffers(1, &m_vbo);
+        if (m_quadVBO) glDeleteBuffers(1, &m_quadVBO);
+        if (m_depthFBO) glDeleteFramebuffers(1, &m_depthFBO);
+        if (m_depthTex) glDeleteTextures(1, &m_depthTex);
+        if (m_depthRB)  glDeleteRenderbuffers(1, &m_depthRB);
+        if (m_smoothFBO[0]) glDeleteFramebuffers(2, m_smoothFBO);
+        if (m_smoothTex[0]) glDeleteTextures(2, m_smoothTex);
+        if (m_sceneCopyFBO) glDeleteFramebuffers(1, &m_sceneCopyFBO);
+        if (m_sceneCopyTex) glDeleteTextures(1, &m_sceneCopyTex);
+    }
+    if (m_vao) glDeleteVertexArrays(1, &m_vao);          // VAOs siempre GL (transitorio)
     if (m_quadVAO) glDeleteVertexArrays(1, &m_quadVAO);
-    if (m_quadVBO) glDeleteBuffers(1, &m_quadVBO);
-    if (m_depthFBO) glDeleteFramebuffers(1, &m_depthFBO);
-    if (m_depthTex) glDeleteTextures(1, &m_depthTex);
-    if (m_depthRB)  glDeleteRenderbuffers(1, &m_depthRB);
-    if (m_smoothFBO[0]) glDeleteFramebuffers(2, m_smoothFBO);
-    if (m_smoothTex[0]) glDeleteTextures(2, m_smoothTex);
-    if (m_sceneCopyFBO) glDeleteFramebuffers(1, &m_sceneCopyFBO);
-    if (m_sceneCopyTex) glDeleteTextures(1, &m_sceneCopyTex);
 }
 
 void FluidRenderer::ensureGL() {
@@ -25,10 +35,13 @@ void FluidRenderer::ensureGL() {
     m_blurShader    = std::make_unique<Shader>("shaders/screenquad.vert",     "shaders/fluid_blur.frag");
     m_surfaceShader = std::make_unique<Shader>("shaders/screenquad.vert",     "shaders/fluid_surface.frag");
 
+    RHI::Device* dev = RHI::device();
+
     glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
     glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    if (dev) { m_particleBuf = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+               m_vbo = dev->nativeBuffer(m_particleBuf); glBindBuffer(GL_ARRAY_BUFFER, m_vbo); }
+    else     { glGenBuffers(1, &m_vbo); glBindBuffer(GL_ARRAY_BUFFER, m_vbo); }
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
@@ -36,10 +49,11 @@ void FluidRenderer::ensureGL() {
     // Fullscreen quad (triangle strip) for the smooth/composite passes.
     constexpr float quad[] = { -1,1, 0,1,  -1,-1, 0,0,  1,1, 1,1,  1,-1, 1,0 };
     glGenVertexArrays(1, &m_quadVAO);
-    glGenBuffers(1, &m_quadVBO);
     glBindVertexArray(m_quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    if (dev) { m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quad), quad);
+               m_quadVBO = dev->nativeBuffer(m_quadBuf); glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO); }
+    else     { glGenBuffers(1, &m_quadVBO); glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO);
+               glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW); }
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
@@ -52,6 +66,38 @@ void FluidRenderer::ensureGL() {
 void FluidRenderer::ensureTargets(int w, int h) {
     if (m_depthFBO && m_fbW == w && m_fbH == h) return;
     m_fbW = w; m_fbH = h;
+
+    // Ruta RHI: 4 render targets. Al redimensionar se destruyen y recrean (storage inmutable).
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_depthPass))     dev->destroy(m_depthPass);
+        if (RHI::valid(m_smoothPass[0])) dev->destroy(m_smoothPass[0]);
+        if (RHI::valid(m_smoothPass[1])) dev->destroy(m_smoothPass[1]);
+        if (RHI::valid(m_sceneCopyPass)) dev->destroy(m_sceneCopyPass);
+
+        RHI::RenderTargetDesc dep;
+        dep.width = w; dep.height = h; dep.colorFormats = { RHI::Format::R32F };
+        dep.colorFilter = RHI::Filter::Nearest; dep.hasDepth = true; dep.depthFormat = RHI::Format::D24;
+        m_depthPass = dev->createRenderTarget(dep);
+        m_depthFBO = dev->nativeFramebuffer(m_depthPass);
+        m_depthTex = dev->nativeTexture(dev->getColorTexture(m_depthPass, 0));
+
+        for (int i = 0; i < 2; ++i) {
+            RHI::RenderTargetDesc sm;
+            sm.width = w; sm.height = h; sm.colorFormats = { RHI::Format::R32F };
+            sm.colorFilter = RHI::Filter::Nearest; sm.hasDepth = false;
+            m_smoothPass[i] = dev->createRenderTarget(sm);
+            m_smoothFBO[i] = dev->nativeFramebuffer(m_smoothPass[i]);
+            m_smoothTex[i] = dev->nativeTexture(dev->getColorTexture(m_smoothPass[i], 0));
+        }
+
+        RHI::RenderTargetDesc sc;
+        sc.width = w; sc.height = h; sc.colorFormats = { RHI::Format::RGBA16F };
+        sc.colorFilter = RHI::Filter::Linear; sc.hasDepth = false;
+        m_sceneCopyPass = dev->createRenderTarget(sc);
+        m_sceneCopyFBO = dev->nativeFramebuffer(m_sceneCopyPass);
+        m_sceneCopyTex = dev->nativeTexture(dev->getColorTexture(m_sceneCopyPass, 0));
+        return;
+    }
 
     auto makeR32F = [&](GLuint& tex) {
         if (!tex) glGenTextures(1, &tex);
@@ -104,10 +150,14 @@ void FluidRenderer::uploadParticles(const Haruka::WorldPos& cameraPos, int n) {
         glm::vec3 cp = glm::vec3(m_solver->worldPos(i) - glm::dvec3(cameraPos));
         m_verts[i*3+0] = cp.x; m_verts[i*3+1] = cp.y; m_verts[i*3+2] = cp.z;
     }
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
-    glBindVertexArray(0);
+    if (RHI::Device* dev = RHI::device()) {
+        dev->uploadBuffer(m_particleBuf, m_verts.size()*sizeof(float), m_verts.data());
+    } else {
+        glBindVertexArray(m_vao);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+        glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
+        glBindVertexArray(0);
+    }
 }
 
 void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH) {

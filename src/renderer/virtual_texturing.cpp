@@ -1,4 +1,5 @@
 #include "virtual_texturing.h"
+#include "rhi/rhi_device.h"
 #include <iostream>
 #include <cmath>
 #include <algorithm>
@@ -8,11 +9,16 @@ namespace Haruka { namespace Renderer {
 VirtualTexturing::VirtualTexturing() {}
 
 VirtualTexturing::~VirtualTexturing() {
+    RHI::Device* dev = RHI::device();
     for (auto& pair : virtualTextures) {
         auto& vt = pair.second;
-        if (vt->indirectionTexture) glDeleteTextures(1, &vt->indirectionTexture);
-        if (vt->physicalTexture) glDeleteTextures(1, &vt->physicalTexture);
-        if (vt->feedbackTexture) glDeleteTextures(1, &vt->feedbackTexture);
+        if (dev && RHI::valid(vt->hIndirection)) {
+            dev->destroy(vt->hIndirection); dev->destroy(vt->hPhysical); dev->destroy(vt->hFeedback);
+        } else {
+            if (vt->indirectionTexture) glDeleteTextures(1, &vt->indirectionTexture);
+            if (vt->physicalTexture) glDeleteTextures(1, &vt->physicalTexture);
+            if (vt->feedbackTexture) glDeleteTextures(1, &vt->feedbackTexture);
+        }
     }
     if (feedbackShader) glDeleteProgram(feedbackShader);
     if (pageUploadShader) glDeleteProgram(pageUploadShader);
@@ -34,6 +40,33 @@ void VirtualTexturing::createVirtualTextureGPUResources(VirtualTextureData& vt) 
         (vt.virtualSize.y + config.pageSize - 1) / config.pageSize
     );
 
+    int physicalSize = static_cast<int>(
+        std::sqrt(config.maxResidentPages) * config.pageSize
+    );
+
+    // Ruta RHI: 3 texturas (page table entera RG32UI, atlas físico RGBA8, feedback entero RGBA16UI).
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::TextureDesc ind; ind.width = vt.pageTableSize.x; ind.height = vt.pageTableSize.y;
+        ind.format = RHI::Format::RG32UI; ind.filter = RHI::Filter::Nearest; ind.wrap = RHI::Wrap::ClampToEdge;
+        vt.hIndirection = dev->createTexture(ind);
+        vt.indirectionTexture = dev->nativeTexture(vt.hIndirection);
+
+        RHI::TextureDesc phys; phys.width = phys.height = physicalSize;
+        phys.format = RHI::Format::RGBA8; phys.filter = RHI::Filter::Linear; phys.wrap = RHI::Wrap::ClampToEdge;
+        vt.hPhysical = dev->createTexture(phys);
+        vt.physicalTexture = dev->nativeTexture(vt.hPhysical);
+
+        RHI::TextureDesc fb; fb.width = fb.height = config.feedbackBufferSize;
+        fb.format = RHI::Format::RGBA16UI; fb.filter = RHI::Filter::Nearest; fb.wrap = RHI::Wrap::ClampToEdge;
+        vt.hFeedback = dev->createTexture(fb);
+        vt.feedbackTexture = dev->nativeTexture(vt.hFeedback);
+
+        std::cout << "  ✓ Created virtual texture: " << vt.id << "\n";
+        std::cout << "    Virtual: " << vt.virtualSize.x << "x" << vt.virtualSize.y << "\n";
+        std::cout << "    Page Table: " << vt.pageTableSize.x << "x" << vt.pageTableSize.y << "\n";
+        return;
+    }
+
     // Crear indirection texture (mapa de páginas)
     glGenTextures(1, &vt.indirectionTexture);
     glBindTexture(GL_TEXTURE_2D, vt.indirectionTexture);
@@ -43,9 +76,6 @@ void VirtualTexturing::createVirtualTextureGPUResources(VirtualTextureData& vt) 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     // Crear physical texture (atlas de páginas cargadas)
-    int physicalSize = static_cast<int>(
-        std::sqrt(config.maxResidentPages) * config.pageSize
-    );
     glGenTextures(1, &vt.physicalTexture);
     glBindTexture(GL_TEXTURE_2D, vt.physicalTexture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, physicalSize, physicalSize,

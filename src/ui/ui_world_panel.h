@@ -101,6 +101,7 @@ private:
     unsigned int m_vao = 0;
     unsigned int m_vbo = 0;
     unsigned int m_ebo = 0;
+    Haruka::RHI::BufferHandle m_vboH, m_eboH, m_uboH;   // buffers RHI (VAO sigue GL)
     int          m_indexCount = 0;
 
     // UBO for PanelTransform block (binding 0)

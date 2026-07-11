@@ -1,5 +1,6 @@
 #include "renderer/particle_system.h"
 #include "renderer/shader.h"
+#include "rhi/rhi_device.h"
 #include <cstdlib>
 #include <cmath>
 
@@ -8,7 +9,8 @@ namespace Haruka {
 ParticleSystem& ParticleSystem::get() { static ParticleSystem s; return s; }
 
 ParticleSystem::~ParticleSystem() {
-    if (m_vbo) glDeleteBuffers(1, &m_vbo);
+    if (RHI::valid(m_vboH)) { if (RHI::Device* dev = RHI::device()) dev->destroy(m_vboH); }
+    else if (m_vbo) glDeleteBuffers(1, &m_vbo);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
@@ -50,9 +52,15 @@ void ParticleSystem::update(double dt, const glm::dvec3& up) {
 void ParticleSystem::ensureGL() {
     if (m_vao) return;
     glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
     glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    if (RHI::Device* dev = RHI::device()) {
+        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+        m_vbo = dev->nativeBuffer(m_vboH);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    } else {
+        glGenBuffers(1, &m_vbo);
+        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    }
     const GLsizei stride = 8 * sizeof(float);   // pos(3) color(3) alpha(1) size(1)
     glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
     glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
@@ -74,8 +82,8 @@ void ParticleSystem::render(const glm::dvec3& camPos) {
     }
 
     glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW);
+    if (RHI::Device* dev = RHI::device()) dev->uploadBuffer(m_vboH, data.size() * sizeof(float), data.data());
+    else { glBindBuffer(GL_ARRAY_BUFFER, m_vbo); glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW); }
     m_shader->use();
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // ADITIVO → radiante

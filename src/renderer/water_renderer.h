@@ -7,6 +7,7 @@
 #include <mutex>
 #include <functional>
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 #include <glm/glm.hpp>
 #include "core/chunk_cache.h"
 #include "tools/math_types.h"
@@ -31,6 +32,7 @@ namespace Haruka {
             GLuint pbo = 0;   // per-vertex water level (km): 0=océano, >0=lago
             GLuint mbo = 0;   // CDLOD morph target (posición en el LOD padre)
             GLuint ebo = 0;
+            Haruka::RHI::BufferHandle hVbo, hNbo, hPbo, hMbo, hEbo;   // buffers RHI (VAO sigue GL)
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
@@ -117,6 +119,7 @@ namespace Haruka {
         struct WaterPool {
             GLuint   vao = 0;
             GLuint   posVBO = 0, normVBO = 0, paramVBO = 0, morphVBO = 0, ebo = 0;
+            Haruka::RHI::BufferHandle hPos, hNorm, hParam, hMorph, hEbo;  // buffers RHI del pool
             uint32_t vertexCount   = 0;   // vértices por slot (grid completo)
             uint32_t maxIndexCount = 0;   // índices reservados por slot (peor caso = todo mojado)
             uint32_t capacity      = 0;   // nº de slots
@@ -158,6 +161,7 @@ namespace Haruka {
         void setFluidSampler(std::function<bool(const glm::dvec3&, float&, float&)> f) { m_fluidSample = std::move(f); }
     private:
         GLuint m_oceanVao = 0, m_oceanPos = 0, m_oceanNorm = 0, m_oceanParam = 0, m_oceanMorph = 0, m_oceanEbo = 0;
+        Haruka::RHI::BufferHandle m_hOceanPos, m_hOceanNorm, m_hOceanParam, m_hOceanMorph, m_hOceanEbo;
         int    m_oceanIdxCount = 0;
         bool   m_singleOcean = true; // DEFAULT: océano = superficie única (aprobado: sin teselas). `oceanshell off` = por-chunk.
         std::function<bool(const glm::dvec3&, float&, float&)> m_fluidSample; // F5.1: acople a la sim

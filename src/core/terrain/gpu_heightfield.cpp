@@ -1,16 +1,23 @@
 #include "gpu_heightfield.h"
 #include "renderer/compute_shader.h"
 #include "core/asset_paths.h" // AssetPaths::shaders() (ruta canónica de shaders)
+#include "rhi/rhi_device.h"
 
 namespace Haruka {
 
 GpuHeightfield::GpuHeightfield() = default;
 GpuHeightfield::~GpuHeightfield() {
     auto del = [](Buffers& b) {
-        if (b.dirs)  glDeleteBuffers(1, &b.dirs);
-        if (b.elev)  glDeleteBuffers(1, &b.elev);
-        if (b.norm)  glDeleteBuffers(1, &b.norm);
-        if (b.water) glDeleteBuffers(1, &b.water);
+        if (RHI::valid(b.hDirs)) {
+            if (RHI::Device* dev = RHI::device()) {
+                dev->destroy(b.hDirs); dev->destroy(b.hElev); dev->destroy(b.hNorm); dev->destroy(b.hWater);
+            }
+        } else {
+            if (b.dirs)  glDeleteBuffers(1, &b.dirs);
+            if (b.elev)  glDeleteBuffers(1, &b.elev);
+            if (b.norm)  glDeleteBuffers(1, &b.norm);
+            if (b.water) glDeleteBuffers(1, &b.water);
+        }
     };
     del(m_sync);
     for (auto& s : m_slot) { del(s.buf); if (s.fence) glDeleteSync(s.fence); }
@@ -37,6 +44,20 @@ bool GpuHeightfield::ensureShader() {
 
 void GpuHeightfield::ensureBuffers(Buffers& b, std::size_t n) {
     if (n <= b.capacity && b.dirs) return;
+
+    // Ruta RHI: 4 SSBOs dinámicos. Al crecer, se destruyen y recrean (storage inmutable).
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(b.hDirs)) { dev->destroy(b.hDirs); dev->destroy(b.hElev); dev->destroy(b.hNorm); dev->destroy(b.hWater); }
+        b.hDirs  = dev->createBuffer(RHI::BufferUsage::Storage, n * sizeof(glm::vec4), nullptr, RHI::BufferMemory::Dynamic);
+        b.hElev  = dev->createBuffer(RHI::BufferUsage::Storage, n * sizeof(float),     nullptr, RHI::BufferMemory::Dynamic);
+        b.hNorm  = dev->createBuffer(RHI::BufferUsage::Storage, n * sizeof(glm::vec4), nullptr, RHI::BufferMemory::Dynamic);
+        b.hWater = dev->createBuffer(RHI::BufferUsage::Storage, n * sizeof(float),     nullptr, RHI::BufferMemory::Dynamic);
+        b.dirs = dev->nativeBuffer(b.hDirs); b.elev = dev->nativeBuffer(b.hElev);
+        b.norm = dev->nativeBuffer(b.hNorm); b.water = dev->nativeBuffer(b.hWater);
+        b.capacity = n;
+        return;
+    }
+
     if (b.dirs) { glDeleteBuffers(1, &b.dirs); glDeleteBuffers(1, &b.elev); glDeleteBuffers(1, &b.norm); glDeleteBuffers(1, &b.water); }
     glGenBuffers(1, &b.dirs); glGenBuffers(1, &b.elev); glGenBuffers(1, &b.norm); glGenBuffers(1, &b.water);
     glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.dirs);
@@ -56,8 +77,12 @@ void GpuHeightfield::uploadAndDispatch(Buffers& b, const std::vector<glm::vec3>&
     ensureBuffers(b, n);
     std::vector<glm::vec4> dirs4(n);
     for (std::size_t i = 0; i < n; ++i) dirs4[i] = glm::vec4(dirs[i], 0.0f);
-    glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.dirs);
-    glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, n * sizeof(glm::vec4), dirs4.data());
+    if (RHI::valid(b.hDirs)) {
+        if (RHI::Device* dev = RHI::device()) dev->updateBuffer(b.hDirs, 0, n * sizeof(glm::vec4), dirs4.data());
+    } else {
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, b.dirs);
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER, 0, n * sizeof(glm::vec4), dirs4.data());
+    }
 
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, b.dirs);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, b.elev);

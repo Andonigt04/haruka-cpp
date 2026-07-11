@@ -7,6 +7,7 @@
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -38,6 +39,7 @@ public:
 private:
     /** @brief Allocates FBO/texture objects. */
     void setupFramebuffer();
+    Haruka::RHI::RenderPassHandle m_pass;
 };
 
 }} // namespace Haruka::Renderer

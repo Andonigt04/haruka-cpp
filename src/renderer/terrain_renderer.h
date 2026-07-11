@@ -8,6 +8,7 @@
 #include <functional>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 #include "core/chunk_cache.h"
 #include "tools/math_types.h"
 
@@ -23,6 +24,8 @@ namespace Haruka {
             GLuint nmbo = 0;  // morph-NORMAL buffer (CDLOD): normal del LOD padre
             GLuint uvo = 0;   // UV buffer
             GLuint ebo = 0;
+            // Handles RHI de los buffers propios (legacy). El ebo es compartido (m_sharedEBO).
+            Haruka::RHI::BufferHandle hVbo, hMbo, hNbo, hNmbo, hUvo;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
@@ -231,6 +234,7 @@ namespace Haruka {
         // en todos los chunks de ese res. Un EBO por indexCount, reusado → ahorra VRAM (no un
         // EBO por chunk). Clave = indexCount; valor = handle GL. Se liberan en el destructor.
         std::unordered_map<uint32_t, GLuint>     m_sharedEBO;
+        std::unordered_map<uint32_t, Haruka::RHI::BufferHandle> m_sharedEBOHandle;  // handles RHI paralelos
 
         // --- BATCHING: pool de geometría por vertexCount ---------------------------------
         // Todos los chunks del MISMO vertexCount comparten un VAO + 5 buffers (pos/morph/
@@ -244,6 +248,8 @@ namespace Haruka {
             GLuint   vao = 0;
             GLuint   posVBO = 0, morphVBO = 0, normVBO = 0, morphNormVBO = 0, uvVBO = 0;
             GLuint   ebo = 0;            // EBO compartido por indexCount (reusa m_sharedEBO)
+            // Handles RHI de los 5 VBOs del pool + los buffers indirectos.
+            Haruka::RHI::BufferHandle hPos, hMorph, hNorm, hMorphNorm, hUv, hCmd, hSSBO;
             uint32_t vertexCount = 0;
             uint32_t indexCount  = 0;
             uint32_t capacity    = 0;   // nº de slots

@@ -178,6 +178,10 @@ if(NOT HARUKA_MOD_PARTICLES)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/particle_system\\.cpp$")
 endif()
 
+# WIP: módulo de reglas DGS (ABI dgs_game_module_v1). Necesita include/dgs/game_module.h,
+# que aún no existe, y se compila como .so aparte (no lo usa el motor). Excluido de momento.
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "net/default_rules\\.cpp$")
+
 # --- 4. Main Target ---
 add_library(HarukaEngine SHARED
     ${ENGINE_SOURCES}

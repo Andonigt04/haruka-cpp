@@ -4,6 +4,7 @@
  */
 #pragma once
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -34,6 +35,7 @@ public:
 private:
     /** @brief Allocates framebuffer and attachments. */
     void setupFramebuffer();
+    Haruka::RHI::RenderPassHandle m_pass;
     unsigned int bloomFBO;
     unsigned int brightTexture;
     unsigned int blurredTexture;

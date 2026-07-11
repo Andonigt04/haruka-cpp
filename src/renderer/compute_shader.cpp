@@ -3,6 +3,7 @@
 #include <iostream>
 #include <fstream>
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 #include <sstream>
 #include <glm/gtc/type_ptr.hpp>
 
@@ -10,6 +11,15 @@ namespace Haruka { namespace Renderer {
 
 ComputeShader::ComputeShader(const std::string& computePath)
 {
+    // Ruta RHI: el device crea el pipeline de compute (carga GLSL-first la ruta dada).
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::PipelineDesc d;
+        d.computePath = computePath.c_str();
+        m_pipe = dev->createPipeline(d);
+        ID = dev->nativeProgram(m_pipe);
+        return;
+    }
+
     std::string computeCode = readFile(computePath);
     const char* cCode = computeCode.c_str();
 
@@ -45,6 +55,10 @@ ComputeShader::ComputeShader(const std::string& computePath)
 
 ComputeShader::~ComputeShader()
 {
+    if (RHI::valid(m_pipe)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_pipe);
+        return;
+    }
     glDeleteProgram(ID);
 }
 

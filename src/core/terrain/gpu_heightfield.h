@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer { class ComputeShader; } }
 
@@ -63,7 +64,11 @@ private:
     bool m_failed = false;
     bool ensureShader();
 
-    struct Buffers { GLuint dirs = 0, elev = 0, norm = 0, water = 0; std::size_t capacity = 0; };
+    struct Buffers {
+        GLuint dirs = 0, elev = 0, norm = 0, water = 0;   // ids GL nativos (cache)
+        Haruka::RHI::BufferHandle hDirs, hElev, hNorm, hWater;  // handles RHI (vacíos en fallback)
+        std::size_t capacity = 0;
+    };
     void ensureBuffers(Buffers& b, std::size_t n);
     void uploadAndDispatch(Buffers& b, const std::vector<glm::vec3>& dirs, const Params& p);
     static void readback(Buffers& b, std::size_t n, std::vector<float>& elev,

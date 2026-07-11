@@ -5,6 +5,7 @@
 #pragma once
 
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -34,6 +35,7 @@ public:
 private:
     /** @brief Allocates framebuffer and attachments. */
     void setupFramebuffer();
+    Haruka::RHI::RenderPassHandle m_pass;   // ruta RHI (los ids GL cacheados abajo)
     unsigned int hdrFBO;
     unsigned int colorTexture;
     unsigned int brightTexture;

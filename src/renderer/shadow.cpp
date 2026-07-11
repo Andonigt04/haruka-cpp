@@ -1,5 +1,6 @@
 #include "shadow.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 
 #include <iostream>
 
@@ -12,6 +13,18 @@ Shadow::Shadow(unsigned int width, unsigned int height) : shadowWidth(width), sh
 
 void Shadow::setupFramebuffer()
 {
+    // Ruta RHI: depth-only, profundidad como TEXTURA muestreable con borde blanco (fuera = sin sombra).
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = shadowWidth; d.height = shadowHeight;
+        d.hasDepth = true; d.depthFormat = RHI::Format::D32F;
+        d.depthAsTexture = true; d.depthBorderClamp = true; d.depthFilter = RHI::Filter::Nearest;
+        m_pass      = dev->createRenderTarget(d);
+        depthMapFBO = dev->nativeFramebuffer(m_pass);
+        depthMap    = dev->nativeTexture(dev->getDepthTexture(m_pass));
+        return;
+    }
+
     // Create Buffer
     glGenFramebuffers(1, &depthMapFBO);
 
@@ -60,6 +73,10 @@ void Shadow::unbind()
 
 Shadow::~Shadow()
 {
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_pass);
+        return;
+    }
     glDeleteFramebuffers(1, &depthMapFBO);
     glDeleteTextures(1, &depthMap);
 }

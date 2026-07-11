@@ -1,5 +1,6 @@
 #include "cascaded_shadow.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
 #include <cmath>
@@ -11,6 +12,11 @@ namespace Haruka { namespace Renderer {
 CascadedShadowMap::CascadedShadowMap() {}
 
 CascadedShadowMap::~CascadedShadowMap() {
+    if (!m_passes.empty()) {
+        if (RHI::Device* dev = RHI::device())
+            for (auto p : m_passes) if (RHI::valid(p)) dev->destroy(p);
+        return;
+    }
     for (auto fbo : shadowMapFramebuffers) {
         glDeleteFramebuffers(1, &fbo);
     }
@@ -26,6 +32,7 @@ void CascadedShadowMap::init(float zNear, float zFar, float lambda) {
 
     shadowMapTextures.resize(NUM_CASCADES);
     shadowMapFramebuffers.resize(NUM_CASCADES);
+    m_passes.resize(NUM_CASCADES);
     cascades.resize(NUM_CASCADES);
 
     for (int i = 0; i < NUM_CASCADES; i++) {
@@ -38,6 +45,18 @@ void CascadedShadowMap::init(float zNear, float zFar, float lambda) {
 }
 
 void CascadedShadowMap::createShadowMap(int cascade) {
+    // Ruta RHI: depth-texture con sampler de sombra hardware (LINEAR + COMPARE_REF_TO_TEXTURE).
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = SHADOW_MAP_RESOLUTION; d.height = SHADOW_MAP_RESOLUTION;
+        d.hasDepth = true; d.depthFormat = RHI::Format::D32F;
+        d.depthAsTexture = true; d.depthFilter = RHI::Filter::Linear; d.depthCompare = true;
+        m_passes[cascade]                = dev->createRenderTarget(d);
+        shadowMapTextures[cascade]       = dev->nativeTexture(dev->getDepthTexture(m_passes[cascade]));
+        shadowMapFramebuffers[cascade]   = dev->nativeFramebuffer(m_passes[cascade]);
+        return;
+    }
+
     // Crear texture
     GLuint texture;
     glGenTextures(1, &texture);

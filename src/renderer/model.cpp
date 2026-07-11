@@ -3,6 +3,7 @@
 #include <iostream>
 #include "stb_image.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -165,8 +166,7 @@ std::vector<MeshTexture> Model::loadMaterialTextures(aiMaterial *mat, aiTextureT
 
 unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene) {
     std::string filename = std::string(path);
-    unsigned int textureID;
-    glGenTextures(1, &textureID);
+    unsigned int textureID = 0;
 
     int width, height, nrComponents;
     unsigned char *data = nullptr;
@@ -221,11 +221,28 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
     }
 
     if (data) {
+        // Ruta RHI: crea la textura por el device (id GL nativo devuelto para el material).
+        if (RHI::Device* dev = RHI::device()) {
+            RHI::TextureDesc td;
+            td.width = width; td.height = height;
+            td.format = (nrComponents == 1) ? RHI::Format::R8
+                      : (nrComponents == 4) ? RHI::Format::RGBA8 : RHI::Format::RGB8;
+            td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::Repeat; td.mipmaps = true;
+            td.initialData = data;
+            textureID = dev->nativeTexture(dev->createTexture(td));
+            if (needsFree) stbi_image_free(data);
+            std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height
+                      << ", " << nrComponents << " canales)" << std::endl;
+            return textureID;
+        }
+
+        // Fallback GL directo (editor/headless sin device).
         GLenum format = GL_RGB;
         if (nrComponents == 1) format = GL_RED;
         else if (nrComponents == 3) format = GL_RGB;
         else if (nrComponents == 4) format = GL_RGBA;
 
+        glGenTextures(1, &textureID);
         glBindTexture(GL_TEXTURE_2D, textureID);
         glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
         glGenerateMipmap(GL_TEXTURE_2D);

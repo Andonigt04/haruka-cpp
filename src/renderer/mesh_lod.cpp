@@ -1,4 +1,5 @@
 #include "mesh_lod.h"
+#include "rhi/rhi_device.h"
 #include <glad/glad.h>
 #include <algorithm>
 
@@ -7,27 +8,32 @@ namespace Haruka { namespace Renderer {
 MeshLOD::MeshLOD() {}
 
 MeshLOD::~MeshLOD() {
+    RHI::Device* dev = RHI::device();
     for (auto& lod : lodLevels) {
         if (lod.VAO) glDeleteVertexArrays(1, &lod.VAO);
-        if (lod.VBO) glDeleteBuffers(1, &lod.VBO);
-        if (lod.EBO) glDeleteBuffers(1, &lod.EBO);
+        if (dev && RHI::valid(lod.hVbo)) { dev->destroy(lod.hVbo); dev->destroy(lod.hEbo); }
+        else { if (lod.VBO) glDeleteBuffers(1, &lod.VBO); if (lod.EBO) glDeleteBuffers(1, &lod.EBO); }
     }
 }
 
 void MeshLOD::setupGL(LODLevel& level) {
     glGenVertexArrays(1, &level.VAO);
-    glGenBuffers(1, &level.VBO);
-    glGenBuffers(1, &level.EBO);
-
     glBindVertexArray(level.VAO);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, level.VBO);
-    glBufferData(GL_ARRAY_BUFFER, level.vertices.size() * sizeof(Vertex), 
-                 level.vertices.data(), GL_STATIC_DRAW);
 
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, level.EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, level.indices.size() * sizeof(unsigned int),
-                 level.indices.data(), GL_STATIC_DRAW);
+    if (RHI::Device* dev = RHI::device()) {
+        level.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, level.vertices.size() * sizeof(Vertex), level.vertices.data());
+        level.hEbo = dev->createBuffer(RHI::BufferUsage::Index,  level.indices.size() * sizeof(unsigned int), level.indices.data());
+        level.VBO = dev->nativeBuffer(level.hVbo); level.EBO = dev->nativeBuffer(level.hEbo);
+        glBindBuffer(GL_ARRAY_BUFFER, level.VBO);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, level.EBO);
+    } else {
+        glGenBuffers(1, &level.VBO);
+        glGenBuffers(1, &level.EBO);
+        glBindBuffer(GL_ARRAY_BUFFER, level.VBO);
+        glBufferData(GL_ARRAY_BUFFER, level.vertices.size() * sizeof(Vertex), level.vertices.data(), GL_STATIC_DRAW);
+        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, level.EBO);
+        glBufferData(GL_ELEMENT_ARRAY_BUFFER, level.indices.size() * sizeof(unsigned int), level.indices.data(), GL_STATIC_DRAW);
+    }
 
     // Vertex attributes
     glEnableVertexAttribArray(0);  // Position

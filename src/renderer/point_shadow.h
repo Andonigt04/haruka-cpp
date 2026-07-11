@@ -5,6 +5,7 @@
 #pragma once
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -33,6 +34,7 @@ private:
     /** @brief Allocates framebuffer and cubemap faces. */
     void setupFramebuffer();
 
+    Haruka::RHI::RenderPassHandle m_pass;
     unsigned int FBO = 0;
     unsigned int depthCubemap = 0;
     unsigned int resolution;

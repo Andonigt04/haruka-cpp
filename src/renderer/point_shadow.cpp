@@ -1,5 +1,6 @@
 #include "point_shadow.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 #include <iostream>
 
 namespace Haruka { namespace Renderer {
@@ -11,6 +12,18 @@ PointShadow::PointShadow(unsigned int resolution) : resolution(resolution)
 
 void PointShadow::setupFramebuffer()
 {
+    // Ruta RHI: cubemap de profundidad (omni shadow), depth-only.
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = resolution; d.height = resolution;
+        d.hasDepth = true; d.depthFormat = RHI::Format::D32F;
+        d.depthCube = true; d.depthFilter = RHI::Filter::Nearest;
+        m_pass       = dev->createRenderTarget(d);
+        FBO          = dev->nativeFramebuffer(m_pass);
+        depthCubemap = dev->nativeTexture(dev->getDepthTexture(m_pass));
+        return;
+    }
+
     // Cubemap de profundidad
     glGenTextures(1, &depthCubemap);
     glBindTexture(GL_TEXTURE_CUBE_MAP, depthCubemap);
@@ -64,6 +77,10 @@ void PointShadow::bindForReading(unsigned int textureUnit)
 
 PointShadow::~PointShadow()
 {
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_pass);
+        return;
+    }
     glDeleteFramebuffers(1, &FBO);
     glDeleteTextures(1, &depthCubemap);
 }

@@ -8,6 +8,7 @@
 #include <glad/glad.h>
 #include <string>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -41,6 +42,7 @@ public:
     }
 private:
     GLuint ID;
+    Haruka::RHI::PipelineHandle m_pipe;   // pipeline RHI (ID = programa GL nativo); vacío en fallback
     std::string readFile(const std::string& filePath);
     GLint getUniformLocation(const std::string& name) const;
 };

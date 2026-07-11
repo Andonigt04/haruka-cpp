@@ -9,6 +9,7 @@
 #include <vector>
 #include <memory>
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -96,7 +97,8 @@ private:
     std::vector<InstanceDataDouble> instancesDouble;
     std::vector<InstanceDataFloat> instancesFloat;
     
-    GLuint instanceVBO = 0;
+    GLuint instanceVBO = 0;                         // id GL nativo (cache)
+    Haruka::RHI::BufferHandle m_instanceBuf;        // handle RHI (vacío en ruta GL directa)
     GLuint instanceVAO = 0;
     int maxInstances = 0;
     bool bufferDirty = false;

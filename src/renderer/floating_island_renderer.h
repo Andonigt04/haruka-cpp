@@ -3,6 +3,7 @@
 #include <vector>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 #include "core/terrain/floating_islands.h"
 #include "tools/math_types.h"
 
@@ -31,6 +32,7 @@ namespace Haruka {
         std::vector<FloatingIsland> m_pending; // CPU, pendiente de subir
         bool   m_uploaded = false;
         GLuint m_vao = 0, m_vbo = 0, m_nbo = 0, m_ebo = 0;
+        Haruka::RHI::BufferHandle m_vboH, m_nboH, m_eboH;   // buffers RHI (VAO sigue GL)
         uint32_t   m_indexCount = 0;
         glm::dvec3 m_origin{0.0};
         int    m_islandCount = 0;

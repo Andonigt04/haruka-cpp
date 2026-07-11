@@ -8,6 +8,7 @@
 #include <vector>
 #include <memory>
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 #include "mesh_optimizer.h"
 
 namespace Haruka { namespace Renderer {
@@ -56,6 +57,7 @@ public:
 private:
     struct LODLevel {
         GLuint VAO = 0, VBO = 0, EBO = 0;
+        Haruka::RHI::BufferHandle hVbo, hEbo;   // buffers RHI (VAO sigue GL)
         std::vector<Vertex> vertices;
         std::vector<unsigned int> indices;
         float minDistance = 0.0f, maxDistance = 0.0f;

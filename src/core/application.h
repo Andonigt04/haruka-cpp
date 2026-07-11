@@ -18,6 +18,7 @@
 #include "core/world_system.h"
 #include "core/window.h"
 #include "core/camera.h"
+#include "rhi/rhi_device.h"
 #include "core/scene/scene_manager.h"
 #include "core/scene/scene_render_policy.h"
 #include "renderer/shader.h"
@@ -261,6 +262,9 @@ private:
 
     /** @brief The main application window. */
     std::unique_ptr<Haruka::Core::Window> _window = nullptr;
+    /** @brief RHI device (backend gráfico). Se crea tras la Window; declarado después para
+     *  destruirse ANTES que la Window (libera el contexto GL mientras la ventana aún existe). */
+    std::unique_ptr<Haruka::RHI::Device> _device = nullptr;
     /** @brief The currently active scene. */
     Haruka::SceneManager* _currentScene = nullptr;
     /** @brief The owned scene instance. */
@@ -300,6 +304,7 @@ private:
     // Reuses the existing _bloomExtractShader / _bloomBlurShader members below.
     unsigned int m_bloomFBO[2] = {0, 0};
     unsigned int m_bloomTex[2] = {0, 0};
+    Haruka::RHI::RenderPassHandle m_bloomPass[2];   // render targets RHI (ids GL cacheados arriba)
     int m_bloomW = 0, m_bloomH = 0;
     /** @brief Bright-pass + separable blur of a scene color texture; returns the
      *  blurred bloom texture id. Used by the standalone post composite. */
@@ -389,6 +394,7 @@ private:
     float deltaTime = 0.0f;
     
     /** @brief The vertex array object for the screen quad. */
+    Haruka::RHI::BufferHandle m_quadBuf, m_uboPerFrameH, m_uboPerObjectH;
     unsigned int quadVAO = 0;
     /** @brief The vertex buffer object for the screen quad. */
     unsigned int quadVBO = 0;

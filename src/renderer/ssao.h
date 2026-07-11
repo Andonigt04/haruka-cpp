@@ -6,6 +6,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <vector>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -38,6 +39,8 @@ private:
     /** @brief Generates kernel and noise sample data. */
     void setupSamples();
 
+    Haruka::RHI::RenderPassHandle m_pass;
+    Haruka::RHI::TextureHandle    m_noise;
     unsigned int ssaoFBO = 0;
     unsigned int ssaoColorBuffer = 0;
     unsigned int noiseTexture = 0;

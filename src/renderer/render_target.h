@@ -4,6 +4,7 @@
  */
 #pragma once
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -31,9 +32,13 @@ public:
 private:
     void setupFramebuffer();
 
-    unsigned int FBO = 0;
-    unsigned int colorTexture = 0;
-    unsigned int rboDepth = 0;
+    // Ruta RHI: el pass posee el FBO/color/depth. FBO y colorTexture cachean los ids GL nativos
+    // para que getFBO()/getColorTexture() y los consumidores directos-GL sigan funcionando.
+    Haruka::RHI::RenderPassHandle m_pass;
+
+    unsigned int FBO = 0;          // id GL nativo (cache) o propio (fallback)
+    unsigned int colorTexture = 0; // id GL nativo (cache) o propio (fallback)
+    unsigned int rboDepth = 0;     // solo usado en la ruta de fallback
     unsigned int width, height;
 };
 

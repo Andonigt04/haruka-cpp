@@ -1,0 +1,455 @@
+/**
+ * @file gl_device.cpp
+ * @brief Implementación OpenGL de RHI::Device: crea el contexto GL y gestiona recursos GPU.
+ */
+#include "rhi/opengl/gl_device.h"
+
+#include <cstdio>
+#include <cmath>
+#include <algorithm>
+#include <fstream>
+#include <vector>
+#include <string>
+
+namespace Haruka::RHI::opengl
+{
+    // ------------------------------------------------------------------ helpers internos
+    // Compila un módulo SPIR-V a un shader GL (GL_ARB_gl_spirv, core en 4.6). Igual que
+    // hace hoy Shader::loadSPV, pero recibiendo los bytes en vez de la ruta del fichero.
+    static GLuint compileSpirv(GLenum stage, const void* bytes, size_t size)
+    {
+        if (!bytes || size == 0) return 0;
+        GLuint sh = glCreateShader(stage);
+        glShaderBinary(1, &sh, GL_SHADER_BINARY_FORMAT_SPIR_V, bytes, (GLsizei)size);
+        glSpecializeShader(sh, "main", 0, nullptr, nullptr);
+
+        GLint ok = 0;
+        glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok)
+        {
+            char log[1024] = {0};
+            glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+            std::fprintf(stderr, "[RHI/GL] SPIR-V specialize error: %s\n", log);
+        }
+        return sh;
+    }
+
+    // Carga una etapa desde ruta COMPLETA, prefiriendo GLSL source y cayendo a ".spv".
+    // Replica la política probada de Shader::loadSPV: glSpecializeShader en Mesa/AMD tiene
+    // soporte incompleto (programas inválidos / cuelgues) → GLSL source es más fiable.
+    static GLuint compileFromPath(GLenum stage, const char* fullPath)
+    {
+        if (!fullPath) return 0;
+
+        // 1. GLSL source (presente en dev; fiable en todos los drivers).
+        if (std::ifstream g(fullPath); g.is_open())
+        {
+            std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
+            const char* p = src.c_str();
+            GLuint sh = glCreateShader(stage);
+            glShaderSource(sh, 1, &p, nullptr);
+            glCompileShader(sh);
+            GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+            if (!ok) { char log[1024] = {0}; glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+                       std::fprintf(stderr, "[RHI/GL] GLSL compile [%s]: %s\n", fullPath, log); }
+            return sh;
+        }
+
+        // 2. SPIR-V binario (producción: solo se envía ".spv").
+        std::string spv = std::string(fullPath) + ".spv";
+        if (std::ifstream f(spv, std::ios::binary | std::ios::ate); f.is_open())
+        {
+            auto n = (std::streamsize)f.tellg(); f.seekg(0);
+            std::vector<char> buf(n); f.read(buf.data(), n);
+            return compileSpirv(stage, buf.data(), (size_t)n);
+        }
+
+        std::fprintf(stderr, "[RHI/GL] shader no encontrado: %s (ni %s)\n", fullPath, spv.c_str());
+        return 0;
+    }
+
+    // Compila una etapa desde una cadena GLSL en línea (shaders generados/embebidos).
+    static GLuint compileFromSource(GLenum stage, const char* source)
+    {
+        if (!source) return 0;
+        GLuint sh = glCreateShader(stage);
+        glShaderSource(sh, 1, &source, nullptr);
+        glCompileShader(sh);
+        GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+        if (!ok) { char log[1024] = {0}; glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
+                   std::fprintf(stderr, "[RHI/GL] GLSL source compile: %s\n", log); }
+        return sh;
+    }
+
+    static void checkLink(GLuint program)
+    {
+        GLint ok = 0;
+        glGetProgramiv(program, GL_LINK_STATUS, &ok);
+        if (!ok)
+        {
+            char log[1024] = {0};
+            glGetProgramInfoLog(program, sizeof(log), nullptr, log);
+            std::fprintf(stderr, "[RHI/GL] program link error: %s\n", log);
+        }
+    }
+
+    static GLsizei mipLevels(uint32_t w, uint32_t h)
+    {
+        return 1 + (GLsizei)std::floor(std::log2((float)std::max(w, h)));
+    }
+
+    // ------------------------------------------------------------------ ciclo de vida
+    GLDevice::GLDevice(SDL_Window* window) : m_window(window)
+    {
+        // Transición: si la Window ya creó un contexto GL (lo normal en el motor actual),
+        // lo ADOPTAMOS en vez de crear uno segundo (dos contextos = recursos no compartidos).
+        // Si no hay ninguno (arranque futuro RHI-first), lo creamos nosotros.
+        if (SDL_GLContext existing = SDL_GL_GetCurrentContext())
+        {
+            m_glContext   = existing;
+            m_ownsContext = false;   // glad ya está cargado por la Window; no re-inicializar
+        }
+        else
+        {
+            m_glContext = SDL_GL_CreateContext(m_window);
+            if (!m_glContext)
+            {
+                std::fprintf(stderr, "[RHI/GL] SDL_GL_CreateContext falló: %s\n", SDL_GetError());
+                return;
+            }
+            if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress))
+            {
+                std::fprintf(stderr, "[RHI/GL] gladLoadGLLoader falló\n");
+                return;
+            }
+            glEnable(GL_DEPTH_TEST);
+            m_ownsContext = true;
+        }
+        m_context = std::make_unique<GLContext>(this);
+    }
+
+    GLDevice::~GLDevice()
+    {
+        for (auto& b : m_buffers)   if (b.id) glDeleteBuffers(1, &b.id);
+        for (auto& t : m_textures)  if (t.id) glDeleteTextures(1, &t.id);
+        for (auto& s : m_samplers)  if (s.id) glDeleteSamplers(1, &s.id);
+        for (auto& p : m_pipelines) { if (p.program) glDeleteProgram(p.program); if (p.vao) glDeleteVertexArrays(1, &p.vao); }
+        for (auto& rt : m_targets)  { if (rt.fbo) glDeleteFramebuffers(1, &rt.fbo); if (rt.depthRbo) glDeleteRenderbuffers(1, &rt.depthRbo); }
+        // Solo destruimos el contexto si lo creamos nosotros; si es adoptado, lo destruye la Window.
+        if (m_glContext && m_ownsContext) SDL_GL_DestroyContext(m_glContext);
+        // OJO: NO destruye m_window; de eso se encarga la clase Window del motor.
+    }
+
+    // ------------------------------------------------------------------ buffers
+    BufferHandle GLDevice::createBuffer(BufferUsage usage, size_t bytes, const void* data, BufferMemory mem)
+    {
+        GLBuffer b;
+        b.target = toTarget(usage);
+        glCreateBuffers(1, &b.id);
+        if (mem == BufferMemory::Stream)
+            glNamedBufferData(b.id, (GLsizeiptr)bytes, data, GL_DYNAMIC_DRAW);   // mutable, reasignable
+        else
+            glNamedBufferStorage(b.id, (GLsizeiptr)bytes, data,
+                                 (mem == BufferMemory::Dynamic) ? GL_DYNAMIC_STORAGE_BIT : 0);
+        m_buffers.push_back(b);
+        return BufferHandle{ (uint32_t)m_buffers.size() };
+    }
+
+    void GLDevice::updateBuffer(BufferHandle h, size_t offset, size_t bytes, const void* data)
+    {
+        const GLBuffer* b = buffer(h);
+        if (!b) return;
+        glNamedBufferSubData(b->id, (GLintptr)offset, (GLsizeiptr)bytes, data);
+    }
+
+    void GLDevice::uploadBuffer(BufferHandle h, size_t bytes, const void* data)
+    {
+        const GLBuffer* b = buffer(h);
+        if (!b) return;
+        glNamedBufferData(b->id, (GLsizeiptr)bytes, data, GL_DYNAMIC_DRAW);   // reasigna (buffer mutable)
+    }
+
+    void GLDevice::copyBuffer(BufferHandle src, BufferHandle dst, size_t srcOff, size_t dstOff, size_t bytes)
+    {
+        const GLBuffer* s = buffer(src);
+        const GLBuffer* d = buffer(dst);
+        if (!s || !d) return;
+        glCopyNamedBufferSubData(s->id, d->id, (GLintptr)srcOff, (GLintptr)dstOff, (GLsizeiptr)bytes);
+    }
+
+    // ------------------------------------------------------------------ texturas
+    TextureHandle GLDevice::createTexture(const TextureDesc& d)
+    {
+        GLTexture t;
+        glCreateTextures(d.cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D, 1, &t.id);
+        GLTexFmt fmt = texFmt(d.format);
+        GLsizei levels = (d.mipmaps && d.width && d.height) ? mipLevels(d.width, d.height) : 1;
+        // glTextureStorage2D asigna las 6 caras si el target es cubemap (una llamada). El render
+        // por-cara (attach a FBO) lo hace el llamador (p.ej. IBL) contra la textura inmutable.
+        glTextureStorage2D(t.id, levels, fmt.internal, (GLsizei)d.width, (GLsizei)d.height);
+        if (d.cube) glTextureParameteri(t.id, GL_TEXTURE_WRAP_R, toWrap(d.wrap));
+
+        if (d.initialData)
+        {
+            // Alinea filas a 1 byte: sin esto, un RGB8 de anchura no-múltiplo-de-4 sale sesgado
+            // (GL_UNPACK_ALIGNMENT por defecto = 4). Robusto para cualquier formato/anchura.
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glTextureSubImage2D(t.id, 0, 0, 0, (GLsizei)d.width, (GLsizei)d.height, fmt.format, fmt.type, d.initialData);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+        }
+
+        GLenum minF = toFilter(d.filter);
+        if (d.mipmaps)
+            minF = (d.filter == Filter::Linear) ? GL_LINEAR_MIPMAP_LINEAR : GL_NEAREST_MIPMAP_NEAREST;
+        glTextureParameteri(t.id, GL_TEXTURE_MIN_FILTER, minF);
+        glTextureParameteri(t.id, GL_TEXTURE_MAG_FILTER, toFilter(d.filter));
+        glTextureParameteri(t.id, GL_TEXTURE_WRAP_S, toWrap(d.wrap));
+        glTextureParameteri(t.id, GL_TEXTURE_WRAP_T, toWrap(d.wrap));
+
+        // Calidad: LOD bias y anisotropía (clampeada al máximo del driver). Como en Texture::setQuality.
+        glTextureParameterf(t.id, GL_TEXTURE_LOD_BIAS, d.lodBias);
+        if (d.maxAnisotropy > 1.0f)
+        {
+            float maxSupported = 1.0f;
+            glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &maxSupported);
+            glTextureParameterf(t.id, GL_TEXTURE_MAX_ANISOTROPY, std::min(d.maxAnisotropy, maxSupported));
+        }
+
+        if (d.mipmaps && d.initialData) glGenerateTextureMipmap(t.id);
+
+        m_textures.push_back(t);
+        return TextureHandle{ (uint32_t)m_textures.size() };
+    }
+
+    SamplerHandle GLDevice::createSampler(const SamplerDesc& d)
+    {
+        GLSampler s;
+        glCreateSamplers(1, &s.id);
+        glSamplerParameteri(s.id, GL_TEXTURE_MIN_FILTER, toFilter(d.filter));
+        glSamplerParameteri(s.id, GL_TEXTURE_MAG_FILTER, toFilter(d.filter));
+        glSamplerParameteri(s.id, GL_TEXTURE_WRAP_S, toWrap(d.wrap));
+        glSamplerParameteri(s.id, GL_TEXTURE_WRAP_T, toWrap(d.wrap));
+        if (d.maxAnisotropy > 1.0f)
+            glSamplerParameterf(s.id, GL_TEXTURE_MAX_ANISOTROPY, d.maxAnisotropy);
+        m_samplers.push_back(s);
+        return SamplerHandle{ (uint32_t)m_samplers.size() };
+    }
+
+    // ------------------------------------------------------------------ pipelines
+    PipelineHandle GLDevice::createPipeline(const PipelineDesc& d)
+    {
+        GLPipeline p;
+        p.depth = d.depth;
+        p.blend = d.blend;
+
+        // Cada etapa: source inline > ruta (GLSL-first) > bytes SPIR-V directos.
+        auto stage = [](GLenum s, const char* source, const char* path, const void* bytes, size_t size) -> GLuint {
+            if (source) return compileFromSource(s, source);
+            if (path)   return compileFromPath(s, path);
+            if (bytes)  return compileSpirv(s, bytes, size);
+            return 0;
+        };
+
+        if (d.computeSource || d.computePath || d.spirvCompute)
+        {
+            GLuint cs = stage(GL_COMPUTE_SHADER, d.computeSource, d.computePath, d.spirvCompute, d.spirvComputeSize);
+            p.program = glCreateProgram();
+            glAttachShader(p.program, cs);
+            glLinkProgram(p.program);
+            checkLink(p.program);
+            glDeleteShader(cs);
+            p.compute = true;
+        }
+        else
+        {
+            GLuint vs = stage(GL_VERTEX_SHADER,   d.vertexSource,   d.vertexPath,   d.spirvVertex,   d.spirvVertexSize);
+            GLuint fs = stage(GL_FRAGMENT_SHADER, d.fragmentSource, d.fragmentPath, d.spirvFragment, d.spirvFragmentSize);
+            GLuint gs = stage(GL_GEOMETRY_SHADER, nullptr,          d.geometryPath, d.spirvGeometry, d.spirvGeometrySize);
+            p.program = glCreateProgram();
+            glAttachShader(p.program, vs);
+            glAttachShader(p.program, fs);
+            if (gs) glAttachShader(p.program, gs);
+            glLinkProgram(p.program);
+            checkLink(p.program);
+            glDeleteShader(vs);
+            glDeleteShader(fs);
+            if (gs) glDeleteShader(gs);
+
+            // VAO con SOLO el formato de los atributos (DSA). El buffer se ata en el draw
+            // vía glVertexArrayVertexBuffer -> desacopla layout de datos (mapea a Vulkan).
+            glCreateVertexArrays(1, &p.vao);
+            for (const VertexAttribute& a : d.vertexLayout.attributes)
+            {
+                GLVertexFmt vf = vertexFmt(a.format);
+                glEnableVertexArrayAttrib(p.vao, a.location);
+                glVertexArrayAttribFormat(p.vao, a.location, vf.size, vf.type, vf.normalized, a.offset);
+                glVertexArrayAttribBinding(p.vao, a.location, 0);
+            }
+            p.stride   = (GLsizei)d.vertexLayout.stride;
+            p.topology = toTopology(d.topology);
+        }
+
+        m_pipelines.push_back(p);
+        return PipelineHandle{ (uint32_t)m_pipelines.size() };
+    }
+
+    // ------------------------------------------------------------------ render targets
+    RenderPassHandle GLDevice::createRenderTarget(const RenderTargetDesc& d)
+    {
+        GLRenderTarget rt;
+        rt.width  = d.width;
+        rt.height = d.height;
+        glCreateFramebuffers(1, &rt.fbo);
+
+        // Color attachments (MRT). Cada uno es una textura muestreable.
+        std::vector<GLenum> drawBufs;
+        for (size_t i = 0; i < d.colorFormats.size(); ++i)
+        {
+            TextureDesc cd;
+            cd.width = d.width; cd.height = d.height; cd.format = d.colorFormats[i];
+            cd.renderTarget = true; cd.filter = d.colorFilter; cd.wrap = Wrap::ClampToEdge;
+            TextureHandle th = createTexture(cd);
+            rt.colors.push_back(th);
+            glNamedFramebufferTexture(rt.fbo, GL_COLOR_ATTACHMENT0 + (GLenum)i, texture(th)->id, 0);
+            drawBufs.push_back(GL_COLOR_ATTACHMENT0 + (GLenum)i);
+        }
+
+        // Profundidad: renderbuffer (rápido), textura 2D muestreable, o cubemap (shadow maps).
+        if (d.hasDepth)
+        {
+            GLTexFmt df = texFmt(d.depthFormat);
+            if (d.depthCube || d.depthAsTexture)
+            {
+                GLTexture t;
+                GLenum tgt = d.depthCube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D;
+                glCreateTextures(tgt, 1, &t.id);
+                glTextureStorage2D(t.id, 1, df.internal, (GLsizei)d.width, (GLsizei)d.height);
+                glTextureParameteri(t.id, GL_TEXTURE_MIN_FILTER, toFilter(d.depthFilter));
+                glTextureParameteri(t.id, GL_TEXTURE_MAG_FILTER, toFilter(d.depthFilter));
+                if (d.depthCompare)   // sampler de sombra: comparación hardware (PCF)
+                {
+                    glTextureParameteri(t.id, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+                    glTextureParameteri(t.id, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+                }
+                if (d.depthBorderClamp)
+                {
+                    glTextureParameteri(t.id, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+                    glTextureParameteri(t.id, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+                    float border[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+                    glTextureParameterfv(t.id, GL_TEXTURE_BORDER_COLOR, border);
+                }
+                else
+                {
+                    GLenum w = GL_CLAMP_TO_EDGE;
+                    glTextureParameteri(t.id, GL_TEXTURE_WRAP_S, w);
+                    glTextureParameteri(t.id, GL_TEXTURE_WRAP_T, w);
+                    if (d.depthCube) glTextureParameteri(t.id, GL_TEXTURE_WRAP_R, w);
+                }
+                m_textures.push_back(t);
+                rt.depthTex = TextureHandle{ (uint32_t)m_textures.size() };
+                glNamedFramebufferTexture(rt.fbo, GL_DEPTH_ATTACHMENT, t.id, 0);  // cubemap entero
+            }
+            else
+            {
+                glCreateRenderbuffers(1, &rt.depthRbo);
+                glNamedRenderbufferStorage(rt.depthRbo, df.internal, (GLsizei)d.width, (GLsizei)d.height);
+                GLenum attach = (d.depthFormat == Format::D24S8) ? GL_DEPTH_STENCIL_ATTACHMENT : GL_DEPTH_ATTACHMENT;
+                glNamedFramebufferRenderbuffer(rt.fbo, attach, GL_RENDERBUFFER, rt.depthRbo);
+            }
+        }
+
+        // Sin color (shadow depth-only) -> draw/read buffer NONE; si no, los N attachments.
+        if (drawBufs.empty())
+        {
+            glNamedFramebufferDrawBuffer(rt.fbo, GL_NONE);
+            glNamedFramebufferReadBuffer(rt.fbo, GL_NONE);
+        }
+        else
+        {
+            glNamedFramebufferDrawBuffers(rt.fbo, (GLsizei)drawBufs.size(), drawBufs.data());
+        }
+
+        if (glCheckNamedFramebufferStatus(rt.fbo, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+            std::fprintf(stderr, "[RHI/GL] framebuffer incompleto (%ux%u, %zu color)\n",
+                         d.width, d.height, d.colorFormats.size());
+
+        m_targets.push_back(rt);
+        return RenderPassHandle{ (uint32_t)m_targets.size() };
+    }
+
+    TextureHandle GLDevice::getColorTexture(RenderPassHandle h, uint32_t index)
+    {
+        const GLRenderTarget* rt = renderTarget(h);
+        return (rt && index < rt->colors.size()) ? rt->colors[index] : TextureHandle{};
+    }
+
+    TextureHandle GLDevice::getDepthTexture(RenderPassHandle h)
+    {
+        const GLRenderTarget* rt = renderTarget(h);
+        return rt ? rt->depthTex : TextureHandle{};
+    }
+
+    uint32_t GLDevice::nativeTexture(TextureHandle h)
+    {
+        const GLTexture* t = texture(h);
+        return t ? t->id : 0;
+    }
+
+    uint32_t GLDevice::nativeFramebuffer(RenderPassHandle h)
+    {
+        const GLRenderTarget* rt = renderTarget(h);
+        return rt ? rt->fbo : 0;
+    }
+
+    uint32_t GLDevice::nativeProgram(PipelineHandle h)
+    {
+        const GLPipeline* p = pipeline(h);
+        return p ? p->program : 0;
+    }
+
+    uint32_t GLDevice::nativeBuffer(BufferHandle h)
+    {
+        const GLBuffer* b = buffer(h);
+        return b ? b->id : 0;
+    }
+
+    // ------------------------------------------------------------------ destrucción
+    // v1: libera el objeto GL pero NO recicla el slot (id estable durante la sesión).
+    void GLDevice::destroy(BufferHandle h)   { if (const GLBuffer* b = buffer(h))   { GLuint id = b->id;  glDeleteBuffers(1, &id);  const_cast<GLBuffer*>(b)->id = 0; } }
+    void GLDevice::destroy(TextureHandle h)  { if (const GLTexture* t = texture(h)) { GLuint id = t->id;  glDeleteTextures(1, &id); const_cast<GLTexture*>(t)->id = 0; } }
+    void GLDevice::destroy(SamplerHandle h)  { if (const GLSampler* s = sampler(h)) { GLuint id = s->id;  glDeleteSamplers(1, &id); const_cast<GLSampler*>(s)->id = 0; } }
+
+    void GLDevice::destroy(PipelineHandle h)
+    {
+        if (const GLPipeline* p = pipeline(h))
+        {
+            if (p->program) glDeleteProgram(p->program);
+            if (p->vao)     { GLuint vao = p->vao; glDeleteVertexArrays(1, &vao); }
+            GLPipeline* mp = const_cast<GLPipeline*>(p); mp->program = 0; mp->vao = 0;
+        }
+    }
+
+    void GLDevice::destroy(RenderPassHandle h)
+    {
+        if (const GLRenderTarget* rt = renderTarget(h))
+        {
+            for (TextureHandle c : rt->colors) destroy(c);
+            if (RHI::valid(rt->depthTex)) destroy(rt->depthTex);
+            if (rt->fbo)      { GLuint fbo = rt->fbo; glDeleteFramebuffers(1, &fbo); }
+            if (rt->depthRbo) { GLuint rbo = rt->depthRbo; glDeleteRenderbuffers(1, &rbo); }
+            GLRenderTarget* mrt = const_cast<GLRenderTarget*>(rt);
+            mrt->colors.clear(); mrt->depthTex = {}; mrt->fbo = 0; mrt->depthRbo = 0;
+        }
+    }
+
+    // ------------------------------------------------------------------ frame
+    Context* GLDevice::beginFrame()
+    {
+        return m_context.get();
+    }
+
+    void GLDevice::endFrame()
+    {
+        SDL_GL_SwapWindow(m_window);
+    }
+}

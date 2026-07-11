@@ -1,4 +1,5 @@
 #include "renderer/floating_island_renderer.h"
+#include "rhi/rhi_device.h"
 
 namespace Haruka {
 
@@ -6,9 +7,14 @@ FloatingIslandRenderer::~FloatingIslandRenderer() { cleanup(); }
 
 void FloatingIslandRenderer::cleanup() {
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
-    if (m_vbo) glDeleteBuffers(1, &m_vbo);
-    if (m_nbo) glDeleteBuffers(1, &m_nbo);
-    if (m_ebo) glDeleteBuffers(1, &m_ebo);
+    if (RHI::valid(m_vboH)) {
+        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_vboH); dev->destroy(m_nboH); dev->destroy(m_eboH); }
+        m_vboH = m_nboH = m_eboH = {};
+    } else {
+        if (m_vbo) glDeleteBuffers(1, &m_vbo);
+        if (m_nbo) glDeleteBuffers(1, &m_nbo);
+        if (m_ebo) glDeleteBuffers(1, &m_ebo);
+    }
     m_vao = m_vbo = m_nbo = m_ebo = 0;
     m_indexCount = 0;
 }
@@ -45,21 +51,22 @@ void FloatingIslandRenderer::uploadPending() {
     glGenVertexArrays(1, &m_vao);
     glBindVertexArray(m_vao);
 
-    glGenBuffers(1, &m_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(glm::vec3), verts.data(), GL_STATIC_DRAW);
+    RHI::Device* dev = RHI::device();
+    auto mkStatic = [&](Haruka::RHI::BufferHandle& h, GLuint& glId, RHI::BufferUsage usage, const void* d, size_t bytes) {
+        GLenum tgt = (usage == RHI::BufferUsage::Index) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
+        if (dev) { h = dev->createBuffer(usage, bytes, d); glId = dev->nativeBuffer(h); glBindBuffer(tgt, glId); }
+        else     { glGenBuffers(1, &glId); glBindBuffer(tgt, glId); glBufferData(tgt, bytes, d, GL_STATIC_DRAW); }
+    };
+
+    mkStatic(m_vboH, m_vbo, RHI::BufferUsage::Vertex, verts.data(), verts.size() * sizeof(glm::vec3));
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
     glEnableVertexAttribArray(0);
 
-    glGenBuffers(1, &m_nbo);
-    glBindBuffer(GL_ARRAY_BUFFER, m_nbo);
-    glBufferData(GL_ARRAY_BUFFER, norms.size() * sizeof(glm::vec3), norms.data(), GL_STATIC_DRAW);
+    mkStatic(m_nboH, m_nbo, RHI::BufferUsage::Vertex, norms.data(), norms.size() * sizeof(glm::vec3));
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
     glEnableVertexAttribArray(1);
 
-    glGenBuffers(1, &m_ebo);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size() * sizeof(unsigned int), idx.data(), GL_STATIC_DRAW);
+    mkStatic(m_eboH, m_ebo, RHI::BufferUsage::Index, idx.data(), idx.size() * sizeof(unsigned int));
 
     glBindVertexArray(0);
     m_uploaded = true;

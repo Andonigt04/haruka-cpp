@@ -8,6 +8,8 @@
 #include <glad/glad.h>
 #include <memory>
 #include <string>
+#include <vector>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -91,6 +93,7 @@ private:
     GLuint bloomShader = 0;
     GLuint toneMappingShader = 0;
     GLuint colorGradingShader = 0;
+    std::vector<Haruka::RHI::PipelineHandle> m_pipes;   // pipelines RHI (vacío en fallback GL)
 
     int screenWidth = 0;
     int screenHeight = 0;

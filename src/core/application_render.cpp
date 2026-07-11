@@ -74,10 +74,16 @@ void Application::setupQuad() {
     };
 
     glGenVertexArrays(1, &quadVAO);
-    glGenBuffers(1, &quadVBO);
     glBindVertexArray(quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    if (RHI::Device* dev = RHI::device()) {
+        m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quadVertices), quadVertices);
+        quadVBO = dev->nativeBuffer(m_quadBuf);
+        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+    } else {
+        glGenBuffers(1, &quadVBO);
+        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
+    }
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
     glEnableVertexAttribArray(1);
@@ -133,18 +139,30 @@ unsigned int Application::renderBloom(unsigned int srcColorTex) {
     const int bw = std::max(1, m_postW / 2), bh = std::max(1, m_postH / 2);
     // (Re)create the two ping-pong color targets when the size changes.
     if (m_bloomFBO[0] == 0 || m_bloomW != bw || m_bloomH != bh) {
-        if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); glDeleteTextures(2, m_bloomTex); }
-        glGenFramebuffers(2, m_bloomFBO);
-        glGenTextures(2, m_bloomTex);
-        for (int i = 0; i < 2; ++i) {
-            glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
-            glBindTexture(GL_TEXTURE_2D, m_bloomTex[i]);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bw, bh, 0, GL_RGBA, GL_FLOAT, nullptr);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
+        if (RHI::Device* dev = RHI::device()) {
+            if (RHI::valid(m_bloomPass[0])) { dev->destroy(m_bloomPass[0]); dev->destroy(m_bloomPass[1]); }
+            for (int i = 0; i < 2; ++i) {
+                RHI::RenderTargetDesc d;
+                d.width = bw; d.height = bh; d.colorFormats = { RHI::Format::RGBA16F };
+                d.colorFilter = RHI::Filter::Linear; d.hasDepth = false;
+                m_bloomPass[i] = dev->createRenderTarget(d);
+                m_bloomFBO[i] = dev->nativeFramebuffer(m_bloomPass[i]);
+                m_bloomTex[i] = dev->nativeTexture(dev->getColorTexture(m_bloomPass[i], 0));
+            }
+        } else {
+            if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); glDeleteTextures(2, m_bloomTex); }
+            glGenFramebuffers(2, m_bloomFBO);
+            glGenTextures(2, m_bloomTex);
+            for (int i = 0; i < 2; ++i) {
+                glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
+                glBindTexture(GL_TEXTURE_2D, m_bloomTex[i]);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bw, bh, 0, GL_RGBA, GL_FLOAT, nullptr);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
+            }
         }
         m_bloomW = bw; m_bloomH = bh;
     }
@@ -336,18 +354,15 @@ void Application::renderFrameContent() {
     _iRenderedTriangles = 0;
 
     if (_currentScene && _camera) {
-        // Lazy-create UBOs
+        // Lazy-create UBOs (dinámicos; el update por frame sigue con glBufferSubData/glBindBufferBase).
+        RHI::Device* uboDev = RHI::device();
         if (m_uboPerFrame == 0) {
-            glGenBuffers(1, &m_uboPerFrame);
-            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
-            glBufferData(GL_UNIFORM_BUFFER, sizeof(PerFrameUBOData), nullptr, GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+            if (uboDev) { m_uboPerFrameH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerFrameUBOData), nullptr, RHI::BufferMemory::Dynamic); m_uboPerFrame = uboDev->nativeBuffer(m_uboPerFrameH); }
+            else { glGenBuffers(1, &m_uboPerFrame); glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame); glBufferData(GL_UNIFORM_BUFFER, sizeof(PerFrameUBOData), nullptr, GL_DYNAMIC_DRAW); glBindBuffer(GL_UNIFORM_BUFFER, 0); }
         }
         if (m_uboPerObject == 0) {
-            glGenBuffers(1, &m_uboPerObject);
-            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
-            glBufferData(GL_UNIFORM_BUFFER, sizeof(PerObjectUBOData), nullptr, GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+            if (uboDev) { m_uboPerObjectH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerObjectUBOData), nullptr, RHI::BufferMemory::Dynamic); m_uboPerObject = uboDev->nativeBuffer(m_uboPerObjectH); }
+            else { glGenBuffers(1, &m_uboPerObject); glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject); glBufferData(GL_UNIFORM_BUFFER, sizeof(PerObjectUBOData), nullptr, GL_DYNAMIC_DRAW); glBindBuffer(GL_UNIFORM_BUFFER, 0); }
         }
 
         const bool useFinalLook = getRenderFeatureHDR() || getRenderFeatureBloom()

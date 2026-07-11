@@ -1,5 +1,6 @@
 #include "ssao.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 #include <random>
 #include <iostream>
 
@@ -41,6 +42,17 @@ void SSAO::setupSamples() {
         ssaoNoise.push_back(noise);
     }
     
+    // Textura de ruido 4x4 (vec3 por texel). RHI usa RGB32F (coincide con los datos vec3).
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::TextureDesc nd;
+        nd.width = 4; nd.height = 4; nd.format = RHI::Format::RGB32F;
+        nd.filter = RHI::Filter::Nearest; nd.wrap = RHI::Wrap::Repeat;
+        nd.initialData = &ssaoNoise[0];
+        m_noise = dev->createTexture(nd);
+        noiseTexture = dev->nativeTexture(m_noise);
+        return;
+    }
+
     glGenTextures(1, &noiseTexture);
     glBindTexture(GL_TEXTURE_2D, noiseTexture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
@@ -51,6 +63,19 @@ void SSAO::setupSamples() {
 }
 
 void SSAO::setupFramebuffer() {
+    // Ruta RHI: 1 color R8 (occlusion), sin depth, filtro nearest.
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = width; d.height = height;
+        d.colorFormats = { RHI::Format::R8 };
+        d.colorFilter = RHI::Filter::Nearest;
+        d.hasDepth = false;
+        m_pass          = dev->createRenderTarget(d);
+        ssaoFBO         = dev->nativeFramebuffer(m_pass);
+        ssaoColorBuffer = dev->nativeTexture(dev->getColorTexture(m_pass, 0));
+        return;
+    }
+
     glGenFramebuffers(1, &ssaoFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
     
@@ -82,6 +107,10 @@ void SSAO::bindForReading(unsigned int textureUnit) {
 }
 
 SSAO::~SSAO() {
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_pass); dev->destroy(m_noise); }
+        return;
+    }
     glDeleteFramebuffers(1, &ssaoFBO);
     glDeleteTextures(1, &ssaoColorBuffer);
     glDeleteTextures(1, &noiseTexture);

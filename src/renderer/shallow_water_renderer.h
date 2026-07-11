@@ -12,6 +12,7 @@
 #include <vector>
 #include <memory>
 #include "tools/math_types.h"
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
@@ -33,6 +34,7 @@ private:
     fluid::ShallowWaterSim* m_sim = nullptr;
     std::unique_ptr<Shader> m_shader;
     GLuint m_vao = 0, m_vbo = 0, m_ebo = 0;
+    Haruka::RHI::BufferHandle m_vboH, m_eboH;   // buffers Stream (RHI); VAO sigue GL
     std::vector<float>        m_verts;   // pos(3)+normal(3)
     std::vector<unsigned int> m_indices;
     bool m_init = false;

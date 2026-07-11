@@ -1,5 +1,6 @@
 #include "hdr.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 
 #include <iostream>
 
@@ -12,6 +13,19 @@ HDR::HDR(unsigned int width, unsigned int height) : width(width), height(height)
 
 void HDR::setupFramebuffer()
 {
+    // Ruta RHI: MRT de 2 color (R11G11B10F: color + bright) + depth. Cachea los ids GL nativos.
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = width; d.height = height;
+        d.colorFormats = { RHI::Format::R11G11B10F, RHI::Format::R11G11B10F };
+        d.hasDepth = true; d.depthFormat = RHI::Format::D24;
+        m_pass        = dev->createRenderTarget(d);
+        hdrFBO        = dev->nativeFramebuffer(m_pass);
+        colorTexture  = dev->nativeTexture(dev->getColorTexture(m_pass, 0));
+        brightTexture = dev->nativeTexture(dev->getColorTexture(m_pass, 1));
+        return;
+    }
+
     glGenFramebuffers(1, &hdrFBO);
     glBindFramebuffer(GL_FRAMEBUFFER, hdrFBO);
 
@@ -67,6 +81,10 @@ void HDR::bindForReading(unsigned int textureUnit, int index)
 
 HDR::~HDR()
 {
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_pass);
+        return;
+    }
     glDeleteFramebuffers(1, &hdrFBO);
     glDeleteTextures(1, &colorTexture);
     glDeleteTextures(1, &brightTexture);

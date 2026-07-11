@@ -1,4 +1,5 @@
 #include "gpu_instancing.h"
+#include "rhi/rhi_device.h"
 #include <glm/gtc/matrix_transform.hpp>
 
 namespace Haruka { namespace Renderer {
@@ -6,8 +7,12 @@ namespace Haruka { namespace Renderer {
 GPUInstancing::GPUInstancing(PrecisionMode mode) : precisionMode(mode) {}
 
 GPUInstancing::~GPUInstancing() {
-    if (instanceVBO) glDeleteBuffers(1, &instanceVBO);
-    if (instanceVAO) glDeleteVertexArrays(1, &instanceVAO);
+    if (RHI::valid(m_instanceBuf)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_instanceBuf);
+    } else if (instanceVBO) {
+        glDeleteBuffers(1, &instanceVBO);
+    }
+    if (instanceVAO) glDeleteVertexArrays(1, &instanceVAO);  // VAO siempre GL (transitorio)
 }
 
 void GPUInstancing::init(int maxInst) {
@@ -99,23 +104,33 @@ void GPUInstancing::addInstanceFloat(
 }
 
 void GPUInstancing::setupInstanceBuffer() {
-    if (instanceVBO == 0) glGenBuffers(1, &instanceVBO);
+    const size_t bytes = (size_t)maxInstances * sizeof(InstanceDataFloat);
 
+    // Ruta RHI: buffer dinámico (tamaño fijo tras init, actualizable por subdata).
+    if (RHI::Device* dev = RHI::device()) {
+        if (!RHI::valid(m_instanceBuf))
+            m_instanceBuf = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic);
+        instanceVBO = dev->nativeBuffer(m_instanceBuf);
+        return;
+    }
+
+    if (instanceVBO == 0) glGenBuffers(1, &instanceVBO);
     glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-    glBufferData(GL_ARRAY_BUFFER,
-                 maxInstances * sizeof(InstanceDataFloat),
-                 nullptr, GL_DYNAMIC_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
 void GPUInstancing::updateBuffer() {
     if (!bufferDirty || instancesFloat.empty()) return;
 
-    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-    glBufferSubData(GL_ARRAY_BUFFER, 0,
-                    instancesFloat.size() * sizeof(InstanceDataFloat),
-                    instancesFloat.data());
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    const size_t bytes = instancesFloat.size() * sizeof(InstanceDataFloat);
+    if (RHI::valid(m_instanceBuf)) {
+        if (RHI::Device* dev = RHI::device()) dev->updateBuffer(m_instanceBuf, 0, bytes, instancesFloat.data());
+    } else {
+        glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+        glBufferSubData(GL_ARRAY_BUFFER, 0, bytes, instancesFloat.data());
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
     bufferDirty = false;
 }
 

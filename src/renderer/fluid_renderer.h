@@ -14,6 +14,7 @@
 #include <vector>
 #include <memory>
 #include "tools/math_types.h"
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
@@ -43,6 +44,9 @@ private:
 
     // Particle point cloud.
     GLuint m_vao = 0, m_vbo = 0;
+    // Handles RHI (buffers + render targets); los ids GL de abajo son cache de los nativos.
+    Haruka::RHI::BufferHandle m_particleBuf, m_quadBuf;
+    Haruka::RHI::RenderPassHandle m_depthPass, m_smoothPass[2], m_sceneCopyPass;
     std::unique_ptr<Shader> m_sphereShader;   // fallback lit spheres
 
     // Screen-space surface pipeline.

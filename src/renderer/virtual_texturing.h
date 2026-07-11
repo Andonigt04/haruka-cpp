@@ -6,6 +6,7 @@
 
 #include <glm/glm.hpp>
 #include <glad/glad.h>
+#include "rhi/rhi_types.h"
 #include <memory>
 #include <vector>
 #include <map>
@@ -106,6 +107,7 @@ private:
         GLuint indirectionTexture = 0;  // UV → page map
         GLuint physicalTexture = 0;     // Loaded physical texture
         GLuint feedbackTexture = 0;     // Feedback buffer
+        Haruka::RHI::TextureHandle hIndirection, hPhysical, hFeedback;  // handles RHI (creación)
         
         std::vector<GLuint> pageData;   // Page data
         std::queue<PageRequest> pageQueue;

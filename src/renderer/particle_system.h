@@ -9,6 +9,7 @@
 #include <memory>
 #include <glad/glad.h>
 #include <glm/glm.hpp>
+#include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
 
@@ -33,6 +34,7 @@ private:
     std::vector<P> m_parts;
     std::unique_ptr<Shader> m_shader;
     GLuint m_vao = 0, m_vbo = 0;
+    Haruka::RHI::BufferHandle m_vboH;   // VBO Stream (RHI); VAO sigue GL
     void ensureGL();
 };
 

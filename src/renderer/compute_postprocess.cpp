@@ -2,18 +2,33 @@
 #include <glm/glm.hpp>
 #include <iostream>
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 
 namespace Haruka { namespace Renderer {
 
 ComputePostProcess::ComputePostProcess() {}
 
 ComputePostProcess::~ComputePostProcess() {
+    if (!m_pipes.empty()) {
+        if (RHI::Device* dev = RHI::device())
+            for (auto p : m_pipes) if (RHI::valid(p)) dev->destroy(p);
+        return;
+    }
     if (bloomShader) glDeleteProgram(bloomShader);
     if (toneMappingShader) glDeleteProgram(toneMappingShader);
     if (colorGradingShader) glDeleteProgram(colorGradingShader);
 }
 
 GLuint ComputePostProcess::compileComputeShader(const std::string& source) {
+    // Ruta RHI: pipeline de compute desde source inline. Guarda el handle para liberar.
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::PipelineDesc d;
+        d.computeSource = source.c_str();
+        RHI::PipelineHandle p = dev->createPipeline(d);
+        m_pipes.push_back(p);
+        return dev->nativeProgram(p);
+    }
+
     GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
     const char* src = source.c_str();
     glShaderSource(shader, 1, &src, nullptr);

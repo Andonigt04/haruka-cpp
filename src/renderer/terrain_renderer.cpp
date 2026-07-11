@@ -1,6 +1,7 @@
 #include "terrain_renderer.h"
 #include "core/terrain/shared_index_table.h" // índices compartidos por res
 #include "tools/profiler.h"                   // HARUKA_PROFILE (sub-scopes de terrain.draw)
+#include "rhi/rhi_device.h"
 #include <cstdio>
 #include <cstdlib>     // std::abs, getenv
 #include <functional>  // std::function (recursión de covered())
@@ -38,14 +39,26 @@ TerrainRenderer::~TerrainRenderer() {
     for (auto& pair : m_gpuMeshes) {
         cleanupMesh(pair.second);
     }
+    RHI::Device* dev = RHI::device();
     for (auto& [vc, p] : m_pools) {   // pools de batching (el EBO es compartido → NO se borra aquí)
         if (p.vao) glDeleteVertexArrays(1, &p.vao);
-        GLuint bufs[5] = { p.posVBO, p.morphVBO, p.normVBO, p.morphNormVBO, p.uvVBO };
-        glDeleteBuffers(5, bufs);
+        if (dev && RHI::valid(p.hPos)) {
+            dev->destroy(p.hPos); dev->destroy(p.hMorph); dev->destroy(p.hNorm);
+            dev->destroy(p.hMorphNorm); dev->destroy(p.hUv);
+        } else {
+            GLuint bufs[5] = { p.posVBO, p.morphVBO, p.normVBO, p.morphNormVBO, p.uvVBO };
+            glDeleteBuffers(5, bufs);
+        }
+        // Indirect (cmdBuf/drawSSBO): siempre GL (stream de comandos por-frame, no migrado).
         if (p.cmdBuf)   glDeleteBuffers(1, &p.cmdBuf);
         if (p.drawSSBO) glDeleteBuffers(1, &p.drawSSBO);
     }
-    for (auto& [ic, ebo] : m_sharedEBO) if (ebo) glDeleteBuffers(1, &ebo); // EBOs compartidos
+    // EBOs compartidos: por el RHI si existen handles, o GL directo.
+    if (dev && !m_sharedEBOHandle.empty()) {
+        for (auto& [ic, h] : m_sharedEBOHandle) if (RHI::valid(h)) dev->destroy(h);
+    } else {
+        for (auto& [ic, ebo] : m_sharedEBO) if (ebo) glDeleteBuffers(1, &ebo);
+    }
 }
 
 void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
@@ -137,18 +150,22 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     glGenVertexArrays(1, &mesh.vao);
     glBindVertexArray(mesh.vao);
 
+    // Crea un VBO estático por el RHI (o GL directo si no hay device) y lo deja bindeado a
+    // GL_ARRAY_BUFFER para el glVertexAttribPointer siguiente. VAO/attribs siguen GL (transitorio).
+    RHI::Device* dev = RHI::device();
+    auto mkStatic = [&](Haruka::RHI::BufferHandle& h, GLuint& glId, const void* d, size_t bytes) {
+        if (dev) { h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, d); glId = dev->nativeBuffer(h); glBindBuffer(GL_ARRAY_BUFFER, glId); }
+        else     { glGenBuffers(1, &glId); glBindBuffer(GL_ARRAY_BUFFER, glId); glBufferData(GL_ARRAY_BUFFER, bytes, d, GL_STATIC_DRAW); }
+    };
+
     // Attr 0: positions (float, relativo a chunkCenter)
-    glGenBuffers(1, &mesh.vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
-    glBufferData(GL_ARRAY_BUFFER, data.vertices.size() * sizeof(glm::vec3), data.vertices.data(), GL_STATIC_DRAW);
+    mkStatic(mesh.hVbo, mesh.vbo, data.vertices.data(), data.vertices.size() * sizeof(glm::vec3));
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
     glEnableVertexAttribArray(0);
 
     // Attr 3: morph-target positions (CDLOD geomorphing)
     if (!data.morphTargets.empty()) {
-        glGenBuffers(1, &mesh.mbo);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.mbo);
-        glBufferData(GL_ARRAY_BUFFER, data.morphTargets.size() * sizeof(glm::vec3), data.morphTargets.data(), GL_STATIC_DRAW);
+        mkStatic(mesh.hMbo, mesh.mbo, data.morphTargets.data(), data.morphTargets.size() * sizeof(glm::vec3));
         glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
         glEnableVertexAttribArray(3);
     }
@@ -156,27 +173,21 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
     // Attr 1: normals — EMPAQUETADAS (#4): INT_2_10_10_10 (4B). El shader lee `vec3 aNormal`
     // y GL des-empaqueta normalizado (xyz) → sin cambios en el shader.
     if (!data.normalsPacked.empty()) {
-        glGenBuffers(1, &mesh.nbo);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.nbo);
-        glBufferData(GL_ARRAY_BUFFER, data.normalsPacked.size() * sizeof(uint32_t), data.normalsPacked.data(), GL_STATIC_DRAW);
+        mkStatic(mesh.hNbo, mesh.nbo, data.normalsPacked.data(), data.normalsPacked.size() * sizeof(uint32_t));
         glVertexAttribPointer(1, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(1);
     }
 
     // Attr 4: morph-target normals (CDLOD), también empaquetadas.
     if (!data.morphNormalsPacked.empty()) {
-        glGenBuffers(1, &mesh.nmbo);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.nmbo);
-        glBufferData(GL_ARRAY_BUFFER, data.morphNormalsPacked.size() * sizeof(uint32_t), data.morphNormalsPacked.data(), GL_STATIC_DRAW);
+        mkStatic(mesh.hNmbo, mesh.nmbo, data.morphNormalsPacked.data(), data.morphNormalsPacked.size() * sizeof(uint32_t));
         glVertexAttribPointer(4, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(4);
     }
 
     // Attr 2: UVs — half-float (#4): 2× half (4B vs 8B). El shader lee `vec2 aUV` (auto-convert).
     if (!data.uvsPacked.empty()) {
-        glGenBuffers(1, &mesh.uvo);
-        glBindBuffer(GL_ARRAY_BUFFER, mesh.uvo);
-        glBufferData(GL_ARRAY_BUFFER, data.uvsPacked.size() * sizeof(uint32_t), data.uvsPacked.data(), GL_STATIC_DRAW);
+        mkStatic(mesh.hUvo, mesh.uvo, data.uvsPacked.data(), data.uvsPacked.size() * sizeof(uint32_t));
         glVertexAttribPointer(2, 2, GL_HALF_FLOAT, GL_FALSE, sizeof(uint32_t), nullptr);
         glEnableVertexAttribArray(2);
     }
@@ -194,9 +205,16 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
             const unsigned int* src = idx ? idx->data()
                                           : (data.indices.empty() ? nullptr : data.indices.data());
             GLuint ebo = 0;
-            glGenBuffers(1, &ebo);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, ic * sizeof(unsigned int), src, GL_STATIC_DRAW);
+            if (dev) {
+                Haruka::RHI::BufferHandle h = dev->createBuffer(RHI::BufferUsage::Index, ic * sizeof(unsigned int), src);
+                ebo = dev->nativeBuffer(h);
+                m_sharedEBOHandle.emplace(ic, h);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);  // ligarlo al VAO actual
+            } else {
+                glGenBuffers(1, &ebo);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, ic * sizeof(unsigned int), src, GL_STATIC_DRAW);
+            }
             it = m_sharedEBO.emplace(ic, ebo).first;
         } else {
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second); // ligarlo al VAO actual
@@ -1180,11 +1198,22 @@ void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
         return;
     }
     if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
-    if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
-    if (mesh.mbo) glDeleteBuffers(1, &mesh.mbo);   // antes NO se borraba → fuga de buffer GPU
-    if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
-    if (mesh.nmbo) glDeleteBuffers(1, &mesh.nmbo);
-    if (mesh.uvo) glDeleteBuffers(1, &mesh.uvo);
+    if (RHI::valid(mesh.hVbo)) {
+        if (RHI::Device* dev = RHI::device()) {
+            dev->destroy(mesh.hVbo);
+            if (RHI::valid(mesh.hMbo))  dev->destroy(mesh.hMbo);
+            if (RHI::valid(mesh.hNbo))  dev->destroy(mesh.hNbo);
+            if (RHI::valid(mesh.hNmbo)) dev->destroy(mesh.hNmbo);
+            if (RHI::valid(mesh.hUvo))  dev->destroy(mesh.hUvo);
+        }
+        mesh.hVbo = mesh.hMbo = mesh.hNbo = mesh.hNmbo = mesh.hUvo = {};
+    } else {
+        if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
+        if (mesh.mbo) glDeleteBuffers(1, &mesh.mbo);   // antes NO se borraba → fuga de buffer GPU
+        if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
+        if (mesh.nmbo) glDeleteBuffers(1, &mesh.nmbo);
+        if (mesh.uvo) glDeleteBuffers(1, &mesh.uvo);
+    }
     // mesh.ebo NO se borra: es el EBO COMPARTIDO por res (lo libera el destructor).
 }
 
@@ -1231,16 +1260,18 @@ TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCoun
     p.capacity    = m_pools.empty() ? (uint32_t)kMaxResidentChunks : kSecondaryPoolSlots;
     glGenVertexArrays(1, &p.vao);
     const size_t n = (size_t)vertexCount * p.capacity;
-    auto mkbuf = [&](GLuint& b, size_t bytes) {
-        glGenBuffers(1, &b);
-        glBindBuffer(GL_ARRAY_BUFFER, b);
-        glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW); // datos por slot vía glBufferSubData
+    // Pool VBO: DYNAMIC (inmutable + subdata por slot). El RHI usa la misma semántica; el
+    // relleno por slot sigue con glBufferSubData (native id). growPool crea nuevos + copyBuffer.
+    RHI::Device* dev = RHI::device();
+    auto mkbuf = [&](Haruka::RHI::BufferHandle& h, GLuint& b, size_t bytes) {
+        if (dev) { h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic); b = dev->nativeBuffer(h); }
+        else     { glGenBuffers(1, &b); glBindBuffer(GL_ARRAY_BUFFER, b); glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW); }
     };
-    mkbuf(p.posVBO,       n * sizeof(glm::vec3));
-    mkbuf(p.morphVBO,     n * sizeof(glm::vec3));
-    mkbuf(p.normVBO,      n * sizeof(uint32_t));
-    mkbuf(p.morphNormVBO, n * sizeof(uint32_t));
-    mkbuf(p.uvVBO,        n * sizeof(uint32_t));
+    mkbuf(p.hPos,       p.posVBO,       n * sizeof(glm::vec3));
+    mkbuf(p.hMorph,     p.morphVBO,     n * sizeof(glm::vec3));
+    mkbuf(p.hNorm,      p.normVBO,      n * sizeof(uint32_t));
+    mkbuf(p.hMorphNorm, p.morphNormVBO, n * sizeof(uint32_t));
+    mkbuf(p.hUv,        p.uvVBO,        n * sizeof(uint32_t));
 
     // EBO compartido por indexCount (reusa el de legacy si ya existe). canPool ya garantizó
     // que la tabla compartida tiene esta topología → el buffer se rellena con datos válidos.
@@ -1249,10 +1280,17 @@ TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCoun
         if (eit == m_sharedEBO.end()) {
             const std::vector<unsigned int>* idx = SharedIndexTable::get().find(indexCount);
             GLuint ebo = 0;
-            glGenBuffers(1, &ebo);
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-            glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int),
-                         idx ? idx->data() : nullptr, GL_STATIC_DRAW);
+            if (dev) {
+                Haruka::RHI::BufferHandle h = dev->createBuffer(RHI::BufferUsage::Index,
+                    indexCount * sizeof(unsigned int), idx ? idx->data() : nullptr);
+                ebo = dev->nativeBuffer(h);
+                m_sharedEBOHandle.emplace(indexCount, h);
+            } else {
+                glGenBuffers(1, &ebo);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int),
+                             idx ? idx->data() : nullptr, GL_STATIC_DRAW);
+            }
             eit = m_sharedEBO.emplace(indexCount, ebo).first;
         }
         p.ebo = eit->second;
@@ -1285,22 +1323,33 @@ void TerrainRenderer::growPool(ChunkPool& p) {
                     "pool o revisar la suposición de topología única.\n",
             vc, oldCap, newCap, (double)((size_t)vc*newCap*kPoolBytesPerVertex)/1048576.0,
             (unsigned long long)m_poolGrowCount);
-    auto regrow = [&](GLuint& buf, size_t elem) {
-        GLuint nb = 0;
-        glGenBuffers(1, &nb);
-        glBindBuffer(GL_ARRAY_BUFFER, nb);
-        glBufferData(GL_ARRAY_BUFFER, (size_t)newCap * vc * elem, nullptr, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_COPY_READ_BUFFER,  buf);   // preserva los slots ya subidos (copia GPU→GPU)
-        glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
-        glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, (size_t)oldCap * vc * elem);
-        glDeleteBuffers(1, &buf);
-        buf = nb;
+    RHI::Device* dev = RHI::device();
+    auto regrow = [&](Haruka::RHI::BufferHandle& h, GLuint& buf, size_t elem) {
+        const size_t newBytes = (size_t)newCap * vc * elem;
+        const size_t oldBytes = (size_t)oldCap * vc * elem;
+        if (dev) {
+            // Crea el nuevo, copia GPU→GPU los slots ya subidos, destruye el viejo.
+            Haruka::RHI::BufferHandle nh = dev->createBuffer(RHI::BufferUsage::Vertex, newBytes, nullptr, RHI::BufferMemory::Dynamic);
+            dev->copyBuffer(h, nh, 0, 0, oldBytes);
+            dev->destroy(h);
+            h = nh; buf = dev->nativeBuffer(h);
+        } else {
+            GLuint nb = 0;
+            glGenBuffers(1, &nb);
+            glBindBuffer(GL_ARRAY_BUFFER, nb);
+            glBufferData(GL_ARRAY_BUFFER, newBytes, nullptr, GL_DYNAMIC_DRAW);
+            glBindBuffer(GL_COPY_READ_BUFFER,  buf);
+            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
+            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, oldBytes);
+            glDeleteBuffers(1, &buf);
+            buf = nb;
+        }
     };
-    regrow(p.posVBO,       sizeof(glm::vec3));
-    regrow(p.morphVBO,     sizeof(glm::vec3));
-    regrow(p.normVBO,      sizeof(uint32_t));
-    regrow(p.morphNormVBO, sizeof(uint32_t));
-    regrow(p.uvVBO,        sizeof(uint32_t));
+    regrow(p.hPos,       p.posVBO,       sizeof(glm::vec3));
+    regrow(p.hMorph,     p.morphVBO,     sizeof(glm::vec3));
+    regrow(p.hNorm,      p.normVBO,      sizeof(uint32_t));
+    regrow(p.hMorphNorm, p.morphNormVBO, sizeof(uint32_t));
+    regrow(p.hUv,        p.uvVBO,        sizeof(uint32_t));
     p.capacity = newCap;
     setupPoolVAO(p);                               // religa atributos a los buffers nuevos
     for (uint32_t s = newCap; s-- > oldCap; ) p.freeSlots.push_back(s);
