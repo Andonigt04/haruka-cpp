@@ -4,6 +4,8 @@
 #include <glad/glad.h>
 #include "tools/error_reporter.h"
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"   // ruta PSO: drawRHI
+#include <cstdio>
 
 namespace Haruka { namespace Renderer {
 
@@ -25,56 +27,44 @@ Mesh::Mesh(const std::vector<glm::vec3>& vertices,
            const std::vector<glm::vec3>& normals,
            const std::vector<unsigned int>& indices) {
     this->isSimpleGeometry = true;
-    this->index = indices;
-    this->vertex.clear();
     this->textures.clear();
-    this->simpleVertexCount = static_cast<int>(vertices.size());
-    setupSimpleMesh(vertices, normals, indices);
+    setupSimpleMesh(vertices, normals, indices);   // interleava en `vertex` + setupMesh()
 }
 
-// Libera los buffers: por el device si son del RHI, o GL directo en la ruta de compatibilidad.
-// El VAO se libera SIEMPRE por GL (no es aún un recurso del RHI — llega con el refactor PSO).
-static void releaseMeshBuffers(Haruka::RHI::BufferHandle vbo, Haruka::RHI::BufferHandle ebo,
-                               Haruka::RHI::BufferHandle nbo,
-                               unsigned int glVBO, unsigned int glEBO, unsigned int glNBO) {
+// Libera los buffers del mesh por el device. El VAO se libera SIEMPRE por GL (no es aún un
+// recurso del RHI — llega con el refactor PSO).
+static void releaseMeshBuffers(Haruka::RHI::BufferHandle vbo, Haruka::RHI::BufferHandle ebo) {
     using namespace Haruka;
-    if (RHI::valid(vbo) || RHI::valid(ebo) || RHI::valid(nbo)) {
-        if (RHI::Device* dev = RHI::device()) {
-            if (RHI::valid(vbo)) dev->destroy(vbo);
-            if (RHI::valid(ebo)) dev->destroy(ebo);
-            if (RHI::valid(nbo)) dev->destroy(nbo);
-        }
-    } else {
-        if (glVBO) glDeleteBuffers(1, &glVBO);
-        if (glNBO) glDeleteBuffers(1, &glNBO);
-        if (glEBO) glDeleteBuffers(1, &glEBO);
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(vbo)) dev->destroy(vbo);
+        if (RHI::valid(ebo)) dev->destroy(ebo);
     }
 }
 
 Mesh::~Mesh() {
-    releaseMeshBuffers(m_vbo, m_ebo, m_nbo, VBO, EBO, nbo);
+    releaseMeshBuffers(m_vbo, m_ebo);
     if (VAO) glDeleteVertexArrays(1, &VAO);
 }
 
 Mesh::Mesh(Mesh&& o) noexcept
     : vertex(std::move(o.vertex)), index(std::move(o.index)), textures(std::move(o.textures)),
-      VAO(o.VAO), VBO(o.VBO), EBO(o.EBO), nbo(o.nbo),
-      m_vbo(o.m_vbo), m_ebo(o.m_ebo), m_nbo(o.m_nbo),
-      isSimpleGeometry(o.isSimpleGeometry), simpleVertexCount(o.simpleVertexCount) {
-    o.VAO = o.VBO = o.EBO = o.nbo = 0; // el origen ya no posee los handles
-    o.m_vbo = o.m_ebo = o.m_nbo = {};
+      VAO(o.VAO), VBO(o.VBO), EBO(o.EBO),
+      m_vbo(o.m_vbo), m_ebo(o.m_ebo),
+      isSimpleGeometry(o.isSimpleGeometry) {
+    o.VAO = o.VBO = o.EBO = 0; // el origen ya no posee los handles
+    o.m_vbo = o.m_ebo = {};
 }
 
 Mesh& Mesh::operator=(Mesh&& o) noexcept {
     if (this != &o) {
-        releaseMeshBuffers(m_vbo, m_ebo, m_nbo, VBO, EBO, nbo);
+        releaseMeshBuffers(m_vbo, m_ebo);
         if (VAO) glDeleteVertexArrays(1, &VAO);
         vertex = std::move(o.vertex); index = std::move(o.index); textures = std::move(o.textures);
-        VAO = o.VAO; VBO = o.VBO; EBO = o.EBO; nbo = o.nbo;
-        m_vbo = o.m_vbo; m_ebo = o.m_ebo; m_nbo = o.m_nbo;
-        isSimpleGeometry = o.isSimpleGeometry; simpleVertexCount = o.simpleVertexCount;
-        o.VAO = o.VBO = o.EBO = o.nbo = 0;
-        o.m_vbo = o.m_ebo = o.m_nbo = {};
+        VAO = o.VAO; VBO = o.VBO; EBO = o.EBO;
+        m_vbo = o.m_vbo; m_ebo = o.m_ebo;
+        isSimpleGeometry = o.isSimpleGeometry;
+        o.VAO = o.VBO = o.EBO = 0;
+        o.m_vbo = o.m_ebo = {};
     }
     return *this;
 }
@@ -138,24 +128,32 @@ void Mesh::Draw(Shader &shader)
     glBindVertexArray(0);
 }
 
+// Toda la geometría (completa o simple) comparte ya el mismo buffer interleaved y el mismo layout
+// → un solo camino de dibujo, sin la rama de atributos constantes (ver setupSimpleMesh).
 void Mesh::draw() const {
     glBindVertexArray(VAO);
-
-    if (!isSimpleGeometry) {
-        glDrawElements(GL_TRIANGLES, index.size(), GL_UNSIGNED_INT, 0);
-    } else {
-        // Defaults para geometria simple
-        glDisableVertexAttribArray(2);
-        glVertexAttrib2f(2, 0.0f, 0.0f);
-        glDisableVertexAttribArray(3);
-        glVertexAttrib3f(3, 1.0f, 0.0f, 0.0f);
-        glDisableVertexAttribArray(4);
-        glVertexAttrib3f(4, 0.0f, 1.0f, 0.0f);
-        
-        glDrawElements(GL_TRIANGLES, index.size(), GL_UNSIGNED_INT, 0);
-    }
-    
+    glDrawElements(GL_TRIANGLES, (GLsizei)index.size(), GL_UNSIGNED_INT, 0);
     glBindVertexArray(0);
+}
+
+// Ruta PSO: sin VAO ni glDrawElements. El pipeline (shader + layout + estado) ya lo bindeó el
+// llamador; aquí solo se atan los buffers de ESTA malla y se dibuja.
+void Mesh::drawRHI(Haruka::RHI::Context& ctx) const {
+    if (index.empty()) return;
+    // Si un handle no resuelve, Context::bindVertexBuffer/bindIndexBuffer abortan EN SILENCIO y el
+    // VAO se queda sin buffer → glDrawElements suelta un GL_INVALID_OPERATION opaco. Mejor gritar.
+    if (!RHI::valid(m_vbo) || !RHI::valid(m_ebo)) {
+        static bool s_warned = false;
+        if (!s_warned) {
+            std::fprintf(stderr, "[Mesh] drawRHI con buffers INVALIDOS (vbo=%u ebo=%u, %zu idx) "
+                                 "→ el draw se salta\n", m_vbo.id, m_ebo.id, index.size());
+            s_warned = true;
+        }
+        return;
+    }
+    ctx.bindVertexBuffer(m_vbo);
+    ctx.bindIndexBuffer(m_ebo);
+    ctx.drawIndexed(static_cast<uint32_t>(index.size()));
 }
 
 void Mesh::setupMesh() {
@@ -163,21 +161,13 @@ void Mesh::setupMesh() {
     glBindVertexArray(VAO);
 
     // Buffers vía RHI (subida incluida). El VAO/attrib-pointers siguen en GL (transitorio).
-    if (RHI::Device* dev = RHI::device()) {
-        m_vbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertex.size() * sizeof(Vertex), &vertex[0]);
-        m_ebo = dev->createBuffer(RHI::BufferUsage::Index,  index.size() * sizeof(unsigned int), &index[0]);
-        VBO = dev->nativeBuffer(m_vbo);
-        EBO = dev->nativeBuffer(m_ebo);
-        glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-    } else {
-        glGenBuffers(1, &VBO);
-        glGenBuffers(1, &EBO);
-        glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertex.size() * sizeof(Vertex), &vertex[0], GL_STATIC_DRAW);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, index.size() * sizeof(unsigned int), &index[0], GL_STATIC_DRAW);
-    }
+    RHI::Device* dev = RHI::device();
+    m_vbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertex.size() * sizeof(Vertex), &vertex[0]);
+    m_ebo = dev->createBuffer(RHI::BufferUsage::Index,  index.size() * sizeof(unsigned int), &index[0]);
+    VBO = dev->nativeBuffer(m_vbo);
+    EBO = dev->nativeBuffer(m_ebo);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)0);
@@ -197,37 +187,29 @@ void Mesh::setupMesh() {
     glBindVertexArray(0);
 }
 
+// Geometría simple (primitivas: cubo/esfera/cápsula) → se INTERLEAVA en el MISMO `Vertex` que las
+// mallas completas. Antes usaba dos buffers separados (pos + normales) y daba uv/tangent/bitangent
+// con atributos CONSTANTES (glVertexAttrib2f/3f). Ambas cosas son intraducibles a Vulkan:
+//   · los atributos de vértice constantes NO existen (no hay vkCmdSetVertexAttrib);
+//   · el Context del RHI ata UN solo vertex buffer (binding 0), no dos.
+// Horneando esos valores como datos reales, la geometría simple queda con el MISMO layout que el
+// resto → mismo PSO, sin ramas en el draw. Coste de VRAM despreciable (son 4 mallas diminutas).
 void Mesh::setupSimpleMesh(const std::vector<glm::vec3>& vertices,
                            const std::vector<glm::vec3>& normals,
                            const std::vector<unsigned int>& indices) {
-    glGenVertexArrays(1, &VAO);
-    glBindVertexArray(VAO);
-
-    RHI::Device* dev = RHI::device();
-
-    // Positions (attrib 0)
-    if (dev) { m_vbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertices.size() * sizeof(glm::vec3), vertices.data());
-               VBO = dev->nativeBuffer(m_vbo); glBindBuffer(GL_ARRAY_BUFFER, VBO); }
-    else     { glGenBuffers(1, &VBO); glBindBuffer(GL_ARRAY_BUFFER, VBO);
-               glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(glm::vec3), vertices.data(), GL_STATIC_DRAW); }
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-    glEnableVertexAttribArray(0);
-
-    // Normals (attrib 1, buffer separado)
-    if (dev) { m_nbo = dev->createBuffer(RHI::BufferUsage::Vertex, normals.size() * sizeof(glm::vec3), normals.data());
-               nbo = dev->nativeBuffer(m_nbo); glBindBuffer(GL_ARRAY_BUFFER, nbo); }
-    else     { glGenBuffers(1, &nbo); glBindBuffer(GL_ARRAY_BUFFER, nbo);
-               glBufferData(GL_ARRAY_BUFFER, normals.size() * sizeof(glm::vec3), normals.data(), GL_STATIC_DRAW); }
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), (void*)0);
-    glEnableVertexAttribArray(1);
-
-    // Indices
-    if (dev) { m_ebo = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(unsigned int), indices.data());
-               EBO = dev->nativeBuffer(m_ebo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO); }
-    else     { glGenBuffers(1, &EBO); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
-               glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW); }
-
-    glBindVertexArray(0);
+    vertex.clear();
+    vertex.reserve(vertices.size());
+    for (size_t i = 0; i < vertices.size(); ++i) {
+        Vertex v{};
+        v.Position  = vertices[i];
+        v.Normal    = (i < normals.size()) ? normals[i] : glm::vec3(0.0f, 1.0f, 0.0f);
+        v.TexCoords = glm::vec2(0.0f, 0.0f);        // antes: glVertexAttrib2f(2, 0, 0)
+        v.Tangent   = glm::vec3(1.0f, 0.0f, 0.0f);  // antes: glVertexAttrib3f(3, 1, 0, 0)
+        v.Bitangent = glm::vec3(0.0f, 1.0f, 0.0f);  // antes: glVertexAttrib3f(4, 0, 1, 0)
+        vertex.push_back(v);
+    }
+    index = indices;
+    setupMesh();   // misma ruta que las mallas completas: un VBO interleaved + EBO
 }
 
 }} // namespace Haruka::Renderer

@@ -51,8 +51,17 @@ namespace Haruka {
         /** @brief Si el slot GPU terminó, lee elev+normal (GL, hilo principal) y libera
          *  el slot → true. Si aún computa, false. El ENSAMBLADO de la malla (CPU) lo
          *  hace luego generateChunk(...,preElev,preNormal) en un worker. */
-        bool gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec3>& outNormal,
+        bool gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec4>& outNormal4,
                             std::vector<float>& outWater);
+        /** @brief Vista de solo lectura sobre los buffers mapeados de un slot GPU terminado. */
+        struct GpuMappedView { const float* elev = nullptr; const glm::vec4* norm4 = nullptr;
+                               const float* water = nullptr; std::size_t count = 0; };
+        /** @brief Como gpuHarvestData pero SIN copiar: devuelve los punteros mapeados para que la
+         *  copia (lenta: memoria no cacheada) la haga el worker. Ver GpuHeightfield::tryMapHarvest.
+         *  Si devuelve true, hay que llamar a gpuReleaseSlot(slot) al terminar. */
+        bool gpuMapHarvest(int slot, GpuMappedView& out);
+        /** @brief Devuelve el slot GPU al pool (thread-safe, sin GL). */
+        void gpuReleaseSlot(int slot);
 
         /**
          * @brief Returns the terrain height offset (in metres) above the
@@ -77,12 +86,28 @@ namespace Haruka {
                                       const nlohmann::json& settings,
                                       double planetRadius);
 
+        // Convierte coordenadas de Chunk (X,Y) a posición 3D en la cara del cubo (pura: sin estado).
+        // PÚBLICA porque el compute la REPLICA en GLSL (u_deriveDirs) y el test las compara.
+        static glm::dvec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
+
+        /**
+         * @brief INVERSA de getLocalPosition: dirección esférica → (cara, lx, ly) del cubo.
+         *
+         * Hace falta para preguntarle la altura A LA MALLA (F10): dada una dirección, hay que saber
+         * en qué CELDA de qué chunk cae. La proyección cubo→esfera (Cobb) **no se invierte en forma
+         * cerrada**, así que se parte de la proyección gnómica (dividir por la componente dominante)
+         * y se refina con Newton — converge en 2-3 pasos porque el mapeo es suave y casi identidad
+         * en el sentido tangencial.
+         *
+         * @param dir  dirección unitaria (planet-local).
+         * @param lx,ly coordenadas de la cara en [-1,1] (las que consume getLocalPosition).
+         */
+        static void dirToFaceLocal(const glm::dvec3& dir, PlanetFace& outFace,
+                                   double& lx, double& ly);
+
     private:
         // Métodos internos para calcular ruido (Noise)
         float calculateHeight(const glm::vec3& posOnSphere, const nlohmann::json& layers);
-        
-        // Convierte coordenadas de Chunk (X,Y) a posición 3D en la cara del cubo
-        glm::dvec3 getLocalPosition(const PlanetChunkKey& key, int x, int y, int chunkSize);
 
         const DeformationField* m_deform = nullptr;
         std::unique_ptr<GpuHeightfield> m_gpu; // lazy; solo hilo principal (gpuTerrain)

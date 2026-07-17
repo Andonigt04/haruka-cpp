@@ -22,21 +22,31 @@ layout(location = 4) in float IsLake;   // 1 = lago (agua dulce), 0 = océano
 layout(location = 5) in float Depth;    // profundidad del agua (m): orilla≈0
 layout(location = 6) in vec3  WorldDir; // radial (planeta→frag), preciso — para la costa per-píxel
 
-layout(location = 20) uniform int u_waterQuality;
+// Parámetros del PASE. MISMO bloque que water.vert (binding 8) — el 7 lo usa el SSBO por-draw.
+// (F1) El bloque ADELGAZÓ: fuera seed / continentFreqA / seaThreshold / invRadius / coastWidth /
+// pxCoast / oceanSurface. Existían solo para re-derivar el terreno per-píxel; ya no hace falta.
+layout(std140, binding = 8) uniform WaterParams {
+    vec4  u_waveUpTime;      // xyz = radial up en el punto de superficie · w = tiempo (s)
+    vec4  u_waveTanWind;     // xyz = tangente (base global por frame)    · w = fuerza del viento
+    vec4  u_waveBitTide;     // xyz = bitangente                          · w = nivel de marea (m)
+    vec4  u_relCamNear;      // xyz = cameraPos − centro del planeta · w = plano cercano
+    vec2  u_windDir;         // dirección viento/corriente en el plano tangente (unitaria)
+    float u_waterQuality;    // >=0.5 → reflejo de cielo (si no, solo especular)
+    float u_fieldRes;        // lado de cara del cube-sphere del CAMPO (0 = sin campo)
+};
 
-// COSTA PER-PÍXEL (océano): evalúa la elevación del terreno EN EL PÍXEL (mismo ruido que el
-// generador → paridad) para recortar la orilla exacta a cualquier distancia, sin el aliasing de
-// celda de la malla. Gateado por DISTANCIA: cerca usa el Depth per-vértice (refleja el cavar, LOD
-// fino); lejos usa esto (nítido, donde no hay deformación visible). Params del planeta activo.
-layout(location = 22) uniform vec3  u_planetRelCam;   // cameraPos - planetCenter
-layout(location = 23) uniform int   u_seed;
-layout(location = 24) uniform float u_continentFreqA;
-layout(location = 25) uniform float u_reliefStrength;
-layout(location = 26) uniform float u_invRadius;
-layout(location = 27) uniform float u_seaThreshold;
-layout(location = 28) uniform int   u_pxCoast;        // 1 = costa per-píxel activa (params válidos)
-layout(location = 29) uniform int   u_oceanSurface;   // 1 = superficie única (recorte per-píxel SIEMPRE, sin Depth)
-layout(location = 30) uniform float u_coastWidth;     // factor de ancho de costa (seed): escala rampas distToCoast
+// CAMPO EROSIONADO del planeta: el MISMO que usa el generador de terreno (una sola fuente de verdad).
+// El agua lo necesita para saber DÓNDE HAY AGUA: sin esto, la lámina del océano existe también BAJO
+// la tierra y la ves en cuanto cavas ("mar bajo el terreno").
+layout(std430, binding = 9) readonly buffer WaterFields { vec4 wFieldCells[]; };
+// xyz: ANCLA la espuma per-píxel al MUNDO (si el ruido se evaluara sobre FragPos —relativo a la
+// cámara— la espuma "nadaría" al moverse). NO es la fórmula del terreno: solo un origen estable.
+#define u_relCam u_relCamNear.xyz
+#define u_near   u_relCamNear.w
+
+// PROFUNDIDAD DE LA ESCENA (copia del depth del target de escena). Con reversed-Z basta esto para
+// saber cuánta agua atraviesa el rayo → adiós al port del ruido del terreno.
+layout(binding = 6) uniform sampler2D u_sceneDepth;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4  view;
@@ -51,168 +61,102 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3  moonLightColor; float _pad4;
 };
 
-// ===== Ruido Perlin 3D — PORT EXACTO de terrain_gen.comp (paridad costa↔terreno) =====
-int  nHash(int x, int y, int z, int seed) {
-    int h = seed; h ^= 61 ^ x; h += (h << 3); h ^= (h >> 4);
-    h += (h << 3) ^ y; h += (h << 3) ^ z; h ^= (h >> 4); h += (h << 3); return h & 0x7fffffff;
-}
-float nGrad(int hash, float x, float y, float z) {
-    int h = hash & 15; float u = h < 8 ? x : y; float v = h < 8 ? y : z;
-    return ((h & 1) == 0 ? u : -u) + ((h & 2) == 0 ? v : -v);
-}
-float nFade(float t) { return t * t * (3.0 - 2.0 * t); }
-float nLerp(float a, float b, float t) { return a + (b - a) * t; }
-float perlin3D(vec3 pos, int seed, float scale) {
-    vec3 p = pos * scale;
-    int x0 = int(floor(p.x)), y0 = int(floor(p.y)), z0 = int(floor(p.z));
-    float xf = p.x - float(x0), yf = p.y - float(y0), zf = p.z - float(z0);
-    float u = nFade(xf), v = nFade(yf), w = nFade(zf);
-    int xi = x0 & 255, yi = y0 & 255, zi = z0 & 255;
-    int xj = (x0 + 1) & 255, yj = (y0 + 1) & 255, zj = (z0 + 1) & 255;
-    float g000 = nGrad(nHash(xi, yi, zi, seed), xf,       yf,       zf);
-    float g100 = nGrad(nHash(xj, yi, zi, seed), xf - 1.0, yf,       zf);
-    float g010 = nGrad(nHash(xi, yj, zi, seed), xf,       yf - 1.0, zf);
-    float g110 = nGrad(nHash(xj, yj, zi, seed), xf - 1.0, yf - 1.0, zf);
-    float g001 = nGrad(nHash(xi, yi, zj, seed), xf,       yf,       zf - 1.0);
-    float g101 = nGrad(nHash(xj, yi, zj, seed), xf - 1.0, yf,       zf - 1.0);
-    float g011 = nGrad(nHash(xi, yj, zj, seed), xf,       yf - 1.0, zf - 1.0);
-    float g111 = nGrad(nHash(xj, yj, zj, seed), xf - 1.0, yf - 1.0, zf - 1.0);
-    float n00 = nLerp(g000, g100, u), n10 = nLerp(g010, g110, u);
-    float n0  = nLerp(n00, n10, v);
-    float n01 = nLerp(g001, g101, u), n11 = nLerp(g011, g111, u);
-    float n1  = nLerp(n01, n11, v);
-    return nLerp(n0, n1, w);
-}
-float fBmW(vec3 pos, int seed, int octaves, float persistence, float lacunarity, float scale) {
-    if (octaves <= 0) return 0.0;
-    float value = 0.0, amplitude = 1.0, frequency = 1.0, maxValue = 0.0;
-    for (int i = 0; i < octaves; ++i) {
-        value += perlin3D(pos, seed + i, scale * frequency) * amplitude;
-        maxValue += amplitude; amplitude *= persistence; frequency *= lacunarity;
-    }
-    return value / maxValue;
-}
-float ssfW(float e0, float e1, float x) {
-    float t = clamp((x - e0) / (e1 - e0), 0.0, 1.0); return t * t * (3.0 - 2.0 * t);
-}
-
-// ===== FASE 4: Perlin con GRADIENTE ANALÍTICO — PORT EXACTO (igual que terrain_gen.comp / C++) =====
-float nGradD(int hash, float x, float y, float z, out vec3 coef) {
-    int h = hash & 15;
-    float u = h < 8 ? x : y;
-    float v = h < 8 ? y : z;
-    float su = (h & 1) == 0 ? 1.0 : -1.0;
-    float sv = (h & 2) == 0 ? 1.0 : -1.0;
-    coef = vec3(0.0);
-    if (h < 8) { coef.x = su; coef.y = sv; } else { coef.y = su; coef.z = sv; }
-    return su * u + sv * v;
-}
-float perlin3D_d(vec3 pos, out vec3 outGrad, int seed, float scale) {
-    vec3 p = pos * scale;
-    int x0 = int(floor(p.x)), y0 = int(floor(p.y)), z0 = int(floor(p.z));
-    float xf = p.x - float(x0), yf = p.y - float(y0), zf = p.z - float(z0);
-    float su = nFade(xf), sv = nFade(yf), sw = nFade(zf);
-    float dsu = 6.0 * xf * (1.0 - xf), dsv = 6.0 * yf * (1.0 - yf), dsw = 6.0 * zf * (1.0 - zf);
-    int cxA[2] = int[2](x0 & 255, (x0 + 1) & 255);
-    int cyA[2] = int[2](y0 & 255, (y0 + 1) & 255);
-    int czA[2] = int[2](z0 & 255, (z0 + 1) & 255);
-    float wx[2] = float[2](1.0 - su, su), dwx[2] = float[2](-dsu, dsu);
-    float wy[2] = float[2](1.0 - sv, sv), dwy[2] = float[2](-dsv, dsv);
-    float wz[2] = float[2](1.0 - sw, sw), dwz[2] = float[2](-dsw, dsw);
-    float n = 0.0; vec3 dn = vec3(0.0);
-    for (int i = 0; i < 2; ++i)
-    for (int j = 0; j < 2; ++j)
-    for (int k = 0; k < 2; ++k) {
-        vec3 gc;
-        float V = nGradD(nHash(cxA[i], cyA[j], czA[k], seed), xf - float(i), yf - float(j), zf - float(k), gc);
-        float wxyz = wx[i] * wy[j] * wz[k];
-        n    += V * wxyz;
-        dn.x += gc.x * wxyz + V * dwx[i] * wy[j] * wz[k];
-        dn.y += gc.y * wxyz + V * wx[i] * dwy[j] * wz[k];
-        dn.z += gc.z * wxyz + V * wx[i] * wy[j] * dwz[k];
-    }
-    outGrad = dn * scale;
-    return n;
-}
-vec3 fBmGradW(vec3 pos, int seed, int octaves, float persistence, float lacunarity, float scale) {
-    float amplitude = 1.0, frequency = 1.0, maxValue = 0.0;
-    vec3 grad = vec3(0.0);
-    for (int i = 0; i < octaves; ++i) {
-        vec3 gn;
-        perlin3D_d(pos, gn, seed + i, scale * frequency);
-        grad += gn * amplitude;
-        maxValue += amplitude;
-        amplitude *= persistence;
-        frequency *= lacunarity;
-    }
-    return grad / maxValue;
-}
-
-// Elevación TERRAN oceánica EXACTA (km, <0 mar / >0 tierra) = PORT LITERAL de terranElevKm de
-// terrain_gen.comp SIN lagos ni deformación (los lagos van por su malla; la deformación/cavar la
-// refleja el Depth per-vértice cerca). Como fBmW≡fBm y ssfW≡ssf, esto da la MISMA costa que el
-// terreno → costa per-píxel EXACTA, sin "discos" (el fallo antiguo era usar (seaThreshold+0.013)−c,
-// una versión simplificada que no casaba). Coste: 6 fBm/píxel → gateado a la franja de costa.
-const float A_NORM = 0.45;
-// distToCoast (m, con signo) — MISMA fórmula/epsilon que terrain_gen.comp y terrain_sampler_v2.cpp →
-// paridad EXACTA con el terreno (si no, la costa per-píxel discreparía = "discos"). Ver PLAN v2 mar.
-float distToCoastW(vec3 dir, float c, float c0) {
-    // FASE 4: gradiente ANALÍTICO (fBmGradW) — 1 evaluación, paridad con terreno CPU/GPU.
-    vec3 g3   = fBmGradW(dir, u_seed, 6, 0.5, 2.0, u_continentFreqA);
-    vec3 gtan = g3 - dot(g3, dir) * dir;
-    float gmag = length(gtan);
-    float ddir = (c - c0) / max(gmag, 1e-5);
-    return ddir / max(u_invRadius, 1e-20);
-}
-float oceanElevKm(vec3 dir) {
-    int seed = u_seed;
-    float c  = fBmW(dir, seed, 6, 0.5, 2.0, u_continentFreqA);
-    float c0 = u_seaThreshold;
-    float landMask = ssfW(c0 - 0.04, c0 + 0.04, c);
-    // EARLY-OUT (perf, mar abierto): elev = mix(seaDepth<0, landRelief>0, landMask) → el contorno
-    // elev=0 SOLO cae dentro de la banda 0<landMask<1. Fuera de ella el signo ya está decidido, así
-    // que devolvemos un valor hondo/alto BARATO y nos saltamos distToCoast (4 fBm) + relieve (5 fBm):
-    // ~1 fBm en vez de ~10 por píxel de mar abierto (el grueso de water.draw). No mueve la orilla.
-    if (landMask <= 0.0) return -5.0;   // océano hondo (signo correcto; magnitud aprox, sin efecto de orilla)
-    if (landMask >= 1.0) return  5.0;   // tierra firme (la ocluye el terreno opaco de todas formas)
-    float dc = distToCoastW(dir, c, c0);          // metros, >0 tierra <0 mar (paridad con el terreno)
-    // BATIMETRÍA (paridad con terrain_gen.comp / terrain_sampler_v2): plataforma → talud → abisal.
-    float off    = -dc;                                        // metros mar adentro (>0)
-    float shelfD = ssfW(0.0,                    3000.0 * u_coastWidth, off);
-    float slopeD = ssfW(3000.0 * u_coastWidth,  12000.0 * u_coastWidth, off);
-    float abyssD = ssfW(12000.0 * u_coastWidth, 45000.0 * u_coastWidth, off);
-    float seaDepth = shelfD * (-0.18) + slopeD * (-3.6) + abyssD * (-1.0);
-    float oreg  = fBmW(dir, seed + 211, 4, 0.5, 2.0, 3.0);
-    float oMask = ssfW(0.05, 0.30, oreg);
-    float omn   = fBmW(dir, seed + 311, 5, 0.5, 2.1, 600.0);
-    float ona   = omn * (1.0 / A_NORM);
-    float oform = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);
-    float oceanRelief = (oform - 0.5) * oMask * 1.6;
-    seaDepth = min(seaDepth + oceanRelief * slopeD, -0.02);
-    float landRamp = ssfW(0.0, 1500.0 * u_coastWidth, dc);
-    float landBase = landRamp * 1.0;
-    float hmn   = fBmW(dir, seed + 77, 5, 0.5, 2.0, 300.0);
-    float hillRelief = (hmn * (1.0 / A_NORM)) * landRamp * 1.3;
-    float reg     = fBmW(dir, seed + 55, 4, 0.5, 2.0, 2.0);
-    float mtnMask = ssfW(0.12, 0.36, reg);
-    float mn      = fBmW(dir, seed + 123, 5, 0.5, 2.1, 800.0);
-    float form    = pow(clamp(1.0 - abs(mn * (1.0 / A_NORM)), 0.0, 1.0), 1.3);
-    float mountains  = form * mtnMask * (6.5 * u_reliefStrength);
-    float landRelief = max(landBase + hillRelief + mountains, 0.01);
-    float elev = mix(seaDepth, landRelief, landMask);
-    // COSTA PURA POR landMask (continente de baja freq, ESTABLE entre LODs) → clamp de AMBOS lados:
-    // landMask>0.5 = tierra (≥+5mm), landMask<0.5 = océano (≤−5mm). Elimina islotes/charcos sub-celda
-    // JUSTO al nivel del mar que el morph CDLOD hacía flipar tierra↔agua entre LODs → SIN panales/
-    // flicker. La costa queda en la línea landMask=0.5 (suave, 6-oct). Lagos = sistema aparte.
-    elev = (landMask > 0.5) ? max(elev, 0.005) : min(elev, -0.005);
-    return elev;
-}
+// (F1) Aquí vivían ~150 líneas de Perlin/fBm portadas A MANO desde terrain_gen.comp (`oceanElevKm`,
+//      `distToCoastW`) para re-derivar el terreno per-píxel y saber dónde estaba la costa.
+//      BORRADAS: con reversed-Z el depth buffer da la profundidad real del agua y el terreno
+//      ocluye solo → se acabó mantener la MISMA fórmula en tres sitios (era la fuente del bug
+//      del agua inundando la tierra). Ver docs/guides/PLAN_TERRENO_V3.md §1.1.
 
 const vec3 DEEP_COLOR    = vec3(0.015, 0.07, 0.14);
 const vec3 SHALLOW_COLOR = vec3(0.05, 0.28, 0.40);
 // Lago (agua dulce): más turquesa/verde y menos profundo que el océano.
 const vec3 LAKE_DEEP     = vec3(0.04, 0.16, 0.18);
 const vec3 LAKE_SHALLOW  = vec3(0.12, 0.40, 0.42);
+
+// --- Ruido de valor 3D barato, para la ESPUMA per-píxel -------------------------------------
+float fHash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float fNoise(vec3 x) {
+    vec3 i = floor(x), f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(fHash(i + vec3(0,0,0)), fHash(i + vec3(1,0,0)), f.x),
+                   mix(fHash(i + vec3(0,1,0)), fHash(i + vec3(1,1,0)), f.x), f.y),
+               mix(mix(fHash(i + vec3(0,0,1)), fHash(i + vec3(1,0,1)), f.x),
+                   mix(fHash(i + vec3(0,1,1)), fHash(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float foamNoise(vec3 wp, float t) {   // 2 octavas, arrastradas por el tiempo
+    return fNoise(wp * 0.45 + vec3(0.0, t * 0.35, 0.0)) * 0.65
+         + fNoise(wp * 1.30 - vec3(0.0, t * 0.55, 0.0)) * 0.35;
+}
+
+// --- Cube-sphere: dirección -> (cara,u,v). PORT del mismo mapeo que planet_fields.cpp ---------
+void wDirToFaceUV(vec3 d, out int face, out float u, out float v) {
+    float ax = abs(d.x), ay = abs(d.y), az = abs(d.z);
+    if (ax >= ay && ax >= az) {
+        if (d.x > 0.0) { face = 0; u = -d.z / ax; v = -d.y / ax; }
+        else           { face = 1; u =  d.z / ax; v = -d.y / ax; }
+    } else if (ay >= az) {
+        if (d.y > 0.0) { face = 2; u =  d.x / ay; v =  d.z / ay; }
+        else           { face = 3; u =  d.x / ay; v = -d.z / ay; }
+    } else {
+        if (d.z > 0.0) { face = 4; u =  d.x / az; v = -d.y / az; }
+        else           { face = 5; u = -d.x / az; v = -d.y / az; }
+    }
+}
+vec3 wSampleField(vec3 dirIn) {   // -> (elev km, caudal, lago km)
+    int R = int(u_fieldRes);
+    if (R <= 0) return vec3(-1.0, 0.0, 0.0);   // sin campo: asumimos mar (comportamiento previo)
+    vec3 d = normalize(dirIn);
+    int f; float u, v;
+    wDirToFaceUV(d, f, u, v);
+    float fx = clamp((u * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    float fy = clamp((v * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    int i0 = int(fx), j0 = int(fy);
+    int i1 = min(i0 + 1, R - 1), j1 = min(j0 + 1, R - 1);
+    float tx = fx - float(i0), ty = fy - float(j0);
+    int base = f * R * R;
+    vec4 e0 = mix(wFieldCells[base + j0 * R + i0], wFieldCells[base + j0 * R + i1], tx);
+    vec4 e1 = mix(wFieldCells[base + j1 * R + i0], wFieldCells[base + j1 * R + i1], tx);
+    return mix(e0, e1, ty).xyz;
+}
+
+// --- OLAS CORTAS PER-PÍXEL --------------------------------------------------------------------
+// Las olas de 7-23 m NO caben en la rejilla del océano (192²): si se meten en la geometría, lo que
+// ves son las FACETAS de la malla, no olas. Así que la malla se queda con el oleaje LARGO (la mar de
+// fondo, que sí resuelve y da la silueta del horizonte) y las cortas se evalúan AQUÍ, perturbando la
+// normal por píxel. Mismo principio que la espuma: geometría per-vértice, sombreado per-píxel.
+const int   SW_N = 3;
+const float SW_LEN[SW_N]   = float[](23.0, 13.0, 7.0);
+const float SW_AMP[SW_N]   = float[](0.25, 0.13, 0.08);
+const float SW_ANG[SW_N]   = float[](1.1, -1.3,  0.9);
+vec3 shortWaveNormal(vec3 camRelPos, vec3 N) {
+    vec3 T = normalize(u_waveTanWind.xyz);
+    vec3 B = normalize(u_waveBitTide.xyz);
+    vec2 horiz = vec2(dot(camRelPos, T), dot(camRelPos, B));
+    float baseAng = atan(u_windDir.y, u_windDir.x);
+    float windAmp = clamp(u_waveTanWind.w, 0.05, 4.0);
+    float t = u_waveUpTime.w;
+    // La normal per-píxel RECOGE lo que la geometría suelta: donde la malla ya no resuelve la ola,
+    // la ola sigue existiendo en la ILUMINACIÓN. Por eso llega mucho más lejos que el desplazamiento
+    // (una normal no aliasa como una faceta). Solo se apaga cuando la ola es sub-píxel de verdad.
+    float fade = 1.0 - smoothstep(2000.0, 9000.0, length(camRelPos));
+    if (fade < 0.01) return N;
+    vec2 slope = vec2(0.0);
+    for (int i = 0; i < SW_N; ++i) {
+        float ang = baseAng + SW_ANG[i];
+        vec2  D   = vec2(cos(ang), sin(ang));
+        float k   = 6.28318530718 / SW_LEN[i];
+        float A   = SW_AMP[i] * windAmp * fade;
+        float w   = sqrt(9.81 * k) * 0.55;
+        float phase = k * dot(D, horiz) - w * t;
+        slope += D * (A * k * cos(phase));       // ∂altura/∂(dirección D)
+    }
+    // Inclinamos la normal con la pendiente de las olas cortas (en el plano tangente del mar).
+    return normalize(N - (T * slope.x + B * slope.y));
+}
 
 // Cheap analytic sky: horizon haze → zenith blue, plus a soft sun halo.
 vec3 skyColor(vec3 dir, vec3 sunDir) {
@@ -230,49 +174,42 @@ vec3 skyColor(vec3 dir, vec3 sunDir) {
 }
 
 void main() {
-    // Recorte de costa por PROFUNDIDAD con signo (negativa sobre tierra), SIN depender del depth
-    // buffer. En vez de un discard DURO en Depth=0 —que a distancia aliasa la orilla en un patrón
-    // de puntos/halftone (una celda de agua ≈ 1 píxel entra/sale de golpe)— usamos una RAMPA de
-    // alpha suave en los primeros decímetros: el agua se FUNDE con el lecho → orilla anti-aliasada.
-    // Descartamos solo lo claramente seco (tierra) para ahorrar relleno.
-    // Recorte de costa. CERCA = Depth per-vértice (refleja el cavar/deformación, y el LOD ya es
-    // fino). LEJOS y solo en OCÉANO = elevación del terreno evaluada POR PÍXEL (orilla exacta, sin
-    // el aliasing de celda de la malla). Mezcla por distancia → seguro con el cavar (cerca nunca
-    // usa el ruido base) y nítido en órbita (donde no hay deformación visible).
-    // Costa per-píxel. Peso SUAVE por profundidad (coastW) en vez de un gate duro → sin círculos
-    // (el gate duro creaba isóbatas circulares visibles). coastW llega a 0 a ~2 km de profundidad,
-    // ANTES del borde de evaluación (3 km) → ese borde es INVISIBLE (peso ya 0) y el agua profunda
-    // SIEMPRE se ve (coastW=0 → clipDepth=Depth). Solo lejos (>4km) y solo océano (cerca/lagos =
-    // per-vértice, refleja el cavar). Continente 6-oct = barato. Params verificados correctos.
-    // COSTA PER-PÍXEL EXACTA (opción B). CERCA = Depth per-vértice (refleja el cavar/deformación).
-    // A partir de ~150 m = elevación del terreno EVALUADA POR PÍXEL con la MISMA función que el
-    // terreno (oceanElevKm) → la orilla es la curva REAL elev=0, no la malla facetada por celda.
-    // Como la paridad es EXACTA, la mezcla per-vértice↔per-píxel es continua (sin discos, sin
-    // escalones). Solo se evalúa en la franja de costa (|Depth| pequeño) por coste (6 fBm/píxel).
-    float clipDepth = Depth;
-    if (u_oceanSurface == 1) {
-        // SUPERFICIE ÚNICA de océano (test): no hay Depth por-vértice del terreno → recorte per-píxel
-        // EXACTO en TODOS los píxeles (la orilla = curva real elev=0). El terreno opaco ocluye por
-        // depth lo que quede sobre tierra; esto descarta el resto → el mar solo se ve donde hay mar.
-        clipDepth = -oceanElevKm(normalize(WorldDir)) * 1000.0;
-    } else if (u_pxCoast == 1 && IsLake < 0.5 && abs(Depth) < 1200.0) { // banda estrecha (perf: menos 6-fBm/píxel)
-        vec3  dir     = normalize(WorldDir);              // radial PRECISO (no float32 a escala planeta)
-        float pxDepth = -oceanElevKm(dir) * 1000.0;       // profundidad con signo (>0 mar, <0 tierra)
-        // farW APRETADO (40→220 m): a partir de ~220 m manda el per-píxel exacto → descarta el agua
-        // GRUESA sobre tierra (celdas de agua a LOD grueso sobre terreno fino) que dejaba blobs. Muy
-        // cerca (<40 m, donde cavas) manda la malla per-vértice. Con dir preciso, paridad exacta.
-        float farW    = smoothstep(40.0, 220.0, length(FragPos));
-        clipDepth = mix(Depth, pxDepth, farW);
-    }
-    if (clipDepth <= 0.0) discard;
-    // Profundidad real en la orilla: en el océano único Depth es constante (50 m) → no había bajío
-    // turquesa ni espuma de orilla y el filo terreno↔agua se veía dentado (malla facetada). Usamos
-    // la profundidad per-píxel (clipDepth) → bajío + espuma + AA del borde enmascaran el faceteado.
-    float shoreDepthM = (u_oceanSurface == 1) ? clipDepth : Depth;
-    // AA del filo del agua: fade suave en los últimos ~0.6 m antes de la orilla (mata el escalón duro).
-    float shoreAlpha = smoothstep(0.0, 0.6, clipDepth);
+    // --- PROFUNDIDAD DEL AGUA LEÍDA DEL DEPTH BUFFER (F1) --------------------------------------
+    // ANTES: el agua RE-DERIVABA el terreno en cada píxel (`oceanElevKm`, un port a mano de la
+    // fórmula del generador, ~150 líneas de Perlin) solo para saber dónde acababa la costa. Hacía
+    // falta porque el z-buffer no tenía precisión para ocluir el mar (todo el terreno caía entre
+    // 0.99996 y 1.0). Eso obligaba a mantener la MISMA fórmula en tres sitios a la vez.
+    //
+    // AHORA (reversed-Z): el terreno opaco ocluye el agua ÉL SOLO por depth test. Aquí ya solo hace
+    // falta saber CUÁNTA agua atraviesa el rayo, y eso lo dice el propio depth buffer:
+    //     proyección reversed-Z de far infinito  ⇒  z_ndc = near / dist  ⇒  dist = near / z_ndc
+    // (z_ndc = 0 ⇒ no se escribió nada ahí = cielo/infinito.)
+    vec2  uv        = gl_FragCoord.xy / vec2(textureSize(u_sceneDepth, 0));
+    float zScene    = texture(u_sceneDepth, uv).r;
+    float distScene = (zScene > 0.0) ? (u_near / zScene) : 1e12;   // el FONDO bajo este píxel
+    float distWater = u_near / gl_FragCoord.z;                     // la propia superficie del agua
+
+    // Espesor de agua ATRAVESADA por el rayo de visión. Es lo correcto también físicamente: la
+    // absorción depende del camino que recorre la luz, no de la profundidad vertical.
+    float shoreDepthM = max(distScene - distWater, 0.0);
+
+    // Orilla: el agua se FUNDE con el lecho en los últimos decímetros → borde anti-aliasado, sin
+    // el escalón/halftone del discard duro. Donde el terreno está DELANTE del agua, el depth test
+    // ya descartó el fragmento → aquí no hace falta ningún discard.
+    float shoreAlpha = smoothstep(0.0, 0.6, shoreDepthM);
+
+    // --- ¿HAY AGUA AQUÍ? (F3) -----------------------------------------------------------------
+    // El océano es una lámina a nivel del mar en TODO el planeta: también existe BAJO la tierra, y
+    // se ve en cuanto cavas. Preguntamos al CAMPO (el mismo que genera el terreno): si aquí el
+    // terreno procedural está sobre el mar y no hay lago, NO hay agua → fuera el fragmento.
+    vec3  wpDir = normalize(FragPos + u_relCam);      // dirección desde el centro del planeta
+    vec3  fld   = wSampleField(wpDir);
+    bool  lake  = (fld.z > 0.0 && fld.z > fld.x);
+    if (fld.x > 0.0 && !lake) discard;                // tierra firme: aquí no hay mar
 
     vec3 N = normalize(Normal);
+    // Detalle de oleaje CORTO: per-píxel, no en la malla (si no, ves los triángulos de la rejilla).
+    N = shortWaveNormal(FragPos, N);
     vec3 V = normalize(-FragPos);   // camera at origin in cam-relative space
     vec3 L = normalize(sunDirection);
     vec3 H = normalize(L + V);
@@ -294,7 +231,7 @@ void main() {
     vec3 color = body;
 
     // Reflection (quality-gated).
-    if (u_waterQuality >= 1) {
+    if (u_waterQuality >= 0.5) {
         vec3 R = reflect(-V, N);
         vec3 sky = skyColor(R, L);
         color = mix(body, sky, fresnel);
@@ -339,18 +276,29 @@ void main() {
 
     color += ambientStrength * body;
 
-    // Espuma de ORILLA: banda blanca donde el agua es muy somera (Depth→0),
-    // modulada por el oleaje (las crestas empujan la espuma). Vale para mar y lago.
-    float shoreFoam = (1.0 - smoothstep(0.0, 2.2, shoreDepthM))
-                    * (0.55 + 0.45 * smoothstep(-0.4, 1.0, WaveHeight));
-    // Foam de cresta (Gerstner-Jacobian + crestas altas): casi nula en lagos calmos.
-    // DESVANECIDO CON DISTANCIA (igual que la normal se aplana en water.vert): la rejilla del océano
-    // (192²) no resuelve las olas cortas (7-41 m) a distancia → el Jacobiano/WaveHeight per-vértice
-    // ALIASA → motas de espuma "aleatorias" sin relación con el oleaje visible. La espuma de OLA solo
-    // es fiable cerca; la de ORILLA (por profundidad, shoreFoam) es estable y se mantiene a cualquier dist.
+    // --- ESPUMA PER-PÍXEL (F1) ---------------------------------------------------------------
+    // ANTES: la espuma de cresta se calculaba PER-VÉRTICE (Jacobiano de Gerstner) sobre la rejilla
+    // del océano (192²) y se interpolaba en triángulos ENORMES → manchas/"triángulos" blancos sin
+    // relación con el oleaje. Era una señal de ALTA frecuencia metida en un canal de BAJA frecuencia;
+    // el fade por distancia solo lo TAPABA. (Ver PLAN_TERRENO_V3 §0: la geometría va per-vértice, el
+    // sombreado va per-píxel.)
+    // AHORA: lo per-vértice aporta solo la MÁSCARA (dónde hay cresta / cuán somero es), y el DETALLE
+    // lo pone un ruido per-píxel anclado al mundo → la espuma se rompe en grumos, no en triángulos.
+    vec3  wp    = FragPos + u_relCam;                 // posición MUNDO estable (no nada con la cámara)
+    float fN    = foamNoise(wp, u_waveUpTime.w);      // 0..1
+
+    // Orilla: ahora shoreDepthM es la profundidad REAL (del depth buffer) → banda de espuma exacta.
+    float shoreMask = 1.0 - smoothstep(0.0, 2.2, shoreDepthM);
+    float shoreFoam = shoreMask * smoothstep(0.30, 0.85, fN * (0.75 + 0.35 * shoreMask));
+
+    // Cresta: máscara per-vértice (Jacobiano + altura) × ruido per-píxel. El fade por distancia se
+    // mantiene, pero ya no es un parche: es LOD honesto (las olas cortas no se resuelven lejos).
     float waveFoamFade = 1.0 - smoothstep(400.0, 2000.0, length(FragPos));
-    float crestFoam = smoothstep(1.2, 2.2, WaveHeight) * (1.0 - 0.9 * IsLake) * waveFoamFade;
-    float foam = clamp(max(max(Foam * (1.0 - 0.9 * IsLake) * waveFoamFade, crestFoam), shoreFoam), 0.0, 1.0);
+    float crestMask = clamp(max(Foam, smoothstep(0.9, 2.0, WaveHeight)), 0.0, 1.0)
+                    * (1.0 - 0.9 * IsLake) * waveFoamFade;
+    float crestFoam = smoothstep(0.42, 0.90, crestMask * (0.55 + 0.85 * fN));
+
+    float foam = clamp(max(crestFoam, shoreFoam), 0.0, 1.0);
     color = mix(color, vec3(0.85, 0.92, 0.97), foam * 0.75);
 
     if (enableHDR != 0) {

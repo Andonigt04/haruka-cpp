@@ -14,6 +14,19 @@
 #endif
 #include <unordered_map>
 #include <unordered_set>
+
+namespace Haruka {
+    // Umbrales del vigilante de memoria (ver update()). Por debajo de kLowMemoryMB el sistema está a
+    // punto de swapear (y con él, de congelar el escritorio) → la caché de terreno suelta lastre.
+    static constexpr size_t kLowMemoryMB   = 3072;  // por debajo: encoger la caché
+    // Recuperar en cuanto haya una HISTÉRESIS de 512 MB sobre el suelo, no 2 GB por encima. Con el gap
+    // anterior (5120) una máquina con 3-5 GB libres caía en una ZONA MUERTA: la caché ni encogía ni
+    // crecía, se congelaba en el techo bajo con el que arrancó y no podía recuperar sitio para el LOD
+    // fino → manta gruesa permanente. La protección anti-swap NO cambia (sigue encogiendo bajo 3072);
+    // el crecimiento es lento (+256 MB/2 s) y se autolimita: al crecer, `avail` baja y frena.
+    static constexpr size_t kAmpleMemoryMB = kLowMemoryMB + 512;  // 3584: por encima, recuperar poco a poco
+    static size_t systemAvailableRAMMB();   // definido más abajo (junto a systemTotalRAMMB)
+}
 #include "core/modules.h"
 #include "core/chunk_cache.h"
 #include "core/lod_system.h"
@@ -39,13 +52,15 @@
 namespace Haruka {
 
 PlanetarySystem::PlanetarySystem() {}
-PlanetarySystem::~PlanetarySystem() {}
+PlanetarySystem::~PlanetarySystem() { stopLODWorker(); }
 
 void PlanetarySystem::init() {
     // Inicializamos los subsistemas una sola vez
     // 768 MB: el suelo de LOD mantiene el planeta entero (~1536 chunks base) residente
     // SIEMPRE; con 384 MB se evictaba y entraba en bucle recarga. Override por GraphicsSettings.
     m_cache = std::make_unique<ChunkCache>(768);
+    // CACHÉ EN DISCO: evictar deja de condenar a REGENERAR. El directorio se fija con la seed del
+    // primer planeta (ver addPlanet) → un mundo nuevo nunca lee chunks de otro.
     m_generator = std::make_unique<TerrainGenerator>();
     m_renderer = std::make_unique<TerrainRenderer>();
     m_waterRenderer = std::make_unique<WaterRenderer>();
@@ -73,6 +88,103 @@ void PlanetarySystem::init() {
     //   Para más detalle súbelo (22 ≈ 64x, 23 ≈ 128x), pero el ruido debe tener
     //   frecuencia suficiente o los chunks pequeños salen lisos.
     m_lod = std::make_unique<LODSystem>(1.0, 20);
+    // Instancia GEMELA para el worker async (misma config inicial). El worker es el único que
+    // la toca; el main le espeja la config por job. Ver setAsyncLOD / lodWorkerLoop.
+    m_lodAsync = std::make_unique<LODSystem>(1.0, 20);
+    // Si el modo async viene ACTIVADO por defecto, hay que arrancar el worker AQUÍ: setAsyncLOD(true)
+    // no lo haría (early-return al no cambiar el flag) y el main esperaría resultados eternamente.
+    // HARUKA_LODASYNC=1 fuerza el modo async (para reproducir/depurar sin recompilar).
+    if (getenv("HARUKA_LODASYNC")) m_asyncLOD.store(true, std::memory_order_relaxed);
+    if (m_asyncLOD.load(std::memory_order_relaxed)) startLODWorker();
+}
+
+// ---------------------------------------------------------------------------------------------
+// LOD asíncrono: hilo worker + arranque/cierre.
+// ---------------------------------------------------------------------------------------------
+void PlanetarySystem::startLODWorker() {
+    if (m_lodThread.joinable()) return; // ya arrancado
+    m_lodStop = false;
+    m_lodThread = std::thread([this] { lodWorkerLoop(); });
+}
+
+void PlanetarySystem::stopLODWorker() {
+    if (!m_lodThread.joinable()) return;
+    { std::lock_guard<std::mutex> lk(m_lodMx); m_lodStop = true; }
+    m_lodCv.notify_all();
+    m_lodThread.join();
+}
+
+void PlanetarySystem::setAsyncLOD(bool on) {
+    if (on == m_asyncLOD.load(std::memory_order_relaxed)) return;
+    if (on) {
+        startLODWorker();
+        m_asyncLOD.store(true, std::memory_order_relaxed);
+    } else {
+        // Apagar: drena el worker (espera a que termine el job en vuelo) y descarta su
+        // resultado, para que el siguiente frame vuelva al recompute inline limpio.
+        m_asyncLOD.store(false, std::memory_order_relaxed);
+        std::unique_lock<std::mutex> lk(m_lodMx);
+        m_lodCv.wait(lk, [this] { return !m_lodBusy; });
+        m_lodResults.clear();
+        m_lodResultReady = false;
+        m_lodJobReady = false;
+    }
+    m_forceLOD = true; // fuerza un recompute limpio tras el cambio de modo
+}
+
+// Bucle del worker: duerme hasta que el main deja un job (m_lodJobReady), lo copia bajo el
+// mutex (para no retener el lock durante el cálculo), recomputa CADA planeta sobre m_lodAsync
+// y publica los LODUpdate. TODO es CPU puro (el LOD no llama a GL) y opera sobre snapshots
+// (residencia/cámara/config) → sin tocar nada del main mientras calcula.
+void PlanetarySystem::lodWorkerLoop() {
+    for (;;) {
+        LODAsyncJob job;
+        {
+            std::unique_lock<std::mutex> lk(m_lodMx);
+            m_lodCv.wait(lk, [this] { return m_lodStop || m_lodJobReady; });
+            if (m_lodStop) return;
+            job = std::move(m_lodJob);       // toma el job y libera el slot
+            m_lodJobReady = false;
+            m_lodBusy = true;
+        }
+
+        // Espeja la config del job en la instancia del worker (sin locks: solo el worker la toca).
+        m_lodAsync->setParams(job.splitFactor, job.maxLOD);
+        m_lodAsync->setMinLOD(job.minLOD);
+        m_lodAsync->setScreenSpaceLOD(job.screenSpace);
+        m_lodAsync->setScreenK(job.screenK);
+        m_lodAsync->setTargetPx(job.targetPx);
+        if (job.hasCull) m_lodAsync->setCullMatrix(job.cullVP);
+        for (const auto& k : job.forgetKeys) m_lodAsync->forgetChunk(k);
+
+        // Residencia: snapshot lock-free (mismo patrón que el main). Copiado en el job.
+        auto residentFn = [&job](const PlanetChunkKey& k) {
+            return job.resident.count(ChunkCache::keyToHash(k)) != 0;
+        };
+
+        std::vector<std::pair<size_t, LODUpdate>> results;
+        results.reserve(job.planets.size());
+        for (const auto& p : job.planets) {
+            // Bias de costa PER-PLANET (cada cuerpo tiene su seed → su línea de mar).
+            if (p.coastFn) m_lodAsync->setCoastBias(p.coastFn, p.coastRefine);
+            else           m_lodAsync->setCoastBias(nullptr);
+            SceneObject proxy;
+            proxy.name = p.name;
+            proxy.position = p.position;
+            proxy.scale = glm::dvec3(p.radius);
+            LODUpdate up = m_lodAsync->updatePlanetLOD(
+                std::shared_ptr<SceneObject>(&proxy, [](SceneObject*){}), p.camPos, residentFn, p.bodyId);
+            results.emplace_back(p.index, std::move(up));
+        }
+
+        {
+            std::lock_guard<std::mutex> lk(m_lodMx);
+            m_lodResults = std::move(results);
+            m_lodResultReady = true;
+            m_lodBusy = false;
+        }
+        m_lodCv.notify_all(); // por si setAsyncLOD(false) espera a que drene
+    }
 }
 
 void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
@@ -166,6 +278,40 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
 
     // 2. Para cada planeta, actualizar su terreno
     static int s_lf = 0; ++s_lf; // contador de frames (para escalonar el catch-up)
+
+    // VIGILANTE DE MEMORIA (cada ~2 s). El presupuesto de la caché se fija al arrancar, pero lo que
+    // el SISTEMA tiene libre cambia MIENTRAS JUEGAS (el navegador crece, otro programa arranca). Sin
+    // esto, la caché sigue llenándose hasta su techo, el sistema entra en swap y **se congela el PC
+    // entero**, no solo el juego. El terreno es REGENERABLE: ante la duda, se tira caché.
+    // (m_cacheBudgetMB == 0 = nadie fijó el techo → no hay nada a lo que volver: sin vigilante.)
+    if (m_cache && m_cacheBudgetMB > 0 && (s_lf % 120) == 0) {
+        const size_t avail = systemAvailableRAMMB();
+        if (avail) {
+            const size_t cur  = m_cache->getMaxMemoryMB();
+            const size_t used = m_cache->getMemoryUsageMB();
+
+            // ⚠️ SUELO = EL CONJUNTO DE TRABAJO, no una constante. Los chunks que el LOD tiene
+            // residentes AHORA no son lastre: si el techo baja de ahí, la caché los desaloja y el
+            // streaming los regenera acto seguido → thrash permanente (visto: `mem 1359/512 MB`, la
+            // caché 2.6× por encima de su techo, el frame a 27 ms y `stream.sort` a 9 ms). Encoger
+            // solo tiene sentido por ENCIMA de lo que el jugador está mirando.
+            const size_t chunks   = std::max<size_t>(1, m_cache->getChunkCount());
+            const size_t avgKB    = (used * 1024) / chunks;
+            const size_t resident = (size_t)std::max(0, getGPUChunkCount());
+            const size_t workingMB = (resident * avgKB) / 1024;
+            const size_t hi       = std::max<size_t>(512, m_cacheBudgetMB); // el techo puede ser < 512 (manual)
+            const size_t floorMB  = std::clamp<size_t>(workingMB * 5 / 4, 512, hi);
+
+            if (avail < kLowMemoryMB && cur > floorMB) {              // apretando → soltar lastre
+                const size_t next = std::max(floorMB, cur * 3 / 4);
+                m_cache->setMaxMemory(next);                          // desaloja al bajar el techo
+                fprintf(stderr, "[ChunkCache] memoria del sistema baja (%zu MB libres) → cache %zu→%zu MB "
+                                "(conjunto de trabajo ~%zu MB)\n", avail, cur, next, workingMB);
+            } else if (avail > kAmpleMemoryMB && cur < m_cacheBudgetMB) { // holgura → recuperar
+                m_cache->setMaxMemory(std::min<size_t>(m_cacheBudgetMB, cur + 256));
+            }
+        }
+    }
     // F7 — PRESUPUESTO DE SUBIDAS POR FRAME: subir un chunk (terreno o agua) = copia
     // pesada + buffers GPU. En una ráfaga (carga inicial / fly-in) eran CIENTOS por frame
     // → pico de >1500 ms. Limitamos cuántos se suben por frame (terreno + agua comparten
@@ -202,6 +348,70 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         uint64_t h = ChunkCache::keyToHash(k);
         return s_waterResident.count(h) != 0 || s_waterNoOcean.count(h) != 0;
     };
+    // Catch-up de throttle: sube a GPU el backlog de terreno/agua ya generado SIN recomputar el
+    // LOD (idempotente, filtra por residencia). Reutilizado por el modo async cuando el worker
+    // aún no ha publicado un resultado para este planeta.
+    // CATCH-UP del agua. ANTES: recorría los MILES de `chunksToKeep` de CADA planeta cada 4 frames
+    // solo para encontrar los pocos que faltaban por subir → era el cuello del frame (5.5 ms ×3).
+    // AHORA: una COLA por planeta que se rellena cuando cambian las hojas y se DRENA con presupuesto
+    // → coste O(lo que subes), no O(todo el mundo). Y los cuerpos SIN OCÉANO (Luna, Júpiter) ni
+    // siquiera entran: no tienen agua que subir.
+    auto planetHasOcean = [](const Planet& p) {
+        const auto& cfg = p.terrainSettings.contains("config") ? p.terrainSettings["config"]
+                                                               : p.terrainSettings;
+        return cfg.value("profile", std::string("terran")) == "terran";
+    };
+    auto lodCatchUp = [&](size_t pi, const Planet& planet) {
+        if (m_catchupGrace > 0 && (s_lf % 3) == 0)
+            m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (filtra por residencia + presupuesto)
+        if (!m_waterRenderer || !m_cache) return;
+        if (!planetHasOcean(planet)) return;                  // sin océano → nada que poner al día
+        if (pi >= m_waterBacklog.size()) m_waterBacklog.resize(m_planets.size());
+        auto& q = m_waterBacklog[pi];
+        if (q.empty()) return;                                // nada pendiente → coste CERO
+        int budget = 24;                                      // tope por frame (no barre el mundo)
+        while (!q.empty() && budget-- > 0) {
+            const PlanetChunkKey k = q.front(); q.pop_front();
+            if (waterSkip(k)) continue;                       // ya en GPU (snapshot, sin lock)
+            if (!m_streaming->tryConsumeUpload()) { q.push_front(k); break; } // presupuesto agotado
+            ChunkData wd;
+            if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
+        }
+    };
+    // BIAS DE COSTA de un planeta (la orilla se subdivide más → sin línea de agua dentada). Solo
+    // para genVersion>=2 perfil terran; devuelve función vacía si no aplica. W cacheada por seed.
+    // Factorizado para reusarlo en el path SÍNCRONO (aplica a m_lod) y en el ASYNC (va al job).
+    auto computeCoastFn = [&](const Planet& planet) -> std::function<double(const glm::dvec3&)> {
+        const auto& cfg = planet.terrainSettings.contains("config") ? planet.terrainSettings["config"] : planet.terrainSettings;
+        if (cfg.value("genVersion", 1) >= 2 && cfg.value("profile", std::string("terran")) == "terran") {
+            const uint32_t seed = (uint32_t)cfg.value("seed", 42);
+            const double   rad  = planet.radius;
+            static std::unordered_map<uint32_t, WorldGenParams> s_wpCache;
+            auto it = s_wpCache.find(seed);
+            if (it == s_wpCache.end()) {
+                WorldGenParams W = deriveWorldParams(seed, rad);
+                W.reliefStrength = cfg.value("reliefStrength", 1.0f); W.profile = 0;
+                it = s_wpCache.emplace(seed, W).first;
+            }
+            const WorldGenParams W = it->second;
+            return [W, rad](const glm::dvec3& dir){ return (double)coastDistanceMeters(glm::vec3(dir), W, rad); };
+        }
+        return {};
+    };
+    // MODO ASYNC: recoge de una vez el lote de LODUpdate que el worker publicó (de un kick
+    // anterior). Se consume por planeta más abajo; lo que toque recomputar se acumula en
+    // asyncKick y se despacha como UN job tras el loop (si el worker está libre).
+    const bool asyncOn = m_asyncLOD.load(std::memory_order_relaxed);
+    std::unordered_map<size_t, LODUpdate> asyncReady;
+    std::vector<LODAsyncPlanet>           asyncKick;
+    if (asyncOn) {
+        std::lock_guard<std::mutex> lk(m_lodMx);
+        if (m_lodResultReady) {
+            for (auto& r : m_lodResults) asyncReady.emplace(r.first, std::move(r.second));
+            m_lodResults.clear();
+            m_lodResultReady = false;
+        }
+    }
     for (size_t pi = 0; pi < m_planets.size(); ++pi) {
         auto& planet = m_planets[pi];
 
@@ -248,79 +458,71 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // recalculando de inmediato (teleport/descenso).
         const bool doRecompute = m_forceLOD || refineNow || bigJump
                               || ((viewChanged || moved >= moveThresh) && frameDue);
-        if (!doRecompute) {
-            HARUKA_PROFILE("lod.catchup"); // subida de backlog de agua (crea mallas GL) en throttle
-            // Cámara quieta: NO recalculamos el LOD (caro). Solo de vez en cuando
-            // (cada ~6 frames) reprocesamos el último set para SUBIR lo recién
-            // generado (idempotente, comprobando residencia → sin recopiar lo que ya
-            // está). Sin esto los chunks no aparecen hasta moverte; haciéndolo cada
-            // frame costaba ~45 ms (copiaba todo el agua siempre).
-            if (m_catchupGrace > 0 && (s_lf % 3) == 0)
-                m_streaming->processLODUpdate(m_lastUpdates[pi]); // terreno (filtra por residencia + presupuesto)
-            // AGUA: catch-up SIEMPRE estando quieto (cada 4 frames), NO solo durante la ventana de
-            // gracia. La subida del agua va por DETRÁS del terreno (mismo presupuesto, terreno
-            // primero); si paraba al expirar la gracia se quedaba a un LOD GRUESO sobre el terreno
-            // fino → el agua salía en DIAMANTES/tiles (celdas mojadas gruesas). Ahora sube el backlog
-            // hasta alcanzar el LOD del terreno. Idempotente (salta lo residente) → barato al día.
-            if (m_waterRenderer && m_cache && (s_lf % 4) == 0)
-                for (const auto& k : m_lastUpdates[pi].chunksToKeep) {
-                    if (waterSkip(k)) continue;                 // ya en GPU → no recopiar (snapshot, sin lock)
-                    if (!m_streaming->tryConsumeUpload()) break;     // presupuesto de frame agotado
-                    ChunkData wd;
-                    if (m_cache->getChunkCopy(k, wd)) m_waterRenderer->addToScene(planet.name, k, wd);
-                }
-            continue;
-        }
-        m_lastLODCamPos[pi] = lodCamPos;
-        m_lastLODFrame[pi]  = s_lf;   // marca el frame de este recompute (throttle temporal)
-        m_lastRecomputeCullVP = m_curCullVP; // vista con la que se refinó → detecta giros posteriores
-
-        SceneObject planetProxy;                 // pila, sin make_shared por frame
-        planetProxy.name = planet.name;
-        planetProxy.position = planet.position;
-        planetProxy.scale = glm::dvec3(planet.radius);
-
-        // A. ¿Qué chunks deben verse? (firma toma shared_ptr → deleter no-op)
-        //    Usa la posición ADELANTADA (lookahead) → prefetch en la dirección de marcha.
-        //    Predicado de residencia → carga PROGRESIVA grueso→fino (sin huecos negros).
-        //    SNAPSHOT del set residente UNA vez (un solo lock) → el LOD lo consulta miles
-        //    de veces sin re-bloquear el mutex por nodo (antes: ~900 ms por contención).
-        static std::unordered_set<uint64_t> s_resident; // reusa buffer entre frames
-        if (m_renderer) m_renderer->residentHashes(s_resident);
-        auto residentFn = [](const PlanetChunkKey& k) { return s_resident.count(ChunkCache::keyToHash(k)) != 0; };
-        // BIAS DE COSTA del LOD para ESTE planeta: la orilla se subdivide más (triángulos finos, sin
-        // línea de agua dentada). Solo se evalúa en el planeta bajo la cámara (gate dist<60 km en el
-        // LOD), así que basta la W de este planeta. W cacheada por seed (deriveWorldParams calibra CDF).
-        {
-            const auto& cfg = planet.terrainSettings.contains("config") ? planet.terrainSettings["config"] : planet.terrainSettings;
-            if (cfg.value("genVersion", 1) >= 2 && cfg.value("profile", std::string("terran")) == "terran") {
-                const uint32_t seed = (uint32_t)cfg.value("seed", 42);
-                const double   rad  = planet.radius;
-                static std::unordered_map<uint32_t, WorldGenParams> s_wpCache;
-                auto it = s_wpCache.find(seed);
-                if (it == s_wpCache.end()) {
-                    WorldGenParams W = deriveWorldParams(seed, rad);
-                    W.reliefStrength = cfg.value("reliefStrength", 1.0f); W.profile = 0;
-                    it = s_wpCache.emplace(seed, W).first;
-                }
-                const WorldGenParams W = it->second;
-                m_lod->setCoastBias([W, rad](const glm::dvec3& dir){
-                    return (double)coastDistanceMeters(glm::vec3(dir), W, rad);
-                }, 0.4);
-            } else {
-                m_lod->setCoastBias(nullptr);
-            }
-        }
-        // bodyId = índice del planeta (estable en la sesión) → estampado en todas las
-        // claves del cuerpo para que Tierra/Luna/Júpiter no colisionen en caché/renderer.
+        // El recompute del LOD (updatePlanetLOD) es el pico de CPU del frame. En modo ASYNC va al
+        // worker; aquí solo consumimos su resultado y decidimos si encolar el siguiente. En modo
+        // SÍNCRONO se ejecuta inline (comportamiento previo, idéntico).
         LODUpdate update;
-        {
-            HARUKA_PROFILE("lod.recompute"); // recursiveProcess + balanceo 2:1 (explota si hay mucha costa en vista)
+        if (asyncOn) {
+            // (1) ¿Toca recompute? → acumula este planeta para el JOB (se despacha tras el loop si
+            //     el worker está libre). El marcado de throttle se hace AL DESPACHAR (no aquí): si
+            //     el worker estaba ocupado no lo despachamos y hay que reintentarlo el frame siguiente.
+            if (doRecompute)
+                asyncKick.push_back(LODAsyncPlanet{
+                    pi, planet.name, planet.position, planet.radius, lodCamPos, (uint16_t)pi,
+                    computeCoastFn(planet), 0.4 });
+            // (2) ¿El worker publicó hojas nuevas para este planeta?
+            auto itR = asyncReady.find(pi);
+            if (itR == asyncReady.end()) {
+                // Aún no → sube el backlog ya generado (idempotente) y sigue, como en throttle. Los
+                // chunks residentes se siguen dibujando con el último set → sin huecos entre kicks.
+                HARUKA_PROFILE("lod.catchup");
+                lodCatchUp(pi, planet);
+                continue;
+            }
+            update = std::move(itR->second); // resultado del worker → cae al streaming (GL) de abajo
+        } else {
+            if (!doRecompute) {
+                HARUKA_PROFILE("lod.catchup"); // subida de backlog de agua (crea mallas GL) en throttle
+                // Cámara quieta: NO recalculamos el LOD (caro). Solo subimos lo recién generado
+                // (idempotente, filtra por residencia). Sin esto los chunks no aparecen hasta moverte;
+                // haciéndolo cada frame costaba ~45 ms (copiaba todo el agua siempre).
+                lodCatchUp(pi, planet);
+                continue;
+            }
+            m_lastLODCamPos[pi] = lodCamPos;
+            m_lastLODFrame[pi]  = s_lf;   // marca el frame de este recompute (throttle temporal)
+            m_lastRecomputeCullVP = m_curCullVP; // vista con la que se refinó → detecta giros posteriores
+
+            SceneObject planetProxy;                 // pila, sin make_shared por frame
+            planetProxy.name = planet.name;
+            planetProxy.position = planet.position;
+            planetProxy.scale = glm::dvec3(planet.radius);
+
+            // A. ¿Qué chunks deben verse? Predicado de residencia → carga PROGRESIVA grueso→fino
+            //    (sin huecos negros). SNAPSHOT del set residente UNA vez (un solo lock) → el LOD lo
+            //    consulta miles de veces sin re-bloquear el mutex por nodo (antes: ~900 ms por contención).
+            static std::unordered_set<uint64_t> s_resident; // reusa buffer entre frames
+            if (m_renderer) m_renderer->residentHashes(s_resident);
+            auto residentFn = [](const PlanetChunkKey& k) { return s_resident.count(ChunkCache::keyToHash(k)) != 0; };
+            // BIAS DE COSTA del LOD para ESTE planeta (orilla más fina, sin línea de agua dentada).
+            auto coastFn = computeCoastFn(planet);
+            if (coastFn) m_lod->setCoastBias(coastFn, 0.4); else m_lod->setCoastBias(nullptr);
+            // bodyId = índice del planeta (estable en la sesión) → estampado en todas las claves del
+            // cuerpo para que Tierra/Luna/Júpiter no colisionen en caché/renderer.
+            HARUKA_PROFILE("lod.recompute"); // recursiveProcess + balanceo 2:1 (explota si hay mucha costa)
             update = m_lod->updatePlanetLOD(
                 std::shared_ptr<SceneObject>(&planetProxy, [](SceneObject*){}), lodCamPos, residentFn, (uint16_t)pi);
         }
         m_lastUpdates[pi] = update; // para el catch-up en throttle
-        leavesChanged[pi] = 1;      // recompute corrió → hojas potencialmente nuevas → re-enviar
+        // Hojas nuevas → RELLENA la cola de agua de este planeta (en vez de re-escanear cada frame).
+        if (m_waterRenderer && planetHasOcean(planet)) {
+            if (pi >= m_waterBacklog.size()) m_waterBacklog.resize(m_planets.size());
+            auto& q = m_waterBacklog[pi];
+            q.clear();
+            for (const auto& k : update.chunksToKeep)
+                if (!waterSkip(k)) q.push_back(k);
+        }
+        leavesChanged[pi] = 1;      // hojas nuevas → re-enviar
         HARUKA_PROFILE("lod.stream"); // resto de la iteración: sort + setDesiredChunks + processLODUpdate + agua + unload
 
         // B. Generar chunks nuevos (async) pasando settings del planeta
@@ -334,6 +536,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
         // Ordenar los chunks deseados de MÁS CERCANO a más lejano al jugador, para
         // que el streaming los genere/cargue en ese orden (cercanos primero).
         {
+            HARUKA_PROFILE("stream.sort");
             const glm::dvec3 pPos = planet.position;
             const double     pRad = planet.radius;
             std::vector<std::pair<double, PlanetChunkKey>> byDist;
@@ -351,18 +554,19 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             std::vector<PlanetChunkKey> sorted;
             sorted.reserve(byDist.size());
             for (auto& p : byDist) sorted.push_back(p.second);
-            m_streaming->setDesiredChunks(std::move(sorted), streamSettings);
+            { HARUKA_PROFILE("stream.setDesired"); m_streaming->setDesiredChunks(std::move(sorted), streamSettings); }
         }
 
         // C. Cargar desde caché a GPU (la descarga es DIFERIDA, abajo)
-        m_streaming->processLODUpdate(update);
+        { HARUKA_PROFILE("stream.processLOD"); m_streaming->processLODUpdate(update); }
 
         // El streaming solo sube el TERRENO desde caché. El AGUA debe seguir la
         // MISMA vida que el terreno (subirse desde caché aquí también), o al
         // recargar un chunk vuelve el terreno pero no el agua → mallas de agua
         // desincronizadas/huérfanas que se solapan (los "blobs"). addToScene se
         // auto-salta si ya está, así que reañadir es barato.
-        if (m_waterRenderer && m_cache)
+        if (m_waterRenderer && m_cache) {
+            HARUKA_PROFILE("stream.water");
             for (const auto& k : update.chunksToLoad) {
                 if (waterSkip(k)) continue;                     // ya en GPU → gratis (snapshot, sin lock)
                 if (!m_streaming->tryConsumeUpload()) break;         // presupuesto de frame agotado
@@ -370,18 +574,54 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
                 if (m_cache->getChunkCopy(k, wd))
                     m_waterRenderer->addToScene(planet.name, k, wd);
             }
+        }
 
         // Lo que sale de vista NO se borra: se marca STALE (sigue dibujándose). El
         // renderer lo retira solo cuando su área queda cubierta por el reemplazo
         // (padre al fusionar, o los 4 hijos al subdividir) vía purgeStaleCoveredBy.
         // Así nunca hay un agujero entre quitar el viejo y subir el nuevo — el mismo
         // mecanismo "sin hueco" que ya usaba el dig, ahora general para todo el LOD.
-        for (const auto& k : update.chunksToUnload) {
-            m_renderer->markStale(k);
-            if (m_waterRenderer) m_waterRenderer->markStale(k);
+        {
+            HARUKA_PROFILE("stream.unload");
+            for (const auto& k : update.chunksToUnload) {
+                m_renderer->markStale(k);
+                if (m_waterRenderer) m_waterRenderer->markStale(k);
+            }
         }
     }
-    m_forceLOD = false;
+
+    // === Despacho del JOB async: si hay planetas a recomputar y el worker está LIBRE, le pasamos
+    //     el lote (config espejo de m_lod + snapshot de residencia + forgets). El main NUNCA bloquea
+    //     esperando al worker: si está ocupado, los kicks se reintentan el frame siguiente. El estado
+    //     de throttle se marca SOLO para los planetas que entran al job (cámara = AHORA).
+    bool asyncDispatched = false;
+    if (asyncOn && !asyncKick.empty()) {
+        std::unique_lock<std::mutex> lk(m_lodMx);
+        if (!m_lodBusy && !m_lodJobReady) {
+            for (const auto& p : asyncKick) {
+                m_lastLODCamPos[p.index] = p.camPos;
+                m_lastLODFrame[p.index]  = s_lf;
+            }
+            m_lastRecomputeCullVP = m_curCullVP;
+            m_lodJob = LODAsyncJob{};
+            m_lodJob.planets     = std::move(asyncKick);
+            m_lodJob.splitFactor = m_lod->getSplitFactor();
+            m_lodJob.maxLOD      = m_lod->getMaxLOD();
+            m_lodJob.minLOD      = m_lod->getMinLOD();
+            m_lodJob.screenSpace = m_lod->getScreenSpaceLOD();
+            m_lodJob.screenK     = m_curScreenK;
+            m_lodJob.targetPx    = m_lod->getTargetPx();
+            m_lodJob.cullVP      = m_curCullVP; m_lodJob.hasCull = true;
+            m_lodJob.forgetKeys  = std::move(m_pendingForget); m_pendingForget.clear();
+            if (m_renderer) m_renderer->residentHashes(m_lodJob.resident); // snapshot COPIADO al job (worker lo lee lock-free)
+            m_lodJobReady = true;
+            asyncDispatched = true;
+        }
+    }
+    if (asyncDispatched) m_lodCv.notify_one();
+    // m_forceLOD: en async solo se limpia si el kick forzado LLEGÓ a despacharse (worker ocupado →
+    // reintentar el frame siguiente). En sync (o sin nada que encolar) se limpia siempre.
+    if (!asyncOn || asyncDispatched || asyncKick.empty()) m_forceLOD = false;
 
     // Pasa al renderer el set de HOJAS deseadas de cada planeta (keep ∪ load del último LOD).
     // El render dibuja, por hoja, el chunk residente más fino (hoja o ancestro) → desacopla el
@@ -400,8 +640,10 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
             leaves.reserve(up.chunksToKeep.size() + up.chunksToLoad.size());
             leaves.insert(leaves.end(), up.chunksToKeep.begin(), up.chunksToKeep.end());
             leaves.insert(leaves.end(), up.chunksToLoad.begin(), up.chunksToLoad.end());
-            if (m_waterRenderer) m_waterRenderer->setDesiredLeaves(up.planetName, leaves); // copia
-            m_renderer->setDesiredLeaves(up.planetName, std::move(leaves));
+            { HARUKA_PROFILE("desired.water");
+              if (m_waterRenderer) m_waterRenderer->setDesiredLeaves(up.planetName, leaves); } // copia
+            { HARUKA_PROFILE("desired.terrain");
+              m_renderer->setDesiredLeaves(up.planetName, std::move(leaves)); }
         }
     }
 
@@ -586,6 +828,18 @@ void PlanetarySystem::updateOrbits(double /*dt*/) {
 }
 
 void PlanetarySystem::addPlanet(const Planet& planet) {
+    // La caché de DISCO se ata a la seed del PRIMER planeta (el mundo). Sin separar por seed, un
+    // mundo nuevo leería los chunks del anterior → terreno de otro planeta.
+    // ⚠️ DETRÁS DE INTERRUPTOR (HARUKA_DISKCACHE=1), aún NO por defecto.
+    // Funciona (genera una vez, luego lee; escrituras en hilo aparte; versionada por generación),
+    // PERO con la caché poblada 1 test de streaming se cae: leer es mucho más rápido que generar y
+    // el orden/ritmo de llegada de los chunks cambia → el LOD no se asienta igual. Hay que entender
+    // esa interacción antes de encenderla. Con la caché vacía o apagada: 57 tests en verde.
+    if (m_cache && m_planets.empty() && getenv("HARUKA_DISKCACHE")) {
+        const auto& cfg = planet.terrainSettings.contains("config")
+                        ? planet.terrainSettings["config"] : planet.terrainSettings;
+        m_cache->setDiskCache("cache/terrain", (uint32_t)cfg.value("seed", 42));
+    }
     m_planets.push_back(planet);
     m_forceLOD = true; // recompute LOD next update so the new planet appears at once
 }
@@ -856,6 +1110,18 @@ bool PlanetarySystem::getActivePlanet(glm::dvec3& center, double& radius,
     return true;
 }
 
+void PlanetarySystem::setWaterPassParams(const WaterRenderer::PassParams& p) {
+    if (m_waterRenderer) m_waterRenderer->setPassParams(p);
+}
+
+// Parámetros del PASE de terreno (van al UBO TerrainParams del renderer, no a uniforms sueltos).
+void PlanetarySystem::setTerrainFog(bool on) {
+    if (m_renderer) m_renderer->setFog(on);
+}
+void PlanetarySystem::setTerrainShadow(Haruka::RHI::TextureHandle map, const glm::mat4& lightSpace, bool on) {
+    if (m_renderer) m_renderer->setShadow(map, lightSpace, on);
+}
+
 void PlanetarySystem::setTerrainCullMatrix(const glm::mat4& camRelViewProj) {
     m_curCullVP = camRelViewProj; // guardado para detectar GIRO de cámara (recompute del LOD al rotar)
     if (m_renderer)      m_renderer->setCullMatrix(camRelViewProj);
@@ -885,7 +1151,7 @@ void PlanetarySystem::bindTerrainTextures(const Planet& planet) {
     if (cfg.contains("textures") && cfg["textures"].is_object())
         dir = cfg["textures"].value("dir", std::string{});
 
-    if (dir.empty()) { glUniform1i(23, 0); return; } // sin texturas → procedural
+    if (dir.empty()) { m_renderer->setBiomeTextures({}, false); return; } // sin texturas → procedural
 
     const int q    = (int)Haruka::SettingsManager::get().graphics().textureQuality;
     const int tier = (q <= 0) ? 512 : (q >= 3) ? 2048 : 1024;
@@ -905,14 +1171,17 @@ void PlanetarySystem::bindTerrainTextures(const Planet& planet) {
         m_texTier = tier; m_texDir = dir;
     }
     bool has = m_texSandAlbedo && m_texGrassAlbedo && m_texLandAlbedo;
+    // Las unidades de textura las fija el PSO (layout(binding=N) en planet.frag) → aquí solo
+    // pasamos los HANDLES; el TerrainRenderer las ata con Context::bindTexture.
+    TerrainRenderer::BiomeTextures t{};
     if (has) {
-        m_texSandAlbedo->use(4);  glUniform1i(21, 4);
-        if (m_texSandNormal) { m_texSandNormal->use(5); glUniform1i(22, 5); }
-        m_texGrassAlbedo->use(6); glUniform1i(24, 6);
-        m_texLandAlbedo->use(7);  glUniform1i(25, 7);
-        if (m_texLandNormal) { m_texLandNormal->use(8); glUniform1i(26, 8); }
+        t.sandAlbedo  = m_texSandAlbedo->handle();
+        t.grassAlbedo = m_texGrassAlbedo->handle();
+        t.landAlbedo  = m_texLandAlbedo->handle();
+        if (m_texSandNormal) t.sandNormal = m_texSandNormal->handle();
+        if (m_texLandNormal) t.landNormal = m_texLandNormal->handle();
     }
-    glUniform1i(23, has ? 1 : 0);
+    m_renderer->setBiomeTextures(t, has);
 }
 
 void PlanetarySystem::renderPlanetTerrain(const std::string& planetName, const glm::dvec3& cameraPos) {
@@ -920,7 +1189,18 @@ void PlanetarySystem::renderPlanetTerrain(const std::string& planetName, const g
     const Planet* planet = nullptr;
     for (const auto& p : m_planets)
         if (p.name == planetName) { m_renderer->setPlanetCenter(p.position); planet = &p; break; }
-    if (planet) bindTerrainTextures(*planet);
+    if (planet) {
+        bindTerrainTextures(*planet);
+        // (F5) El BIOMA sale del campo (temperatura + humedad + pendiente + caudal), no de la
+        // altura: mismo campo que generó el relieve → no pueden contradecirse.
+        const auto& cfg = planet->terrainSettings.contains("config")
+                        ? planet->terrainSettings["config"] : planet->terrainSettings;
+        const uint32_t pseed = (uint32_t)cfg.value("seed", 42);
+        int fres = 0, cres = 0;
+        const unsigned fieldSSBO   = planetFieldsSSBO(pseed, fres);
+        const unsigned climateSSBO = planetClimateSSBO(pseed, cres);
+        m_renderer->setPlanetFields(fieldSSBO, climateSSBO, fres);
+    }
     m_renderer->renderPlanet(planetName, cameraPos);
 }
 
@@ -953,6 +1233,30 @@ int PlanetarySystem::getQueuedChunks()     const { return m_streaming ? m_stream
 int PlanetarySystem::getCachedChunks()     const { return m_cache     ? (int)m_cache->getChunkCount()               : 0; }
 int PlanetarySystem::getCacheMemoryMB()    const { return m_cache     ? (int)m_cache->getMemoryUsageMB()            : 0; }
 int PlanetarySystem::getCacheMaxMemoryMB() const { return m_cache     ? (int)m_cache->getMaxMemoryMB()              : 0; }
+// RAM DISPONIBLE de verdad en MB (0 si no se puede determinar). NO es "libre": MemAvailable es lo
+// que el kernel puede dar sin swapear (libre + caché reclamable). Es lo único que importa aquí: la
+// RAM total no dice nada si el usuario ya tiene medio sistema ocupado con el navegador.
+static size_t systemAvailableRAMMB() {
+#if defined(_WIN32)
+    MEMORYSTATUSEX s{}; s.dwLength = sizeof(s);
+    if (GlobalMemoryStatusEx(&s)) return (size_t)(s.ullAvailPhys / (1024ull * 1024ull));
+    return 0;
+#else
+    if (FILE* f = fopen("/proc/meminfo", "r")) {
+        char line[256];
+        size_t kb = 0;
+        while (fgets(line, sizeof(line), f))
+            if (sscanf(line, "MemAvailable: %zu kB", &kb) == 1) break;
+        fclose(f);
+        if (kb) return kb / 1024;
+    }
+    // Sin MemAvailable (kernels viejos / otro Unix): pág. libres × tamaño de página.
+    long pages = sysconf(_SC_AVPHYS_PAGES), psize = sysconf(_SC_PAGE_SIZE);
+    if (pages > 0 && psize > 0) return (size_t)((double)pages * (double)psize / (1024.0 * 1024.0));
+    return 0;
+#endif
+}
+
 // RAM física total del sistema en MB (0 si no se puede determinar).
 static size_t systemTotalRAMMB() {
 #if defined(_WIN32)
@@ -971,6 +1275,7 @@ static size_t systemTotalRAMMB() {
 void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
     if (!m_cache) return;
     int resolved = mb;
+    int initialMB = mb;   // tamaño de arranque (auto: conservador según RAM libre; manual: = techo)
     if (mb <= 0) {
         // AUTO (mb<=0): el presupuesto de la cache de terreno = fracción de la RAM TOTAL,
         // acotado. El terreno es regenerable, así que puede ocupar bastante, pero hay que
@@ -978,12 +1283,38 @@ void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
         // 33% de la RAM, suelo 512 MB (que cargue algo en equipos pequeños), techo 16384 MB
         // (en equipos grandes la fracción sí compensa para explorar sin regenerar; el techo solo
         // evita que un servidor con cientos de GB dedique decenas de GB a terreno).
-        const size_t ram = systemTotalRAMMB();
-        size_t budget = ram ? (ram / 4) : 1024;          // 25%: conserva lo ya cargado (menos regenerar)
-        budget = std::clamp<size_t>(budget, 512, 10240); // sin pasarse (deja sitio a VRAM/SO)
-        resolved = (int)budget;
-        fprintf(stderr, "[ChunkCache] Auto: RAM total=%zu MB → presupuesto cache terreno=%d MB\n",
-                ram, resolved);
+        // ⚠️ La RAM TOTAL no basta: en una máquina de 14 GB con 7 GB ya en uso (navegador, etc.),
+        // el 25% del total = 3.4 GB de terreno + el resto del juego + el driver GPU metían al SISTEMA
+        // ENTERO en swap → se congelaba el PC, no solo el juego. El terreno es REGENERABLE: la caché
+        // es una optimización, jamás un motivo para empujar la máquina al swap.
+        //
+        // Se toma el MENOR de: 25% del total, y lo que quede de la RAM DISPONIBLE dejando una reserva
+        // (para el driver GPU, texturas/modelos, el SO y lo que el usuario ya tenga abierto).
+        // Los LÍMITES importan tanto como la fracción:
+        //  - SUELO 1 GB: el conjunto de trabajo (los chunks que el LOD tiene residentes) ya ronda
+        //    ~1 GB. Un techo por DEBAJO de eso no ahorra memoria: desaloja lo que el streaming
+        //    regenera acto seguido → thrash permanente (la caché acaba MUY por encima de su techo).
+        //    Si una máquina no puede con eso, lo que hay que bajar es el detalle (targetPx), no esto.
+        //  - TECHO 3 GB: acumular más solo evita regenerar al VOLVER a un sitio — y para eso está la
+        //    caché de DISCO. No merece la pena arriesgar el swap del sistema por ello.
+        const size_t ram   = systemTotalRAMMB();
+        const size_t avail = systemAvailableRAMMB();
+        const size_t reserve = 2048;                              // aire para SO + driver GPU + resto
+        // TECHO = fracción de la RAM TOTAL (no de la libre). Es el máximo al que el vigilante puede
+        // recuperar cuando hay holgura. ⚠️ ANTES se acotaba por `avail` EN EL ARRANQUE: si abrías el
+        // juego con el navegador abierto, el techo quedaba clavado bajo (p.ej. 1728) y NUNCA subía →
+        // manta gruesa permanente. El techo debe venir de la RAM total; la protección la da el
+        // vigilante en vivo (encoge si `avail` baja), no un techo tímido de arranque.
+        size_t ceiling = ram ? (ram / 4) : 1024;
+        ceiling = std::clamp<size_t>(ceiling, 1024, 3072);
+        resolved = (int)ceiling;
+        // TAMAÑO INICIAL = conservador según la RAM LIBRE ahora (no empujar al swap al arrancar). El
+        // vigilante lo hace CRECER hacia el techo si `avail` da holgura, y encoger si aprieta.
+        size_t initial = ceiling;
+        if (avail) initial = std::min<size_t>(ceiling, avail > reserve ? avail - reserve : 1024);
+        initialMB = (int)std::clamp<size_t>(initial, 1024, ceiling);
+        fprintf(stderr, "[ChunkCache] Auto: RAM total=%zu MB, disponible=%zu MB → techo=%d MB, inicial=%d MB\n",
+                ram, avail, resolved, initialMB);
     }
     // SEGURIDAD (memoria): la cache de terreno NUNCA debe pasar de ~50% de la RAM total, aunque el
     // ajuste manual lo pida (p.ej. 24 GB en una máquina de 32 GB llenaba TODA la RAM → thrashing).
@@ -992,7 +1323,12 @@ void PlanetarySystem::setCacheMaxMemoryMB(int mb) {
         const size_t ram = systemTotalRAMMB();
         if (ram > 0) resolved = std::min<int>(resolved, (int)(ram * 3 / 10)); // ≤30% RAM (deja sitio a VRAM/SO)
     }
-    m_cache->setMaxMemory((size_t)std::max(16, resolved));
+    m_cacheBudgetMB = (size_t)std::max(16, resolved); // techo al que el vigilante puede REGRESAR
+    // Arranca en el tamaño INICIAL (conservador en auto), no en el techo → no empuja al swap al abrir.
+    // El vigilante lo sube hacia el techo si hay holgura. Manual (initialMB=mb) = techo, salvo si la
+    // seguridad bajó el techo: en ese caso, capado al techo.
+    if (initialMB <= 0 || initialMB > (int)m_cacheBudgetMB) initialMB = (int)m_cacheBudgetMB;
+    m_cache->setMaxMemory((size_t)std::max(16, initialMB));
 }
 void PlanetarySystem::setLODParams(double splitFactor, int maxLOD) {
     if (!m_lod) return;
@@ -1015,6 +1351,7 @@ void PlanetarySystem::setLODScreenSpace(bool on) { if (m_lod) { m_lod->setScreen
 bool PlanetarySystem::getLODScreenSpace() const { return m_lod && m_lod->getScreenSpaceLOD(); }
 void PlanetarySystem::setLODScreenK(double k) {
     if (!m_lod) return;
+    m_curScreenK = k; // espejo para snapshotear al job async (LODSystem no tiene getter)
     m_lod->setScreenK(k);
     // CDLOD morph EN SCREEN-SPACE: el split decide por targetPx (screenK·size/dist), así que la BANDA
     // de morph del renderer debe usar el MISMO criterio o se desalinea. splitFactor efectivo del morph
@@ -1093,8 +1430,43 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
     return m_generator->sampleSurfaceAt(sphereDir, settings, nearest->radius);
 }
 
+double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
+    const Haruka::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Haruka::WaterType::None) return kNoWater;   // aquí NO hay agua
+    return double(s.waterLevelKm) * 1000.0;                        // m sobre el radio de referencia
+}
+
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
-    return double(sampleSurface(worldPos).elevKm) * 1000.0; // metros (canónico)
+    // (F10) LA MALLA MANDA. Es lo que el jugador ve y sobre lo que se dibujan los props: si la
+    // colisión usara la fórmula analítica (que difiere del meso donde el chunk es grueso), caerías a
+    // través del suelo o los props flotarían. Se pregunta a la malla; solo si no hay chunk residente
+    // ahí (spawn, IA, lejos) se cae al sampler analítico — donde, además, no hay malla que contradiga.
+    const Planet* nearest = nullptr; double best = 1e300;
+    for (const auto& p : m_planets) {
+        const double d = glm::length(p.position - worldPos);
+        if (d < best) { best = d; nearest = &p; }
+    }
+    if (nearest) {
+        const glm::dvec3 rel = worldPos - nearest->position;
+        const double len = glm::length(rel);
+        if (len > 1e-9) {
+            float meshKm = 0.0f;
+            if (meshHeightKmAt(nearest->name, glm::vec3(rel / len), meshKm))
+                return (double)meshKm * 1000.0;
+        }
+    }
+    return double(sampleSurface(worldPos).elevKm) * 1000.0; // respaldo analítico (sin malla aquí)
+}
+
+std::string PlanetarySystem::getActivePlanetName() const {
+    const Planet* fallback = nullptr;
+    for (const auto& p : m_planets) {
+        const auto& cfg = p.terrainSettings.contains("config") ? p.terrainSettings["config"] : p.terrainSettings;
+        if (cfg.value("genVersion", 1) < 2) continue;
+        if (p.isHome) return p.name;
+        if (!fallback) fallback = &p;
+    }
+    return fallback ? fallback->name : std::string{};
 }
 
 bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const {
@@ -1129,6 +1501,9 @@ void PlanetarySystem::invalidateAllChunks() {
             if (m_cache) m_cache->removeChunk(k);
             if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
             if (m_lod) m_lod->forgetChunk(k);
+            // En async el recompute corre sobre m_lodAsync (del worker): encola el forget para
+            // aplicarlo en el próximo job (no podemos tocar m_lodAsync desde el hilo de render).
+            if (m_asyncLOD.load(std::memory_order_relaxed)) m_pendingForget.push_back(k);
         }
     }
     m_forceLOD = true;
@@ -1198,9 +1573,73 @@ void PlanetarySystem::invalidateEditedChunks(const glm::dvec3& center, double ra
             if (m_waterRenderer) m_waterRenderer->removeFromScene("", k);
             // Olvídalo en el LOD: el próximo update lo re-pide (LOAD) → regenera y reemplaza.
             if (m_lod) m_lod->forgetChunk(k);
+            // En async, el worker recomputa sobre m_lodAsync: encola el forget para el próximo job.
+            if (m_asyncLOD.load(std::memory_order_relaxed)) m_pendingForget.push_back(k);
         }
     }
     m_forceLOD = true; // recomputa el LOD el próximo update → re-pide los chunks liberados
+}
+
+
+// ===================== F10 — LA ALTURA SALE DE LA MALLA ========================================
+bool PlanetarySystem::meshHeightKmAt(const std::string& planetName, const glm::vec3& dirIn,
+                                     float& outElevKm) const {
+    if (!m_cache || !m_renderer) return false;
+
+    // Índice del cuerpo: las claves de chunk lo llevan estampado (Tierra/Luna no colisionan).
+    uint16_t body = 0; double radius = 0.0; bool found = false;
+    for (size_t i = 0; i < m_planets.size(); ++i)
+        if (m_planets[i].name == planetName) { body = (uint16_t)i; radius = m_planets[i].radius; found = true; break; }
+    if (!found || radius <= 0.0) return false;
+
+    const glm::dvec3 dir = glm::normalize(glm::dvec3(dirIn));
+
+    // 1) Dirección → (cara, lx, ly): la INVERSA del cubo→esfera (Newton; ver TerrainGenerator).
+    PlanetFace face; double lx, ly;
+    TerrainGenerator::dirToFaceLocal(dir, face, lx, ly);
+    const double u = glm::clamp(lx * 0.5 + 0.5, 0.0, 1.0);   // [0,1] dentro de la cara
+    const double v = glm::clamp(ly * 0.5 + 0.5, 0.0, 1.0);
+
+    // 2) De FINO a GRUESO: el primer chunk RESIDENTE que cubre el punto es el que el render dibuja.
+    const int maxLod = m_lod ? m_lod->getMaxLOD() : 12;
+    for (int lod = maxLod; lod >= 0; --lod) {
+        const double cpa = (double)(1u << lod);              // chunks por eje en este LOD
+        PlanetChunkKey key;
+        key.face = face;
+        key.lod  = (uint8_t)lod;
+        key.x    = (uint32_t)glm::clamp((int)(u * cpa), 0, (int)cpa - 1);
+        key.y    = (uint32_t)glm::clamp((int)(v * cpa), 0, (int)cpa - 1);
+        key.body = body;
+        if (!m_renderer->isResident(key)) continue;
+
+        const ChunkData* cd = m_cache->getChunk(key);
+        if (!cd || cd->vertices.empty()) continue;
+
+        // 3) Resolución de la rejilla: n = (res+1)² + 4·(res+1) (los 4 faldones). Se despeja en vez
+        //    de guardarla: ChunkData ya carga bastante y esto es exacto.
+        int res = 0;
+        for (int r = 4; r <= 256; ++r)
+            if ((size_t)(r + 1) * (r + 5) == cd->vertices.size()) { res = r; break; }
+        if (res == 0) continue;
+
+        // 4) Bilineal sobre la celda. La malla es lineal a trozos ENTRE vértices: interpolar igual
+        //    que el rasterizador es lo que hace que la altura sea la MISMA que ves.
+        const double fx = glm::clamp((u * cpa - key.x) * res, 0.0, (double)res - 1e-9);
+        const double fy = glm::clamp((v * cpa - key.y) * res, 0.0, (double)res - 1e-9);
+        const int x0 = (int)fx, y0 = (int)fy;
+        const int x1 = std::min(x0 + 1, res), y1 = std::min(y0 + 1, res);
+        const double tx = fx - x0, ty = fy - y0;
+
+        auto elevAt = [&](int x, int y) -> double {
+            const glm::dvec3 p = cd->chunkCenter + glm::dvec3(cd->vertices[(size_t)(x + y * (res + 1))]);
+            return (glm::length(p) - radius) * 0.001;        // km sobre el nivel del mar
+        };
+        const double e0 = elevAt(x0, y0) * (1 - tx) + elevAt(x1, y0) * tx;
+        const double e1 = elevAt(x0, y1) * (1 - tx) + elevAt(x1, y1) * tx;
+        outElevKm = (float)(e0 * (1 - ty) + e1 * ty);
+        return true;
+    }
+    return false;   // sin malla aquí (lejos del jugador) → el llamador usa el sampler analítico
 }
 
 }

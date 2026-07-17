@@ -106,9 +106,15 @@ namespace Haruka {
         int m_minLOD = 4; // suelo: el planeta entero siempre a ≥ este LOD (≈1536 chunks)
         bool   m_screenSpace = true;  // F1 por DEFECTO (mata el tope por altitud). `lodscreen off` vuelve a baseline.
         double m_screenK     = 935.0; // px por (unidad de mundo / distancia); se fija por frame
-        double m_targetPx    = 320.0; // subdivide si el chunk proyecta > este tamaño (px)
+        // MALLA MÁS GRUESA (PLAN_TERRENO_V3 §1.3): el conteo de chunks escala ~1/targetPx², y ES la
+        // única palanca que mueve el frame (lod.stream/desired/evict/drawset y la MEMORIA escalan con
+        // él; la GPU está ociosa). 320 → 480 = ~2.2× menos chunks. El detalle perdido va per-píxel.
+        double m_targetPx    = 480.0; // subdivide si el chunk proyecta > este tamaño (px)
         std::function<double(const glm::dvec3&)> m_coastFn; // |distToCoast| m (bias de costa); vacía = off
-        double m_coastRefine = 0.4;   // factor de targetPx en chunks costeros (más fino)
+        // El refinado de costa multiplicaba los chunks por ~6 justo donde más hay (0.4 = 2.5× más
+        // fino → 6× más chunks). Con la costa ahora exacta por depth (el agua ya no la re-deriva),
+        // no hace falta tanta malla: 0.7 sigue afinando la orilla sin reventar el conteo.
+        double m_coastRefine = 0.7;   // factor de targetPx en chunks costeros (más fino)
         glm::vec4 m_cullPlanes[6];    // F2: 6 planos del frustum (cam-rel) para acotar el recompute
         bool   m_hasCull = false;
         glm::dvec3 m_curCamPos{0.0}, m_curPlanetPos{0.0}; // estado del frame para balanceLeaves

@@ -3,6 +3,10 @@
  * @brief LRU cache for terrain chunks with configurable memory limits.
  */
 #pragma once
+#include <deque>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
 
 #include "tools/planetary_types.h"
 #include <unordered_map>
@@ -24,13 +28,35 @@ namespace Haruka {
  */
 class ChunkCache {
 public:
+    /// LOD hasta el que la pirámide de chunks queda PINNEADA (nunca se evicta). Es el fallback del
+    /// render: sin ancestro residente, un chunk fino que no llega deja un AGUJERO. 6 caras × 4^lod
+    /// → con 5 son ~6k chunks gruesos, baratos y siempre disponibles.
+    static constexpr uint8_t kPinnedLOD = 5;
+
+private:
+    std::string m_diskDir;      // vacío = sin caché de disco
+
+    // ESCRITOR EN SEGUNDO PLANO. Escribir ~500 KB por chunk DENTRO de addChunk (que corre en el
+    // camino de cosecha, `pump.harvest`) hundía el frame: I/O síncrono en el hilo caliente. Ahora se
+    // encola y escribe un hilo aparte. La cola está ACOTADA y se descarta lo que sobra: persistir es
+    // una optimización, no una obligación — perder una escritura solo cuesta regenerar ese chunk.
+    struct DiskJob { PlanetChunkKey key; ChunkData data; };
+    std::deque<DiskJob>     m_diskQueue;
+    mutable std::mutex      m_diskMx;
+    std::condition_variable m_diskCv;
+    std::thread             m_diskThread;
+    std::atomic<bool>       m_diskStop{false};
+    void diskWriterLoop();
+    void enqueueDiskWrite(const PlanetChunkKey& key, const ChunkData& d);
+public:
+
     /**
      * @brief Initializes the chunk cache with specified memory limit.
      * @param maxMemoryMB Maximum memory to use for cached chunks (MB)
      */
     explicit ChunkCache(size_t maxMemoryMB = 128);
     
-    ~ChunkCache() = default;
+    ~ChunkCache();   // para el hilo escritor de disco
     
     /**
      * @brief Converts a PlanetChunkKey to a uint64_t hash.
@@ -43,6 +69,11 @@ public:
      * @return Pointer to cached ChunkData, or nullptr if not in cache
      */
     const ChunkData* getChunk(const PlanetChunkKey& key);
+
+    /** @brief Refresca el LRU de MUCHOS chunks con UN solo lock.
+     *  El streaming refrescaba chunk a chunk (getChunk) los ~1500 chunks que mantiene visibles:
+     *  1500 lock/unlock por frame. Es el mismo trabajo, pero pagando el mutex una vez. */
+    void touchMany(const std::vector<PlanetChunkKey>& keys);
 
     /**
      * @brief Copies a cached chunk into `out` while holding the cache lock.
@@ -74,6 +105,25 @@ public:
      * @return true if chunk is cached, false otherwise
      */
     bool hasChunk(const PlanetChunkKey& key) const;
+
+    /**
+     * @brief CACHÉ EN DISCO. Hoy, evictar un chunk = **recalcularlo desde cero** la próxima vez, y
+     * generar es caro (compute + erosión + readback: ~5-7 ms). Con la caché de RAM al tope, eso es
+     * thrashing puro: el terreno desaparece y reaparece mientras se regenera.
+     *
+     * Con esto, evictar = ESCRIBIR y fallar = LEER. La regeneración pasa de recomputar a cargar.
+     * El directorio se separa por SEED: un mundo nuevo no lee los chunks del anterior.
+     */
+    /// ⚠️ SUBIR ESTE NÚMERO SIEMPRE QUE CAMBIE LA GENERACIÓN DEL TERRENO (fórmula, campos, erosión).
+    /// La caché se separa por seed... pero eso NO basta: si cambias la generación, los chunks viejos
+    /// son de un mundo que YA NO EXISTE y se seguirían sirviendo → terreno incoherente, huecos y el
+    /// LOD sin asentarse (pasó: 3 tests en rojo hasta borrar la caché a mano).
+    static constexpr uint32_t kGenVersion = 3;   // v3: tectónica + campos erosionados + orogenia horneada
+    void setDiskCache(const std::string& dir, uint32_t seed);
+    /** @brief Intenta cargar el chunk del disco (sin generarlo). */
+    bool loadFromDisk(const PlanetChunkKey& key, ChunkData& out) const;
+    /** @brief Escribe el chunk al disco (lo llama la evicción). */
+    void saveToDisk(const PlanetChunkKey& key, const ChunkData& data) const;
     
     /**
      * @brief Clears all cached chunks.

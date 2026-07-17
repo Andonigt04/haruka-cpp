@@ -14,10 +14,6 @@ VirtualTexturing::~VirtualTexturing() {
         auto& vt = pair.second;
         if (dev && RHI::valid(vt->hIndirection)) {
             dev->destroy(vt->hIndirection); dev->destroy(vt->hPhysical); dev->destroy(vt->hFeedback);
-        } else {
-            if (vt->indirectionTexture) glDeleteTextures(1, &vt->indirectionTexture);
-            if (vt->physicalTexture) glDeleteTextures(1, &vt->physicalTexture);
-            if (vt->feedbackTexture) glDeleteTextures(1, &vt->feedbackTexture);
         }
     }
     if (feedbackShader) glDeleteProgram(feedbackShader);
@@ -64,36 +60,7 @@ void VirtualTexturing::createVirtualTextureGPUResources(VirtualTextureData& vt) 
         std::cout << "  ✓ Created virtual texture: " << vt.id << "\n";
         std::cout << "    Virtual: " << vt.virtualSize.x << "x" << vt.virtualSize.y << "\n";
         std::cout << "    Page Table: " << vt.pageTableSize.x << "x" << vt.pageTableSize.y << "\n";
-        return;
     }
-
-    // Crear indirection texture (mapa de páginas)
-    glGenTextures(1, &vt.indirectionTexture);
-    glBindTexture(GL_TEXTURE_2D, vt.indirectionTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32UI, vt.pageTableSize.x, vt.pageTableSize.y,
-                 0, GL_RG_INTEGER, GL_UNSIGNED_INT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    // Crear physical texture (atlas de páginas cargadas)
-    glGenTextures(1, &vt.physicalTexture);
-    glBindTexture(GL_TEXTURE_2D, vt.physicalTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, physicalSize, physicalSize,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    // Crear feedback texture
-    glGenTextures(1, &vt.feedbackTexture);
-    glBindTexture(GL_TEXTURE_2D, vt.feedbackTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16UI, config.feedbackBufferSize, config.feedbackBufferSize,
-                 0, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    std::cout << "  ✓ Created virtual texture: " << vt.id << "\n";
-    std::cout << "    Virtual: " << vt.virtualSize.x << "x" << vt.virtualSize.y << "\n";
-    std::cout << "    Page Table: " << vt.pageTableSize.x << "x" << vt.pageTableSize.y << "\n";
 }
 
 void VirtualTexturing::addVirtualTexture(

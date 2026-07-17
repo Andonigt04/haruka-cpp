@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include <cstdio>
+
 #include <glad/glad.h>
 #include "rhi/rhi_types.h"
 
@@ -22,7 +24,16 @@ namespace Haruka::RHI::opengl
             case Format::RGB32F:  return { 3, GL_FLOAT, GL_FALSE };
             case Format::RGBA32F: return { 4, GL_FLOAT, GL_FALSE };
             case Format::RGBA8:   return { 4, GL_UNSIGNED_BYTE, GL_TRUE };
-            default:              return { 4, GL_FLOAT, GL_FALSE };
+            // Empaquetados (el terreno): normal en 4 B y uv en 4 B.
+            case Format::RGB10A2_SNORM: return { 4, GL_INT_2_10_10_10_REV, GL_TRUE };
+            case Format::RG16F:         return { 2, GL_HALF_FLOAT, GL_FALSE };
+            // El default ANTERIOR devolvía {4, GL_FLOAT} en silencio → un formato no mapeado
+            // (p.ej. los empaquetados de arriba) habría leído BASURA del buffer sin avisar.
+            // Ahora se queja: un layout mal declarado se ve al instante, no en pantalla.
+            default:
+                std::fprintf(stderr, "[RHI/GL] vertexFmt: formato de vertice NO soportado (%d)\n",
+                             (int)f);
+                return { 4, GL_FLOAT, GL_FALSE };
         }
     }
 
@@ -89,6 +100,7 @@ namespace Haruka::RHI::opengl
             case BufferUsage::Vertex:  return GL_ARRAY_BUFFER;
             case BufferUsage::Index:   return GL_ELEMENT_ARRAY_BUFFER;
             case BufferUsage::Uniform: return GL_UNIFORM_BUFFER;
+            case BufferUsage::Indirect: return GL_DRAW_INDIRECT_BUFFER;
             case BufferUsage::Storage: return GL_SHADER_STORAGE_BUFFER;
         }
         return GL_ARRAY_BUFFER;

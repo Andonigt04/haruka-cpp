@@ -77,6 +77,12 @@ public:
     ///@{
     void setPhysicsBody(std::shared_ptr<RigidBody> body) { physicsBody = body; }
     std::shared_ptr<RigidBody> getPhysicsBody() { return physicsBody; }
+    /** @brief (Fase 2) Movimiento GESTIONADO POR EL MOTOR: en vez de escribir la posición a mano,
+     *  move() fija la velocidad de locomoción en el body y el motor integra (gravedad radial +
+     *  ground-snap). Así una fuerza externa (viento, empujón, magia) SÍ afecta al jugador. Off =
+     *  comportamiento clásico (kinemático, el juego integra a mano). Lo activa Player según un flag. */
+    void setPhysicsDriven(bool on) { m_physicsDriven = on; }
+    bool isPhysicsDriven() const { return m_physicsDriven; }
     ///@}
     
     /** @name Network synchronization */
@@ -181,6 +187,7 @@ private:
     
     std::unique_ptr<Camera> camera;
     std::shared_ptr<RigidBody> physicsBody;
+    bool m_physicsDriven = false;   // (Fase 2) el motor integra el body; move() fija velocidad, no posición
     
     CharacterState state = CharacterState::IDLE;
     

@@ -13,6 +13,8 @@
 #include "shader.h"
 #include "rhi/rhi_types.h"
 
+namespace Haruka { namespace RHI { class Context; } }
+
 namespace Haruka { namespace Renderer {
 
 /** @brief Interleaved vertex layout used by complex mesh path. */
@@ -67,22 +69,33 @@ public:
     /** @brief Issues draw call using associated textures and shader bindings. */
     void Draw(Shader &shader);
     /** @brief Compatibility alias for simple draw usage. */
-    void draw() const;  // Alias para compatibilidad
+    void draw() const;  // Alias para compatibilidad (ruta GL directa)
+
+    /** @brief Dibuja por la ruta PSO/Context. El PIPELINE lo bindea el LLAMADOR (es quien elige
+     *  shader + estado del pase); la malla solo aporta su geometría. Sustituye a VAO+glDrawElements
+     *  por bindVertexBuffer/bindIndexBuffer/drawIndexed. Así se rompe el acoplamiento
+     *  "Shader externo + VAO por geometría" que no existe en Vulkan. */
+    void drawRHI(Haruka::RHI::Context& ctx) const;
     /** @brief Returns index count in index buffer. */
     size_t getIndexCount() const { return index.size(); }
-    /** @brief Returns vertex count for active mesh representation. */
-    int getVertexCount() const { return isSimpleGeometry ? simpleVertexCount : static_cast<int>(vertex.size()); }
+    /** @brief Returns vertex count. Toda la geometría (completa o simple) vive ya en el mismo
+     *  buffer interleaved → un único contador. */
+    int getVertexCount() const { return static_cast<int>(vertex.size()); }
     /** @brief Returns triangle count (`indices / 3`). */
     int getTriangleCount() const { return static_cast<int>(index.size() / 3); }
 
+    /** @brief Handles RHI de la geometría — la ruta PSO dibuja con
+     *  bindVertexBuffer/bindIndexBuffer/drawIndexed en vez de VAO+glDrawElements. */
+    Haruka::RHI::BufferHandle vertexBuffer() const { return m_vbo; }
+    Haruka::RHI::BufferHandle indexBuffer()  const { return m_ebo; }
+
 private:
     unsigned int VBO = 0, EBO = 0;    // ids GL nativos (cache; el owner es el device en ruta RHI)
-    GLuint nbo = 0;  // Normal buffer para geometria simple
-    // Handles RHI de los buffers (vacíos en ruta de compatibilidad GL directa).
-    Haruka::RHI::BufferHandle m_vbo, m_ebo, m_nbo;
+    // Handles RHI de los buffers. (m_nbo eliminado: la geometría simple ya no usa un segundo
+    // buffer de normales — va interleaved en m_vbo, ver setupSimpleMesh.)
+    Haruka::RHI::BufferHandle m_vbo, m_ebo;
     bool isSimpleGeometry = false;
-    int simpleVertexCount = 0;
-    
+
     /** @brief Configures VAO/VBO/EBO for full vertex path. */
     void setupMesh();
     /** @brief Configures buffers for simplified geometry path. */

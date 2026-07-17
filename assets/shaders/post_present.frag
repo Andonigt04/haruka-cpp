@@ -20,10 +20,16 @@ layout(location = 0) in  vec2 TexCoords;
 layout(binding = 0) uniform sampler2D u_scene;   // HDR scene color
 layout(binding = 1) uniform sampler2D u_bloomTex; // blurred bright-pass
 
-layout(location = 0) uniform int   u_fxaa;        // 0 = off
-layout(location = 1) uniform vec2  u_texel;       // 1.0 / sceneResolution
-layout(location = 2) uniform int   u_bloom;       // 0 = off
-layout(location = 3) uniform float u_bloomStrength;
+// UBO (binding 3) — antes eran uniforms sueltos (glUniform1i/2f/1f). Los glUniform* NO existen en
+// Vulkan → los parámetros van por UBO (ruta PSO/RHI). Los flags son FLOAT (no int/bool): el
+// empaquetado de int/bool en std140 es una fuente clásica de bugs entre GL y Vulkan.
+// std140 redondea el bloque a múltiplo de 16 → 5 floats = 32 B (ver PresentParams en C++).
+layout(std140, binding = 3) uniform PresentParams {
+    vec2  u_texel;          // 1.0 / sceneResolution
+    float u_bloomStrength;
+    float u_fxaa;           // >0.5 = on
+    float u_bloom;          // >0.5 = on
+};
 
 float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
 
@@ -59,9 +65,9 @@ vec3 fxaa(vec2 uv) {
 }
 
 void main() {
-    vec3 color = (u_fxaa != 0) ? fxaa(TexCoords) : texture(u_scene, TexCoords).rgb;
+    vec3 color = (u_fxaa > 0.5) ? fxaa(TexCoords) : texture(u_scene, TexCoords).rgb;
 
-    if (u_bloom != 0)
+    if (u_bloom > 0.5)
         color += texture(u_bloomTex, TexCoords).rgb * u_bloomStrength;
 
     FragColor = vec4(color, 1.0);

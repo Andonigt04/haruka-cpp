@@ -4,6 +4,8 @@
  */
 #pragma once
 
+namespace Haruka { namespace RHI { class Context; } }
+
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
@@ -35,6 +37,8 @@ public:
     
     /** @brief Issues a draw call when a resident mesh exists. */
     void render(Shader& shader) const;
+    /** @brief Ruta PSO/Context (el pipeline lo bindea el llamador). Ver Mesh::drawRHI. */
+    void renderRHI(Haruka::RHI::Context& ctx) const;
     /** @brief Inspector ImGui de rutas auxiliares. */
     void renderInspector();
     

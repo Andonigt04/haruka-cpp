@@ -5,17 +5,15 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <vector>
 #include <memory>
 #include <string>
 #include <functional>
 #include "octree.h"
-#include "core/world_system.h"
-#include "game/planetary_system.h"
+#include "world_provider.h"   // IWorldProvider — ventana abstracta al mundo (sin GL)
 
 namespace Haruka { namespace Physics {
-
-class RaycastSimple;
 
 /** @brief Rigid body simulation record used by the physics engine. */
 struct RigidBody {
@@ -27,14 +25,38 @@ struct RigidBody {
     bool isKinematic = false;
     bool inWater = false;   // estado agua↔aire para disparar el splash SOLO al ENTRAR (no cada frame)
     std::string name;
+
+    // --- Estado ANGULAR (opt-in). Por defecto identidad/cero y comOffset=0 → los cuerpos que no lo
+    // usan (jugador, props existentes) NO rotan y el motor se comporta igual que antes. ---
+    glm::dquat orientation{1, 0, 0, 0};   // rotación del cuerpo (identidad = sin girar)
+    glm::dvec3 angularVel{0, 0, 0};       // velocidad angular (rad/s, en el mundo)
+    glm::dvec3 comOffset{0, 0, 0};        // centro de masa DESPLAZADO del centro geométrico (LOCAL, m).
+                                          // ≠0 → apoyado, la gravedad hace PALANCA y el cuerpo VUELCA
+                                          // hacia donde pesa (balance). =0 → equilibrado, no vuelca.
+
+    // --- FORMA de colisión. Sphere (por defecto): esfera de `radius`. Box: caja de medios-lados
+    // `halfExtents`, que colisiona con el terreno por sus 8 ESQUINAS → se apoya en su cara y vuelca
+    // sobre la ARISTA de verdad (no como una esfera). `radius` sigue siendo el radio ENVOLVENTE
+    // (broad-phase y colisión cuerpo-cuerpo, que sigue siendo esférica). ---
+    enum class Shape { Sphere, Box };
+    Shape      shape = Shape::Sphere;
+    glm::dvec3 halfExtents{0.5, 0.5, 0.5};   // solo si shape==Box (m)
+
+    // Puntos de contacto LOCALES de la FORMA REAL del objeto (vértices del casco convexo). Si está
+    // VACÍO y shape==Box, se usan las 8 esquinas de halfExtents. Rellénalo para que la colisión con el
+    // terreno siga la forma REAL (no solo esfera/caja): cada vértice se prueba contra el suelo. Es el
+    // primer paso de "colisión por la forma del objeto" — el modelo por-puntos de la dirección.
+    std::vector<glm::dvec3> points;
 };
 
-/** @brief Collision resolution input/output data. */
+/** @brief Un CONTACTO entre dos cuerpos. `normal` apunta de A hacia B (dirección para separarlos).
+ *  `point` = punto de contacto en el mundo (brazo para el impulso ANGULAR → el choque hace girar). */
 struct CollisionInfo {
     RigidBody* bodyA;
     RigidBody* bodyB;
     double penetration;
     glm::dvec3 normal;
+    glm::dvec3 point{0.0};
 };
 
 /** @brief Axis-aligned static box for scene geometry collision. */
@@ -90,8 +112,17 @@ public:
     glm::dvec3 resolveSphere(const glm::dvec3& center, double radius,
                              const glm::dvec3& up, bool& grounded) const;
 
-    /** @brief Advances simulation by one time step. */
+    /** @brief Avanza la simulación UN paso del tamaño dado. Normalmente NO se llama directo: usar
+     *  `advance()`, que trocea en pasos fijos. Directo solo para tests deterministas. */
     void update(double deltaTime);
+
+    /** @brief Avanza la simulación con TIMESTEP FIJO (acumulador). Llamar 1×/frame con el dt de
+     *  reloj. Determinista → cliente y servidor coinciden. Ver kFixedDt. */
+    void advance(double frameDt);
+
+    /** @brief Paso fijo de la simulación (s). 1/60. La misma constante la usa el DGS. */
+    static constexpr double kFixedDt  = 1.0 / 60.0;
+    static constexpr double kMaxAccum = 0.25;   // tope anti-espiral (no recuperar >0.25 s de golpe)
     /** @brief Sets constant gravity acceleration. */
     /** @brief Callback de SPLASH: se dispara cuando un cuerpo dinámico CRUZA la superficie del mar
      *  hacia dentro con velocidad de entrada apreciable. (pos superficie, velocidad de impacto,
@@ -116,13 +147,9 @@ public:
         octree = std::make_unique<Octree>(center, size);
     }
     
-    /**
-     * @brief Initializes planetary physics systems.
-     * @param worldSystem World system for body information
-     * @param planetarySystem Planetary system for gravity calculation
-     * @param raycastSystem Physics raycast system for collisions
-     */
-    void initPlanetaryPhysics(Haruka::WorldSystem* worldSystem, Haruka::PlanetarySystem* planetarySystem, RaycastSimple* raycastSystem);
+    /** @brief Inyecta la ventana al mundo (gravedad + mar + terreno). El motor no conoce
+     *  WorldSystem/PlanetarySystem; el llamador pasa un adaptador (ver world_provider.h). */
+    void setWorldProvider(IWorldProvider* provider) { m_world = provider; }
     
     /**
      * @brief Calculates gravitational acceleration at a world position.
@@ -140,7 +167,7 @@ public:
      * @param worldPos Test position in world space
      * @return Gravitational acceleration vector (m/s²)
      */
-    glm::dvec3 calculateGravityContribution(const Haruka::CelestialBody& body, const glm::dvec3& worldPos);
+    glm::dvec3 calculateGravityContribution(const GravBody& body, const glm::dvec3& worldPos);
     
     /**
      * @brief Checks if a position collides with terrain.
@@ -170,11 +197,6 @@ public:
     
     double getGravitationalConstant() const { return gravitationalConstant; }
     
-    /**
-     * @brief Sets the maximum raycast distance for terrain collision detection.
-     * @param maxDistanceKm Maximum raycast distance in km
-     */
-    void setCollisionRaycastDistance(double maxDistanceKm) { maxCollisionRaycastDistanceKm = maxDistanceKm; }
 
 private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
@@ -194,12 +216,10 @@ private:
 
     std::unique_ptr<Octree> octree;
 
-    // Planetary physics members
-    Haruka::WorldSystem* worldSystem = nullptr;
-    Haruka::PlanetarySystem* planetarySystem = nullptr;
-    RaycastSimple* raycastSystem = nullptr;
+    // Ventana al mundo (gravedad + mar + terreno). Inyectada; el motor no conoce el resto del engine.
+    IWorldProvider* m_world = nullptr;
     double gravitationalConstant = 6.67430e-11;
-    double maxCollisionRaycastDistanceKm = 1000.0;
+    double m_accum = 0.0;   // acumulador del timestep fijo (ver advance)
 
     /** @brief Integrates external forces for all bodies. */
     void integrateForces(double dt);

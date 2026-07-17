@@ -81,7 +81,10 @@ namespace Haruka::RHI::opengl
         return sh;
     }
 
-    static void checkLink(GLuint program)
+    // Devuelve false si el enlazado falló. El llamador DEBE descartar el pipeline: un programa sin
+    // linkar no da error al crearse, sino un GL_INVALID_OPERATION opaco en el primer glUseProgram
+    // (lejos de la causa). Mejor fallar aquí y en voz alta.
+    static bool checkLink(GLuint program)
     {
         GLint ok = 0;
         glGetProgramiv(program, GL_LINK_STATUS, &ok);
@@ -91,6 +94,7 @@ namespace Haruka::RHI::opengl
             glGetProgramInfoLog(program, sizeof(log), nullptr, log);
             std::fprintf(stderr, "[RHI/GL] program link error: %s\n", log);
         }
+        return ok != 0;
     }
 
     static GLsizei mipLevels(uint32_t w, uint32_t h)
@@ -146,13 +150,27 @@ namespace Haruka::RHI::opengl
         GLBuffer b;
         b.target = toTarget(usage);
         glCreateBuffers(1, &b.id);
-        if (mem == BufferMemory::Stream)
-            glNamedBufferData(b.id, (GLsizeiptr)bytes, data, GL_DYNAMIC_DRAW);   // mutable, reasignable
+        // Almacenamiento MUTABLE (glBufferData) con el mismo hint que el código GL original.
+        // Se probó storage inmutable (glBufferStorage) pero en iGPU de portátil penaliza el
+        // glBufferSubData por-slot (memoria device-local lenta para escrituras CPU) → mutable
+        // deja al driver elegir la región óptima. Es EXACTAMENTE el comportamiento previo.
+        if (mem == BufferMemory::Readback)
+        {
+            // La GPU escribe, la CPU lee: storage inmutable + mapeo PERSISTENTE. Así el harvest
+            // es un memcpy desde memoria de sistema en vez de un glGetBufferSubData por buffer
+            // (que sincroniza con el driver: ~100 µs × 3 buffers × N chunks/frame).
+            const GLbitfield flags = GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT
+                                   | GL_CLIENT_STORAGE_BIT; // pista: aloja en RAM, no en VRAM
+            glNamedBufferStorage(b.id, (GLsizeiptr)bytes, data, flags);
+            b.mapped = glMapNamedBufferRange(b.id, 0, (GLsizeiptr)bytes,
+                                             GL_MAP_READ_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+        }
         else
-            glNamedBufferStorage(b.id, (GLsizeiptr)bytes, data,
-                                 (mem == BufferMemory::Dynamic) ? GL_DYNAMIC_STORAGE_BIT : 0);
-        m_buffers.push_back(b);
-        return BufferHandle{ (uint32_t)m_buffers.size() };
+        {
+            const GLenum hint = (mem == BufferMemory::Static) ? GL_STATIC_DRAW : GL_DYNAMIC_DRAW;
+            glNamedBufferData(b.id, (GLsizeiptr)bytes, data, hint);
+        }
+        return BufferHandle{ alloc(m_buffers, m_freeBuffers, b) };
     }
 
     void GLDevice::updateBuffer(BufferHandle h, size_t offset, size_t bytes, const void* data)
@@ -217,8 +235,7 @@ namespace Haruka::RHI::opengl
 
         if (d.mipmaps && d.initialData) glGenerateTextureMipmap(t.id);
 
-        m_textures.push_back(t);
-        return TextureHandle{ (uint32_t)m_textures.size() };
+        return TextureHandle{ alloc(m_textures, m_freeTextures, t) };
     }
 
     SamplerHandle GLDevice::createSampler(const SamplerDesc& d)
@@ -241,6 +258,7 @@ namespace Haruka::RHI::opengl
         GLPipeline p;
         p.depth = d.depth;
         p.blend = d.blend;
+        p.cull  = d.cull;
 
         // Cada etapa: source inline > ruta (GLSL-first) > bytes SPIR-V directos.
         auto stage = [](GLenum s, const char* source, const char* path, const void* bytes, size_t size) -> GLuint {
@@ -253,11 +271,13 @@ namespace Haruka::RHI::opengl
         if (d.computeSource || d.computePath || d.spirvCompute)
         {
             GLuint cs = stage(GL_COMPUTE_SHADER, d.computeSource, d.computePath, d.spirvCompute, d.spirvComputeSize);
+            if (!cs) { std::fprintf(stderr, "[RHI/GL] createPipeline: falta la etapa COMPUTE\n"); return {}; }
             p.program = glCreateProgram();
             glAttachShader(p.program, cs);
             glLinkProgram(p.program);
-            checkLink(p.program);
+            const bool linked = checkLink(p.program);
             glDeleteShader(cs);
+            if (!linked) { glDeleteProgram(p.program); return {}; }
             p.compute = true;
         }
         else
@@ -265,27 +285,52 @@ namespace Haruka::RHI::opengl
             GLuint vs = stage(GL_VERTEX_SHADER,   d.vertexSource,   d.vertexPath,   d.spirvVertex,   d.spirvVertexSize);
             GLuint fs = stage(GL_FRAGMENT_SHADER, d.fragmentSource, d.fragmentPath, d.spirvFragment, d.spirvFragmentSize);
             GLuint gs = stage(GL_GEOMETRY_SHADER, nullptr,          d.geometryPath, d.spirvGeometry, d.spirvGeometrySize);
+            // Una etapa a 0 = shader no encontrado o que no compila (la causa ya se logueó). Enlazar
+            // igualmente produce un programa NO linkado que solo revienta en el draw → abortar aquí.
+            if (!vs || !fs)
+            {
+                std::fprintf(stderr, "[RHI/GL] createPipeline: etapa invalida (vs=%u fs=%u). "
+                                     "¿La ruta esta enraizada con el base dir de assets?\n", vs, fs);
+                if (vs) glDeleteShader(vs);
+                if (fs) glDeleteShader(fs);
+                if (gs) glDeleteShader(gs);
+                return {};
+            }
             p.program = glCreateProgram();
             glAttachShader(p.program, vs);
             glAttachShader(p.program, fs);
             if (gs) glAttachShader(p.program, gs);
             glLinkProgram(p.program);
-            checkLink(p.program);
+            const bool linked = checkLink(p.program);
             glDeleteShader(vs);
             glDeleteShader(fs);
             if (gs) glDeleteShader(gs);
+            if (!linked) { glDeleteProgram(p.program); return {}; }
 
             // VAO con SOLO el formato de los atributos (DSA). El buffer se ata en el draw
             // vía glVertexArrayVertexBuffer -> desacopla layout de datos (mapea a Vulkan).
             glCreateVertexArrays(1, &p.vao);
             for (const VertexAttribute& a : d.vertexLayout.attributes)
             {
+                if (a.binding >= 8) continue;   // cota del array de strides
                 GLVertexFmt vf = vertexFmt(a.format);
                 glEnableVertexArrayAttrib(p.vao, a.location);
                 glVertexArrayAttribFormat(p.vao, a.location, vf.size, vf.type, vf.normalized, a.offset);
-                glVertexArrayAttribBinding(p.vao, a.location, 0);
+                glVertexArrayAttribBinding(p.vao, a.location, a.binding);   // de qué buffer sale
             }
-            p.stride   = (GLsizei)d.vertexLayout.stride;
+            // Un stride por binding: el terreno alimenta cada atributo desde su propio buffer.
+            p.bindingCount = (uint32_t)std::min<size_t>(d.vertexLayout.strides.size(), 8);
+            for (uint32_t i = 0; i < p.bindingCount; ++i)
+            {
+                p.strides[i] = (GLsizei)d.vertexLayout.strides[i];
+                // INSTANCING: el divisor va en el BINDING del VAO (no por atributo) → es estado del
+                // PIPELINE, no del draw. Así el instancer no tiene que tocar glVertexAttribDivisor
+                // (ni acordarse de RESETEARLO, que era la trampa: el divisor se queda pegado al VAO
+                // y contamina los draws normales que vengan detrás).
+                const bool perInstance = (i < d.vertexLayout.rates.size()) &&
+                                         (d.vertexLayout.rates[i] == InputRate::Instance);
+                glVertexArrayBindingDivisor(p.vao, i, perInstance ? 1u : 0u);
+            }
             p.topology = toTopology(d.topology);
         }
 
@@ -345,8 +390,7 @@ namespace Haruka::RHI::opengl
                     glTextureParameteri(t.id, GL_TEXTURE_WRAP_T, w);
                     if (d.depthCube) glTextureParameteri(t.id, GL_TEXTURE_WRAP_R, w);
                 }
-                m_textures.push_back(t);
-                rt.depthTex = TextureHandle{ (uint32_t)m_textures.size() };
+                rt.depthTex = TextureHandle{ alloc(m_textures, m_freeTextures, t) };
                 glNamedFramebufferTexture(rt.fbo, GL_DEPTH_ATTACHMENT, t.id, 0);  // cubemap entero
             }
             else
@@ -413,10 +457,16 @@ namespace Haruka::RHI::opengl
         return b ? b->id : 0;
     }
 
+    const void* GLDevice::mappedData(BufferHandle h)
+    {
+        const GLBuffer* b = buffer(h);
+        return b ? b->mapped : nullptr;
+    }
+
     // ------------------------------------------------------------------ destrucción
     // v1: libera el objeto GL pero NO recicla el slot (id estable durante la sesión).
-    void GLDevice::destroy(BufferHandle h)   { if (const GLBuffer* b = buffer(h))   { GLuint id = b->id;  glDeleteBuffers(1, &id);  const_cast<GLBuffer*>(b)->id = 0; } }
-    void GLDevice::destroy(TextureHandle h)  { if (const GLTexture* t = texture(h)) { GLuint id = t->id;  glDeleteTextures(1, &id); const_cast<GLTexture*>(t)->id = 0; } }
+    void GLDevice::destroy(BufferHandle h)   { if (const GLBuffer* b = buffer(h))   { GLuint id = b->id;  if (b->mapped) glUnmapNamedBuffer(id); glDeleteBuffers(1, &id);  release(m_buffers, m_freeBuffers, h.id); } }
+    void GLDevice::destroy(TextureHandle h)  { if (const GLTexture* t = texture(h)) { GLuint id = t->id;  glDeleteTextures(1, &id); release(m_textures, m_freeTextures, h.id); } }
     void GLDevice::destroy(SamplerHandle h)  { if (const GLSampler* s = sampler(h)) { GLuint id = s->id;  glDeleteSamplers(1, &id); const_cast<GLSampler*>(s)->id = 0; } }
 
     void GLDevice::destroy(PipelineHandle h)

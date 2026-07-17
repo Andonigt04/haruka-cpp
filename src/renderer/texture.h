@@ -25,6 +25,10 @@ public:
     /** @brief Deletes owned OpenGL texture resources. */
     void cleanup();
 
+    /** @brief Handle del RHI (vacío si se cargó por la ruta GL directa). Para los pases con
+     *  PSO, que atan la textura con Context::bindTexture en vez de glActiveTexture+glUniform1i. */
+    Haruka::RHI::TextureHandle handle() const { return m_handle; }
+
     /**
      * @brief Sets the texture-quality params applied to every newly loaded texture.
      *

@@ -88,6 +88,11 @@ namespace Haruka::Core {
         glViewport(0, 0, m_data.width, m_data.height);
         glEnable(GL_DEPTH_TEST);
 
+        // REVERSED-Z: el rango de profundidad del clip pasa de [-1,1] (convención GL) a [0,1]
+        // (convención D3D/Vulkan). Sin esto, la mitad del rango del depth buffer se desperdicia y
+        // la matriz reversed-Z de la cámara NO funciona. glm emite [0,1] por GLM_FORCE_DEPTH_ZERO_TO_ONE.
+        glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+
         return true;
     }
 

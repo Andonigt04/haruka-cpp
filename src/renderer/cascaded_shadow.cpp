@@ -12,17 +12,8 @@ namespace Haruka { namespace Renderer {
 CascadedShadowMap::CascadedShadowMap() {}
 
 CascadedShadowMap::~CascadedShadowMap() {
-    if (!m_passes.empty()) {
-        if (RHI::Device* dev = RHI::device())
-            for (auto p : m_passes) if (RHI::valid(p)) dev->destroy(p);
-        return;
-    }
-    for (auto fbo : shadowMapFramebuffers) {
-        glDeleteFramebuffers(1, &fbo);
-    }
-    for (auto tex : shadowMapTextures) {
-        glDeleteTextures(1, &tex);
-    }
+    if (RHI::Device* dev = RHI::device())
+        for (auto p : m_passes) if (RHI::valid(p)) dev->destroy(p);
 }
 
 void CascadedShadowMap::init(float zNear, float zFar, float lambda) {
@@ -54,38 +45,7 @@ void CascadedShadowMap::createShadowMap(int cascade) {
         m_passes[cascade]                = dev->createRenderTarget(d);
         shadowMapTextures[cascade]       = dev->nativeTexture(dev->getDepthTexture(m_passes[cascade]));
         shadowMapFramebuffers[cascade]   = dev->nativeFramebuffer(m_passes[cascade]);
-        return;
     }
-
-    // Crear texture
-    GLuint texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F,
-                 SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION,
-                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
-
-    shadowMapTextures[cascade] = texture;
-
-    // Crear framebuffer
-    GLuint fbo;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "Shadow map framebuffer incomplete!");
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    shadowMapFramebuffers[cascade] = fbo;
 }
 
 namespace {

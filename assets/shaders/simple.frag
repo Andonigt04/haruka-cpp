@@ -133,7 +133,9 @@ void main()
     // Light Position on Space
     vec4 posLightSpace = lightProjection * lightView * vec4(FragPos, 1.0);
     vec3 projCoords = posLightSpace.xyz / posLightSpace.w;
-    projCoords = projCoords * 0.5 + 0.5; // [-1,1] -> [0,1]
+    // glClipControl(ZERO_TO_ONE): la Z de clip YA sale en [0,1]; solo x/y van en [-1,1].
+    // (El shadow map usa ortho ESTÁNDAR, no reversed-Z.)
+    projCoords = vec3(projCoords.xy * 0.5 + 0.5, projCoords.z);
 
     // Calcular sombra con PCF (suavizado)
     float shadow = 0.0;

@@ -11,7 +11,15 @@
 layout(location = 1) in vec3 vViewPos;   // particle CENTRE in view space
 layout(location = 0) out float FragEyeDepth;
 
-layout(location = 12) uniform float u_radius; // world particle radius (m)
+// Mismo bloque (binding 8) que el resto de shaders del fluido. Ver fluid_particle.vert.
+layout(std140, binding = 8) uniform FluidParams {
+    vec2  u_blurDir;
+    vec2  u_texel;
+    float u_depthFalloff;
+    float u_refractScale;
+    float u_radius;         // radio de partícula (m)
+    float u_viewportH;
+};
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;

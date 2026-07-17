@@ -10,8 +10,16 @@ layout(location = 0) in vec3 aPos; // camera-relative particle position
 
 layout(location = 1) out vec3 vViewPos;
 
-layout(location = 12) uniform float u_radius;     // world particle radius (m)
-layout(location = 13) uniform float u_viewportH;  // viewport height (px)
+// Parámetros del pase de fluido. Antes eran uniforms sueltos (glUniform no existe en Vulkan).
+// El bloque es IDÉNTICO en los 4 shaders del fluido (comparten el binding 8); cada uno usa lo suyo.
+layout(std140, binding = 8) uniform FluidParams {
+    vec2  u_blurDir;        // blur separable: (1/w,0) o (0,1/h)
+    vec2  u_texel;          // 1/resolución
+    float u_depthFalloff;   // m; menor = bordes más nítidos
+    float u_refractScale;   // refracción en unidades uv
+    float u_radius;         // radio de partícula (m)
+    float u_viewportH;      // alto del viewport (px)
+};
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;

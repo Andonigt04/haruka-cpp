@@ -55,18 +55,7 @@ void IBL::setupCubemap() {
         RHI::TextureDesc d; d.width = d.height = 512; d.format = RHI::Format::RGB16F;
         d.cube = true; d.filter = RHI::Filter::Linear; d.wrap = RHI::Wrap::ClampToEdge;
         hEnv = dev->createTexture(d); envCubemap = dev->nativeTexture(hEnv);
-        return;
     }
-    glGenTextures(1, &envCubemap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, envCubemap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 512, 512, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
 
 void IBL::loadHDRI(const std::string& imagePath) {
@@ -125,7 +114,9 @@ void IBL::loadHDRI(const std::string& imagePath) {
         equirectToCubemap.setMat4("view", captureViews[i]);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, envCubemap, 0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClearDepth(1.0); glDepthFunc(GL_LESS);   // proyección propia (no invertida)
+        glClearDepth(1.0); glDepthFunc(GL_LESS);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         renderCube();
     }
 
@@ -137,21 +128,11 @@ void IBL::loadHDRI(const std::string& imagePath) {
 }
 
 void IBL::generateIrradianceMap() {
-    if (RHI::Device* dev = RHI::device()) {
+    {
+        RHI::Device* dev = RHI::device();
         RHI::TextureDesc d; d.width = d.height = 32; d.format = RHI::Format::RGB16F;
         d.cube = true; d.filter = RHI::Filter::Linear; d.wrap = RHI::Wrap::ClampToEdge;
         hIrradiance = dev->createTexture(d); irradianceMap = dev->nativeTexture(hIrradiance);
-    } else {
-    glGenTextures(1, &irradianceMap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, irradianceMap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 32, 32, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     }
 
     unsigned int captureFBO, captureRBO;
@@ -188,7 +169,9 @@ void IBL::generateIrradianceMap() {
         irradianceShader.setMat4("view", captureViews[i]);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, irradianceMap, 0);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glClearDepth(1.0); glDepthFunc(GL_LESS);   // proyección propia (no invertida)
+        glClearDepth(1.0); glDepthFunc(GL_LESS);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         renderCube();
     }
 
@@ -198,23 +181,12 @@ void IBL::generateIrradianceMap() {
 }
 
 void IBL::generatePrefilterMap() {
-    if (RHI::Device* dev = RHI::device()) {
+    {
         // Cubemap con cadena de mips (storage inmutable la pre-asigna; IBL renderiza cada mip por-cara).
+        RHI::Device* dev = RHI::device();
         RHI::TextureDesc d; d.width = d.height = 128; d.format = RHI::Format::RGB16F;
         d.cube = true; d.mipmaps = true; d.filter = RHI::Filter::Linear; d.wrap = RHI::Wrap::ClampToEdge;
         hPrefilter = dev->createTexture(d); prefilterMap = dev->nativeTexture(hPrefilter);
-    } else {
-    glGenTextures(1, &prefilterMap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, prefilterMap);
-    for (unsigned int i = 0; i < 6; ++i) {
-        glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_RGB16F, 128, 128, 0, GL_RGB, GL_FLOAT, nullptr);
-    }
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
     }
 
     unsigned int captureFBO, captureRBO;
@@ -259,7 +231,9 @@ void IBL::generatePrefilterMap() {
             prefilterShader.setMat4("view", captureViews[i]);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                    GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, prefilterMap, mip);
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glClearDepth(1.0); glDepthFunc(GL_LESS);   // proyección propia (no invertida)
+        glClearDepth(1.0); glDepthFunc(GL_LESS);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             renderCube();
         }
     }
@@ -269,18 +243,11 @@ void IBL::generatePrefilterMap() {
 }
 
 void IBL::generateBRDFLUT() {
-    if (RHI::Device* dev = RHI::device()) {
+    {
+        RHI::Device* dev = RHI::device();
         RHI::TextureDesc d; d.width = d.height = 512; d.format = RHI::Format::RG16F;
         d.filter = RHI::Filter::Linear; d.wrap = RHI::Wrap::ClampToEdge;
         hBrdf = dev->createTexture(d); brdfLUT = dev->nativeTexture(hBrdf);
-    } else {
-    glGenTextures(1, &brdfLUT);
-    glBindTexture(GL_TEXTURE_2D, brdfLUT);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RG16F, 512, 512, 0, GL_RG, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     }
 
     unsigned int captureFBO, captureRBO;
@@ -295,6 +262,7 @@ void IBL::generateBRDFLUT() {
     brdfShader.use();
 
     glViewport(0, 0, 512, 512);
+    glClearDepth(1.0); glDepthFunc(GL_LESS);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     renderQuad(); // Usa tu quad del IBL
 
@@ -308,11 +276,6 @@ IBL::~IBL() {
         dev->destroy(hEnv); dev->destroy(hIrradiance); dev->destroy(hPrefilter); dev->destroy(hBrdf);
         if (RHI::valid(hCubeBuf)) dev->destroy(hCubeBuf);
         if (RHI::valid(hQuadBuf)) dev->destroy(hQuadBuf);
-    } else {
-        glDeleteTextures(1, &envCubemap);
-        glDeleteTextures(1, &irradianceMap);
-        glDeleteTextures(1, &prefilterMap);
-        glDeleteTextures(1, &brdfLUT);
     }
     if (cubeVAO) glDeleteVertexArrays(1, &cubeVAO);   // VAOs siempre GL
     if (quadVAO) glDeleteVertexArrays(1, &quadVAO);
@@ -332,13 +295,10 @@ void IBL::renderCube()
         };
 
         glGenVertexArrays(1, &cubeVAO);
-        if (RHI::Device* dev = RHI::device()) {
+        {
+            RHI::Device* dev = RHI::device();
             hCubeBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(vertices), vertices);
             cubeVBO = dev->nativeBuffer(hCubeBuf); glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
-        } else {
-            glGenBuffers(1, &cubeVBO);
-            glBindBuffer(GL_ARRAY_BUFFER, cubeVBO);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
         }
 
         glBindVertexArray(cubeVAO);
@@ -365,13 +325,10 @@ void IBL::renderQuad()
 
         glGenVertexArrays(1, &quadVAO);
         glBindVertexArray(quadVAO);
-        if (RHI::Device* dev = RHI::device()) {
+        {
+            RHI::Device* dev = RHI::device();
             hQuadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quadVertices), quadVertices);
             quadVBO = dev->nativeBuffer(hQuadBuf); glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-        } else {
-            glGenBuffers(1, &quadVBO);
-            glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), &quadVertices, GL_STATIC_DRAW);
         }
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);

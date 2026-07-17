@@ -19,6 +19,44 @@ layout(std430, binding = 1) writeonly buffer ElevOut   { float elev_out[];  };
 layout(std430, binding = 2) writeonly buffer NormalOut  { vec4 normal_out[]; };
 layout(std430, binding = 3) writeonly buffer WaterOut   { float water_out[]; }; // nivel de agua km (0=mar, >0=lago)
 
+// ===== F2: TECTÓNICA DE PLACAS (PLAN_TERRENO_V3) ==========================================
+// Las PLACAS las genera C++ (PlanetGeology::generate) y se suben aquí: los DATOS tienen una sola
+// fuente de verdad. Lo único duplicado es la fórmula de `sample`, que es corta y está cubierta por
+// un test de paridad CPU↔GPU. (La fórmula entera desaparecerá en F3-F4, cuando el heightfield
+// cacheado pase a ser la fuente de verdad y nadie re-derive nada.)
+struct Plate {
+    vec4 siteCont;   // xyz = sitio (unitario) · w = 1 continental, 0 oceánica
+    vec4 motionSpd;  // xyz = movimiento tangente · w = rapidez
+};
+layout(std430, binding = 4) readonly buffer PlatesIn { Plate plates[]; };
+layout(location = 20) uniform int   u_plateCount;
+layout(location = 21) uniform float u_geoContBaseKm;   // PlanetGeology::kContinentalBaseKm
+layout(location = 22) uniform float u_geoOceanBaseKm;  // kOceanicBaseKm
+layout(location = 23) uniform float u_geoBoundaryRad;  // kBoundaryWidthRad
+layout(location = 24) uniform float u_geoMaxOrogenyKm; // kMaxOrogenyKm
+layout(location = 25) uniform float u_geoMarginRad;    // kMarginRad
+
+// ===== F3: CAMPOS EROSIONADOS (LA FUENTE DE VERDAD) =======================================
+// La altura ya NO se re-deriva de una fórmula: se MUESTREA del campo que C++ generó y erosionó
+// (PlanetFields). Es lo que permite tener valles tallados, cuencas y cauces — un terreno erosionado
+// no es una función cerrada. GPU y CPU muestrean EL MISMO campo con EL MISMO bilineal → paridad.
+layout(std430, binding = 5) readonly buffer FieldsIn { vec4 fieldCells[]; };  // x=elev(km) y=caudal z=lago(km)
+layout(location = 30) uniform int u_fieldRes;   // lado de cara del cube-sphere (0 = sin campo)
+
+// --- MESO: teselas erosionadas (~40 m/téxel). El macro (40 km/celda) tiene los valles pero NO los
+// pisas; esto los baja a escala humana. Las teselas las genera y erosiona C++ (proceso iterativo:
+// no es una fórmula) y se suben en un ATLAS. Si la tesela no está, se cae al macro.
+layout(std430, binding = 6) readonly buffer MesoAtlas { float mesoCells[]; };   // slots × res²
+// TABLA HASH de teselas: (face, tx, ty, slot+1). w==0 = hueco vacío. Sondeo lineal.
+// Antes era una lista de slots barrida ENTERA por vértice (192 iteraciones × miles de vértices):
+// eso ataba el cupo de teselas al coste del shader, y el cupo pequeño hacía que las teselas se
+// evictaran bajo los pies del jugador (la malla se coció con tesela, la física ya no la tiene →
+// alturas distintas → props flotando). Con hash, buscar es O(1) y el cupo se puede subir.
+layout(std430, binding = 7) readonly buffer MesoTable { ivec4 mesoTable[]; };
+layout(location = 31) uniform int u_mesoRes;      // lado de tesela (0 = sin meso)
+layout(location = 32) uniform int u_mesoLevel;    // teselas por lado de cara = 1<<level
+layout(location = 33) uniform int u_mesoHashSize;   // potencia de 2
+
 layout(location = 0) uniform int   u_numVerts;
 layout(location = 1) uniform int   u_seed;
 layout(location = 2) uniform float u_continentFreqA;
@@ -30,6 +68,44 @@ layout(location = 7) uniform float u_lakeDensity;    // densidad de sellos de la
 layout(location = 8) uniform float u_lakeMaxProb;    // prob. máx. de lago
 layout(location = 9) uniform float u_coastWidth;     // factor de ancho de costa (seed): escala las rampas distToCoast
 layout(location = 10) uniform float u_vertexSpacingM; // separación entre vértices del chunk (m) → eps de la normal (LOD-aware)
+
+// --- Direcciones DERIVADAS EN GPU (u_deriveDirs=1) ---------------------------------------
+// Construir la rejilla de direcciones en CPU costaba ~25 ms por frame de ráfaga (16 chunks ×
+// (res+1)² cubo→esfera) MÁS subirla. Es una función pura de (cara, lod, x, y, res): la GPU la
+// calcula sola. En DOUBLE, igual que getLocalPosition en C++ — en float, el error de u,v a LOD
+// alto desplaza el punto de muestreo ~1 m y la paridad CPU↔GPU se resiente.
+layout(location = 40) uniform int u_deriveDirs;  // 0 = leer dirs_in (camino síncrono/paridad)
+layout(location = 41) uniform int u_gridRes;     // res: la rejilla es (res+1)²
+layout(location = 42) uniform int u_face;
+layout(location = 43) uniform int u_lod;
+layout(location = 44) uniform int u_chunkX;
+layout(location = 45) uniform int u_chunkY;
+
+// Réplica EXACTA de TerrainGenerator::getLocalPosition (cubo→esfera de Cobb).
+dvec3 gridDir(uint idx) {
+    int stride = u_gridRes + 1;
+    int x = int(idx) % stride;
+    int y = int(idx) / stride;
+
+    double numChunks = double(1 << u_lod);
+    double u = (double(u_chunkX) + double(x) / double(u_gridRes)) / numChunks;
+    double v = (double(u_chunkY) + double(y) / double(u_gridRes)) / numChunks;
+    double lx = u * 2.0LF - 1.0LF;
+    double ly = v * 2.0LF - 1.0LF;
+
+    dvec3 p;
+    if      (u_face == 0) p = dvec3( 1.0LF,  ly,   -lx);
+    else if (u_face == 1) p = dvec3(-1.0LF,  ly,    lx);
+    else if (u_face == 2) p = dvec3( lx,     1.0LF, -ly);
+    else if (u_face == 3) p = dvec3( lx,    -1.0LF,  ly);
+    else if (u_face == 4) p = dvec3( lx,     ly,    1.0LF);
+    else                  p = dvec3(-lx,     ly,   -1.0LF);
+
+    double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
+    return dvec3(p.x * sqrt(1.0LF - y2 / 2.0LF - z2 / 2.0LF + y2 * z2 / 3.0LF),
+                 p.y * sqrt(1.0LF - z2 / 2.0LF - x2 / 2.0LF + z2 * x2 / 3.0LF),
+                 p.z * sqrt(1.0LF - x2 / 2.0LF - y2 / 2.0LF + x2 * y2 / 3.0LF));
+}
 
 // ===================== Perlin 3D — PORT EXACTO de NoiseGenerator =====================
 // hash/grad/fade idénticos al C++ (enteros 32-bit con wrap 2's-complement = GLSL int).
@@ -208,60 +284,237 @@ float regionalElevKm(vec3 dir) {
 
 const float A_NORM = 0.45;
 
+
+// --- Ruido de valor 3D (PORT EXACTO de planet_geology.cpp: mismo hash, mismo lerp) ------------
+uint gHashU(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+uint gHashC(uint a, uint b) { return gHashU(a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2))); }
+float gH01(uint h) { return float(h & 0xFFFFFFu) / float(0xFFFFFFu); }
+float gVHash(ivec3 p, uint seed) {
+    return gH01(gHashC(gHashC(uint(p.x * 73856093) ^ uint(p.y * 19349663),
+                              uint(p.z * 83492791)), seed)) * 2.0 - 1.0;
+}
+float gVNoise(vec3 x, uint seed) {
+    vec3 i = floor(x);
+    vec3 f = x - i;
+    f = f * f * (3.0 - 2.0 * f);
+    ivec3 I = ivec3(i);
+    float x00 = mix(gVHash(I + ivec3(0,0,0), seed), gVHash(I + ivec3(1,0,0), seed), f.x);
+    float x10 = mix(gVHash(I + ivec3(0,1,0), seed), gVHash(I + ivec3(1,1,0), seed), f.x);
+    float x01 = mix(gVHash(I + ivec3(0,0,1), seed), gVHash(I + ivec3(1,0,1), seed), f.x);
+    float x11 = mix(gVHash(I + ivec3(0,1,1), seed), gVHash(I + ivec3(1,1,1), seed), f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+vec3 gWarp(vec3 dir, uint seed) {
+    const float A = 0.16;
+    vec3 w  = vec3(gVNoise(dir * 2.3, seed + 11u), gVNoise(dir * 2.3, seed + 22u), gVNoise(dir * 2.3, seed + 33u));
+    vec3 w2 = vec3(gVNoise(dir * 5.7, seed + 44u), gVNoise(dir * 5.7, seed + 55u), gVNoise(dir * 5.7, seed + 66u));
+    return normalize(dir + (w * A + w2 * (A * 0.35)));
+}
+
+// --- Cube-sphere: dirección -> (cara,u,v). PORT EXACTO de planet_fields.cpp -------------------
+void dirToFaceUV(vec3 d, out int face, out float u, out float v) {
+    float ax = abs(d.x), ay = abs(d.y), az = abs(d.z);
+    if (ax >= ay && ax >= az) {
+        if (d.x > 0.0) { face = 0; u = -d.z / ax; v = -d.y / ax; }
+        else           { face = 1; u =  d.z / ax; v = -d.y / ax; }
+    } else if (ay >= az) {
+        if (d.y > 0.0) { face = 2; u =  d.x / ay; v =  d.z / ay; }
+        else           { face = 3; u =  d.x / ay; v = -d.z / ay; }
+    } else {
+        if (d.z > 0.0) { face = 4; u =  d.x / az; v = -d.y / az; }
+        else           { face = 5; u = -d.x / az; v = -d.y / az; }
+    }
+}
+
+// Muestreo BILINEAL del campo. Debe ser idéntico bit-a-bit al de PlanetFields::sample o la malla
+// (GPU) y la colisión (CPU) discreparían.
+vec4 sampleField4(vec3 dirIn) {   // -> (elev km, caudal, lago km, orogenia)
+    if (u_fieldRes <= 0) return vec4(0.0);
+    vec3 d = normalize(dirIn);
+    int f; float u, v;
+    dirToFaceUV(d, f, u, v);
+    int R = u_fieldRes;
+    float fx = clamp((u * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    float fy = clamp((v * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    int i0 = int(fx), j0 = int(fy);
+    int i1 = min(i0 + 1, R - 1), j1 = min(j0 + 1, R - 1);
+    float tx = fx - float(i0), ty = fy - float(j0);
+    int base = f * R * R;
+    vec4 c00 = fieldCells[base + j0 * R + i0];
+    vec4 c10 = fieldCells[base + j0 * R + i1];
+    vec4 c01 = fieldCells[base + j1 * R + i0];
+    vec4 c11 = fieldCells[base + j1 * R + i1];
+    vec4 e0 = mix(c00, c10, tx);
+    vec4 e1 = mix(c01, c11, tx);
+    return mix(e0, e1, ty);
+}
+vec3 sampleField(vec3 d) { return sampleField4(d).xyz; }
+
+// Altura del MESO. PORT EXACTO de PlanetMeso::elevKm (misma tesela, mismo bilineal → paridad).
+// Devuelve false si la tesela no está residente (→ el llamador usa el macro).
+bool sampleMeso(vec3 dirIn, out float outElev) {
+    outElev = 0.0;
+    if (u_mesoRes <= 0 || u_mesoHashSize <= 0) return false;
+    vec3 d = normalize(dirIn);
+    int f; float u, v;
+    dirToFaceUV(d, f, u, v);
+    int TILES = 1 << u_mesoLevel;
+    int R = u_mesoRes;
+    float gx = (u * 0.5 + 0.5) * float(TILES) * float(R);
+    float gy = (v * 0.5 + 0.5) * float(TILES) * float(R);
+    int tx = clamp(int(gx / float(R)), 0, TILES - 1);
+    int ty = clamp(int(gy / float(R)), 0, TILES - 1);
+
+    // Hash de (face,tx,ty) + sondeo lineal. Mismo hash que la CPU (planet_meso.cpp) o buscaría mal.
+    uint h = uint(f) * 73856093u ^ uint(tx) * 19349663u ^ uint(ty) * 83492791u;
+    h ^= h >> 15; h *= 0x2c1b3c6du; h ^= h >> 12;
+    int mask = u_mesoHashSize - 1;
+    int idx  = int(h) & mask;
+    int slot = -1;
+    for (int probe = 0; probe < 32; ++probe) {
+        ivec4 t = mesoTable[idx];
+        if (t.w == 0) return false;                                  // hueco vacío → no está
+        if (t.x == f && t.y == tx && t.z == ty) { slot = t.w - 1; break; }
+        idx = (idx + 1) & mask;
+    }
+    if (slot < 0) return false;
+
+    int base = slot * R * R;
+    float fx = clamp(gx - float(tx * R) - 0.5, 0.0, float(R) - 1.001);
+    float fy = clamp(gy - float(ty * R) - 0.5, 0.0, float(R) - 1.001);
+    int i0 = int(fx), j0 = int(fy);
+    int i1 = min(i0 + 1, R - 1), j1 = min(j0 + 1, R - 1);
+    float sx = fx - float(i0), sy = fy - float(j0);
+    float e0 = mix(mesoCells[base + j0 * R + i0], mesoCells[base + j0 * R + i1], sx);
+    float e1 = mix(mesoCells[base + j1 * R + i0], mesoCells[base + j1 * R + i1], sx);
+    outElev = mix(e0, e1, sy);
+    return true;
+}
+
+// Elevación BASE de la corteza (km) + orogenia. PORT EXACTO de PlanetGeology::sample.
+// out oro = [0,1] intensidad del límite · out conv = convergencia (>0 chocan)
+float geologyElevKm(vec3 dirIn, out float oro, out float conv) {
+    oro = 0.0; conv = 0.0;
+    if (u_plateCount <= 0) return 0.0;
+    vec3 dir = normalize(dirIn);
+    vec3 d   = gWarp(dir, uint(u_seed));
+
+    int i0 = 0, i1 = -1;
+    float c0 = -2.0, c1 = -2.0;
+    for (int i = 0; i < u_plateCount; ++i) {
+        float c = dot(d, plates[i].siteCont.xyz);
+        if (c > c0)      { c1 = c0; i1 = i0; c0 = c; i0 = i; }
+        else if (c > c1) { c1 = c;  i1 = i; }
+    }
+    if (i1 < 0) i1 = i0;
+
+    vec3  siteA = plates[i0].siteCont.xyz, siteB = plates[i1].siteCont.xyz;
+    float contA = plates[i0].siteCont.w,   contB = plates[i1].siteCont.w;
+    vec3  motA  = plates[i0].motionSpd.xyz, motB = plates[i1].motionSpd.xyz;
+    float spdA  = plates[i0].motionSpd.w,   spdB = plates[i1].motionSpd.w;
+
+    float dA = acos(clamp(c0, -1.0, 1.0));
+    float dB = acos(clamp(c1, -1.0, 1.0));
+    float boundaryDist = max(0.0, (dB - dA) * 0.5);
+
+    vec3 toB = siteB - siteA;
+    toB -= d * dot(toB, d);
+    float toBLen = length(toB);
+    vec3 nrm = (toBLen > 1e-6) ? (toB / toBLen) : vec3(0.0);
+    conv = dot(motA - motB, nrm);
+
+    float w = 1.0 - smoothstep(0.0, u_geoBoundaryRad, boundaryDist);
+    oro = w;
+
+    // Continentalidad (margen continental: la costa NO es el borde de la placa).
+    float bw = 0.5 * (1.0 - smoothstep(0.0, u_geoMarginRad, boundaryDist));
+    float continentality = contA * (1.0 - bw) + contB * bw;
+    float edgeW = 1.0 - abs(continentality * 2.0 - 1.0);
+    continentality += (gVNoise(dir * 6.0,  uint(u_seed) + 909u) * 0.28
+                     + gVNoise(dir * 14.0, uint(u_seed) + 313u) * 0.12) * edgeW;
+
+    float land = smoothstep(0.42, 0.62, continentality);
+    bool  isCont = (land > 0.5);
+
+    float elev = u_geoOceanBaseKm + (u_geoContBaseKm - u_geoOceanBaseKm) * land;
+
+    bool bothCont = isCont && (contB > 0.5);
+    bool bothOcea = (!isCont) && (contB <= 0.5);
+
+    if (conv > 0.0) {
+        float f = conv * w;
+        if (bothCont)      elev += u_geoMaxOrogenyKm * f * w;
+        else if (bothOcea) elev += (spdA <= spdB) ? (3.2 * f * w) : (-4.5 * f);
+        else               elev += isCont ? (4.6 * f * w) : (-5.0 * f);
+    } else if (conv < 0.0) {
+        float f = -conv * w;
+        if (bothCont) elev -= 1.6 * f;
+        else          elev += 2.4 * f;
+    }
+    return elev;
+}
+
 // Rama TERRAN de sampleTerrainV2: continentes + montañas ridged + LAGOS (talla la
 // cuenca y fija el nivel de agua). km. outWaterKm = nivel de agua aplicable (0=mar,
 // >0=lago dentro de un sello activo), idéntico a sampleTerrainV2.
 float terranElevKm(vec3 dir, out float outWaterKm) {
     int seed = u_seed;
-    float c = fBm(dir, seed, 6, 0.5, 2.0, u_continentFreqA);
-    float c0 = u_seaThreshold;   // debe coincidir con W.seaThreshold de la CPU
-    float band = 0.04;
-    float landMask = ssf(c0 - band, c0 + band, c);
 
-    // distToCoast (m, con signo): el relieve sube/baja SIEMPRE desde la orilla aunque el continente
-    // sea plano (rompe el llano tostado + los rectángulos de agua). Paridad exacta en los 3 sitios.
-    float dc = distToCoastWorld(dir, c, c0);
+    // ===== F2 — la elevación BASE la da la TECTÓNICA, no un fBm =====
+    // PORT EXACTO de terrain_sampler_v2.cpp → la malla (GPU) y la física (CPU) coinciden.
+    // (F3) TODO sale del CAMPO: altura erosionada, caudal, agua y OROGENIA (horneada de la
+    // tectónica). Antes aquí se evaluaban las 30 placas + 6 ruidos de warp POR VÉRTICE — el grueso
+    // del coste de reconstruir terreno, y para nada: la altura ya no sale de esa fórmula.
+    vec4  fld     = sampleField4(dir);
+    float geoBase = fld.x;
+    float oro     = fld.w;               // orogenia con signo (>0 = el límite levanta montaña)
+    // El MESO manda si su tesela está residente (trae detalle + erosión local a escala humana).
+    float mesoE;
+    if (sampleMeso(dir, mesoE)) geoBase = mesoE;
 
-    // LECHO — BATIMETRÍA: PLATAFORMA continental somera → TALUD → LLANURA ABISAL (perfil por distToCoast)
-    // + montes/dorsales solo mar adentro. MISMA fórmula que terrain_sampler_v2.cpp y water.frag (paridad).
-    float off    = -dc;                                        // metros mar adentro (>0)
-    float shelfD = ssf(0.0,                    3000.0 * u_coastWidth, off);
-    float slopeD = ssf(3000.0 * u_coastWidth,  12000.0 * u_coastWidth, off);
-    float abyssD = ssf(12000.0 * u_coastWidth, 45000.0 * u_coastWidth, off);
-    float seaDepth = shelfD * (-0.18) + slopeD * (-3.6) + abyssD * (-1.0); // km, -0.18→-4.78
-    float oreg   = fBm(dir, seed + 211, 4, 0.5, 2.0, 3.0);
-    float oMask  = ssf(0.05, 0.30, oreg);
-    float omn    = fBm(dir, seed + 311, 5, 0.5, 2.1, 600.0);
-    float ona    = omn * (1.0 / A_NORM);
-    float oform  = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);   // dorsales (ridged)
-    float oceanRelief = (oform - 0.5) * oMask * 1.6;           // km, montes/fosas del lecho
-    seaDepth = min(seaDepth + oceanRelief * slopeD, -0.02);    // relieve solo mar adentro
+    // Tierra/mar: el nivel del mar es elev = 0. BANDA ESTRECHA (±2 m): con una banda ancha, todo
+    // el terreno entre 0 y 60 m caía en landMask<0.5 y el clamp de costa lo HUNDÍA → llanura costera
+    // sumergida. (Idéntico a terrain_sampler_v2.cpp → paridad.)
+    float landMask = smoothstep(-0.002, 0.002, geoBase);
 
-    // TIERRA: sube en pendiente desde la orilla por distToCoast (rampa por seed) → sin meseta plana.
-    float landRamp = ssf(0.0, 1500.0 * u_coastWidth, dc);
-    float landBase = landRamp * 1.0;
-    // Colinas de frecuencia media, onduladas desde la costa (gateadas por landRamp → entran en la orilla).
-    float hmn   = fBm(dir, seed + 77, 5, 0.5, 2.0, 300.0);
-    float hills = hmn * (1.0 / A_NORM);                 // ~[-1,1]
-    float hillRelief = hills * landRamp * 1.3;          // km, ondulado
+    // ===== Detalle CONDICIONADO por los campos (ya no es ruido libre) =====
+    // --- CAUCE (nivel C): el CAUDAL del campo TALLA el terreno (idéntico a la CPU → paridad) ---
+    // El campo sabe por dónde va el río; aquí ese caudal se convierte en GEOMETRÍA: encaja el cauce
+    // y aplana la vega. Es lo que hace que el río se VEA al caminar.
+    float flow    = fld.y;
+    float riverW  = smoothstep(0.30, 0.62, flow);            // 0 divisoria … 1 cauce principal
+    float valleyW = smoothstep(0.18, 0.50, flow);            // fondo de valle (más ancho)
+    float carveKm = riverW * 0.045;                          // hasta 45 m de encajamiento
 
-    // Montañas: cordilleras cohesionadas (máscara propia, independiente de la costa).
-    float reg     = fBm(dir, seed + 55, 4, 0.5, 2.0, 2.0);
-    float mtnMask = ssf(0.12, 0.36, reg);
-    float mn      = fBm(dir, seed + 123, 5, 0.5, 2.1, 800.0);
-    float na      = mn * (1.0 / A_NORM);
-    float form    = pow(clamp(1.0 - abs(na), 0.0, 1.0), 1.3); // cresta definida
-    float mountains = form * mtnMask * (6.5 * u_reliefStrength); // km, picos prominentes
+    float hmn        = fBm(dir, seed + 77, 5, 0.5, 2.0, 300.0);
+    float hills      = hmn * (1.0 / A_NORM);
+    // (El MESO ya trae el detalle fino Y erosionado → las colinas quedan como variación de gran
+    //  escala, muy bajas; si no, se sumarían al relieve que la erosión ya esculpió.) Idéntico a CPU.
+    float hillRelief = hills * landMask * (0.12 * (1.0 - 0.85 * valleyW));
 
-    // La TIERRA nunca por debajo del nivel del mar (las colinas podían hundirla bajo 0 →
-    // la esfera de océano de órbita la tapaba y los continentes se "disolvían" en islas).
-    // Clamp a +10 m garantiza que landMask>0.5 quede SIEMPRE sobre el mar.
-    float landRelief = max(landBase + hillRelief + mountains, 0.01); // km (≥10 m)
-    float elev = mix(seaDepth, landRelief, landMask);
-    // COSTA PURA POR landMask (baja freq, ESTABLE entre LODs): clamp de AMBOS lados → landMask>0.5
-    // tierra (≥+5mm), landMask<0.5 océano (≤−5mm). Quita los charcos (tierra baja) Y los islotes
-    // sub-celda del lado mar que el morph CDLOD hacía flipar → sin panales/flicker. Paridad con
-    // water.frag oceanElevKm y terrain_sampler_v2.cpp.
+    // Crestas RIDGED: SOLO donde la tectónica levanta montaña (orogenia × convergencia) → las
+    // crestas SIGUEN la cordillera en vez de salpicar toda la tierra.
+    float mn     = fBm(dir, seed + 123, 5, 0.5, 2.1, 800.0);
+    float na     = mn * (1.0 / A_NORM);
+    float form   = pow(clamp(1.0 - abs(na), 0.0, 1.0), 1.3);
+    float mtnAmp = oro * u_reliefStrength;   // la orogenia ya viene con el signo aplicado
+    float mountains = form * (1.4 * mtnAmp);
+
+    // Relieve del lecho oceánico (montes submarinos), solo mar adentro.
+    float omn   = fBm(dir, seed + 311, 5, 0.5, 2.1, 600.0);
+    float ona   = omn * (1.0 / A_NORM);
+    float oform = pow(clamp(1.0 - abs(ona), 0.0, 1.0), 1.5);
+    float seaRelief = (oform - 0.5) * ((1.0 - landMask) * 0.6);
+
+    // El CAUCE ya lo talla la erosión del meso → no se vuelve a restar aquí (se duplicaría).
+    float elev = geoBase + hillRelief + mountains + seaRelief;
+
+    // Costa estable entre LODs (clamp de ambos lados, IDÉNTICO a la CPU).
     elev = (landMask > 0.5) ? max(elev, 0.005) : min(elev, -0.005);
 
     // --- Lagos (sellos de la seed, gateados por wetness del continente) ---
@@ -293,7 +546,8 @@ void main() {
     uint idx = gl_GlobalInvocationID.x;
     if (idx >= uint(u_numVerts)) return;
 
-    vec3 dir = normalize(dirs_in[idx].xyz);
+    vec3 dir = (u_deriveDirs != 0) ? vec3(normalize(gridDir(idx)))
+                                   : normalize(dirs_in[idx].xyz);
     float waterKm;
     elev_out[idx]  = terranElevKm(dir, waterKm);
     water_out[idx] = waterKm;

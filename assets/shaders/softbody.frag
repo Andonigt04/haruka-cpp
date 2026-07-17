@@ -10,9 +10,13 @@ layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 layout(location = 2) in float Alpha;
 
-layout(location = 15) uniform vec3  u_color;
+// UBO (binding 6) — antes uniforms sueltos (glUniform3fv/1f), que NO existen en Vulkan.
+// std140: vec3 (align 16, size 12) + el float siguiente comparten el slot de 16 B.
+layout(std140, binding = 6) uniform SoftbodyParams {
+    vec3  u_color;
+    float u_alphaMode;   // 1 = usar el alpha por-vértice; 0 = opaco
+};
 // 0 = opaque (softbodies). >0.5 = use per-vertex Alpha (water depth fade).
-layout(location = 16) uniform float u_alphaMode;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;

@@ -32,19 +32,32 @@ layout(location = 5) out float Depth;      // profundidad del agua (m): orilla�
 layout(location = 6) out vec3  WorldDir;   // dirección RADIAL (planeta→vértice), PRECISA (para costa
                                            // per-píxel: evita el float32 de FragPos+planetRelCam)
 
-layout(location = 10) uniform vec3  u_chunkOffset;   // chunkCentre - cameraPos
-layout(location = 12) uniform float u_morphFactor;   // 0=detalle, 1=forma del padre (CDLOD, misma location que el terreno)
-// MultiDrawIndirect del agua: por cada draw del batch, offset+morph vienen de este SSBO por gl_DrawID.
-layout(location = 40) uniform int u_batched;         // 1 = leer offset/morph del SSBO
+// Datos POR-DRAW: SIEMPRE del SSBO, indexado por gl_DrawID (índice del comando en un multidraw,
+// 0 en un draw suelto) → el MISMO shader sirve al océano único, a los chunks sueltos y al pool,
+// sin uniforms por-draw (no existen en Vulkan). Igual que el terreno.
 struct WDrawItem { vec4 offMorph; };                 // xyz=offset, w=morph
 layout(std430, binding = 7) readonly buffer WDrawSSBO { WDrawItem uItems[]; };
-layout(location = 14) uniform float u_time;          // seconds
-layout(location = 15) uniform vec3  u_waveUp;        // radial up at camera surface point
-layout(location = 16) uniform vec3  u_waveTangent;   // tangent basis (global per frame)
-layout(location = 17) uniform vec3  u_waveBitangent;
-layout(location = 18) uniform vec2  u_windDir;       // wind/current direction in tangent plane (unit)
-layout(location = 19) uniform float u_windStrength;  // 0..N, scales amplitude/chop
-layout(location = 21) uniform float u_tideHeight;    // F5.4: nivel de marea (m), desplazamiento radial del mar
+
+// Parámetros del PASE (antes uniforms sueltos). glUniform no existe en Vulkan → UBO.
+// Binding 8, no 7: el 7 es el SSBO de arriba (en Vulkan chocarían en el descriptor set).
+// Empaquetados en vec4 para que std140 no deje huecos; los #define dejan el cuerpo intacto.
+// (F1) Bloque ADELGAZADO: fuera los params de costa (seed, seaThreshold, …). Existían para que el
+// fragment re-derivara el terreno per-píxel; con reversed-Z el depth buffer ya da la profundidad.
+layout(std140, binding = 8) uniform WaterParams {
+    vec4  u_waveUpTime;      // xyz = radial up en el punto de superficie de la cámara · w = tiempo (s)
+    vec4  u_waveTanWind;     // xyz = tangente (base global por frame)   · w = fuerza del viento
+    vec4  u_waveBitTide;     // xyz = bitangente                          · w = nivel de marea (m)
+    vec4  u_relCamNear;      // xyz = cam − centro del planeta (ancla la espuma) · w = plano cercano
+    vec2  u_windDir;         // dirección viento/corriente en el plano tangente (unitaria)
+    float u_waterQuality;
+    float u_fieldRes;        // (lo usa el fragment: campo del planeta)
+};
+#define u_waveUp        u_waveUpTime.xyz
+#define u_time          u_waveUpTime.w
+#define u_waveTangent   u_waveTanWind.xyz
+#define u_windStrength  u_waveTanWind.w
+#define u_waveBitangent u_waveBitTide.xyz
+#define u_tideHeight    u_waveBitTide.w
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -59,6 +72,14 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 moonLightColor; float _pad4;
 };
 
+// LOD DE OLEAJE — la regla: **una ola se desplaza en la geometría SOLO mientras la malla pueda
+// resolverla**. La rejilla del océano es DENSA cerca de la cámara y muy gruesa lejos, así que:
+//   - cerca: las 6 olas desplazan → hay CHOP de verdad (antes las cortas se habían quitado del todo
+//     y el mar parecía una lámina: "el oleaje no crea olas").
+//   - lejos: cada ola se apaga cuando su longitud deja de caber en la celda → el mar queda liso y
+//     NO se ven las facetas de la malla (antes las olas largas seguían deformando celdas enormes:
+//     "a mucha distancia aparece con triángulos").
+// El detalle que se pierde al apagar la geometría lo recoge la NORMAL per-píxel (water.frag).
 const int   NUM_WAVES = 6;
 const float GRAV      = 9.81;
 
@@ -75,10 +96,10 @@ void main() {
     // CDLOD: la lámina se "aplana" hacia la forma del LOD padre antes del cambio de
     // nivel → sin salto de teselación (igual que el terreno). El faldón lleva su propio
     // morph = su posición, así no se mueve.
-    // Datos por-draw: en batched (MultiDrawIndirect) vienen del SSBO por gl_DrawID.
-    vec3  off   = u_chunkOffset;
-    float morph = u_morphFactor;
-    if (u_batched == 1) { WDrawItem d = uItems[gl_DrawID]; off = d.offMorph.xyz; morph = d.offMorph.w; }
+    // Datos por-draw: SIEMPRE del SSBO (gl_DrawID = 0 en un draw suelto).
+    WDrawItem d = uItems[gl_DrawID];
+    vec3  off   = d.offMorph.xyz;
+    float morph = d.offMorph.w;
     vec3 basePos   = mix(aPos, aMorphTarget, morph);
     vec3 camRelPos = off + basePos;
 
@@ -108,8 +129,12 @@ void main() {
         float ang = baseAng + ANGOFF[i];
         vec2  D   = vec2(cos(ang), sin(ang));
         float k   = 6.28318530718 / WAVELEN[i];   // spatial frequency
-        // Distance fade: full amplitude until 400× wavelength, gone by 1200×.
-        float fade = 1.0 - smoothstep(WAVELEN[i] * 400.0, WAVELEN[i] * 1200.0, camDist);
+        // FADE POR RESOLUCIÓN DE MALLA (no por gusto): una ola necesita ~8 celdas por longitud de
+        // onda. La celda del océano crece con la distancia, así que la ola se apaga a partir de
+        // ~15× su longitud y muere a ~40×. Ejemplos: la de 7 m vive hasta ~280 m; la de 120 m hasta
+        // ~4.8 km. Más allá, la malla no la resuelve y solo produciría FACETAS.
+        // (Antes era 400×-1200×: la de 120 m seguía deformando la malla a 48-144 km → triángulos.)
+        float fade = 1.0 - smoothstep(WAVELEN[i] * 15.0, WAVELEN[i] * 40.0, camDist);
         float A   = AMP[i] * windAmp * fade * waveScale;
         if (A < 1e-4) continue;
         float w   = sqrt(GRAV * k) * 0.55;         // deep-water dispersion, amansado (x0.55: se veía demasiado rápido)

@@ -1,6 +1,8 @@
 #include "renderer/particle_system.h"
 #include "renderer/shader.h"
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
+#include "renderer/shader.h"
 #include <cstdlib>
 #include <cmath>
 
@@ -9,9 +11,11 @@ namespace Haruka {
 ParticleSystem& ParticleSystem::get() { static ParticleSystem s; return s; }
 
 ParticleSystem::~ParticleSystem() {
-    if (RHI::valid(m_vboH)) { if (RHI::Device* dev = RHI::device()) dev->destroy(m_vboH); }
-    else if (m_vbo) glDeleteBuffers(1, &m_vbo);
-    if (m_vao) glDeleteVertexArrays(1, &m_vao);
+    // Ruta PSO: el pipeline y el VBO los posee el device. Ya no hay VAO propio.
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_vboH)) dev->destroy(m_vboH);
+        if (RHI::valid(m_pso))  dev->destroy(m_pso);
+    }
 }
 
 void ParticleSystem::clear() { m_parts.clear(); }
@@ -49,30 +53,36 @@ void ParticleSystem::update(double dt, const glm::dvec3& up) {
     }
 }
 
-void ParticleSystem::ensureGL() {
-    if (m_vao) return;
-    glGenVertexArrays(1, &m_vao);
-    glBindVertexArray(m_vao);
-    if (RHI::Device* dev = RHI::device()) {
-        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
-        m_vbo = dev->nativeBuffer(m_vboH);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    } else {
-        glGenBuffers(1, &m_vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    }
-    const GLsizei stride = 8 * sizeof(float);   // pos(3) color(3) alpha(1) size(1)
-    glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-    glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(2); glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)(7 * sizeof(float)));
-    glBindVertexArray(0);
-}
-
+// === MIGRADO A PSO/Context ===
+// Antes: Shader externo + VAO propio + glEnable(BLEND/PROGRAM_POINT_SIZE) + glDrawArrays.
+// Ahora todo eso vive en el pipeline: blend ADITIVO (partículas radiantes), depth test on pero
+// SIN escribir z, y topología Points (el backend GL activa GL_PROGRAM_POINT_SIZE solo).
 void ParticleSystem::render(const glm::dvec3& camPos) {
     if (m_parts.empty()) return;
-    if (!m_shader) m_shader = std::make_unique<Shader>("shaders/particle.vert", "shaders/particle.frag");
-    ensureGL();
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+
+    if (!RHI::valid(m_pso)) {
+        // OJO: createPipeline hace un ifstream CRUDO → hay que enraizar con el base dir de assets.
+        const std::string vs = Shader::baseDir() + "shaders/particle.vert";
+        const std::string fs = Shader::baseDir() + "shaders/particle.frag";
+        RHI::PipelineDesc pd;
+        pd.vertexPath          = vs.c_str();
+        pd.fragmentPath        = fs.c_str();
+        pd.vertexLayout.strides = { (uint32_t)(8 * sizeof(float)) };           // pos(3) color(3) alpha(1) size(1)
+        pd.vertexLayout.attributes = {
+            { 0, 0,                 RHI::Format::RGB32F },
+            { 1, 3 * sizeof(float), RHI::Format::RGB32F },
+            { 2, 6 * sizeof(float), RHI::Format::R32F   },
+            { 3, 7 * sizeof(float), RHI::Format::R32F   },
+        };
+        pd.topology     = RHI::PrimitiveTopology::Points;
+        pd.depth.test   = true;  pd.depth.write = false;      // no ocluyen entre sí
+        pd.blend.enable = true;  pd.blend.mode  = RHI::BlendMode::Additive;
+        m_pso  = dev->createPipeline(pd);
+        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+    }
+    if (!RHI::valid(m_pso)) return;   // shader roto: createPipeline ya lo logueó
 
     std::vector<float> data; data.reserve(m_parts.size() * 8);
     for (const auto& p : m_parts) {
@@ -80,17 +90,15 @@ void ParticleSystem::render(const glm::dvec3& camPos) {
         float a = p.life / p.maxLife;
         data.insert(data.end(), { rp.x, rp.y, rp.z, p.color.r, p.color.g, p.color.b, a, p.size });
     }
+    dev->uploadBuffer(m_vboH, data.size() * sizeof(float), data.data());  // Stream: orphan + subida
 
-    glBindVertexArray(m_vao);
-    if (RHI::Device* dev = RHI::device()) dev->uploadBuffer(m_vboH, data.size() * sizeof(float), data.data());
-    else { glBindBuffer(GL_ARRAY_BUFFER, m_vbo); glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), data.data(), GL_DYNAMIC_DRAW); }
-    m_shader->use();
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE);  // ADITIVO → radiante
-    glEnable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
-    glDrawArrays(GL_POINTS, 0, (GLsizei)m_parts.size());
+    RHI::Context* ctx = dev->beginFrame();
+    ctx->bindPipeline(m_pso);          // programa + blend aditivo + depth/point-size
+    ctx->bindVertexBuffer(m_vboH);
+    ctx->draw((uint32_t)m_parts.size());
+
+    // Transición: el resto del frame sigue en GL directo y espera este estado.
     glDepthMask(GL_TRUE);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     glDisable(GL_BLEND);
     glBindVertexArray(0);
 }

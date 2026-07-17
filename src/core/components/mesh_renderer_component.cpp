@@ -36,6 +36,10 @@ void MeshRendererComponent::render(Shader& shader) const {
     }
 }
 
+void MeshRendererComponent::renderRHI(Haruka::RHI::Context& ctx) const {
+    if (mesh) mesh->drawRHI(ctx);
+}
+
 // Herramientas editor-only para inspección/edición de rutas asociadas.
 void MeshRendererComponent::renderInspector() {
     ImGui::Text("Mesh Renderer");

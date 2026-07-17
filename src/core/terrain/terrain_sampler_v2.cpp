@@ -1,5 +1,10 @@
 #include "terrain_sampler_v2.h"
 #include "core/noise_generator.h"
+#include "core/terrain/planet_geology.h"   // F2: tectónica de placas (PLAN_TERRENO_V3)
+#include "core/terrain/planet_fields.h"    // F3: campos erosionados (LA FUENTE DE VERDAD)
+#include "core/terrain/planet_meso.h"      // F3-MESO: el detalle erosionado que SÍ pisas
+#include <mutex>
+#include <memory>
 
 #include <cmath>
 #include <algorithm>
@@ -20,6 +25,104 @@ struct ValD {
 };
 
 inline ValD konst(float c)                 { return { c, glm::vec3(0.0f) }; }
+
+// ===== F2 — GEOLOGÍA (tectónica de placas) ==================================================
+// La elevación BASE deja de salir de un fBm y pasa a salir de las PLACAS: qué corteza hay aquí
+// (continental → tierra, oceánica → mar) y qué le hace el límite más cercano (cordillera, fosa,
+// arco volcánico, dorsal, rift). Es lo que convierte manchas de ruido en CORDILLERAS.
+//
+// Las placas se generan una vez por seed y se cachean: `sample()` es O(nº placas) ≈ 30 productos
+// escalares, así que se puede llamar por vértice sin caché de campos. (La caché de heightfield
+// llega en F3, cuando la EROSIÓN lo exija: un terreno erosionado ya no es función cerrada.)
+const PlanetGeology& geologyFor(uint32_t seed) {
+    static std::mutex mx;
+    static std::vector<std::unique_ptr<PlanetGeology>> cache;   // pocas seeds vivas a la vez
+    std::lock_guard<std::mutex> lk(mx);
+    for (auto& g : cache) if (g->seed() == seed) return *g;
+    auto g = std::make_unique<PlanetGeology>();
+    g->generate(seed);
+    cache.push_back(std::move(g));
+    return *cache.back();
+}
+
+// --- F3: los CAMPOS EROSIONADOS son la fuente de verdad -------------------------------------
+// La geología (F2) da la corteza y dónde se levanta montaña. Pero la ALTURA final ya no sale de esa
+// fórmula: sale del campo EROSIONADO (valles tallados, cuencas, cauces). Un terreno erosionado no es
+// una función cerrada — hay que precomputarlo y muestrearlo. Se genera una vez por seed (segundos)
+// y se cachea; `sample` es un bilineal.
+const PlanetFields& fieldsFor(uint32_t seed) {
+    static std::mutex mx;
+    static std::vector<std::unique_ptr<PlanetFields>> cache;
+    std::lock_guard<std::mutex> lk(mx);
+    for (auto& f : cache) if (f->seed() == seed) return *f;
+    auto f = std::make_unique<PlanetFields>();
+    f->generate(seed, geologyFor(seed), 256, 40);
+    cache.push_back(std::move(f));
+    return *cache.back();
+}
+
+// El MESO: teselas erosionadas a ~40 m/téxel alrededor de donde se pregunta. El macro (40 km/celda)
+// tiene los valles pero no los PISAS; esto los baja a escala humana. Se genera bajo demanda y se
+// cachea (LRU). Determinista → CPU y GPU obtienen la MISMA tesela aunque la generen por separado.
+// Campo CON GRADIENTE (diferencias finitas): sin él, las normales de COLISIÓN ignorarían la
+// pendiente de los valles tallados y caminarías por una ladera como si fuera llana.
+// ⚠️ NO generamos teselas bajo demanda aquí: la física/spawn consultan direcciones por TODO el
+// planeta (el spawn muestrea 4000) → generaríamos miles de teselas y el frame se caería. El meso se
+// usa SOLO donde la tesela ya existe, y las pide el GENERADOR DE CHUNKS (o sea, alrededor del
+// jugador — que es justo donde hay malla con la que colisionar). Fuera de ahí, macro.
+ValD mesoElevD(const glm::vec3& dir, PlanetMeso& M) {
+    const float v = M.elevKmIfResident(dir);
+    const float h = 0.00002f;   // ~130 m en la Tierra: resuelve la ladera del valle, no el téxel
+    glm::vec3 ref = (std::abs(dir.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 t1  = glm::normalize(glm::cross(ref, dir));
+    glm::vec3 t2  = glm::cross(dir, t1);
+    const float a1 = M.elevKmIfResident(glm::normalize(dir + t1 * h));
+    const float b1 = M.elevKmIfResident(glm::normalize(dir - t1 * h));
+    const float a2 = M.elevKmIfResident(glm::normalize(dir + t2 * h));
+    const float b2 = M.elevKmIfResident(glm::normalize(dir - t2 * h));
+    const glm::vec3 g = t1 * ((a1 - b1) / (2.0f * h)) + t2 * ((a2 - b2) / (2.0f * h));
+    return { v, g };
+}
+
+ValD fieldElevD(const glm::vec3& dir, const PlanetFields& F) {
+    const float v = F.sample(dir).elevKm;
+    const float h = 0.002f;
+    glm::vec3 ref = (std::abs(dir.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 t1  = glm::normalize(glm::cross(ref, dir));
+    glm::vec3 t2  = glm::cross(dir, t1);
+    const float a1 = F.sample(glm::normalize(dir + t1 * h)).elevKm;
+    const float b1 = F.sample(glm::normalize(dir - t1 * h)).elevKm;
+    const float a2 = F.sample(glm::normalize(dir + t2 * h)).elevKm;
+    const float b2 = F.sample(glm::normalize(dir - t2 * h)).elevKm;
+    const glm::vec3 g = t1 * ((a1 - b1) / (2.0f * h)) + t2 * ((a2 - b2) / (2.0f * h));
+    return { v, g };
+}
+
+// Elevación geológica CON GRADIENTE. La geología no es analítica-derivable (hay un `min/max` por
+// placa dentro), así que el gradiente va por DIFERENCIAS FINITAS en el plano tangente. Sin esto las
+// normales de COLISIÓN ignorarían la pendiente de las cordilleras (caminarías por una ladera de
+// 6 km como si fuera llana).
+inline float sstepf(float e0, float e1, float x) {
+    float t = glm::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
+ValD geologyElevD(const glm::vec3& dir, const PlanetGeology& G) {
+    const float v = G.sample(dir).upliftKm;
+    // h angular pequeño pero no tanto que el float lo trague: ~0.002 rad ≈ 13 km en la Tierra.
+    // La geología es de BAJA frecuencia (cordilleras de cientos de km) → esta escala la captura bien.
+    const float h = 0.002f;
+    glm::vec3 ref = (std::abs(dir.y) < 0.9f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
+    glm::vec3 t1  = glm::normalize(glm::cross(ref, dir));
+    glm::vec3 t2  = glm::cross(dir, t1);
+    const float a1 = G.sample(glm::normalize(dir + t1 * h)).upliftKm;
+    const float b1 = G.sample(glm::normalize(dir - t1 * h)).upliftKm;
+    const float a2 = G.sample(glm::normalize(dir + t2 * h)).upliftKm;
+    const float b2 = G.sample(glm::normalize(dir - t2 * h)).upliftKm;
+    const glm::vec3 g = t1 * ((a1 - b1) / (2.0f * h)) + t2 * ((a2 - b2) / (2.0f * h));
+    return { v, g };
+}
+
 inline ValD operator+(const ValD& a, const ValD& b) { return { a.v + b.v, a.g + b.g }; }
 inline ValD operator-(const ValD& a, const ValD& b) { return { a.v - b.v, a.g - b.g }; }
 inline ValD operator+(const ValD& a, float s)       { return { a.v + s, a.g }; }
@@ -296,70 +399,76 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
     if (W.profile == 1) return sampleMoon(dir, W, R);
     if (W.profile == 2) return sampleGas(dir, W, R);
 
-    // ===================== A — geografía (binario gate) =====================
-    ValD c = fbmD(dir, seed, 6, 0.5f, 2.0f, W.continentFreqA); // continentalness ~[-1,1]
-    const float c0 = W.seaThreshold;
-    const float band = 0.04f; // medio-ancho de banda costa en unidades de ruido (suave, no 0)
+    // ===================== A — GEOLOGÍA (F2: tectónica de placas) =====================
+    // ANTES: la geografía salía de un fBm con un umbral (`seaThreshold`) → continentes = manchas de
+    // ruido y montañas esparcidas. AHORA la base es TECTÓNICA: corteza continental vs oceánica, y el
+    // relieve lo levanta el LÍMITE de placa (cordillera / arco volcánico / fosa / dorsal / rift).
+    // Ver docs/guides/PLAN_TERRENO_V3.md §2.
+    // La OROGENIA viene HORNEADA en el campo (no se evalúan las placas por muestra: era el grueso
+    // del coste de regenerar terreno, y es innecesario — la altura ya sale del campo).
+    const PlanetFields&  FL = fieldsFor(W.seed);
+    const FieldSample    fsm = FL.sample(dir);
+    // La ALTURA base ya no es una fórmula: es el campo EROSIONADO. Y a escala humana, la TESELA
+    // MESO (~40 m/téxel), que ya trae detalle + erosión local (valles, cauces, taludes).
+    // MESO (HARUKA_MESO=1): teselas erosionadas a ~40 m/téxel. Apagado por defecto hasta moverlo a
+    // un worker con presupuesto — sin eso, generar teselas cuelga el arranque. Si está apagado no hay
+    // teselas residentes y esto cae al macro, exactamente igual que la GPU → paridad en ambos casos.
+    PlanetMeso& MS = planetMeso(W.seed, FL, planetRadius);       // MISMA caché que el generador de chunks
+    ValD geoBase = mesoElevD(dir, MS);             // meso si la tesela está; si no, macro
 
-    ValD landMask = smoothstepD(c0 - band, c0 + band, c); // 0 mar … 1 tierra
+    // Tierra/mar SALE de la geología: el nivel del mar es simplemente elev = 0. Se acabó el umbral
+    // arbitrario sobre el ruido. La banda suave evita un acantilado de un vértice en la costa.
+    // ⚠️ BANDA ESTRECHA (±2 m), no 120 m. Con una banda ancha, TODO el terreno entre 0 y 60 m
+    // quedaba con landMask<0.5 → el clamp de costa lo hundía bajo el mar → la llanura costera
+    // entera aparecía sumergida (y el agua z-fighteaba con el suelo). La costa es elev = 0.
+    ValD landMask = smoothstepD(-0.002f, 0.002f, geoBase);   // 0 mar … 1 tierra
 
-    // ===================== B — relieve (gateado por distToCoast) ======================
-    // distToCoast (m, con signo) — MISMA fórmula que terrain_gen.comp/water.frag → paridad EXACTA del
-    // VALOR (colisión↔visual). El relieve sube/baja SIEMPRE desde la orilla aunque el continente sea
-    // plano → rompe el llano tostado + los rectángulos de agua. (La derivada del ramp NO entra en el
-    // ValD → la normal de COLISIÓN es aprox. cerca de la costa; la normal VISIBLE la calcula la GPU.)
-    const float dc = distToCoastWorld(dir, c.v, c0, W, R);
-    auto sstep = [](float e0, float e1, float x){ float t = glm::clamp((x - e0) / (e1 - e0), 0.0f, 1.0f); return t * t * (3.0f - 2.0f * t); };
-    const float cwL = 1500.0f * W.coastWidth;  // rampa tierra (m), escalada por seed
-    const float cwS = 2000.0f * W.coastWidth;  // rampa lecho (m)
+    // ===================== B — DETALLE, CONDICIONADO POR LA GEOLOGÍA ==================
+    // El ruido NO desaparece: pasa a ser detalle **gobernado por los campos**, no ruido libre.
 
-    // Rama MAR — BATIMETRÍA realista por distToCoast (m mar adentro = -dc): PLATAFORMA continental
-    // somera → TALUD (caída) → LLANURA ABISAL. Perfil suave (función de dc, konst en el ValD) + montes/
-    // dorsales solo mar adentro. MISMA fórmula en terrain_gen.comp y water.frag (paridad exacta).
-    const float off    = -dc;                                    // metros mar adentro (>0)
-    const float shelfD = sstep(0.0f,             3000.0f * W.coastWidth, off); // plataforma (0→1)
-    const float slopeD = sstep(3000.0f * W.coastWidth, 12000.0f * W.coastWidth, off); // talud (0→1)
-    const float abyssD = sstep(12000.0f * W.coastWidth, 45000.0f * W.coastWidth, off); // hacia abisal
-    const float bathyKm = shelfD * (-0.18f) + slopeD * (-3.6f) + abyssD * (-1.0f); // -0.18→-4.78 km
-    ValD seaDepth = konst(bathyKm);
-    ValD oreg   = fbmD(dir, seed + 211, 4, 0.5f, 2.0f, 3.0f);
-    ValD oMask  = smoothstepD(0.05f, 0.30f, oreg);
-    ValD omn    = fbmD(dir, seed + 311, 5, 0.5f, 2.1f, 600.0f);
-    ValD ona    = omn * (1.0f / A_NORM);
-    ValD oform  = powD(clampD(konst(1.0f) - absD(ona), 0.0f, 1.0f), 1.5f); // dorsales (ridged)
-    ValD oceanRelief = (oform - konst(0.5f)) * oMask * 1.6f;               // km, montes/fosas del lecho
-    seaDepth = clampD(seaDepth + oceanRelief * slopeD, -1e9f, -0.02f);     // relieve solo mar adentro (no en plataforma)
+    // --- CAUCE (nivel C): el CAUDAL del campo TALLA el terreno ------------------------------
+    // El campo macro (~40 km/celda) sabe por dónde va el río, pero a esa resolución no lo pisas.
+    // Aquí el caudal se convierte en GEOMETRÍA: talla el cauce y aplana la vega alrededor. Es lo que
+    // hace que el río se VEA al caminar, y que la vegetación de ribera tenga dónde ponerse.
+    const float flow      = fsm.flow;
+    const float riverW    = sstepf(0.30f, 0.62f, flow);          // 0 divisoria … 1 cauce principal
+    const float valleyW   = sstepf(0.18f, 0.50f, flow);          // vega/fondo de valle (más ancho)
+    const float carveKm   = riverW * 0.045f;                     // hasta 45 m de encajamiento
 
-    // Rama TIERRA: sube desde la orilla por distToCoast (rampa por seed) → sin meseta plana.
-    const float landRamp = sstep(0.0f, cwL, dc);
-    ValD landBase = konst(landRamp * 1.0f);                 // km (landHeight ~1)
+    // Colinas de frecuencia media: solo en tierra, y APLANADAS en el fondo del valle (una vega es
+    // plana: el río la ha rellenado de sedimento).
+    ValD hmn        = fbmD(dir, seed + 77, 5, 0.5f, 2.0f, 300.0f);
+    ValD hills      = hmn * (1.0f / A_NORM);              // ~[-1,1]
+    // (El MESO ya trae el detalle fino Y lo ha erosionado: colinas suaves aquí SOLO como variación
+    //  de gran escala, muy bajas — si no, se sumarían al relieve que la erosión ya esculpió.)
+    ValD hillRelief = hills * landMask * (0.12f * (1.0f - 0.85f * valleyW));   // km
 
-    // Colinas de frecuencia media, onduladas desde la costa (gateadas por landRamp).
-    ValD hmn        = fbmD(dir, seed + 77, 5, 0.5f, 2.0f, 300.0f); // freq alta → onda ~130km, VISIBLE
-    ValD hills      = hmn * (1.0f / A_NORM);                 // ~[-1,1]
-    ValD hillRelief = hills * (landRamp * 1.3f);            // km, ondulado
-
-    // Régimen (fase 1): dónde hay montañas (vs llano/montículo).
-    ValD reg     = fbmD(dir, seed + 55, 4, 0.5f, 2.0f, 2.0f);
-    // Máscara ESTRECHA: montañas CONCENTRADAS en regiones (cordilleras), no esparcidas como
-    // montículos por toda la tierra (antes -0.05→0.30 cubría casi todo → ruido de montaña en
-    // todas partes). MISMO valor que el compute GPU.
-    ValD mtnMask = smoothstepD(0.12f, 0.36f, reg);
-
-    // Montañas RIDGED con MASA: exponente 1.3 → cresta definida. 5 octavas → sin spikes finos.
-    // Pico 6.5 km (prominente) apoyado sobre las colinas → relieve continuo costa→colina→pico.
+    // Crestas RIDGED: **solo donde la tectónica construye montaña** (orogeny), no repartidas por
+    // toda la tierra. Esto es lo que hace que las crestas SIGAN la cordillera en vez de salpicarla.
     ValD mn     = fbmD(dir, seed + 123, 5, 0.5f, 2.1f, 800.0f);
     ValD na     = mn * (1.0f / A_NORM);
-    ValD form   = powD(clampD(konst(1.0f) - absD(na), 0.0f, 1.0f), 1.3f); // cresta definida, con masa
-    ValD mountains = form * mtnMask * (6.5f * W.reliefStrength); // km. reliefStrength = parámetro de escena
+    ValD form   = powD(clampD(konst(1.0f) - absD(na), 0.0f, 1.0f), 1.3f);  // cresta definida
+    // La orogenia es de baja frecuencia → la tratamos como escalar (su pendiente ya la lleva geoBase).
+    const float mtnAmp = fsm.orogeny * W.reliefStrength;   // ya viene con el signo aplicado
+    ValD mountains = form * (1.4f * mtnAmp);            // km, encima del levantamiento tectónico
 
-    // La TIERRA nunca bajo el nivel del mar (las colinas la hundían bajo 0 → la esfera de
-    // océano de órbita la tapaba → continentes disueltos en islas). Clamp a +10 m. MISMO que
-    // el compute GPU.
-    ValD landRelief = clampD(landBase + hillRelief + mountains, 0.01f, 1e30f);
+    // Relieve del LECHO oceánico (montes submarinos), solo mar adentro.
+    ValD omn    = fbmD(dir, seed + 311, 5, 0.5f, 2.1f, 600.0f);
+    ValD ona    = omn * (1.0f / A_NORM);
+    ValD oform  = powD(clampD(konst(1.0f) - absD(ona), 0.0f, 1.0f), 1.5f);
+    ValD seaRelief = (oform - konst(0.5f)) * ((1.0f - landMask.v) * 0.6f);   // km
 
-    // Fusión costa: mar ↔ tierra por landMask (suave).
-    ValD elev = mixD(seaDepth, landRelief, landMask);       // km
+    // Elevación final = TECTÓNICA + detalle. Sin clamps artificiales de costa: la línea de costa es
+    // simplemente elev = 0, y es continua porque geoBase lo es.
+    // El CAUCE ya lo talla la erosión del meso → aquí no se vuelve a restar (se duplicaría).
+    ValD elevD = geoBase + hillRelief + mountains + seaRelief;
+
+    // distToCoast: proxy a partir de la propia elevación (>0 tierra, <0 mar). Antes se calculaba con
+    // un gradiente de la continentalidad (4 fBm extra); ahora sale gratis y es COHERENTE por
+    // construcción con la costa que se dibuja.
+    const float dc = elevD.v * 1000.0f;   // m con signo
+
+    ValD elev = elevD;   // (la fusión mar↔tierra ya la hace la geología: la costa es elev = 0)
     // COSTA PURA POR landMask (baja freq, estable entre LODs): clamp de AMBOS lados. landMask>0.5
     // tierra (≥+5mm), landMask<0.5 océano (≤−5mm) → sin charcos ni islotes sub-celda que floten
     // entre LODs (flicker). Condición IDÉNTICA a la GPU (terrain_gen.comp) y water.frag oceanElevKm.
@@ -376,34 +485,17 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
         wetness     = hash01(cid);                // [0,1] por continente
     }
 
-    // ===================== Etapa 2.5 — lagos (sellos de la seed) ============
-    // Sellos deterministas gateados por wetness. Cada lago CONFORMA el terreno
-    // (talla una cuenca) y fija un nivel de agua local. El bowl entra en el
-    // gradiente (autodiff) → la normal de la orilla del lago es correcta.
-    WaterType lakeWater       = WaterType::None;
-    float     lakeLevel       = 0.0f;
-    float     activeLakeLevel = -1e30f; // nivel del lago si estás DENTRO de un sello activo (para la orilla)
-    if (landMask.v > 0.5f) {
-        glm::vec3 lc; uint32_t lh;
-        nearestLakeCell(dir, W.lakeDensity, W.seed ^ 0x1A4E1A4Eu, lc, lh);
-        if (hash01(lh ^ 0x5151u) < wetness * W.lakeMaxProb) {     // activo (gateado por wetness)
-            float rKm  = glm::mix(0.1f, 2.0f,  hash01(lh ^ 0x33u)); // 100 m … 2 km (charco→lago)
-            float Dkm  = glm::mix(0.01f, 0.06f, hash01(lh ^ 0x77u)); // 10 … 60 m de cuenca
-            float rAng = rKm * 1000.0f / (float)R;
-            ValD cosd  = { glm::dot(dir, lc), lc };               // ∂(dir·lc)/∂dir = lc (lc fijo)
-            ValD dAng  = acosD(cosd);
-            ValD carve = smoothstepD(rAng, 0.0f, dAng) * Dkm;     // Dkm en el centro → 0 en el borde
-            elev = elev - carve;                                  // tallar la cuenca
-            float L = regionalElevKm(lc, W);                      // nivel del agua = suelo regional del centro
-            activeLakeLevel = L;                                  // nivel aplicable (también en la orilla, elev>L)
-            if (elev.v < L) { lakeWater = WaterType::Lake; lakeLevel = L; }
-        }
-    }
+    // ===================== Etapa 2.5 — LAGOS: cuencas REALES (F3) ============
+    // ANTES: "sellos" colocados por un hash, que TALLABAN una cuenca donde tocara. Un lago no está
+    // donde un hash dice: está donde la topografía NO DRENA. Ahora sale del relleno de depresiones
+    // (priority-flood) del campo hidrológico → el lago está en la cuenca endorreica de verdad.
+    const float lakeKm = fsm.waterKm;                     // cota del lago aquí (0 = no hay)
+    const bool  hasLake = (lakeKm > 0.0f && lakeKm > elev.v);
 
     // ===================== Normal analítica =================================
     // Superficie radial ρ(dir)=R+1000·elev. n ∝ ρ·dir − 1000·∇_tan(elev).
-    glm::vec3 G    = elev.g;                                // ∇ elev[km] respecto a dir (incluye el bowl)
-    glm::vec3 Gtan = G - glm::dot(G, dir) * dir;            // parte tangencial
+    glm::vec3 grad = elev.g;                                // ∇ elev[km] respecto a dir (incluye el bowl)
+    glm::vec3 Gtan = grad - glm::dot(grad, dir) * dir;      // parte tangencial
     float     rho  = (float)R + kmToM * elev.v;
     glm::vec3 nd   = rho * dir - kmToM * Gtan;
     glm::vec3 normal = glm::length(nd) > 1e-9f ? glm::normalize(nd) : dir;
@@ -414,18 +506,37 @@ TerrainSample sampleTerrainV2(const glm::vec3& dirIn, const WorldGenParams& W, d
     s.landMask    = landMask.v;
     s.elevKm      = elev.v;
     s.normal      = normal;
-    s.distToCoast = (c.v - c0); // proxy normalizado (refinable a métrico)
+    // (F2) distToCoast: la propia elevación con signo. Antes era un proxy sobre el ruido de
+    // continentalidad (c - c0); ahora la costa ES elev = 0, así que esto es EXACTO por construcción.
+    s.distToCoast = elev.v;   // km con signo: >0 tierra · <0 mar
     s.continentId = continentId;
     s.wetness     = wetness;
-    s.climate     = glm::clamp(1.0f - std::fabs(dir.y), 0.0f, 1.0f); // 0 polos → 1 ecuador
+    s.climate     = glm::clamp(1.0f - std::fabs(dir.y), 0.0f, 1.0f); // 0 polos → 1 ecuador (legado)
+    // (F5) El clima REAL sale del campo — el MISMO que muestrea el shader del terreno (planet.frag)
+    // y el que usan los props. Si cada uno lo derivara por su cuenta, el bosque no coincidiría con
+    // el verde que ves.
+    s.tempC       = fsm.tempC;
+    s.humidity    = fsm.humidity;
+    s.flow        = fsm.flow;
+    s.orogeny     = fsm.orogeny;
 
-    // Nivel de agua APLICABLE (para calcular orillas, también en tierra): lago si
-    // estás dentro de un sello activo, si no el océano global (0).
-    s.waterLevelKm = (activeLakeLevel > -1e29f) ? activeLakeLevel : 0.0f;
-    // Tipo de agua (para la malla de agua): océano si el suelo baja de 0, o lago.
-    if (s.elevKm < 0.0f)                         s.waterType = WaterType::Ocean;
-    else if (lakeWater == WaterType::Lake)       s.waterType = WaterType::Lake;
-    // else: tierra sobre el agua → waterType = None (pero waterLevelKm queda fijado).
+    // AGUA: sale del CAMPO, no de una regla ad-hoc. Lago si la cuenca no drena y su cota está por
+    // encima del suelo; océano si el suelo procedural está bajo el nivel del mar.
+    //
+    // ⚠️ CLAVE (arregla el "mar bajo tierra"): esto se decide con la elevación PROCEDURAL, no con la
+    // excavada. Un agujero que cavas tierra adentro NO está conectado al mar → no se llena de agua.
+    // Antes la física preguntaba "¿estoy bajo el nivel del mar?" y cualquier hoyo profundo se volvía
+    // océano, con física de nadar incluida.
+    if (hasLake) {
+        s.waterType    = WaterType::Lake;
+        s.waterLevelKm = lakeKm;
+    } else if (fsm.elevKm < 0.0f) {          // el CAMPO dice mar aquí (no la altura cavada)
+        s.waterType    = WaterType::Ocean;
+        s.waterLevelKm = 0.0f;
+    } else {
+        s.waterType    = WaterType::None;    // tierra: aquí NO hay agua aunque caves
+        s.waterLevelKm = 0.0f;
+    }
     return s;
 }
 

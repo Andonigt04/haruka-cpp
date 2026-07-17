@@ -14,7 +14,9 @@ Most engines render a *level*. Haruka renders a **solar system at true scale** a
 
 - **🪐 Real-scale planets, millimetre precision.** Earth sits ~1 AU (1.5×10⁸ m) from the sun at its real radius (6 371 km). Rendering is **camera-relative double precision**: the world is re-centred on the camera every frame so GPU floats never lose precision, no matter how far from the origin you are. You can fly from interplanetary space down to the grass without a seam.
 
-- **⚡ GPU-compute terrain, streamed grueso→fino.** The planetary heightfield (continents, ridged mountains, lakes) is generated on the **GPU via compute shaders** (Perlin ported 1:1 from the CPU sampler, parity-validated) and harvested **asynchronously with GL fences** — the CPU never blocks on the GPU. A cube-sphere **quadtree LOD** streams chunks **progressively coarse→fine**: a node only subdivides once its parent is resident, so you **never see a black hole** while detail loads — the planet fills in from low-poly to crisp. An optional **LOD floor** keeps the *entire* planet resident at a base detail so the far side is always there.
+- **⚡ GPU-compute terrain, streamed grueso→fino.** The planetary heightfield is generated on the **GPU via compute shaders** and harvested **asynchronously with GL fences** — the CPU never blocks on the GPU. The render thread does almost nothing: chunk vertex directions are **derived on the GPU** (not built and uploaded), the readback lands in **persistently-mapped buffers**, and the copy + mesh assembly happen on **worker threads**. A cube-sphere **quadtree LOD** streams chunks **progressively coarse→fine**: a node only subdivides once its parent is resident, so you **never see a black hole** while detail loads — the planet fills in from low-poly to crisp. An optional **LOD floor** keeps the *entire* planet resident at a base detail so the far side is always there.
+
+- **🌋 Terrain by process, not by noise.** Elevation isn't a noise formula — it's the **output of a simulation** run once per seed: **plate tectonics** (Voronoi plates, noise-warped boundaries, convergence → orogeny, continental margins) feeds **hydrology and erosion** (priority-flood lakes, D8 flow accumulation, stream-power incision, thermal talus). The eroded field is the **single source of truth**, shared by the terrain compute shader, the physics sampler and the water shader — so mountains have *drainage*, rivers run *downhill into* lakes and the coast is simply where elevation = 0. A parity test keeps the CPU and GPU heightfields within centimetres of each other, because a mismatch means you walk through the ground.
 
 - **🌗 Movable celestial bodies.** Planets and moons **orbit** (day/night from the sun, moonlight, sun–moon tides). Terrain chunks are stored **planet-local**, so a body can move every frame **without regenerating a single chunk** — the renderer just re-anchors them. Moons, gas giants and home worlds are **the same kind of procedural, streamed body**, declared entirely in the **scene file** (a `terran` / `moon` / `gas` generation profile), not in game code.
 
@@ -33,18 +35,23 @@ Most engines render a *level*. Haruka renders a **solar system at true scale** a
 ## 🎯 Core Features
 
 ### 🖼️ Rendering
+- **RHI abstraction** (`src/rhi/`) — Device/Context + **pipeline state objects**; the renderers issue no raw GL calls. OpenGL is one backend; the seam for a Vulkan one is already in place.
+- **Reversed-Z with an infinite far plane** — depth as `near/dist`, `glClipControl(ZERO_TO_ONE)`, D32F. Precision is uniform from a pebble to a planet; a conventional 0.1 / 3e11 range collapsed all terrain depth into the last 0.004% of the buffer.
 - **Deferred Shading Pipeline** — G-Buffer + light accumulation for hundreds of dynamic lights
 - **PBR Materials** — Metallic/Roughness workflow with IBL (Image-Based Lighting)
 - **Advanced Shadows** — Cascaded shadow maps + point lights + directional shadows
 - **Post-Processing** — SSAO (Screen Space Ambient Occlusion), HDR + bloom, tone mapping
 - **GPU Compute** — Frustum culling, compute post-processing via SPIR-V shaders
+- **Pooled terrain draws** — chunks share vertex pools and are drawn with `drawIndexedIndirect` (`gl_DrawID` indexes a per-draw SSBO), so there are no per-chunk uniforms or VAO rebinds
 
 ### 🌍 Procedural Worlds
 - **Double-Precision Coordinates** — Millimeter precision at astronomical scales (camera-relative; tested to AU distances)
-- **Procedural Planetary Terrain** — Cube-sphere projection, Perlin/fBm continents + ridged mountains + lakes, generated on the **GPU (compute shaders)**
+- **Geology → hydrology → terrain** — plate tectonics (`planet_geology`) drives an eroded cube-sphere field (`planet_fields`: lakes, rivers, stream-power + thermal erosion), cached once per seed and sampled by CPU *and* GPU
+- **MESO tiles** *(opt-in: `HARUKA_MESO=1`)* — on-demand ~5 km tiles (128², radius-derived) re-eroded locally with **inherited flow + margin** so tile borders don't seam; built on a worker, never on the render thread
 - **Cube-sphere Quadtree LOD** — Deep, distance-driven detail (root face → fine leaves) with **progressive coarse→fine streaming** and an optional whole-planet LOD floor
-- **Async Chunk Generation** — GPU dispatch harvested via **GL fences** + mesh assembly on worker threads (never blocks the frame), LRU RAM cache
+- **Async Chunk Generation** — GPU dispatch harvested via **GL fences** into persistently-mapped buffers; copy + mesh assembly on a worker pool (never blocks the frame); LRU RAM cache + optional disk cache
 - **Floating Origin** — Per-frame world re-centering on the camera to keep GPU float precision
+- **CPU↔GPU parity, tested** — the physics sampler and the terrain compute shader must agree (median error ~2 cm); the mesh and the collision are the same surface
 
 ### ⚙️ Physics & Simulation
 - **Rigid Body Dynamics** — Gravity, collisions, friction
@@ -235,7 +242,7 @@ Documentation generated by Doxygen.
 
 ## 🏗️ Architecture Highlights
 
-Chunks are **generated asynchronously** using multi-octave Perlin noise and cached in RAM (LRU eviction when >256 MB).
+Chunks are **generated asynchronously on the GPU** from the planet's eroded geological field (not from raw noise), assembled on a worker pool and cached in RAM (LRU eviction, budget auto-sized from system RAM) with an optional versioned disk cache.
 
 ### Scene JSON Format
 
@@ -267,9 +274,53 @@ Chunks are **generated asynchronously** using multi-octave Perlin noise and cach
 
 ---
 
-## 📝 Status & Roadmap
+## 📝 Engine status
 
-**Current Version:** 1.0 — Deferred renderer, terrain streaming, physics foundation
+**v1.0 — playable and stable.** A real-scale solar system streams and renders end to end: you can
+orbit, fly in, land and walk, dig the ground, swim, and the planet stays consistent between what you
+*see* and what you *collide with*. Below is an honest account of what is done, what is opt-in and
+what is not there yet.
+
+### ✅ Working (on by default)
+
+| Area | State |
+|------|-------|
+| Rendering | Deferred + PBR + shadows + post-FX, all through the **RHI/PSO** layer (no raw GL in the renderers) |
+| Depth | **Reversed-Z + infinite far plane** — no z-fighting between terrain and water at any scale |
+| Terrain | GPU compute generation from the **eroded geological field** (tectonics → hydrology → erosion) |
+| Streaming | Async LOD recompute on a worker; GPU-derived vertex grids; persistently-mapped readback; worker pool for mesh assembly; pinned coarse pyramid (never evicted → no holes) |
+| Water | Ocean (Gerstner) + lakes/rivers + PBF particles; depth-based thickness and foam, reading the scene depth instead of re-deriving terrain |
+| Physics | Rigid bodies, planetary gravity, octree broad-phase, terrain raycast |
+| Tests | **61/61 green** (`haruka_tests`) — includes CPU↔GPU parity, LOD invariants (no holes / no overlaps), streaming settle, orbit closure |
+
+### 🧪 Opt-in (works, off by default)
+
+| Flag | What it does | Why it's off |
+|------|--------------|--------------|
+| `HARUKA_MESO=1` | ~5 km eroded tiles under the player: relief you actually *walk on* (+64 m over the macro field, ≤2 m seam at tile borders) | Suite is green with it, but it hasn't been through a long play session yet |
+| `HARUKA_DISKCACHE=1` | Persist generated chunks to disk (versioned, 4 GB cap, background writer) | With a populated cache the streaming doesn't settle in 3 tests — root cause not yet found |
+| `HARUKA_PROF_LOG=N` | Dump the profiler tree to stderr every N frames | Diagnostics only |
+
+### 🎯 Performance
+
+Frame cost is dominated by *genuine* work (GPU uploads inside their budget), not by waste. Measured
+in-game over ~1 500 frames while flying and turning:
+
+| Scope | p50 | p90 | p99 |
+|-------|-----|-----|-----|
+| `planetary.update` (LOD + streaming) | 5.6 ms | 10.6 ms | 18 ms |
+| `pump.harvest` (GPU readback) | 0 ms | 0.8 ms | 3.0 ms |
+| `scan.dispatch` (chunk dispatch) | 0 ms | 0.3 ms | 0.5 ms |
+
+Frames over 30 ms: **4 in 1 338**. The remaining p90 is the chunk-upload time-box (5 ms/frame by
+design — spending it is the point, it's how new terrain reaches the GPU without stalling).
+
+### 🚧 Next
+
+1. **Climate → biomes → props** — orographic rain shadow, Whittaker biomes, and vegetation/resources placed *by the field* (a forest where there's water and soil), not by uniform noise.
+2. **Materials** — height-blended splatmap so slope actually switches texture.
+3. **Vulkan backend** — the RHI/PSO seam is done; this is now a backend, not a rewrite. (Note: it would *not* fix a CPU-bound frame — the bottleneck is game logic, not draw submission.)
+4. **Parked:** caves and floating islands — deliberately postponed until the surface is credible.
 
 ---
 
@@ -290,4 +341,4 @@ own licenses.
 
 ---
 
-**Last Updated:** 15 June 2026 | **OpenGL 4.6** | **C++17/20**
+**Last Updated:** 14 July 2026 | **OpenGL 4.6 (RHI: Vulkan-ready)** | **C++17/20**

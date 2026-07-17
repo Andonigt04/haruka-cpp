@@ -32,6 +32,38 @@ namespace Haruka::RHI
     }
 
     static Device* g_device = nullptr;
-    Device* device()             { return g_device; }
-    void    setDevice(Device* d) { g_device = d; }
+    static bool    g_torndown = false;   // true tras setDevice(nullptr): no resucitar el device
+
+    Device* device()
+    {
+        // Red de seguridad: si nadie fijó un device pero hay un contexto GL activo, crea uno
+        // del RHI (backend OpenGL) adoptando ese contexto. Así los wrappers del renderer pueden
+        // asumir que device() NUNCA es null (dentro de un contexto GL) → sin ramas de GL-directo.
+        // El juego llama setDevice() en el arranque, así que esta rama casi nunca se usa.
+        //
+        // OJO con g_torndown: tras el cierre NO se puede resucitar un device. Los destructores de
+        // recursos (Mesh, Texture...) llaman a device()->destroy(); si se ejecutan DESPUÉS de que
+        // el device muera (cachés estáticas, miembros destruidos más tarde) y aquí creásemos uno
+        // nuevo, estaríamos tocando GL sobre un contexto agonizante. Devolver null es lo correcto:
+        // esos destructores ya comprueban `if (Device* dev = device())` y se vuelven no-op, y los
+        // objetos GL ya los liberó el destructor del device al barrer sus pools.
+        if (!g_device && !g_torndown && SDL_GL_GetCurrentContext())
+        {
+            // Fuga intencionada: NO se destruye al salir (el contexto GL ya no existiría →
+            // glDelete* sobre un contexto muerto = crash). El SO recupera la memoria al terminar.
+            g_device = new opengl::GLDevice(nullptr);
+            std::fprintf(stderr, "[RHI] device() sin setDevice previo → GLDevice del RHI creado bajo demanda.\n");
+        }
+        return g_device;
+    }
+
+    // setDevice(nullptr) = CIERRE: el global deja de apuntar al device y no se vuelve a crear
+    // ninguno. Llamarlo JUSTO ANTES de destruir el device — si no, g_device queda COLGANDO y el
+    // primer destructor de recurso que corra después llama un virtual sobre memoria liberada
+    // ("pure virtual method called").
+    void setDevice(Device* d)
+    {
+        g_device = d;
+        if (!d) g_torndown = true;
+    }
 }

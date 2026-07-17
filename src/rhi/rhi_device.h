@@ -38,6 +38,10 @@ namespace Haruka::RHI
              *  datos (p.ej. growPool del terreno). */
             virtual void               copyBuffer(BufferHandle src, BufferHandle dst,
                                                   size_t srcOffset, size_t dstOffset, size_t bytes) = 0;
+            /** @brief Puntero mapeado de un buffer BufferMemory::Readback (nullptr en el resto).
+             *  El mapeo es PERSISTENTE: se hace al crear y vive hasta destroy(). Leerlo solo es
+             *  válido tras esperar la fence del trabajo que lo escribió. */
+            virtual const void*        mappedData(BufferHandle) = 0;
             virtual TextureHandle      createTexture(const TextureDesc&) = 0;
             virtual SamplerHandle      createSampler(const SamplerDesc&) = 0;
             virtual PipelineHandle     createPipeline(const PipelineDesc&) = 0;

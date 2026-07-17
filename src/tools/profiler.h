@@ -9,9 +9,11 @@
  * planetary.update → lod.recompute …) instead of a flat list. Call
  * Profiler::get().newFrame() once per frame; read last frame's tree via nodes().
  *
- * Single-threaded by design (the render/update hot path). Negligible overhead:
- * one clock read on enter/exit + a small child lookup. Compile out with
- * HARUKA_NO_PROFILER.
+ * THREAD-LOCAL: cada hilo tiene su propio árbol (Profiler::get() es thread_local). No es
+ * thread-safe dentro de un hilo por diseño; el aislamiento por hilo evita la corrupción cuando
+ * varios hilos perfilan (p.ej. el worker del LOD, ver lodasync). El HUD lee el árbol del hilo de
+ * render (newFrame/nodes en el main). Negligible overhead: one clock read on enter/exit + a small
+ * child lookup. Compile out with HARUKA_NO_PROFILER.
  */
 #pragma once
 
@@ -24,7 +26,13 @@ namespace Haruka {
 
 class Profiler {
 public:
-    static Profiler& get() { static Profiler p; return p; }
+    // THREAD-LOCAL: cada hilo acumula su PROPIO árbol. El profiler no es thread-safe (una sola
+    // pila m_cur/m_stack), así que con el recompute del LOD en un hilo worker (ver lodasync) un
+    // singleton global se corrompía (enter/leave concurrentes → índices fuera de rango). Con
+    // thread_local el hilo de render lee su árbol (el HUD, vía newFrame/nodes en el main) y el
+    // worker el suyo (nunca leído, inofensivo). Es lo correcto además: el trabajo movido al worker
+    // NO debe aparecer en el árbol del frame del hilo de render.
+    static Profiler& get() { thread_local Profiler p; return p; }
 
     /** @brief Un nodo del árbol de perfilado (tiempo INCLUSIVO = self + hijos). */
     struct Node {

@@ -32,10 +32,18 @@ public:
     unsigned int getBrightTexture() { return brightTexture; }
     /** @brief Returns HDR framebuffer id. */
     unsigned int getFBO() { return hdrFBO; }
+
+    /** @brief Handle RHI de la textura de color — la ruta PSO (Context::bindTexture) necesita el
+     *  HANDLE, no el id GL. Los get*Texture()/getFBO() (ids nativos) son el crutch de la transición
+     *  y desaparecerán cuando todos los pases dibujen por el Context. */
+    Haruka::RHI::TextureHandle    getColorTextureHandle() const { return m_colorTex; }
+    /** @brief Handle RHI del pass (para Context::beginRenderPass). */
+    Haruka::RHI::RenderPassHandle getPass() const { return m_pass; }
 private:
     /** @brief Allocates framebuffer and attachments. */
     void setupFramebuffer();
     Haruka::RHI::RenderPassHandle m_pass;   // ruta RHI (los ids GL cacheados abajo)
+    Haruka::RHI::TextureHandle    m_colorTex;  // handle de la color attachment (ruta PSO)
     unsigned int hdrFBO;
     unsigned int colorTexture;
     unsigned int brightTexture;

@@ -14,7 +14,7 @@
 namespace Haruka::RHI::opengl
 {
     // --- Recursos GL internos. Un handle.id == índice+1 en la tabla correspondiente. ---
-    struct GLBuffer  { GLuint id = 0; GLenum target = GL_ARRAY_BUFFER; };
+    struct GLBuffer  { GLuint id = 0; GLenum target = GL_ARRAY_BUFFER; void* mapped = nullptr; };
     struct GLTexture { GLuint id = 0; };
     struct GLSampler { GLuint id = 0; };
 
@@ -23,9 +23,11 @@ namespace Haruka::RHI::opengl
         GLuint     program  = 0;
         GLuint     vao      = 0;              // 0 en pipelines de compute
         GLenum     topology = GL_TRIANGLES;
-        GLsizei    stride   = 0;
+        GLsizei    strides[8] = {0};   // stride por BINDING (máx 8 vertex buffers)
+        uint32_t   bindingCount = 0;
         DepthState depth;
         BlendState blend;
+        CullMode   cull = CullMode::None;
         bool       compute  = false;
     };
 
@@ -58,6 +60,7 @@ namespace Haruka::RHI::opengl
             uint32_t         nativeFramebuffer(RenderPassHandle) override;
             uint32_t         nativeProgram(PipelineHandle) override;
             uint32_t         nativeBuffer(BufferHandle) override;
+            const void*      mappedData(BufferHandle) override;
 
             void destroy(BufferHandle) override;
             void destroy(TextureHandle) override;
@@ -86,6 +89,22 @@ namespace Haruka::RHI::opengl
                 return &pool[id - 1];
             }
 
+            // Asigna un slot: reusa uno liberado (free-list) o crece el pool. handle.id = slot+1.
+            // Evita el crecimiento sin límite de los pools bajo churn de chunks (terreno).
+            template <class T>
+            static uint32_t alloc(std::vector<T>& pool, std::vector<uint32_t>& freeList, const T& v)
+            {
+                if (!freeList.empty()) { uint32_t s = freeList.back(); freeList.pop_back(); pool[s] = v; return s + 1; }
+                pool.push_back(v); return (uint32_t)pool.size();
+            }
+            template <class T>
+            static void release(std::vector<T>& pool, std::vector<uint32_t>& freeList, uint32_t id)
+            {
+                if (id == 0 || id > pool.size()) return;
+                pool[id - 1] = T{};              // limpia el slot
+                freeList.push_back(id - 1);      // disponible para reutilizar
+            }
+
             SDL_Window*                m_window      = nullptr;
             SDL_GLContext              m_glContext   = nullptr;
             bool                       m_ownsContext = false;   // false = adoptado de la Window
@@ -96,5 +115,6 @@ namespace Haruka::RHI::opengl
             std::vector<GLSampler>      m_samplers;
             std::vector<GLPipeline>     m_pipelines;
             std::vector<GLRenderTarget> m_targets;
+            std::vector<uint32_t>       m_freeBuffers, m_freeTextures;   // slots reciclables (churn de chunks)
     };
 }

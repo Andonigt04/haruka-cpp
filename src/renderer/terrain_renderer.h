@@ -6,26 +6,22 @@
 #include <vector>
 #include <mutex>
 #include <functional>
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include "rhi/rhi_types.h"
 #include "core/chunk_cache.h"
 #include "tools/math_types.h"
+
+namespace Haruka::RHI { class Device; }
 
 namespace Haruka {
 
     class TerrainRenderer {
     public:
         struct RenderMesh {
-            GLuint vao = 0;
-            GLuint vbo = 0;
-            GLuint mbo = 0;   // morph-target buffer (CDLOD)
-            GLuint nbo = 0;
-            GLuint nmbo = 0;  // morph-NORMAL buffer (CDLOD): normal del LOD padre
-            GLuint uvo = 0;   // UV buffer
-            GLuint ebo = 0;
-            // Handles RHI de los buffers propios (legacy). El ebo es compartido (m_sharedEBO).
-            Haruka::RHI::BufferHandle hVbo, hMbo, hNbo, hNmbo, hUvo;
+            // Buffers propios (chunk SIN slot de pool). Un buffer por STREAM: posición, morph de
+            // posición, normal empaquetada, morph de normal, uv → 5 bindings del PSO. El índice es
+            // el EBO COMPARTIDO por indexCount (hEbo: referencia, no se posee).
+            Haruka::RHI::BufferHandle hVbo, hMbo, hNbo, hNmbo, hUvo, hEbo;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
@@ -59,11 +55,37 @@ namespace Haruka {
         // Llamado por el StreamingSystem cuando el LOD decide ocultar un chunk
         void removeFromScene(const std::string& planetName, const PlanetChunkKey& key);
 
-        // Render completo (sin modelo por planeta)
-        void render(const Haruka::WorldPos& cameraPos);
-
         // Render de un planeta específico (el caller ya subió el UBO model matrix)
         void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
+
+        // --- Parámetros del PASE (antes uniforms sueltos del shader; glUniform no existe en
+        // Vulkan → viajan en el UBO TerrainParams, binding 7). Fijar antes de renderPlanet. ---
+        /** @brief Niebla atmosférica on/off (consola: `fog`). */
+        void setFog(bool on) { m_params.fogEnabled = on ? 1.0f : 0.0f; }
+        /** @brief Shadow map del sol + su matriz de luz. `map` vacío o !on = sin sombras. */
+        void setShadow(Haruka::RHI::TextureHandle map, const glm::mat4& lightSpace, bool on) {
+            m_shadowMap = map;
+            m_params.lightSpace = lightSpace;
+            m_params.shadowsOn  = (on && Haruka::RHI::valid(map)) ? 1.0f : 0.0f;
+        }
+        /** @brief Texturas de bioma (opcionales, por escena). Sin ellas → color procedural. */
+        struct BiomeTextures {
+            Haruka::RHI::TextureHandle sandAlbedo, sandNormal, grassAlbedo, landAlbedo, landNormal;
+        };
+        void setBiomeTextures(const BiomeTextures& t, bool has) {
+            m_biome = t;
+            m_params.hasTex = has ? 1.0f : 0.0f;
+        }
+
+        /** @brief (F5) Campos del planeta para el BIOMA per-píxel: elevación/caudal/lago/orogenia
+         *  (binding 9) y temperatura/humedad (binding 10), con su resolución de cara. Es el MISMO
+         *  campo que usan el compute del terreno y el agua → el bioma no puede contradecir al relieve.
+         *  Fijar por planeta antes de renderPlanet. */
+        void setPlanetFields(unsigned fieldSSBO, unsigned climateSSBO, int fieldRes) {
+            m_fieldSSBO = fieldSSBO;
+            m_climateSSBO = climateSSBO;
+            m_params.fieldRes = (float)fieldRes;
+        }
 
         /**
          * @brief Sets the camera-relative view-projection used for frustum culling.
@@ -232,9 +254,37 @@ namespace Haruka {
         std::unordered_map<uint64_t, RenderMesh> m_gpuMeshes;
         // EBO COMPARTIDO por nº de índices: los índices son topología fija por res → idénticos
         // en todos los chunks de ese res. Un EBO por indexCount, reusado → ahorra VRAM (no un
-        // EBO por chunk). Clave = indexCount; valor = handle GL. Se liberan en el destructor.
-        std::unordered_map<uint32_t, GLuint>     m_sharedEBO;
-        std::unordered_map<uint32_t, Haruka::RHI::BufferHandle> m_sharedEBOHandle;  // handles RHI paralelos
+        // EBO por chunk). Clave = indexCount. Se liberan en el destructor.
+        std::unordered_map<uint32_t, Haruka::RHI::BufferHandle> m_sharedEBO;
+
+        // --- PSO del terreno (planet.vert/frag) + estado de pase ---------------------------
+        // El pipeline hornea shaders + layout de 5 bindings (un buffer por stream) + estado
+        // (depth LEQUAL, cull back). Sustituye al glUseProgram + VAO + glEnable sueltos.
+        Haruka::RHI::PipelineHandle m_pso;
+        // UBO del pase (binding 7): lo que antes eran uniforms sueltos del fragment. Flags como
+        // FLOAT a propósito: el empaquetado std140 de int/bool difiere entre GL y Vulkan.
+        struct TerrainParams {
+            glm::mat4 lightSpace{1.0f};
+            float     fogEnabled = 0.0f;
+            float     shadowsOn  = 0.0f;
+            float     hasTex     = 0.0f;
+            // (F5) Lado de cara del cube-sphere del CAMPO/CLIMA (0 = sin campo → bioma de respaldo).
+            // Va como FLOAT: en std140, int/bool se empaquetan distinto en GL y Vulkan.
+            float     fieldRes   = 0.0f;
+        };
+        static_assert(sizeof(TerrainParams) == 80, "std140: mat4(64) + 4 floats(16)");
+        TerrainParams               m_params{};
+        Haruka::RHI::BufferHandle   m_uboParams;
+        Haruka::RHI::TextureHandle  m_shadowMap;
+        BiomeTextures               m_biome{};
+        // SSBO de UN elemento para los chunks SIN slot de pool: se dibujan con un drawIndexed
+        // suelto, donde gl_DrawID vale 0 → leen el item 0. Mismo shader que el camino indirecto,
+        // sin uniforms por-draw y SIN perder el fallback (borrar este camino dejaría huecos).
+        Haruka::RHI::BufferHandle   m_soloSSBO;
+        unsigned                    m_fieldSSBO = 0;   // (F5) campo del planeta (binding 9)
+        unsigned                    m_climateSSBO = 0; // (F5) clima del planeta (binding 10)
+        /** @brief Crea (una vez) el PSO, el UBO del pase y el SSBO de 1 elemento. */
+        void ensurePipeline(Haruka::RHI::Device* dev);
 
         // --- BATCHING: pool de geometría por vertexCount ---------------------------------
         // Todos los chunks del MISMO vertexCount comparten un VAO + 5 buffers (pos/morph/
@@ -245,20 +295,16 @@ namespace Haruka {
         // vez (ver getOrCreatePool): NO crece en runtime en el caso normal (1 topología). growPool
         // queda solo como VÁLVULA DE SEGURIDAD ruidosa (ver m_poolGrowCount) para transiciones raras.
         struct ChunkPool {
-            GLuint   vao = 0;
-            GLuint   posVBO = 0, morphVBO = 0, normVBO = 0, morphNormVBO = 0, uvVBO = 0;
-            GLuint   ebo = 0;            // EBO compartido por indexCount (reusa m_sharedEBO)
-            // Handles RHI de los 5 VBOs del pool + los buffers indirectos.
-            Haruka::RHI::BufferHandle hPos, hMorph, hNorm, hMorphNorm, hUv, hCmd, hSSBO;
+            // Los 5 streams del pool (un binding del PSO cada uno) + EBO compartido por indexCount.
+            Haruka::RHI::BufferHandle hPos, hMorph, hNorm, hMorphNorm, hUv, hEbo;
+            // MultiDrawIndirect: comandos + datos por-draw (se rellenan cada frame con los chunks
+            // visibles de ESTE pool → un solo drawIndexedIndirect por pool). Stream: se reasignan
+            // enteros cada frame (orphan) → el driver no espera a que la multidraw anterior suelte.
+            Haruka::RHI::BufferHandle hCmd, hSSBO;
             uint32_t vertexCount = 0;
             uint32_t indexCount  = 0;
             uint32_t capacity    = 0;   // nº de slots
             std::vector<uint32_t> freeSlots;
-            // MultiDrawIndirect: buffers de comandos + datos por-draw (se rellenan cada frame con
-            // los chunks visibles de ESTE pool → una sola glMultiDrawElementsIndirect por pool).
-            GLuint   cmdBuf   = 0;       // GL_DRAW_INDIRECT_BUFFER
-            GLuint   drawSSBO = 0;       // DrawItem[] (binding 7), 1 por comando (gl_DrawID)
-            uint32_t drawBufCap = 0;     // capacidad actual (en elementos) de cmdBuf/drawSSBO
         };
         // std430 (coincide con el SSBO de planet.vert) y comando indirecto estándar.
         struct GpuDrawItem { float offMorph[4]; int32_t mode[4]; };                 // 32 B
@@ -274,8 +320,8 @@ namespace Haruka {
         ChunkPool& getOrCreatePool(uint32_t vertexCount, uint32_t indexCount);
         /** @brief Duplica la capacidad del pool preservando los slots ya subidos (copia GPU→GPU). */
         void growPool(ChunkPool& p);
-        /** @brief (Re)configura los atributos del VAO del pool tras crear/recrear sus buffers. */
-        void setupPoolVAO(ChunkPool& p);
+        /** @brief EBO compartido para esa topología (lo crea la primera vez). */
+        Haruka::RHI::BufferHandle sharedEBO(uint32_t indexCount, const ChunkData* fallback);
 
         std::unordered_set<uint64_t>             m_stale;   // chunks a REEMPLAZAR en addToScene
         std::function<void(const PlanetChunkKey&)> m_onRemoved; // espejo del agua
@@ -328,15 +374,22 @@ namespace Haruka {
         // SOLO lee la residencia de nodos de la clausura (demostrado: canCover solo consulta nodos que
         // la recursión visita, y todos están en la clausura) → un cambio de residencia FUERA de la
         // clausura NO puede alterar el draw-set. Por eso m_residentVersion solo sube si el chunk que
-        // cambió está en m_closureAll → evita reconstruir por evicciones lejanas/purgas/cargas no
+        // cambió está en la clausura de algún planeta → evita reconstruir por evicciones lejanas/purgas/cargas no
         // deseadas al moverse. Se reconstruye cuando cambian las hojas (setDesiredLeaves, throttleado).
         std::unordered_map<std::string, std::unordered_set<uint64_t>> m_closureByPlanet;
-        std::unordered_set<uint64_t> m_closureAll; // unión de todas las clausuras (test de pertenencia O(1))
-        void rebuildClosureForPlanet(const std::string& planet); // clausura del planeta + m_closureAll (CALLER tiene lock)
-        void rebuildClosureAll();                  // recomputa m_closureAll = ∪ m_closureByPlanet (CALLER tiene lock)
+        void rebuildClosureForPlanet(const std::string& planet); // clausura del planeta (CALLER tiene lock)
+        /** @brief ¿Está el nodo en la clausura de ALGÚN planeta?
+         *  Antes había un set-unión (m_closureAll) que se RECONSTRUÍA entero (miles de hashes) en cada
+         *  setDesiredLeaves, o sea una vez por planeta y frame: 2.25 ms de los 4.4 de `lod.desired`.
+         *  Con un puñado de planetas, preguntar a cada clausura cuesta lo mismo que preguntar a la
+         *  unión — y no hay nada que reconstruir. */
+        bool inAnyClosure(uint64_t hash) const {
+            for (const auto& [p, s] : m_closureByPlanet) if (s.count(hash)) return true;
+            return false;
+        }
         void noteResidencyChange(uint64_t hash) {  // ++version SOLO si el nodo está en la clausura
             ++m_dbgResChanges;
-            if (m_closureAll.count(hash)) {
+            if (inAnyClosure(hash)) {
                 ++m_residentVersion; ++m_dbgResBumps;
                 // Ruta el nodo cambiado a su planeta (por body) → pendiente de splice. face(3)|lod(5)|
                 // x(23)|y(23)|body(10): el body está en los 10 bits altos (>>54).

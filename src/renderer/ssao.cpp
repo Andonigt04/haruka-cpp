@@ -50,16 +50,7 @@ void SSAO::setupSamples() {
         nd.initialData = &ssaoNoise[0];
         m_noise = dev->createTexture(nd);
         noiseTexture = dev->nativeTexture(m_noise);
-        return;
     }
-
-    glGenTextures(1, &noiseTexture);
-    glBindTexture(GL_TEXTURE_2D, noiseTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 }
 
 void SSAO::setupFramebuffer() {
@@ -73,23 +64,7 @@ void SSAO::setupFramebuffer() {
         m_pass          = dev->createRenderTarget(d);
         ssaoFBO         = dev->nativeFramebuffer(m_pass);
         ssaoColorBuffer = dev->nativeTexture(dev->getColorTexture(m_pass, 0));
-        return;
     }
-
-    glGenFramebuffers(1, &ssaoFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-    
-    glGenTextures(1, &ssaoColorBuffer);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssaoColorBuffer, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "SSAO framebuffer incomplete!");
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void SSAO::bindForWriting() {
@@ -109,11 +84,7 @@ void SSAO::bindForReading(unsigned int textureUnit) {
 SSAO::~SSAO() {
     if (RHI::valid(m_pass)) {
         if (RHI::Device* dev = RHI::device()) { dev->destroy(m_pass); dev->destroy(m_noise); }
-        return;
     }
-    glDeleteFramebuffers(1, &ssaoFBO);
-    glDeleteTextures(1, &ssaoColorBuffer);
-    glDeleteTextures(1, &noiseTexture);
 }
 
 }} // namespace Haruka::Renderer

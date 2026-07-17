@@ -84,6 +84,15 @@ namespace Haruka {
         float distToCoast = 0.0f;   ///< distancia con signo a la costa: <0 tierra adentro · 0 costa · >0 mar (km)
         float wetness     = 0.0f;   ///< [0,1] potencial hidrológico del continente (lagos/charcos)
         float climate     = 0.5f;   ///< [0,1] clima: 0 frío (polos/altura) · 1 cálido. De latitud + ruido.
+        // ============ F5 — CLIMA DERIVADO (del campo del planeta) ============
+        // NO son ruido: temperatura = latitud + altitud; humedad = advección desde el mar CON sombra
+        // orográfica (detrás de una cordillera llega seca). Es lo que decide el BIOMA — y por tanto
+        // dónde van los props: bosque donde llueve, no "a tal altitud".
+        float tempC       = 15.0f;  ///< temperatura media (°C)
+        float humidity    = 0.5f;   ///< [0,1] humedad
+        float flow        = 0.0f;   ///< [0,1] caudal normalizado (>0.45 = río; ver PlanetFields::kRiverFlow)
+        float orogeny     = 0.0f;   ///< intensidad orogénica (límite de placa CONVERGENTE): >0 = cordillera/falla.
+                                    ///< Las VETAS minerales siguen esto — dejan de aparecer "por altitud".
 
         // ============ Etapa 2 — relieve (ruido B, gateado por A) ============
         float elevKm = 0.0f;        ///< elevación FINAL sobre el nivel del mar (km). Mar<0, tierra>0. Render y colisión usan ESTE valor.

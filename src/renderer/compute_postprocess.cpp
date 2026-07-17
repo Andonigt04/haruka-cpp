@@ -9,58 +9,18 @@ namespace Haruka { namespace Renderer {
 ComputePostProcess::ComputePostProcess() {}
 
 ComputePostProcess::~ComputePostProcess() {
-    if (!m_pipes.empty()) {
-        if (RHI::Device* dev = RHI::device())
-            for (auto p : m_pipes) if (RHI::valid(p)) dev->destroy(p);
-        return;
-    }
-    if (bloomShader) glDeleteProgram(bloomShader);
-    if (toneMappingShader) glDeleteProgram(toneMappingShader);
-    if (colorGradingShader) glDeleteProgram(colorGradingShader);
+    if (RHI::Device* dev = RHI::device())
+        for (auto p : m_pipes) if (RHI::valid(p)) dev->destroy(p);
 }
 
 GLuint ComputePostProcess::compileComputeShader(const std::string& source) {
-    // Ruta RHI: pipeline de compute desde source inline. Guarda el handle para liberar.
-    if (RHI::Device* dev = RHI::device()) {
-        RHI::PipelineDesc d;
-        d.computeSource = source.c_str();
-        RHI::PipelineHandle p = dev->createPipeline(d);
-        m_pipes.push_back(p);
-        return dev->nativeProgram(p);
-    }
-
-    GLuint shader = glCreateShader(GL_COMPUTE_SHADER);
-    const char* src = source.c_str();
-    glShaderSource(shader, 1, &src, nullptr);
-    glCompileShader(shader);
-
-    int success;
-    char infoLog[512];
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        glGetShaderInfoLog(shader, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader compile error: ") + infoLog);
-        glDeleteShader(shader);
-        return 0;
-    }
-
-    GLuint program = glCreateProgram();
-    glAttachShader(program, shader);
-    glLinkProgram(program);
-
-    glGetProgramiv(program, GL_LINK_STATUS, &success);
-    if (!success) {
-        glGetProgramInfoLog(program, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader link error: ") + infoLog);
-        glDeleteProgram(program);
-        glDeleteShader(shader);
-        return 0;
-    }
-
-    glDeleteShader(shader);
-    return program;
+    // Pipeline de compute desde source inline. Guarda el handle para liberar.
+    RHI::Device* dev = RHI::device();
+    RHI::PipelineDesc d;
+    d.computeSource = source.c_str();
+    RHI::PipelineHandle p = dev->createPipeline(d);
+    m_pipes.push_back(p);
+    return dev->nativeProgram(p);
 }
 
 void ComputePostProcess::init(int width, int height) {

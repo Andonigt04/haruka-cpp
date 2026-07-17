@@ -18,19 +18,69 @@ layout(location = 2) in vec2 TexCoord;
 // aquí). #define para no tocar cada uso de u_terrainMode del cuerpo.
 layout(location = 3) flat in int vMode;
 #define u_terrainMode vMode
-layout(location = 15) uniform int u_fogEnabled; // 1 = niebla on (config consola: fog)
 
-// Texturas de bioma (Fase 4A). u_hasTex=0 → color procedural (fallback).
-layout(location = 21) uniform sampler2D u_sandAlbedo;
-layout(location = 22) uniform sampler2D u_sandNormal;
-layout(location = 23) uniform int        u_hasTex;
-layout(location = 24) uniform sampler2D u_grassAlbedo;
-layout(location = 25) uniform sampler2D u_landAlbedo;
-layout(location = 26) uniform sampler2D u_landNormal;
-// Sombras del sol (depth map desde la luz). u_lightSpace ocupa locs 30..33.
-layout(location = 30) uniform mat4      u_lightSpace;
-layout(location = 34) uniform sampler2D u_shadowMap;
-layout(location = 35) uniform int       u_shadowsOn;
+// Parámetros del PASE de terreno (antes uniforms sueltos: fog, sombras, u_lightSpace, u_hasTex).
+// glUniform no existe en Vulkan → van en un UBO. Los FLAGS son float a propósito: el empaquetado
+// std140 de int/bool difiere entre GL y Vulkan.
+// Binding 8, NO 7: el 7 lo usa el SSBO del DrawItem. En GL son espacios de binding distintos y no
+// chocarían, pero en un descriptor set de Vulkan sí → no dejamos la mina puesta.
+layout(std140, binding = 8) uniform TerrainParams {
+    mat4  u_lightSpace;   // sombras del sol (matriz luz)
+    float u_fogEnabled;   // >0.5 = niebla on (consola: fog)
+    float u_shadowsOn;    // >0.5 = hay shadow map bindeado
+    float u_hasTex;       // >0.5 = texturas de bioma disponibles (si no, color procedural)
+    float u_fieldRes;     // (F5) lado de cara del cube-sphere del campo/clima (0 = sin campo)
+};
+
+// (F5) EL CAMPO DEL PLANETA — el MISMO que generó el relieve y que usa el agua.
+//  · binding 9  = (elevKm, caudal, cotaLago, orogenia)
+//  · binding 10 = (tempC, humedad, -, -)
+// El bioma se decide con ESTO, no con la altura: así no puede contradecir al terreno (un desierto
+// a sotavento de la cordillera sale porque el campo dice que ahí no llueve, no porque esté a tal cota).
+layout(std430, binding = 9)  readonly buffer PlanetField   { vec4 pFieldCells[]; };
+layout(std430, binding = 10) readonly buffer PlanetClimate { vec4 pClimateCells[]; };
+
+void pDirToFaceUV(vec3 d, out int face, out float u, out float v) {
+    vec3 a = abs(d);
+    if (a.x >= a.y && a.x >= a.z) {
+        if (d.x > 0.0) { face = 0; u = -d.z / a.x; v = -d.y / a.x; }
+        else           { face = 1; u =  d.z / a.x; v = -d.y / a.x; }
+    } else if (a.y >= a.z) {
+        if (d.y > 0.0) { face = 2; u =  d.x / a.y; v =  d.z / a.y; }
+        else           { face = 3; u =  d.x / a.y; v = -d.z / a.y; }
+    } else {
+        if (d.z > 0.0) { face = 4; u =  d.x / a.z; v = -d.y / a.z; }
+        else           { face = 5; u = -d.x / a.z; v = -d.y / a.z; }
+    }
+}
+// Devuelve (caudal, tempC, humedad). Bilineal, igual que el sampler de CPU → mismo bioma en ambos.
+vec3 pSampleClimate(vec3 dir) {
+    int R = int(u_fieldRes);
+    if (R <= 0) return vec3(0.0, 15.0, 0.5);      // sin campo: templado y medio húmedo (respaldo)
+    vec3 d = normalize(dir);
+    int f; float u, v;
+    pDirToFaceUV(d, f, u, v);
+    float fx = clamp((u * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    float fy = clamp((v * 0.5 + 0.5) * float(R) - 0.5, 0.0, float(R) - 1.001);
+    int i0 = int(fx), j0 = int(fy);
+    int i1 = min(i0 + 1, R - 1), j1 = min(j0 + 1, R - 1);
+    float tx = fx - float(i0), ty = fy - float(j0);
+    int base = f * R * R;
+    vec4 fl0 = mix(pFieldCells[base + j0 * R + i0], pFieldCells[base + j0 * R + i1], tx);
+    vec4 fl1 = mix(pFieldCells[base + j1 * R + i0], pFieldCells[base + j1 * R + i1], tx);
+    vec4 cl0 = mix(pClimateCells[base + j0 * R + i0], pClimateCells[base + j0 * R + i1], tx);
+    vec4 cl1 = mix(pClimateCells[base + j1 * R + i0], pClimateCells[base + j1 * R + i1], tx);
+    return vec3(mix(fl0, fl1, ty).y, mix(cl0, cl1, ty).x, mix(cl0, cl1, ty).y);
+}
+
+// Texturas de bioma (Fase 4A). Sin ellas (u_hasTex=0) → color procedural (fallback).
+// El binding = la unidad de textura que ata el RHI (bindTexture) → sin glUniform1i de sampler.
+layout(binding = 0) uniform sampler2D u_sandAlbedo;
+layout(binding = 1) uniform sampler2D u_sandNormal;
+layout(binding = 2) uniform sampler2D u_grassAlbedo;
+layout(binding = 3) uniform sampler2D u_landAlbedo;
+layout(binding = 4) uniform sampler2D u_landNormal;
+layout(binding = 5) uniform sampler2D u_shadowMap;
 
 // Only the fields actually used from the per-frame UBO.
 // Must preserve std140 offsets: view(0), projection(64),
@@ -120,25 +170,79 @@ const vec3 BIOME_DRY   = vec3(0.40, 0.35, 0.21); // hierba seca / tierra parda
 const vec3 BIOME_ROCK  = vec3(0.33, 0.29, 0.25); // roca parda
 const vec3 BIOME_SNOW  = vec3(0.74, 0.74, 0.71); // nieve sucia (no blanco puro)
 
-// Color de superficie por altura (m s.n.m.), pendiente (0 llano…1 vertical) y
-// clima (0 frío/polos…1 cálido/ecuador). La TIERRA es verde por defecto; roca y
-// nieve solo aparecen MUY alto o en laderas empinadas → no un planeta gris.
-vec3 biomeColor(float altitude, float slope, float climate, vec3 wp, float camDist) {
-    // wp = posición MUNDO (relativa al centro del planeta) → el moteado de bioma queda ANCLADO al
-    // terreno (no "nada" al moverse). camDist aparte para el fundido lejano.
-    // Rompe las bandas de contorno: ruido grande sobre la altura usada en los biomas.
-    float aN = altitude + (noised(wp * 0.006).x - 0.5) * 700.0;
-    float coldness = clamp((1.0 - climate) * 0.6 + altitude / 6000.0, 0.0, 1.0);
-    vec3 c = BIOME_GRASS;                                            // base = TIERRA verde
-    c = mix(c, BIOME_DRY,  smoothstep(1100.0, 2600.0, aN));          // hierba seca en altura
-    c = mix(c, BIOME_ROCK, smoothstep(2800.0, 4400.0, aN));          // roca solo muy alto
-    c = mix(c, BIOME_ROCK, smoothstep(0.70,   0.90,   slope));       // roca SOLO en laderas muy empinadas
-    float snow = smoothstep(0.74, 0.95, coldness) * (1.0 - smoothstep(0.86, 0.97, slope));
-    c = mix(c, BIOME_SNOW, snow);                                    // nieve solo muy fría/alta
-    // Detalle fino de brillo SOLO cerca (gate por distancia a cámara, no por length(wp) que ahora
-    // es planet-scale y siempre enorme).
+// Paleta por BIOMA (Whittaker). No son "colores por altura": cada uno es un ecosistema.
+const vec3 BIOME_DESERT = vec3(0.62, 0.53, 0.35); // desierto cálido (arena/gravilla)
+const vec3 BIOME_STEPPE = vec3(0.47, 0.44, 0.26); // estepa / sabana seca
+const vec3 BIOME_FOREST = vec3(0.18, 0.30, 0.13); // bosque templado
+const vec3 BIOME_JUNGLE = vec3(0.13, 0.31, 0.11); // selva (cálido + muy húmedo)
+const vec3 BIOME_TAIGA  = vec3(0.20, 0.28, 0.21); // conífera fría
+const vec3 BIOME_TUNDRA = vec3(0.42, 0.42, 0.34); // tundra (musgo/roca)
+const vec3 BIOME_RIPAR  = vec3(0.22, 0.38, 0.15); // ribera: verde intenso junto al cauce
+
+// BIOMA = f(temperatura, humedad, pendiente, caudal) — la tabla de Whittaker.
+//
+// Esto SUSTITUYE al color por bandas de altura. La diferencia no es estética: la altura no sabe si
+// llueve, así que producía el MISMO paisaje a ambos lados de una cordillera. Ahora el desierto sale
+// donde el aire llega seco (sombra orográfica), el bosque donde llueve, y la ribera acompaña al río
+// → **el río se ve porque la vegetación lo delata**, que es como se lee un paisaje de verdad.
+vec3 biomeColor(float tempC, float humidity, float slope, float flow, float altitude, vec3 wp, float camDist) {
+    // Ruido de borde: rompe la frontera limpia entre biomas (las transiciones reales son sucias).
+    float n = (noised(wp * 0.004).x - 0.5);
+    float T = tempC    + n * 6.0;      // ±3 °C
+    float H = clamp(humidity + n * 0.12, 0.0, 1.0);
+
+    // Eje húmedo: desierto → estepa → bosque → selva (la selva solo si además hace calor).
+    vec3 c = BIOME_DESERT;
+    c = mix(c, BIOME_STEPPE, smoothstep(0.18, 0.38, H));
+    c = mix(c, BIOME_FOREST, smoothstep(0.40, 0.60, H));
+    c = mix(c, BIOME_JUNGLE, smoothstep(0.72, 0.92, H) * smoothstep(18.0, 24.0, T));
+
+    // Eje frío: conífera y, más al norte/arriba, tundra. La temperatura YA lleva dentro la altitud
+    // (−6.5 °C/km en el campo) → la montaña se enfría sola, sin una regla aparte por cota.
+    c = mix(c, BIOME_TAIGA,  smoothstep(8.0, 2.0, T) * smoothstep(0.25, 0.5, H));
+    c = mix(c, BIOME_TUNDRA, smoothstep(2.0, -6.0, T));
+
+    // RIBERA: el cauce y su entorno verdean aunque el bioma sea seco (el agua está AHÍ).
+    c = mix(c, BIOME_RIPAR, smoothstep(0.30, 0.55, flow) * (1.0 - smoothstep(0.35, 0.6, slope)));
+
+    // ROCA por PENDIENTE: donde supera el ángulo de reposo no se sostiene el suelo (lo dice la
+    // erosión térmica del campo) → pared desnuda, en cualquier bioma.
+    c = mix(c, BIOME_ROCK, smoothstep(0.55, 0.80, slope));
+
+    // NIEVE por temperatura REAL, y menos en pendiente fuerte (no se acumula en la pared).
+    float snow = smoothstep(-1.0, -8.0, T) * (1.0 - smoothstep(0.55, 0.85, slope));
+    c = mix(c, BIOME_SNOW, snow);
+
     float v = noised(wp * 0.4).x * (1.0 - smoothstep(2500.0, 9000.0, camDist));
     return c * (0.94 + 0.10 * v);
+}
+
+// (F7) MEZCLA POR ALTURA (height-based blending) — el estándar del sector para splatmapping.
+//
+// Un `mix(a, b, t)` lineal FUNDE los dos materiales: a mitad de camino no ves ni tierra ni hierba,
+// ves el promedio (una papilla parda). Lo que hace la naturaleza es otra cosa: la hierba ocupa
+// primero los HUECOS y la tierra sigue asomando entre las matas. Eso se consigue comparando la
+// ALTURA de cada capa y quedándose con la que sobresale:
+//
+//   peso_i = altura_i + t_i ;  gana la mayor, con una banda estrecha de transición.
+//
+// LA ALTURA SALE DE LA PROPIA TEXTURA (su luminancia), no de un ruido.
+//
+// ⚠️ Usar ruido aquí era un error de precisión, y se veía: la altura se muestreaba con `relPos`
+// (posición relativa al CENTRO DEL PLANETA, ~6.4e6 m) reconstruida en float32 → a esa magnitud el
+// float solo resuelve ~0.5 m, así que un ruido de frecuencia 0.35 salía CUANTIZADO = sal y pimienta
+// por todo el terreno. Además era innecesario: los guijarros de la tierra y las matas de la hierba
+// YA están en el albedo — sus zonas oscuras son los huecos y las claras lo que sobresale.
+vec3 heightBlend(vec3 colA, vec3 colB, float t) {
+    float hA = dot(colA, vec3(0.299, 0.587, 0.114));  // "relieve" de la tierra (sus guijarros)
+    float hB = dot(colB, vec3(0.299, 0.587, 0.114));  // el de la hierba (sus matas)
+    const float kBand = 0.16;                     // ancho de la transición (0 = corte duro)
+    float wA = hA * (1.0 - t);
+    float wB = hB * t;
+    float m  = max(wA, wB) - kBand;
+    wA = max(wA - m, 0.0);
+    wB = max(wB - m, 0.0);
+    return (colA * wA + colB * wB) / max(wA + wB, 1e-5);
 }
 
 // Triplanar: muestrea una textura tileable proyectando desde los 3 ejes del
@@ -163,7 +267,14 @@ void main() {
     vec3  up       = normalize(relPos);                    // radial (planeta sin rotación)
     vec3  Ngeo     = normalize(Normal);                    // normal geométrica (para pendiente)
     float slope    = clamp(1.0 - dot(Ngeo, up), 0.0, 1.0); // 0 llano … 1 vertical
-    float climate  = clamp(1.0 - abs(up.y), 0.0, 1.0);     // 0 polos … 1 ecuador
+
+    // (F5) CLIMA REAL, del campo del planeta: temperatura (latitud + altitud) y humedad (traída por
+    // el viento desde el mar, descargada al subir las montañas → sombra orográfica). Antes esto era
+    // `1 - |latitud|`, o sea: el mismo paisaje a los dos lados de una cordillera.
+    vec3  clim     = pSampleClimate(up);
+    float flow     = clim.x;       // caudal normalizado [0,1] (>0.45 = río)
+    float tempC    = clim.y;       // °C
+    float humidity = clim.z;       // [0,1]
 
     // Factor de ORILLA per-PÍXEL: arena en la costa por ALTITUD (suave, continua) + ruido que
     // ROMPE la línea → costa ONDULADA. Antes la arena se gateaba con TexCoord.x (shoreFactor
@@ -186,28 +297,23 @@ void main() {
         baseColor = vec3(g, g, g * 1.03);
     } else if (u_terrainMode == 1) {
         baseColor = vec3(0.30, 0.30, 0.38);                // modo manual: tinte neutro
-    } else if (u_hasTex == 1) {
-        // Bioma TEXTURIZADO (triplanar): hierba → tierra seca → roca → nieve,
-        // + arena en TODA orilla (uv.x = shoreFactor del generador).
-        float aN = altitude + (noised(relPos * 0.006).x - 0.5) * 700.0; // rompe bandas (mundo-estable)
-        float coldness = clamp((1.0 - climate) * 0.6 + altitude / 6000.0, 0.0, 1.0);
-        vec3 col = triplanarAlbedo(u_grassAlbedo, FragPos, Ngeo, 0.5);                 // hierba (base)
-        col = mix(col, triplanarAlbedo(u_landAlbedo, FragPos, Ngeo, 0.5),
-                  smoothstep(900.0, 2400.0, aN));                                       // tierra seca en altura
-        col = mix(col, BIOME_ROCK, smoothstep(0.55, 0.82, slope));                     // roca en laderas
-        col = mix(col, BIOME_ROCK, smoothstep(2800.0, 4400.0, aN));                    // roca muy alto
-        float snow = smoothstep(0.74, 0.95, coldness) * (1.0 - smoothstep(0.86, 0.97, slope));
-        col = mix(col, BIOME_SNOW, snow);                                              // nieve
-        float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));               // arena en orillas
-        col = mix(col, triplanarAlbedo(u_sandAlbedo, FragPos, Ngeo, 0.7), sandW);
-        // A DISTANCIA las texturas triplanar (coords relativas a cámara, enormes) ALIASEAN →
-        // moteado (y se cuela por la costa del océano lejano). Fundimos al color de bioma
-        // PLANO (sin textura) lejos → terreno liso a distancia, detalle solo cerca.
-        float farFade = smoothstep(2500.0, 9000.0, length(FragPos));
-        col = mix(col, biomeColor(altitude, slope, climate, relPos, length(FragPos)), farFade);
-        baseColor = col;
+    } else if (u_hasTex > 0.5) {
+        // ⚠️ El bioma manda el COLOR; la textura, solo el GRANO. Antes este camino IGNORABA el bioma
+        // Whittaker: mezclaba tierra/hierba/roca/nieve genéricas, así que un desierto (sin hierba, sin
+        // roca, sin nieve) quedaba como la textura de tierra pura = GRIS. Todo el trabajo de biomas
+        // (desierto dorado, estepa, taiga, selva, ribera) era invisible en cuanto había texturas.
+        // biomeColor() ya resuelve el bioma COMPLETO (incluidas roca por pendiente y nieve por temp),
+        // así que se usa como color y la textura solo aporta variación de brillo de cerca.
+        vec3 biome = biomeColor(tempC, humidity, slope, flow, altitude, relPos, length(FragPos));
+        vec3 tex   = triplanarAlbedo(u_landAlbedo, FragPos, Ngeo, 0.5);   // grano de superficie
+        float grain = dot(tex, vec3(0.333)) / 0.45;                       // ~1.0 (brillo de la textura)
+        float near  = 1.0 - smoothstep(2500.0, 9000.0, length(FragPos));  // detalle solo cerca
+        // Arena de orilla: única textura que SÍ pinta color propio (la playa no es "bioma").
+        float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
+        vec3 col    = biome * mix(1.0, clamp(grain, 0.75, 1.25), near);
+        baseColor   = mix(col, triplanarAlbedo(u_sandAlbedo, FragPos, Ngeo, 0.7), sandW);
     } else {
-        baseColor = biomeColor(altitude, slope, climate, relPos, length(FragPos)); // procedural (mundo-estable)
+        baseColor = biomeColor(tempC, humidity, slope, flow, altitude, relPos, length(FragPos)); // por CLIMA
         float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
         baseColor = mix(baseColor, BIOME_SAND, sandW);
     }
@@ -219,13 +325,17 @@ void main() {
     vec3 H = normalize(L + V);
 
     float ndl  = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), 32.0);
+    // SIN ESPECULAR: el terreno es MATE. El `pow(dot(N,H),32)*0.12` daba un borde brillante que no
+    // existe en roca/tierra/hierba y delataba las facetas de la malla. (Lo pidió el usuario.)
 
     // Sombra del sol (PCF 3×3) — los props proyectan en u_shadowMap.
     float shadow = 0.0;
-    if (u_shadowsOn != 0) {
+    if (u_shadowsOn > 0.5) {
         vec4 lp = u_lightSpace * vec4(FragPos, 1.0);
-        vec3 pc = lp.xyz / lp.w * 0.5 + 0.5;     // a [0,1]
+        // Con glClipControl(ZERO_TO_ONE) la Z de clip YA sale en [0,1] (solo x/y van en [-1,1]).
+        // Antes se remapeaba xyz*0.5+0.5 asumiendo [-1,1]: eso ahora hundiría la z y el terreno
+        // saldría todo sombreado. El shadow map NO es reversed-Z (usa ortho estándar).
+        vec3 pc = vec3(lp.xy / lp.w * 0.5 + 0.5, lp.z / lp.w);
         if (pc.z <= 1.0 && pc.x > 0.0 && pc.x < 1.0 && pc.y > 0.0 && pc.y < 1.0) {
             float bias = max(0.0025 * (1.0 - ndl), 0.0008);
             vec2 texel = 1.0 / vec2(textureSize(u_shadowMap, 0));
@@ -244,14 +354,13 @@ void main() {
 
     vec3 color = ambientStrength * baseColor
                + 0.7 * ndl * sunLightColor * baseColor * (1.0 - 0.85 * shadow)
-               + sunLightColor * 0.12 * spec * (1.0 - shadow)
                + moonLightColor * moonIntensity * ndlMoon * baseColor;
 
     // Niebla atmosférica: da profundidad y un horizonte claro, y disimula el LOD
     // lejano. Color grisáceo (dieselpunk sombrío). FOG_DENSITY = qué tan pronto cierra.
     const vec3  FOG_COLOR   = vec3(0.60, 0.63, 0.68);
     const float FOG_DENSITY = 0.00035; // conocido-bueno: oculta el horizonte de bajo LOD (tiras)
-    float fog = (u_fogEnabled != 0) ? (1.0 - exp(-length(FragPos) * FOG_DENSITY)) : 0.0;
+    float fog = (u_fogEnabled > 0.5) ? (1.0 - exp(-length(FragPos) * FOG_DENSITY)) : 0.0;
     color = mix(color, FOG_COLOR, fog);
 
     if (enableHDR != 0) {

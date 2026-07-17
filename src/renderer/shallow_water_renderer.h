@@ -32,9 +32,11 @@ public:
 
 private:
     fluid::ShallowWaterSim* m_sim = nullptr;
-    std::unique_ptr<Shader> m_shader;
-    GLuint m_vao = 0, m_vbo = 0, m_ebo = 0;
-    Haruka::RHI::BufferHandle m_vboH, m_eboH;   // buffers Stream (RHI); VAO sigue GL
+    // Ruta PSO: el pipeline hornea shader + layout + estado (blend alfa, SIN culling — el agua es
+    // a dos caras). Ya no hay Shader ni VAO propios.
+    Haruka::RHI::PipelineHandle m_pso;
+    Haruka::RHI::BufferHandle   m_vboH, m_eboH;   // buffers Stream
+    Haruka::RHI::BufferHandle   m_uboH;           // SoftbodyParams (binding 6)
     std::vector<float>        m_verts;   // pos(3)+normal(3)
     std::vector<unsigned int> m_indices;
     bool m_init = false;

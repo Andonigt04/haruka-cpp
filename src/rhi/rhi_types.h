@@ -38,14 +38,30 @@ namespace Haruka::RHI
         D24,       // depth 24 (sin stencil)
         D24S8,     // depth 24 + stencil 8
         D32F,      // depth 32 float
+        // Formato de VÉRTICE empaquetado: normal en 4 B (10/10/10/2 con signo, normalizado).
+        // GL: GL_INT_2_10_10_10_REV · Vulkan: VK_FORMAT_A2B10G10R10_SNORM_PACK32.
+        // AÑADIR SIEMPRE AL FINAL: insertar en medio desplaza los valores numéricos de los que
+        // vienen detrás — inocuo si TODO se recompila, pero es una bomba de relojería gratuita.
+        RGB10A2_SNORM,
     };
 
     enum class PrimitiveTopology { Triangles, TriangleStrip, Lines, LineStrip, Points };
-    enum class BufferUsage { Vertex, Index, Uniform, Storage };
+    // Modo de mezcla. Alpha = transparencia normal (src·a + dst·(1-a)). Additive = emisivo/radiante
+    // (src·a + dst): partículas, fogonazos. Mapea a VkPipelineColorBlendAttachmentState.
+    enum class BlendMode { Alpha, Additive };
+    // Culling de caras. None = a dos caras (agua, vegetación). Mapea a
+    // VkPipelineRasterizationStateCreateInfo.cullMode.
+    enum class CullMode { None, Back, Front };
+    // Indirect = buffer de comandos de dibujo leídos por la GPU (multi-draw indirect). En Vulkan
+    // necesita VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, así que debe declararse explícitamente.
+    enum class BufferUsage { Vertex, Index, Uniform, Storage, Indirect };
     // Static  = inmutable, subida en creación (geometría fija).
     // Dynamic = inmutable pero actualizable por subdata (tamaño fijo, p.ej. UBO/instancia).
     // Stream  = MUTABLE y reasignable (glBufferData): mallas dinámicas que cambian de tamaño cada frame.
-    enum class BufferMemory { Static, Dynamic, Stream };
+    // Readback: la GPU escribe, la CPU LEE. Se mapea PERSISTENTE al crearlo, así leerlo es un
+    // memcpy y no una llamada al driver (glGetBufferSubData sincroniza y cuesta ~100 µs cada una).
+    // En Vulkan es literalmente lo mismo: memoria HOST_VISIBLE|HOST_CACHED mapeada una vez.
+    enum class BufferMemory { Static, Dynamic, Stream, Readback };
     enum class ShaderStage { Vertex, Fragment, Geometry, Compute };
     enum class CompareOp { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always };
     enum class Filter { Nearest, Linear };

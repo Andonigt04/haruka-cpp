@@ -36,6 +36,10 @@ public:
     void bindForReading(unsigned int textureUnit = 2);
     /** @brief Restores default framebuffer binding. */
     void unbind();
+
+    /** @brief Render target del RHI (su textura de profundidad es el shadow map). Para los pases
+     *  que lo MUESTREAN por el RHI (terreno): Device::getDepthTexture(pass()). */
+    Haruka::RHI::RenderPassHandle pass() const { return m_pass; }
 private:
     /** @brief Allocates FBO/texture objects. */
     void setupFramebuffer();

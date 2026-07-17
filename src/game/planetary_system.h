@@ -4,7 +4,13 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <functional>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <deque>
 #include <nlohmann/json.hpp>
 #include "core/modules.h"
 #include "tools/math_types.h"
@@ -12,6 +18,8 @@
 #include "core/terrain/terrain_sample.h"     // WorldGenParams (terreno)
 #include "tools/planetary_types.h"           // PlanetChunkKey (descarga diferida)
 #include "core/lod_system.h"                  // LODUpdate (cache del último set)
+#include "rhi/rhi_types.h"                    // TextureHandle (shadow map del pase de terreno)
+#include "renderer/water_renderer.h"          // WaterRenderer::PassParams (params del pase de agua)
 
 namespace Haruka { namespace Renderer { class Texture; } } using Haruka::Renderer::Texture;
 
@@ -20,7 +28,6 @@ namespace Haruka {
 class ChunkCache;
 class TerrainGenerator;
 class TerrainRenderer;
-class WaterRenderer;
 class FloatingIslandRenderer;
 class TerrainStreamingSystem;
 class LODSystem;
@@ -77,9 +84,46 @@ public:
      *  genere su sistema de recursos. center/radius/seed/relief. false si no hay. Los
      *  recursos (árboles/rocas/minerales) son del juego, no del motor. */
     bool getActivePlanet(glm::dvec3& center, double& radius, uint32_t& seed, float& reliefStrength) const;
+    /** @brief Nombre del planeta ACTIVO (el hogar; ver getActivePlanet). Vacío si no hay. */
+    std::string getActivePlanetName() const;
+
+    /**
+     * @brief (F10) Altura DE LA MALLA que se está dibujando, en `dir` (planet-local, unitaria).
+     *
+     * ⚠️ Esta es LA fuente de verdad de la altura para todo lo que toca el suelo (colisión, props,
+     * colocación). Antes cada consumidor RE-DERIVABA la altura con la fórmula analítica de CPU — y
+     * esa fórmula y la malla NO siempre coinciden (la malla solo aplica el meso en chunks finos; un
+     * chunk grueso, con vértices cada 200 m, no puede representar relieve de 40 m). Resultado: props
+     * flotando hasta 60 m sobre el suelo que ves. Preguntarle a la malla elimina la discrepancia por
+     * construcción: la altura que devuelve es, literalmente, la que se dibuja.
+     *
+     * Busca de FINO a GRUESO el primer chunk RESIDENTE que cubre `dir` (que es, por construcción, el
+     * que el renderer dibuja ahí) y lo interpola bilinealmente.
+     *
+     * @return false si no hay ningún chunk residente que cubra el punto (lejos del jugador: spawn,
+     *         IA, consultas planetarias). Ahí NO hay malla con la que chocar → el llamador usa el
+     *         sampler analítico, que sigue siendo válido para eso.
+     */
+    bool meshHeightKmAt(const std::string& planetName, const glm::vec3& dir, float& outElevKm) const;
 
     /** @brief Sets camera-relative VP for frustum culling terrain+water chunks. */
     void setTerrainCullMatrix(const glm::mat4& camRelViewProj);
+
+    /** @brief Parámetros del pase de agua (oleaje + costa per-píxel) → UBO WaterParams. */
+    void setWaterPassParams(const WaterRenderer::PassParams& p);
+
+    /** @brief Cota del AGUA (m sobre el radio del planeta) en un punto, o `kNoWater` si aquí NO hay
+     *  agua. (F3) Sale del campo hidrológico: océano donde el terreno PROCEDURAL está bajo el mar, y
+     *  lago donde la cuenca no drena. **Un agujero que cavas tierra adentro NO tiene agua**: no está
+     *  conectado al mar. Antes la física preguntaba "¿estoy bajo el nivel del mar?" y cualquier hoyo
+     *  profundo se convertía en océano (bug del "mar bajo tierra"). */
+    static constexpr double kNoWater = -1e30;
+    double sampleWaterLevel(const glm::dvec3& worldPos) const;
+
+    /** @brief Niebla atmosférica del terreno on/off (consola: `fog`). */
+    void setTerrainFog(bool on);
+    /** @brief Shadow map del sol + matriz de luz para el terreno (vacío/off = sin sombras). */
+    void setTerrainShadow(Haruka::RHI::TextureHandle map, const glm::mat4& lightSpace, bool on);
 
     int getGPUWaterChunkCount() const;
 
@@ -132,6 +176,18 @@ public:
     void   setLODBudget(double budgetMs, double minPx, double maxPx);
     void   setAdaptiveLOD(bool on) { m_adaptiveLOD = on; }
     bool   getAdaptiveLOD() const  { return m_adaptiveLOD; }
+
+    /** @brief Ejecuta el recompute del LOD (updatePlanetLOD ~ el pico de CPU del frame:
+     *  recursiveProcess + balanceo 2:1) en un HILO WORKER en vez de en el hilo de render.
+     *  El worker es puro CPU (el LOD no hace llamadas GL) y trabaja sobre una instancia
+     *  propia de LODSystem + snapshots (residencia, cámara, config) → CERO estado compartido,
+     *  sin locks en el hot path. El main consume el resultado (doble-buffer) 1–2 recomputes
+     *  después y hace TODO el trabajo GL (streaming/subidas/agua/unload) como siempre. Solapa
+     *  el cálculo con la GPU ociosa. Conmutable (consola: `lodasync 0|1`); OFF = recompute
+     *  inline (idéntico al comportamiento previo). Validar en el juego: pop-in/parpadeo del
+     *  terreno = síntoma de un problema en el async → volver a OFF. */
+    void setAsyncLOD(bool on);
+    bool getAsyncLOD() const { return m_asyncLOD.load(std::memory_order_relaxed); }
 
     struct TerrainDrawStats { int draws = 0; int vertices = 0; int triangles = 0; };
     TerrainDrawStats getTerrainDrawStats() const;
@@ -267,6 +323,72 @@ private:
     void bindTerrainTextures(const Planet& planet); // carga diferida + bind + uniforms
     std::unique_ptr<TerrainStreamingSystem> m_streaming;
     std::unique_ptr<LODSystem> m_lod;
+
+    // --- LOD ASÍNCRONO (offload del recompute al worker; ver setAsyncLOD) ------------------
+    // El worker corre updatePlanetLOD sobre m_lodAsync, una instancia SEPARADA de LODSystem
+    // que SOLO el worker toca → el estado interno del LOD (m_lastFrameChunks, config) nunca se
+    // comparte con el main. El main pasa un job-snapshot (cámara + residencia + config) bajo
+    // m_lodMx y recoge el resultado igual. m_lod (main) solo se usa como fuente de config/
+    // getters; en modo async NO recomputa.
+    std::unique_ptr<LODSystem>  m_lodAsync;             // instancia exclusiva del worker
+    std::thread                 m_lodThread;
+    std::mutex                  m_lodMx;                // protege job/result/flags de abajo
+    std::condition_variable     m_lodCv;               // el worker duerme aquí hasta tener job
+    // ✅ ON POR DEFECTO (2026-07-14). El recompute del LOD (5-8 ms: el PICO de CPU del frame) va a un
+    // WORKER, solapado con la GPU —que está OCIOSA—. Suite completa en verde con async ON (57/57).
+    //
+    // ⚠️ EL BUG QUE LO TENÍA APAGADO (y que despistó): el hilo worker lo arrancaba `setAsyncLOD(true)`,
+    // que empieza con `if (on == m_asyncLOD) return;`. Con el flag ya en `true` por defecto, esa
+    // llamada NO HACÍA NADA → el worker nunca arrancaba → el main esperaba resultados que nadie
+    // producía → CERO chunks a GPU. Por eso `init()` arranca el worker explícitamente.
+    // (Los "huecos" que se le achacaron al async eran en realidad de la caché de disco sirviendo
+    //  chunks de una generación anterior. Ver ChunkCache::kGenVersion.)
+    //
+    // Fallback: consola `lodasync off` → recompute inline (comportamiento previo, idéntico).
+    std::atomic<bool>           m_asyncLOD{true};       // ON = recompute en el worker
+
+    // Cola de chunks de AGUA pendientes de subir, por planeta. Se rellena al cambiar las hojas y se
+    // drena con presupuesto → el catch-up cuesta O(lo que sube), no O(todos los chunks del mundo)
+    // (era 5.5 ms ×3 por barrer `chunksToKeep` entero cada 4 frames).
+    std::vector<std::deque<PlanetChunkKey>> m_waterBacklog;
+    bool                        m_lodStop     = false;  // señal de cierre del worker
+    bool                        m_lodJobReady = false;  // hay un job esperando al worker
+    bool                        m_lodBusy     = false;  // el worker está recomputando (no re-encolar)
+    bool                        m_lodResultReady = false; // el worker publicó resultado sin consumir
+
+    // Snapshot de un planeta para el recompute en el worker (todo lo que updatePlanetLOD lee).
+    struct LODAsyncPlanet {
+        size_t     index = 0;
+        std::string name;
+        glm::dvec3 position{0.0};
+        double     radius = 1.0;
+        glm::dvec3 camPos{0.0};
+        uint16_t   bodyId = 0;
+        std::function<double(const glm::dvec3&)> coastFn; // bias de costa de ESTE planeta (o vacía)
+        double     coastRefine = 0.4;
+    };
+    // Job = un lote de planetas + la config/residencia comunes de este recompute.
+    struct LODAsyncJob {
+        std::vector<LODAsyncPlanet> planets;
+        std::unordered_set<uint64_t> resident;          // snapshot de residencia (lock-free en el worker)
+        // config del LOD (espejo de m_lod → aplicada a m_lodAsync antes de recomputar)
+        double splitFactor = 1.0, targetPx = 320.0, screenK = 935.0;
+        int    maxLOD = 20, minLOD = 4;
+        bool   screenSpace = true;
+        glm::mat4 cullVP{1.0f}; bool hasCull = false; // el bias de costa va PER-PLANET (LODAsyncPlanet)
+        std::vector<PlanetChunkKey> forgetKeys;           // forgetChunk acumulados
+    };
+    LODAsyncJob                 m_lodJob;                 // job en curso (protegido por m_lodMx)
+    std::vector<std::pair<size_t, LODUpdate>> m_lodResults; // salida del worker (protegida por m_lodMx)
+    std::vector<PlanetChunkKey> m_pendingForget;          // forgetChunk acumulados para el próximo job
+    // Config "actual" que el main mantiene para snapshotear al job (sin getters en LODSystem).
+    double                      m_curScreenK   = 935.0;
+    std::function<double(const glm::dvec3&)> m_curCoastFn; // última coastFn (o vacía)
+    double                      m_curCoastRefine = 0.4;
+
+    void lodWorkerLoop();                                  // bucle del hilo worker
+    void startLODWorker();                                 // arranca el hilo (idempotente)
+    void stopLODWorker();                                  // señala cierre y join (idempotente)
     // Último set deseado por planeta. Cuando el LOD está en THROTTLE (cámara quieta)
     // NO recalculamos, pero SÍ reprocesamos este último set para SUBIR a GPU lo que
     // se haya generado mientras tanto (si no, los chunks no aparecen hasta moverte).
@@ -275,6 +397,9 @@ private:
     // activa (+1 s de margen). Cuando todo está cargado y la cámara quieta, el
     // catch-up se apaga → sin el pico periódico de subida.
     int m_catchupGrace = 0;
+    // Techo de caché resuelto al arrancar (AUTO o manual). El vigilante de memoria baja el techo real
+    // cuando el SISTEMA se queda sin RAM y lo devuelve hasta AQUÍ (nunca más) cuando hay holgura.
+    size_t m_cacheBudgetMB = 0;
 #ifdef HARUKA_MOD_DEFORM
     std::unique_ptr<DeformationField> m_deform; // player terrain edits
 #endif

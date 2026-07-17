@@ -1,7 +1,10 @@
 #pragma once
 
 #include <queue>
+#include <deque>
 #include <future>
+#include <functional>
+#include <condition_variable>
 #include <mutex>
 #include <chrono>
 #include <thread>
@@ -27,7 +30,10 @@ namespace Haruka {
             // sobre-suscribir la CPU es más rápido.
             unsigned hw = std::thread::hardware_concurrency();
             m_maxInFlight = (size_t)std::max(4u, hw ? hw * 2u : 8u);
+            startPool();
         }
+
+        ~TerrainStreamingSystem();
 
         /**
          * @brief Registra el conjunto de chunks deseados, ORDENADO de más cercano a
@@ -100,7 +106,19 @@ namespace Haruka {
         // Chunks que están siendo generados actualmente
         std::unordered_set<uint64_t> m_pendingRequests;
         std::mutex m_pendingMutex;
-        std::vector<std::future<void>> m_asyncTasks;
+
+        // --- POOL de trabajadores (generación CPU + ensamblado de malla del camino GPU) ----------
+        // Antes cada chunk se lanzaba con std::async(launch::async) = UN HILO NUEVO POR CHUNK.
+        // Con decenas de chunks por frame, crear/destruir hilos costaba más que el trabajo en sí
+        // (y el vector de futures había que barrerlo cada frame: `pump.reap`). Ahora: N hilos fijos
+        // y una cola. `m_pendingRequests` sigue siendo el que limita el trabajo en vuelo.
+        std::vector<std::thread>          m_pool;
+        std::deque<std::function<void()>> m_jobs;
+        std::mutex                        m_jobMutex;
+        std::condition_variable           m_jobCv;
+        bool                              m_poolStop = false;
+        void startPool();
+        void submit(std::function<void()> job, bool urgent = false);
 
         // Cola de deseo POR PLANETA (cercano→lejano) + ajustes, para el pump por frame.
         // CLAVE: con varios planetas, un único set se sobreescribía entre planetas y
@@ -137,7 +155,6 @@ namespace Haruka {
         void requestAsyncGeneration(const PlanetChunkKey& key, const nlohmann::json& settings, const std::string& planetName);
         // Genera SÍNCRONO en el hilo principal (necesario para el camino GPU/compute).
         void generateSyncMainThread(const PlanetChunkKey& key, const nlohmann::json& settings, const std::string& planetName);
-        void reapFinishedTasks();
     };
 
 }

@@ -12,6 +12,8 @@
 #include <string>
 
 #include "mesh.h"
+
+namespace Haruka { namespace RHI { class Context; } }
 #include "shader.h"
 
 // Engine renderer types live in Haruka::Renderer (sub-namespace migration). Crucially this
@@ -36,6 +38,10 @@ public:
     
     /** @brief Draws all internal meshes. */
     void Draw(Shader &shader);
+
+    /** @brief Dibuja por la ruta PSO/Context. El pipeline lo bindea el LLAMADOR; el modelo solo
+     *  aporta la geometría de sus mallas. Ver Mesh::drawRHI. */
+    void drawRHI(Haruka::RHI::Context& ctx);
 
     /** @brief Aggregated vertex count across all sub-meshes. */
     int getVertexCount() const {

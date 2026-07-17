@@ -6,11 +6,12 @@
 #include <vector>
 #include <mutex>
 #include <functional>
-#include <glad/glad.h>
 #include "rhi/rhi_types.h"
 #include <glm/glm.hpp>
 #include "core/chunk_cache.h"
 #include "tools/math_types.h"
+
+namespace Haruka::RHI { class Device; class Context; }
 
 namespace Haruka {
 
@@ -26,13 +27,9 @@ namespace Haruka {
     class WaterRenderer {
     public:
         struct RenderMesh {
-            GLuint vao = 0;
-            GLuint vbo = 0;   // positions (relative to chunkCenter)
-            GLuint nbo = 0;   // radial normals
-            GLuint pbo = 0;   // per-vertex water level (km): 0=océano, >0=lago
-            GLuint mbo = 0;   // CDLOD morph target (posición en el LOD padre)
-            GLuint ebo = 0;
-            Haruka::RHI::BufferHandle hVbo, hNbo, hPbo, hMbo, hEbo;   // buffers RHI (VAO sigue GL)
+            // Un buffer por STREAM (= un binding del PSO): posición · normal radial · param
+            // (x = nivel km, 0=océano; y = profundidad m) · morph target CDLOD. + índices.
+            Haruka::RHI::BufferHandle hVbo, hNbo, hPbo, hMbo, hEbo;
             uint32_t indexCount  = 0;
             uint32_t vertexCount = 0;
             bool isReady = false;
@@ -69,8 +66,34 @@ namespace Haruka {
          *  El catch-up del agua los salta → no re-copia/reintenta chunks de tierra cada pasada. */
         void noWaterHashes(std::unordered_set<uint64_t>& out) const;
 
-        /** Renders this planet's ocean. Caller binds the water shader + UBO first. */
+        /** Renders this planet's ocean. Ata su propio PSO (el llamador ya subió el UBO per-frame). */
         void renderPlanet(const std::string& planetName, const Haruka::WorldPos& cameraPos);
+
+        /**
+         * @brief Parámetros del PASE de agua: oleaje (base tangente + viento + marea) y costa
+         * per-píxel (params del generador del planeta activo → paridad exacta con el terreno).
+         *
+         * Eran ~15 uniforms sueltos que el llamador fijaba con glUniform antes de dibujar. Ahora
+         * viajan en el UBO WaterParams (binding 8). Fijar por planeta, antes de renderPlanet.
+         * (`oceanSurface` NO está aquí: lo pone el propio renderer según el camino que dibuje.)
+         */
+        struct PassParams {
+            glm::vec3 waveUp{0,1,0}, waveTangent{1,0,0}, waveBitangent{0,0,1};
+            glm::vec2 windDir{1.0f, 0.0f};
+            float time = 0.0f, windStrength = 1.0f, tideHeight = 0.0f;
+            float waterQuality = 1.0f;
+            // (F1) Profundidad de la ESCENA + plano cercano: con reversed-Z, dist = near / z → el
+            // fragment saca del depth buffer cuánta agua atraviesa el rayo. Sustituye a los params
+            // de costa (seed, seaThreshold…) con los que ANTES re-derivaba el terreno per-píxel.
+            Haruka::RHI::TextureHandle sceneDepth;
+            float     nearPlane = 0.1f;
+            glm::vec3 planetRelCam{0.0f};   // ancla de mundo (espuma per-píxel + consulta del campo)
+            // (F3) CAMPO del planeta: el agua pregunta "¿hay agua aquí?" en vez de existir en todas
+            // partes. `fieldSSBO` es el id GL nativo (lo comparte el generador de terreno).
+            unsigned int fieldSSBO = 0;
+            int          fieldRes  = 0;
+        };
+        void setPassParams(const PassParams& p);
 
         int getGPUMeshCount() const { return static_cast<int>(m_gpuMeshes.size()); }
 
@@ -117,15 +140,12 @@ namespace Haruka {
         // índices VARIABLES = celdas mojadas → cada slot reserva el MÁXIMO de índices y el
         // comando indirecto usa el count real). Un VAO + 4 VBOs + 1 EBO por vertexCount.
         struct WaterPool {
-            GLuint   vao = 0;
-            GLuint   posVBO = 0, normVBO = 0, paramVBO = 0, morphVBO = 0, ebo = 0;
-            Haruka::RHI::BufferHandle hPos, hNorm, hParam, hMorph, hEbo;  // buffers RHI del pool
+            Haruka::RHI::BufferHandle hPos, hNorm, hParam, hMorph, hEbo;  // 4 streams + índices
+            Haruka::RHI::BufferHandle hCmd, hSSBO;   // multidraw: comandos + WDrawItem[] (binding 7)
             uint32_t vertexCount   = 0;   // vértices por slot (grid completo)
             uint32_t maxIndexCount = 0;   // índices reservados por slot (peor caso = todo mojado)
             uint32_t capacity      = 0;   // nº de slots
             std::vector<uint32_t> freeSlots;
-            GLuint   cmdBuf   = 0;         // GL_DRAW_INDIRECT_BUFFER (por frame)
-            GLuint   drawSSBO = 0;         // WDrawItem[] (binding 7)
         };
         std::unordered_map<uint32_t, WaterPool> m_pools; // clave = vertexCount
         // Agua en per-chunk por DEFECTO (no pool): el pool de agua reserva slots de índice al MÁXIMO
@@ -139,7 +159,39 @@ namespace Haruka {
         std::unordered_map<uint32_t, std::vector<GpuDrawItem>> m_scratchItems;
         WaterPool& getOrCreatePool(uint32_t vertexCount, uint32_t maxIndexCount);
         void growPool(WaterPool& p);
-        void setupPoolVAO(WaterPool& p);
+
+        // --- PSO del agua (water.vert/frag) ------------------------------------------------
+        // UNO SOLO para los TRES caminos (océano único · chunk suelto · pool): los tres tienen el
+        // MISMO layout de 4 bindings (pos vec3 · normal vec3 · param vec2 · morph vec3). Estado:
+        // depth LEQUAL SIN escritura (el terreno bajo el agua se sigue viendo), blend alfa, y SIN
+        // culling (la superficie debe verse también desde DEBAJO, bajo el agua).
+        Haruka::RHI::PipelineHandle m_pso;
+        // UBO del pase (binding 8; el 7 es el SSBO por-draw). Flags como float (std140 GL↔Vulkan).
+        struct WaterParamsUBO {
+            glm::vec4 waveUpTime{0,1,0,0};      // xyz = up · w = tiempo
+            glm::vec4 waveTanWind{1,0,0,1};     // xyz = tangente · w = fuerza del viento
+            glm::vec4 waveBitTide{0,0,1,0};     // xyz = bitangente · w = marea (m)
+            // xyz = cam − centro del planeta: ANCLA al mundo el ruido de la espuma per-píxel (si se
+            // evaluara sobre FragPos, relativo a cámara, la espuma "nadaría"). w = plano cercano
+            // (reversed-Z: dist = near / z). NO es la fórmula del terreno: solo un origen estable.
+            glm::vec4 relCamNear{0,0,0,0.1f};
+            glm::vec2 windDir{1.0f, 0.0f};
+            float     waterQuality = 1.0f;
+            float     fieldRes = 0.0f;   // (F3) lado de cara del campo; el shader lo usa para saber
+                                         // DÓNDE HAY AGUA → sin esto el mar existe bajo la tierra
+        };
+        static_assert(sizeof(WaterParamsUBO) == 80, "std140: 4×vec4 + vec2 + 2 floats");
+        WaterParamsUBO             m_params{};
+        Haruka::RHI::BufferHandle  m_uboParams;
+        Haruka::RHI::TextureHandle m_sceneDepth;   // depth de la escena (binding 6)
+        unsigned int               m_fieldSSBO = 0; // campo del planeta (binding 9)
+        // SSBO de UN elemento: el océano único y los chunks sueltos se dibujan con un drawIndexed
+        // (gl_DrawID = 0) → leen el item 0. Mismo shader que el camino indirecto, sin ramas.
+        Haruka::RHI::BufferHandle m_soloSSBO;
+        /** @brief Crea (una vez) el PSO + UBO + SSBO de 1 elemento. Devuelve false si no hay device. */
+        bool ensurePipeline();
+        /** @brief Ata pipeline + UBO del pase + depth de escena. Común a los tres caminos. */
+        Haruka::RHI::Context* beginPass();
 
     public:
         void setBatching(bool b) { std::lock_guard<std::mutex> lk(m_renderMutex); m_batching = b; }
@@ -160,7 +212,6 @@ namespace Haruka {
         // nivel del mar estático. Callback = puente engine↔juego (el juego posee la sim).
         void setFluidSampler(std::function<bool(const glm::dvec3&, float&, float&)> f) { m_fluidSample = std::move(f); }
     private:
-        GLuint m_oceanVao = 0, m_oceanPos = 0, m_oceanNorm = 0, m_oceanParam = 0, m_oceanMorph = 0, m_oceanEbo = 0;
         Haruka::RHI::BufferHandle m_hOceanPos, m_hOceanNorm, m_hOceanParam, m_hOceanMorph, m_hOceanEbo;
         int    m_oceanIdxCount = 0;
         bool   m_singleOcean = true; // DEFAULT: océano = superficie única (aprobado: sin teselas). `oceanshell off` = por-chunk.

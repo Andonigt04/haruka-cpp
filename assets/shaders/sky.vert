@@ -9,7 +9,19 @@
  */
 #version 450 core
 
-layout(location = 0) uniform mat4 u_invViewProjRot; // inv(proj * mat4(mat3(view)))
+// UBO compartido con sky.frag (binding 5) — antes eran uniforms sueltos (glUniformMatrix4fv/
+// glUniform3fv/1f). Los glUniform* NO existen en Vulkan → van por UBO (ruta PSO/RHI). El bloque
+// debe declararse IDÉNTICO en ambas etapas. Truco std140: un vec3 (align 16, size 12) deja 4 B
+// libres → el float que le sigue entra en el mismo slot de 16 B (por eso van emparejados).
+layout(std140, binding = 5) uniform SkyParams {
+    mat4  u_invViewProjRot; // inv(proj * mat4(mat3(view)))
+    vec3  u_sunDir;         // hacia el Sol (mundo, normalizado)
+    float u_sunElev;        // dot(sunDir, up): elevación del sol
+    vec3  u_up;             // cénit local del observador (mundo)
+    float u_atmo;           // 1=superficie ... 0=espacio
+    vec3  u_sunColor;       // color de la luz solar
+    float _padSky;
+};
 
 layout(location = 0) out vec3 vRayDir; // dirección de vista en espacio mundo
 

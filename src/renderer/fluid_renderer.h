@@ -16,7 +16,7 @@
 #include "tools/math_types.h"
 #include "rhi/rhi_types.h"
 
-namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
+namespace Haruka::RHI { class Context; }
 
 namespace Haruka {
 namespace fluid { class PBFSolver; }
@@ -42,24 +42,38 @@ private:
     float m_radius = 0.3f;
     bool m_init = false;
 
-    // Particle point cloud.
-    GLuint m_vao = 0, m_vbo = 0;
-    // Handles RHI (buffers + render targets); los ids GL de abajo son cache de los nativos.
+    // Handles RHI (buffers + render targets). Los FBO/textura GL de abajo se conservan porque
+    // los BLITS (copia de color/depth de la escena) siguen en GL: el RHI no tiene comando de blit.
     Haruka::RHI::BufferHandle m_particleBuf, m_quadBuf;
     Haruka::RHI::RenderPassHandle m_depthPass, m_smoothPass[2], m_sceneCopyPass;
-    std::unique_ptr<Shader> m_sphereShader;   // fallback lit spheres
 
-    // Screen-space surface pipeline.
-    std::unique_ptr<Shader> m_depthShader;    // particle → eye depth
-    std::unique_ptr<Shader> m_blurShader;     // separable bilateral
-    std::unique_ptr<Shader> m_surfaceShader;  // composite
-    GLuint m_quadVAO = 0, m_quadVBO = 0;
-    GLuint m_depthFBO = 0, m_depthTex = 0, m_depthRB = 0;
+    // Los 4 PSO del fluido (antes: 4 Shader + VAOs + glUniform + glEnable sueltos).
+    //  - spheres: puntos, depth on           (fallback de esferas)
+    //  - depth:   puntos → profundidad de ojo
+    //  - blur:    quad, bilateral separable
+    //  - surface: quad, composite final
+    Haruka::RHI::PipelineHandle m_psoSpheres, m_psoDepth, m_psoBlur, m_psoSurface;
+    // UBO del pase (binding 8), compartido por los 4 programas: el bloque es idéntico en todos.
+    struct FluidParamsUBO {
+        glm::vec2 blurDir{0.0f};
+        glm::vec2 texel{0.0f};
+        float depthFalloff = 0.5f;
+        float refractScale = 0.03f;
+        float radius       = 0.3f;
+        float viewportH    = 1.0f;
+    };
+    static_assert(sizeof(FluidParamsUBO) == 32, "std140: 2×vec2 + 4 floats");
+    FluidParamsUBO            m_params{};
+    Haruka::RHI::BufferHandle m_uboParams;
+
+    GLuint m_depthFBO = 0, m_depthTex = 0;
     GLuint m_smoothFBO[2] = {0, 0}, m_smoothTex[2] = {0, 0};
     GLuint m_sceneCopyFBO = 0, m_sceneCopyTex = 0; // copy of scene colour (refraction)
     int    m_fbW = 0, m_fbH = 0;
 
     void ensureGL();
+    /** @brief Sube m_params al UBO y lo ata (los 4 pases lo comparten). */
+    void bindParams(Haruka::RHI::Context* ctx);
     void ensureTargets(int w, int h);
     void uploadParticles(const Haruka::WorldPos& cameraPos, int n);
     void renderSpheres(int n, float vpH);

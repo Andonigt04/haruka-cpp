@@ -43,54 +43,34 @@ public:
             s_baseDir += '/';
     }
 
+    /** @brief Base dir de assets (p.ej. "<exe>/assets/"). OBLIGATORIO para quien cree un PSO
+     *  DIRECTAMENTE por el RHI (sin objeto Shader): `Device::createPipeline` hace un ifstream
+     *  CRUDO de vertexPath/fragmentPath — NO resuelve la raíz. Pasar "shaders/x.vert" a pelo
+     *  no encuentra el fichero → shader 0 → el programa NO linka → GL_INVALID_OPERATION en el
+     *  primer glUseProgram. Enraíza siempre: Shader::baseDir() + "shaders/x.vert". */
+    static const std::string& baseDir() { return s_baseDir; }
+
     /** @brief Builds a program from vertex + fragment (+ optional geometry) SPIR-V. */
     Shader(const char* vertexPath, const char* fragmentPath, const char* geometryPath = nullptr) {
-        // Ruta RHI: el device crea el pipeline (GLSL-first en GL) y exponemos su programa nativo.
-        if (Haruka::RHI::Device* dev = Haruka::RHI::device()) {
-            std::string vp = s_baseDir + vertexPath, fp = s_baseDir + fragmentPath, gp;
-            Haruka::RHI::PipelineDesc d;
-            d.vertexPath = vp.c_str();
-            d.fragmentPath = fp.c_str();
-            if (geometryPath) { gp = s_baseDir + geometryPath; d.geometryPath = gp.c_str(); }
-            m_pipe = dev->createPipeline(d);
-            ID = dev->nativeProgram(m_pipe);
-            return;
-        }
-        // Fallback (editor/headless sin device): GL directo, comportamiento idéntico al previo.
-        GLuint vert = loadSPV(GL_VERTEX_SHADER,   vertexPath);
-        GLuint frag = loadSPV(GL_FRAGMENT_SHADER, fragmentPath);
-        GLuint geom = geometryPath ? loadSPV(GL_GEOMETRY_SHADER, geometryPath) : 0;
-
-        ID = glCreateProgram();
-        glAttachShader(ID, vert);
-        glAttachShader(ID, frag);
-        if (geom) glAttachShader(ID, geom);
-        glLinkProgram(ID);
-        checkErrors(ID, "PROGRAM");
-
-        glDeleteShader(vert);
-        glDeleteShader(frag);
-        if (geom) glDeleteShader(geom);
+        // El device crea el pipeline (GLSL-first en GL) y exponemos su programa nativo.
+        Haruka::RHI::Device* dev = Haruka::RHI::device();
+        std::string vp = s_baseDir + vertexPath, fp = s_baseDir + fragmentPath, gp;
+        Haruka::RHI::PipelineDesc d;
+        d.vertexPath = vp.c_str();
+        d.fragmentPath = fp.c_str();
+        if (geometryPath) { gp = s_baseDir + geometryPath; d.geometryPath = gp.c_str(); }
+        m_pipe = dev->createPipeline(d);
+        ID = dev->nativeProgram(m_pipe);
     }
 
     /** @brief Builds a program from a single compute SPIR-V. */
     explicit Shader(const char* computePath) {
-        if (Haruka::RHI::Device* dev = Haruka::RHI::device()) {
-            std::string cp = s_baseDir + computePath;
-            Haruka::RHI::PipelineDesc d;
-            d.computePath = cp.c_str();
-            m_pipe = dev->createPipeline(d);
-            ID = dev->nativeProgram(m_pipe);
-            return;
-        }
-        GLuint comp = loadSPV(GL_COMPUTE_SHADER, computePath);
-
-        ID = glCreateProgram();
-        glAttachShader(ID, comp);
-        glLinkProgram(ID);
-        checkErrors(ID, "PROGRAM");
-
-        glDeleteShader(comp);
+        Haruka::RHI::Device* dev = Haruka::RHI::device();
+        std::string cp = s_baseDir + computePath;
+        Haruka::RHI::PipelineDesc d;
+        d.computePath = cp.c_str();
+        m_pipe = dev->createPipeline(d);
+        ID = dev->nativeProgram(m_pipe);
     }
 
     /** @brief Binds the program for subsequent draw calls. */

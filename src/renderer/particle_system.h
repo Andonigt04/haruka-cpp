@@ -32,10 +32,10 @@ private:
     ParticleSystem() = default;
     struct P { glm::dvec3 pos; glm::dvec3 vel; glm::vec3 color; float life; float maxLife; float size; };
     std::vector<P> m_parts;
-    std::unique_ptr<Shader> m_shader;
-    GLuint m_vao = 0, m_vbo = 0;
-    Haruka::RHI::BufferHandle m_vboH;   // VBO Stream (RHI); VAO sigue GL
-    void ensureGL();
+    // Ruta PSO: el pipeline hornea shader + layout + estado (blend ADITIVO, depth-write off,
+    // topología Points). Ya no hay Shader ni VAO propios.
+    Haruka::RHI::PipelineHandle m_pso;
+    Haruka::RHI::BufferHandle   m_vboH;   // VBO Stream (se re-sube cada frame)
 };
 
 } // namespace Haruka

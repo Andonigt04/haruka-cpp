@@ -16,6 +16,10 @@ static glm::mat4 aiToGlm(const aiMatrix4x4& m) {
         m.a4, m.b4, m.c4, m.d4);
 }
 
+void Model::drawRHI(Haruka::RHI::Context& ctx) {
+    for (auto& m : meshes) m.drawRHI(ctx);
+}
+
 void Model::Draw(Shader &shader) {
     for(unsigned int i = 0; i < meshes.size(); i++)
         meshes[i].Draw(shader);
@@ -221,42 +225,18 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
     }
 
     if (data) {
-        // Ruta RHI: crea la textura por el device (id GL nativo devuelto para el material).
-        if (RHI::Device* dev = RHI::device()) {
-            RHI::TextureDesc td;
-            td.width = width; td.height = height;
-            td.format = (nrComponents == 1) ? RHI::Format::R8
-                      : (nrComponents == 4) ? RHI::Format::RGBA8 : RHI::Format::RGB8;
-            td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::Repeat; td.mipmaps = true;
-            td.initialData = data;
-            textureID = dev->nativeTexture(dev->createTexture(td));
-            if (needsFree) stbi_image_free(data);
-            std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height
-                      << ", " << nrComponents << " canales)" << std::endl;
-            return textureID;
-        }
-
-        // Fallback GL directo (editor/headless sin device).
-        GLenum format = GL_RGB;
-        if (nrComponents == 1) format = GL_RED;
-        else if (nrComponents == 3) format = GL_RGB;
-        else if (nrComponents == 4) format = GL_RGBA;
-
-        glGenTextures(1, &textureID);
-        glBindTexture(GL_TEXTURE_2D, textureID);
-        glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
-        glGenerateMipmap(GL_TEXTURE_2D);
-
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        if (needsFree) {
-            stbi_image_free(data);
-        }
-        
-        std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height << ", " << nrComponents << " canales)" << std::endl;
+        // La textura se crea por el device (id GL nativo devuelto para el material).
+        RHI::Device* dev = RHI::device();
+        RHI::TextureDesc td;
+        td.width = width; td.height = height;
+        td.format = (nrComponents == 1) ? RHI::Format::R8
+                  : (nrComponents == 4) ? RHI::Format::RGBA8 : RHI::Format::RGB8;
+        td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::Repeat; td.mipmaps = true;
+        td.initialData = data;
+        textureID = dev->nativeTexture(dev->createTexture(td));
+        if (needsFree) stbi_image_free(data);
+        std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height
+                  << ", " << nrComponents << " canales)" << std::endl;
         return textureID;
     }
 

@@ -13,13 +13,19 @@
 layout(location = 0) in vec3 vRayDir;
 layout(location = 0) out vec4 FragColor;
 
-// Nota: u_invViewProjRot (vert) es un mat4 en location 0 → ocupa 0..3.
-// Por eso estos uniforms empiezan en 4 (el espacio de locations es por PROGRAMA).
-layout(location = 4)  uniform vec3  u_sunDir;   // hacia el Sol (mundo, normalizado)
-layout(location = 5)  uniform vec3  u_up;       // cénit local del observador (mundo)
-layout(location = 6)  uniform vec3  u_sunColor; // color de la luz solar
-layout(location = 7)  uniform float u_sunElev;  // dot(sunDir, up): elevación del sol
-layout(location = 8)  uniform float u_atmo;     // 1=superficie ... 0=espacio
+// UBO compartido con sky.vert (binding 5) — antes uniforms sueltos (glUniform3fv/1f), que NO
+// existen en Vulkan → van por UBO (ruta PSO/RHI). Declaración IDÉNTICA a la de sky.vert (GLSL lo
+// exige entre etapas del mismo programa). Truco std140: vec3 (align 16, size 12) + float siguiente
+// comparten el mismo slot de 16 B → por eso van emparejados.
+layout(std140, binding = 5) uniform SkyParams {
+    mat4  u_invViewProjRot; // inv(proj * mat4(mat3(view))) — lo usa el vertex
+    vec3  u_sunDir;         // hacia el Sol (mundo, normalizado)
+    float u_sunElev;        // dot(sunDir, up): elevación del sol
+    vec3  u_up;             // cénit local del observador (mundo)
+    float u_atmo;           // 1=superficie ... 0=espacio
+    vec3  u_sunColor;       // color de la luz solar
+    float _padSky;
+};
 
 // Hash 3D barato para el campo de estrellas.
 float hash13(vec3 p) {

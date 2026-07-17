@@ -8,8 +8,10 @@
  *
  * In:  TexCoords
  * Out: FragColor — original color if bright, black otherwise
- * Sampler: scene (HDR render target)
- * Uniforms: threshold (location 0)
+ * Sampler: scene (HDR render target), unidad 0
+ * UBO: BloomParams (binding 2) — threshold. Antes era un uniform suelto
+ *      (`layout(location=0) uniform float`); los glUniform* NO existen en Vulkan, así que
+ *      el parámetro va por UBO (ruta PSO/RHI). Mismo bloque que bloom_blur.frag.
  */
 #version 450 core
 
@@ -17,7 +19,11 @@ layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec2 TexCoords;
 
 layout(binding = 0) uniform sampler2D scene;
-layout(location = 0) uniform float threshold;
+
+layout(std140, binding = 2) uniform BloomParams {
+    float threshold;    // bright-pass: umbral de luminancia
+    float horizontal;   // blur: 1 = horizontal, 0 = vertical (no lo usa este pase)
+};
 
 void main()
 {

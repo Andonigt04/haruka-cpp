@@ -35,6 +35,7 @@ static const char* shadowQualNames[]   = { "Off",  "Low",   "Medium", "High" };
 static const char* aaNames[]           = { "None", "FXAA",  "TAA" };
 static const char* waterQualityNames[] = { "Low", "Medium", "High", "Ultra" };
 static const char* windowModeNames[]   = { "Windowed", "Borderless", "Fullscreen" };
+static const char* renderBackendNames[] = { "OpenGL", "Vulkan" };
 
 bool SettingsPanel::render() {
     auto& sm = SettingsManager::get();
@@ -117,6 +118,16 @@ void SettingsPanel::tabGraphics() {
         if (auto* app = MotorInstance::getInstance().getApplication())
             app->applyGraphicsSettings();
     }
+
+    // API gráfica (RHI). El device se crea en el arranque → NO se aplica en vivo: requiere
+    // reiniciar. Se persiste en el imgui.ini (RenderBackend) y Application::run lo lee al iniciar.
+    int rb = (int)g.renderBackend;
+    if (ImGui::Combo("Render API", &rb, renderBackendNames, 2))
+        g.renderBackend = (Settings::RenderBackend)rb;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Requiere reiniciar el juego.\nVulkan aún no implementado → cae a OpenGL automáticamente.");
 
     int tq = (int)g.textureQuality;
     if (ImGui::Combo(TR("gfx.textureQuality").c_str(), &tq, texQualityNames, 4))

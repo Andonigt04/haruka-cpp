@@ -3,6 +3,8 @@
 #include "core/noise_generator.h"
 #include "core/terrain/terrain_sampler_v2.h"
 #include "core/terrain/gpu_heightfield.h"
+#include "core/terrain/planet_meso.h"
+#include "core/terrain/planet_fields.h"
 #include "core/terrain/shared_index_table.h" // índices compartidos por res (ahorro RAM caché)
 #include <algorithm>
 #include <cmath>     // std::lround (#4 empaquetado de posiciones)
@@ -14,6 +16,7 @@
 #include "core/terrain/deformation_field.h"
 #endif
 #include <cstdio>
+#include "tools/profiler.h"
 
 
 namespace Haruka {
@@ -80,6 +83,68 @@ namespace {
         spherePos.z = p.z * sqrt(1.0 - x2 / 2.0 - y2 / 2.0 + x2 * y2 / 3.0);
 
         return glm::dvec3(spherePos);
+    }
+
+    // --- INVERSA del cubo→esfera (ver el .h) ---------------------------------------------------
+    // spherify() es la MISMA fórmula que getLocalPosition (Cobb). Se separa para poder evaluarla en
+    // el Newton sin duplicarla: si divergieran, la altura de la física caería en OTRA celda.
+    static glm::dvec3 spherifyFace(PlanetFace face, double lx, double ly) {
+        glm::dvec3 p;
+        switch (face) {
+            case PlanetFace::FRONT:  p = {  1.0,  ly, -lx }; break;
+            case PlanetFace::BACK:   p = { -1.0,  ly,  lx }; break;
+            case PlanetFace::TOP:    p = {  lx,  1.0, -ly }; break;
+            case PlanetFace::BOTTOM: p = {  lx, -1.0,  ly }; break;
+            case PlanetFace::RIGHT:  p = {  lx,   ly,  1.0 }; break;
+            default:                 p = { -lx,   ly, -1.0 }; break;   // LEFT
+        }
+        const double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
+        return glm::dvec3(p.x * std::sqrt(1.0 - y2 / 2.0 - z2 / 2.0 + y2 * z2 / 3.0),
+                          p.y * std::sqrt(1.0 - z2 / 2.0 - x2 / 2.0 + z2 * x2 / 3.0),
+                          p.z * std::sqrt(1.0 - x2 / 2.0 - y2 / 2.0 + x2 * y2 / 3.0));
+    }
+
+    void TerrainGenerator::dirToFaceLocal(const glm::dvec3& dirIn, PlanetFace& outFace,
+                                          double& lx, double& ly) {
+        const glm::dvec3 d = glm::normalize(dirIn);
+        const double ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
+
+        // 1) CARA: la componente dominante. El spherify no saca el punto de su cara, así que la
+        //    dirección y su punto de cubo comparten cara.
+        // 2) SEMILLA: proyección gnómica (dividir por la componente dominante) → el punto del CUBO
+        //    que ve esa dirección desde el centro. No es la inversa exacta de Cobb, pero está cerca.
+        if (ax >= ay && ax >= az) {
+            if (d.x > 0) { outFace = PlanetFace::FRONT; lx = -d.z / ax; ly =  d.y / ax; }
+            else         { outFace = PlanetFace::BACK;  lx =  d.z / ax; ly =  d.y / ax; }
+        } else if (ay >= az) {
+            if (d.y > 0) { outFace = PlanetFace::TOP;    lx = d.x / ay; ly = -d.z / ay; }
+            else         { outFace = PlanetFace::BOTTOM; lx = d.x / ay; ly =  d.z / ay; }
+        } else {
+            if (d.z > 0) { outFace = PlanetFace::RIGHT; lx =  d.x / az; ly = d.y / az; }
+            else         { outFace = PlanetFace::LEFT;  lx = -d.x / az; ly = d.y / az; }
+        }
+
+        // 3) NEWTON con jacobiano numérico: refina (lx,ly) hasta que spherify(lx,ly) == dir.
+        //    Sin esto el error es de ~1% de la cara — decenas de km en la Tierra, o sea: la celda
+        //    equivocada, y la altura que devolvería la física sería la de OTRO sitio.
+        const double h = 1e-6;
+        for (int it = 0; it < 4; ++it) {
+            const glm::dvec3 f0 = spherifyFace(outFace, lx, ly);
+            const glm::dvec3 e  = d - f0;
+            if (glm::dot(e, e) < 1e-24) break;                 // ya está
+            const glm::dvec3 dfx = (spherifyFace(outFace, lx + h, ly) - f0) / h;
+            const glm::dvec3 dfy = (spherifyFace(outFace, lx, ly + h) - f0) / h;
+
+            // Mínimos cuadrados 2x2 (3 ecuaciones, 2 incógnitas): J^T J · s = J^T e
+            const double a = glm::dot(dfx, dfx), b = glm::dot(dfx, dfy), c = glm::dot(dfy, dfy);
+            const double u = glm::dot(dfx, e),   v = glm::dot(dfy, e);
+            const double det = a * c - b * b;
+            if (std::abs(det) < 1e-18) break;
+            lx += ( c * u - b * v) / det;
+            ly += (-b * u + a * v) / det;
+            lx = glm::clamp(lx, -1.0, 1.0);
+            ly = glm::clamp(ly, -1.0, 1.0);
+        }
     }
 
     std::shared_ptr<ChunkData> TerrainGenerator::generateChunk(const PlanetChunkKey& key, const nlohmann::json& settings, double planetRadius, bool mainThread,
@@ -895,22 +960,57 @@ namespace {
         if (!m_gpu) m_gpu = std::make_unique<GpuHeightfield>();
         GpuHeightfield::Params p; int res;
         if (!gpuParamsFromSettings(settings, planetRadius, p, res)) return -1;
-        std::vector<glm::vec3> dirs((size_t)(res + 1) * (res + 1));
-        for (int y = 0; y <= res; ++y)
-            for (int x = 0; x <= res; ++x)
-                dirs[(size_t)(x + y * (res + 1))] = glm::vec3(getLocalPosition(key, x, y, res));
+        // La rejilla de direcciones la DERIVA la GPU (misma fórmula, en double): construirla aquí
+        // costaba ~25 ms por frame de ráfaga (16 chunks × (res+1)² cubo→esfera) y había que subirla.
+        // Solo se calculan los DOS puntos del espaciado y, si hay meso, las 5 sondas de tesela.
+        const size_t vtxCount = (size_t)(res + 1) * (res + 1);
+        p.deriveDirs = true;
+        p.gridRes = res; p.face = (int)key.face; p.lod = (int)key.lod;
+        p.chunkX  = (int)key.x; p.chunkY = (int)key.y;
+
         // Espaciado de vértices (m) = arco entre dos vértices adyacentes × radio → eps de la normal
         // LOD-aware: la normal representa la geometría a ESTA resolución, no ruido sub-vértice (pinchos).
         if (res >= 1) {
-            glm::vec3 d0 = glm::normalize(dirs[0]);
-            glm::vec3 d1 = glm::normalize(dirs[1]);
+            glm::vec3 d0 = glm::normalize(glm::vec3(getLocalPosition(key, 0, 0, res)));
+            glm::vec3 d1 = glm::normalize(glm::vec3(getLocalPosition(key, 1, 0, res)));
             p.vertexSpacingM = glm::length(d1 - d0) * (float)planetRadius;
         }
-        return m_gpu->dispatchAsync(dirs, p);
+
+        // --- MESO: NO generar el chunk hasta que su tesela esté lista -------------------------
+        // Si generáramos con el macro y luego la física usara el meso (o al revés), la malla y la
+        // colisión discreparían decenas de metros → caes a través del suelo. Así que preguntamos, y
+        // si la tesela no está, la ENCOLAMOS al worker y devolvemos -2 = "todavía no". El streaming
+        // reintenta en frames siguientes; mientras, se dibuja el ancestro grueso (que ya no se
+        // evicta) → nunca hay agujero, solo detalle que llega un poco tarde.
+        if (mesoEnabled() && p.vertexSpacingM > 0.0f && p.vertexSpacingM < 200.0f) {
+            PlanetMeso& M = planetMeso((uint32_t)p.seed, planetFieldsFor((uint32_t)p.seed), planetRadius);
+            bool ready = true;
+            // Basta con las 4 esquinas y el centro: una tesela (~5 km) es mucho mayor que un chunk fino.
+            const int probes[5][2] = { {0,0}, {res,0}, {0,res}, {res,res}, {res/2,res/2} };
+            for (const auto& q : probes)
+                if (!M.requestTile(glm::normalize(glm::vec3(getLocalPosition(key, q[0], q[1], res)))))
+                    ready = false;
+            if (!ready) return -2;   // "todavía no": reintentar, NO caer a CPU
+        }
+        HARUKA_PROFILE("dispatch.gl");
+        static const std::vector<glm::vec3> kNoDirs; // la GPU las deriva
+        return m_gpu->dispatchAsync(kNoDirs, p, vtxCount);
     }
 
-    bool TerrainGenerator::gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec3>& outNormal,
+    bool TerrainGenerator::gpuHarvestData(int slot, std::vector<float>& outElev, std::vector<glm::vec4>& outNormal4,
                                           std::vector<float>& outWater) {
-        return m_gpu && m_gpu->tryHarvest(slot, outElev, outNormal, outWater);
+        return m_gpu && m_gpu->tryHarvest(slot, outElev, outNormal4, outWater);
+    }
+
+    bool TerrainGenerator::gpuMapHarvest(int slot, GpuMappedView& out) {
+        if (!m_gpu) return false;
+        GpuHeightfield::MappedView v;
+        if (!m_gpu->tryMapHarvest(slot, v)) return false;
+        out = GpuMappedView{ v.elev, v.norm4, v.water, v.count };
+        return true;
+    }
+
+    void TerrainGenerator::gpuReleaseSlot(int slot) {
+        if (m_gpu) m_gpu->releaseSlot(slot);
     }
 }

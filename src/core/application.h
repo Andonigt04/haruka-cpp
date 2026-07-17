@@ -16,6 +16,7 @@
 #include "tools/math_types.h"
 #include "core/modules.h"      // HARUKA_MOD_* (gating de subsistemas opcionales)
 #include "core/world_system.h"
+#include "core/world_system_provider.h"  // adaptador IWorldProvider (cliente) para la física
 #include "core/window.h"
 #include "core/camera.h"
 #include "rhi/rhi_device.h"
@@ -132,6 +133,21 @@ public:
     /** @brief Terrain height (metres above reference sphere) at a world position. */
     double getTerrainHeightAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
+    }
+
+    /** @brief (F10) Altura DE LA MALLA en una dirección planet-local (km), para el planeta activo.
+     *  Devuelve false si no hay chunk residente ahí. Lo usa la colocación de props para plantarlos
+     *  sobre el terreno que se DIBUJA (ver PlanetarySystem::meshHeightKmAt). */
+    bool meshTerrainHeightKm(const glm::vec3& dir, float& outElevKm) const {
+        if (!_planetarySystem) return false;
+        return _planetarySystem->meshHeightKmAt(_planetarySystem->getActivePlanetName(), dir, outElevKm);
+    }
+
+    /** @brief Cota del agua (m sobre el radio del planeta), o `PlanetarySystem::kNoWater` si aquí
+     *  no hay agua. Ver PlanetarySystem::sampleWaterLevel — un hoyo cavado en tierra NO es mar. */
+    double getWaterLevelAt(const glm::dvec3& worldPos) const {
+        return _planetarySystem ? _planetarySystem->sampleWaterLevel(worldPos)
+                                : Haruka::PlanetarySystem::kNoWater;
     }
 
     /** @brief Edits the terrain (dig crater / build) at a world position. */
@@ -274,14 +290,10 @@ private:
     
     /** @brief The main shader instance. */
     std::unique_ptr<Shader> _mainShader;
-    /** @brief Dedicated planet terrain shader. */
-    std::unique_ptr<Shader> _planetShader;
-    /** @brief Dedicated planet ocean shader. */
-    std::unique_ptr<Shader> _waterShader;
-    /** @brief Atmospheric sky background shader (fullscreen). */
-    std::unique_ptr<Shader> _skyShader;
-    /** @brief Empty VAO for the attribute-less fullscreen sky triangle. */
-    unsigned int _skyVAO = 0;
+    /** @brief Cielo atmosférico de fondo (pase 3 migrado a PSO/Context). Sin VBO ni VAO propios:
+     *  el triángulo fullscreen sale de gl_VertexID y el VAO (vacío) lo aporta el pipeline. */
+    Haruka::RHI::PipelineHandle m_skyPSO;
+    Haruka::RHI::BufferHandle   m_skyUBO;   // SkyParams (binding 5)
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */
@@ -301,14 +313,31 @@ private:
     unsigned int m_sceneTargetFBO = 0;     // FBO the scene passes render into this frame
     bool m_postActive = false;             // standalone post stack engaged this frame
     // Bloom ping-pong targets (own FBOs — the Bloom class isn't ping-pong shaped).
-    // Reuses the existing _bloomExtractShader / _bloomBlurShader members below.
-    unsigned int m_bloomFBO[2] = {0, 0};
-    unsigned int m_bloomTex[2] = {0, 0};
-    Haruka::RHI::RenderPassHandle m_bloomPass[2];   // render targets RHI (ids GL cacheados arriba)
+    // === MIGRADO A PSO (primer pase de la ruta Vulkan) ===
+    // Los draws van por el Context del RHI (beginRenderPass/bindPipeline/bindVertexBuffer/
+    // bindUniformBuffer/bindTexture/draw) en vez de glUseProgram+glBindVertexArray+glDrawArrays.
+    // Los uniforms SUELTOS (threshold/horizontal) — que NO existen en Vulkan — viven ahora en el
+    // UBO BloomParams (binding 2). Ver assets/shaders/bloom_extract.frag / bloom_blur.frag.
+    unsigned int m_bloomFBO[2] = {0, 0};            // id GL cacheado (solo para el guard de recreación)
+    // (F1) COPIA de la profundidad de la escena, para que el pase de AGUA la muestree y sepa cuánta
+    // agua atraviesa el rayo (reversed-Z: dist = near / z). Es una copia y no el propio depth de la
+    // escena porque leer una textura ATADA al FBO activo es un feedback loop (comportamiento
+    // indefinido). El blit cuesta poco y la GPU está ociosa.
+    Haruka::RHI::RenderPassHandle m_sceneDepthCopy;
+    int m_depthCopyW = 0, m_depthCopyH = 0;
+
+    Haruka::RHI::RenderPassHandle m_bloomPass[2];   // render targets RHI
+    Haruka::RHI::TextureHandle    m_bloomTexH[2];   // handles de color (Context::bindTexture)
+    Haruka::RHI::PipelineHandle   m_bloomExtractPSO, m_bloomBlurPSO; // horneados 1 vez (shader+layout+estado)
+    Haruka::RHI::BufferHandle     m_bloomUBO;       // BloomParams (binding 2)
     int m_bloomW = 0, m_bloomH = 0;
-    /** @brief Bright-pass + separable blur of a scene color texture; returns the
-     *  blurred bloom texture id. Used by the standalone post composite. */
-    unsigned int renderBloom(unsigned int srcColorTex);
+    // Present/composite (pase 2 migrado): FXAA + bloom + upscale a pantalla.
+    Haruka::RHI::PipelineHandle   m_presentPSO;
+    Haruka::RHI::BufferHandle     m_presentUBO;     // PresentParams (binding 3)
+    /** @brief Bright-pass + separable blur of a scene color texture. Toma y devuelve HANDLES RHI
+     *  (no ids GL): toda la cadena bloom→composite dibuja por el Context (ruta PSO). Handle
+     *  inválido = los pipelines no se pudieron crear → componer sin bloom. */
+    Haruka::RHI::TextureHandle renderBloom(Haruka::RHI::TextureHandle srcColorTex);
     /** @brief The IBL shader instance. */
     std::unique_ptr<IBL> _ibl;
     /** @brief The point shadow shader instance. */
@@ -333,7 +362,8 @@ private:
     std::unique_ptr<Haruka::TerrainStreamingSystem> _terrainStreamingSystem;
     /** @brief The physics engine instance. */
 #ifdef HARUKA_MOD_PHYSICS
-    std::unique_ptr<Haruka::PhysicsEngine> _physicsEngine;
+    std::unique_ptr<Haruka::PhysicsEngine>      _physicsEngine;
+    std::unique_ptr<Haruka::WorldSystemProvider> _worldProvider; // adaptador mundo→física (vive con el motor)
 #endif
     /** @brief The chunk cache instance. */
     std::unique_ptr<Haruka::ChunkCache> _chunkCache;
@@ -359,14 +389,18 @@ private:
     std::unique_ptr<Shader> _geomShader;
     std::unique_ptr<Shader> _ssaoShader;
     std::unique_ptr<Shader> _lightShader;
-    std::unique_ptr<Shader> _compositeShader;
+    // (_compositeShader eliminado: el present dibuja por PSO/Context — m_presentPSO.)
     std::unique_ptr<Shader> _flatShader;
     std::unique_ptr<Shader> _cascadeShadowShader;
-    std::unique_ptr<Shader> _bloomExtractShader;
-    std::unique_ptr<Shader> _bloomBlurShader;
+    // (_bloomExtractShader/_bloomBlurShader eliminados: el bloom ya dibuja por PSO/Context —
+    //  el shader vive dentro del PipelineHandle, no en un objeto Shader suelto.)
     std::unique_ptr<Shader> _pointShadowShader;
     std::unique_ptr<Shader> _instancingShader;
     bool _mainShaderUsesFinalLook = false;
+    // Pase de ESCENA (objetos) migrado a PSO/Context. Dos variantes de fragment (final/preview)
+    // → el pipeline se recrea si cambia useFinalLook.
+    Haruka::RHI::PipelineHandle m_scenePSO;
+    bool m_scenePSOFinalLook = false;
     
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;

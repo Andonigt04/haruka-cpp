@@ -1,5 +1,12 @@
 #include "shallow_water_renderer.h"
 #include "shader.h"
+#include "rhi/rhi_context.h"
+
+namespace {
+// std140 (binding 6): vec3 (align 16, size 12) + el float siguiente entran en el mismo slot de 16 B.
+struct SoftbodyParams { glm::vec3 color; float alphaMode; };
+static_assert(sizeof(SoftbodyParams) == 16, "SoftbodyParams std140 size mismatch");
+}
 #include "physics/fluid/shallow_water.h"
 #include "rhi/rhi_device.h"
 #include <glm/glm.hpp>
@@ -7,38 +14,39 @@
 namespace Haruka {
 
 ShallowWaterRenderer::~ShallowWaterRenderer() {
-    if (RHI::valid(m_vboH)) {
-        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_vboH); dev->destroy(m_eboH); }
-    } else {
-        if (m_vbo) glDeleteBuffers(1, &m_vbo);
-        if (m_ebo) glDeleteBuffers(1, &m_ebo);
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_vboH)) dev->destroy(m_vboH);
+        if (RHI::valid(m_eboH)) dev->destroy(m_eboH);
+        if (RHI::valid(m_uboH)) dev->destroy(m_uboH);
+        if (RHI::valid(m_pso))  dev->destroy(m_pso);
     }
-    if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
 void ShallowWaterRenderer::ensureGL() {
     if (m_init) return;
-    m_shader = std::make_unique<Shader>("shaders/softbody.vert", "shaders/softbody.frag");
-    glGenVertexArrays(1, &m_vao);
-    if (RHI::Device* dev = RHI::device()) {
-        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
-        m_eboH = dev->createBuffer(RHI::BufferUsage::Index,  0, nullptr, RHI::BufferMemory::Stream);
-        m_vbo = dev->nativeBuffer(m_vboH); m_ebo = dev->nativeBuffer(m_eboH);
-    } else {
-        glGenBuffers(1, &m_vbo);
-        glGenBuffers(1, &m_ebo);
-    }
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    // Vertex: pos(3) + normal(3) + alpha(1) = 7 floats. Alpha (loc 2) drives the
-    // depth-based edge fade in softbody.frag (u_alphaMode), softening the grid.
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)(3*sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, 7*sizeof(float), (void*)(6*sizeof(float)));
-    glEnableVertexAttribArray(2);
-    glBindVertexArray(0);
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    // OJO: createPipeline hace un ifstream CRUDO → enraizar con el base dir de assets.
+    const std::string vs = Shader::baseDir() + "shaders/softbody.vert";
+    const std::string fs = Shader::baseDir() + "shaders/softbody.frag";
+    RHI::PipelineDesc pd;
+    pd.vertexPath          = vs.c_str();
+    pd.fragmentPath        = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)(7 * sizeof(float)) };   // pos(3) + normal(3) + alpha(1)
+    pd.vertexLayout.attributes = {
+        { 0, 0,                 RHI::Format::RGB32F },
+        { 1, 3 * sizeof(float), RHI::Format::RGB32F },
+        { 2, 6 * sizeof(float), RHI::Format::R32F   },   // alpha por-vértice (fade de borde)
+    };
+    pd.topology     = RHI::PrimitiveTopology::Triangles;
+    pd.depth.test   = true;  pd.depth.write = true;
+    pd.blend.enable = true;  pd.blend.mode  = RHI::BlendMode::Alpha;
+    pd.cull         = RHI::CullMode::None;        // agua a DOS CARAS (antes: glDisable(GL_CULL_FACE))
+    m_pso  = dev->createPipeline(pd);
+    m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex,  0, nullptr, RHI::BufferMemory::Stream);
+    m_eboH = dev->createBuffer(RHI::BufferUsage::Index,   0, nullptr, RHI::BufferMemory::Stream);
+    m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(SoftbodyParams), nullptr,
+                               RHI::BufferMemory::Dynamic);
     m_init = true;
 }
 
@@ -108,33 +116,25 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
         }
     if (m_indices.empty()) return;
 
-    glBindVertexArray(m_vao);
-    if (RHI::Device* dev = RHI::device()) {
-        dev->uploadBuffer(m_vboH, m_verts.size()*sizeof(float), m_verts.data());
-        dev->uploadBuffer(m_eboH, m_indices.size()*sizeof(unsigned int), m_indices.data());
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);   // asegura el binding EBO en el VAO
-    } else {
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, m_indices.size()*sizeof(unsigned int), m_indices.data(), GL_DYNAMIC_DRAW);
-    }
+    RHI::Device* dev = RHI::device();
+    if (!dev || !RHI::valid(m_pso)) return;
+    dev->uploadBuffer(m_vboH, m_verts.size()   * sizeof(float),        m_verts.data());
+    dev->uploadBuffer(m_eboH, m_indices.size() * sizeof(unsigned int), m_indices.data());
 
-    m_shader->use();
-    const GLint locColor = 15;
-    glm::vec3 waterCol(0.10f, 0.35f, 0.55f);
-    glUniform3fv(locColor, 1, &waterCol[0]);
-    glUniform1f(16, 1.0f); // u_alphaMode: use the per-vertex depth alpha
+    // Antes eran uniforms sueltos (locations 15/16); ahora van por UBO (no existen en Vulkan).
+    const SoftbodyParams params{ glm::vec3(0.10f, 0.35f, 0.55f), 1.0f };
+    dev->updateBuffer(m_uboH, 0, sizeof(params), &params);
 
-    GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
-    glDisable(GL_CULL_FACE);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    RHI::Context* ctx = dev->beginFrame();
+    ctx->bindPipeline(m_pso);            // programa + blend alfa + SIN culling (dos caras)
+    ctx->bindVertexBuffer(m_vboH);
+    ctx->bindIndexBuffer(m_eboH);
+    ctx->bindUniformBuffer(6, m_uboH);
+    ctx->drawIndexed((uint32_t)m_indices.size());
 
-    glDrawElements(GL_TRIANGLES, (GLsizei)m_indices.size(), GL_UNSIGNED_INT, nullptr);
-
+    // Transición: el resto del frame sigue en GL directo y espera este estado.
+    glDisable(GL_BLEND);
     glBindVertexArray(0);
-    if (cullWas) glEnable(GL_CULL_FACE);
 }
 
 } // namespace Haruka

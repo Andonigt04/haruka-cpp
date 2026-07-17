@@ -40,30 +40,51 @@ namespace Haruka::RHI
     /** @brief Un atributo de vértice: qué es y dónde está. Reemplaza glVertexAttribPointer. */
     struct VertexAttribute
     {
-        uint32_t location;   // el "layout(location = N)" del shader
-        uint32_t offset;     // bytes desde el inicio del vértice
-        Format   format;     // RGB32F = vec3, RG32F = vec2, RGBA8 = color normalizado...
+        uint32_t location;      // el "layout(location = N)" del shader
+        uint32_t offset;        // bytes desde el inicio del vértice DENTRO de su binding
+        Format   format;        // RGB32F = vec3, RG32F = vec2, RGBA8 = color normalizado...
+        uint32_t binding = 0;   // de QUÉ vertex buffer se alimenta (ver VertexLayout::strides)
     };
 
-    /** @brief Layout completo de un vértice. */
+    /** @brief Cada cuánto AVANZA el binding: por vértice (lo normal) o por INSTANCIA.
+     *  Es lo que hace posible el instancing sin tocar GL: los atributos que describen la INSTANCIA
+     *  (matriz de modelo, color, escala) salen de un buffer que avanza una vez por instancia, no por
+     *  vértice. Mapea 1:1 a `VkVertexInputBindingDescription::inputRate` (en GL: divisor 0/1). */
+    enum class InputRate { Vertex, Instance };
+
+    /** @brief Layout completo de un vértice. Un stride por BINDING (= por vertex buffer).
+     *  El caso común —todo interleaved en un solo buffer— usa un único stride. El TERRENO usa
+     *  un buffer POR STREAM de atributo (posición / normal empaquetada / uv), cada uno con su
+     *  stride → varios bindings. Mapea 1:1 a VkVertexInputBindingDescription. */
     struct VertexLayout
     {
-        uint32_t                     stride = 0;   // bytes que ocupa UN vértice
+        std::vector<uint32_t>        strides;      // strides[i] = bytes/vértice del binding i
         std::vector<VertexAttribute> attributes;
+        /// rates[i] = cada cuánto avanza el binding i. Vacío o corto ⇒ Vertex (comportamiento previo).
+        std::vector<InputRate>       rates;
     };
 
-    /** @brief Estado de profundidad (hoy son tus glEnable(GL_DEPTH_TEST) sueltos). */
+    /**
+     * @brief Estado de profundidad.
+     *
+     * ⚠️ El motor usa **REVERSED-Z** (near→1, infinito→0; ver Camera::getProjectionMatrix):
+     * lo CERCANO tiene z MAYOR → el test por defecto es **Greater**, no Less. Un pase que
+     * ponga `Less` con la proyección de la cámara NO dibujará nada (o solo lo más lejano).
+     * Los pases con proyección PROPIA no invertida (shadow maps, IBL) deben pedir Less/LessEqual
+     * explícitamente Y limpiar su depth a 1.0.
+     */
     struct DepthState
     {
         bool      test = true;
         bool      write = true;
-        CompareOp compare = CompareOp::Less;
+        CompareOp compare = CompareOp::Greater;   // reversed-Z: lo más cercano gana con >
     };
 
     /** @brief Estado de mezcla (hoy son tus glBlendFunc sueltos). alpha estándar src/1-src. */
     struct BlendState
     {
-        bool enable = false;
+        bool      enable = false;
+        BlendMode mode   = BlendMode::Alpha;
     };
 
     /**
@@ -98,6 +119,9 @@ namespace Haruka::RHI
         PrimitiveTopology topology = PrimitiveTopology::Triangles;
         DepthState        depth;
         BlendState        blend;
+        // OJO al default: None = SIN culling. Los pases que quieran descartar caras traseras
+        // (la escena sólida) deben pedir Back explícitamente.
+        CullMode          cull = CullMode::None;
     };
 
     /**
@@ -124,12 +148,14 @@ namespace Haruka::RHI
         bool                depthCompare = false;            // sampler de sombra (COMPARE_REF_TO_TEXTURE, LEQUAL)
     };
 
-    /** @brief Valores de limpieza al comenzar un render pass. */
+    /** @brief Valores de limpieza al comenzar un render pass.
+     *  ⚠️ REVERSED-Z: el "infinito" es 0 → el clear de profundidad es **0.0**, no 1.0.
+     *  (Los pases con proyección no invertida —shadow maps, IBL— deben pasar depth = 1.0.) */
     struct ClearValues
     {
         bool  clearColor = true;
         float color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
         bool  clearDepth = true;
-        float depth = 1.0f;
+        float depth = 0.0f;   // reversed-Z: lejano = 0
     };
 }

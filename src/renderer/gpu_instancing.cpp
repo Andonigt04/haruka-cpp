@@ -1,184 +1,81 @@
-#include "gpu_instancing.h"
+#include "renderer/gpu_instancing.h"
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
+
 #include <glm/gtc/matrix_transform.hpp>
+#include <cstddef>
 
 namespace Haruka { namespace Renderer {
 
-GPUInstancing::GPUInstancing(PrecisionMode mode) : precisionMode(mode) {}
-
 GPUInstancing::~GPUInstancing() {
-    if (RHI::valid(m_instanceBuf)) {
-        if (RHI::Device* dev = RHI::device()) dev->destroy(m_instanceBuf);
-    } else if (instanceVBO) {
-        glDeleteBuffers(1, &instanceVBO);
-    }
-    if (instanceVAO) glDeleteVertexArrays(1, &instanceVAO);  // VAO siempre GL (transitorio)
+    if (RHI::valid(m_buf))
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_buf);
 }
 
-void GPUInstancing::init(int maxInst) {
-    maxInstances = maxInst;
-    instancesDouble.reserve(maxInstances);
-    instancesFloat.reserve(maxInstances);
-    setupInstanceBuffer();
+void GPUInstancing::init(int maxInstances) {
+    m_maxInstances = maxInstances > 0 ? maxInstances : 1;
+    m_instances.reserve((size_t)m_maxInstances);
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    if (RHI::valid(m_buf)) dev->destroy(m_buf);
+    // Vertex buffer (no SSBO): lo consume el ensamblador de vértices como binding por-instancia.
+    m_buf = dev->createBuffer(RHI::BufferUsage::Vertex,
+                              (size_t)m_maxInstances * sizeof(InstanceDataFloat),
+                              nullptr, RHI::BufferMemory::Dynamic);
 }
 
-glm::dmat4 GPUInstancing::createModelMatrixDouble(
-    const glm::dvec3& pos,
-    const glm::vec3& scale,
-    const glm::dvec3& rotation) const {
-    
-    glm::dmat4 model = glm::dmat4(1.0);
-    
-    // Translación (double precision)
-    model = glm::translate(model, pos);
-    
-    // Rotación (Euler angles)
-    model = glm::rotate(model, rotation.x, glm::dvec3(1.0, 0.0, 0.0));
-    model = glm::rotate(model, rotation.y, glm::dvec3(0.0, 1.0, 0.0));
-    model = glm::rotate(model, rotation.z, glm::dvec3(0.0, 0.0, 1.0));
-    
-    // Escala
-    model = glm::scale(model, glm::dvec3(scale));
-    
-    return model;
+void GPUInstancing::addInstance(const glm::vec3& position, const glm::vec3& scale,
+                                const glm::vec4& color, const glm::vec3& rotation) {
+    glm::mat4 m(1.0f);
+    m = glm::translate(m, position);
+    if (rotation.x != 0.0f) m = glm::rotate(m, rotation.x, glm::vec3(1, 0, 0));
+    if (rotation.y != 0.0f) m = glm::rotate(m, rotation.y, glm::vec3(0, 1, 0));
+    if (rotation.z != 0.0f) m = glm::rotate(m, rotation.z, glm::vec3(0, 0, 1));
+    m = glm::scale(m, scale);
+    addInstance(m, color, scale);
 }
 
-glm::mat4 GPUInstancing::createModelMatrixFloat(
-    const glm::vec3& pos,
-    const glm::vec3& scale,
-    const glm::vec3& rotation) const {
-    
-    glm::mat4 model = glm::mat4(1.0f);
-    
-    // Translación
-    model = glm::translate(model, pos);
-    
-    // Rotación (Euler angles)
-    model = glm::rotate(model, rotation.x, glm::vec3(1.0f, 0.0f, 0.0f));
-    model = glm::rotate(model, rotation.y, glm::vec3(0.0f, 1.0f, 0.0f));
-    model = glm::rotate(model, rotation.z, glm::vec3(0.0f, 0.0f, 1.0f));
-    
-    // Escala
-    model = glm::scale(model, scale);
-    
-    return model;
+void GPUInstancing::addInstance(const glm::mat4& model, const glm::vec4& color, const glm::vec3& scale) {
+    if ((int)m_instances.size() >= m_maxInstances) return;   // cota dura: el buffer es fijo
+    m_instances.push_back({ model, color, scale, 0.0f });
+    m_dirty = true;
 }
 
-void GPUInstancing::addInstanceDouble(
-    const glm::dvec3& position,
-    const glm::vec3& scale,
-    const glm::vec4& color,
-    const glm::dvec3& rotation) {
-    
-    if (instancesDouble.size() >= maxInstances) {
-        return;  // Buffer lleno
-    }
-    
-    InstanceDataDouble instance;
-    instance.model = createModelMatrixDouble(position, scale, rotation);
-    instance.position = position;
-    instance.color = color;
-    instance.scale = scale;
-    
-    instancesDouble.push_back(instance);
-    bufferDirty = true;
+void GPUInstancing::upload() {
+    if (!m_dirty || m_instances.empty() || !RHI::valid(m_buf)) return;
+    if (RHI::Device* dev = RHI::device())
+        dev->updateBuffer(m_buf, 0, m_instances.size() * sizeof(InstanceDataFloat), m_instances.data());
+    m_dirty = false;
 }
 
-void GPUInstancing::addInstanceFloat(
-    const glm::vec3& position,
-    const glm::vec3& scale,
-    const glm::vec4& color,
-    const glm::vec3& rotation) {
-    
-    if (instancesFloat.size() >= maxInstances) {
-        return;  // Buffer lleno
-    }
-    
-    InstanceDataFloat instance;
-    instance.model = createModelMatrixFloat(position, scale, rotation);
-    instance.color = color;
-    instance.scale = scale;
-    
-    instancesFloat.push_back(instance);
-    bufferDirty = true;
-}
-
-void GPUInstancing::setupInstanceBuffer() {
-    const size_t bytes = (size_t)maxInstances * sizeof(InstanceDataFloat);
-
-    // Ruta RHI: buffer dinámico (tamaño fijo tras init, actualizable por subdata).
-    if (RHI::Device* dev = RHI::device()) {
-        if (!RHI::valid(m_instanceBuf))
-            m_instanceBuf = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic);
-        instanceVBO = dev->nativeBuffer(m_instanceBuf);
-        return;
-    }
-
-    if (instanceVBO == 0) glGenBuffers(1, &instanceVBO);
-    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-    glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
-void GPUInstancing::updateBuffer() {
-    if (!bufferDirty || instancesFloat.empty()) return;
-
-    const size_t bytes = instancesFloat.size() * sizeof(InstanceDataFloat);
-    if (RHI::valid(m_instanceBuf)) {
-        if (RHI::Device* dev = RHI::device()) dev->updateBuffer(m_instanceBuf, 0, bytes, instancesFloat.data());
-    } else {
-        glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-        glBufferSubData(GL_ARRAY_BUFFER, 0, bytes, instancesFloat.data());
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-    }
-    bufferDirty = false;
-}
-
-void GPUInstancing::render(GLuint VAO, GLuint indexCount) {
-    int instanceCount = (int)instancesFloat.size();
-    if (instanceCount == 0) return;
-
-    updateBuffer();
-
-    glBindVertexArray(VAO);
-    glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
-
-    // mat4 model: 4 consecutive vec4 columns at locations 3-6
-    constexpr GLsizei stride = sizeof(InstanceDataFloat);
-    for (int col = 0; col < 4; ++col) {
-        GLuint loc = 3 + col;
-        glEnableVertexAttribArray(loc);
-        glVertexAttribPointer(loc, 4, GL_FLOAT, GL_FALSE, stride,
-                              (void*)(uintptr_t)(col * 16));
-        glVertexAttribDivisor(loc, 1);
-    }
-    // vec4 color at location 7
-    glEnableVertexAttribArray(7);
-    glVertexAttribPointer(7, 4, GL_FLOAT, GL_FALSE, stride,
-                          (void*)offsetof(InstanceDataFloat, color));
-    glVertexAttribDivisor(7, 1);
-    // vec3 scale at location 8
-    glEnableVertexAttribArray(8);
-    glVertexAttribPointer(8, 3, GL_FLOAT, GL_FALSE, stride,
-                          (void*)offsetof(InstanceDataFloat, scale));
-    glVertexAttribDivisor(8, 1);
-
-    glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_INT, 0, instanceCount);
-
-    // Reset divisors so non-instanced draws of this VAO aren't affected
-    for (int col = 0; col < 4; ++col) glVertexAttribDivisor(3 + col, 0);
-    glVertexAttribDivisor(7, 0);
-    glVertexAttribDivisor(8, 0);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindVertexArray(0);
+void GPUInstancing::render(RHI::Context* ctx, uint32_t indexCount, uint32_t instanceBinding) {
+    if (!ctx || m_instances.empty() || indexCount == 0) return;
+    upload();
+    // El divisor NO se toca aquí: vive en el PSO (InputRate::Instance). El llamador ya ató su
+    // pipeline y la malla base; nosotros solo añadimos el stream de instancias y disparamos el draw.
+    ctx->bindVertexBuffer(m_buf, instanceBinding);
+    ctx->drawIndexed(indexCount, /*first*/0, (uint32_t)m_instances.size());
 }
 
 void GPUInstancing::clear() {
-    instancesDouble.clear();
-    instancesFloat.clear();
-    bufferDirty = true;
+    m_instances.clear();
+    m_dirty = true;
 }
 
+void GPUInstancing::appendInstanceLayout(RHI::VertexLayout& layout, uint32_t binding) {
+    if (layout.strides.size() <= binding) layout.strides.resize(binding + 1, 0);
+    if (layout.rates.size()   <= binding) layout.rates.resize(binding + 1, RHI::InputRate::Vertex);
+    layout.strides[binding] = (uint32_t)sizeof(InstanceDataFloat);
+    layout.rates[binding]   = RHI::InputRate::Instance;   // ← avanza una vez por OBJETO
+
+    // mat4 = 4 columnas vec4 en locations 3..6 (así lo declara el shader).
+    for (uint32_t col = 0; col < 4; ++col)
+        layout.attributes.push_back({ 3 + col, (uint32_t)(col * sizeof(glm::vec4)),
+                                      RHI::Format::RGBA32F, binding });
+    layout.attributes.push_back({ 7, (uint32_t)offsetof(InstanceDataFloat, color),
+                                  RHI::Format::RGBA32F, binding });
+    layout.attributes.push_back({ 8, (uint32_t)offsetof(InstanceDataFloat, scale),
+                                  RHI::Format::RGB32F, binding });
+}
 
 }} // namespace Haruka::Renderer

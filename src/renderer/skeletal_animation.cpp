@@ -28,20 +28,12 @@ SkinnedMesh::SkinnedMesh(std::vector<SkinnedVertex> verts, std::vector<unsigned 
     glGenVertexArrays(1, &m_vao);
     glBindVertexArray(m_vao);
 
-    if (RHI::Device* dev = RHI::device()) {
-        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(SkinnedVertex), verts.data());
-        m_eboH = dev->createBuffer(RHI::BufferUsage::Index,  indices.size() * sizeof(unsigned int), indices.data());
-        m_vbo = dev->nativeBuffer(m_vboH); m_ebo = dev->nativeBuffer(m_eboH);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    } else {
-        glGenBuffers(1, &m_vbo);
-        glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-        glBufferData(GL_ARRAY_BUFFER, verts.size() * sizeof(SkinnedVertex), verts.data(), GL_STATIC_DRAW);
-        glGenBuffers(1, &m_ebo);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-    }
+    RHI::Device* dev = RHI::device();
+    m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(SkinnedVertex), verts.data());
+    m_eboH = dev->createBuffer(RHI::BufferUsage::Index,  indices.size() * sizeof(unsigned int), indices.data());
+    m_vbo = dev->nativeBuffer(m_vboH); m_ebo = dev->nativeBuffer(m_eboH);
+    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
 
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(SkinnedVertex), (void*)offsetof(SkinnedVertex, position));
@@ -63,12 +55,8 @@ SkinnedMesh::SkinnedMesh(SkinnedMesh&& o) noexcept
     o.m_vboH = o.m_eboH = {};
 }
 SkinnedMesh::~SkinnedMesh() {
-    if (RHI::valid(m_vboH)) {
+    if (RHI::valid(m_vboH))
         if (RHI::Device* dev = RHI::device()) { dev->destroy(m_vboH); dev->destroy(m_eboH); }
-    } else {
-        if (m_vbo) glDeleteBuffers(1, &m_vbo);
-        if (m_ebo) glDeleteBuffers(1, &m_ebo);
-    }
     if (m_vao) glDeleteVertexArrays(1, &m_vao);   // VAO siempre GL (transitorio)
 }
 void SkinnedMesh::draw() const {
@@ -243,21 +231,12 @@ void Animator::upload(Shader& shader) const {
     static Haruka::RHI::BufferHandle uboH;
     static GLuint ubo = 0;
     const size_t bytes = MAX_BONES * sizeof(glm::mat4);
-    if (RHI::Device* dev = RHI::device()) {
-        if (!RHI::valid(uboH)) {
-            uboH = dev->createBuffer(RHI::BufferUsage::Uniform, bytes, nullptr, RHI::BufferMemory::Dynamic);
-            ubo = dev->nativeBuffer(uboH);
-        }
-        dev->updateBuffer(uboH, 0, bytes, m_final.data());
-    } else {
-        if (!ubo) {
-            glGenBuffers(1, &ubo);
-            glBindBuffer(GL_UNIFORM_BUFFER, ubo);
-            glBufferData(GL_UNIFORM_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW);
-        }
-        glBindBuffer(GL_UNIFORM_BUFFER, ubo);
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, bytes, m_final.data());
+    RHI::Device* dev = RHI::device();
+    if (!RHI::valid(uboH)) {
+        uboH = dev->createBuffer(RHI::BufferUsage::Uniform, bytes, nullptr, RHI::BufferMemory::Dynamic);
+        ubo = dev->nativeBuffer(uboH);
     }
+    dev->updateBuffer(uboH, 0, bytes, m_final.data());
     glBindBufferBase(GL_UNIFORM_BUFFER, 4, ubo);   // binding sigue GL (native id)
     (void)shader;
 }

@@ -1,8 +1,11 @@
 #include <cmath>
+#include <glad/glad.h>   // glBindBufferBase del SSBO del campo (escotilla nativa)
 #include "water_renderer.h"
 #include "tools/profiler.h"
 #include "terrain_renderer.h" // drawnHashesFor: sincroniza el agua con el set dibujado del terreno
+#include "renderer/shader.h"  // Shader::baseDir (createPipeline NO resuelve rutas)
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 #include <cstdio>
 
 namespace Haruka {
@@ -10,44 +13,96 @@ namespace Haruka {
 WaterRenderer::~WaterRenderer() {
     RHI::Device* dev = RHI::device();
     for (auto& pair : m_gpuMeshes) cleanupMesh(pair.second);
+    if (!dev) return;
     for (auto& [vc, p] : m_pools) {
-        if (p.vao) glDeleteVertexArrays(1, &p.vao);
-        if (dev && RHI::valid(p.hPos)) {
+        if (RHI::valid(p.hPos)) {
             dev->destroy(p.hPos); dev->destroy(p.hNorm); dev->destroy(p.hParam);
             dev->destroy(p.hMorph); dev->destroy(p.hEbo);
-        } else {
-            GLuint bufs[5] = { p.posVBO, p.normVBO, p.paramVBO, p.morphVBO, p.ebo };
-            glDeleteBuffers(5, bufs);
         }
-        if (p.cmdBuf)   glDeleteBuffers(1, &p.cmdBuf);   // indirect: siempre GL (stream por-frame)
-        if (p.drawSSBO) glDeleteBuffers(1, &p.drawSSBO);
+        if (RHI::valid(p.hCmd))  dev->destroy(p.hCmd);
+        if (RHI::valid(p.hSSBO)) dev->destroy(p.hSSBO);
     }
-    if (m_oceanVao) glDeleteVertexArrays(1, &m_oceanVao);
-    if (dev && RHI::valid(m_hOceanPos)) {
+    if (RHI::valid(m_hOceanPos)) {
         dev->destroy(m_hOceanPos); dev->destroy(m_hOceanNorm); dev->destroy(m_hOceanParam);
         dev->destroy(m_hOceanMorph); dev->destroy(m_hOceanEbo);
-    } else {
-        GLuint ob[5] = { m_oceanPos, m_oceanNorm, m_oceanParam, m_oceanMorph, m_oceanEbo };
-        glDeleteBuffers(5, ob);
     }
+    if (RHI::valid(m_pso))       dev->destroy(m_pso);
+    if (RHI::valid(m_uboParams)) dev->destroy(m_uboParams);
+    if (RHI::valid(m_soloSSBO))  dev->destroy(m_soloSSBO);
+}
+
+// --- PSO del agua: uno solo para los tres caminos (mismo layout de 4 streams) --------------
+bool WaterRenderer::ensurePipeline() {
+    RHI::Device* dev = RHI::device();
+    if (!dev) return false;
+    if (RHI::valid(m_pso)) return true;
+
+    const std::string vs = Shader::baseDir() + "shaders/water.vert";
+    const std::string fs = Shader::baseDir() + "shaders/water.frag";
+    RHI::PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = {
+        (uint32_t)sizeof(glm::vec3),  // 0: aPos
+        (uint32_t)sizeof(glm::vec3),  // 1: aNormal (radial)
+        (uint32_t)sizeof(glm::vec2),  // 2: aWaterParam (nivel, profundidad)
+        (uint32_t)sizeof(glm::vec3),  // 3: aMorphTarget
+    };
+    pd.vertexLayout.attributes = {
+        { 0, 0, RHI::Format::RGB32F, 0 },
+        { 1, 0, RHI::Format::RGB32F, 1 },
+        { 2, 0, RHI::Format::RG32F,  2 },
+        { 3, 0, RHI::Format::RGB32F, 3 },
+    };
+    pd.topology      = RHI::PrimitiveTopology::Triangles;
+    pd.depth.test    = true;
+    // El agua NO escribe profundidad: depth-TESTA (el terreno delante la ocluye) pero no escribe,
+    // para que el TERRENO bajo el agua se siga viendo y no quede tapado por el océano.
+    pd.depth.write   = false;
+    pd.depth.compare = RHI::CompareOp::GreaterEqual;   // reversed-Z
+    pd.blend.enable  = true;
+    pd.blend.mode    = RHI::BlendMode::Alpha;
+    // A DOS CARAS: la superficie del océano tiene que verse también desde DEBAJO (cámara bajo el
+    // agua). Con cull back (el que dejaba el pase de terreno) no se veía nada al sumergirse.
+    pd.cull          = RHI::CullMode::None;
+    m_pso = dev->createPipeline(pd);
+
+    m_uboParams = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(WaterParamsUBO), nullptr,
+                                    RHI::BufferMemory::Dynamic);
+    m_soloSSBO  = dev->createBuffer(RHI::BufferUsage::Storage, sizeof(GpuDrawItem), nullptr,
+                                    RHI::BufferMemory::Dynamic);
+
+    return RHI::valid(m_pso);
+}
+
+void WaterRenderer::setPassParams(const PassParams& p) {
+    m_params.waveUpTime  = glm::vec4(p.waveUp,        p.time);
+    m_params.waveTanWind = glm::vec4(p.waveTangent,   p.windStrength);
+    m_params.waveBitTide = glm::vec4(p.waveBitangent, p.tideHeight);
+    m_params.relCamNear   = glm::vec4(p.planetRelCam, p.nearPlane);
+    m_params.windDir      = p.windDir;
+    m_params.waterQuality = p.waterQuality;
+    m_params.fieldRes     = (float)p.fieldRes;
+    m_sceneDepth          = p.sceneDepth;
+    m_fieldSSBO           = p.fieldSSBO;
+}
+
+// Ata pipeline + UBO del pase + la profundidad de la escena. Común a los tres caminos (océano
+// único, chunk suelto, pool): ya no hay flag de camino — el recorte de costa lo hace el depth.
+RHI::Context* WaterRenderer::beginPass() {
+    RHI::Device* dev = RHI::device();
+    RHI::Context* ctx = dev->beginFrame();
+    ctx->bindPipeline(m_pso);      // depth GEQUAL sin escritura + blend alfa + sin cull
+    dev->updateBuffer(m_uboParams, 0, sizeof(WaterParamsUBO), &m_params);
+    ctx->bindUniformBuffer(8, m_uboParams);   // 8: el 7 es el SSBO por-draw
+    ctx->bindTexture(6, m_sceneDepth);        // (F1) profundidad del terreno bajo cada píxel
+    // (F3) El CAMPO del planeta: el agua consulta si aquí HAY agua (si no, existe también bajo tierra).
+    if (m_fieldSSBO) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9, m_fieldSSBO);
+    return ctx;
 }
 
 // --- BATCHING: pool de agua ----------------------------------------------------------
-void WaterRenderer::setupPoolVAO(WaterPool& p) {
-    glBindVertexArray(p.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, p.posVBO);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr); glEnableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, p.normVBO);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr); glEnableVertexAttribArray(1);
-    glBindBuffer(GL_ARRAY_BUFFER, p.paramVBO);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr); glEnableVertexAttribArray(2);
-    glBindBuffer(GL_ARRAY_BUFFER, p.morphVBO);
-    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr); glEnableVertexAttribArray(3);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.ebo);
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
+// (Sin VAO: el layout vive en el PSO y los buffers se atan por handle → growPool no religa nada.)
 WaterRenderer::WaterPool& WaterRenderer::getOrCreatePool(uint32_t vertexCount, uint32_t maxIndexCount) {
     auto it = m_pools.find(vertexCount);
     if (it != m_pools.end()) return it->second;
@@ -55,22 +110,21 @@ WaterRenderer::WaterPool& WaterRenderer::getOrCreatePool(uint32_t vertexCount, u
     p.vertexCount   = vertexCount;
     p.maxIndexCount = maxIndexCount;
     p.capacity      = 512;                       // slots iniciales (crece x2)
-    glGenVertexArrays(1, &p.vao);
     const size_t nv = (size_t)vertexCount * p.capacity;
     RHI::Device* dev = RHI::device();
-    auto mkbuf = [&](Haruka::RHI::BufferHandle& h, GLuint& b, RHI::BufferUsage usage, size_t bytes) {
-        if (dev) { h = dev->createBuffer(usage, bytes, nullptr, RHI::BufferMemory::Dynamic); b = dev->nativeBuffer(h); }
-        else     { glGenBuffers(1, &b); glBindBuffer(GL_ARRAY_BUFFER, b); glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW); }
+    auto mkbuf = [&](Haruka::RHI::BufferHandle& h, RHI::BufferUsage usage, size_t bytes) {
+        h = dev->createBuffer(usage, bytes, nullptr, RHI::BufferMemory::Dynamic);
     };
-    mkbuf(p.hPos,   p.posVBO,   RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
-    mkbuf(p.hNorm,  p.normVBO,  RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
-    mkbuf(p.hParam, p.paramVBO, RHI::BufferUsage::Vertex, nv * sizeof(glm::vec2));
-    mkbuf(p.hMorph, p.morphVBO, RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
-    mkbuf(p.hEbo,   p.ebo,      RHI::BufferUsage::Index,  (size_t)maxIndexCount * p.capacity * sizeof(unsigned int));
-    setupPoolVAO(p);
+    mkbuf(p.hPos,   RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
+    mkbuf(p.hNorm,  RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
+    mkbuf(p.hParam, RHI::BufferUsage::Vertex, nv * sizeof(glm::vec2));
+    mkbuf(p.hMorph, RHI::BufferUsage::Vertex, nv * sizeof(glm::vec3));
+    mkbuf(p.hEbo,   RHI::BufferUsage::Index,  (size_t)maxIndexCount * p.capacity * sizeof(unsigned int));
+    // Multidraw: comandos + items, reasignados enteros cada frame (orphan) → Stream.
+    p.hCmd  = dev->createBuffer(RHI::BufferUsage::Indirect, 0, nullptr, RHI::BufferMemory::Stream);
+    p.hSSBO = dev->createBuffer(RHI::BufferUsage::Storage,  0, nullptr, RHI::BufferMemory::Stream);
     p.freeSlots.reserve(p.capacity);
     for (uint32_t s = p.capacity; s-- > 0; ) p.freeSlots.push_back(s);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
     return m_pools.emplace(vertexCount, std::move(p)).first->second;
 }
 
@@ -78,36 +132,21 @@ void WaterRenderer::growPool(WaterPool& p) {
     const uint32_t oldCap = p.capacity, newCap = oldCap * 2;
     const size_t vc = p.vertexCount;
     RHI::Device* dev = RHI::device();
-    auto regrow = [&](Haruka::RHI::BufferHandle& h, GLuint& buf, RHI::BufferUsage usage, size_t elemPerSlot, size_t elemSize) {
+    auto regrow = [&](Haruka::RHI::BufferHandle& h, RHI::BufferUsage usage, size_t elemPerSlot, size_t elemSize) {
         const size_t newBytes = (size_t)newCap * elemPerSlot * elemSize;
         const size_t oldBytes = (size_t)oldCap * elemPerSlot * elemSize;
-        if (dev) {
-            Haruka::RHI::BufferHandle nh = dev->createBuffer(usage, newBytes, nullptr, RHI::BufferMemory::Dynamic);
-            dev->copyBuffer(h, nh, 0, 0, oldBytes);
-            dev->destroy(h);
-            h = nh; buf = dev->nativeBuffer(h);
-        } else {
-            GLuint nb = 0; glGenBuffers(1, &nb);
-            GLenum tgt = (usage == RHI::BufferUsage::Index) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
-            glBindBuffer(tgt, nb);
-            glBufferData(tgt, newBytes, nullptr, GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_COPY_READ_BUFFER, buf);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, oldBytes);
-            glDeleteBuffers(1, &buf); buf = nb;
-        }
+        Haruka::RHI::BufferHandle nh = dev->createBuffer(usage, newBytes, nullptr, RHI::BufferMemory::Dynamic);
+        dev->copyBuffer(h, nh, 0, 0, oldBytes);
+        dev->destroy(h);
+        h = nh;
     };
-    regrow(p.hPos,   p.posVBO,   RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
-    regrow(p.hNorm,  p.normVBO,  RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
-    regrow(p.hParam, p.paramVBO, RHI::BufferUsage::Vertex, vc, sizeof(glm::vec2));
-    regrow(p.hMorph, p.morphVBO, RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
-    regrow(p.hEbo,   p.ebo,      RHI::BufferUsage::Index,  p.maxIndexCount, sizeof(unsigned int));
+    regrow(p.hPos,   RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
+    regrow(p.hNorm,  RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
+    regrow(p.hParam, RHI::BufferUsage::Vertex, vc, sizeof(glm::vec2));
+    regrow(p.hMorph, RHI::BufferUsage::Vertex, vc, sizeof(glm::vec3));
+    regrow(p.hEbo,   RHI::BufferUsage::Index,  p.maxIndexCount, sizeof(unsigned int));
     p.capacity = newCap;
-    setupPoolVAO(p);
     for (uint32_t s = newCap; s-- > oldCap; ) p.freeSlots.push_back(s);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 }
 
 void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
@@ -171,75 +210,61 @@ void WaterRenderer::addToScene(const std::string& planetName, const PlanetChunkK
             if (p.freeSlots.empty()) growPool(p);
             uint32_t slot = p.freeSlots.back(); p.freeSlots.pop_back();
             const size_t vbase = (size_t)slot * vc;
-            auto sub = [&](GLuint buf, size_t elem, const void* src) {
-                glBindBuffer(GL_ARRAY_BUFFER, buf);
-                glBufferSubData(GL_ARRAY_BUFFER, vbase * elem, vc * elem, src);
+            RHI::Device* pdev = RHI::device();
+            auto sub = [&](RHI::BufferHandle h, size_t elem, const void* src) {
+                pdev->updateBuffer(h, vbase * elem, vc * elem, src);
             };
-            sub(p.posVBO,   sizeof(glm::vec3), data.waterVertices.data());
-            sub(p.normVBO,  sizeof(glm::vec3), data.waterNormals.data());
-            if (data.waterParams.size() == vc) sub(p.paramVBO, sizeof(glm::vec2), data.waterParams.data());
-            else { std::vector<glm::vec2> z(vc, glm::vec2(0.0f)); sub(p.paramVBO, sizeof(glm::vec2), z.data()); }
-            if (data.waterMorphTargets.size() == vc) sub(p.morphVBO, sizeof(glm::vec3), data.waterMorphTargets.data());
-            else sub(p.morphVBO, sizeof(glm::vec3), data.waterVertices.data()); // morph=pos → sin morphing
-            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            sub(p.hPos,  sizeof(glm::vec3), data.waterVertices.data());
+            sub(p.hNorm, sizeof(glm::vec3), data.waterNormals.data());
+            if (data.waterParams.size() == vc) sub(p.hParam, sizeof(glm::vec2), data.waterParams.data());
+            else { std::vector<glm::vec2> z(vc, glm::vec2(0.0f)); sub(p.hParam, sizeof(glm::vec2), z.data()); }
+            if (data.waterMorphTargets.size() == vc) sub(p.hMorph, sizeof(glm::vec3), data.waterMorphTargets.data());
+            else sub(p.hMorph, sizeof(glm::vec3), data.waterVertices.data()); // morph=pos → sin morphing
             // Índices al slot [slot*maxIdx, +indexCount); 0-based (el baseVertex del comando desplaza).
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.ebo);
-            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (size_t)slot * p.maxIndexCount * sizeof(unsigned int),
-                            mesh.indexCount * sizeof(unsigned int), data.waterIndices.data());
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+            pdev->updateBuffer(p.hEbo, (size_t)slot * p.maxIndexCount * sizeof(unsigned int),
+                               mesh.indexCount * sizeof(unsigned int), data.waterIndices.data());
             mesh.poolSlot = (int32_t)slot;
             mesh.poolKey  = vc;
-            mesh.vao      = 0;
             mesh.isReady  = true;
             m_gpuMeshes[hash] = mesh;
             return;
         }
     }
 
-    glGenVertexArrays(1, &mesh.vao);
-    glBindVertexArray(mesh.vao);
-
+    // --- CAMINO SIN POOL: buffers propios, un stream por binding del PSO ----------------------
+    // Los 4 streams se crean SIEMPRE. El PSO tiene un VAO ÚNICO compartido por todos los draws: un
+    // binding sin atar seguiría leyendo el buffer del chunk ANTERIOR (basura silenciosa) en vez del
+    // constante 0 que daba el VAO-por-malla con el atributo deshabilitado. Los ausentes se
+    // sintetizan con su valor neutro (param = 0 → océano; morph = la propia posición → sin morph).
     RHI::Device* dev = RHI::device();
-    auto mkStatic = [&](Haruka::RHI::BufferHandle& h, GLuint& glId, RHI::BufferUsage usage, const void* d, size_t bytes) {
-        GLenum tgt = (usage == RHI::BufferUsage::Index) ? GL_ELEMENT_ARRAY_BUFFER : GL_ARRAY_BUFFER;
-        if (dev) { h = dev->createBuffer(usage, bytes, d); glId = dev->nativeBuffer(h); glBindBuffer(tgt, glId); }
-        else     { glGenBuffers(1, &glId); glBindBuffer(tgt, glId); glBufferData(tgt, bytes, d, GL_STATIC_DRAW); }
+    auto mkStatic = [&](Haruka::RHI::BufferHandle& h, RHI::BufferUsage usage, const void* d, size_t bytes) {
+        h = dev->createBuffer(usage, bytes, d);
     };
 
-    mkStatic(mesh.hVbo, mesh.vbo, RHI::BufferUsage::Vertex, data.waterVertices.data(), data.waterVertices.size() * sizeof(glm::vec3));
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-    glEnableVertexAttribArray(0);
+    mkStatic(mesh.hVbo, RHI::BufferUsage::Vertex, data.waterVertices.data(), (size_t)vc * sizeof(glm::vec3));
 
-    if (!data.waterNormals.empty()) {
-        mkStatic(mesh.hNbo, mesh.nbo, RHI::BufferUsage::Vertex, data.waterNormals.data(), data.waterNormals.size() * sizeof(glm::vec3));
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-        glEnableVertexAttribArray(1);
-    }
+    if (data.waterNormals.size() == vc)
+        mkStatic(mesh.hNbo, RHI::BufferUsage::Vertex, data.waterNormals.data(), (size_t)vc * sizeof(glm::vec3));
+    else { std::vector<glm::vec3> z(vc, glm::vec3(0.0f));
+           mkStatic(mesh.hNbo, RHI::BufferUsage::Vertex, z.data(), (size_t)vc * sizeof(glm::vec3)); }
 
-    // Atributo 2: nivel de agua por vértice (0=océano, >0=lago). Si no viene
-    // (malla v1), el atributo queda deshabilitado → el shader lo lee como 0 = océano.
-    if (!data.waterParams.empty()) {
-        mkStatic(mesh.hPbo, mesh.pbo, RHI::BufferUsage::Vertex, data.waterParams.data(), data.waterParams.size() * sizeof(glm::vec2));
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(glm::vec2), nullptr); // x=nivel, y=profundidad
-        glEnableVertexAttribArray(2);
-    }
+    if (data.waterParams.size() == vc)   // x = nivel (0 = océano), y = profundidad (m)
+        mkStatic(mesh.hPbo, RHI::BufferUsage::Vertex, data.waterParams.data(), (size_t)vc * sizeof(glm::vec2));
+    else { std::vector<glm::vec2> z(vc, glm::vec2(0.0f));
+           mkStatic(mesh.hPbo, RHI::BufferUsage::Vertex, z.data(), (size_t)vc * sizeof(glm::vec2)); }
 
-    // Atributo 3: morph target CDLOD (posición en el LOD padre). Si no viene, el
-    // atributo queda deshabilitado y el shader no morfa (mix con factor 0 da igual).
-    if (!data.waterMorphTargets.empty()) {
-        mkStatic(mesh.hMbo, mesh.mbo, RHI::BufferUsage::Vertex, data.waterMorphTargets.data(), data.waterMorphTargets.size() * sizeof(glm::vec3));
-        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-        glEnableVertexAttribArray(3);
-    }
+    if (data.waterMorphTargets.size() == vc)
+        mkStatic(mesh.hMbo, RHI::BufferUsage::Vertex, data.waterMorphTargets.data(), (size_t)vc * sizeof(glm::vec3));
+    else                                  // morph = la propia posición → mix() es la identidad
+        mkStatic(mesh.hMbo, RHI::BufferUsage::Vertex, data.waterVertices.data(), (size_t)vc * sizeof(glm::vec3));
 
-    mkStatic(mesh.hEbo, mesh.ebo, RHI::BufferUsage::Index, data.waterIndices.data(), data.waterIndices.size() * sizeof(unsigned int));
+    mkStatic(mesh.hEbo, RHI::BufferUsage::Index, data.waterIndices.data(), data.waterIndices.size() * sizeof(unsigned int));
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
     // El agua NO se autopurga: su borrado lo dirige el TerrainRenderer (callback
     // onChunkRemoved) para que agua y terreno cubran SIEMPRE lo mismo (sin huecos
     // de océano ni mallas de agua huérfanas). Aquí solo reemplazamos si era stale.
-    glBindVertexArray(0);
 }
 
 void WaterRenderer::removeFromScene(const std::string& planetName, const PlanetChunkKey& key) {
@@ -320,10 +345,9 @@ void WaterRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
 void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldPos& cameraPos) {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
-    GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-    if (prog == 0) return;
-
-    const GLint locOffset = 10; // u_chunkOffset (shared convention with terrain)
+    if (!ensurePipeline()) return;
+    RHI::Device*  dev = RHI::device();
+    RHI::Context* ctx = beginPass();
 
     glm::vec4 planes[6];
     if (m_cullEnabled) {
@@ -337,11 +361,7 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         for (int p = 0; p < 6; ++p) planes[p] /= glm::length(glm::vec3(planes[p]));
     }
 
-    // Two-sided: the ocean shell must be visible from BELOW too (underwater) — with
-    // back-face culling (inherited from the terrain pass) you'd see nothing once the
-    // camera dips under the surface. Restore the cull state after.
-    GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
-    glDisable(GL_CULL_FACE);
+    // (A dos caras —visible desde bajo el agua— y depth sin escritura: ahora los hornea el PSO.)
 
     // Horizon-cull setup (see TerrainRenderer).
     glm::dvec3 camFromCenter = glm::dvec3(cameraPos) - m_planetCenter;
@@ -424,20 +444,17 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
     }
     const std::unordered_set<uint64_t>& drawn = *tset;
 
-    const GLint locBatched = 40;
-    glUniform1i(locBatched, 0); // por defecto: draws normales
     for (auto& [k, v] : m_scratchCmds)  v.clear();
     for (auto& [k, v] : m_scratchItems) v.clear();
-    GLuint boundVao = 0;
 
     // Sub-scopes de perfil: renderPlanet no tenía ninguno → water.draw era una caja negra de ~3.5ms.
     // Separa (1) el SELECT (CPU: recorrer el draw-set + morph/cull + armar cmd/item por chunk), (2)
-    // el UPLOAD del indirecto (glBufferData STREAM×2/pool), (3) el DRAW (glMultiDraw; el reloj CPU
-    // aquí incluye stalls de sync del driver → si domina, el cuello es GPU/fragmento, no CPU).
+    // el UPLOAD del indirecto (orphan ×2/pool), (3) el DRAW (el reloj CPU aquí incluye stalls de
+    // sync del driver → si domina, el cuello es GPU/fragmento, no CPU).
     {
     HARUKA_PROFILE("water.select");
-    // Iteramos el DRAW SET (~cientos). Los chunks pooled se ACUMULAN por pool y se emiten con
-    // UNA glMultiDrawElementsIndirect (tras el bucle); si batching OFF o legacy, draw inline.
+    // Iteramos el DRAW SET (~cientos). Los chunks pooled se ACUMULAN por pool y se emiten con UN
+    // drawIndexedIndirect (tras el bucle); los que no tienen slot van con un drawIndexed suelto.
     for (uint64_t hash : drawn) {
         auto mit = m_gpuMeshes.find(hash);
         if (mit == m_gpuMeshes.end()) continue;
@@ -483,9 +500,12 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
         double morph    = (t - 0.6) / 0.4;
         morph = morph < 0.0 ? 0.0 : (morph > 1.0 ? 1.0 : morph);
 
-        if (mesh.poolSlot >= 0 && m_batching) {
-            GpuDrawItem it;
-            it.offMorph[0]=offset.x; it.offMorph[1]=offset.y; it.offMorph[2]=offset.z; it.offMorph[3]=(float)morph;
+        // Datos por-draw: SIEMPRE por el SSBO (gl_DrawID), nunca por uniforms.
+        GpuDrawItem it;
+        it.offMorph[0]=offset.x; it.offMorph[1]=offset.y; it.offMorph[2]=offset.z; it.offMorph[3]=(float)morph;
+
+        if (mesh.poolSlot >= 0) {
+            // POOLED: acumular para el multidraw de su pool (gl_DrawID = índice del comando).
             auto pit = m_pools.find(mesh.poolKey);
             if (pit == m_pools.end()) continue;
             GpuDrawCmd cmd;
@@ -499,58 +519,46 @@ void WaterRenderer::renderPlanet(const std::string& planet, const Haruka::WorldP
             continue;
         }
 
-        // Inline (legacy o batching OFF).
-        GLuint wantVao = mesh.vao; GLint baseVertex = 0;
-        if (mesh.poolSlot >= 0) {
-            auto pit = m_pools.find(mesh.poolKey);
-            if (pit == m_pools.end()) continue;
-            wantVao = pit->second.vao;
-            baseVertex = (GLint)((size_t)mesh.poolSlot * mesh.vertexCount);
-        }
-        glUniform3fv(locOffset, 1, &offset[0]);
-        glUniform1f(12, (float)morph);
-        if (wantVao != boundVao) { glBindVertexArray(wantVao); boundVao = wantVao; }
-        if (mesh.poolSlot >= 0) {
-            auto& pool = m_pools[mesh.poolKey];
-            glDrawElementsBaseVertex(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT,
-                (const void*)((size_t)mesh.poolSlot * pool.maxIndexCount * sizeof(unsigned int)), baseVertex);
-        } else {
-            glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
-        }
+        // SIN POOL (el DEFAULT del agua: m_batching = false): draw suelto con sus propios buffers.
+        // gl_DrawID vale 0 → lee el item 0 del SSBO de UN elemento. Mismo shader, sin ramas.
+        dev->updateBuffer(m_soloSSBO, 0, sizeof(GpuDrawItem), &it);
+        ctx->bindStorageBuffer(7, m_soloSSBO);
+        ctx->bindVertexBuffer(mesh.hVbo, 0);
+        ctx->bindVertexBuffer(mesh.hNbo, 1);
+        ctx->bindVertexBuffer(mesh.hPbo, 2);
+        ctx->bindVertexBuffer(mesh.hMbo, 3);
+        ctx->bindIndexBuffer(mesh.hEbo);
+        ctx->drawIndexed(mesh.indexCount);
     }
     } // fin scope "water.select"
 
     // --- MultiDrawIndirect: una llamada por pool con todos sus chunks de agua visibles ---------
-    if (m_batching) {
-        glUniform1i(locBatched, 1);
-        for (auto& [poolKey, cmds] : m_scratchCmds) {
-            if (cmds.empty()) continue;
-            auto pit = m_pools.find(poolKey);
-            if (pit == m_pools.end()) continue;
-            WaterPool& pool = pit->second;
-            auto& items = m_scratchItems[poolKey];
-            const size_t n = cmds.size();
-            if (pool.cmdBuf == 0)   glGenBuffers(1, &pool.cmdBuf);
-            if (pool.drawSSBO == 0) glGenBuffers(1, &pool.drawSSBO);
-            glBindBuffer(GL_DRAW_INDIRECT_BUFFER, pool.cmdBuf);
-            glBufferData(GL_DRAW_INDIRECT_BUFFER, n * sizeof(GpuDrawCmd), cmds.data(), GL_STREAM_DRAW);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, pool.drawSSBO);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, n * sizeof(GpuDrawItem), items.data(), GL_STREAM_DRAW);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, pool.drawSSBO);
-            glBindVertexArray(pool.vao);
-            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, (GLsizei)n, 0);
-        }
-        glUniform1i(locBatched, 0);
+    for (auto& [poolKey, cmds] : m_scratchCmds) {
+        if (cmds.empty()) continue;
+        auto pit = m_pools.find(poolKey);
+        if (pit == m_pools.end()) continue;
+        WaterPool& pool = pit->second;
+        auto& items = m_scratchItems[poolKey];
+        const size_t n = cmds.size();
+        // Orphan + upload (Stream): el driver da buffers nuevos sin esperar a la multidraw anterior.
+        dev->uploadBuffer(pool.hCmd,  n * sizeof(GpuDrawCmd),  cmds.data());
+        dev->uploadBuffer(pool.hSSBO, n * sizeof(GpuDrawItem), items.data());
+        ctx->bindStorageBuffer(7, pool.hSSBO);
+        ctx->bindVertexBuffer(pool.hPos,   0);
+        ctx->bindVertexBuffer(pool.hNorm,  1);
+        ctx->bindVertexBuffer(pool.hParam, 2);
+        ctx->bindVertexBuffer(pool.hMorph, 3);
+        ctx->bindIndexBuffer(pool.hEbo);
+        ctx->drawIndexedIndirect(pool.hCmd, (uint32_t)n, (uint32_t)sizeof(GpuDrawCmd));
     }
-    glBindVertexArray(0);
-    if (cullWas) glEnable(GL_CULL_FACE);
 }
 
 void WaterRenderer::renderSingleOcean(const std::string& planet, const Haruka::WorldPos& cameraPos) {
     (void)planet;
     std::lock_guard<std::mutex> lock(m_renderMutex);
-    GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-    if (prog == 0 || m_planetRadius <= 0.0 || !m_hasPlanetCenter) return;
+    if (m_planetRadius <= 0.0 || !m_hasPlanetCenter) return;
+    if (!ensurePipeline()) return;
+    RHI::Device* dev = RHI::device();
 
     const glm::dvec3 camd(cameraPos);
     glm::dvec3 up = camd - m_planetCenter;
@@ -571,19 +579,12 @@ void WaterRenderer::renderSingleOcean(const std::string& planet, const Haruka::W
     const glm::dvec3 t2 = glm::cross(up, t1);
 
     const int N = 192, side = N + 1;
-    if (m_oceanVao == 0) {
-        glGenVertexArrays(1, &m_oceanVao);
-        glBindVertexArray(m_oceanVao);
-        RHI::Device* dev = RHI::device();
-        auto mk = [&](Haruka::RHI::BufferHandle& h, GLuint& b, int loc, int comps){
+    if (!RHI::valid(m_hOceanPos)) {
+        auto mk = [&](Haruka::RHI::BufferHandle& h, int comps){
             size_t bytes = (size_t)side*side*comps*sizeof(float);
-            if (dev) { h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic); b = dev->nativeBuffer(h); glBindBuffer(GL_ARRAY_BUFFER, b); }
-            else     { glGenBuffers(1, &b); glBindBuffer(GL_ARRAY_BUFFER, b); glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW); }
-            glVertexAttribPointer(loc, comps, GL_FLOAT, GL_FALSE, comps*sizeof(float), nullptr);
-            glEnableVertexAttribArray(loc);
+            h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic);
         };
-        mk(m_hOceanPos, m_oceanPos, 0, 3); mk(m_hOceanNorm, m_oceanNorm, 1, 3);
-        mk(m_hOceanParam, m_oceanParam, 2, 2); mk(m_hOceanMorph, m_oceanMorph, 3, 3);
+        mk(m_hOceanPos, 3); mk(m_hOceanNorm, 3); mk(m_hOceanParam, 2); mk(m_hOceanMorph, 3);
         // Índices (fijos): N×N celdas × 2 triángulos.
         std::vector<unsigned int> idx; idx.reserve((size_t)N*N*6);
         for (int y = 0; y < N; ++y) for (int x = 0; x < N; ++x) {
@@ -592,11 +593,7 @@ void WaterRenderer::renderSingleOcean(const std::string& planet, const Haruka::W
             idx.push_back(b); idx.push_back(c); idx.push_back(d);
         }
         m_oceanIdxCount = (int)idx.size();
-        if (dev) { m_hOceanEbo = dev->createBuffer(RHI::BufferUsage::Index, idx.size()*sizeof(unsigned int), idx.data());
-                   m_oceanEbo = dev->nativeBuffer(m_hOceanEbo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_oceanEbo); }
-        else     { glGenBuffers(1, &m_oceanEbo); glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_oceanEbo);
-                   glBufferData(GL_ELEMENT_ARRAY_BUFFER, idx.size()*sizeof(unsigned int), idx.data(), GL_STATIC_DRAW); }
-        glBindVertexArray(0);
+        m_hOceanEbo = dev->createBuffer(RHI::BufferUsage::Index, idx.size()*sizeof(unsigned int), idx.data());
     }
 
     // Vértices (relativos al sub-punto), densidad hacia el centro (fino cerca del jugador). Buffers
@@ -652,13 +649,12 @@ void WaterRenderer::renderSingleOcean(const std::string& planet, const Haruka::W
     }
     if (needRebuild) {
         HARUKA_PROFILE("water.upload");
-        glBindBuffer(GL_ARRAY_BUFFER, m_oceanPos);   glBufferSubData(GL_ARRAY_BUFFER, 0, pos.size()*sizeof(glm::vec3), pos.data());
-        glBindBuffer(GL_ARRAY_BUFFER, m_oceanMorph); glBufferSubData(GL_ARRAY_BUFFER, 0, morph.size()*sizeof(glm::vec3), morph.data());
+        dev->updateBuffer(m_hOceanPos,   0, pos.size()*sizeof(glm::vec3),   pos.data());
+        dev->updateBuffer(m_hOceanMorph, 0, morph.size()*sizeof(glm::vec3), morph.data());
         if (fullUpload) {
-            glBindBuffer(GL_ARRAY_BUFFER, m_oceanNorm);  glBufferSubData(GL_ARRAY_BUFFER, 0, nrm.size()*sizeof(glm::vec3), nrm.data());
-            glBindBuffer(GL_ARRAY_BUFFER, m_oceanParam); glBufferSubData(GL_ARRAY_BUFFER, 0, par.size()*sizeof(glm::vec2), par.data());
+            dev->updateBuffer(m_hOceanNorm,  0, nrm.size()*sizeof(glm::vec3), nrm.data());
+            dev->updateBuffer(m_hOceanParam, 0, par.size()*sizeof(glm::vec2), par.data());
         }
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
         m_ocLastCamd = camd; m_ocSubBuilt = sub; m_ocBuilt = true; m_ocFluidWasActive = fluidActive;
     }
 
@@ -666,15 +662,19 @@ void WaterRenderer::renderSingleOcean(const std::string& planet, const Haruka::W
     // Offset relativo al sub del BUILD (no al actual): entre rebuilds la geometría cacheada (pos rel.
     // a sub_build) queda en su posición MUNDO exacta → la orilla no deriva; solo el centro de densidad lag.
     glm::vec3 offset = glm::vec3(m_ocSubBuilt - camd);
-    glUniform3fv(10, 1, &offset[0]);  // u_chunkOffset
-    glUniform1f(12, 0.0f);            // u_morphFactor (sin morph)
-    glUniform1i(29, 1);               // u_oceanSurface = 1 (recorte per-píxel siempre)
-    GLboolean cullWas = glIsEnabled(GL_CULL_FACE); glDisable(GL_CULL_FACE);
-    glBindVertexArray(m_oceanVao);
-    glDrawElements(GL_TRIANGLES, m_oceanIdxCount, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
-    glUniform1i(29, 0);
-    if (cullWas) glEnable(GL_CULL_FACE);
+    GpuDrawItem it;
+    it.offMorph[0]=offset.x; it.offMorph[1]=offset.y; it.offMorph[2]=offset.z;
+    it.offMorph[3]=0.0f;                       // sin morph (la rejilla es única, no hay LOD que fundir)
+    dev->updateBuffer(m_soloSSBO, 0, sizeof(GpuDrawItem), &it);
+
+    RHI::Context* ctx = beginPass();
+    ctx->bindStorageBuffer(7, m_soloSSBO);     // draw suelto → gl_DrawID = 0 → item 0
+    ctx->bindVertexBuffer(m_hOceanPos,   0);
+    ctx->bindVertexBuffer(m_hOceanNorm,  1);
+    ctx->bindVertexBuffer(m_hOceanParam, 2);
+    ctx->bindVertexBuffer(m_hOceanMorph, 3);
+    ctx->bindIndexBuffer(m_hOceanEbo);
+    ctx->drawIndexed((uint32_t)m_oceanIdxCount);
 }
 
 void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
@@ -684,7 +684,6 @@ void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
         mesh.poolSlot = -1;
         return;
     }
-    if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
     if (RHI::valid(mesh.hVbo)) {
         if (RHI::Device* dev = RHI::device()) {
             dev->destroy(mesh.hVbo);
@@ -694,12 +693,6 @@ void WaterRenderer::cleanupMesh(RenderMesh& mesh) {
             if (RHI::valid(mesh.hEbo)) dev->destroy(mesh.hEbo);
         }
         mesh.hVbo = mesh.hNbo = mesh.hPbo = mesh.hMbo = mesh.hEbo = {};
-    } else {
-        if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
-        if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
-        if (mesh.pbo) glDeleteBuffers(1, &mesh.pbo);
-        if (mesh.mbo) glDeleteBuffers(1, &mesh.mbo);
-        if (mesh.ebo) glDeleteBuffers(1, &mesh.ebo);
     }
 }
 

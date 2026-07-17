@@ -14,8 +14,16 @@ layout(location = 0) out float FragDepth;
 layout(location = 0) in  vec2 TexCoords;
 
 layout(binding = 0) uniform sampler2D u_depth;
-layout(location = 0) uniform vec2  u_dir;        // (1/w,0) or (0,1/h)
-layout(location = 1) uniform float u_depthFalloff; // metres; smaller = sharper edges
+// Mismo bloque (binding 8) que el resto de shaders del fluido. Ver fluid_particle.vert.
+layout(std140, binding = 8) uniform FluidParams {
+    vec2  u_blurDir;        // (1/w,0) o (0,1/h)
+    vec2  u_texel;
+    float u_depthFalloff;   // m; menor = bordes más nítidos
+    float u_refractScale;
+    float u_radius;
+    float u_viewportH;
+};
+#define u_dir u_blurDir
 
 void main() {
     float c = texture(u_depth, TexCoords).r;

@@ -17,40 +17,7 @@ ComputeShader::ComputeShader(const std::string& computePath)
         d.computePath = computePath.c_str();
         m_pipe = dev->createPipeline(d);
         ID = dev->nativeProgram(m_pipe);
-        return;
     }
-
-    std::string computeCode = readFile(computePath);
-    const char* cCode = computeCode.c_str();
-
-    GLuint compute = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(compute, 1, &cCode, nullptr);
-    glCompileShader(compute);
-
-    // Error checking
-    int success;
-    char infoLog[512];
-    glGetShaderiv(compute, GL_COMPILE_STATUS, &success);
-    if (!success)
-    {
-        glGetShaderInfoLog(compute, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader compile error: ") + infoLog);
-    }
-
-    ID = glCreateProgram();
-    glAttachShader(ID, compute);
-    glLinkProgram(ID);
-
-    glGetProgramiv(ID, GL_LINK_STATUS, &success);
-    if (!success)
-    {
-        glGetProgramInfoLog(ID, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader link error: ") + infoLog);
-    }
-
-    glDeleteShader(compute);
 }
 
 ComputeShader::~ComputeShader()

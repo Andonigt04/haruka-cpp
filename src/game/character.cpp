@@ -179,11 +179,24 @@ void Character::move(glm::vec2 input, float deltaTime) {
 
     float speed = getSpeed();
     glm::dvec3 delta = surfaceForward * (double)(input.y * speed)
-                     + surfaceRight   * (double)(input.x * speed);
+                     + surfaceRight   * (double)(input.x * speed);   // velocidad de locomoción (m/s, tangente)
+    glm::dvec3 u = glm::dvec3(up);
+
+    if (m_physicsDriven && physicsBody) {
+        // MOTOR-DRIVEN: no escribimos la posición. Fijamos la velocidad TANGENCIAL de locomoción en
+        // el body y CONSERVAMOS su componente radial (gravedad/salto, que integra el motor). El motor
+        // avanza el body (advance) → la posición sale de ahí, y una fuerza externa (viento, empujón,
+        // magia) se suma a esa velocidad en vez de ser ignorada.
+        const glm::dvec3 vBody = physicsBody->velocity;
+        physicsBody->velocity  = delta + u * glm::dot(vBody, u);
+        velocity = physicsBody->velocity;
+        return;
+    }
+
+    // CLÁSICO (kinemático): el juego integra a mano → escribimos la posición.
     position += delta * (double)deltaTime;
     // Conserva la componente RADIAL de la velocidad (salto/gravedad) — solo reemplaza la
     // horizontal — para no matar el salto al moverse a la vez.
-    glm::dvec3 u = glm::dvec3(up);
     velocity = delta + u * glm::dot(velocity, u);
 }
 

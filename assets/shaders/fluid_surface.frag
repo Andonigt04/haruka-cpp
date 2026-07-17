@@ -17,8 +17,15 @@ layout(location = 0) in  vec2 TexCoords;
 layout(binding = 0) uniform sampler2D u_depth;   // smoothed eye-depth (positive m)
 layout(binding = 1) uniform sampler2D u_scene;   // copy of the scene colour behind
 
-layout(location = 0) uniform vec2  u_texel;        // 1/resolution
-layout(location = 1) uniform float u_refractScale; // uv-space refraction strength
+// Mismo bloque (binding 8) que el resto de shaders del fluido. Ver fluid_particle.vert.
+layout(std140, binding = 8) uniform FluidParams {
+    vec2  u_blurDir;
+    vec2  u_texel;          // 1/resolución
+    float u_depthFalloff;
+    float u_refractScale;   // fuerza de refracción en unidades uv
+    float u_radius;
+    float u_viewportH;
+};
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;

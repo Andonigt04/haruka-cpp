@@ -152,6 +152,22 @@ configure_file(
 # Collect sources, then drop the ones belonging to OFF modules.
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
+# --- HarukaPhysics: la física en su PROPIA librería, SIN GL ---------------------------------
+# Motivo: pasarla al DGS (servidor autoritativo) y validar el movimiento con el MISMO código en
+# cliente y servidor. La física solo depende de glm + IWorldProvider (ver src/physics/world_provider.h);
+# no toca renderer, SDL ni assets. `octree` es su broad-phase (GL-free, solo lo usa la física).
+# El engine EXCLUYE estas fuentes y linka HarukaPhysics.
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/octree\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/physics_engine\\.cpp$")
+set(PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/physics/octree.cpp")
+if(HARUKA_MOD_PHYSICS)
+    list(APPEND PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/physics/physics_engine.cpp")
+endif()
+add_library(HarukaPhysics STATIC ${PHYSICS_SOURCES})
+target_include_directories(HarukaPhysics PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
+set_target_properties(HarukaPhysics PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
+
 # Per-module source patterns to exclude when the module is OFF.
 if(NOT HARUKA_MOD_DEFORM)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "core/terrain/deformation_field\\.cpp$")
@@ -169,18 +185,38 @@ endif()
 if(NOT HARUKA_MOD_AUDIO)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "audio/.*\\.cpp$")
 endif()
-if(NOT HARUKA_MOD_PHYSICS)
-    # Solo el motor de físicas. octree.cpp/raycast_simple.cpp se quedan (los usan
-    # scene_manager y main, no son exclusivos de físicas).
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/physics_engine\\.cpp$")
-endif()
+# (physics_engine.cpp / octree.cpp los gestiona el target HarukaPhysics — ver arriba. El gating de
+#  PHYSICS off ya se aplica allí: sin PHYSICS, HarukaPhysics contiene solo octree.)
 if(NOT HARUKA_MOD_PARTICLES)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/particle_system\\.cpp$")
 endif()
 
-# WIP: módulo de reglas DGS (ABI dgs_game_module_v1). Necesita include/dgs/game_module.h,
-# que aún no existe, y se compila como .so aparte (no lo usa el motor). Excluido de momento.
+# --- Módulo de reglas DGS (ABI dgs_game_module_v1) — se compila como .so APARTE (dlopen) -------
+# El módulo valida el movimiento (velocidad/teleport + terreno) con el MISMO código que usará el
+# cliente para predicción y el host/DGS para validar. Es GL-FREE: solo el ABI + el sampler de terreno
+# CPU (haruka_simbase) + HarukaPhysics. Para el DGS real cargaría con dlopen; en LOCAL, el host de la
+# partida lo usa igual. No lo linka el motor (se excluye de ENGINE_SOURCES).
 list(FILTER ENGINE_SOURCES EXCLUDE REGEX "net/default_rules\\.cpp$")
+
+# haruka_simbase: el sampler de terreno CPU (sin GL) que el módulo necesita para validar contra el
+# suelo. Mismas fuentes que usa el engine, aquí en una lib GL-free reusable por el .so de reglas.
+add_library(haruka_simbase STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/terrain_sampler_v2.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_geology.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_fields.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_meso.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/noise_generator.cpp")
+target_include_directories(haruka_simbase PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
+target_link_libraries(haruka_simbase PUBLIC HarukaPhysics)
+set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# haruka_rules.so: el módulo por defecto (dgs_game_module_v1). GL-free.
+add_library(haruka_rules SHARED "${CMAKE_CURRENT_SOURCE_DIR}/src/net/default_rules.cpp")
+target_include_directories(haruka_rules PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
+    "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
+target_link_libraries(haruka_rules PRIVATE haruka_simbase HarukaPhysics)
 
 # --- 4. Main Target ---
 add_library(HarukaEngine SHARED
@@ -211,7 +247,13 @@ else()
     set(ZSTD_LIB ${ZSTD_LIBRARIES})
 endif()
 
+# REVERSED-Z: glm debe emitir profundidad en [0,1] (como D3D/Vulkan), no en [-1,1]. Va PUBLIC
+# porque el juego también construye matrices con glm y TODAS deben usar la misma convención
+# (el motor llama a glClipControl(GL_ZERO_TO_ONE) al crear el contexto).
+target_compile_definitions(HarukaEngine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
+
 target_link_libraries(HarukaEngine PUBLIC
+    HarukaPhysics
     SDL3::SDL3
     OpenGL::GL
     assimp::assimp
@@ -299,10 +341,52 @@ set_target_properties(mapc PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 
+# --- physics_demo: banco VISUAL de la física (cubos/esferas cayendo en terreno irregular) ---
+# Ventana visible + selección de API gráfica vía la fábrica del RHI (Device::create). Demuestra la
+# física real del motor (HarukaPhysics) a ojo. Correr: ./bin/physics_demo [--api gl|vk] [--bodies N]
+add_executable(physics_demo tools/physics_demo.cpp)
+target_link_libraries(physics_demo PRIVATE HarukaEngine)
+set_target_properties(physics_demo PROPERTIES
+    BUILD_RPATH   "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN")
+
+# --- Jolt Physics (PRUEBA de integración): motor de rígidos maduro (SAT, apilado estable,
+# determinista, GL-free). Submódulo git en third_party/JoltPhysics. Solo se compila si el módulo
+# PHYSICS está ACTIVO y el submódulo está presente → con la física apagada, Jolt NO existe. ---
+if(HARUKA_MOD_PHYSICS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPhysics/Build/CMakeLists.txt")
+    set(DOUBLE_PRECISION OFF CACHE BOOL "" FORCE)                 # física en marco LOCAL (floats bastan)
+    set(GENERATE_DEBUG_SYMBOLS OFF CACHE BOOL "" FORCE)
+    set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)               # no pisar los flags del proyecto padre
+    set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)     # build más rápido
+    set(FLOATING_POINT_EXCEPTIONS_ENABLED OFF CACHE BOOL "" FORCE)
+    set(CROSS_PLATFORM_DETERMINISTIC OFF CACHE BOOL "" FORCE)     # ON cuando toque el DGS
+    set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)              # que -Werror de Jolt no rompa el build
+    set(USE_ASSERTS OFF CACHE BOOL "" FORCE)
+    # Apagar el compute GPU/CPU de Jolt (simulación de pelo): compila shaders HLSL→SPV y necesita glslc
+    # de Vulkan, que aquí no está. El núcleo de rígidos NO lo necesita.
+    set(JPH_USE_DX12 OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_VK   OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_MTL  OFF CACHE BOOL "" FORCE)
+    set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/JoltPhysics/Build "${CMAKE_BINARY_DIR}/jolt" EXCLUDE_FROM_ALL)
+
+    add_executable(jolt_demo tools/jolt_demo.cpp)
+    target_link_libraries(jolt_demo PRIVATE Jolt HarukaEngine)   # Jolt (física) + HarukaEngine (GL/SDL)
+    set_target_properties(jolt_demo PROPERTIES
+        BUILD_RPATH   "$ORIGIN"
+        INSTALL_RPATH "$ORIGIN")
+endif()
+
 # --- 6a-bis. haruka_tests: banco de pruebas HEADLESS (LOD/sampler/órbitas, sin ventana/GL) ---
 # Subsistemas puros-CPU dirigidos con entrada sintética + verificación de invariantes → depurar a
 # pequeña escala, determinista y rápido, sin cargar un planeta entero. `ctest` o `./bin/haruka_tests`.
-add_executable(haruka_tests tests/haruka_tests.cpp)
+add_executable(haruka_tests
+    tests/haruka_tests.cpp      # main() — selecciona/dirige
+    tests/test_common.cpp       # framework de aserciones compartido
+    tests/test_terrain.cpp      # sampler / cube-sphere / geología / clima / erosión / meso (CPU)
+    tests/test_physics.cpp      # caída radial + determinismo (sin GL)
+    tests/test_dgs.cpp          # módulo de reglas por dlopen
+    tests/test_render_gl.cpp)   # engine / draw-set / pool / parity / orbit / stress (GL)
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 set_target_properties(haruka_tests PROPERTIES
     BUILD_RPATH   "$ORIGIN"

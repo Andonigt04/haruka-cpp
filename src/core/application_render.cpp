@@ -4,8 +4,10 @@
 // GPU timer. Lifecycle/orchestration lives in application.cpp; the GL asset
 // caches in application_assets.cpp.
 
+#include "core/terrain/gpu_heightfield.h"   // planetFieldsSSBO (F3): el agua consulta el campo
 #include "application.h"
 #include "application_internal.h"
+#include "rhi/rhi_context.h"   // ruta PSO: comandos de dibujo del frame (bloom migrado)
 
 #include <algorithm>
 
@@ -61,6 +63,43 @@ struct alignas(16) PerObjectUBOData {
     glm::vec4 planetCenterAndFlag;      // xyz=planetCenter, w=useProceduralTerrain
 };
 static_assert(sizeof(PerObjectUBOData) == 96, "PerObjectUBOData std140 size mismatch");
+
+// UBO del bloom (binding 2) — antes eran uniforms sueltos (glUniform1f/1i), que NO existen en
+// Vulkan. Compartido por bloom_extract.frag y bloom_blur.frag (cada pase usa un campo). std140
+// alinea el bloque a vec4 → padding explícito a 16 B para que C++ y GLSL coincidan.
+struct BloomParams {
+    float threshold;   // bright-pass: umbral de luminancia
+    float horizontal;  // blur: 1 = horizontal, 0 = vertical
+    float _pad0, _pad1;
+};
+static_assert(sizeof(BloomParams) == 16, "BloomParams std140 size mismatch");
+
+// UBO del present/composite (binding 3) — antes uniforms sueltos (glUniform1i/2f/1f). Flags como
+// FLOAT (no int/bool): el empaquetado de int/bool en std140 difiere entre GL y Vulkan. std140
+// redondea el bloque a múltiplo de 16 → 5 floats ocupan 32 B, no 20: el padding es OBLIGATORIO
+// o C++ y GLSL leen campos desalineados.
+struct PresentParams {
+    float texel[2];        // 0..8    1.0 / sceneResolution
+    float bloomStrength;   // 8..12
+    float fxaa;            // 12..16  >0.5 = on
+    float bloom;           // 16..20  >0.5 = on
+    float _pad[3];         // 20..32  (relleno std140)
+};
+static_assert(sizeof(PresentParams) == 32, "PresentParams std140 size mismatch");
+
+// UBO del cielo (binding 5) — compartido por sky.vert (la mat4) y sky.frag (el resto). Antes eran
+// uniforms sueltos (glUniformMatrix4fv/3fv/1f). Truco std140: un vec3 tiene alineación 16 pero
+// tamaño 12 → el float que le SIGUE cabe en el mismo slot de 16 B. Por eso los pares vec3+float.
+struct SkyParams {
+    glm::mat4 invViewProjRot; //   0..64
+    glm::vec3 sunDir;         //  64..76
+    float     sunElev;        //  76..80  (relleno del vec3 anterior)
+    glm::vec3 up;             //  80..92
+    float     atmo;           //  92..96
+    glm::vec3 sunColor;       //  96..108
+    float     _pad;           // 108..112
+};
+static_assert(sizeof(SkyParams) == 112, "SkyParams std140 size mismatch");
 } // namespace
 
 void Application::setupQuad() {
@@ -75,14 +114,11 @@ void Application::setupQuad() {
 
     glGenVertexArrays(1, &quadVAO);
     glBindVertexArray(quadVAO);
-    if (RHI::Device* dev = RHI::device()) {
+    {
+        RHI::Device* dev = RHI::device();
         m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quadVertices), quadVertices);
         quadVBO = dev->nativeBuffer(m_quadBuf);
         glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-    } else {
-        glGenBuffers(1, &quadVBO);
-        glBindBuffer(GL_ARRAY_BUFFER, quadVBO);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(quadVertices), quadVertices, GL_STATIC_DRAW);
     }
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
@@ -132,81 +168,121 @@ void Application::buildRenderQueue() {
     _iRenderedDrawCalls = _iTotalDrawCalls;
 }
 
-unsigned int Application::renderBloom(unsigned int srcColorTex) {
+// === BLOOM: primer pase migrado a PSO/Context (ruta Vulkan) ===================================
+// Antes: glUseProgram + glBindVertexArray + glUniform1f/1i + glBindTexture + glDrawArrays.
+// Ahora: pipelines horneados (shader × vertex-layout × estado) + comandos por RHI::Context. Los
+// uniforms SUELTOS pasaron al UBO BloomParams (binding 2) — glUniform* no existe en Vulkan.
+RHI::TextureHandle Application::renderBloom(RHI::TextureHandle srcColorTex) {
     // Bloom runs at HALF resolution: ~4x fewer pixels through the blur ping-pong
     // for a near-identical look (bloom is low-frequency). The composite samples it
     // at full-res UV and linear-upscales.
     const int bw = std::max(1, m_postW / 2), bh = std::max(1, m_postH / 2);
+    RHI::Device* dev = RHI::device();
+
     // (Re)create the two ping-pong color targets when the size changes.
     if (m_bloomFBO[0] == 0 || m_bloomW != bw || m_bloomH != bh) {
-        if (RHI::Device* dev = RHI::device()) {
-            if (RHI::valid(m_bloomPass[0])) { dev->destroy(m_bloomPass[0]); dev->destroy(m_bloomPass[1]); }
-            for (int i = 0; i < 2; ++i) {
-                RHI::RenderTargetDesc d;
-                d.width = bw; d.height = bh; d.colorFormats = { RHI::Format::RGBA16F };
-                d.colorFilter = RHI::Filter::Linear; d.hasDepth = false;
-                m_bloomPass[i] = dev->createRenderTarget(d);
-                m_bloomFBO[i] = dev->nativeFramebuffer(m_bloomPass[i]);
-                m_bloomTex[i] = dev->nativeTexture(dev->getColorTexture(m_bloomPass[i], 0));
-            }
-        } else {
-            if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); glDeleteTextures(2, m_bloomTex); }
-            glGenFramebuffers(2, m_bloomFBO);
-            glGenTextures(2, m_bloomTex);
-            for (int i = 0; i < 2; ++i) {
-                glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[i]);
-                glBindTexture(GL_TEXTURE_2D, m_bloomTex[i]);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, bw, bh, 0, GL_RGBA, GL_FLOAT, nullptr);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_bloomTex[i], 0);
-            }
+        if (RHI::valid(m_bloomPass[0])) { dev->destroy(m_bloomPass[0]); dev->destroy(m_bloomPass[1]); }
+        for (int i = 0; i < 2; ++i) {
+            RHI::RenderTargetDesc d;
+            d.width = bw; d.height = bh; d.colorFormats = { RHI::Format::RGBA16F };
+            d.colorFilter = RHI::Filter::Linear; d.hasDepth = false;
+            m_bloomPass[i] = dev->createRenderTarget(d);
+            m_bloomFBO[i]  = dev->nativeFramebuffer(m_bloomPass[i]);
+            m_bloomTexH[i] = dev->getColorTexture(m_bloomPass[i], 0);   // handle (Context) — sin id GL
         }
         m_bloomW = bw; m_bloomH = bh;
     }
-    if (quadVAO == 0) setupQuad();
-    if (!_bloomExtractShader)
-        _bloomExtractShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_extract.frag");
-    if (!_bloomBlurShader)
-        _bloomBlurShader = std::make_unique<Shader>("shaders/screenquad.vert", "shaders/bloom_blur.frag");
+    if (m_quadBuf.id == 0) setupQuad();   // crea el VBO del quad (el VAO lo aporta el PSO)
 
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
-    glViewport(0, 0, bw, bh);
-    glBindVertexArray(quadVAO);
+    // Pipelines horneados UNA vez: shader + vertex layout + estado de rasterizado. El VAO y el
+    // glUseProgram viven DENTRO del pipeline → el llamador ya no toca GL.
+    if (!RHI::valid(m_bloomExtractPSO)) {
+        // OJO: createPipeline hace un ifstream CRUDO de la ruta — NO la resuelve. Hay que
+        // enraizarla con el base dir de assets (lo que hace Shader por dentro). Pasar
+        // "shaders/x.vert" a pelo → fichero no encontrado → shader 0 → programa sin linkar.
+        const std::string vsPath = Shader::baseDir() + "shaders/screenquad.vert";
+        const std::string fsExtract = Shader::baseDir() + "shaders/bloom_extract.frag";
+        const std::string fsBlur    = Shader::baseDir() + "shaders/bloom_blur.frag";
+
+        RHI::PipelineDesc pd;
+        pd.vertexPath              = vsPath.c_str();
+        pd.vertexLayout.strides     = { (uint32_t)(4 * sizeof(float)) };
+        pd.vertexLayout.attributes = {
+            { 0, 0,                 RHI::Format::RG32F },   // aPos (NDC xy)
+            { 1, 2 * sizeof(float), RHI::Format::RG32F },   // aTexCoords
+        };
+        pd.topology     = RHI::PrimitiveTopology::TriangleStrip;
+        pd.depth.test   = false;  pd.depth.write = false;   // pase fullscreen: sin depth
+        pd.blend.enable = false;
+
+        pd.fragmentPath   = fsExtract.c_str();
+        m_bloomExtractPSO = dev->createPipeline(pd);
+        pd.fragmentPath   = fsBlur.c_str();
+        m_bloomBlurPSO    = dev->createPipeline(pd);
+
+        m_bloomUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(BloomParams), nullptr,
+                                       RHI::BufferMemory::Dynamic);
+    }
+    // Si los pipelines no se pudieron crear (shader ausente/roto — createPipeline ya lo logueó),
+    // degrada a SIN bloom en vez de dibujar con un programa invalido (o reintentar cada frame).
+    if (!RHI::valid(m_bloomExtractPSO) || !RHI::valid(m_bloomBlurPSO)) {
+        static bool s_warned = false;
+        if (!s_warned) { std::fprintf(stderr, "[bloom] pipelines PSO no disponibles → bloom desactivado\n"); s_warned = true; }
+        return {};   // handle invalido → el composite lo detecta y compone sin bloom
+    }
+
+    // GL: beginFrame() es un getter puro del Context (el swap lo sigue haciendo la app en endFrame
+    // propio). Cuando el frame entero pase por el RHI, begin/endFrame subirán al bucle de render.
+    RHI::Context* ctx = dev->beginFrame();
+    RHI::ClearValues keep;                    // el quad cubre el target entero → no hace falta clear
+    keep.clearColor = false; keep.clearDepth = false;
+
+    // OJO (Vulkan): en GL cada draw se ejecuta al vuelo, así que reescribir el MISMO UBO entre
+    // draws es correcto. En Vulkan habrá que usar offsets dinámicos o un UBO por draw (los comandos
+    // se graban y se ejecutan después). Anotado para cuando entre el VKContext.
+    auto setParams = [&](float threshold, float horizontal) {
+        const BloomParams p{ threshold, horizontal, 0.0f, 0.0f };
+        dev->updateBuffer(m_bloomUBO, 0, sizeof(p), &p);
+    };
 
     // 1. Bright-pass: scene color -> tex[0].
-    glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]);
-    _bloomExtractShader->use();
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, srcColorTex);
-    glUniform1f(0, Haruka::SettingsManager::get().graphics().bloomThreshold); // luminance threshold
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    setParams(Haruka::SettingsManager::get().graphics().bloomThreshold, 0.0f);
+    ctx->beginRenderPass(m_bloomPass[0], keep);   // bindea FBO + viewport(bw,bh)
+    ctx->bindPipeline(m_bloomExtractPSO);
+    ctx->bindVertexBuffer(m_quadBuf);
+    ctx->bindUniformBuffer(2, m_bloomUBO);
+    ctx->bindTexture(0, srcColorTex);
+    ctx->draw(4);
 
     // 2. Separable Gaussian: N iterations of horizontal+vertical, ping-ponging
     //    tex[1] <-> tex[0]. Result ends up in tex[0].
-    _bloomBlurShader->use();
-    unsigned int src = m_bloomTex[0];
+    RHI::TextureHandle src = m_bloomTexH[0];
     const int iterations = 5;
     for (int i = 0; i < iterations; ++i) {
-        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[1]); // horizontal -> tex[1]
-        glUniform1i(0, 1);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, src);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        setParams(0.0f, 1.0f);                          // horizontal -> tex[1]
+        ctx->beginRenderPass(m_bloomPass[1], keep);
+        ctx->bindPipeline(m_bloomBlurPSO);
+        ctx->bindVertexBuffer(m_quadBuf);
+        ctx->bindUniformBuffer(2, m_bloomUBO);
+        ctx->bindTexture(0, src);
+        ctx->draw(4);
 
-        glBindFramebuffer(GL_FRAMEBUFFER, m_bloomFBO[0]); // vertical -> tex[0]
-        glUniform1i(0, 0);
-        glBindTexture(GL_TEXTURE_2D, m_bloomTex[1]);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-        src = m_bloomTex[0];
+        setParams(0.0f, 0.0f);                          // vertical -> tex[0]
+        ctx->beginRenderPass(m_bloomPass[0], keep);
+        ctx->bindPipeline(m_bloomBlurPSO);
+        ctx->bindVertexBuffer(m_quadBuf);
+        ctx->bindUniformBuffer(2, m_bloomUBO);
+        ctx->bindTexture(0, m_bloomTexH[1]);
+        ctx->draw(4);
+        src = m_bloomTexH[0];
     }
+    ctx->endRenderPass();
 
+    // Transición: partes del frame que aún dibujan en GL directo dan por hecho VAO 0 y depth ON.
+    // Desaparece cuando TODOS los pases usen el PSO.
     glBindVertexArray(0);
     glEnable(GL_DEPTH_TEST);
-    return m_bloomTex[0];
+    return m_bloomTexH[0];   // handle: el composite (también PSO) lo bindea por el Context
 }
 
 void Application::renderFrameContent() {
@@ -296,6 +372,8 @@ void Application::renderFrameContent() {
     glm::vec3 sky(0.01f);
     if (_worldSystem && _camera) sky = _worldSystem->getSkyColor(glm::dvec3(_camera->position));
     glClearColor(sky.r, sky.g, sky.b, 1.0f);
+    glClearDepth(0.0);   // REVERSED-Z: el "infinito" es 0, no 1
+    glDepthMask(GL_TRUE);  // el clear de depth exige write habilitado
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     // Pase de cielo procedural (gradiente + sol + estrellas) como FONDO: triángulo
@@ -303,14 +381,28 @@ void Application::renderFrameContent() {
     if (_worldSystem && _camera && _planetarySystem) {
         glm::dvec3 pc; double pr; uint32_t psd; float prl;
         if (_planetarySystem->getActivePlanet(pc, pr, psd, prl)) {
-            if (!_skyShader)
-                _skyShader = std::make_unique<Shader>("shaders/sky.vert", "shaders/sky.frag");
-            if (_skyVAO == 0) glGenVertexArrays(1, &_skyVAO);
-            // Solo dibujamos el cielo si su shader LINKÓ. Si no, fijar sus uniforms
-            // (locations 0..8) con otro programa bound corrompería el estado (los
-            // GL_INVALID_OPERATION sobre planetCenterAndFlag/moonDirection/etc). Saltarlo
-            // → el resto renderiza normal (el clearColor dejó un fondo de respaldo).
-            if (_skyShader->linked()) {
+            // === PASE 3 MIGRADO A PSO/Context ===
+            // Sin VBO: el triángulo fullscreen sale de gl_VertexID → pipeline SIN vertex layout
+            // (createPipeline crea igualmente el VAO vacío que bindPipeline ata) y draw(3).
+            RHI::Device* skyDev = RHI::device();
+            if (!RHI::valid(m_skyPSO)) {
+                const std::string vsPath = Shader::baseDir() + "shaders/sky.vert";
+                const std::string fsPath = Shader::baseDir() + "shaders/sky.frag";
+                RHI::PipelineDesc pd;
+                pd.vertexPath   = vsPath.c_str();
+                pd.fragmentPath = fsPath.c_str();
+                pd.topology     = RHI::PrimitiveTopology::Triangles;  // vertexLayout vacío a propósito
+                // Fondo: sin depth test → GL tampoco ESCRIBE depth (con el test off no se actualiza
+                // el z-buffer), así que el terreno/objetos se pintan encima sin más.
+                pd.depth.test   = false;  pd.depth.write = false;
+                pd.blend.enable = false;
+                m_skyPSO = skyDev->createPipeline(pd);
+                m_skyUBO = skyDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(SkyParams), nullptr,
+                                                RHI::BufferMemory::Dynamic);
+            }
+            // Si el pipeline no se creó (shader roto), saltar el cielo: el clearColor deja un fondo
+            // de respaldo y el resto de la escena renderiza normal.
+            if (RHI::valid(m_skyPSO)) {
             const glm::dvec3 camD = glm::dvec3(_camera->position);
             glm::dvec3 up = camD - pc; double ul = glm::length(up);
             up = (ul > 1e-9) ? up / ul : glm::dvec3(0, 1, 0);
@@ -325,24 +417,34 @@ void Application::renderFrameContent() {
             glm::mat4 viewRot  = glm::mat4(glm::mat3(_camera->getViewMatrix()));
             glm::mat4 invVPRot = glm::inverse(_camera->getProjectionMatrix(aspectS) * viewRot);
 
-            _skyShader->use();
-            glm::vec3 upf = glm::vec3(up);
-            glUniformMatrix4fv(0, 1, GL_FALSE, &invVPRot[0][0]); // mat4 → locations 0..3
-            glUniform3fv(4, 1, &sunDir[0]);
-            glUniform3fv(5, 1, &upf[0]);
-            glUniform3fv(6, 1, &sunCol[0]);
-            glUniform1f(7, sunElev);
-            glUniform1f(8, atmo);
+            SkyParams sp{};
+            sp.invViewProjRot = invVPRot;
+            sp.sunDir         = sunDir;
+            sp.sunElev        = sunElev;
+            sp.up             = glm::vec3(up);
+            sp.atmo           = atmo;
+            sp.sunColor       = sunCol;
+            skyDev->updateBuffer(m_skyUBO, 0, sizeof(sp), &sp);
 
-            GLboolean depthWas = glIsEnabled(GL_DEPTH_TEST);
-            glDisable(GL_DEPTH_TEST);
-            glDepthMask(GL_FALSE);
-            glBindVertexArray(_skyVAO);
-            glDrawArrays(GL_TRIANGLES, 0, 3);
+            const GLboolean depthWas = glIsEnabled(GL_DEPTH_TEST);
+            RHI::Context* ctx = skyDev->beginFrame();
+            // El target de escena (backbuffer o _postScene) ya está bindeado y limpiado por el
+            // código de arriba → reabrimos el MISMO pass sin clear (borraría la escena).
+            RHI::ClearValues keep; keep.clearColor = false; keep.clearDepth = false;
+            ctx->beginRenderPass(m_postActive && _postScene ? _postScene->getPass()
+                                                            : RHI::RenderPassHandle{}, keep);
+            if (!(m_postActive && _postScene))                       // el pass a pantalla NO fija viewport
+                ctx->setViewport(0, 0, (int)width, (int)height);
+            ctx->bindPipeline(m_skyPSO);                             // programa + depth off (no escribe z)
+            ctx->bindUniformBuffer(5, m_skyUBO);
+            ctx->draw(3);                                            // sin vertex buffer: gl_VertexID
+            ctx->endRenderPass();
+
+            // Transición: los pases de escena siguientes van en GL directo y esperan depth ON.
             glBindVertexArray(0);
             glDepthMask(GL_TRUE);
             if (depthWas) glEnable(GL_DEPTH_TEST);
-            } // if (_skyShader->linked())
+            } // if (RHI::valid(m_skyPSO))
         }
     }
 
@@ -357,12 +459,12 @@ void Application::renderFrameContent() {
         // Lazy-create UBOs (dinámicos; el update por frame sigue con glBufferSubData/glBindBufferBase).
         RHI::Device* uboDev = RHI::device();
         if (m_uboPerFrame == 0) {
-            if (uboDev) { m_uboPerFrameH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerFrameUBOData), nullptr, RHI::BufferMemory::Dynamic); m_uboPerFrame = uboDev->nativeBuffer(m_uboPerFrameH); }
-            else { glGenBuffers(1, &m_uboPerFrame); glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame); glBufferData(GL_UNIFORM_BUFFER, sizeof(PerFrameUBOData), nullptr, GL_DYNAMIC_DRAW); glBindBuffer(GL_UNIFORM_BUFFER, 0); }
+            m_uboPerFrameH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerFrameUBOData), nullptr, RHI::BufferMemory::Dynamic);
+            m_uboPerFrame = uboDev->nativeBuffer(m_uboPerFrameH);
         }
         if (m_uboPerObject == 0) {
-            if (uboDev) { m_uboPerObjectH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerObjectUBOData), nullptr, RHI::BufferMemory::Dynamic); m_uboPerObject = uboDev->nativeBuffer(m_uboPerObjectH); }
-            else { glGenBuffers(1, &m_uboPerObject); glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject); glBufferData(GL_UNIFORM_BUFFER, sizeof(PerObjectUBOData), nullptr, GL_DYNAMIC_DRAW); glBindBuffer(GL_UNIFORM_BUFFER, 0); }
+            m_uboPerObjectH = uboDev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerObjectUBOData), nullptr, RHI::BufferMemory::Dynamic);
+            m_uboPerObject = uboDev->nativeBuffer(m_uboPerObjectH);
         }
 
         const bool useFinalLook = getRenderFeatureHDR() || getRenderFeatureBloom()
@@ -375,22 +477,50 @@ void Application::renderFrameContent() {
             );
             _mainShaderUsesFinalLook = useFinalLook;
         }
-        if (!_planetShader) {
-            _planetShader = std::make_unique<Shader>(
-                "shaders/planet.vert",
-                "shaders/planet.frag"
-            );
-        }
-        if (!_waterShader) {
-            _waterShader = std::make_unique<Shader>(
-                "shaders/water.vert",
-                "shaders/water.frag"
-            );
+        // (Los programas de planet.* y water.* los poseen ahora los PSO del TerrainRenderer y del
+        //  WaterRenderer — cada pase ata su propio pipeline; ya no hay Shader suelto que bindear.)
+
+        // === PASE 4 MIGRADO A PSO/Context: los OBJETOS de la escena. ===
+        // El pipeline hornea shader + layout `Vertex` + estado (depth on). Se recrea solo si
+        // cambia la variante de fragment (final.frag <-> preview.frag).
+        if (!RHI::valid(m_scenePSO) || m_scenePSOFinalLook != useFinalLook) {
+            if (RHI::valid(m_scenePSO)) uboDev->destroy(m_scenePSO);
+            const std::string vsPath = Shader::baseDir() + "shaders/simple.vert";
+            const std::string fsPath = Shader::baseDir() +
+                (useFinalLook ? "shaders/final.frag" : "shaders/preview.frag");
+            using V = Haruka::Renderer::Vertex;
+            RHI::PipelineDesc pd;
+            pd.vertexPath              = vsPath.c_str();
+            pd.fragmentPath            = fsPath.c_str();
+            pd.vertexLayout.strides     = { (uint32_t)(sizeof(V)) };
+            pd.vertexLayout.attributes = {
+                { 0, (uint32_t)offsetof(V, Position),  RHI::Format::RGB32F },
+                { 1, (uint32_t)offsetof(V, Normal),    RHI::Format::RGB32F },
+                { 2, (uint32_t)offsetof(V, TexCoords), RHI::Format::RG32F  },
+                { 3, (uint32_t)offsetof(V, Tangent),   RHI::Format::RGB32F },
+                { 4, (uint32_t)offsetof(V, Bitangent), RHI::Format::RGB32F },
+            };
+            pd.topology     = RHI::PrimitiveTopology::Triangles;
+            pd.depth.test   = true;  pd.depth.write = true;   // escena sólida
+            pd.blend.enable = false;
+            pd.cull         = RHI::CullMode::Back;   // lo hacía el glEnable(GL_CULL_FACE) global
+            m_scenePSO = uboDev->createPipeline(pd);
+            m_scenePSOFinalLook = useFinalLook;
         }
 
-        _mainShader->use();
-        glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
-        glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_uboPerObject);
+        RHI::Context* sceneCtx = uboDev->beginFrame();
+        if (RHI::valid(m_scenePSO)) {
+            // El target de escena ya está bindeado y limpiado arriba → reabrir el MISMO pass SIN
+            // clear (borraría el cielo ya pintado).
+            RHI::ClearValues keep; keep.clearColor = false; keep.clearDepth = false;
+            sceneCtx->beginRenderPass(m_postActive && _postScene ? _postScene->getPass()
+                                                                 : RHI::RenderPassHandle{}, keep);
+            if (!(m_postActive && _postScene))          // el pass a pantalla NO fija viewport
+                sceneCtx->setViewport(0, 0, (int)width, (int)height);
+            sceneCtx->bindPipeline(m_scenePSO);         // programa + depth on (absorbe glUseProgram)
+            sceneCtx->bindUniformBuffer(0, m_uboPerFrameH);
+            sceneCtx->bindUniformBuffer(1, m_uboPerObjectH);
+        }
 
         // Upload per-frame UBO
         const float      aspect       = (height > 0u) ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
@@ -424,6 +554,10 @@ void Application::renderFrameContent() {
         // Viento atmosférico → arrastre aerodinámico de la física (por cuerpo, barato).
         if (_physicsEngine && _worldSystem)
             _physicsEngine->setWind(_worldSystem->getWind(glm::dvec3(cameraOrigin)));
+        // Avanza el motor de física con TIMESTEP FIJO (determinista). Hoy solo procesa cuerpos
+        // DINÁMICOS (el jugador aún es kinemático → no afecta); lo activa de verdad la Fase 2.
+        if (_physicsEngine)
+            _physicsEngine->advance(deltaTime > 0.0f ? (double)deltaTime : 0.016);
         // Luz de luna (2ª luz): dirección + brillo por fase (WorldSystem), color azulado.
         {
             glm::vec3 moonDir(0.0f, 1.0f, 0.0f); float moonI = 0.0f;
@@ -441,9 +575,7 @@ void Application::renderFrameContent() {
         frameData.enableIBL       = (int)(getRenderFeatureIBL()     && _ibl    != nullptr);
         frameData.enableShadows   = (int)(getRenderFeatureShadows() && _shadow != nullptr);
 
-        glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerFrame);
-        glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerFrameUBOData), &frameData);
-        glBindBuffer(GL_UNIFORM_BUFFER, 0);
+        uboDev->updateBuffer(m_uboPerFrameH, 0, sizeof(PerFrameUBOData), &frameData);
 
         glEnable(GL_CULL_FACE);
         glCullFace(GL_BACK);
@@ -492,15 +624,19 @@ void Application::renderFrameContent() {
             // w = 0: normal, 1: procedural terrain, 2: emissive star (no diffuse shading)
             objData.planetCenterAndFlag      = glm::vec4(0.0f, 0.0f, 0.0f, isStar ? 2.0f : 0.0f);
 
-            glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
-            glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &objData);
-            glBindBuffer(GL_UNIFORM_BUFFER, 0);
+            uboDev->updateBuffer(m_uboPerObjectH, 0, sizeof(PerObjectUBOData), &objData);
 
             switch (command.kind) {
                 case Haruka::RenderKind::Model: {
                     Model* model = AppInternal::getOrLoadModelCached(obj->modelPath);
                     if (!model) break;
-                    model->Draw(*_mainShader);
+                    if (!RHI::valid(m_scenePSO)) break;
+                    // La carga PEREZOSA de arriba crea mallas, y Mesh::setupMesh() deja el VAO a 0
+                    // → desbindearía el VAO del pipeline JUSTO antes de dibujar (glDrawElements con
+                    // VAO 0 = GL_INVALID_OPERATION). Rebindeamos el pipeline después de cargar.
+                    // Desaparece cuando la creación de recursos deje de tocar el estado global.
+                    sceneCtx->bindPipeline(m_scenePSO);
+                    model->drawRHI(*sceneCtx);
                     ++renderedDrawCalls;
                     renderedVertices  += model->getVertexCount();
                     renderedTriangles += model->getTriangleCount();
@@ -508,7 +644,9 @@ void Application::renderFrameContent() {
                 }
                 case Haruka::RenderKind::MeshComponent: {
                     if (!obj->meshRenderer || !obj->meshRenderer->isResident()) break;
-                    obj->meshRenderer->render(*_mainShader);
+                    if (!RHI::valid(m_scenePSO)) break;
+                    sceneCtx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
+                    obj->meshRenderer->renderRHI(*sceneCtx);
                     ++renderedDrawCalls;
                     renderedVertices  += obj->meshRenderer->getResidentVertexCount();
                     renderedTriangles += obj->meshRenderer->getResidentTriangleCount();
@@ -517,7 +655,9 @@ void Application::renderFrameContent() {
                 case Haruka::RenderKind::Primitive: {
                     SimpleMesh* primitiveMesh = AppInternal::getPrimitiveMesh(command.primitive);
                     if (!primitiveMesh) break;
-                    primitiveMesh->draw();
+                    if (!RHI::valid(m_scenePSO)) break;
+                    sceneCtx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
+                    primitiveMesh->drawRHI(*sceneCtx);
                     ++renderedDrawCalls;
                     renderedVertices  += primitiveMesh->getVertexCount();
                     renderedTriangles += primitiveMesh->getTriangleCount();
@@ -528,6 +668,13 @@ void Application::renderFrameContent() {
             }
         }
         } // scene.objects.draw
+
+        // Transición: el pase de escena deja bindeados el programa y el VAO del PSO. Los pases
+        // siguientes (terreno/agua/islas) siguen en GL directo; dejamos el VAO a 0 para que
+        // ninguno pueda MODIFICAR por accidente el VAO del pipeline (p.ej. un glBindBuffer de
+        // element array se aplicaría al VAO bindeado y lo corrompería para el frame siguiente).
+        if (RHI::valid(m_scenePSO)) sceneCtx->endRenderPass();
+        glBindVertexArray(0);
 
         _iRenderedDrawCalls = renderedDrawCalls;
         _iRenderedVertices  = renderedVertices;
@@ -572,6 +719,11 @@ void Application::renderFrameContent() {
 
                 _shadow->bindForWriting();
                 glViewport(0, 0, _shadow->shadowWidth, _shadow->shadowHeight);
+                // El shadow map usa proyección ORTOGRÁFICA propia (NO invertida) → convención
+                // estándar: lejos = 1, test LESS. Hay que fijarlo explícitamente porque el estado
+                // global viene del último PSO de la escena, que es reversed-Z (clear 0 / GEQUAL).
+                glClearDepth(1.0);
+                glDepthFunc(GL_LESS);
                 glClear(GL_DEPTH_BUFFER_BIT);
                 glEnable(GL_DEPTH_TEST); glDepthMask(GL_TRUE); glDisable(GL_CULL_FACE);
                 _gameInterface->onRenderShadow(lightSpace, glm::vec3(_camera->position));
@@ -581,34 +733,15 @@ void Application::renderFrameContent() {
                                  m_postActive ? (uint32_t)m_postH : height);
             }
 
-            if (_planetShader) {
-                _planetShader->use();
-                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
-                glBindBufferBase(GL_UNIFORM_BUFFER, 1, m_uboPerObject);
-                // Fog on/off from the config (console: fog 0|1). Persists for the
-                // islands pass (reuses the same shader).
-                glUniform1i(15, Haruka::SettingsManager::get().graphics().fog ? 1 : 0);
-                // Shadows: bind the depth map + light matrix (the terrain receives them).
-                if (shadowsOn && _shadow) {
-                    glActiveTexture(GL_TEXTURE5);
-                    glBindTexture(GL_TEXTURE_2D, _shadow->depthMap);
-                    glUniform1i(34, 5);
-                    glUniformMatrix4fv(30, 1, GL_FALSE, &lightSpace[0][0]);
-                    glUniform1i(35, 1);
-                    glActiveTexture(GL_TEXTURE0);
-                } else {
-                    glUniform1i(35, 0);
-                }
-            }
+            // Parámetros del PASE de terreno (antes uniforms sueltos del shader; ahora viajan en
+            // el UBO TerrainParams del TerrainRenderer, que ata su propio PSO). El estado de
+            // rasterizado (depth LEQUAL, cull back, blend off) lo hornea ese pipeline.
+            _planetarySystem->setTerrainFog(Haruka::SettingsManager::get().graphics().fog);
+            _planetarySystem->setTerrainShadow(
+                (shadowsOn && _shadow) ? uboDev->getDepthTexture(_shadow->pass()) : RHI::TextureHandle{},
+                lightSpace, shadowsOn && _shadow);
 
-            // Ensure correct GL state for terrain pass
-            glEnable(GL_DEPTH_TEST);
-            glDepthFunc(GL_LEQUAL);  // near/far=0.1/3e11 collapses NDC_z to ~1.0 for km-range terrain
-            glDepthMask(GL_TRUE);
-            glEnable(GL_CULL_FACE);
-            glCullFace(GL_BACK);
             glFrontFace(GL_CCW);
-            glDisable(GL_BLEND);
             glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 
             // Bind the scene target (the offscreen post target when active, else
@@ -619,6 +752,12 @@ void Application::renderFrameContent() {
 
             {
             HARUKA_PROFILE("terrain.draw");
+            // UBOs per-frame (0) y per-object (1): los ata el llamador y siguen atados durante
+            // todo el pase (los binding points son estado del contexto, no del pipeline) → el
+            // PSO del terreno solo ata LO SUYO (SSBO por-draw, TerrainParams, texturas).
+            RHI::Context* terrainCtx = uboDev->beginFrame();
+            terrainCtx->bindUniformBuffer(0, m_uboPerFrameH);
+            terrainCtx->bindUniformBuffer(1, m_uboPerObjectH);
             // Camera-relative view-projection for frustum culling (matches the
             // shader's projection * mat3(view) — view rotation only, no translation).
             const float aspectC = (height > 0u) ? (float)width / (float)height : 1.0f;
@@ -645,55 +784,84 @@ void Application::renderFrameContent() {
                 terrainObj.planetCenterAndFlag      = glm::vec4(
                     glm::vec3(glm::dvec3(_camera->position) - planet.position), prof);
 
-                glBindBuffer(GL_UNIFORM_BUFFER, m_uboPerObject);
-                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PerObjectUBOData), &terrainObj);
-                glBindBuffer(GL_UNIFORM_BUFFER, 0);
+                uboDev->updateBuffer(m_uboPerObjectH, 0, sizeof(PerObjectUBOData), &terrainObj);
 
                 _planetarySystem->renderPlanetTerrain(planet.name, glm::dvec3(_camera->position));
             }
             }
 
 
-            // --- Floating islands pass (reuse planet shader, opaque, after terrain) ---
-            if (_planetShader) {
+            // --- Floating islands pass (opaque, after terrain) ---
+            // Reusan los shaders del planeta pero con su PROPIO PSO (layout de 2 streams vec3, sin
+            // culling) y su SSBO de 1 elemento (morph = 0). El UBO per-object sigue siendo el del
+            // ÚLTIMO planeta del bucle de arriba — mismo comportamiento que antes.
+            {
                 HARUKA_PROFILE("islands.draw");
-                _planetShader->use();
-                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
-                glUniform1f(12, 0.0f); // u_morphFactor = 0 (islands don't morph)
-                glUniform1i(11, 0);    // u_terrainMode = procedural
-                glDisable(GL_CULL_FACE); // two-sided: the blob's winding can vary
                 for (const auto& planet : _planetarySystem->getPlanets())
                     _planetarySystem->renderPlanetIslands(planet.name, glm::dvec3(_camera->position));
-                glEnable(GL_CULL_FACE);
             }
 
             // (Resources —trees/rocks/minerals— are drawn by the GAME in onRenderWorld;
             //  they are game content, not engine content.)
 
             // --- Water pass (ocean shell, after terrain) ---
-            if (_waterShader) {
+            // El estado (depth LEQUAL sin escritura, blend alfa, a dos caras) y el programa los
+            // hornea el PSO del WaterRenderer. Aquí solo se calculan sus PARÁMETROS de pase, que
+            // antes eran ~15 glUniform sueltos y ahora viajan en el UBO WaterParams.
+            // DEBUG: volcado del target de escena ANTES del agua (para comparar con el de después).
+            if (const char* pre = getenv("HARUKA_SCENE_SHOT_PRE")) {
+                static bool tk = false;
+                const int secs = getenv("HARUKA_SHOT_SEC") ? atoi(getenv("HARUKA_SHOT_SEC")) : 60;
+                if (!tk && SDL_GetTicks() > (uint64_t)secs * 1000) {
+                    tk = true;
+                    const int sw = m_postActive ? (int)m_postW : (int)width;
+                    const int sh = m_postActive ? (int)m_postH : (int)height;
+                    std::vector<unsigned char> px((size_t)sw * sh * 3);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_sceneTargetFBO);
+                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                    if (FILE* f = fopen(pre, "wb")) {
+                        fprintf(f, "P6\n%d %d\n255\n", sw, sh);
+                        for (int y = sh - 1; y >= 0; --y) fwrite(&px[(size_t)y * sw * 3], 1, (size_t)sw * 3, f);
+                        fclose(f);
+                        fprintf(stderr, "[SCENE-PRE] escrito %s\n", pre);
+                    }
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_sceneTargetFBO);
+                }
+            }
+
+            if (!getenv("HARUKA_NO_WATER")) {   // DEBUG TEMPORAL: aislar el pase de agua
                 HARUKA_PROFILE("water.draw");
-                _waterShader->use();
-                glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_uboPerFrame);
-                glEnable(GL_DEPTH_TEST);
-                glDepthFunc(GL_LEQUAL);
-                // El agua NO escribe profundidad: depth-TESTA (el terreno por delante la
-                // ocluye) pero no escribe, para que el TERRENO bajo el agua se siga viendo
-                // y no quede tapado por el océano. (Los "cubos" de transición de LOD se
-                // atacarán con morph/skirt del agua, no escondiendo el terreno.)
-                glDepthMask(GL_FALSE);
-                glEnable(GL_CULL_FACE);
-                glCullFace(GL_BACK);
-                glFrontFace(GL_CCW);
-                glEnable(GL_BLEND);
-                glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                WaterRenderer::PassParams wp;
+                wp.time = (float)(SDL_GetTicks() / 1000.0);
 
-                glUniform1f(14, (float)(SDL_GetTicks() / 1000.0)); // u_time
-
-                // Costa per-píxel (océano lejano): params del generador del planeta activo (los
-                // mismos que el terreno → paridad). u_pxCoast=1 si válidos.
-                Haruka::WorldGenParams wgp; double wgpR = 0.0;
-                const bool havePxCoast = _planetarySystem->getActivePlanetParams(wgp, wgpR);
+                // (F1) COPIA de la profundidad de la escena → el agua la muestrea para saber cuánta
+                // agua atraviesa el rayo. Antes re-derivaba el terreno per-píxel (~150 líneas de
+                // Perlin duplicadas del generador); con reversed-Z el depth ya lo dice. Se copia
+                // (no se lee el depth de la escena directamente) porque muestrear una textura ATADA
+                // al FBO activo es un feedback loop = comportamiento indefinido.
+                {
+                    const int dw = m_postActive ? (int)m_postW : (int)width;
+                    const int dh = m_postActive ? (int)m_postH : (int)height;
+                    if (!RHI::valid(m_sceneDepthCopy) || m_depthCopyW != dw || m_depthCopyH != dh) {
+                        if (RHI::valid(m_sceneDepthCopy)) uboDev->destroy(m_sceneDepthCopy);
+                        RHI::RenderTargetDesc dd;
+                        dd.width = (uint32_t)dw; dd.height = (uint32_t)dh;
+                        dd.colorFormats  = {};                       // solo profundidad
+                        dd.hasDepth      = true;
+                        dd.depthFormat   = RHI::Format::D32F;        // igual que el target de escena
+                        dd.depthAsTexture = true;                    // muestreable por el shader
+                        dd.depthFilter   = RHI::Filter::Nearest;
+                        m_sceneDepthCopy = uboDev->createRenderTarget(dd);
+                        m_depthCopyW = dw; m_depthCopyH = dh;
+                    }
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_sceneTargetFBO);
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, uboDev->nativeFramebuffer(m_sceneDepthCopy));
+                    glBlitFramebuffer(0, 0, dw, dh, 0, 0, dw, dh, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_sceneTargetFBO);
+                    wp.sceneDepth = uboDev->getDepthTexture(m_sceneDepthCopy);
+                    wp.nearPlane  = _camera->getNearPlane();
+                }
 
                 const glm::dvec3 camD = glm::dvec3(_camera->position);
                 for (const auto& planet : _planetarySystem->getPlanets()) {
@@ -720,30 +888,26 @@ void Application::renderFrameContent() {
                     glm::dvec3 T = glm::normalize(glm::cross(ref, up));
                     glm::dvec3 B = glm::cross(up, T);
 
-                    glm::vec3 upf(up), Tf(T), Bf(B);
-                    glUniform3fv(15, 1, &upf[0]);
-                    glUniform3fv(16, 1, &Tf[0]);
-                    glUniform3fv(17, 1, &Bf[0]);
+                    wp.waveUp        = glm::vec3(up);
+                    wp.waveTangent   = glm::vec3(T);
+                    wp.waveBitangent = glm::vec3(B);
 
-                    // Costa per-píxel: dir = posición relativa al centro del planeta + params.
-                    glm::vec3 relCam = glm::vec3(camD - planet.position);
-                    glUniform3fv(22, 1, &relCam[0]); // u_planetRelCam
-                    if (havePxCoast) {
-                        glUniform1i(23, (int)wgp.seed);
-                        glUniform1f(24, wgp.continentFreqA);
-                        glUniform1f(25, wgp.reliefStrength);
-                        glUniform1f(26, (float)(planet.radius > 1e-9 ? 1.0 / planet.radius : 0.0));
-                        glUniform1f(27, wgp.seaThreshold);
-                        // Costa PER-PÍXEL exacta (opción B) — recorta el agua al contorno real de la
-                        // costa. SIEMPRE-ON (antes solo Medium+): en LOW el agua salía por chunks
-                        // enteros = "rectángulos azules". La GPU está ociosa (todo el cuello es CPU),
-                        // así que el coste (~10 fBm/píxel en la franja de costa con distToCoast) sobra.
-                        glUniform1i(28, 1); // u_pxCoast (paridad oceanElevKm↔terreno exacta vía distToCoast)
-                        glUniform1f(30, wgp.coastWidth); // u_coastWidth (escala rampas costa, paridad seed)
-                    } else {
-                        glUniform1i(28, 0);
-                        glUniform1f(30, 1.0f);
+                    // (F1) Aquí se pasaban los params del generador (seed, seaThreshold, coastWidth…)
+                    // para que el fragment del agua RE-DERIVARA el terreno y recortara la costa.
+                    // Ya no: el depth buffer da la profundidad real → costa exacta y gratis.
+                    // Lo único que queda es un ANCLA de mundo para el ruido de la espuma per-píxel.
+                    wp.planetRelCam = glm::vec3(camD - planet.position);
+                    // (F3) El CAMPO del planeta → el agua sabe DÓNDE HAY AGUA (sin esto la lámina
+                    // del océano existe también bajo la tierra y se ve al cavar).
+                    {
+                        const auto& wcfg2 = planet.terrainSettings.contains("config")
+                            ? planet.terrainSettings["config"] : planet.terrainSettings;
+                        const uint32_t pseed = (uint32_t)wcfg2.value("seed", 42);
+                        int fres = 0;
+                        wp.fieldSSBO = Haruka::planetFieldsSSBO(pseed, fres);
+                        wp.fieldRes  = fres;
                     }
+
                     // Oleaje = MAREA (alineación Sol–Luna) × VIENTO atmosférico (ráfagas):
                     // marea viva + ráfaga = mar picado; marea muerta sin viento = calmo.
                     // CORRIENTE (F5.4): u_windDir = dirección del viento/corriente proyectada al
@@ -757,23 +921,59 @@ void Application::renderFrameContent() {
                         if (cl > 1e-3f) curDir = cd / cl;
                         else { float a = (float)(SDL_GetTicks() / 1000.0) * 0.02f; curDir = glm::vec2(cosf(a), sinf(a)); }
                     }
-                    glUniform2f(18, curDir.x, curDir.y); // u_windDir (corriente, plano tangente)
+                    wp.windDir = curDir;  // corriente, plano tangente
                     const float tide = _worldSystem ? _worldSystem->getTideFactor() : 1.0f;
                     float windF = 1.0f;
                     if (_worldSystem) {
                         float ws = glm::length(_worldSystem->getWind(camD));
                         windF = glm::clamp(0.85f + ws * 0.10f, 0.8f, 1.8f);
                     }
-                    glUniform1f(19, tide * windF); // u_windStrength (marea × viento)
+                    wp.windStrength = tide * windF;   // marea × viento
                     // NIVEL de marea (m): el mar sube/baja siguiendo a la Luna → "respira".
-                    glUniform1f(21, _worldSystem ? _worldSystem->getTideHeight(camD) : 0.0f); // u_tideHeight
+                    wp.tideHeight = _worldSystem ? _worldSystem->getTideHeight(camD) : 0.0f;
                     // Reflejo de cielo solo cerca (más caro); lejos solo especular.
-                    glUniform1i(20, waterAlt < 0.05 ? 1 : 0); // 0=spec only, 1=sky refl (near)
+                    wp.waterQuality = (waterAlt < 0.05) ? 1.0f : 0.0f;
 
+                    _planetarySystem->setWaterPassParams(wp);
                     _planetarySystem->renderPlanetWater(planet.name, camD);
                 }
+                // El PSO del agua deja blend ON y depth-write OFF. Los pases que vienen después
+                // (onRenderWorld del JUEGO) siguen siendo GL crudo y dan por hecho el estado
+                // normal → hay que restaurarlo a mano. Cuando el juego también use PSOs, sobra.
                 glDisable(GL_BLEND);
-                glDepthMask(GL_TRUE);   // restore for subsequent passes (resources, etc.)
+                glDepthMask(GL_TRUE);
+            }
+
+            // DEBUG TEMPORAL: HARUKA_SCENE_SHOT=<ruta.ppm> vuelca el TARGET DE ESCENA (terreno+agua,
+            // sin la UI del juego encima) tras HARUKA_SHOT_SEC segundos. Para inspeccionar el render
+            // aunque la pantalla de carga tape el backbuffer.
+            if (const char* shot = getenv("HARUKA_SCENE_SHOT")) {
+                static bool taken = false;
+                const int secs = getenv("HARUKA_SHOT_SEC") ? atoi(getenv("HARUKA_SHOT_SEC")) : 60;
+                if (!taken && SDL_GetTicks() > (uint64_t)secs * 1000) {
+                    taken = true;
+                    const int sw = m_postActive ? (int)m_postW : (int)width;
+                    const int sh = m_postActive ? (int)m_postH : (int)height;
+                    std::vector<unsigned char> px((size_t)sw * sh * 3);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, m_sceneTargetFBO);
+                    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                    glReadPixels(0, 0, sw, sh, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                    if (FILE* f = fopen(shot, "wb")) {
+                        fprintf(f, "P6\n%d %d\n255\n", sw, sh);
+                        for (int y = sh - 1; y >= 0; --y) fwrite(&px[(size_t)y * sw * 3], 1, (size_t)sw * 3, f);
+                        fclose(f);
+                        fprintf(stderr, "[SCENE-SHOT] escrito %s (%dx%d)\n", shot, sw, sh);
+                    }
+                    // ¿ESCRIBE PROFUNDIDAD el terreno? Volcamos el depth del target de escena.
+                    std::vector<float> dz((size_t)sw * sh);
+                    glReadPixels(0, 0, sw, sh, GL_DEPTH_COMPONENT, GL_FLOAT, dz.data());
+                    double mn = 2.0, mx = -1.0; size_t nFar = 0;
+                    for (float d : dz) { mn = std::min(mn, (double)d); mx = std::max(mx, (double)d);
+                                         if (d >= 0.999999f) ++nFar; }
+                    fprintf(stderr, "[DEPTH] min=%.6f max=%.6f  px_al_fondo(=1.0)=%.1f%%\n",
+                            mn, mx, 100.0 * (double)nFar / (double)dz.size());
+                    glBindFramebuffer(GL_FRAMEBUFFER, m_sceneTargetFBO);
+                }
             }
 
             // Restore main shader for subsequent rendering
@@ -802,37 +1002,64 @@ void Application::renderFrameContent() {
     // Resolve the offscreen scene target to the screen: upscales the render-scaled
     // image and applies the present-time effects (FXAA, and later bloom). With
     // FXAA off and scale 1.0 the scene never took this path (m_postActive false).
+    // === PASE 2 MIGRADO A PSO/Context: el present/composite (FXAA + bloom + upscale). ===
     if (m_postActive && _postScene) {
-        if (quadVAO == 0) setupQuad();
-        if (!_compositeShader)
-            _compositeShader = std::make_unique<Shader>("shaders/screenquad.vert",
-                                                        "shaders/post_present.frag");
+        RHI::Device* dev = RHI::device();
+        if (m_quadBuf.id == 0) setupQuad();   // VBO del quad (el VAO lo aporta el PSO)
 
-        // Build the blurred bloom texture first (it rebinds FBOs/viewport).
-        unsigned int bloomTex = 0;
-        if (wantBloom) bloomTex = renderBloom(_postScene->getColorTexture());
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glViewport(0, 0, width, height);
-        glDisable(GL_DEPTH_TEST);
-        glDisable(GL_BLEND);
-
-        _compositeShader->use();
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, _postScene->getColorTexture());
-        if (wantBloom) {
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, bloomTex);
+        // Pipeline horneado 1 vez. Dibuja a PANTALLA → sin depth ni blend.
+        if (!RHI::valid(m_presentPSO)) {
+            const std::string vsPath = Shader::baseDir() + "shaders/screenquad.vert";
+            const std::string fsPath = Shader::baseDir() + "shaders/post_present.frag";
+            RHI::PipelineDesc pd;
+            pd.vertexPath              = vsPath.c_str();
+            pd.fragmentPath            = fsPath.c_str();
+            pd.vertexLayout.strides     = { (uint32_t)(4 * sizeof(float)) };
+            pd.vertexLayout.attributes = {
+                { 0, 0,                 RHI::Format::RG32F },   // aPos
+                { 1, 2 * sizeof(float), RHI::Format::RG32F },   // aTexCoords
+            };
+            pd.topology     = RHI::PrimitiveTopology::TriangleStrip;
+            pd.depth.test   = false;  pd.depth.write = false;
+            pd.blend.enable = false;
+            m_presentPSO = dev->createPipeline(pd);
+            m_presentUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PresentParams), nullptr,
+                                             RHI::BufferMemory::Dynamic);
         }
-        glUniform1i(0, wantFXAA ? 1 : 0);                                 // u_fxaa
-        glUniform2f(1, 1.0f / (float)m_postW, 1.0f / (float)m_postH);     // u_texel
-        glUniform1i(2, wantBloom ? 1 : 0);                               // u_bloom
-        glUniform1f(3, gpost.bloomStrength);                            // u_bloomStrength
 
-        glBindVertexArray(quadVAO);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        if (RHI::valid(m_presentPSO)) {
+            // El bloom se construye ANTES (rebindea FBOs/viewport) y devuelve su handle.
+            RHI::TextureHandle bloomTex;
+            if (wantBloom) bloomTex = renderBloom(_postScene->getColorTextureHandle());
+            const bool haveBloom = wantBloom && RHI::valid(bloomTex);
+
+            PresentParams p{};
+            p.texel[0]      = 1.0f / (float)m_postW;
+            p.texel[1]      = 1.0f / (float)m_postH;
+            p.bloomStrength = gpost.bloomStrength;
+            p.fxaa          = wantFXAA  ? 1.0f : 0.0f;
+            p.bloom         = haveBloom ? 1.0f : 0.0f;
+            dev->updateBuffer(m_presentUBO, 0, sizeof(p), &p);
+
+            RHI::Context* ctx = dev->beginFrame();
+            RHI::ClearValues keep;                       // el quad cubre la pantalla entera
+            keep.clearColor = false; keep.clearDepth = false;
+
+            ctx->beginRenderPass(RHI::RenderPassHandle{}, keep);  // id 0 = backbuffer (pantalla)
+            ctx->setViewport(0, 0, (int)width, (int)height);      // el pass a pantalla NO fija viewport
+            ctx->bindPipeline(m_presentPSO);
+            ctx->bindVertexBuffer(m_quadBuf);
+            ctx->bindUniformBuffer(3, m_presentUBO);
+            ctx->bindTexture(0, _postScene->getColorTextureHandle());
+            // El sampler u_bloomTex se lee SIEMPRE en el shader aunque u_bloom sea 0; bindea algo
+            // válido para no dejar la unidad 1 con basura de un pase anterior.
+            ctx->bindTexture(1, haveBloom ? bloomTex : _postScene->getColorTextureHandle());
+            ctx->draw(4);
+            ctx->endRenderPass();
+        }
+
+        // Transición: ImGui y otros pases posteriores siguen en GL directo y esperan este estado.
         glBindVertexArray(0);
-
         glActiveTexture(GL_TEXTURE0); // leave unit 0 active for following passes
         glEnable(GL_DEPTH_TEST);
     }

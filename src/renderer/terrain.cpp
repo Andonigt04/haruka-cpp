@@ -6,11 +6,10 @@
 #include "tools/error_reporter.h"
 #include "rhi/rhi_device.h"
 
-namespace { // Libera los buffers de un patch: por el RHI si son suyos, o GL directo.
+namespace { // Libera los buffers de un patch por el RHI.
     void freePatchBuffers(Haruka::TerrainPatch& p) {
         using namespace Haruka;
         if (RHI::valid(p.hVbo)) { if (RHI::Device* dev = RHI::device()) { dev->destroy(p.hVbo); dev->destroy(p.hEbo); } p.hVbo = p.hEbo = {}; }
-        else { if (p.VBO) glDeleteBuffers(1, &p.VBO); if (p.EBO) glDeleteBuffers(1, &p.EBO); }
     }
 }
 #include <cmath>
@@ -242,20 +241,12 @@ void Terrain::createPatch(int startX, int startZ, int lod) {
     glGenVertexArrays(1, &patch.VAO);
     glBindVertexArray(patch.VAO);
 
-    if (RHI::Device* dev = RHI::device()) {
-        patch.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertices.size() * sizeof(float), vertices.data());
-        patch.hEbo = dev->createBuffer(RHI::BufferUsage::Index,  indices.size() * sizeof(unsigned int), indices.data());
-        patch.VBO = dev->nativeBuffer(patch.hVbo); patch.EBO = dev->nativeBuffer(patch.hEbo);
-        glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
-    } else {
-        glGenBuffers(1, &patch.VBO);
-        glGenBuffers(1, &patch.EBO);
-        glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
-        glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-    }
+    RHI::Device* dev = RHI::device();
+    patch.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertices.size() * sizeof(float), vertices.data());
+    patch.hEbo = dev->createBuffer(RHI::BufferUsage::Index,  indices.size() * sizeof(unsigned int), indices.data());
+    patch.VBO = dev->nativeBuffer(patch.hVbo); patch.EBO = dev->nativeBuffer(patch.hEbo);
+    glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
     
     // Position
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);

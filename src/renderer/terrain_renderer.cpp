@@ -1,7 +1,9 @@
 #include "terrain_renderer.h"
 #include "core/terrain/shared_index_table.h" // índices compartidos por res
 #include "tools/profiler.h"                   // HARUKA_PROFILE (sub-scopes de terrain.draw)
+#include "renderer/shader.h"                  // Shader::baseDir (createPipeline NO resuelve rutas)
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 #include <cstdio>
 #include <cstdlib>     // std::abs, getenv
 #include <functional>  // std::function (recursión de covered())
@@ -40,25 +42,78 @@ TerrainRenderer::~TerrainRenderer() {
         cleanupMesh(pair.second);
     }
     RHI::Device* dev = RHI::device();
+    if (!dev) return;
     for (auto& [vc, p] : m_pools) {   // pools de batching (el EBO es compartido → NO se borra aquí)
-        if (p.vao) glDeleteVertexArrays(1, &p.vao);
-        if (dev && RHI::valid(p.hPos)) {
+        if (RHI::valid(p.hPos)) {
             dev->destroy(p.hPos); dev->destroy(p.hMorph); dev->destroy(p.hNorm);
             dev->destroy(p.hMorphNorm); dev->destroy(p.hUv);
-        } else {
-            GLuint bufs[5] = { p.posVBO, p.morphVBO, p.normVBO, p.morphNormVBO, p.uvVBO };
-            glDeleteBuffers(5, bufs);
         }
-        // Indirect (cmdBuf/drawSSBO): siempre GL (stream de comandos por-frame, no migrado).
-        if (p.cmdBuf)   glDeleteBuffers(1, &p.cmdBuf);
-        if (p.drawSSBO) glDeleteBuffers(1, &p.drawSSBO);
+        if (RHI::valid(p.hCmd))  dev->destroy(p.hCmd);
+        if (RHI::valid(p.hSSBO)) dev->destroy(p.hSSBO);
     }
-    // EBOs compartidos: por el RHI si existen handles, o GL directo.
-    if (dev && !m_sharedEBOHandle.empty()) {
-        for (auto& [ic, h] : m_sharedEBOHandle) if (RHI::valid(h)) dev->destroy(h);
-    } else {
-        for (auto& [ic, ebo] : m_sharedEBO) if (ebo) glDeleteBuffers(1, &ebo);
-    }
+    for (auto& [ic, h] : m_sharedEBO) if (RHI::valid(h)) dev->destroy(h);
+    if (RHI::valid(m_pso))      dev->destroy(m_pso);
+    if (RHI::valid(m_uboParams)) dev->destroy(m_uboParams);
+    if (RHI::valid(m_soloSSBO))  dev->destroy(m_soloSSBO);
+}
+
+// EBO COMPARTIDO por topología: los índices son fijos por resolución → idénticos en todos los
+// chunks de ese indexCount. `fallback` solo se usa si la tabla compartida no tiene la topología.
+Haruka::RHI::BufferHandle TerrainRenderer::sharedEBO(uint32_t indexCount, const ChunkData* fallback) {
+    auto it = m_sharedEBO.find(indexCount);
+    if (it != m_sharedEBO.end()) return it->second;
+    const std::vector<unsigned int>* idx = SharedIndexTable::get().find(indexCount);
+    const unsigned int* src = idx ? idx->data()
+                  : (fallback && !fallback->indices.empty() ? fallback->indices.data() : nullptr);
+    RHI::BufferHandle h = RHI::device()->createBuffer(
+        RHI::BufferUsage::Index, (size_t)indexCount * sizeof(unsigned int), src);
+    m_sharedEBO.emplace(indexCount, h);
+    return h;
+}
+
+// PSO del terreno: shaders + layout de 5 BINDINGS (un buffer por stream: el terreno NO interleava)
+// + estado de rasterizado. Antes eran glUseProgram + VAO + glEnable(GL_DEPTH_TEST/GL_CULL_FACE)
+// sueltos en el llamador; ahora el pipeline los hornea (y es lo que Vulkan necesita).
+void TerrainRenderer::ensurePipeline(RHI::Device* dev) {
+    if (RHI::valid(m_pso)) return;
+
+    // createPipeline hace un ifstream CRUDO (no resuelve rutas de assets) → enraizar con baseDir.
+    const std::string vs = Shader::baseDir() + "shaders/planet.vert";
+    const std::string fs = Shader::baseDir() + "shaders/planet.frag";
+    RHI::PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    // Un stride por binding = un buffer por stream (posición · morph de posición · normal
+    // empaquetada · morph de normal · uv). Los formatos EMPAQUETADOS (4 B en vez de 12/8) son un
+    // ahorro de ancho de banda deliberado del generador.
+    pd.vertexLayout.strides = {
+        (uint32_t)sizeof(glm::vec3),  // 0: aPos
+        (uint32_t)sizeof(glm::vec3),  // 1: aMorphTarget
+        (uint32_t)sizeof(uint32_t),   // 2: aNormal       (INT_2_10_10_10_REV)
+        (uint32_t)sizeof(uint32_t),   // 3: aMorphNormal  (INT_2_10_10_10_REV)
+        (uint32_t)sizeof(uint32_t),   // 4: aUV           (2× half-float)
+    };
+    pd.vertexLayout.attributes = {
+        { 0, 0, RHI::Format::RGB32F,        0 },
+        { 3, 0, RHI::Format::RGB32F,        1 },
+        { 1, 0, RHI::Format::RGB10A2_SNORM, 2 },
+        { 4, 0, RHI::Format::RGB10A2_SNORM, 3 },
+        { 2, 0, RHI::Format::RG16F,         4 },
+    };
+    pd.topology     = RHI::PrimitiveTopology::Triangles;
+    pd.depth.test   = true;
+    pd.depth.write  = true;
+    // REVERSED-Z (near→1, lejos→0): lo cercano gana con >. GEQUAL (no Greater) para tolerar
+    // coplanares. Antes era LEQUAL con near/far=0.1/3e11, donde el NDC.z colapsaba a ~1.0.
+    pd.depth.compare = RHI::CompareOp::GreaterEqual;
+    pd.blend.enable  = false;
+    pd.cull          = RHI::CullMode::Back;   // lo hacía el glEnable(GL_CULL_FACE) del llamador
+    m_pso = dev->createPipeline(pd);
+
+    m_uboParams = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(TerrainParams), nullptr,
+                                    RHI::BufferMemory::Dynamic);
+    m_soloSSBO  = dev->createBuffer(RHI::BufferUsage::Storage, sizeof(GpuDrawItem), nullptr,
+                                    RHI::BufferMemory::Dynamic);
 }
 
 void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChunkKey& key, const ChunkData& data) {
@@ -121,25 +176,23 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
         && data.morphNormalsPacked.size() == data.vertices.size()
         && data.uvsPacked.size()          == data.vertices.size()
         && SharedIndexTable::get().find(mesh.indexCount) != nullptr;
+    RHI::Device* dev = RHI::device();
     if (canPool) {
         ChunkPool& p = getOrCreatePool(mesh.vertexCount, mesh.indexCount);
         if (p.freeSlots.empty()) growPool(p);
         uint32_t slot = p.freeSlots.back(); p.freeSlots.pop_back();
         const size_t vc   = mesh.vertexCount;
         const size_t base = (size_t)slot * vc;
-        auto sub = [&](GLuint buf, size_t elem, const void* src) {
-            glBindBuffer(GL_ARRAY_BUFFER, buf);
-            glBufferSubData(GL_ARRAY_BUFFER, base * elem, vc * elem, src);
+        auto sub = [&](RHI::BufferHandle h, size_t elem, const void* src) {
+            dev->updateBuffer(h, base * elem, vc * elem, src);
         };
-        sub(p.posVBO,       sizeof(glm::vec3), data.vertices.data());
-        sub(p.morphVBO,     sizeof(glm::vec3), data.morphTargets.data());
-        sub(p.normVBO,      sizeof(uint32_t),  data.normalsPacked.data());
-        sub(p.morphNormVBO, sizeof(uint32_t),  data.morphNormalsPacked.data());
-        sub(p.uvVBO,        sizeof(uint32_t),  data.uvsPacked.data());
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        sub(p.hPos,       sizeof(glm::vec3), data.vertices.data());
+        sub(p.hMorph,     sizeof(glm::vec3), data.morphTargets.data());
+        sub(p.hNorm,      sizeof(uint32_t),  data.normalsPacked.data());
+        sub(p.hMorphNorm, sizeof(uint32_t),  data.morphNormalsPacked.data());
+        sub(p.hUv,        sizeof(uint32_t),  data.uvsPacked.data());
         mesh.poolSlot = (int32_t)slot;
         mesh.poolKey  = mesh.vertexCount;
-        mesh.vao      = 0;               // sin buffers propios
         mesh.isReady  = true;
         m_gpuMeshes[hash] = mesh;
         noteResidencyChange(hash);       // invalida el draw-set SOLO si el chunk está en la clausura
@@ -147,80 +200,36 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
         return;
     }
 
-    glGenVertexArrays(1, &mesh.vao);
-    glBindVertexArray(mesh.vao);
-
-    // Crea un VBO estático por el RHI (o GL directo si no hay device) y lo deja bindeado a
-    // GL_ARRAY_BUFFER para el glVertexAttribPointer siguiente. VAO/attribs siguen GL (transitorio).
-    RHI::Device* dev = RHI::device();
-    auto mkStatic = [&](Haruka::RHI::BufferHandle& h, GLuint& glId, const void* d, size_t bytes) {
-        if (dev) { h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, d); glId = dev->nativeBuffer(h); glBindBuffer(GL_ARRAY_BUFFER, glId); }
-        else     { glGenBuffers(1, &glId); glBindBuffer(GL_ARRAY_BUFFER, glId); glBufferData(GL_ARRAY_BUFFER, bytes, d, GL_STATIC_DRAW); }
+    // --- CAMINO SIN POOL (fallback): buffers propios, un stream por binding del PSO -----------
+    // Los 5 streams se crean SIEMPRE, aunque el chunk no traiga alguno. El PSO tiene un VAO ÚNICO
+    // compartido por todos los draws: si dejáramos un binding sin atar, el atributo seguiría
+    // leyendo el buffer del chunk ANTERIOR (basura silenciosa) en vez del constante 0 que daba el
+    // viejo VAO-por-malla con el atributo deshabilitado. Los streams ausentes se sintetizan con el
+    // valor que los hace neutros: morph = la propia geometría (mix(x,x,t) = x), uv = 0.
+    const size_t vcount = mesh.vertexCount;
+    auto mkStatic = [&](RHI::BufferHandle& h, const void* d, size_t bytes) {
+        h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, d);
     };
+    mkStatic(mesh.hVbo, data.vertices.data(), data.vertices.size() * sizeof(glm::vec3));
 
-    // Attr 0: positions (float, relativo a chunkCenter)
-    mkStatic(mesh.hVbo, mesh.vbo, data.vertices.data(), data.vertices.size() * sizeof(glm::vec3));
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-    glEnableVertexAttribArray(0);
+    if (!data.morphTargets.empty())
+        mkStatic(mesh.hMbo, data.morphTargets.data(), data.morphTargets.size() * sizeof(glm::vec3));
+    else                                    // sin morph → el target es la propia posición
+        mkStatic(mesh.hMbo, data.vertices.data(), data.vertices.size() * sizeof(glm::vec3));
 
-    // Attr 3: morph-target positions (CDLOD geomorphing)
-    if (!data.morphTargets.empty()) {
-        mkStatic(mesh.hMbo, mesh.mbo, data.morphTargets.data(), data.morphTargets.size() * sizeof(glm::vec3));
-        glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr);
-        glEnableVertexAttribArray(3);
-    }
+    // Normales EMPAQUETADAS: INT_2_10_10_10_REV (4 B). El shader lee `vec3 aNormal` y la GPU
+    // des-empaqueta normalizado → sin cambios en el shader.
+    std::vector<uint32_t> zeros;
+    const uint32_t* nrm  = data.normalsPacked.empty()      ? nullptr : data.normalsPacked.data();
+    const uint32_t* mnrm = data.morphNormalsPacked.empty() ? nrm     : data.morphNormalsPacked.data();
+    const uint32_t* uv   = data.uvsPacked.empty()          ? nullptr : data.uvsPacked.data();
+    if (!nrm || !uv) zeros.assign(vcount, 0u);
+    mkStatic(mesh.hNbo,  nrm  ? nrm  : zeros.data(), vcount * sizeof(uint32_t));
+    mkStatic(mesh.hNmbo, mnrm ? mnrm : zeros.data(), vcount * sizeof(uint32_t));
+    mkStatic(mesh.hUvo,  uv   ? uv   : zeros.data(), vcount * sizeof(uint32_t));
 
-    // Attr 1: normals — EMPAQUETADAS (#4): INT_2_10_10_10 (4B). El shader lee `vec3 aNormal`
-    // y GL des-empaqueta normalizado (xyz) → sin cambios en el shader.
-    if (!data.normalsPacked.empty()) {
-        mkStatic(mesh.hNbo, mesh.nbo, data.normalsPacked.data(), data.normalsPacked.size() * sizeof(uint32_t));
-        glVertexAttribPointer(1, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
-        glEnableVertexAttribArray(1);
-    }
-
-    // Attr 4: morph-target normals (CDLOD), también empaquetadas.
-    if (!data.morphNormalsPacked.empty()) {
-        mkStatic(mesh.hNmbo, mesh.nmbo, data.morphNormalsPacked.data(), data.morphNormalsPacked.size() * sizeof(uint32_t));
-        glVertexAttribPointer(4, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr);
-        glEnableVertexAttribArray(4);
-    }
-
-    // Attr 2: UVs — half-float (#4): 2× half (4B vs 8B). El shader lee `vec2 aUV` (auto-convert).
-    if (!data.uvsPacked.empty()) {
-        mkStatic(mesh.hUvo, mesh.uvo, data.uvsPacked.data(), data.uvsPacked.size() * sizeof(uint32_t));
-        glVertexAttribPointer(2, 2, GL_HALF_FLOAT, GL_FALSE, sizeof(uint32_t), nullptr);
-        glEnableVertexAttribArray(2);
-    }
-
-    // EBO COMPARTIDO: los índices son topología FIJA por nº de índices (grid + skirts del
-    // mismo res) → idénticos en TODOS los chunks de ese res. Un único EBO por indexCount,
-    // reusado por todos → ahorra ~6·res²·4 B × miles de chunks en VRAM. El VAO (ligado abajo)
-    // recuerda este EBO; cleanupMesh NO lo borra (es compartido; se liberan en el destructor).
-    {
-        uint32_t ic = mesh.indexCount; // (indexCount conservado o fallback a indices.size())
-        auto it = m_sharedEBO.find(ic);
-        if (it == m_sharedEBO.end()) {
-            // Datos: tabla compartida (camino normal) o los índices propios del chunk (fallback).
-            const std::vector<unsigned int>* idx = SharedIndexTable::get().find(ic);
-            const unsigned int* src = idx ? idx->data()
-                                          : (data.indices.empty() ? nullptr : data.indices.data());
-            GLuint ebo = 0;
-            if (dev) {
-                Haruka::RHI::BufferHandle h = dev->createBuffer(RHI::BufferUsage::Index, ic * sizeof(unsigned int), src);
-                ebo = dev->nativeBuffer(h);
-                m_sharedEBOHandle.emplace(ic, h);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);  // ligarlo al VAO actual
-            } else {
-                glGenBuffers(1, &ebo);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER, ic * sizeof(unsigned int), src, GL_STATIC_DRAW);
-            }
-            it = m_sharedEBO.emplace(ic, ebo).first;
-        } else {
-            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, it->second); // ligarlo al VAO actual
-        }
-        mesh.ebo = it->second; // referencia (NO se posee → no se borra en cleanupMesh)
-    }
+    // EBO compartido por indexCount (referencia: NO se posee → cleanupMesh no lo borra).
+    mesh.hEbo = sharedEBO(mesh.indexCount, &data);
 
     mesh.isReady = true;
     m_gpuMeshes[hash] = mesh;
@@ -228,8 +237,6 @@ void TerrainRenderer::addToScene(const std::string& planetName, const PlanetChun
 
     // Retira mallas STALE cuya área ya cubre esta recién añadida (sin agujero).
     purgeStaleCoveredBy(key);
-
-    glBindVertexArray(0);
 }
 
 void TerrainRenderer::removeFromScene(const std::string& planetName, const PlanetChunkKey& key) {
@@ -313,48 +320,36 @@ void TerrainRenderer::purgeStaleCoveredBy(const PlanetChunkKey& key) {
     }
 }
 
-void TerrainRenderer::render(const Haruka::WorldPos& cameraPos) {
-    std::lock_guard<std::mutex> lock(m_renderMutex);
-
-    GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-    GLint loc = glGetUniformLocation(prog, "u_chunkOffset");
-
-    GLuint boundVao = 0;
-    for (auto& [hash, mesh] : m_gpuMeshes) {
-        if (!mesh.isReady) continue;
-        if (loc >= 0) {
-            glm::vec3 offset = glm::vec3(mesh.chunkCenter - glm::dvec3(cameraPos));
-            glUniform3fv(loc, 1, &offset[0]);
-        }
-        GLuint wantVao = mesh.vao;
-        GLint  baseVertex = 0;
-        if (mesh.poolSlot >= 0) {
-            auto pit = m_pools.find(mesh.poolKey);
-            if (pit == m_pools.end()) continue;
-            wantVao    = pit->second.vao;
-            baseVertex = (GLint)((size_t)mesh.poolSlot * mesh.vertexCount);
-        }
-        if (wantVao != boundVao) { glBindVertexArray(wantVao); boundVao = wantVao; }
-        if (mesh.poolSlot >= 0)
-            glDrawElementsBaseVertex(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr, baseVertex);
-        else
-            glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
-    }
-    glBindVertexArray(0);
-}
-
 void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::WorldPos& cameraPos) {
     std::lock_guard<std::mutex> lock(m_renderMutex);
 
-    GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
-    if (prog == 0) {
-        fprintf(stderr, "[TerrainRenderer] ERROR: no shader bound — skipping terrain draw\n");
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    ensurePipeline(dev);
+    if (!RHI::valid(m_pso)) {
+        fprintf(stderr, "[TerrainRenderer] ERROR: sin pipeline — no se dibuja el terreno\n");
         return;
     }
-    // layout(location=10) in planet.vert, layout(location=11) in planet.frag
-    const GLint locOffset = 10;
-    const GLint locMode   = 11;
-    const GLint locMorph  = 12; // CDLOD morph factor (per-chunk)
+
+    // El pipeline trae programa + layout + depth LEQUAL + cull back. Los UBOs per-frame (0) y
+    // per-object (1) los ata el llamador (application_render) y siguen atados: en GL los binding
+    // points de UBO son estado global, no del programa; en Vulkan, descriptor sets compatibles.
+    RHI::Context* ctx = dev->beginFrame();
+    ctx->bindPipeline(m_pso);
+    dev->updateBuffer(m_uboParams, 0, sizeof(TerrainParams), &m_params);
+    ctx->bindUniformBuffer(8, m_uboParams);   // 8, no 7: el 7 es el SSBO del DrawItem (ver planet.frag)
+    // (F5) Campo + clima del planeta → el BIOMA se decide per-píxel con los MISMOS datos que
+    // generaron el relieve (misma convención que el agua, que ya usa el 9).
+    if (m_fieldSSBO)   glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 9,  m_fieldSSBO);
+    if (m_climateSSBO) glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, m_climateSSBO);
+    if (m_params.shadowsOn > 0.5f) ctx->bindTexture(5, m_shadowMap);
+    if (m_params.hasTex > 0.5f) {   // texturas de bioma (opcionales, por escena)
+        ctx->bindTexture(0, m_biome.sandAlbedo);
+        ctx->bindTexture(1, m_biome.sandNormal);
+        ctx->bindTexture(2, m_biome.grassAlbedo);
+        ctx->bindTexture(3, m_biome.landAlbedo);
+        ctx->bindTexture(4, m_biome.landNormal);
+    }
 
     // DEBE coincidir con el splitFactor REAL del LODSystem (setSplitFactor). Una hoja de
     // LOD L es visible en la banda de distancia [size*sf, 2*size*sf]; morphamos en su mitad
@@ -426,16 +421,11 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
     }
     const std::unordered_set<uint64_t>& drawnHashes = cacheIt->second;
 
-    const GLint locBatched = 40; // u_batched en planet.vert (1 = leer datos por-draw del SSBO)
     std::unordered_set<uint64_t> visibleHashes; // chunks VISIBLES (post-cull) → sync del agua
     visibleHashes.reserve(drawnHashes.size());
     int drawn = 0;
-    GLuint boundVao = 0; // batching: solo rebind del VAO cuando cambia (con el pool = 1 sola vez)
-    glUniform1i(locBatched, 0);   // por defecto: draws normales (uniforms por chunk)
-    // MultiDrawIndirect: acumulamos por pool los chunks VISIBLES (tras cull) y emitimos UNA
-    // glMultiDrawElementsIndirect por pool → colapsa ~1500 draws en 1 (o pocas) llamadas. Solo
-    // con m_batching ON; si OFF, los chunks pooled se dibujan inline con glDrawElementsBaseVertex
-    // (camino validado) → fallback seguro con `terrainpool off`.
+    // MultiDrawIndirect: acumulamos por pool los chunks VISIBLES (tras cull) y emitimos UN
+    // drawIndexedIndirect por pool → colapsa ~1500 draws en 1 (o pocas) llamadas.
     for (auto& [k, v] : m_scratchCmds)  v.clear();
     for (auto& [k, v] : m_scratchItems) v.clear();
     // Iteramos el DRAW SET (~1500 chunks) en vez de TODAS las mallas residentes (~6400): antes
@@ -516,13 +506,15 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
         double morph    = (t - 0.6) / 0.4;
         morph = morph < 0.0 ? 0.0 : (morph > 1.0 ? 1.0 : morph);
 
-        const bool pooled = (mesh.poolSlot >= 0);
-        if (pooled && m_batching) {
-            // Acumular para MultiDrawIndirect (una llamada por pool tras el bucle).
-            GpuDrawItem it;
-            it.offMorph[0] = offset.x; it.offMorph[1] = offset.y; it.offMorph[2] = offset.z;
-            it.offMorph[3] = (float)morph;
-            it.mode[0] = mesh.terrainMode; it.mode[1] = it.mode[2] = it.mode[3] = 0;
+        // Datos POR-DRAW: van SIEMPRE por el SSBO (gl_DrawID), nunca por uniforms — no existen en
+        // Vulkan, y a ~1500 chunks/frame serían ~1500 updates.
+        GpuDrawItem it;
+        it.offMorph[0] = offset.x; it.offMorph[1] = offset.y; it.offMorph[2] = offset.z;
+        it.offMorph[3] = (float)morph;
+        it.mode[0] = mesh.terrainMode; it.mode[1] = it.mode[2] = it.mode[3] = 0;
+
+        if (mesh.poolSlot >= 0) {
+            // POOLED: acumular para el multidraw de su pool (gl_DrawID = índice del comando).
             GpuDrawCmd cmd;
             cmd.count         = mesh.indexCount;
             cmd.instanceCount = 1;
@@ -534,30 +526,25 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
             continue; // se dibuja en el batch de su pool
         }
 
-        // Camino inline (legacy sin pool, o pooled con batching OFF): draw normal por chunk.
-        GLuint wantVao = mesh.vao;
-        GLint  baseVertex = 0;
-        if (pooled) {
-            auto pit = m_pools.find(mesh.poolKey);
-            if (pit == m_pools.end()) continue;
-            wantVao    = pit->second.vao;
-            baseVertex = (GLint)((size_t)mesh.poolSlot * mesh.vertexCount);
-        }
-        glUniform3fv(locOffset, 1, &offset[0]);
-        glUniform1i(locMode, mesh.terrainMode);
-        glUniform1f(locMorph, (float)morph);
-        if (wantVao != boundVao) { glBindVertexArray(wantVao); boundVao = wantVao; }
-        if (pooled)
-            glDrawElementsBaseVertex(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr, baseVertex);
-        else
-            glDrawElements(GL_TRIANGLES, mesh.indexCount, GL_UNSIGNED_INT, nullptr);
+        // SIN SLOT DE POOL (fallback: batching off, chunk sin todos los streams, topología rara):
+        // draw suelto con sus propios buffers. gl_DrawID vale 0 → lee el item 0 del SSBO de UN
+        // elemento. MISMO shader que el camino indirecto, sin ramas. Es un update de 32 B por
+        // chunk, pero son POCOS: los chunks normales van todos al pool.
+        dev->updateBuffer(m_soloSSBO, 0, sizeof(GpuDrawItem), &it);
+        ctx->bindStorageBuffer(7, m_soloSSBO);
+        ctx->bindVertexBuffer(mesh.hVbo,  0);
+        ctx->bindVertexBuffer(mesh.hMbo,  1);
+        ctx->bindVertexBuffer(mesh.hNbo,  2);
+        ctx->bindVertexBuffer(mesh.hNmbo, 3);
+        ctx->bindVertexBuffer(mesh.hUvo,  4);
+        ctx->bindIndexBuffer(mesh.hEbo);
+        ctx->drawIndexed(mesh.indexCount);
         ++drawn;
     }
 
     // --- MultiDrawIndirect: una llamada por pool con todos sus chunks visibles ---------------
-    if (m_batching) {
-        HARUKA_PROFILE("terrain.emit"); // orphan+upload de cmd/SSBO + glMultiDrawElementsIndirect por pool
-        glUniform1i(locBatched, 1);
+    {
+        HARUKA_PROFILE("terrain.emit"); // orphan+upload de cmd/SSBO + drawIndexedIndirect por pool
         for (auto& [poolKey, cmds] : m_scratchCmds) {
             if (cmds.empty()) continue;
             auto pit = m_pools.find(poolKey);
@@ -565,23 +552,22 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
             ChunkPool& pool = pit->second;
             auto& items = m_scratchItems[poolKey];
             const size_t n = cmds.size();
-            if (pool.cmdBuf == 0)   glGenBuffers(1, &pool.cmdBuf);
-            if (pool.drawSSBO == 0) glGenBuffers(1, &pool.drawSSBO);
-            // ORPHAN + upload (glBufferData) cada frame: descarta el buffer viejo → el driver da uno
-            // nuevo sin esperar a que la MultiDraw del frame anterior lo suelte (evita el stall
-            // implícito de glBufferSubData sobre un buffer aún en uso). ~48 KB → barato.
-            glBindBuffer(GL_DRAW_INDIRECT_BUFFER, pool.cmdBuf);
-            glBufferData(GL_DRAW_INDIRECT_BUFFER, n * sizeof(GpuDrawCmd), cmds.data(), GL_STREAM_DRAW);
-            glBindBuffer(GL_SHADER_STORAGE_BUFFER, pool.drawSSBO);
-            glBufferData(GL_SHADER_STORAGE_BUFFER, n * sizeof(GpuDrawItem), items.data(), GL_STREAM_DRAW);
-            glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, pool.drawSSBO);
-            glBindVertexArray(pool.vao);
-            glMultiDrawElementsIndirect(GL_TRIANGLES, GL_UNSIGNED_INT, nullptr, (GLsizei)n, 0);
+            // ORPHAN + upload (buffers Stream) cada frame: descarta el buffer viejo → el driver da
+            // uno nuevo sin esperar a que la multidraw del frame anterior lo suelte (evita el stall
+            // implícito de un subdata sobre un buffer aún en uso). ~48 KB → barato.
+            dev->uploadBuffer(pool.hCmd,  n * sizeof(GpuDrawCmd),  cmds.data());
+            dev->uploadBuffer(pool.hSSBO, n * sizeof(GpuDrawItem), items.data());
+            ctx->bindStorageBuffer(7, pool.hSSBO);
+            ctx->bindVertexBuffer(pool.hPos,       0);
+            ctx->bindVertexBuffer(pool.hMorph,     1);
+            ctx->bindVertexBuffer(pool.hNorm,      2);
+            ctx->bindVertexBuffer(pool.hMorphNorm, 3);
+            ctx->bindVertexBuffer(pool.hUv,        4);
+            ctx->bindIndexBuffer(pool.hEbo);
+            ctx->drawIndexedIndirect(pool.hCmd, (uint32_t)n, (uint32_t)sizeof(GpuDrawCmd));
             drawn += (int)n;
         }
-        glUniform1i(locBatched, 0);
     }
-    glBindVertexArray(0);
     m_lastDrawn = drawn;
     m_drawnByPlanet[planet] = std::move(visibleHashes); // set POST-CULL → el agua dibuja solo lo visible
 
@@ -630,7 +616,11 @@ void TerrainRenderer::renderPlanet(const std::string& planet, const Haruka::Worl
             const double keepR   = std::min(horizon * 1.05 + 300.0, 15000.0);
             glm::dvec3 d = (m.chunkCenter + m_planetCenter) - camW;
             const bool nearCam = (glm::dot(d, d) < keepR * keepR);
-            if (needed.count(h) || nearCam) m.framesUndrawn = 0;
+            // La PIRÁMIDE GRUESA no se purga NUNCA de la GPU: es el fallback que evita agujeros
+            // (si el chunk fino no llega y su ancestro tampoco está, no hay NADA que dibujar).
+            // Mismo criterio que ChunkCache::kPinnedLOD.
+            if (m.key.lod <= 5)             m.framesUndrawn = 0;
+            else if (needed.count(h) || nearCam) m.framesUndrawn = 0;
             else if (++m.framesUndrawn > MAX_UNDRAWN) purge.push_back(h);
         }
         }
@@ -770,6 +760,7 @@ void TerrainRenderer::rebuildClosureForPlanet(const std::string& planet) {
     // conjunto EXACTO de nodos cuya residencia puede alterar buildDrawSet (ver comentario en el .h).
     // Coste: como el pase de construcción de buildDrawSet (early-out de trie) → barato; solo corre
     // al cambiar las hojas (throttleado).
+    HARUKA_PROFILE("closure.planet");
     auto& clo = m_closureByPlanet[planet];
     clo.clear();
     // Sets PRECOMPUTADOS para emitSubtree (estáticos hasta el próximo cambio de hojas): hojas y nodos
@@ -803,16 +794,6 @@ void TerrainRenderer::rebuildClosureForPlanet(const std::string& planet) {
                 clo.insert(ChunkCache::keyToHash({ (PlanetFace)f, 0, 0, 0, bd }));
         }
     }
-    rebuildClosureAll();
-}
-
-void TerrainRenderer::rebuildClosureAll() {
-    // CALLER HOLDS m_renderMutex. Unión de todas las clausuras por planeta (pocos planetas).
-    m_closureAll.clear();
-    size_t total = 0;
-    for (const auto& [p, s] : m_closureByPlanet) total += s.size();
-    m_closureAll.reserve(total);
-    for (const auto& [p, s] : m_closureByPlanet) m_closureAll.insert(s.begin(), s.end());
 }
 
 void TerrainRenderer::buildDrawSet(const std::string& planet,
@@ -1197,7 +1178,6 @@ void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
         mesh.poolSlot = -1;
         return;
     }
-    if (mesh.vao) glDeleteVertexArrays(1, &mesh.vao);
     if (RHI::valid(mesh.hVbo)) {
         if (RHI::Device* dev = RHI::device()) {
             dev->destroy(mesh.hVbo);
@@ -1207,36 +1187,14 @@ void TerrainRenderer::cleanupMesh(RenderMesh& mesh) {
             if (RHI::valid(mesh.hUvo))  dev->destroy(mesh.hUvo);
         }
         mesh.hVbo = mesh.hMbo = mesh.hNbo = mesh.hNmbo = mesh.hUvo = {};
-    } else {
-        if (mesh.vbo) glDeleteBuffers(1, &mesh.vbo);
-        if (mesh.mbo) glDeleteBuffers(1, &mesh.mbo);   // antes NO se borraba → fuga de buffer GPU
-        if (mesh.nbo) glDeleteBuffers(1, &mesh.nbo);
-        if (mesh.nmbo) glDeleteBuffers(1, &mesh.nmbo);
-        if (mesh.uvo) glDeleteBuffers(1, &mesh.uvo);
     }
-    // mesh.ebo NO se borra: es el EBO COMPARTIDO por res (lo libera el destructor).
+    // mesh.hEbo NO se borra: es el EBO COMPARTIDO por res (lo libera el destructor).
+    mesh.hEbo = {};
 }
 
 // --- BATCHING: gestión del pool ------------------------------------------------------
-void TerrainRenderer::setupPoolVAO(ChunkPool& p) {
-    // (Re)liga los atributos del VAO a los buffers actuales del pool. Debe rellamarse tras
-    // recrear buffers (growPool) porque glVertexAttribPointer captura el buffer ligado AHORA.
-    glBindVertexArray(p.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, p.posVBO);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr); glEnableVertexAttribArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, p.morphVBO);
-    glVertexAttribPointer(3, 3, GL_FLOAT, GL_FALSE, sizeof(glm::vec3), nullptr); glEnableVertexAttribArray(3);
-    glBindBuffer(GL_ARRAY_BUFFER, p.normVBO);
-    glVertexAttribPointer(1, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr); glEnableVertexAttribArray(1);
-    glBindBuffer(GL_ARRAY_BUFFER, p.morphNormVBO);
-    glVertexAttribPointer(4, 4, GL_INT_2_10_10_10_REV, GL_TRUE, sizeof(uint32_t), nullptr); glEnableVertexAttribArray(4);
-    glBindBuffer(GL_ARRAY_BUFFER, p.uvVBO);
-    glVertexAttribPointer(2, 2, GL_HALF_FLOAT, GL_FALSE, sizeof(uint32_t), nullptr); glEnableVertexAttribArray(2);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, p.ebo); // el VAO recuerda este EBO
-    glBindVertexArray(0);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-}
-
+// (El VAO y los attrib-pointers los posee ahora el PSO: un layout de 5 bindings, uno por stream.
+//  El pool solo posee BUFFERS → crearlos/recrearlos no toca ningún estado de render.)
 TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCount, uint32_t indexCount) {
     auto it = m_pools.find(vertexCount);
     if (it != m_pools.end()) return it->second;
@@ -1258,48 +1216,28 @@ TerrainRenderer::ChunkPool& TerrainRenderer::getOrCreatePool(uint32_t vertexCoun
     // N×2GB). Si una topología secundaria se vuelve dominante (aterrizas ahí) y llena su pool, growPool
     // dispara (raro) y lo registra en m_poolGrowCount. Vigilar #pools con HARUKA_POOL_DBG.
     p.capacity    = m_pools.empty() ? (uint32_t)kMaxResidentChunks : kSecondaryPoolSlots;
-    glGenVertexArrays(1, &p.vao);
     const size_t n = (size_t)vertexCount * p.capacity;
-    // Pool VBO: DYNAMIC (inmutable + subdata por slot). El RHI usa la misma semántica; el
-    // relleno por slot sigue con glBufferSubData (native id). growPool crea nuevos + copyBuffer.
+    // Streams del pool: DYNAMIC (tamaño fijo + subdata por slot). growPool crea nuevos + copyBuffer.
     RHI::Device* dev = RHI::device();
-    auto mkbuf = [&](Haruka::RHI::BufferHandle& h, GLuint& b, size_t bytes) {
-        if (dev) { h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic); b = dev->nativeBuffer(h); }
-        else     { glGenBuffers(1, &b); glBindBuffer(GL_ARRAY_BUFFER, b); glBufferData(GL_ARRAY_BUFFER, bytes, nullptr, GL_DYNAMIC_DRAW); }
+    auto mkbuf = [&](Haruka::RHI::BufferHandle& h, size_t bytes) {
+        h = dev->createBuffer(RHI::BufferUsage::Vertex, bytes, nullptr, RHI::BufferMemory::Dynamic);
     };
-    mkbuf(p.hPos,       p.posVBO,       n * sizeof(glm::vec3));
-    mkbuf(p.hMorph,     p.morphVBO,     n * sizeof(glm::vec3));
-    mkbuf(p.hNorm,      p.normVBO,      n * sizeof(uint32_t));
-    mkbuf(p.hMorphNorm, p.morphNormVBO, n * sizeof(uint32_t));
-    mkbuf(p.hUv,        p.uvVBO,        n * sizeof(uint32_t));
+    mkbuf(p.hPos,       n * sizeof(glm::vec3));
+    mkbuf(p.hMorph,     n * sizeof(glm::vec3));
+    mkbuf(p.hNorm,      n * sizeof(uint32_t));
+    mkbuf(p.hMorphNorm, n * sizeof(uint32_t));
+    mkbuf(p.hUv,        n * sizeof(uint32_t));
 
-    // EBO compartido por indexCount (reusa el de legacy si ya existe). canPool ya garantizó
-    // que la tabla compartida tiene esta topología → el buffer se rellena con datos válidos.
-    {
-        auto eit = m_sharedEBO.find(indexCount);
-        if (eit == m_sharedEBO.end()) {
-            const std::vector<unsigned int>* idx = SharedIndexTable::get().find(indexCount);
-            GLuint ebo = 0;
-            if (dev) {
-                Haruka::RHI::BufferHandle h = dev->createBuffer(RHI::BufferUsage::Index,
-                    indexCount * sizeof(unsigned int), idx ? idx->data() : nullptr);
-                ebo = dev->nativeBuffer(h);
-                m_sharedEBOHandle.emplace(indexCount, h);
-            } else {
-                glGenBuffers(1, &ebo);
-                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-                glBufferData(GL_ELEMENT_ARRAY_BUFFER, indexCount * sizeof(unsigned int),
-                             idx ? idx->data() : nullptr, GL_STATIC_DRAW);
-            }
-            eit = m_sharedEBO.emplace(indexCount, ebo).first;
-        }
-        p.ebo = eit->second;
-    }
-    setupPoolVAO(p);
+    // Comandos + datos por-draw del multidraw: STREAM (se reasignan enteros cada frame, orphan).
+    p.hCmd  = dev->createBuffer(RHI::BufferUsage::Indirect, 0, nullptr, RHI::BufferMemory::Stream);
+    p.hSSBO = dev->createBuffer(RHI::BufferUsage::Storage,  0, nullptr, RHI::BufferMemory::Stream);
+
+    // EBO compartido por indexCount. canPool ya garantizó que la tabla compartida tiene esta
+    // topología → el buffer se rellena con datos válidos.
+    p.hEbo = sharedEBO(indexCount, nullptr);
 
     p.freeSlots.reserve(p.capacity);
     for (uint32_t s = p.capacity; s-- > 0; ) p.freeSlots.push_back(s); // slot 0 al final → se usa primero
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
     if (getenv("HARUKA_POOL_DBG")) {
         size_t bytesPos = (size_t)vertexCount * p.capacity * sizeof(glm::vec3);
         fprintf(stderr, "[POOL-NEW] vc=%u ic=%u cap=%u  pos=%.1fMB total5=%.1fMB  #pools=%zu\n",
@@ -1324,38 +1262,24 @@ void TerrainRenderer::growPool(ChunkPool& p) {
             vc, oldCap, newCap, (double)((size_t)vc*newCap*kPoolBytesPerVertex)/1048576.0,
             (unsigned long long)m_poolGrowCount);
     RHI::Device* dev = RHI::device();
-    auto regrow = [&](Haruka::RHI::BufferHandle& h, GLuint& buf, size_t elem) {
+    auto regrow = [&](Haruka::RHI::BufferHandle& h, size_t elem) {
         const size_t newBytes = (size_t)newCap * vc * elem;
         const size_t oldBytes = (size_t)oldCap * vc * elem;
-        if (dev) {
-            // Crea el nuevo, copia GPU→GPU los slots ya subidos, destruye el viejo.
-            Haruka::RHI::BufferHandle nh = dev->createBuffer(RHI::BufferUsage::Vertex, newBytes, nullptr, RHI::BufferMemory::Dynamic);
-            dev->copyBuffer(h, nh, 0, 0, oldBytes);
-            dev->destroy(h);
-            h = nh; buf = dev->nativeBuffer(h);
-        } else {
-            GLuint nb = 0;
-            glGenBuffers(1, &nb);
-            glBindBuffer(GL_ARRAY_BUFFER, nb);
-            glBufferData(GL_ARRAY_BUFFER, newBytes, nullptr, GL_DYNAMIC_DRAW);
-            glBindBuffer(GL_COPY_READ_BUFFER,  buf);
-            glBindBuffer(GL_COPY_WRITE_BUFFER, nb);
-            glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, oldBytes);
-            glDeleteBuffers(1, &buf);
-            buf = nb;
-        }
+        // Crea el nuevo, copia GPU→GPU los slots ya subidos, destruye el viejo.
+        Haruka::RHI::BufferHandle nh = dev->createBuffer(RHI::BufferUsage::Vertex, newBytes, nullptr, RHI::BufferMemory::Dynamic);
+        dev->copyBuffer(h, nh, 0, 0, oldBytes);
+        dev->destroy(h);
+        h = nh;
     };
-    regrow(p.hPos,       p.posVBO,       sizeof(glm::vec3));
-    regrow(p.hMorph,     p.morphVBO,     sizeof(glm::vec3));
-    regrow(p.hNorm,      p.normVBO,      sizeof(uint32_t));
-    regrow(p.hMorphNorm, p.morphNormVBO, sizeof(uint32_t));
-    regrow(p.hUv,        p.uvVBO,        sizeof(uint32_t));
+    regrow(p.hPos,       sizeof(glm::vec3));
+    regrow(p.hMorph,     sizeof(glm::vec3));
+    regrow(p.hNorm,      sizeof(uint32_t));
+    regrow(p.hMorphNorm, sizeof(uint32_t));
+    regrow(p.hUv,        sizeof(uint32_t));
     p.capacity = newCap;
-    setupPoolVAO(p);                               // religa atributos a los buffers nuevos
+    // Los buffers nuevos NO hay que religarlos a ningún VAO: el layout vive en el PSO y los
+    // buffers se atan por handle en cada frame (bindVertexBuffer) → el realloc es transparente.
     for (uint32_t s = newCap; s-- > oldCap; ) p.freeSlots.push_back(s);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glBindBuffer(GL_COPY_READ_BUFFER, 0);
-    glBindBuffer(GL_COPY_WRITE_BUFFER, 0);
 }
 
 TerrainRenderer::PoolStats TerrainRenderer::poolStats() const {

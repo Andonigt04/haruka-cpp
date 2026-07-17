@@ -98,13 +98,14 @@ void Application::initPlanetarySystem() {
     _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
     _planetarySystem->init();
 
-    // Wire up planetary physics so gravity and terrain collision use real planet data.
+    // Wire up planetary physics: la física solo conoce IWorldProvider (sin GL). Aquí se le inyecta
+    // el adaptador CLIENTE sobre WorldSystem (gravedad + mar) + PlanetarySystem (altura del terreno).
 #ifdef HARUKA_MOD_PHYSICS
-    if (_physicsEngine)
-        _physicsEngine->initPlanetaryPhysics(
-            _worldSystem.get(),
-            _planetarySystem.get(),
-            _raycastSystem.get());
+    if (_physicsEngine) {
+        _worldProvider = std::make_unique<Haruka::WorldSystemProvider>(
+            _worldSystem.get(), _planetarySystem.get());
+        _physicsEngine->setWorldProvider(_worldProvider.get());
+    }
 #endif
 
     // Toda la interpretación escena→cuerpos celestes (planetas con terreno + cuerpos
@@ -283,18 +284,31 @@ void Application::cleanup() {
     // Members not explicitly reset here would run their destructors AFTER
     // _window->shutdown() destroys the GL context, corrupting the heap.
     _mainShader.reset();
-    _planetShader.reset();
     _lampShader.reset();
     _geomShader.reset();
     _ssaoShader.reset();
     _lightShader.reset();
-    _compositeShader.reset();
     _flatShader.reset();
     _cascadeShadowShader.reset();
-    _bloomExtractShader.reset();
-    _bloomBlurShader.reset();
-    if (m_bloomFBO[0]) { glDeleteFramebuffers(2, m_bloomFBO); m_bloomFBO[0] = m_bloomFBO[1] = 0; }
-    if (m_bloomTex[0]) { glDeleteTextures(2, m_bloomTex);     m_bloomTex[0] = m_bloomTex[1] = 0; }
+    // POSTFX (ruta PSO — bloom + present): sus recursos los posee el RHI, no nosotros. Antes se
+    // borraban los FBO y las texturas del bloom con glDelete* crudos aunque pertenecen a los render
+    // targets del device (m_bloomPass) → doble-free / entrada huérfana en el pool. Ahora todo se
+    // libera por el device.
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_bloomExtractPSO)) { dev->destroy(m_bloomExtractPSO); m_bloomExtractPSO = {}; }
+        if (RHI::valid(m_bloomBlurPSO))    { dev->destroy(m_bloomBlurPSO);    m_bloomBlurPSO    = {}; }
+        if (RHI::valid(m_bloomUBO))        { dev->destroy(m_bloomUBO);        m_bloomUBO        = {}; }
+        if (RHI::valid(m_presentPSO))      { dev->destroy(m_presentPSO);      m_presentPSO      = {}; }
+        if (RHI::valid(m_presentUBO))      { dev->destroy(m_presentUBO);      m_presentUBO      = {}; }
+        if (RHI::valid(m_skyPSO))          { dev->destroy(m_skyPSO);          m_skyPSO          = {}; }
+        if (RHI::valid(m_skyUBO))          { dev->destroy(m_skyUBO);          m_skyUBO          = {}; }
+        if (RHI::valid(m_scenePSO))        { dev->destroy(m_scenePSO);        m_scenePSO        = {}; }
+        for (int i = 0; i < 2; ++i)
+            if (RHI::valid(m_bloomPass[i])) { dev->destroy(m_bloomPass[i]); m_bloomPass[i] = {}; }
+    }
+    m_bloomFBO[0] = m_bloomFBO[1] = 0;   // eran ids GL cacheados del pass (ya liberado arriba)
+    m_bloomTexH[0] = m_bloomTexH[1] = {};
+    m_bloomW = m_bloomH = 0;
     _postScene.reset();
     _pointShadowShader.reset();
     _instancingShader.reset();
@@ -325,6 +339,18 @@ void Application::cleanup() {
     // Free GL-owning caches (model cache + primitive meshes created on demand)
     AppInternal::cleanupGLStatics();
 
+    // CIERRE DEL RHI — el orden importa y estaba mal:
+    //  1) setDevice(nullptr): el global g_device dejaba de actualizarse y quedaba COLGANDO al morir
+    //     _device. Cualquier destructor de recurso posterior (Mesh/Texture llaman a
+    //     device()->destroy()) invocaba un virtual sobre memoria liberada → "pure virtual method
+    //     called". Ahora device() devuelve null y esos destructores son no-op (sus objetos GL ya
+    //     los libera el barrido de pools del device, justo debajo).
+    //  2) _device.reset() AQUÍ, no en ~Application(): el device se destruía DESPUÉS de que
+    //     _window->shutdown() matara el contexto GL → sus glDelete* corrían sobre un contexto
+    //     muerto. Destruyéndolo antes, el contexto sigue vivo y libera todo limpiamente.
+    Haruka::RHI::setDevice(nullptr);
+    _device.reset();
+
     if (_window) {
         _window->shutdown();
     }
@@ -349,8 +375,17 @@ void Application::run(const std::string& startScenePath) {
 
     // RHI: crea el device sobre la ventana. La Window ya creó y activó el contexto GL, así que
     // el backend GL lo ADOPTA (no crea uno segundo). Lo publicamos como device global para que
-    // los wrappers (Texture, …) lo usen. Cuando el backend Vulkan exista, aquí se elegiría.
-    const Haruka::RHI::Backend requestedBackend = Haruka::RHI::Backend::OpenGL; // futuro: config/CLI
+    // los wrappers (Texture, …) lo usen.
+    //
+    // El backend se elige por el setting persistente RenderBackend (menu de settings → imgui.ini).
+    // Cambiarlo REQUIERE REINICIAR (el device se crea aquí, una vez). Vulkan cae a OpenGL si no está.
+    // ⚠️ ORDEN (F5): este punto corre ANTES de que el juego cargue su imgui.ini (SettingsManager::init
+    // va tras ImGui::CreateContext, más abajo) → hoy lee el DEFAULT. Inofensivo mientras Vulkan no exista
+    // (fallback a GL). Cuando se implemente Vulkan, mover la carga de settings ANTES de esta línea.
+    const auto& gfx = Haruka::SettingsManager::get().graphics();
+    const Haruka::RHI::Backend requestedBackend =
+        (gfx.renderBackend == Haruka::Settings::RenderBackend::Vulkan)
+            ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL;
     _device = Haruka::RHI::Device::create(requestedBackend, _window->getNativeWindow());
     Haruka::RHI::setDevice(_device.get());
 
@@ -447,6 +482,20 @@ void Application::run(const std::string& startScenePath) {
         // the game update (physics: PBF/XPBD/shallow-water) is measured too.
         Haruka::Profiler::get().newFrame();
 
+        // HARUKA_PROF_LOG=N → vuelca el árbol del profiler a stderr cada N frames. Permite medir
+        // el coste de un cambio sin depender de leer el panel en una captura.
+        if (const char* pl = getenv("HARUKA_PROF_LOG")) {
+            static int period = std::max(1, atoi(pl));
+            static int frame  = 0;
+            if (++frame % period == 0) {
+                const auto& nodes = Haruka::Profiler::get().nodes();
+                fprintf(stderr, "--- profiler frame %d ---\n", frame);
+                for (size_t i = 1; i < nodes.size(); ++i)
+                    fprintf(stderr, "%*s%-24s %7.2f ms  x%d\n", (nodes[i].depth - 1) * 2, "",
+                            nodes[i].name.c_str(), nodes[i].ms, nodes[i].count);
+            }
+        }
+
         // Start ImGui frame
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -473,6 +522,29 @@ void Application::run(const std::string& startScenePath) {
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         glFlush();
+
+        // DEBUG TEMPORAL: HARUKA_SHOT=<ruta.ppm> vuelca el framebuffer tras N frames (HARUKA_SHOT_FRAME,
+        // por defecto 900) y sale. Para inspeccionar lo que se renderiza sin capturar la pantalla.
+        if (const char* shot = getenv("HARUKA_SHOT")) {
+            static bool taken = false;
+            const int secs = getenv("HARUKA_SHOT_SEC") ? atoi(getenv("HARUKA_SHOT_SEC")) : 70;
+            if (!taken && SDL_GetTicks() > (uint64_t)secs * 1000) {
+                taken = true;
+                int w = (int)_window->getWidth(), h = (int)_window->getHeight();
+                std::vector<unsigned char> px((size_t)w * h * 3);
+                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glReadBuffer(GL_BACK);
+                glPixelStorei(GL_PACK_ALIGNMENT, 1);
+                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                if (FILE* f = fopen(shot, "wb")) {
+                    fprintf(f, "P6\n%d %d\n255\n", w, h);
+                    for (int y = h - 1; y >= 0; --y) fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f); // GL: origen abajo
+                    fclose(f);
+                    fprintf(stderr, "[SHOT] escrito %s (%dx%d)\n", shot, w, h);
+                }
+                running = false;
+            }
+        }
 
         _window->swapBuffers();
 

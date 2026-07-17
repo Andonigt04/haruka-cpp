@@ -18,8 +18,14 @@ enum class FoliageQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
 // pantalla completa (windowed fullscreen); Fullscreen = pantalla completa (SDL).
 enum class WindowMode : int { Windowed = 0, Borderless = 1, Fullscreen = 2 };
 
+// API gráfica (backend del RHI). Se elige en el ARRANQUE (el device se crea entonces):
+// cambiarla requiere REINICIAR el juego. Vulkan cae a OpenGL si no está disponible
+// (ver el fallback en rhi_device.cpp).
+enum class RenderBackend : int { OpenGL = 0, Vulkan = 1 };
+
 struct GraphicsSettings {
     WindowMode      windowMode      = WindowMode::Fullscreen;
+    RenderBackend   renderBackend   = RenderBackend::OpenGL; // API gráfica (requiere reinicio)
     TextureQuality  textureQuality  = TextureQuality::High;
     ShadowQuality   shadowQuality   = ShadowQuality::Medium;
     AntialiasingMode antialiasing   = AntialiasingMode::TAA;
