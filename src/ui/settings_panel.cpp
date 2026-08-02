@@ -203,7 +203,7 @@ void SettingsPanel::tabAudio() {
     auto& a = SettingsManager::get().audio();
 
     ImGui::SeparatorText(TR("audio.devices").c_str());
-    // Entrada (micro): por SDL (la voz/Vosk lee de SDL).
+    // Entrada (micro): la enumera SDL (la captura de audio del motor lee de SDL).
     deviceCombo(TR("audio.input").c_str(),  /*recording*/true,  a.inputDevice);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("audio.input.tip").c_str());
 

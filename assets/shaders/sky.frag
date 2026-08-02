@@ -24,7 +24,9 @@ layout(std140, binding = 5) uniform SkyParams {
     vec3  u_up;             // cénit local del observador (mundo)
     float u_atmo;           // 1=superficie ... 0=espacio
     vec3  u_sunColor;       // color de la luz solar
-    float _padSky;
+    float u_time;           // segundos (movimiento de nubes)
+    vec4  u_weather;        // x=humedad · y=tempC · z=precipitación · w=COBERTURA de nube (del mundo)
+    vec4  u_wind;           // x=este(m/s) · y=norte(m/s) · z=racha · w=1 si es NIEVE
 };
 
 // Hash 3D barato para el campo de estrellas.
@@ -32,6 +34,31 @@ float hash13(vec3 p) {
     p = fract(p * 0.1031);
     p += dot(p, p.yzx + 33.33);
     return fract((p.x + p.y) * p.z);
+}
+
+// Value-noise + fBm para las NUBES pintadas (anime).
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float a = hash13(vec3(i, 0.0));
+    float b = hash13(vec3(i + vec2(1.0, 0.0), 0.0));
+    float c = hash13(vec3(i + vec2(0.0, 1.0), 0.0));
+    float d = hash13(vec3(i + vec2(1.0, 1.0), 0.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm(vec2 p) {
+    float v = 0.0, a = 0.5;
+    for (int i = 0; i < 5; ++i) { v += a * vnoise(p); p *= 2.0; a *= 0.5; }
+    return v;
+}
+
+// Densidad de nube: DOMAIN WARP (deforma las coords con otro ruido → formas orgánicas billowy, no blobs) +
+// erosión de detalle en los bordes (desgarrados). `wind` = deriva temporal.
+float cloudField(vec2 p, vec2 wind) {
+    vec2  warp = vec2(fbm(p * 0.6 + wind * 0.5), fbm(p * 0.6 + 5.2 - wind * 0.5));
+    float d    = fbm(p * 1.3 + warp * 1.4 + wind);
+    d -= 0.20 * fbm(p * 4.0 - wind * 2.0);
+    return d;
 }
 
 void main()
@@ -69,6 +96,65 @@ void main()
     // corona-objeto emisiva; el cielo ya NO dibuja un disco solar aparte que se veía distinto
     // contra cielo azul vs negro = "dos soles/diferentes").
     sky += u_sunColor * pow(sunAmt, 8.0) * 0.35 * day * u_atmo;
+
+    // Con LLUVIA el cielo se CUBRE y agrisa (overcast) → el azul soleado desaparece.
+    sky = mix(sky, vec3(0.55, 0.58, 0.63) * (0.65 + 0.35 * day), u_weather.z * 0.7 * u_atmo);
+
+    // --- NUBES cinematográficas: VOLUMEN (domain warp + auto-sombra en varios pasos hacia el sol = gradiente
+    //     luz→sombra "de película"), ESCALA por zonas (un campo de masa de baja frecuencia → cúmulos grandes,
+    //     zonas despejadas y puffs pequeños), CICLO del planeta y SILVER-LINING a contraluz. Plano tangente
+    //     LOCAL (es un planeta → "arriba" = u_up). ---
+    if (u_atmo > 0.5 && t > 0.02) {
+        vec3 e1 = normalize(cross(u_up, abs(u_up.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
+        vec3 e2 = cross(u_up, e1);
+        vec2 base = vec2(dot(dir, e1), dot(dir, e2)) / (t + 0.22);       // proyección al domo
+        // DERIVA = el viento del CLIMA (m/s en este/norte), no una constante. Es el mismo vector que
+        // inclina la lluvia y (fase futura) ondea el follaje: la nube va hacia donde sopla.
+        vec2 wind = u_wind.xy * 0.0022 * u_time;
+
+        // MASA a baja frecuencia → varía el TAMAÑO/cobertura por zonas (grandes cúmulos ↔ despejado ↔ puffs).
+        float mass    = fbm(base * 0.30 + wind * 0.25);
+        float rain    = u_weather.z;   // 0..1 precipitación (la que el MUNDO dice que está cayendo aquí)
+
+        // ⚠️ LA COBERTURA VIENE DEL MUNDO (`WeatherSystem`), NO de un fbm(u_time) local.
+        // Aquí había `weather = fbm(vec2(u_time*0.008, 3.7))`, una segunda opinión sobre el tiempo
+        // que no tenía nada que ver con la que usaba la CPU para decidir la lluvia → nubarrones sin
+        // gota y lluvia con cielo azul. El shader ya NO decide CUÁNTA nube hay: eso lo dice el frente
+        // que está pasando por encima. Lo que el shader sigue decidiendo —y hace bien— es la FORMA.
+        float cloudiness = clamp(u_weather.w, 0.0, 1.0)
+                         * smoothstep(0.16, 0.72, mass + 0.15 + 0.5 * rain);   // con lluvia cubre hasta lo despejado
+
+        float dens = cloudField(base, wind);
+        float lo   = mix(0.70, 0.32, cloudiness);                        // umbral: más cobertura = más nube
+        float cov  = smoothstep(lo, lo + 0.26, dens);
+        cov = cov * cov * (3.0 - 2.0 * cov);                             // remap "puffy"
+
+        float band  = smoothstep(0.03, 0.30, t) * (1.0 - smoothstep(0.55, 0.99, t)); // ni horizonte ni cénit
+        float cloud = cov * band * day * u_atmo;
+
+        // Iluminación VOLUMÉTRICA (Beer): acumula densidad en 3 pasos HACIA el sol (proyectado al plano) →
+        // gradiente fuerte luz→sombra (base oscura, cara al sol brillante) = el "pop" 3D de cine.
+        vec3  sunT = normalize(u_sunDir - dot(u_sunDir, u_up) * u_up);
+        vec2  ls   = vec2(dot(sunT, e1), dot(sunT, e2)) * 0.20;
+        float sh   = 0.0;
+        for (int i = 1; i <= 3; ++i) sh += smoothstep(lo, lo + 0.26, cloudField(base + ls * float(i), wind));
+        float light = exp(-(sh / 3.0) * 1.9);                            // Beer-Lambert
+
+        // SIN silver-lining/powder en las nubes (el usuario: el halo, en el cielo sí, en las nubes no).
+        // Cima blanca-MATE (no 1.0 → no se sobreexpone), base fría en sombra. Con LLUVIA → nubes GRISES.
+        vec3  cLit  = mix(vec3(0.80, 0.82, 0.86), u_sunColor, 0.10 + 0.18 * pow(sunAmt, 2.0));
+        vec3  cShad = vec3(0.46, 0.52, 0.67);                            // base fría (sombra propia)
+        // Nube de LLUVIA = gris plomo con contraste. Nube de NIEVE = gris CLARO y PLANO (la nevada
+        // apaga el relieve del cielo: no hay claroscuro, todo es una lámina lechosa). Distinguirlas
+        // es lo que hace que "va a nevar" se lea desde lejos, sin más información que el cielo.
+        float snowy = u_wind.w;
+        vec3  pLit  = mix(vec3(0.55, 0.57, 0.61), vec3(0.78, 0.79, 0.83), snowy);
+        vec3  pShad = mix(vec3(0.30, 0.32, 0.36), vec3(0.63, 0.65, 0.70), snowy);
+        cLit  = mix(cLit,  pLit,  rain);
+        cShad = mix(cShad, pShad, rain);
+        vec3  cloudCol = mix(cShad, cLit, light);
+        sky = mix(sky, cloudCol, cloud * 0.92);
+    }
 
     // disc solo para ATENUAR estrellas cerca del Sol (el cuerpo del Sol lo dibuja la corona-objeto).
     float disc = smoothstep(0.9994, 0.9998, dot(dir, u_sunDir));

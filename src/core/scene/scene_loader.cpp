@@ -1,5 +1,6 @@
 #include "scene_loader.h"
 #include "io/blob_codec.h"
+#include "core/components/material_component.h"
 
 #include <fstream>
 #include <iostream>
@@ -11,7 +12,6 @@ namespace {
 using Haruka::LODSettings;
 using Haruka::StreamingSettings;
 using Haruka::TerrainGeneratorSettings;
-using Haruka::TerrainLayerSettings;
 
 bool parseBoolField(const nlohmann::json& value, const char* key, bool defaultValue) {
     if (value.contains(key) && value[key].is_boolean()) {
@@ -61,14 +61,6 @@ Haruka::Rotation parseRotation(const nlohmann::json& value) {
     return Haruka::Rotation(1.0, 0.0, 0.0, 0.0);
 }
 
-TerrainLayerSettings parseTerrainLayer(const nlohmann::json& value) {
-    TerrainLayerSettings layer;
-    layer.freq = value.value("freq", 0.0);
-    layer.octaves = value.value("octaves", 0);
-    layer.strength = value.value("strength", 0.0);
-    return layer;
-}
-
 LODSettings parseLodSettings(const nlohmann::json& value) {
     LODSettings settings;
     settings.type = value.value("type", "");
@@ -104,13 +96,9 @@ TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
         settings.seed = config.value("seed", 0);
         settings.chunkSize = config.value("chunkSize", 0);
         settings.rawConfig = config; // keep the full, unfiltered config
-        if (config.contains("layers") && config["layers"].is_object()) {
-            for (auto it = config["layers"].begin(); it != config["layers"].end(); ++it) {
-                if (it.value().is_object()) {
-                    settings.layers[it.key()] = parseTerrainLayer(it.value());
-                }
-            }
-        }
+        // (`config.layers` se parseaba aquí a un mapa tipado para el generador v1. Ese generador ya no
+        //  existe; si una escena antigua trae el bloque, sigue viajando intacto en rawConfig y
+        //  simplemente no lo lee nadie.)
     }
     return settings;
 }
@@ -140,17 +128,6 @@ nlohmann::json toJson(const TerrainGeneratorSettings& settings) {
     nlohmann::json config;
     if (settings.seed != 0) config["seed"] = settings.seed;
     if (settings.chunkSize != 0) config["chunkSize"] = settings.chunkSize;
-    if (!settings.layers.empty()) {
-        nlohmann::json layers = nlohmann::json::object();
-        for (const auto& [name, layer] : settings.layers) {
-            nlohmann::json entry;
-            if (layer.freq != 0.0) entry["freq"] = layer.freq;
-            if (layer.octaves != 0) entry["octaves"] = layer.octaves;
-            if (layer.strength != 0.0) entry["strength"] = layer.strength;
-            layers[name] = entry;
-        }
-        config["layers"] = std::move(layers);
-    }
     if (!config.empty()) value["config"] = std::move(config);
     return value;
 }
@@ -277,6 +254,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     // Asignación de campos básicos (ya validados por el SceneValidator)
     obj->name = mergedJson.at("name").get<std::string>();
     obj->type = mergedJson.at("type").get<std::string>();
+    obj->objectType = Haruka::classifyObjectType(obj->type);
     obj->templateName = mergedJson.value("template", "");
     
     // Transformaciones
@@ -299,8 +277,42 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     if (mergedJson.contains("terrainSettings") && mergedJson["terrainSettings"].is_object()) {
         obj->terrainSettings = parseTerrainSettings(mergedJson["terrainSettings"]);
     }
+    if (mergedJson.contains("surface") && mergedJson["surface"].is_object()) {
+        obj->surfaceConfig = mergedJson["surface"];
+    }
     if (mergedJson.contains("components"))       obj->components = mergedJson["components"];
     if (mergedJson.contains("properties"))       obj->properties = mergedJson["properties"];
+    if (mergedJson.contains("modelPath"))        obj->modelPath  = mergedJson["modelPath"].get<std::string>();
+    // `material` (MaterialComponent) también es parte del objeto y se serializa en save(). Sin esto,
+    // las texturas que hornea el editor de node graph (y cualquier material asignado por código) se
+    // perdían al recargar la escena: el loader lo ignoraba y `save()` no lo escribía.
+    if (mergedJson.contains("material") && mergedJson["material"].is_object()) {
+        obj->material = std::make_shared<MaterialComponent>();
+        obj->material->fromJSON(mergedJson["material"]);
+    }
+
+    // Sol/estrella: material PROPIO y dedicado (no reutiliza uno genérico). Un cuerpo luminoso
+    // (`castLight`) sin terreno emite su propia luz: el disco del sol (sun_disc.png) + emisión
+    // hacen que brille desde el shader. Vale en el IDE y en el juego, sin editar la escena.
+    if (obj->flags.castLight &&
+        (obj->objectType == ObjectType::PLANET || obj->objectType == ObjectType::STAR)) {
+        glm::vec3 sunColor(1.0f, 0.9f, 0.7f);
+        if (obj->components.is_object() && obj->components.contains("light") &&
+            obj->components["light"].is_object()) {
+            const auto& lc = obj->components["light"];
+            if (lc.contains("color") && lc["color"].is_array() && lc["color"].size() >= 3)
+                sunColor = glm::vec3(lc["color"][0].get<float>(),
+                                     lc["color"][1].get<float>(),
+                                     lc["color"][2].get<float>());
+        }
+        obj->material = std::make_shared<MaterialComponent>();
+        obj->material->name = obj->name + "_SunMaterial";
+        obj->material->albedo    = glm::vec3(1.0f);
+        obj->material->emission  = sunColor;
+        obj->material->roughness = 0.15f;
+        obj->material->textures.clear();
+        obj->material->textures["albedo"] = "assets/textures/sun_disc.png";
+    }
 
     return obj;
 }
@@ -361,6 +373,15 @@ bool SceneManager::save(const std::string& filepath) const {
         if (obj.lodSettings) item["lod"] = toJson(*obj.lodSettings);
         if (obj.streamingSettings) item["streaming"] = toJson(*obj.streamingSettings);
         if (obj.terrainSettings) item["terrainSettings"] = toJson(*obj.terrainSettings);
+        // `surface` y `modelPath` los LEE el loader pero no los escribía nadie: cada guardado
+        // BORRABA la configuración de superficie de los planetas y la malla de los objetos con
+        // modelo. Y un planeta sin `surface` es INVISIBLE por construcción — `classifySceneObject`
+        // no le da comando de dibujo (delega en el terreno) y `buildFromScene` no lo adopta (exige
+        // `surfaceConfig`), así que nadie lo pinta y no hay error que lo diga. Guardar una escena
+        // desde el IDE bastaba para perder los planetas para siempre.
+        if (!obj.surfaceConfig.is_null() && !obj.surfaceConfig.empty()) item["surface"] = obj.surfaceConfig;
+        if (!obj.modelPath.empty()) item["modelPath"] = obj.modelPath;
+        if (obj.material) item["material"] = obj.material->toJSON();
         if (!obj.components.is_null() && !obj.components.empty()) item["components"] = obj.components;
         if (!obj.properties.is_null() && !obj.properties.empty()) item["properties"] = obj.properties;
         if (obj.parentIndex >= 0) item["parentIndex"] = obj.parentIndex;

@@ -13,6 +13,7 @@
 
 #include "tools/math_types.h"                 // Haruka::WorldPos
 #include "core/scene/scene_render_policy.h"   // RenderCommand / RenderKind / PrimitiveType
+#include "rhi/rhi_types.h"                    // Haruka::RHI::TextureHandle
 
 namespace Haruka { namespace Renderer { class Model; class Mesh; } } // Haruka::Renderer::*
 using Haruka::Renderer::Model;                            // back-compat aliases (migration)
@@ -34,6 +35,10 @@ Model* getOrLoadModelCached(const std::string& path);
 
 // Lazily-built shared primitive mesh for a primitive kind (nullptr if unknown).
 SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive);
+
+// Texture of a MaterialComponent slot, by path. Cached (failures included → un PNG que falta
+// no se reintenta cada frame). Handle inválido si no se pudo cargar.
+Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path);
 
 // Releases every GL-owning cache (models + primitive meshes) before the context
 // is destroyed. Must run while the GL context is still current.

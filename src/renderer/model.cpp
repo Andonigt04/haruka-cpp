@@ -4,10 +4,20 @@
 #include "stb_image.h"
 #include "tools/error_reporter.h"
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
+#include "renderer/gpu_instancing.h"
 
 namespace Haruka { namespace Renderer {
 
-// Assimp es row-major; glm column-major → transpone al convertir.
+Model::~Model() {
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    for (auto& t : textures_loaded) {
+        if (RHI::valid(t.rhiHandle))
+            dev->destroy(t.rhiHandle);
+    }
+}
+
 static glm::mat4 aiToGlm(const aiMatrix4x4& m) {
     return glm::mat4(
         m.a1, m.b1, m.c1, m.d1,
@@ -20,9 +30,15 @@ void Model::drawRHI(Haruka::RHI::Context& ctx) {
     for (auto& m : meshes) m.drawRHI(ctx);
 }
 
-void Model::Draw(Shader &shader) {
-    for(unsigned int i = 0; i < meshes.size(); i++)
-        meshes[i].Draw(shader);
+void Model::drawInstancedRHI(Haruka::RHI::Context& ctx, Haruka::Renderer::GPUInstancing& inst,
+                             uint32_t instanceBinding) {
+    for (const auto& m : meshes) {
+        if (m.getIndexCount() == 0) continue;
+        if (!Haruka::RHI::valid(m.vertexBuffer()) || !Haruka::RHI::valid(m.indexBuffer())) continue;
+        ctx.bindVertexBuffer(m.vertexBuffer(), 0);
+        ctx.bindIndexBuffer(m.indexBuffer());
+        inst.render(&ctx, (uint32_t)m.getIndexCount(), instanceBinding);
+    }
 }
 
 void Model::loadModel(std::string const &path) {
@@ -35,7 +51,7 @@ void Model::loadModel(std::string const &path) {
     }
     directory = path.substr(0, path.find_last_of('/'));
 
-    m_min = glm::vec3( 1e30f);   // se reduce con cada vértice (post-transform)
+    m_min = glm::vec3( 1e30f);
     m_max = glm::vec3(-1e30f);
     m_hasBounds = false;
 
@@ -43,7 +59,6 @@ void Model::loadModel(std::string const &path) {
 }
 
 void Model::processNode(aiNode *node, const aiScene *scene, const glm::mat4& parentTransform) {
-    // Transform acumulada: padre × nodo (coloca/escala cada parte como en el editor).
     glm::mat4 nodeTransform = parentTransform * aiToGlm(node->mTransformation);
     for(unsigned int i = 0; i < node->mNumMeshes; i++) {
         aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
@@ -62,9 +77,8 @@ Mesh Model::processMesh(aiMesh *mesh, const aiScene *scene, const glm::mat4& tra
 
     for(unsigned int i = 0; i < mesh->mNumVertices; i++) {
         Vertex vertex;
-        // Aplica la transform del nodo: posición en el espacio del modelo (no la local cruda).
         vertex.Position = glm::vec3(transform * glm::vec4(mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z, 1.0f));
-        m_min = glm::min(m_min, vertex.Position);   // AABB del modelo (para colisión)
+        m_min = glm::min(m_min, vertex.Position);
         m_max = glm::max(m_max, vertex.Position);
         m_hasBounds = true;
 
@@ -90,11 +104,7 @@ Mesh Model::processMesh(aiMesh *mesh, const aiScene *scene, const glm::mat4& tra
     }
 
     aiMaterial* material = scene->mMaterials[mesh->mMaterialIndex];
-    
-    // Mapeo de tipos de textura con prioridad para evitar duplicados
-    // El orden importa: intentamos primero los tipos más específicos
-    
-    // 1. Diffuse/Base Color (GLTF usa BASE_COLOR, OBJ usa DIFFUSE)
+
     auto tryLoadTexture = [&](const std::vector<aiTextureType>& types, const std::string& uniformName) {
         for (auto type : types) {
             auto loaded = loadMaterialTextures(material, type, uniformName);
@@ -105,29 +115,14 @@ Mesh Model::processMesh(aiMesh *mesh, const aiScene *scene, const glm::mat4& tra
         }
         return false;
     };
-    
-    // Diffuse/Albedo
+
     tryLoadTexture({aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE}, "texture_diffuse");
-    
-    // Normal Map (OBJ usa HEIGHT para bump maps)
     tryLoadTexture({aiTextureType_NORMALS, aiTextureType_HEIGHT}, "texture_normal");
-    
-    // Specular (para workflows tradicionales)
     tryLoadTexture({aiTextureType_SPECULAR}, "texture_specular");
-    
-    // Metallic-Roughness (GLTF PBR - textura combinada en UNKNOWN)
     tryLoadTexture({aiTextureType_UNKNOWN}, "texture_metallic_roughness");
-    
-    // Metallic separado
     tryLoadTexture({aiTextureType_METALNESS}, "texture_metallic");
-    
-    // Roughness separado
     tryLoadTexture({aiTextureType_DIFFUSE_ROUGHNESS, aiTextureType_SHININESS}, "texture_roughness");
-    
-    // Ambient Occlusion
     tryLoadTexture({aiTextureType_AMBIENT_OCCLUSION, aiTextureType_LIGHTMAP, aiTextureType_AMBIENT}, "texture_ao");
-    
-    // Emissive
     tryLoadTexture({aiTextureType_EMISSIVE, aiTextureType_EMISSION_COLOR}, "texture_emissive");
 
     return Mesh(vertices, indices, textures);
@@ -140,83 +135,82 @@ std::vector<MeshTexture> Model::loadMaterialTextures(aiMaterial *mat, aiTextureT
     {
         aiString str;
         mat->GetTexture(type, i, &str);
-        
+
         bool skip = false;
-        for(unsigned int j = 0; j < textures_loaded.size(); j++) 
+        for(unsigned int j = 0; j < textures_loaded.size(); j++)
         {
             if(std::strcmp(textures_loaded[j].path.data(), str.C_Str()) == 0)
             {
                 textures.push_back(textures_loaded[j]);
-                skip = true; 
+                skip = true;
                 break;
             }
         }
         if(!skip)
         {
-            unsigned int textureID = TextureFromFile(str.C_Str(), this->directory, this->scene);
-            
+            RHI::TextureHandle texHandle;
+            unsigned int textureID = TextureFromFile(str.C_Str(), this->directory, this->scene, &texHandle);
+
             if (textureID != 0) {
                 MeshTexture texture;
                 texture.id = textureID;
+                texture.rhiHandle = texHandle;
                 texture.type = typeName;
                 texture.path = str.C_Str();
                 textures.push_back(texture);
-                textures_loaded.push_back(texture); 
+                textures_loaded.push_back(texture);
             }
         }
     }
     return textures;
 }
 
-unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene) {
+unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene,
+                              Haruka::RHI::TextureHandle* outHandle) {
     std::string filename = std::string(path);
     unsigned int textureID = 0;
 
     int width, height, nrComponents;
     unsigned char *data = nullptr;
     bool needsFree = false;
-    
-    // attempt to load glb
+
     if (filename[0] == '*')
-    { 
+    {
         if (!scene) return 0;
         int index = std::stoi(filename.substr(1));
-        
+
         if (index >= scene->mNumTextures) {
             HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED,
                 "Texture index out of range: " + std::to_string(index));
             return 0;
         }
-        
+
         aiTexture* tex = scene->mTextures[index];
-        
-        // Textura comprimida
+
         if (tex->mHeight == 0)
         {
-            stbi_set_flip_vertically_on_load(true);  // Cambiar a true para GLB
+            stbi_set_flip_vertically_on_load(true);
             data = stbi_load_from_memory(reinterpret_cast<unsigned char*>(tex->pcData), tex->mWidth, &width, &height, &nrComponents, 0);
-            stbi_set_flip_vertically_on_load(false);  // Restaurar
+            stbi_set_flip_vertically_on_load(false);
             needsFree = true;
-        } 
-        // Textura descomprimida (formato argb8888)
+        }
         else
         {
             data = reinterpret_cast<unsigned char*>(tex->pcData);
-            width = tex->mWidth; 
+            width = tex->mWidth;
             height = tex->mHeight;
-            nrComponents = 4;  // aiTexture sin comprimir siempre es ARGB8888
+            nrComponents = 4;
             needsFree = false;
         }
     }
-    // attempt to load obj/fbx
     else
     {
-        stbi_set_flip_vertically_on_load(false);  // GLTF no necesita flip
-    
+        stbi_set_flip_vertically_on_load(false);
+
         std::string fullPath = directory + "/" + filename;
         data = stbi_load(fullPath.c_str(), &width, &height, &nrComponents, 0);
         needsFree = true;
-        
+
         if (!data)
         {
             std::string fallbackPath = "assets/textures/" + filename;
@@ -225,7 +219,6 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
     }
 
     if (data) {
-        // La textura se crea por el device (id GL nativo devuelto para el material).
         RHI::Device* dev = RHI::device();
         RHI::TextureDesc td;
         td.width = width; td.height = height;
@@ -233,7 +226,9 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
                   : (nrComponents == 4) ? RHI::Format::RGBA8 : RHI::Format::RGB8;
         td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::Repeat; td.mipmaps = true;
         td.initialData = data;
-        textureID = dev->nativeTexture(dev->createTexture(td));
+        RHI::TextureHandle handle = dev->createTexture(td);
+        textureID = dev->nativeTexture(handle);
+        if (outHandle) *outHandle = handle;
         if (needsFree) stbi_image_free(data);
         std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height
                   << ", " << nrComponents << " canales)" << std::endl;

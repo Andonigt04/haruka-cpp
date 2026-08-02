@@ -36,8 +36,8 @@ static float terrainOcclusion(const glm::dvec3& a, const glm::dvec3& b) {
     Application* app = MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return 1.0f;
-    glm::dvec3 center; double radius; uint32_t sd; float rl;
-    if (!ps->getActivePlanet(center, radius, sd, rl)) return 1.0f;
+    glm::dvec3 center; double radius;
+    if (!ps->getActivePlanet(center, radius)) return 1.0f;
     const int N = 8; int blocked = 0;
     for (int i = 1; i < N; ++i) {
         glm::dvec3 p = glm::mix(a, b, (double)i / N);
@@ -65,8 +65,8 @@ static bool terrainBlocks(const glm::dvec3& a, const glm::dvec3& b) {
     Application* app = MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return false;
-    glm::dvec3 center; double radius; uint32_t sd; float rl;
-    if (!ps->getActivePlanet(center, radius, sd, rl)) return false;
+    glm::dvec3 center; double radius;
+    if (!ps->getActivePlanet(center, radius)) return false;
     const int N = 12;
     for (int i = 1; i < N; ++i) {
         glm::dvec3 p = glm::mix(a, b, (double)i / N);
@@ -80,8 +80,8 @@ static glm::dvec3 snapAboveTerrain(const glm::dvec3& p, double clearance) {
     Application* app = MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return p;
-    glm::dvec3 center; double radius; uint32_t sd; float rl;
-    if (!ps->getActivePlanet(center, radius, sd, rl)) return p;
+    glm::dvec3 center; double radius;
+    if (!ps->getActivePlanet(center, radius)) return p;
     glm::dvec3 dir = p - center; double dl = glm::length(dir);
     if (dl < 1e-6) return p;
     dir /= dl;
@@ -120,8 +120,8 @@ std::vector<glm::dvec3> Propagation::path(const glm::dvec3& a, const glm::dvec3&
         glm::dvec3 up(0, 1, 0);
         if (Application* app = MotorInstance::getInstance().getApplication())
             if (auto* ps = app->getPlanetarySystem()) {
-                glm::dvec3 c; double r; uint32_t sd; float rl;
-                if (ps->getActivePlanet(c, r, sd, rl)) {
+                glm::dvec3 c; double r;
+                if (ps->getActivePlanet(c, r)) {
                     glm::dvec3 d = a - c; double dl = glm::length(d);
                     if (dl > 1e-6) up = d / dl;
                 }

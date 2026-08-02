@@ -142,7 +142,10 @@ namespace DGS
 
     static constexpr uint16_t MAX_GHOST_DATA = 4096;
 
-    alignas(16) struct GhostDelta
+    // ⚠️ `alignas` va DESPUÉS de `struct`: escrito delante, el compilador lo IGNORA (-Wattributes) y la
+    // estructura se quedaba con alineación 8. Aquí sizeof ya es múltiplo de 16 (4176), así que corregirlo
+    // NO cambia el layout ni el formato de red — solo alinea de verdad.
+    struct alignas(16) GhostDelta
     {
         uint64_t uuid;
         int32_t  chunkX, chunkY, chunkZ;

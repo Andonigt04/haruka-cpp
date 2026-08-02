@@ -15,7 +15,7 @@ namespace Haruka::RHI::opengl
 {
     // --- Recursos GL internos. Un handle.id == índice+1 en la tabla correspondiente. ---
     struct GLBuffer  { GLuint id = 0; GLenum target = GL_ARRAY_BUFFER; void* mapped = nullptr; };
-    struct GLTexture { GLuint id = 0; };
+    struct GLTexture { GLuint id = 0; GLenum target = GL_TEXTURE_2D; };
     struct GLSampler { GLuint id = 0; };
 
     struct GLPipeline
@@ -23,6 +23,7 @@ namespace Haruka::RHI::opengl
         GLuint     program  = 0;
         GLuint     vao      = 0;              // 0 en pipelines de compute
         GLenum     topology = GL_TRIANGLES;
+        GLint      patchVertices = 0;   // >0 solo con topology == GL_PATCHES
         GLsizei    strides[8] = {0};   // stride por BINDING (máx 8 vertex buffers)
         uint32_t   bindingCount = 0;
         DepthState depth;
@@ -40,11 +41,15 @@ namespace Haruka::RHI::opengl
         uint32_t                   width = 0, height = 0;
     };
 
+    struct GLFence { GLsync sync = nullptr; };
+
     class GLDevice : public Device
     {
         public:
             explicit GLDevice(SDL_Window* window);
             ~GLDevice() override;
+
+            friend class GLContext;
 
             BufferHandle     createBuffer(BufferUsage, size_t bytes, const void* data, BufferMemory) override;
             void             updateBuffer(BufferHandle, size_t offset, size_t bytes, const void* data) override;
@@ -61,6 +66,8 @@ namespace Haruka::RHI::opengl
             uint32_t         nativeProgram(PipelineHandle) override;
             uint32_t         nativeBuffer(BufferHandle) override;
             const void*      mappedData(BufferHandle) override;
+            void             updateCubemapFace(TextureHandle tex, int face, int width, int height,
+                                                Format format, const void* data) override;
 
             void destroy(BufferHandle) override;
             void destroy(TextureHandle) override;
@@ -71,6 +78,7 @@ namespace Haruka::RHI::opengl
             Context* beginFrame() override;
             void     endFrame() override;
             Backend  backend() const override { return Backend::OpenGL; }
+            void     readPixels(int x, int y, int w, int h, Format format, void* data) override;
 
             bool ready() const { return m_glContext != nullptr; }
 
@@ -80,6 +88,7 @@ namespace Haruka::RHI::opengl
             const GLSampler*      sampler(SamplerHandle h) const         { return get(m_samplers, h.id); }
             const GLPipeline*     pipeline(PipelineHandle h) const        { return get(m_pipelines, h.id); }
             const GLRenderTarget* renderTarget(RenderPassHandle h) const  { return get(m_targets, h.id); }
+            const GLFence*        fence(FenceHandle h) const              { return get(m_fences, h.id); }
 
         private:
             template <class T>
@@ -115,6 +124,8 @@ namespace Haruka::RHI::opengl
             std::vector<GLSampler>      m_samplers;
             std::vector<GLPipeline>     m_pipelines;
             std::vector<GLRenderTarget> m_targets;
+            std::vector<GLFence>        m_fences;
             std::vector<uint32_t>       m_freeBuffers, m_freeTextures;   // slots reciclables (churn de chunks)
+            std::vector<uint32_t>       m_freeSamplers, m_freePipelines, m_freeTargets, m_freeFences;
     };
 }

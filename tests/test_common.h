@@ -1,12 +1,11 @@
 #ifndef HARUKA_TEST_COMMON_H
 #define HARUKA_TEST_COMMON_H
 // ================================================================================================
-// Infra COMPARTIDA del banco de pruebas. El monolito histórico se repartió por ÁREA (petición del
-// autor): CPU de terreno (test_terrain), física (test_physics), módulo DGS (test_dgs) y todo lo que
-// necesita GL (test_render_gl); `main()` vive en haruka_tests.cpp y los dirige todos.
+// Infra COMPARTIDA del banco de pruebas. Los tests se reparten por ÁREA en varios .cpp:
+// CPU de terreno (test_terrain), física (test_physics), módulo DGS (test_dgs).
+// `main()` vive en haruka_tests.cpp y los dirige todos.
 //
-// Aquí solo el mini-framework de aserciones (sin GL, sin dominio) + las DECLARACIONES de cada test,
-// para que main() los llame desde otra unidad de traducción. Las definiciones están en su .cpp.
+// Aquí solo el mini-framework de aserciones + las DECLARACIONES de cada test.
 // ================================================================================================
 #include <cstdio>
 #include <string>
@@ -20,38 +19,37 @@ extern std::string g_curTest;
 } while (0)
 void beginTest(const char* name);
 
-// Fixtures GL (definidos en test_gl_fixture.h). Forward-decl para las firmas de los tests GL — los
-// .cpp puros-CPU no necesitan arrastrar glad/SDL solo por ver estos punteros.
-struct TerrainDrawGL;
-struct WaterDrawGL;
-
-// --- Declaraciones de TODOS los tests, agrupadas como en su .cpp ---
+// --- Declaraciones de TODOS los tests ---
 // CPU puro de terreno  (test_terrain.cpp)
-void test_sampler_determinism();
 void test_cube_sphere_inverse();
-void test_geology_plates();
-void test_climate_orographic();
-void test_erosion_hydrology();
-void test_meso_tiles();
+void test_weather_fronts();
+void test_ground_layer();
 // Física determinista  (test_physics.cpp)
 void test_physics_radial_fall();
-// Módulo de reglas DGS por dlopen  (test_dgs.cpp)
+void test_physics_mesh_ground();
+void test_physics_static_wall();
+void test_physics_character();
+void test_physics_body_removal();
+// Sistema de construcción  (test_construction.cpp)
+void test_construction_placement();
+// Módulo de reglas DGS  (test_dgs.cpp)
 void test_dgs_rules_module();
-// Render / streaming — requieren contexto GL  (test_render_gl.cpp)
-void test_engine_loads_terrain(TerrainDrawGL* gl);
-void test_engine_rotate_keeps_terrain(TerrainDrawGL* gl);
-void test_drawset_bench(TerrainDrawGL* gl);
-void test_drawset_cache_gating(TerrainDrawGL* gl);
-void test_drawset_delta_streaming(TerrainDrawGL* gl);
-void test_cpu_gpu_parity();
-void test_earth_diag(TerrainDrawGL* gl);
-void test_gpu_derived_dirs();
-void test_gpu_instancing();
-void test_mesh_height_matches_vertices(TerrainDrawGL* gl);
-void test_orbit_stability();
-void test_stress(TerrainDrawGL* gl, WaterDrawGL* wgl);
-void test_pool_fixed_no_grow(TerrainDrawGL* gl);
-void test_pool_multitopology_bounded(TerrainDrawGL* gl);
-void test_quality_sweep(TerrainDrawGL* gl);
+// SimplePlanet mesh   (test_simple_planet.cpp)
+void test_simple_planet_mesh();
+void test_simple_planet_config();
+// Terrain quality → resolution  (test_terrain_quality.cpp)
+void test_terrain_quality_mapping();
+// ProcGraph node system + helpers  (test_procgraph.cpp)
+void test_procgraph_basic();
+void test_procgraph_fbm();
+void test_procgraph_voronoi();
+void test_procgraph_blend();
+void test_procgraph_clamp();
+void test_procgraph_biome_config();
+void test_procgraph_rgba_image();
+void test_procgraph_evaluate_to_rgba();
+void test_procgraph_evaluate_to_normal();
+void test_procgraph_cycle();
+void test_procgraph_determinism();
 
 #endif // HARUKA_TEST_COMMON_H

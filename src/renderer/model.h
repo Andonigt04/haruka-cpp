@@ -1,7 +1,3 @@
-/**
- * @file model.h
- * @brief Assimp-backed model loader — parses 3D assets into engine `Mesh` instances.
- */
 #ifndef MODEL_H
 #define MODEL_H
 
@@ -14,53 +10,39 @@
 #include "mesh.h"
 
 namespace Haruka { namespace RHI { class Context; } }
-#include "shader.h"
+namespace Haruka { namespace Renderer { class GPUInstancing; } }
 
-// Engine renderer types live in Haruka::Renderer (sub-namespace migration). Crucially this
-// keeps the engine `Model` symbol as `Haruka::Renderer::Model`, so it no longer collides with
-// Vosk's exported `Model` class (the collision crashed voice shutdown). Back-compat `using`s at
-// the bottom keep existing unqualified references compiling during the migration.
 namespace Haruka { namespace Renderer {
 
-/** @brief Loads texture resource from model directory context. */
-unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene);
+unsigned int TextureFromFile(const char *path, const std::string &directory, const aiScene *scene,
+                             Haruka::RHI::TextureHandle* outHandle = nullptr);
 
-/**
- * @brief Assimp-backed model loader and draw wrapper.
- *
- * Owns parsed meshes and deduplicated texture descriptors.
- */
 class Model
 {
 public:
-    /** @brief Loads model at construction time. */
     Model(const std::string &path) { loadModel(path); }
-    
-    /** @brief Draws all internal meshes. */
-    void Draw(Shader &shader);
+    ~Model();
 
-    /** @brief Dibuja por la ruta PSO/Context. El pipeline lo bindea el LLAMADOR; el modelo solo
-     *  aporta la geometría de sus mallas. Ver Mesh::drawRHI. */
     void drawRHI(Haruka::RHI::Context& ctx);
+    void drawInstancedRHI(Haruka::RHI::Context& ctx, Haruka::Renderer::GPUInstancing& inst,
+                          uint32_t instanceBinding = 1);
 
-    /** @brief Aggregated vertex count across all sub-meshes. */
     int getVertexCount() const {
         int total = 0;
         for (const auto& mesh : meshes) total += mesh.getVertexCount();
         return total;
     }
-    /** @brief Aggregated triangle count across all sub-meshes. */
     int getTriangleCount() const {
         int total = 0;
         for (const auto& mesh : meshes) total += mesh.getTriangleCount();
         return total;
     }
 
-    /** @brief AABB del modelo (espacio del modelo, ya con las transforms de nodos
-     *  aplicadas). Para colisión: caja ajustada al modelo, sin tunear a mano. */
     bool      hasBounds()  const { return m_hasBounds; }
     glm::vec3 boundsMin()  const { return m_min; }
     glm::vec3 boundsMax()  const { return m_max; }
+
+    const std::vector<Mesh>& getMeshes() const { return meshes; }
 private:
     std::vector<Mesh> meshes;
     std::string directory;
@@ -69,25 +51,17 @@ private:
     Assimp::Importer importer;
     const aiScene* scene = nullptr;
 
-    glm::vec3 m_min{0.0f}, m_max{0.0f}; // AABB acumulada al cargar
+    glm::vec3 m_min{0.0f}, m_max{0.0f};
     bool      m_hasBounds = false;
 
-    /** @brief Parses model file and initializes node traversal. */
     void loadModel(std::string const &path);
-    /** @brief Recursively processes one Assimp node hierarchy branch, acumulando la
-     *  transform del nodo (escala/posición de cada parte del modelo). */
     void processNode(aiNode *node, const aiScene *scene, const glm::mat4& parentTransform);
-    /** @brief Converts one Assimp mesh into engine `Mesh`, aplicando la transform del nodo. */
     Mesh processMesh(aiMesh *mesh, const aiScene *scene, const glm::mat4& transform);
-    /** @brief Loads material textures by semantic type with deduplication. */
     std::vector<MeshTexture> loadMaterialTextures(aiMaterial *mat, aiTextureType type, std::string typeName);
 };
 
 }} // namespace Haruka::Renderer
 
-// --- Back-compat aliases (temporary, during the namespace migration) ---
-// Let existing unqualified `Model` / `Haruka::Model` references keep compiling. The exported
-// symbol is now Haruka::Renderer::Model (no Vosk collision); these are names, not new symbols.
 using Haruka::Renderer::Model;
 using Haruka::Renderer::TextureFromFile;
 namespace Haruka { using Renderer::Model; }

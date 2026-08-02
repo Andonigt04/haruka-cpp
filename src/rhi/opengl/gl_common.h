@@ -7,6 +7,8 @@
 
 #include <cstdio>
 
+#include "core/logger.h"
+
 #include <glad/glad.h>
 #include "rhi/rhi_types.h"
 
@@ -31,7 +33,7 @@ namespace Haruka::RHI::opengl
             // (p.ej. los empaquetados de arriba) habría leído BASURA del buffer sin avisar.
             // Ahora se queja: un layout mal declarado se ve al instante, no en pantalla.
             default:
-                std::fprintf(stderr, "[RHI/GL] vertexFmt: formato de vertice NO soportado (%d)\n",
+                HARUKA_LOGE("RHI/GL", "vertexFmt: formato de vertice NO soportado (%d)",
                              (int)f);
                 return { 4, GL_FLOAT, GL_FALSE };
         }
@@ -69,6 +71,9 @@ namespace Haruka::RHI::opengl
         switch (t)
         {
             case PrimitiveTopology::Triangles:     return GL_TRIANGLES;
+            // Con teselación el rasterizador NO ve triángulos: ve parches. El tamaño del parche lo
+            // fija glPatchParameteri en bindPipeline (es estado global, no del draw).
+            case PrimitiveTopology::Patches:       return GL_PATCHES;
             case PrimitiveTopology::TriangleStrip: return GL_TRIANGLE_STRIP;
             case PrimitiveTopology::Lines:         return GL_LINES;
             case PrimitiveTopology::LineStrip:     return GL_LINE_STRIP;

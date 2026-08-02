@@ -9,7 +9,8 @@ enum class ShadowQuality  : int { Off = 0, Low = 1, Medium = 2, High = 3 };
 enum class AntialiasingMode : int { None = 0, FXAA = 1, TAA = 2 };
 // Drives simulated-water mesh density (river / shallow-water grid resolution).
 enum class WaterQuality   : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
-// Terrain LOD detail: lower = fewer/larger chunks = cheaper (CPU/GPU/RAM).
+// Resolución de texturas de terreno: Low=hd(2048) Medium=4k(4096) High=8k(8192) Ultra=16k(16384).
+// Carga la primera disponible desde la calidad seleccionada hacia abajo.
 enum class TerrainQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
 // Densidad/alcance de props (árboles/rocas). Lower = menos/más cerca = menos CPU.
 enum class FoliageQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
@@ -30,14 +31,18 @@ struct GraphicsSettings {
     ShadowQuality   shadowQuality   = ShadowQuality::Medium;
     AntialiasingMode antialiasing   = AntialiasingMode::TAA;
     WaterQuality    waterQuality    = WaterQuality::Medium;
-    TerrainQuality  terrainQuality  = TerrainQuality::High; // High = current detail
+    TerrainQuality  terrainQuality  = TerrainQuality::Low; // Low = hd (2048px); sube a 4k/8k/16k según VRAM
     FoliageQuality  foliageQuality  = FoliageQuality::Medium; // densidad/alcance de árboles/rocas
     float           fov             = 90.0f;
     float           renderScale     = 1.0f;
     bool            vsync           = false;
     bool            ssao            = true;
     bool            bloom           = true;
-    float           bloomThreshold  = 0.8f; // luma above which pixels bloom
+    float           bloomThreshold  = 0.95f; // luma above which pixels bloom. OJO: el color llega ya
+                                            // tonemapeado+gamma (0..1), así que 0.8 hacía brillar el 20%
+                                            // MÁS CLARO de la imagen — ladrillo al sol, nubes… todo
+                                            // "reluciente". 0.95 deja el bloom para lo casi blanco (sol,
+                                            // emisivos, destellos), que es para lo que está.
     float           bloomStrength   = 0.7f; // additive bloom intensity
     bool            motionBlur      = false;
     bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
@@ -67,7 +72,7 @@ inline void applyLowPreset(GraphicsSettings& g) {
 }
 inline void applyHighPreset(GraphicsSettings& g) {
     g.renderScale    = 1.0f;
-    g.terrainQuality = TerrainQuality::High;
+    g.terrainQuality = TerrainQuality::Medium; // 4k (4096px); High=8k/Ultra=16k son paquetes opcionales
     g.foliageQuality = FoliageQuality::High;
     g.waterQuality   = WaterQuality::Medium;
     g.textureQuality = TextureQuality::High;

@@ -1,53 +1,31 @@
-/**
- * @file ssao.h
- * @brief Screen-space ambient occlusion — kernel generation, noise texture, and FBO.
- */
 #pragma once
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <vector>
 #include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
-/**
- * @brief Screen-space ambient occlusion resources and sample generation.
- */
 class SSAO {
 public:
-    /** @brief Creates SSAO buffers at the given resolution. */
     SSAO(unsigned int width, unsigned int height);
     ~SSAO();
 
-    /** @brief Binds SSAO framebuffer for the occlusion pass. */
-    void bindForWriting();
-    /** @brief Restores default framebuffer binding. */
-    void unbind();
-    /** @brief Binds SSAO texture for composition. */
-    void bindForReading(unsigned int textureUnit);
-
-    /** @brief Returns SSAO output texture id. */
-    unsigned int getSSAOTexture() const { return ssaoColorBuffer; }
-    /** @brief Returns the hemisphere sample kernel (vec3[64]). */
+    Haruka::RHI::RenderPassHandle getPass() const { return m_pass; }
+    Haruka::RHI::TextureHandle getSSAOTexture() const { return m_ssaoTex; }
+    Haruka::RHI::TextureHandle getNoiseTexture() const { return m_noise; }
     const std::vector<glm::vec3>& getKernel() const { return ssaoKernel; }
-    /** @brief Returns the 4×4 noise texture id. */
-    unsigned int getNoiseTexture() const { return noiseTexture; }
 
 private:
-    /** @brief Allocates framebuffer and textures. */
     void setupFramebuffer();
-    /** @brief Generates kernel and noise sample data. */
     void setupSamples();
 
     Haruka::RHI::RenderPassHandle m_pass;
-    Haruka::RHI::TextureHandle    m_noise;
-    unsigned int ssaoFBO = 0;
-    unsigned int ssaoColorBuffer = 0;
-    unsigned int noiseTexture = 0;
-    
+    Haruka::RHI::TextureHandle m_ssaoTex;
+    Haruka::RHI::TextureHandle m_noise;
+
     std::vector<glm::vec3> ssaoKernel;
     std::vector<glm::vec3> ssaoNoise;
-    
+
     unsigned int width, height;
 };
 

@@ -54,8 +54,9 @@ namespace Haruka {
         // --- Etapa 1: geografía (ruido A, binario base) ---
         float oceanFraction = 0.60f;  ///< fracción de superficie que es mar  (hash seed, ~[0.45,0.75])
         float seaThreshold  = 0.0f;   ///< umbral de continentalidad (c0) que produce oceanFraction
-        float coastBandKm   = 0.005f; ///< medio-ancho de la banda costa del smoothstep (km). Pequeño pero NUNCA 0 (0 = acantilado = aliasa)
-        float coastWidth    = 1.0f;   ///< factor de ANCHO de costa (hash seed, ~[0.35,2.5]): escala las rampas distToCoast → costa corta/acantilado (bajo) ↔ larga/playa gradual (alto)
+        // (Aquí estaban `coastBandKm` y `coastWidth`, que parametrizaban la banda y las rampas de
+        //  costa cuando la costa era un smoothstep sobre el ruido. Desde F2 la costa ES elev = 0 y la
+        //  banda es fija (±2 m, ver sampleTerrainV2): ninguno de los dos tenía ya un solo lector.)
 
         // Escala de continentes — UN solo factor s∈[0,1] (hash seed) gobierna los tres:
         int   continentCount = 5;     ///< nº de continentes  (~[3,8])
@@ -65,10 +66,11 @@ namespace Haruka {
         // --- Etapa 2: relieve (ruido B) ---
         float reliefStrength = 1.0f;  ///< intensidad del relieve montañoso (1 = ~7.5 km pico). Parámetro de escena: config.reliefStrength.
 
-        // --- Etapa 2.5: hidrología (lagos sembrados por la seed) ---
-        float lakeDensity = 120.0f;  ///< densidad de la rejilla de sellos de lago (más alto = lagos más juntos)
-        float lakeMaxProb = 0.15f;   ///< prob. máx. de que un sello sea lago (×wetness). BAJADO 0.5→0.15:
-                                     ///< a 0.5 salían DEMASIADOS lagos ("círculos" por toda la tierra baja).
+        // --- Etapa 2.5: hidrología ---
+        // (Aquí estaban `lakeDensity` y `lakeMaxProb`, que sembraban los "sellos de lago" por hash.
+        //  Desde F3 los lagos salen del CAMPO —priority-flood sobre la topografía erosionada, o sea,
+        //  donde de verdad no drena— y esos dos parámetros dejaron de tener lector. Un lago no está
+        //  donde un hash diga.)
     };
 
     /**
@@ -110,5 +112,17 @@ namespace Haruka {
         // Etapa 4 (material/bioma de superficie) se derivará de elevKm + normal(pendiente)
         // + climate + wetness en el shader/material; no necesita campos extra aquí de momento.
     };
+
+    // Stub: terrain sampler removed. Returns flat terrain at elevKm=0.
+    inline TerrainSample sampleTerrainV2(const glm::vec3&, const WorldGenParams&, double) {
+        return TerrainSample{};
+    }
+
+    // Stub: deriveWorldParams — returns default WorldGenParams from seed.
+    inline WorldGenParams deriveWorldParams(uint32_t seed, double /*radius*/) {
+        WorldGenParams W{};
+        W.seed = seed;
+        return W;
+    }
 
 } // namespace Haruka

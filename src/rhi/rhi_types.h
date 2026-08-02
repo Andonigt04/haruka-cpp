@@ -4,6 +4,9 @@
  *
  * Este header es la "lengua franca" del RHI: solo define nombres. No incluye ninguna
  * API gráfica, así que puede incluirse desde cualquier parte sin acoplar el motor a GL/Vulkan.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
  */
 #pragma once
 
@@ -45,7 +48,10 @@ namespace Haruka::RHI
         RGB10A2_SNORM,
     };
 
-    enum class PrimitiveTopology { Triangles, TriangleStrip, Lines, LineStrip, Points };
+    // Patches = entrada de la TESELACIÓN. No es un modo de dibujo más: con teselación activa el
+    // rasterizador NO recibe triángulos, recibe parches que las etapas de control y evaluación
+    // subdividen. En GL obliga a GL_PATCHES + glPatchParameteri(GL_PATCH_VERTICES, n).
+    enum class PrimitiveTopology { Triangles, TriangleStrip, Lines, LineStrip, Points, Patches };
     // Modo de mezcla. Alpha = transparencia normal (src·a + dst·(1-a)). Additive = emisivo/radiante
     // (src·a + dst): partículas, fogonazos. Mapea a VkPipelineColorBlendAttachmentState.
     enum class BlendMode { Alpha, Additive };
@@ -67,6 +73,15 @@ namespace Haruka::RHI
     enum class Filter { Nearest, Linear };
     enum class Wrap { Repeat, ClampToEdge, MirroredRepeat };
 
+    // --- Memory barrier flags (GPU → CPU readback, SSBO after compute). ---
+    // Bitmask, combinable con |. Mapea 1:1 a los bits de glMemoryBarrier / VkMemoryBarrier.
+    enum BarrierBits : uint32_t {
+        Barrier_Storage       = 0x00002000,  // GL_SHADER_STORAGE_BARRIER_BIT
+        Barrier_Update        = 0x00000200,  // GL_BUFFER_UPDATE_BARRIER_BIT
+        Barrier_Mapped        = 0x00004000,  // GL_CLIENT_MAPPED_BUFFER_BARRIER_BIT
+        Barrier_All           = 0xFFFFFFFF,  // GL_ALL_BARRIER_BITS
+    };
+
     // -----------------------------------------------------------------------------------
     // Handles: un uint con TIPO. Reemplazan al `unsigned int ID` suelto de los wrappers GL.
     // id == 0 = vacío/inválido (como un puntero null). El backend traduce id -> objeto real.
@@ -76,10 +91,12 @@ namespace Haruka::RHI
     struct SamplerHandle    { uint32_t id = 0; };
     struct PipelineHandle   { uint32_t id = 0; };
     struct RenderPassHandle { uint32_t id = 0; }; // id 0 = backbuffer (framebuffer por defecto)
+    struct FenceHandle     { uint32_t id = 0; };
 
     inline bool valid(BufferHandle h)     { return h.id != 0; }
     inline bool valid(TextureHandle h)    { return h.id != 0; }
     inline bool valid(SamplerHandle h)    { return h.id != 0; }
     inline bool valid(PipelineHandle h)   { return h.id != 0; }
     inline bool valid(RenderPassHandle h) { return h.id != 0; }
+    inline bool valid(FenceHandle h)      { return h.id != 0; }
 }

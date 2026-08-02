@@ -3,6 +3,9 @@
  * @brief "Recetas" (descriptores) para crear recursos. Son solo datos agrupados (POD-ish).
  *
  * Rellenas la struct y se la pasas al Device::create*(). Sin métodos, sin lógica.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
  */
 #pragma once
 
@@ -24,6 +27,12 @@ namespace Haruka::RHI
         Wrap        wrap = Wrap::Repeat;
         bool        mipmaps = false;
         bool        cube = false;              // textura cubemap (6 caras) para IBL/reflejos
+        // >1 → TEXTURA ARRAY (GL_TEXTURE_2D_ARRAY). Existe para que un material del terreno pueda
+        // tener su PROPIO PNG: GLSL no indexa samplers dinámicamente (son handles, no valores), así
+        // que N materiales con N samplers obligan a una cadena de `if` cableada — justo lo que la
+        // tabla de materiales vino a quitar. Con un array, el material aporta un ÍNDICE DE CAPA y
+        // la selección deja de existir. `initialData` apila las capas: layer0, layer1, …
+        uint32_t    layers = 1;
         float       maxAnisotropy = 1.0f;      // 1 = isotrópico (clampeado al máx del driver)
         float       lodBias = 0.0f;            // >0 mips más borrosos (barato), <0 más nítidos
         const void* initialData = nullptr;     // píxeles iniciales, o null si vacía
@@ -78,6 +87,20 @@ namespace Haruka::RHI
         bool      test = true;
         bool      write = true;
         CompareOp compare = CompareOp::Greater;   // reversed-Z: lo más cercano gana con >
+
+        /**
+         * @brief Sesgo de profundidad (glPolygonOffset / VkPipelineRasterizationStateCreateInfo).
+         *
+         * Para superficies COPLANARES a propósito: dos mallas que describen el mismo suelo a
+         * distinto detalle (el clipmap sobre la malla del planeta), calcomanías, marcas en el
+         * terreno. Sin esto la única forma de que una gane a la otra es separarlas en el mundo, y
+         * eso rompe que el suelo que se ve y el que se pisa sean el mismo.
+         *
+         * ⚠️ El signo depende de reversed-Z: aquí "más cerca" es profundidad MAYOR, así que para
+         * que una superficie gane el sesgo es POSITIVO. Con proyección normal sería al revés.
+         */
+        float biasConstant = 0.0f;   // en unidades del mínimo resoluble del buffer
+        float biasSlope    = 0.0f;   // proporcional a la pendiente en pantalla
     };
 
     /** @brief Estado de mezcla (hoy son tus glBlendFunc sueltos). alpha estándar src/1-src. */
@@ -102,6 +125,11 @@ namespace Haruka::RHI
         const char* fragmentPath = nullptr;
         const char* geometryPath = nullptr;
         const char* computePath = nullptr;
+        // TESELACIÓN. Ambas o ninguna: GL rechaza un programa con control sin evaluación.
+        // Con ellas, `topology` debe ser Patches y `patchVertices` decir cuántos vértices forma
+        // cada parche (4 para un quad de cube-sphere).
+        const char* tessControlPath = nullptr;
+        const char* tessEvalPath = nullptr;
 
         // Opción B: bytes SPIR-V directos (si no se dan rutas). Útil para pipelines generados.
         const void* spirvVertex = nullptr;   size_t spirvVertexSize = 0;
@@ -114,9 +142,15 @@ namespace Haruka::RHI
         const char* vertexSource = nullptr;
         const char* fragmentSource = nullptr;
         const char* computeSource = nullptr;
+        const char* tessControlSource = nullptr;
+        const char* tessEvalSource = nullptr;
 
         VertexLayout      vertexLayout;    // puede ir vacío (Shader solo-programa durante leaf-swap)
         PrimitiveTopology topology = PrimitiveTopology::Triangles;
+        // Vértices por parche. Solo se mira con topology == Patches. Es estado GLOBAL en GL
+        // (glPatchParameteri), así que lo fija bindPipeline y no el draw: si lo pusiera el draw,
+        // dos pipelines de teselación con distinto tamaño de parche se pisarían entre sí.
+        uint32_t          patchVertices = 4;
         DepthState        depth;
         BlendState        blend;
         // OJO al default: None = SIN culling. Los pases que quieran descartar caras traseras

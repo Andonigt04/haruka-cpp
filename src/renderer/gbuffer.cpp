@@ -1,7 +1,6 @@
 #include "gbuffer.h"
 #include "tools/error_reporter.h"
 #include "rhi/rhi_device.h"
-#include <iostream>
 
 namespace Haruka { namespace Renderer {
 
@@ -11,7 +10,6 @@ GBuffer::GBuffer(unsigned int width, unsigned int height)
 }
 
 void GBuffer::setupFramebuffer() {
-    // Ruta RHI: MRT de 4 color (pos/normal RGBA16F, albedoSpec/emissive RGBA8) + depth. Filtro nearest.
     if (RHI::Device* dev = RHI::device()) {
         RHI::RenderTargetDesc d;
         d.width = width; d.height = height;
@@ -19,29 +17,11 @@ void GBuffer::setupFramebuffer() {
         d.colorFilter = RHI::Filter::Nearest;
         d.hasDepth = true; d.depthFormat = RHI::Format::D24;
         m_pass      = dev->createRenderTarget(d);
-        gBufferFBO  = dev->nativeFramebuffer(m_pass);
-        gPosition   = dev->nativeTexture(dev->getColorTexture(m_pass, 0));
-        gNormal     = dev->nativeTexture(dev->getColorTexture(m_pass, 1));
-        gAlbedoSpec = dev->nativeTexture(dev->getColorTexture(m_pass, 2));
-        gEmissive   = dev->nativeTexture(dev->getColorTexture(m_pass, 3));
+        m_position  = dev->getColorTexture(m_pass, 0);
+        m_normal    = dev->getColorTexture(m_pass, 1);
+        m_albedoSpec = dev->getColorTexture(m_pass, 2);
+        m_emissive  = dev->getColorTexture(m_pass, 3);
     }
-}
-
-void GBuffer::bindForWriting() {
-    glBindFramebuffer(GL_FRAMEBUFFER, gBufferFBO);
-    glViewport(0, 0, width, height);
-}
-
-void GBuffer::unbind() {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void GBuffer::bindForReading(int index, unsigned int textureUnit) {
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    if (index == 0) glBindTexture(GL_TEXTURE_2D, gPosition);
-    if (index == 1) glBindTexture(GL_TEXTURE_2D, gNormal);
-    if (index == 2) glBindTexture(GL_TEXTURE_2D, gAlbedoSpec);
-    if (index == 3) glBindTexture(GL_TEXTURE_2D, gEmissive);
 }
 
 GBuffer::~GBuffer() {

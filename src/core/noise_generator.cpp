@@ -34,20 +34,25 @@ float NoiseGenerator::grad(int hash, float x, float y, float z) {
 }
 
 float NoiseGenerator::perlin3D(const glm::vec3& pos, int seed, float scale) {
-    glm::vec3 p = pos * scale;
+    return perlin3D(glm::dvec3(pos), seed, (double)scale);   // una sola implementacion (ver el .h)
+}
+
+float NoiseGenerator::perlin3D(const glm::dvec3& pos, int seed, double scale) {
+    // REDUCCION EN DOUBLE: el producto y el floor van en double; a float solo pasa la FRACCION, que
+    // vive en [0,1) y ahi float tiene precision de sobra. Hacerlo en float cuantizaba la posicion a
+    // ~1e-3 de celda con scale alta, y CPU y GPU caian en puntos distintos → cm de discrepancia
+    // entre lo que se dibuja y lo que se pisa. Ver perlin3D(dvec3) en el .h.
+    const glm::dvec3 pd = pos * scale;
+    const double fx = std::floor(pd.x), fy = std::floor(pd.y), fz = std::floor(pd.z);
+    const glm::vec3 p((float)(pd.x - fx), (float)(pd.y - fy), (float)(pd.z - fz));
 
     // Cell origin as full integers (NO premature & 255 — that wrapped 255→0 at
     // every 256-cell boundary, so one cube corner hashed index 255 and its
     // neighbour index 0: unrelated gradients → a hard discontinuity / cliff there.
     // High octaves (scale·lacunarity^i) easily exceed 256, so these cliffs peppered
     // the terrain. We mask each corner index INDIVIDUALLY and consistently below.)
-    int x0 = (int)std::floor(p.x);
-    int y0 = (int)std::floor(p.y);
-    int z0 = (int)std::floor(p.z);
-
-    float xf = p.x - (float)x0;
-    float yf = p.y - (float)y0;
-    float zf = p.z - (float)z0;
+    const int x0 = (int)fx, y0 = (int)fy, z0 = (int)fz;
+    const float xf = p.x, yf = p.y, zf = p.z;   // ya son la fraccion (reducida en double)
 
     float u = smoothstep(xf);
     float v = smoothstep(yf);
@@ -87,11 +92,22 @@ float NoiseGenerator::fBm(
     float lacunarity,
     float scale
 ) {
+    return fBm(glm::dvec3(pos), seed, octaves, persistence, lacunarity, (double)scale);
+}
+
+float NoiseGenerator::fBm(
+    const glm::dvec3& pos,
+    int seed,
+    int octaves,
+    float persistence,
+    float lacunarity,
+    double scale
+) {
     if (octaves <= 0) return 0.0f;
 
     float value = 0.0f;
     float amplitude = 1.0f;
-    float frequency = 1.0f;
+    double frequency = 1.0;
     float maxValue = 0.0f;
 
     for (int i = 0; i < octaves; ++i) {
@@ -124,15 +140,15 @@ float NoiseGenerator::gradd(int hash, float x, float y, float z, glm::vec3& outC
 }
 
 float NoiseGenerator::perlin3D_d(const glm::vec3& pos, glm::vec3& outGrad, int seed, float scale) {
-    glm::vec3 p = pos * scale;
+    return perlin3D_d(glm::dvec3(pos), outGrad, seed, (double)scale);
+}
 
-    int x0 = (int)std::floor(p.x);
-    int y0 = (int)std::floor(p.y);
-    int z0 = (int)std::floor(p.z);
-
-    float xf = p.x - (float)x0;
-    float yf = p.y - (float)y0;
-    float zf = p.z - (float)z0;
+float NoiseGenerator::perlin3D_d(const glm::dvec3& pos, glm::vec3& outGrad, int seed, double scale) {
+    // Misma reduccion en double que perlin3D(dvec3).
+    const glm::dvec3 pd = pos * scale;
+    const double ffx = std::floor(pd.x), ffy = std::floor(pd.y), ffz = std::floor(pd.z);
+    const int x0 = (int)ffx, y0 = (int)ffy, z0 = (int)ffz;
+    const float xf = (float)(pd.x - ffx), yf = (float)(pd.y - ffy), zf = (float)(pd.z - ffz);
 
     // Fade cúbico (3t²-2t³) y su derivada (6t-6t²), igual que smoothstep().
     float su = smoothstep(xf), sv = smoothstep(yf), sw = smoothstep(zf);
@@ -166,7 +182,7 @@ float NoiseGenerator::perlin3D_d(const glm::vec3& pos, glm::vec3& outGrad, int s
     }
 
     // Cadena: xf = pos·scale → ∂/∂pos = ∂/∂xf · scale.
-    outGrad = dn * scale;
+    outGrad = dn * (float)scale;
     return n;
 }
 
@@ -179,9 +195,22 @@ float NoiseGenerator::fBm_d(
     float lacunarity,
     float scale
 ) {
+    return fBm_d(glm::dvec3(pos), outGrad, seed, octaves, persistence, lacunarity, (double)scale);
+}
+
+float NoiseGenerator::fBm_d(
+    const glm::dvec3& pos,
+    glm::vec3& outGrad,
+    int seed,
+    int octaves,
+    float persistence,
+    float lacunarity,
+    double scale
+) {
     if (octaves <= 0) { outGrad = glm::vec3(0.0f); return 0.0f; }
 
-    float value = 0.0f, maxValue = 0.0f, amplitude = 1.0f, frequency = 1.0f;
+    float value = 0.0f, maxValue = 0.0f, amplitude = 1.0f;
+    double frequency = 1.0;
     glm::vec3 grad(0.0f);
 
     for (int i = 0; i < octaves; ++i) {

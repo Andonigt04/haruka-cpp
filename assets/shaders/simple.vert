@@ -7,17 +7,19 @@
  * of the model matrix.
  * Used with final.frag / light_cube.frag.
  *
- * In:  aPos (loc 0), aNormal (loc 1)
- * Out: Normal (loc 0), FragPos (loc 1)
+ * In:  aPos (loc 0), aNormal (loc 1), aTexCoords (loc 2)
+ * Out: Normal (loc 0), FragPos (loc 1), TexCoord (loc 2)
  * UBOs: PerFrameData (binding 0), PerObjectData (binding 1)
  */
 #version 450 core
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
+layout(location = 2) in vec2 aTexCoords;
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
+layout(location = 2) out vec2 TexCoord;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -35,15 +37,21 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 moonLightColor; float _pad4;
 };
 
+// El bloque debe declararse IDÉNTICO en TODAS las etapas del mismo programa (este .vert se linka
+// con final.frag y con preview.frag): si una declara menos campos, GL da "definitions of uniform
+// block do not match" AL LINKAR, no al compilar, y el pase se queda mudo.
 layout(std140, binding = 1) uniform PerObjectData {
     mat4 model;
     vec4 baseColorAndPlanetRadius; // rgb = base color, a = planet radius
     vec4 planetCenterAndFlag;      // xyz = planet center, w = useProceduralTerrain (0/1)
+    vec4 materialPBR;              // x=metallic y=roughness z=ao w=máscara de texturas
+    vec4 materialEmission;         // rgb = emisión
 };
 
 void main() {
     vec4 worldPos = model * vec4(aPos, 1.0);
     FragPos = worldPos.xyz;
+    TexCoord = aTexCoords;
 
     mat3 normalMatrix = mat3(transpose(inverse(model)));
     Normal = normalize(normalMatrix * aNormal);

@@ -7,6 +7,8 @@
 #include "application.h"
 #include "application_internal.h"
 
+#include "rhi/rhi_context.h"
+
 #include <iostream>
 #include <algorithm>
 #include <csignal>
@@ -14,14 +16,16 @@
 #include <filesystem>
 #include <cstring>
 
+#include "core/logger.h"
+
 #include <SDL3/SDL.h>
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_opengl3.h>
 
 #include "renderer/motor_instance.h"
+#include "renderer/shader.h"
 #include "game/planetary_system.h"
-#include "core/terrain/terrain_generator.h"
 #include "renderer/texture.h"
 #include "core/scene/scene_loader.h"
 #include "tools/error_reporter.h"
@@ -129,50 +133,6 @@ void Application::applyGraphicsSettings() {
         _window->setWindowMode(static_cast<int>(g.windowMode)); // windowed / borderless / fullscreen
     }
 
-    // Chunk cache memory budget.
-    if (_planetarySystem)
-        _planetarySystem->setCacheMaxMemoryMB(g.chunkMemoryMB);
-
-    // Terrain LOD detail: lower = fewer/larger chunks = cheaper (CPU/GPU/RAM).
-    // Also scales the per-vertex noise octaves (cheaper chunk generation).
-    if (_planetarySystem) {
-        switch (g.terrainQuality) {
-            // chunkSize=96 (scene): la malla de AGUA usa esta res y a 96 la costa lejana queda
-            // CONTINUA (a 64 aliasaba en tiles = "el círculo"; a 48 en celdas/discos). El coste es
-            // RAM de caché (96²=9216 quads/chunk); con 32GB no es problema si el cap de chunkMemory
-            // está alto (0=Auto → ~33% RAM). maxLOD 15/17/18/19. Ajuste en vivo con `terrainq`.
-            // Ver perf_terrain_chunksize_rootcause (memoria). Fix definitivo pendiente = decouplar
-            // la res del agua del terreno (agua fina + terreno más barato).
-            // LOD ADAPTATIVO: el preset fija el PRESUPUESTO de frame (1000/fpsObjetivo RX 6600: low 300 /
-            // mid 260 / high 160 / ultra 100) y las COTAS de calidad [fino,grueso]. El targetPx se ajusta
-            // solo hacia la mejor calidad que ese presupuesto sostiene; solo engorda (menos detalle) si el
-            // frame se pasa. Así el LOD degrada SOLO bajo carga (no es un tope fijo agresivo).
-            // Cota GRUESA (maxPx) ACOTADA a un LOD que NUNCA muestre triángulos grandes: coarsear más
-            // allá de esto NO sube FPS cuando el cuello es CPU (GPU ociosa) — solo degrada el detalle en
-            // balde. Rango ESTRECHO min↔max → el adaptativo apenas oscila (sin "respirar" de detalle al
-            // girar). Bajo carga real el terreno se queda fino; solo baja un pelín, sin verse facetado.
-            // Rangos afinados con el barrido de calidad del harness (test_quality_sweep): la curva
-            // calidad/targetPx va en ESCALONES; el salto grande de detalle está en ~280 (700-380 no
-            // gana nada). Bajamos el rango para ALCANZAR ese escalón → casi el doble de detalle por
-            // ~1 ms, sin desperdiciar LOD en la zona plana. El adaptativo engorda hacia el max bajo carga.
-            case Haruka::Settings::TerrainQuality::Low:    _planetarySystem->setLODParams(0.70, 15); _planetarySystem->setLODBudget(1000.0/300.0, 280.0, 400.0); Haruka::TerrainGenerator::s_detailScale = 0.5f;  break;
-            case Haruka::Settings::TerrainQuality::Medium: _planetarySystem->setLODParams(0.85, 17); _planetarySystem->setLODBudget(1000.0/260.0, 240.0, 340.0); Haruka::TerrainGenerator::s_detailScale = 0.75f; break;
-            case Haruka::Settings::TerrainQuality::High:   _planetarySystem->setLODParams(1.00, 18); _planetarySystem->setLODBudget(1000.0/160.0, 180.0, 280.0); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
-            case Haruka::Settings::TerrainQuality::Ultra:  _planetarySystem->setLODParams(1.20, 19); _planetarySystem->setLODBudget(1000.0/100.0, 140.0, 220.0); Haruka::TerrainGenerator::s_detailScale = 1.0f;  break;
-        }
-        // OVERRIDE DE USUARIO (opción persistente): el preset fija el presupuesto adaptativo, pero el
-        // usuario puede sobreponerse — adaptiveLOD=false congela el auto-ajuste, y lodTargetPx>0 fija un
-        // detalle manual (px del split screen-space). Así "calidad automática según HW" es el default,
-        // pero quien quiera manda el valor a mano.
-        _planetarySystem->setAdaptiveLOD(g.adaptiveLOD);
-        if (g.lodTargetPx > 0) _planetarySystem->setLODTargetPx((double)g.lodTargetPx);
-        // CLAVE (perf): el LOD por defecto es SCREEN-SPACE (splitea si el chunk proyecta > targetPx).
-        // Antes targetPx era FIJO a 320 para TODOS los presets → Low dibujaba los mismos ~1500 chunks
-        // que Ultra → los presets NO cambiaban el nº de draws (el cuello es CPU draw-calls, GPU ociosa).
-        // Ahora targetPx sube en Low (chunks más grandes en pantalla = MENOS draws = más FPS) y baja en
-        // Ultra (más detalle). Runtime, sin mundo nuevo. Ajuste fino en vivo: `lodscreen on <px>`.
-    }
-
     // Texture quality → anisotropic filtering + mip LOD bias. Low trades sharpness
     // for fill-rate (positive bias = blurrier mips); Ultra = max anisotropy, sharp.
     // Applies to textures loaded after this call (see Texture::setQuality).
@@ -210,6 +170,14 @@ void Application::init(Haruka::SceneManager& scene) {
         _camera = std::make_unique<Camera>(camStart);
     }
 
+    // SISTEMA PLANETARIO. Estaba solo en loadScene(), así que quien entra por init() —el EDITOR, que
+    // trae su propia SceneManager— se quedaba con `_planetarySystem` nulo. Y de él cuelga casi todo
+    // lo que se ve: el pase de CIELO, el terreno y los SimplePlanet están todos dentro de
+    // `if (_planetarySystem)`. Con una escena que tuviera un planeta, el viewport del IDE no
+    // mostraba NADA y no había error que lo dijera. El IDE no puede llamarlo él: no sabe qué es un
+    // planeta a propósito — la interpretación escena→cuerpos celestes es del motor.
+    initPlanetarySystem();
+
     MotorInstance::getInstance().setApplication(this);
     MotorInstance::getInstance().setScene(_currentScene);
     MotorInstance::getInstance().setCamera(_camera.get());
@@ -222,10 +190,9 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
     uint32_t width = _window->getWidth();
     uint32_t height = _window->getHeight();
 
-    // 1. Update OpenGL's global viewport
-    glViewport(0, 0, width, height);
-
-    // 2. Recreate the G-Buffer (essential for deferred rendering)
+    // 1. Update the viewport via RHI
+    if (RHI::Device* dev = RHI::device())
+        dev->beginFrame()->setViewport(0, 0, (int)width, (int)height);
     // The G-Buffer holds albedo, normal, position, etc. textures.
     _gBuffer = std::make_unique<GBuffer>(width, height);
 
@@ -262,22 +229,14 @@ void Application::cleanup() {
 #ifdef HARUKA_MOD_PHYSICS
     _physicsEngine.reset();
 #endif
-    _terrainStreamingSystem.reset();
-    _chunkCache.reset();
     _planetarySystem.reset();
     _worldSystem.reset();
     _raycastSystem.reset();
 
-    if (m_uboPerFrame  != 0) { glDeleteBuffers(1, &m_uboPerFrame);  m_uboPerFrame  = 0; }
-    if (m_uboPerObject != 0) { glDeleteBuffers(1, &m_uboPerObject); m_uboPerObject = 0; }
-
-    if (quadVBO != 0) {
-        glDeleteBuffers(1, &quadVBO);
-        quadVBO = 0;
-    }
-    if (quadVAO != 0) {
-        glDeleteVertexArrays(1, &quadVAO);
-        quadVAO = 0;
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_uboPerFrameH))  { dev->destroy(m_uboPerFrameH);  m_uboPerFrameH  = {}; }
+        if (RHI::valid(m_uboPerObjectH)) { dev->destroy(m_uboPerObjectH); m_uboPerObjectH = {}; }
+        if (RHI::valid(m_quadBuf))       { dev->destroy(m_quadBuf);       m_quadBuf       = {}; }
     }
 
     // Release ALL GL-owned resources before the context is destroyed.
@@ -306,12 +265,9 @@ void Application::cleanup() {
         for (int i = 0; i < 2; ++i)
             if (RHI::valid(m_bloomPass[i])) { dev->destroy(m_bloomPass[i]); m_bloomPass[i] = {}; }
     }
-    m_bloomFBO[0] = m_bloomFBO[1] = 0;   // eran ids GL cacheados del pass (ya liberado arriba)
     m_bloomTexH[0] = m_bloomTexH[1] = {};
     m_bloomW = m_bloomH = 0;
     _postScene.reset();
-    _pointShadowShader.reset();
-    _instancingShader.reset();
 
     // Render-pipeline objects with GL resources in their destructors
     _shadow.reset();
@@ -360,15 +316,35 @@ void Application::cleanup() {
     }
 }
 
-void Application::run(const std::string& startScenePath) {
+void Application::run(const std::string& startScenePath, bool headless) {
+    m_headless = headless;
     uint32_t _width = 1280;
     uint32_t _height = 720;
 
+    // Raíz de assets para JUEGOS STANDALONE. El IDE la fija explícitamente (Shader::setBaseDir
+    // en editor_app.cpp) porque NO usa Application::run; un juego que SÍ pasa por aquí la derivaba
+    // del cwd y, si nadie la fijaba, `shaderIncludeDir()` quedaba VACÍA → los #include de los
+    // shaders del planeta ("lib/terrain_material.glsl") no se resolvían y el pipeline fallaba.
+    // Guard: solo si nadie la fijó ya (el juego puede querer su propia raíz ANTES de run()).
+    if (Haruka::Renderer::Shader::baseDir().empty()) {
+        std::error_code ec;
+        std::filesystem::path exeDir = std::filesystem::read_symlink("/proc/self/exe", ec).parent_path();
+        if (!ec && !exeDir.empty()) {
+            Haruka::Renderer::Shader::setBaseDir((exeDir / "assets/").string().c_str());
+        } else {
+            Haruka::Renderer::Shader::setBaseDir("assets/");
+        }
+    }
+
     _window = std::make_unique<Haruka::Core::Window>(
-        // Título de la ventana = nombre del juego; icono desde assets/icons/icon.png (si existe).
         Haruka::Core::WindowProps("Survival", _width, _height, "assets/icons/icon.png")
     );
-    if (!_window->init()) {
+    if (m_headless) {
+        if (!_window->initHeadless()) {
+            HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize headless Window system.");
+            return;
+        }
+    } else if (!_window->init()) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
         return;
     }
@@ -395,37 +371,22 @@ void Application::run(const std::string& startScenePath) {
             return b == Haruka::RHI::Backend::OpenGL ? "OpenGL" : "Vulkan";
         };
         if (_device->backend() == requestedBackend)
-            std::fprintf(stderr, "[RHI] Backend activo: %s (solicitado, sin fallback).\n", beName(_device->backend()));
+            HARUKA_LOGI("RHI", "Backend activo: %s (solicitado, sin fallback).", beName(_device->backend()));
         else
-            std::fprintf(stderr, "[RHI] Backend activo: %s (FALLBACK desde %s).\n",
-                         beName(_device->backend()), beName(requestedBackend));
+            HARUKA_LOGW("RHI", "Backend activo: %s (FALLBACK desde %s).",
+                        beName(_device->backend()), beName(requestedBackend));
     } else {
-        std::fprintf(stderr, "[RHI] No hay device — el motor correrá por las rutas GL directas de compatibilidad.\n");
+        HARUKA_LOGW("RHI", "No hay device — el motor correrá por las rutas GL directas de compatibilidad.");
     }
 
-    // GL debug output — catches driver errors and shader compile failures.
-    // Synchronous mode ensures the callback fires at the exact offending call.
-    glEnable(GL_DEBUG_OUTPUT);
-    glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-    glDebugMessageCallback(
-        [](GLenum /*src*/, GLenum type, GLuint /*id*/, GLenum severity,
-           GLsizei /*len*/, const GLchar* msg, const void*) {
-            if (severity == GL_DEBUG_SEVERITY_NOTIFICATION) return;
-            const char* lvl = (type == GL_DEBUG_TYPE_ERROR) ? "ERROR"
-                            : (severity == GL_DEBUG_SEVERITY_HIGH) ? "HIGH"
-                            : (severity == GL_DEBUG_SEVERITY_MEDIUM) ? "MEDIUM" : "LOW";
-            fprintf(stderr, "[GL %s] %s\n", lvl, msg);
-        }, nullptr);
-    // Suppress performance notifications — only keep errors/warnings
-    glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE,
-                          GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
-
-    // ImGui — standalone runtime owns the context
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGui::StyleColorsDark();
-    ImGui_ImplSDL3_InitForOpenGL(_window->getNativeWindow(), _window->getContext());
-    ImGui_ImplOpenGL3_Init("#version 450");
+    // ImGui — standalone runtime owns the context (skipped in headless mode)
+    if (!m_headless) {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+        ImGui_ImplSDL3_InitForOpenGL(_window->getNativeWindow(), SDL_GL_GetCurrentContext());
+        ImGui_ImplOpenGL3_Init("#version 450");
+    }
 
     loadScene(startScenePath);
     init(*_currentScene);
@@ -453,25 +414,26 @@ void Application::run(const std::string& startScenePath) {
         uint32_t lastWidth  = _window->getWidth();
         uint32_t lastHeight = _window->getHeight();
 
-        // Poll events — game gets first crack, then ImGui
-        SDL_Event event;
-        while (SDL_PollEvent(&event)) {
-            bool consumed = false;
-            if (_gameInterface && _gameInterface->onEvent)
-                consumed = _gameInterface->onEvent(&event);
-            if (!consumed)
-                ImGui_ImplSDL3_ProcessEvent(&event);
-            if (event.type == SDL_EVENT_QUIT) running = false;
-            if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                // Update the window's stored size so getWidth()/getHeight() reflect
-                // reality — otherwise the recreateFBOs() check below never fires and
-                // the scene keeps rendering at the old resolution (viewport, FBOs and
-                // camera aspect all stay stale).
-                _window->setWidth(event.window.data1);
-                _window->setHeight(event.window.data2);
-                m_editorViewportW = event.window.data1;
-                m_editorViewportH = event.window.data2;
-                glViewport(0, 0, event.window.data1, event.window.data2);
+        // Headless: no window events, just yield
+        if (m_headless) {
+            SDL_DelayNS(16666666); // ~60 fps pacing
+        } else {
+            SDL_Event event;
+            while (SDL_PollEvent(&event)) {
+                bool consumed = false;
+                if (_gameInterface && _gameInterface->onEvent)
+                    consumed = _gameInterface->onEvent(&event);
+                if (!consumed)
+                    ImGui_ImplSDL3_ProcessEvent(&event);
+                if (event.type == SDL_EVENT_QUIT) running = false;
+                if (event.type == SDL_EVENT_WINDOW_RESIZED) {
+                    _window->setWidth(event.window.data1);
+                    _window->setHeight(event.window.data2);
+                    m_editorViewportW = event.window.data1;
+                    m_editorViewportH = event.window.data2;
+                    if (RHI::Device* dev = RHI::device())
+                        dev->beginFrame()->setViewport(0, 0, event.window.data1, event.window.data2);
+                }
             }
         }
 
@@ -489,17 +451,19 @@ void Application::run(const std::string& startScenePath) {
             static int frame  = 0;
             if (++frame % period == 0) {
                 const auto& nodes = Haruka::Profiler::get().nodes();
-                fprintf(stderr, "--- profiler frame %d ---\n", frame);
+                HARUKA_LOGD("Profiler", "--- frame %d ---", frame);
                 for (size_t i = 1; i < nodes.size(); ++i)
-                    fprintf(stderr, "%*s%-24s %7.2f ms  x%d\n", (nodes[i].depth - 1) * 2, "",
+                    HARUKA_LOGD("Profiler", "%*s%-24s %7.2f ms  x%d", (nodes[i].depth - 1) * 2, "",
                             nodes[i].name.c_str(), nodes[i].ms, nodes[i].count);
             }
         }
 
-        // Start ImGui frame
-        ImGui_ImplOpenGL3_NewFrame();
-        ImGui_ImplSDL3_NewFrame();
-        ImGui::NewFrame();
+        // Start ImGui frame (skipped in headless mode)
+        if (!m_headless) {
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplSDL3_NewFrame();
+            ImGui::NewFrame();
+        }
 
         if (_gameInterface && _gameInterface->onUpdate) {
             HARUKA_PROFILE("game.onUpdate");
@@ -517,13 +481,14 @@ void Application::run(const std::string& startScenePath) {
         buildRenderQueue();
         renderFrameContent();
 
-        // ImGui composite — draw all ImGui widgets over the 3D scene
-        ImGui::Render();
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        // ImGui composite — draw all ImGui widgets over the 3D scene (skipped in headless)
+        if (!m_headless) {
+            ImGui::Render();
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        }
 
-        glFlush();
 
-        // DEBUG TEMPORAL: HARUKA_SHOT=<ruta.ppm> vuelca el framebuffer tras N frames (HARUKA_SHOT_FRAME,
+        // DEBUG TEMPORAL: HARUKA_SHOT=<ruta.ppm> vuelca el framebuffer tras N segundos (HARUKA_SHOT_SEC,
         // por defecto 900) y sale. Para inspeccionar lo que se renderiza sin capturar la pantalla.
         if (const char* shot = getenv("HARUKA_SHOT")) {
             static bool taken = false;
@@ -531,22 +496,31 @@ void Application::run(const std::string& startScenePath) {
             if (!taken && SDL_GetTicks() > (uint64_t)secs * 1000) {
                 taken = true;
                 int w = (int)_window->getWidth(), h = (int)_window->getHeight();
-                std::vector<unsigned char> px((size_t)w * h * 3);
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
-                glReadBuffer(GL_BACK);
-                glPixelStorei(GL_PACK_ALIGNMENT, 1);
-                glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+                std::vector<unsigned char> px((size_t)w * h * 4);
+                if (RHI::Device* dev = RHI::device()) {
+                    dev->readPixels(0, 0, w, h, RHI::Format::RGBA8, px.data());
+                }
                 if (FILE* f = fopen(shot, "wb")) {
                     fprintf(f, "P6\n%d %d\n255\n", w, h);
-                    for (int y = h - 1; y >= 0; --y) fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f); // GL: origen abajo
+                    // Convert RGBA → RGB for PPM output
+                    std::vector<unsigned char> rgb((size_t)w * h * 3);
+                    for (int y = 0; y < h; ++y)
+                        for (int x = 0; x < w; ++x) {
+                            size_t src = (size_t)y * w * 4 + (size_t)x * 4;
+                            size_t dst = (size_t)y * w * 3 + (size_t)x * 3;
+                            rgb[dst] = px[src]; rgb[dst+1] = px[src+1]; rgb[dst+2] = px[src+2];
+                        }
+                    for (int y = h - 1; y >= 0; --y)
+                        fwrite(&rgb[(size_t)y * w * 3], 1, (size_t)w * 3, f);
                     fclose(f);
-                    fprintf(stderr, "[SHOT] escrito %s (%dx%d)\n", shot, w, h);
+                    HARUKA_LOGI("Shot", "escrito %s (%dx%d)", shot, w, h);
                 }
                 running = false;
             }
         }
 
-        _window->swapBuffers();
+        if (RHI::device())
+            RHI::device()->endFrame();
 
         // Frame-rate cap (battery/heat on laptops; 0 = uncapped). With vsync on,
         // swapBuffers already blocks to refresh — this only caps below that.
@@ -572,9 +546,11 @@ void Application::run(const std::string& startScenePath) {
     if (_gameInterface && _gameInterface->onShutdown)
         _gameInterface->onShutdown();
 
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL3_Shutdown();
-    ImGui::DestroyContext();
+    if (!m_headless) {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplSDL3_Shutdown();
+        ImGui::DestroyContext();
+    }
 }
 
 

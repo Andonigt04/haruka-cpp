@@ -17,6 +17,7 @@
 
 #include <glm/glm.hpp>
 #include <vector>
+#include <cstdint>
 
 namespace Haruka { namespace Physics {
 
@@ -44,6 +45,15 @@ public:
     /** @brief Altura del terreno en `worldPos`: metros SOBRE la esfera de referencia (radio). El
      *  ground-snap la usa. Cliente: malla (F10). Servidor: sampler analítico. Mismas unidades. */
     virtual double terrainHeightAt(const glm::dvec3& worldPos) const = 0;
+
+    /** @brief (Fase 2) Geometría LOCAL del terreno alrededor de `center` (radio `radius`, m), para
+     *  colisión REAL con la malla (no una altura vertical). Rellena `outVerts` (posiciones mundo) y
+     *  `outTris` (índices de triángulo, 3 por cara) y devuelve true si hay malla. Por defecto false →
+     *  el motor usa la aproximación de esfera. Cliente: triángulos de los chunks residentes; servidor:
+     *  sin malla (usa la altura analítica). Se consulta al entrar en una región nueva o al editar. */
+    virtual bool terrainMesh(const glm::dvec3& /*center*/, double /*radius*/,
+                             std::vector<glm::dvec3>& /*outVerts*/,
+                             std::vector<uint32_t>& /*outTris*/) const { return false; }
 };
 
 }} // namespace Haruka::Physics

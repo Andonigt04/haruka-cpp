@@ -205,7 +205,13 @@ void main() {
     vec3  wpDir = normalize(FragPos + u_relCam);      // dirección desde el centro del planeta
     vec3  fld   = wSampleField(wpDir);
     bool  lake  = (fld.z > 0.0 && fld.z > fld.x);
-    if (fld.x > 0.0 && !lake) discard;                // tierra firme: aquí no hay mar
+    // El mar SOLO donde el terreno está DE VERDAD bajo el nivel del mar. Las franjas que apenas rozan
+    // por debajo (relieve de media frecuencia hundiendo tierra + interpolación GRUESA del campo vs
+    // malla fina) dibujaban cintas de mar FLOTANDO sobre tierra seca ("se ve el mar dentro") → se
+    // recortan exigiendo unos metros de profundidad real. La orilla auténtica la funde `shoreAlpha`
+    // (por depth), así que no se pierde la costa. Umbral en km; subir = recorta más. fld.x = elev (km).
+    const float kSeaMinDepthKm = 0.006;               // ~6 m bajo el mar para contar como MAR
+    if (fld.x > -kSeaMinDepthKm && !lake) discard;     // tierra o mar marginal: aquí no se dibuja mar
 
     vec3 N = normalize(Normal);
     // Detalle de oleaje CORTO: per-píxel, no en la malla (si no, ves los triángulos de la rejilla).

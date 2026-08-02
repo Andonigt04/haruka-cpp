@@ -4,6 +4,9 @@
  *
  * El backend GL ejecuta cada comando al momento; el backend Vulkan los graba en un
  * command buffer. El código llamador no nota la diferencia.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
  */
 #pragma once
 
@@ -51,5 +54,33 @@ namespace Haruka::RHI
             virtual void drawIndexedIndirect(BufferHandle cmds, uint32_t drawCount,
                                              uint32_t stride, size_t offset = 0) = 0;
             virtual void dispatch(uint32_t x, uint32_t y, uint32_t z) = 0;          // glDispatchCompute
+
+            // --- Fence / sync (GPU→CPU readback). ---
+            /** @brief Inserta una fence en la cola de la GPU. Útil tras un dispatch para
+             *  saber cuándo los SSBO de readback están completos. GL: glFenceSync.
+             *  Vulkan: vkQueueSubmit + vkGetFenceStatus. */
+            virtual FenceHandle signalFence() = 0;
+            /** @brief Espera (o comprueba) una fence. timeoutNs = 0 → no bloquea (solo
+             *  consulta). >0 → bloquea hasta ese límite. Devuelve true si señaló, false si
+             *  timeout. Para esperar indefinido pasa UINT64_MAX. */
+            virtual bool waitFence(FenceHandle, uint64_t timeoutNs = 0) = 0;
+            virtual void deleteFence(FenceHandle) = 0;
+
+            // --- Extra utilities needed by the renderer ---
+            /** @brief Begin rendering to one face of a cubemap texture at a given mip level.
+             *  The texture must have been created with cube=true.
+             *  After endRenderPass(), the face is ready for sampling.
+             *  Used by IBL precomputation. */
+            virtual void beginRenderPassCubemapFace(TextureHandle cubemap, int face,
+                                                     int mipLevel, const ClearValues& clear) = 0;
+
+            /** @brief Blit/copy depth from src to dst render pass. For water depth copy. */
+            virtual void blitDepth(RenderPassHandle src, RenderPassHandle dst,
+                                   int w, int h) = 0;
+            /** @brief Blit/copy color from src to dst render pass. For fluid refraction copy. */
+            virtual void blitColor(RenderPassHandle src, RenderPassHandle dst,
+                                   int w, int h) = 0;
+            /** @brief Memory barrier after compute writes (GL: glMemoryBarrier). */
+            virtual void memoryBarrier(uint32_t barriers = 0xFF) = 0;
     };
 }

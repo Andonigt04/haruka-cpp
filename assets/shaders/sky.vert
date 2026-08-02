@@ -20,7 +20,9 @@ layout(std140, binding = 5) uniform SkyParams {
     vec3  u_up;             // cénit local del observador (mundo)
     float u_atmo;           // 1=superficie ... 0=espacio
     vec3  u_sunColor;       // color de la luz solar
-    float _padSky;
+    float u_time;           // segundos (movimiento de nubes)
+    vec4  u_weather;        // x=humedad · y=tempC · z=precipitación · w=COBERTURA de nube (del mundo)
+    vec4  u_wind;           // x=este(m/s) · y=norte(m/s) · z=racha · w=1 si es NIEVE
 };
 
 layout(location = 0) out vec3 vRayDir; // dirección de vista en espacio mundo

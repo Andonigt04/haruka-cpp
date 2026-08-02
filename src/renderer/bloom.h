@@ -1,45 +1,21 @@
-/**
- * @file bloom.h
- * @brief Bloom post-processing buffer pair (bright-pass + blurred textures).
- */
 #pragma once
-#include <glad/glad.h>
 #include "rhi/rhi_types.h"
 
 namespace Haruka { namespace Renderer {
 
-/**
- * @brief Bloom post-processing buffer pair.
- *
- * Stores a bright-pass texture and a blurred texture used during composition.
- */
-class Bloom
-{
+class Bloom {
 public:
-    /** @brief Creates bloom buffers at the given resolution. */
     Bloom(unsigned int width, unsigned int height);
     ~Bloom();
-    
-    /** @brief Binds bloom FBO for writing. */
-    void bindForWriting();
-    /** @brief Restores default framebuffer binding. */
-    void unbind();
-    /** @brief Binds one bloom texture for reading. */
-    void bindForReading(unsigned int textureUnit, int index);  // 0=bright, 1=blurred
-    
-    /** @brief Returns bright-pass texture id. */
-    unsigned int getBrightTexture() { return brightTexture; }
-    /** @brief Returns blurred bloom texture id. */
-    unsigned int getBlurredTexture() { return blurredTexture; }
-    
+
+    Haruka::RHI::RenderPassHandle getPass() const { return m_pass; }
+    Haruka::RHI::TextureHandle getBrightTexture() const { return m_bright; }
+    Haruka::RHI::TextureHandle getBlurredTexture() const { return m_blurred; }
+
 private:
-    /** @brief Allocates framebuffer and attachments. */
     void setupFramebuffer();
     Haruka::RHI::RenderPassHandle m_pass;
-    unsigned int bloomFBO;
-    unsigned int brightTexture;
-    unsigned int blurredTexture;
-    unsigned int rboDepth;
+    Haruka::RHI::TextureHandle m_bright, m_blurred;
     unsigned int width, height;
 };
 

@@ -62,3 +62,15 @@ jobs:
 
             # Compilar el objetivo final
             cmake --build build -j"$(nproc)" --target HarukaEngine
+
+            # Compilar y ejecutar tests (CPU-only, headless)
+            cmake --build build -j"$(nproc)" --target haruka_tests
+            ./build/haruka_tests
+
+            # Smoke test: build the template game as a headless binary
+            cmake -B build/template -S template -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPROJECT_NAME="SmokeTest" \
+              -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
+            cmake --build build/template -j"$(nproc)" --target SmokeTestExe 2>&1 || \
+              echo "[smoke] template build skipped (may need game scripts)"

@@ -4,6 +4,7 @@ layout(location = 0) out vec4 FragColor;
 
 layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
+layout(location = 2) in vec2 TexCoord;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -21,16 +22,26 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 moonLightColor; float _pad4;
 };
 
+// Idéntico a simple.vert, con el que linka (ver la nota de allí): declararlo con menos campos da
+// un error de LINKADO, no de compilación, y el modo Preview se quedaría mudo.
 layout(std140, binding = 1) uniform PerObjectData {
     mat4 model;
     vec4 baseColorAndPlanetRadius;
     vec4 planetCenterAndFlag;
+    vec4 materialPBR;
+    vec4 materialEmission;
 };
+
+// El modo PREVIEW muestra el material sin el look final: solo el albedo, para juzgar la textura
+// (y el grafo que la horneó) sin que el toon, el rim ni el tonemap la disfracen.
+layout(binding = 0) uniform sampler2D u_matAlbedo;
 
 void main() {
     vec3 baseColor = baseColorAndPlanetRadius.rgb;
     if (dot(baseColor, baseColor) < 0.001)
         baseColor = vec3(0.72, 0.74, 0.78);
+    if ((int(materialPBR.w) & 1) != 0)
+        baseColor *= pow(texture(u_matAlbedo, TexCoord).rgb, vec3(2.2));
 
     // Emissive stars: render at full brightness, no shading
     if (planetCenterAndFlag.w > 1.5) {

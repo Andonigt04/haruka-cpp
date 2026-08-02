@@ -1,7 +1,6 @@
 #pragma once
 
 #include <SDL3/SDL.h>
-#include <glad/glad.h>
 #include <string>
 #include <iostream>
 
@@ -11,7 +10,7 @@ namespace Haruka::Core {
         std::string title;
         uint32_t width;
         uint32_t height;
-        std::string iconPath; // PNG del icono de la ventana (vacío = sin icono)
+        std::string iconPath;
 
         WindowProps(const std::string& t = "Haruka Engine", uint32_t w = 1280, uint32_t h = 720,
                     const std::string& icon = "")
@@ -24,26 +23,22 @@ namespace Haruka::Core {
         ~Window();
 
         bool init();
+        /** @brief Creates a hidden SDL window for headless / CI operation. */
+        bool initHeadless();
         void shutdown();
-        void swapBuffers();
         void pollEvents(bool& running);
-        
-        // Getters
+
         SDL_Window* getNativeWindow() const { return m_window; }
-        SDL_GLContext getContext()    const { return m_glContext; }
         uint32_t getWidth()           const { return m_data.width; }
         uint32_t getHeight()          const { return m_data.height; }
 
         uint32_t setWidth(uint32_t w) { m_data.width = w; return m_data.width; }
         uint32_t setHeight(uint32_t h) { m_data.height = h; return m_data.height; }
 
-        // Aplica el modo de ventana: 0=Windowed (con borde), 1=Borderless (sin borde a
-        // pantalla completa), 2=Fullscreen (SDL). Seguro de llamar en runtime.
         void setWindowMode(int mode);
 
     private:
         SDL_Window* m_window = nullptr;
-        SDL_GLContext m_glContext = nullptr;
 
         struct WindowData {
             std::string title;

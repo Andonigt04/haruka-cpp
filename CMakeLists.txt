@@ -33,6 +33,35 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if(NOT MSVC)
     set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -flto -ffast-math")
+
+    # ⚠️ EL CAMINO DE ALTURA DEL TERRENO SE COMPILA SIN fast-math. No es purismo: el invariante
+    # render↔colisión es de 1 cm, y se cumple porque la CPU y el shader evalúan la MISMA fórmula con
+    # la MISMA aritmética (ver terrain_gen.comp y `haruka_tests paridad`). `-ffast-math` autoriza a
+    # GCC a reasociar sumas y —con `-march=native`, que sí tiene FMA— a fundir `a*b + c` en un FMA.
+    # Las dos cosas cambian el resultado en ulps, y en el terreno un ulp de la dirección son
+    # decímetros de superficie: la paridad se rompería SOLO en la build de Release, o sea justo en la
+    # que juega el usuario, y los tests (que se compilan sin BUILD_TYPE) seguirían en verde.
+    # Coste: estos ficheros pierden vectorización agresiva; el grueso del tiempo de generación está en
+    # la GPU, no aquí. Si algún día hace falta, se mide antes de tocarlo.
+    set_source_files_properties(
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/noise_generator.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_geology.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/cube_sphere.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/reference_surface.cpp"
+        DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
+endif()
+
+# Sanitizadores (diagnóstico, apagado por defecto). Para cazar QUIÉN pisa memoria ajena o qué acceso
+# entre hilos no está sincronizado, en vez de deducirlo del volcado: el sanitizador señala la línea.
+#   cmake -B build-asan -DHARUKA_SANITIZE=address   → escrituras fuera de rango, uso tras liberar
+#   cmake -B build-tsan -DHARUKA_SANITIZE=thread    → carreras de datos
+# Van en un directorio de build APARTE: no se mezclan con el build normal.
+set(HARUKA_SANITIZE "" CACHE STRING "Sanitizador: vacío, 'address' o 'thread'")
+if(HARUKA_SANITIZE AND NOT MSVC)
+    message(STATUS "Sanitizador ACTIVO: ${HARUKA_SANITIZE} (build de diagnóstico, más lento)")
+    add_compile_options(-fsanitize=${HARUKA_SANITIZE} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${HARUKA_SANITIZE})
 endif()
 
 set(THIRD_PARTY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party")
@@ -152,6 +181,16 @@ configure_file(
 # Collect sources, then drop the ones belonging to OFF modules.
 file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
+# --- src/main.cpp FUERA de la librería compartida -------------------------------------------
+# Es el `main()` del runtime antiguo (arrancar el motor a pelo desde un project.hrk). El glob lo
+# metía en libHarukaEngine.so, así que la .so EXPORTABA el símbolo `main`:
+#     $ nm -D build/libHarukaEngine.so | grep -w main
+#     00000000001da25e T main
+# No rompía nada —el ejecutable del juego define el suyo y el símbolo fuerte del ejecutable gana—
+# pero un `main` público en una librería compartida es una colisión esperando a pasar. Ningún
+# add_executable lo usa: el punto de entrada vivo es el del juego.
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")
+
 # --- HarukaPhysics: la física en su PROPIA librería, SIN GL ---------------------------------
 # Motivo: pasarla al DGS (servidor autoritativo) y validar el movimiento con el MISMO código en
 # cliente y servidor. La física solo depende de glm + IWorldProvider (ver src/physics/world_provider.h);
@@ -168,17 +207,23 @@ target_include_directories(HarukaPhysics PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
 set_target_properties(HarukaPhysics PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
 
+# --- HarukaConstruction: el núcleo del sistema de construcción, GL-free y FUERA de físicas ----
+# El sistema de construcción NO es física: es lógica de VALIDACIÓN determinista de colocación (OBB SAT
+# + terreno vía IWorldProvider). Vive en game/construction, GL-free y PIC, en su PROPIA lib para que
+# el cliente prediga y el DGS valide con el MISMO código. No cuelga de HarukaPhysics (no es física).
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "game/construction/construction\\.cpp$")
+add_library(HarukaConstruction STATIC "${CMAKE_CURRENT_SOURCE_DIR}/src/game/construction/construction.cpp")
+target_include_directories(HarukaConstruction PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
+set_target_properties(HarukaConstruction PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
+
 # Per-module source patterns to exclude when the module is OFF.
-if(NOT HARUKA_MOD_DEFORM)
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "core/terrain/deformation_field\\.cpp$")
-endif()
 if(NOT HARUKA_MOD_SOFTBODY)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/xpbd/.*\\.cpp$")
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/softbody_renderer\\.cpp$")
 endif()
 if(NOT HARUKA_MOD_FLUIDS)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/fluid/.*\\.cpp$")
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/water_renderer\\.cpp$")
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/shallow_water_renderer\\.cpp$")
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/fluid_renderer\\.cpp$")
 endif()
@@ -201,14 +246,21 @@ list(FILTER ENGINE_SOURCES EXCLUDE REGEX "net/default_rules\\.cpp$")
 # haruka_simbase: el sampler de terreno CPU (sin GL) que el módulo necesita para validar contra el
 # suelo. Mismas fuentes que usa el engine, aquí en una lib GL-free reusable por el .so de reglas.
 add_library(haruka_simbase STATIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/terrain_sampler_v2.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_geology.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_fields.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_meso.cpp"
+    # La SUPERFICIE DE REFERENCIA (el suelo del juego) y el cubo↔esfera que necesita. Están aquí, y no
+    # solo en el motor, para que el servidor pueda evaluar EL MISMO suelo que pisa el cliente: si el
+    # DGS valida contra otra superficie, expulsa a jugadores legítimos o deja pasar noclip.
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/reference_surface.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/cube_sphere.cpp"
+    # EL CLIMA (frentes deterministas). GL-free y aquí, no solo en el motor, por el mismo motivo
+    # que la superficie de referencia: el servidor tiene que poder ver LA MISMA tormenta que el
+    # cliente para validarla. Es una funcion pura de (seed, tiempo, direccion) → replicarla solo
+    # exige compartir el reloj.
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/weather_system.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/noise_generator.cpp")
 target_include_directories(haruka_simbase PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
-target_link_libraries(haruka_simbase PUBLIC HarukaPhysics)
+target_link_libraries(haruka_simbase PUBLIC HarukaPhysics HarukaConstruction)
 set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # haruka_rules.so: el módulo por defecto (dgs_game_module_v1). GL-free.
@@ -254,6 +306,7 @@ target_compile_definitions(HarukaEngine PUBLIC GLM_FORCE_DEPTH_ZERO_TO_ONE)
 
 target_link_libraries(HarukaEngine PUBLIC
     HarukaPhysics
+    HarukaConstruction
     SDL3::SDL3
     OpenGL::GL
     assimp::assimp
@@ -299,12 +352,48 @@ endif()
 if(NOT HARUKA_MOD_PARTICLES)
     list(FILTER SHADER_SOURCES EXCLUDE REGEX "/particle\\.(vert|frag)$")
 endif()
-if(NOT HARUKA_MOD_SHADOWS)
-    list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(shadow|point_shadow)\\.(vert|frag|geom)$")
-endif()
+# (El filtro de HARUKA_MOD_SHADOWS excluía shadow.* y point_shadow.*. Los dos se borraron por no
+#  tener call-site: el pase de sombra real usa el shader del JUEGO —Survival/assets/shaders/
+#  shadow_depth.*— y las sombras puntuales nunca se llegaron a construir. El filtro quedaba vacío.)
 if(NOT HARUKA_MOD_SOFTBODY)
     list(FILTER SHADER_SOURCES EXCLUDE REGEX "/softbody\\.(vert|frag)$")
 endif()
+
+# Las librerías compartidas (assets/shaders/lib/*.glsl) NO se compilan por su cuenta: son
+# fragmentos que otros shaders incluyen. Se copian al directorio de salida —el RHI las resuelve en
+# tiempo de carga— y se declaran como DEPENDS para que tocar una recompile a quien la usa.
+# CONFIGURE_DEPENDS: sin él el glob solo se evalúa al configurar, así que una librería NUEVA no se
+# copia hasta volver a lanzar cmake a mano. El síntoma es idéntico al de la nota de abajo pero peor:
+# el `#include` no se encuentra, el pipeline no linka y el objeto simplemente no se dibuja — sin
+# error de dibujado, porque el fallo fue al crear el pipeline y el camino de respaldo lo tapa.
+#
+# Los del PLANETA (assets/shaders/planet/) tampoco: el RHI los carga por ruta en tiempo de ejecución
+# (`PipelineDesc::*Path`), y entre ellos hay .tesc/.tese, que el glob de arriba —plano y sin esas
+# extensiones— no recoge de todos modos. Estaban incrustados como literales dentro de
+# planetary_system.cpp: 465 líneas de GLSL dentro de un .cpp, con lo que probar un cambio de una
+# línea exigía recompilar el motor entero.
+file(GLOB SHADER_LIBS CONFIGURE_DEPENDS
+    "${SHADER_SRC_DIR}/lib/*.glsl"
+    "${SHADER_SRC_DIR}/planet/*.vert" "${SHADER_SRC_DIR}/planet/*.frag"
+    "${SHADER_SRC_DIR}/planet/*.tesc" "${SHADER_SRC_DIR}/planet/*.tese")
+list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(lib|planet)/")
+# Copia en tiempo de BUILD, no de configure. Con `configure_file` la copia solo se rehace al
+# re-ejecutar cmake, así que editar una librería y compilar dejaba el shader usando la versión
+# ANTERIOR — y el síntoma es el peor posible: el cambio "no hace nada" y parece que la hipótesis
+# era falsa. Costó una iteración entera en la paridad del terreno.
+#
+# Se preserva el subdirectorio (lib/ o planet/), porque las rutas que pide el motor lo incluyen.
+set(SHADER_LIB_OUTPUTS "")
+foreach(LIB ${SHADER_LIBS})
+    file(RELATIVE_PATH LIBREL "${SHADER_SRC_DIR}" "${LIB}")
+    set(LIBOUT "${SHADER_OUT_DIR}/${LIBREL}")
+    add_custom_command(OUTPUT ${LIBOUT}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${LIB} ${LIBOUT}
+        DEPENDS ${LIB}
+        COMMENT "shader lib  ${LIBREL}"
+        VERBATIM)
+    list(APPEND SHADER_LIB_OUTPUTS ${LIBOUT})
+endforeach()
 
 set(SPIRV_OUTPUTS "")
 foreach(SRC ${SHADER_SOURCES})
@@ -314,16 +403,16 @@ foreach(SRC ${SHADER_SOURCES})
 
     if(GLSLC)
         add_custom_command(OUTPUT ${SPV}
-            COMMAND ${GLSLC} --target-env=opengl ${SRC} -o ${SPV}
+            COMMAND ${GLSLC} --target-env=opengl -I${SHADER_SRC_DIR} ${SRC} -o ${SPV}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
-            DEPENDS ${SRC}
+            DEPENDS ${SRC} ${SHADER_LIBS}
             COMMENT "glslc  ${NAME} -> ${NAME}.spv"
             VERBATIM)
     else()
         add_custom_command(OUTPUT ${SPV}
-            COMMAND ${GLSLANG_V} -G ${SRC} -o ${SPV}
+            COMMAND ${GLSLANG_V} -G -I${SHADER_SRC_DIR} ${SRC} -o ${SPV}
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
-            DEPENDS ${SRC}
+            DEPENDS ${SRC} ${SHADER_LIBS}
             COMMENT "glslangValidator  ${NAME} -> ${NAME}.spv"
             VERBATIM)
     endif()
@@ -331,22 +420,13 @@ foreach(SRC ${SHADER_SOURCES})
     list(APPEND SPIRV_OUTPUTS ${SPV})
 endforeach()
 
-add_custom_target(HarukaShaders ALL DEPENDS ${SPIRV_OUTPUTS})
+add_custom_target(HarukaShaders ALL DEPENDS ${SPIRV_OUTPUTS} ${SHADER_LIB_OUTPUTS})
 add_dependencies(HarukaEngine HarukaShaders)
 
 # --- 6a. mapc: map compiler tool (.scene -> .hmap) ---
 add_executable(mapc tools/mapc.cpp)
 target_link_libraries(mapc PRIVATE HarukaEngine)
 set_target_properties(mapc PROPERTIES
-    BUILD_RPATH   "$ORIGIN"
-    INSTALL_RPATH "$ORIGIN")
-
-# --- physics_demo: banco VISUAL de la física (cubos/esferas cayendo en terreno irregular) ---
-# Ventana visible + selección de API gráfica vía la fábrica del RHI (Device::create). Demuestra la
-# física real del motor (HarukaPhysics) a ojo. Correr: ./bin/physics_demo [--api gl|vk] [--bodies N]
-add_executable(physics_demo tools/physics_demo.cpp)
-target_link_libraries(physics_demo PRIVATE HarukaEngine)
-set_target_properties(physics_demo PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 
@@ -369,12 +449,17 @@ if(HARUKA_MOD_PHYSICS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPh
     set(JPH_USE_MTL  OFF CACHE BOOL "" FORCE)
     set(JPH_USE_CPU_COMPUTE OFF CACHE BOOL "" FORCE)
     add_subdirectory(third_party/JoltPhysics/Build "${CMAKE_BINARY_DIR}/jolt" EXCLUDE_FROM_ALL)
+    # HarukaEngine es SHARED → todo lo que enlaza debe ser PIC. Jolt no lo pone por defecto.
+    set_target_properties(Jolt PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # Optimizar Jolt para TAMAÑO (-Os) y sin símbolos de depuración → objetos/lib mucho más pequeños en
+    # el build (Jolt es grande). No afecta a la corrección; sí acelera y adelgaza.
+    target_compile_options(Jolt PRIVATE -Os -g0)
 
-    add_executable(jolt_demo tools/jolt_demo.cpp)
-    target_link_libraries(jolt_demo PRIVATE Jolt HarukaEngine)   # Jolt (física) + HarukaEngine (GL/SDL)
-    set_target_properties(jolt_demo PROPERTIES
-        BUILD_RPATH   "$ORIGIN"
-        INSTALL_RPATH "$ORIGIN")
+    # Fase 1: HarukaPhysics ENVUELVE a Jolt (PIMPL) → el juego nunca ve Jolt. PRIVATE = encapsulado;
+    # las include-dirs llegan a physics_engine.cpp y los símbolos se enlazan en el consumidor final.
+    # HARUKA_HAS_JOLT activa el camino Jolt en physics_engine.cpp (si no, cae al solver a mano).
+    target_link_libraries(HarukaPhysics PRIVATE Jolt)
+    target_compile_definitions(HarukaPhysics PRIVATE HARUKA_HAS_JOLT)
 endif()
 
 # --- 6a-bis. haruka_tests: banco de pruebas HEADLESS (LOD/sampler/órbitas, sin ventana/GL) ---
@@ -383,11 +468,31 @@ endif()
 add_executable(haruka_tests
     tests/haruka_tests.cpp      # main() — selecciona/dirige
     tests/test_common.cpp       # framework de aserciones compartido
-    tests/test_terrain.cpp      # sampler / cube-sphere / geología / clima / erosión / meso (CPU)
+    tests/test_terrain.cpp      # cube-sphere / climate / weather fronts / ground layer (CPU)
     tests/test_physics.cpp      # caída radial + determinismo (sin GL)
-    tests/test_dgs.cpp          # módulo de reglas por dlopen
-    tests/test_render_gl.cpp)   # engine / draw-set / pool / parity / orbit / stress (GL)
+    tests/test_construction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
+    tests/test_dgs.cpp
+    tests/test_simple_planet.cpp         # SimplePlanet mesh & config
+    tests/test_terrain_quality.cpp       # terrain quality → resolution mappings
+    tests/test_procgraph.cpp)            # ProcGraph nodes, BiomeConfig, RGBAImage
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
+# test_dgs.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre
+# se propaga desde HarukaEngine (solo con HARUKA_NETWORK), así que se lo damos al test directamente.
+target_include_directories(haruka_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
+# RAÍZ DE ASSETS DEL BANCO, absoluta y fijada aquí (ver GLContext en test_gl_fixture.h). El banco se
+# construye también dentro del árbol del JUEGO (FetchContent), donde NO hay assets al lado del
+# ejecutable: sin esto, ese binario corría sin shaders — terreno GPU deshabilitado — y daba números
+# incomparables con los del motor, con parte de la suite en verde igualmente.
+# ⚠️ Se DERIVA de SHADER_OUT_DIR, que es la variable que ya decide dónde acaban los shaders — y que
+# el JUEGO redefine (`<build>/bin/assets/shaders`). Escribir aquí una ruta propia funcionaba en el
+# árbol del motor y apuntaba a un directorio INEXISTENTE en el del juego: mismo síntoma que se venía
+# a arreglar, con la ruta ahora absoluta y equivocada en vez de relativa y equivocada.
+# ⚠️ Y es el dir de BUILD, no el de fuente: el build compila los shaders a SPIR-V (`*.spv`) y el RHI
+# los prefiere; apuntando al fuente el banco pasaría en silencio a la ruta GLSL — otro backend, no
+# otro directorio (probado: un test de lluvia bajo cubierto cambiaba de resultado).
+get_filename_component(HARUKA_TESTS_ASSET_ROOT "${SHADER_OUT_DIR}" DIRECTORY)
+target_compile_definitions(haruka_tests PRIVATE
+    HARUKA_TEST_ASSET_DIR="${HARUKA_TESTS_ASSET_ROOT}/")
 set_target_properties(haruka_tests PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
@@ -424,4 +529,10 @@ if(PROJECT_IS_TOP_LEVEL)
     install(DIRECTORY "${SHADER_OUT_DIR}/"
         DESTINATION "bin/assets/shaders"
         FILES_MATCHING PATTERN "*.spv")
+endif()
+
+# --- 7. Examples ---
+option(HARUKA_BUILD_EXAMPLES "Build example projects" OFF)
+if(HARUKA_BUILD_EXAMPLES)
+    add_subdirectory(examples/planet_demo)
 endif()

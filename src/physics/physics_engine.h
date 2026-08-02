@@ -42,6 +42,24 @@ struct RigidBody {
     Shape      shape = Shape::Sphere;
     glm::dvec3 halfExtents{0.5, 0.5, 0.5};   // solo si shape==Box (m)
 
+    // El cuerpo NO GIRA (solo traslada). Un PERSONAJE es una esfera que no debe RODAR: si rueda, la
+    // velocidad angular se convierte en avance por el contacto y sigue deslizándose aunque le pongas la
+    // velocidad lineal a cero. Un objeto suelto (una piedra) sí quiere rodar → false por defecto.
+    bool lockRotation = false;
+
+    // Es un PERSONAJE: lo lleva un controlador de personaje (Jolt `CharacterVirtual`) en vez de un
+    // rígido dinámico. Un rígido no es un personaje — emular a mano pisar escalones, pendientes,
+    // "estar en el suelo" y la fricción sale mal pieza a pieza; el controlador lo hace nativo.
+    bool isCharacter = false;
+    // Lo RELLENA la física: ¿el controlador dice que pisa suelo? (fuente de verdad para el salto).
+    bool onGround = false;
+
+    // "He cambiado `velocity` a propósito, aplícala" (un empujón, una explosión, lanzar algo). Un cuerpo
+    // LIBRE lo posee el motor: re-imponerle su velocidad cada frame re-aplicaba la velocidad de
+    // separación del solver una y otra vez → el objeto ganaba energía y SALÍA VOLANDO. La física
+    // consume esta marca y la baja.
+    bool velocityDirty = false;
+
     // Puntos de contacto LOCALES de la FORMA REAL del objeto (vértices del casco convexo). Si está
     // VACÍO y shape==Box, se usan las 8 esquinas de halfExtents. Rellénalo para que la colisión con el
     // terreno siga la forma REAL (no solo esfera/caja): cada vértice se prueba contra el suelo. Es el
@@ -102,11 +120,16 @@ public:
     // Obstáculos colocados (paredes/estructuras) — para navegación/propagación (sonido, conjuros).
     const std::vector<StaticOBB>& getPlacedOBBs() const { return placedOBBs; }
     void clearPlacedOBBs();
+    /** @brief Sube cada vez que cambia el mundo ESTÁTICO. Jolt reconstruye sus cuerpos estáticos solo
+     *  cuando cambia — son estáticos y tocarlos es raro (colocar/romper), no cosa de cada frame. */
+    uint64_t staticsVersion() const { return m_staticsVersion; }
 
     /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
      *  regeneran al moverse, independiente de los objetos colocados. */
     void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
     void clearPropOBBs();
+    const std::vector<StaticOBB>& getPropOBBs()    const { return propOBBs; }
+    const std::vector<StaticBox>& getStaticBoxes() const { return staticBoxes; }
     /** @brief Empuja una esfera fuera de los OBB colocados (te subes encima o te frena).
      *  Devuelve el centro corregido; pone grounded=true si el empuje fue a favor de 'up'. */
     glm::dvec3 resolveSphere(const glm::dvec3& center, double radius,
@@ -202,6 +225,7 @@ private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
     std::vector<StaticBox>                  staticBoxes;
     std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
+    uint64_t                                m_staticsVersion = 0;  // ver staticsVersion()
     std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
@@ -220,6 +244,11 @@ private:
     IWorldProvider* m_world = nullptr;
     double gravitationalConstant = 6.67430e-11;
     double m_accum = 0.0;   // acumulador del timestep fijo (ver advance)
+
+    // Fase 1 — wrapper de Jolt (PIMPL): Jolt NO aparece en este header (forward-decl). Solo se crea si
+    // se compiló con HARUKA_HAS_JOLT; si no, `m_jolt` queda null y el motor usa el solver a mano.
+    struct JoltImpl;
+    std::unique_ptr<JoltImpl> m_jolt;
 
     /** @brief Integrates external forces for all bodies. */
     void integrateForces(double dt);

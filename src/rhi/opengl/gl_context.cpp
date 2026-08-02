@@ -5,9 +5,15 @@
 #include "rhi/opengl/gl_context.h"
 #include "rhi/opengl/gl_device.h"
 #include <cstdio>
+#include <algorithm>
 
 namespace Haruka::RHI::opengl
 {
+    GLContext::~GLContext()
+    {
+        if (m_cubeFbo) glDeleteFramebuffers(1, &m_cubeFbo);
+    }
+
     void GLContext::beginRenderPass(RenderPassHandle target, const ClearValues& c)
     {
         if (target.id == 0)
@@ -30,6 +36,38 @@ namespace Haruka::RHI::opengl
         if (c.clearDepth)
         {
             glDepthMask(GL_TRUE);                            // clear de depth requiere write habilitado
+            glClearDepth(c.depth);
+            mask |= GL_DEPTH_BUFFER_BIT;
+        }
+        if (mask) glClear(mask);
+    }
+
+    void GLContext::beginRenderPassCubemapFace(TextureHandle th, int face, int mipLevel, const ClearValues& c)
+    {
+        const GLTexture* t = m_device->texture(th);
+        if (!t) return;
+        if (!m_cubeFbo) glGenFramebuffers(1, &m_cubeFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_cubeFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_CUBE_MAP_POSITIVE_X + face, t->id, mipLevel);
+        // size from the texture dimensions (top-level, mip-scaled)
+        GLint w = 0, h = 0;
+        glGetTextureLevelParameteriv(t->id, 0, GL_TEXTURE_WIDTH, &w);
+        glGetTextureLevelParameteriv(t->id, 0, GL_TEXTURE_HEIGHT, &h);
+        int fw = std::max(1, w >> mipLevel);
+        int fh = std::max(1, h >> mipLevel);
+        glViewport(0, 0, (GLsizei)fw, (GLsizei)fh);
+
+        GLbitfield mask = 0;
+        if (c.clearColor)
+        {
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            glClearColor(c.color[0], c.color[1], c.color[2], c.color[3]);
+            mask |= GL_COLOR_BUFFER_BIT;
+        }
+        if (c.clearDepth)
+        {
+            glDepthMask(GL_TRUE);
             glClearDepth(c.depth);
             mask |= GL_DEPTH_BUFFER_BIT;
         }
@@ -67,6 +105,11 @@ namespace Haruka::RHI::opengl
         glUseProgram(p->program);
         if (p->compute) return;   // los pipelines de compute no tienen estado de rasterizado
 
+        // Tamaño del parche de TESELACIÓN. Va aquí y no en el draw porque glPatchParameteri es
+        // estado GLOBAL de GL: puesto en el draw, dos pipelines de teselación con distinto tamaño
+        // de parche se pisarían, y el síntoma sería geometría rota en el segundo — lejos de la causa.
+        if (p->patchVertices > 0) glPatchParameteri(GL_PATCH_VERTICES, p->patchVertices);
+
         if (p->depth.test)
         {
             glEnable(GL_DEPTH_TEST);
@@ -76,6 +119,22 @@ namespace Haruka::RHI::opengl
         else
         {
             glDisable(GL_DEPTH_TEST);
+        }
+
+        // Sesgo de profundidad para superficies coplanares a propósito. Se resetea SIEMPRE (rama
+        // else) porque glPolygonOffset es estado global: dejarlo puesto contaminaría cualquier
+        // pipeline que viniera detrás, y el síntoma —una malla que se hunde en otra tres draws más
+        // allá— no apunta a esta línea.
+        if (p->depth.biasConstant != 0.0f || p->depth.biasSlope != 0.0f)
+        {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glEnable(GL_POLYGON_OFFSET_LINE);   // para que el wireframe de depuración coincida
+            glPolygonOffset(p->depth.biasSlope, p->depth.biasConstant);
+        }
+        else
+        {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            glDisable(GL_POLYGON_OFFSET_LINE);
         }
 
         if (p->blend.enable)
@@ -187,5 +246,55 @@ namespace Haruka::RHI::opengl
     {
         glDispatchCompute(x, y, z);
         glMemoryBarrier(GL_ALL_BARRIER_BITS);   // conservador: asegura visibilidad tras el compute
+    }
+
+    void GLContext::blitDepth(RenderPassHandle src, RenderPassHandle dst, int w, int h)
+    {
+        const GLuint srcFBO = (src.id == 0) ? 0 : (m_device->renderTarget(src) ? m_device->renderTarget(src)->fbo : 0);
+        const GLuint dstFBO = (dst.id == 0) ? 0 : (m_device->renderTarget(dst) ? m_device->renderTarget(dst)->fbo : 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFBO);
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    }
+
+    void GLContext::blitColor(RenderPassHandle src, RenderPassHandle dst, int w, int h)
+    {
+        const GLuint srcFBO = (src.id == 0) ? 0 : (m_device->renderTarget(src) ? m_device->renderTarget(src)->fbo : 0);
+        const GLuint dstFBO = (dst.id == 0) ? 0 : (m_device->renderTarget(dst) ? m_device->renderTarget(dst)->fbo : 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, srcFBO);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dstFBO);
+        glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+
+    void GLContext::memoryBarrier(uint32_t /*barriers*/)
+    {
+        glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    }
+
+    // ------------------------------------------------------------------ fences
+    FenceHandle GLContext::signalFence()
+    {
+        GLsync sync = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (!sync) return {};
+        GLFence f;
+        f.sync = sync;
+        return FenceHandle{ GLDevice::alloc(m_device->m_fences, m_device->m_freeFences, f) };
+    }
+
+    bool GLContext::waitFence(FenceHandle h, uint64_t timeoutNs)
+    {
+        const GLFence* f = m_device->fence(h);
+        if (!f || !f->sync) return true;
+        GLbitfield flags = (timeoutNs == 0) ? 0 : GL_SYNC_FLUSH_COMMANDS_BIT;
+        GLuint64 t = (timeoutNs == UINT64_MAX) ? GL_TIMEOUT_IGNORED : (GLuint64)timeoutNs;
+        GLenum r = glClientWaitSync(f->sync, flags, t);
+        return (r == GL_ALREADY_SIGNALED || r == GL_CONDITION_SATISFIED);
+    }
+
+    void GLContext::deleteFence(FenceHandle h)
+    {
+        const GLFence* f = m_device->fence(h);
+        if (f && f->sync) glDeleteSync(f->sync);
+        GLDevice::release(m_device->m_fences, m_device->m_freeFences, h.id);
     }
 }

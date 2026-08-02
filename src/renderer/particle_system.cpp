@@ -96,11 +96,6 @@ void ParticleSystem::render(const glm::dvec3& camPos) {
     ctx->bindPipeline(m_pso);          // programa + blend aditivo + depth/point-size
     ctx->bindVertexBuffer(m_vboH);
     ctx->draw((uint32_t)m_parts.size());
-
-    // Transición: el resto del frame sigue en GL directo y espera este estado.
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-    glBindVertexArray(0);
 }
 
 } // namespace Haruka

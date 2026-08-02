@@ -7,7 +7,6 @@
  */
 #include <vector>
 #include <memory>
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include "rhi/rhi_types.h"
 

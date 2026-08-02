@@ -4,8 +4,12 @@
  *
  * El Device vive todo el programa. La fábrica Device::create elige el backend concreto
  * (GLDevice / VKDevice) y devuelve la interfaz. El resto del motor solo ve esta clase.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
  */
 #pragma once
+#include <string>
 
 #include "rhi_types.h"
 #include "rhi_resources.h"
@@ -80,6 +84,16 @@ namespace Haruka::RHI
             virtual void     endFrame() = 0;
 
             virtual Backend backend() const = 0;
+
+            /** @brief Updates a single face of a cubemap texture with pixel data.
+             *  Used by IBL sky generation. The texture must have been created with cube=true. */
+            virtual void updateCubemapFace(TextureHandle tex, int face, int width, int height,
+                                            Format format, const void* data) = 0;
+
+            /** @brief Lee píxeles del framebuffer activo a RAM (screenshots).
+             *  x,y,w,h = región en píxeles. format = RGBA8 o R32F (depth). data debe tener tamaño suficiente.
+             *  ⚠️ Sincroniza con la GPU (glReadPixels). Solo para depuración/capturas. */
+            virtual void readPixels(int x, int y, int w, int h, Format format, void* data) = 0;
     };
 
     // -----------------------------------------------------------------------------------
@@ -89,4 +103,13 @@ namespace Haruka::RHI
     // -----------------------------------------------------------------------------------
     Device* device();
     void    setDevice(Device*);
+
+    /**
+     * @brief Raíz donde se resuelven los `#include "..."` de los shaders (con "/" final).
+     *
+     * GLSL no tiene #include, así que lo resuelve el backend por texto antes de compilar. Sin una
+     * raíz, un shader COMPILADO DESDE CADENA (los inline del SimplePlanet) no tendría contra qué
+     * resolver: no hay fichero del que colgar la ruta relativa. La fija `Shader::setBaseDir`.
+     */
+    void setShaderIncludeDir(const std::string&);
 }

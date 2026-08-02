@@ -66,29 +66,33 @@ void PrimitiveShapes::createCube(float size, std::vector<glm::vec3>& vertices, s
 
     float s = size / 2.0f;
 
-    // Crear 24 vértices (4 por cara, para normales per-face)
+    // Crear 24 vértices (4 por cara, para normales per-face).
+    // ⚠️ Los 4 vértices de CADA cara deben listarse en el MISMO sentido de giro, porque los índices de
+    // abajo aplican un único patrón a todas. Frontal/Izquierda/Inferior estaban al revés que las otras
+    // tres → su triángulo salía con la normal hacia DENTRO y `glFrontFace(GL_CCW)` + descarte de caras
+    // traseras las borraba al mirar el cubo desde fuera. Síntoma: paredes que solo se ven desde dentro.
     // Back face (z = -s)
-    vertices.push_back({-s, -s, -s}); vertices.push_back({s, -s, -s}); 
+    vertices.push_back({-s, -s, -s}); vertices.push_back({s, -s, -s});
     vertices.push_back({s, s, -s}); vertices.push_back({-s, s, -s});
-    
+
     // Front face (z = s)
-    vertices.push_back({-s, -s, s}); vertices.push_back({s, -s, s}); 
-    vertices.push_back({s, s, s}); vertices.push_back({-s, s, s});
-    
-    // Left face (x = -s)
-    vertices.push_back({-s, -s, -s}); vertices.push_back({-s, -s, s}); 
-    vertices.push_back({-s, s, s}); vertices.push_back({-s, s, -s});
-    
-    // Right face (x = s)
-    vertices.push_back({s, -s, -s}); vertices.push_back({s, -s, s}); 
-    vertices.push_back({s, s, s}); vertices.push_back({s, s, -s});
-    
-    // Bottom face (y = -s)
-    vertices.push_back({-s, -s, -s}); vertices.push_back({s, -s, -s}); 
+    vertices.push_back({-s, s, s}); vertices.push_back({s, s, s});
     vertices.push_back({s, -s, s}); vertices.push_back({-s, -s, s});
-    
+
+    // Left face (x = -s)
+    vertices.push_back({-s, s, -s}); vertices.push_back({-s, s, s});
+    vertices.push_back({-s, -s, s}); vertices.push_back({-s, -s, -s});
+
+    // Right face (x = s)
+    vertices.push_back({s, -s, -s}); vertices.push_back({s, -s, s});
+    vertices.push_back({s, s, s}); vertices.push_back({s, s, -s});
+
+    // Bottom face (y = -s)
+    vertices.push_back({-s, -s, s}); vertices.push_back({s, -s, s});
+    vertices.push_back({s, -s, -s}); vertices.push_back({-s, -s, -s});
+
     // Top face (y = s)
-    vertices.push_back({-s, s, -s}); vertices.push_back({s, s, -s}); 
+    vertices.push_back({-s, s, -s}); vertices.push_back({s, s, -s});
     vertices.push_back({s, s, s}); vertices.push_back({-s, s, s});
 
     // Normals (una por cara, aplicada a los 4 vértices de esa cara)

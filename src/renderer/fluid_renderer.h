@@ -9,7 +9,6 @@
  */
 #pragma once
 
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
@@ -31,7 +30,8 @@ public:
 
     /** @brief Uploads particle positions and draws the fluid. Per-frame UBO
      *  (binding 0) must already be bound. vpW/vpH = framebuffer size in pixels. */
-    void render(const Haruka::WorldPos& cameraPos, int vpW, int vpH);
+    void render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
+                Haruka::RHI::RenderPassHandle scenePass = {});
 
     // Switch between the screen-space surface (true) and the sphere fallback.
     static inline bool s_surfaceMode = true;
@@ -66,9 +66,6 @@ private:
     FluidParamsUBO            m_params{};
     Haruka::RHI::BufferHandle m_uboParams;
 
-    GLuint m_depthFBO = 0, m_depthTex = 0;
-    GLuint m_smoothFBO[2] = {0, 0}, m_smoothTex[2] = {0, 0};
-    GLuint m_sceneCopyFBO = 0, m_sceneCopyTex = 0; // copy of scene colour (refraction)
     int    m_fbW = 0, m_fbH = 0;
 
     void ensureGL();

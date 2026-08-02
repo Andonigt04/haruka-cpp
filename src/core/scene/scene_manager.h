@@ -1,17 +1,28 @@
+/**
+ * @file scene_manager.h
+ * @brief Gestión de escenas: carga, almacenamiento y acceso a objetos del universo.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
+ */
 #pragma once
 
 #include <vector>
 #include <string>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <unordered_map>
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <any>
 
 #include "tools/math_types.h"
+#include "tools/object_types.h"
 
 namespace Haruka {
 
@@ -45,18 +56,16 @@ namespace Haruka {
         bool enabled = true;
     };
 
-    struct TerrainLayerSettings {
-        double freq = 0.0;
-        int octaves = 0;
-        double strength = 0.0;
-    };
+    // (Aquí estaba `TerrainLayerSettings` {freq, octaves, strength} y el mapa `layers` de
+    //  TerrainGeneratorSettings: los parámetros por capa de ruido del generador v1. Ese generador se
+    //  borró —la altura sale de la cadena geología→erosión→campo— y con él el esquema entero. Lo que
+    //  la escena sí sigue autorizando viaja en `rawConfig` sin filtrar.)
 
     struct TerrainGeneratorSettings {
         std::string type;
         std::string shader;
         int seed = 0;
         int chunkSize = 0;
-        std::unordered_map<std::string, TerrainLayerSettings> layers;
         // Raw "config" JSON straight from the scene, UNFILTERED. The typed fields
         // above are a convenience subset; rawConfig preserves every parameter
         // (landHeight, oceanDepth, sharpness, belt, trench, future sandbox keys…)
@@ -68,10 +77,20 @@ namespace Haruka {
      * @brief Representación unificada de cualquier entidad en el universo.
      * Diseñado para soportar desde pequeñas naves hasta planetas procedurales.
      */
+    /** @brief Id ÚNICO y creciente por objeto. Hace falta porque la cola de render guarda punteros a
+     *  objetos que pueden DESTRUIRSE: comparar por puntero no vale (una dirección liberada se reutiliza
+     *  para el objeto siguiente y se confundirían) y desreferenciarlo para comprobarlo sería peor. */
+    inline uint64_t nextSceneObjectUid() {
+        static std::atomic<uint64_t> s_next{1};
+        return s_next.fetch_add(1, std::memory_order_relaxed);
+    }
+
     struct SceneObject {
         // Identificación
+        uint64_t    uid = nextSceneObjectUid();   // identidad estable (ver nextSceneObjectUid)
         std::string name;
         std::string type; // "CelestialBody", "Planet", "Spacecraft", "Camera", etc.
+        ObjectType  objectType = ObjectType::UNKNOWN; // clasificación rápida para dispatch
         std::string templateName; // El arquetipo del que hereda (opcional)
 
         // Transformación con precisión astronómica (double precision)
@@ -79,6 +98,12 @@ namespace Haruka {
         Haruka::WorldPos position = Haruka::WorldPos(0.0);
         Haruka::Rotation rotation = Haruka::Rotation(); // Euler angles en grados
         Haruka::DScale   scale    = Haruka::DScale(1.0);
+        // ORIENTACIÓN EXACTA (opcional). Quien ya tiene un cuaternión NO debe pasarlo por Euler: el
+        // viaje quat→Euler→matriz se degrada en la singularidad del cardán y devuelve orientaciones
+        // basura (síntoma: piezas de un muro entero desperdigadas y girando mal). Con `useOrientation`
+        // el render usa este cuaternión tal cual y se salta `rotation`.
+        glm::dquat orientation{1.0, 0.0, 0.0, 0.0};
+        bool       useOrientation = false;
 
         
         glm::dvec3 color = glm::dvec3(1.0);
@@ -95,6 +120,7 @@ namespace Haruka {
         std::optional<LODSettings> lodSettings;      // Configuración de distancias o QuadTree
         std::optional<StreamingSettings> streamingSettings;// Modo (Disk/Procedural) y prioridad
         std::optional<TerrainGeneratorSettings> terrainSettings;  // Terreno procedural del objeto
+        nlohmann::json surfaceConfig;       // Surface texture config (albedo/normal/height paths)
         nlohmann::json components;       // Luces, scripts, colisionadores
         nlohmann::json properties;       // Metadatos extra (velocidad, facción, etc.)
 
@@ -119,6 +145,10 @@ namespace Haruka {
             }
             return defaultValue;
         }
+
+        /** @brief Dato arbitrario del juego asociado a este objeto (mineral data, AI state, etc.).
+         *  No se serializa — es solo para runtime. */
+        std::any userData;
     };
 
     /**
@@ -196,6 +226,18 @@ namespace Haruka {
          */
         const std::vector<std::shared_ptr<SceneObject>>& getAllObjects() const {
             return m_objects;
+        }
+
+        /**
+         * @brief Crea un objeto con tipo inferido del string type.
+         * El ObjectType se deduce automáticamente vía classifyObjectType().
+         */
+        std::shared_ptr<SceneObject> createObject(const std::string& name, const std::string& type) {
+            auto obj = std::make_shared<SceneObject>();
+            obj->name = name;
+            obj->type = type;
+            obj->objectType = Haruka::classifyObjectType(type);
+            return obj;
         }
 
         /**

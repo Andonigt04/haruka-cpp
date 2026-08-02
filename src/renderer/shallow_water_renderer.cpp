@@ -131,10 +131,6 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     ctx->bindIndexBuffer(m_eboH);
     ctx->bindUniformBuffer(6, m_uboH);
     ctx->drawIndexed((uint32_t)m_indices.size());
-
-    // Transición: el resto del frame sigue en GL directo y espera este estado.
-    glDisable(GL_BLEND);
-    glBindVertexArray(0);
 }
 
 } // namespace Haruka

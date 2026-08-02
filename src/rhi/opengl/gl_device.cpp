@@ -10,6 +10,8 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include "core/logger.h"
+#include "core/asset_paths.h"
 
 namespace Haruka::RHI::opengl
 {
@@ -29,9 +31,81 @@ namespace Haruka::RHI::opengl
         {
             char log[1024] = {0};
             glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
-            std::fprintf(stderr, "[RHI/GL] SPIR-V specialize error: %s\n", log);
+            HARUKA_LOGE("RHI/GL", "SPIR-V specialize error: %s", log);
         }
         return sh;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // #include para GLSL. GLSL no lo tiene (ARB_shading_language_include existe pero apenas se
+    // implementa), así que el terreno vivía DUPLICADO: `planet.frag` y el shader inline del
+    // SimplePlanet eran dos copias del mismo look, y cada ajuste había que hacerlo dos veces —
+    // exactamente la clase de duplicación que en este motor ya produjo "tres suelos" y "dos climas".
+    // Resolución textual, relativa a `assets/shaders/`, con tope de profundidad para que un include
+    // circular falle en vez de colgar el arranque.
+    // ------------------------------------------------------------------------------------------
+    static std::string resolveIncludes(const std::string& src, const std::string& baseDir, int depth = 0)
+    {
+        if (src.find("#include") == std::string::npos) return src;   // caso común: sin coste
+        if (depth > 8) {
+            HARUKA_LOGE("RHI/GL", "#include: profundidad > 8 (¿ciclo?)");
+            return src;
+        }
+        std::string out;
+        out.reserve(src.size() + 4096);
+        size_t pos = 0;
+        while (pos < src.size()) {
+            size_t eol  = src.find('\n', pos);
+            if (eol == std::string::npos) eol = src.size();
+            std::string line = src.substr(pos, eol - pos);
+
+            // La extensión que habilita #include en glslc/glslangValidator NO la reconoce el
+            // compilador GLSL del driver: se retira aquí, después de haber servido para que el
+            // build valide el fichero.
+            if (line.find("GL_GOOGLE_include_directive") != std::string::npos) {
+                pos = eol + 1;
+                continue;
+            }
+
+            size_t h = line.find("#include");
+            // Solo si `#include` abre la línea (sin contar espacios): así una mención dentro de un
+            // comentario o de una cadena no dispara una carga de fichero.
+            size_t firstNonWs = line.find_first_not_of(" \t");
+            if (h != std::string::npos && firstNonWs == h) {
+                size_t q0 = line.find('"', h);
+                size_t q1 = (q0 == std::string::npos) ? std::string::npos : line.find('"', q0 + 1);
+                if (q0 != std::string::npos && q1 != std::string::npos) {
+                    const std::string rel  = line.substr(q0 + 1, q1 - q0 - 1);
+                    const std::string full = baseDir + rel;
+                    std::ifstream inc(full);
+                    if (inc.is_open()) {
+                        std::string body((std::istreambuf_iterator<char>(inc)),
+                                          std::istreambuf_iterator<char>());
+                        out += resolveIncludes(body, baseDir, depth + 1);
+                        out += '\n';
+                    } else {
+                        HARUKA_LOGE("RHI/GL", "#include no encontrado: %s", full.c_str());
+                    }
+                    pos = eol + 1;
+                    continue;
+                }
+            }
+            out += line;
+            out += '\n';
+            pos = eol + 1;
+        }
+        return out;
+    }
+
+    // Raíz de resolución de los #include. La fija `RHI::setShaderIncludeDir` (ver rhi_device.cpp).
+    // Fallback: si nadie la fijó (juego standalone que no pasa por Shader::setBaseDir), se deriva
+    // de AssetPaths::shaders(), que SIEMPRE devuelve una raíz válida (absoluta si el motor la fijó,
+    // o "assets/shaders/" relativa al cwd — el ejecutable hace `cd` a su directorio).
+    std::string& shaderIncludeDir() {
+        static std::string s;
+        if (s.empty())
+            s = Haruka::AssetPaths::shaders();
+        return s;
     }
 
     // Carga una etapa desde ruta COMPLETA, prefiriendo GLSL source y cayendo a ".spv".
@@ -45,13 +119,14 @@ namespace Haruka::RHI::opengl
         if (std::ifstream g(fullPath); g.is_open())
         {
             std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
+            src = resolveIncludes(src, shaderIncludeDir());
             const char* p = src.c_str();
             GLuint sh = glCreateShader(stage);
             glShaderSource(sh, 1, &p, nullptr);
             glCompileShader(sh);
             GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
             if (!ok) { char log[1024] = {0}; glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
-                       std::fprintf(stderr, "[RHI/GL] GLSL compile [%s]: %s\n", fullPath, log); }
+                       HARUKA_LOGE("RHI/GL", "GLSL compile [%s]: %s", fullPath, log); }
             return sh;
         }
 
@@ -64,7 +139,7 @@ namespace Haruka::RHI::opengl
             return compileSpirv(stage, buf.data(), (size_t)n);
         }
 
-        std::fprintf(stderr, "[RHI/GL] shader no encontrado: %s (ni %s)\n", fullPath, spv.c_str());
+        HARUKA_LOGW("RHI/GL", "shader no encontrado: %s (ni %s)", fullPath, spv.c_str());
         return 0;
     }
 
@@ -72,12 +147,14 @@ namespace Haruka::RHI::opengl
     static GLuint compileFromSource(GLenum stage, const char* source)
     {
         if (!source) return 0;
+        const std::string src = resolveIncludes(source, shaderIncludeDir());
+        const char* p = src.c_str();
         GLuint sh = glCreateShader(stage);
-        glShaderSource(sh, 1, &source, nullptr);
+        glShaderSource(sh, 1, &p, nullptr);
         glCompileShader(sh);
         GLint ok = 0; glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
         if (!ok) { char log[1024] = {0}; glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
-                   std::fprintf(stderr, "[RHI/GL] GLSL source compile: %s\n", log); }
+                   HARUKA_LOGE("RHI/GL", "GLSL source compile: %s", log); }
         return sh;
     }
 
@@ -92,7 +169,7 @@ namespace Haruka::RHI::opengl
         {
             char log[1024] = {0};
             glGetProgramInfoLog(program, sizeof(log), nullptr, log);
-            std::fprintf(stderr, "[RHI/GL] program link error: %s\n", log);
+            HARUKA_LOGE("RHI/GL", "program link error: %s", log);
         }
         return ok != 0;
     }
@@ -118,12 +195,12 @@ namespace Haruka::RHI::opengl
             m_glContext = SDL_GL_CreateContext(m_window);
             if (!m_glContext)
             {
-                std::fprintf(stderr, "[RHI/GL] SDL_GL_CreateContext falló: %s\n", SDL_GetError());
+                HARUKA_LOGE("RHI/GL", "SDL_GL_CreateContext falló: %s", SDL_GetError());
                 return;
             }
             if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress))
             {
-                std::fprintf(stderr, "[RHI/GL] gladLoadGLLoader falló\n");
+                HARUKA_LOGE("RHI/GL", "gladLoadGLLoader falló");
                 return;
             }
             glEnable(GL_DEPTH_TEST);
@@ -199,12 +276,20 @@ namespace Haruka::RHI::opengl
     TextureHandle GLDevice::createTexture(const TextureDesc& d)
     {
         GLTexture t;
-        glCreateTextures(d.cube ? GL_TEXTURE_CUBE_MAP : GL_TEXTURE_2D, 1, &t.id);
+        const bool isArray = (d.layers > 1) && !d.cube;
+        const GLenum target = d.cube ? GL_TEXTURE_CUBE_MAP
+                                     : (isArray ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D);
+        glCreateTextures(target, 1, &t.id);
+        t.target = target;
         GLTexFmt fmt = texFmt(d.format);
         GLsizei levels = (d.mipmaps && d.width && d.height) ? mipLevels(d.width, d.height) : 1;
         // glTextureStorage2D asigna las 6 caras si el target es cubemap (una llamada). El render
         // por-cara (attach a FBO) lo hace el llamador (p.ej. IBL) contra la textura inmutable.
-        glTextureStorage2D(t.id, levels, fmt.internal, (GLsizei)d.width, (GLsizei)d.height);
+        if (isArray)
+            glTextureStorage3D(t.id, levels, fmt.internal, (GLsizei)d.width, (GLsizei)d.height,
+                               (GLsizei)d.layers);
+        else
+            glTextureStorage2D(t.id, levels, fmt.internal, (GLsizei)d.width, (GLsizei)d.height);
         if (d.cube) glTextureParameteri(t.id, GL_TEXTURE_WRAP_R, toWrap(d.wrap));
 
         if (d.initialData)
@@ -212,7 +297,12 @@ namespace Haruka::RHI::opengl
             // Alinea filas a 1 byte: sin esto, un RGB8 de anchura no-múltiplo-de-4 sale sesgado
             // (GL_UNPACK_ALIGNMENT por defecto = 4). Robusto para cualquier formato/anchura.
             glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            glTextureSubImage2D(t.id, 0, 0, 0, (GLsizei)d.width, (GLsizei)d.height, fmt.format, fmt.type, d.initialData);
+            if (isArray)
+                // Las capas van CONTIGUAS en initialData: una sola subida para todo el array.
+                glTextureSubImage3D(t.id, 0, 0, 0, 0, (GLsizei)d.width, (GLsizei)d.height,
+                                    (GLsizei)d.layers, fmt.format, fmt.type, d.initialData);
+            else
+                glTextureSubImage2D(t.id, 0, 0, 0, (GLsizei)d.width, (GLsizei)d.height, fmt.format, fmt.type, d.initialData);
             glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
         }
 
@@ -248,8 +338,7 @@ namespace Haruka::RHI::opengl
         glSamplerParameteri(s.id, GL_TEXTURE_WRAP_T, toWrap(d.wrap));
         if (d.maxAnisotropy > 1.0f)
             glSamplerParameterf(s.id, GL_TEXTURE_MAX_ANISOTROPY, d.maxAnisotropy);
-        m_samplers.push_back(s);
-        return SamplerHandle{ (uint32_t)m_samplers.size() };
+        return SamplerHandle{ alloc(m_samplers, m_freeSamplers, s) };
     }
 
     // ------------------------------------------------------------------ pipelines
@@ -271,7 +360,7 @@ namespace Haruka::RHI::opengl
         if (d.computeSource || d.computePath || d.spirvCompute)
         {
             GLuint cs = stage(GL_COMPUTE_SHADER, d.computeSource, d.computePath, d.spirvCompute, d.spirvComputeSize);
-            if (!cs) { std::fprintf(stderr, "[RHI/GL] createPipeline: falta la etapa COMPUTE\n"); return {}; }
+            if (!cs) { HARUKA_LOGE("RHI/GL", "createPipeline: falta la etapa COMPUTE"); return {}; }
             p.program = glCreateProgram();
             glAttachShader(p.program, cs);
             glLinkProgram(p.program);
@@ -285,27 +374,50 @@ namespace Haruka::RHI::opengl
             GLuint vs = stage(GL_VERTEX_SHADER,   d.vertexSource,   d.vertexPath,   d.spirvVertex,   d.spirvVertexSize);
             GLuint fs = stage(GL_FRAGMENT_SHADER, d.fragmentSource, d.fragmentPath, d.spirvFragment, d.spirvFragmentSize);
             GLuint gs = stage(GL_GEOMETRY_SHADER, nullptr,          d.geometryPath, d.spirvGeometry, d.spirvGeometrySize);
+            // TESELACIÓN: control y evaluación. Van juntas o ninguna — GL rechaza un programa con
+            // control sin evaluación, y el error que da ("tessellation control shader must be
+            // paired") no dice cuál falta.
+            const bool wantsTess = d.tessControlSource || d.tessControlPath ||
+                                   d.tessEvalSource    || d.tessEvalPath;
+            GLuint tcs = 0, tes = 0;
+            if (wantsTess)
+            {
+                tcs = stage(GL_TESS_CONTROL_SHADER,    d.tessControlSource, d.tessControlPath, nullptr, 0);
+                tes = stage(GL_TESS_EVALUATION_SHADER, d.tessEvalSource,    d.tessEvalPath,    nullptr, 0);
+            }
             // Una etapa a 0 = shader no encontrado o que no compila (la causa ya se logueó). Enlazar
             // igualmente produce un programa NO linkado que solo revienta en el draw → abortar aquí.
-            if (!vs || !fs)
+            if (!vs || !fs || (wantsTess && (!tcs || !tes)))
             {
-                std::fprintf(stderr, "[RHI/GL] createPipeline: etapa invalida (vs=%u fs=%u). "
-                                     "¿La ruta esta enraizada con el base dir de assets?\n", vs, fs);
+                HARUKA_LOGE("RHI/GL", "createPipeline: etapa invalida (vs=%u fs=%u tcs=%u tes=%u). "
+                           "¿La ruta esta enraizada con el base dir de assets?", vs, fs, tcs, tes);
                 if (vs) glDeleteShader(vs);
                 if (fs) glDeleteShader(fs);
                 if (gs) glDeleteShader(gs);
+                if (tcs) glDeleteShader(tcs);
+                if (tes) glDeleteShader(tes);
                 return {};
             }
             p.program = glCreateProgram();
             glAttachShader(p.program, vs);
             glAttachShader(p.program, fs);
-            if (gs) glAttachShader(p.program, gs);
+            if (gs)  glAttachShader(p.program, gs);
+            if (tcs) glAttachShader(p.program, tcs);
+            if (tes) glAttachShader(p.program, tes);
             glLinkProgram(p.program);
             const bool linked = checkLink(p.program);
             glDeleteShader(vs);
             glDeleteShader(fs);
-            if (gs) glDeleteShader(gs);
+            if (gs)  glDeleteShader(gs);
+            if (tcs) glDeleteShader(tcs);
+            if (tes) glDeleteShader(tes);
             if (!linked) { glDeleteProgram(p.program); return {}; }
+
+            // Tamaño del parche. Se guarda en el pipeline y lo aplica bindPipeline: en GL
+            // glPatchParameteri es estado GLOBAL, así que si lo pusiera el draw, dos pipelines de
+            // teselación con distinto tamaño de parche se pisarían el uno al otro.
+            if (d.topology == PrimitiveTopology::Patches)
+                p.patchVertices = (GLint)(d.patchVertices > 0 ? d.patchVertices : 4);
 
             // VAO con SOLO el formato de los atributos (DSA). El buffer se ata en el draw
             // vía glVertexArrayVertexBuffer -> desacopla layout de datos (mapea a Vulkan).
@@ -334,8 +446,7 @@ namespace Haruka::RHI::opengl
             p.topology = toTopology(d.topology);
         }
 
-        m_pipelines.push_back(p);
-        return PipelineHandle{ (uint32_t)m_pipelines.size() };
+        return PipelineHandle{ alloc(m_pipelines, m_freePipelines, p) };
     }
 
     // ------------------------------------------------------------------ render targets
@@ -414,11 +525,10 @@ namespace Haruka::RHI::opengl
         }
 
         if (glCheckNamedFramebufferStatus(rt.fbo, GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            std::fprintf(stderr, "[RHI/GL] framebuffer incompleto (%ux%u, %zu color)\n",
+            HARUKA_LOGE("RHI/GL", "framebuffer incompleto (%ux%u, %zu color)",
                          d.width, d.height, d.colorFormats.size());
 
-        m_targets.push_back(rt);
-        return RenderPassHandle{ (uint32_t)m_targets.size() };
+        return RenderPassHandle{ alloc(m_targets, m_freeTargets, rt) };
     }
 
     TextureHandle GLDevice::getColorTexture(RenderPassHandle h, uint32_t index)
@@ -464,10 +574,10 @@ namespace Haruka::RHI::opengl
     }
 
     // ------------------------------------------------------------------ destrucción
-    // v1: libera el objeto GL pero NO recicla el slot (id estable durante la sesión).
+    // libera el objeto GL y recicla el slot (free-list).
     void GLDevice::destroy(BufferHandle h)   { if (const GLBuffer* b = buffer(h))   { GLuint id = b->id;  if (b->mapped) glUnmapNamedBuffer(id); glDeleteBuffers(1, &id);  release(m_buffers, m_freeBuffers, h.id); } }
     void GLDevice::destroy(TextureHandle h)  { if (const GLTexture* t = texture(h)) { GLuint id = t->id;  glDeleteTextures(1, &id); release(m_textures, m_freeTextures, h.id); } }
-    void GLDevice::destroy(SamplerHandle h)  { if (const GLSampler* s = sampler(h)) { GLuint id = s->id;  glDeleteSamplers(1, &id); const_cast<GLSampler*>(s)->id = 0; } }
+    void GLDevice::destroy(SamplerHandle h)  { if (const GLSampler* s = sampler(h)) { GLuint id = s->id;  glDeleteSamplers(1, &id); release(m_samplers, m_freeSamplers, h.id); } }
 
     void GLDevice::destroy(PipelineHandle h)
     {
@@ -475,7 +585,7 @@ namespace Haruka::RHI::opengl
         {
             if (p->program) glDeleteProgram(p->program);
             if (p->vao)     { GLuint vao = p->vao; glDeleteVertexArrays(1, &vao); }
-            GLPipeline* mp = const_cast<GLPipeline*>(p); mp->program = 0; mp->vao = 0;
+            release(m_pipelines, m_freePipelines, h.id);
         }
     }
 
@@ -487,8 +597,7 @@ namespace Haruka::RHI::opengl
             if (RHI::valid(rt->depthTex)) destroy(rt->depthTex);
             if (rt->fbo)      { GLuint fbo = rt->fbo; glDeleteFramebuffers(1, &fbo); }
             if (rt->depthRbo) { GLuint rbo = rt->depthRbo; glDeleteRenderbuffers(1, &rbo); }
-            GLRenderTarget* mrt = const_cast<GLRenderTarget*>(rt);
-            mrt->colors.clear(); mrt->depthTex = {}; mrt->fbo = 0; mrt->depthRbo = 0;
+            release(m_targets, m_freeTargets, h.id);
         }
     }
 
@@ -501,5 +610,30 @@ namespace Haruka::RHI::opengl
     void GLDevice::endFrame()
     {
         SDL_GL_SwapWindow(m_window);
+    }
+
+    void GLDevice::readPixels(int x, int y, int w, int h, Format format, void* data)
+    {
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        if (format == Format::RGBA8) {
+            glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        } else if (format == Format::R32F) {
+            glReadPixels(x, y, w, h, GL_DEPTH_COMPONENT, GL_FLOAT, data);
+        } else if (format == Format::RGB8) {
+            glReadPixels(x, y, w, h, GL_RGB, GL_UNSIGNED_BYTE, data);
+        }
+    }
+
+    void GLDevice::updateCubemapFace(TextureHandle th, int face, int width, int height,
+                                      Format format, const void* data)
+    {
+        const GLTexture* t = texture(th);
+        if (!t) return;
+        GLTexFmt fmt = texFmt(format);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        // Use glTextureSubImage3D with the face as the z-offset (layer).
+        glTextureSubImage3D(t->id, 0, 0, 0, face, (GLsizei)width, (GLsizei)height, 1,
+                            fmt.format, fmt.type, data);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     }
 }

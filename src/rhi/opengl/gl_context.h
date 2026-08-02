@@ -14,8 +14,11 @@ namespace Haruka::RHI::opengl
     {
         public:
             explicit GLContext(GLDevice* device) : m_device(device) {}
+            ~GLContext() override;
 
             void beginRenderPass(RenderPassHandle target, const ClearValues& clear) override;
+            void beginRenderPassCubemapFace(TextureHandle cubemap, int face,
+                                             int mipLevel, const ClearValues& clear) override;
             void endRenderPass() override;
             void setViewport(int x, int y, int w, int h) override;
             void clear(float r, float g, float b, float a) override;
@@ -33,8 +36,18 @@ namespace Haruka::RHI::opengl
                                      uint32_t stride, size_t offset) override;
             void dispatch(uint32_t x, uint32_t y, uint32_t z) override;
 
+            FenceHandle signalFence() override;
+            bool waitFence(FenceHandle, uint64_t timeoutNs) override;
+            void deleteFence(FenceHandle) override;
+
+            void blitDepth(RenderPassHandle src, RenderPassHandle dst, int w, int h) override;
+            void blitColor(RenderPassHandle src, RenderPassHandle dst, int w, int h) override;
+            void memoryBarrier(uint32_t barriers) override;
+
         private:
+            friend class GLDevice;
             GLDevice*         m_device = nullptr;
+            unsigned int      m_cubeFbo = 0;   // temp FBO for cubemap face rendering
             // Estado del pipeline activo COPIADO por valor, NO un puntero al pool del device:
             // `m_pipelines` es un std::vector y crear un pipeline nuevo (push_back) puede
             // REALOCAR → un puntero guardado aquí quedaría COLGANDO, y el siguiente draw leería

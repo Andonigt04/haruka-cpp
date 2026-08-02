@@ -106,7 +106,7 @@ std::vector<LightCuller::CulledLight> LightCuller::cullLights(
     
     for (const auto& obj : objects) {
         if (!obj) continue;
-        if (obj->type == "PointLight" || obj->type == "DirectionalLight" || obj->type == "Light") {
+        if (obj->objectType == ObjectType::LIGHT || obj->objectType == ObjectType::DIRECTIONAL_LIGHT || obj->objectType == ObjectType::SPOTLIGHT) {
             CulledLight light;
             light.position = glm::vec3(obj->position);
 

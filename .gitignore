@@ -1,5 +1,6 @@
 .vscode/
 build/
+./cache/
 test/vk_resize/build/
 
 docs/doxygen_warn.log
@@ -10,3 +11,5 @@ docs/latex/
 docs/html/
 docs/theme/node_modules
 docs/theme/package-lock.json
+# Planet bake cache (deterministic on-disk textures)
+bakes/

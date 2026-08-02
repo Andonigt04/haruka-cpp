@@ -1,8 +1,10 @@
+#include <string>
 #include "rhi/rhi_device.h"
 #include "rhi/opengl/gl_device.h"
 // #include "rhi/vulkan/vk_device.h"   // F5: cuando exista el backend Vulkan
 
 #include <cstdio>
+#include "core/logger.h"
 
 namespace Haruka::RHI
 {
@@ -11,7 +13,7 @@ namespace Haruka::RHI
     {
         auto gl = std::make_unique<opengl::GLDevice>(window);
         if (gl && gl->ready()) return gl;
-        std::fprintf(stderr, "[RHI] No se pudo crear el device OpenGL (contexto GL inválido).\n");
+        HARUKA_LOGE("RHI", "No se pudo crear el device OpenGL (contexto GL inválido).");
         return nullptr;
     }
 
@@ -25,7 +27,7 @@ namespace Haruka::RHI
             //   auto vk = std::make_unique<vulkan::VKDevice>(window);
             //   if (vk && vk->ready()) return vk;
             //   std::fprintf(stderr, "[RHI] Vulkan falló al inicializar → fallback a OpenGL (RHI).\n");
-            std::fprintf(stderr, "[RHI] Vulkan solicitado → fallback a OpenGL (RHI).\n");
+            HARUKA_LOGW("RHI", "Vulkan solicitado → fallback a OpenGL.");
         }
 
         return createGL(window);   // OpenGL del RHI: backend por defecto y fallback
@@ -52,7 +54,7 @@ namespace Haruka::RHI
             // Fuga intencionada: NO se destruye al salir (el contexto GL ya no existiría →
             // glDelete* sobre un contexto muerto = crash). El SO recupera la memoria al terminar.
             g_device = new opengl::GLDevice(nullptr);
-            std::fprintf(stderr, "[RHI] device() sin setDevice previo → GLDevice del RHI creado bajo demanda.\n");
+            HARUKA_LOGI("RHI", "device() sin setDevice previo → GLDevice del RHI creado bajo demanda.");
         }
         return g_device;
     }
@@ -65,5 +67,14 @@ namespace Haruka::RHI
     {
         g_device = d;
         if (!d) g_torndown = true;
+    }
+
+    namespace opengl { std::string& shaderIncludeDir(); }   // definido en gl_device.cpp
+
+    void setShaderIncludeDir(const std::string& dir)
+    {
+        std::string d = dir;
+        if (!d.empty() && d.back() != '/' && d.back() != '\\') d += '/';
+        opengl::shaderIncludeDir() = d;
     }
 }

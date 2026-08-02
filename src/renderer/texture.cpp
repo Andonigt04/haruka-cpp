@@ -1,10 +1,10 @@
 #include "texture.h"
-
 #include "stb_image.h"
 #include <iostream>
 #include <algorithm>
 #include "tools/error_reporter.h"
 #include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 
 namespace Haruka { namespace Renderer {
 
@@ -25,7 +25,6 @@ Texture::Texture(const char* path)
         return;
     }
 
-    // La textura se crea a través del RHI (device garantizado por RHI::device()).
     RHI::Device* dev = RHI::device();
     RHI::TextureDesc desc;
     desc.width         = (uint32_t)width;
@@ -38,17 +37,17 @@ Texture::Texture(const char* path)
     desc.lodBias       = s_lodBias;
     desc.initialData   = data;
     m_handle = dev->createTexture(desc);
-    ID = dev->nativeTexture(m_handle);   // id GL nativo, para use()/ImGui
+    ID = dev->nativeTexture(m_handle);
 
     stbi_image_free(data);
-};
+}
 
-void Texture::use(unsigned int unit)
-{
-    // Bind directo por unidad; ID es el id GL nativo venga de la ruta que venga.
-    // (El bind se migrará al Context del RHI en F3.)
-    glActiveTexture(GL_TEXTURE0 + unit);
-    glBindTexture(GL_TEXTURE_2D, ID);
+void Texture::use(int slot) const {
+    RHI::Device* dev = RHI::device();
+    if (dev) {
+        RHI::Context* ctx = dev->beginFrame();
+        ctx->bindTexture((uint32_t)slot, m_handle);
+    }
 }
 
 void Texture::cleanup()
