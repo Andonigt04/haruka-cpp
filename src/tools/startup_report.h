@@ -9,7 +9,7 @@ namespace Haruka { namespace Tools {
  * Collects per-system init results during Application::init(), then prints
  * a clean summary (clear screen + table) showing failures and skips.
  * Usage:
- *   StartupReport::get().record("GBuffer", StartupReport::OK);
+ *   StartupReport::get().record("IBL", StartupReport::OK);
  *   StartupReport::get().record("IBL",     StartupReport::FAIL, "shader missing");
  *   StartupReport::get().printSummary();
  */

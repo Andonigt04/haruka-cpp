@@ -81,6 +81,12 @@ namespace Haruka {
          *  cuadratura. 1.0 si no hay Luna. El render del agua lo pasa a u_windStrength. */
         float getTideFactor() const { return m_tideFactor; }
 
+        /** @brief NIVEL de marea (metros, con signo) en el observador: el bulto de marea sigue a
+         *  la Luna (y al Sol, ~0.46×). Pleamar cuando la Luna está en el cénit o el nadir,
+         *  bajamar en el horizonte. El render lo suma radialmente a la lámina del océano para que
+         *  el mar "respire" (sube/baja). Amplitud suave (~±0.7 m). 0 si no hay planeta/Luna. */
+        float getTideHeight(const glm::dvec3& observer) const;
+
         /** @brief Luz de luna para el observador dado. outDir = dirección HACIA la Luna,
          *  outIntensity = brillo según la FASE (llena≈máx, nueva≈0). Devuelve false si
          *  no hay Luna (entonces no hay 2ª luz). */
@@ -92,6 +98,11 @@ namespace Haruka {
         void setActivePlanet(const glm::dvec3& center, double radius) {
             m_planetCenter = center; m_planetRadius = radius; m_hasActivePlanet = true;
         }
+        /** @brief Planeta activo (centro/radio en METROS, mismas unidades que las posiciones
+         *  de física). Radio = nivel del mar (esfera de referencia). Para buoyancy/oclusión. */
+        bool       hasActivePlanet()        const { return m_hasActivePlanet; }
+        glm::dvec3 getActivePlanetCenter()  const { return m_planetCenter; }
+        double     getActivePlanetRadius()  const { return m_planetRadius; }
         /** @brief Avanza la mecánica celeste un frame: órbita del Sol (día/noche),
          *  órbita de la Luna, marea y tiempo atmosférico. Lo llama el render. */
         void advanceCelestial(double dt);

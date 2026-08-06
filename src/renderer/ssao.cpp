@@ -1,7 +1,7 @@
 #include "ssao.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
 #include <random>
-#include <iostream>
 
 namespace Haruka { namespace Renderer {
 
@@ -14,8 +14,7 @@ SSAO::SSAO(unsigned int width, unsigned int height)
 void SSAO::setupSamples() {
     std::uniform_real_distribution<float> randomFloats(0.0, 1.0);
     std::mt19937 gen;
-    
-    // Kernel de 64 muestras en hemisferio
+
     for (unsigned int i = 0; i < 64; ++i) {
         glm::vec3 sample(
             randomFloats(gen) * 2.0 - 1.0,
@@ -24,14 +23,12 @@ void SSAO::setupSamples() {
         );
         sample = glm::normalize(sample);
         sample *= randomFloats(gen);
-        
         float scale = float(i) / 64.0;
         scale = 0.1f + (scale * scale) * (1.0f - 0.1f);
         sample *= scale;
         ssaoKernel.push_back(sample);
     }
-    
-    // Noise texture (4x4)
+
     for (unsigned int i = 0; i < 16; i++) {
         glm::vec3 noise(
             randomFloats(gen) * 2.0 - 1.0,
@@ -40,51 +37,32 @@ void SSAO::setupSamples() {
         );
         ssaoNoise.push_back(noise);
     }
-    
-    glGenTextures(1, &noiseTexture);
-    glBindTexture(GL_TEXTURE_2D, noiseTexture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, 4, 4, 0, GL_RGB, GL_FLOAT, &ssaoNoise[0]);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::TextureDesc nd;
+        nd.width = 4; nd.height = 4; nd.format = RHI::Format::RGB32F;
+        nd.filter = RHI::Filter::Nearest; nd.wrap = RHI::Wrap::Repeat;
+        nd.initialData = &ssaoNoise[0];
+        m_noise = dev->createTexture(nd);
+    }
 }
 
 void SSAO::setupFramebuffer() {
-    glGenFramebuffers(1, &ssaoFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-    
-    glGenTextures(1, &ssaoColorBuffer);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, width, height, 0, GL_RED, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, ssaoColorBuffer, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "SSAO framebuffer incomplete!");
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = width; d.height = height;
+        d.colorFormats = { RHI::Format::R8 };
+        d.colorFilter = RHI::Filter::Nearest;
+        d.hasDepth = false;
+        m_pass    = dev->createRenderTarget(d);
+        m_ssaoTex = dev->getColorTexture(m_pass, 0);
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void SSAO::bindForWriting() {
-    glBindFramebuffer(GL_FRAMEBUFFER, ssaoFBO);
-    glViewport(0, 0, width, height);
-}
-
-void SSAO::unbind() {
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void SSAO::bindForReading(unsigned int textureUnit) {
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, ssaoColorBuffer);
 }
 
 SSAO::~SSAO() {
-    glDeleteFramebuffers(1, &ssaoFBO);
-    glDeleteTextures(1, &ssaoColorBuffer);
-    glDeleteTextures(1, &noiseTexture);
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) { dev->destroy(m_pass); dev->destroy(m_noise); }
+    }
 }
 
 }} // namespace Haruka::Renderer

@@ -105,8 +105,11 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "TerrainQuality")) g.terrainQuality = (Settings::TerrainQuality)atoi(val);
     else if (!strcmp(key, "ChunkMemoryMB"))  g.chunkMemoryMB  = atoi(val);
     else if (!strcmp(key, "MaxFps"))         g.maxFps         = atoi(val);
+    else if (!strcmp(key, "AdaptiveLOD"))    g.adaptiveLOD    = atoi(val) != 0;
+    else if (!strcmp(key, "LODTargetPx"))    g.lodTargetPx    = atoi(val);
     else if (!strcmp(key, "MotionBlur"))     g.motionBlur     = atoi(val) != 0;
     else if (!strcmp(key, "WindowMode"))     g.windowMode     = (Settings::WindowMode)atoi(val);
+    else if (!strcmp(key, "RenderBackend"))  g.renderBackend  = (Settings::RenderBackend)atoi(val);
     else if (!strcmp(key, "MasterVolume"))   a.masterVolume   = (float)atof(val);
     else if (!strcmp(key, "MusicVolume"))    a.musicVolume    = (float)atof(val);
     else if (!strcmp(key, "SFXVolume"))      a.sfxVolume      = (float)atof(val);
@@ -130,8 +133,11 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("TerrainQuality=%d\n", (int)g.terrainQuality);
     buf->appendf("ChunkMemoryMB=%d\n",  g.chunkMemoryMB);
     buf->appendf("MaxFps=%d\n",         g.maxFps);
+    buf->appendf("AdaptiveLOD=%d\n",    g.adaptiveLOD ? 1 : 0);
+    buf->appendf("LODTargetPx=%d\n",    g.lodTargetPx);
     buf->appendf("MotionBlur=%d\n",     g.motionBlur ? 1 : 0);
     buf->appendf("WindowMode=%d\n",     (int)g.windowMode);
+    buf->appendf("RenderBackend=%d\n",  (int)g.renderBackend);
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);
     buf->appendf("SFXVolume=%.2f\n",    a.sfxVolume);

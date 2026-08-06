@@ -1,6 +1,10 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "ui/ui_world_panel.h"
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
+#include "renderer/shader.h"
 
+// ImGui integration still uses GL for FBO management
 #include <glad/glad.h>
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -8,10 +12,11 @@
 #include <glm/gtx/quaternion.hpp>
 #include <cmath>
 #include <vector>
+#include "core/logger.h"
 
 namespace Haruka::UI {
 
-// ── Construction ─────────────────────────────────────────────────────────────
+struct PanelVert { glm::vec3 pos; glm::vec2 uv; };
 
 // Must match layout(std140, binding = 0) in ui_world_panel.vert/.frag
 struct PanelUBOData {
@@ -23,10 +28,10 @@ struct PanelUBOData {
 };
 
 UIWorldPanel::~UIWorldPanel() {
-    if (m_vao) { glDeleteVertexArrays(1, &m_vao); m_vao = 0; }
-    if (m_vbo) { glDeleteBuffers(1, &m_vbo);      m_vbo = 0; }
-    if (m_ebo) { glDeleteBuffers(1, &m_ebo);      m_ebo = 0; }
-    if (m_ubo) { glDeleteBuffers(1, &m_ubo);      m_ubo = 0; }
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    if (RHI::valid(m_vboH)) { dev->destroy(m_vboH); dev->destroy(m_eboH); dev->destroy(m_uboH); }
+    if (RHI::valid(m_pipeline)) dev->destroy(m_pipeline);
 }
 
 UIWorldPanel::UIWorldPanel(Desc desc)
@@ -34,14 +39,25 @@ UIWorldPanel::UIWorldPanel(Desc desc)
     , m_windowId("##wp_" + m_desc.id)
 {
     m_fbo = std::make_unique<RenderTarget>(m_desc.fboWidth, m_desc.fboHeight);
-    // The constructor's glClear() writes to the color texture; mark dirty so
-    // the first draw() emits a memory barrier before reading it back.
     m_fboDirtyThisFrame = true;
 
-    glGenBuffers(1, &m_ubo);
-    glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
-    glBufferData(GL_UNIFORM_BUFFER, sizeof(PanelUBOData), nullptr, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    RHI::Device* dev = RHI::device();
+    if (!dev) { HARUKA_LOGE("UIWorldPanel", "no RHI device"); return; }
+
+    m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PanelUBOData), nullptr, RHI::BufferMemory::Dynamic);
+
+    std::string vsPath = Shader::baseDir() + "shaders/ui_world_panel.vert";
+    std::string fsPath = Shader::baseDir() + "shaders/ui_world_panel.frag";
+    RHI::PipelineDesc pd;
+    pd.vertexPath = vsPath.c_str();
+    pd.fragmentPath = fsPath.c_str();
+    pd.vertexLayout.strides = { (uint32_t)(sizeof(PanelVert)) };
+    pd.vertexLayout.attributes = {
+        { 0, offsetof(PanelVert, pos), RHI::Format::RGB32F },
+        { 1, offsetof(PanelVert, uv),  RHI::Format::RG32F  },
+    };
+    pd.cull = RHI::CullMode::None;  // two-sided
+    m_pipeline = dev->createPipeline(pd);
 
     rebuildMesh();
 }
@@ -52,8 +68,10 @@ void UIWorldPanel::beginImGui() {
     m_fboDirtyThisFrame = true;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &m_savedFBO);
     glGetIntegerv(GL_VIEWPORT, m_savedViewport);
-    m_fbo->bindForWriting();
+    glBindFramebuffer(GL_FRAMEBUFFER, m_fbo->getFBO());
     glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClearDepth(1.0);
+    glDepthFunc(GL_LESS);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     ImGui::SetNextWindowPos(ImVec2(0, 0));
@@ -72,44 +90,36 @@ void UIWorldPanel::endImGui() {
 
 // ── World-space draw ──────────────────────────────────────────────────────────
 
-void UIWorldPanel::draw(Shader& shader, const glm::mat4& view, const glm::mat4& proj,
+void UIWorldPanel::draw(const glm::mat4& view, const glm::mat4& proj,
                         const glm::vec3& camPos) const
 {
-    if (!m_visible) return;
+    if (!m_visible || !RHI::valid(m_pipeline)) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    RHI::Context* ctx = dev->beginFrame();
+
     if (m_meshDirty) const_cast<UIWorldPanel*>(this)->rebuildMesh();
 
     glm::mat4 model = modelMatrix(camPos);
 
-    // Upload PanelTransform UBO (binding 0)
     PanelUBOData uboData;
     uboData.model   = model;
     uboData.view    = view;
     uboData.proj    = proj;
     uboData.focused = m_focused ? 1.0f : 0.0f;
+    dev->updateBuffer(m_uboH, 0, sizeof(PanelUBOData), &uboData);
 
-    glBindBuffer(GL_UNIFORM_BUFFER, m_ubo);
-    glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(PanelUBOData), &uboData);
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, m_ubo);
-
-    // Only emit barrier if beginImGui() wrote to colorTexture this frame.
-    // An unconditional glTextureBarrier() stalls the AMD glthread even when
-    // the FBO hasn't been touched, causing a hang in the render loop.
     if (m_fboDirtyThisFrame) {
-        glMemoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
+        ctx->memoryBarrier(GL_TEXTURE_FETCH_BARRIER_BIT);
         m_fboDirtyThisFrame = false;
     }
 
-    // Bind FBO color texture to unit 1 (matches layout(binding=1) sampler)
-    m_fbo->bindForReading(1);
-
-    shader.use();
-    glBindVertexArray(m_vao);
-    glDrawElements(GL_TRIANGLES, m_indexCount, GL_UNSIGNED_INT, nullptr);
-    glBindVertexArray(0);
-
-    // Unbind UBO binding 0 so subsequent passes don't accidentally read PanelTransform
-    // data instead of whatever they expect at binding 0 (e.g. PerFrameUBO).
-    glBindBufferBase(GL_UNIFORM_BUFFER, 0, 0);
+    ctx->bindPipeline(m_pipeline);
+    ctx->bindUniformBuffer(0, m_uboH);
+    ctx->bindTexture(1, m_fbo->getColorTextureHandle());
+    ctx->bindVertexBuffer(m_vboH);
+    ctx->bindIndexBuffer(m_eboH);
+    ctx->drawIndexed((uint32_t)m_indexCount);
 }
 
 // ── Raycast ──────────────────────────────────────────────────────────────────
@@ -117,8 +127,6 @@ void UIWorldPanel::draw(Shader& shader, const glm::mat4& view, const glm::mat4& 
 bool UIWorldPanel::raycast(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
                             glm::vec2& outUV) const
 {
-    // Only flat-panel raycast for now (arcAngle == 0 or small).
-    // Build local-space transform from anchor.
     glm::vec3 normal = glm::normalize(m_desc.anchor.normal);
     float denom = glm::dot(normal, rayDir);
     if (std::abs(denom) < 1e-6f) return false;
@@ -129,17 +137,13 @@ bool UIWorldPanel::raycast(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
     glm::vec3 hit = rayOrigin + rayDir * t;
     glm::vec3 local = hit - m_desc.anchor.worldPos;
 
-    // Build right/up axes from normal
     glm::vec3 worldUp = std::abs(normal.y) < 0.99f ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
     glm::vec3 right = glm::normalize(glm::cross(worldUp, normal));
     glm::vec3 up    = glm::cross(normal, right);
 
-    float halfW = m_desc.widthMeters  * 0.5f;
-    float halfH = m_desc.heightMeters * 0.5f;
-
     float u = glm::dot(local, right) / m_desc.widthMeters  + m_desc.anchor.pivotNorm.x;
     float v = glm::dot(local, up)    / m_desc.heightMeters + m_desc.anchor.pivotNorm.y;
-    (void)halfW; (void)halfH;
+    (void)u; (void)v;
 
     if (u < 0.f || u > 1.f || v < 0.f || v > 1.f) return false;
 
@@ -166,20 +170,15 @@ void UIWorldPanel::triggerInteract(glm::vec2 hitUV) {
 // ── Mesh building ─────────────────────────────────────────────────────────────
 
 void UIWorldPanel::rebuildMesh() {
-    // Vertex layout: vec3 pos, vec2 uv
-    struct PanelVert { glm::vec3 pos; glm::vec2 uv; };
-
     std::vector<PanelVert> verts;
     std::vector<unsigned int> indices;
 
     float w = m_desc.widthMeters;
     float h = m_desc.heightMeters;
-    // Pivot offset — shifts so pivotNorm=(0.5,0.5) means centered.
     float ox = -(m_desc.anchor.pivotNorm.x - 0.5f) * w;
     float oy = -(m_desc.anchor.pivotNorm.y - 0.5f) * h;
 
     if (m_desc.curve.arcAngle < 0.01f) {
-        // Flat quad: 4 vertices, 2 triangles
         verts = {
             { glm::vec3(-w*0.5f + ox,  h*0.5f + oy, 0.f), glm::vec2(0.f, 1.f) },
             { glm::vec3( w*0.5f + ox,  h*0.5f + oy, 0.f), glm::vec2(1.f, 1.f) },
@@ -188,21 +187,18 @@ void UIWorldPanel::rebuildMesh() {
         };
         indices = { 0,1,2, 0,2,3 };
     } else {
-        // Curved strip: subdivide horizontally along the arc
         const int segs = 32;
         float arc = m_desc.curve.arcAngle;
         float R   = m_desc.curve.radius;
 
         for (int i = 0; i <= segs; ++i) {
-            float t     = (float)i / (float)segs;       // 0..1
-            float theta = (t - 0.5f) * arc;             // -arc/2 .. +arc/2
+            float t     = (float)i / (float)segs;
+            float theta = (t - 0.5f) * arc;
 
             float px = R * std::sin(theta);
-            float pz = R * (1.f - std::cos(theta));     // curves toward viewer
+            float pz = R * (1.f - std::cos(theta));
 
-            // Top vertex
             verts.push_back({ glm::vec3(px + ox,  h*0.5f + oy, pz), glm::vec2(t, 1.f) });
-            // Bottom vertex
             verts.push_back({ glm::vec3(px + ox, -h*0.5f + oy, pz), glm::vec2(t, 0.f) });
 
             if (i > 0) {
@@ -215,33 +211,18 @@ void UIWorldPanel::rebuildMesh() {
         }
     }
 
-    // Upload
-    if (m_vao == 0) {
-        glGenVertexArrays(1, &m_vao);
-        glGenBuffers(1, &m_vbo);
-        glGenBuffers(1, &m_ebo);
-    }
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
 
-    glBindVertexArray(m_vao);
+    if (RHI::valid(m_vboH))
+        dev->uploadBuffer(m_vboH, verts.size() * sizeof(PanelVert), verts.data());
+    else
+        m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(PanelVert), verts.data(), RHI::BufferMemory::Stream);
 
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(verts.size() * sizeof(PanelVert)),
-                 verts.data(), GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(indices.size() * sizeof(unsigned int)),
-                 indices.data(), GL_DYNAMIC_DRAW);
-
-    // pos = attrib 0
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(PanelVert),
-                          (void*)offsetof(PanelVert, pos));
-    // uv = attrib 1
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(PanelVert),
-                          (void*)offsetof(PanelVert, uv));
-
-    glBindVertexArray(0);
+    if (RHI::valid(m_eboH))
+        dev->uploadBuffer(m_eboH, indices.size() * sizeof(unsigned int), indices.data());
+    else
+        m_eboH = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(unsigned int), indices.data(), RHI::BufferMemory::Stream);
 
     m_indexCount = (int)indices.size();
     m_meshDirty  = false;
@@ -254,13 +235,11 @@ glm::mat4 UIWorldPanel::modelMatrix(const glm::vec3& camPos) const {
 
     switch (m_desc.billboard) {
         case UIBillboardMode::FaceCamera: {
-            // Recompute forward to always face camera
             glm::vec3 toCamera = glm::normalize(camPos - m_desc.anchor.worldPos);
             fwd = toCamera;
             break;
         }
         case UIBillboardMode::AxisLocked: {
-            // Rotate around Y only
             glm::vec3 toCamera = camPos - m_desc.anchor.worldPos;
             toCamera.y = 0.f;
             if (glm::length(toCamera) > 1e-6f)
@@ -272,7 +251,6 @@ glm::mat4 UIWorldPanel::modelMatrix(const glm::vec3& camPos) const {
             break;
     }
 
-    // Build rotation from local +Z to fwd
     glm::vec3 localZ(0.f, 0.f, 1.f);
     glm::mat4 rot(1.f);
     float d = glm::dot(localZ, fwd);

@@ -121,6 +121,30 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         m_tideFactor = (float)glm::mix(0.55, 1.35, align); // amplitud del oleaje
     }
 
+    float WorldSystem::getTideHeight(const glm::dvec3& observer) const {
+        if (!m_hasActivePlanet) return 0.0f;
+        glm::dvec3 up = observer - m_planetCenter; double ul = glm::length(up);
+        if (ul < 1e-9) return 0.0f; up /= ul;
+
+        // Bulto de marea ∝ (3·cos²θ − 1)/2, θ = ángulo cuerpo↔up local. +1 en cénit/nadir
+        // (pleamar), −0.5 en el horizonte (bajamar). Luna domina; Sol ~0.46×.
+        auto bulge = [&](const glm::dvec3& bodyWorld, double weight) -> double {
+            glm::dvec3 d = bodyWorld - m_planetCenter; double l = glm::length(d);
+            if (l < 1e-9) return 0.0;
+            double c = glm::dot(d / l, up);
+            return weight * (3.0 * c * c - 1.0) * 0.5;
+        };
+        double h = 0.0;
+        std::shared_ptr<SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
+        if (moon) h += bulge(glm::dvec3(moon->position), 1.0);
+        const CelestialBody* sun = nullptr;
+        for (const auto& b : m_bodies) { if (b.type == ObjectType::STAR) { sun = &b; break; } }
+        if (sun) h += bulge(sun->worldPos, 0.46);
+
+        const double kTideAmplitudeM = 0.7; // amplitud suave para que no rompa la costa
+        return (float)(h * kTideAmplitudeM);
+    }
+
     void WorldSystem::updateMoon(double dt) {
         if (!m_scene || !m_hasActivePlanet) return;
         auto moon = m_scene->getObject("Moon");
@@ -130,11 +154,17 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         if (!m_moonInit) { m_moonOffset0 = glm::dvec3(moon->position) - pc; m_moonInit = true; }
         m_moonAngle += dt * (2.0 * M_PI / kMoonPeriodSeconds);
 
-        // Órbita en el plano XZ (rotación en Y) manteniendo la altura del offset.
-        const double c = std::cos(m_moonAngle), s = std::sin(m_moonAngle);
-        const glm::dvec3 o = m_moonOffset0;
-        const glm::dvec3 rot(o.x * c - o.z * s, o.y, o.x * s + o.z * c);
-        moon->position = pc + rot;
+        // Órbita circular INCLINADA (no plana): el plano orbital se inclina un ángulo `incl`
+        // respecto al ecuador y se gira por el nodo ascendente `node` → la Luna cruza el cielo en
+        // diagonal, como la Luna real (~5° real; aquí ~25° para que se note). Radio = distancia inicial.
+        const double R    = glm::length(m_moonOffset0);
+        const double incl = 0.44;  // inclinación del plano orbital (rad, ~25°)
+        const double node = 0.7;   // longitud del nodo ascendente (rad) → orienta el plano
+        // Normal del plano orbital (inclinada desde +Y) y base (u,v) perpendicular a ella.
+        const glm::dvec3 n(std::sin(incl) * std::cos(node), std::cos(incl), std::sin(incl) * std::sin(node));
+        glm::dvec3 u = glm::normalize(glm::cross(n, glm::dvec3(0.0, 1.0, 0.001)));
+        glm::dvec3 v = glm::cross(n, u);
+        moon->position = pc + (u * std::cos(m_moonAngle) + v * std::sin(m_moonAngle)) * R;
     }
 
     void WorldSystem::updateDayNight(double dt) {
@@ -156,11 +186,14 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
         m_dayAngle += dt * (2.0 * M_PI / kDayLengthSeconds);
 
-        // Rotación del offset del Sol alrededor del eje Y del planeta (sale por el
-        // este, se pone por el oeste). La luz = normalize(sol - observador) sigue sola.
-        const double c = std::cos(m_dayAngle), s = std::sin(m_dayAngle);
+        // Rotación del Sol alrededor del EJE DEL PLANETA, que va INCLINADO ~23.5° (como el eje
+        // real de la Tierra) en vez del eje Y recto → el terminador día/noche cruza en DIAGONAL y
+        // la altura del Sol cambia con la latitud (sensación de estaciones/eje inclinado). Rodrigues.
+        const double tilt = 0.41; // ~23.5° (inclinación axial)
+        const glm::dvec3 axis = glm::normalize(glm::dvec3(std::sin(tilt), std::cos(tilt), 0.0));
         const glm::dvec3 o = m_sunOffset0;
-        const glm::dvec3 rot(o.x * c - o.z * s, o.y, o.x * s + o.z * c);
+        const double c = std::cos(m_dayAngle), s = std::sin(m_dayAngle);
+        const glm::dvec3 rot = o * c + glm::cross(axis, o) * s + axis * (glm::dot(axis, o) * (1.0 - c));
         sun->worldPos = pc + rot;
 
         // Mueve también el Sol VISIBLE (objeto de escena) para que cruce el cielo.
@@ -207,14 +240,20 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
     glm::vec3 WorldSystem::getDominantLightDirection(const glm::dvec3& observerPos) const {
         glm::dvec3 sum(0.0);
+        bool any = false;
         for (const auto& body : m_bodies) {
             if (body.type != ObjectType::STAR) continue;
             glm::dvec3 delta = body.worldPos - observerPos;
             double dist2 = glm::dot(delta, delta);
             if (dist2 < 1e-12) continue;
             sum += delta / dist2; // direction weighted by 1/dist²
+            any = true;
         }
-        if (glm::length(sum) < 1e-9)
+        // OJO: a escala astronómica |sum| ~ 1/dist es DIMINUTO (Sol a 1.5e11 → ~7e-12), así que
+        // un umbral fijo (antes 1e-9) lo confundía con "no hay estrella" → devolvía el fallback
+        // (0,1,0) → toda la iluminación/cielo apuntaba "arriba" (y el disco del cielo aparecía
+        // separado de la corona = "dos soles"). Usamos un FLAG: si hubo estrella, normalizamos.
+        if (!any || glm::dot(sum, sum) <= 0.0)
             return glm::vec3(0.0f, 1.0f, 0.0f);
         return glm::vec3(glm::normalize(sum));
     }
@@ -257,7 +296,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
             colorSum   += glm::dvec3(body.color) * w;
             weightSum  += w;
         }
-        if (weightSum < 1e-12)
+        if (weightSum <= 0.0)   // a escala astronómica w es DIMINUTO; el cociente da el color igual
             return glm::vec3(1.0f);
         return glm::vec3(colorSum / weightSum);
     }

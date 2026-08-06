@@ -1,6 +1,7 @@
 #include "mesh_renderer_component.h"
 #include "renderer/shader.h"
 #include "renderer/simple_mesh.h"
+#include "rhi/rhi_device.h"
 #include "imgui.h"
 
 namespace Haruka {
@@ -32,8 +33,13 @@ void MeshRendererComponent::releaseMesh() {
 // Dibuja únicamente cuando existe malla válida.
 void MeshRendererComponent::render(Shader& shader) const {
     if (mesh) {
-        mesh->draw();
+        if (Haruka::RHI::Device* dev = Haruka::RHI::device())
+            mesh->drawRHI(*dev->beginFrame());
     }
+}
+
+void MeshRendererComponent::renderRHI(Haruka::RHI::Context& ctx) const {
+    if (mesh) mesh->drawRHI(ctx);
 }
 
 // Herramientas editor-only para inspección/edición de rutas asociadas.

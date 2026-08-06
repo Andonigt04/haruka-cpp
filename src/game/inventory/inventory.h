@@ -13,6 +13,7 @@
 #include <vector>
 #include <unordered_map>
 #include <cstdint>
+#include <glm/glm.hpp>
 
 namespace Haruka {
 
@@ -22,11 +23,28 @@ struct ItemDef {
     std::string name;               // display name, e.g. "Wood"
     std::string type;               // categoría: herramienta/comida/metal/gema/estacion/...
     int   maxStack = 99;            // how many fit in one slot (1 = non-stackable)
-    std::string iconPath;           // optional UI icon/preview asset (2D)
     // Free-form tags/values the game interprets (tool, food value, damage, pureza…).
     std::unordered_map<std::string, float> stats;
     std::vector<std::string> tags;  // usos/etiquetas (construccion, polvora, magia…)
-    std::string modelPath;          // optional 3D model (.glb) — colocar/equipar/preview 3D
+    // --- ASPECTO: un item se ve de UNA de estas dos formas ---------------------------------------
+    // (a) `modelPath`: un .glb de verdad (herramientas, muebles, fixtures).
+    // (b) `shape` + `size` + `material`: una FORMA PROCEDURAL de un material. Es lo que permite definir
+    //     MILES de items sin arte: baldosa/columna/viga/bloque × piedra/madera/ladrillo/mármol… Mismo
+    //     principio que los edificios (forma tejida de un material), reutilizando su lista de materiales.
+    // Antes había cuatro campos (`sizeMax`, `bulk`, `variants`, `proc`) que NADIE leía: se parseaban y se
+    // guardaban sin más. Los sustituye esto, que sí tiene consumidor.
+    std::string modelPath;          // (a) modelo .glb — solo para lo que de verdad necesita malla a mano
+    std::string shape;              // (b) forma; "" = sin forma. DOS familias:
+                                    //   · PRIMITIVA (cosas rectas): block/tile/column/beam/slab/plank →
+                                    //     una caja con la TEXTURA del material. Aquí caen piedra, tablón,
+                                    //     baldosa, ladrillo… que hoy son .glb y NO deberían serlo.
+                                    //   · PROCEDURAL (cosas orgánicas): log/branch/rock/ore → la malla se
+                                    //     GENERA por semilla. En el mundo, la semilla es la de su fuente
+                                    //     (variedad); el preview del inventario usa SEMILLA 1 = forma
+                                    //     canónica, siempre igual.
+    glm::vec3   size{0.5f};         // lo que define el item es su TAMAÑO/PROPORCIÓN (m), no la malla
+    std::string material;           // id de material (stone, wood, brick…): su TEXTURA. PENDIENTE: hoy
+                                    //     solo se aplica el COLOR del material.
 
     float stat(const std::string& k, float def = 0.0f) const {
         auto it = stats.find(k);

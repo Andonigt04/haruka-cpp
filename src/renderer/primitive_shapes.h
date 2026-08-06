@@ -5,7 +5,6 @@
 #ifndef PRIMITIVE_SHAPES_H
 #define PRIMITIVE_SHAPES_H
 
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <vector>
 #include "mesh.h"

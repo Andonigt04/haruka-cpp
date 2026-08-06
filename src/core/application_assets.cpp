@@ -16,6 +16,14 @@
 #include "renderer/simple_mesh.h"
 #include "renderer/primitive_shapes.h"
 #include "core/scene/scene_manager.h"   // Haruka::SceneObject
+#include "game/planetary_system.h"      // radio real de un planeta (getObjectBoundingRadius)
+#include "core/asset_paths.h"
+#include "core/logger.h"
+#include "rhi/rhi_device.h"
+#include <stb_image.h>
+#include <cstdio>
+#include <algorithm>
+#include <cmath>
 
 namespace AppInternal {
 
@@ -32,9 +40,19 @@ std::unique_ptr<SimpleMesh> g_capsuleMesh;
 std::unique_ptr<SimpleMesh> g_planeMesh;
 std::unique_ptr<SimpleMesh> g_cylinderMesh;
 std::unique_ptr<SimpleMesh> g_triangleMesh;
+
+// Texturas de MATERIAL por ruta. Cachea también los FALLOS (handle inválido): sin eso, un
+// material que apunta a un PNG que no existe reintentaría el stbi_load de cada objeto y de
+// cada frame — un fallo de carga se paga una vez, no 60 veces por segundo.
+std::unordered_map<std::string, Haruka::RHI::TextureHandle> g_materialTexCache;
 } // namespace
 
 void cleanupGLStatics() {
+    if (Haruka::RHI::Device* dev = Haruka::RHI::device()) {
+        for (auto& [path, tex] : g_materialTexCache)
+            if (Haruka::RHI::valid(tex)) dev->destroy(tex);
+    }
+    g_materialTexCache.clear();
     g_modelCache.clear();
     g_sphereMesh.reset();
     g_cubeMesh.reset();
@@ -50,11 +68,15 @@ glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::World
     // ~0.5 m jitter that appeared when casting surface positions (millions of m) to float.
     glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position - camPos));
 
-    glm::mat4 rotation = glm::eulerAngleXYZ(
-        glm::radians(static_cast<float>(obj.rotation.x)),
-        glm::radians(static_cast<float>(obj.rotation.y)),
-        glm::radians(static_cast<float>(obj.rotation.z))
-    );
+    // Orientación EXACTA si el objeto la trae como cuaternión: el rodeo por Euler se degrada en la
+    // singularidad del cardán (una pieza con una orientación perfectamente válida sale girada al azar).
+    glm::mat4 rotation = obj.useOrientation
+        ? glm::mat4_cast(glm::quat(obj.orientation))
+        : glm::eulerAngleXYZ(
+            glm::radians(static_cast<float>(obj.rotation.x)),
+            glm::radians(static_cast<float>(obj.rotation.y)),
+            glm::radians(static_cast<float>(obj.rotation.z))
+        );
 
     transform *= rotation;
     return glm::scale(transform, glm::vec3(obj.scale));
@@ -71,6 +93,51 @@ Model* getOrLoadModelCached(const std::string& path) {
     Model* modelPtr = model.get();
     g_modelCache.emplace(path, std::move(model));
     return modelPtr;
+}
+
+Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path) {
+    using namespace Haruka;
+    if (path.empty()) return {};
+    auto it = g_materialTexCache.find(path);
+    if (it != g_materialTexCache.end()) return it->second;   // incluido el fallo cacheado
+
+    RHI::Device* dev = RHI::device();
+    if (!dev) return {};
+
+    // Las rutas de material vienen del JSON de la escena y las escribe el IDE como
+    // "assets/textures/<obj>_<slot>.png" (relativa a la raíz del proyecto). Se prueban las
+    // formas en las que puede llegar antes de darla por perdida: tal cual (cwd), contra la
+    // raíz de assets del MOTOR (el IDE la fija a la suya) y contra la del PROYECTO abierto.
+    const std::string candidates[] = {
+        path,
+        AssetPaths::assetsDir() + path,
+        AssetPaths::textures() + path,
+        AssetPaths::projectRoot() + path,
+    };
+    int w = 0, h = 0, n = 0;
+    unsigned char* pixels = nullptr;
+    for (const std::string& candidate : candidates) {
+        if (candidate.empty()) continue;
+        pixels = stbi_load(candidate.c_str(), &w, &h, &n, 4);
+        if (pixels) break;
+    }
+    if (!pixels) {
+        HARUKA_LOGW("Material", "textura no encontrada: %s", path.c_str());
+        g_materialTexCache.emplace(path, RHI::TextureHandle{});
+        return {};
+    }
+
+    RHI::TextureDesc td;
+    td.width = (uint32_t)w; td.height = (uint32_t)h;
+    td.format = RHI::Format::RGBA8;
+    td.mipmaps = true;
+    td.maxAnisotropy = 8.0f;
+    td.initialData = pixels;
+    RHI::TextureHandle handle = dev->createTexture(td);
+    stbi_image_free(pixels);
+
+    g_materialTexCache.emplace(path, handle);
+    return handle;
 }
 
 SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
@@ -139,11 +206,47 @@ SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
 // Model bounds (AABB) — an ASSET query (Application owns the model cache).
 // Not collision logic: the physics module uses these bounds for its collider.
 namespace Haruka { namespace Core {
+Haruka::Renderer::Model* Application::getModel(const std::string& path) {
+    return AppInternal::getOrLoadModelCached(path);   // misma caché perezosa que getModelBounds
+}
+
 bool Application::getModelBounds(const std::string& path, glm::vec3& outMin, glm::vec3& outMax) {
     Model* m = AppInternal::getOrLoadModelCached(path);
     if (!m || !m->hasBounds()) return false;
     outMin = m->boundsMin();
     outMax = m->boundsMax();
     return true;
+}
+
+double Application::getObjectBoundingRadius(const Haruka::SceneObject& obj) {
+    const double maxScale = std::max({ std::abs(obj.scale.x),
+                                       std::abs(obj.scale.y),
+                                       std::abs(obj.scale.z) });
+
+    // 1. ¿Es un planeta? Lo sabe el PlanetarySystem, no el objeto: en el JSON de escena un planeta
+    //    es un SceneObject más y su radio vive en la configuración que interpreta el motor.
+    if (_planetarySystem) {
+        for (const auto& pl : _planetarySystem->getPlanets())
+            if (pl.name == obj.name) return pl.radius;
+        for (size_t i = 0; i < _planetarySystem->getSimplePlanetCount(); ++i) {
+            const auto& sp = _planetarySystem->getSimplePlanet(i);
+            if (sp.name == obj.name) return sp.radius;
+        }
+    }
+
+    // 2. ¿Tiene modelo? Media diagonal de su AABB local, escalada.
+    if (!obj.modelPath.empty()) {
+        glm::vec3 mn, mx;
+        if (getModelBounds(obj.modelPath, mn, mx)) {
+            const double halfDiag = glm::length(glm::dvec3(mx) - glm::dvec3(mn)) * 0.5;
+            if (halfDiag > 0.0) return halfDiag * maxScale;
+        }
+    }
+
+    // 3. Primitivas y objetos sin geometría (luces, spawns, entidades). `PrimitiveShapes` las genera
+    //    de tamaño UNIDAD centradas en el origen → media diagonal del cubo unidad = √3/2.
+    const double kUnitPrimitiveRadius = 0.8660254;
+    const double r = kUnitPrimitiveRadius * maxScale;
+    return (r > 1e-6) ? r : kUnitPrimitiveRadius;   // nunca 0: sería la cámara DENTRO del objeto
 }
 }} // namespace Haruka::Core

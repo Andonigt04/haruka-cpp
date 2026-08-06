@@ -1,4 +1,5 @@
 #include "camera.h"
+#include <cmath>   // std::tan (proyección reversed-Z)
 
 #include <SDL3/SDL.h>
 
@@ -46,12 +47,39 @@ void Camera::ProcessMouseScroll(float yoffset) {
     if (zoom > 45.0f) zoom = 45.0f;
 }
 
+// --- REVERSED-Z con FAR INFINITO ---------------------------------------------------------
+// Antes: glm::perspective(fov, aspect, 0.1, 3e11). A escala planetaria eso destruía la precisión
+// de profundidad: TODO el terreno caía entre 0.99996 y 1.0 (medido) → el z-buffer no distinguía el
+// mar del suelo (z-fighting, y el agua sin poder ocluirse por depth → tenía que recortar la costa
+// re-evaluando el ruido del terreno per-píxel).
+//
+// Reversed-Z: near mapea a 1 y el infinito a 0. Como el float tiene MUCHA más resolución cerca de
+// 0, la precisión se reparte bien por todo el rango → profundidad utilizable a escala de planeta.
+// Requisitos (ya puestos): glClipControl(ZERO_TO_ONE), depth buffer D32F, clear de depth a 0 y
+// comparación GREATER/GEQUAL (los PSO lo traen por defecto; ver rhi_resources.h).
+//
+// Matriz (columna-mayor; f = 1/tan(fov/2)):
+//   [ f/aspect  0    0     0 ]
+//   [    0      f    0     0 ]
+//   [    0      0    0    -1 ]
+//   [    0      0   near   0 ]
+// z_ndc = near/(-z_view) → -z_view = near ⇒ 1 ; -z_view → ∞ ⇒ 0. Sin plano lejano: nada se recorta.
+static glm::mat4 reversedZInfinitePerspective(float fovYRadians, float aspect, float zNear) {
+    const float f = 1.0f / std::tan(fovYRadians * 0.5f);
+    glm::mat4 p(0.0f);
+    p[0][0] = f / aspect;
+    p[1][1] = f;
+    p[2][3] = -1.0f;
+    p[3][2] = zNear;
+    return p;
+}
+
 glm::mat4 Camera::getProjectionMatrix() const {
-    return glm::perspective(glm::radians(zoom), 16.0f / 9.0f, 0.1f, 300000000000.0f);
+    return reversedZInfinitePerspective(glm::radians(zoom), 16.0f / 9.0f, m_nearPlane);
 }
 
 glm::mat4 Camera::getProjectionMatrix(float aspectRatio) const {
-    return glm::perspective(glm::radians(zoom), aspectRatio, 0.1f, 300000000000.0f);
+    return reversedZInfinitePerspective(glm::radians(zoom), aspectRatio, m_nearPlane);
 }
 
 

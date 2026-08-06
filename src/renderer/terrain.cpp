@@ -1,33 +1,48 @@
 #include "terrain.h"
 
-#include <glad/glad.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <iostream>
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
+#include "../core/camera.h"
 #include <cmath>
 #include <algorithm>
 #include "stb_image.h"
-#include "../core/camera.h"
+
+namespace {
+    void freePatchBuffers(Haruka::TerrainPatch& p) {
+        using namespace Haruka;
+        if (RHI::valid(p.hVbo)) {
+            if (RHI::Device* dev = RHI::device()) { dev->destroy(p.hVbo); dev->destroy(p.hEbo); }
+            p.hVbo = p.hEbo = {};
+        }
+    }
+}
 
 namespace Haruka {
 
 Terrain::Terrain(int size, float scale)
     : size(size), scale(scale) {
     heightData.resize(size * size, 0.0f);
+    if (RHI::Device* dev = RHI::device()) {
+        m_patchUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(glm::mat4), nullptr, RHI::BufferMemory::Dynamic);
+    }
 }
 
 Terrain::~Terrain() {
     for (auto& patch : patches) {
-        if (patch.VAO) glDeleteVertexArrays(1, &patch.VAO);
-        if (patch.VBO) glDeleteBuffers(1, &patch.VBO);
-        if (patch.EBO) glDeleteBuffers(1, &patch.EBO);
+        freePatchBuffers(patch);
+    }
+    if (RHI::valid(m_patchUBO)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_patchUBO);
     }
 }
 
 void Terrain::loadHeightmap(const std::string& filepath) {
     int width, height, channels;
     unsigned char* data = stbi_load(filepath.c_str(), &width, &height, &channels, 1);
-    
+
     if (!data) {
         HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load heightmap: " + filepath);
         return;
@@ -38,21 +53,20 @@ void Terrain::loadHeightmap(const std::string& filepath) {
             "Heightmap size mismatch. Expected " + std::to_string(size) + "x" + std::to_string(size)
             + ", got " + std::to_string(width) + "x" + std::to_string(height));
     }
-    
+
     int actualSize = std::min(width, size);
     for (int z = 0; z < actualSize; z++) {
         for (int x = 0; x < actualSize; x++) {
             heightData[z * size + x] = data[z * width + x] / 255.0f;
         }
     }
-    
+
     stbi_image_free(data);
-    
+
     std::cout << "[Terrain] Loaded heightmap: " << filepath << std::endl;
     generateMesh();
 }
 
-// Hash-based value noise — deterministic, no global state, no periodic patterns.
 static float valueNoise(int x, int z, int seed) {
     int n = x + z * 57 + seed * 131;
     n = (n << 13) ^ n;
@@ -99,7 +113,6 @@ void Terrain::generatePerlin(int seed) {
 
 void Terrain::generateMesh() {
     patches.clear();
-    std::cout << "[Terrain] GENERATE MESH: size=" << size << ", patchSize=" << patchSize << ", terrainScale=(" << terrainScale.x << "," << terrainScale.y << "," << terrainScale.z << ") position=(" << position.x << "," << position.y << "," << position.z << ")" << std::endl << std::flush;
 
     int numPatchesX = (size + patchSize - 1) / patchSize;
     int numPatchesZ = (size + patchSize - 1) / patchSize;
@@ -111,51 +124,45 @@ void Terrain::generateMesh() {
             int patchWidth = std::min(patchSize, size - startX);
             int patchHeight = std::min(patchSize, size - startZ);
             if (patchWidth > 1 && patchHeight > 1) {
-                std::cout << "[Terrain] Patch px=" << px << ", pz=" << pz << ", startX=" << startX << ", startZ=" << startZ << ", patchWidth=" << patchWidth << ", patchHeight=" << patchHeight << std::endl << std::flush;
                 createPatch(startX, startZ, 0);
             }
         }
     }
 
-    std::cout << "[Terrain] Generated " << patches.size() << " patches" << std::endl << std::flush;
+    std::cout << "[Terrain] Generated " << patches.size() << " patches" << std::endl;
 }
 
 void Terrain::createPatch(int startX, int startZ, int lod) {
-    int step = 1 << lod; // 1, 2, 4, 8...
+    int step = 1 << lod;
     int verticesPerSide = (patchSize / step) + 1;
-    
+
     std::vector<float> vertices;
     std::vector<unsigned int> indices;
-    
-    // Generate vertices
+
     for (int z = 0; z < verticesPerSide; z++) {
         for (int x = 0; x < verticesPerSide; x++) {
             int actualX = startX + x * step;
             int actualZ = startZ + z * step;
-            
+
             if (actualX >= size) actualX = size - 1;
             if (actualZ >= size) actualZ = size - 1;
-            
+
             float height = getHeightNormalized(actualX, actualZ) * scale;
-            
-            // Position
+
             vertices.push_back(actualX * terrainScale.x);
             vertices.push_back(height * terrainScale.y);
             vertices.push_back(actualZ * terrainScale.z);
-            
-            // Normal (calculated from neighbors)
+
             glm::vec3 normal = getNormal(actualX, actualZ);
             vertices.push_back(normal.x);
             vertices.push_back(normal.y);
             vertices.push_back(normal.z);
-            
-            // TexCoord globales para continuidad entre patches
+
             vertices.push_back((float)actualX / (size - 1));
             vertices.push_back((float)actualZ / (size - 1));
         }
     }
-    
-    // Generate indices
+
     for (int z = 0; z < verticesPerSide - 1; z++) {
         for (int x = 0; x < verticesPerSide - 1; x++) {
             int topLeft = z * verticesPerSide + x;
@@ -163,37 +170,31 @@ void Terrain::createPatch(int startX, int startZ, int lod) {
             int bottomLeft = (z + 1) * verticesPerSide + x;
             int bottomRight = bottomLeft + 1;
 
-            // Triangle 1
             indices.push_back(topLeft);
             indices.push_back(bottomLeft);
             indices.push_back(topRight);
 
-            // Triangle 2
             indices.push_back(topRight);
             indices.push_back(bottomLeft);
             indices.push_back(bottomRight);
         }
     }
 
-    // Skirt geometry: downward-hanging quads along each edge to cover LOD-mismatch cracks.
-    // Each skirt vertex is a copy of the corresponding edge surface vertex, Y lowered by skirtDepth.
     const float skirtDepth = scale * terrainScale.y * 0.5f;
     int mainVertCount = verticesPerSide * verticesPerSide;
 
-    // Helper: append a skirt vertex (copy of surface vertex at flat index fi, Y -= skirtDepth)
     auto addSkirtVert = [&](int fi) {
         int base = fi * 8;
-        vertices.push_back(vertices[base + 0]);              // X
-        vertices.push_back(vertices[base + 1] - skirtDepth); // Y (lowered)
-        vertices.push_back(vertices[base + 2]);              // Z
-        vertices.push_back(vertices[base + 3]);              // nx
-        vertices.push_back(vertices[base + 4]);              // ny
-        vertices.push_back(vertices[base + 5]);              // nz
-        vertices.push_back(vertices[base + 6]);              // u
-        vertices.push_back(vertices[base + 7]);              // v
+        vertices.push_back(vertices[base + 0]);
+        vertices.push_back(vertices[base + 1] - skirtDepth);
+        vertices.push_back(vertices[base + 2]);
+        vertices.push_back(vertices[base + 3]);
+        vertices.push_back(vertices[base + 4]);
+        vertices.push_back(vertices[base + 5]);
+        vertices.push_back(vertices[base + 6]);
+        vertices.push_back(vertices[base + 7]);
     };
 
-    // Helper: emit two triangles for a skirt quad (surface edge s0,s1 → skirt sk0,sk1)
     auto addSkirtQuad = [&](int s0, int s1, int sk0, int sk1) {
         indices.push_back(s0);  indices.push_back(s1);  indices.push_back(sk0);
         indices.push_back(s1);  indices.push_back(sk1); indices.push_back(sk0);
@@ -201,119 +202,85 @@ void Terrain::createPatch(int startX, int startZ, int lod) {
 
     int N = verticesPerSide;
 
-    // Bottom edge (z == 0): surface row 0, skirt appended starting at mainVertCount
     int skirtBase = mainVertCount;
     for (int x = 0; x < N; ++x) addSkirtVert(0 * N + x);
     for (int x = 0; x < N - 1; ++x)
         addSkirtQuad(0 * N + x, 0 * N + x + 1, skirtBase + x, skirtBase + x + 1);
 
-    // Top edge (z == N-1)
     skirtBase = mainVertCount + N;
     for (int x = 0; x < N; ++x) addSkirtVert((N - 1) * N + x);
     for (int x = 0; x < N - 1; ++x)
         addSkirtQuad((N-1)*N + x + 1, (N-1)*N + x, skirtBase + x + 1, skirtBase + x);
 
-    // Left edge (x == 0)
     skirtBase = mainVertCount + 2 * N;
     for (int z = 0; z < N; ++z) addSkirtVert(z * N + 0);
     for (int z = 0; z < N - 1; ++z)
         addSkirtQuad((z+1)*N, z*N, skirtBase + z + 1, skirtBase + z);
 
-    // Right edge (x == N-1)
     skirtBase = mainVertCount + 3 * N;
     for (int z = 0; z < N; ++z) addSkirtVert(z * N + (N - 1));
     for (int z = 0; z < N - 1; ++z)
         addSkirtQuad(z*N + (N-1), (z+1)*N + (N-1), skirtBase + z, skirtBase + z + 1);
 
-    // Create OpenGL buffers
     TerrainPatch patch;
     patch.offset = glm::vec2(startX, startZ);
     patch.lod = lod;
     patch.indexCount = indices.size();
-    
-    glGenVertexArrays(1, &patch.VAO);
-    glGenBuffers(1, &patch.VBO);
-    glGenBuffers(1, &patch.EBO);
-    
-    glBindVertexArray(patch.VAO);
-    
-    glBindBuffer(GL_ARRAY_BUFFER, patch.VBO);
-    glBufferData(GL_ARRAY_BUFFER, vertices.size() * sizeof(float), vertices.data(), GL_STATIC_DRAW);
-    
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, patch.EBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), indices.data(), GL_STATIC_DRAW);
-    
-    // Position
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    
-    // Normal
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    
-    // TexCoord
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(2);
-    
-    glBindVertexArray(0);
-    
+
+    RHI::Device* dev = RHI::device();
+    patch.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, vertices.size() * sizeof(float), vertices.data());
+    patch.hEbo = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(unsigned int), indices.data());
+
     patches.push_back(patch);
 }
 
 int Terrain::calculateLOD(const glm::vec2& patchCenter, const glm::dvec3& cameraPos) {
     float distance = glm::length(cameraPos - glm::dvec3(patchCenter.x, 0.0, patchCenter.y));
-    
+
     for (int i = 0; i < 4; i++) {
         if (distance < lodDistance[i]) {
             return i;
         }
     }
-    
-    return 3; // Max LOD
+
+    return 3;
 }
 
-void Terrain::render(Shader& shader, const Camera* camera) {
-    shader.use();
+void Terrain::render(Haruka::RHI::Context& ctx) {
+    if (!m_camera) return;
 
-    // LOD update pass: collect patches that need rebuilding, then recreate them.
-    // Must NOT modify `patches` while iterating (push_back would invalidate refs).
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+
     struct PatchUpdate { int idx; int newLod; };
     std::vector<PatchUpdate> updates;
     for (int i = 0; i < (int)patches.size(); ++i) {
         float cx = patches[i].offset.x + patchSize * 0.5f;
         float cz = patches[i].offset.y + patchSize * 0.5f;
-        int target = calculateLOD(glm::vec2(cx, cz), camera->position);
+        int target = calculateLOD(glm::vec2(cx, cz), m_camera->position);
         if (target != patches[i].lod) updates.push_back({i, target});
     }
     for (auto& u : updates) {
         TerrainPatch& p = patches[u.idx];
-        if (p.VAO) glDeleteVertexArrays(1, &p.VAO);
-        if (p.VBO) glDeleteBuffers(1, &p.VBO);
-        if (p.EBO) glDeleteBuffers(1, &p.EBO);
+        freePatchBuffers(p);
         glm::vec2 off = p.offset;
-        createPatch(off.x, off.y, u.newLod); // appends to patches
-        patches[u.idx] = patches.back();     // copy new data into slot
-        patches.pop_back();                  // remove the duplicate at the end
+        createPatch(off.x, off.y, u.newLod);
+        patches[u.idx] = patches.back();
+        patches.pop_back();
     }
 
-    // Compute frustum planes once for all patches (Gribb-Hartmann, glm column-major).
-    glm::mat4 vp = camera->getProjectionMatrix() * camera->getViewMatrix();
+    glm::mat4 vp = m_camera->getProjectionMatrix() * m_camera->getViewMatrix();
     glm::vec4 planes[6];
     for (int i = 0; i < 4; ++i) {
-        planes[0][i] = vp[i][3] + vp[i][0]; // left
-        planes[1][i] = vp[i][3] - vp[i][0]; // right
-        planes[2][i] = vp[i][3] + vp[i][1]; // bottom
-        planes[3][i] = vp[i][3] - vp[i][1]; // top
-        planes[4][i] = vp[i][3] + vp[i][2]; // near
-        planes[5][i] = vp[i][3] - vp[i][2]; // far
+        planes[0][i] = vp[i][3] + vp[i][0];
+        planes[1][i] = vp[i][3] - vp[i][0];
+        planes[2][i] = vp[i][3] + vp[i][1];
+        planes[3][i] = vp[i][3] - vp[i][1];
+        planes[4][i] = vp[i][3] + vp[i][2];
+        planes[5][i] = vp[i][3] - vp[i][2];
     }
 
-    glm::mat4 model = glm::translate(glm::mat4(1.0f), position);
-    shader.setMat4("model", model);
-
     for (auto& patch : patches) {
-
-        // AABB del patch en mundo
         float minX = patch.offset.x * terrainScale.x + position.x;
         float minZ = patch.offset.y * terrainScale.z + position.z;
         float maxX = (patch.offset.x + patchSize) * terrainScale.x + position.x;
@@ -338,15 +305,17 @@ void Terrain::render(Shader& shader, const Camera* camera) {
             if (allOut) visible = false;
         }
         if (visible) {
-            glBindVertexArray(patch.VAO);
-            glDrawElements(GL_TRIANGLES, patch.indexCount, GL_UNSIGNED_INT, 0);
-            glBindVertexArray(0);
+            glm::mat4 model = glm::translate(glm::mat4(1.0f), position);
+            dev->updateBuffer(m_patchUBO, 0, sizeof(glm::mat4), &model);
+            ctx.bindUniformBuffer(1, m_patchUBO);
+            ctx.bindVertexBuffer(patch.hVbo);
+            ctx.bindIndexBuffer(patch.hEbo);
+            ctx.drawIndexed(patch.indexCount);
         }
     }
 }
 
 float Terrain::getHeightNormalized(int x, int z) const {
-    // Clamp en vez de devolver 0 para bordes
     int clampedX = std::max(0, std::min(x, size - 1));
     int clampedZ = std::max(0, std::min(z, size - 1));
     return heightData[clampedZ * size + clampedX];
@@ -355,23 +324,22 @@ float Terrain::getHeightNormalized(int x, int z) const {
 float Terrain::getHeight(float x, float z) const {
     x /= terrainScale.x;
     z /= terrainScale.z;
-    
+
     if (x < 0 || x >= size - 1 || z < 0 || z >= size - 1) return 0.0f;
-    
+
     int ix = (int)x;
     int iz = (int)z;
     float fx = x - ix;
     float fz = z - iz;
-    
-    // Bilinear interpolation
+
     float h00 = getHeightNormalized(ix, iz);
     float h10 = getHeightNormalized(ix + 1, iz);
     float h01 = getHeightNormalized(ix, iz + 1);
     float h11 = getHeightNormalized(ix + 1, iz + 1);
-    
+
     float h0 = h00 * (1.0f - fx) + h10 * fx;
     float h1 = h01 * (1.0f - fx) + h11 * fx;
-    
+
     return (h0 * (1.0f - fz) + h1 * fz) * scale * terrainScale.y;
 }
 
@@ -380,7 +348,7 @@ glm::vec3 Terrain::getNormal(float x, float z) const {
     float heightR = getHeight(x + 1, z);
     float heightD = getHeight(x, z - 1);
     float heightU = getHeight(x, z + 1);
-    
+
     glm::vec3 normal = glm::normalize(glm::vec3(heightL - heightR, 2.0f, heightD - heightU));
     return normal;
 }

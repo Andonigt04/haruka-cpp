@@ -1,0 +1,50 @@
+name: Deploy Doxygen to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout del código
+        uses: actions/checkout@v4
+
+      - name: Instalar Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz
+
+      - name: Compilar Doxygen
+        run: |
+          BRANCH_NAME=$(echo ${{ github.ref }} | sed 's|refs/heads/||')
+          sed -i "s/^PROJECT_NUMBER.*/PROJECT_NUMBER = 1.0.0 ($BRANCH_NAME-b${{ github.run_number }})/" Doxyfile
+          sed -i "s/^# HarukaEngine.*/# HarukaEngine (v1.0.0-$BRANCH_NAME-b${{ github.run_number }})/" README.md
+
+          doxygen Doxyfile # Asegúrate de que este es el nombre de tu archivo
+
+      - name: Configurar Pages
+        uses: actions/configure-pages@v4
+
+      - name: Subir artefacto
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'docs/html'
+
+      - name: Desplegar en GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -28,7 +28,7 @@ namespace Haruka::UI {
  *   uiSystem.updateInteraction(camPos, camFwd, interactJustPressed);
  *
  *   // 3. Draw panels into the 3-D scene
- *   uiSystem.drawAll(panelShader, view, proj, camPos);
+ *   uiSystem.drawAll(view, proj, camPos);
  */
 class UISystem {
 public:
@@ -57,8 +57,7 @@ public:
 
     // Draws all visible panels into the scene.
     // Shader requirements: see UIWorldPanel::draw().
-    void drawAll(Shader& shader, const glm::mat4& view,
-                 const glm::mat4& proj, const glm::vec3& camPos) const;
+    void drawAll(const glm::mat4& view, const glm::mat4& proj, const glm::vec3& camPos) const;
 
     // -- Query ---------------------------------------------------------------
 

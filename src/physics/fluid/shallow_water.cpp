@@ -104,6 +104,7 @@ float ShallowWaterSim::surfaceAlongUpAtWorld(const glm::dvec3& wp) const {
 }
 
 void ShallowWaterSim::applySeaLevel(float seaLevelAlongUp) {
+    m_seaLevelAlongUp = seaLevelAlongUp; // F5.3: el render salta las celdas a/bajo este nivel (las cubre el océano)
     // For any cell whose terrain sits at/below sea level, force the water surface
     // (terrain + water) up to sea level — the ocean "fills" coastal cells. Above
     // sea level, leave the simulation alone (rivers flow freely).

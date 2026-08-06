@@ -1,7 +1,7 @@
 /**
  * @file softbody_renderer.h
  * @brief Renders XPBD softbodies by streaming particle positions into a dynamic
- *        VBO each frame (Fase B). Self-contained (own VAO/VBO/shader), drawn from
+ *        VBO each frame (Fase B). Self-contained (own pipeline/VBO/shader), drawn from
  *        the game's onRenderWorld hook — decoupled like the water/terrain renderers.
  *
  * Positions are camera-relative (particle.origin - cameraPos + localPos), so the
@@ -10,10 +10,10 @@
  */
 #pragma once
 
-#include <glad/glad.h>
 #include <glm/glm.hpp>
 #include <vector>
 #include <memory>
+#include "rhi/rhi_types.h"
 #include "physics/xpbd/softbody.h"
 #include "tools/math_types.h"
 
@@ -26,12 +26,9 @@ public:
     SoftBodyRenderer() = default;
     ~SoftBodyRenderer();
 
-    /** @brief Registers a softbody (handle + which solver owns its particles). */
     void add(const xpbd::SoftBodyHandle& handle, xpbd::XPBDSolver* solver,
              const glm::vec3& color = glm::vec3(0.8f, 0.2f, 0.25f));
 
-    /** @brief Uploads current particle positions and draws all softbodies.
-     *  Expects view/projection already available via the per-frame UBO (binding 0). */
     void render(const Haruka::WorldPos& cameraPos);
 
     void clear();
@@ -41,14 +38,15 @@ private:
         xpbd::SoftBodyHandle handle;
         xpbd::XPBDSolver*    solver = nullptr;
         glm::vec3            color{0.8f};
-        GLuint vao = 0, vbo = 0, ebo = 0;
-        std::vector<float> cpuVerts; // interleaved pos(3)+normal(3)
+        Haruka::RHI::BufferHandle hVbo, hEbo;
+        std::vector<float> cpuVerts;
         bool initialized = false;
     };
     std::vector<Entry> m_entries;
-    std::unique_ptr<Shader> m_shader;
+    Haruka::RHI::PipelineHandle m_pso;
+    Haruka::RHI::BufferHandle   m_paramsUBO; // SoftbodyParams (binding 6)
 
-    void ensureShader();
+    void ensurePSO();
     void uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos);
 };
 

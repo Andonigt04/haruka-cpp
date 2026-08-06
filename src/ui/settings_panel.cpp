@@ -35,6 +35,7 @@ static const char* shadowQualNames[]   = { "Off",  "Low",   "Medium", "High" };
 static const char* aaNames[]           = { "None", "FXAA",  "TAA" };
 static const char* waterQualityNames[] = { "Low", "Medium", "High", "Ultra" };
 static const char* windowModeNames[]   = { "Windowed", "Borderless", "Fullscreen" };
+static const char* renderBackendNames[] = { "OpenGL", "Vulkan" };
 
 bool SettingsPanel::render() {
     auto& sm = SettingsManager::get();
@@ -118,6 +119,16 @@ void SettingsPanel::tabGraphics() {
             app->applyGraphicsSettings();
     }
 
+    // API gráfica (RHI). El device se crea en el arranque → NO se aplica en vivo: requiere
+    // reiniciar. Se persiste en el imgui.ini (RenderBackend) y Application::run lo lee al iniciar.
+    int rb = (int)g.renderBackend;
+    if (ImGui::Combo("Render API", &rb, renderBackendNames, 2))
+        g.renderBackend = (Settings::RenderBackend)rb;
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Requiere reiniciar el juego.\nVulkan aún no implementado → cae a OpenGL automáticamente.");
+
     int tq = (int)g.textureQuality;
     if (ImGui::Combo(TR("gfx.textureQuality").c_str(), &tq, texQualityNames, 4))
         g.textureQuality = (Settings::TextureQuality)tq;
@@ -145,7 +156,10 @@ void SettingsPanel::tabGraphics() {
     ImGui::SliderFloat(TR("gfx.fov").c_str(), &g.fov, 60.0f, 120.0f, "%.0f°");
     ImGui::SliderFloat(TR("gfx.renderScale").c_str(), &g.renderScale, 0.5f, 2.0f, "%.2f");
 
-    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 64, 4096);
+    // 0 = Auto (presupuesto = 25% de la RAM del sistema, acotado). El format string muestra
+    // "Auto" en 0 (sin %d) y "%d MB" en cualquier otro valor → el usuario puede forzarlo.
+    ImGui::SliderInt(TR("gfx.chunkMemory").c_str(), &g.chunkMemoryMB, 0, 24576,
+                     g.chunkMemoryMB == 0 ? "Auto" : "%d MB");
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("gfx.chunkMemory.tip").c_str());
 
     ImGui::SeparatorText(TR("gfx.postProcessing").c_str());
@@ -189,7 +203,7 @@ void SettingsPanel::tabAudio() {
     auto& a = SettingsManager::get().audio();
 
     ImGui::SeparatorText(TR("audio.devices").c_str());
-    // Entrada (micro): por SDL (la voz/Vosk lee de SDL).
+    // Entrada (micro): la enumera SDL (la captura de audio del motor lee de SDL).
     deviceCombo(TR("audio.input").c_str(),  /*recording*/true,  a.inputDevice);
     if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("audio.input.tip").c_str());
 

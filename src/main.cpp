@@ -14,12 +14,11 @@
  * C++17 / OpenGL 4.6 runtime for space exploration, deferred rendering, and
  * procedural planetary terrain.
  *
- * The source tree is documented in parallel with the Markdown guides:
- * - `README.md`
- * - `docs/guides/ANALISIS_SISTEMAS.md`
- * - `docs/guides/DIAGRAMAS_FLUJO.md`
- * - `docs/guides/PATRONES_USO.md`
- * - `docs/guides/GUIA_RAPIDA.md`
+ *  * @section sec_docs Documentation map
+ * - @subpage analisis_sistemas "Análisis de Sistemas" — Architecture breakdown.
+ * - @subpage diagramas_flujo "Diagramas de Flujo" — Execution and data-flow diagrams.
+ * - @subpage patrones_uso "Patrones de Uso" — Implementation patterns and code examples.
+ * - @subpage guia_rapida "Guía Rápida" — Quick reference and debugging tips.
  *
  * @section sec_overview Overview
  *
@@ -27,7 +26,7 @@
  * - `SceneManager` stores the active scene as a flat collection of `SceneObject` records.
  * - `WorldSystem` maintains the floating origin and bridges double-precision CPU coordinates with GPU-local floats.
  * - `PlanetarySystem` owns orbital simulation, chunk generation, streaming, and LOD.
- * - `ObjectType` and `PlanetChunkKey` classify runtime entities and terrain chunks.
+ * - `ObjectType` classifies runtime entities.
  *
  * ---
  *
@@ -100,17 +99,7 @@
  * @section sec_terrain Terrain and chunk streaming
  *
  * The planet surface is split into a **cube-sphere** grid. Each face is
- * subdivided into a configurable tile grid; each tile is one
- * `PlanetChunkKey` (face, LOD, x, y).
- *
- * **Generation** (`PlanetarySystem::generateChunk()`):
- * - A cube-sphere patch is tessellated at LOD resolution.
- * - Height is computed by layered fBm noise (`NoiseGenerator::fBm`) with four
- *   independent seeds: continents, macro, detail, warp.
- * - Vertices are displaced along the sphere normal by the height value.
- * - Normals are recalculated from the displaced positions.
- * - The job runs on a background thread via `std::async`; result is a
- *   `ChunkData` (vertices / normals / indices).
+ * subdivided into a configurable tile grid per face at a given LOD.
  *
  * **Streaming** (`TerrainStreamingSystem`):
  * - `WorldSystem::updateVisibleChunks()` builds the visible set from camera
@@ -186,6 +175,7 @@
 
 #include <iostream>
 #include <stdexcept>
+#include <cstring>
 
 /**
  * @brief Program entry point.
@@ -197,10 +187,19 @@
  * path. Any uncaught exception is reported through the engine error system and
  * causes a non-zero exit.
  *
+ * Supported flags:
+ *   --headless  — run without a visible window (used by smoke tests / CI).
+ *
  * @return `EXIT_SUCCESS` on clean shutdown, `EXIT_FAILURE` on fatal error.
  */
-int main() {
+int main(int argc, char* argv[]) {
     Application app;
+    bool headless = false;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--headless") == 0)
+            headless = true;
+    }
 
     std::string startScenePath = "";
 
@@ -210,7 +209,7 @@ int main() {
     }
 
     try {
-        app.run(startScenePath);
+        app.run(startScenePath, headless);
     } catch (const std::exception& e) {
         HARUKA_MOTOR_ERROR(ErrorCode::MOTOR_INIT_FAILED,
             std::string("Uncaught exception: ") + e.what());

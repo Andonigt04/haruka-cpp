@@ -32,6 +32,13 @@ public:
     float sensitivity = 0.1f;     ///< Mouse rotation sensitivity (degrees per pixel)
     float zoom = 45.0f;           ///< Vertical FOV in degrees
     float aspectRatio = 1.0f;     ///< Aspect ratio for projection matrix
+    float m_nearPlane = 0.1f;     ///< Near plane (m). DINÁMICO: la app lo sube con la altitud
+                                  ///< (órbita) → precisión de depth lejana ~millones× mejor (sin z-fight
+                                  ///< agua/lecho); pegado al suelo se queda en 0.1 (precisión cercana).
+
+    /** @brief Fija el near plane (la app lo calcula por frame desde la altitud sobre el planeta). */
+    void setNearPlane(float n) { m_nearPlane = (n > 0.001f) ? n : 0.001f; }
+    float getNearPlane() const { return m_nearPlane; }
 
     /** @brief Constructs camera at initial world-space position. */
     Camera(Haruka::WorldPos startPos);

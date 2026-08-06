@@ -167,7 +167,9 @@ void Character::processInput(SDL_Window* window, float deltaTime) {
 }
 
 float Character::getSpeed() const {
-    return sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed);
+    // El terreno FRENA: nieve profunda, arena, barro. Va aquí y no en cada llamada de movimiento para
+    // que lo respeten todos los caminos (andar, correr, agacharse) sin poder olvidarse de uno.
+    return (sprinting ? runSpeed : (crouched ? crouchSpeed : walkSpeed)) * groundSpeedFactor;
 }
 
 void Character::move(glm::vec2 input, float deltaTime) {
@@ -179,12 +181,41 @@ void Character::move(glm::vec2 input, float deltaTime) {
 
     float speed = getSpeed();
     glm::dvec3 delta = surfaceForward * (double)(input.y * speed)
-                     + surfaceRight   * (double)(input.x * speed);
+                     + surfaceRight   * (double)(input.x * speed);   // velocidad de locomoción (m/s, tangente)
+    glm::dvec3 u = glm::dvec3(up);
+
+    // VOLANDO manda el juego (el cuerpo está kinemático y NADIE lo integra), así que el desplazamiento
+    // horizontal debe escribir la POSICIÓN como en el camino clásico. Con el camino de física solo se
+    // fijaba una velocidad que nadie consumía → se ascendía (eso sí mueve la posición) pero no se andaba.
+    if (m_physicsDriven && physicsBody && !flightMode) {
+        // MOTOR-DRIVEN: no escribimos la posición. Fijamos la velocidad TANGENCIAL de locomoción en
+        // el body y CONSERVAMOS su componente radial (gravedad/salto, que integra el motor). El motor
+        // avanza el body (advance) → la posición sale de ahí, y una fuerza externa (viento, empujón,
+        // magia) se suma a esa velocidad en vez de ser ignorada.
+        const glm::dvec3 vBody = physicsBody->velocity;
+        physicsBody->velocity  = delta + u * glm::dot(vBody, u);
+        velocity = physicsBody->velocity;
+        return;
+    }
+
+    // CLÁSICO (kinemático): el juego integra a mano → escribimos la posición.
     position += delta * (double)deltaTime;
     // Conserva la componente RADIAL de la velocidad (salto/gravedad) — solo reemplaza la
     // horizontal — para no matar el salto al moverse a la vez.
-    glm::dvec3 u = glm::dvec3(up);
     velocity = delta + u * glm::dot(velocity, u);
+}
+
+// FRICCIÓN al soltar el movimiento (jugador físico). `move()` es un binding "Performed" → solo corre con
+// tecla pulsada; al soltar, la última velocidad tangencial se quedaba y el motor la re-inyectaba cada
+// frame → deslizabas sin parar. Aquí se anula SOLO la componente tangencial y se conserva la RADIAL
+// (gravedad/salto en curso) → paras en seco pero sigues cayendo/subiendo con normalidad.
+void Character::stopWalking() {
+    if (!m_physicsDriven || !physicsBody) return;
+    glm::dvec3 u = glm::dvec3(getEffectiveUp());
+    const double ul = glm::length(u);
+    u = (ul > 1e-6) ? u / ul : glm::dvec3(0.0, 1.0, 0.0);
+    physicsBody->velocity = u * glm::dot(glm::dvec3(physicsBody->velocity), u);   // deja solo lo radial
+    velocity = physicsBody->velocity;
 }
 
 void Character::moveForward(float amount) {

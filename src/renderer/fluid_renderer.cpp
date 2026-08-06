@@ -1,101 +1,108 @@
 #include "fluid_renderer.h"
 #include "shader.h"
 #include "physics/fluid/pbf_solver.h"
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 
 namespace Haruka {
 
 FluidRenderer::~FluidRenderer() {
-    if (m_vao) glDeleteVertexArrays(1, &m_vao);
-    if (m_vbo) glDeleteBuffers(1, &m_vbo);
-    if (m_quadVAO) glDeleteVertexArrays(1, &m_quadVAO);
-    if (m_quadVBO) glDeleteBuffers(1, &m_quadVBO);
-    if (m_depthFBO) glDeleteFramebuffers(1, &m_depthFBO);
-    if (m_depthTex) glDeleteTextures(1, &m_depthTex);
-    if (m_depthRB)  glDeleteRenderbuffers(1, &m_depthRB);
-    if (m_smoothFBO[0]) glDeleteFramebuffers(2, m_smoothFBO);
-    if (m_smoothTex[0]) glDeleteTextures(2, m_smoothTex);
-    if (m_sceneCopyFBO) glDeleteFramebuffers(1, &m_sceneCopyFBO);
-    if (m_sceneCopyTex) glDeleteTextures(1, &m_sceneCopyTex);
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    auto del = [&](auto& h) { if (RHI::valid(h)) { dev->destroy(h); h = {}; } };
+    del(m_particleBuf); del(m_quadBuf); del(m_uboParams);
+    del(m_depthPass); del(m_smoothPass[0]); del(m_smoothPass[1]); del(m_sceneCopyPass);
+    del(m_psoSpheres); del(m_psoDepth); del(m_psoBlur); del(m_psoSurface);
 }
 
 void FluidRenderer::ensureGL() {
     if (m_init) return;
-    m_sphereShader  = std::make_unique<Shader>("shaders/fluid_particle.vert", "shaders/fluid_particle.frag");
-    m_depthShader   = std::make_unique<Shader>("shaders/fluid_particle.vert", "shaders/fluid_depth.frag");
-    m_blurShader    = std::make_unique<Shader>("shaders/screenquad.vert",     "shaders/fluid_blur.frag");
-    m_surfaceShader = std::make_unique<Shader>("shaders/screenquad.vert",     "shaders/fluid_surface.frag");
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
 
-    glGenVertexArrays(1, &m_vao);
-    glGenBuffers(1, &m_vbo);
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glBindVertexArray(0);
+    const std::string base = Shader::baseDir();
+    const std::string vPart = base + "shaders/fluid_particle.vert";
+    const std::string fPart = base + "shaders/fluid_particle.frag";
+    const std::string fDep  = base + "shaders/fluid_depth.frag";
+    const std::string vQuad = base + "shaders/screenquad.vert";
+    const std::string fBlur = base + "shaders/fluid_blur.frag";
+    const std::string fSurf = base + "shaders/fluid_surface.frag";
 
-    // Fullscreen quad (triangle strip) for the smooth/composite passes.
+    RHI::PipelineDesc pp;
+    pp.vertexPath              = vPart.c_str();
+    pp.fragmentPath            = fPart.c_str();
+    pp.vertexLayout.strides    = { (uint32_t)(3 * sizeof(float)) };
+    pp.vertexLayout.attributes = { { 0, 0, RHI::Format::RGB32F, 0 } };
+    pp.topology     = RHI::PrimitiveTopology::Points;
+    pp.depth.test   = true;
+    pp.depth.write  = true;
+    pp.blend.enable = false;
+    pp.cull         = RHI::CullMode::None;
+    m_psoSpheres = dev->createPipeline(pp);
+
+    pp.fragmentPath = fDep.c_str();
+    m_psoDepth = dev->createPipeline(pp);
+
+    RHI::PipelineDesc pq;
+    pq.vertexPath              = vQuad.c_str();
+    pq.fragmentPath            = fBlur.c_str();
+    pq.vertexLayout.strides    = { (uint32_t)(4 * sizeof(float)) };
+    pq.vertexLayout.attributes = {
+        { 0, 0,                        RHI::Format::RG32F, 0 },
+        { 1, (uint32_t)(2*sizeof(float)), RHI::Format::RG32F, 0 },
+    };
+    pq.topology     = RHI::PrimitiveTopology::TriangleStrip;
+    pq.depth.test   = false;
+    pq.depth.write  = false;
+    pq.blend.enable = false;
+    pq.cull         = RHI::CullMode::None;
+    m_psoBlur = dev->createPipeline(pq);
+
+    pq.fragmentPath = fSurf.c_str();
+    m_psoSurface = dev->createPipeline(pq);
+
+    m_particleBuf = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
+
     constexpr float quad[] = { -1,1, 0,1,  -1,-1, 0,0,  1,1, 1,1,  1,-1, 1,0 };
-    glGenVertexArrays(1, &m_quadVAO);
-    glGenBuffers(1, &m_quadVBO);
-    glBindVertexArray(m_quadVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_quadVBO);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4*sizeof(float), (void*)(2*sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
+    m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quad), quad);
 
+    m_uboParams = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(FluidParamsUBO), nullptr,
+                                    RHI::BufferMemory::Dynamic);
     m_init = true;
 }
 
+void FluidRenderer::bindParams(RHI::Context* ctx) {
+    RHI::Device* dev = RHI::device();
+    dev->updateBuffer(m_uboParams, 0, sizeof(FluidParamsUBO), &m_params);
+    ctx->bindUniformBuffer(8, m_uboParams);
+}
+
 void FluidRenderer::ensureTargets(int w, int h) {
-    if (m_depthFBO && m_fbW == w && m_fbH == h) return;
+    if (RHI::valid(m_depthPass) && m_fbW == w && m_fbH == h) return;
     m_fbW = w; m_fbH = h;
 
-    auto makeR32F = [&](GLuint& tex) {
-        if (!tex) glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_R32F, w, h, 0, GL_RED, GL_FLOAT, nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    };
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    auto del = [&](auto& h) { if (RHI::valid(h)) { dev->destroy(h); h = {}; } };
+    del(m_depthPass); del(m_smoothPass[0]); del(m_smoothPass[1]); del(m_sceneCopyPass);
 
-    // Depth pass target: R32F color + a depth renderbuffer (nearest particle wins).
-    if (!m_depthFBO) glGenFramebuffers(1, &m_depthFBO);
-    makeR32F(m_depthTex);
-    if (!m_depthRB) glGenRenderbuffers(1, &m_depthRB);
-    glBindRenderbuffer(GL_RENDERBUFFER, m_depthRB);
-    // Match the scene target's depth format (HDR uses generic GL_DEPTH_COMPONENT)
-    // so the depth blit for occlusion is format-compatible.
-    glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, w, h);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_depthFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_depthTex, 0);
-    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depthRB);
+    RHI::RenderTargetDesc dep;
+    dep.width = w; dep.height = h; dep.colorFormats = { RHI::Format::R32F };
+    dep.colorFilter = RHI::Filter::Nearest; dep.hasDepth = true;
+    dep.depthFormat = RHI::Format::D32F;
+    m_depthPass = dev->createRenderTarget(dep);
 
-    // Smooth ping-pong targets (R32F, color only).
     for (int i = 0; i < 2; ++i) {
-        if (!m_smoothFBO[i]) glGenFramebuffers(1, &m_smoothFBO[i]);
-        makeR32F(m_smoothTex[i]);
-        glBindFramebuffer(GL_FRAMEBUFFER, m_smoothFBO[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_smoothTex[i], 0);
+        RHI::RenderTargetDesc sm;
+        sm.width = w; sm.height = h; sm.colorFormats = { RHI::Format::R32F };
+        sm.colorFilter = RHI::Filter::Nearest; sm.hasDepth = false;
+        m_smoothPass[i] = dev->createRenderTarget(sm);
     }
 
-    // Scene-colour copy (RGBA16F covers both HDR and LDR scene targets) for refraction.
-    if (!m_sceneCopyTex) glGenTextures(1, &m_sceneCopyTex);
-    glBindTexture(GL_TEXTURE_2D, m_sceneCopyTex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, w, h, 0, GL_RGBA, GL_FLOAT, nullptr);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    if (!m_sceneCopyFBO) glGenFramebuffers(1, &m_sceneCopyFBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_sceneCopyFBO);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_sceneCopyTex, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    RHI::RenderTargetDesc sc;
+    sc.width = w; sc.height = h; sc.colorFormats = { RHI::Format::RGBA16F };
+    sc.colorFilter = RHI::Filter::Linear; sc.hasDepth = false;
+    m_sceneCopyPass = dev->createRenderTarget(sc);
 }
 
 void FluidRenderer::uploadParticles(const Haruka::WorldPos& cameraPos, int n) {
@@ -104,111 +111,110 @@ void FluidRenderer::uploadParticles(const Haruka::WorldPos& cameraPos, int n) {
         glm::vec3 cp = glm::vec3(m_solver->worldPos(i) - glm::dvec3(cameraPos));
         m_verts[i*3+0] = cp.x; m_verts[i*3+1] = cp.y; m_verts[i*3+2] = cp.z;
     }
-    glBindVertexArray(m_vao);
-    glBindBuffer(GL_ARRAY_BUFFER, m_vbo);
-    glBufferData(GL_ARRAY_BUFFER, m_verts.size()*sizeof(float), m_verts.data(), GL_DYNAMIC_DRAW);
-    glBindVertexArray(0);
+    if (RHI::Device* dev = RHI::device())
+        dev->uploadBuffer(m_particleBuf, m_verts.size()*sizeof(float), m_verts.data());
 }
 
-void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH) {
+void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
+                           RHI::RenderPassHandle scenePass) {
     if (!m_solver || m_solver->count() == 0) return;
+    if (getenv("HARUKA_NO_FLUID")) return;
     ensureGL();
 
     const int n = m_solver->count();
     uploadParticles(cameraPos, n);
 
-    // Use the ACTUAL bound viewport (handles Render Scale: the scene target may be
-    // smaller than the window). Fall back to the passed size if unavailable.
-    GLint vp[4] = {0, 0, vpW, vpH};
-    glGetIntegerv(GL_VIEWPORT, vp);
-    int w = vp[2] > 0 ? vp[2] : vpW;
-    int h = vp[3] > 0 ? vp[3] : vpH;
-
-    if (s_surfaceMode) renderSurface(n, w, h);
-    else               renderSpheres(n, (float)h);
+    if (s_surfaceMode) renderSurface(n, vpW, vpH, scenePass);
+    else               renderSpheres(n, (float)vpH);
 }
 
 void FluidRenderer::renderSpheres(int n, float vpH) {
-    m_sphereShader->use();
-    glUniform1f(12, m_radius);
-    glUniform1f(13, vpH);
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    glEnable(GL_DEPTH_TEST);
-    glBindVertexArray(m_vao);
-    glDrawArrays(GL_POINTS, 0, n);
-    glBindVertexArray(0);
+    RHI::Device* dev = RHI::device();
+    m_params.radius    = m_radius;
+    m_params.viewportH = vpH;
+
+    RHI::Context* ctx = dev->beginFrame();
+    ctx->bindPipeline(m_psoSpheres);
+    bindParams(ctx);
+    ctx->bindVertexBuffer(m_particleBuf, 0);
+    ctx->draw((uint32_t)n);
 }
 
-void FluidRenderer::renderSurface(int n, int w, int h) {
-    GLint prevFBO = 0;
-    glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevFBO);
+void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle scenePass) {
     ensureTargets(w, h);
+    if (!RHI::valid(m_depthPass)) return;
+    if (n <= 0) return;
 
-    // 0) Copy the scene colour (for refraction) and depth (for occlusion) out of the
-    //    scene target via blits — works even though the scene depth is a renderbuffer.
-    glBindFramebuffer(GL_READ_FRAMEBUFFER, prevFBO);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_sceneCopyFBO);
-    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    // scenePass es el target de escena: `{0}` == backbuffer (válido). Los blits y el compuesto
+    // leen/escriben ese target para sembrar refracción+oclusión y componer la superficie final.
 
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, m_depthFBO);
-    glBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+    RHI::Device*  dev = RHI::device();
+    RHI::Context* ctx = dev->beginFrame();
+    const float texelX = 1.0f / (float)w;
+    const float texelY = 1.0f / (float)h;
 
-    // 1) Depth pass: particle spheres → nearest eye-depth into m_depthTex, depth-
-    //    tested against the SCENE depth just blitted in (so terrain in front occludes
-    //    the fluid). Clear colour only — keep the blitted scene depth.
-    glBindFramebuffer(GL_FRAMEBUFFER, m_depthFBO);
-    glViewport(0, 0, w, h);
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glEnable(GL_DEPTH_TEST);
-    glDepthMask(GL_TRUE);
-    glDisable(GL_BLEND);
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    m_depthShader->use();
-    glUniform1f(12, m_radius);
-    glUniform1f(13, (float)h);
-    glBindVertexArray(m_vao);
-    glDrawArrays(GL_POINTS, 0, n);
+    // 0) SIEMBRA del modo superficie (blits GL: el RHI no tiene comando de blit).
+    //    - Copia el COLOR de la escena a m_sceneCopyPass → lo lee el composite para refracción.
+    //    - Copia el DEPTH de la escena al depth del pase de partículas → las gotas OCLUYEN a lo
+    //      que tienen por detrás (paredes, acantilados, la propia costa). Sin esto el splash
+    //      pintaría por delante de geometría que le tapa.
+    ctx->blitColor(scenePass, m_sceneCopyPass, w, h);
+    ctx->blitDepth(scenePass, m_depthPass, w, h);
+
+    // 1) Particle depth pass: clear colour (R32F=0), preserve blitted scene depth.
+    RHI::ClearValues cv;
+    cv.clearColor = true;  cv.color[0] = cv.color[1] = cv.color[2] = cv.color[3] = 0.0f;
+    cv.clearDepth = false; // keep scene depth from blit
+
+    ctx->beginRenderPass(m_depthPass, cv);
+    m_params.radius    = m_radius;
+    m_params.viewportH = (float)h;
+    m_params.texel     = glm::vec2(texelX, texelY);
+    ctx->bindPipeline(m_psoDepth);
+    bindParams(ctx);
+    ctx->bindVertexBuffer(m_particleBuf, 0);
+    ctx->draw((uint32_t)n);
+    ctx->endRenderPass();
 
     // 2) Separable bilateral smooth: depthTex -> smooth[0] (H) -> smooth[1] (V).
-    glDisable(GL_DEPTH_TEST);
-    glDepthMask(GL_FALSE);
-    glDisable(GL_BLEND);
-    m_blurShader->use();
-    glUniform1f(1, 0.5f); // u_depthFalloff (m) — edge sharpness
-    glBindVertexArray(m_quadVAO);
+    m_params.depthFalloff = 0.5f;
 
-    glBindFramebuffer(GL_FRAMEBUFFER, m_smoothFBO[0]);
-    glUniform2f(0, 1.0f / (float)w, 0.0f);
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_depthTex);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    RHI::ClearValues ccv;
+    ccv.clearColor = true; ccv.color[0] = ccv.color[1] = ccv.color[2] = ccv.color[3] = 0.0f;
+    ccv.clearDepth = false;
 
-    glBindFramebuffer(GL_FRAMEBUFFER, m_smoothFBO[1]);
-    glUniform2f(0, 0.0f, 1.0f / (float)h);
-    glBindTexture(GL_TEXTURE_2D, m_smoothTex[0]);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    ctx->beginRenderPass(m_smoothPass[0], ccv);
+    ctx->bindPipeline(m_psoBlur);
+    ctx->bindVertexBuffer(m_quadBuf, 0);
+    m_params.blurDir = glm::vec2(texelX, 0.0f);
+    bindParams(ctx);
+    ctx->bindTexture(0, dev->getColorTexture(m_depthPass, 0));
+    ctx->draw(4);
+    ctx->endRenderPass();
 
-    // 3) Composite the water surface into the scene target (prevFBO). Opaque: the
-    //    shader samples the scene COPY for refraction, so no feedback loop and no
-    //    blend needed; empty pixels are discarded.
-    glBindFramebuffer(GL_FRAMEBUFFER, prevFBO);
-    glViewport(0, 0, w, h);
-    glDisable(GL_DEPTH_TEST);
-    glDisable(GL_BLEND);
-    m_surfaceShader->use();
-    glUniform2f(0, 1.0f / (float)w, 1.0f / (float)h); // u_texel
-    glUniform1f(1, 0.03f);                            // u_refractScale (uv units)
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, m_smoothTex[1]); // smoothed depth (binding 0)
-    glActiveTexture(GL_TEXTURE1);
-    glBindTexture(GL_TEXTURE_2D, m_sceneCopyTex); // scene behind (binding 1)
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    ctx->beginRenderPass(m_smoothPass[1], ccv);
+    m_params.blurDir = glm::vec2(0.0f, texelY);
+    bindParams(ctx);
+    ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[0], 0));
+    ctx->draw(4);
+    ctx->endRenderPass();
 
-    glActiveTexture(GL_TEXTURE0);  // restore default active unit
-    glBindVertexArray(0);
-    glDepthMask(GL_TRUE);
-    glEnable(GL_DEPTH_TEST);
+    // 3) Compuesto de SUPERFICIE OPAQUE sobre el target de escena. El quad cubre toda la
+    //    pantalla; fluid_surface.frag descarta donde no hay fluido (u_depth ≤ 0) y refracta lo
+    //    que hay detrás (u_scene) donde sí lo hay → el resto de la escena queda intacto.
+    RHI::ClearValues keep;
+    keep.clearColor = false; keep.clearDepth = false;
+    ctx->beginRenderPass(scenePass, keep);
+    ctx->setViewport(0, 0, w, h);
+    ctx->bindPipeline(m_psoSurface);
+    m_params.texel       = glm::vec2(texelX, texelY);
+    m_params.refractScale = 0.03f;
+    bindParams(ctx);
+    ctx->bindVertexBuffer(m_quadBuf, 0);
+    ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[1], 0));   // smoothed depth
+    ctx->bindTexture(1, dev->getColorTexture(m_sceneCopyPass, 0));   // scene colour behind
+    ctx->draw(4);
+    ctx->endRenderPass();
 }
 
 } // namespace Haruka

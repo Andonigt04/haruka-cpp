@@ -63,6 +63,7 @@ public:
     void moveForward(float amount);
     void moveRight(float amount);
     void jump();
+    void stopWalking();   // anula la velocidad tangencial (fricción al soltar; jugador físico)
     void crouch(bool enabled);
     void sprint(bool enabled);
     ///@}
@@ -77,6 +78,12 @@ public:
     ///@{
     void setPhysicsBody(std::shared_ptr<RigidBody> body) { physicsBody = body; }
     std::shared_ptr<RigidBody> getPhysicsBody() { return physicsBody; }
+    /** @brief (Fase 2) Movimiento GESTIONADO POR EL MOTOR: en vez de escribir la posición a mano,
+     *  move() fija la velocidad de locomoción en el body y el motor integra (gravedad radial +
+     *  ground-snap). Así una fuerza externa (viento, empujón, magia) SÍ afecta al jugador. Off =
+     *  comportamiento clásico (kinemático, el juego integra a mano). Lo activa Player según un flag. */
+    void setPhysicsDriven(bool on) { m_physicsDriven = on; }
+    bool isPhysicsDriven() const { return m_physicsDriven; }
     ///@}
     
     /** @name Network synchronization */
@@ -155,6 +162,15 @@ public:
     void move(glm::vec2 input, float deltaTime);
 
     float getSpeed() const;
+    /** @brief Multiplicador de velocidad por el TERRENO que se pisa [0.2, 1]. Lo fija el juego según
+     *  la capa granular: andar por nieve profunda cuesta, y tiene que NOTARSE — si la nieve solo se
+     *  ve y no se siente, es una textura, no una capa. 1 = suelo firme. */
+    void setGroundSpeedFactor(float f) { groundSpeedFactor = glm::clamp(f, 0.2f, 1.0f); }
+    float getGroundSpeedFactor() const { return groundSpeedFactor; }
+    /** @brief Cuánto se HUNDEN los pies en la capa (m). Es un offset VISUAL/de cámara: no mueve el
+     *  suelo ni toca la colisión (ver GroundLayer: la superficie de referencia no se puede tocar). */
+    void setGroundSink(float m) { groundSink = glm::clamp(m, 0.0f, 0.5f); }
+    float getGroundSink() const { return groundSink; }
 
     /** Sync camera position/orientation from current yaw/pitch/position.
      *  Call after rotate() so the view matrix reflects the new direction
@@ -181,10 +197,13 @@ private:
     
     std::unique_ptr<Camera> camera;
     std::shared_ptr<RigidBody> physicsBody;
+    bool m_physicsDriven = false;   // (Fase 2) el motor integra el body; move() fija velocidad, no posición
     
     CharacterState state = CharacterState::IDLE;
     
     // Movement parameters (meters / second)
+    float groundSpeedFactor = 1.0f;  // lo baja la capa granular (nieve/arena/barro)
+    float groundSink = 0.0f;         // hundimiento en la capa (m), solo visual
     float walkSpeed = 1.5f;
     float runSpeed = 4.0f;
     float crouchSpeed = 0.6f;

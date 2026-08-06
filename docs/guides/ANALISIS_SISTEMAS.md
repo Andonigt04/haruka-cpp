@@ -1,4 +1,4 @@
-# Análisis de Sistemas: Object Types, Scene System y World System
+/** @page analisis_sistemas Análisis de Sistemas
 
 ## 📋 Índice
 1. [Tipos de Objetos (ObjectType)](#tipos-de-objetos)

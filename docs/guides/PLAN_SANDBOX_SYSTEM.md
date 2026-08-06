@@ -102,6 +102,6 @@ Moverlos a una struct `SandboxConfig` o a campos editables. NO es bloqueante par
 el MVP (puede colocar con los defaults actuales), pero es el paso natural después.
 
 ## 8. Decisiones abiertas (para más adelante)
-- ¿El sandbox es un MODO aparte (menú) o siempre disponible con una tecla?
-- ¿Límite de objetos (presupuesto de CPU) — cuántos manantiales/jellies a la vez?
-- ¿Las tools del jugador son las mismas que las de dev, o un subconjunto?
+- ¿El sandbox es un MODO aparte (menú) o siempre disponible con una tecla? No, con herramientas y forma de utilizar esta, esta por definir.
+- ¿Límite de objetos (presupuesto de CPU) — cuántos manantiales/jellies a la vez? Poder poner limite pero si == 0 infinito y que lo decida la semilla.
+- ¿Las tools del jugador son las mismas que las de dev, o un subconjunto? Herramientas.

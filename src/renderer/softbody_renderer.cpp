@@ -1,5 +1,6 @@
 #include "softbody_renderer.h"
-#include "shader.h"
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 #include <glm/glm.hpp>
 
 namespace Haruka {
@@ -7,17 +8,44 @@ namespace Haruka {
 SoftBodyRenderer::~SoftBodyRenderer() { clear(); }
 
 void SoftBodyRenderer::clear() {
+    RHI::Device* dev = RHI::device();
     for (auto& e : m_entries) {
-        if (e.vao) glDeleteVertexArrays(1, &e.vao);
-        if (e.vbo) glDeleteBuffers(1, &e.vbo);
-        if (e.ebo) glDeleteBuffers(1, &e.ebo);
+        if (dev) {
+            if (RHI::valid(e.hVbo)) dev->destroy(e.hVbo);
+            if (RHI::valid(e.hEbo)) dev->destroy(e.hEbo);
+        }
     }
     m_entries.clear();
+    if (dev) {
+        if (RHI::valid(m_pso))       { dev->destroy(m_pso);       m_pso       = {}; }
+        if (RHI::valid(m_paramsUBO)) { dev->destroy(m_paramsUBO); m_paramsUBO = {}; }
+    }
 }
 
-void SoftBodyRenderer::ensureShader() {
-    if (m_shader) return;
-    m_shader = std::make_unique<Shader>("shaders/softbody.vert", "shaders/softbody.frag");
+void SoftBodyRenderer::ensurePSO() {
+    if (RHI::valid(m_pso)) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+
+    RHI::PipelineDesc pd;
+    pd.vertexPath   = "shaders/softbody.vert";
+    pd.fragmentPath = "shaders/softbody.frag";
+    pd.cull         = RHI::CullMode::None;
+    pd.depth.test   = true;
+    pd.depth.write  = true;
+    pd.depth.compare= RHI::CompareOp::Less;
+    pd.topology     = RHI::PrimitiveTopology::Triangles;
+
+    pd.vertexLayout.strides  = { 6 * sizeof(float) };
+    pd.vertexLayout.attributes = {
+        { 0, 0,                      RHI::Format::RGB32F, 0 }, // aPos
+        { 1, 3 * sizeof(float),      RHI::Format::RGB32F, 0 }, // aNormal
+    };
+
+    m_pso = dev->createPipeline(pd);
+
+    // SoftbodyParams UBO (binding 6): vec3 color + float alphaMode
+    m_paramsUBO = dev->createBuffer(RHI::BufferUsage::Uniform, 16, nullptr, RHI::BufferMemory::Dynamic);
 }
 
 void SoftBodyRenderer::add(const xpbd::SoftBodyHandle& handle, xpbd::XPBDSolver* solver,
@@ -26,23 +54,11 @@ void SoftBodyRenderer::add(const xpbd::SoftBodyHandle& handle, xpbd::XPBDSolver*
     e.handle = handle;
     e.solver = solver;
     e.color  = color;
-    glGenVertexArrays(1, &e.vao);
-    glGenBuffers(1, &e.vbo);
-    glGenBuffers(1, &e.ebo);
 
-    glBindVertexArray(e.vao);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, e.ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER,
-                 handle.renderIndices.size() * sizeof(unsigned int),
-                 handle.renderIndices.data(), GL_STATIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, e.vbo);
-    // pos(3) + normal(3)
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glBindVertexArray(0);
+    RHI::Device* dev = RHI::device();
+    e.hEbo = dev->createBuffer(RHI::BufferUsage::Index, handle.renderIndices.size() * sizeof(unsigned int),
+                               handle.renderIndices.data());
+    e.hVbo = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
 
     e.initialized = true;
     m_entries.push_back(std::move(e));
@@ -53,12 +69,10 @@ void SoftBodyRenderer::uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos) 
     const int base = e.handle.firstParticle;
     const int cnt  = e.handle.particleCount;
 
-    // Camera-relative position for each particle (float-safe).
     std::vector<glm::vec3> camPos(cnt);
     for (int i = 0; i < cnt; ++i)
         camPos[i] = glm::vec3(ps.worldPos(base + i) - glm::dvec3(cameraPos));
 
-    // Per-vertex normals from the render triangles (smooth).
     std::vector<glm::vec3> nrm(cnt, glm::vec3(0.0f));
     const auto& idx = e.handle.renderIndices;
     for (size_t t = 0; t + 2 < idx.size(); t += 3) {
@@ -79,34 +93,35 @@ void SoftBodyRenderer::uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos) 
         e.cpuVerts[i*6+3] = n.x;         e.cpuVerts[i*6+4] = n.y;         e.cpuVerts[i*6+5] = n.z;
     }
 
-    glBindVertexArray(e.vao);
-    glBindBuffer(GL_ARRAY_BUFFER, e.vbo);
-    glBufferData(GL_ARRAY_BUFFER, e.cpuVerts.size() * sizeof(float),
-                 e.cpuVerts.data(), GL_DYNAMIC_DRAW);
-    glBindVertexArray(0);
+    if (RHI::Device* dev = RHI::device())
+        dev->uploadBuffer(e.hVbo, e.cpuVerts.size() * sizeof(float), e.cpuVerts.data());
 }
 
 void SoftBodyRenderer::render(const Haruka::WorldPos& cameraPos) {
     if (m_entries.empty()) return;
-    ensureShader();
-    m_shader->use();
-    // Per-frame UBO is already bound at binding 0 by the engine for this frame;
-    // the shader's PerFrameData block resolves against it. Do not rebind.
+    ensurePSO();
+    if (!RHI::valid(m_pso) || !RHI::valid(m_paramsUBO)) return;
 
-    GLboolean cullWas = glIsEnabled(GL_CULL_FACE);
-    glDisable(GL_CULL_FACE); // softbodies (esp. cloth) are double-sided
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    RHI::Context* ctx = dev->beginFrame();
 
-    const GLint locColor = 15;
+    ctx->bindPipeline(m_pso);
+    ctx->bindUniformBuffer(6, m_paramsUBO);
+
     for (auto& e : m_entries) {
         if (!e.initialized || !e.solver) continue;
         uploadEntry(e, cameraPos);
-        glUniform3fv(locColor, 1, &e.color[0]);
-        glBindVertexArray(e.vao);
-        glDrawElements(GL_TRIANGLES, (GLsizei)e.handle.renderIndices.size(),
-                       GL_UNSIGNED_INT, nullptr);
+
+        // Upload SoftbodyParams (binding 6): vec3 color, float alphaMode = 0
+        struct { float c[4]; } params;
+        params.c[0] = e.color.x; params.c[1] = e.color.y; params.c[2] = e.color.z; params.c[3] = 0.0f;
+        dev->updateBuffer(m_paramsUBO, 0, sizeof(params), &params);
+
+        ctx->bindVertexBuffer(e.hVbo, 0);
+        ctx->bindIndexBuffer(e.hEbo);
+        ctx->drawIndexed((uint32_t)e.handle.renderIndices.size());
     }
-    glBindVertexArray(0);
-    if (cullWas) glEnable(GL_CULL_FACE);
 }
 
 } // namespace Haruka

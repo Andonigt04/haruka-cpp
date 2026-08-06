@@ -1,71 +1,41 @@
 #include "point_shadow.h"
 #include "tools/error_reporter.h"
-#include <iostream>
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 
 namespace Haruka { namespace Renderer {
 
-PointShadow::PointShadow(unsigned int resolution) : resolution(resolution)
-{
+PointShadow::PointShadow(unsigned int resolution) : resolution(resolution) {
     setupFramebuffer();
 }
 
-void PointShadow::setupFramebuffer()
-{
-    // Cubemap de profundidad
-    glGenTextures(1, &depthCubemap);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, depthCubemap);
-
-    for (unsigned int i = 0; i < 6; ++i) {
-        glTexImage2D(
-            GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, GL_DEPTH_COMPONENT,
-            resolution, resolution, 0,
-            GL_DEPTH_COMPONENT, GL_FLOAT, nullptr
-        );
+void PointShadow::setupFramebuffer() {
+    if (RHI::Device* dev = RHI::device()) {
+        RHI::RenderTargetDesc d;
+        d.width = resolution; d.height = resolution;
+        d.hasDepth = true; d.depthFormat = RHI::Format::D32F;
+        d.depthCube = true; d.depthFilter = RHI::Filter::Nearest;
+        m_pass     = dev->createRenderTarget(d);
+        m_depthTex = dev->getDepthTexture(m_pass);
     }
+}
 
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+void PointShadow::bindForWriting() {
+    // RHI: caller should use Context::beginRenderPass(m_pass, clear)
+}
 
-    // Framebuffer
-    glGenFramebuffers(1, &FBO);
-    glBindFramebuffer(GL_FRAMEBUFFER, FBO);
-    glFramebufferTexture(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, depthCubemap, 0);
+void PointShadow::unbind() {
+    // RHI: caller should use Context::endRenderPass()
+}
 
-    glDrawBuffer(GL_NONE);
-    glReadBuffer(GL_NONE);
+void PointShadow::bindForReading(unsigned int textureUnit) {
+    // RHI: caller should use Context::bindTexture(textureUnit, m_depthTex)
+}
 
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "Point Shadow framebuffer incomplete!");
+PointShadow::~PointShadow() {
+    if (RHI::valid(m_pass)) {
+        if (RHI::Device* dev = RHI::device()) dev->destroy(m_pass);
     }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void PointShadow::bindForWriting()
-{
-    glBindFramebuffer(GL_FRAMEBUFFER, FBO);
-    glViewport(0, 0, resolution, resolution);
-    glClear(GL_DEPTH_BUFFER_BIT);
-}
-
-void PointShadow::unbind()
-{
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-}
-
-void PointShadow::bindForReading(unsigned int textureUnit)
-{
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_CUBE_MAP, depthCubemap);
-}
-
-PointShadow::~PointShadow()
-{
-    glDeleteFramebuffers(1, &FBO);
-    glDeleteTextures(1, &depthCubemap);
 }
 
 }} // namespace Haruka::Renderer

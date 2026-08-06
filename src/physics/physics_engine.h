@@ -5,16 +5,15 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <vector>
 #include <memory>
 #include <string>
+#include <functional>
 #include "octree.h"
-#include "core/world_system.h"
-#include "game/planetary_system.h"
+#include "world_provider.h"   // IWorldProvider — ventana abstracta al mundo (sin GL)
 
 namespace Haruka { namespace Physics {
-
-class RaycastSimple;
 
 /** @brief Rigid body simulation record used by the physics engine. */
 struct RigidBody {
@@ -24,15 +23,58 @@ struct RigidBody {
     double mass;
     double radius;
     bool isKinematic = false;
+    bool inWater = false;   // estado agua↔aire para disparar el splash SOLO al ENTRAR (no cada frame)
     std::string name;
+
+    // --- Estado ANGULAR (opt-in). Por defecto identidad/cero y comOffset=0 → los cuerpos que no lo
+    // usan (jugador, props existentes) NO rotan y el motor se comporta igual que antes. ---
+    glm::dquat orientation{1, 0, 0, 0};   // rotación del cuerpo (identidad = sin girar)
+    glm::dvec3 angularVel{0, 0, 0};       // velocidad angular (rad/s, en el mundo)
+    glm::dvec3 comOffset{0, 0, 0};        // centro de masa DESPLAZADO del centro geométrico (LOCAL, m).
+                                          // ≠0 → apoyado, la gravedad hace PALANCA y el cuerpo VUELCA
+                                          // hacia donde pesa (balance). =0 → equilibrado, no vuelca.
+
+    // --- FORMA de colisión. Sphere (por defecto): esfera de `radius`. Box: caja de medios-lados
+    // `halfExtents`, que colisiona con el terreno por sus 8 ESQUINAS → se apoya en su cara y vuelca
+    // sobre la ARISTA de verdad (no como una esfera). `radius` sigue siendo el radio ENVOLVENTE
+    // (broad-phase y colisión cuerpo-cuerpo, que sigue siendo esférica). ---
+    enum class Shape { Sphere, Box };
+    Shape      shape = Shape::Sphere;
+    glm::dvec3 halfExtents{0.5, 0.5, 0.5};   // solo si shape==Box (m)
+
+    // El cuerpo NO GIRA (solo traslada). Un PERSONAJE es una esfera que no debe RODAR: si rueda, la
+    // velocidad angular se convierte en avance por el contacto y sigue deslizándose aunque le pongas la
+    // velocidad lineal a cero. Un objeto suelto (una piedra) sí quiere rodar → false por defecto.
+    bool lockRotation = false;
+
+    // Es un PERSONAJE: lo lleva un controlador de personaje (Jolt `CharacterVirtual`) en vez de un
+    // rígido dinámico. Un rígido no es un personaje — emular a mano pisar escalones, pendientes,
+    // "estar en el suelo" y la fricción sale mal pieza a pieza; el controlador lo hace nativo.
+    bool isCharacter = false;
+    // Lo RELLENA la física: ¿el controlador dice que pisa suelo? (fuente de verdad para el salto).
+    bool onGround = false;
+
+    // "He cambiado `velocity` a propósito, aplícala" (un empujón, una explosión, lanzar algo). Un cuerpo
+    // LIBRE lo posee el motor: re-imponerle su velocidad cada frame re-aplicaba la velocidad de
+    // separación del solver una y otra vez → el objeto ganaba energía y SALÍA VOLANDO. La física
+    // consume esta marca y la baja.
+    bool velocityDirty = false;
+
+    // Puntos de contacto LOCALES de la FORMA REAL del objeto (vértices del casco convexo). Si está
+    // VACÍO y shape==Box, se usan las 8 esquinas de halfExtents. Rellénalo para que la colisión con el
+    // terreno siga la forma REAL (no solo esfera/caja): cada vértice se prueba contra el suelo. Es el
+    // primer paso de "colisión por la forma del objeto" — el modelo por-puntos de la dirección.
+    std::vector<glm::dvec3> points;
 };
 
-/** @brief Collision resolution input/output data. */
+/** @brief Un CONTACTO entre dos cuerpos. `normal` apunta de A hacia B (dirección para separarlos).
+ *  `point` = punto de contacto en el mundo (brazo para el impulso ANGULAR → el choque hace girar). */
 struct CollisionInfo {
     RigidBody* bodyA;
     RigidBody* bodyB;
     double penetration;
     glm::dvec3 normal;
+    glm::dvec3 point{0.0};
 };
 
 /** @brief Axis-aligned static box for scene geometry collision. */
@@ -78,19 +120,40 @@ public:
     // Obstáculos colocados (paredes/estructuras) — para navegación/propagación (sonido, conjuros).
     const std::vector<StaticOBB>& getPlacedOBBs() const { return placedOBBs; }
     void clearPlacedOBBs();
+    /** @brief Sube cada vez que cambia el mundo ESTÁTICO. Jolt reconstruye sus cuerpos estáticos solo
+     *  cuando cambia — son estáticos y tocarlos es raro (colocar/romper), no cosa de cada frame. */
+    uint64_t staticsVersion() const { return m_staticsVersion; }
 
     /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
      *  regeneran al moverse, independiente de los objetos colocados. */
     void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
     void clearPropOBBs();
+    const std::vector<StaticOBB>& getPropOBBs()    const { return propOBBs; }
+    const std::vector<StaticBox>& getStaticBoxes() const { return staticBoxes; }
     /** @brief Empuja una esfera fuera de los OBB colocados (te subes encima o te frena).
      *  Devuelve el centro corregido; pone grounded=true si el empuje fue a favor de 'up'. */
     glm::dvec3 resolveSphere(const glm::dvec3& center, double radius,
                              const glm::dvec3& up, bool& grounded) const;
 
-    /** @brief Advances simulation by one time step. */
+    /** @brief Avanza la simulación UN paso del tamaño dado. Normalmente NO se llama directo: usar
+     *  `advance()`, que trocea en pasos fijos. Directo solo para tests deterministas. */
     void update(double deltaTime);
+
+    /** @brief Avanza la simulación con TIMESTEP FIJO (acumulador). Llamar 1×/frame con el dt de
+     *  reloj. Determinista → cliente y servidor coinciden. Ver kFixedDt. */
+    void advance(double frameDt);
+
+    /** @brief Paso fijo de la simulación (s). 1/60. La misma constante la usa el DGS. */
+    static constexpr double kFixedDt  = 1.0 / 60.0;
+    static constexpr double kMaxAccum = 0.25;   // tope anti-espiral (no recuperar >0.25 s de golpe)
     /** @brief Sets constant gravity acceleration. */
+    /** @brief Callback de SPLASH: se dispara cuando un cuerpo dinámico CRUZA la superficie del mar
+     *  hacia dentro con velocidad de entrada apreciable. (pos superficie, velocidad de impacto,
+     *  radio). El juego lo engancha para emitir partículas PBF → acopla rígidos↔fluido. */
+    void setWaterEntryCallback(std::function<void(const glm::dvec3&, const glm::dvec3&, double)> cb) {
+        m_onWaterEntry = std::move(cb);
+    }
+
     void setGravity(glm::dvec3 g) { gravity = g; }
     /** @brief Returns current gravity acceleration. */
     glm::dvec3 getGravity() const { return gravity; }
@@ -107,13 +170,9 @@ public:
         octree = std::make_unique<Octree>(center, size);
     }
     
-    /**
-     * @brief Initializes planetary physics systems.
-     * @param worldSystem World system for body information
-     * @param planetarySystem Planetary system for gravity calculation
-     * @param raycastSystem Physics raycast system for collisions
-     */
-    void initPlanetaryPhysics(Haruka::WorldSystem* worldSystem, Haruka::PlanetarySystem* planetarySystem, RaycastSimple* raycastSystem);
+    /** @brief Inyecta la ventana al mundo (gravedad + mar + terreno). El motor no conoce
+     *  WorldSystem/PlanetarySystem; el llamador pasa un adaptador (ver world_provider.h). */
+    void setWorldProvider(IWorldProvider* provider) { m_world = provider; }
     
     /**
      * @brief Calculates gravitational acceleration at a world position.
@@ -131,7 +190,7 @@ public:
      * @param worldPos Test position in world space
      * @return Gravitational acceleration vector (m/s²)
      */
-    glm::dvec3 calculateGravityContribution(const Haruka::CelestialBody& body, const glm::dvec3& worldPos);
+    glm::dvec3 calculateGravityContribution(const GravBody& body, const glm::dvec3& worldPos);
     
     /**
      * @brief Checks if a position collides with terrain.
@@ -161,16 +220,12 @@ public:
     
     double getGravitationalConstant() const { return gravitationalConstant; }
     
-    /**
-     * @brief Sets the maximum raycast distance for terrain collision detection.
-     * @param maxDistanceKm Maximum raycast distance in km
-     */
-    void setCollisionRaycastDistance(double maxDistanceKm) { maxCollisionRaycastDistanceKm = maxDistanceKm; }
 
 private:
     std::vector<std::shared_ptr<RigidBody>> bodies;
     std::vector<StaticBox>                  staticBoxes;
     std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
+    uint64_t                                m_staticsVersion = 0;  // ver staticsVersion()
     std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
@@ -178,18 +233,22 @@ private:
     // Arrastre aerodinámico: viento ambiente (m/s) + coeficientes SUAVES (la
     // resistencia del aire amortigua hacia 0; el viento empuja sutilmente). Valores
     // pequeños para no zarandear al jugador; afecta sobre todo a objetos sueltos.
+    std::function<void(const glm::dvec3&, const glm::dvec3&, double)> m_onWaterEntry; // splash al entrar al agua
     glm::dvec3 m_wind{0.0};
     double     m_airDamp  = 0.10;  // amortiguación del aire (1/s) hacia velocidad 0
     double     m_windCoef = 0.010; // acoplamiento cuadrático con la vel. relativa al viento
 
     std::unique_ptr<Octree> octree;
 
-    // Planetary physics members
-    Haruka::WorldSystem* worldSystem = nullptr;
-    Haruka::PlanetarySystem* planetarySystem = nullptr;
-    RaycastSimple* raycastSystem = nullptr;
+    // Ventana al mundo (gravedad + mar + terreno). Inyectada; el motor no conoce el resto del engine.
+    IWorldProvider* m_world = nullptr;
     double gravitationalConstant = 6.67430e-11;
-    double maxCollisionRaycastDistanceKm = 1000.0;
+    double m_accum = 0.0;   // acumulador del timestep fijo (ver advance)
+
+    // Fase 1 — wrapper de Jolt (PIMPL): Jolt NO aparece en este header (forward-decl). Solo se crea si
+    // se compiló con HARUKA_HAS_JOLT; si no, `m_jolt` queda null y el motor usa el solver a mano.
+    struct JoltImpl;
+    std::unique_ptr<JoltImpl> m_jolt;
 
     /** @brief Integrates external forces for all bodies. */
     void integrateForces(double dt);

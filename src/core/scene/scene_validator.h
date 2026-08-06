@@ -4,6 +4,8 @@
 #include <vector>
 #include <iostream>
 
+#include "core/planet/prop_cond.h"                 // parsePropCond: valida el `when` de las capas
+
 namespace Haruka {
 
     class SceneValidator {
@@ -119,33 +121,113 @@ namespace Haruka {
 
         static void validateTerrainBlock(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
             if (!obj.contains("terrainSettings")) return;
-            if (!obj["terrainSettings"].is_object()) {
-                result.addError(owner + ".terrainSettings debe ser un objeto.");
+            // (old terrain system removed; block is accepted but ignored)
+        }
+
+        static void validateSurfaceBlock(const nlohmann::json& obj, ValidationResult& result, const std::string& owner) {
+            if (!obj.contains("surface")) return;
+            if (!obj["surface"].is_object()) {
+                result.addError(owner + ".surface debe ser un objeto.");
                 return;
             }
-            const auto& terrain = obj["terrainSettings"];
-            if (terrain.contains("type") && !terrain["type"].is_string()) result.addError(owner + ".terrainSettings.type debe ser string.");
-            if (terrain.contains("shader") && !terrain["shader"].is_string()) result.addError(owner + ".terrainSettings.shader debe ser string.");
-            if (terrain.contains("config")) {
-                if (!terrain["config"].is_object()) {
-                    result.addError(owner + ".terrainSettings.config debe ser un objeto.");
+            const auto& s = obj["surface"];
+            if (s.contains("albedo") && !s["albedo"].is_string())
+                result.addError(owner + ".surface.albedo debe ser string.");
+            if (s.contains("normal") && !s["normal"].is_string())
+                result.addError(owner + ".surface.normal debe ser string.");
+            if (s.contains("height") && !s["height"].is_string())
+                result.addError(owner + ".surface.height debe ser string.");
+            if (s.contains("tiling") && !s["tiling"].is_number())
+                result.addError(owner + ".surface.tiling debe ser número.");
+            validatePlanetSurface(s, result, owner);
+        }
+
+        /** @brief Bloque `surface` de un PLANETA: zonas del autor, materiales del terreno y capas
+         *  de props. La escena de planetas pone aquí `zoneMap`/`materials`/`propLayers` (el loader
+         *  lo copia a `surfaceConfig` del objeto). El motor los interpreta en TerrestrialPlanet
+         *  y PropLayerTable; validar aquí adelanta los errores de autoría al abrir la escena. */
+        static void validatePlanetSurface(const nlohmann::json& s, ValidationResult& result, const std::string& owner) {
+            const std::string pfx = owner + ".surface";
+
+            // ZONAS del autor: cada entrada es {name + (center/radiusM | perimeter) | color}.
+            if (s.contains("zones")) {
+                if (!s["zones"].is_array()) {
+                    result.addError(pfx + ".zones debe ser un array.");
                 } else {
-                    const auto& config = terrain["config"];
-                    if (config.contains("seed") && !config["seed"].is_number_integer()) result.addError(owner + ".terrainSettings.config.seed debe ser entero.");
-                    if (config.contains("chunkSize") && !config["chunkSize"].is_number_integer()) result.addError(owner + ".terrainSettings.config.chunkSize debe ser entero.");
-                    if (config.contains("layers")) {
-                        if (!config["layers"].is_object()) {
-                            result.addError(owner + ".terrainSettings.config.layers debe ser un objeto.");
-                        } else {
-                            for (auto it = config["layers"].begin(); it != config["layers"].end(); ++it) {
-                                if (!it.value().is_object()) {
-                                    result.addError(owner + ".terrainSettings.config.layers.'" + it.key() + "' debe ser un objeto.");
-                                    continue;
-                                }
-                                const auto& layer = it.value();
-                                if (layer.contains("freq") && !layer["freq"].is_number()) result.addError(owner + ".terrainSettings.config.layers.'" + it.key() + "'.freq debe ser numérico.");
-                                if (layer.contains("octaves") && !layer["octaves"].is_number_integer()) result.addError(owner + ".terrainSettings.config.layers.'" + it.key() + "'.octaves debe ser entero.");
-                                if (layer.contains("strength") && !layer["strength"].is_number()) result.addError(owner + ".terrainSettings.config.layers.'" + it.key() + "'.strength debe ser numérico.");
+                    for (const auto& z : s["zones"]) {
+                        if (!z.is_object()) { result.addError(pfx + ".zones: cada zona debe ser un objeto."); continue; }
+                        const std::string zn = z.value("name", std::string());
+                        const std::string zowner = pfx + ".zones['" + (zn.empty() ? "?" : zn) + "']";
+                        if (zn.empty()) result.addError(zowner + " no tiene 'name'.");
+                        const bool hasCircle = z.contains("center");
+                        const bool hasPoly   = z.contains("perimeter");
+                        const bool hasColor  = z.contains("color");
+                        if (hasCircle) {
+                            if (!z["center"].is_array() || z["center"].size() < 2)
+                                result.addError(zowner + ".center debe ser [lat, lon].");
+                            if (!z.contains("radiusM") || !z["radiusM"].is_number())
+                                result.addError(zowner + " con 'center' necesita 'radiusM' (metros).");
+                        }
+                        if (hasPoly) {
+                            if (!z["perimeter"].is_array())
+                                result.addError(zowner + ".perimeter debe ser un array de [lat, lon].");
+                            else for (const auto& v : z["perimeter"])
+                                if (!v.is_array() || v.size() < 2)
+                                    result.addError(zowner + ".perimeter: cada vértice debe ser [lat, lon].");
+                        }
+                        if (hasColor && (!z["color"].is_array() || z["color"].size() < 3))
+                            result.addError(zowner + ".color debe ser [r, g, b].");
+                        if (!hasCircle && !hasPoly && !hasColor)
+                            result.addError(zowner + " no delimita nada: usa 'center'/'radiusM', 'perimeter' o 'color'.");
+                    }
+                }
+            }
+
+            // MATERIALES del terreno: nombre obligatorio, resto informativo.
+            if (s.contains("materials")) {
+                if (!s["materials"].is_array()) {
+                    result.addError(pfx + ".materials debe ser un array.");
+                } else {
+                    for (const auto& m : s["materials"]) {
+                        if (!m.is_object()) { result.addError(pfx + ".materials: cada material debe ser un objeto."); continue; }
+                        if (!m.contains("name") || !m["name"].is_string() || m["name"].get<std::string>().empty())
+                            result.addError(pfx + ".materials: material sin 'name'.");
+                    }
+                }
+            }
+
+            // CAPAS DE PROPS: `when` (condición booleana) se valida sintácticamente; el resto de
+            // campos se comprueban por tipo. El orden de la lista es la prioridad de construcción.
+            if (s.contains("propLayers")) {
+                if (!s["propLayers"].is_array()) {
+                    result.addError(pfx + ".propLayers debe ser un array.");
+                } else {
+                    int idx = 0;
+                    for (const auto& p : s["propLayers"]) {
+                        const std::string powner = pfx + ".propLayers[" + std::to_string(idx) + "]";
+                        ++idx;
+                        if (!p.is_object()) { result.addError(powner + " debe ser un objeto."); continue; }
+                        if (p.contains("name") && !p["name"].is_string())
+                            result.addError(powner + ".name debe ser string.");
+                        if (p.contains("mesh") && !p["mesh"].is_string())
+                            result.addError(powner + ".mesh debe ser string.");
+                        if (p.contains("densityMap") && !p["densityMap"].is_string())
+                            result.addError(powner + ".densityMap debe ser string.");
+                        if (p.contains("zones")) {
+                            if (!p["zones"].is_array())
+                                result.addError(powner + ".zones debe ser un array de nombres.");
+                            else for (const auto& z : p["zones"])
+                                if (!z.is_string())
+                                    result.addError(powner + ".zones: cada entrada debe ser un nombre de zona.");
+                        }
+                        // CONDICIÓN BOOLEANA: la sintaxis se valida con el mismo parser del motor.
+                        if (p.contains("when")) {
+                            if (!p["when"].is_string()) {
+                                result.addError(powner + ".when debe ser string.");
+                            } else {
+                                std::string perr;
+                                if (!Haruka::Planet::parsePropCond(p["when"].get<std::string>(), perr))
+                                    result.addError(powner + ".when: " + perr);
                             }
                         }
                     }
@@ -197,6 +279,7 @@ namespace Haruka {
                     validateLodBlock(t, result, "Template '" + it.key() + "'");
                     validateStreamingBlock(t, result, "Template '" + it.key() + "'");
                     validateTerrainBlock(t, result, "Template '" + it.key() + "'");
+                    validateSurfaceBlock(t, result, "Template '" + it.key() + "'");
                 }
             }
         }
@@ -230,6 +313,7 @@ namespace Haruka {
             validateLodBlock(obj, result, "Objeto '" + name + "'");
             validateStreamingBlock(obj, result, "Objeto '" + name + "'");
             validateTerrainBlock(obj, result, "Objeto '" + name + "'");
+            validateSurfaceBlock(obj, result, "Objeto '" + name + "'");
 
             if (obj.contains("components") && !obj["components"].is_object()) {
                 result.addError("Objeto '" + name + "'.components debe ser un objeto.");
@@ -242,14 +326,8 @@ namespace Haruka {
 
             // Regla: Validación específica para Planetas
             if (obj.value("type", "") == "Planet") {
-                if (!hasInlineOrTemplateBlock(obj, fullData, "lod")) {
-                    result.addError("El planeta '" + name + "' no define LOD ni lo hereda de su template.");
-                }
-                if (!hasInlineOrTemplateBlock(obj, fullData, "streaming")) {
-                    result.addError("El planeta '" + name + "' no define streaming ni lo hereda de su template.");
-                }
-                if (!hasInlineOrTemplateBlock(obj, fullData, "terrainSettings")) {
-                    result.addWarning("El planeta '" + name + "' no define terrainSettings ni lo hereda de su template.");
+                if (!hasInlineOrTemplateBlock(obj, fullData, "surface")) {
+                    result.addWarning("El planeta '" + name + "' no define surface (texture config) ni lo hereda de su template.");
                 }
             }
         }

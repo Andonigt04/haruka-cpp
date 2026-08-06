@@ -42,11 +42,11 @@ void UISystem::updateInteraction(const glm::vec3& camPos,
     m_interaction.update(camPos, camFwd, ptrs, interactPressed);
 }
 
-void UISystem::drawAll(Shader& shader, const glm::mat4& view,
+void UISystem::drawAll(const glm::mat4& view,
                         const glm::mat4& proj, const glm::vec3& camPos) const
 {
     for (const auto& [id, panel] : m_panels)
-        panel->draw(shader, view, proj, camPos);
+        panel->draw(view, proj, camPos);
 }
 
 } // namespace Haruka::UI

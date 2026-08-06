@@ -1,99 +1,61 @@
 #include "compute_shader.h"
-
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 #include <iostream>
 #include <fstream>
+#include "core/logger.h"
 #include "tools/error_reporter.h"
-#include <sstream>
-#include <glm/gtc/type_ptr.hpp>
 
 namespace Haruka { namespace Renderer {
 
 ComputeShader::ComputeShader(const std::string& computePath)
-{
-    std::string computeCode = readFile(computePath);
-    const char* cCode = computeCode.c_str();
+    : ComputeShader(readFile(computePath).c_str()) {}
 
-    GLuint compute = glCreateShader(GL_COMPUTE_SHADER);
-    glShaderSource(compute, 1, &cCode, nullptr);
-    glCompileShader(compute);
+ComputeShader::ComputeShader(const char* computeSource) {
+    if (!computeSource || !computeSource[0]) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) { HARUKA_LOGE("ComputeShader", "no RHI device"); return; }
+    RHI::PipelineDesc pd;
+    pd.computeSource = computeSource;
+    m_pipe = dev->createPipeline(pd);
+    if (!RHI::valid(m_pipe))
+        HARUKA_LOGE("ComputeShader", "pipeline creation failed");
+}
 
-    // Error checking
-    int success;
-    char infoLog[512];
-    glGetShaderiv(compute, GL_COMPILE_STATUS, &success);
-    if (!success)
-    {
-        glGetShaderInfoLog(compute, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader compile error: ") + infoLog);
+ComputeShader::~ComputeShader() {
+    if (RHI::valid(m_pipe)) {
+        if (RHI::Device* dev = RHI::device())
+            dev->destroy(m_pipe);
     }
+}
 
-    ID = glCreateProgram();
-    glAttachShader(ID, compute);
-    glLinkProgram(ID);
+void ComputeShader::use() const {
+    // No-op: the pipeline is bound via RHI Context::bindPipeline in dispatch
+}
 
-    glGetProgramiv(ID, GL_LINK_STATUS, &success);
-    if (!success)
-    {
-        glGetProgramInfoLog(ID, 512, nullptr, infoLog);
-        HARUKA_RENDERER_ERROR(ErrorCode::SHADER_COMPILATION_FAILED,
-            std::string("compute shader link error: ") + infoLog);
+void ComputeShader::dispatch(unsigned int x, unsigned int y, unsigned int z, RHI::Context* ctx) const {
+    if (!RHI::valid(m_pipe)) return;
+    RHI::Context* c = ctx;
+    if (!c) {
+        RHI::Device* dev = RHI::device();
+        if (!dev) return;
+        c = dev->beginFrame();
     }
-
-    glDeleteShader(compute);
+    c->bindPipeline(m_pipe);
+    c->dispatch(x, y, z);
 }
 
-ComputeShader::~ComputeShader()
-{
-    glDeleteProgram(ID);
+bool ComputeShader::linked() const {
+    return RHI::valid(m_pipe);
 }
 
-void ComputeShader::use() const
-{
-    glUseProgram(ID);
-}
-
-void ComputeShader::dispatch(GLuint x, GLuint y, GLuint z) const
-{
-    glDispatchCompute(x, y, z);
-    glMemoryBarrier(GL_ALL_BARRIER_BITS);
-}
-
-void ComputeShader::setInt(const std::string& name, int value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform1i(loc, value);
-}
-
-void ComputeShader::setFloat(const std::string& name, float value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform1f(loc, value);
-}
-
-void ComputeShader::setVec3(const std::string& name, const glm::vec3& value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniform3fv(loc, 1, glm::value_ptr(value));
-}
-
-void ComputeShader::setMat4(const std::string& name, const glm::mat4& value) const
-{
-    GLint loc = getUniformLocation(name);
-    glUniformMatrix4fv(loc, 1, GL_FALSE, glm::value_ptr(value));
-}
-
-std::string ComputeShader::readFile(const std::string& filePath)
-{
+std::string ComputeShader::readFile(const std::string& filePath) {
     std::ifstream file(filePath);
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
-GLint ComputeShader::getUniformLocation(const std::string& name) const
-{
-    return glGetUniformLocation(ID, name.c_str());
+    if (!file.is_open()) {
+        HARUKA_LOGE("ComputeShader", "cannot open %s", filePath.c_str());
+        return {};
+    }
+    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
 }
 
 }} // namespace Haruka::Renderer

@@ -1,4 +1,4 @@
-# Patrones de Implementación y Casos de Uso
+/** @page patrones_uso Patrones de Uso
 
 ## 1. Patrón: Crear un Nuevo Objeto de Escena
 

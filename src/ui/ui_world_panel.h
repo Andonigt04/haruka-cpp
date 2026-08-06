@@ -1,13 +1,13 @@
 #pragma once
 #include "ui/ui_types.h"
 #include "renderer/render_target.h"
-#include "renderer/shader.h"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <functional>
 #include <string>
 #include <memory>
+#include "rhi/rhi_types.h"
 
 namespace Haruka::UI {
 
@@ -19,7 +19,7 @@ namespace Haruka::UI {
  *   1. beginImGui()  — bind FBO, push ImGui window
  *   2. <caller draws ImGui widgets>
  *   3. endImGui()    — pop ImGui window, restore default FBO
- *   4. draw(shader, view, proj, camPos) — render textured quad(s) in world space
+ *   4. draw(view, proj, camPos) — render textured quad(s) in world space
  */
 class UIWorldPanel {
 public:
@@ -48,15 +48,12 @@ public:
     // Call after drawing ImGui widgets. Restores default FBO.
     void endImGui();
 
-    // Draws the panel's texture onto a world-space quad using the provided shader.
-    // Shader must accept uniforms: uModel (mat4), uTexture (sampler2D).
-    void draw(Shader& shader, const glm::mat4& view, const glm::mat4& proj,
+    // Draws the panel's texture onto a world-space quad using RHI pipeline.
+    void draw(const glm::mat4& view, const glm::mat4& proj,
               const glm::vec3& camPos) const;
 
     // -- Interaction ----------------------------------------------------------
 
-    // Returns true if the given ray hits the panel's collider.
-    // If hit, outUV receives the normalized [0,1] UV of the hit point.
     bool raycast(const glm::vec3& rayOrigin, const glm::vec3& rayDir,
                  glm::vec2& outUV) const;
 
@@ -67,7 +64,6 @@ public:
     void setVisible(bool v)       { m_visible = v; }
     bool isFocused()        const { return m_focused; }
 
-    // Called by UIInteractionSystem when focus/interact events fire.
     void setFocused(bool focused);
     void triggerInteract(glm::vec2 hitUV);
 
@@ -83,33 +79,24 @@ public:
     UIBillboardMode billboard() const { return m_desc.billboard; }
 
 private:
-    // Build the quad/curved-strip vertex data into m_vao/m_vbo.
     void rebuildMesh();
-
-    // Returns the model matrix, applying billboard rotation if needed.
     glm::mat4 modelMatrix(const glm::vec3& camPos) const;
 
     Desc        m_desc;
-    std::string m_windowId; // "##wp_" + m_desc.id, pre-computed to avoid PLT preemption crash
+    std::string m_windowId;
     bool m_visible   = true;
     bool m_focused   = false;
     bool m_meshDirty = true;
 
     std::unique_ptr<RenderTarget> m_fbo;
 
-    // GPU mesh (flat quad or curved strip)
-    unsigned int m_vao = 0;
-    unsigned int m_vbo = 0;
-    unsigned int m_ebo = 0;
+    // RHI pipeline and buffers
+    Haruka::RHI::PipelineHandle m_pipeline;
+    Haruka::RHI::BufferHandle m_vboH, m_eboH, m_uboH;
     int          m_indexCount = 0;
 
-    // UBO for PanelTransform block (binding 0)
-    unsigned int m_ubo = 0;
-
-    // Set by beginImGui(), cleared by draw() — triggers GL barrier only when needed
     mutable bool m_fboDirtyThisFrame = false;
 
-    // Previous FBO binding and viewport saved across begin/end
     int m_savedFBO         = 0;
     int m_savedViewport[4] = {};
 };

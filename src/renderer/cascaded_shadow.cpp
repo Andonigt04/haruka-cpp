@@ -1,5 +1,7 @@
 #include "cascaded_shadow.h"
 #include "tools/error_reporter.h"
+#include "rhi/rhi_device.h"
+#include "rhi/rhi_context.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
 #include <cmath>
@@ -11,70 +13,37 @@ namespace Haruka { namespace Renderer {
 CascadedShadowMap::CascadedShadowMap() {}
 
 CascadedShadowMap::~CascadedShadowMap() {
-    for (auto fbo : shadowMapFramebuffers) {
-        glDeleteFramebuffers(1, &fbo);
-    }
-    for (auto tex : shadowMapTextures) {
-        glDeleteTextures(1, &tex);
+    if (RHI::Device* dev = RHI::device()) {
+        for (auto& p : m_passes)
+            if (RHI::valid(p)) dev->destroy(p);
     }
 }
 
 void CascadedShadowMap::init(float zNear, float zFar, float lambda) {
     this->zNear = zNear;
-    this->zFar = zFar;
+    this->zFar  = zFar;
     this->lambda = lambda;
 
-    shadowMapTextures.resize(NUM_CASCADES);
-    shadowMapFramebuffers.resize(NUM_CASCADES);
+    m_passes.resize(NUM_CASCADES);
+    m_depthTex.resize(NUM_CASCADES);
     cascades.resize(NUM_CASCADES);
 
-    for (int i = 0; i < NUM_CASCADES; i++) {
+    for (int i = 0; i < NUM_CASCADES; ++i)
         createShadowMap(i);
-    }
-
-    std::cout << "✓ Cascaded Shadow Maps initialized\n";
-    std::cout << "  Cascades: " << NUM_CASCADES << "\n";
-    std::cout << "  Resolution: " << SHADOW_MAP_RESOLUTION << "x" << SHADOW_MAP_RESOLUTION << "\n";
 }
 
 void CascadedShadowMap::createShadowMap(int cascade) {
-    // Crear texture
-    GLuint texture;
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F,
-                 SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION,
-                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
-    
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
 
-    shadowMapTextures[cascade] = texture;
-
-    // Crear framebuffer
-    GLuint fbo;
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, texture, 0);
-    
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        HARUKA_MOTOR_ERROR(ErrorCode::RENDER_TARGET_FAILED, "Shadow map framebuffer incomplete!");
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    shadowMapFramebuffers[cascade] = fbo;
-}
-
-namespace {
-glm::vec3 safeNormalize(const glm::vec3& v, const glm::vec3& fallback) {
-    float len = glm::length(v);
-    if (len < 1e-6f) return fallback;
-    return v / len;
-}
+    RHI::RenderTargetDesc desc;
+    desc.width       = SHADOW_MAP_RESOLUTION;
+    desc.height      = SHADOW_MAP_RESOLUTION;
+    desc.hasDepth    = true;
+    desc.depthFormat = RHI::Format::D32F;
+    desc.depthFilter = RHI::Filter::Nearest;
+    m_passes[cascade] = dev->createRenderTarget(desc);
+    m_depthTex[cascade] = dev->getDepthTexture(m_passes[cascade]);
 }
 
 void CascadedShadowMap::updateCascades(
@@ -83,125 +52,110 @@ void CascadedShadowMap::updateCascades(
     const glm::vec3& cameraForward,
     const glm::vec3& cameraUp,
     float aspect,
-    float zNear,
-    float zFar,
-    float fov) {
+    float cameraNear,
+    float cameraFar,
+    float fov)
+{
+    // Compute cascade split depths using the PSSM lambda function
+    std::array<float, NUM_CASCADES + 1> splits;
+    splits[0] = cameraNear;
+    splits[NUM_CASCADES] = cameraFar;
 
-    this->zNear = zNear;
-    this->zFar = zFar;
-
-    glm::vec3 forward = safeNormalize(cameraForward, glm::vec3(0.0f, 0.0f, -1.0f));
-    glm::vec3 up = safeNormalize(cameraUp, glm::vec3(0.0f, 1.0f, 0.0f));
-    glm::vec3 right = safeNormalize(glm::cross(forward, up), glm::vec3(1.0f, 0.0f, 0.0f));
-    up = safeNormalize(glm::cross(right, forward), glm::vec3(0.0f, 1.0f, 0.0f));
-
-    float tanHalfFov = std::tan(glm::radians(fov) * 0.5f);
-
-    // Splits prácticos: mezcla entre lineal y logarítmico
-    std::array<float, NUM_CASCADES + 1> splits{};
-    splits[0] = zNear;
-    for (int i = 1; i <= NUM_CASCADES; ++i) {
-        float p = static_cast<float>(i) / static_cast<float>(NUM_CASCADES);
-        float logSplit = zNear * std::pow(zFar / zNear, p);
-        float uniformSplit = zNear + (zFar - zNear) * p;
-        splits[i] = lambda * logSplit + (1.0f - lambda) * uniformSplit;
+    for (int i = 1; i < NUM_CASCADES; ++i) {
+        float ratio = (float)i / (float)NUM_CASCADES;
+        float logSplit  = cameraNear * powf(cameraFar / cameraNear, ratio);
+        float uniformSplit = cameraNear + (cameraFar - cameraNear) * ratio;
+        splits[i] = logSplit * lambda + uniformSplit * (1.0f - lambda);
     }
 
-    for (int i = 0; i < NUM_CASCADES; i++) {
-        float nearDist = splits[i];
-        float farDist = splits[i + 1];
+    // Build light view-projection for each cascade
+    for (int i = 0; i < NUM_CASCADES; ++i) {
+        float n = splits[i];
+        float f = splits[i + 1];
 
-        glm::vec3 nearCenter = cameraPos + forward * nearDist;
-        glm::vec3 farCenter = cameraPos + forward * farDist;
+        // Frustum corners in view space
+        float tanHalfFov = tanf(glm::radians(fov * 0.5f));
+        float xn = n * tanHalfFov;
+        float xf = f * tanHalfFov;
+        float yn = xn / aspect;
+        float yf = xf / aspect;
 
-        float nearHeight = nearDist * tanHalfFov;
-        float nearWidth = nearHeight * aspect;
-        float farHeight = farDist * tanHalfFov;
-        float farWidth = farHeight * aspect;
-
-        std::array<glm::vec3, 8> corners = {
-            nearCenter - right * nearWidth + up * nearHeight,
-            nearCenter + right * nearWidth + up * nearHeight,
-            nearCenter + right * nearWidth - up * nearHeight,
-            nearCenter - right * nearWidth - up * nearHeight,
-            farCenter - right * farWidth + up * farHeight,
-            farCenter + right * farWidth + up * farHeight,
-            farCenter + right * farWidth - up * farHeight,
-            farCenter - right * farWidth - up * farHeight
+        glm::vec3 fc[8] = {
+            glm::vec3( xn,  yn, -n), glm::vec3( xf,  yf, -f),
+            glm::vec3(-xn,  yn, -n), glm::vec3(-xf,  yf, -f),
+            glm::vec3( xn, -yn, -n), glm::vec3( xf, -yf, -f),
+            glm::vec3(-xn, -yn, -n), glm::vec3(-xf, -yf, -f),
         };
 
-        glm::vec3 frustumCenter(0.0f);
-        for (const auto& c : corners) frustumCenter += c;
-        frustumCenter *= 1.0f / 8.0f;
+        // Rotate frustum corners to world space
+        glm::mat4 camRot = glm::lookAt(cameraPos, cameraPos + cameraForward, cameraUp);
+        glm::mat4 invCamRot = glm::inverse(camRot);
 
-        glm::vec3 lightPos = frustumCenter - safeNormalize(lightDir, glm::vec3(1.0f, 1.0f, 1.0f)) * (farDist * 4.0f);
-        glm::vec3 lightUp = std::abs(glm::dot(safeNormalize(lightDir, glm::vec3(1.0f, 1.0f, 1.0f)), glm::vec3(0.0f, 1.0f, 0.0f))) > 0.9f
-            ? glm::vec3(0.0f, 0.0f, 1.0f)
-            : glm::vec3(0.0f, 1.0f, 0.0f);
+        glm::vec3 center(0.0f);
+        glm::vec3 cornersWS[8];
+        for (int j = 0; j < 8; ++j) {
+            cornersWS[j] = glm::vec3(invCamRot * glm::vec4(fc[j], 1.0f));
+            center += cornersWS[j];
+        }
+        center /= 8.0f;
 
-        glm::mat4 lightView = glm::lookAt(lightPos, frustumCenter, lightUp);
+        // Light view matrix looking at frustum center
+        glm::vec3 lightPos = center - lightDir * 200.0f;
+        glm::mat4 lightView = glm::lookAt(lightPos, center, glm::vec3(0.0f, 1.0f, 0.0f));
 
-        glm::vec3 minExtents(std::numeric_limits<float>::max());
-        glm::vec3 maxExtents(std::numeric_limits<float>::lowest());
-        for (const auto& corner : corners) {
-            glm::vec4 tr = lightView * glm::vec4(corner, 1.0f);
-            minExtents = glm::min(minExtents, glm::vec3(tr));
-            maxExtents = glm::max(maxExtents, glm::vec3(tr));
+        // Compute AABB in light space
+        float minX =  std::numeric_limits<float>::max();
+        float maxX = -std::numeric_limits<float>::max();
+        float minY =  std::numeric_limits<float>::max();
+        float maxY = -std::numeric_limits<float>::max();
+        float minZ =  std::numeric_limits<float>::max();
+        float maxZ = -std::numeric_limits<float>::max();
+
+        for (int j = 0; j < 8; ++j) {
+            glm::vec4 lv = lightView * glm::vec4(cornersWS[j], 1.0f);
+            minX = std::min(minX, lv.x); maxX = std::max(maxX, lv.x);
+            minY = std::min(minY, lv.y); maxY = std::max(maxY, lv.y);
+            minZ = std::min(minZ, lv.z); maxZ = std::max(maxZ, lv.z);
         }
 
-        const float zMult = 8.0f;
-        if (minExtents.z < 0.0f) minExtents.z *= zMult;
-        else minExtents.z /= zMult;
-        if (maxExtents.z < 0.0f) maxExtents.z /= zMult;
-        else maxExtents.z *= zMult;
+        // Stabilize: snap to texel-sized increments
+        float texelSize = (maxX - minX) / SHADOW_MAP_RESOLUTION;
+        minX -= fmodf(minX, texelSize);
+        maxX -= fmodf(maxX, texelSize);
+        minY -= fmodf(minY, texelSize);
+        maxY -= fmodf(maxY, texelSize);
 
-        glm::mat4 lightProj = glm::ortho(minExtents.x, maxExtents.x, minExtents.y, maxExtents.y, minExtents.z - 1000.0f, maxExtents.z + 1000.0f);
-
-        cascades[i].zNear = nearDist;
-        cascades[i].zFar = farDist;
+        glm::mat4 lightProj = glm::ortho(minX, maxX, minY, maxY, -maxZ, -minZ);
+        cascades[i].zNear = splits[i];
+        cascades[i].zFar  = splits[i + 1];
         cascades[i].viewProj = lightProj * lightView;
     }
 }
 
 glm::mat4 CascadedShadowMap::getCascadeMatrix(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return cascades[cascade].viewProj;
-    }
-    return glm::mat4(1.0f);
+    return (cascade >= 0 && cascade < NUM_CASCADES) ? cascades[cascade].viewProj : glm::mat4(1.0f);
 }
 
-GLuint CascadedShadowMap::getShadowMapTexture(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return shadowMapTextures[cascade];
-    }
-    return 0;
+Haruka::RHI::TextureHandle CascadedShadowMap::getDepthTexture(int cascade) const {
+    return (cascade >= 0 && cascade < NUM_CASCADES) ? m_depthTex[cascade] : Haruka::RHI::TextureHandle{};
 }
 
-GLuint CascadedShadowMap::getFramebuffer(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return shadowMapFramebuffers[cascade];
-    }
-    return 0;
-}
-
-void CascadedShadowMap::bindForWriting(int cascade) const {
-    if (cascade < 0 || cascade >= NUM_CASCADES) return;
-    glBindFramebuffer(GL_FRAMEBUFFER, shadowMapFramebuffers[cascade]);
-    glViewport(0, 0, SHADOW_MAP_RESOLUTION, SHADOW_MAP_RESOLUTION);
-}
-
-void CascadedShadowMap::bindForReading(int cascade, unsigned int textureUnit) const {
-    if (cascade < 0 || cascade >= NUM_CASCADES) return;
-    glActiveTexture(GL_TEXTURE0 + textureUnit);
-    glBindTexture(GL_TEXTURE_2D, shadowMapTextures[cascade]);
+Haruka::RHI::RenderPassHandle CascadedShadowMap::getPass(int cascade) const {
+    return (cascade >= 0 && cascade < NUM_CASCADES) ? m_passes[cascade] : Haruka::RHI::RenderPassHandle{};
 }
 
 CascadedShadowMap::CascadeInfo CascadedShadowMap::getCascadeInfo(int cascade) const {
-    if (cascade >= 0 && cascade < NUM_CASCADES) {
-        return cascades[cascade];
-    }
-    return CascadeInfo{zNear, zFar, glm::mat4(1.0f)};
+    return (cascade >= 0 && cascade < NUM_CASCADES) ? cascades[cascade] : CascadeInfo{};
 }
 
+void CascadedShadowMap::bindForWriting(int cascade) const {
+    // RHI path: caller should use Context::beginRenderPass(m_passes[cascade], ...)
+    // This method kept for API compatibility but does nothing — migrate callers.
+}
+
+void CascadedShadowMap::bindForReading(int cascade, unsigned int textureUnit) const {
+    // RHI path: caller should use Context::bindTexture(textureUnit, m_depthTex[cascade])
+    // This method kept for API compatibility but does nothing — migrate callers.
+}
 
 }} // namespace Haruka::Renderer

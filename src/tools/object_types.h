@@ -6,10 +6,16 @@
  * Helper functions `stringToObjectType` / `objectTypeToString` handle JSON
  * round-trips. `isRenderableObjectType` and `isLightObjectType` are used by
  * the render queue to filter draw-eligible and light-source objects.
+ *
+ * Custom object types (minerals, trees, monsters, projectiles, etc.) can be
+ * registered at runtime via `customTypeId()` and objects created with
+ * `ObjectType::CUSTOM`. Game code attaches per-object data via
+ * `SceneObject::userData` (std::any).
  */
 #pragma once
 
 #include <string>
+#include <unordered_map>
 
 namespace Haruka {
     /**
@@ -38,7 +44,10 @@ namespace Haruka {
         EMPTY = 12,            // Nodo de transformación vacío
         PARTICLE_SYSTEM = 13,  
         AUDIO_SOURCE = 14,     
-        COLLIDER = 15          // Volúmenes de colisión puros
+        COLLIDER = 15,          // Volúmenes de colisión puros
+
+        // --- TIPO GENÉRICO PARA ENTIDADES CUSTOM ---
+        CUSTOM = 999            // Cualquier tipo definido por el juego (mineral, árbol, monstruo, proyectil...)
     };
 
     /**
@@ -74,29 +83,58 @@ namespace Haruka {
         }
     }
 
-    // --- HELPERS DE CONVERSIÓN (Para carga de JSON) ---
-
-    inline ObjectType stringToObjectType(const std::string& s) {
-        if (s == "planet")   return ObjectType::PLANET;
-        if (s == "model")    return ObjectType::MODEL;
-        if (s == "mesh")     return ObjectType::MESH;
-        if (s == "light")    return ObjectType::LIGHT;
-        if (s == "star")           return ObjectType::STAR;
-        if (s == "CelestialBody")  return ObjectType::STAR;
-        if (s == "celestialbody")  return ObjectType::STAR;
-        if (s == "camera")         return ObjectType::CAMERA;
-        return ObjectType::UNKNOWN;
+    /// Runtime registry of custom type names → numeric IDs.
+    /// Game code calls `registerCustomType("Monster")` at init; the returned
+    /// ID can be stored or compared, but dispatch is typically via
+    /// `SceneObject::type` string comparison in game callbacks.
+    inline int registerCustomType(const std::string& name) {
+        static std::unordered_map<std::string, int> s_customIds;
+        static int s_nextId = 1000;
+        auto it = s_customIds.find(name);
+        if (it != s_customIds.end()) return it->second;
+        int id = s_nextId++;
+        s_customIds[name] = id;
+        return id;
     }
 
-    inline std::string objectTypeToString(ObjectType t) {
-        switch (t) {
-            case ObjectType::PLANET: return "planet";
-            case ObjectType::MODEL:  return "model";
-            case ObjectType::MESH:   return "mesh";
-            case ObjectType::LIGHT:  return "light";
-            case ObjectType::STAR:   return "star";
-            default:                 return "unknown";
-        }
+    /// Returns 0 if `name` was never registered.
+    inline int lookupCustomType(const std::string& name) {
+        static std::unordered_map<std::string, int> s_customIds;
+        auto it = s_customIds.find(name);
+        return it != s_customIds.end() ? it->second : 0;
+    }
+
+    /// Classifies a freeform type string into the `ObjectType` enum.
+    /// Built-in types (planet, model, mesh, …) map to their enum values;
+    /// anything else returns `ObjectType::CUSTOM` so the game can handle it.
+    inline ObjectType classifyObjectType(const std::string& s) {
+        if (s == "planet" || s == "Planet" || s == "CelestialBody" || s == "celestialbody" || s == "satellite" || s == "Satellite")
+            return ObjectType::PLANET;
+        if (s == "star" || s == "Star")
+            return ObjectType::STAR;
+        if (s == "model" || s == "Model")
+            return ObjectType::MODEL;
+        if (s == "mesh" || s == "Mesh")
+            return ObjectType::MESH;
+        if (s == "light" || s == "Light" || s == "PointLight")
+            return ObjectType::LIGHT;
+        if (s == "directional_light" || s == "DirectionalLight")
+            return ObjectType::DIRECTIONAL_LIGHT;
+        if (s == "spotlight" || s == "SpotLight" || s == "Spotlight")
+            return ObjectType::SPOTLIGHT;
+        if (s == "camera" || s == "Camera")
+            return ObjectType::CAMERA;
+        if (s == "character" || s == "Character")
+            return ObjectType::CHARACTER;
+        if (s == "empty" || s == "Empty")
+            return ObjectType::EMPTY;
+        if (s == "particle_system" || s == "ParticleSystem" || s == "particles")
+            return ObjectType::PARTICLE_SYSTEM;
+        if (s == "audio_source" || s == "AudioSource")
+            return ObjectType::AUDIO_SOURCE;
+        if (s == "collider" || s == "Collider")
+            return ObjectType::COLLIDER;
+        return ObjectType::CUSTOM;   // game-defined: mineral, tree, monster, projectile, …
     }
 
     // --- FILTROS RÁPIDOS ---
