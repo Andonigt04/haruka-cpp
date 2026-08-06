@@ -259,7 +259,6 @@ Es un **forward renderer** con pase de estilo: `simple.vert` + `final.frag`
 
 | miembro | dónde se declara | estado |
 |---|---|---|
-| `_gBuffer` | `application.h`, creado en `application.cpp:230` | **se crea y se destruye; jamás se bindea** → no hay deferred |
 | `_cascadedShadow` | `application.h:421` | nunca construido |
 | `_pointShadow` | `application.h:413` | nunca construido |
 | `_ibl` | `application.h:410` | nunca construido |
@@ -287,8 +286,7 @@ se recrea al cambiar de tamaño (`application_render.cpp:372-375`).)*
 `bloom_composite.frag` · `deferred_geom.{vert,frag}` · `deferred_light.frag` · `frustum_cull.comp` ·
 `ibl.frag` · `instancing.{vert,frag}` · `light_cube.frag` · `parallax.frag` ·
 `planet_generation.comp` · `planet_pooled.vert` · `point_shadow.{vert,frag,geom}` ·
-`rain.{vert,frag}` (sustituido por `precip.*`) · `shadow.{vert,frag}` (el juego trae el suyo) ·
-`skinned.{vert,frag}` · `ssao.frag` · `tonemapping.frag`
+`rain.{vert,frag}` (sustituido por `precip.*`) · `shadow.{vert,frag}` (el juego trae el suyo) · `ssao.frag` · `tonemapping.frag`
 
 Y tres artefactos sueltos commiteados en `assets/shaders/`: **`comp.spv`, `frag.spv`, `vert.spv`**.
 
@@ -340,12 +338,6 @@ El RHI/PSO está completo para los renderers de escena, pero siguen con GL a pel
 `compute_shader.cpp:34-39`, `virtual_texturing.cpp:150`, los blits del fluido
 (`fluid_renderer.cpp:106, 177-194`, falta `blit` en el RHI) y el pase de sombra, que fija estado
 global a mano (`application_render.cpp:918-921`) precisamente porque el PSO anterior dejó reversed-Z.
-
-### 2.6 ✅ `MeshLOD` y `MeshOptimizer` — borrados
-
-`mesh_lod.{h,cpp}` no lo incluía nadie salvo su propio `.cpp`; `mesh_optimizer` solo lo incluía
-`mesh_lod.h`. Los dos, muertos. `skeletal_animation.{h,cpp}` (SkinnedMesh), igual. Los seis ficheros
-fuera.
 
 ### 2.7 🟡 Objetos de escena sin LOD ni culling
 

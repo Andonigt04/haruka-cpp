@@ -29,8 +29,7 @@
 #include "renderer/hdr.h"
 #include "renderer/bloom.h"
 #include "game/planet.h"        // TerrestrialPlanet::RenderStats (panel de performance)
-#include "tools/profiler.h"     // Haruka::Profiler::Node — árbol CPU por etapa (panel de performance)
-#include "renderer/gbuffer.h"
+#include "tools/profiler.h"
 #include "renderer/ssao.h"
 #include "renderer/ibl.h"
 #include "renderer/point_shadow.h"
@@ -39,11 +38,8 @@
 #include "core/ground_layer.h"                // la capa granular en sí (GL-free)
 #include "renderer/render_target.h"
 #include "renderer/simple_mesh.h"
-#include "renderer/light_culler.h"
 #include "renderer/gpu_instancing.h"
-#include "renderer/compute_postprocess.h"
 #include "renderer/cascaded_shadow.h"
-#include "renderer/virtual_texturing.h"
 #ifdef HARUKA_MOD_FLUIDS
 #include "renderer/fluid_host.h"
 #endif
@@ -450,8 +446,6 @@ private:
     std::unique_ptr<HDR> _hdr;
     /** @brief The bloom shader instance. */
     std::unique_ptr<Bloom> _bloom;
-    /** @brief The G-buffer shader instance. */
-    std::unique_ptr<GBuffer> _gBuffer;
     /** @brief The SSAO shader instance. */
     std::unique_ptr<SSAO> _ssao;
     /** @brief Offscreen HDR scene target for the standalone post-processing stack
@@ -488,16 +482,10 @@ private:
     std::unique_ptr<IBL> _ibl;
     /** @brief The point shadow shader instance. */
     std::unique_ptr<PointShadow> _pointShadow;
-    /** @brief The light culler instance. */
-    std::unique_ptr<LightCuller> _lightCuller;
     /** @brief The GPU instancing instance. */
     std::unique_ptr<GPUInstancing> _instancing;
-    /** @brief The compute post-process instance. */
-    std::unique_ptr<ComputePostProcess> _computePostProcess;
     /** @brief The cascaded shadow map instance. */
     std::unique_ptr<CascadedShadowMap> _cascadedShadow;
-    /** @brief The virtual texturing instance. */
-    std::unique_ptr<VirtualTexturing> _virtualTexturing;
     /** @brief The raycast system instance. */
     std::unique_ptr<RaycastSimple> _raycastSystem;
     /** @brief The world system instance. */

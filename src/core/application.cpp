@@ -193,8 +193,6 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
     // 1. Update the viewport via RHI
     if (RHI::Device* dev = RHI::device())
         dev->beginFrame()->setViewport(0, 0, (int)width, (int)height);
-    // The G-Buffer holds albedo, normal, position, etc. textures.
-    _gBuffer = std::make_unique<GBuffer>(width, height);
 
     // 3. Recreate lighting + post-processing buffers
     _hdr = std::make_unique<HDR>(width, height);
@@ -273,7 +271,6 @@ void Application::cleanup() {
     _shadow.reset();
     _hdr.reset();
     _bloom.reset();
-    _gBuffer.reset();
     _ssao.reset();
     _ibl.reset();
     _pointShadow.reset();

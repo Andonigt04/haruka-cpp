@@ -77,8 +77,7 @@ Most engines render a *level*. Haruka renders a **solar system at true scale** a
 
 ### 🔻 Present in the tree but **not wired**
 `GBuffer` / deferred pipeline · `CascadedShadowMap` · `PointShadow` · `IBL` · `LightCuller` ·
-`ComputePostProcess` · `VirtualTexturing` · the SSAO **pass** (the class allocates buffers; nothing
-runs an occlusion pass) · `MeshLOD` / `MeshOptimizer` · `SkinnedMesh`.
+`ComputePostProcess` · `VirtualTexturing` · the SSAO **pass** (the class allocates buffers;
 Details and file:line in [docs/ESTADO_MOTOR.md](docs/ESTADO_MOTOR.md).
 
 ---

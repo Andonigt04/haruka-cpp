@@ -24,7 +24,6 @@ assets/data/magic/language/` → **53 OK**.
 | 3 | **Objetos de escena sin LOD ni cull**: full detalle a cualquier distancia (solo hay un corte por distancia). Con el instancing ya migrado, toca darles cull + LOD. | `application_render.cpp` |
 | 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `src/rhi/` |
 | 5 | **`preview.vert` es código muerto** y además declara un `PerObjectData` DESACTUALIZADO (sin los campos de material). Nadie lo compila hoy; el día que alguien lo use, falla al LINKAR sin decir por qué. Borrarlo o actualizarlo. | `assets/shaders/preview.vert` |
-| 6 | **Código muerto**: `MeshLOD`, `SoftbodyRenderer` sin call-site. | `src/renderer/` |
 | 7 | **Nadie fija la raíz de assets salvo el editor**: `Shader::setBaseDir` no lo llama ni el motor ni Survival, así que ambos dependen de que el cwd sea el del ejecutable. El editor ya la deriva de `SDL_GetBasePath`; el resto sigue a merced de desde dónde se lance. | `renderer/shader.h` |
 | 8 | **El clear del frame usa el color de cielo aunque no haya cielo**: sin planeta activo `getSkyColor` devuelve 0.005 → un viewport casi negro que parece roto. Para el editor conviene un fondo neutro declarado, no el del espacio. | `application_render.cpp` |
 
@@ -87,6 +86,41 @@ la esfera de agua, que es lo que descartó la primera.
 ## 🔍 Verificación pendiente (el autor ejecuta; yo no)
 
 Todo esto tiene los tests en verde y **nadie lo ha visto funcionando**. No es lo mismo.
+
+### ⚠️ Terreno v4 (clipmap) — qué se lleva por delante el cambio del 2026-08-06
+
+El v4 sustituye el streaming por chunks por un **clipmap con teselación hardware**
+(`planet/clipmap.vert/.tesc/.tese`). El motivo es bueno y va al README: un planeta a escala real
+con chunks horneados y cacheados **no cabe en disco** (orden de TB); generando en la `tese` el
+coste de almacenamiento es **cero**. Es un experimento, pero estable.
+
+Lo que hay que confirmar antes de tocar el README, porque el documento sigue describiendo el v3:
+
+- [ ] **¿Cuántos suelos hay ahora?** `reference_surface.cpp:43` devuelve `h = 0.0` (esfera lisa) y
+  `application.h:260` la declara *fallback*. El suelo real parece ser
+  `PlanetarySystem::groundHeightKmAtDir` leyendo `m_heightCPU`. **La afirmación estrella del README
+  ("un solo suelo" + 0,3 mm medidos) es del v3 y hoy no está respaldada.** O se re-mide con el
+  clipmap, o se reformula. Sospecha del autor: sigue habiendo uno solo — *falta comprobarlo*.
+- [ ] **¿La paridad render↔colisión se mantiene con teselación?** Ahora el desplazamiento ocurre en
+  la `tese`, en GPU, y la CPU no tiene la malla. Si el suelo se evalúa en dos sitios distintos con
+  fórmulas distintas, vuelve el bug de los dos terrenos por otra puerta. Es **la** verificación
+  crítica del v4.
+- [ ] **`terrain_gen.comp`**: sin ningún consumidor hoy. ¿Reconectar (el v4 sigue necesitando el
+  campo erosionado) o retirar? Sospecha: sigue haciendo falta, viene del v3.
+- [ ] **Fences + mapeo persistente**: solo aparecen ya en el RHI, sin consumidor. Si el clipmap no
+  hace readback, dejan de ser una feature del terreno y pasan a ser **capacidad del RHI**. Eso está
+  bien, pero el README no puede seguir vendiéndolo como pipeline de terreno.
+- [ ] **Caché LRU + caché en disco (`core/cache/`)**: **cero consumidores**. Si el v4 genera en la
+  `tese`, no hay malla que cachear — y entonces la caché no es deuda: es la **consecuencia lógica**
+  del cambio y hay que contarla como simplificación, no dejarla muerta y callada.
+- [ ] **MESO**: solo sobrevive en un comentario de `reference_surface.h`. Retirar del README y de
+  los switches de entorno si ya no existe.
+- [ ] **`drawIndexedIndirect` / `gl_DrawID`**: ¿lo conserva el camino del clipmap o murió con los
+  chunks? Afecta a lo que se puede afirmar sobre draws agrupados.
+
+> Regla mientras esto esté abierto: **el README no promete cifras del v3 como si fueran del v4.**
+> Un aviso de "en reescritura, cifras pendientes de re-medir" suma credibilidad; una cifra que el
+> código contradice la destruye.
 
 ### IDE
 
