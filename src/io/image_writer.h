@@ -20,6 +20,13 @@ namespace Haruka {
  */
 bool writePNG(const std::string& path, int w, int h, int channels, const unsigned char* pixels);
 
+/**
+ * @brief Writes a 16-bit GRAYSCALE PNG (color type 0, bit depth 16, big-endian).
+ * @param gray row-major, **top-to-bottom**, `w*h` samples in HOST byte order.
+ * @return false on bad args or file-open failure.
+ */
+bool writePNG16(const std::string& path, int w, int h, const unsigned short* gray);
+
 } // namespace Haruka
 
 #endif // HARUKA_IMAGE_WRITER_H

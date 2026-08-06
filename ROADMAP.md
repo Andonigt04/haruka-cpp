@@ -335,6 +335,29 @@ es la FORMA, y eso no tiene rodeo: sin triángulos no hay ladera por mucho norma
   target). Para pintar un planeta también —pintas donde miras—; lo que no puede ser el mismo es el
   DATO: no editas vértices de una malla, escribes en una estructura dispersa.
 
+## Optimización del render del terreno — candidatos (roadmap, 2026-08-05)
+
+> Un planeta a escala real se aligera en tres niveles: geometría (cuántos triángulos), culling (qué
+> no se dibuja) y fragmento/streaming (shading y VRAM). Lo que el motor **ya tiene** —un solo suelo,
+> clipmap, teselación GPU (`terrain.tesc/tese`), culling de limbo/horizonte (`patchHidden`), culling
+> de frustum por esfera conservadora, backface y LOD de material por octavas (`triM`)— no está listado.
+> Lo de abajo es lo que **falta**, por prioridad de impacto/esfuerzo.
+
+- [ ] **HiZ occlusion culling + depth-prepass**: tras un prepass de profundidad barato, consultar la
+  pirámide de profundidad para saltar los parches que el relieve ya tapa (más que el frustum solo).
+  Barato de añadir sobre el pipeline actual.
+- [ ] **Streaming de tiles de terreno desde disco**: no hornear/generar todo el planeta en RAM;
+  cargar por región. El quadtree de chunks de geometría ya existe en el motor (ver § detalle cercano).
+- [ ] **Virtual texturing** — `src/renderer/virtual_texturing.{h,cpp}` está en el árbol **sin un solo
+  call-site**: es la pieza que permite "1 cm donde miras" sin guardar exabytes. Ya anotado en
+  § "El detalle cercano".
+- [ ] **GPU-driven / Meshlets (Nanite-style) + sub-píxel culling**: pre-generar meshlets (~64-126
+  vértices) y recortarlos por clúster y por triángulo sub-píxel antes de rasterizar. El gran salto,
+  pero es overhaul (requiere mesh/task shaders, otra pila Vulkan).
+- [ ] **Draw-indirect / instancing GPU-driven para Props y vegetación**: `drawIndexedIndirect` ya
+  existe en el RHI (`src/rhi/opengl/gl_context.cpp:233`) **sin llamadores**; falta el culling
+  GPU-driven y el `MultiDrawElementsIndirect` para objetos a gran escala.
+
 ## v1.2 — Materiales de verdad
 
 - [ ] **Texturas por material compartidas** entre edificios, piezas de construcción e items (hoy

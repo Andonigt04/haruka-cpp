@@ -3,9 +3,9 @@
 #include "rhi/rhi_context.h"
 
 namespace {
-// std140 (binding 6): vec3 (align 16, size 12) + el float siguiente entran en el mismo slot de 16 B.
-struct SoftbodyParams { glm::vec3 color; float alphaMode; };
-static_assert(sizeof(SoftbodyParams) == 16, "SoftbodyParams std140 size mismatch");
+// std140 (binding 6): dos bloques vec3(12)+float(4) = 2 x 16 B = 32 B.
+struct ShallowWaterParams { glm::vec3 color; float alphaMode; glm::vec3 foamColor; float foamStrength; };
+static_assert(sizeof(ShallowWaterParams) == 32, "ShallowWaterParams std140 size mismatch");
 }
 #include "physics/fluid/shallow_water.h"
 #include "rhi/rhi_device.h"
@@ -27,16 +27,17 @@ void ShallowWaterRenderer::ensureGL() {
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     // OJO: createPipeline hace un ifstream CRUDO → enraizar con el base dir de assets.
-    const std::string vs = Shader::baseDir() + "shaders/softbody.vert";
-    const std::string fs = Shader::baseDir() + "shaders/softbody.frag";
+    const std::string vs = Shader::baseDir() + "shaders/shallow_water.vert";
+    const std::string fs = Shader::baseDir() + "shaders/shallow_water.frag";
     RHI::PipelineDesc pd;
     pd.vertexPath          = vs.c_str();
     pd.fragmentPath        = fs.c_str();
-    pd.vertexLayout.strides = { (uint32_t)(7 * sizeof(float)) };   // pos(3) + normal(3) + alpha(1)
+    pd.vertexLayout.strides = { (uint32_t)(8 * sizeof(float)) };   // pos(3)+normal(3)+alpha(1)+foam(1)
     pd.vertexLayout.attributes = {
         { 0, 0,                 RHI::Format::RGB32F },
         { 1, 3 * sizeof(float), RHI::Format::RGB32F },
         { 2, 6 * sizeof(float), RHI::Format::R32F   },   // alpha por-vértice (fade de borde)
+        { 3, 7 * sizeof(float), RHI::Format::R32F   },   // foam (espuma de cresta rompiente)
     };
     pd.topology     = RHI::PrimitiveTopology::Triangles;
     pd.depth.test   = true;  pd.depth.write = true;
@@ -45,7 +46,7 @@ void ShallowWaterRenderer::ensureGL() {
     m_pso  = dev->createPipeline(pd);
     m_vboH = dev->createBuffer(RHI::BufferUsage::Vertex,  0, nullptr, RHI::BufferMemory::Stream);
     m_eboH = dev->createBuffer(RHI::BufferUsage::Index,   0, nullptr, RHI::BufferMemory::Stream);
-    m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(SoftbodyParams), nullptr,
+    m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(ShallowWaterParams), nullptr,
                                RHI::BufferMemory::Dynamic);
     m_init = true;
 }
@@ -70,7 +71,7 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     // Build vertex grid (only used cells matter, but a full grid keeps indexing
     // simple; cells without water collapse to terrain and are skipped in tris).
     m_verts.clear();
-    m_verts.resize(size_t(n) * n * 7, 0.0f);
+    m_verts.resize(size_t(n) * n * 8, 0.0f);
     std::vector<glm::vec3> pos(size_t(n) * n);
     for (int j = 0; j < n; ++j)
         for (int i = 0; i < n; ++i)
@@ -90,10 +91,18 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
             // waterline instead of a hard grid edge. Deeper water reads as solid.
             float depth = m_sim->waterAt(i, j);
             float alpha = glm::smoothstep(0.02f, 0.30f, depth) * 0.85f;
-            int b = (j*n+i)*7;
+            // Breaking-crest foam: where the surface tilts strongly from `up` the
+            // wavefront is steep (curling/breaking). Scale by water depth so dry,
+            // slope-only terrain does not foam. `smoothstep` gives a crisp-ish line
+            // on the surf while the depth fade keeps the interior calm.
+            float tilt = 1.0f - glm::dot(nrm, glm::vec3(up));
+            float foam = glm::smoothstep(0.22f, 0.55f, tilt)
+                       * glm::smoothstep(0.05f, 0.50f, depth);
+            int b = (j*n+i)*8;
             m_verts[b+0]=pos[j*n+i].x; m_verts[b+1]=pos[j*n+i].y; m_verts[b+2]=pos[j*n+i].z;
             m_verts[b+3]=nrm.x; m_verts[b+4]=nrm.y; m_verts[b+5]=nrm.z;
             m_verts[b+6]=alpha;
+            m_verts[b+7]=foam;
         }
 
     // Triangles only for quads where at least one corner holds water POR ENCIMA del mar.
@@ -122,7 +131,12 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     dev->uploadBuffer(m_eboH, m_indices.size() * sizeof(unsigned int), m_indices.data());
 
     // Antes eran uniforms sueltos (locations 15/16); ahora van por UBO (no existen en Vulkan).
-    const SoftbodyParams params{ glm::vec3(0.10f, 0.35f, 0.55f), 1.0f };
+    const ShallowWaterParams params{
+        glm::vec3(0.10f, 0.35f, 0.55f),   // water colour
+        1.0f,                             // per-vertex alpha
+        glm::vec3(0.90f, 0.97f, 1.0f),    // foam colour (near-white, hint of cyan)
+        1.2f,                             // foam strength (can exceed 1 → stronger mix)
+    };
     dev->updateBuffer(m_uboH, 0, sizeof(params), &params);
 
     RHI::Context* ctx = dev->beginFrame();

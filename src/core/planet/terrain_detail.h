@@ -113,17 +113,19 @@ inline float octaveWeight(float wavelengthM, float minFeatureM) {
 }
 
 inline float terrainDetail(const glm::vec3& dir, float radius, float minFeatureM) {
+    // Early-out idéntico al gemelo GLSL: si ni la octava más gruesa (λ=2857 m) tiene triángulos para
+    // ella —`octaveWeight` es > 0 ⟺ minFeatureM < 1428.5— ninguna octava contribuye y el resultado es
+    // 0 (lo mismo que sumar los términos con peso 0, sin pagar el ruido). La CPU de la física siempre
+    // pasa minFeatureM=2.0, así que este camino no lo toca; es el render de lejos/orbita el que ahorra.
+    if (minFeatureM >= 1428.5f) return 0.0f;
     const glm::dvec3 p = glm::dvec3(dir) * (double)radius;
     float h = 0.0f;
-    //                 escala        λ aprox.  amplitud
-    h += (detailNoise(p * 0.00035) - 0.5f) * 260.0f * octaveWeight(2857.0f, minFeatureM);
-    h += (detailNoise(p * 0.0016)  - 0.5f) *  70.0f * octaveWeight( 625.0f, minFeatureM);
-    h += (detailNoise(p * 0.0090)  - 0.5f) *  14.0f * octaveWeight( 111.0f, minFeatureM);
-    // Las dos octavas que llevan el relieve al rango de 10–2 m que se camina. Cuestan dos
-    // evaluaciones de ruido y CERO memoria — es la única forma de tener ese detalle: guardarlo
-    // serían 128 TB para el planeta.
-    h += (detailNoise(p * 0.0450)  - 0.5f) *   3.0f * octaveWeight(  22.0f, minFeatureM);
-    h += (detailNoise(p * 0.2200)  - 0.5f) *   0.7f * octaveWeight(   4.5f, minFeatureM);
+    // Guardas con la MISMA equivalencia que las de octaveWeight (λ/2), mismo corte que el .glsl.
+    if (minFeatureM < 1428.5f) h += (detailNoise(p * 0.00035) - 0.5f) * 260.0f * octaveWeight(2857.0f, minFeatureM);
+    if (minFeatureM <  312.5f) h += (detailNoise(p * 0.0016)  - 0.5f) *  70.0f * octaveWeight( 625.0f, minFeatureM);
+    if (minFeatureM <   55.5f) h += (detailNoise(p * 0.0090)  - 0.5f) *  14.0f * octaveWeight( 111.0f, minFeatureM);
+    if (minFeatureM <   11.0f) h += (detailNoise(p * 0.0450)  - 0.5f) *   3.0f * octaveWeight(  22.0f, minFeatureM);
+    if (minFeatureM <    2.25f) h += (detailNoise(p * 0.2200) - 0.5f) *   0.7f * octaveWeight(   4.5f, minFeatureM);
     return h;
 }
 
@@ -148,6 +150,44 @@ inline float terrainDetail(const glm::vec3& dir, float radius) {
 inline float seaLevelAttenuation(float baseHeightM) {
     if (baseHeightM > 0.0f) return glm::clamp(baseHeightM * (1.0f / 5.0f), 0.0f, 1.0f);
     return glm::clamp(-baseHeightM * (1.0f / 200.0f), 0.0f, 1.0f);     // agua: por profundidad
+}
+
+/**
+ * @brief UV equirectangular de una dirección: convención de TODOS los bakes (norte en la fila 0).
+ *
+ * Gemela exacta de `harukaEquirectUV` del .glsl (mismos literales, mismo orden). Es la proyección
+ * que rellena los mapas horneados — lee un mapa con ella y obtienes el valor del punto correcto.
+ */
+inline glm::vec2 equirectUV(const glm::vec3& dir) {
+    const glm::vec3 d = glm::normalize(dir);
+    return glm::vec2(0.5f + std::atan2(d.z, d.x) * 0.1591549f,
+                     0.5f - std::asin(glm::clamp(d.y, -1.0f, 1.0f)) * 0.3183099f);
+}
+
+/**
+ * @brief Bilineal a mano de un campo de altura horneado (R32F), gemela de la GPU.
+ *
+ * Envuelve la longitud (borde ±π) y abraza los polos (la fila del polo se repite). El orden de las
+ * operaciones es el MISMO que `harukaSampleHeightField` del .glsl: la física muestrea este campo con
+ * la misma cuenta que el render, o el suelo que se pisa y el que se ve divergirían en centímetros.
+ */
+inline float sampleHeightField(const glm::vec2& uv, int w, int h, const float* field) {
+    const glm::vec2  fxy = uv * glm::vec2((float)w, (float)h) - 0.5f;
+    const glm::ivec2 i0  = glm::ivec2(glm::floor(fxy));
+    // Sin `%`: mismo ajuste por lado que el gemelo GLSL (que evita la división entera por drivers).
+    // Para uv ∈ [0,1] el resultado es idéntico al módulo.
+    int x0 = i0.x; if (x0 < 0) x0 += w; if (x0 >= w) x0 -= w;
+    int y0 = i0.y; y0 = glm::clamp(y0, 0, h - 1);
+    int x1 = x0 + 1; if (x1 >= w) x1 = 0;
+    int y1 = y0 + 1; if (y1 >= h) y1 = y0;
+    const glm::vec2 t = fxy - glm::vec2(i0);
+    const float h00 = field[(size_t)y0 * (size_t)w + (size_t)x0];
+    const float h10 = field[(size_t)y0 * (size_t)w + (size_t)x1];
+    const float h01 = field[(size_t)y1 * (size_t)w + (size_t)x0];
+    const float h11 = field[(size_t)y1 * (size_t)w + (size_t)x1];
+    const float a = h00 + (h10 - h00) * t.x;
+    const float b = h01 + (h11 - h01) * t.x;
+    return a + (b - a) * t.y;
 }
 
 }} // namespace Haruka::Planet

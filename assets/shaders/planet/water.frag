@@ -6,12 +6,16 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
 };
 // Campo base del terreno (elev del nivel del mar, 6 capas): lo usa la costa per-pixel.
 layout(binding = 15) uniform sampler2DArray uBaseField;
+// Campo base horneado (R32F): la costa lee de aquí la MISMA altura que pinta la malla.
+layout(binding = 16) uniform sampler2D uHeightTex;
 out vec4 fragColor;
 
 // La costa per-pixel evalúa el MISMO suelo que pinta la malla: descomposición de cara compartida
 // (gemela de dirToCubeFaceClosed en cube_sphere.cpp) y función de detalle compartida con C++.
 #include "lib/cube_face.glsl"
 #include "lib/terrain_detail.glsl"
+// Cuerpos masivos que atraen/mueven el mar (mismo bloque que water.vert; uTide.x = 0 ⇒ neutro).
+#include "lib/tidal.glsl"
 
 // Bilineal a MANO del campo base, idéntica a clipmap.tese (misma retícula, mismo peso: si la
 // orilla del agua y la costa de la malla difirieran en centímetros se vería un escalón).
@@ -88,10 +92,21 @@ vec3 waterNormal(vec3 wp, float t) {
 void main() {
     vec3 n = normalize(vNorm);
     vec3 wp = vFragPos - uCenter.xyz;
+    // LIMPIA EL MAR BAJO TIERRA. Donde el bake dice que hay tierra (baseH > 0,5 m) la superficie del
+    // terreno está DELANTE del océano y este fragmento lo habría ocultado el depth test de todos
+    // modos: descartarlo ahorra la mezcla del agua bajo el continente (y cualquier asomo por
+    // grietas). Es el recorte CORRECTO frente al que intentaba water.vert —empujar el vértice fuera
+    // del NDC estiraba los triángulos que compartían un vértice de costa con uno recortado en bandas
+    // hacia la esquina del clip (las "láminas de azul")— así que water.vert se revirtió a una
+    // transformación limpia y el recorte vive aquí, por píxel. Umbral 0,5 m: solo tierra clara.
+    if (uDebug.z > 0.5 && texture(uHeightTex, harukaEquirectUV(normalize(wp))).r > 0.5) discard;
     float t = uDebug.y;
     // Mezcla la normal de la esfera con la de las olas: sin mezcla, la onda dominaría el borde
-    // del terminador; con 0.5 la superficie ondula pero la esfera sigue siendo legible.
-    n = normalize(mix(n, waterNormal(wp, t), 0.5));
+    // del terminador; con 0.5 la superficie ondula pero la esfera sigue siendo legible. Cerca de un
+    // cuerpo masivo, sobre cada CRESTA del tren de anillos (`tidalRings`) la mezcla sube → las olas
+    // se agitan y el movimiento se lee (la marea geométrica sola no se percibe).
+    float rings = tidalRings(wp, t);
+    n = normalize(mix(n, waterNormal(wp, t), 0.5 + 0.30 * clamp(rings, 0.0, 1.0)));
 
     vec3 L = normalize(uLightDir.xyz);
     vec3 V = normalize(-vFragPos);          // vFragPos es relativo a la cámara
@@ -108,17 +123,31 @@ void main() {
     vec3 amb   = uAmbient.xyz + sky * (0.55 + 0.45 * fres);
     float sunD = clamp(diff * 1.6, 0.0, 1.0);
     vec3 base = mix(deep, shallow, sunD);
+    // MAR DINÁMICO POR MASA: donde el bulto de marea de los cuerpos masivos levanta/hunde el agua,
+    // la superficie queda más tensa y "atrapa" mejor el sol → un destello tenue que sigue al pozo
+    // mientras éste barre el océano. Neutro (0) sin cuerpos.
+    float tideW = tidalHeight(wp);
+    float tideGlint = clamp(abs(tideW) * 0.5 + rings * 0.5, 0.0, 1.0);
     vec3 col = base * (amb + uLightColor.xyz * sunD * 1.1)
-             + uLightColor.xyz * spec * (0.45 + 0.55 * fres) * 1.6;
+             + uLightColor.xyz * spec * (0.45 + 0.55 * fres) * (1.6 + 2.4 * tideGlint)
+             + uLightColor.xyz * spec * 0.6 * tideGlint;
 
     // COSTA PER-PIXEL: el borde del agua lo recorta la superficie del TERRENO, y desde órbita esa
     // superficie sale poligonal (la teselación cae a LOD 1 y la malla base de 256 manda). Aquí el
-    // agua computa la altura REAL del suelo en cada píxel —campo base + detalle compartido, el
+    // agua computa la altura REAL del suelo en cada píxel —bake horneado + detalle compartido, el
     // mismo que pinta la malla— y dibuja la orilla con un degradado somero y una línea de espuma
     // en el cruce exacto. El detalle solo se evalúa cerca de la costa (|baseH| < 400 m); en mar
     // abierto son 4 texelFetch + un exp, casi gratis.
     vec3  wdir   = normalize(wp);
-    float baseH  = sampleBase(wdir).x;
+    // La altura REAL del suelo: el bake horneado (binding 16), el MISMO que leen la malla, el clipmap
+    // y la física. Sin él (uDebug.z ≤ 0.5) se cae al campo de 39 km, la retícula antigua.
+    // Aquí NO hace falta la bilineal manual: la paridad bit a bit solo importa donde se PINTA el
+    // terreno (teselación y clipmap) y donde se PISA (física). El agua es un efecto de fragmento, y
+    // el bilineal de hardware hace 1 fetch donde la manual hace 4 — la costura de longitud ±π no se
+    // ve en mar abierto.
+    float baseH  = uDebug.z > 0.5
+                 ? texture(uHeightTex, harukaEquirectUV(wdir)).r
+                 : sampleBase(wdir).x;
     float shoreH = baseH;
     if (baseH > -400.0 && baseH < 400.0) {
         float baseR = uExtra.w + baseH;
@@ -131,6 +160,11 @@ void main() {
     float foamW    = exp(-abs(shoreH) * 0.45);               // espuma justo en el cruce (H≈0)
     col = mix(col, vec3(0.14, 0.55, 0.72) * (amb + uLightColor.xyz * sunD * 1.1), shallowW * 0.55);
     col = mix(col, vec3(0.90, 0.94, 0.97) * (amb + uLightColor.xyz * sunD), foamW * 0.40);
+    // ESPUMA DE MAREA: sobre las crestas del tren de anillos de los cuerpos masivos se pinta una
+    // línea blanca que las sigue al propagarse — la estela espumosa de una "ola real". Se apaga
+    // con la distancia al pozo (ya está en `rings`). Neutro (0) sin cuerpos.
+    col = mix(col, vec3(0.90, 0.94, 0.97) * (amb + uLightColor.xyz * sunD),
+              clamp(rings, 0.0, 1.0) * 0.55);
 
     fragColor = vec4(col, 0.85);
 }

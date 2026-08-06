@@ -115,12 +115,15 @@ struct TreeBakeResult {
 
 // ===========================================================================
 // Hornea las texturas del árbol en `outDir` (absoluta) con nombres basados en
-// `baseName`. Devuelve rutas relativas "assets/textures/<base>_<slot>.png".
+// `baseName`. Devuelve rutas relativas `relDir/<base>_<slot>.png` (por defecto
+// "assets/textures/", para la raíz de texturas; el llamador la cambia cuando
+// hornea a una subcarpeta dedicada de props).
 // ===========================================================================
 inline TreeBakeResult bakeTreeTextures(int seed, bool foliage,
                                        const std::string& outDir,
                                        const std::string& baseName,
-                                       int size = 256) {
+                                       int size = 256,
+                                       const std::string& relDir = "assets/textures/") {
     TreeBakeResult r;
     std::error_code ec;
     std::filesystem::create_directories(outDir, ec);
@@ -135,7 +138,7 @@ inline TreeBakeResult bakeTreeTextures(int seed, bool foliage,
         return Haruka::writePNG(path, img.width, img.height, 4, img.data());
     };
     auto rel = [&](const char* suffix) {
-        return std::string("assets/textures/") + baseName + "_" + suffix + ".png";
+        return relDir + baseName + "_" + suffix + ".png";
     };
 
     // Albedo: alpha forzado a 255 (el grafo da Vec3, data[3]=0).

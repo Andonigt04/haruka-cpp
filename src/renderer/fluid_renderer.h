@@ -74,7 +74,10 @@ private:
     void ensureTargets(int w, int h);
     void uploadParticles(const Haruka::WorldPos& cameraPos, int n);
     void renderSpheres(int n, float vpH);
-    void renderSurface(int n, int vpW, int vpH);
+    /** @brief Modo superficie completo: sembra oclusión/refracción desde `scenePass`
+     *  (blit de color+depth de la escena), pase de profundidad de partículas, blur
+     *  bilateral y composición OPAQUE final sobre `scenePass`. */
+    void renderSurface(int n, int vpW, int vpH, Haruka::RHI::RenderPassHandle scenePass);
 };
 
 } // namespace Haruka

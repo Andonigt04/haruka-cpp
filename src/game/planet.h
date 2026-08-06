@@ -28,6 +28,9 @@
 #include "core/planet/climate.h"
 #include "core/planet/biomes.h"
 #include "core/planet/terrain_material.h"
+#include "core/planet/prop_layer.h"
+#include "core/planet/zone_shape.h"
+#include "core/terrain/planet_fields.h"        // FieldSample (fieldSampleAt)
 #include "core/weather_system.h"
 #include "tools/procgraph/proc_graph.h"
 #include "tools/procgraph/proc_climate.h"
@@ -37,7 +40,8 @@ namespace Haruka { namespace Planet {
 /** @brief Configuración de superficie: tiling de textura y resolución procedural. */
 struct SurfaceConfig {
     float       tiling = 100.0f;
-    int         texRes = 512;   // procedural texture resolution (width); height = width/2
+    int         texRes = 512;   // biome map procedural texture resolution (width); height = width/2
+    int         macroRes = 2048; // macro-variation texture resolution (width); height = width/2
     /**
      * @brief Fracción de la superficie por ENCIMA del nivel del mar [0,1].
      *
@@ -59,6 +63,23 @@ struct SurfaceConfig {
     std::string elevationMap;
     /** @brief Metros a los que corresponden el 0 y el 255 del mapa. */
     glm::vec2   elevationRange = glm::vec2(-4000.0f, 4000.0f);
+};
+
+/**
+ * @brief Una ZONA del autor con nombre propio.
+ *
+ * Independiente de los materiales del terreno: una zona es "city" aunque ningún material se llame
+ * así. Puede ser GEOMÉTRICA (un círculo o un polígono con perímetro en lat/lon — "la ciudad es
+ * esta área"), PINTADA (un color en el zoneMap) o ambas. Las capas de props la referencian por
+ * nombre en su campo `zones`. Si la misma área/pintura coincide con el `zone` de un material,
+ * MANDA la zona nombrada (el autor la definió a propósito).
+ */
+struct NamedZone {
+    std::string name;
+    ZoneShape   shape;                    ///< perímetro (círculo/polígono); vacío = solo pintada
+    glm::vec3   color = glm::vec3(-1.0f); ///< color en el zoneMap (0-255); negativo = sin color
+    bool hasColor()    const { return color.r >= 0.0f; }
+    bool hasGeometry() const { return shape.hasGeometry(); }
 };
 
 /**
@@ -183,6 +204,38 @@ public:
      */
     double sampleHeight(const glm::dvec3& dir) const;
 
+    /**
+     * @brief Campo ecológico del planeta en una dirección: cota + clima (temp/humedad).
+     *
+     * Es el muestreador que el adaptador de props (`TerrainPropField`) usa como `fieldFn`/`heightFn`:
+     * la MISMA info de clima con la que se hornearon los biomas, así "donde hay un árbol" se rige
+     * por el mismo clima que dibuja la hierba. `elevKm` sale del suelo muestreado (`sampleHeight`),
+     * `tempC`/`humidity` del ClimateOutput del planeta.
+     */
+    Haruka::FieldSample fieldSampleAt(const glm::vec3& dir) const;
+
+    /**
+     * @brief Densidad [0,1] de un mapa de distribución (densityMap de una capa de prop) en la
+     *  dirección. La textura se carga/cachea por ruta la primera vez (mismo patrón de candidatos
+     *  que zoneMap/elevationMap) y se muestrea BILINEAL en equirectangular. Sin mapa = 1.0.
+     */
+    float densityMapAt(const std::string& path, const glm::vec3& dir) const;
+
+    /**
+     * @brief Zona del zoneMap en la dirección: nombre del material que MÁS se parece al color
+     *  pintado ahí (el mismo `zoneToMaterial` que usa el terreno para decidir mar/tierra).
+     *
+     * Vacío = el planeta no tiene zoneMap o el punto no cae en ninguna zona declarada. Es la sonda
+     * que usan las capas de props con `zones` (filtro por zona pintada).
+     */
+    std::string zoneNameAt(const glm::vec3& dir) const;
+
+    /** @brief MATERIAL del terreno en la dirección (p.ej. "sand", "forest"): el mismo
+     *  `zoneToMaterial` que usa el terreno, SIN el recubrimiento de zonas nombradas. Vacío = el
+     *  planeta no tiene zoneMap. Es la sonda de `layer` para la condición booleana `when` de las
+     *  capas de props (`layer != sand || zone == oasis`). */
+    std::string materialNameAt(const glm::vec3& dir) const;
+
     /** @brief Libera los recursos GPU de ESTE planeta. */
     void clearGPU();
     /** @brief Destruye los pipelines/handles ESTÁTICOS compartidos (una vez, al cerrar el motor). */
@@ -200,6 +253,28 @@ public:
                   const glm::dvec3& u, const glm::dvec3& v);
     void setWeatherTime(double t) { m_weather.setTime(t); }
 
+    // --- MAR DINÁMICO POR MASA (Hito 1) -------------------------------------------------------
+    /** @brief Cuerpo masivo que atrae/mueve el océano de este planeta. */
+    struct MassiveBody {
+        glm::dvec3 posCenter;   ///< posición relativa al CENTRO del planeta (m)
+        double     gm;          ///< G·M del cuerpo (m³/s²)
+    };
+    /** @brief Fija la lista de cuerpos masivos (soles/planetas/lunas) para la marea del océano.
+     *  Vacío ⇒ el agua queda como la esfera rígida de siempre (aditivo/neutro). Se llama cada
+     *  frame desde el sistema orbital. */
+    void setTidalBodies(std::vector<MassiveBody> bodies) { m_tidalBodies = std::move(bodies); }
+    const std::vector<MassiveBody>& tidalBodies() const { return m_tidalBodies; }
+
+    // --- Stats de geometría del último frame (para el panel del editor) ---------------------
+    /** @brief Lo que dibujó el planeta el último render: base + clipmap + agua, separados. */
+    struct RenderStats {
+        uint32_t baseVertices = 0, baseTriangles = 0;     ///< malla del planeta (o teselada)
+        uint32_t clipVertices = 0, clipTriangles = 0;     ///< rejilla fina cerca del jugador
+        uint32_t waterVertices = 0, waterTriangles = 0;   ///< esfera del océano (caras dibujadas)
+        int      drawCalls = 0;                           ///< 1 base + 1 clip + caras de agua
+    };
+    const RenderStats& lastRenderStats() const { return m_lastRenderStats; }
+
     /** @brief Vista de depuración del terreno. 0=normal, 1=elevación, 2=zonas, 3=bioma,
      *  4=temperatura, 5=humedad, 6=capas (todas), 10+i=máscara del material i.
      *  `i` es la POSICIÓN en `surface.materials` (0=primero, incluya agua/hielo). La consume el
@@ -210,6 +285,11 @@ public:
     /** @brief Tabla de materiales del terreno (capas + nombres + zonas). La lee el editor para
      *  poblar el selector de capas. */
     const Haruka::Planet::TerrainMaterialTable& terrainMaterials() const { return m_materialTable; }
+
+    /** @brief Tabla de CAPAS DE PROPS (regla clima/forma → qué objeto instala). La sube `render`
+     *  a un UBO para la VISTA DE SPAWN del editor (dónde instalaría cada capa). La lee también el
+     *  scatter global (`scatterPropsNear`), que parsea la misma config por separado. */
+    const Haruka::Planet::PropLayerTable& propLayers() const { return m_propLayers; }
 
 private:
     TerrestrialPlanetConfig m_config;
@@ -225,8 +305,10 @@ private:
      */
     float m_seaLevelOffsetM = 0.0f;
 
-    /** @brief Lado de los mapas equirectangulares GENERADOS (biomas, macro-variación). */
+    /** @brief Ancho de la biome map horneada (2:1, alto = ancho/2). */
     int m_mapRes = 512;
+    /** @brief Ancho del horneado de macro-variación (2:1); la biome map usa m_mapRes. */
+    int m_macroRes = 2048;
     /**
      * @brief Semilla EFECTIVA con la que se generó la geología (la usa la clave del cache de
      * horneados). Es `cfg.seed` si viene, si no `hash(name)`: el mismo número que `build` metió en
@@ -241,11 +323,31 @@ private:
     int m_zoneW = 0, m_zoneH = 0;
     Haruka::RHI::TextureHandle m_zoneTex;
     Haruka::Tools::ProcGraph::BiomeConfig m_biomeConfig;
+    // Zonas NOMBRADAS del autor (escena `zones`): independientes de los materiales; las capas de
+    // props las referencian por nombre. Vacío = solo cuentan los `zoneColor` de los materiales.
+    std::vector<NamedZone> m_namedZones;
+    // ¿Hace falta el zoneMap para resolver la zona de los PROPS? Solo si hay zonas PINTADAS
+    // (con `color`) o alguna capa consulta el material del terreno (`when: layer`). Sin eso, la
+    // zona se decide SOLO por geometría y el muestreo del mapa por celda del scatter es ocioso.
+    bool m_propNeedZoneMap = false;
     // Tabla de MATERIALES del terreno (regla clima/forma → aspecto). Se sube a un UBO y la recorre
     // el shader: añadir un material es un objeto más en el JSON, no un `if` más en GLSL.
     Haruka::Planet::TerrainMaterialTable m_materialTable =
         Haruka::Planet::TerrainMaterialTable::defaults();
     Haruka::RHI::BufferHandle m_materialUBO;
+
+    // Tabla de CAPAS DE PROPS (regla clima/forma → qué instala). Se sube a un UBO (binding 14) para
+    // la VISTA DE SPAWN del editor; el densityMap de la capa seleccionada se sube aparte (textura).
+    Haruka::Planet::PropLayerTable m_propLayers;
+    Haruka::RHI::BufferHandle m_propUBO;
+    // Textura del densityMap de la capa activa (cargada/cacheadas por ruta). Se bindea en el 17 del
+    // shader para que la vista de spawn multiplique por el mapa — igual que hace el placer en CPU.
+    std::unordered_map<std::string, Haruka::RHI::TextureHandle> m_propDensityTex;
+    Haruka::RHI::TextureHandle m_propWhiteTex;   // 1×1 blanco: capa sin densityMap = sin recorte
+
+    /** @brief Carga el densityMap de una capa y lo sube a GPU (misma búsqueda de candidatos que
+     *  `densityMapAt`, bilineal + mipmaps). Devuelve la textura, o la blanca si no se encontró. */
+    Haruka::RHI::TextureHandle uploadPropDensityMap(const std::string& path);
 
     // Retícula base del terreno — el suelo que se PISA (ver notas en planetary_system.cpp antiguo).
     std::vector<float> m_baseHeights;   // metros, [face][j][i] con lado (faceRes+1)
@@ -270,15 +372,40 @@ private:
     std::vector<unsigned char> m_elevCPU;   // RGBA8 equirectangular (se lee el canal rojo)
     int m_elevW = 0, m_elevH = 0;
 
+    // MAPAS DE DISTRIBUCIÓN de props (densityMap por capa), cargados/cacheados por ruta. Cada uno
+    // es RGBA8 equirectangular como zone/elev; `densityMapAt(path, dir)` los muestrea bilineal.
+    struct DensityMap {
+        std::vector<unsigned char> cpu;
+        int w = 0, h = 0;
+    };
+    mutable std::unordered_map<std::string, DensityMap> m_densityMaps;
+    mutable std::vector<std::string> m_densityMapOrder;   // orden de carga (log/diagnóstico)
+
+    // ALTURA BASE HORNEADA (fase 2a): `baseHeight` evaluada por píxel equirect (2:1) y subida como
+    // R32F. Es el MAESTRO del "campo lento" — geología + mapa de elevación + recorte de zonas — que
+    // hoy se re-evalúa por vértice en la retícula de 39 km y por texel en los shaders. La fase 2b/2c
+    // re-cablea tess/clipmap/CPU para que TODOS la lean (paridad por construcción); de momento solo
+    // se hornea, cachea y sube.
+    Haruka::RHI::TextureHandle m_heightTex;
+    // Copia CPU del campo R32F subido a la GPU (misma resolución, mismos valores): `sampleHeight`
+    // la muestrea con la MISMA bilineal que los shaders, así que el suelo que se pisa y el que se
+    // ve nacen del mismo dato (paridad por construcción, fase 2b).
+    std::vector<float> m_heightCPU;
+    int m_heightW = 0, m_heightH = 0;
+
     // CLIPMAP — la rejilla que da los 2 m cerca del jugador.
     Haruka::RHI::BufferHandle m_clipVB, m_clipIB;
     uint32_t m_clipIndexCount = 0;
+    uint32_t m_clipVertexCount = 0;
     Haruka::RHI::BufferHandle m_clipUBO;
+    float m_clipCoverM = 1984.0f;   // semi-lado del clipmap (m), según calidad; lo leen los shaders
+    bool  m_clipMapActive = false;  // estado del clipmap con histéresis (no parpadea al cruzar el umbral)
 
     // Single terrain mesh (all faces combined)
     Haruka::RHI::BufferHandle m_vertexBuffer;
     Haruka::RHI::BufferHandle m_indexBuffer;
     uint32_t m_indexCount = 0;
+    uint32_t m_vertexCount = 0;
 
     // TESELACIÓN: mismo vertex buffer, OTRO índice (parches del quad).
     Haruka::RHI::BufferHandle m_patchIB;
@@ -288,6 +415,16 @@ private:
     Haruka::RHI::BufferHandle m_waterVB;
     Haruka::RHI::BufferHandle m_waterIB;
     uint32_t m_waterIndexCount = 0;
+    uint32_t m_waterVertexCount = 0;
+    uint32_t m_waterFaceStride = 0;    // índices por cara cúbica (6): permite saltar caras tras el planeta
+
+    // MAR DINÁMICO POR MASA: snapshot de cuerpos masivos (setTidalBodies, desde el sistema
+    // orbital) a subir al UBO binding 21 de la pipeline del agua. Vacío ⇒ mar neutro.
+    std::vector<MassiveBody>        m_tidalBodies;
+    Haruka::RHI::BufferHandle       m_tidalUBO;
+
+    // Stats del último render (malla base + clipmap + agua) para el panel del editor.
+    RenderStats m_lastRenderStats;
 
     // Texturas (legacy singles + biome 4-layer + macro/biome map)
     Haruka::RHI::TextureHandle m_albedoTex;
@@ -322,6 +459,8 @@ private:
                                             const Haruka::Planet::GeologyOutput& geology);
     Haruka::RHI::TextureHandle generateProceduralAlbedo(int width, int height) const;
     Haruka::RHI::TextureHandle generateProceduralNormal(int width, int height) const;
+    /** @brief Hornea la altura base (fase 2a) con cache en disco y la sube como R32F. */
+    void bakeHeightMap();
 
     // Shaders y UBO COMPARTIDOS entre planetas (estáticos).
     static Haruka::RHI::PipelineHandle s_pipeline;

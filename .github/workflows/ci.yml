@@ -63,9 +63,23 @@ jobs:
             # Compilar el objetivo final
             cmake --build build -j"$(nproc)" --target HarukaEngine
 
+            # El test DGS dlopen libharuka_rules.so (no se enlaza a HarukaEngine → hay que
+            # construirlo aparte) y lo busca con "./libharuka_rules.so", relativo al CWD del
+            # runner (/workspace). Lo copiamos ahí para que la suite del dgs pase completa.
+            cmake --build build -j"$(nproc)" --target haruka_rules
+            cp build/libharuka_rules.so ./libharuka_rules.so
+
             # Compilar y ejecutar tests (CPU-only, headless)
             cmake --build build -j"$(nproc)" --target haruka_tests
             ./build/haruka_tests
+
+            # Suite DGS enfocada (golden wire-format + módulo de reglas) en un solo filtro.
+            ./build/haruka_tests dgs
+
+            # Test de estrés de transferencia DGS (bench BDP + framer real). Header-only, sin red:
+            # `--fast` reduce el volumen para que sea una verificación rápida en CI.
+            cmake --build build -j"$(nproc)" --target bench_dgs_bandwidth
+            ./build/bench_dgs_bandwidth --fast
 
             # Smoke test: build the template game as a headless binary
             cmake -B build/template -S template -G Ninja \

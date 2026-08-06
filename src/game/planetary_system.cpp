@@ -5,6 +5,7 @@
 #include "core/planet/geology.h"       // GeologyConfig (addSimplePlanet/rebuildSimplePlanet)
 #include "renderer/primitive_shapes.h"
 #include "core/components/mesh_renderer_component.h"
+#include "core/planet/prop_layer.h"           // PropLayerTable (propLayers del surfaceConfig)
 #include "tools/profiler.h"   // HARUKA_PROFILE (sub-scopes de planetary.update: lod.recompute / lod.stream)
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <cstdlib>
 #include <cstdio>
 #include <random>
+#include <filesystem>
+#include <system_error>
 #include "core/logger.h"
 #include <utility>
 #if defined(_WIN32)
@@ -278,6 +281,7 @@ Haruka::Planet::TerrestrialPlanetConfig planetConfigFromObject(const Haruka::Sce
     cfg.seed     = obj.surfaceConfig.value("seed", 0u);
     cfg.surface.tiling       = obj.surfaceConfig.value("tiling", 100.0f);
     cfg.surface.texRes       = obj.surfaceConfig.value("texRes", 512);
+    cfg.surface.macroRes     = obj.surfaceConfig.value("macroRes", 2048);
     cfg.surface.landFraction = obj.surfaceConfig.value("landFraction", 0.29f);
     cfg.surface.zoneMap      = obj.surfaceConfig.value("zoneMap", std::string());
     cfg.surface.elevationMap = obj.surfaceConfig.value("elevationMap", std::string());
@@ -389,9 +393,15 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
     HARUKA_LOGI("Scene", "planetas añadidos a m_planets: %zu", m_planets.size());
     for (const auto& p : m_planets)
         HARUKA_LOGI("Scene", "  - '%s' r=%.0f", p.name.c_str(), p.radius);
+
+    // PROPS: el scatter GLOBAL (Application::refreshPropScatter → scatterPropsNear) coloca las
+    // instancias por CELDA MUNDIAL alrededor del jugador, determinista y vía GPUInstancing. El
+    // parche ecuatorial provisional (placePropsForPlanet → SceneObjects) quedó OBSULETO: duplicaba
+    // los props en el mundo con un ancla fija y se renderizaban por la ruta normal, fuera del pase
+    // instanciado. Los props de la escena solo salen del scatter global.
 }
 
-void PlanetarySystem::updatePlanetFromScene(const SceneManager& scene, const std::string& name) {
+void PlanetarySystem::updatePlanetFromScene(SceneManager& scene, const std::string& name) {
     const auto obj = scene.getObject(name);
     if (!obj || !obj->surfaceConfig.is_object() || obj->surfaceConfig.empty()) {
         HARUKA_LOGW("SimplePlanet", "updatePlanetFromScene: '%s' sin surfaceConfig en la escena", name.c_str());
@@ -407,6 +417,7 @@ void PlanetarySystem::updatePlanetFromScene(const SceneManager& scene, const std
         pl.radius   = cfg.radius;
         pl.surface.tiling         = cfg.surface.tiling;
         pl.surface.texRes         = cfg.surface.texRes;
+        pl.surface.macroRes       = cfg.surface.macroRes;
         pl.surface.landFraction   = cfg.surface.landFraction;
         pl.surface.zoneMap        = cfg.surface.zoneMap;
         pl.surface.elevationMap   = cfg.surface.elevationMap;
@@ -419,6 +430,8 @@ void PlanetarySystem::updatePlanetFromScene(const SceneManager& scene, const std
         if (sp->config().name != name) continue;
         sp->build(cfg);
         HARUKA_LOGI("SimplePlanet", "'%s': regenerado desde la escena", name.c_str());
+        // Los PROPS los recoloca el scatter global (refreshPropScatter), determinista por celda
+        // mundial; el parche ecuatorial provisional quedó obsoleto (ver buildFromScene).
         return;
     }
     HARUKA_LOGW("SimplePlanet", "updatePlanetFromScene: '%s' no es un SimplePlanet activo", name.c_str());
@@ -442,6 +455,31 @@ std::vector<std::string> PlanetarySystem::activeTerrainLayerNames() const {
     for (const auto& m : m_simplePlanets.front()->terrainMaterials().materials)
         names.push_back(m.name);
     return names;
+}
+
+std::vector<std::string> PlanetarySystem::activePropLayerNames() const {
+    std::vector<std::string> names;
+    if (m_simplePlanets.empty()) return names;
+    // TODAS las capas, en orden de prioridad: el índice es la POSICIÓN en `propLayers`, que es
+    // exactamente el valor de debug (40+i). Así el editor pinta el área de spawn de cada capa.
+    for (const auto& L : m_simplePlanets.front()->propLayers().layers) {
+        if (L.mesh.empty()) continue;   // capa informativa: no instala nada, no se lista
+        names.push_back(L.name.empty() ? L.mesh : L.name);
+    }
+    return names;
+}
+
+Haruka::Planet::TerrestrialPlanet::RenderStats PlanetarySystem::getTerrainRenderStats() const {
+    Haruka::Planet::TerrestrialPlanet::RenderStats sum;
+    for (const auto& sp : m_simplePlanets) {
+        if (!sp) continue;
+        const auto& s = sp->lastRenderStats();
+        sum.baseVertices  += s.baseVertices;  sum.baseTriangles  += s.baseTriangles;
+        sum.clipVertices  += s.clipVertices;  sum.clipTriangles  += s.clipTriangles;
+        sum.waterVertices += s.waterVertices; sum.waterTriangles += s.waterTriangles;
+        sum.drawCalls     += s.drawCalls;
+    }
+    return sum;
 }
 
 void PlanetarySystem::syncFromScene(const SceneManager& scene) {
@@ -589,10 +627,21 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
 }
 
 bool PlanetarySystem::groundHeightKmAtDir(const glm::dvec3& dir, float& outElevKm) const {
-    if (!m_refSurface.ready()) return false;
     const double len = glm::length(dir);
     if (!(len > 1e-9)) return false;
     const glm::dvec3 d = dir / len;
+
+    // EL SUELO REAL: el SimplePlanet (TerrestrialPlanet) es el que pinta la malla y pisa la física
+    // (`sampleTerrainHeight` lo consulta antes que la referencia). La ReferenceSurface en esta rama
+    // es un stub que devuelve 0 (esfera lisa) — anclar los props ahí era la causa de que flotaran.
+    // `sampleHeight` lee solo `m_heightCPU` (inmutable tras el bake) → seguro desde el hilo async.
+    for (const auto& sp : m_simplePlanets) {
+        if (!sp || sp->config().name != getActivePlanetName()) continue;
+        outElevKm = (float)(sp->sampleHeight(d) / 1000.0);
+        return true;
+    }
+
+    if (!m_refSurface.ready()) return false;
     double m = m_refSurface.elevM(d);
     outElevKm = (float)(m / 1000.0);
     return true;
@@ -602,6 +651,14 @@ std::string PlanetarySystem::getActivePlanetName() const {
     for (const auto& p : m_planets)
         if (p.isHome) return p.name;
     return m_planets.empty() ? std::string{} : m_planets.front().name;
+}
+
+const Haruka::Planet::TerrestrialPlanet* PlanetarySystem::activeTerrestrial() const {
+    const std::string name = getActivePlanetName();
+    for (const auto& sp : m_simplePlanets)
+        if (sp && sp->config().name == name) return sp.get();
+    // Sin planeta declarado en la escena: si hay un solo SimplePlanet, es el que pinta el mundo.
+    return m_simplePlanets.size() == 1 ? m_simplePlanets.front().get() : nullptr;
 }
 
 bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const {
@@ -700,6 +757,47 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
         return p.position();
     };
     for (size_t i = 0; i < n; ++i) resolve(i);
+
+    // MAR DINÁMICO POR MASA (Hito 1): instantánea de los cuerpos masivos del sistema orbital
+    // (m_planets: soles/planetas/lunas) que atraen y mueven el océano de cada planeta de agua.
+    // Planet no expone masa: proxy por densidad uniforme a partir del radio ⇒ GM ≈ G·ρ·(4/3)π·r³.
+    // Sin m_planets no hay cuerpos → setTidalBodies({}) deja el mar neutro (mismo que antes).
+    if (!m_planets.empty() || m_simplePlanets.size() > 1) {
+        using MB = Haruka::Planet::TerrestrialPlanet::MassiveBody;
+        const double den = 3000.0;              // kg/m³ proxy planetario
+        // Candidatos masivos = cuerpos orbitales (m_planets: soles) + el resto de planetas/lunas
+        // de agua (m_simplePlanets). Cada uno se convierte a GM por proxy de radio y densidad.
+        std::vector<MB> cand;
+        std::vector<glm::dvec3> candPos;
+        cand.reserve(m_planets.size() + m_simplePlanets.size());
+        for (const auto& b : m_planets) {
+            const double gm = G * den * (4.0 / 3.0) * 3.14159265358979323846
+                              * b.radius * b.radius * b.radius;
+            cand.push_back({ b.position, gm });
+        }
+        for (auto& b : m_simplePlanets) {
+            cand.push_back({ b->position(), G * den * (4.0 / 3.0) * 3.14159265358979323846
+                                              * b->radius() * b->radius() * b->radius() });
+        }
+        for (auto& p : m_simplePlanets) {
+            const glm::dvec3 self = p->position();
+            std::vector<MB> rel;
+            rel.reserve(cand.size());
+            for (const auto& b : cand) rel.push_back({ b.posCenter - self, b.gm });
+            // El propio planeta se EXCLUYE (su campo es uniforme en su superficie → sin marea) y
+            // nos quedamos con las 8 atracciones más influyentes (las más cercanas).
+            std::sort(rel.begin(), rel.end(), [](const MB& a, const MB& b) {
+                return glm::length(a.posCenter) < glm::length(b.posCenter);
+            });
+            std::vector<MB> nearest;
+            nearest.reserve(8);
+            for (const auto& b : rel) {
+                if (glm::length(b.posCenter) > p->radius()) nearest.push_back(b);
+                if ((int)nearest.size() >= 8) break;
+            }
+            p->setTidalBodies(std::move(nearest));
+        }
+    }
 }
 
 } // namespace Haruka

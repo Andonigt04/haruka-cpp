@@ -22,6 +22,7 @@
 #include "settings/settings_manager.h"
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
+#include "tools/profiler.h"          // HARUKA_PROFILE: sub-scopes de simple_planet.draw (base/clipmap/agua)
 #include "core/logger.h"
 #include "io/image_writer.h"
 #include <thread>
@@ -152,6 +153,7 @@ void TerrestrialPlanet::ensureShaders() {
     const std::string pTessVert        = shaderDir + "terrain.vert";
     const std::string pTexFrag         = shaderDir + "textured.frag";
     const std::string pWatFrag         = shaderDir + "water.frag";
+    const std::string pWatVert         = shaderDir + "water.vert";
     const std::string pSimpleWireFrag  = shaderDir + "wire.frag";
     const std::string pSimpleWireVert  = shaderDir + "wire.vert";
 
@@ -239,9 +241,11 @@ void TerrestrialPlanet::ensureShaders() {
                     RHI::valid(s_tessPipeline) ? "ok" : "FALLO (se usa la malla sin teselar)");
     }
 
-    // Water pipeline — same vertex format, blue shader, alpha blend
+    // Water pipeline — same vertex format, blue shader, alpha blend. El vertex es water.vert (no
+    // simple.vert): recorta los vértices bajo tierra para no rasterizar el océano que el depth
+    // ocultaría de todos modos.
     RHI::PipelineDesc wpd;
-    wpd.vertexPath   = pSimpleVert.c_str();
+    wpd.vertexPath   = pWatVert.c_str();
     wpd.fragmentPath = pWatFrag.c_str();
     wpd.vertexLayout   = withClimate(pd.vertexLayout);
     wpd.depth.test     = true;  wpd.depth.write = false;
@@ -417,15 +421,22 @@ void TerrestrialPlanet::buildMesh(
     m_vertexBuffer = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(SimplePlanetVertex), verts.data(), RHI::BufferMemory::Static);
     m_indexBuffer  = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data(), RHI::BufferMemory::Static);
     m_indexCount   = (uint32_t)indices.size();
+    m_vertexCount  = (uint32_t)verts.size();
     m_patchIB      = dev->createBuffer(RHI::BufferUsage::Index, patchIdx.size() * sizeof(uint32_t), patchIdx.data(), RHI::BufferMemory::Static);
     m_patchIndexCount = (uint32_t)patchIdx.size();
 
-    // REJILLA DEL CLIPMAP: 31x31 parches de 128 m = ~4 km a la redonda con 961 parches. En metros
-    // LOCALES y centrada en 0: la cámara va en el centro y la rejilla no se regenera nunca, solo se
-    // reorienta con el marco tangente que se le pasa por UBO.
+    // REJILLA DEL CLIPMAP: N x N parches de 128 m con la cámara en el centro; la rejilla no se
+    // regenera nunca, solo se reorienta con el marco tangente del UBO. El TAMAÑO depende de la
+    // calidad de terreno (TerrainQuality): el fino cubre más en calidad alta para empujar la malla
+    // gruesa a mayor distancia. El semi-lado resultante (m_clipCoverM) se pasa a los shaders por
+    // ClipParams (binding 13): el recorte de la malla base (terrain.tese) y el anillo de mezcla del
+    // clipmap (clipmap.tese) leen ESE valor, nunca literales.
     {
-        const int   NC = 31;
         const float PATCH = 128.0f;
+        const int   quality = (int)SettingsManager::get().graphics().terrainQuality;
+        const int   NCs[4]  = { 31, 47, 63, 95 };   // Low, Medium, High, Ultra (31 = ±1984 m, como antes)
+        const int   NC = NCs[std::clamp(quality, 0, 3)];
+        m_clipCoverM = NC * PATCH * 0.5f;
         std::vector<glm::vec2> cv;
         std::vector<uint32_t>  ci;
         cv.reserve((NC + 1) * (NC + 1));
@@ -441,6 +452,7 @@ void TerrestrialPlanet::buildMesh(
         m_clipVB = dev->createBuffer(RHI::BufferUsage::Vertex, cv.size() * sizeof(glm::vec2), cv.data(), RHI::BufferMemory::Static);
         m_clipIB = dev->createBuffer(RHI::BufferUsage::Index,  ci.size() * sizeof(uint32_t),  ci.data(), RHI::BufferMemory::Static);
         m_clipIndexCount = (uint32_t)ci.size();
+        m_clipVertexCount = (uint32_t)cv.size();
     }
 
     // Copia CPU de la retícula de alturas: es el suelo que consultará la física.
@@ -508,6 +520,8 @@ void TerrestrialPlanet::buildMesh(
     m_waterVB = dev->createBuffer(RHI::BufferUsage::Vertex, wVerts.size() * sizeof(SimplePlanetVertex), wVerts.data(), RHI::BufferMemory::Static);
     m_waterIB = dev->createBuffer(RHI::BufferUsage::Index, wIndices.size() * sizeof(uint32_t), wIndices.data(), RHI::BufferMemory::Static);
     m_waterIndexCount = (uint32_t)wIndices.size();
+    m_waterVertexCount = (uint32_t)wVerts.size();
+    m_waterFaceStride = (uint32_t)(res * res * 6);   // índices por cara: 6 para poder saltar caras ocultas
 }
 
 void TerrestrialPlanet::clearGPU() {
@@ -531,6 +545,12 @@ void TerrestrialPlanet::clearGPU() {
     destroyTex(m_biomeTex.rockAlbedo);  destroyTex(m_biomeTex.rockNormal);
     destroyTex(m_macroTex);
     destroyTex(m_biomeMapTex);
+    destroyTex(m_heightTex);
+    destroyTex(m_propWhiteTex);
+    for (auto& kv : m_propDensityTex) destroyTex(kv.second);
+    m_propDensityTex.clear();
+    if (RHI::valid(m_propUBO)) { dev->destroy(m_propUBO); m_propUBO = {}; }
+    m_heightCPU.clear(); m_heightW = 0; m_heightH = 0;
     m_indexCount = 0;
     m_waterIndexCount = 0;
 }
@@ -960,34 +980,16 @@ float TerrestrialPlanet::baseHeight(const glm::dvec3& dir) const {
 }
 
 double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn) const {
-    if (m_baseHeights.empty() || m_baseRes <= 0) return 0.0;
+    if (m_heightCPU.empty() || m_heightW <= 0 || m_heightH <= 0) return 0.0;
     const glm::dvec3 dir = glm::normalize(dirIn);
 
-    // Misma descomposición cara+UV que la malla: `cubeFaceToDir` es la inversa de esto, y las dos
-    // vienen del mismo `cube_sphere.h` compartido y GL-free.
-    PlanetFace f; double lx, ly;
-    dirToCubeFace(dir, f, lx, ly);
-
-    // La malla coloca el vértice (i,j) en lx = i/res*2-1, así que el índice es (lx+1)/2*res.
-    const int    res = m_baseRes;
-    const double fu  = (lx + 1.0) * 0.5 * res;
-    const double fv  = (ly + 1.0) * 0.5 * res;
-    int i0 = (int)std::floor(fu), j0 = (int)std::floor(fv);
-    i0 = glm::clamp(i0, 0, res - 1);
-    j0 = glm::clamp(j0, 0, res - 1);
-    const float tu = (float)(fu - i0), tv = (float)(fv - j0);
-
-    const size_t base = (size_t)(int)f * (size_t)(res + 1) * (res + 1);
-    auto at = [&](int i, int j) -> float {
-        i = glm::clamp(i, 0, res); j = glm::clamp(j, 0, res);
-        return m_baseHeights[base + (size_t)j * (res + 1) + i];
-    };
-    // Bilineal en el MISMO orden que el shader: primero en u, luego en v.
-    const float h00 = at(i0, j0),     h10 = at(i0 + 1, j0);
-    const float h01 = at(i0, j0 + 1), h11 = at(i0 + 1, j0 + 1);
-    const float e01  = h00 + (h10 - h00) * tu;
-    const float e32  = h01 + (h11 - h01) * tu;
-    const float baseH = e01 + (e32 - e01) * tv;
+    // El MISMO campo base que pintan la malla y el clipmap: la copia CPU del R32F horneado, muestreada
+    // con la misma bilineal (mismo orden de operaciones, terrain_detail.h) que los shaders. Así la
+    // física, la malla y el clipmap nacen del mismo dato y no pueden divergir (paridad por
+    // construcción, fase 2b).
+    const glm::vec2 uv    = Haruka::Planet::equirectUV(glm::vec3(dir));
+    const float     baseH = Haruka::Planet::sampleHeightField(uv, m_heightW, m_heightH,
+                                                              m_heightCPU.data());
 
     // Y el detalle, con la MISMA función que la GPU (paridad medida: 34 µm en el peor caso).
     const float baseR = m_baseRadius + baseH;
@@ -997,6 +999,146 @@ double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn) const {
     // o el océano (esfera en R) lo taparía. La tierra queda ≥ R, el agua solo rellena los océanos.
     if (baseH > 0.0f) det = glm::max(det, -baseH);
     return (double)baseH + (double)det;
+}
+
+Haruka::FieldSample TerrestrialPlanet::fieldSampleAt(const glm::vec3& dirIn) const {
+    const glm::dvec3 dir = glm::normalize(glm::dvec3(dirIn));
+    Haruka::FieldSample s;
+    const double hM = sampleHeight(glm::vec3(dir));
+    s.elevKm = (float)(hM / 1000.0);
+    const bool ocean = s.elevKm < 0.0f;
+    s.tempC    = (float)m_climate.temperature(glm::vec3(dir), s.elevKm, ocean);
+    s.humidity = (float)m_climate.humidity(glm::vec3(dir), s.elevKm, ocean);
+    return s;
+}
+
+float TerrestrialPlanet::densityMapAt(const std::string& path, const glm::vec3& dirIn) const {    const glm::dvec3 dir = glm::normalize(glm::dvec3(dirIn));
+    const auto found = m_densityMaps.find(path);
+    if (found != m_densityMaps.end()) {
+        const DensityMap& dm = found->second;
+        if (dm.cpu.empty() || dm.w <= 0 || dm.h <= 0) return 1.0f;
+        // Mismo muestreo bilineal equirectangular que sampleElevMap: R va en el canal rojo.
+        const double u = 0.5 + std::atan2(dir.z, dir.x) * 0.1591549430918953;
+        const double v = 0.5 - std::asin(glm::clamp(dir.y, -1.0, 1.0)) * 0.3183098861837907;
+        const double fx = u * dm.w - 0.5, fy = v * dm.h - 0.5;
+        int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+        const float tx = (float)(fx - x0), ty = (float)(fy - y0);
+        auto at = [&](int x, int y) -> float {
+            x = ((x % dm.w) + dm.w) % dm.w;             // longitud envuelve
+            y = glm::clamp(y, 0, dm.h - 1);             // latitud no
+            return dm.cpu[((size_t)y * dm.w + x) * 4] / 255.0f;
+        };
+        const float a = at(x0, y0)     + (at(x0 + 1, y0)     - at(x0, y0))     * tx;
+        const float b = at(x0, y0 + 1) + (at(x0 + 1, y0 + 1) - at(x0, y0 + 1)) * tx;
+        return glm::clamp(a + (b - a) * ty, 0.0f, 1.0f);
+    }
+    // Carga diferida por ruta (mismos candidatos que zone/elev; cacheada para el resto del pase).
+    DensityMap dm;
+    int zw = 0, zh = 0, zn = 0;
+    unsigned char* zp = nullptr;
+    const std::string cands[] = {
+        path,
+        Haruka::AssetPaths::projectRoot() + path,
+        Haruka::AssetPaths::projectTextures() + path,
+        Haruka::AssetPaths::textures() + path,
+    };
+    for (const auto& c : cands) { zp = stbi_load(c.c_str(), &zw, &zh, &zn, 4); if (zp) break; }
+    if (!zp) {
+        // Ruta inencontrable: cachea VACÍA para no reintentar stbi_load por celda (el placer
+        // pregunta por cada spot) y el muestreo devolverá 1.0 (la capa no está limitada por mapa).
+        dm.w = dm.h = 0;
+        m_densityMaps.emplace(path, dm);
+        m_densityMapOrder.push_back(path);
+        HARUKA_LOGW("SimplePlanet", "'%s': mapa de distribución de props NO encontrado: %s",
+                    m_config.name.c_str(), path.c_str());
+        return 1.0f;
+    }
+    dm.cpu.assign(zp, zp + (size_t)zw * zh * 4);
+    dm.w = zw; dm.h = zh;
+    stbi_image_free(zp);
+    m_densityMaps.emplace(path, dm);
+    m_densityMapOrder.push_back(path);
+    HARUKA_LOGI("SimplePlanet", "'%s': mapa de distribución de props %dx%d",
+                m_config.name.c_str(), zw, zh);
+    return densityMapAt(path, glm::vec3(dir));
+}
+
+std::string TerrestrialPlanet::zoneNameAt(const glm::vec3& dirIn) const {
+    // Zonas GEOMÉTRICAS primero: el perímetro (círculo/polígono) es la delimitación más explícita;
+    // una ciudad dentro de su polígono manda aunque el color pintado de ahí dijera otra cosa.
+    if (!m_namedZones.empty()) {
+        for (const auto& z : m_namedZones) {
+            if (z.hasGeometry() && zoneShapeContains(z.shape, dirIn, m_config.radius))
+                return z.name;
+        }
+    }
+
+    // Sin zonas PINTADAS ni capas que consulten el material (`when: layer`), el zoneMap no puede
+    // aportar NADA a la zona de los props: se decide solo por los perímetros geométricos (ya
+    // comprobados). Se evita muestrear el mapa (bilineal sobre 4k ×2 + el match) en cada celda
+    // del scatter global (~61k celdas) — véase `m_propNeedZoneMap` en build().
+    if (!m_propNeedZoneMap) return {};
+
+    // Zonas PINTADAS después: color del zoneMap más parecido a una zona declarada (vecino más
+    // cercano, sin umbral: un color de borde/bilineal debe caer en la zona más próxima), y solo
+    // entonces cae al material (el MISMO desempate que el terreno).
+    if (m_zoneCPU.empty()) return {};
+    glm::vec3 zc;
+    if (!sampleZone(m_zoneCPU, m_zoneW, m_zoneH, dirIn, zc)) return {};
+    int best = -1; float bestD = 0.0f;
+    for (size_t i = 0; i < m_namedZones.size(); ++i) {
+        const auto& z = m_namedZones[i];
+        if (!z.hasColor()) continue;
+        const glm::vec3 d = z.color - zc;
+        const float dist = glm::dot(d, d);
+        if (best < 0 || dist < bestD) { best = (int)i; bestD = dist; }
+    }
+    if (best >= 0) return m_namedZones[(size_t)best].name;
+
+    return materialNameAt(dirIn);
+}
+
+std::string TerrestrialPlanet::materialNameAt(const glm::vec3& dirIn) const {
+    // Solo el MATERIAL del terreno (zoneToMaterial), sin el recubrimiento de zonas nombradas.
+    if (m_zoneCPU.empty()) return {};
+    glm::vec3 zc;
+    if (!sampleZone(m_zoneCPU, m_zoneW, m_zoneH, dirIn, zc)) return {};
+    const int mi = zoneToMaterial(m_materialTable, zc);
+    if (mi < 0 || mi >= (int)m_materialTable.materials.size()) return {};
+    return m_materialTable.materials[(size_t)mi].name;
+}
+
+Haruka::RHI::TextureHandle TerrestrialPlanet::uploadPropDensityMap(const std::string& path) {
+    // Misma búsqueda de candidatos que `densityMapAt`: relativa al cwd, al proyecto, a sus
+    // texturas y a las texturas del motor. Solo sube a GPU (la vista de spawn); la copia CPU
+    // sigue viviendo en `densityMapAt` para el placer.
+    int zw = 0, zh = 0, zn = 0;
+    unsigned char* zp = nullptr;
+    const std::string cands[] = {
+        path,
+        Haruka::AssetPaths::projectRoot() + path,
+        Haruka::AssetPaths::projectTextures() + path,
+        Haruka::AssetPaths::textures() + path,
+    };
+    for (const auto& c : cands) { zp = stbi_load(c.c_str(), &zw, &zh, &zn, 4); if (zp) break; }
+    if (!zp) {
+        HARUKA_LOGW("SimplePlanet", "'%s': densityMap NO encontrado para la vista de spawn: %s",
+                    m_config.name.c_str(), path.c_str());
+        return m_propWhiteTex;
+    }
+    RHI::TextureDesc td;
+    td.width = (uint32_t)zw; td.height = (uint32_t)zh;
+    td.format = RHI::Format::RGBA8;
+    td.filter = RHI::Filter::Linear;
+    td.wrap   = RHI::Wrap::Repeat;
+    td.mipmaps = true;
+    td.initialData = zp;
+    RHI::TextureHandle tex;
+    if (RHI::Device* tdev = RHI::device()) tex = tdev->createTexture(td);
+    stbi_image_free(zp);
+    HARUKA_LOGI("SimplePlanet", "'%s': densityMap %dx%d subido para la vista de spawn",
+                m_config.name.c_str(), zw, zh);
+    return RHI::valid(tex) ? tex : m_propWhiteTex;
 }
 
 // Nivel del mar que deja EXACTAMENTE `landFraction` de la superficie por encima.
@@ -1237,95 +1379,141 @@ static RGBAImage evaluateBiomeAlbedo(int biomeIdx,
     return img;
 }
 
+// ── Horneado PARALELO por filas ─────────────────────────────────────────
+// `Graph::evaluate` muta buffers scratch INTERNOS del grafo (m_temp/m_inputs), así que un MISMO
+// grafo no puede ejecutarse desde dos threads a la vez. Pero construir un grafo es determinista y
+// barato, y TODOS los nodos del bake (PerlinNode/FBMNode/BiomeClassifyNode/SampleElevationNode/
+// SampleClimateNode/… ) son puros: mismo (x,y,z) → mismo valor, sin estado compartido. Así que
+// cada thread construye SU grafo idéntico y evalúa un rango DISJUNTO de filas: los píxeles salen
+// EXACTAMENTE igual que single-thread, pero en N threads. Los nodos `BranchNode`/`KnotNode` (con
+// estática mutable) NO se usan en estos horneados — si algún día se añaden, hay que excluirlos de
+// la paralelización (o hacerlos puros).
+//
+// `buildGraph` recibe el grafo por REFERENCIA y lo rellena (nada de moves): los nodos guardan un
+// raw pointer al grafo (`m_graph`, usado por DomainNode) que solo es válido si el grafo no se
+// mueve. `rowFn(graph, y)` pinta la fila `y` — cada thread escribe filas disjuntas, sin races.
+template<typename BuildGraphFn, typename RowFn>
+static void parallelBake(int width, int height, BuildGraphFn&& buildGraph, RowFn&& rowFn) {
+    unsigned hw = std::thread::hardware_concurrency();
+    int nThreads = std::clamp<int>((int)hw, 1, 8);
+    std::vector<std::thread> threads;
+    threads.reserve(nThreads);
+    for (int t = 0; t < nThreads; ++t) {
+        const int y0 = t * height / nThreads;
+        const int y1 = (t + 1) * height / nThreads;
+        threads.emplace_back([&, t, y0, y1]() {
+            Graph graph;                          // grafo PRIVADO de este thread (idéntico)
+            buildGraph(graph);
+            for (int y = y0; y < y1; ++y) rowFn(graph, y);
+        });
+    }
+    for (auto& th : threads) th.join();
+    (void)width;
+}
+
 // Generate a macro-variation texture (equirectangular) that breaks tile repetition.
 // Sized mapRes², uses climate + large-scale noise → RGBA = (brightness, hueShift, detail, _)
 static RGBAImage generateMacroVariation(const Haruka::Planet::ClimateOutput& climate,
                                          const Haruka::Planet::GeologyOutput& geology,
                                          int width, int height)
 {
-    Graph graph;
-    int elevNode = graph.emplaceNode<SampleElevationNode>();
-    static_cast<SampleElevationNode*>(graph.node(elevNode))->geology = &geology;
+    auto buildGraph = [&](Graph& graph) -> int {
+        int elevNode = graph.emplaceNode<SampleElevationNode>();
+        static_cast<SampleElevationNode*>(graph.node(elevNode))->geology = &geology;
 
-    int climateNode = graph.emplaceNode<SampleClimateNode>();
-    auto* cn = static_cast<SampleClimateNode*>(graph.node(climateNode));
-    cn->climate = &climate;
-    cn->geology = &geology;
+        int climateNode = graph.emplaceNode<SampleClimateNode>();
+        auto* cn = static_cast<SampleClimateNode*>(graph.node(climateNode));
+        cn->climate = &climate;
+        cn->geology = &geology;
 
-    int noiseNode = graph.emplaceNode<FBMNode>();
-    {
-        FBMNode* fbm = static_cast<FBMNode*>(graph.node(noiseNode));
-        fbm->setNoiseFn([](float x, float y, float z, int seed) {
-            return PerlinNode::perlin(x, y, z, seed);
-        });
-    }
-    int noiseScale = graph.emplaceNode<ConstNode>(0.3f);
-    graph.connect(noiseScale, 0, noiseNode, 0);
-    int noiseSeed = graph.emplaceNode<ConstNode>(999.0f);
-    graph.connect(noiseSeed, 0, noiseNode, 4);
+        int noiseNode = graph.emplaceNode<FBMNode>();
+        {
+            FBMNode* fbm = static_cast<FBMNode*>(graph.node(noiseNode));
+            fbm->setNoiseFn([](float x, float y, float z, int seed) {
+                return PerlinNode::perlin(x, y, z, seed);
+            });
+        }
+        int noiseScale = graph.emplaceNode<ConstNode>(0.3f);
+        graph.connect(noiseScale, 0, noiseNode, 0);
+        int noiseSeed = graph.emplaceNode<ConstNode>(999.0f);
+        graph.connect(noiseSeed, 0, noiseNode, 4);
 
-    int tempMap = graph.emplaceNode<MapRangeNode>();
-    graph.connect(climateNode, 0, tempMap, 0);
-    int tMin = graph.emplaceNode<ConstNode>(-30.0f);
-    graph.connect(tMin, 0, tempMap, 1);
-    int tMax = graph.emplaceNode<ConstNode>(30.0f);
-    graph.connect(tMax, 0, tempMap, 2);
-    int tOutMin = graph.emplaceNode<ConstNode>(0.0f);
-    graph.connect(tOutMin, 0, tempMap, 3);
-    int tOutMax = graph.emplaceNode<ConstNode>(1.0f);
-    graph.connect(tOutMax, 0, tempMap, 4);
+        int tempMap = graph.emplaceNode<MapRangeNode>();
+        graph.connect(climateNode, 0, tempMap, 0);
+        int tMin = graph.emplaceNode<ConstNode>(-30.0f);
+        graph.connect(tMin, 0, tempMap, 1);
+        int tMax = graph.emplaceNode<ConstNode>(30.0f);
+        graph.connect(tMax, 0, tempMap, 2);
+        int tOutMin = graph.emplaceNode<ConstNode>(0.0f);
+        graph.connect(tOutMin, 0, tempMap, 3);
+        int tOutMax = graph.emplaceNode<ConstNode>(1.0f);
+        graph.connect(tOutMax, 0, tempMap, 4);
 
-    int mixNode = graph.emplaceNode<BlendNode>(BlendMode::Mix);
-    graph.connect(noiseNode, 0, mixNode, 0);
-    graph.connect(tempMap, 0, mixNode, 1);
-    int mixFactor = graph.emplaceNode<ConstNode>(0.6f);
-    graph.connect(mixFactor, 0, mixNode, 2);
+        int mixNode = graph.emplaceNode<BlendNode>(BlendMode::Mix);
+        graph.connect(noiseNode, 0, mixNode, 0);
+        graph.connect(tempMap, 0, mixNode, 1);
+        int mixFactor = graph.emplaceNode<ConstNode>(0.6f);
+        graph.connect(mixFactor, 0, mixNode, 2);
 
-    int clampNode = graph.emplaceNode<ClampNode>();
-    graph.connect(mixNode, 0, clampNode, 0);
+        int clampNode = graph.emplaceNode<ClampNode>();
+        graph.connect(mixNode, 0, clampNode, 0);
 
-    graph.compile();
+        graph.compile();
+        return clampNode;
+    };
+
+    // Índice del nodo de salida: la construcción es IDÉNTICA en cada thread, así que se calcula
+    // una vez en un grafo de plantilla y se comparte como int (lectura sola, sin race).
+    Graph templateGraph;
+    const int clampNode = buildGraph(templateGraph);
 
     RGBAImage img(width, height);
-    for (int y = 0; y < height; ++y) {
-        double lat = (double)y / (height - 1) * glm::pi<double>() - glm::pi<double>() * 0.5;
-        double cLat = std::cos(lat);
-        double sLat = std::sin(lat);
-        for (int x = 0; x < width; ++x) {
-            double lon = (double)x / (width - 1) * glm::two_pi<double>();
-            double cLon = std::cos(lon);
-            double sLon = std::sin(lon);
-            glm::dvec3 dir(cLon * cLat, sLat, sLon * cLat);
+    parallelBake(width, height,
+        [&](Graph& graph) { (void)buildGraph(graph); },
+        [&](Graph& graph, int y) {
+            // Convención del mapa de zonas (`tools/gen_planet_zones.py`): texel-center, longitudes
+            // centradas (lon 0 en la columna central) y polo norte arriba — la inversa exacta de
+            // `equirectUV`, para que muestrear en el shader con esa función dé el mismo valor.
+            double vv = ((double)y + 0.5) / height;
+            double lat = (0.5 - vv) * glm::pi<double>();
+            double cLat = std::cos(lat);
+            double sLat = std::sin(lat);
+            for (int x = 0; x < width; ++x) {
+                double u = ((double)x + 0.5) / width;
+                double lon = (u - 0.5) * glm::two_pi<double>();
+                double cLon = std::cos(lon);
+                double sLon = std::sin(lon);
+                glm::dvec3 dir(cLon * cLat, sLat, sLon * cLat);
 
-            float v = graph.evaluate(clampNode, 0, (float)dir.x, (float)dir.y, (float)dir.z).asFloat();
-            v = glm::clamp(v, 0.0f, 1.0f);
+                float v = graph.evaluate(clampNode, 0, (float)dir.x, (float)dir.y, (float)dir.z).asFloat();
+                v = glm::clamp(v, 0.0f, 1.0f);
 
-            float hueShift = 0.0f;
-            {
-                Graph g2;
-                int n2 = g2.emplaceNode<FBMNode>();
+                float hueShift = 0.0f;
                 {
-                    FBMNode* f = static_cast<FBMNode*>(g2.node(n2));
-                    f->setNoiseFn([](float x, float y, float z, int s) {
-                        return PerlinNode::perlin(x, y, z, s);
-                    });
+                    Graph g2;
+                    int n2 = g2.emplaceNode<FBMNode>();
+                    {
+                        FBMNode* f = static_cast<FBMNode*>(g2.node(n2));
+                        f->setNoiseFn([](float x, float y, float z, int s) {
+                            return PerlinNode::perlin(x, y, z, s);
+                        });
+                    }
+                    int s2 = g2.emplaceNode<ConstNode>(0.15f);
+                    g2.connect(s2, 0, n2, 0);
+                    int sd2 = g2.emplaceNode<ConstNode>(888.0f);
+                    g2.connect(sd2, 0, n2, 4);
+                    g2.compile();
+                    hueShift = g2.evaluate(n2, 0, (float)dir.x, (float)dir.y, (float)dir.z).asFloat();
+                    hueShift = (hueShift - 0.5f) * 0.08f;
                 }
-                int s2 = g2.emplaceNode<ConstNode>(0.15f);
-                g2.connect(s2, 0, n2, 0);
-                int sd2 = g2.emplaceNode<ConstNode>(888.0f);
-                g2.connect(sd2, 0, n2, 4);
-                g2.compile();
-                hueShift = g2.evaluate(n2, 0, (float)dir.x, (float)dir.y, (float)dir.z).asFloat();
-                hueShift = (hueShift - 0.5f) * 0.08f;
-            }
 
-            img.setPixel(x, y,
-                (uint8_t)(v * 255),
-                (uint8_t)((hueShift * 0.5f + 0.5f) * 255),
-                (uint8_t)((1.0f - v) * 128 + 64),
-                255);
-        }
-    }
+                img.setPixel(x, y,
+                    (uint8_t)(v * 255),
+                    (uint8_t)((hueShift * 0.5f + 0.5f) * 255),
+                    (uint8_t)((1.0f - v) * 128 + 64),
+                    255);
+            }
+        });
     return img;
 }
 
@@ -1338,62 +1526,74 @@ static RGBAImage generateBiomeMap(const Haruka::Planet::ClimateOutput& climate,
                                    const Haruka::Tools::ProcGraph::BiomeConfig& cfg)
 {
     using namespace Haruka::Tools::ProcGraph;
-    Graph graph;
+    auto buildGraph = [&](Graph& graph) -> int {
+        int noiseNode = -1;
+        if (noiseScale > 0) {
+            noiseNode = graph.emplaceNode<FBMNode>();
+            FBMNode* fbm = static_cast<FBMNode*>(graph.node(noiseNode));
+            fbm->setNoiseFn([](float x, float y, float z, int seed) {
+                return PerlinNode::perlin(x, y, z, seed);
+            });
+            int ns = graph.emplaceNode<ConstNode>(noiseScale);
+            graph.connect(ns, 0, noiseNode, 0);
+            int nSeed = graph.emplaceNode<ConstNode>(42.0f);
+            graph.connect(nSeed, 0, noiseNode, 4);
+        }
 
-    int noiseNode = -1;
-    if (noiseScale > 0) {
-        noiseNode = graph.emplaceNode<FBMNode>();
-        FBMNode* fbm = static_cast<FBMNode*>(graph.node(noiseNode));
-        fbm->setNoiseFn([](float x, float y, float z, int seed) {
-            return PerlinNode::perlin(x, y, z, seed);
-        });
-        int ns = graph.emplaceNode<ConstNode>(noiseScale);
-        graph.connect(ns, 0, noiseNode, 0);
-        int nSeed = graph.emplaceNode<ConstNode>(42.0f);
-        graph.connect(nSeed, 0, noiseNode, 4);
-    }
+        int bcNode = graph.emplaceNode<BiomeClassifyNode>();
+        auto* bc = static_cast<BiomeClassifyNode*>(graph.node(bcNode));
+        bc->climate = &climate;
+        bc->geology = &geology;
+        bc->config = cfg;
 
-    int bcNode = graph.emplaceNode<BiomeClassifyNode>();
-    auto* bc = static_cast<BiomeClassifyNode*>(graph.node(bcNode));
-    bc->climate = &climate;
-    bc->geology = &geology;
-    bc->config = cfg;
+        if (noiseNode >= 0)
+            graph.connect(noiseNode, 0, bcNode, 0);
 
-    if (noiseNode >= 0)
-        graph.connect(noiseNode, 0, bcNode, 0);
+        graph.compile();
+        return bcNode;
+    };
 
-    graph.compile();
+    // Mismo esquema que la macro: el índice del nodo de salida es determinista (construcción
+    // idéntica en todos los threads), se calcula una vez y se comparte como int de solo lectura.
+    Graph templateGraph;
+    const int bcNode = buildGraph(templateGraph);
 
     RGBAImage img(width, height);
-    for (int y = 0; y < height; ++y) {
-        double lat = (double)y / (height - 1) * glm::pi<double>() - glm::pi<double>() * 0.5;
-        double cLat = std::cos(lat);
-        double sLat = std::sin(lat);
-        for (int x = 0; x < width; ++x) {
-            double lon = (double)x / (width - 1) * glm::two_pi<double>();
-            double cLon = std::cos(lon);
-            double sLon = std::sin(lon);
-            glm::dvec3 dir(cLon * cLat, sLat, sLon * cLat);
+    parallelBake(width, height,
+        [&](Graph& graph) { (void)buildGraph(graph); },
+        [&](Graph& graph, int y) {
+            // Misma convención que la macro (inversa de `equirectUV`): texel-center, lon 0 en el
+            // centro, polo norte arriba — coincidiendo con `tools/gen_planet_zones.py`.
+            double vv = ((double)y + 0.5) / height;
+            double lat = (0.5 - vv) * glm::pi<double>();
+            double cLat = std::cos(lat);
+            double sLat = std::sin(lat);
+            for (int x = 0; x < width; ++x) {
+                double u = ((double)x + 0.5) / width;
+                double lon = (u - 0.5) * glm::two_pi<double>();
+                double cLon = std::cos(lon);
+                double sLon = std::sin(lon);
+                glm::dvec3 dir(cLon * cLat, sLat, sLon * cLat);
 
-            Value v = graph.evaluate(bcNode, 0, (float)dir.x, (float)dir.y, (float)dir.z);
-            float r = v.data[0];
-            float g = v.data[1];
-            float b = v.data[2];
-            float idx = v.data[3];
+                Value v = graph.evaluate(bcNode, 0, (float)dir.x, (float)dir.y, (float)dir.z);
+                float r = v.data[0];
+                float g = v.data[1];
+                float b = v.data[2];
+                float idx = v.data[3];
 
-            if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(idx)) {
-                HARUKA_LOGE("BiomeMap", "NON-FINITE biome value at (%d,%d) dir=(%f,%f,%f) r=%f g=%f b=%f idx=%f",
-                            x, y, dir.x, dir.y, dir.z, r, g, b, idx);
-                r = g = b = idx = 0.0f;
+                if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b) || !std::isfinite(idx)) {
+                    HARUKA_LOGE("BiomeMap", "NON-FINITE biome value at (%d,%d) dir=(%f,%f,%f) r=%f g=%f b=%f idx=%f",
+                                x, y, dir.x, dir.y, dir.z, r, g, b, idx);
+                    r = g = b = idx = 0.0f;
+                }
+
+                img.setPixel(x, y,
+                    (uint8_t)(glm::clamp(r, 0.0f, 1.0f) * 255.0f),
+                    (uint8_t)(glm::clamp(g, 0.0f, 1.0f) * 255.0f),
+                    (uint8_t)(glm::clamp(b, 0.0f, 1.0f) * 255.0f),
+                    (uint8_t)(glm::clamp(idx, 0.0f, 1.0f) * 255.0f));
             }
-
-            img.setPixel(x, y,
-                (uint8_t)(glm::clamp(r, 0.0f, 1.0f) * 255.0f),
-                (uint8_t)(glm::clamp(g, 0.0f, 1.0f) * 255.0f),
-                (uint8_t)(glm::clamp(b, 0.0f, 1.0f) * 255.0f),
-                (uint8_t)(glm::clamp(idx, 0.0f, 1.0f) * 255.0f));
-        }
-    }
+        });
     return img;
 }
 
@@ -1419,22 +1619,23 @@ inline void bakeHashMix(uint64_t& h, const void* data, size_t n) {
     }
 }
 
-std::string bakeCacheKey(uint32_t seed, int texRes,
+std::string bakeCacheKey(uint32_t seed, int w, int h,
                          const Haruka::Tools::ProcGraph::BiomeConfig& bc) {
-    uint64_t h = 1469598103934665603ull;
-    const char* version = "planet-bake-v1";
-    bakeHashMix(h, version, std::strlen(version));
-    bakeHashMix(h, &seed, sizeof(seed));
-    bakeHashMix(h, &texRes, sizeof(texRes));
-    auto mixVec = [&h](const glm::vec3& v) {
-        bakeHashMix(h, &v.x, sizeof(v.x));
-        bakeHashMix(h, &v.y, sizeof(v.y));
-        bakeHashMix(h, &v.z, sizeof(v.z));
+    uint64_t hsh = 1469598103934665603ull;
+    const char* version = "planet-bake-v2";   // v2: convención equirect = inversa de `equirectUV`
+    bakeHashMix(hsh, version, std::strlen(version));
+    bakeHashMix(hsh, &seed, sizeof(seed));
+    bakeHashMix(hsh, &w, sizeof(w));
+    bakeHashMix(hsh, &h, sizeof(h));
+    auto mixVec = [&hsh](const glm::vec3& v) {
+        bakeHashMix(hsh, &v.x, sizeof(v.x));
+        bakeHashMix(hsh, &v.y, sizeof(v.y));
+        bakeHashMix(hsh, &v.z, sizeof(v.z));
     };
     mixVec(bc.desert);  mixVec(bc.steppe);  mixVec(bc.grass);  mixVec(bc.forest);  mixVec(bc.jungle);
     mixVec(bc.ice);     mixVec(bc.tundra);  mixVec(bc.taiga);  mixVec(bc.savanna);
     float f;
-    auto mixF = [&h](float x) { bakeHashMix(h, &x, sizeof(x)); };
+    auto mixF = [&hsh](float x) { bakeHashMix(hsh, &x, sizeof(x)); };
     f = bc.steppeEdge0; mixF(f); f = bc.steppeEdge1; mixF(f);
     f = bc.grassEdge0;  mixF(f); f = bc.grassEdge1;  mixF(f);
     f = bc.forestEdge0; mixF(f); f = bc.forestEdge1; mixF(f);
@@ -1448,7 +1649,7 @@ std::string bakeCacheKey(uint32_t seed, int texRes,
     f = bc.edgeNoiseStrength; mixF(f);
 
     char hex[20];
-    std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)h);
+    std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)hsh);
     return std::string(hex);
 }
 
@@ -1458,10 +1659,10 @@ std::string bakeCacheDir() {
     return root.empty() ? std::string("bakes/") : root + "bakes/";
 }
 
-std::string bakeCachePath(uint32_t seed, int texRes,
+std::string bakeCachePath(uint32_t seed, int w, int h,
                           const Haruka::Tools::ProcGraph::BiomeConfig& bc,
                           const char* tag) {
-    return bakeCacheDir() + bakeCacheKey(seed, texRes, bc) + "_" + tag + ".png";
+    return bakeCacheDir() + bakeCacheKey(seed, w, h, bc) + "_" + tag + ".png";
 }
 
 bool loadBakedPNG(const std::string& path, RGBAImage& out) {
@@ -1494,6 +1695,203 @@ RGBAImage loadOrBake(const std::string& path, const std::function<RGBAImage()>& 
     return img;
 }
 
+/**
+ * @brief Sube un horneado a la GPU aplicando el DOWNSCALE por calidad de terreno.
+ *
+ * El MAESTRO del bake queda COMPLETO en disco (con `texRes` alto son cientos de MB: los píxeles
+ * 1:1 que vería el raymarch/streaming de fases posteriores). Pero una textura RGBA8 de
+ * 45000×22500 son ~4 GB en RAM de vídeo: subirla entera vuela la VRAM y es un crash — y la
+ * estabilidad es OBLIGATORIA. Aquí se reduce a la resolución objetivo de la calidad activa
+ * (Ultra=maestro, High=8192, Medium=4096, Low=2048) antes de `createRHIFromRGBA`. El filtrado es
+ * de CAJAS (entero, sin alias), el mismo que usa el mapa de zonas.
+ */
+Haruka::RHI::TextureHandle uploadBake(const RGBAImage& img) {
+    if (img.width <= 0 || img.height <= 0) return {};
+    int target = terrainQualityTarget();
+    // TOPE DURO de estabilidad: aunque la calidad pida "maestro completo" (Ultra=0), una textura de
+    // 45000×22500 son ~4 GB y supera además el límite de textura GL (16384 en la mayoría de GPUs).
+    // El MAESTRO queda completo en disco; a la GPU sube como mucho este lado. Es el puente hasta
+    // el streaming/virtual-texture (fase 3).
+    if (target <= 0 || target > 16384) target = 16384;
+    // Factor CEL: garantiza que el lado mayor subido a GPU quede <= target. qualityDownsampleFactor
+    // divide a la baja (18750/16384=1 → subiría el maestro entero); ceil(18750/16384)=2 → 9375.
+    const int size = std::max(img.width, img.height);
+    const int f = (size + target - 1) / target;
+    if (f <= 1)
+        return Haruka::Tools::ProcGraph::createRHIFromRGBA(img);
+
+    std::vector<unsigned char> reduced;
+    boxDownsample(img.data(), img.width, img.height, f, reduced);
+    RGBAImage scaled(img.width / f, img.height / f);
+    scaled.pixels = std::move(reduced);
+    HARUKA_LOGI("BakeCache", "upload %dx%d -> %dx%d (calidad %d, master completo en disco)",
+                img.width, img.height, scaled.width, scaled.height, target);
+    return Haruka::Tools::ProcGraph::createRHIFromRGBA(scaled);
+}
+
+// ===========================================================================
+// ALTURA HORNEADA (fase 2a): el campo BASE —geología + mapa de elevación + recorte de zonas— como
+// textura 16-bit. El objetivo NO es subirla: es que CPU (física) y GPU (tess/clipmap) lean la MISMA
+// textura en las fases 2b/2c y la paridad deje de depender de ficheros gemelos. Aquí solo se hornea,
+// cachea y sube como R32F (aún no cableada a los shaders).
+// ===========================================================================
+
+// Altura base horneada: metros convertidos a uint16 (offset +32768). El rango útil (±32767 m)
+// cubre la Tierra y cualquier planeta con relieve geológico razonable; fuera de él se clampea.
+struct BakedHeightField {
+    int w = 0, h = 0;
+    std::vector<uint16_t> data;   // metros + 32768, filas de arriba abajo (como los demás PNG)
+};
+
+bool loadBakedHeightPNG16(const std::string& path, BakedHeightField& out) {
+    int w = 0, h = 0, n = 0;
+    stbi_us* p = stbi_load_16(path.c_str(), &w, &h, &n, 1);
+    if (!p) return false;
+    out.w = w; out.h = h;
+    out.data.assign(p, p + (size_t)w * h);
+    stbi_image_free(p);
+    return true;
+}
+
+bool saveBakedHeightPNG16(const std::string& path, const BakedHeightField& field) {
+    return Haruka::writePNG16(path, field.w, field.h, field.data.data());
+}
+
+/** @brief Clave del cache de altura. A diferencia de macro/bioma (que solo dependen de seed+res),
+ *  la altura base depende TAMBIÉN del mapa de elevación (y su rango), del mapa de zonas y de la
+ *  tabla de materiales (su submersion recorta el signo). Cualquiera de esos cambia → re-horneo. */
+std::string heightBakeKey(uint32_t seed, int w, int h,
+                          const std::vector<unsigned char>& elevCPU,
+                          const glm::vec2& elevRange,
+                          const std::vector<unsigned char>& zoneCPU,
+                          const Haruka::Planet::TerrainMaterialTable& mats,
+                          float seaLevelM) {
+    uint64_t hsh = 1469598103934665603ull;
+    const char* version = "planet-height-v2";   // v2: convención equirect = inversa de `equirectUV`
+    bakeHashMix(hsh, version, std::strlen(version));
+    bakeHashMix(hsh, &seed, sizeof(seed));
+    bakeHashMix(hsh, &w, sizeof(w));
+    bakeHashMix(hsh, &h, sizeof(h));
+    bakeHashMix(hsh, &seaLevelM, sizeof(seaLevelM));
+    bakeHashMix(hsh, &elevRange, sizeof(elevRange));
+    if (!elevCPU.empty()) bakeHashMix(hsh, elevCPU.data(), elevCPU.size());
+    if (!zoneCPU.empty())  bakeHashMix(hsh, zoneCPU.data(),  zoneCPU.size());
+    // Solo lo que decide la altura: zona (color) y submersion. Lo demás (tint, texturas…) no afecta
+    // a la geometría y no debe invalidar el horneado.
+    for (const auto& m : mats.materials) {
+        if (!m.hasZone()) continue;
+        bakeHashMix(hsh, &m.zoneColor, sizeof(m.zoneColor));
+        bakeHashMix(hsh, &m.submerged, sizeof(m.submerged));
+    }
+    char hex[20];
+    std::snprintf(hex, sizeof(hex), "%016llx", (unsigned long long)hsh);
+    return std::string(hex);
+}
+
+struct HeightUpload {
+    Haruka::RHI::TextureHandle tex;
+    std::vector<float> cpuField;   // el MISMO campo R32F subido a GPU (paridad física/render)
+    int w = 0, h = 0;
+};
+
+HeightUpload uploadHeight(const BakedHeightField& field) {
+    HeightUpload up;
+    if (field.w <= 0 || field.h <= 0) return up;
+    // La ALTURA es GEOMETRÍA: merece más resolución que los mapas de color — el coste por muestra no
+    // depende del tamaño de la textura, solo la memoria. Sin doblarla, un pico real a 21 km/texel
+    // (calidad Low) se convierte en una aguja, y con menos texeles la montaña verdadera se ve como
+    // un pincho. Mínimo 4096, el doble de la calidad de color, sin bajar nunca del máster.
+    int target = terrainQualityTarget();
+    if (target <= 0) target = 8192;                       // Ultra (0 = máster completo): capamos
+    target = std::clamp(target * 2, 4096, 8192);
+    const int size = std::max(field.w, field.h);
+    const int f = (size + target - 1) / target;
+    const int dw = field.w / f, dh = field.h / f;
+    if (dw <= 0 || dh <= 0) return up;
+
+    // 16-bit → R32F, ya downscaleado por cajas (media de cada bloque f×f).
+    up.w = dw; up.h = dh;
+    up.cpuField.resize((size_t)dw * dh);
+    const int np = f * f;
+    for (int y = 0; y < dh; ++y) {
+        for (int x = 0; x < dw; ++x) {
+            int acc = 0;
+            for (int j = 0; j < f; ++j)
+                for (int i = 0; i < f; ++i)
+                    acc += (int)field.data[(size_t)(y * f + j) * field.w + (x * f + i)];
+            up.cpuField[(size_t)y * dw + x] = (float)(acc / np) - 32768.0f;
+        }
+    }
+
+    // POLOS + COSTURA ±180°: dos imperfecciones del mapa real que se ven como PINCOS desde órbita.
+    //  - En el polo todas las longitudes son EL MISMO punto: la fila debe ser CONSTANTE. Las filas de
+    //    los polos del mapa traen ~8 km de variación (basura de la proyección), y la bilineal —que
+    //    abraza el polo repitiendo la fila— la dibuja como un ANILLO de picos alrededor del polo.
+    //  - La longitud ±180° es EL MISMO meridiano: la columna 0 y la última deben COINCIDIR. El mapa
+    //    las trae descuadradas hasta ~1,4 km y la envoltura de longitud lo dibuja como una grieta.
+    {
+        const int lastR = dh - 1, lastC = dw - 1;
+        // La fila del polo se COPIA de su contigua (la primera real), no se rellena con un valor
+        // inventado: así el polo es CONSTANTE (un punto) y además CONTINUO con el interior — la
+        // bilineal interpola la fila 0 con la 1 en la primera franja, y si divergieran saldría un
+        // escalón circular alrededor del polo. La mediana de la fila basura (~+455 m sobre un Ártico
+        // real de ~−4 km) dejaba una meseta gigante: constante, pero falsa.
+        for (int x = 0; x < dw; ++x) {
+            up.cpuField[(size_t)0 * dw + x]     = up.cpuField[(size_t)1 * dw + x];
+            up.cpuField[(size_t)lastR * dw + x] = up.cpuField[(size_t)(lastR - 1) * dw + x];
+        }
+        for (int y = 0; y < dh; ++y)
+            up.cpuField[(size_t)y * dw + lastC] = up.cpuField[(size_t)y * dw + 0];
+    }
+
+    // PINCOS: un texel AISLADO que queda estrictamente por encima/debajo de sus 4 vecinos por más de
+    // 1,2 km es una aguja, no una ladera — a 10–21 km por texel la cumbre o fosa real mide un solo
+    // píxel, y el render lo dibuja como un pincho de kilómetros. Se sustituye por la media de sus
+    // vecinos. Las laderas CONECTADAS (costas, sierras) no se tocan. Se filtra ANTES de subir el
+    // campo, y la física y el render leen el MISMO campo filtrado (paridad intacta). Con el doble
+    // de resolución de arriba quedan 22 agujas en 3750×1875 (las 218 de 1875×937); el filtro las
+    // recorta todas. Análisis replicado en /tmp/opencode/check_spikes.py.
+    // Las filas de los polos y la columna de la costura YA son constantes (arreglo de arriba): no
+    // se tocan aquí, o el filtro las volvería a variar con sus vecinos.
+    {
+        std::vector<float> src = up.cpuField;
+        const float kSpikeT = 1200.0f;                    // m por encima/debajo del vecino más extremo
+        const int lastR = dh - 1, lastC = dw - 1;
+        for (int y = 1; y < lastR; ++y) {
+            const int y0 = y - 1;
+            const int y1 = y + 1;
+            for (int x = 1; x < lastC; ++x) {
+                const float h = src[(size_t)y * dw + x];
+                const int x0 = x - 1;
+                const int x1 = x + 1;
+                float mx = -1e30f, mn = 1e30f, acc = 0.0f;
+                const int nxs[4] = {x0, x1, x0, x1};
+                const int nys[4] = {y0, y0, y1, y1};
+                for (int k = 0; k < 4; ++k) {
+                    const float v = src[(size_t)nys[k] * dw + nxs[k]];
+                    mx = std::max(mx, v); mn = std::min(mn, v); acc += v;
+                }
+                if (h > mx + kSpikeT || h < mn - kSpikeT)
+                    up.cpuField[(size_t)y * dw + x] = acc * 0.25f;
+            }
+        }
+    }
+
+    RHI::TextureDesc td;
+    td.width = (uint32_t)dw; td.height = (uint32_t)dh;
+    td.format = RHI::Format::R32F;
+    td.filter = RHI::Filter::Linear;
+    td.wrap   = RHI::Wrap::ClampToEdge;
+    td.mipmaps = false;
+    td.initialData = up.cpuField.data();
+    if (RHI::Device* dev = RHI::device()) {
+        HARUKA_LOGI("BakeCache", "upload height %dx%d -> %dx%d R32F (calidad %d)",
+                    field.w, field.h, dw, dh, target);
+        up.tex = dev->createTexture(td);
+    }
+    return up;
+}
+
 } // namespace
 
 // ── Construcción (el planeta se crea a sí mismo) ─────────────────────────
@@ -1509,6 +1907,17 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
     if (RHI::Device* zdev = RHI::device()) {
         if (RHI::valid(m_zoneTex))     { zdev->destroy(m_zoneTex);     m_zoneTex     = {}; }
         if (RHI::valid(m_materialUBO)) { zdev->destroy(m_materialUBO); m_materialUBO = {}; }
+        if (RHI::valid(m_propUBO))     { zdev->destroy(m_propUBO);     m_propUBO     = {}; }
+    }
+    if (!RHI::valid(m_propWhiteTex)) {
+        const unsigned char white[4] = { 255, 255, 255, 255 };
+        RHI::TextureDesc wd;
+        wd.width = 1; wd.height = 1;
+        wd.format = RHI::Format::RGBA8;
+        wd.filter = RHI::Filter::Nearest;
+        wd.wrap   = RHI::Wrap::Repeat;
+        wd.initialData = white;
+        if (RHI::Device* wdev = RHI::device()) m_propWhiteTex = wdev->createTexture(wd);
     }
 
     // GEOLOGÍA: la semilla del planeta MANDA en el reparto de placas; sin esto la geología usaba
@@ -1523,6 +1932,7 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
     m_weather.configure((uint32_t)std::hash<std::string>{}(cfg.name));
     m_faceSubdiv = cfg.faceRes > 0 ? cfg.faceRes : 512;
     m_mapRes = cfg.surface.texRes > 0 ? cfg.surface.texRes : 512;
+    m_macroRes = cfg.surface.macroRes > 0 ? cfg.surface.macroRes : 2048;
 
     // biomePalette del SceneObject (opcional). Todas las entradas opcionales: una escena que no la
     // declare mantiene los valores por defecto y se comporta como antes.
@@ -1631,6 +2041,62 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
                             cfg.name.c_str(), table.materials.size());
             }
         }
+
+        // ZONAS del autor (escena `zones`): un nombre + cómo se delimita. GEOMÉTRICAS: un círculo
+        // (`center` [lat,lon] grados + `radiusM`) o un polígono (`perimeter` lista de [lat,lon]).
+        // PINTADA: `color` (0-255) en el zoneMap. Pueden ser geométricas Y pintadas a la vez.
+        // Independientes de los materiales — "city" es una zona aunque ningún material se llame así.
+        // Las capas de props las referencian por nombre en su campo `zones`.
+        m_namedZones.clear();
+        if (cfg.raw.contains("zones") && cfg.raw["zones"].is_array()) {
+            for (const auto& jz : cfg.raw["zones"]) {
+                if (!jz.is_object()) continue;
+                Haruka::Planet::NamedZone z;
+                z.name = jz.value("name", std::string());
+                if (jz.contains("center") && jz["center"].is_array() && jz["center"].size() >= 2) {
+                    z.shape.hasCircle = true;
+                    z.shape.circleCenterDeg = glm::dvec2(jz["center"][0], jz["center"][1]); // (lat, lon)
+                    z.shape.circleRadiusM   = jz.value("radiusM", 1000.0);
+                } else if (jz.contains("perimeter") && jz["perimeter"].is_array()) {
+                    for (const auto& jv : jz["perimeter"]) {
+                        if (!jv.is_array() || jv.size() < 2) continue;
+                        z.shape.polygonDeg.emplace_back(jv[0].get<double>(), jv[1].get<double>());
+                        z.shape.hasPolygon = true;
+                    }
+                }
+                if (jz.contains("color") && jz["color"].is_array() && jz["color"].size() >= 3)
+                    z.color = glm::vec3(jz["color"][0], jz["color"][1], jz["color"][2]);
+                if (z.name.empty() || (!z.hasGeometry() && !z.hasColor())) continue;   // basura
+                m_namedZones.push_back(z);
+            }
+            if (!m_namedZones.empty())
+                HARUKA_LOGI("Terrain", "'%s': %zu zonas desde la escena",
+                            cfg.name.c_str(), m_namedZones.size());
+        }
+
+        // CAPAS DE PROPS desde la escena, para la VISTA DE SPAWN del editor (dónde instalaría
+        // cada capa). El scatter global (`scatterPropsNear`) las parsea del surfaceConfig por su
+        // lado; esta copia solo alimenta el UBO de depuración. Ausente = tabla vacía = vista apagada.
+        if (cfg.raw.contains("propLayers") && cfg.raw["propLayers"].is_array()) {
+            m_propLayers = Haruka::Planet::PropLayerTable::fromJSON(cfg.raw);
+            HARUKA_LOGI("Terrain", "'%s': %zu capas de props desde la escena",
+                        cfg.name.c_str(), m_propLayers.layers.size());
+        } else {
+            m_propLayers.layers.clear();
+        }
+
+        // ¿Se necesita el zoneMap en el muestreo de zona para PROPS? Solo si alguna capa consulta
+        // el material del terreno (`when: layer`) o existe una zona PINTADA (colores en el zoneMap).
+        // El caso habitual (solo `when: zone` + zonas GEOMÉTRICAS) se decide por perímetros y el
+        // mapa no aporta: muestrearlo por celda son 2 bilineales 4k + el match de color (~61k
+        // celdas) — el grueso del coste del scatter.
+        m_propNeedZoneMap = false;
+        for (const auto& L : m_propLayers.layers) {
+            if (L.when.find("layer") != std::string::npos) { m_propNeedZoneMap = true; break; }
+        }
+        if (!m_propNeedZoneMap)
+            for (const auto& z : m_namedZones)
+                if (z.hasColor()) { m_propNeedZoneMap = true; break; }
     }
 
     // `rawHeight` es función miembro (see planet.h) y es la que el orquestador también usa.
@@ -1749,21 +2215,23 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
     // (geología, clima, resolución, biomeConfig). Si el archivo ya existe para esta clave, se carga
     // (píxeles 1:1 con lo que se hornearía); si no, se hornea una vez y se persiste.
     if (!RHI::valid(m_macroTex)) {
-        auto macro = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_biomeConfig, "macro"),
-                                [&] { return generateMacroVariation(m_climate, m_geology, m_mapRes, m_mapRes); });
-        m_macroTex = Haruka::Tools::ProcGraph::createRHIFromRGBA(macro);
+        auto macro = loadOrBake(bakeCachePath(m_seed, m_macroRes, m_macroRes / 2, m_biomeConfig, "macro"),
+                                [&] { return generateMacroVariation(m_climate, m_geology, m_macroRes, m_macroRes / 2); });
+        m_macroTex = uploadBake(macro);
     }
     HARUKA_LOGI("SimplePlanet", "build '%s': macro tex ok", cfg.name.c_str());
     // Generate biome map texture (always — replaces GLSL biomeColor() classification)
     if (!RHI::valid(m_biomeMapTex)) {
-        auto biomeImg = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_biomeConfig, "biome"),
+        auto biomeImg = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_mapRes / 2, m_biomeConfig, "biome"),
                                    [&] {
-                                       return generateBiomeMap(m_climate, m_geology, m_mapRes, m_mapRes,
+                                       return generateBiomeMap(m_climate, m_geology, m_mapRes, m_mapRes / 2,
                                                                0.004f, m_biomeConfig);
                                    });
-        m_biomeMapTex = Haruka::Tools::ProcGraph::createRHIFromRGBA(biomeImg);
+        m_biomeMapTex = uploadBake(biomeImg);
     }
     HARUKA_LOGI("SimplePlanet", "build '%s': biome map ok", cfg.name.c_str());
+    // ALTURA BASE horneada (fase 2a): el campo lento como R32F, aún no cableada a los shaders.
+    bakeHeightMap();
     m_tiling = cfg.surface.tiling > 0.0f ? cfg.surface.tiling : 100.0f;
     return true;
     } catch (const std::exception& e) {
@@ -1800,16 +2268,17 @@ void TerrestrialPlanet::rebuild(const Haruka::Planet::GeologyConfig& geo, int fa
     // semilla nueva, así que `loadOrBake` o bien carga el horneado de ESTA semilla (si ya se hizo
     // alguna vez) o bien hornea de nuevo — nunca reutiliza el de otra semilla.
     {
-        auto macro = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_biomeConfig, "macro"),
-                                [&] { return generateMacroVariation(m_climate, m_geology, m_mapRes, m_mapRes); });
-        m_macroTex = Haruka::Tools::ProcGraph::createRHIFromRGBA(macro);
-        auto biomeImg = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_biomeConfig, "biome"),
+        auto macro = loadOrBake(bakeCachePath(m_seed, m_macroRes, m_macroRes / 2, m_biomeConfig, "macro"),
+                                [&] { return generateMacroVariation(m_climate, m_geology, m_macroRes, m_macroRes / 2); });
+        m_macroTex = uploadBake(macro);
+        auto biomeImg = loadOrBake(bakeCachePath(m_seed, m_mapRes, m_mapRes / 2, m_biomeConfig, "biome"),
                                    [&] {
-                                       return generateBiomeMap(m_climate, m_geology, m_mapRes, m_mapRes,
+                                       return generateBiomeMap(m_climate, m_geology, m_mapRes, m_mapRes / 2,
                                                                0.004f, m_biomeConfig);
                                    });
-        m_biomeMapTex = Haruka::Tools::ProcGraph::createRHIFromRGBA(biomeImg);
+        m_biomeMapTex = uploadBake(biomeImg);
     }
+    bakeHeightMap();
 }
 
 void TerrestrialPlanet::rebuildWithEdits(const std::function<float(const glm::dvec3&)>& editFn) {
@@ -1819,6 +2288,69 @@ void TerrestrialPlanet::rebuildWithEdits(const std::function<float(const glm::dv
     };
     clearGPU();
     buildMesh(combined, m_config.radius);
+}
+
+// Hornea la ALTURA BASE (geología + mapa de elevación + recorte por zonas) a la misma resolución
+// equirect 2:1 que la biome map. Es el MAESTRO del "campo lento" — lo que la fase 2b/2c cableará a
+// tess/clipmap/CPU para que los tres lean la MISMA textura. Cache en disco como PNG 16-bit con la
+// clave de `heightBakeKey` (incluye mapas y materiales: cambiarlos invalida).
+void TerrestrialPlanet::bakeHeightMap() {
+    if (m_mapRes <= 0) return;
+    const int w = m_mapRes;
+    const int h = m_mapRes / 2;
+    const std::string key = heightBakeKey(m_seed, w, h, m_elevCPU,
+                                          m_config.surface.elevationRange,
+                                          m_zoneCPU, m_materialTable, m_seaLevelOffsetM);
+    const std::string path = bakeCacheDir() + key + "_height.png";
+
+    BakedHeightField field;
+    if (loadBakedHeightPNG16(path, field)) {
+        HARUKA_LOGI("BakeCache", "cached  %s", path.c_str());
+    } else {
+        field.w = w; field.h = h;
+        field.data.resize((size_t)w * h);
+        // Paralelo por filas: `baseHeight` solo LEE estado const (mapas, materiales, geología), así
+        // que es seguro desde N threads sin grafo por hilo (no hay buffers scratch que proteger).
+        unsigned hw = std::thread::hardware_concurrency();
+        int nThreads = std::clamp<int>((int)hw, 1, 8);
+        std::vector<std::thread> threads;
+        for (int t = 0; t < nThreads; ++t) {
+            const int y0 = t * h / nThreads;
+            const int y1 = (t + 1) * h / nThreads;
+            threads.emplace_back([this, &field, y0, y1, w, h]() {
+                for (int y = y0; y < y1; ++y) {
+                    // Misma convención que macro/bioma (inversa de `equirectUV`): texel-center,
+                    // lon 0 en la columna central, polo norte arriba. Así `texture(heightTex,
+                    // equirectUV(dir))` devuelve exactamente `baseHeight(dir)` (paridad CPU/GPU).
+                    double v = ((double)y + 0.5) / h;
+                    double lat = (0.5 - v) * glm::pi<double>();
+                    double cLat = std::cos(lat), sLat = std::sin(lat);
+                    for (int x = 0; x < w; ++x) {
+                        double u = ((double)x + 0.5) / w;
+                        double lon = (u - 0.5) * glm::two_pi<double>();
+                        glm::dvec3 dir(std::cos(lon) * cLat, sLat, std::sin(lon) * cLat);
+                        double meters = (double)baseHeight(dir);
+                        long val = (long)glm::round(meters) + 32768L;
+                        val = std::clamp<long>(val, 0L, 65535L);
+                        field.data[(size_t)y * w + x] = (uint16_t)val;
+                    }
+                }
+            });
+        }
+        for (auto& th : threads) th.join();
+        if (!saveBakedHeightPNG16(path, field))
+            HARUKA_LOGW("BakeCache", "no pude persistir %s", path.c_str());
+        else
+            HARUKA_LOGI("BakeCache", "baked   %s (%dx%d)", path.c_str(), field.w, field.h);
+    }
+
+    HeightUpload up = uploadHeight(field);
+    m_heightTex  = up.tex;
+    m_heightCPU  = std::move(up.cpuField);   // copia CPU del R32F: la física usa el mismo campo
+    m_heightW    = up.w;
+    m_heightH    = up.h;
+    HARUKA_LOGI("SimplePlanet", "'%s': height map ok (R32F=%d)", m_config.name.c_str(),
+                RHI::valid(m_heightTex));
 }
 
 // ── Render ───────────────────────────────────────────────────────────────
@@ -1880,7 +2412,56 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     static const auto s_waterClockStart = std::chrono::high_resolution_clock::now();
     const float elapsedSec = std::chrono::duration<float>(
         std::chrono::high_resolution_clock::now() - s_waterClockStart).count();
-    ubo.uDebug = glm::vec4((float)m_debugView, elapsedSec, 0.0f, 0.0f);
+    // ¿Dibuja el clipmap este frame? (misma condición que el bloque de draw de abajo). La malla
+    // base se recorta donde el clipmap la cubre (terrain.tese), y el recorte SOLO debe actuar cuando
+    // el clipmap va a pintar de verdad — si el pipeline no compiló, no hay bake o la cámara está en
+    // órbita, recortar la base dejaría un agujero en el planeta.
+    const glm::dvec3 camDir = cameraPos - m_config.position;
+    const double camDist = glm::length(camDir);
+    const double camAlt = camDist - m_config.radius;
+    // ¿La cámara está DENTRO del terreno? (modo fly/ghost atravesando el suelo). La rejilla del
+    // clipmap vive en el plano tangente de la cámara: si la cámara se hunde, la rejilla la persigue
+    // como una lámina "pegada al personaje" mientras la malla base queda anclada al planeta → las
+    // "dos capas de terreno". Soterrada, el clipmap no aporta nada (el suelo que la rodea ya no se
+    // ve desde arriba) y solo crea el artefacto: se apaga junto con el recorte de la malla base.
+    // Margen de 3 m: a la altura de los ojos (≈1,7 m) el clipmap sigue activo, y solo se apaga
+    // cuando la cámara queda claramente bajo la superficie — sin eso, cruzar un bache con la cabeza
+    // justa encima parpadearía entre rejilla fina y malla gorda.
+    bool camUnderground = camAlt + 3.0 < sampleHeight(camDir);
+    if (!camUnderground) {
+        // El test del sub-punto falla al entrar en una LADERA en diagonal: la cámara está dentro
+        // de la montaña pero su proyección radial cae en el valle de abajo (por debajo de su
+        // altitud), y `camUnderground` queda falso — la rejilla sigue pegada al personaje. Se
+        // sondean 4 puntos alrededor (a ±2, ±8 y ±25 m en el plano tangente): si el terreno a
+        // cualquier lado queda >3 m por encima de la cámara, está enterrada y se apaga igual.
+        const glm::dvec3 up = camDir / camDist;
+        glm::dvec3 tu = glm::cross(glm::dvec3(0, 1, 0), up);
+        if (glm::length(tu) < 1e-6) tu = glm::cross(glm::dvec3(1, 0, 0), up);
+        tu = glm::normalize(tu);
+        const glm::dvec3 tv = glm::cross(up, tu);
+        const double R = m_config.radius;
+        for (const double dM : { 2.0, 8.0, 25.0 }) {
+            const double arc = dM / R;
+            const double c = std::cos(arc), s = std::sin(arc);
+            const glm::dvec3 probes[4] = {
+                glm::normalize(up * c + tu * s), glm::normalize(up * c + tv * s),
+                glm::normalize(up * c - tu * s), glm::normalize(up * c - tv * s),
+            };
+            for (const glm::dvec3& p : probes) {
+                if (camAlt + 3.0 < sampleHeight(p)) { camUnderground = true; break; }
+            }
+            if (camUnderground) break;
+        }
+    }
+    // Pegado al suelo (donde el fino vale la pena y la costura del cuadrado queda en el horizonte):
+    // enciende <10 m, apaga >20 m, con histéresis vía m_clipMapActive para no parpadear al cruzar.
+    const bool wantClip = m_clipMapActive ? (camAlt < 20.0) : (camAlt < 10.0);
+    const bool clipActive = RHI::valid(s_clipPipeline) && RHI::valid(m_clipVB) &&
+                            RHI::valid(m_baseFieldTex) && hasBiome && !camUnderground && wantClip;
+    m_clipMapActive = clipActive;
+    ubo.uDebug = glm::vec4((float)m_debugView, elapsedSec,
+                           RHI::valid(m_heightTex) ? 1.0f : 0.0f,  // z = hay bake de altura (16)
+                           clipActive ? 1.0f : 0.0f);              // w = el clipmap dibuja (recorte base)
     dev->updateBuffer(s_ubo, 0, sizeof(ubo), &ubo);
     ctx->bindUniformBuffer(0, s_ubo);
 
@@ -1923,6 +2504,68 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         ctx->bindUniformBuffer(12, m_materialUBO);
     }
 
+    // TABLA DE CAPAS DE PROPS → UBO binding 14 (VISTA DE SPAWN del editor). Como la de materiales:
+    // se sube una vez por planeta y se reescribe solo si cambió; sin capas, `uPropCount.x = 0` y la
+    // vista de props queda apagada. Se suben SOLO las capas que instalan (mesh no vacía), para que
+    // el índice del shader (dbg-20) coincida con el del selector del editor, que también las filtra.
+    // El densityMap de la capa SELECCIONADA se sube aparte (17).
+    {
+        struct GpuProp { glm::vec4 a, b, c, d; };
+        struct GpuPropTable {
+            glm::vec4 count;
+            GpuProp    layers[Haruka::Planet::PropLayerTable::kMaxLayers];
+        } ptable{};
+        const auto& src = m_propLayers.layers;
+        int n = 0;
+        for (const auto& L : src) {
+            if (L.mesh.empty()) continue;
+            if (n >= Haruka::Planet::PropLayerTable::kMaxLayers) break;
+            GpuProp& g = ptable.layers[n];
+            g.a = glm::vec4(L.humMin, L.humMax, L.tempMin, L.tempMax);
+            g.b = glm::vec4(L.slopeMin, L.slopeMax, 0.0f, L.feather);
+            g.c = glm::vec4(L.densityMap.empty() ? 0.0f : 1.0f, 0, 0, 0);
+            g.d = glm::vec4(L.density, 0, 0, 0);
+            ++n;
+        }
+        ptable.count = glm::vec4((float)n, 0, 0, 0);
+        if (!RHI::valid(m_propUBO)) {
+            m_propUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(ptable),
+                                          &ptable, RHI::BufferMemory::Dynamic);
+        } else {
+            dev->updateBuffer(m_propUBO, 0, sizeof(ptable), &ptable);
+        }
+        ctx->bindUniformBuffer(14, m_propUBO);
+
+        // densityMap de la capa que el editor está viendo (dbg = 40+i): carga/subida perezosa por
+        // ruta, cacheada. Sin mapa (o sin capa activa) se bindea una textura 1×1 BLANCA — el shader
+        // multiplica por 1.0 y la vista muestra solo las bandas de clima/forma.
+        const int dbgLayer = m_debugView - 40;
+        RHI::TextureHandle densityTex = m_propWhiteTex;
+        if (m_debugView >= 40 && dbgLayer >= 0 && dbgLayer < n) {
+            // El densityMap vive en la capa ORIGINAL de la tabla (misma posición, ya que el filtro
+            // por mesh no altera el orden relativo de las capas que instalan).
+            int instCount = 0;
+            for (const auto& L : src) {
+                if (L.mesh.empty()) continue;
+                if (instCount == dbgLayer) {
+                    if (!L.densityMap.empty()) {
+                        const auto& path = L.densityMap;
+                        auto it = m_propDensityTex.find(path);
+                        if (it != m_propDensityTex.end()) {
+                            densityTex = it->second;
+                        } else {
+                            densityTex = uploadPropDensityMap(path);
+                            m_propDensityTex[path] = densityTex;
+                        }
+                    }
+                    break;
+                }
+                ++instCount;
+            }
+        }
+        ctx->bindTexture(17, densityTex);
+    }
+
     // Bind macro-variation texture (slot 10) if available — both paths
     if (RHI::valid(m_macroTex))
         ctx->bindTexture(10, m_macroTex);
@@ -1940,17 +2583,45 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     if (RHI::valid(m_biomeTex.albedoArray)) ctx->bindTexture(12, m_biomeTex.albedoArray);
     if (RHI::valid(m_biomeTex.normalArray)) ctx->bindTexture(13, m_biomeTex.normalArray);
     if (RHI::valid(m_zoneTex))              ctx->bindTexture(14, m_zoneTex);
+    // El bake de altura (R32F, binding 16): lo leen terrain.tese, clipmap.tese y water.frag con la
+    // bilineal manual compartida. Se enlaza SIEMPRE que exista, antes de cualquier draw, y aguanta
+    // hasta el agua (ninguna bind intermedia toca la unidad 16).
+    if (RHI::valid(m_heightTex))            ctx->bindTexture(16, m_heightTex);
 
     // TESELADO si está disponible: la malla base es la misma, cambia el índice (parches) y el
     // pipeline. Si el pipeline no compiló se cae a la malla sin teselar.
     const bool useTess = RHI::valid(s_tessPipeline) && RHI::valid(m_patchIB) && hasBiome;
 
     // CLIPMAP: solo tiene sentido si la cámara está lo bastante cerca de la superficie. Con la
-    // cámara en órbita la rejilla sería un punto, y el coste de decidirlo es despreciable.
-    const double camAlt = glm::length(cameraPos - m_config.position) - m_config.radius;
-    const bool useClip = RHI::valid(s_clipPipeline) && RHI::valid(m_clipVB) &&
-                         RHI::valid(m_baseFieldTex) && camAlt < 20000.0 && hasBiome;
+    // cámara en órbita la rejilla sería un punto, y el coste de decidirlo es despreciable. Misma
+    // condición que `clipActive` del UBO (recorte de la malla base en terrain.tese).
+    const bool useClip = clipActive;
 
+    // ClipParams (binding 13) con el SEMI-LADO real del clipmap y su anillo de mezcla: lo usan
+    // BOTH terrain.tese (recorte de la base) y clipmap.tese (blend ring). Se sube y se bindea ANTES
+    // del draw de la base para que el recorte lea el mismo valor que dibuja el clipmap.
+    if (clipActive) {
+        const glm::dvec3 up = glm::normalize(cameraPos - m_config.position);
+        glm::dvec3 tu = glm::cross(glm::dvec3(0, 1, 0), up);
+        if (glm::length(tu) < 1e-6) tu = glm::cross(glm::dvec3(1, 0, 0), up);
+        tu = glm::normalize(tu);
+        const glm::dvec3 tv = glm::cross(up, tu);
+
+        struct ClipParams { glm::vec4 origin, tanU, tanV, cover; } cp{};
+        cp.origin = glm::vec4(glm::vec3(up), 128.0f);
+        cp.tanU   = glm::vec4(glm::vec3(tu), 0.0f);
+        cp.tanV   = glm::vec4(glm::vec3(tv), 0.0f);
+        const float half  = m_clipCoverM;
+        const float blendS = half * 0.70f, blendE = half * 0.95f;
+        cp.cover = glm::vec4(half, blendS, blendE, 0.0f);
+        if (!RHI::valid(m_clipUBO))
+            m_clipUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp, RHI::BufferMemory::Dynamic);
+        else
+            dev->updateBuffer(m_clipUBO, 0, sizeof(cp), &cp);
+        ctx->bindUniformBuffer(13, m_clipUBO);
+    }
+
+    { HARUKA_PROFILE("planet.base.draw");
     if (useTess) {
         ctx->bindPipeline(s_tessPipeline);
         ctx->bindTexture(1, m_biomeTex.sandAlbedo);
@@ -1980,28 +2651,15 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         ctx->bindIndexBuffer(m_indexBuffer);
         ctx->drawIndexed(m_indexCount);
     }
+    }  // fin planet.base.draw
 
     // El clipmap va DESPUÉS de la malla del planeta, no antes. Las dos describen el MISMO
     // suelo —misma altura base, misma función de detalle—, así que son coplanares a propósito y
     // el orden no las separa: lo que decide es el sesgo de profundidad del pipeline.
+    { HARUKA_PROFILE("planet.clipmap.draw");
     if (useClip) {
-        // Marco tangente en la vertical de la cámara. El clipmap vive en ESE plano, así que se
-        // reorienta solo al moverse: no hay que regenerar la rejilla nunca.
-        const glm::dvec3 up = glm::normalize(cameraPos - m_config.position);
-        glm::dvec3 tu = glm::cross(glm::dvec3(0, 1, 0), up);
-        if (glm::length(tu) < 1e-6) tu = glm::cross(glm::dvec3(1, 0, 0), up);
-        tu = glm::normalize(tu);
-        const glm::dvec3 tv = glm::cross(up, tu);
-
-        struct ClipParams { glm::vec4 origin, tanU, tanV; } cp{};
-        cp.origin = glm::vec4(glm::vec3(up), 128.0f);
-        cp.tanU   = glm::vec4(glm::vec3(tu), 0.0f);
-        cp.tanV   = glm::vec4(glm::vec3(tv), 0.0f);
-        if (!RHI::valid(m_clipUBO))
-            m_clipUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp, RHI::BufferMemory::Dynamic);
-        else
-            dev->updateBuffer(m_clipUBO, 0, sizeof(cp), &cp);
-
+        // m_clipUBO ya se rellenó y bindeó a 13 ANTES del draw de la base (para el recorte en
+        // terrain.tese); aquí solo se re-bindea (el pipeline del clipmap lo necesita igualmente).
         ctx->bindPipeline(s_clipPipeline);
         ctx->bindUniformBuffer(0, s_ubo);
         ctx->bindUniformBuffer(13, m_clipUBO);
@@ -2017,20 +2675,71 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         ctx->bindIndexBuffer(m_clipIB);
         ctx->drawIndexed(m_clipIndexCount);
     }
+    }  // fin planet.clipmap.draw
 
     // Draw water (transparent ocean sphere). El océano es una esfera a nivel del mar: la tierra está
     // garantizada por encima (el detalle se recorta para no hundir el suelo bajo el nivel del mar, ver
     // los eval de teselado), así que la esfera solo rellena los océanos y no tapa la costa. Quitarla:
     // HARUKA_NOWATER=1 (deja a la vista el suelo sumergido, con su relieve de ruido).
+    m_lastRenderStats = RenderStats{};   // lo rellena este frame (lo que realmente dibuja)
+    int waterFacesDrawn = 0;
+    { HARUKA_PROFILE("planet.water.draw");
     if (RHI::valid(m_waterVB) && !std::getenv("HARUKA_NOWATER")) {
         ctx->bindPipeline(s_waterPipeline);
         ctx->bindVertexBuffer(m_waterVB);
         ctx->bindIndexBuffer(m_waterIB);
+        // MAR DINÁMICO POR MASA (UBO binding 21): sube la lista de cuerpos masivos que atraen el
+        // océano. Se bindea SIEMPRE (uTide.x puede ser 0 ⇒ el shader no mueve nada), para que la
+        // bind de water.vert/water.frag sea válida y no muestreen un bloque sin atar.
+        {
+            constexpr int kMaxTidals = 8;
+            struct GpuTidal { glm::vec4 body[kMaxTidals]; glm::vec4 tide; } t{};
+            const int n = (int)std::min<size_t>(m_tidalBodies.size(), (size_t)kMaxTidals);
+            for (int i = 0; i < n; ++i)
+                t.body[i] = glm::vec4(glm::vec3(m_tidalBodies[i].posCenter),
+                                      (float)m_tidalBodies[i].gm);
+            const double R = m_config.radius;
+            // Escala que convierte el potencial de marea (1/s²) en metros DIFERENCIA (≈r²/g) y lo
+            // exagera ~15× para que el abultamiento se vea en juego (la marea física real es ~1 m).
+            const float scale = (float)((R * R / 9.8) * 15.0);
+            t.tide = glm::vec4((float)n, scale, (float)(R * 0.5), (float)R);
+            if (!RHI::valid(m_tidalUBO))
+                m_tidalUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(t), &t,
+                                               RHI::BufferMemory::Dynamic);
+            else
+                dev->updateBuffer(m_tidalUBO, 0, sizeof(t), &t);
+            ctx->bindUniformBuffer(21, m_tidalUBO);
+        }
         // La costa per-pixel de water.frag lee el campo base (binding 15): se enlaza aquí
         // SIEMPRE, no solo cuando está el clipmap, o el agua muestrearía una textura sin bindear.
         if (RHI::valid(m_baseFieldTex)) ctx->bindTexture(15, m_baseFieldTex);
-        ctx->drawIndexed(m_waterIndexCount);
+        // Culling por CARA cúbica: la esfera de agua cubre el planeta entero (1,58 M vértices),
+        // pero desde fuera solo su hemisferio hacia la cámara es visible. A pie, 5 de las 6 caras
+        // están tras el planeta (~263 k vértices muertos de vertex shading cada una). El centro de
+        // cada cara es su eje (cubeFaceToDir(face,0,0)); si queda detrás del plano de la cámara,
+        // toda la cara es invisible (el propio planeta oculta su parte delantera). Las caras del
+        // limbo se siguen dibujando enteras — el depth test descarta lo oculto.
+        const glm::dvec3 camRelD = cameraPos - m_config.position;
+        const glm::dvec3 camDirD = camRelD / glm::length(camRelD);
+        static const glm::dvec3 kFaceAxis[6] = {
+            { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1}
+        };
+        for (int face = 0; face < 6; ++face) {
+            if (glm::dot(camDirD, kFaceAxis[face]) < 0.0) continue;   // cara tras el planeta
+            ctx->drawIndexed(m_waterFaceStride, (uint32_t)face * m_waterFaceStride);
+            ++waterFacesDrawn;
+        }
     }
+    }  // fin planet.water.draw
+    // Geometría DEL ÚLTIMO FRAME para el panel: la malla base (teselada o lisa), el clipmap solo
+    // cuando pinta, y el agua solo por las caras que se dibujaron. Triángulos = índices/3.
+    m_lastRenderStats.baseVertices  = m_vertexCount;
+    m_lastRenderStats.baseTriangles = (useTess ? m_patchIndexCount : m_indexCount) / 3;
+    m_lastRenderStats.clipVertices  = useClip ? m_clipVertexCount : 0;
+    m_lastRenderStats.clipTriangles = useClip ? m_clipIndexCount / 3 : 0;
+    m_lastRenderStats.waterVertices  = waterFacesDrawn ? m_waterVertexCount : 0;
+    m_lastRenderStats.waterTriangles = waterFacesDrawn * (m_waterFaceStride / 3);
+    m_lastRenderStats.drawCalls = 1 + (useClip ? 1 : 0) + (waterFacesDrawn ? waterFacesDrawn : 0);
 }
 
 }} // namespace Haruka::Planet

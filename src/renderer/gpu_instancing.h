@@ -54,6 +54,10 @@ public:
                      const glm::vec4& color = glm::vec4(1.0f),
                      const glm::vec3& scale = glm::vec3(1.0f));
 
+    /** @brief Sustituye la cola por `data` (recortando al máximo del buffer). Evita el bucle
+     *  addInstance del llamador cuando el conjunto se monta de una vez (props del scatter). */
+    void setInstances(const std::vector<InstanceDataFloat>& data);
+
     /**
      * @brief Sube lo pendiente y dibuja TODAS las instancias en un solo draw.
      * @param ctx              contexto RHI (el PSO y la malla base ya deben estar atados).

@@ -64,6 +64,23 @@ std::vector<uint8_t> zlibStored(const std::vector<uint8_t>& raw) {
 
 } // namespace
 
+// Serializa IHDR+IDAT+IEND a disco (lo comparten writePNG y writePNG16).
+static bool writePNGChunks(const std::string& path, const std::vector<uint8_t>& ihdr,
+                           const std::vector<uint8_t>& raw) {
+    std::vector<uint8_t> out = {0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A};
+    chunk(out, "IHDR", ihdr);
+    chunk(out, "IDAT", zlibStored(raw));
+    chunk(out, "IEND", {});
+
+    std::error_code ec;
+    std::filesystem::path p(path);
+    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
+    std::ofstream f(path, std::ios::binary);
+    if (!f) return false;
+    f.write(reinterpret_cast<const char*>(out.data()), (std::streamsize)out.size());
+    return (bool)f;
+}
+
 bool writePNG(const std::string& path, int w, int h, int channels, const unsigned char* pixels) {
     if (w <= 0 || h <= 0 || (channels != 3 && channels != 4) || !pixels) return false;
 
@@ -82,18 +99,32 @@ bool writePNG(const std::string& path, int w, int h, int channels, const unsigne
     ihdr.push_back(channels == 4 ? 6 : 2);             // color type: 6=RGBA, 2=RGB
     ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0); // compression/filter/interlace
 
-    std::vector<uint8_t> out = {0x89,'P','N','G',0x0D,0x0A,0x1A,0x0A};
-    chunk(out, "IHDR", ihdr);
-    chunk(out, "IDAT", zlibStored(raw));
-    chunk(out, "IEND", {});
+    return writePNGChunks(path, ihdr, raw);
+}
 
-    std::error_code ec;
-    std::filesystem::path p(path);
-    if (p.has_parent_path()) std::filesystem::create_directories(p.parent_path(), ec);
-    std::ofstream f(path, std::ios::binary);
-    if (!f) return false;
-    f.write(reinterpret_cast<const char*>(out.data()), (std::streamsize)out.size());
-    return (bool)f;
+bool writePNG16(const std::string& path, int w, int h, const unsigned short* gray) {
+    if (w <= 0 || h <= 0 || !gray) return false;
+
+    // Grayscale 16-bit: samples are BIG-ENDIAN in the PNG datastream (PNG spec).
+    // Filtered scanlines, filter byte 0 (None).
+    std::vector<uint8_t> raw;
+    raw.reserve((size_t)h * (1 + (size_t)w * 2));
+    for (int y = 0; y < h; ++y) {
+        raw.push_back(0);
+        const unsigned short* row = gray + (size_t)y * w;
+        for (int x = 0; x < w; ++x) {
+            raw.push_back((uint8_t)(row[x] >> 8));
+            raw.push_back((uint8_t)(row[x] & 0xFF));
+        }
+    }
+
+    std::vector<uint8_t> ihdr;
+    putBE32(ihdr, (uint32_t)w); putBE32(ihdr, (uint32_t)h);
+    ihdr.push_back(16);                                // bit depth
+    ihdr.push_back(0);                                 // color type: 0=grayscale
+    ihdr.push_back(0); ihdr.push_back(0); ihdr.push_back(0); // compression/filter/interlace
+
+    return writePNGChunks(path, ihdr, raw);
 }
 
 } // namespace Haruka

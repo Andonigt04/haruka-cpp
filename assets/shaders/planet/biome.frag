@@ -22,6 +22,7 @@ layout(binding = 13) uniform sampler2DArray uTerrainNormal;
 layout(binding = 14) uniform sampler2D uZoneMap;
 
 #include "lib/terrain_material.glsl"
+#include "lib/prop_layer_debug.glsl"
 out vec4 fragColor;
 
 vec2 equirectUV(vec3 dir) {
@@ -125,6 +126,14 @@ void main() {
     vec3 up = normalize(vFragPos - uCenter.xyz);
     float elev = vClimate.x; // km
 
+    // LOD POR DISTANCIA DEL FRAGMENTO: el detalle de textura (triplanar, normal map, arena) es
+    // subpíxel a más de ~500 m — muestrearlo es coste sin resultado. Se apaga suavemente; el color
+    // del bioma (mapa horneado) queda, que es lo que se ve de lejos. El rango (300 m – 2,5 km) está
+    // pensado para el JUEGO A PIE, que es donde el fragmento pesaba: casi toda la pantalla es suelo
+    // a 0-4 km, y el triplanar en la mitad lejana era subpíxel pero se pagaba entero. En órbita todo
+    // supera 2,5 km → lod 0 → solo el color del bioma, que es lo único visible a esa distancia.
+    float lod = 1.0 - smoothstep(300.0, 2500.0, length(vFragPos));
+
     // Sample biome map for classification + color
     vec2 bUV = equirectUV(up);
     vec4 biomeSample = texture(uBiomeMap, bUV);
@@ -157,6 +166,16 @@ void main() {
     // declarado) manda el clima, que es el comportamiento de siempre.
     biomeCol = mix(biomeCol, matColor.rgb, matColor.a);
 
+    // EL SUELO DEL OCÉANO NO SE PINTA DE MATERIAL DE AGUA. El agua es la ESFERA 3D (water.frag); el
+    // material 0 de la tabla siempre gana bajo el nivel del mar y dibujaba una "capa de agua" azul
+    // sobre la textura del planeta — un segundo mar horneado que ni se ve (la esfera lo tapa) ni se
+    // quita al generar otro planeta, y que asoma con HARUKA_NOWATER. Donde `elev` (km) < 0 el
+    // fragmento está bajo el nivel del mar y debe leerse como FONDO MARINO (arena), no como agua. La
+    // transición suaviza justo en la orilla, donde la playa de arena (`sandW`) ya se encarga del
+    // borde; el `col` normal sigue pasando por textura/iluminación como el resto del suelo.
+    if (elev < 0.0)
+        biomeCol = mix(biomeCol, vec3(0.42, 0.38, 0.31), 1.0 - smoothstep(-0.4, 0.0, elev));
+
     // `tiling` es METROS POR TILE. Estaba usándose al revés (`vFragPos * tiling` con un scale de
     // 0.5 encima) → un tile cada 2 cm: muy por debajo del píxel a cualquier distancia, así que la
     // textura se promediaba a gris plano y no aportaba ni grano ni relieve. De ahí que el terreno
@@ -168,7 +187,7 @@ void main() {
     float tileScale = 1.0 / max(tiling, 0.01);
     // Una sola llamada: el material dice QUE CAPA, no que sampler. tile < 0 = sin textura (hielo,
     // sal, lava vidriada): luminancia neutra -> grano ~1 y superficie lisa.
-    vec3 tex = (tile < 0) ? vec3(0.45) : triplanarArr(uTerrainAlbedo, float(tile), wp, n, tileScale);
+    vec3 tex = (tile < 0 || lod < 0.01) ? vec3(0.45) : triplanarArr(uTerrainAlbedo, float(tile), wp, n, tileScale);
 
     // Macro variation brightness modulation
     vec4 macro = texture(uMacroVar, bUV);
@@ -180,26 +199,34 @@ void main() {
     // lo tapaba y la textura solo aportaba grano, que es como "no tener texturas".
     // `tex * 2.0` compensa el brillo medio de los PNG (~0.45); el peso sale de `grainAmt` (los
     // materiales sin textura quedan intactos: tex = 0.45 constante y mix ≈ identidad).
-    float texW = clamp(grainAmt * 0.55, 0.0, 0.75);
+    float texW = clamp(grainAmt * 0.55, 0.0, 0.75) * lod;
     vec3 col = mix(biomeCol, biomeCol * tex * 2.0, texW) * tint * clamp(grain, 0.75, 1.25);
     // La variación de macro solo en TIERRA: en el mar (liso, sin tiles) su patrón de manchas se
     // veía como círculos grises. step(0,elev) = 1 en tierra, 0 en mar.
     col *= 0.85 + 0.30 * macro.r * step(0.0, elev);
 
-    // Sand overlay at shoreline
-    float ocean = elev < 0.0 ? 1.0 : 0.0;
-    float shoreF = ocean * (1.0 - smoothstep(-0.2, 0.0, elev));
+    // Sand overlay at shoreline — a los DOS lados del nivel del mar. `elev` está en km. La rampa del
+    // lado del agua sube al acercarse a la superficie (de -30 m a -2 m: arena mojada en la orilla) y
+    // la del lado de tierra baja al alejarse (0 a +12 m: playa seca). Antes solo se pintaba bajo el
+    // agua y además con la rampa invertida, así que la orilla seca salía con el color del bioma de
+    // esa latitud y la costa no se leía como costa; ahora la línea del agua tiene playa en sus dos
+    // lados y se ve como costa incluso desde lejos.
+    float shoreF = smoothstep(-0.030, -0.002, elev) * (1.0 - smoothstep(0.0, 0.012, elev));
     float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
-    col = mix(col, triplanar(uSandAlbedo, wp, n, tileScale * 1.4), sandW);
+    if (lod > 0.01) col = mix(col, triplanar(uSandAlbedo, wp, n, tileScale * 1.4), sandW);
 
     // RELIEVE del material: la desviacion de su normal map. Solo la parte tangencial (la componente
     // a lo largo de n no inclina nada y si desnormaliza) y con fuerza baja: con sombreado cel un
     // relieve fuerte pica el terminador y saca manchas oscuras.
-    vec3 nrmDelta = (tile < 0) ? vec3(0.0)
-                               : triplanarArrNrm(uTerrainNormal, float(tile), wp, n, tileScale);
+    vec3 nrmDelta = (tile < 0 || lod < 0.01) ? vec3(0.0)
+                                             : triplanarArrNrm(uTerrainNormal, float(tile), wp, n, tileScale);
     if (dot(nrmDelta, nrmDelta) > 1e-8) {
         vec3 dTan = nrmDelta - dot(nrmDelta, n) * n;
-        n = normalize(n + 0.35 * detailAmt * dTan);
+        // El relieve del normal map se apaga con la distancia igual que la textura (`lod`): a
+        // 500-2500 m es subpíxel y muestrear su desviación a plena fuerza solo mete temblor y paga
+        // el mismo coste. Cerca de los pies (`lod`≈1) queda entero; `(0.5 + 0.5·lod)` mantiene al
+        // menos la mitad en el plano medio en vez de un corte brusco.
+        n = normalize(n + 0.35 * detailAmt * (0.5 + 0.5 * lod) * dTan);
         diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar con la normal nueva
     }
 
@@ -212,9 +239,9 @@ void main() {
     vec3 L = normalize(uLightDir.xyz);
     vec3 V = -vFragPos;
     V = length(V) > 1e-6 ? normalize(V) : vec3(0.0, 0.0, 1.0);
-    vec3 H = normalize(L + V);
+    vec3 hh = normalize(L + V);
     float sunD = clamp(diff * 1.6, 0.0, 1.0);
-    float sheen = pow(max(dot(n, H), 0.0), 24.0) * 0.30;
+    float sheen = pow(max(dot(n, hh), 0.0), 24.0) * 0.30;
     col = col * (uAmbient.xyz + sky * (0.35 + 0.65 * sunD) + uLightColor.xyz * sunD * 1.6)
         + uLightColor.xyz * sheen;
 
@@ -222,7 +249,12 @@ void main() {
     // Se aplican DESPUÉS de la iluminación y SIN texturas: lo que importa es el dato, no el grano.
     int dbg = int(uDebug.x);
     if (dbg == 1) {                       // elevación (km): ±5 km normalizado
-        col = heatmap(elev * 0.1 + 0.5);
+        // La elevación REAL del fragmento (radio desde el centro del planeta), no la base del
+        // vértice: así la vista de elevación refleja el relieve fino que la malla/clipmap dibujan
+        // (el `vClimate.x` es la base del bake, sin las octavas — la vista salía lisa donde la
+        // geometría tenía relieve, y eso despistaba al autor).
+        float realElevKm = (length(vFragPos - uCenter.xyz) - uExtra.w) * 0.001;
+        col = heatmap(realElevKm * 0.1 + 0.5);
     } else if (dbg == 2) {                // zonas del autor (paleta del mapa)
         col = hasZoneMap ? zoneRGB / 255.0 : vec3(0.3, 0.3, 0.35);
     } else if (dbg == 3) {                // bioma clasificado (mapa horneado)
@@ -233,11 +265,21 @@ void main() {
         col = heatmap(humid);
     } else if (dbg == 6) {                // CAPAS: TODAS a la vez, cada material con su color
         col = matDebugColor(matIdx);
-    } else if (dbg >= 10) {               // CAPA i: solo donde manda ese material (máscara).
+    } else if (dbg >= 10 && dbg < 40) {    // CAPA i: solo donde manda ese material (máscara).
         // El índice es la POSICIÓN en `surface.materials` (0=agua, 1=arena…), no el tile: así
         // los materiales sin textura (agua, hielo) también se pueden aislar.
         int layer = dbg - 10;
         col = (matIdx == layer) ? matDebugColor(layer) : vec3(0.05, 0.06, 0.09);
+    } else if (dbg >= 40) {               // ÁREA DE SPAWN de la capa de prop (dbg-40).
+        // Pinta dónde INSTALARÍA la capa: bandas de clima/forma × densityMap (uPropDensityMap se
+        // bindea con el mapa de la capa seleccionada). Es la MISMA regla que el placer, así la
+        // vista coincide con los objetos que aparecerían. Sin capas, planeta apagado.
+        int layer = dbg - 40;
+        if (layer >= 0 && layer < int(uPropCount.x)) {
+            col = heatmap(harukaPropCoverage(layer, humid, tempC, slope, bUV));
+        } else {
+            col = vec3(0.05, 0.06, 0.09);
+        }
     }
     fragColor = vec4(col, 1.0);
 }

@@ -4,6 +4,9 @@
 // GPU timer. Lifecycle/orchestration lives in application.cpp; the GL asset
 // caches in application_assets.cpp.
 
+// glm/gtx/* (usado por glm::rotation del pase de props) exige la macro en GLM moderno.
+#define GLM_ENABLE_EXPERIMENTAL
+
 #include <chrono>
 #include <cmath>
 #include "application.h"
@@ -16,6 +19,8 @@
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>   // glm::mat4_cast (orientar el prototipo al suelo, pase de props)
+#include <glm/gtx/quaternion.hpp>   // glm::rotation (eje→cuaternión: up del prototipo → dir radial)
 
 #include "game/planetary_system.h"
 #include "core/components/mesh_renderer_component.h"
@@ -27,9 +32,16 @@
 #include "settings/settings_manager.h"
 #include "io/image_writer.h"
 #include "core/asset_paths.h"
+#include "core/planet/prop_scatter.h"   // scatterPropsNear + IPropSphereField (scatter GLOBAL de props)
+#include "tools/procgraph/tree_mesh.h"
+#include "tools/procgraph/prop_mesh.h"
+#include "tools/procgraph/tree_textures.h"   // TreeCombineRGBNode (bake de material per-pixel de props)
+#include "tools/procgraph/proc_texture.h"    // evaluateToRGBA / evaluateToNormalMap / createRHIFromRGBA
 
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <ctime>
 #include <cstdio>
 #include <cstring>
@@ -106,6 +118,165 @@ struct PresentParams {
     float _pad[3];         // 20..32  (relleno std140)
 };
 static_assert(sizeof(PresentParams) == 32, "PresentParams std140 size mismatch");
+
+// UBO del pase de PROPS instanciados (binding 6) — espejo de `PropParams` en prop_inst.vert/frag.
+// vec3+float (16 B) + vec4 (16 B) → 32 B std140. Los escalares del material son del PROTOTIPO
+// (compartido por todas sus instancias), por eso viven aquí y no por-instancia.
+struct PropParams {
+    glm::vec3 wind;   float time;       // viento del clima (mundo, m/s) · segundos
+    glm::vec4 matPBR;                   // x=metallic y=roughness z=ao w=máscara de texturas (bits)
+};
+static_assert(sizeof(PropParams) == 32, "PropParams std140 size mismatch");
+
+// Material PER-PIXEL del prototipo de props: el MISMO grafo de texturas del editor de node graph
+// (perlin → altura → albedo por rampa + normal por derivadas + AO/roughness desde la altura),
+// horneado a CPU y subido a GPU SIN pasar por disco. El albedo MODULA el color de vértice (que
+// sigue llevando la identidad del material: corteza/copa, muro/tejado, tinte de roca), así el
+// per-pixel no pelea con el arte horneado en la malla. Devuelve la máscara en `mask` (0 = falló).
+struct PropMaterialBake {
+    Haruka::RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
+    float   metallicS  = 0.0f;
+    float   roughnessS = 0.5f;
+    float   aoS        = 1.0f;
+    uint32_t mask      = 0u;
+};
+
+static PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
+    using namespace Haruka::Tools::ProcGraph;
+    PropMaterialBake m;
+
+    // Tono por defecto: cálido-vegetal neutro de bajo contraste (el color de vértice manda).
+    const glm::vec3 tintA(1.04f, 1.00f, 0.92f), tintB(0.80f, 0.76f, 0.70f);
+    Graph g;
+    int h  = g.emplaceNode<PerlinNode>((int)seed, 7.0f);
+    int nr = g.emplaceNode<MapRangeNode>(-1.0f, 1.0f, 0.0f, 1.0f);
+    g.connect(h, 0, nr, 0);
+    auto ramp = [&](float a, float b) -> int {
+        auto n = std::make_unique<ColorRampNode>();
+        n->setStops({{0.0f, a}, {1.0f, b}});
+        return g.addNode(std::move(n));
+    };
+    int rR = ramp(tintA.r, tintB.r);
+    int rG = ramp(tintA.g, tintB.g);
+    int rB = ramp(tintA.b, tintB.b);
+    int combine = g.emplaceNode<TreeCombineRGBNode>();
+    g.connect(rR, 0, combine, 0);
+    g.connect(rG, 0, combine, 1);
+    g.connect(rB, 0, combine, 2);
+    if (!g.compile()) return m;
+
+    // Albedo PRE-GAMMA: la textura sube RGBA8 sin tag sRGB y prop_inst.frag linealiza con
+    // `pow(tex, 2.2)`. Guardar c^(1/2.2) hace que el muestreo recupere el tono horneado exacto.
+    int cmap[4] = {0, 1, 2, -1};
+    RGBAImage alb = evaluateToRGBA(g, combine, 0, size, size, 0, 0, 1, cmap);
+    const float invGamma = 1.0f / 2.2f;
+    for (size_t i = 0; i < alb.pixels.size(); i += 4) {
+        for (int c = 0; c < 3; ++c) {
+            const float v = alb.pixels[i + (size_t)c] / 255.0f;
+            alb.pixels[i + (size_t)c] = (uint8_t)(std::pow(v, invGamma) * 255.0f);
+        }
+        alb.pixels[i + 3] = 255;
+    }
+
+    // Normal desde la altura (derivadas), AO y roughness por-pixel desde la misma altura.
+    RGBAImage nrm = evaluateToNormalMap(g, nr, 0, size, size, 0, 0, 1, 1.5f);
+    RGBAImage ao(size, size);
+    RGBAImage rough(size, size);
+    const float dark  = 0.45f;                 // AO: hendiduras (h baja) oscuras
+    const float rLo   = 0.55f, rHi = 0.90f;    // roughness: valles más lisos, crestas ásperas
+    for (int y = 0; y < size; ++y) {
+        for (int x = 0; x < size; ++x) {
+            const float hh = g.evaluate(nr, 0, (float)x, (float)y, 0).asFloat();
+            const uint8_t av = (uint8_t)(glm::clamp(1.0f - hh * dark, 0.0f, 1.0f) * 255.0f);
+            ao.setPixel(x, y, av, av, av);
+            const uint8_t rv = (uint8_t)((rLo + (rHi - rLo) * hh) * 255.0f);
+            rough.setPixel(x, y, rv, rv, rv);
+        }
+    }
+
+    m.albedo   = createRHIFromRGBA(alb);
+    m.normal   = createRHIFromRGBA(nrm);
+    m.roughness = createRHIFromRGBA(rough);
+    m.ao       = createRHIFromRGBA(ao);
+    if (Haruka::RHI::valid(m.albedo))    m.mask |= kTexAlbedo;
+    if (Haruka::RHI::valid(m.normal))    m.mask |= kTexNormal;
+    if (Haruka::RHI::valid(m.roughness)) m.mask |= kTexRoughness;
+    if (Haruka::RHI::valid(m.ao))        m.mask |= kTexAO;
+    m.metallicS = 0.0f; m.roughnessS = rLo; m.aoS = 1.0f;
+    return m;
+}
+
+// UBO del pase de CONSTRUCCIÓN (binding 6) — espejo de `ConstParams` en construction_inst.frag.
+// Solo los escalares/máscara del material del GRUPO (el color por pieza va por instancia).
+struct ConstParams {
+    glm::vec4 matPBR;   // x=metallic y=roughness z=ao w=máscara de texturas (bits)
+};
+static_assert(sizeof(ConstParams) == 16, "ConstParams std140 size mismatch");
+
+// Material PER-PIXEL de un grupo de piezas instanciadas (objetos NPC/construcción): los MISMOS
+// slots que el pase de escena (MaterialComponent). mask == 0 → solo color por instancia.
+struct ConstGroupMaterial {
+    Haruka::RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
+    float   metallicS  = 0.0f;
+    float   roughnessS = 0.5f;
+    float   aoS        = 1.0f;
+    uint32_t mask      = 0u;
+};
+
+// Resuelve el material de un objeto instanciado → texturas cargadas + escalares + máscara.
+// Sin MaterialComponent (o sin slots) → mascara 0 (el aspecto de siempre por color de instancia).
+static ConstGroupMaterial resolveInstancedMaterial(const Haruka::MaterialComponent* mat) {
+    ConstGroupMaterial m;
+    if (!mat) return m;
+    m.metallicS = mat->metallic; m.roughnessS = mat->roughness; m.aoS = mat->ao;
+    auto bind = [&](const char* key, uint32_t unit, uint32_t bit, Haruka::RHI::TextureHandle& out) {
+        (void)unit;
+        auto it = mat->textures.find(key);
+        if (it == mat->textures.end() || it->second.empty()) return;
+        Haruka::RHI::TextureHandle tex = AppInternal::getOrLoadMaterialTexture(it->second);
+        if (!Haruka::RHI::valid(tex)) return;
+        out = tex; m.mask |= bit;
+    };
+    bind("albedo",    0, kTexAlbedo,    m.albedo);
+    bind("normal",    1, kTexNormal,    m.normal);
+    bind("metallic",  2, kTexMetallic,  m.metallic);
+    bind("roughness", 3, kTexRoughness, m.roughness);
+    bind("ao",        4, kTexAO,        m.ao);
+    return m;
+}
+
+// Clave de material para el agrupamiento: las rutas de texturas + los escalares. Dos piezas con la
+// misma malla y la MISMA clave comparten un draw (mismo bind de texturas y misma máscara).
+static std::string instancedMaterialKey(const Haruka::MaterialComponent* mat) {
+    std::string k;
+    if (!mat) return k;
+    static const char* kSlots[] = {"albedo", "normal", "metallic", "roughness", "ao"};
+    for (const char* s : kSlots) {
+        auto it = mat->textures.find(s);
+        if (it != mat->textures.end() && !it->second.empty()) { k += s; k += '='; k += it->second; k += ';'; }
+    }
+    k += "m"; { uint32_t bits; std::memcpy(&bits, &mat->metallic, 4); k += std::to_string(bits); }
+    k += "r"; { uint32_t bits; std::memcpy(&bits, &mat->roughness, 4); k += std::to_string(bits); }
+    k += "a"; { uint32_t bits; std::memcpy(&bits, &mat->ao, 4);        k += std::to_string(bits); }
+    return k;
+}
+
+// Grupo de piezas instanciadas (NPC/construcción): MISMA malla + MISMO material → un draw con un
+// bind de texturas. `meshKey` = modelPath, o "prim:N" para primitivas de edificio (cubos tejidos).
+struct ConstInstGroup {
+    std::string  meshKey;
+    int          primitive = -1;
+    ConstGroupMaterial mat;
+    std::vector<Haruka::InstanceDataFloat> instances;
+};
+
+// Vértice del PROTOTIPO de props (binding 0): Pos(0)/Normal(1)/Color(2)/Uv(9). El `Vertex` de
+// escena no tiene canal de color, así que el prototipo usa su propio layout (los shaders lo
+// leen en esas locations; el Uv a 9 no choca con el stream de instancia que ocupa loc 3-8).
+struct PropVertex {
+    glm::vec3 pos, normal, color;
+    glm::vec2 uv;
+};
 
 // UBO del pase de LLUVIA (binding 5). x=tiempo · y=lluvia[0,1] · z=aspecto · w=inclinación(viento).
 struct RainParams { glm::vec4 p; };
@@ -379,6 +550,10 @@ void Application::renderFrameContent() {
             dynNear = glm::clamp((float)((nearestAlt - 2000.0) * 0.05), 0.1f, (float)(nearestAlt * 0.5));
         _camera->setNearPlane(dynNear);
     }
+
+    // Props del mundo: refresca el scatter global si la cámara cruzó un tramo (caché por posición).
+    // Debe correr ANTES del render pass de escena, donde el pase instanciado lee m_propRegistry.
+    refreshPropScatter();
 
     // Cielo atmosférico: color por elevación solar + altitud (azul de día → cálido al
     // amanecer/atardecer → oscuro de noche → negro en el espacio). Fallback oscuro.
@@ -668,17 +843,22 @@ void Application::renderFrameContent() {
 
         // Cull face handled by the pipeline
 
+        // TOTAL = geometría que el frame podía dibujar ANTES de culling; RENDERED = lo que de verdad
+        // entró en el draw. Solo divergen donde hay cull de verdad: props (frustum/sub-pixel + tope
+        // del buffer) y agua (caras tras el planeta). El resto (objetos, piezas, terreno) dibuja
+        // todo lo que llega, así que TOTAL == RENDERED ahí.
         int renderedDrawCalls = 0;
         int renderedVertices  = 0;
         int renderedTriangles = 0;
+        int totalDrawCalls = 0;
+        int totalVertices  = 0;
+        int totalTriangles = 0;
 
-        // Piezas de CONSTRUCCIÓN (prop "construction"): en vez de 1 draw por pieza, se acumulan por
-        // MODELO y se dibujan INSTANCIADAS tras el bucle (1 draw por modelo). Ver el pase de abajo.
-        std::unordered_map<std::string, std::vector<Haruka::InstanceDataFloat>> constInstances;
-        // Lo mismo para las PRIMITIVAS de edificio (prop "building"): un edificio tejido son cientos o
-        // miles de cubos —las tablas/sillares del muro—, y por-objeto serían cientos o miles de draws.
-        // Se agrupan por primitiva → 1 draw por primitiva (por lote, ver la cota de instancias).
-        std::unordered_map<int, std::vector<Haruka::InstanceDataFloat>> primInstances;
+        // Piezas de CONSTRUCCIÓN (prop "construction"/"building"): en vez de 1 draw por pieza, se
+        // acumulan por (malla, material) y se dibujan INSTANCIADAS tras el bucle (1 draw por grupo).
+        // El material del grupo es el del MaterialComponent del objeto (per-pixel, MISMO aspecto que
+        // el pase de escena); dos piezas con la misma malla y el mismo material comparten el draw.
+        std::unordered_map<std::string, ConstInstGroup> constGroups;
 
         { HARUKA_PROFILE("scene.objects.draw");
         for (const auto& command : g_sceneRenderQueue) {
@@ -713,23 +893,43 @@ void Application::renderFrameContent() {
                                          lc["color"][2].get<float>());
             }
 
+            // El albedo del material TIÑE el color de la pieza (misma regla que el pase de escena:
+            // `baseColor × mat.albedo`). El material entero (texturas + escalares) viaja con el grupo.
+            const Haruka::MaterialComponent* mat = obj->material ? obj->material.get() : nullptr;
+            const glm::vec3 instColor = baseColor * (mat ? mat->albedo : glm::vec3(1.0f));
+
             // Pieza de construcción → al pase INSTANCIADO (no draw individual). Mismo model/color que
             // llevaría por-objeto, así se ve idéntica; el cull de arriba ya se aplicó.
             if (command.instanced && command.kind == Haruka::RenderKind::Model && !obj->modelPath.empty()) {
                 Haruka::InstanceDataFloat inst;
                 inst.model = AppInternal::getTransformMatrix(*obj, _camera->position);
-                inst.color = glm::vec4(baseColor, 1.0f);
+                inst.color = glm::vec4(instColor, 1.0f);
                 inst.scale = glm::vec3(obj->scale);
-                constInstances[obj->modelPath].push_back(inst);
+                const std::string key = obj->modelPath + "|" + instancedMaterialKey(mat);
+                ConstInstGroup& g = constGroups[key];
+                if (g.instances.empty()) {
+                    g.meshKey = obj->modelPath; g.primitive = -1;
+                    g.mat = resolveInstancedMaterial(mat);
+                }
+                g.instances.push_back(inst);
                 continue;
             }
-            // Primitiva de construcción/edificio → al mismo pase instanciado, agrupada por primitiva.
+            // Primitiva de construcción/edificio → al mismo pase instanciado, agrupada por (primitiva,
+            // material): un edificio tejido son cientos o miles de cubos —las tablas/sillares del muro—
+            // y por-objeto serían cientos o miles de draws.
             if (command.instanced && command.kind == Haruka::RenderKind::Primitive) {
                 Haruka::InstanceDataFloat inst;
                 inst.model = AppInternal::getTransformMatrix(*obj, _camera->position);
-                inst.color = glm::vec4(baseColor, 1.0f);
+                inst.color = glm::vec4(instColor, 1.0f);
                 inst.scale = glm::vec3(obj->scale);
-                primInstances[(int)command.primitive].push_back(inst);
+                const std::string key = std::string("prim:") + std::to_string((int)command.primitive) +
+                                        "|" + instancedMaterialKey(mat);
+                ConstInstGroup& g = constGroups[key];
+                if (g.instances.empty()) {
+                    g.meshKey.clear(); g.primitive = (int)command.primitive;
+                    g.mat = resolveInstancedMaterial(mat);
+                }
+                g.instances.push_back(inst);
                 continue;
             }
 
@@ -786,6 +986,9 @@ void Application::renderFrameContent() {
                     ++renderedDrawCalls;
                     renderedVertices  += model->getVertexCount();
                     renderedTriangles += model->getTriangleCount();
+                    ++totalDrawCalls;
+                    totalVertices  += model->getVertexCount();
+                    totalTriangles += model->getTriangleCount();
                     break;
                 }
                 case Haruka::RenderKind::MeshComponent: {
@@ -796,6 +999,9 @@ void Application::renderFrameContent() {
                     ++renderedDrawCalls;
                     renderedVertices  += obj->meshRenderer->getResidentVertexCount();
                     renderedTriangles += obj->meshRenderer->getResidentTriangleCount();
+                    ++totalDrawCalls;
+                    totalVertices  += obj->meshRenderer->getResidentVertexCount();
+                    totalTriangles += obj->meshRenderer->getResidentTriangleCount();
                     break;
                 }
                 case Haruka::RenderKind::Primitive: {
@@ -807,6 +1013,9 @@ void Application::renderFrameContent() {
                     ++renderedDrawCalls;
                     renderedVertices  += primitiveMesh->getVertexCount();
                     renderedTriangles += primitiveMesh->getTriangleCount();
+                    ++totalDrawCalls;
+                    totalVertices  += primitiveMesh->getVertexCount();
+                    totalTriangles += primitiveMesh->getTriangleCount();
                     break;
                 }
                 case Haruka::RenderKind::None:
@@ -816,7 +1025,7 @@ void Application::renderFrameContent() {
         } // scene.objects.draw
 
         // --- Pase INSTANCIADO de piezas de construcción (mismo render pass/depth que la escena) ---
-        if ((!constInstances.empty() || !primInstances.empty()) && RHI::valid(m_scenePSO)) {
+        if (!constGroups.empty() && RHI::valid(m_scenePSO)) {
             HARUKA_PROFILE("scene.construction.instanced");
             if (!RHI::valid(m_constInstPSO)) {                    // PSO instanciado (una vez)
                 using V = Haruka::Renderer::Vertex;
@@ -829,6 +1038,7 @@ void Application::renderFrameContent() {
                 pd.vertexLayout.attributes = {
                     { 0, (uint32_t)offsetof(V, Position), RHI::Format::RGB32F, 0 },
                     { 1, (uint32_t)offsetof(V, Normal),   RHI::Format::RGB32F, 0 },
+                    { 2, (uint32_t)offsetof(V, TexCoords), RHI::Format::RG32F,  0 },   // UV → material per-pixel
                 };
                 Haruka::Renderer::GPUInstancing::appendInstanceLayout(pd.vertexLayout, 1);  // binding 1 = instancias
                 pd.topology     = RHI::PrimitiveTopology::Triangles;
@@ -839,6 +1049,11 @@ void Application::renderFrameContent() {
             }
             if (RHI::valid(m_constInstPSO)) {
                 if (!_instancing) { _instancing = std::make_unique<GPUInstancing>(); _instancing->init(20000); }
+                if (!RHI::valid(m_constParamsUBO)) {              // UBO del material del grupo (binding 6)
+                    m_constParamsUBO = uboDev->createBuffer(RHI::BufferUsage::Uniform,
+                                                            sizeof(ConstParams), nullptr,
+                                                            RHI::BufferMemory::Dynamic);
+                }
                 sceneCtx->bindPipeline(m_constInstPSO);
                 sceneCtx->bindUniformBuffer(0, m_uboPerFrameH);   // view/proj + luces (mismo UBO que la escena)
 
@@ -852,48 +1067,373 @@ void Application::renderFrameContent() {
                     for (std::size_t i = 0; i < n; ++i)
                         _instancing->addInstance(src[off + i].model, src[off + i].color, src[off + i].scale);
                 };
+                // Enlaza las texturas del material del grupo + su UBO (escalares/máscara) → per-pixel.
+                auto bindGroupMaterial = [&](const ConstGroupMaterial& gm) {
+                    if (RHI::valid(gm.albedo))    sceneCtx->bindTexture(0, gm.albedo);
+                    if (RHI::valid(gm.normal))    sceneCtx->bindTexture(1, gm.normal);
+                    if (RHI::valid(gm.metallic))  sceneCtx->bindTexture(2, gm.metallic);
+                    if (RHI::valid(gm.roughness)) sceneCtx->bindTexture(3, gm.roughness);
+                    if (RHI::valid(gm.ao))        sceneCtx->bindTexture(4, gm.ao);
+                    ConstParams cp;
+                    cp.matPBR = glm::vec4(gm.metallicS, gm.roughnessS, gm.aoS, (float)gm.mask);
+                    uboDev->updateBuffer(m_constParamsUBO, 0, sizeof(cp), &cp);
+                    sceneCtx->bindUniformBuffer(6, m_constParamsUBO);
+                };
 
-                for (auto& kv : constInstances) {
-                    Model* model = AppInternal::getOrLoadModelCached(kv.first);
-                    if (!model) continue;
+                for (auto& kv : constGroups) {
+                    ConstInstGroup& g = kv.second;
+                    if (g.instances.empty()) continue;
+                    // Malla del modelo (pieza de obra) o primitiva de edificio (cubos tejidos).
+                    Model* model = g.primitive < 0 ? AppInternal::getOrLoadModelCached(g.meshKey) : nullptr;
+                    SimpleMesh* pm = g.primitive >= 0
+                                     ? AppInternal::getPrimitiveMesh((Haruka::PrimitiveType)g.primitive) : nullptr;
+                    if (g.primitive < 0 && !model) continue;
+                    if (g.primitive >= 0 && (!pm || pm->getIndexCount() == 0 ||
+                                             !RHI::valid(pm->vertexBuffer()) || !RHI::valid(pm->indexBuffer()))) continue;
                     // La carga/creación PEREZOSA de arriba crea recursos GL y deja el VAO a 0 → habría
                     // desbindeado el VAO del pipeline justo antes del draw (GL_INVALID_OPERATION).
                     // Re-bindear tras resolver la malla. Misma trampa que documenta el pase de escena.
                     sceneCtx->bindPipeline(m_constInstPSO);
-                    for (std::size_t off = 0; off < kv.second.size(); off += cap) {
-                        fillChunk(kv.second, off);
-                        model->drawInstancedRHI(*sceneCtx, *_instancing, 1);   // 1 draw por malla del modelo
-                        ++renderedDrawCalls;
-                    }
-                }
-                // Primitivas (los cubos de los muros tejidos): mismo camino que una malla del modelo —
-                // bindear su VBO/EBO y disparar el draw instanciado.
-                for (auto& kv : primInstances) {
-                    SimpleMesh* pm = AppInternal::getPrimitiveMesh((Haruka::PrimitiveType)kv.first);
-                    if (!pm || pm->getIndexCount() == 0) continue;
-                    if (!RHI::valid(pm->vertexBuffer()) || !RHI::valid(pm->indexBuffer())) continue;
-                    sceneCtx->bindPipeline(m_constInstPSO);   // ver la nota de arriba (creación perezosa)
-                    for (std::size_t off = 0; off < kv.second.size(); off += cap) {
-                        fillChunk(kv.second, off);
-                        sceneCtx->bindVertexBuffer(pm->vertexBuffer(), 0);
-                        sceneCtx->bindIndexBuffer(pm->indexBuffer());
-                        _instancing->render(sceneCtx, (uint32_t)pm->getIndexCount(), 1);
-                        ++renderedDrawCalls;
-                        renderedVertices  += pm->getVertexCount()   * (int)std::min(cap, kv.second.size() - off);
-                        renderedTriangles += pm->getTriangleCount() * (int)std::min(cap, kv.second.size() - off);
+                    bindGroupMaterial(g.mat);
+                    for (std::size_t off = 0; off < g.instances.size(); off += cap) {
+                        const std::size_t n = std::min(cap, g.instances.size() - off);
+                        fillChunk(g.instances, off);
+                        if (model) {
+                            model->drawInstancedRHI(*sceneCtx, *_instancing, 1);   // 1 draw por malla del modelo
+                            ++renderedDrawCalls;
+                            // Piezas de OBRA (casas/puentes): contaban 0 en el panel — se cuentan
+                            // aquí por instancia del lote (TOTAL == RENDERED: sin cull, todas entran).
+                            renderedVertices  += model->getVertexCount() * (int)n;
+                            renderedTriangles += model->getTriangleCount() * (int)n;
+                            ++totalDrawCalls;
+                            totalVertices  += model->getVertexCount() * (int)n;
+                            totalTriangles += model->getTriangleCount() * (int)n;
+                        } else {
+                            sceneCtx->bindVertexBuffer(pm->vertexBuffer(), 0);
+                            sceneCtx->bindIndexBuffer(pm->indexBuffer());
+                            _instancing->render(sceneCtx, (uint32_t)pm->getIndexCount(), 1);
+                            ++renderedDrawCalls;
+                            renderedVertices  += pm->getVertexCount()   * (int)n;
+                            renderedTriangles += pm->getTriangleCount() * (int)n;
+                            ++totalDrawCalls;
+                            totalVertices  += pm->getVertexCount()   * (int)n;
+                            totalTriangles += pm->getTriangleCount() * (int)n;
+                        }
                     }
                 }
                 sceneCtx->bindPipeline(m_scenePSO);   // restaura el PSO de escena (el cierre del pass lo asume)
             }
         }
 
-        if (RHI::valid(m_scenePSO)) sceneCtx->endRenderPass();
+        // --- Pase INSTANCIADO de PROPS del mundo (mismo render pass/depth que la escena) -------
+        // Objetos del scatter global (árboles/rocas/…) con un PROTOTIPO compartido por tipo: una
+        // malla (con color de vértice + UV) y un material del node graph (albedo/normal/…), y por
+        // instancia solo {transform, tinte, escala, estado}. 1 draw por prototipo vía GPUInstancing.
+        if (m_propScatterEnabled && m_propRegistry.prototypeCount() > 0 && RHI::valid(m_scenePSO)) {
+            HARUKA_PROFILE("scene.prop.instanced");
+            if (!RHI::valid(m_propInstPSO)) {                 // PSO instanciado de props (una vez)
+                const std::string vs = Shader::baseDir() + "shaders/prop_inst.vert";
+                const std::string fs = Shader::baseDir() + "shaders/prop_inst.frag";
+                RHI::PipelineDesc pd;
+                pd.vertexPath   = vs.c_str();
+                pd.fragmentPath = fs.c_str();
+                pd.vertexLayout.strides = { (uint32_t)sizeof(PropVertex) };  // binding 0 = prototipo
+                pd.vertexLayout.attributes = {
+                    { 0, (uint32_t)offsetof(PropVertex, pos),    RHI::Format::RGB32F, 0 },
+                    { 1, (uint32_t)offsetof(PropVertex, normal), RHI::Format::RGB32F, 0 },
+                    { 2, (uint32_t)offsetof(PropVertex, color),  RHI::Format::RGB32F, 0 },
+                    { 9, (uint32_t)offsetof(PropVertex, uv),     RHI::Format::RG32F,  0 },
+                };
+                Haruka::Renderer::GPUInstancing::appendInstanceLayout(pd.vertexLayout, 1);  // binding 1 = instancias
+                pd.topology     = RHI::PrimitiveTopology::Triangles;
+                pd.depth.test   = true;  pd.depth.write = true;
+                pd.blend.enable = false;
+                pd.cull         = RHI::CullMode::Back;
+                m_propInstPSO  = uboDev->createPipeline(pd);
+            }
 
-        _iRenderedDrawCalls = renderedDrawCalls;
-        _iRenderedVertices  = renderedVertices;
-        _iRenderedTriangles = renderedTriangles;
-        _iTotalVertices     = renderedVertices;
-        _iTotalTriangles    = renderedTriangles;
+            // UBO del pase (binding 6): viento + tiempo + escalares del material del prototipo.
+            if (!RHI::valid(m_propParamsUBO)) {
+                m_propParamsUBO = uboDev->createBuffer(RHI::BufferUsage::Uniform,
+                                                       sizeof(PropParams), nullptr, RHI::BufferMemory::Dynamic);
+            }
+
+            // Viento del CLIMA (m/s, marco del observador) y tiempo del cielo — el mismo que mueve
+            // las nubes (sky.frag). Sin WorldSystem: viento en calma.
+            glm::vec3 windWorld(0.0f, 0.0f, 0.0f);
+            if (_worldSystem)
+                windWorld = _worldSystem->getWind(glm::dvec3(_camera->position));
+            static const auto s_propT0 = std::chrono::steady_clock::now();
+            const float propTime = std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - s_propT0).count();
+
+            if (RHI::valid(m_propInstPSO)) {
+                if (!_instancing) { _instancing = std::make_unique<GPUInstancing>(); _instancing->init(20000); }
+                sceneCtx->bindPipeline(m_propInstPSO);
+                sceneCtx->bindUniformBuffer(0, m_uboPerFrameH);    // view/proj + luces (mismo UBO que la escena)
+
+                // Frustum culling: base de la cámara + medias tangentes de los FOV. Se calculan UNA vez
+                // por frame y las instancias se testean contra los 4 planos laterales con una esfera
+                // (radio ~ tamaño del prop) → no se sube al buffer lo que no puede verse. Sin esto, en
+                // órbita o mirando lejos se dibujaban las 20000 del buffer aunque estuvieran fuera de
+                // pantalla (y el tope del buffer robaba instancias visibles a las no visibles).
+                const glm::vec3 camF  = _camera->getFront();
+                const glm::vec3 camU  = _camera->getUp();
+                const glm::vec3 camR  = glm::normalize(glm::cross(camF, camU));
+                const float tanV = std::tan(glm::radians(_camera->zoom * 0.5f));
+                const float tanH = tanV * std::max(aspect, 0.01f);
+                // Test de esfera contra los 4 planos laterales del frustum. El radio cubre el prop
+                // entero (árbol ~6.5 m, casa/roca menos; ×scale) con margen para no hacer "pop" en el
+                // borde de pantalla. Lo usan el draw y el snapshot de debug (mismo criterio).
+                //
+                // Además, CULL POR TAMAÑO EN PANTALLA (sub-pixel): en órbita un árbol (radio ~6.5 m)
+                // cubre <1 px y se dibujaba igual, saturando el buffer con ~20000 instancias invisibles.
+                // El tamaño angular del prop (radio/distancia, en fracción del medio FOV) → píxeles →
+                // si cubre < kMinPropPixels se culla. Esto NO es un gate por altura: un prop GIGANTE
+                // (radio de km) crece su tamaño angular con su radio y se ve desde cualquier órbita.
+                const float vpPx = std::max((float)height, 1.0f);
+                const float kMinPropPixels = 1.0f;   // radio ≥ ~1 px en pantalla (diámetro ~2 px)
+                auto propCull = [&](const glm::vec3& posF, float radius) -> uint8_t {
+                    const float dist = glm::length(posF);
+                    if (dist <= 1e-3f) return 0;
+                    const float fwd = glm::dot(posF, camF);
+                    if (fwd < -radius) return 1;                      // detrás de la cámara
+                    if (std::abs(glm::dot(posF, camR)) > fwd * tanH + radius) return 1;
+                    if (std::abs(glm::dot(posF, camU)) > fwd * tanV + radius) return 1;
+                    if ((radius / dist) / tanV * vpPx < kMinPropPixels) return 2;   // sub-pixel
+                    return 0;
+                };
+
+                // Centro/radio del planeta y cámara: se calculan UNA vez (antes `getActivePlanet` se
+                // llamaba dentro del bucle, por instancia).
+                const glm::dvec3 camD = glm::dvec3(_camera->position);
+                glm::dvec3 planetC; double planetR = 6371000.0;
+                const bool hasPlanet = _planetarySystem && _planetarySystem->getActivePlanet(planetC, planetR);
+                if (!hasPlanet) planetC = glm::dvec3(0.0);
+                const glm::vec3 up(0.0f, 1.0f, 0.0f);
+                const int protoCount = m_propRegistry.prototypeCount();
+
+                // Buckets de instancias VISIBLES por prototipo (reusados entre frames). Antes el
+                // bucle era O(prototipos × instancias): por cada prototipo se recorría el registro
+                // ENTERO filtrando `io.prototype != pi`. Con ~61k celdas del scatter y ~4 prototipos
+                // eso son ~160k iteraciones/frame con cull+mat4 cada una — el grueso de los ~39 ms
+                // que medía `scene.prop.instanced`. Ahora se barre UNA vez (O(N)) y se agrupa.
+                static std::vector<std::vector<Haruka::InstanceDataFloat>> s_propBuckets;
+                static std::vector<int> s_aliveCounts;
+                static std::vector<int> s_drawnCounts;
+                if ((int)s_propBuckets.size() != protoCount) {
+                    s_propBuckets.resize((size_t)protoCount);
+                    s_aliveCounts.resize((size_t)protoCount);
+                    s_drawnCounts.resize((size_t)protoCount);
+                }
+                for (int pi = 0; pi < protoCount; ++pi) {
+                    s_propBuckets[(size_t)pi].clear();
+                    s_aliveCounts[(size_t)pi] = 0;
+                    s_drawnCounts[(size_t)pi] = 0;
+                }
+
+                // Snapshot de debug para la jerarquía del editor: se reconstruye cada 10 frames
+                // (~6 Hz) — 40k entradas/instancia con asignaciones por frame cuestan ~5 ms y el
+                // árbol es una vista de debug; a 6 Hz amortiza a <1 ms. El motor sigue marcando
+                // hasPerPixel en el draw, solo que con la misma cadencia que el snapshot.
+                static int s_propDbgFrame = 0;
+                const bool snapshotDbg = m_propDebugEnabled && (++s_propDbgFrame % 10 == 1);
+                if (snapshotDbg) {
+                    m_propScatterDebug.clear();
+                    m_propScatterDebug.reserve((size_t)protoCount);
+                    for (int pi = 0; pi < protoCount; ++pi) {
+                        PropPrototypeDebug dbg;
+                        dbg.name = m_propRegistry.prototype(pi).name;
+                        m_propScatterDebug.push_back(std::move(dbg));
+                    }
+                }
+
+                // --- 1. Barrido ÚNICO sobre las instancias (O(N)): cull + transform + agrupar por
+                // prototipo (y, si el editor lo pide, el snapshot de debug en línea con el MISMO
+                // cull, sin repetirlo).
+                const int bufCap = _instancing->getMaxInstances();
+                const glm::dvec3 camToCenter = planetC - camD;   // una resta dvec por frame, no por instancia
+                std::vector<int> aliveSeenPerProto((size_t)protoCount, 0);
+                for (const auto& io : m_propRegistry.instances()) {
+                    const int pi = io.prototype;
+                    if (pi < 0 || pi >= protoCount) continue;
+                    const bool alive = io.state == (uint32_t)Haruka::InstancedObjectState::Alive;
+
+                    uint8_t cull = 0;
+                    if (alive) {
+                        ++s_aliveCounts[(size_t)pi];
+                        const glm::vec3 posF = glm::vec3(
+                            camToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
+                        cull = propCull(posF, io.scale * 8.0f);
+                        if (cull == 0) {
+                            glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
+                            m *= glm::mat4_cast(glm::rotation(up, io.dir));
+                            m = glm::rotate(m, io.yaw, io.dir);
+                            m = glm::scale(m, glm::vec3(io.scale));
+                            Haruka::InstanceDataFloat inst;
+                            inst.model = m;
+                            inst.color = glm::vec4(io.tint, 1.0f);
+                            inst.scale = glm::vec3(io.scale);
+                            s_propBuckets[(size_t)pi].push_back(inst);
+                        }
+                    }
+
+                    if (snapshotDbg) {
+                        PropPrototypeDebug& dbg = m_propScatterDebug[(size_t)pi];
+                        ++dbg.totalInstances;
+                        PropInstanceDebug idbg;
+                        idbg.seed = io.seed;
+                        idbg.state = io.state;
+                        idbg.cullReason = cull;
+                        idbg.culled = alive && cull != 0;
+                        idbg.rendered = alive && cull == 0 && aliveSeenPerProto[(size_t)pi] < bufCap;
+                        if (idbg.rendered) ++dbg.renderedInstances;
+                        if (alive && cull == 0) ++aliveSeenPerProto[(size_t)pi];
+                        dbg.instances.push_back(idbg);
+                    }
+                }
+
+                for (int pi = 0; pi < protoCount; ++pi) {
+                    const Haruka::InstancedPrototype& proto = m_propRegistry.prototype(pi);
+                    if (proto.name.empty()) continue;
+
+                    // 1. Malla prototipo (una vez): horneada con la seed del tipo. La cache la clavea
+                    //    el NOMBRE del prototipo (el "tipo" del scatter): árbol por TreeMeshNode, y roca/
+                    //    casa por los bakes procedurales de prop_mesh.h (misma paridad determinista).
+                    auto itMesh = m_propProtoMesh.find(proto.name);
+                    if (itMesh == m_propProtoMesh.end()) {
+                        Haruka::Tools::ProcGraph::TreeMeshData tm;
+                        const std::string& nm = proto.name;
+                        const bool isRock  = nm.find("rock")  != std::string::npos ||
+                                             nm.find("roca")  != std::string::npos;
+                        const bool isHouse = nm.find("house") != std::string::npos ||
+                                             nm.find("casa")  != std::string::npos;
+                        if (isRock) {
+                            tm = Haruka::Tools::ProcGraph::bakeRockMesh((int)proto.meshSeed, 1.0f, 0.72f);
+                        } else if (isHouse) {
+                            tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
+                        } else {
+                            Haruka::Tools::ProcGraph::Graph g;
+                            int tree = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
+                                (int)proto.meshSeed, 6.5f, 0.35f, 1.0f, 8);
+                            g.compile();
+                            if (!Haruka::Tools::ProcGraph::bakeTreeMesh(g, tree, tm)) {
+                                // bakeTreeMesh devuelve la malla en `out` solo si el nodo es válido;
+                                // el dato queda vacío si falla el dynamic_cast.
+                            }
+                        }
+                        if (!tm.positions.empty()) {
+                            // Sube a GPU con el layout del prototipo (Pos/Normal/Color/Uv).
+                            std::vector<PropVertex> verts;
+                            verts.reserve(tm.positions.size());
+                            for (size_t vi = 0; vi < tm.positions.size(); ++vi) {
+                                PropVertex pv;
+                                pv.pos    = tm.positions[vi];
+                                pv.normal = (vi < tm.normals.size()) ? tm.normals[vi]
+                                                                      : glm::vec3(0, 1, 0);
+                                pv.color  = (vi < tm.colors.size()) ? tm.colors[vi]
+                                                                    : glm::vec3(1.0f);
+                                pv.uv     = (vi < tm.uvs.size()) ? tm.uvs[vi] : glm::vec2(0.0f);
+                                verts.push_back(pv);
+                            }
+                            PropPrototypeGpu pg;
+                            pg.vbo = uboDev->createBuffer(RHI::BufferUsage::Vertex,
+                                                          verts.size() * sizeof(PropVertex), verts.data());
+                            pg.ebo = uboDev->createBuffer(RHI::BufferUsage::Index,
+                                                          tm.indices.size() * sizeof(unsigned int),
+                                                          tm.indices.data());
+                            pg.indexCount = (uint32_t)tm.indices.size();
+                            pg.vertexCount = (uint32_t)verts.size();
+                            // 2. Material PER-PIXEL del prototipo (una vez): texturas horneadas con la
+                            //    seed del tipo y subidas a GPU. mask != 0 → el pase enlaza texturas y
+                            //    el editor deja de marcar "⚠ sin per-pixel" en la jerarquía.
+                            PropMaterialBake pm = bakePropPrototypeMaterial(proto.meshSeed);
+                            pg.albedo    = pm.albedo;
+                            pg.normal    = pm.normal;
+                            pg.metallic  = pm.metallic;
+                            pg.roughness = pm.roughness;
+                            pg.ao        = pm.ao;
+                            pg.metallicS = pm.metallicS;
+                            pg.roughnessS = pm.roughnessS;
+                            pg.aoS       = pm.aoS;
+                            pg.mask      = pm.mask;
+                            itMesh = m_propProtoMesh.emplace(proto.name, pg).first;
+                        }
+                    }
+                    if (itMesh == m_propProtoMesh.end()) continue;   // bake fallido
+                    const PropPrototypeGpu& pg = itMesh->second;
+                    if (!RHI::valid(pg.vbo) || !RHI::valid(pg.ebo) || pg.indexCount == 0) continue;
+
+                    // Per-pixel REAL del prototipo (mask != 0 → texturas enlazadas en el draw). Se marca
+                    // ANTES del `continue` de bucket vacío: un prototipo sin instancias visibles este
+                    // frame no deja de tener material per-pixel en la jerarquía del editor.
+                    if (snapshotDbg)
+                        m_propScatterDebug[(size_t)pi].hasPerPixel = pg.mask != 0u;
+
+                    // 2. Stats + buffer del prototipo desde el barrido ÚNICO de arriba. TOTAL = TODAS
+                    //    las instancias vivas (lo que el frame podía dibujar sin cull); RENDERED = las
+                    //    que entraron al buffer tras el cull + el tope (20000). `setInstances` recorta
+                    //    el exceso igual que hacía `addInstance`.
+                    const int aliveN = s_aliveCounts[(size_t)pi];
+                    totalVertices  += pg.vertexCount * aliveN;
+                    totalTriangles += (pg.indexCount / 3) * aliveN;
+                    ++totalDrawCalls;
+                    if (s_propBuckets[(size_t)pi].empty()) continue;
+                    _instancing->setInstances(s_propBuckets[(size_t)pi]);
+                    const int drawnN = _instancing->getInstanceCount();
+                    s_drawnCounts[(size_t)pi] = drawnN;
+                    renderedVertices  += pg.vertexCount * drawnN;
+                    renderedTriangles += (pg.indexCount / 3) * drawnN;
+
+                    // 3. Material PER-PIXEL del PROTOTIPO: texturas horneadas (bakePropPrototypeMaterial)
+                    //    enlazadas a los slots 0..4; la máscara y los escalares van en `PropParams.matPBR`.
+                    //    mask == 0 → fallback al color por vértice (tinte por instancia) sin texturas.
+                    PropParams pp{};
+                    pp.wind = windWorld;
+                    pp.time = propTime;
+                    pp.matPBR = glm::vec4(pg.metallicS, pg.roughnessS, pg.aoS, (float)pg.mask);
+
+                    // 4. Un draw con todas las instancias del prototipo. El buffer de instancias es
+                    //    fijo (m_maxInstances) y setInstances recorta el exceso — un draw por tipo.
+                    sceneCtx->bindPipeline(m_propInstPSO);   // re-bind (creación perezosa de buffers)
+                    sceneCtx->bindVertexBuffer(pg.vbo, 0);
+                    sceneCtx->bindIndexBuffer(pg.ebo);
+                    if (RHI::valid(pg.albedo))    sceneCtx->bindTexture(0, pg.albedo);
+                    if (RHI::valid(pg.normal))    sceneCtx->bindTexture(1, pg.normal);
+                    if (RHI::valid(pg.metallic))  sceneCtx->bindTexture(2, pg.metallic);
+                    if (RHI::valid(pg.roughness)) sceneCtx->bindTexture(3, pg.roughness);
+                    if (RHI::valid(pg.ao))        sceneCtx->bindTexture(4, pg.ao);
+                    uboDev->updateBuffer(m_propParamsUBO, 0, sizeof(pp), &pp);
+                    sceneCtx->bindUniformBuffer(6, m_propParamsUBO);
+                    _instancing->render(sceneCtx, pg.indexCount, 1);
+                    ++renderedDrawCalls;
+                }
+
+                // [DIAGNÓSTICO TEMPORAL] cada 120 frames: N instancias, y por prototipo vivos /
+                // en bucket / dibujados. Pínchalo: si N=0 el registro está vacío (scatter), si
+                // vivos>0 y bucket=0 el cull lo está tumbando todo, si bucket>0 pero no hay draw
+                // el problema está en el bucle de dibujo/PSO. Quitar tras localizar.
+                {
+                    static int s_diagFrame = 0;
+                    if (++s_diagFrame % 120 == 1) {
+                        std::string line;
+                        char tmp[96];
+                        for (int di = 0; di < protoCount; ++di) {
+                            std::snprintf(tmp, sizeof(tmp), " p%d:%d/%d/%d", di,
+                                          s_aliveCounts[(size_t)di],
+                                          (int)s_propBuckets[(size_t)di].size(),
+                                          s_drawnCounts[(size_t)di]);
+                            line += tmp;
+                        }
+                        HARUKA_LOGI("PropDiag", "protoCount=%d instances=%zu%s", protoCount,
+                                    m_propRegistry.instances().size(), line.c_str());
+                    }
+                }
+                sceneCtx->bindPipeline(m_scenePSO);   // restaura el PSO de escena (el cierre lo asume)
+            }
+        }
+
+        if (RHI::valid(m_scenePSO)) sceneCtx->endRenderPass();
 
         // Terrain streaming: update LOD + render planet chunks
         if (_planetarySystem) {
@@ -991,7 +1531,25 @@ void Application::renderFrameContent() {
                         glm::dvec3(_camera->position), projC, viewC);
                 }
             }
+
+            // Stats del TERRENO (malla base + clipmap + agua): se suman a los contadores del frame
+            // y se guardan para el panel. TOTAL == RENDERED aquí (el planeta dibuja todo lo que
+            // tiene; solo el agua culla las caras tras el planeta, que es lo que refleja el desglose).
+            m_terrainStats = _planetarySystem->getTerrainRenderStats();
+            totalDrawCalls  += m_terrainStats.drawCalls;
+            totalVertices   += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices + m_terrainStats.waterVertices);
+            totalTriangles  += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles + m_terrainStats.waterTriangles);
+            renderedDrawCalls += m_terrainStats.drawCalls;
+            renderedVertices  += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices + m_terrainStats.waterVertices);
+            renderedTriangles += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles + m_terrainStats.waterTriangles);
         }
+
+        _iRenderedDrawCalls = renderedDrawCalls;
+        _iRenderedVertices  = renderedVertices;
+        _iRenderedTriangles = renderedTriangles;
+        _iTotalDrawCalls    = totalDrawCalls;
+        _iTotalVertices     = totalVertices;
+        _iTotalTriangles    = totalTriangles;
     }
 
     if (_gameInterface && _gameInterface->onRenderWorld && _camera) {
@@ -1038,6 +1596,66 @@ void Application::renderFrameContent() {
         m_precip.render(pp);
 
     }
+
+#ifdef HARUKA_MOD_FLUIDS
+    // --- HITO 2: RÍOS/LAGOS + SPLASH (FluidHost) -------------------------------------------
+    // Dibuja en el pase de escena DESPUÉS del planeta y la precipitación: el color/depth de la
+    // escena ya están completos, que es lo que el modo superficie del fluido necesita para sembrar
+    // refracción y oclusión (blit de escena). El binding 0 se restaura al UBO per-frame del
+    // engine (el planeta lo pisa con su SimplePlanetUBO; softbody/fluido esperan PerFrameData).
+    if (!_fluidHost) _fluidHost = std::make_unique<Haruka::FluidHost>();
+    if (_fluidHost && _planetarySystem && _camera) {
+        glm::dvec3 pc; double pr;
+            if (_planetarySystem->getActivePlanet(pc, pr)) {
+                _fluidHost->planetCenter = pc;
+                _fluidHost->planetRadius = pr;
+                _fluidHost->hasPlanet    = true;
+            }
+            _fluidHost->terrainHeightFn = [this](const glm::dvec3& wp) -> double {
+                return _planetarySystem->sampleTerrainHeight(wp);
+            };
+            const auto* tp = _planetarySystem->activeTerrestrial();
+            if (tp) {
+                _fluidHost->tidalSeaAlongUpFn = [this](const glm::dvec3& dir) -> double {
+                    if (!_planetarySystem) return 0.0;
+                    const auto* t = _planetarySystem->activeTerrestrial();
+                    if (!t) return 0.0;
+                    const auto& bodies = t->tidalBodies();
+                    if (bodies.empty()) return 0.0;
+                    glm::dvec3 pc2; double R;
+                    if (!_planetarySystem->getActivePlanet(pc2, R)) return 0.0;
+                    const double scale  = (R * R / 9.8) * 15.0;   // misma escala que planet.cpp:2686
+                    const double floorD = R * 0.5;                 // mismo suelo que uTide.z
+                    double h = 0.0;
+                    for (const auto& b : bodies) {
+                        const glm::dvec3 surf = dir * R;
+                        const glm::dvec3 to   = b.posCenter - surf;
+                        const double D = glm::max(glm::length(to), floorD);
+                        const double L = glm::max(glm::length(b.posCenter), 1.0);
+                        const double c = glm::dot(dir, b.posCenter) / L;
+                        h += b.gm * (3.0 * c * c - 1.0) / (2.0 * D * D * D);
+                    }
+                    return h * scale;
+                };
+            } else {
+                _fluidHost->tidalSeaAlongUpFn = nullptr;
+            }
+            _fluidHost->rainPerSec = (m_rainAmount > 0.01f) ? m_rainAmount : 0.0f;
+            _fluidHost->update(deltaTime > 0.0f ? deltaTime : 0.016f,
+                               glm::dvec3(_camera->position));
+
+            int fw = (int)width, fh = (int)height;
+            if (m_postActive && _postScene) { fw = m_postW; fh = m_postH; }
+            // Binding 0 = PerFrameData (m_uboPerFrameH): las binds de UBO son por contexto GL
+            // (globales al mismo device), así que un contexto local recién creado lo deja puesto
+            // para los draws de softbody/fluido de abajo.
+            if (RHI::Device* dev = RHI::device()) {
+                RHI::Context* fluidCtx = dev->beginFrame();
+                if (fluidCtx) fluidCtx->bindUniformBuffer(0, m_uboPerFrameH);
+            }
+            _fluidHost->render(glm::dvec3(_camera->position), fw, fh, sceneTargetPass);
+        }
+#endif
 
     // --- Post-processing composite -----------------------------------------
     // Resolve the offscreen scene target to the screen: upscales the render-scaled
@@ -1135,6 +1753,154 @@ void Application::renderFrameContent() {
     }
 
     // GPU timer disabled during RHI migration
+}
+
+// Implementación del campo ESFÉRICO que pide el scatter global: el planeta activo (el mismo que
+// pinta el terreno). `TerrestrialPlanet` ya expone la MISMA ecología/cota por dirección; aquí solo
+// se redirige por dirección (el parche plano del placer viejo quedó obsoleto).
+namespace {
+struct PlanetSphereField : Haruka::Planet::IPropSphereField {
+    const Haruka::Planet::TerrestrialPlanet* planet = nullptr;
+
+    Haruka::FieldSample sampleAt(const glm::vec3& dir) const override {
+        return planet ? planet->fieldSampleAt(dir) : Haruka::FieldSample{};
+    }
+    float heightAt(const glm::vec3& dir) const override {
+        return planet ? (float)planet->sampleHeight(dir) : 0.0f;
+    }
+    float mapDensityAt(const glm::vec3& dir, const std::string& mapPath) const override {
+        return planet ? planet->densityMapAt(mapPath, dir) : 1.0f;
+    }
+    std::string zoneAt(const glm::vec3& dir) const override {
+        return planet ? planet->zoneNameAt(dir) : std::string{};
+    }
+    std::string layerAt(const glm::vec3& dir) const override {
+        return planet ? planet->materialNameAt(dir) : std::string{};
+    }
+};
+} // namespace
+
+// Scatter GLOBAL de props (Todo 5): rellena `m_propRegistry` desde el campo del planeta activo.
+// Cada planeta registra sus PROTOTIPOS una vez (uno por `mesh` de sus capas); las INSTANCIAS se
+// re-enumeran por demanda con `scatterPropsNear` cuando la cámara cruza un tramo (determinismo por
+// CELDA MUNDIAL → el mismo árbol siempre en el mismo sitio, sin parche tangente).
+void Application::refreshPropScatter() {
+    if (!m_propScatterEnabled) {
+        if (m_propRegistry.prototypeCount() > 0) m_propRegistry.reset();
+        m_propScatterDebug.clear();
+        m_propScatterPlanet.clear();
+        m_propScatterLastCam = {1e300, 1e300, 1e300};
+        return;
+    }
+    if (!_camera || !_planetarySystem) return;
+    const glm::dvec3 camPos = glm::dvec3(_camera->position);
+
+    glm::dvec3 planetC; double planetR = 0.0;
+    if (!_planetarySystem->getActivePlanet(planetC, planetR)) {
+        if (m_propRegistry.prototypeCount() > 0) m_propRegistry.reset();
+        m_propScatterPlanet.clear();
+        return;
+    }
+    const Haruka::Planet::TerrestrialPlanet* planet = _planetarySystem->activeTerrestrial();
+    const std::string pname = _planetarySystem->getActivePlanetName();
+    if (!planet) {                                   // planeta orbital sin superficie = sin props
+        if (m_propRegistry.prototypeCount() > 0) m_propRegistry.reset();
+        m_propScatterPlanet.clear();
+        m_propScatterLastCam = {1e300, 1e300, 1e300};
+        return;
+    }
+    if (pname != m_propScatterPlanet) {
+        m_propRegistry.reset();   // planeta nuevo: re-registrar prototipos
+        m_propScatterPlanet = pname;
+    }
+
+    // Solo re-enumera cuando la cámara cruza un tramo desde la última muestra. El scatter (~61k
+    // celdas × muestreo del campo) es caro (~121 ms); sin topes re-corría a cada paso al volar.
+    // El tramo es ADAPTATIVO a la velocidad: al andar bastan 30 m, pero al volar/órbita el tope
+    // fijo de 0,5 s producía un bajón de ~121 ms cada medio segundo (1-8 fps). Con el tramo ~1,5 s
+    // de viaje, el refresh se espacia a la vez que la cámara se mueve rápido. Las celdas son
+    // MUNDIALES y deterministas: entran/salen por delante/detrás sin "tp", solo con algo de retraso.
+    static std::chrono::steady_clock::time_point s_lastT = std::chrono::steady_clock::now();
+    const auto nowT = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(nowT - s_lastT).count();
+    const double distCam = glm::length(camPos - m_propScatterLastCam);
+    const double speed   = elapsed > 1e-3 ? distCam / elapsed : 0.0;
+    const double refreshM = std::max(30.0, speed * 1.5);
+    const bool tooSoon = elapsed < 0.5;
+    if ((distCam < refreshM || tooSoon) &&
+        !m_propScatterPlanet.empty() && m_propRegistry.prototypeCount() > 0)
+        return;
+    m_propScatterLastCam = camPos;
+    s_lastT = nowT;
+
+    // El campo real del planeta + la tabla de capas que DECLARA (orden = prioridad de instalación).
+    PlanetSphereField field;
+    field.planet = planet;
+    const Haruka::Planet::PropLayerTable& table = planet->propLayers();
+    if (table.layers.empty()) return;   // sin capas declaradas = sin props
+
+    // Registra UN prototipo por mesh de capa (malla compartida por todas sus instancias).
+    // `meshSeed` fija el bake determinista de la malla del prototipo (p.ej. bakeTreeMesh).
+    for (const auto& L : table.layers) {
+        if (L.mesh.empty()) continue;
+        bool found = false;
+        for (int i = 0; i < m_propRegistry.prototypeCount(); ++i)
+            if (m_propRegistry.prototype(i).name == L.mesh) { found = true; break; }
+        if (found) continue;
+        Haruka::InstancedPrototype p;
+        p.name     = L.mesh;
+        // meshSeed determinista (hash32 de planeta+mesh): el bake de la malla prototipo (bakeTreeMesh)
+        // es reproducible en cualquier plataforma/ejecución — un árbol es SIEMPRE el mismo árbol.
+        uint32_t h = 2166136261u;
+        for (const char c : m_propScatterPlanet) h = (h ^ (uint8_t)c) * 16777619u;
+        for (const char c : L.mesh)             h = (h ^ (uint8_t)c) * 16777619u;
+        p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
+        p.lodLevel = 0;
+        m_propRegistry.addPrototype(p);
+    }
+    if (m_propRegistry.prototypeCount() == 0) return;
+
+    // Parámetros del scatter: bandas hasta el horizonte + semilla/radio del planeta activo.
+    Haruka::Planet::PropScatterParams params;
+    params.radius = planetR;
+    params.seed   = planet->config().seed ? planet->config().seed : 1u;
+
+    // Coloca las instancias (deterministas por celda) y las traduce al registro.
+    const std::vector<Haruka::Planet::ScatteredProp> placed =
+        Haruka::Planet::scatterPropsNear(field, camPos, planetC, params, table);
+
+    // El scatter regenera las instancias desde CERO en cada refresco: preserva el ESTADO que el
+    // juego marcó (destruido/rebrotando) por seed determinista — el árbol que tumbaste sigue caído
+    // al volver, en vez de reaparecer porque el registro se recalculó.
+    std::unordered_map<uint32_t, std::pair<uint32_t, float>> savedState;
+    for (const auto& io : m_propRegistry.instances())
+        if (io.state != (uint32_t)Haruka::InstancedObjectState::Alive)
+            savedState[io.seed] = { io.state, io.regrow };
+
+    std::vector<Haruka::InstancedObject> objs;
+    objs.reserve(placed.size());
+    for (const auto& sp : placed) {
+        int protoIdx = -1;
+        for (int i = 0; i < m_propRegistry.prototypeCount(); ++i)
+            if (m_propRegistry.prototype(i).name == sp.mesh) { protoIdx = i; break; }
+        if (protoIdx < 0) continue;
+
+        Haruka::InstancedObject io;
+        io.prototype = protoIdx;
+        io.dir       = sp.dir;
+        io.heightM   = sp.heightM;
+        io.scale     = sp.scale;
+        io.tint      = sp.tint;
+        // Yaw determinista por celda (orientación estable, sin volver a mirar el campo).
+        io.yaw = Haruka::Tools::ProcGraph::WhiteNode::hashFloat((int)sp.cellSeed, 500, 0, params.seed)
+                 * 6.2831853f;
+        io.seed  = sp.cellSeed;
+        io.state = sp.state;
+        auto it = savedState.find(io.seed);
+        if (it != savedState.end()) { io.state = it->second.first; io.regrow = it->second.second; }
+        objs.push_back(io);
+    }
+    m_propRegistry.setInstances(std::move(objs));
 }
 
 unsigned int Application::getMaterialTextureGL(const std::string& path) {

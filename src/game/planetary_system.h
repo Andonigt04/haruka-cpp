@@ -45,7 +45,8 @@ public:
     /** @brief Configuración de superficie: tiling de textura y resolución procedural. */
     struct SurfaceConfig {
         float       tiling = 100.0f;
-        int         texRes = 512;   // procedural texture resolution (width); height = width/2
+        int         texRes = 512;   // biome map procedural texture resolution (width); height = width/2
+        int         macroRes = 2048; // macro-variation texture resolution (width); height = width/2
         /**
          * @brief Fracción de la superficie por ENCIMA del nivel del mar [0,1].
          *
@@ -117,6 +118,11 @@ public:
     /** @brief Nombre del planeta activo. */
     std::string getActivePlanetName() const;
 
+    /** @brief TerrestrialPlanet del planeta activo (el que da el campo ecológico + cota de props).
+     *  Busca por NOMBRE (m_planets y m_simplePlanets no comparten índice cuando el planeta se
+     *  añadió por `addSimplePlanet`). nullptr si no hay planeta con superficie. */
+    const Haruka::Planet::TerrestrialPlanet* activeTerrestrial() const;
+
     /** @brief Parámetros de generación del planeta activo. */
     bool getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const;
 
@@ -146,7 +152,7 @@ public:
      * (misma interpretación que `buildFromScene`) y reconstruye ese TerrestrialPlanet. Si la
      * escena aún no tiene objeto con ese nombre, no hace nada.
      */
-    void updatePlanetFromScene(const SceneManager& scene, const std::string& name);
+    void updatePlanetFromScene(SceneManager& scene, const std::string& name);
 
     /** @brief Vista de depuración para TODOS los planetas renderizables (ver TerrestrialPlanet::setDebugView). */
     void setDebugView(int view);
@@ -161,6 +167,21 @@ public:
      * cómo se aplica cada textura. Vacío si no hay planeta.
      */
     std::vector<std::string> activeTerrainLayerNames() const;
+
+    /**
+     * @brief Nombres de las CAPAS DE PROPS del planeta activo, en orden de prioridad.
+     *
+     * Las lista el editor en el selector de vista para pintar el ÁREA DE SPAWN de cada capa
+     * (dónde instalaría esa capa sus objetos: bandas de clima/forma × densityMap). Vacío si el
+     * planeta no declara `propLayers`.
+     */
+    std::vector<std::string> activePropLayerNames() const;
+
+    /**
+     * @brief Stats de geometría del último frame, sumadas sobre TODOS los SimplePlanets.
+     * Lo consume el panel de performance del editor (sustituye al "Chunk Streaming" legacy).
+     */
+    Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
 
     double simulationTime() const { return m_simulationTime; }
     const Haruka::WeatherSystem& weather() const { return m_weather; }

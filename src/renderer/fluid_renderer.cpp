@@ -124,7 +124,7 @@ void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
     const int n = m_solver->count();
     uploadParticles(cameraPos, n);
 
-    if (s_surfaceMode) renderSurface(n, vpW, vpH);
+    if (s_surfaceMode) renderSurface(n, vpW, vpH, scenePass);
     else               renderSpheres(n, (float)vpH);
 }
 
@@ -140,14 +140,28 @@ void FluidRenderer::renderSpheres(int n, float vpH) {
     ctx->draw((uint32_t)n);
 }
 
-void FluidRenderer::renderSurface(int n, int w, int h) {
+void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle scenePass) {
     ensureTargets(w, h);
     if (!RHI::valid(m_depthPass)) return;
+    if (n <= 0) return;
+
+    // scenePass es el target de escena: `{0}` == backbuffer (válido). Los blits y el compuesto
+    // leen/escriben ese target para sembrar refracción+oclusión y componer la superficie final.
 
     RHI::Device*  dev = RHI::device();
     RHI::Context* ctx = dev->beginFrame();
+    const float texelX = 1.0f / (float)w;
+    const float texelY = 1.0f / (float)h;
 
-    // 1) Particle depth pass: clear color, preserve blitted depth
+    // 0) SIEMBRA del modo superficie (blits GL: el RHI no tiene comando de blit).
+    //    - Copia el COLOR de la escena a m_sceneCopyPass → lo lee el composite para refracción.
+    //    - Copia el DEPTH de la escena al depth del pase de partículas → las gotas OCLUYEN a lo
+    //      que tienen por detrás (paredes, acantilados, la propia costa). Sin esto el splash
+    //      pintaría por delante de geometría que le tapa.
+    ctx->blitColor(scenePass, m_sceneCopyPass, w, h);
+    ctx->blitDepth(scenePass, m_depthPass, w, h);
+
+    // 1) Particle depth pass: clear colour (R32F=0), preserve blitted scene depth.
     RHI::ClearValues cv;
     cv.clearColor = true;  cv.color[0] = cv.color[1] = cv.color[2] = cv.color[3] = 0.0f;
     cv.clearDepth = false; // keep scene depth from blit
@@ -155,6 +169,7 @@ void FluidRenderer::renderSurface(int n, int w, int h) {
     ctx->beginRenderPass(m_depthPass, cv);
     m_params.radius    = m_radius;
     m_params.viewportH = (float)h;
+    m_params.texel     = glm::vec2(texelX, texelY);
     ctx->bindPipeline(m_psoDepth);
     bindParams(ctx);
     ctx->bindVertexBuffer(m_particleBuf, 0);
@@ -171,20 +186,35 @@ void FluidRenderer::renderSurface(int n, int w, int h) {
     ctx->beginRenderPass(m_smoothPass[0], ccv);
     ctx->bindPipeline(m_psoBlur);
     ctx->bindVertexBuffer(m_quadBuf, 0);
-    m_params.blurDir = glm::vec2(1.0f / (float)w, 0.0f);
+    m_params.blurDir = glm::vec2(texelX, 0.0f);
     bindParams(ctx);
     ctx->bindTexture(0, dev->getColorTexture(m_depthPass, 0));
     ctx->draw(4);
     ctx->endRenderPass();
 
     ctx->beginRenderPass(m_smoothPass[1], ccv);
-    m_params.blurDir = glm::vec2(0.0f, 1.0f / (float)h);
+    m_params.blurDir = glm::vec2(0.0f, texelY);
     bindParams(ctx);
     ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[0], 0));
     ctx->draw(4);
     ctx->endRenderPass();
 
-    // Surface composite skipped - use RHI beginRenderPass on caller's target
+    // 3) Compuesto de SUPERFICIE OPAQUE sobre el target de escena. El quad cubre toda la
+    //    pantalla; fluid_surface.frag descarta donde no hay fluido (u_depth ≤ 0) y refracta lo
+    //    que hay detrás (u_scene) donde sí lo hay → el resto de la escena queda intacto.
+    RHI::ClearValues keep;
+    keep.clearColor = false; keep.clearDepth = false;
+    ctx->beginRenderPass(scenePass, keep);
+    ctx->setViewport(0, 0, w, h);
+    ctx->bindPipeline(m_psoSurface);
+    m_params.texel       = glm::vec2(texelX, texelY);
+    m_params.refractScale = 0.03f;
+    bindParams(ctx);
+    ctx->bindVertexBuffer(m_quadBuf, 0);
+    ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[1], 0));   // smoothed depth
+    ctx->bindTexture(1, dev->getColorTexture(m_sceneCopyPass, 0));   // scene colour behind
+    ctx->draw(4);
+    ctx->endRenderPass();
 }
 
 } // namespace Haruka

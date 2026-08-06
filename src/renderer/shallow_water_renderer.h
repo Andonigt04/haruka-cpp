@@ -35,7 +35,7 @@ private:
     // a dos caras). Ya no hay Shader ni VAO propios.
     Haruka::RHI::PipelineHandle m_pso;
     Haruka::RHI::BufferHandle   m_vboH, m_eboH;   // buffers Stream
-    Haruka::RHI::BufferHandle   m_uboH;           // SoftbodyParams (binding 6)
+    Haruka::RHI::BufferHandle   m_uboH;           // ShallowWaterParams (binding 6)
     std::vector<float>        m_verts;   // pos(3)+normal(3)
     std::vector<unsigned int> m_indices;
     bool m_init = false;

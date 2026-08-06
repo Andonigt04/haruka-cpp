@@ -26,6 +26,8 @@ int main(int argc, char** argv) {
     if (want("physics"))                  test_physics_body_removal();
     if (want("construction") || want("build")) test_construction_placement();
     if (want("dgs") || want("rules"))     test_dgs_rules_module();
+    if (want("dgs") || want("wire"))      test_dgs_wire_format();
+    if (want("robust") || want("dgs"))    test_dgs_robust();
     if (want("planet") || want("mesh"))   test_simple_planet_mesh();
     if (want("planet") || want("config")) test_simple_planet_config();
     if (want("quality") || want("tier"))  test_terrain_quality_mapping();
@@ -41,6 +43,15 @@ int main(int argc, char** argv) {
         test_procgraph_evaluate_to_normal();
         test_procgraph_cycle();
         test_procgraph_determinism();
+        test_procgraph_tree_mesh();
+        test_procgraph_tree_prop();
+        test_procgraph_tree_spawn();
+        test_procgraph_zone_shape();
+        test_procgraph_prop_layer();
+        test_procgraph_prop_placer();
+        test_procgraph_terrain_prop_field();
+        test_procgraph_prop_assembler();
+        test_procgraph_prop_layer_json();
     }
 
     std::printf("\n== %d OK · %d FALLOS ==\n", g_pass, g_fail);

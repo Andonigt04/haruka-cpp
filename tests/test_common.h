@@ -34,6 +34,10 @@ void test_physics_body_removal();
 void test_construction_placement();
 // Módulo de reglas DGS  (test_dgs.cpp)
 void test_dgs_rules_module();
+// Golden wire-format / layout DGS  (test_dgs.cpp) — guarda el layout que viaja por red (P0)
+void test_dgs_wire_format();
+// Batería de robustez DGS (test_dgs.cpp): framing TCP (bug 6), evicción, escalado dry-run, fuzz (§4.3)
+void test_dgs_robust();
 // SimplePlanet mesh   (test_simple_planet.cpp)
 void test_simple_planet_mesh();
 void test_simple_planet_config();
@@ -51,5 +55,14 @@ void test_procgraph_evaluate_to_rgba();
 void test_procgraph_evaluate_to_normal();
 void test_procgraph_cycle();
 void test_procgraph_determinism();
+void test_procgraph_tree_mesh();
+void test_procgraph_tree_prop();
+void test_procgraph_tree_spawn();
+void test_procgraph_zone_shape();
+void test_procgraph_prop_layer();
+void test_procgraph_prop_placer();
+void test_procgraph_terrain_prop_field();
+void test_procgraph_prop_assembler();
+void test_procgraph_prop_layer_json();
 
 #endif // HARUKA_TEST_COMMON_H

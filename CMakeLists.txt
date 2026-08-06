@@ -430,6 +430,12 @@ set_target_properties(mapc PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 
+# --- 6a-bis. bench_dgs_bandwidth: test de estrés de transferencia entre nodos DGS (sin .a, sin
+# sockets). Modela el límite BDP (min(enlace, ventana/RTT)) y estresa el PacketFramer real (bug 6)
+# con el volumen completo. Header-only → compila en CI; `--fast` para verificación rápida. ---
+add_executable(bench_dgs_bandwidth tools/bench_dgs_bandwidth.cpp)
+target_include_directories(bench_dgs_bandwidth PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
+
 # --- Jolt Physics (PRUEBA de integración): motor de rígidos maduro (SAT, apilado estable,
 # determinista, GL-free). Submódulo git en third_party/JoltPhysics. Solo se compila si el módulo
 # PHYSICS está ACTIVO y el submódulo está presente → con la física apagada, Jolt NO existe. ---

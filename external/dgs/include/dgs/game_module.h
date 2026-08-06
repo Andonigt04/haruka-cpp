@@ -146,8 +146,11 @@ namespace DGS
         // `dropRegion` suelta lo que ya sirve otro nodo (el paso final de una reasignación).
         void   (*dropRegion)(ZoneHandle z, const double center[3], double radius);
 
-        // --- Reservado (nulo por ahora) ---
-        // void (*step)(ZoneHandle z, EntityTransfer* e, float dt, const WorldQuery* w);
+        // SIMULACIÓN (P4, §3.6): la ZONA DUEÑA ejecuta `step` a tick fijo sobre UNA entidad que posee
+        // (C4 del plan v2). Solo el nodo autoritativo avanza la entidad; los demás la proyectan como
+        // ghost. `dt` = tick en segundos. Null = la zona no simula (solo validación) y el mundo va por
+        // las actualizaciones del cliente.
+        void   (*step)(ZoneHandle z, EntityTransfer* e, float dt, const WorldQuery* w);
     };
 }
 

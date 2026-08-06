@@ -41,6 +41,12 @@ void GPUInstancing::addInstance(const glm::mat4& model, const glm::vec4& color, 
     m_dirty = true;
 }
 
+void GPUInstancing::setInstances(const std::vector<InstanceDataFloat>& data) {
+    const size_t n = data.size() < (size_t)m_maxInstances ? data.size() : (size_t)m_maxInstances;
+    m_instances.assign(data.begin(), data.begin() + static_cast<std::ptrdiff_t>(n));
+    m_dirty = true;
+}
+
 void GPUInstancing::upload() {
     if (!m_dirty || m_instances.empty() || !RHI::valid(m_buf)) return;
     if (RHI::Device* dev = RHI::device())

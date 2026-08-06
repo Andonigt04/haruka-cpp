@@ -3,6 +3,7 @@
 
 #include <SDL3/SDL.h>
 #include <cstdint>
+#include <string>
 #include <memory>
 #include <vector>
 #include <functional>
@@ -27,6 +28,8 @@
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
 #include "renderer/bloom.h"
+#include "game/planet.h"        // TerrestrialPlanet::RenderStats (panel de performance)
+#include "tools/profiler.h"     // Haruka::Profiler::Node — árbol CPU por etapa (panel de performance)
 #include "renderer/gbuffer.h"
 #include "renderer/ssao.h"
 #include "renderer/ibl.h"
@@ -41,6 +44,9 @@
 #include "renderer/compute_postprocess.h"
 #include "renderer/cascaded_shadow.h"
 #include "renderer/virtual_texturing.h"
+#ifdef HARUKA_MOD_FLUIDS
+#include "renderer/fluid_host.h"
+#endif
 #include "tools/error_reporter.h"
 #include "io/asset_streamer.h"
 #include "tools/debug_overlay.h"
@@ -48,12 +54,33 @@
 #include "physics/physics_engine.h"
 #include "core/scene/scene_loader.h"
 #include "core/game_interface.h"
+#include "game/instanced_object.h"
 
 namespace Haruka { namespace Renderer { class MotorInstance; } } using Haruka::Renderer::MotorInstance;
 namespace Haruka { namespace Renderer { class Model; class RenderTarget; } }
 namespace Haruka { class MaterialComponent; }
 
 namespace Haruka { namespace Core {
+
+/** @brief Snapshot de debug de UNA instancia del scatter, para la jerarquía del editor. */
+struct PropInstanceDebug {
+    uint32_t seed    = 0;          ///< identidad determinista (celda del mundo)
+    uint32_t state   = 0;          ///< InstancedObjectState (0=viva, 1=destruida, 2=rebrotando)
+    bool     rendered = false;     ///< entró en el draw de este frame (Alive, dentro del tope y sin cull)
+    bool     culled   = false;     ///< viva pero sin draw este frame (cull activo)
+    uint8_t  cullReason = 0;       ///< 0 = ninguna (se dibujó), 1 = fuera del frustum, 2 = sub-pixel en pantalla
+};
+
+/** @brief Snapshot de debug de UN prototipo (GPUInstancing = un draw por prototipo). La jerarquía
+ *  del editor lo usa como árbol de debug: instancias que no se renderizan → gris, y el nombre en
+ *  ROJO + alerta si el prototipo NO tiene material per-pixel (solo color por vértice). */
+struct PropPrototypeDebug {
+    std::string name;                          ///< mesh/tipo ("tree", "rock", "house", …)
+    bool        hasPerPixel = false;           ///< material con texturas (mask != 0) vs color por vértice
+    int         totalInstances   = 0;          ///< instancias en el registro
+    int         renderedInstances = 0;         ///< las que entraron en el draw este frame
+    std::vector<PropInstanceDebug> instances;  ///< lista por instancia (para el árbol)
+};
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -88,6 +115,11 @@ public:
         if (_planetarySystem) return _planetarySystem->activeTerrainLayerNames();
         return {};
     }
+    /** @brief Nombres de las CAPAS DE PROPS (para pintar el área de spawn de cada capa). */
+    std::vector<std::string> getPlanetPropLayerNames() const {
+        if (_planetarySystem) return _planetarySystem->activePropLayerNames();
+        return {};
+    }
     /** @brief Regenera el planeta `name` leyendo SU surfaceConfig actual de la escena.
      *  Camino del editor: cambias parámetros en el inspector y el planeta se reconstruye. */
     void regeneratePlanet(const std::string& name) {
@@ -97,6 +129,21 @@ public:
     }
     /** @brief Fuerza la lluvia (0..1) para pruebas; <0 vuelve al modo AUTO (según el clima). */
     void setRainOverride(float r) { m_rainOverride = r; }
+
+    /** @brief Activa/desactiva el scatter GLOBAL de props del motor (`scene.prop.instanced`).
+     *  El juego (Survival) usa SU propio sistema de props (ResourceSystem) y lo desactiva con
+     *  `setPropScatterEnabled(false)` para no duplicar árboles ni pagar su scatter de ~61k celdas. */
+    void setPropScatterEnabled(bool enabled) { m_propScatterEnabled = enabled; }
+    bool isPropScatterEnabled() const { return m_propScatterEnabled; }
+
+    /** @brief Activa/desactiva el snapshot de DEBUG del scatter (`getPropScatterDebug`). La
+     *  jerarquía del editor lo pide cuando muestra el árbol "Props (GPUInstancing)"; apagado por
+     *  defecto para no pagar el barrido de instancias por frame en el motor sin editor. */
+    void setPropDebugEnabled(bool enabled) { m_propDebugEnabled = enabled; }
+    bool isPropDebugEnabled() const { return m_propDebugEnabled; }
+    /** @brief Snapshot por prototipo (GPUInstancing) del pase de props del ÚLTIMO frame: cuántas
+     *  instancias hay, cuántas se dibujaron, cuál es su estado y si el material es per-pixel. */
+    const std::vector<PropPrototypeDebug>& getPropScatterDebug() const { return m_propScatterDebug; }
 
     /** @brief LA CAPA GRANULAR (nieve/arena/barro): aquí se registran las HUELLAS. Cualquier cosa con
      *  collider puede pisar — el jugador por zancada, una criatura, una rueda; el motor solo necesita
@@ -193,15 +240,29 @@ public:
     int getTotalVertices()         const { return _iTotalVertices; }
     int getTotalTriangles()        const { return _iTotalTriangles; }
     int getTotalDrawCalls()        const { return _iTotalDrawCalls; }
+
+    // Stats de geometría del TERRENO del último frame (malla base + clipmap + agua), para el
+    // panel de performance del editor. Sustituye al "Chunk Streaming" legacy (no existe streaming
+    // por chunks: el planeta es malla fija + clipmap, así que el panel muestra el desglose real).
+    Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainStats() const { return m_terrainStats; }
+
+    /** @brief Árbol CPU del ÚLTIMO FRAME del hilo de render (ms inclusivos por etapa, anidado):
+     *  renderFrameContent → scene.objects.draw, scene.prop.instanced, simple_planet.draw →
+     *  planet.base/clipmap/water.draw, etc. Los scopes son THREAD-LOCAL; este getter devuelve el
+     *  árbol del hilo que llama (el del editor = el de render, ya que el imgui corre dentro del
+     *  frame). Se añade `Haruka::Profiler::get().add()` con el tiempo GPU cuando exista. */
+    const std::vector<Haruka::Profiler::Node>& profilerNodes() const {
+        return Haruka::Profiler::get().nodes();
+    }
     /** @brief Terrain height (metres above reference sphere) at a world position. */
     double getTerrainHeightAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
     }
 
-    /** @brief Altura DEL SUELO DEL JUEGO en una dirección planet-local (km): la superficie de
-     *  referencia, la MISMA que pisa el jugador y valida el servidor. Segura desde un hilo worker.
-     *  Devuelve false solo si aún no está configurada (el hilo principal la configura al muestrear).
-     *  Es lo que deben usar los PROPS: anclarlos a otra superficie es lo que los deja flotando. */
+    /** @brief Altura DEL SUELO DEL JUEGO en una dirección planet-local (km): la MISMA superficie que
+     *  pisa el jugador (el SimplePlanet/TerrestrialPlanet, como `sampleTerrainHeight`). La
+     *  ReferenceSurface (esfera lisa en esta rama) solo se usa como fallback. Segura desde un hilo
+     *  worker (`sampleHeight` lee solo `m_heightCPU` inmutable). Devuelve false si no hay suelo. */
     bool groundHeightKmAtDir(const glm::dvec3& dir, float& outElevKm) const {
         if (!_planetarySystem) return false;
         return _planetarySystem->groundHeightKmAtDir(dir, outElevKm);
@@ -443,6 +504,10 @@ private:
     std::unique_ptr<Haruka::WorldSystem> _worldSystem;
     /** @brief The planetary system instance. */
     std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
+#ifdef HARUKA_MOD_FLUIDS
+    /** @brief Hito 2: host del stack de fluido (ríos/lagos/splash) frente al jugador. */
+    std::unique_ptr<Haruka::FluidHost> _fluidHost;
+#endif
     /** @brief The physics engine instance. */
 #ifdef HARUKA_MOD_PHYSICS
     std::unique_ptr<Haruka::PhysicsEngine>      _physicsEngine;
@@ -494,6 +559,40 @@ private:
     // Pase INSTANCIADO de piezas de construcción: mismo Vertex (binding 0) + stream de instancia
     // (binding 1). Un draw por modelo. Ver application_render.cpp (recolección + dibujo).
     Haruka::RHI::PipelineHandle m_constInstPSO;
+
+    // Pase INSTANCIADO de PROPS del mundo (árboles/rocas/objetos). Prototipo compartido por tipo
+    // (malla con color de vértice + material del node graph) + stream de instancia (binding 1).
+    // El REGISTRO es de la Application (decisión de arquitectura): el scatter lo rellena, este
+    // pase lo lee por frame. Ver application_render.cpp (pase "scene.prop.instanced").
+    Haruka::InstancedObjectRegistry m_propRegistry;
+    Haruka::RHI::PipelineHandle     m_propInstPSO;
+    Haruka::RHI::BufferHandle       m_propParamsUBO;   // PropParams (binding 6) del pase de props
+    Haruka::RHI::BufferHandle       m_constParamsUBO;  // ConstParams (binding 6) del pase de construcción
+    bool m_propScatterEnabled = true;                  // off = el juego gestiona sus props (Survival)
+    bool m_propDebugEnabled   = false;                 // snapshot de debug para la jerarquía del editor
+    std::vector<PropPrototypeDebug> m_propScatterDebug; // por frame, cuando m_propDebugEnabled
+    // Cache GPU de prototipos: por nombre de prototipo → malla (VBO/EBO) + material PER-PIXEL
+    // (albedo/normal/metallic/roughness/ao horneados con el node material graph y subidos a GPU).
+    // Sin material (mask == 0) → solo color por vértice (el caso del editor de debug "⚠ sin per-pixel").
+    struct PropPrototypeGpu {
+        Haruka::RHI::BufferHandle vbo = {}, ebo = {};
+        uint32_t vertexCount = 0;
+        uint32_t indexCount = 0;
+        Haruka::RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
+        float   metallicS   = 0.0f;     ///< escalar fallback (si el bit no está en la máscara)
+        float   roughnessS  = 0.5f;
+        float   aoS         = 1.0f;
+        uint32_t mask       = 0u;       ///< bits de texturas presentes (mismo esquema que prop_inst.frag)
+    };
+    std::unordered_map<std::string, PropPrototypeGpu> m_propProtoMesh;
+
+    // Scatter GLOBAL de props (Todo 5): rellena `m_propRegistry` desde el campo del planeta activo.
+    // El refresh es por demanda: solo se re-enumera cuando la cámara cruza `kPropScatterCellM`/2
+    // desde la última posición — el scatter determinista por CELDA MUNDIAL no necesita correr cada
+    // frame (las instancias se mantienen estables hasta que el jugador se mueve un tramo).
+    void refreshPropScatter();
+    glm::dvec3 m_propScatterLastCam{1e300, 1e300, 1e300};   // última posición muestreada
+    std::string m_propScatterPlanet;                        // planeta del último scatter (reset al cambiar)
 
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;
@@ -559,6 +658,9 @@ private:
     int _iTotalVertices         = 0;
     int _iTotalTriangles        = 0;
     int _iTotalDrawCalls        = 0;
+
+    // Último desglose de geometría del terreno (lo rellena el render tras el pase del planeta).
+    Haruka::Planet::TerrestrialPlanet::RenderStats m_terrainStats;
 };
 
 }} // namespace Haruka::Core

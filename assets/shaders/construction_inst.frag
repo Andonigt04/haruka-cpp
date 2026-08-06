@@ -1,12 +1,14 @@
 /**
  * @file construction_inst.frag
  * @brief Fragment lit para piezas de construcción instanciadas. Fork de final.frag: el color base
- *        viene del varying InstanceColor (por instancia), NO del UBO per-objeto. Misma iluminación
- *        (ambiente + sol + luna, con los toggles), para que las piezas instanciadas se vean IGUAL
- *        que las de escena. Sin rama de estrella emisiva (una pieza nunca lo es).
+ *        viene del varying InstanceColor (por instancia) MODULADO por las texturas del MATERIAL del
+ *        grupo (albedo/normal/metallic/roughness/ao, los mismos slots que el pase de escena). Misma
+ *        iluminación (ambiente + sol + luna, con los toggles), para que las piezas instanciadas se
+ *        vean IGUAL que las de escena. Sin rama de estrella emisiva (una pieza nunca lo es).
  *
- * In:  Normal (0), FragPos (1), InstanceColor (2)
- * UBO: PerFrameData (binding 0) — MISMO layout que final.frag.
+ * In:  Normal (0), FragPos (1), InstanceColor (2), TexCoord (3)
+ * UBOs: PerFrameData (binding 0) + ConstParams (binding 6, escalares + máscara del material)
+ * Texturas del material del GRUPO: bindings 0..4 (albedo/normal/metallic/roughness/ao)
  */
 #version 450 core
 
@@ -15,6 +17,14 @@ layout(location = 0) out vec4 FragColor;
 layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 layout(location = 2) in vec4 InstanceColor;
+layout(location = 3) in vec2 TexCoord;
+
+// --- Texturas del MATERIAL del grupo (compartidas por todas sus piezas) ------------------------
+layout(binding = 0) uniform sampler2D u_matAlbedo;
+layout(binding = 1) uniform sampler2D u_matNormal;
+layout(binding = 2) uniform sampler2D u_matMetallic;
+layout(binding = 3) uniform sampler2D u_matRoughness;
+layout(binding = 4) uniform sampler2D u_matAO;
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -32,20 +42,50 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 moonLightColor; float _pad4;
 };
 
-// Cel suave + rim — MISMA iluminación que final.frag (mood cálido-aventura + crudeza mística), pero el
-// color base viene por INSTANCIA. Así las piezas instanciadas se ven igual que la escena.
+// Parámetros del material del GRUPO (binding 6): escalares + máscara de texturas (bits).
+layout(std140, binding = 6) uniform ConstParams {
+    vec4 u_matPBR;      // x=metallic y=roughness z=ao w=máscara de texturas
+};
+
+const int TEX_ALBEDO = 1, TEX_NORMAL = 2, TEX_METALLIC = 4, TEX_ROUGHNESS = 8, TEX_AO = 16;
+bool hasTex(int bit) { return (int(u_matPBR.w) & bit) != 0; }
+
+// TBN por DERIVADAS de pantalla, no por tangentes de vértice. Idéntico a final.frag.
+vec3 applyNormalMap(vec3 N, vec3 texN) {
+    vec3 dp1 = dFdx(FragPos), dp2 = dFdy(FragPos);
+    vec2 du1 = dFdx(TexCoord), du2 = dFdy(TexCoord);
+    float det = du1.x * du2.y - du2.x * du1.y;
+    if (abs(det) < 1e-12) return N;
+    vec3 T = normalize((dp1 * du2.y - dp2 * du1.y) / det);
+    T = normalize(T - N * dot(N, T));
+    vec3 B = cross(N, T);
+    return normalize(mat3(T, B, N) * texN);
+}
+
+// Cel suave + rim — MISMA iluminación que final.frag (mood cálido-aventura + crudeza mística). El
+// color base viene por INSTANCIA (InstanceColor × albedo del material) y el AO modula las sombras.
 void main() {
     vec3 baseColor = InstanceColor.rgb;
+    // ALBEDO del material del grupo (los slots son los del editor de node graph). Se linealiza al
+    // muestrear (el PNG viene en sRGB); sin eso las texturas salen lavadas.
+    if (hasTex(TEX_ALBEDO)) {
+        vec3 tex = texture(u_matAlbedo, TexCoord).rgb;
+        baseColor *= pow(tex, vec3(2.2));
+    }
 
     vec3 N = normalize(Normal);
+    if (hasTex(TEX_NORMAL))
+        N = applyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0));
     vec3 L = normalize(sunDirection);
     vec3 V = normalize(cameraPos - FragPos);
-    // (sin especular: la obra es MATE — ver la nota de abajo)
+
+    float ao = u_matPBR.z;
+    if (hasTex(TEX_AO)) ao = texture(u_matAO, TexCoord).r;
 
     float ndl  = dot(N, L);
     float band = smoothstep(-0.03, 0.22, ndl);
     vec3  litCol    = baseColor * (0.80 + 0.25 * sunLightColor);
-    vec3  shadowCol = baseColor * vec3(0.40, 0.46, 0.60);
+    vec3  shadowCol = baseColor * vec3(0.40, 0.46, 0.60) * ao;
     if (enableShadows == 0) shadowCol *= 1.06;
     if (enableSSAO    == 0) shadowCol *= 1.03;
     vec3  diffuse   = mix(shadowCol, litCol, band);
