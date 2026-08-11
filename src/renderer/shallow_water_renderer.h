@@ -36,8 +36,11 @@ private:
     Haruka::RHI::PipelineHandle m_pso;
     Haruka::RHI::BufferHandle   m_vboH, m_eboH;   // buffers Stream
     Haruka::RHI::BufferHandle   m_uboH;           // ShallowWaterParams (binding 6)
-    std::vector<float>        m_verts;   // pos(3)+normal(3)
+    std::vector<float>        m_verts;   // pos(3)+normal(3)+alpha+espuma, REUSADO entre frames
     std::vector<unsigned int> m_indices;
+    /// Posiciones de la rejilla, reusadas. Antes era un `std::vector` local: una asignación en el
+    /// heap de n² elementos por frame, para un tamaño que solo cambia si cambia la rejilla.
+    std::vector<glm::vec3>    m_pos;
     bool m_init = false;
 
     void ensureGL();

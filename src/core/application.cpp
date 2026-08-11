@@ -11,6 +11,8 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cstdlib>   // setenv/getenv — offload PRIME antes de crear el contexto GL
+#include <cmath>
 #include <csignal>
 #include <atomic>
 #include <filesystem>
@@ -22,6 +24,7 @@
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_opengl3.h>
+#include <imgui_impl_vulkan.h>
 
 #include "renderer/motor_instance.h"
 #include "renderer/shader.h"
@@ -192,7 +195,8 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
 
     // 1. Update the viewport via RHI
     if (RHI::Device* dev = RHI::device())
-        dev->beginFrame()->setViewport(0, 0, (int)width, (int)height);
+        if (auto* c = dev->beginFrame())        // beginFrame() puede devolver null (VK: sin swapchain/imagen aún)
+            c->setViewport(0, 0, (int)width, (int)height);
 
     // 3. Recreate lighting + post-processing buffers
     _hdr = std::make_unique<HDR>(width, height);
@@ -274,11 +278,8 @@ void Application::cleanup() {
     _ssao.reset();
     _ibl.reset();
     _pointShadow.reset();
-    _lightCuller.reset();
     _instancing.reset();
-    _computePostProcess.reset();
     _cascadedShadow.reset();
-    _virtualTexturing.reset();
 
     // Render targets (own FBOs / textures)
     _lightingTarget.reset();
@@ -333,6 +334,59 @@ void Application::run(const std::string& startScenePath, bool headless) {
         }
     }
 
+    // ImGui window + settings ANTES de crear la ventana y el device: el backend RHI se elige por el
+    // setting persistente RenderBackend (settings → imgui.ini). Hace falta conocer el backend ANTES
+    // de crear la ventana para elegir su flag: GL (SDL_WINDOW_OPENGL) o Vulkan (SDL_WINDOW_VULKAN).
+    // SettingsManager::init lee ese ini vía ImGui, así que el contexto ImGui se crea aquí (el init
+    // del RENDERER de ImGui —GL— va tras el device, que es lo que depende del contexto GL real).
+    bool useVulkan = false;
+    if (!m_headless) {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+        ImGui::StyleColorsDark();
+        Haruka::SettingsManager::get().init();   // carga imgui.ini → m_graphics.renderBackend
+        useVulkan = Haruka::SettingsManager::get().graphics().renderBackend
+                    == Haruka::Settings::RenderBackend::Vulkan;
+
+        // ── ELEGIR GPU TAMBIÉN EN OPENGL: offload PRIME ─────────────────────────────────────────
+        //
+        // OpenGL no permite elegir adaptador desde la API, pero SÍ desde el entorno — y tiene que
+        // estar puesto ANTES de que se cree el contexto, porque el driver lo lee al inicializarse.
+        // Este hueco (ajustes ya cargados, ventana todavía no) es el único sitio donde cabe.
+        //
+        // Sin esto, en un portátil híbrido el juego corre siempre en la integrada y el desplegable
+        // de tarjeta gráfica no puede hacer nada: se elige la dedicada y no pasa nada.
+        //
+        // Solo se toca el entorno si el usuario eligió explícitamente: sin elección no se fuerza
+        // nada y manda la configuración del sistema, que es lo que espera quien no lo ha tocado.
+        // Y NO se pisa una variable que ya venga puesta desde fuera — quien arranca con
+        // `__NV_PRIME_RENDER_OFFLOAD=1` a mano está diciendo algo más específico que el ajuste.
+        const auto& gpus = Haruka::SettingsManager::get().graphics().preferredGpus;
+        if (!useVulkan && !gpus.empty() && !gpus[0].empty()) {
+            std::string want = gpus[0];
+            std::transform(want.begin(), want.end(), want.begin(),
+                           [](unsigned char c) { return (char)std::tolower(c); });
+            const bool isNvidia = want.find("nvidia")  != std::string::npos
+                               || want.find("geforce") != std::string::npos
+                               || want.find("rtx")     != std::string::npos
+                               || want.find("gtx")     != std::string::npos;
+            if (isNvidia) {
+                // Offload PRIME de NVIDIA, tal como lo documenta el propio driver.
+                if (!std::getenv("__NV_PRIME_RENDER_OFFLOAD"))
+                    setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 0);
+                if (!std::getenv("__GLX_VENDOR_LIBRARY_NAME"))
+                    setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+                HARUKA_LOGI("RHI", "GPU '%s': activado offload PRIME de NVIDIA para el contexto GL",
+                            gpus[0].c_str());
+            } else if (!std::getenv("DRI_PRIME")) {
+                // Mesa (AMD/Intel): DRI_PRIME=1 pide la NO predeterminada. Es lo único que Mesa
+                // ofrece sin conocer el id PCI, así que solo se pone si NO se pidió una NVIDIA.
+                setenv("DRI_PRIME", "1", 0);
+                HARUKA_LOGI("RHI", "GPU '%s': DRI_PRIME=1 para el contexto GL", gpus[0].c_str());
+            }
+        }
+    }
+
     _window = std::make_unique<Haruka::Core::Window>(
         Haruka::Core::WindowProps("Survival", _width, _height, "assets/icons/icon.png")
     );
@@ -341,26 +395,63 @@ void Application::run(const std::string& startScenePath, bool headless) {
             HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize headless Window system.");
             return;
         }
-    } else if (!_window->init()) {
+    } else if (!_window->init(useVulkan)) {
         HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
         return;
     }
 
-    // RHI: crea el device sobre la ventana. La Window ya creó y activó el contexto GL, así que
-    // el backend GL lo ADOPTA (no crea uno segundo). Lo publicamos como device global para que
-    // los wrappers (Texture, …) lo usen.
+    // RHI: crea el device sobre la ventana. Con backend GL la Window/GLDevice crea el contexto GL
+    // correspondiente; con Vulkan la ventana es Vulkan-only (SDL_WINDOW_VULKAN) y el VKDevice crea
+    // surface/swapchain. Lo publicamos como device global para que los wrappers (Texture, …) lo usen.
     //
-    // El backend se elige por el setting persistente RenderBackend (menu de settings → imgui.ini).
-    // Cambiarlo REQUIERE REINICIAR (el device se crea aquí, una vez). Vulkan cae a OpenGL si no está.
-    // ⚠️ ORDEN (F5): este punto corre ANTES de que el juego cargue su imgui.ini (SettingsManager::init
-    // va tras ImGui::CreateContext, más abajo) → hoy lee el DEFAULT. Inofensivo mientras Vulkan no exista
-    // (fallback a GL). Cuando se implemente Vulkan, mover la carga de settings ANTES de esta línea.
+    // El backend se elige por el setting ya cargado arriba. Cambiarlo REQUIERE REINICIAR (el
+    // device se crea aquí, una vez). Vulkan cae a OpenGL si no está o si falla al inicializar.
     const auto& gfx = Haruka::SettingsManager::get().graphics();
-    const Haruka::RHI::Backend requestedBackend =
+    Haruka::RHI::Backend requestedBackend =
         (gfx.renderBackend == Haruka::Settings::RenderBackend::Vulkan)
             ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL;
-    _device = Haruka::RHI::Device::create(requestedBackend, _window->getNativeWindow());
+
+    // `HARUKA_BACKEND=vulkan|opengl` fuerza el backend para ESTA ejecución, sin tocar los ajustes.
+    // Existe para poder COMPARAR: el backend solo se elige al arrancar, así que sin esto probar
+    // Vulkan obliga a editar `imgui.ini`, reiniciar, y acordarse de deshacerlo — y una comparación
+    // que cuesta eso no se hace. No persiste: el ajuste del usuario queda intacto.
+    if (const char* be = std::getenv("HARUKA_BACKEND")) {
+        if (!std::strcmp(be, "vulkan") || !std::strcmp(be, "vk")) {
+            requestedBackend = Haruka::RHI::Backend::Vulkan;
+            HARUKA_LOGI("RHI", "HARUKA_BACKEND=vulkan -> backend forzado (el ajuste no se toca)");
+        } else if (!std::strcmp(be, "opengl") || !std::strcmp(be, "gl")) {
+            requestedBackend = Haruka::RHI::Backend::OpenGL;
+            HARUKA_LOGI("RHI", "HARUKA_BACKEND=opengl -> backend forzado (el ajuste no se toca)");
+        } else {
+            HARUKA_LOGW("RHI", "HARUKA_BACKEND='%s' no reconocido (usa 'vulkan' u 'opengl')", be);
+        }
+    }
+    // La GPU preferida sale del mismo ajuste, y viaja como LISTA de nombres (ver
+    // `GraphicsSettings::preferredGpus`). Vacía = automática. En OpenGL se ignora: la API no permite
+    // elegir adaptador, y el panel de ajustes lo dice en vez de fingir que sí.
+    _device = Haruka::RHI::Device::create(requestedBackend, _window->getNativeWindow(),
+                                          gfx.preferredGpus);
+    if (!gfx.preferredGpus.empty() && !gfx.preferredGpus[0].empty())
+        HARUKA_LOGI("RHI", "GPU preferida por ajuste: '%s'%s", gfx.preferredGpus[0].c_str(),
+                    requestedBackend == Haruka::RHI::Backend::OpenGL
+                        ? " (IGNORADA: OpenGL no permite elegir adaptador)" : "");
     Haruka::RHI::setDevice(_device.get());
+
+    // ── QUÉ GPUs VE EL SISTEMA ──────────────────────────────────────────────────────────────────
+    //
+    // Se lista al arrancar y no solo al abrir el panel: "mi tarjeta no sale en la lista" es una
+    // pregunta que se contesta con esta línea en el log, sin tener que reproducir nada ni abrir la
+    // UI. Marca cuál es dedicada y cuál coincide con lo elegido.
+    if (!m_headless) {
+        const auto adapters = Haruka::RHI::Device::enumerateAdapters(
+            requestedBackend, _window->getNativeWindow());
+        for (size_t i = 0; i < adapters.size(); ++i)
+            HARUKA_LOGI("RHI", "  GPU detectada [%zu] %s%s", i, adapters[i].name.c_str(),
+                        adapters[i].discrete ? "  [dedicada]" : "");
+        if (adapters.size() <= 1)
+            HARUKA_LOGI("RHI", "  (solo una GPU listada: sin Vulkan disponible no se pueden "
+                               "enumerar adaptadores y solo se ve la que ya usa el contexto)");
+    }
 
     // Log del backend ACTIVO vs SOLICITADO → deja claro si corre directo o cayó al fallback.
     if (_device) {
@@ -376,13 +467,20 @@ void Application::run(const std::string& startScenePath, bool headless) {
         HARUKA_LOGW("RHI", "No hay device — el motor correrá por las rutas GL directas de compatibilidad.");
     }
 
-    // ImGui — standalone runtime owns the context (skipped in headless mode)
-    if (!m_headless) {
-        IMGUI_CHECKVERSION();
-        ImGui::CreateContext();
-        ImGui::StyleColorsDark();
+    // ImGui — renderer GPU. OpenGL → impl GL (necesita un contexto GL real). Vulkan → ImGui_ImplVulkan
+    // (fase 7): el device lo inicia (render pass/framebuffers propios + backend de ImGui) y la UI se
+    // graba en el command buffer del frame ANTES de presentar (ver VKDevice::endFrame/drawImgui).
+    if (!m_headless && _device && _device->backend() == Haruka::RHI::Backend::OpenGL) {
         ImGui_ImplSDL3_InitForOpenGL(_window->getNativeWindow(), SDL_GL_GetCurrentContext());
         ImGui_ImplOpenGL3_Init("#version 450");
+        m_imguiGL = true;
+    } else if (!m_headless && _device && _device->backend() == Haruka::RHI::Backend::Vulkan) {
+        ImGui_ImplSDL3_InitForVulkan(_window->getNativeWindow());
+        m_imguiVK = _device->initUi();
+        if (!m_imguiVK)
+            HARUKA_LOGW("RHI", "initUi() Vulkan falló — la UI no se dibujará.");
+    } else {
+        HARUKA_LOGW("RHI", "ImGui sin renderer backend inicializado para este modo.");
     }
 
     loadScene(startScenePath);
@@ -398,9 +496,45 @@ void Application::run(const std::string& startScenePath, bool headless) {
     std::signal(SIGINT,  handleSigint);
     std::signal(SIGTERM, handleSigint);
 
+    // `HARUKA_SHOT_AFTER=<segundos>[,ruta.png]`: espera a que el mundo esté cargado, captura un
+    // frame limpio (sin HUD) y SALE. Existe para poder COMPARAR backends: el arranque en frío ronda
+    // el minuto y el backend solo se elige al inicio, así que sin esto "¿se ve igual en Vulkan que
+    // en OpenGL?" no es una pregunta que se pueda contestar con una medida — solo de memoria.
+    // Junto con `HARUKA_BACKEND` da dos PNG comparables del mismo escenario.
+    double shotAfterS = -1.0;
+    std::string shotPath;
+    if (const char* sa = std::getenv("HARUKA_SHOT_AFTER")) {
+        const std::string s(sa);
+        const size_t comma = s.find(',');
+        shotAfterS = std::atof(s.substr(0, comma).c_str());
+        if (comma != std::string::npos) shotPath = s.substr(comma + 1);
+        HARUKA_LOGI("Shot", "HARUKA_SHOT_AFTER=%.1f s -> captura y salida%s%s",
+                    shotAfterS, shotPath.empty() ? "" : " -> ", shotPath.c_str());
+    }
+    const auto shotT0 = std::chrono::steady_clock::now();
+    bool shotRequested = false, shotDone = false;
+
     bool running = true;
     while (running) {
         if (g_sigintReceived.load()) { running = false; continue; }
+
+        if (shotAfterS > 0.0) {
+            const double elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - shotT0).count();
+            // Dos fases: primero se PIDE la captura, y solo se sale en la vuelta SIGUIENTE — la
+            // captura ocurre dentro del render del frame, así que salir en la misma iteración
+            // dejaría el PNG a medias o sin escribir.
+            if (!shotRequested && elapsed >= shotAfterS) {
+                requestScreenshot(shotPath);
+                shotRequested = true;
+            } else if (shotRequested && !shotDone) {
+                shotDone = true;
+            } else if (shotDone) {
+                HARUKA_LOGI("Shot", "captura hecha, saliendo");
+                running = false;
+                continue;
+            }
+        }
 
         auto now = std::chrono::high_resolution_clock::now();
         deltaTime        = std::chrono::duration<float>(now - _frameStart).count();
@@ -420,7 +554,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 bool consumed = false;
                 if (_gameInterface && _gameInterface->onEvent)
                     consumed = _gameInterface->onEvent(&event);
-                if (!consumed)
+                if (!consumed && (m_imguiGL || m_imguiVK))
                     ImGui_ImplSDL3_ProcessEvent(&event);
                 if (event.type == SDL_EVENT_QUIT) running = false;
                 if (event.type == SDL_EVENT_WINDOW_RESIZED) {
@@ -429,7 +563,8 @@ void Application::run(const std::string& startScenePath, bool headless) {
                     m_editorViewportW = event.window.data1;
                     m_editorViewportH = event.window.data2;
                     if (RHI::Device* dev = RHI::device())
-                        dev->beginFrame()->setViewport(0, 0, event.window.data1, event.window.data2);
+                        if (auto* c = dev->beginFrame())
+                            c->setViewport(0, 0, event.window.data1, event.window.data2);
                 }
             }
         }
@@ -455,10 +590,55 @@ void Application::run(const std::string& startScenePath, bool headless) {
             }
         }
 
-        // Start ImGui frame (skipped in headless mode)
+        // Start ImGui frame. ImGui::NewFrame() define el SCOPE del frame (el juego llama ImGui::Begin en
+        // sus menús: sin NewFrame aborta). Los impl*_NewFrame y el dibujo existen según backend:
+        // GL → impl GL; Vulkan → ImGui_ImplVulkan (la escena 3D es RHI y corre igual).
         if (!m_headless) {
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplSDL3_NewFrame();
+            if (m_imguiGL) {
+                ImGui_ImplOpenGL3_NewFrame();
+                ImGui_ImplSDL3_NewFrame();
+            } else if (m_imguiVK) {
+                ImGui_ImplSDL3_NewFrame();               // fija io.DisplaySize (lógico) para el ratón
+                // Escala real = extent físico del swapchain / DisplaySize lógico. Es el único par que
+                // usa ImGui_ImplVulkan (viewport = DisplaySize * FramebufferScale) → con esto la UI
+                // cubre EXACTO el framebuffer. Se recalcula por-frame (resize / cambio de monitor).
+                {
+                    ImGuiIO& io = ImGui::GetIO();
+                    uint32_t fbw = 0, fbh = 0;
+                    if (_device) _device->framebufferSize(fbw, fbh);
+                    if (fbw && fbh && io.DisplaySize.x > 1.f && io.DisplaySize.y > 1.f) {
+                        const float sx = (float)fbw / io.DisplaySize.x;
+                        const float sy = (float)fbh / io.DisplaySize.y;
+                        io.DisplayFramebufferScale = ImVec2(sx, sy);
+                        // Re-rasterizamos el atlas de fuentes a la resolución física (fuente escalada +
+                        // FontGlobalScale compensado) para que el texto salga NÍTIDO y del tamaño lógico
+                        // esperado. Solo la primera vez (o si cambia de forma significativa).
+                        const float sc = std::max(sx, sy);
+                        if (std::fabs(sc - m_imguiFbScale) > 0.05f) {
+                            m_imguiFbScale = sc;
+                            ImFontConfig cfg;
+                            cfg.SizePixels = 13.0f * sc;
+                            cfg.OversampleH = 3; cfg.OversampleV = 3;
+                            io.Fonts->Clear();
+                            io.Fonts->AddFontDefault(&cfg);
+                            io.FontGlobalScale = 1.0f / sc;
+                        }
+                    }
+                }
+                ImGui_ImplVulkan_NewFrame();   // construye el atlas (ya a la resolución correcta)
+            } else {
+                ImGuiIO& io = ImGui::GetIO();
+                io.DisplaySize = ImVec2((float)_window->getWidth(), (float)_window->getHeight());
+                io.DisplayFramebufferScale = ImVec2(1.0f, 1.0f);
+                // Sin backend de render (backend de respaldo/editor): construimos el atlas CPU-side con
+                // un texID ficticio para que NewFrame() no aborte; la UI no se pinta.
+                if (ImFontAtlas* atlas = io.Fonts) {
+                    if (!atlas->IsBuilt()) {
+                        atlas->Build();
+                        atlas->SetTexID((ImTextureID)(intptr_t)1);
+                    }
+                }
+            }
             ImGui::NewFrame();
         }
 
@@ -478,10 +658,18 @@ void Application::run(const std::string& startScenePath, bool headless) {
         buildRenderQueue();
         renderFrameContent();
 
-        // ImGui composite — draw all ImGui widgets over the 3D scene (skipped in headless)
+        // ImGui composite — Render() siempre (cierra el scope del frame del menú del juego); el DIBUJO
+        // (RenderDrawData) solo existe con impl GL activo (Vulkan: fase 7 → ImGui_ImplVulkan).
         if (!m_headless) {
             ImGui::Render();
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            if (m_imguiGL)
+                ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            else if (m_imguiVK) {
+                // Fase 7: adjuntamos el draw data de la UI al context activo del frame. El device lo
+                // graba y presenta en endFrame() (drawImgui); beginFrame() es idempotente (mismo cmd).
+                if (RHI::Context* c = _device->beginFrame())
+                    c->setUiDrawData(ImGui::GetDrawData());
+            }
         }
 
 
@@ -516,8 +704,15 @@ void Application::run(const std::string& startScenePath, bool headless) {
             }
         }
 
-        if (RHI::device())
+        // ⚠️ MEDIR EL SWAP no es cosmético: es donde se hace visible el coste de la GPU. La CPU solo
+        // ENCOLA los draws (por eso `simple_planet.draw` marca <0,5 ms aunque el terreno cueste
+        // decenas de ms de GPU); el bloqueo real aparece aquí, cuando el driver espera a que la GPU
+        // termine o a que llegue el vsync. Sin este scope, un frame limitado por GPU parece tiempo
+        // "perdido" dentro del render y se acaba optimizando el sitio equivocado.
+        if (RHI::device()) {
+            HARUKA_PROFILE("present.swap(espera GPU/vsync)");
             RHI::device()->endFrame();
+        }
 
         // Frame-rate cap (battery/heat on laptops; 0 = uncapped). With vsync on,
         // swapBuffers already blocks to refresh — this only caps below that.
@@ -543,9 +738,17 @@ void Application::run(const std::string& startScenePath, bool headless) {
     if (_gameInterface && _gameInterface->onShutdown)
         _gameInterface->onShutdown();
 
-    if (!m_headless) {
+    if (m_imguiGL) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplSDL3_Shutdown();
+    } else if (m_imguiVK) {
+        // El renderer de ImGui_ImplVulkan lo apaga el propio device en su destructor (necesita la
+        // cola/device; corre tras este run() al destruirse _device). Aquí solo la plataforma SDL3.
+        ImGui_ImplSDL3_Shutdown();
+    }
+    if (!m_headless && !m_imguiVK) {
+        // Con Vulkan el context se destruye al final del proceso (tras el dtormr del device), para que
+        // ImGui_ImplVulkan_Shutdown (device dtor) corra con el context aún vivo.
         ImGui::DestroyContext();
     }
 }

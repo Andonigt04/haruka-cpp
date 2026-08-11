@@ -9,6 +9,7 @@ static_assert(sizeof(ShallowWaterParams) == 32, "ShallowWaterParams std140 size 
 }
 #include "physics/fluid/shallow_water.h"
 #include "rhi/rhi_device.h"
+#include "core/logger.h"
 #include <glm/glm.hpp>
 
 namespace Haruka {
@@ -55,7 +56,15 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
     if (!m_sim) return;
     ensureGL();
 
+    // Guarda anti-crash: si el grid no está dimensionado (arrays CPU vacíos) los accessors
+    // m_terrain[i]/m_water[i] leen fuera del vector → SIGSEGV (suele manifestarse como crash en
+    // el primer clamp/min del building de vértices). Log del valor real para diagnosticar.
     const int n = m_sim->size();
+    if (!m_sim->valid() || n > 4096)
+    {
+        HARUKA_LOGE("Fluid", "ShallowWater sim inválido (grid n=%d) — agua saltada", n);
+        return;
+    }
     if (n < 2) return;
 
     // Surface position of cell (i,j): anchor-plane world pos lifted by
@@ -68,11 +77,41 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
         return glm::vec3(wp - glm::dvec3(cameraPos));
     };
 
-    // Build vertex grid (only used cells matter, but a full grid keeps indexing
-    // simple; cells without water collapse to terrain and are skipped in tris).
-    m_verts.clear();
-    m_verts.resize(size_t(n) * n * 8, 0.0f);
-    std::vector<glm::vec3> pos(size_t(n) * n);
+    // ── ÍNDICES PRIMERO. ────────────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ Esto estaba AL FINAL, y era el derroche gordo: se construían los 9216 vértices con sus
+    // normales, su alpha y su espuma, y DESPUÉS se miraba si alguna celda tenía agua. Sin agua a la
+    // vista —el caso normal— todo ese trabajo se tiraba: 4,95 ms por frame para no dibujar nada.
+    // Decidir la topología primero cuesta dos lecturas por celda y permite salir antes de tocar un
+    // solo vértice.
+    //
+    // Triángulos solo donde algún vértice del quad tiene agua POR ENCIMA del mar: las celdas a/bajo
+    // el nivel del mar las dibujan los chunks de océano (Gerstner) → aquí se saltan para que no haya
+    // DOBLE lámina en la costa. Sin océano acoplado (seaLevel=-1e9) se dibuja todo como antes.
+    const float sea    = m_sim->seaLevelAlongUp();
+    const float seaEps = 0.15f; // margen sobre el mar (las celdas fijadas al mar quedan ~en seaLevel)
+    auto inlandWet = [&](int i, int j) {
+        return m_sim->hasWaterAt(i,j) && m_sim->surfaceAt(i,j) > sea + seaEps;
+    };
+    m_indices.clear();   // conserva la capacidad entre frames: no re-asigna
+    for (int j = 0; j + 1 < n; ++j)
+        for (int i = 0; i + 1 < n; ++i) {
+            bool wet = inlandWet(i,j) || inlandWet(i+1,j)
+                    || inlandWet(i,j+1) || inlandWet(i+1,j+1);
+            if (!wet) continue;
+            const unsigned int a=j*n+i, b=j*n+i+1, c=(j+1)*n+i, d=(j+1)*n+i+1;
+            m_indices.push_back(a); m_indices.push_back(c); m_indices.push_back(b);
+            m_indices.push_back(b); m_indices.push_back(c); m_indices.push_back(d);
+        }
+    if (m_indices.empty()) return;   // ← la salida que faltaba: sin agua, ni un vértice
+
+    // Rejilla de vértices. `m_pos` y `m_verts` son MIEMBROS reutilizados: antes `pos` se asignaba
+    // en el heap cada frame (9216 elementos) y `m_verts` se hacía clear+resize, o sea 73 728 floats
+    // puestos a cero para sobrescribirlos justo después.
+    const size_t vcount = size_t(n) * n;
+    if (m_pos.size()   != vcount)     m_pos.resize(vcount);
+    if (m_verts.size() != vcount * 8) m_verts.resize(vcount * 8);
+    auto& pos = m_pos;
     for (int j = 0; j < n; ++j)
         for (int i = 0; i < n; ++i)
             pos[j*n+i] = surfPos(i, j);
@@ -104,26 +143,6 @@ void ShallowWaterRenderer::render(const Haruka::WorldPos& cameraPos) {
             m_verts[b+6]=alpha;
             m_verts[b+7]=foam;
         }
-
-    // Triangles only for quads where at least one corner holds water POR ENCIMA del mar.
-    // F5.3: las celdas a/bajo el nivel del mar las dibujan los chunks de océano (Gerstner) →
-    // aquí se saltan para que no haya DOBLE lámina en la costa. Sin océano acoplado
-    // (seaLevel=-1e9) se dibuja todo como antes.
-    const float sea    = m_sim->seaLevelAlongUp();
-    const float seaEps = 0.15f; // margen sobre el mar (las celdas fijadas al mar quedan ~en seaLevel)
-    auto inlandWet = [&](int i, int j) {
-        return m_sim->hasWaterAt(i,j) && m_sim->surfaceAt(i,j) > sea + seaEps;
-    };
-    m_indices.clear();
-    for (int j = 0; j + 1 < n; ++j)
-        for (int i = 0; i + 1 < n; ++i) {
-            bool wet = inlandWet(i,j) || inlandWet(i+1,j)
-                    || inlandWet(i,j+1) || inlandWet(i+1,j+1);
-            if (!wet) continue;
-            unsigned int a=j*n+i, b=j*n+i+1, c=(j+1)*n+i, d=(j+1)*n+i+1;
-            m_indices.insert(m_indices.end(), {a,c,b, b,c,d});
-        }
-    if (m_indices.empty()) return;
 
     RHI::Device* dev = RHI::device();
     if (!dev || !RHI::valid(m_pso)) return;

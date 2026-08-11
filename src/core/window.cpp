@@ -42,7 +42,7 @@ namespace Haruka::Core {
         return true;
     }
 
-    bool Window::init() {
+    bool Window::init(bool vulkanWindow) {
         if (!SDL_WasInit(SDL_INIT_VIDEO) && !SDL_Init(SDL_INIT_VIDEO)) {
             std::cerr << "[SDL] Init failed: " << SDL_GetError() << std::endl;
             return false;
@@ -59,6 +59,17 @@ namespace Haruka::Core {
             }
             if (!audioOk)
                 std::cerr << "[SDL] audio no disponible: " << firstErr << std::endl;
+        }
+
+        // Backend Vulkan: ventana con SDL_WINDOW_VULKAN y SIN hints/flag de GL (el VKDevice usa
+        // SDL_Vulkan_CreateSurface; en SDL3 la ventana debe crearse con el flag de Vulkan). No se
+        // crea ningún contexto GL: así el device Vulkan no comparte ventana con el contexto GL.
+        if (vulkanWindow) {
+            m_window = SDL_CreateWindow(m_data.title.c_str(), m_data.width, m_data.height,
+                                        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+            if (!m_window) return false;
+            applyWindowIcon(m_window, m_data.iconPath);
+            return true;
         }
 
         SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);

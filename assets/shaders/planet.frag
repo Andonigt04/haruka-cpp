@@ -355,7 +355,11 @@ void main() {
         vec3 matTint; float grainAmt, detailAmt; int tile; int matIdx;
         // Sin mapa de zonas en esta ruta (el terreno V3 por chunks aún no lo bindea): reglas de clima.
         vec4 matColor;
-        harukaSelectMaterial(H, tempC, max(slope, rock), vec3(0.0), false,
+        // ⚠️ Cuarto eje (altura) INERTE en este camino: es el terreno V3 por chunks, y su fragmento
+        // solo recibe Normal/FragPos/TexCoord — no tiene la cota. Se pasa 0 para que los materiales
+        // sin banda de altura declarada (el rango por defecto ±1000 km) sigan funcionando igual.
+        // El camino VIVO es `planet/biome.frag`, que sí lee la cota del bake por píxel.
+        harukaSelectMaterial(H, tempC, max(slope, rock), 0.0, vec3(0.0), false,
                              matTint, grainAmt, detailAmt, tile, matColor, matIdx);
         biomeCol = mix(biomeCol, matColor.rgb, matColor.a);
 

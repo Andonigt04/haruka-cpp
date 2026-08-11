@@ -17,8 +17,15 @@ int main(int argc, char** argv) {
     std::printf("== Haruka tests (CPU) ==\n");
 
     if (want("cube") || want("mesh"))   test_cube_sphere_inverse();
-    if (want("weather") || want("clima")) test_weather_fronts();
+    if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); }
     if (want("capa") || want("ground"))   test_ground_layer();
+    if (want("clip") || want("parity"))   test_clipmap_parity();
+    if (want("lod")  || want("parity"))   test_terrain_lod_invariants();
+    if (want("ring") || want("parity"))   test_terrain_ring_grid();
+    if (want("ring") || want("parity"))   test_terrain_ring_tiling();
+    if (want("chord") || want("parity"))  test_terrain_chord_error();
+    if (want("clipmap") || want("parity"))  test_clipmap_vertex_lattice();
+    if (want("grad")  || want("parity"))  test_terrain_detail_gradient();
     if (want("physics"))                  test_physics_radial_fall();
     if (want("physics"))                  test_physics_mesh_ground();
     if (want("physics"))                  test_physics_static_wall();
@@ -31,6 +38,10 @@ int main(int argc, char** argv) {
     if (want("planet") || want("mesh"))   test_simple_planet_mesh();
     if (want("planet") || want("config")) test_simple_planet_config();
     if (want("quality") || want("tier"))  test_terrain_quality_mapping();
+    if (want("sky") || want("ambient") || want("sh")) {
+        test_sky_ambient_palette();
+        test_sky_ambient_sh();
+    }
     if (want("procgraph") || want("pg")) {
         test_procgraph_basic();
         test_procgraph_fbm();
@@ -52,6 +63,22 @@ int main(int argc, char** argv) {
         test_procgraph_terrain_prop_field();
         test_procgraph_prop_assembler();
         test_procgraph_prop_layer_json();
+    }
+
+    {   // Órbitas: Kepler con elementos precesantes + auditoría de no-choque
+        test_orbit_basis();
+        test_orbit_no_drift();
+        test_orbit_precession();
+        test_orbit_no_collision();
+        test_soi_gravity();
+        test_soi_orbital_energy();
+    }
+
+    {   // Escritor de PNG: ida y vuelta con decodificador independiente + compresión
+        test_image_writer_roundtrip();
+        test_prop_lod_mesh();
+        test_prop_collider();
+        test_clipmap_dir_parity();
     }
 
     std::printf("\n== %d OK · %d FALLOS ==\n", g_pass, g_fail);

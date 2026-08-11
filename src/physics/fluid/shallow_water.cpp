@@ -1,6 +1,10 @@
 #include "shallow_water.h"
 #include <algorithm>
 #include <cmath>
+#include <queue>      // priority_queue: la siembra de lagos (priority-flood)
+#include <utility>
+#include <vector>
+#include "core/logger.h"
 
 namespace Haruka::fluid {
 
@@ -33,6 +37,84 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
             glm::dvec3 wp = worldPosAt(i, j);
             m_terrain[idx(i,j)] = float(terrainHeight(wp) - h0);
         }
+
+    seedLakes();
+}
+
+// ── SIEMBRA DE LAGOS: llena las hondonadas hasta su punto de derrame ────────────────────────────
+//
+// Antes de esto la simulación arrancaba SECA y solo había dos fuentes de agua en todo el motor:
+// `addRain` (únicamente si llovía) y `applySeaLevel` (que rellena la costa, y el renderizador la
+// descarta a propósito para no duplicar la lámina del océano). `addWater` no la llamaba nadie. O sea
+// que el sistema era un acumulador de lluvia: sin lluvia, no había lagos ni ríos NUNCA.
+//
+// El algoritmo es PRIORITY-FLOOD, el estándar para "rellenar depresiones" en un heightfield:
+//   1. Todas las celdas del BORDE entran en un montículo por altura de terreno. El borde es el
+//      escape: lo que llegue ahí se va del parche.
+//   2. Se saca la más baja y se propaga a sus vecinos: el nivel de agua de un vecino es el MÁXIMO
+//      entre el nivel desde el que llegamos y su propio terreno. Ese máximo ES el punto de derrame.
+//   3. El agua de cada celda es `nivel − terreno`.
+//
+// Una pasada O(n² log n) sobre 96×96, solo al re-anclar (cada 160 m). Comparado con las 9216
+// llamadas al terreno procedural que ya cuesta ese re-anclaje, esto es ruido.
+//
+// ⚠️ LIMITACIÓN HONESTA: el resultado depende del BORDE del parche, porque el borde es por donde el
+// agua escapa. Una cuenca que asome por el borde se considera abierta y no se llena; al re-anclar
+// 160 m más allá puede quedar dentro y sí llenarse. O sea que un lago cerca del borde puede aparecer
+// o desaparecer al caminar. Los del centro (~100 m) son estables. Arreglarlo de verdad pide un
+// campo de lagos GLOBAL horneado con el planeta, no un parche local.
+void ShallowWaterSim::seedLakes() {
+    const int n = m_n;
+    if (n < 3) return;
+    const int N = n * n;
+
+    // Umbral mínimo de profundidad: sin él, cada dolina de una celda se llena y el resultado es un
+    // moteado de charcos de milímetros por todo el parche — ruido, no lagos.
+    const float kMinDepth = 0.25f;
+
+    std::vector<float> level(N);
+    std::vector<char>  done(N, 0);
+    // Montículo por nivel (el más BAJO primero): pair<nivel, celda>.
+    std::priority_queue<std::pair<float,int>, std::vector<std::pair<float,int>>,
+                        std::greater<std::pair<float,int>>> heap;
+
+    auto push = [&](int i, int j) {
+        const int c = idx(i,j);
+        if (done[c]) return;
+        done[c]  = 1;
+        level[c] = m_terrain[c];        // el borde no retiene: su nivel es su propio terreno
+        heap.emplace(level[c], c);
+    };
+    for (int i = 0; i < n; ++i) { push(i, 0); push(i, n-1); }
+    for (int j = 1; j < n-1; ++j) { push(0, j); push(n-1, j); }
+
+    while (!heap.empty()) {
+        const auto top = heap.top(); heap.pop();
+        const float lv = top.first;
+        const int   c  = top.second;
+        const int   ci = c % n, cj = c / n;
+        const int di[4] = { 1, -1, 0, 0 }, dj[4] = { 0, 0, 1, -1 };
+        for (int k = 0; k < 4; ++k) {
+            const int ni = ci + di[k], nj = cj + dj[k];
+            if (ni < 0 || nj < 0 || ni >= n || nj >= n) continue;
+            const int nc = idx(ni, nj);
+            if (done[nc]) continue;
+            done[nc] = 1;
+            // El nivel del vecino no puede bajar del que traemos: si su terreno es más bajo, queda
+            // SUMERGIDO hasta el punto de derrame por el que hemos llegado. Eso es el lago.
+            level[nc] = std::max(lv, m_terrain[nc]);
+            heap.emplace(level[nc], nc);
+        }
+    }
+
+    int filled = 0;
+    for (int c = 0; c < N; ++c) {
+        const float d = level[c] - m_terrain[c];
+        if (d > kMinDepth) { m_water[c] = d; ++filled; }
+    }
+    if (filled > 0)
+        HARUKA_LOGD("Fluid", "lagos sembrados: %d celdas de %d (%.1f%% del parche)",
+                    filled, N, 100.0 * filled / N);
 }
 
 glm::dvec3 ShallowWaterSim::worldPosAt(int i, int j) const {

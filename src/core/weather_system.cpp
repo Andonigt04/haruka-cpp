@@ -98,6 +98,27 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
     return glm::clamp(cover * (0.45f + 0.75f * H) + 0.12f * H, 0.0f, 1.0f);
 }
 
+float WeatherSystem::cloudDensityAt(const WeatherSample& w, float altM) {
+    if (w.cloudCover <= 0.0f) return 0.0f;
+    const float thick = w.cloudTopM - w.cloudBaseM;
+    if (thick <= 1.0f) return 0.0f;
+
+    // Altura RELATIVA dentro de la losa: 0 en la base, 1 en el techo. Fuera de [0,1] no hay nube, y
+    // ese cero es literal — es lo que permite volar por debajo de la capa y salir por encima.
+    const float t = (altM - w.cloudBaseM) / thick;
+    if (t <= 0.0f || t >= 1.0f) return 0.0f;
+
+    // Perfil: entra rápido por abajo y se deshilacha por arriba. Asimétrico a propósito — la base de
+    // una nube es un plano bastante definido (el nivel de condensación es una cota, y por eso todas
+    // las nubes de un cielo tienen la base a la misma altura) mientras que el techo se desfleca.
+    // Bordes SUAVES: con un corte duro, atravesar la base se leería como cruzar una pared de niebla.
+    // Los bordes viven en la cabecera (`kProfileRise`/`kProfileFall`) porque un TEST los compara
+    // con los del shader: es la misma losa evaluada en dos sitios y no pueden separarse.
+    const float rise = glm::smoothstep(0.0f, kProfileRise, t);
+    const float fall = 1.0f - glm::smoothstep(kProfileFall, 1.0f, t);
+    return glm::clamp(w.cloudCover * rise * fall, 0.0f, 1.0f);
+}
+
 WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float humidity) const {
     WeatherSample w;
     w.tempC    = tempC;
@@ -122,6 +143,24 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     w.cloudBaseM = glm::clamp(320.0f + (1.0f - w.humidity) * 2100.0f
                               - glm::smoothstep(25.0f, -5.0f, tempC) * 260.0f,
                               200.0f, 2600.0f);
+
+    // ── TECHO: el DESARROLLO VERTICAL ───────────────────────────────────────────────────────────
+    // Aquí es donde la nube deja de ser una superficie y pasa a ser un cuerpo. El grosor NO es una
+    // constante, y la razón es la misma por la que llueve: una nube descarga porque se ha
+    // desarrollado en vertical. Una capa de buen tiempo son unos cientos de metros de estrato; un
+    // cumulonimbo de tormenta sube kilómetros. Poner un grosor fijo daría el mismo cielo a las dos
+    // y perdería justo lo que hace reconocible una tormenta al verla venir de lejos.
+    //
+    // Dos sumandos, y cada uno responde a algo distinto:
+    //   · la COBERTURA da el cuerpo base (más nube encima = capa más gruesa);
+    //   · la PRECIPITACIÓN dispara la torre (es el término convectivo, el que hace el yunque).
+    // La temperatura tapona: en aire frío la convección no sube igual, así que la tormenta polar es
+    // más baja que la tropical.
+    const float convect = glm::smoothstep(-10.0f, 24.0f, tempC);   // 0 = gélido, 1 = tropical
+    const float body    = 260.0f + 900.0f * w.cloudCover;
+    const float tower   = 5200.0f * w.precip * (0.35f + 0.65f * convect);
+    const float thick   = glm::clamp(body + tower, 180.0f, 11000.0f);
+    w.cloudTopM = w.cloudBaseM + thick;
 
     // ── VIENTO ──────────────────────────────────────────────────────────────────────────────────
     // Marco tangente local (este/norte) para poder hablar de vientos zonales como en la Tierra.

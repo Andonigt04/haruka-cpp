@@ -8,8 +8,10 @@ Nada de plan por versión.
 | Bugs abiertos · verificaciones pendientes · ideas sin decidir. | [ROADMAP.md](ROADMAP.md) — el plan por versión de los tres proyectos. |
 | | [docs/HISTORIAL.md](docs/HISTORIAL.md) — lo cerrado, con las trampas que costaron sesiones. |
 
-**Suite**: `./haruka_tests` → **20135 OK · 0 FALLOS**. Juego: `Survival/build/bin/survival_tests
-assets/data/magic/language/` → **53 OK**.
+**Suite**: `./haruka_tests` → **25806 OK · 0 FALLOS** (ejecutado 2026-08-11). Juego:
+`Survival/build/bin/survival_tests assets/data/magic/language/` → **53 OK**.
+*⚠️ El README sigue diciendo 19 460 y este fichero decía 20 135: los dos estaban obsoletos. El
+recuento de arriba es el de la última ejecución real, no una estimación.*
 
 ---
 
@@ -121,6 +123,136 @@ Lo que hay que confirmar antes de tocar el README, porque el documento sigue des
 > Regla mientras esto esté abierto: **el README no promete cifras del v3 como si fueran del v4.**
 > Un aviso de "en reescritura, cifras pendientes de re-medir" suma credibilidad; una cifra que el
 > código contradice la destruye.
+
+### 🔴 VULKAN: la UI se dibuja, el MUNDO 3D no (medido 2026-08-12)
+
+Ya no es "no se ve bien": está acotado. `HARUKA_BACKEND=vulkan HARUKA_SHOT_AFTER=45,x.png` da una
+captura donde **el HUD de ImGui sale perfecto** (hotbar, paneles, barras de estado) y **la escena 3D
+es negro con ruido de sal**. O sea: instancia, dispositivo, swapchain, descriptores, SPIR-V y el
+render de ImGui funcionan; lo que no llega al backbuffer es la escena.
+
+Lo que el log DESCARTA (no hace falta volver a mirarlo):
+- Vulkan arranca sin fallback, elige la RTX 3050, y **todos** los pipelines dan `ok` — incluidos
+  clipmap, teselado, culling por compute, sombras de props y el pase volumétrico de nubes.
+- Ni un error de SPIR-V, ni de validación. `glslangValidator` 11:16.2.0 presente.
+- El motor funciona: paridad de terreno, física, props y anillo cercano dan valores normales.
+
+- [ ] **Encontrar por qué la escena no llega al backbuffer.** El ruido de sal apunta a un color
+  attachment que nadie limpia ni escribe. Primer sitio a mirar: si los pases de escena dibujan a un
+  render target offscreen (`_postScene`) que en Vulkan nunca se compone al swapchain — ImGui sí
+  dibuja directo al backbuffer, que es justo lo único que se ve.
+- [ ] **Vulkan sale solo a los 60 s EXACTOS** (dos ejecuciones), sin error y por el camino de apagado
+  limpio; OpenGL pasa de 75 s sin inmutarse. Número redondo = temporizador, no fallo. Sin localizar.
+
+✅ **Arreglado de paso: la captura de pantalla en Vulkan.** Daba negro absoluto (0,0,0,0) y eso
+ocultaba el bug de verdad — parecía que no se renderizaba nada. Eran TRES fallos apilados en
+`VKDevice::readPixels`, ninguno relacionado con el render:
+1. `m_swapchain->image(0)` — imagen 0 **cableada**, no la que se estaba usando.
+2. `oldLayout = VK_IMAGE_LAYOUT_UNDEFINED` — transicionar desde `UNDEFINED` **autoriza al driver a
+   descartar el contenido**; la barrera tiraba el frame justo antes de copiarlo.
+3. Leía la imagen del frame EN CURSO, cuyo command buffer sigue abierto y sin enviar cuando se llama
+   a `readPixels` (la captura ocurre a mitad de frame). Ahora se copia la última PRESENTADA.
+4. Y la copia usaba el tamaño de VENTANA en vez del del swapchain: con `e` obtenido y sin usar,
+   pedía una región fuera de la imagen → **`VK_ERROR_DEVICE_LOST`**, no un error de validación.
+
+⚠️ Efecto secundario a saber: la captura de Vulkan va **un frame por detrás** y por tanto **incluye
+el HUD**, mientras que la de OpenGL es limpia (se toma a mitad de frame, antes de ImGui). Para
+comparar backends píxel a píxel habría que igualar eso.
+
+**Herramientas nuevas** (las dos hacían falta para poder medir esto):
+- `HARUKA_BACKEND=vulkan|opengl` — fuerza el backend sin tocar `imgui.ini` ni reiniciar ajustes.
+- `HARUKA_SHOT_AFTER=<segundos>[,ruta.png]` — espera, captura un frame y sale. Con lo anterior, da
+  dos PNG comparables del mismo escenario.
+
+### ⚠️ Clima 3D (2026-08-11) — la nube ya es un volumen; falta que el ojo lo note
+
+`cloudCover`/`precip` eran campos de SUPERFICIE: respondían "¿hay nube sobre este punto?", que basta
+a ras de suelo y deja de bastar en cuanto despegas. Ahora `WeatherSample` lleva `cloudTopM` además
+de `cloudBaseM`, y `WeatherSystem::cloudDensityAt(w, altM)` responde "¿estoy DENTRO?".
+
+**Medido** (banco `weather_3d`, +17 checks): grosor medio **433 m sin lluvia · 3853 m descargando
+(8,9×)**, techo de tormenta hasta **6336 m**; densidad 0 exacta bajo la base y sobre el techo en
+3600/3600 muestras, con contraprueba (el modelo 2D da nube a cualquier altitud, incluida la órbita);
+43200 combinaciones sin base ≥ techo.
+
+Ya conectado: `sky.frag` tenía la cima del cúmulo **cableada a `base + 1700 m`** — el mismo
+desarrollo vertical con buen tiempo que con tormenta. Ahora la trae el clima por `u_planet.w`.
+
+**El cúmulo ya NO se pinta en el cielo.** Estaba en `sky.frag`, que es un pase de FONDO (sin
+profundidad, antes que la escena): un telón que cualquier objeto tapaba y, sobre todo, **sin
+interior** — atravesar una nube era imposible por construcción, y la única alternativa habría sido
+fingirlo con un efecto de pantalla. Ahora lo dibuja `cloud_vol.frag` DESPUÉS de la escena, con la
+profundidad a mano, marchando el rayo por la losa: estar dentro deja de ser un caso especial. El
+cirro (8 km) y el altocúmulo (4 km) siguen de fondo — nunca se cruzan.
+
+⚠️ **NADA DE ESTE PASE SE HA EJECUTADO.** Compila y la suite está verde, pero la suite no dibuja un
+píxel. Un raymarch recién escrito puede salir negro, invisible o costar el frame entero.
+
+- [ ] **QUE SE VEA ALGO.** Primero de todo: que haya nubes. Si el cielo sale sin cúmulos, el pase no
+  está pintando (mirar el log: `[Clouds] pase volumetrico: ok|FALLO`). Apagable con
+  `m_volumetricClouds = false` → vuelve al cúmulo plano de antes, que es el estado conocido bueno.
+- [ ] **CUÁNTO CUESTA.** `scene.clouds.volumetric` en el profiler. Es un raymarch a pantalla
+  completa con `kCloudSteps = 24`: es EL número a bajar, y si no basta, el pase va a media
+  resolución. Sin medirlo no sé si es 0,5 ms o 15.
+- [ ] **La oclusión contra la escena**: que una montaña delante tape la nube de detrás, y que la
+  nube no se pinte encima de los props cercanos. Es lo que el pase de fondo no podía hacer.
+- [ ] **ATRAVESARLA**, que es el requisito que pidió el autor: entrar en un cúmulo y perder
+  visibilidad de forma continua, sin salto al cruzar la base.
+- [ ] ⚠️ **MIRAR DESDE ARRIBA.** La parte más floja del shader: el tramo de marcha con la cámara
+  POR ENCIMA de la capa invierte el orden de entrada/salida, y ese caso está derivado a mano y sin
+  comprobar. Si desde un avión las nubes desaparecen o se ven del revés, es ahí.
+- [ ] **La lluvia debería ocupar el volumen base→suelo**, no caer desde una cota fija. El pase de
+  gotas usa `cloudBaseM` como techo; con la losa real, dentro de la nube no debería haber gotas
+  distinguibles y por debajo sí.
+- [ ] El look cambia: el cúmulo plano estaba estilizado a propósito (*"borde duro = el look de
+  anime"*). Un volumen con autosombra no es lo mismo. Si no gusta, se decide a propósito.
+
+✅ **Ya atado**: el perfil vertical estaba duplicado a mano entre C++ y GLSL. Ahora `kProfileRise`/
+`kProfileFall` viven en `weather_system.h` y el test `weather_3d` **lee
+`lib/cloud_volume.glsl` y compara los números** (con contraprueba de que el lector distingue un
+valor distinto). Si divergen, el test cae.
+
+### ⚠️ Props: colisión y talado por partes (2026-08-11) — nada de esto se ha visto en pantalla
+
+Los árboles del scatter global **no colisionaban ni se podían talar** desde que `gameOnInit` apagó
+el `ResourceSystem` del juego (`setGenerationEnabled(false)`): ese sistema era el único que llenaba
+`m_propsQuery`, y con él se fueron `registerPropColliders()` y `harvestAt()`. Ahora el collider sale
+del **esqueleto** del árbol (`treeSkeleton` en `tree_mesh.h` → `prop_collider.h`): tronco y cada rama
+por separado, con `partId` propio.
+
+**Lo que SÍ está medido** (no hace falta volver a mirarlo):
+
+- El refactor del esqueleto no movió un vértice: 12/12 huellas idénticas entre binarios de las dos
+  versiones del fuente, con contraprueba (mover un radio 0,04 % cambia las 12).
+- `prop_collider`: `64/64 puntos libres bajo la copa por partes · 64/64 bloqueados por la caja
+  envolvente` (contraprueba) y `634 triángulos · 0 con vértices de dos partes`.
+
+**Lo que hay que ver ejecutando:**
+
+- [ ] **Chocas con el tronco y pasas bajo las ramas.** Es la propiedad que motivó hacerlo por partes.
+- [ ] **El número de la sonda `PropCollider`** al arrancar: `N props en 96 m -> M cajas (X ms)`.
+  ⚠️ Importa de verdad: cada `addPropOBB` sube `m_staticsVersion` y Jolt **destruye y recrea TODOS**
+  los cuerpos estáticos. Si M se dispara, bajar `kColliderRadiusM`. El radio no puede bajar de la
+  deriva entre refrescos del scatter (30 m, `refreshM`) o llegas a un árbol antes que su collider.
+- [ ] **Talar el tronco** tumba el árbol y da madera; **golpear una rama** la arranca dejando el
+  árbol en pie, y una rama ≥ 1,2 m da palos (`stick`).
+- [ ] **La rama arrancada deja de colisionar Y deja de proyectar sombra** (el pase de profundidad
+  lleva la misma regla; si faltara, la sombra delataría la rama que ya no está).
+- [ ] **El árbol talado sigue talado al volver** tras alejarse > 1 km (es lo que prueba que el estado
+  vive en `m_propState` y no en el registro de instancias, que el scatter regenera).
+- [ ] **Guardar y cargar** conserva talados y ramas (`scatterProps` en el save).
+
+**Huecos CONOCIDOS, decididos, no olvidados** (si molestan en pantalla, aquí está el porqué):
+
+- [ ] **No hay rebrote**: lo talado se queda talado para siempre. Nada decrementa `regrow`. El
+  sistema viejo tenía respawn 90 s / grow 60 s y ese camino no se ha reconectado.
+- [ ] **El árbol no cae: desaparece.** `state=Destroyed` hace que el render lo salte — sin animación
+  de caída, sin tocón, sin tronco en el suelo.
+- [ ] **La copa cuelga del TRONCO** (`partId` 0), no de las ramas: arrancar una rama no se lleva
+  follaje. Es lo simple y honesto; repartir blobs por rama es trabajo aparte.
+- [ ] **Softbody de ramas**: fuera de alcance, pero el esqueleto YA es el rig que necesitaría (cadena
+  de segmentos con radio en cada extremo). No hay que rehacer nada para añadirlo.
+- [ ] **Roca y casa colisionan con UNA caja**, no por partes: su bake no tiene esqueleto.
 
 ### IDE
 

@@ -23,7 +23,26 @@ void beginTest(const char* name);
 // CPU puro de terreno  (test_terrain.cpp)
 void test_cube_sphere_inverse();
 void test_weather_fronts();
+void test_weather_3d();
 void test_ground_layer();
+// Paridad clipmap ↔ recorte (test_terrain.cpp): el cuadro del recorte y la rejilla que dibuja el
+// clipmap cubren EXACTAMENTE el mismo cuadrado tangente (el hueco 0-2 km no aparece).
+void test_clipmap_parity();
+// Las cifras de LOD (terrain_lod.h) casan entre sí y con el hardware: ningún tope de teselación por
+// encima de GL_MAX_TESS_GEN_LEVEL, y el piso de triM == el lado real del quad (Nyquist).
+void test_terrain_lod_invariants();
+// La rejilla por anillos de la colisión (§9 Fase 3): monótona, simétrica, cubre su radio y acotada.
+void test_terrain_ring_grid();
+// La disparidad REAL en metros entre la superficie que se DIBUJA y la que se PISA: las dos son
+// poligonales, con celdas distintas, así que se separan por la sagita de la celda.
+void test_terrain_chord_error();
+void test_clipmap_vertex_lattice();
+// El gradiente ANALÍTICO del detalle coincide con las diferencias finitas: es lo que permite bajar
+// de 3 evaluaciones por vértice a 1 (§8) sin que la iluminación deje de describir la geometría.
+void test_terrain_detail_gradient();
+// Los ANILLOS de heightfield que sustituyen a la malla lejana TESELAN el plano: ni hueco (por el que
+// se cae) ni solape (contactos dobles de Jolt), y todo nodo en la retícula del render.
+void test_terrain_ring_tiling();
 // Física determinista  (test_physics.cpp)
 void test_physics_radial_fall();
 void test_physics_mesh_ground();
@@ -43,6 +62,9 @@ void test_simple_planet_mesh();
 void test_simple_planet_config();
 // Terrain quality → resolution  (test_terrain_quality.cpp)
 void test_terrain_quality_mapping();
+// Ambiente por SH (test_sky_ambient.cpp): paridad con sky_palette.glsl + simetría azimutal
+void test_sky_ambient_palette();
+void test_sky_ambient_sh();
 // ProcGraph node system + helpers  (test_procgraph.cpp)
 void test_procgraph_basic();
 void test_procgraph_fbm();
@@ -64,5 +86,26 @@ void test_procgraph_prop_placer();
 void test_procgraph_terrain_prop_field();
 void test_procgraph_prop_assembler();
 void test_procgraph_prop_layer_json();
+// Órbitas con elementos precesantes (test_orbit.cpp): compatibilidad de la base, ausencia de deriva
+// tras 400k órbitas, que la precesión de verdad rompe la periodicidad, y la prueba de no-choque.
+void test_orbit_basis();
+void test_orbit_no_drift();
+void test_orbit_precession();
+void test_orbit_no_collision();
+// Esferas de influencia + gravedad N-cuerpos (test_orbit.cpp): fija los números del sistema real —
+// 9,81 m/s² en superficie, SOI de la Tierra a 9,25e8 m — y que una órbita integrada se cierra.
+void test_soi_gravity();
+void test_soi_orbital_energy();
+// Escritor de PNG (test_image_writer.cpp): ida y vuelta contra el inflate de stb_image (código ajeno)
+// más el ratio de compresión, que es la razón del cambio — antes emitía bloques "stored" (1,00x).
+void test_image_writer_roundtrip();
+// LOD de malla de props (test_prop_lod.cpp): que la envolvente NO cambie entre niveles (el artefacto
+// del salto de tamaño), que la malla baje de verdad y que detalle 1.0 siga siendo la de siempre.
+void test_prop_lod_mesh();
+void test_prop_collider();
+// La reconstrucción de `dir` del clipmap (test_clipmap_dir.cpp): el vértice del clipmap llega a su
+// dirección en FLOAT desde el marco tangente, mientras la CPU la calcula en DOUBLE desde la posición.
+// Mide cuánta altura separa eso — la única pieza del terreno que nunca se había comparado.
+void test_clipmap_dir_parity();
 
 #endif // HARUKA_TEST_COMMON_H

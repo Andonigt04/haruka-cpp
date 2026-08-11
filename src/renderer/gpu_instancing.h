@@ -33,7 +33,12 @@ struct InstanceDataFloat {
     glm::mat4 model;           // transformación completa
     glm::vec4 color;           // tinte RGBA (la variedad sale de aquí, no de geometría nueva)
     glm::vec3 scale;           // escala (para normales/efectos que la necesiten)
-    float     _padding;
+    /// MÁSCARA DE PARTES ROTAS de esta instancia (bit p = la parte p ya no está). Ocupa el hueco
+    /// que antes era relleno, así que el stream de instancia NO crece. Va como float con el VALOR
+    /// entero (no el patrón de bits): un índice de parte cabe exacto en float hasta 2^24, y el
+    /// patrón de bits de un entero pequeño es un denormal que la GPU puede vaciar a cero.
+    /// Los pases que no rompen nada (construcción) la dejan en 0 = nada roto.
+    float     breakMask = 0.0f;
 };
 
 class GPUInstancing {

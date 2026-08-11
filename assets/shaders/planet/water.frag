@@ -1,14 +1,15 @@
 #version 460 core
 #extension GL_GOOGLE_include_directive : require
-in vec3 vNorm; in vec3 vFragPos; in vec3 vColor; in vec2 vUv;
+layout(location = 0) in vec3 vNorm; layout(location = 1) in vec3 vFragPos; layout(location = 2) in vec3 vColor; layout(location = 3) in vec2 vUv;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
 };
 // Campo base del terreno (elev del nivel del mar, 6 capas): lo usa la costa per-pixel.
 layout(binding = 15) uniform sampler2DArray uBaseField;
 // Campo base horneado (R32F): la costa lee de aquí la MISMA altura que pinta la malla.
 layout(binding = 16) uniform sampler2D uHeightTex;
-out vec4 fragColor;
+layout(location = 0) out vec4 fragColor;
 
 // La costa per-pixel evalúa el MISMO suelo que pinta la malla: descomposición de cara compartida
 // (gemela de dirToCubeFaceClosed en cube_sphere.cpp) y función de detalle compartida con C++.
@@ -116,10 +117,20 @@ void main() {
     float spec  = pow(max(dot(n, H), 0.0), 96.0);
     vec3 deep    = vec3(0.01, 0.10, 0.32);   // fondo del océano
     vec3 shallow = vec3(0.03, 0.34, 0.72);   // superficie iluminada
-    // Luz propia de cielo: el ambiente del UBO es casi nulo (espacio exterior), y sin más el océano
-    // es una lámina negra fuera del parche del sol. Este término no depende de uAmbient — es la
-    // dispersión Rayleigh azulada, más fuerte en el horizonte (fresnel).
-    vec3 sky   = vec3(0.09, 0.15, 0.24);
+    // Luz propia de cielo: sin ella el océano es una lámina negra fuera del parche del sol, porque
+    // el ambiente del UBO es bajo. Es la dispersión Rayleigh azulada, más fuerte en el horizonte.
+    //
+    // ⚠️ ANTES ERA UNA CONSTANTE (`vec3(0.09, 0.15, 0.24)`) y ese era el bug: el término se sumaba
+    // ENTERO a las tres de la madrugada. De noche `uLightColor·sunD` se va a cero, así que esa
+    // constante era TODO lo que quedaba — el mar brillaba igual de día que de noche y la luz "no le
+    // afectaba", porque literalmente no entraba en su iluminación dominante. Un parche contra el
+    // océano negro que no distinguía la noche de una sombra.
+    //
+    // Ahora cuelga de `uAmbient`, que YA sigue el ciclo (`ambientStrength = mix(0.11, 0.28, day)`,
+    // ver application_render.cpp). El océano sigue sin ser negro de noche —la intención original se
+    // conserva— pero ahora se apaga y se enciende con el día, que es lo que se le pide a algo
+    // iluminado. El tinte azulado se mantiene en la proporción, no en el valor absoluto.
+    vec3 sky   = uAmbient.xyz * vec3(0.9, 1.15, 1.6);
     vec3 amb   = uAmbient.xyz + sky * (0.55 + 0.45 * fres);
     float sunD = clamp(diff * 1.6, 0.0, 1.0);
     vec3 base = mix(deep, shallow, sunD);
@@ -151,7 +162,9 @@ void main() {
     float shoreH = baseH;
     if (baseH > -400.0 && baseH < 400.0) {
         float baseR = uExtra.w + baseH;
-        float triM  = max(length(wdir * baseR + uCenter.xyz) * 0.012, 2.0);
+        // ⚠️ Piso GEMELO de `terrainTriM` (core/planet/terrain_lod.h): la orilla tiene que salir de
+        // la MISMA superficie que dibuja el terreno, o el agua corta el suelo por otra cota.
+        float triM  = max(length(wdir * baseR + uCenter.xyz) * 0.012, 4.0);
         float det   = harukaTerrainDetail(wdir, baseR, triM) * harukaSeaLevelAttenuation(baseH);
         if (baseH > 0.0) det = max(det, -baseH);   // la tierra no baja del nivel del mar (paridad)
         shoreH = baseH + det;

@@ -47,6 +47,9 @@ namespace Haruka::RHI::opengl
         switch (f)
         {
             case Format::RGBA8:   return { GL_RGBA8,               GL_RGBA,            GL_UNSIGNED_BYTE };
+            // sRGB (SOLO texturas de color): el HW decodifica a lineal al muestrear → el filtrado
+            // se hace en espacio lineal. GL requiere un target RGBA. Ver rhi_types.h.
+            case Format::SRGB8_ALPHA8: return { GL_SRGB8_ALPHA8,    GL_RGBA,            GL_UNSIGNED_BYTE };
             case Format::RGBA16F: return { GL_RGBA16F,             GL_RGBA,            GL_HALF_FLOAT };
             case Format::RGB16F:  return { GL_RGB16F,              GL_RGB,             GL_FLOAT };
             case Format::RG16F:   return { GL_RG16F,               GL_RG,              GL_FLOAT };

@@ -51,6 +51,12 @@ struct InstancedObject {
     uint32_t seed        = 0;       ///< identidad determinista (celda del mundo, id de cosecha)
     uint32_t state       = 0;       ///< InstancedObjectState
     float    regrow      = 0.0f;    ///< 0..1 progreso de rebrote (si state == Regrowing)
+    /// PARTES ROTAS: bit `p` puesto = la parte `p` del esqueleto ya no está (rama arrancada).
+    /// Es una máscara y no un contador porque las partes se rompen en cualquier orden y hay que
+    /// saber CUÁL falta: la que falta no da collider ni se dibuja. 32 bits sobran — un árbol tiene
+    /// tronco + 2-3 ramas. Ortogonal a `state`: se puede tener un árbol vivo al que le falta una
+    /// rama, y `state=Destroyed` (tronco talado) se lleva el árbol entero sin mirar la máscara.
+    uint32_t breakMask   = 0;
 };
 
 /** @brief Un prototipo: la malla COMPARTIDA que dibujan todas sus instancias.
@@ -103,6 +109,24 @@ public:
             return true;
         }
         return false;
+    }
+
+    /** @brief Marca UNA parte como rota (rama arrancada) sin tocar el estado de la instancia: el
+     *  árbol sigue vivo y en pie, solo que le falta ese trozo. Devuelve true si existía. */
+    bool setBreakBitBySeed(uint32_t seed, uint32_t partId) {
+        if (partId >= 32) return false;
+        for (auto& o : m_instances) {
+            if (o.seed != seed) continue;
+            o.breakMask |= (1u << partId);
+            return true;
+        }
+        return false;
+    }
+
+    /** @brief Máscara de partes rotas de una instancia (0 si no existe). Para persistirla. */
+    uint32_t breakMaskBySeed(uint32_t seed) const {
+        for (const auto& o : m_instances) if (o.seed == seed) return o.breakMask;
+        return 0u;
     }
 
 private:

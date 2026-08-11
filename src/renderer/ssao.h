@@ -24,7 +24,7 @@ private:
     Haruka::RHI::TextureHandle m_noise;
 
     std::vector<glm::vec3> ssaoKernel;
-    std::vector<glm::vec3> ssaoNoise;
+    std::vector<glm::vec4> ssaoNoise;
 
     unsigned int width, height;
 };

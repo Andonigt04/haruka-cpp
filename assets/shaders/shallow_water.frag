@@ -40,15 +40,28 @@ void main() {
     float ndl  = max(dot(N, L), 0.0);
     float spec = pow(max(dot(N, H), 0.0), 48.0);
 
-    vec3 color = ambientStrength * u_color
-               + 0.85 * ndl * sunLightColor * u_color
+    // La respuesta a la luz, aparte: la comparten el agua y la espuma. Tenerla en una variable es
+    // lo que impide que se separen — que es justo lo que había pasado.
+    vec3 lit = vec3(ambientStrength) + 0.85 * ndl * sunLightColor;
+
+    vec3 color = lit * u_color
                + sunLightColor * 0.25 * spec;
 
-    // Breaking-crest foam: blend toward white on the steep wavefronts.
+    // Espuma de cresta rompiente.
+    //
+    // ⚠️ VA MULTIPLICADA POR LA LUZ. Antes era `mix(color, u_foamColor, f)` con `u_foamColor` EN
+    // CRUDO, más un `color += u_foamColor * 0.15 * f` explícitamente autoiluminado. O sea que donde
+    // había espuma la superficie valía un blanco fijo, idéntico a mediodía y a medianoche: los lagos
+    // y los ríos brillaban en la oscuridad y "la luz no les afectaba" — no como efecto secundario,
+    // sino porque literalmente no entraba en la cuenta.
+    //
+    // Y saturaba fácil: `u_foamStrength` vale 1,2, así que `f` llega a 1 con `Foam ≥ 0,83` y láminas
+    // enteras quedaban en blanco puro, no solo las crestas.
+    //
+    // La espuma sigue destacando sobre el agua, que era la intención del término autoiluminado, pero
+    // por la razón correcta: es más CLARA bajo la misma luz. De noche se apaga con todo lo demás.
     float f = clamp(u_foamStrength * Foam, 0.0, 1.0);
-    color = mix(color, u_foamColor, f);
-    // A touch of self-illumination on the foam so it stands out against the sea.
-    color += u_foamColor * (0.15 * f);
+    color = mix(color, u_foamColor * lit, f);
 
     if (enableHDR != 0) {
         color = color / (color + vec3(1.0));

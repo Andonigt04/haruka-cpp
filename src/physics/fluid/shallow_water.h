@@ -44,6 +44,14 @@ public:
     /** @brief Advances the simulation by dt seconds (sub-stepped internally for CFL). */
     void step(float dt);
 
+    /** @brief Llena las hondonadas del parche hasta su punto de derrame (priority-flood).
+     *
+     *  La llama `init` tras muestrear el terreno. Sin esto la simulación arranca SECA y no hay lagos
+     *  ni ríos: las únicas fuentes eran la lluvia y el rellenado costero, así que el sistema era un
+     *  acumulador de lluvia. Ver la nota larga de la implementación (incluida su limitación: el
+     *  resultado depende del borde del parche). */
+    void seedLakes();
+
     /** @brief Adds water depth (m) at a grid cell (sources: springs, rain). */
     void addWater(int i, int j, float depth);
 
@@ -80,6 +88,9 @@ public:
     int   size() const { return m_n; }
     float cellSize() const { return (float)m_dx; }
     double totalWater() const; // sum of depth*cellArea (m³), for mass checks
+    /** @brief true si la malla está lista para render/step: grid > 1 y arrays CPU dimensionados. */
+    bool valid() const { return m_n > 1 && m_terrain.size() >= size_t(m_n) * (size_t)m_n
+                                        && m_water.size()  >= size_t(m_n) * (size_t)m_n; }
 
     // --- Accessors for rendering ---
     float terrainAt(int i, int j) const { return m_terrain[idx(i,j)]; }

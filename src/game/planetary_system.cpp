@@ -1,7 +1,7 @@
 #include "planetary_system.h"
 #include "core/terrain/cube_sphere.h"
-#include "core/terrain/reference_surface.h"
 #include "core/planet/terrain_grid.h"
+#include "core/planet/terrain_lod.h"   // terrainTriM: el piso del campo cercano, no un literal
 #include "core/planet/geology.h"       // GeologyConfig (addSimplePlanet/rebuildSimplePlanet)
 #include "renderer/primitive_shapes.h"
 #include "core/components/mesh_renderer_component.h"
@@ -43,11 +43,22 @@ PlanetarySystem::~PlanetarySystem() {
 
 void PlanetarySystem::init() {}
 
+// Paso de la retícula de deformaciones. Era `ReferenceSurface::latticeStep`; se queda aquí porque es
+// lo ÚNICO de esa clase que hacía algo — el resto calculaba cero.
+static double terrainLatticeStep(int refLod, int chunkSize) {
+    return 2.0 / (double(1u << refLod) * (double)chunkSize);
+}
+
+// Retícula de las deformaciones: los mismos valores que usaban `editTerrain` y la difunta
+// `ensureReferenceSurface`, ahora en un solo sitio.
+static constexpr int kEditRefLod    = 4;
+static constexpr int kEditChunkSize = 24;
+
 uint64_t PlanetarySystem::dirToHeightKey(const glm::dvec3& dir, int refLod, int chunkSize) {
     PlanetFace f;
     double lx, ly;
     dirToCubeFace(dir, f, lx, ly);
-    const double step = ReferenceSurface::latticeStep(refLod, chunkSize);
+    const double step = terrainLatticeStep(refLod, chunkSize);
     const int64_t k = (int64_t)std::floor((lx + 1.0) / step);
     const int64_t l = (int64_t)std::floor((ly + 1.0) / step);
     return ((uint64_t)((int)f & 0x7))
@@ -79,7 +90,7 @@ void PlanetarySystem::editHeightsInRadius(std::unordered_map<uint64_t, float>& e
     // Compute face-local bounds for the brush
     PlanetFace cf; double clx, cly;
     dirToCubeFace(centerDir, cf, clx, cly);
-    const double step = ReferenceSurface::latticeStep(refLod, chunkSize);
+    const double step = terrainLatticeStep(refLod, chunkSize);
     // Radius in face-local units
     const double radiusLocal = radius / planet->radius;
     const int brushK = std::max(1, (int)std::ceil(radiusLocal / step));
@@ -123,8 +134,34 @@ void PlanetarySystem::levelTerrain(const glm::dvec3& worldPos, double radius, do
     rebuildPlanetMeshes();
 }
 
+// ⚠️ LA DEFORMACIÓN DEL TERRENO NO LLEGA A LA SUPERFICIE. Aviso una vez, porque fallar en silencio
+// es lo peor: el jugador cava, no pasa nada, y no hay forma de saber por qué.
+//
+// La cadena está rota en el paso 3:
+//   1. `editTerrain` guarda el desnivel en `m_heightEdits`.                        ✅
+//   2. `rebuildWithEdits` reconstruye la malla con `base + edits`.                  ✅
+//   3. Pero NO rehornea el bake (`bakeHeightMap` solo lo llaman `build`/`rebuild`). ❌
+//   4. Y el bake es quien manda: los dos tess eval leen `baseH` de `uHeightTex`, y
+//      `sampleHeight` (la física) lee `m_heightCPU`. Las alturas de los VÉRTICES solo
+//      se usan de respaldo cuando NO hay bake.
+//
+// Es deuda de la fase 2b: el bake pasó a ser la fuente de verdad y este camino se quedó atrás.
+//
+// Y no se arregla rehorneando: el bake cuesta ~2 s y se cachea por hash en disco — imposible por
+// palada. Lo que hace falta es una CAPA DE DEFORMACIÓN aparte (textura dispersa de deltas) que
+// muestreen los DOS lados encima del bake, con su gemelo GLSL, igual que el resto del §5.
+static void warnDeformationInert() {
+    static bool warned = false;
+    if (warned) return;
+    warned = true;
+    HARUKA_LOGW("Terrain",
+        "la deformacion del terreno NO tiene efecto: las ediciones van a la malla, pero la altura la "
+        "manda el bake (uHeightTex / m_heightCPU) y ese no se rehornea. Hace falta una capa de "
+        "deformacion muestreada por render y fisica, no un rebuild de la malla.");
+}
+
 void PlanetarySystem::rebuildPlanetMeshes() {
-    m_refSurface.clear();
+    warnDeformationInert();
     const int refLod = 4;
     const int chunkSize = 24;
     // Cada planeta reconstruye SU malla sobre la base con la que la construyó (la guarda en
@@ -158,7 +195,6 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     { HARUKA_PROFILE("lod.orbits"); updateOrbits(dt); }
     { HARUKA_PROFILE("simple.orbits"); updateSimpleOrbits(dt); }
 
-    ensureReferenceSurface();
 }
 
 void PlanetarySystem::updateOrbits(double /*dt*/) {
@@ -175,13 +211,10 @@ void PlanetarySystem::updateOrbits(double /*dt*/) {
         done[i] = 1;
         if (p.orbitParent >= 0 && (size_t)p.orbitParent < n && p.orbitPeriod > 0.0 && (size_t)p.orbitParent != i) {
             const glm::dvec3 focus = resolve((size_t)p.orbitParent);
-            const double e = glm::clamp(p.orbitEcc, 0.0, 0.99);
-            const double M = p.orbitPhase + 2.0 * 3.14159265358979323846 * (m_simulationTime / p.orbitPeriod);
-            double E = M;
-            for (int it = 0; it < 8; ++it) E -= (E - e * std::sin(E) - M) / (1.0 - e * std::cos(E));
-            const double x = p.orbitA * (std::cos(E) - e);
-            const double y = p.orbitA * std::sqrt(std::max(0.0, 1.0 - e * e)) * std::sin(E);
-            p.position = focus + p.orbitU * x + p.orbitV * y;
+            // La posición sale de los ELEMENTOS evaluados en `t`, no de una base congelada: la elipse
+            // precesa dentro de su plano y el plano gira, así que la órbita nunca se repite. Sigue
+            // siendo función de `t` (O(1), sin deriva, idéntica en todos los clientes del DGS).
+            p.position = focus + Haruka::Planet::orbitPositionAt(p.orbit, m_simulationTime);
         }
         return glm::dvec3(p.position);
     };
@@ -205,13 +238,22 @@ bool PlanetarySystem::setPlanetOrbit(const std::string& planetName, const std::s
     double dist = glm::length(rel);
     if (dist < 1e-6) return false;
     const double e = glm::clamp(ecc, 0.0, 0.9);
-    glm::dvec3 u = rel / dist;
-    glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
-    glm::dvec3 v = glm::normalize(glm::cross(axis, u));
-    pl.orbitParent = par; pl.orbitEcc = e; pl.orbitA = dist / std::max(1.0 - e, 1e-3);
-    pl.orbitPeriod = period;
-    pl.orbitPhase = -2.0 * 3.14159265358979323846 * (m_simulationTime / period);
-    pl.orbitU = u; pl.orbitV = v;
+    // El cuerpo está AHORA en su periastro: la base se ancla a su posición actual y de ahí salen los
+    // elementos. `orbitElementsFromBasis` es la inversa exacta de la base, así que esto no cambia la
+    // órbita inicial — solo la deja expresada en elementos, que es lo que permite que precese.
+    const glm::dvec3 u = rel / dist;
+    const glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+    const glm::dvec3 v = glm::normalize(glm::cross(axis, u));
+    pl.orbitParent = par;
+    pl.orbit = Haruka::Planet::OrbitElements{};
+    pl.orbit.a = dist / std::max(1.0 - e, 1e-3);
+    pl.orbit.e = e;
+    pl.orbit.period = period;
+    pl.orbit.meanAnom0 = -2.0 * 3.14159265358979323846 * (m_simulationTime / period);
+    Haruka::Planet::orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
+    Haruka::Planet::defaultPrecession(pl.seed, pl.orbit);
+    pl.orbitA = pl.orbit.a; pl.orbitEcc = pl.orbit.e;
+    pl.orbitPeriod = pl.orbit.period; pl.orbitPhase = pl.orbit.meanAnom0;
     return true;
 }
 
@@ -369,26 +411,34 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
         double dist = glm::length(rel);
         if (dist < 1e-6) continue;
         const double e = glm::clamp(oi.ecc, 0.0, 0.9);
-        glm::dvec3 u = rel / dist;
-        glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
-        glm::dvec3 v = glm::normalize(glm::cross(axis, u));
+        const glm::dvec3 u = rel / dist;
+        const glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+        const glm::dvec3 v = glm::normalize(glm::cross(axis, u));
         pl.orbitParent = parentIdx;
-        pl.orbitEcc    = e;
-        pl.orbitA      = dist / std::max(1.0 - e, 1e-3);
-        pl.orbitPeriod = oi.period;
-        pl.orbitPhase  = 0.0;
-        pl.orbitU = u; pl.orbitV = v;
-        HARUKA_LOGI("Orbit", "'%s' orbita '%s': a=%.3e e=%.2f T=%.1fs",
-                pl.name.c_str(), oi.parent.c_str(), pl.orbitA, e, pl.orbitPeriod);
+        pl.orbit = Haruka::Planet::OrbitElements{};
+        pl.orbit.a = dist / std::max(1.0 - e, 1e-3);
+        pl.orbit.e = e;
+        pl.orbit.period = oi.period;
+        Haruka::Planet::orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
+        Haruka::Planet::defaultPrecession(pl.seed, pl.orbit);
+        pl.orbitA = pl.orbit.a; pl.orbitEcc = pl.orbit.e;
+        pl.orbitPeriod = pl.orbit.period; pl.orbitPhase = pl.orbit.meanAnom0;
+        HARUKA_LOGI("Orbit", "'%s' orbita '%s': a=%.3e e=%.2f T=%.1fs · precesion: apsides 1 vuelta/%.0f "
+                    "orbitas, nodos 1/%.0f",
+                pl.name.c_str(), oi.parent.c_str(), pl.orbit.a, e, pl.orbit.period,
+                pl.orbit.apsidalCycles, std::abs(pl.orbit.nodalCycles));
         // Sync orbit al SimplePlanet (el planeta renderizable se mueve igual que el cuerpo físico).
+        // Se pasan los ELEMENTOS, no la base: si se reconvirtieran a (u,v) y de vuelta, el planeta
+        // renderizado precesaría con otras tasas que el cuerpo físico y los dos se separarían.
         for (auto& sp : m_simplePlanets) {
             if (sp->config().name == pl.name) {
-                sp->setOrbit(pl.orbitParent, pl.orbitA, pl.orbitEcc, pl.orbitPeriod,
-                             pl.orbitPhase, pl.orbitU, pl.orbitV);
+                sp->setOrbit(pl.orbitParent, pl.orbit);
                 break;
             }
         }
     }
+    // El sistema recién resuelto se AUDITA: que no pueda haber colisiones no se espera, se comprueba.
+    validateOrbits();
 
     HARUKA_LOGI("Scene", "planetas añadidos a m_planets: %zu", m_planets.size());
     for (const auto& p : m_planets)
@@ -582,15 +632,13 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     return double(s.waterLevelKm) * 1000.0;
 }
 
-void PlanetarySystem::ensureReferenceSurface() const {
-    Haruka::WorldGenParams W; double R = 0.0;
-    if (!getActivePlanetParams(W, R)) return;
-    const int chunkSize = 24;
-    const int refLod = 4;
-    m_refSurface.configure(W, R, refLod, chunkSize);
+double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
+    // Sin `triM` explícito = campo cercano: el piso de `terrainTriM`, que es el lado real del quad
+    // del clipmap. Un literal aquí volvería a desalinear la física del render en silencio.
+    return sampleTerrainHeight(worldPos, Haruka::Planet::terrainTriM(0.0));
 }
 
-double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
+double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos, float minFeatureM) const {
     const Planet* nearest = nullptr; double best = 1e300;
     for (const auto& p : m_planets) {
         const double d = glm::length(p.position - worldPos);
@@ -599,25 +647,55 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
     // SimplePlanet: el suelo sale de SU retícula base + el detalle compartido con la GPU. Va antes
     // que la superficie de referencia porque ésta cuelga de `sampleTerrainV2`, que en esta rama es
     // un stub que devuelve 0 — con ella la física caminaba sobre una esfera lisa.
+    // (1) El planeta ACTIVO por nombre. ⚠️ El nombre cruza DOS listas distintas (`m_planets`, que
+    // son los cuerpos, y `m_simplePlanets`, que son los renderizables): si no casan exactamente, esto
+    // no encuentra nada y antes se caía a la esfera lisa SIN DECIR NADA.
+    const std::string& activeName = getActivePlanetName();
     for (const auto& sp : m_simplePlanets) {
-        if (!sp || sp->config().name != getActivePlanetName()) continue;
+        if (!sp || sp->config().name != activeName) continue;
         const glm::dvec3 rel = worldPos - sp->config().position;
         const double len = glm::length(rel);
-        if (len > 1e-9) return sp->sampleHeight(rel / len);
+        if (len > 1e-9) return sp->sampleHeight(rel / len, minFeatureM);
+    }
+
+    // (2) Si el nombre no casó, el suelo es el del SimplePlanet MÁS CERCANO — que es el que se está
+    // pisando y el que se está dibujando. Antes se pasaba directo a `ReferenceSurface`, o sea a
+    // devolver 0: la física caminaba sobre una esfera lisa mientras el render pintaba relieve. Un
+    // planeta renderizable a mano es infinitamente mejor suelo que el nivel del mar.
+    {
+        const Haruka::Planet::TerrestrialPlanet* best = nullptr;
+        double bestD = 1e300;
+        for (const auto& sp : m_simplePlanets) {
+            if (!sp) continue;
+            const double d = glm::length(worldPos - sp->config().position) - sp->config().radius;
+            if (d < bestD) { bestD = d; best = sp.get(); }
+        }
+        if (best) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                HARUKA_LOGW("Terrain",
+                    "el planeta activo ('%s') no casa con ningun SimplePlanet: la fisica usa el mas "
+                    "cercano ('%s'). Revisa que los nombres de m_planets y m_simplePlanets coincidan.",
+                    activeName.c_str(), best->config().name.c_str());
+            }
+            const glm::dvec3 rel = worldPos - best->config().position;
+            const double len = glm::length(rel);
+            if (len > 1e-9) return best->sampleHeight(rel / len, minFeatureM);
+        }
     }
 
     if (nearest && nearest->name == getActivePlanetName()) {
         const glm::dvec3 rel = worldPos - nearest->position;
         const double len = glm::length(rel);
         if (len > 1e-9) {
-            ensureReferenceSurface();
+                    // Sin SimplePlanet no hay superficie muestreable: la base es el nivel del mar. Antes
+            // esto pasaba por `ReferenceSurface`, que devolvía exactamente lo mismo (cero) tras un
+            // snapshot atómico y una caché de 1 M entradas con mutex.
             double baseM = 0.0;
-            if (m_refSurface.ready()) {
-                baseM = m_refSurface.elevM(rel / len);
-            }
             // Apply deformation edits
             const glm::dvec3 dir = rel / len;
-            const uint64_t key = dirToHeightKey(dir, m_refSurface.refLod(), m_refSurface.chunkSize());
+            const uint64_t key = dirToHeightKey(dir, kEditRefLod, kEditChunkSize);
             auto it = m_heightEdits.find(key);
             if (it != m_heightEdits.end()) baseM += it->second;
             return baseM;
@@ -641,16 +719,18 @@ bool PlanetarySystem::groundHeightKmAtDir(const glm::dvec3& dir, float& outElevK
         return true;
     }
 
-    if (!m_refSurface.ready()) return false;
-    double m = m_refSurface.elevM(d);
-    outElevKm = (float)(m / 1000.0);
-    return true;
+    // Sin SimplePlanet no hay altura que dar, y **devolver false es lo correcto**. Antes se
+    // preguntaba a `ReferenceSurface`, que contestaba 0 siempre: el llamante recibía `true` con
+    // "estás al nivel del mar" en cualquier punto del planeta — y ancló los props ahí, que es por lo
+    // que flotaban. Un "no lo sé" honesto es mejor que un cero que parece un dato.
+    return false;
 }
 
-std::string PlanetarySystem::getActivePlanetName() const {
+const std::string& PlanetarySystem::getActivePlanetName() const {
+    static const std::string kNone;   // para el caso sin planetas: referencia válida y estable
     for (const auto& p : m_planets)
         if (p.isHome) return p.name;
-    return m_planets.empty() ? std::string{} : m_planets.front().name;
+    return m_planets.empty() ? kNone : m_planets.front().name;
 }
 
 const Haruka::Planet::TerrestrialPlanet* PlanetarySystem::activeTerrestrial() const {
@@ -688,6 +768,22 @@ void PlanetarySystem::addSimplePlanet(const SimplePlanet& orbit,
         if (grid.faceRes > 0) cfg.faceRes = grid.faceRes;
         p->build(cfg);
         m_simplePlanets.push_back(std::move(p));
+
+        // ⚠️ ESTA VÍA CREA MEDIO PLANETA. `buildFromScene` empuja a las DOS listas a la vez
+        // (`m_planets` = el cuerpo con masa y órbita, `m_simplePlanets` = lo renderizable); esta
+        // solo empuja a la segunda. El resultado se DIBUJA entero —terreno, mar, props— pero no
+        // existe para nada más: sin gravedad, sin física, y `getActivePlanetName()` no lo ve, así
+        // que `sampleTerrainHeight` nunca lo muestrea. Es decir, un planeta al que no se puede ir
+        // y sobre el que no se puede caminar. Si eso no es lo que se quería, el planeta va en la
+        // escena (con `surfaceConfig`), no por aquí.
+        bool hasBody = false;
+        for (const auto& b : m_planets) if (b.name == orbit.name) { hasBody = true; break; }
+        if (!hasBody) {
+            HARUKA_LOGW("SimplePlanet",
+                "'%s' se DIBUJA pero no tiene cuerpo en m_planets: sin gravedad ni fisica, y la "
+                "fisica del terreno no lo muestrea. Declaralo en la escena si debe ser pisable.",
+                orbit.name.c_str());
+        }
     } catch (const std::exception& e) {
         HARUKA_LOGE("SimplePlanet", "addSimplePlanet('%s') EXCEPTION: %s", orbit.name.c_str(), e.what());
     } catch (...) {
@@ -731,6 +827,64 @@ void PlanetarySystem::setSunLight(const glm::vec3& dir, const glm::vec3& color,
     for (auto& p : m_simplePlanets) p->setSunLight(dir, color, ambientStrength);
 }
 
+int PlanetarySystem::validateOrbits() const {
+    // ── LA AUDITORÍA DEL SISTEMA ────────────────────────────────────────────────────────────────
+    //
+    // "Que no choquen" no es una esperanza que se comprueba jugando: con elementos precesantes el
+    // radio de cada cuerpo vive SIEMPRE en [a(1−eMax), a(1+eMax)], un intervalo fijo y conocido antes
+    // de arrancar. Así que se puede DEMOSTRAR aquí, una vez, para todo t. Con integración N-cuerpos
+    // ese intervalo no existe y esta función no se podría escribir.
+    //
+    // Se auditan dos cosas distintas y hacen falta las dos: que las órbitas no se cruzen (geometría)
+    // y que estén lo bastante separadas para no perturbarse hasta cruzarse (dinámica).
+    int problems = 0;
+    // Se agrupa por PADRE: comparar la órbita de una luna con la de un planeta de otro sol no dice
+    // nada (los semiejes están medidos respecto a focos distintos).
+    for (size_t parent = 0; parent < m_planets.size(); ++parent) {
+        std::vector<size_t> kids;
+        for (size_t i = 0; i < m_planets.size(); ++i)
+            if (m_planets[i].orbitParent == (int)parent && m_planets[i].orbit.period > 0.0)
+                kids.push_back(i);
+        if (kids.size() < 2) continue;
+        // Ordenar por semieje: solo hay que comparar VECINOS. Si el vecino inmediato está separado,
+        // los de más allá también (los intervalos son disjuntos y crecientes).
+        std::sort(kids.begin(), kids.end(), [&](size_t a, size_t b) {
+            return m_planets[a].orbit.a < m_planets[b].orbit.a;
+        });
+        const double centralMass = Haruka::Planet::bodyMassFromRadius(m_planets[parent].radius);
+        for (size_t k = 0; k + 1 < kids.size(); ++k) {
+            const Planet& in  = m_planets[kids[k]];
+            const Planet& out = m_planets[kids[k + 1]];
+            if (!Haruka::Planet::orbitsSeparated(in.orbit, out.orbit)) {
+                HARUKA_LOGW("Orbit", "'%s' y '%s' PUEDEN CRUZARSE: apoapsis max %.4e >= periapsis min "
+                            "%.4e (con e maxima %.3f y %.3f). Sube el semieje de '%s' o baja su "
+                            "excentricidad.",
+                            in.name.c_str(), out.name.c_str(), in.orbit.apoapsisMax(),
+                            out.orbit.periapsisMin(), in.orbit.eMax(), out.orbit.eMax(),
+                            out.name.c_str());
+                ++problems;
+                continue;   // sin separación geométrica, el criterio de Hill no aporta nada
+            }
+            const double delta = Haruka::Planet::mutualHillSeparation(
+                in.orbit.a,  Haruka::Planet::bodyMassFromRadius(in.radius),
+                out.orbit.a, Haruka::Planet::bodyMassFromRadius(out.radius), centralMass);
+            // Δ > 10 sobrevive escalas de gigaaños; por debajo de 3.5 los pares se cruzan. Entre
+            // ambos hay una zona gris: se avisa, no se rechaza, porque la precesión de este sistema
+            // es una función acotada y no puede llevarlos a cruzarse (eso ya lo garantiza el test de
+            // arriba). El aviso es para el AUTOR del sistema: un Δ bajo se ve raro, muy apretado.
+            if (delta < 10.0) {
+                HARUKA_LOGW("Orbit", "'%s' y '%s' estan a %.1f radios de Hill mutuos (se recomienda "
+                            ">10). No pueden chocar, pero el par queda muy apretado.",
+                            in.name.c_str(), out.name.c_str(), delta);
+                ++problems;
+            }
+        }
+    }
+    if (problems == 0 && m_planets.size() > 1)
+        HARUKA_LOGI("Orbit", "sistema auditado: ninguna pareja puede cruzarse para ningun t");
+    return problems;
+}
+
 void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
     const size_t n = m_simplePlanets.size();
     if (n == 0) return;
@@ -746,13 +900,10 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
         done[i] = 1;
         if (cfg.orbitParent >= 0 && (size_t)cfg.orbitParent < n && cfg.orbitPeriod > 0.0) {
             const glm::dvec3 focus = resolve((size_t)cfg.orbitParent);
-            const double e = glm::clamp(cfg.orbitEcc, 0.0, 0.99);
-            const double M = cfg.orbitPhase + 2.0 * 3.14159265358979323846 * (m_simulationTime / cfg.orbitPeriod);
-            double E = M;
-            for (int it = 0; it < 8; ++it) E -= (E - e * std::sin(E) - M) / (1.0 - e * std::cos(E));
-            const double x = cfg.orbitA * (std::cos(E) - e);
-            const double y = cfg.orbitA * std::sqrt(std::max(0.0, 1.0 - e * e)) * std::sin(E);
-            p.setPosition(focus + cfg.orbitU * x + cfg.orbitV * y);
+            // MISMA función que `updateOrbits`. Antes eran dos copias del resolvedor de Kepler, y con
+            // la precesión serían dos copias que además tienen que precesar igual: el planeta que se
+            // dibuja y el cuerpo que orbita se habrían separado en cuanto una de las dos cambiara.
+            p.setPosition(focus + Haruka::Planet::orbitPositionAt(cfg.orbit, m_simulationTime));
         }
         return p.position();
     };

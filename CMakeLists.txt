@@ -31,8 +31,82 @@ set(OpenGL_GL_PREFERENCE GLVND)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# ⚠️ SIN ESTO EL MOTOR SE COMPILA A -O0, Y NADIE LO SABÍA.
+#
+# `CMAKE_CXX_FLAGS_RELEASE` estaba definido abajo desde hace tiempo, pero `CMAKE_BUILD_TYPE` no se
+# fijaba en NINGÚN sitio (ni aquí, ni en el juego, ni en `build.sh`, que solo pasa `-DRELEASE=ON` —
+# y esa opción cambia el LAYOUT DE ASSETS, no la optimización). Resultado: todos los binarios salían
+# sin `-O`, incluidos los de `./build.sh release`.
+#
+# Lo que costaba, medido con el mismo escenario y la misma sonda:
+#     fluid.render.lamina  5,80 ms -> 0,28 ms   (21x)
+#     post.composite       0,142   -> 0,003     (47x)
+#     shadow.pass          2,31    -> 0,40      (5,8x)
+#     barrido de props     584 ns/inst -> 35    (17x)
+# O sea que cualquier juicio de rendimiento hecho hasta hoy estaba sesgado por ese factor, y varias
+# "optimizaciones necesarias" se evaporan al compilar bien.
+#
+# Por defecto RelWithDebInfo y no Release: es -O2 CON símbolos, así que el build de todos los días
+# es rápido y además se puede depurar y perfilar. `Release` (-O3 -flto) queda para el empaquetado,
+# que es donde el coste de compilar con LTO tiene sentido. La CPU objetivo la fija `HARUKA_ARCH`
+# (ver abajo) y es la MISMA en los dos tipos: portable por defecto.
+get_property(_haruka_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _haruka_multi_config AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Tipo de build (vacío = -O0, ver nota)" FORCE)
+    message(STATUS "CMAKE_BUILD_TYPE vacío -> RelWithDebInfo (-O2 -g). Antes se compilaba a -O0.")
+endif()
+
 if(NOT MSVC)
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -flto -ffast-math")
+    # ⚠️ SIN `-ffast-math`, Y CON `-ffp-contract=off` GLOBAL. Medido, no supuesto: con
+    # `-ffast-math` los tests de paridad FALLAN en Release —
+    #     terrain_chord_error: "lo que se dibuja y lo que se pisa es la MISMA superficie (0 m)"
+    #     terrain_detail_gradient: "devuelve EXACTAMENTE la misma altura que terrainDetail"
+    # — que es justo lo que la nota de abajo predecía que pasaría.
+    #
+    # El blindaje por FICHERO era insuficiente por un motivo estructural: la aritmética del terreno
+    # vive en CABECERAS (`terrain_detail.h`, `terrain_lod.h`), así que se compila dentro de cada
+    # unidad que las incluya. Marcar tres `.cpp` no puede cubrirla.
+    #
+    # Y `-ffp-contract` en GCC vale `fast` POR DEFECTO desde -O2: la fusión `a*b+c` -> FMA ocurriría
+    # aunque no hubiera `-ffast-math`. Por eso va explícito y global, no solo en Release.
+    #
+    # Lo que se pierde es reasociación y vectorización agresiva de coma flotante. Lo que se gana es
+    # que el suelo que se dibuja y el que se pisa sigan siendo el mismo en la build que juega el
+    # usuario — que es la propiedad central del proyecto, no un detalle.
+    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -flto")
+    add_compile_options(-ffp-contract=off)
+
+    # ── PARA QUÉ CPU SE COMPILA ─────────────────────────────────────────────────────────────────
+    #
+    # ⚠️ AQUÍ PONÍA `-march=native`, y eso produce un binario que SOLO ARRANCA EN ESTA MÁQUINA.
+    # `native` en este equipo resuelve a `znver3` (Ryzen 7 5800H) y exige AVX2, FMA, BMI2, F16C. En
+    # una CPU sin ellas no da un error legible: muere con SIGILL («instrucción ilegal») al ejecutar
+    # la primera. Para `build/` daba igual —se compila y se ejecuta en el mismo sitio— pero
+    # `./build.sh release` empaqueta en `dist/`, que es justo lo que se reparte.
+    #
+    # `x86-64-v3` es el nivel base que exige AVX2+FMA (Haswell/Excavator, 2013 en adelante): conserva
+    # el grueso de la ganancia y arranca en cualquier equipo de la última década. El ajuste fino de
+    # latencias se recupera con `-mtune=native`, que REORDENA instrucciones sin exigir nada nuevo al
+    # hardware — o sea, gratis en portabilidad.
+    #
+    # `-DHARUKA_ARCH=native` para una build local a máxima velocidad, a sabiendas de que no es
+    # distribuible. `-DHARUKA_ARCH=x86-64-v2` si hiciera falta llegar a máquinas de ~2009.
+    #
+    # Va con `add_compile_options` y no solo en los flags de Release para que el build de todos los
+    # días (RelWithDebInfo) también aproveche AVX2: sin esto se compilaba al x86-64 base, o sea SSE2.
+    set(HARUKA_ARCH "x86-64-v3" CACHE STRING
+        "Nivel de CPU objetivo: x86-64-v3 (portable, AVX2) | native (solo esta maquina) | x86-64-v2")
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-march=${HARUKA_ARCH}" HARUKA_ARCH_OK)
+    if(HARUKA_ARCH_OK)
+        add_compile_options(-march=${HARUKA_ARCH})
+        if(NOT HARUKA_ARCH STREQUAL "native")
+            add_compile_options(-mtune=native)   # solo ordena; no añade instrucciones exigidas
+        endif()
+        message(STATUS "CPU objetivo: -march=${HARUKA_ARCH}")
+    else()
+        message(WARNING "El compilador no acepta -march=${HARUKA_ARCH}; se compila al x86-64 base")
+    endif()
 
     # ⚠️ EL CAMINO DE ALTURA DEL TERRENO SE COMPILA SIN fast-math. No es purismo: el invariante
     # render↔colisión es de 1 cm, y se cumple porque la CPU y el shader evalúan la MISMA fórmula con
@@ -47,7 +121,6 @@ if(NOT MSVC)
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/noise_generator.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_geology.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/cube_sphere.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/reference_surface.cpp"
         DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()
@@ -109,6 +182,7 @@ set(IMGUI_SOURCES
     ${THIRD_PARTY_DIR}/imgui/imgui_demo.cpp
     ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_sdl3.cpp
     ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_opengl3.cpp
+    ${THIRD_PARTY_DIR}/imgui/backends/imgui_impl_vulkan.cpp
 )
 
 set(NFD_SOURCES
@@ -247,10 +321,14 @@ list(FILTER ENGINE_SOURCES EXCLUDE REGEX "net/default_rules\\.cpp$")
 # suelo. Mismas fuentes que usa el engine, aquí en una lib GL-free reusable por el .so de reglas.
 add_library(haruka_simbase STATIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/planet_geology.cpp"
-    # La SUPERFICIE DE REFERENCIA (el suelo del juego) y el cubo↔esfera que necesita. Están aquí, y no
-    # solo en el motor, para que el servidor pueda evaluar EL MISMO suelo que pisa el cliente: si el
-    # DGS valida contra otra superficie, expulsa a jugadores legítimos o deja pasar noclip.
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/reference_surface.cpp"
+    # El cubo↔esfera, que el servidor necesita para hablar de direcciones en la misma retícula que
+    # el cliente.
+    #
+    # ⚠️ Aquí estaba también `reference_surface.cpp`, con el argumento de que el servidor debía
+    # evaluar EL MISMO suelo que pisa el cliente. Buen argumento, implementación vacía: su `cornerM`
+    # devolvía 0.0, así que lo que compartían era un cero. Retirada; el problema que describía ese
+    # comentario SIGUE ABIERTO —el DGS valida contra el nivel del mar— y el arreglo real es que el
+    # servidor reproduzca el bake de altura, no una clase que devuelve constantes.
     "${CMAKE_CURRENT_SOURCE_DIR}/src/core/terrain/cube_sphere.cpp"
     # EL CLIMA (frentes deterministas). GL-free y aquí, no solo en el motor, por el mismo motivo
     # que la superficie de referencia: el servidor tiene que poder ver LA MISMA tormenta que el
@@ -318,6 +396,22 @@ target_link_libraries(HarukaEngine PUBLIC
     ${CMAKE_DL_LIBS}
 )
 
+# Vulkan (backend VK, OPCIONAL): el código se compila bajo `#if __has_include(<vulkan/vulkan.h>)`
+# (HARUKA_RHI_HAS_VULKAN). Si hay SDK, hay que enlazar también el loader (libvulkan): la .so
+# transparenta los símbolos vk* y los ejecutables fallarían al enlazar sin la librería.
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND AND TARGET Vulkan::Vulkan)
+    target_link_libraries(HarukaEngine PUBLIC Vulkan::Vulkan)
+else()
+    # Fedora: `vulkan` puede traer solo cabeceras → FindVulkan sin target de librería. Fallback a
+    # libvulkan.so del loader (paquete `vulkan-loader`). Si tampoco está, el backend VK no se
+    # enlaza y habría que instalarlo (los símbolos vk* de la .so quedarían undefined).
+    find_library(VULKAN_LOADER_LIB NAMES vulkan)
+    if(VULKAN_LOADER_LIB)
+        target_link_libraries(HarukaEngine PUBLIC ${VULKAN_LOADER_LIB})
+    endif()
+endif()
+
 # --- 5. GLSL -> SPIR-V Shader Compilation ---
 find_program(GLSLC     glslc)
 find_program(GLSLANG_V glslangValidator)
@@ -367,16 +461,22 @@ endif()
 # el `#include` no se encuentra, el pipeline no linka y el objeto simplemente no se dibuja — sin
 # error de dibujado, porque el fallo fue al crear el pipeline y el camino de respaldo lo tapa.
 #
-# Los del PLANETA (assets/shaders/planet/) tampoco: el RHI los carga por ruta en tiempo de ejecución
-# (`PipelineDesc::*Path`), y entre ellos hay .tesc/.tese, que el glob de arriba —plano y sin esas
-# extensiones— no recoge de todos modos. Estaban incrustados como literales dentro de
-# planetary_system.cpp: 465 líneas de GLSL dentro de un .cpp, con lo que probar un cambio de una
-# línea exigía recompilar el motor entero.
+# Los del PLANETA (assets/shaders/planet/) SÍ se compilan a SPIR-V: el RHI los carga por ruta en
+# tiempo de ejecución (`PipelineDesc::*Path`), y entre ellos hay .tesc/.tese, que el glob plano de
+# arriba no recoge. PARIDAD GL=VK por construcción: el mismo GLSL → el mismo glslang/glslc, con el
+# target de GL (bindings literales). El runtime GL prefiere este .spv; el GLSL del driver solo queda
+# como fallback para GPUs sin GL_ARB_gl_spirv. (Antes solo se copiaban: el clipmap —el único que
+# aporta detalle fino— caía siempre al compilador GLSL del driver, divergiendo de Vulkan.)
 file(GLOB SHADER_LIBS CONFIGURE_DEPENDS
-    "${SHADER_SRC_DIR}/lib/*.glsl"
-    "${SHADER_SRC_DIR}/planet/*.vert" "${SHADER_SRC_DIR}/planet/*.frag"
-    "${SHADER_SRC_DIR}/planet/*.tesc" "${SHADER_SRC_DIR}/planet/*.tese")
+    "${SHADER_SRC_DIR}/lib/*.glsl")
 list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(lib|planet)/")
+# ⚠️ `.comp` incluido: el culling de parches (planet/terrain_cull.comp) es un COMPUTE, y sin él en
+# este glob el fichero no se copiaba al build ni se compilaba a SPIR-V. El síntoma era
+# "createPipeline: falta la etapa COMPUTE" — el motor pedía una ruta que no existía en bin/.
+file(GLOB PLANET_SHADERS CONFIGURE_DEPENDS
+    "${SHADER_SRC_DIR}/planet/*.vert" "${SHADER_SRC_DIR}/planet/*.frag"
+    "${SHADER_SRC_DIR}/planet/*.tesc" "${SHADER_SRC_DIR}/planet/*.tese"
+    "${SHADER_SRC_DIR}/planet/*.comp")
 # Copia en tiempo de BUILD, no de configure. Con `configure_file` la copia solo se rehace al
 # re-ejecutar cmake, así que editar una librería y compilar dejaba el shader usando la versión
 # ANTERIOR — y el síntoma es el peor posible: el cambio "no hace nada" y parece que la hipótesis
@@ -414,6 +514,34 @@ foreach(SRC ${SHADER_SOURCES})
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
             DEPENDS ${SRC} ${SHADER_LIBS}
             COMMENT "glslangValidator  ${NAME} -> ${NAME}.spv"
+            VERBATIM)
+    endif()
+
+    list(APPEND SPIRV_OUTPUTS ${SPV})
+endforeach()
+
+# Shaders del PLANETA → SPIR-V GL, preservando el subdirectorio planet/ (el RHI pide la ruta
+# completa `assets/shaders/planet/*.spv`). Igual target que el resto: bindings literales GL.
+foreach(SRC ${PLANET_SHADERS})
+    get_filename_component(NAME ${SRC} NAME)
+    set(SPV "${SHADER_OUT_DIR}/planet/${NAME}.spv")
+    set(DST_SRC "${SHADER_OUT_DIR}/planet/${NAME}")
+
+    if(GLSLC)
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUT_DIR}/planet"
+            COMMAND ${GLSLC} --target-env=opengl -I${SHADER_SRC_DIR} ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
+            DEPENDS ${SRC} ${SHADER_LIBS}
+            COMMENT "glslc  planet/${NAME} -> planet/${NAME}.spv"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUT_DIR}/planet"
+            COMMAND ${GLSLANG_V} -G -I${SHADER_SRC_DIR} ${SRC} -o ${SPV}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST_SRC}
+            DEPENDS ${SRC} ${SHADER_LIBS}
+            COMMENT "glslangValidator  planet/${NAME} -> planet/${NAME}.spv"
             VERBATIM)
     endif()
 
@@ -480,7 +608,14 @@ add_executable(haruka_tests
     tests/test_dgs.cpp
     tests/test_simple_planet.cpp         # SimplePlanet mesh & config
     tests/test_terrain_quality.cpp       # terrain quality → resolution mappings
-    tests/test_procgraph.cpp)            # ProcGraph nodes, BiomeConfig, RGBAImage
+    tests/test_sky_ambient.cpp           # ambiente SH: paridad con sky_palette.glsl + simetría
+    tests/test_procgraph.cpp             # ProcGraph nodes, BiomeConfig, RGBAImage
+    tests/test_orbit.cpp                 # órbitas Kepler con elementos precesantes
+    tests/test_image_writer.cpp          # PNG: ida y vuelta + compresión DEFLATE
+    tests/test_prop_lod.cpp              # LOD de malla de props: envolvente estable
+    tests/test_prop_collider.cpp         # colliders de props por PARTE (esqueleto del arbol)
+    tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
+    tests/test_clipmap_dir.cpp)          # dir del clipmap: float del marco vs double de la CPU
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # test_dgs.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre
 # se propaga desde HarukaEngine (solo con HARUKA_NETWORK), así que se lo damos al test directamente.
@@ -504,6 +639,21 @@ set_target_properties(haruka_tests PROPERTIES
     INSTALL_RPATH "$ORIGIN")
 enable_testing()
 add_test(NAME haruka_tests COMMAND haruka_tests)
+
+# --- 6a-bis-2. haruka_tests_rhi: banco ABIERTO del RHI (GL + Vulkan, requiere VENTANA) -------
+# A diferencia de haruka_tests (headless, CPU), esto abre una SDL_Window y crea un device real
+# con swapchain, así que SOLO se lanza a mano o en un runner con display:
+#   ./bin/haruka_tests_rhi all    (GL + Vulkan, el que exista)
+#   ./bin/haruka_tests_rhi vk     (solo Vulkan)
+# Cubre: textura por formato, buffers, render targets (incl. depth-as-texture / MRT), array &
+# cubemaps & samplers, y un ciclo completo del frame (acquire->clear->present: la cadena que
+# daba TDR en NVIDIA). Si no hay display, SDL_CreateWindow falla y el test se salta con "skip".
+add_executable(haruka_tests_rhi
+    tests/rhi_test_main.cpp)
+target_link_libraries(haruka_tests_rhi PRIVATE HarukaEngine)
+set_target_properties(haruka_tests_rhi PROPERTIES
+    BUILD_RPATH   "$ORIGIN"
+    INSTALL_RPATH "$ORIGIN")
 
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)

@@ -132,6 +132,45 @@ public:
     void setPropScatterEnabled(bool enabled) { m_propScatterEnabled = enabled; }
     bool isPropScatterEnabled() const { return m_propScatterEnabled; }
 
+    /** @brief Resultado de un golpe contra un prop del scatter. `partId` identifica QUÉ parte se
+     *  rompió (0 = tronco → el prop entero cae; >0 = una rama) y `lengthM` es lo que medía ese
+     *  segmento en el mundo, que es lo que decide si el golpe deja un palo aprovechable. */
+    struct PropHit {
+        bool        hit       = false;
+        uint32_t    seed      = 0;      ///< identidad determinista de la instancia (celda del mundo)
+        std::string prototype;          ///< nombre del prototipo ("tree", "rock", …)
+        int         partId    = -1;
+        bool        trunk     = false;  ///< true = se ha tumbado el prop entero
+        double      lengthM   = 0.0;    ///< longitud del segmento roto (m), ya escalada
+        glm::dvec3  pos{0.0};           ///< punto medio de la parte rota, en el mundo
+    };
+    /** @brief Rompe la parte de prop más cercana al golpe (esfera `center`+`radius`), si la hay.
+     *  Sin raycast: la caja de la parte contra la esfera del hachazo, que es lo mismo que usaba el
+     *  sistema de cosecha anterior. Marca el estado en el registro (tronco → `Destroyed`, rama →
+     *  bit en `breakMask`) y REGENERA los colliders, para que lo que has roto deje de estorbar.
+     *  Es PÚBLICA a propósito: el talado lo dispara el JUEGO (el hachazo), no el motor. */
+    PropHit breakPropAt(const glm::dvec3& center, double radius);
+
+    /** @brief Lo que le ha pasado a un prop concreto: talado y/o con ramas arrancadas. */
+    struct PropStateDelta {
+        uint32_t seed      = 0;
+        uint32_t state     = 0;    ///< InstancedObjectState
+        uint32_t breakMask = 0;    ///< partes rotas
+        float    regrow    = 0.0f;
+    };
+    /** @brief Todo lo que el jugador ha roto, para guardarlo en la partida.
+     *
+     *  ⚠️ Vive FUERA del registro de instancias a propósito. El scatter regenera las instancias
+     *  desde cero y solo conserva las que siguen cerca: si el estado viviera solo ahí, el árbol que
+     *  talaste reaparecería en cuanto te alejaras lo bastante para que saliera del radio del
+     *  scatter — que es a los pocos cientos de metros. El mapa es por SEMILLA (la celda del mundo),
+     *  que es una identidad estable para siempre.
+     *
+     *  Solo guarda lo ROTO, no todos los props: un mundo entero de árboles intactos no se
+     *  serializa, se regenera de la semilla. */
+    std::vector<PropStateDelta> serializePropState() const;
+    void restorePropState(const std::vector<PropStateDelta>& deltas);
+
     /** @brief Activa/desactiva el snapshot de DEBUG del scatter (`getPropScatterDebug`). La
      *  jerarquía del editor lo pide cuando muestra el árbol "Props (GPUInstancing)"; apagado por
      *  defecto para no pagar el barrido de instancias por frame en el motor sin editor. */
@@ -508,6 +547,15 @@ private:
     int m_editorViewportH = 0;
     /** @brief True when running with --headless (no visible window, no ImGui). */
     bool m_headless = false;
+    /** @brief True cuando el impl de ImGui GL está activo (solo backend OpenGL). Con Vulkan no hay
+     *         impl (fase 7 → ImGui_ImplVulkan) y no se pinta la UI; la escena 3D es RHI y sí corre. */
+    bool m_imguiGL = false;
+    /** @brief True cuando el impl de ImGui Vulkan está activo (fase 7: ImGui_ImplVulkan). La UI se
+     *         graba en el command buffer del frame ANTES de presentar (VKDevice::drawImgui). */
+    bool m_imguiVK = false;
+    /** @brief Factor físico/lógico del swapchain (DPI). Si > 1, el viewport de ImGui y el atlas de
+     *         fuentes se escalan a esa resolución (texto nítido); DisplaySize se mantiene lógico. */
+    float m_imguiFbScale = 1.0f;
 
     // Resets to 0 on each init(); renderFrameContent logs the first 5 frames per init.
     int _diagFramesLeft = 0;
@@ -554,8 +602,27 @@ private:
     // pase lo lee por frame. Ver application_render.cpp (pase "scene.prop.instanced").
     Haruka::InstancedObjectRegistry m_propRegistry;
     Haruka::RHI::PipelineHandle     m_propInstPSO;
+    /// Solo profundidad, instanciado: mete los props del motor en el mapa de sombras. Sin esto el
+    /// pase de sombras solo contenía lo que dibuja el hook del juego y ningún árbol proyectaba.
+    Haruka::RHI::PipelineHandle     m_propShadowPSO;
+    Haruka::RHI::BufferHandle       m_propShadowUBO;   ///< la matriz de luz del pase
+    // Pase VOLUMÉTRICO de nubes. El cúmulo bajo dejó de pintarse en el shader de CIELO (fondo, sin
+    // profundidad, antes que la escena) y pasó a ser un medio que se RECORRE, dibujado después de
+    // toda la geometría. Ese cambio es lo que hace posible atravesar una nube: un fondo no tiene
+    // interior, así que la única alternativa habría sido fingirlo con un efecto de pantalla.
+    Haruka::RHI::PipelineHandle     m_cloudPSO;
+    Haruka::RHI::BufferHandle       m_cloudUBO;
+    /// Copia del depth de la escena: no se puede samplear la profundidad del MISMO target al que se
+    /// dibuja (realimentación). Mismo patrón que usa el fluido para que sus partículas se ocluyan.
+    Haruka::RHI::RenderPassHandle   m_cloudDepthRT;
+    int  m_cloudDepthW = 0, m_cloudDepthH = 0;
+    bool m_volumetricClouds = true;   ///< off = solo el cielo de fondo (nubes planas, no atravesables)
+
     Haruka::RHI::BufferHandle       m_propParamsUBO;   // PropParams (binding 6) del pase de props
     Haruka::RHI::BufferHandle       m_constParamsUBO;  // ConstParams (binding 6) del pase de construcción
+    /// Estado PERSISTENTE de los props rotos, por semilla de celda. Ver `serializePropState` para
+    /// por qué no puede vivir dentro de `m_propRegistry`. Crece solo con lo que el jugador rompe.
+    std::unordered_map<uint32_t, PropStateDelta> m_propState;
     bool m_propScatterEnabled = true;                  // off = el juego gestiona sus props (Survival)
     bool m_propDebugEnabled   = false;                 // snapshot de debug para la jerarquía del editor
     std::vector<PropPrototypeDebug> m_propScatterDebug; // por frame, cuando m_propDebugEnabled
@@ -563,9 +630,18 @@ private:
     // (albedo/normal/metallic/roughness/ao horneados con el node material graph y subidos a GPU).
     // Sin material (mask == 0) → solo color por vértice (el caso del editor de debug "⚠ sin per-pixel").
     struct PropPrototypeGpu {
-        Haruka::RHI::BufferHandle vbo = {}, ebo = {};
-        uint32_t vertexCount = 0;
-        uint32_t indexCount = 0;
+        /// NIVELES DE DETALLE de la malla. Existen porque, medido con RenderDoc, los árboles del
+        /// scatter son el **85,8 % de los triángulos del frame** (6320 instancias × 512 = 3,24 M) y el
+        /// instancing no lo arregla: instanciar ahorra draw calls, no trabajo de vértices — la GPU
+        /// ejecuta el vertex shader por instancia, vaya en un comando o en 6320.
+        ///
+        /// El material (texturas) es COMPARTIDO por los niveles: es el mismo prototipo, solo cambia la
+        /// densidad de la malla. Cada nivel es un draw instanciado propio, así que 4 prototipos × 3
+        /// niveles son 12 draws como máximo — sigue siendo nada al lado de los 3,24 M de triángulos.
+        static constexpr int kLods = 3;
+        Haruka::RHI::BufferHandle vbo[kLods] = {}, ebo[kLods] = {};
+        uint32_t vertexCount[kLods] = {0, 0, 0};
+        uint32_t indexCount[kLods]  = {0, 0, 0};
         Haruka::RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
         float   metallicS   = 0.0f;     ///< escalar fallback (si el bit no está en la máscara)
         float   roughnessS  = 0.5f;
@@ -579,6 +655,45 @@ private:
     // desde la última posición — el scatter determinista por CELDA MUNDIAL no necesita correr cada
     // frame (las instancias se mantienen estables hasta que el jugador se mueve un tramo).
     void refreshPropScatter();
+    /** @brief Vuelca los props del scatter cercanos al jugador como cuerpos estáticos de la física.
+     *  Los colliders salen del ESQUELETO del prop (tronco + ramas por separado, ver
+     *  `prop_collider.h`), no de una caja envolvente: así se camina bajo las ramas y cada parte
+     *  tiene identidad para poder romperla. La llama `refreshPropScatter`, que es quien cambia el
+     *  conjunto de instancias. */
+    void refreshPropColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos);
+    /// Dibuja los props del motor en el mapa de sombras (culling por la caja de la LUZ, no por la
+    /// cámara: el volumen está centrado en ella e incluye lo que queda detrás).
+    void renderPropShadows(Haruka::RHI::Context* ctx, const glm::mat4& lightSpace);
+
+    /**
+     * @brief ALAMBRE DE LA MALLA DE COLISIÓN encima del terreno dibujado.
+     *
+     * La disparidad del terreno se veía a ojo y no la detectaba ninguna medida: la sonda de paridad da
+     * 2 cm, los pies quedan a centímetros del suelo, y el clipmap dibuja con quads de 4 m — la misma
+     * retícula que colisiona. Con todo coherente y el problema visible, la salida es dibujar la malla
+     * que la física TIENE de verdad sobre lo que el render pinta: si el alambre flota o se hunde, ya no
+     * es una impresión.
+     */
+    void renderCollisionWireframe(Haruka::RHI::Context* ctx, const glm::mat4& viewProjRotOnly);
+public:
+    /** @brief Activa el alambre de la malla de colisión (F-tecla del juego / editor). */
+    void setCollisionWireframe(bool on);
+    bool isCollisionWireframe() const { return m_collisionWireOn; }
+private:
+    bool m_collisionWireOn = false;
+    Haruka::RHI::PipelineHandle m_dbgLinePSO{};
+    Haruka::RHI::BufferHandle   m_dbgLineVB{}, m_dbgLineUBO{};
+    uint32_t                    m_dbgLineVerts = 0;
+    uint64_t                    m_dbgLineRev   = ~0ull;
+
+    // EL SUELO CERCANO DIBUJADO DESDE LA COLISIÓN. Dentro de ±192 m el suelo que se dibuja son los
+    // MISMOS vértices y los MISMOS triángulos que Jolt colisiona, con el material del terreno de
+    // siempre; el clipmap deja el hueco. ENCENDIDO por defecto (`HARUKA_NEAR_RING=0` lo apaga).
+    // Los buffers de GPU los posee `TerrestrialPlanet` (los dibuja con su propio material); aquí
+    // solo se recuerda QUÉ revisión se le entregó y desde qué ancla, para no re-subir por frame.
+    uint64_t                    m_nearRingRev     = ~0ull;
+    glm::dvec3                  m_nearRingAnchor{0.0};
+    void updateNearGroundRing();
     glm::dvec3 m_propScatterLastCam{1e300, 1e300, 1e300};   // última posición muestreada
     std::string m_propScatterPlanet;                        // planeta del último scatter (reset al cambiar)
 
@@ -606,6 +721,12 @@ private:
 
     /** @brief The time elapsed since the last frame. */
     float deltaTime = 0.0f;
+
+    /** @brief Reloj de los diagnósticos periódicos del render (segundos acumulados). Es ESTADO DE
+     *  LA APLICACIÓN, no una estática de función: dos Application (editor + juego, o un test) tienen
+     *  cada una su frame y su cadencia de log. */
+    double m_diagClock   = 0.0;
+    double m_lastStarLog = -1e9;
     
     /** @brief The vertex array object for the screen quad. */
     Haruka::RHI::BufferHandle m_quadBuf, m_uboPerFrameH, m_uboPerObjectH;

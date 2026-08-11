@@ -7,15 +7,54 @@
 #include <cstdio>
 #include <cmath>
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <vector>
 #include <string>
+#include <unordered_map>
+#include <cstdlib>
 #include "core/logger.h"
 #include "core/asset_paths.h"
 
 namespace Haruka::RHI::opengl
 {
     // ------------------------------------------------------------------ helpers internos
+    // PARIDAD GL=VK (decisión GLOBAL, NO por-etapa): un programa GL NO puede mezclar etapas
+    // SPIR-V y GLSL — el link falla con "not all attached shaders have the same SPIR_V_BINARY_ARB
+    // state". Así que el modo se decide UNA VEZ para todo el dispositivo:
+    //   · true  → TODAS las etapas cargan SPIR-V precompilado (build time, glslang/glslc -G),
+    //             con glShaderBinary + glSpecializeShader. Mismo compilador que Vulkan → paridad.
+    //   · false → TODAS con el compilador GLSL del driver (fallback para GPUs sin GL_ARB_gl_spirv).
+    // Se detecta la PRIMERA vez (hay contexto GL) y se cachea; NUNCA cambia a mitad de sesión.
+    // Override: HARUKA_GL_SPIRV=0 fuerza el driver; =1 fuerza SPIR-V aunque la detección no lo vea.
+    static bool gUseSpirv = false;
+    static bool gSpirvChecked = false;
+    static bool glspirvAvailable()
+    {
+        if (gSpirvChecked) return gUseSpirv;
+        gSpirvChecked = true;
+
+        const char* opt = std::getenv("HARUKA_GL_SPIRV");
+        const bool forced = (opt && *opt && *opt != '0' && *opt != 'n');
+
+        const bool haveFuncs = glShaderBinary && glSpecializeShader;
+        const char* version = (const char*)glGetString(GL_VERSION);
+        bool core = version && atoi(version) >= 4 && version[2] >= '6';
+
+        if (forced)
+            gUseSpirv = haveFuncs;
+        else if (core && haveFuncs)
+            gUseSpirv = true;
+        else
+            gUseSpirv = false;
+
+        if (!gUseSpirv)
+            HARUKA_LOGW("RHI/GL", "GL=VK por driver (SPIR-V GL no disponible%s%s).",
+                        haveFuncs ? "" : ": faltan glShaderBinary/glSpecializeShader",
+                        (!forced && !core) ? ": GL < 4.6" : "");
+        return gUseSpirv;
+    }
+
     // Compila un módulo SPIR-V a un shader GL (GL_ARB_gl_spirv, core en 4.6). Igual que
     // hace hoy Shader::loadSPV, pero recibiendo los bytes en vez de la ruta del fichero.
     static GLuint compileSpirv(GLenum stage, const void* bytes, size_t size)
@@ -32,8 +71,103 @@ namespace Haruka::RHI::opengl
             char log[1024] = {0};
             glGetShaderInfoLog(sh, sizeof(log), nullptr, log);
             HARUKA_LOGE("RHI/GL", "SPIR-V specialize error: %s", log);
+            glDeleteShader(sh);
+            return 0;
         }
         return sh;
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Compila GLSL→SPIR-V (GL_ARB_gl_spirv) con glslangValidator, target OPENGL (-G).
+    //
+    // POR QUÉ: GL y Vulkan deben apuntarnos al MISMO shader. Si GL compila con el compilador GLSL
+    // del driver y Vulkan con glslang, los dos pueden divergir (el clipmap fino no se ve en GL).
+    // Compilando GL también con glslang (-G) y cargando el resultado por glShaderBinary +
+    // glSpecializeShader, EL MISMO compilador genera el binario de cada backend a partir del mismo
+    // fuente: paridad garantizada. GLSL_source sigue sin duplicarse; solo cambia *quién* compila.
+    //
+    // -G produce SPIR-V orientado a OpenGL: bindings literales (sin shifts, ver backend.glsl) y
+    // builtins GL (gl_VertexID/gl_InstanceID) — a diferencia de -V para VULKAN. glShaderBinary+GL
+    // specialize lo acepta (GL_ARB_gl_spirv, core en GL 4.6).
+    static uint64_t glFnv1a(const std::string& s);   // fwd: definida más abajo
+    static std::vector<uint8_t> compileGlslToGlSpv(const std::string& src, const char* stageSuffix)
+    {
+        if (src.empty()) { HARUKA_LOGE("RHI/GL", "compileGlslToGlSpv: fuente vacía"); return {}; }
+        if (!glspirvAvailable()) { HARUKA_LOGE("RHI/GL", "compileGlslToGlSpv: SPIR-V no activo"); return {}; }
+        const uint64_t hash = glFnv1a(src + "\n@" + stageSuffix);
+        static std::unordered_map<uint64_t, std::vector<uint8_t>> cache;
+        if (auto it = cache.find(hash); it != cache.end()) return it->second;
+
+        const char* tmp = std::getenv("TMPDIR");
+        if (!tmp || !*tmp) tmp = "/tmp";
+        const std::string inPath  = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".glsl";
+        const std::string outPath = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".spv";
+
+        {
+            std::ofstream f(inPath);
+            if (!f.is_open()) return {};
+            f << src;
+        }
+
+        const std::string errPath = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".err";
+        // OJO: algunos builds de glslangValidator escriben los errores en STDOUT (no stderr).
+        // Se redirigen AMBOS al mismo fichero para no perder el diagnóstico del fallo.
+        const std::string cmd =
+            "glslangValidator -G -S " + std::string(stageSuffix) +
+            " --auto-map-locations \"" + inPath + "\" -o \"" + outPath + "\" >\"" + errPath + "\" 2>&1";
+
+        const int rc = std::system(cmd.c_str());
+        std::vector<uint8_t> spv;
+        if (rc == 0)
+        {
+            std::ifstream f(outPath, std::ios::binary | std::ios::ate);
+            if (f) {
+                auto n = (std::streamsize)f.tellg(); f.seekg(0);
+                spv.resize((size_t)n); f.read(reinterpret_cast<char*>(spv.data()), n);
+            }
+        }
+        if (rc != 0 || spv.empty()) {
+            // Conserva el .err y el .glsl en disco (hash conocido) para que puedas
+            // reproducir el fallo a mano: glslangValidator -G -S <etapa> /tmp/haruka_<hash>.glsl
+            std::vector<uint8_t> err;
+            std::ifstream ef(errPath, std::ios::binary | std::ios::ate);
+            if (ef) { auto n = ef.tellg(); ef.seekg(0); err.resize((size_t)n);
+                      ef.read(reinterpret_cast<char*>(err.data()), n); }
+            if (!err.empty())
+                HARUKA_LOGE("RHI/GL", "glslang -G falló (rc=%d, etapa %s, input %s):\n%s",
+                            rc, stageSuffix, inPath.c_str(), err.data());
+            else
+                HARUKA_LOGE("RHI/GL", "glslang -G falló (rc=%d, etapa %s, input %s) sin mensaje.",
+                            rc, stageSuffix, inPath.c_str());
+            return {};
+        }
+        std::remove(inPath.c_str());
+        std::remove(outPath.c_str());
+        std::remove(errPath.c_str());
+        cache[hash] = std::move(spv);
+        return spv;
+    }
+
+    static uint64_t glFnv1a(const std::string& s)
+    {
+        uint64_t h = 1469598103934665603ull;
+        for (unsigned char c : s) { h ^= c; h *= 1099511628211ull; }
+        return h;
+    }
+
+    // Suffix de etapa para glslangValidator (-S vert/frag/geom/tesc/tese/comp).
+    static const char* stageSuffix(GLenum stage)
+    {
+        switch (stage)
+        {
+            case GL_VERTEX_SHADER:              return "vert";
+            case GL_FRAGMENT_SHADER:            return "frag";
+            case GL_GEOMETRY_SHADER:            return "geom";
+            case GL_TESS_CONTROL_SHADER:        return "tesc";
+            case GL_TESS_EVALUATION_SHADER:     return "tese";
+            case GL_COMPUTE_SHADER:             return "comp";
+            default:                            return nullptr;
+        }
     }
 
     // ------------------------------------------------------------------------------------------
@@ -108,19 +242,38 @@ namespace Haruka::RHI::opengl
         return s;
     }
 
-    // Carga una etapa desde ruta COMPLETA, prefiriendo GLSL source y cayendo a ".spv".
-    // Replica la política probada de Shader::loadSPV: glSpecializeShader en Mesa/AMD tiene
-    // soporte incompleto (programas inválidos / cuelgues) → GLSL source es más fiable.
+    // Carga una etapa desde ruta COMPLETA. PARIDAD GL=VK (build time): el CMake compila cada
+    // shader a `<ruta>.spv` con glslang/glslc target GL; aquí se PREFIERE ese SPIR-V (mismo
+    // compilador que Vulkan). Solo si el SPIR-V no está activo (GPU sin GL_ARB_gl_spirv) o no
+    // existe el .spv se cae al GLSL del driver.
     static GLuint compileFromPath(GLenum stage, const char* fullPath)
     {
         if (!fullPath) return 0;
 
-        // 1. GLSL source (presente en dev; fiable en todos los drivers).
+        // 1. SPIR-V precompilado (build time): paridad GL=VK por construcción.
+        if (glspirvAvailable())
+        {
+            std::string spv = std::string(fullPath) + ".spv";
+            if (std::ifstream f(spv, std::ios::binary | std::ios::ate); f.is_open())
+            {
+                auto n = (std::streamsize)f.tellg(); f.seekg(0);
+                std::vector<char> buf(n); f.read(buf.data(), n);
+                GLuint sh = compileSpirv(stage, buf.data(), (size_t)n);
+                if (sh) return sh;
+                // specialize fallido: se devuelve 0 → el pipeline falla visible (no mezcla).
+                return 0;
+            }
+            // Sin .spv (dev sin recompilar): se deja pasar al driver, pero logueando la causa
+            // para que no parezca un "no dibuja" mágico.
+            HARUKA_LOGW("RHI/GL", "SPIR-V activo pero sin %s (¿recompilar shaders?) → driver GLSL.", spv.c_str());
+        }
+
+        // 2. GLSL source (fallback driver; también se usa en dev antes de compilar a .spv).
         if (std::ifstream g(fullPath); g.is_open())
         {
-            std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
-            src = resolveIncludes(src, shaderIncludeDir());
-            const char* p = src.c_str();
+            const std::string src((std::istreambuf_iterator<char>(g)), std::istreambuf_iterator<char>());
+            const std::string resolved = resolveIncludes(src, shaderIncludeDir());
+            const char* p = resolved.c_str();
             GLuint sh = glCreateShader(stage);
             glShaderSource(sh, 1, &p, nullptr);
             glCompileShader(sh);
@@ -130,25 +283,25 @@ namespace Haruka::RHI::opengl
             return sh;
         }
 
-        // 2. SPIR-V binario (producción: solo se envía ".spv").
-        std::string spv = std::string(fullPath) + ".spv";
-        if (std::ifstream f(spv, std::ios::binary | std::ios::ate); f.is_open())
-        {
-            auto n = (std::streamsize)f.tellg(); f.seekg(0);
-            std::vector<char> buf(n); f.read(buf.data(), n);
-            return compileSpirv(stage, buf.data(), (size_t)n);
-        }
-
-        HARUKA_LOGW("RHI/GL", "shader no encontrado: %s (ni %s)", fullPath, spv.c_str());
+        HARUKA_LOGW("RHI/GL", "shader no encontrado: %s (ni %s.spv)", fullPath, fullPath);
         return 0;
     }
 
-    // Compila una etapa desde una cadena GLSL en línea (shaders generados/embebidos).
+    // Compila una etapa desde una cadena GLSL en línea (shaders generados/embebidos). Estos no
+    // tienen `.spv` precompilado; con SPIR-V activo se compilan aquí mismo con glslang -G (mismo
+    // compilador que Vulkan) para NO mezclar etapas SPIR-V+GLSL dentro de un programa.
     static GLuint compileFromSource(GLenum stage, const char* source)
     {
         if (!source) return 0;
-        const std::string src = resolveIncludes(source, shaderIncludeDir());
-        const char* p = src.c_str();
+        const std::string resolved = resolveIncludes(source, shaderIncludeDir());
+        if (glspirvAvailable())
+        {
+            auto spv = compileGlslToGlSpv(resolved, stageSuffix(stage));
+            if (spv.empty()) { HARUKA_LOGE("RHI/GL", "SPIR-V compile falló [inline]"); return 0; }
+            return compileSpirv(stage, spv.data(), spv.size());
+        }
+
+        const char* p = resolved.c_str();
         GLuint sh = glCreateShader(stage);
         glShaderSource(sh, 1, &p, nullptr);
         glCompileShader(sh);
@@ -206,6 +359,12 @@ namespace Haruka::RHI::opengl
             glEnable(GL_DEPTH_TEST);
             m_ownsContext = true;
         }
+        // Reversed-Z con near→1, infinito→0 (ver Camera::getProjectionMatrix). La matriz emite
+        // z_ndc ∈ [0,1], así que GL DEBE mapear [0,1]→depth (glClipControl(GL_ZERO_TO_ONE)); sin
+        // esta llamada GL asume [-1,1] y comprime toda la profundidad a [0.5,1] — el z-buffer pierde
+        // la mitad de su precisión a escala planetaria (z-fight del clipmap y del agua↔lecho).
+        if (glad_glClipControl)
+            glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
         m_context = std::make_unique<GLContext>(this);
     }
 

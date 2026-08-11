@@ -1,5 +1,6 @@
 #include "ui/settings_panel.h"
 #include "settings/settings_manager.h"
+#include "rhi/rhi_device.h"   // enumerar GPUs para el combo de tarjeta gráfica
 #include "renderer/motor_instance.h"
 #include "core/application.h"
 #include "core/locale.h"
@@ -128,6 +129,73 @@ void SettingsPanel::tabGraphics() {
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Requiere reiniciar el juego.\nVulkan aún no implementado → cae a OpenGL automáticamente.");
+
+    // ── TARJETA GRÁFICA ─────────────────────────────────────────────────────────────────────────
+    //
+    // La lista se pide UNA vez (`static`): enumerar levanta una instancia Vulkan temporal y esto
+    // corre por frame mientras el panel esté abierto. Se pide para el backend SELECCIONADO, no para
+    // el que está corriendo: si acabas de cambiar a Vulkan, lo que importa es qué GPUs tendrás al
+    // reiniciar, no cuál usa el contexto GL actual.
+    //
+    // Se guarda el NOMBRE (ver `GraphicsSettings::preferredGpus`), nunca el índice de la lista.
+    {
+        static Settings::RenderBackend s_listedFor = (Settings::RenderBackend)-1;
+        static std::vector<Haruka::RHI::Device::AdapterInfo> s_adapters;
+        if (s_listedFor != g.renderBackend) {
+            s_listedFor = g.renderBackend;
+            s_adapters  = Haruka::RHI::Device::enumerateAdapters(
+                g.renderBackend == Settings::RenderBackend::Vulkan
+                    ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL,
+                nullptr);
+        }
+
+        const std::string autoLabel = "Automática (dedicada si la hay)";
+        // ⚠️ SE CONSULTA EN CADA USO, no se cachea antes del combo. El cuerpo del combo MUTA la lista
+        // (pulsar "Automática" la vacía), así que un `isAuto` calculado arriba se queda obsoleto en
+        // cuanto el usuario elige, y la iteración siguiente indexaba `[0]` de un vector ya vacío →
+        // abort en `std::vector::operator[]`. El juego se caía al tocar el desplegable.
+        auto chosen = [&]() -> const std::string* {
+            return (!g.preferredGpus.empty() && !g.preferredGpus[0].empty()) ? &g.preferredGpus[0]
+                                                                             : nullptr;
+        };
+        // El preview se COPIA: `c_str()` de un elemento del vector colgaría si el cuerpo del combo
+        // lo vacía o lo realoja mientras ImGui lo sigue usando.
+        const std::string preview = chosen() ? *chosen() : autoLabel;
+        if (ImGui::BeginCombo("Tarjeta gráfica", preview.c_str())) {
+            if (ImGui::Selectable(autoLabel.c_str(), chosen() == nullptr)) g.preferredGpus.clear();
+            for (const auto& a : s_adapters) {
+                const std::string* cur = chosen();
+                const bool sel = cur && *cur == a.name;
+                std::string label = a.name + (a.discrete ? "  [dedicada]" : "");
+                if (ImGui::Selectable(label.c_str(), sel)) {
+                    // Se escribe en el PUESTO 0 conservando el resto: la lista es de preferencia y
+                    // un multi-GPU futuro poblará los siguientes puestos.
+                    if (g.preferredGpus.empty()) g.preferredGpus.emplace_back();
+                    g.preferredGpus[0] = a.name;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            // ⚠️ Decirlo, no fingirlo: en OpenGL elegir aquí NO tiene efecto. GL no expone selección
+            // de adaptador — la GPU la fija el driver/SO antes de que el proceso arranque. Un
+            // desplegable que parece funcionar y no hace nada es peor que uno que avisa.
+            if (g.renderBackend == Settings::RenderBackend::Vulkan)
+                ImGui::SetTooltip("Requiere reiniciar el juego.\n"
+                                  "Se guarda el NOMBRE: si cambias de tarjeta o de equipo, vuelve a "
+                                  "la automática en vez de apuntar a otra.\n"
+                                  "HARUKA_VK_GPU=<nombre> tiene prioridad sobre esto.");
+            else
+                ImGui::SetTooltip("Requiere reiniciar el juego.\n"
+                                  "OpenGL no permite elegir adaptador desde la API, así que el juego "
+                                  "lo pide al arrancar por offload PRIME\n"
+                                  "(__NV_PRIME_RENDER_OFFLOAD para NVIDIA, DRI_PRIME para Mesa). "
+                                  "Depende del driver: puede no aplicarse.\n"
+                                  "Con Vulkan la selección es directa y fiable.");
+        }
+    }
 
     int tq = (int)g.textureQuality;
     if (ImGui::Combo(TR("gfx.textureQuality").c_str(), &tq, texQualityNames, 4))

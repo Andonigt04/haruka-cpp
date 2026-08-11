@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdlib>   // std::getenv — Jolt es opt-in (HARUKA_JOLT=1) mientras se integra
 #include <future>    // refresco ASÍNCRONO de la malla de colisión (no bloquear el frame)
+#include <atomic>
+#include <mutex>
 #include <chrono>
 
 #ifdef HARUKA_HAS_JOLT
@@ -17,10 +19,14 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
+#include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
+#include "core/planet/terrain_lod.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <unordered_map>
 #include <cstdarg>
+#include <cstring>   // memcpy — checksum de las muestras publicadas al render
 #include "core/logger.h"
 
 // Boilerplate de Jolt (capas + filtros), aislado en este .cpp — el header NO ve Jolt.
@@ -63,32 +69,326 @@ struct PhysicsEngine::JoltImpl {
     BPImpl  bpli; OVBImpl ovbp; OVOImpl ovo;
     JPH::PhysicsSystem            system;
     std::unordered_map<RigidBody*, JPH::BodyID> map;
-    JPH::BodyID groundId; bool haveGround = false; bool groundIsMesh = false; glm::dvec3 meshCenter{0.0};
-    double meshBuildElev = 0.0;   // altura del terreno (m sobre la esfera) EN meshCenter al construir la
-                                  // malla → si el LOD refina bajo un jugador QUIETO y esa altura cambia,
-                                  // hay que rehacer aunque no se haya movido (si no: se camina sobre la
-                                  // malla vieja gruesa = "flotar" sobre el terreno fino ya dibujado).
     // MARCO LOCAL: Jolt usa float; a escala planetaria (Tierra a ~1.5e8 m en la escena) eso da ~16 m de
     // precisión → inservible. Simulamos TODO relativo a `origin` (posición del primer cuerpo) → floats
     // pequeños. El mundo exterior sigue en double. (Recentrar al alejarse mucho = refinamiento posterior.)
     glm::dvec3 origin{0.0}; bool originSet = false;
     double simTime = 0.0, lastRebuildT = -1e9;   // reloj de simulación para rate-limitar la reconstrucción
+    double lastParityLogT = -1e9;                // rate-limit de la sonda de paridad suelo↔render
+
+    // ── EL SUELO CERCANO Y EL LEJANO SON DOS CUERPOS, CON DOS CADENCIAS ─────────────────────────
+    //
+    // Antes eran uno solo, reconstruido cada 48 m de deriva. Eso deja el suelo que se PISA anclado
+    // donde estabas hace hasta 48 m, mientras el clipmap que se DIBUJA se re-ancla cada 4 m (el paso
+    // de `terrainClipFrame`): las dos superficies nacen de anclas distintas casi todo el rato, y como
+    // ningún nodo sobrevive a un cambio de ancla (medido: 8 de 257 049) la disparidad no puede bajar
+    // de la sagita de la celda por mucho que se afine la aritmética. Era un desfase ESTRUCTURAL, no
+    // un error numérico.
+    //
+    // El anillo 0 (±256 m, 16 900 nodos, ~20 ms) puede seguir al anclaje sin coste apreciable; los
+    // diez de fuera (213 000 nodos, ~280 ms) no, y tampoco hace falta — a >256 m no se camina.
+    JPH::BodyID nearId, farId;
+    bool   haveNear = false, haveFar = false, groundIsMesh = false;
+    glm::dvec3 meshCenter{0.0};
+    glm::dvec3 nearAnchor{0.0};      // `up` ANCLADO con el que se construyó el anillo 0 vigente
+    bool       nearAnchorSet = false;
+    double meshBuildElev = 0.0;      // altura del terreno en meshCenter al construir el suelo lejano
+    // Compatibilidad con el camino de MALLA (servidor/tests, sin anillos) y con la esfera de respaldo:
+    // esos siguen siendo UN cuerpo, el "lejano".
+    bool  haveGround() const { return haveNear || haveFar; }
 
     // REFRESCO ASÍNCRONO de la malla de colisión. Construir el parche (muestrear el terreno + montar la
     // MeshShape) cuesta ms; hacerlo en el hilo de física daba un TIRÓN al avanzar 48 m. La Shape NO toca
     // el PhysicsSystem, así que se construye en un worker; solo el intercambio del cuerpo (barato) va en
     // el hilo de física. La malla VIEJA sigue colisionando hasta que la nueva está lista → nunca hay
     // hueco (no se cae). El campo de altura interpolado (world_system_provider) hace el worker barato.
-    std::future<JPH::Ref<JPH::Shape>> groundJob;
+    // Copia de la malla de colisión para el alambre de depuración. `mutable`/atómico porque
+    // `buildGroundShape` es const y corre en un WORKER, mientras el render lee desde el hilo principal.
+    // ⚠️ SE ARMA DESDE EL ENTORNO, no solo desde `setCollisionWireframe`. La captura ocurre DENTRO de
+    // la construcción del suelo, así que si el interruptor se enciende desde el render (primer frame)
+    // el suelo ya está construido y no se captura nada hasta que el jugador camina 48 m y la física
+    // reconstruye. Un instrumento que solo se arma después del suceso que observa no sirve para
+    // arrancar: había que caminar a ciegas para que apareciera el alambre.
+    std::atomic<bool>       debugCaptureGround{
+        [] { const char* e = std::getenv("HARUKA_COLLISION_WIRE"); return e && e[0] == '1'; }() };
+    mutable std::mutex      debugMeshMx;
+    // Dos slots: 0 = anillo CERCANO, 1 = los lejanos. Se construyen en jobs distintos y con cadencias
+    // distintas, así que no pueden compartir buffer — el que llegara segundo borraría al primero y el
+    // alambre enseñaría medio suelo. El lector los concatena.
+    mutable std::vector<glm::dvec3> debugMeshVerts[2];
+    mutable std::vector<uint32_t>   debugMeshTris[2];
+    mutable glm::dvec3      debugMeshCenter{0.0};
+    mutable uint64_t        debugMeshRevision = 0;
+
+    // EL ANILLO CERCANO PUBLICADO AL RENDER (ver `PhysicsEngine::getNearGroundRing`). Se guarda
+    // SIEMPRE, no solo con la depuración encendida: no es un instrumento, es la fuente del suelo que
+    // se dibuja. Mismo mutex que el alambre — los dos los escribe el worker y los lee el render.
+    mutable PhysicsEngine::NearGroundRing nearRing;
+    mutable bool                          nearRingValid = false;
+
+    // Reconstrucciones de medida pendientes (`HARUKA_GROUND_BENCH=N`, ver `step`). 0 = apagado.
+    int groundBenchLeft = [] { const char* e = std::getenv("HARUKA_GROUND_BENCH");
+                               return e ? std::atoi(e) : 0; }();
+
+    std::future<JPH::Ref<JPH::Shape>> groundJob;      // suelo LEJANO (o el respaldo de malla/esfera)
     glm::dvec3 groundJobCenter{0.0};
     double     groundJobElev = 0.0;
+    std::future<JPH::Ref<JPH::Shape>> nearJob;        // anillo 0, cadencia del ANCLAJE
+    glm::dvec3 nearJobAnchor{0.0};
 
     // Construye la MeshShape del parche alrededor de `near` (SIN tocar el PhysicsSystem → seguro fuera
     // del hilo de física). Devuelve null si no hay malla. `terrainMesh` es thread-safe (caché con mutex).
-    JPH::Ref<JPH::Shape> buildGroundShape(IWorldProvider* w, const glm::dvec3& near) const {
-        std::vector<glm::dvec3> verts; std::vector<uint32_t> tris;
-        if (!w || !w->terrainMesh(near, 96.0, verts, tris) || tris.size() < 3 || verts.size() < 3)
+    // §9 Fase 3: radio del parche ~200 km (200000 m); la retícula de world_system_provider es no-uniforme
+    // (densa 3 m al pie, kilométrica en el borde) → la colisión cubre TODO el terreno visible como pisa.
+    // El suelo como PILA DE ANILLOS de heightfield. Devuelve null si el provider no los da (servidor,
+    // tests) → el llamante cae a la malla. Ver `terrain_lod.h` para por qué esto sustituye a medio
+    // millón de triángulos: el árbol AABB de la MeshShape son 802-1274 ms medidos, y aquí no hay.
+    JPH::Ref<JPH::Shape> buildGroundRings(IWorldProvider* w, const glm::dvec3& near,
+                                          size_t firstRing, double halfExtent, int slot) const {
+        using Clock = std::chrono::steady_clock;
+        const auto t0 = Clock::now();
+        std::vector<IWorldProvider::TerrainRing> rings;
+        glm::dvec3 org(0.0), rx(0.0), rup(0.0), rz(0.0);
+        if (!w || !w->terrainHeightFieldRings(near, halfExtent, rings, org, rx, rup, rz, firstRing)
+            || rings.empty())
             return {};
+        const auto tSample = Clock::now();
+
+        // Rotación anillo→cuerpo: los ejes del heightfield (X, altura, Z) son (rx, rup, rz). El
+        // provider ya entrega la terna DEXTRÓGIRA; con una levógira el determinante sería -1 y Jolt
+        // recibiría el relieve espejado.
+        const glm::dmat3 M(rx, rup, rz);
+        JPH::Mat44 jm = JPH::Mat44::sIdentity();
+        for (int c = 0; c < 3; ++c)
+            jm.SetColumn3(c, JPH::Vec3((float)M[c].x, (float)M[c].y, (float)M[c].z));
+        const glm::dvec3 lp = org - origin;
+        const JPH::Vec3  jp((float)lp.x, (float)lp.y, (float)lp.z);
+        const JPH::Quat  jq = jm.GetQuaternion().Normalized();
+
+        // ── LA SUPERFICIE QUE JOLT DE VERDAD COLISIONA ──────────────────────────────────────────
+        //
+        // Un heightfield es PLANO: Jolt coloca el nodo en `origen + X·x + arriba·muestra + Z·z`, sin
+        // volver a la esfera. No es el punto con el que se generó la muestra (ese es
+        // `pc + dir·(R+h)`), y la diferencia es TANGENCIAL: `x·h/R`, o sea 3 cm en el borde del
+        // bloque de 256 m y menos de 1 mm a 5 m. Se reconstruye asi y no "como se genero" porque lo
+        // que hay que poder mirar es lo que se PISA, no lo que se pretendia.
+        auto ringPoint = [&](const IWorldProvider::TerrainRing& r, uint32_t i, uint32_t j) {
+            const double x = Haruka::Planet::terrainRingNode(i, r.spec);
+            const double z = Haruka::Planet::terrainRingNode(j, r.spec);
+            return org + rx * x + rz * z + rup * (double)r.samples[(size_t)j * r.spec.samples + i];
+        };
+
+        // ── EL TWIST DEL QUAD: la disparidad que NINGUNA comparación de nodos puede ver ──────────
+        //
+        // Los cuatro nodos de un quad los comparten render y colisión EXACTAMENTE (eso ya está
+        // demostrado: `clipmap_vertex_lattice`, 0 de 59 785 fuera de la retícula). Pero un quad no es
+        // plano: para dibujarlo hay que partirlo en dos triángulos, y las dos diagonales posibles dan
+        // superficies DISTINTAS que solo coinciden en los cuatro nodos. En el centro del quad se
+        // separan por `|h00 + h11 − h10 − h01| / 4`.
+        //
+        // Y las dos diagonales NO tienen por qué coincidir: `clipmap.tese` declara
+        // `layout(quads, equal_spacing, ccw)`, y qué diagonal usa el teselador para partir un quad
+        // NO lo fija el spec de OpenGL — lo elige la implementación. Jolt sí la fija: parte por
+        // `(x,y)→(x+1,y+1)` (ver `HeightFieldShape::GetSurfacePosition`).
+        //
+        // Por eso este número: es la disparidad MÁXIMA atribuible a que las diagonales no casen, y
+        // existe a CUALQUIER distancia — a 2 m del jugador igual que a 200 m. Toda la paridad medida
+        // hasta ahora es estructuralmente ciega a ella, porque compara valores EN los nodos.
+        double twistNear = 0.0, twistBlock = 0.0;
+        if (firstRing == 0) {
+            const auto& r0 = rings[0];
+            const uint32_t n = r0.spec.samples;
+            for (uint32_t j = 1; j + 1 < n; ++j) for (uint32_t i = 1; i + 1 < n; ++i) {
+                const float h00 = r0.samples[(size_t)j * n + i],       h10 = r0.samples[(size_t)j * n + i + 1];
+                const float h01 = r0.samples[(size_t)(j + 1) * n + i], h11 = r0.samples[(size_t)(j + 1) * n + i + 1];
+                const double d = std::abs((double)h00 + h11 - h10 - h01) * 0.25;
+                if (!(d == d)) continue;
+                if (d > twistBlock) twistBlock = d;
+                const double x = Haruka::Planet::terrainRingNode(i, r0.spec);
+                const double z = Haruka::Planet::terrainRingNode(j, r0.spec);
+                if (std::abs(x) <= 8.0 && std::abs(z) <= 8.0 && d > twistNear) twistNear = d;
+            }
+        }
+
+        // Alambre de depuración: la MISMA geometría que se le entrega a Jolt y con SU triangulación
+        // (diagonal `(i,j)→(i+1,j+1)`), no una reconstrucción. Dibujarla con la otra diagonal
+        // enseñaría una superficie que nadie pisa — justo el error que se está intentando ver.
+        // ── MONTAR UN ANILLO EN TRIÁNGULOS ──────────────────────────────────────────────────────
+        //
+        // UNA sola implementación, usada por el alambre de depuración Y por lo que se le publica al
+        // render. Si fueran dos, el suelo que se dibuja y el que se inspecciona podrían diferir — y
+        // entonces el instrumento dejaría de poder auditar precisamente lo que hay que auditar.
+        // `limit` (0 = sin límite) recorta la emisión a un cuadrado tangente. Lo necesita la copia
+        // que va al RENDER: el clipmap solo puede abrir el hueco en un borde de PARCHE, y el mayor
+        // que cabe en el anillo son 192 m (ver `TERRAIN_CLIP_HOLE_M`). Emitir hasta 256 dejaría la
+        // banda 192-256 dibujada por los dos — dos superficies sobre el mismo suelo. El alambre de
+        // depuración sí se emite entero: ahí lo que interesa es lo que COLISIONA, no lo que se pinta.
+        auto emitRing = [&](const IWorldProvider::TerrainRing& r, double limit,
+                            std::vector<glm::dvec3>& dv, std::vector<uint32_t>& dt) {
+                const uint32_t n = r.spec.samples;
+                auto solid = [&](uint32_t i, uint32_t j) {
+                    if (Haruka::Planet::terrainRingNoSample(r.samples[(size_t)j * n + i])) return false;
+                    if (limit <= 0.0) return true;
+                    const double x = Haruka::Planet::terrainRingNode(i, r.spec);
+                    const double z = Haruka::Planet::terrainRingNode(j, r.spec);
+                    return std::abs(x) <= limit + 1e-9 && std::abs(z) <= limit + 1e-9;
+                };
+                // ⚠️ SOLO los nodos CON superficie. Emitir también los del hueco metía NaN en la lista
+                // de vértices: no los referencia ningún triángulo, pero el autotest del alambre
+                // recorre VÉRTICES y su media salía `nan` — un instrumento envenenado por lo que
+                // dibuja. Se compacta con un remapeo en vez de indexar por `j·n+i`.
+                std::vector<uint32_t> remap((size_t)n * n, UINT32_MAX);
+                for (uint32_t j = 0; j < n; ++j) for (uint32_t i = 0; i < n; ++i)
+                    if (solid(i, j)) {
+                        remap[(size_t)j * n + i] = (uint32_t)dv.size();
+                        dv.push_back(ringPoint(r, i, j));
+                    }
+                for (uint32_t j = 0; j + 1 < n; ++j) for (uint32_t i = 0; i + 1 < n; ++i) {
+                    // Jolt tira el quad entero si un solo nodo no tiene superficie.
+                    const uint32_t a = remap[(size_t)j * n + i],       b = remap[(size_t)j * n + i + 1];
+                    const uint32_t c = remap[(size_t)(j + 1) * n + i], d = remap[(size_t)(j + 1) * n + i + 1];
+                    if (a == UINT32_MAX || b == UINT32_MAX || c == UINT32_MAX || d == UINT32_MAX)
+                        continue;
+                    dt.insert(dt.end(), { a, c, d,  a, d, b });   // diagonal a-d, la de Jolt
+                }
+        };
+
+        // Publicar el anillo 0 al RENDER: vértices e índices ya montados (ver `getNearGroundRing`).
+        if (firstRing == 0) {
+            std::vector<glm::dvec3> rv; std::vector<uint32_t> rt;
+            emitRing(rings[0], Haruka::Planet::TERRAIN_CLIP_HOLE_M, rv, rt);
+            uint64_t ck = 1469598103934665603ull;
+            for (const auto& v : rv) {
+                const glm::vec3 f(v - org);      // el checksum va sobre lo que se DIBUJA (float, relativo)
+                for (int c = 0; c < 3; ++c) { uint32_t b; std::memcpy(&b, &f[c], 4); ck = (ck ^ b) * 1099511628211ull; }
+            }
+            std::lock_guard<std::mutex> lk(debugMeshMx);
+            nearRing.verts = std::move(rv);
+            nearRing.tris  = std::move(rt);
+            nearRing.anchor = org;
+            nearRing.cell   = rings[0].spec.cell;
+            // El alcance que se DIBUJA, no el del anillo: fuera de aquí manda el clipmap.
+            nearRing.extent = Haruka::Planet::TERRAIN_CLIP_HOLE_M;
+            ++nearRing.revision;
+            nearRingValid = true;
+            HARUKA_LOGI("Physics", "  anillo cercano publicado: rev %llu · %zu vert · %zu tris · "
+                        "checksum %016llx", (unsigned long long)nearRing.revision,
+                        nearRing.verts.size(), nearRing.tris.size() / 3, (unsigned long long)ck);
+        }
+
+        if (debugCaptureGround.load(std::memory_order_relaxed)) {
+            std::vector<glm::dvec3> dv; std::vector<uint32_t> dt;
+            for (const auto& r : rings) emitRing(r, 0.0, dv, dt);
+            std::lock_guard<std::mutex> lk(debugMeshMx);
+            debugMeshVerts[slot] = std::move(dv);
+            debugMeshTris[slot]  = std::move(dt);
+            debugMeshCenter = near;
+            ++debugMeshRevision;
+        }
+
+        JPH::StaticCompoundShapeSettings cs;
+        size_t samples = 0;
+        for (size_t k = 0; k < rings.size(); ++k) {
+            const auto& r = rings[k];
+            JPH::HeightFieldShapeSettings hs;
+            hs.mHeightSamples.resize(r.samples.size());
+            for (size_t i = 0; i < r.samples.size(); ++i)
+                hs.mHeightSamples[i] = Haruka::Planet::terrainRingNoSample(r.samples[i])
+                    ? JPH::HeightFieldShapeConstants::cNoCollisionValue : r.samples[i];
+            hs.mSampleCount = r.spec.samples;
+            // ⚠️ 16 BITS POR MUESTRA, no los 8 de fábrica. Jolt cuantiza las alturas dentro de cada
+            // bloque, y en los anillos lejanos el rango dentro de un bloque no lo marca el relieve
+            // sino la CAÍDA POR CURVATURA (x²/2R), que a celda de 4 km son cientos de metros. Error
+            // peor en el nodo, medido: celda 1024 m → 0,217 m con 8 bits y 0,0009 m con 16; celda
+            // 4096 m → 1,718 m con 8 y 0,0068 m con 16. Con 8 bits el suelo lejano se desplazaría
+            // más de un metro por pura cuantización, en una superficie cuyo objetivo es 0.
+            // Cuesta el doble de memoria: 360 KB en total. No es un ajuste libre.
+            hs.mBitsPerSample = 16;
+            const double lo = Haruka::Planet::terrainRingNode(0, r.spec);
+            hs.mOffset = JPH::Vec3((float)lo, 0.0f, (float)lo);
+            hs.mScale  = JPH::Vec3((float)r.spec.cell, 1.0f, (float)r.spec.cell);
+            JPH::ShapeSettings::ShapeResult hr = hs.Create();
+            if (!hr.IsValid()) {
+                HARUKA_LOGW("Physics", "anillo %zu (celda %.0f m) invalido: %s", k, r.spec.cell,
+                            hr.GetError().c_str());
+                return {};
+            }
+            samples += r.samples.size();
+            cs.AddShape(jp, jq, hr.Get());
+        }
+        JPH::ShapeSettings::ShapeResult cres = cs.Create();
+        if (!cres.IsValid()) return {};
+        auto ms_of = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        // El PRECIO del diseño, medido sobre las muestras que se acaban de entregar a Jolt. Va en la
+        // misma línea que el tiempo a propósito: la ganancia y lo que cuesta no deben poder leerse
+        // por separado.
+        int seamK = -1; std::vector<double> seamPer;
+        const double seam = IWorldProvider::terrainRingSeamStep(rings, &seamK, &seamPer);
+        HARUKA_LOGI("Physics", "suelo %s: %zu anillos (alcance +-%.0f m, %zu KB de muestras)"
+                    "  ·  %.0f ms = muestreo %.0f + shapes %.0f",
+                    firstRing == 0 ? "CERCANO" : "lejano",
+                    rings.size(), rings.back().spec.extent,
+                    samples * sizeof(float) / 1024, ms_of(t0, Clock::now()),
+                    ms_of(t0, tSample), ms_of(tSample, Clock::now()));
+        // El escalón POR NIVEL, con la distancia a la que cae cada costura. El máximo suelto no dice
+        // nada útil: crece con el cuadrado de la celda y su peor valor está a cientos de km.
+        std::string seams;
+        for (size_t k = 1; k < seamPer.size(); ++k) {
+            char buf[96];
+            std::snprintf(buf, sizeof buf, "%s%.1f km:%.2f m (celda %.0f m)", k > 1 ? "  " : "",
+                          rings[k].spec.hole / 1000.0, seamPer[k], rings[k].spec.cell);
+            seams += buf;
+        }
+        if (firstRing == 0)
+            HARUKA_LOGI("Physics", "  twist del quad de 4 m (disparidad en el CENTRO del quad si las "
+                        "diagonales no casan): %.3f m a <8 m del jugador · %.3f m peor en el bloque",
+                        twistNear, twistBlock);
+        if (rings.size() > 1)
+            HARUKA_LOGI("Physics", "  escalon en costuras (distancia:escalon): %s  ·  peor %.2f m (nivel %d)",
+                        seams.c_str(), seam, seamK);
+        return cres.Get();
+    }
+
+    JPH::Ref<JPH::Shape> buildGroundShape(IWorldProvider* w, const glm::dvec3& near) const {
+        // Camino preferente: los ANILLOS (todos, en un cuerpo). La malla de abajo sigue existiendo
+        // como respaldo para los providers que no los implementan (servidor, tests), no como
+        // alternativa que se elija.
+        if (JPH::Ref<JPH::Shape> r = buildGroundRings(w, near, 0, 200000.0, 0)) return r;
+
+        // ── SONDA DE COSTE ──────────────────────────────────────────────────────────────────────
+        //
+        // Esto corre en un worker cada vez que el jugador deriva 48 m, y reconstruye la rejilla
+        // ENTERA (257 049 nodos, 479 814 triángulos) aunque el jugador solo se haya movido 48 m de
+        // 190 km de alcance. La pregunta de si eso hay que trocear en parches no se contesta
+        // razonando: hace falta el reparto real entre MUESTREO del terreno (una llamada a
+        // `sampleTerrainHeight` por nodo) y CONSTRUCCIÓN de las Shape de Jolt (árbol AABB sobre medio
+        // millón de triángulos). Son dos remedios distintos y solo uno de los dos vale la pena.
+        using Clock = std::chrono::steady_clock;
+        const auto t0 = Clock::now();
+        std::vector<glm::dvec3> verts; std::vector<uint32_t> tris;
+        if (!w || !w->terrainMesh(near, 200000.0, verts, tris) || tris.size() < 3 || verts.size() < 3)
+            return {};
+        const auto tMesh = Clock::now();
+        // ── CAPTURA PARA DEPURACIÓN ─────────────────────────────────────────────────────────────
+        //
+        // Se guarda una copia de la MISMA geometría que se le entrega a Jolt, no una reconstrucción:
+        // el render la dibuja en alambre encima del terreno y así "se ve disparidad" pasa a ser algo
+        // que se mira. Reconstruirla en el render no valdría — parte de lo que hay que poder ver es si
+        // la malla que Jolt TIENE se ha quedado vieja respecto a lo que se dibuja.
+        //
+        // Solo se copia si alguien la ha pedido: el parche de 200 km son ~88 k vértices (2 MB), y
+        // pagarlos por si acaso en cada reconstrucción no tiene sentido.
+        if (debugCaptureGround.load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> lk(debugMeshMx);
+            debugMeshVerts[1] = verts;
+            debugMeshTris[1]  = tris;
+            debugMeshVerts[0].clear();
+            debugMeshTris[0].clear();
+            debugMeshCenter = near;
+            ++debugMeshRevision;
+        }
         JPH::VertexList jv; jv.reserve(verts.size());
         for (const auto& p : verts) { const glm::dvec3 lp = p - origin;
             jv.push_back(JPH::Float3((float)lp.x, (float)lp.y, (float)lp.z)); }
@@ -97,19 +397,85 @@ struct PhysicsEngine::JoltImpl {
             jt.push_back(JPH::IndexedTriangle(tris[i], tris[i + 1], tris[i + 2], 0));
         JPH::MeshShapeSettings ms(jv, jt);
         JPH::ShapeSettings::ShapeResult res = ms.Create();
-        return res.IsValid() ? res.Get() : JPH::Ref<JPH::Shape>{};
+        if (!res.IsValid()) return {};
+        const auto tShape = Clock::now();
+
+        // ── EL BLOQUE CERCANO COMO HEIGHTFIELD ──────────────────────────────────────────────────
+        //
+        // La malla de arriba viene con un HUECO donde va esto (`terrainHeightFieldCovers`): las dos
+        // geometrías se tocan pero no se solapan, porque solapadas Jolt generaría contactos DOBLES
+        // sobre el mismo suelo y el personaje rebotaría en la frontera.
+        //
+        // Es el mismo terreno, misma función, mismo marco anclado y los mismos vértices que tendría la
+        // malla — pero `HeightFieldShape` no guarda posiciones ni índices ni construye árbol AABB sobre
+        // triángulos: solo las alturas cuantizadas sobre una rejilla implícita.
+        std::vector<float> hf; uint32_t hfN = 0; double hfCell = 0.0;
+        glm::dvec3 hfO(0.0), hfX(0.0), hfUp(0.0), hfZ(0.0);
+        const bool haveHF = w->terrainHeightField(near, hf, hfN, hfCell, hfO, hfX, hfUp, hfZ);
+        const auto tHF = Clock::now();
+        auto ms_of = [](Clock::time_point a, Clock::time_point b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        if (haveHF && hfN >= 2) {
+            JPH::HeightFieldShapeSettings hs;
+            hs.mHeightSamples.assign(hf.begin(), hf.end());
+            hs.mSampleCount = hfN;
+            // La superficie de Jolt es `mOffset + mScale·(x, muestra, y)` con x,y enteros: el offset
+            // lleva la esquina a su coordenada tangente y la escala convierte índice→metros.
+            hs.mOffset = JPH::Vec3((float)Haruka::Planet::TERRAIN_HF_LO, 0.0f,
+                                   (float)Haruka::Planet::TERRAIN_HF_LO);
+            hs.mScale  = JPH::Vec3((float)hfCell, 1.0f, (float)hfCell);
+            JPH::ShapeSettings::ShapeResult hres = hs.Create();
+            if (hres.IsValid()) {
+                // Rotación heightfield→cuerpo: sus ejes (X, altura, Z) son (hfX, hfUp, hfZ). El provider
+                // ya devuelve la terna DEXTRÓGIRA (por eso su Z es `-t2`); si no lo fuera, la matriz
+                // tendría determinante -1 y Jolt recibiría el relieve espejado.
+                const glm::dmat3 M(hfX, hfUp, hfZ);          // columnas
+                JPH::Mat44 jm = JPH::Mat44::sIdentity();
+                for (int c = 0; c < 3; ++c)
+                    jm.SetColumn3(c, JPH::Vec3((float)M[c].x, (float)M[c].y, (float)M[c].z));
+                const glm::dvec3 lp = hfO - origin;          // ancla en coordenadas del cuerpo
+                JPH::StaticCompoundShapeSettings cs;
+                cs.AddShape(JPH::Vec3::sZero(), JPH::Quat::sIdentity(), res.Get());
+                cs.AddShape(JPH::Vec3((float)lp.x, (float)lp.y, (float)lp.z),
+                            jm.GetQuaternion().Normalized(), hres.Get());
+                JPH::ShapeSettings::ShapeResult cres = cs.Create();
+                if (cres.IsValid()) {
+                    HARUKA_LOGI("Physics", "suelo: malla %zu tris (con hueco) + heightfield %ux%u "
+                                "(%zu KB de muestras)  ·  %.0f ms = muestreo %.0f + MeshShape %.0f "
+                                "+ heightfield %.0f + compound %.0f",
+                                tris.size() / 3, hfN, hfN, hf.size() * sizeof(float) / 1024,
+                                ms_of(t0, Clock::now()), ms_of(t0, tMesh), ms_of(tMesh, tShape),
+                                ms_of(tShape, tHF), ms_of(tHF, Clock::now()));
+                    return cres.Get();
+                }
+            }
+        }
+        return res.Get();
     }
 
-    // Cambia el cuerpo del suelo por `shape` (en el hilo de física). La vieja se quita justo aquí, no
-    // antes: hasta este instante seguía colisionando.
-    void swapGroundShape(JPH::Ref<JPH::Shape> shape, const glm::dvec3& center, double elev) {
+    // Cambia un cuerpo de suelo por `shape` (en el hilo de física). El viejo se quita justo aquí, no
+    // antes: hasta este instante seguía colisionando, así que nunca hay un frame sin suelo.
+    void swapBody(JPH::BodyID& id, bool& have, JPH::Ref<JPH::Shape> shape) {
         if (!shape) return;
         JPH::BodyInterface& bi = system.GetBodyInterface();
-        if (haveGround) { bi.RemoveBody(groundId); bi.DestroyBody(groundId); haveGround = false; }
+        if (have) { bi.RemoveBody(id); bi.DestroyBody(id); have = false; }
         JPH::BodyCreationSettings s(shape, JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
             JPH::EMotionType::Static, JLayers::NON_MOVING);
-        groundId = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
-        haveGround = true; groundIsMesh = true; meshCenter = center; meshBuildElev = elev;
+        id = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
+        have = true;
+    }
+
+    // El `up` ANCLADO en `p`: la retícula del clipmap salta en escalones discretos del tamaño del
+    // quad, y entre salto y salto los vértices están quietos en coordenadas del mundo. Comparar este
+    // vector es la forma exacta de preguntar "¿se ha movido la retícula que dibuja el render?", que
+    // es lo que tiene que disparar la reconstrucción del anillo cercano — no la distancia recorrida.
+    static glm::dvec3 anchorOf(IWorldProvider* w, const glm::dvec3& p) {
+        glm::dvec3 up(0.0, 1.0, 0.0), t1, t2;
+        if (w && w->hasActivePlanet())
+            Haruka::Planet::terrainClipFrame(p, w->activePlanetCenter(), up, t1, t2,
+                                             w->activePlanetRadius());
+        return up;
     }
 
     JoltImpl() {
@@ -121,30 +487,30 @@ struct PhysicsEngine::JoltImpl {
     // moverse el jugador (sigue la región); la esfera (fallback: servidor/test) es fija → una vez basta.
     void rebuildGround(IWorldProvider* w, const glm::dvec3& near) {
         if (!w || !w->hasActivePlanet()) return;
-        JPH::BodyInterface& bi = system.GetBodyInterface();
-        std::vector<glm::dvec3> verts; std::vector<uint32_t> tris;
-        const bool hasMesh = w->terrainMesh(near, 96.0, verts, tris) && tris.size() >= 3 && verts.size() >= 3;
-        if (haveGround && !groundIsMesh && !hasMesh) return;   // sigue en modo esfera fija → nada que hacer
-        if (haveGround) { bi.RemoveBody(groundId); bi.DestroyBody(groundId); haveGround = false; }
-
-        if (hasMesh) {                                          // colisión con la MALLA REAL (float-safe: local)
-            JPH::VertexList jv; jv.reserve(verts.size());
-            for (const auto& p : verts) { const glm::dvec3 lp = p - origin;
-                jv.push_back(JPH::Float3((float)lp.x, (float)lp.y, (float)lp.z)); }
-            JPH::IndexedTriangleList jt; jt.reserve(tris.size() / 3);
-            for (size_t i = 0; i + 2 < tris.size(); i += 3)
-                jt.push_back(JPH::IndexedTriangle(tris[i], tris[i + 1], tris[i + 2], 0));
-            JPH::MeshShapeSettings ms(jv, jt);
-            JPH::ShapeSettings::ShapeResult res = ms.Create();
-            if (res.IsValid()) {
-                JPH::BodyCreationSettings s(res.Get(), JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
-                    JPH::EMotionType::Static, JLayers::NON_MOVING);
-                groundId = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
-                haveGround = true; groundIsMesh = true; meshCenter = near;
-                meshBuildElev = w->terrainHeightAt(near);   // referencia para detectar refinamiento vertical
-                return;
-            }
+        // ⚠️ LA MISMA GEOMETRÍA QUE EL REFRESCO ASÍNCRONO, no una segunda versión. Aquí había una copia
+        // del montaje de la MeshShape, así que el suelo del SPAWN y el de después de caminar 48 m eran
+        // dos códigos distintos que había que mantener a la vez — y el del spawn se quedó sin los
+        // anillos y sin el heightfield cercano. Ahora los dos pasan por `buildGroundShape`.
+        // Camino de ANILLOS: dos cuerpos, dos cadencias (ver los miembros `nearId`/`farId`).
+        JPH::Ref<JPH::Shape> nearShape =
+            buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
+        if (nearShape) {
+            JPH::Ref<JPH::Shape> farShape = buildGroundRings(w, near, 1, 200000.0, 1);
+            swapBody(nearId, haveNear, nearShape);
+            swapBody(farId,  haveFar,  farShape);
+            groundIsMesh = true; meshCenter = near; meshBuildElev = w->terrainHeightAt(near);
+            nearAnchor = anchorOf(w, near); nearAnchorSet = true;
+            return;
         }
+        // Sin anillos: el respaldo (malla o esfera) es UN cuerpo, el "lejano".
+        if (JPH::Ref<JPH::Shape> shape = buildGroundShape(w, near)) {
+            swapBody(farId, haveFar, shape);
+            groundIsMesh = true; meshCenter = near; meshBuildElev = w->terrainHeightAt(near);
+            return;
+        }
+        JPH::BodyInterface& bi = system.GetBodyInterface();
+        if (haveGround() && !groundIsMesh) return;   // sigue en modo esfera fija → nada que hacer
+        if (haveFar) { bi.RemoveBody(farId); bi.DestroyBody(farId); haveFar = false; }
         // Fallback: esfera (planeta + altura de un punto). Fija.
         const glm::dvec3 c = w->activePlanetCenter();
         const double R = w->activePlanetRadius();
@@ -153,8 +519,8 @@ struct PhysicsEngine::JoltImpl {
         JPH::BodyCreationSettings s(new JPH::SphereShape((float)(R + h)),
             JPH::RVec3((float)lc.x, (float)lc.y, (float)lc.z), JPH::Quat::sIdentity(),
             JPH::EMotionType::Static, JLayers::NON_MOVING);
-        groundId = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
-        haveGround = true; groundIsMesh = false;
+        farId = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
+        haveFar = true; groundIsMesh = false;
     }
     // --- CONTROLADOR DE PERSONAJE (Jolt CharacterVirtual) ---
     // Un personaje NO es un rígido dinámico: quiere subir escalones, no resbalar por pendientes suaves,
@@ -261,15 +627,25 @@ struct PhysicsEngine::JoltImpl {
             addBox((b.bmin + b.bmax) * 0.5, (b.bmax - b.bmin) * 0.5, glm::dquat(1, 0, 0, 0));
     }
 
-    // Gravedad RADIAL del planeta activo (m/s², hacia su centro). `gravBodies()` solo trae los cuerpos
-    // que EMITEN luz (estrellas) → el planeta sobre el que andas NO está ahí y habría gravedad ~0.
-    glm::dvec3 planetGravity(IWorldProvider* w, const glm::dvec3& pos) const {
-        if (!w || !w->hasActivePlanet()) return glm::dvec3(0.0);
+    // Gravedad en un punto: SUMA de todos los cuerpos masivos, con su masa real.
+    //
+    // ⚠️ Esto era `9.81·R²/r²` hacia el planeta activo, con este comentario: «`gravBodies()` solo trae
+    // los cuerpos que EMITEN luz (estrellas) → el planeta sobre el que andas NO está ahí». El parche
+    // era correcto sobre un dato que no lo era, y tenía dos costes: TODO cuerpo tenía la gravedad de
+    // la Tierra (una luna te frenaba como un planeta) y la regla de gravedad existía por duplicado —
+    // aquí y en el camino de los cuerpos dinámicos. Arreglada la lista (ver world_system_provider.h),
+    // los dos parches se van y queda una sola función.
+    glm::dvec3 gravityAtPoint(IWorldProvider* w, const glm::dvec3& pos) const {
+        if (!w) return glm::dvec3(0.0);
+        const glm::dvec3 g = Haruka::Planet::gravityAt(w->gravBodies(), pos);
+        // Red de seguridad: si la escena aún no ha registrado ningún cuerpo masivo (carga a medias),
+        // sin esto el jugador se queda sin "arriba" y el controlador de personaje pierde su eje.
+        if (glm::dot(g, g) > 1e-18 || !w->hasActivePlanet()) return g;
         const glm::dvec3 toC = w->activePlanetCenter() - pos;
         const double r = glm::length(toC);
         if (r < 1e-6) return glm::dvec3(0.0);
         const double R = w->activePlanetRadius();
-        return (toC / r) * (9.81 * (R * R) / (r * r));
+        return (toC / r) * (Haruka::Planet::surfaceGravity(R) * (R * R) / (r * r));
     }
 
     void stepCharacter(double dt, PhysicsEngine* eng, IWorldProvider* w) {
@@ -287,7 +663,7 @@ struct PhysicsEngine::JoltImpl {
             return;
         }
 
-        const glm::dvec3 gvec = planetGravity(w, b->position);
+        const glm::dvec3 gvec = gravityAtPoint(w, b->position);
         const double gl = glm::length(gvec);
         const glm::dvec3 up = (gl > 1e-9) ? -gvec / gl : glm::dvec3(0.0, 1.0, 0.0);
         charCtrl->SetUp(JPH::Vec3((float)up.x, (float)up.y, (float)up.z));   // "arriba" es RADIAL y cambia al moverte
@@ -334,31 +710,118 @@ struct PhysicsEngine::JoltImpl {
         if (charBody) near = charBody->position;
         else for (auto& sp : bodies) if (map.count(sp.get())) { near = sp->position; break; }
         // Primera vez (spawn): SÍNCRONO — hay que tener suelo ya, no se puede caer un frame.
-        if (!haveGround) { rebuildGround(w, near); lastRebuildT = simTime; }
+        if (!haveGround()) { rebuildGround(w, near); lastRebuildT = simTime; }
+
+        // ── BANCO DE PRUEBAS DEL SUELO (`HARUKA_GROUND_BENCH=N`) ────────────────────────────────
+        //
+        // El desglose de coste de `buildGroundShape` solo se imprime cuando el jugador DERIVA 48 m,
+        // o sea que medirlo exigía arrancar el juego y caminar — y un número que hay que ir a buscar
+        // a mano no se mide, se supone. Con esto se fuerzan N reconstrucciones nada más existir el
+        // suelo, cada una desde un centro distinto (48 m de separación, la deriva real) para que
+        // ninguna se aproveche de cachés calientes de la anterior.
+        //
+        // Va aquí y no en un test porque lo caro es `sampleTerrainHeight`, que necesita el planeta
+        // BAKEADO: fuera del juego no existe la función cuyo coste se quiere conocer.
+        if (haveGround() && groundBenchLeft > 0) {
+            const int n = groundBenchLeft--;
+            HARUKA_LOGI("Physics", "banco del suelo: reconstruccion %d", n);
+            buildGroundShape(w, near + glm::dvec3((double)n * 48.0, 0.0, 0.0));
+        }
 
         // ¿Terminó un refresco en curso? Intercambia el cuerpo (barato, hilo de física). La malla vieja
         // colisionó hasta este instante → cero hueco.
         if (groundJob.valid() && groundJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            swapGroundShape(groundJob.get(), groundJobCenter, groundJobElev);
+            swapBody(farId, haveFar, groundJob.get());
+            meshCenter = groundJobCenter; meshBuildElev = groundJobElev;
+        }
+        if (nearJob.valid() && nearJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+            swapBody(nearId, haveNear, nearJob.get());
+            nearAnchor = nearJobAnchor; nearAnchorSet = true;
         }
 
-        // ¿Hace falta refrescar? (movido >48 m, o el terreno bajo los pies cambió >0.5 m por refinado del
-        // LOD / deform, aunque el jugador esté QUIETO). Se lanza en un WORKER: el parche (muestrear +
-        // montar la MeshShape) se construye FUERA del frame; el frame solo paga el intercambio cuando
-        // esté listo (arriba). Un solo job en vuelo. El campo de altura interpolado hace el worker barato.
+        // ── EL ANILLO CERCANO SIGUE AL ANCLAJE DEL RENDER, no a la deriva ───────────────────────
+        //
+        // El disparador NO es "me he movido X metros": es "la retícula del clipmap ha saltado". Son
+        // cosas distintas — el anclaje se cuantiza en (lat, lon) y su paso en metros depende de la
+        // latitud (`quad·cos(lat)`, 3,30 m a 0,6 rad). Preguntarlo por el `up` anclado es exacto y no
+        // hay que replicar la cuantización aquí.
+        //
+        // Sin esto, el suelo que se PISA se quedaba anclado donde estabas hace hasta 48 m mientras el
+        // que se DIBUJA se re-ancla cada 4 m: dos retículas distintas casi todo el rato, y como ningún
+        // nodo sobrevive a un cambio de ancla (medido: 8 de 257 049) la disparidad no podía bajar de
+        // la sagita de la celda por mucho que se afinara la aritmética.
+        if (groundIsMesh && haveNear && !nearJob.valid()) {
+            const glm::dvec3 a = anchorOf(w, near);
+            if (!nearAnchorSet || glm::length(a - nearAnchor) > 1e-12) {
+                nearJobAnchor = a;
+                nearJob = std::async(std::launch::async, [this, w, near] {
+                    return buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
+                });
+            }
+        }
+
+        // ¿Hace falta refrescar? (movido >48 m — el radio fino del nuevo parche abandona al jugador —,
+        // o el terreno bajo los pies cambió >0.5 m por refinado del LOD / deform, aunque el jugador esté
+        // QUIETO). Se lanza en un WORKER: el parche (muestrear + montar la MeshJolt) se construye FUERA
+        // del frame; el frame solo paga el intercambio cuando esté listo (arriba). Un solo job en vuelo.
+        // El parche es el de 200 km (§9 Fase 3); por eso el 48 m es conservador pero barato en worker.
+        // SONDA DE PARIDAD (cada ~2 s): cuánto se separa el suelo que se PISA del que describe la
+        // función que dibuja el render. Son dos superficies distintas: la malla es lineal dentro de
+        // cada celda y la función no, así que entre vértices divergen. Ninguna comparación de la
+        // función consigo misma puede verlo — por eso se mide aquí, con la malla real.
+        if (groundIsMesh && simTime - lastParityLogT > 2.0) {
+            lastParityLogT = simTime;
+            double funcH = 0.0, meshH = 0.0, cellM = 0.0;
+            if (w->terrainParityProbe(near, meshCenter, funcH, meshH, cellM)) {
+                const double drift = glm::length(near - meshCenter);
+                // ⚠️ Y DÓNDE ACABA EL JUGADOR, que es lo que de verdad se nota.
+                //
+                // `funcion` vs `malla` compara dos descripciones del CAMPO DE ALTURA, las dos en CPU. Da
+                // 0.000 m —comparten campo, bilineal, triM, radio base y recorte del nivel del mar— y
+                // sin embargo se ve disparidad al caminar. Es que esa comparación no puede verla: lo que
+                // se pisa no es el campo, es la forma de colisión de Jolt tal como la resuelve el
+                // controlador de personaje, con su cápsula, su holgura de penetración y una malla que
+                // solo se reconstruye al derivar 48 m.
+                //
+                // `pies` es la altura del cuerpo sobre la esfera de referencia menos su radio: si el
+                // jugador flota o se hunde respecto al suelo que describe la función, sale AQUÍ y no en
+                // ninguna comparación de campos.
+                // ⚠️ HAY QUE RESTAR EL RADIO DEL CUERPO. La posición de un cuerpo con cápsula es el
+                // centro de su esfera inferior, así que en reposo está EXACTAMENTE `radius` por encima
+                // del suelo — el juego lo coloca así a propósito (`player.cpp`: `spawnPos.y + radius`).
+                // La primera versión de esta sonda no lo restaba y reportaba +0.400 m constantes con un
+                // radio de 0,4: un falso positivo que parecía justo el bug que se estaba buscando.
+                double feetOffset = 0.0;
+                if (w->hasActivePlanet()) {
+                    const glm::dvec3 pc = w->activePlanetCenter();
+                    const double alt = glm::length(near - pc) - w->activePlanetRadius();
+                    const double bodyR = (charBody && charBody->radius > 0.0) ? charBody->radius : 0.0;
+                    feetOffset = alt - bodyR - funcH;
+                }
+                HARUKA_LOGI("TerrainParity",
+                    "funcion=%.3f m  malla=%.3f m  |delta|=%.3f m  ·  celda=%.1f m  deriva=%.1f m"
+                    "  ·  pies-suelo=%+.3f m (radio ya restado)",
+                    funcH, meshH, std::fabs(funcH - meshH), cellM, drift, feetOffset);
+            }
+        }
+
         const bool drifted = groundIsMesh && glm::length(near - meshCenter) > 48.0;
         const bool refined = groundIsMesh && std::abs(w->terrainHeightAt(near) - meshBuildElev) > 0.5;
         // onSphere: el primer build cayó al fallback de ESFERA (terrainMesh falló ese instante, p.ej. el
         // planeta aún no estaba listo). La esfera es PLANA a la altura de un punto → el terreno aparece
         // decenas de m desplazado. Hay que SEGUIR intentando la malla (si no, se queda clavado en la
         // esfera para siempre, porque drifted/refined exigen que YA haya malla). Rate-limit lo acota.
-        const bool onSphere = haveGround && !groundIsMesh;
+        const bool onSphere = haveGround() && !groundIsMesh;
         if (((groundIsMesh && (drifted || refined)) || onSphere)
             && simTime - lastRebuildT > 0.25 && !groundJob.valid()) {
             groundJobCenter = near;
             groundJobElev   = w->terrainHeightAt(near);
-            groundJob = std::async(std::launch::async,
-                                   [this, w, near]{ return buildGroundShape(w, near); });
+            groundJob = std::async(std::launch::async, [this, w, near] {
+                // Solo los anillos de FUERA: el 0 lo lleva `nearJob` con su propia cadencia. Si el
+                // provider no da anillos, `buildGroundShape` cae a la malla/esfera de respaldo.
+                if (JPH::Ref<JPH::Shape> r = buildGroundRings(w, near, 1, 200000.0, 1)) return r;
+                return buildGroundShape(w, near);
+            });
             lastRebuildT = simTime;
         }
         syncStatics(eng);   // TODO el mundo estático (colocados + recursos + escena) → cuerpos de Jolt
@@ -396,20 +859,11 @@ struct PhysicsEngine::JoltImpl {
                 bi.ActivateBody(it->second);
                 sp->velocityDirty = false;
             }
-            glm::dvec3 gdir; const double g = eng->calculateGravityAtPosition(sp->position, gdir);
-            glm::dvec3 F = gdir * (g * sp->mass);   // cuerpos celestes (el Sol) — insignificante
-            // Gravedad del PLANETA ACTIVO (radial). `gravBodies()` solo trae los cuerpos que EMITEN luz
-            // (estrellas), NO el planeta sobre el que andas → sin esto el jugador no cae y flota al saltar.
-            // Superficie = 9.81 m/s² (el valor que usaba el jugador a mano), con caída por altura (R²/r²).
-            if (w && w->hasActivePlanet()) {
-                const glm::dvec3 toC = w->activePlanetCenter() - sp->position;
-                const double r = glm::length(toC);
-                if (r > 1e-6) {
-                    const double R = w->activePlanetRadius();
-                    const double gp = 9.81 * (R * R) / (r * r);
-                    F += (toC / r) * (gp * sp->mass);
-                }
-            }
+            // MISMA función que el personaje. Antes eran dos: la suma de `gravBodies()` (que no tenía
+            // planetas, así que solo aportaba el Sol y era «insignificante» como decía el comentario)
+            // más un parche radial de 9.81 hacia el planeta activo. Un escombro y el jugador caían por
+            // reglas distintas, y ninguna de las dos usaba la masa del cuerpo.
+            const glm::dvec3 F = gravityAtPoint(w, sp->position) * sp->mass;
             if (finite3(F))
                 bi.AddForce(it->second, JPH::Vec3((float)F.x, (float)F.y, (float)F.z));
         }
@@ -1001,14 +1455,18 @@ double PhysicsEngine::calculateGravityAtPosition(const glm::dvec3& worldPos, glm
         return 9.81;  // Default Earth gravity
     }
 
-    glm::dvec3 totalGravity = glm::dvec3(0.0);
+    // UNA sola implementación de la suma (core/planet/soi.h). Este bucle era la tercera copia de la
+    // regla de gravedad del motor —con las dos de `stepCharacter` y los cuerpos dinámicos— y además la
+    // única que no trataba el interior del cuerpo: `GM/r²` con r → 0 dispara a un objeto que atraviese
+    // el suelo un frame, en vez de frenarlo como hace una esfera uniforme.
+    //
+    // ⚠️ `gravitationalConstant` (el miembro, con su setter público) deja de intervenir aquí. Hoy vale
+    // exactamente `Planet::kGravConstant` y nadie llama al setter, así que el resultado es idéntico;
+    // si algún día alguien lo cambia, el sitio a cambiar es la constante compartida — tener G en dos
+    // sitios es exactamente el tipo de duplicado que este cambio viene a quitar.
+    const glm::dvec3 totalGravity = Haruka::Planet::gravityAt(m_world->gravBodies(), worldPos);
 
-    // Sum gravity from all celestial bodies
-    const auto& bodies = m_world->gravBodies();
-    for (const auto& body : bodies) {
-        totalGravity += calculateGravityContribution(body, worldPos);
-    }
-    
+
     double magnitude = glm::length(totalGravity);
     if (magnitude > 1e-6) {
         outGravityDir = glm::normalize(totalGravity);
@@ -1022,7 +1480,7 @@ double PhysicsEngine::calculateGravityAtPosition(const glm::dvec3& worldPos, glm
 
 glm::dvec3 PhysicsEngine::calculateGravityContribution(const GravBody& body, const glm::dvec3& worldPos) {
     // Calculate vector from test position to body
-    glm::dvec3 delta = body.worldPos - worldPos;
+    glm::dvec3 delta = body.pos - worldPos;
     double distance = glm::length(delta);
     
     // Avoid division by zero
@@ -1055,6 +1513,64 @@ void PhysicsEngine::applyGravity(const glm::dvec3& worldPos, double deltaTime, g
     // Apply gravitational acceleration: v += a * dt
     glm::dvec3 gravityAcceleration = gravityDir * gravityMagnitude;
     inOutVelocity += gravityAcceleration * deltaTime;
+}
+
+// ── ALAMBRE DE LA MALLA DE COLISIÓN ─────────────────────────────────────────────────────────────
+// Delegan en el JoltImpl. Sin Jolt compilado no hay malla que enseñar y devuelven false, que es la
+// respuesta honesta: el solver a mano no construye una MeshShape.
+void PhysicsEngine::setCollisionMeshDebug(bool on) {
+#ifdef HARUKA_HAS_JOLT
+    if (m_jolt) m_jolt->debugCaptureGround.store(on, std::memory_order_relaxed);
+#else
+    (void)on;
+#endif
+}
+
+bool PhysicsEngine::isCollisionMeshDebug() const {
+#ifdef HARUKA_HAS_JOLT
+    return m_jolt && m_jolt->debugCaptureGround.load(std::memory_order_relaxed);
+#else
+    return false;
+#endif
+}
+
+bool PhysicsEngine::getNearGroundRing(NearGroundRing& out) const {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt) return false;
+    std::lock_guard<std::mutex> lk(m_jolt->debugMeshMx);
+    if (!m_jolt->nearRingValid || m_jolt->nearRing.tris.size() < 3) return false;
+    out = m_jolt->nearRing;
+    return true;
+#else
+    (void)out; return false;
+#endif
+}
+
+bool PhysicsEngine::getCollisionMeshDebug(std::vector<glm::dvec3>& outVerts,
+                                          std::vector<uint32_t>& outTris,
+                                          glm::dvec3& outCenter, uint64_t& outRevision) const {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt) return false;
+    std::lock_guard<std::mutex> lk(m_jolt->debugMeshMx);
+    // Los dos slots (cercano y lejano) se construyen por separado; aquí se unen en una sola malla,
+    // reindexando el segundo. El consumidor ve un alambre, no dos.
+    if (m_jolt->debugMeshTris[0].size() + m_jolt->debugMeshTris[1].size() < 3) return false;
+    outVerts.clear(); outTris.clear();
+    outVerts.reserve(m_jolt->debugMeshVerts[0].size() + m_jolt->debugMeshVerts[1].size());
+    outTris.reserve(m_jolt->debugMeshTris[0].size() + m_jolt->debugMeshTris[1].size());
+    for (int slot = 0; slot < 2; ++slot) {
+        const uint32_t base = (uint32_t)outVerts.size();
+        outVerts.insert(outVerts.end(), m_jolt->debugMeshVerts[slot].begin(),
+                        m_jolt->debugMeshVerts[slot].end());
+        for (uint32_t i : m_jolt->debugMeshTris[slot]) outTris.push_back(base + i);
+    }
+    outCenter   = m_jolt->debugMeshCenter;
+    outRevision = m_jolt->debugMeshRevision;
+    return true;
+#else
+    (void)outVerts; (void)outTris; (void)outCenter; (void)outRevision;
+    return false;
+#endif
 }
 
 }} // namespace Haruka::Physics

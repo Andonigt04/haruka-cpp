@@ -30,9 +30,12 @@ void SSAO::setupSamples() {
     }
 
     for (unsigned int i = 0; i < 16; i++) {
-        glm::vec3 noise(
+        // RGBA32F (NO RGB32F): Vulkan/NVIDIA no soporta muestrear R32G32B32 (RGB está prohibido
+        // para imágenes). El shader solo lee .rgb, el 4º componente se rellena con 0.
+        glm::vec4 noise(
             randomFloats(gen) * 2.0 - 1.0,
             randomFloats(gen) * 2.0 - 1.0,
+            0.0f,
             0.0f
         );
         ssaoNoise.push_back(noise);
@@ -40,7 +43,7 @@ void SSAO::setupSamples() {
 
     if (RHI::Device* dev = RHI::device()) {
         RHI::TextureDesc nd;
-        nd.width = 4; nd.height = 4; nd.format = RHI::Format::RGB32F;
+        nd.width = 4; nd.height = 4; nd.format = RHI::Format::RGBA32F;
         nd.filter = RHI::Filter::Nearest; nd.wrap = RHI::Wrap::Repeat;
         nd.initialData = &ssaoNoise[0];
         m_noise = dev->createTexture(nd);

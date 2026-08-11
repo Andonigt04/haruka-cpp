@@ -22,7 +22,10 @@ namespace Haruka::Core {
         Window(const WindowProps& props);
         ~Window();
 
-        bool init();
+        /** @brief Crea la ventana visible. `vulkanWindow` → SDL_WINDOW_VULKAN (sin perfil GL); si
+         *         false → perfil OpenGL 4.6 core (backend GL). El flag lo decide el backend RHI
+         *         pedido ANTES de crear la ventana (settings → imgui.ini → RenderBackend). */
+        bool init(bool vulkanWindow = false);
         /** @brief Creates a hidden SDL window for headless / CI operation. */
         bool initHeadless();
         void shutdown();

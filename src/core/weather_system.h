@@ -57,9 +57,18 @@ struct WeatherSample {
     float  precip     = 0.0f;    ///< [0,1] intensidad de precipitación. >0 exige cloudCover alto.
     Precip type       = Precip::None;
     float  cloudBaseM = 1200.0f; ///< altura de la base de la nube (m sobre el suelo). Techo de la lluvia.
+    /// TECHO de la nube (m sobre el suelo). Sin esto la nube es una SUPERFICIE, no un cuerpo: el
+    /// clima se lee bien desde el suelo y deja de existir en cuanto despegas. Con base y techo la
+    /// nube es una losa que se puede atravesar, ver de canto desde un avión y dejar por debajo.
+    /// El grosor no es constante: una capa de buen tiempo tiene cientos de metros y una tormenta
+    /// crece kilómetros (el cumulonimbo se desarrolla en vertical, y por eso descarga).
+    float  cloudTopM  = 1800.0f;
     float  tempC      = 15.0f;   ///< temperatura del campo en el punto (la que decide lluvia/nieve).
     float  humidity   = 0.5f;    ///< humedad del campo en el punto.
     glm::vec3 wind{0.0f};        ///< viento TANGENTE (m/s) en el marco local del planeta.
+
+    /// Grosor de la nube (m). >0 siempre que haya algo de cobertura.
+    float cloudThicknessM() const { return cloudTopM - cloudBaseM; }
 
     bool isSnow() const { return type == Precip::Snow; }
     /** @brief Intensidad de LLUVIA (0 si lo que cae es nieve). Para el pase de lluvia y el mojado. */
@@ -88,6 +97,19 @@ public:
      *  que es justo la mitad de "la lluvia cae de las nubes": nube sin lluvia SÍ existe. */
     static constexpr float kPrecipCover = 0.62f;
 
+    /** @brief Bordes de la losa de nube, en fracción del grosor: dónde acaba de entrar y dónde
+     *  empieza a deshilacharse.
+     *
+     *  ⚠️ ESTÁN DUPLICADOS EN `assets/shaders/lib/cloud_volume.glsl` (`HARUKA_CLOUD_RISE`/`_FALL`),
+     *  porque el mismo volumen se evalúa en dos sitios: aquí para saber si el ojo está dentro, y en
+     *  el shader para pintarlo. No hay forma de compartir un `constexpr` con GLSL, así que los ata
+     *  un TEST que lee el fichero de shader (`weather_3d`). Sin esa atadura, divergir es cuestión de
+     *  tiempo — y el síntoma sería entrar en la niebla a una altura distinta de la que se ve la
+     *  nube, que es el mismo fallo que tenía el clima cuando CPU y shader calculaban la nubosidad
+     *  cada uno por su cuenta. */
+    static constexpr float kProfileRise = 0.28f;
+    static constexpr float kProfileFall = 0.62f;
+
     /** @brief Fija la seed del planeta y siembra los frentes. Idempotente para la misma seed. */
     void configure(uint32_t seed);
 
@@ -115,6 +137,32 @@ public:
 
     /** @brief Solo la cobertura de nube (más barato: sin viento ni base de nube). */
     float cloudCoverAt(const glm::dvec3& dir, float humidity) const;
+
+    /**
+     * @brief DENSIDAD DE NUBE en un punto 3D: cuánta nube hay a `altM` sobre el suelo. [0,1]
+     *
+     * Es la pieza que hace el clima tridimensional. `cloudCover` responde "¿hay nube sobre este
+     * punto del planeta?"; esto responde "¿estoy DENTRO de ella?", que es otra pregunta y es la que
+     * hace falta en cuanto el jugador puede volar: para el blanqueo al meterse en la nube, para ver
+     * la capa de canto desde arriba, y para saber cuándo la has dejado por debajo.
+     *
+     * Es una función PURA de la muestra ya calculada (no vuelve a mirar los frentes), así que
+     * evaluarla a lo largo de un rayo cuesta lo que cuesta la aritmética y nada más.
+     *
+     * Perfil vertical: 0 bajo la base, sube suave, macizo en el cuerpo, y se deshilacha hacia el
+     * techo. Los bordes son suaves a propósito — un corte duro se lee como una pared de niebla, que
+     * es exactamente lo que una nube no parece.
+     *
+     * @param w    muestra del clima en esa dirección (`sampleAt`).
+     * @param altM altura sobre el SUELO (m), no sobre el nivel del mar.
+     */
+    static float cloudDensityAt(const WeatherSample& w, float altM);
+
+    /** @brief ¿Está el punto DENTRO de la nube lo bastante para blanquear la vista? Umbral en un
+     *  sitio, para que el render y la lógica no discrepen sobre qué es "estar en la nube". */
+    static bool insideCloud(const WeatherSample& w, float altM) {
+        return cloudDensityAt(w, altM) > 0.35f;
+    }
 
 private:
     /** @brief Un frente: un casquete que gira alrededor de su eje a velocidad constante. */

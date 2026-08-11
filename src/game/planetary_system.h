@@ -17,9 +17,9 @@
 #include "planet.h"                            // TerrestrialPlanet (el planeta se crea a sí mismo)
 #include "core/scene/scene_manager.h"
 #include "core/terrain/terrain_sample.h"     // WorldGenParams
-#include "core/terrain/reference_surface.h"  // ReferenceSurface
 #include "core/weather_system.h"              // WeatherSystem
 #include "core/ground_layer.h"                // GroundMaterial
+#include "core/planet/orbit.h"                // OrbitElements (Kepler con elementos precesantes)
 #include "tools/planetary_types.h"           // PlanetFace (GL-free)
 #include "rhi/rhi_types.h"
 
@@ -93,12 +93,16 @@ public:
         // integración) y depurable. orbitParent = índice del cuerpo central (Sol) en m_planets, o -1
         // (estático). Plano orbital = base ortonormal (u,v); foco en el cuerpo padre. ---
         int    orbitParent = -1;          // índice del cuerpo central en m_planets (-1 = estático)
+        // ⚠️ La FUENTE DE VERDAD del plano orbital son los ELEMENTOS, no una base (u,v) guardada.
+        // Con la base congelada al cargar la escena la órbita no puede precesar, y sin precesión es
+        // exactamente periódica: la misma elipse para siempre, que es lo que se lee como "rail".
+        // Ver core/planet/orbit.h. `orbitA/Ecc/Period/Phase` siguen aquí porque son parte de los
+        // elementos y hay API pública que los expone.
         double orbitA      = 0.0;         // semi-eje mayor (m)
-        double orbitEcc    = 0.0;         // excentricidad [0,1) (0 = círculo)
+        double orbitEcc    = 0.0;         // excentricidad MEDIA [0,1) (0 = círculo)
         double orbitPeriod = 0.0;         // periodo (s); <=0 = no orbita
         double orbitPhase  = 0.0;         // anomalía media en t=0 (rad)
-        glm::dvec3 orbitU  = glm::dvec3(1, 0, 0); // eje del periastro (plano orbital)
-        glm::dvec3 orbitV  = glm::dvec3(0, 0, 1); // eje perpendicular en el plano (sentido del avance)
+        Haruka::Planet::OrbitElements orbit;   // elementos completos + tasas de precesión
     };
 
     void init();
@@ -116,12 +120,23 @@ public:
         return getActivePlanet(center, radius);
     }
     /** @brief Nombre del planeta activo. */
-    std::string getActivePlanetName() const;
+    /** @brief Nombre del planeta activo, por REFERENCIA.
+     *
+     *  ⚠️ Devolvía `std::string` por VALOR, y está en el camino caliente: `sampleTerrainHeight` lo
+     *  llama para elegir el planeta, y el solver de partículas del fluido llama a `sampleTerrainHeight`
+     *  ~1600 veces por frame (400 partículas × 3 iteraciones de densidad). Una asignación de heap por
+     *  muestreo de terreno, para comparar un nombre que no cambia. */
+    const std::string& getActivePlanetName() const;
 
     /** @brief TerrestrialPlanet del planeta activo (el que da el campo ecológico + cota de props).
      *  Busca por NOMBRE (m_planets y m_simplePlanets no comparten índice cuando el planeta se
      *  añadió por `addSimplePlanet`). nullptr si no hay planeta con superficie. */
     const Haruka::Planet::TerrestrialPlanet* activeTerrestrial() const;
+    /** @brief Igual, MUTABLE: hace falta para entregarle al planeta activo el suelo cercano que
+     *  monta la física (`setNearGroundRing`). Delega en la versión const — una sola búsqueda. */
+    Haruka::Planet::TerrestrialPlanet* activeTerrestrialMut() {
+        return const_cast<Haruka::Planet::TerrestrialPlanet*>(activeTerrestrial());
+    }
 
     /** @brief Parámetros de generación del planeta activo. */
     bool getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const;
@@ -191,6 +206,7 @@ public:
     Haruka::WeatherSample weatherAt(const glm::dvec3& worldPos) const;
 
     double sampleTerrainHeight(const glm::dvec3& worldPos) const;
+    double sampleTerrainHeight(const glm::dvec3& worldPos, float minFeatureM) const;
     bool groundHeightKmAtDir(const glm::dvec3& dir, float& outElevKm) const;
 
     /// Dynamic terrain editing: add/subtract height within a radius (meters)
@@ -198,7 +214,6 @@ public:
     /// Flatten terrain to a target height (meters) within a radius
     void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeight);
 
-    Haruka::ReferenceSurface& referenceSurface() const { return m_refSurface; }
     /** @brief Muestrea la superficie (altura, normal, material) en un punto del mundo. */
     Haruka::TerrainSample sampleSurface(const glm::dvec3& worldPos) const;
     bool getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const;
@@ -258,8 +273,13 @@ private:
     double m_simulationTime = 0.0;
 
     // EL SUELO DEL JUEGO (ver sampleTerrainHeight)
-    mutable Haruka::ReferenceSurface m_refSurface;
-    void ensureReferenceSurface() const;
+    // ⚠️ AQUÍ VIVÍA `ReferenceSurface`: 12 KB de máquina —snapshot atómico, caché de 1 M entradas con
+    // mutex, bilineal sobre retícula cube-sphere— cuyo `cornerM` acababa en `return 0.0`. Calculaba
+    // CERO, y los dos llamantes reales la esquivaban con un comentario que lo decía. Colgaba de
+    // `sampleTerrainV2`, que en esta rama es un stub.
+    //
+    // Lo único que se conserva es el paso de retícula (`terrainLatticeStep`, en el .cpp), porque la
+    // clave de las deformaciones lo usa. Y esa vía es inerte de todas formas: ver `warnDeformationInert`.
 
     // Alturas editadas (deformación dinámica del terreno)
     // Key = hash de la dirección del punto, Value = offset en metros sobre la altura base
@@ -282,6 +302,18 @@ private:
 
     void updateOrbits(double dt);
     void updateSimpleOrbits(double dt);
+public:
+    /**
+     * @brief Audita el sistema: ¿puede alguna pareja de órbitas cruzarse en algún instante?
+     *
+     * Con elementos precesantes `a` es constante y `e` está acotada, así que el radio de cada cuerpo
+     * vive siempre en un intervalo fijo y la respuesta se puede DEMOSTRAR una vez para todo t (ver
+     * core/planet/orbit.h). Se llama sola al resolver las órbitas de la escena.
+     *
+     * @return nº de problemas encontrados (0 = sistema limpio). Cada uno se registra con su causa.
+     */
+    int validateOrbits() const;
+private:
 };
 
 }

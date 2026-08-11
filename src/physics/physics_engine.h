@@ -103,6 +103,69 @@ public:
     PhysicsEngine();
     ~PhysicsEngine();
     
+    /**
+     * @brief ALAMBRE DE LA MALLA DE COLISIÓN: activa la captura de la geometría que se le da a Jolt.
+     *
+     * Existe porque la disparidad del terreno se veía a ojo y no la detectaba ninguna medida: la sonda
+     * de paridad compara la función con la malla (2 cm), los pies quedan a centímetros del suelo, y el
+     * clipmap dibuja con quads de 4 m — la misma retícula que colisiona. Todo coherente, y aun así se
+     * ve. Dibujando encima la malla que Jolt TIENE de verdad, la diferencia deja de ser una impresión.
+     *
+     * Apagado por defecto: la copia del parche de 200 km son ~88 k vértices (2 MB) por reconstrucción.
+     */
+    void setCollisionMeshDebug(bool on);
+    bool isCollisionMeshDebug() const;
+    /**
+     * @brief Copia la malla capturada, en coordenadas de MUNDO. `outRevision` cambia cuando se
+     *        reconstruye, así que el render solo re-sube los buffers cuando hace falta.
+     * @return false si no hay captura (o está apagada).
+     */
+    bool getCollisionMeshDebug(std::vector<glm::dvec3>& outVerts, std::vector<uint32_t>& outTris,
+                               glm::dvec3& outCenter, uint64_t& outRevision) const;
+
+    /**
+     * @brief EL ANILLO CERCANO tal cual lo colisiona Jolt, para que el RENDER lo dibuje.
+     *
+     * No es depuración: es el camino por el que el suelo dibujado deja de ser una segunda
+     * evaluación de la función y pasa a ser **los mismos bytes** que se pisan.
+     *
+     * Mientras el terreno cercano lo genere el teselador, la paridad no puede ser exacta: los cuatro
+     * nodos de cada quad coinciden, pero un quad no es plano y hay que partirlo en dos triángulos —
+     * y `clipmap.tese` declara `layout(quads, equal_spacing, ccw)`, donde **qué diagonal usa el
+     * teselador NO lo fija el spec de OpenGL**. Jolt sí la fija. La diferencia en el centro del quad,
+     * medida sobre el terreno real, es de 2-4 cm bajo los pies y hasta 8,9 cm en el bloque.
+     *
+     * Se publican VÉRTICES E ÍNDICES ya montados, no las muestras y la regla para montarlos. La
+     * diferencia importa: en cuanto hay dos montadores acaban divergiendo, y esa divergencia es
+     * literalmente el bug que este camino existe para cerrar. El render sube lo que recibe.
+     *
+     * ⚠️ Los vértices están en el PLANO TANGENTE, no sobre la esfera. El punto con el que se generó
+     * la muestra es `centro + dir·(R+h)`, pero Jolt NO vuelve a la esfera: coloca el nodo en el plano.
+     * El desplazamiento tangencial (`x·h/R`, 3 cm en el borde del bloque) es parte de lo que se pisa,
+     * y en cuanto los dos lados lo tienen deja de ser disparidad. "Corregirlo" volvería a separarlos.
+     *
+     * ⚠️ Dibujar en float RELATIVO a `anchor`, nunca en coordenadas de mundo: a 6,37e6 m un float
+     * tiene ~0,5 m de resolución y el suelo temblaría. `anchor` no se mueve entre reconstrucciones.
+     *
+     * `outRevision` cambia solo cuando el anillo se reconstruye (al saltar el anclaje del clipmap),
+     * así que el render re-sube la textura únicamente entonces.
+     *
+     * @return false si no hay anillo (servidor, tests, o el provider no da anillos).
+     */
+    struct NearGroundRing {
+        /// Posiciones de MUNDO de los nodos con superficie. NO son "la función evaluada otra vez":
+        /// salen de la misma función que monta el alambre y que describe lo que Jolt colisiona.
+        std::vector<glm::dvec3> verts;
+        /// Triangulación de Jolt (`(i,j)→(i+1,j+1)`), ya montada. Se publica hecha, y no las reglas
+        /// para montarla, porque dos montadores acaban divergiendo — que es el bug entero.
+        std::vector<uint32_t>   tris;
+        glm::dvec3 anchor{0.0};   ///< Origen ESTABLE para dibujar en float (el punto de ancla).
+        double     cell   = 0.0;  ///< Lado de la celda, m.
+        double     extent = 0.0;  ///< Semi-alcance, m.
+        uint64_t   revision = 0;  ///< Cambia solo al reconstruirse: el render re-sube solo entonces.
+    };
+    bool getNearGroundRing(NearGroundRing& out) const;
+
     /** @brief Adds a body to the simulation. */
     void addBody(std::shared_ptr<RigidBody> body);
     /** @brief Removes body by name. */

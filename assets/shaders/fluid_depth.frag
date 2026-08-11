@@ -41,7 +41,11 @@ void main() {
 
     // gl_FragDepth so the depth test keeps the nearest particle.
     vec4 clip = projection * vec4(frontView, 1.0);
-    gl_FragDepth = (clip.z / clip.w) * 0.5 + 0.5;
+    // ⚠️ SIN el *0.5+0.5 de la convención GL por defecto: el motor usa glClipControl(ZERO_TO_ONE)
+    // con reversed-Z (gl_device.cpp:362), así que clip.z/clip.w YA viene en [0,1]. Reescalarlo lo
+    // comprimía a [0.5, 1] y el agua quedaba SIEMPRE "más lejos" que el terreno con depth GREATER:
+    // fallaba el test y los lagos y ríos no se veían.
+    gl_FragDepth = clip.z / clip.w;
 
     // Eye-space linear depth = distance in front of the camera (positive).
     FragEyeDepth = -frontView.z;

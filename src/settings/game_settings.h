@@ -1,5 +1,8 @@
 #pragma once
 
+#include <vector>
+#include <string>
+
 #include <string>
 
 namespace Haruka::Settings {
@@ -27,6 +30,20 @@ enum class RenderBackend : int { OpenGL = 0, Vulkan = 1 };
 struct GraphicsSettings {
     WindowMode      windowMode      = WindowMode::Fullscreen;
     RenderBackend   renderBackend   = RenderBackend::OpenGL; // API gráfica (requiere reinicio)
+
+    /// GPUs preferidas, por NOMBRE y en orden. Vacío = elección automática (discreta > integrada).
+    ///
+    /// ⚠️ Es una LISTA con una sola entrada hoy, no una cadena suelta. Un reparto multi-GPU (dibujar
+    /// en una, computar en otra) necesita expresar orden, y cambiar la forma del ajuste más adelante
+    /// obligaría a migrar la configuración ya guardada de los usuarios. Se guarda como `Gpu0`, `Gpu1`…
+    ///
+    /// ⚠️ Y por NOMBRE, no por índice: el orden en que el sistema enumera las GPUs cambia al
+    /// actualizar drivers, al conectar un eGPU o al arrancar en otra máquina. Un índice guardado
+    /// apuntaría mañana a otra tarjeta sin que el usuario entienda por qué; un nombre que ya no está
+    /// simplemente no casa y se cae a la automática.
+    ///
+    /// Requiere REINICIO: el device se crea una vez en el arranque.
+    std::vector<std::string> preferredGpus;
     TextureQuality  textureQuality  = TextureQuality::High;
     ShadowQuality   shadowQuality   = ShadowQuality::Medium;
     AntialiasingMode antialiasing   = AntialiasingMode::TAA;
@@ -44,6 +61,36 @@ struct GraphicsSettings {
                                             // "reluciente". 0.95 deja el bloom para lo casi blanco (sol,
                                             // emisivos, destellos), que es para lo que está.
     float           bloomStrength   = 0.7f; // additive bloom intensity
+    /** @brief Iteraciones del gaussiano separable del bloom. Es el RADIO del halo.
+     *
+     *  Estaba hardcodeado a 5 en `renderBloom`. El bloom corre a media resolución con un kernel de
+     *  5 taps: σ por pase ≈ 1,75 téxeles, y al iterar σ crece como √N. Con 5 → σ ≈ 3,9 téxeles = 7,8 px
+     *  de pantalla, y el halo visible (≈3σ) llega a **~23 px de radio**. Alrededor de un sol que mide
+     *  9,5 px (0,533°, el tamaño real), eso es el "foco diluido".
+     *
+     *  Con 3 → σ ≈ 3,0 téxeles: el halo baja a ~18 px. Bajar de 3 empieza a dejar ver la cruz del
+     *  kernel de 5 taps, que es peor que un halo ancho. */
+    int             bloomIterations = 3;
+
+    /** @brief Culling de PARCHES de la malla base en GPU (compute + drawIndexedIndirect).
+     *
+     *  La malla base envía 393 216 parches por frame y el TCS mata casi todos: a altura de ojo el
+     *  horizonte está a 4,65 km y un parche mide 39,1 km, así que se ve parte de UNO. El compute los
+     *  descarta antes, con una invocación por parche en vez de cuatro.
+     *
+     *  ⚠️ Un fallo aquí se ve como AGUJEROS en el planeta. `HARUKA_GPU_CULL=0` lo apaga sin tocar los
+     *  ajustes ni recompilar, que es la salida que uno quiere a las 3 de la mañana. */
+    bool            gpuPatchCull    = true;
+
+    /** @brief Sombras del TERRENO por ray-march contra la función de altura, en el fragment.
+     *
+     *  El mapa de sombras cubre ±42 m alrededor del jugador, así que no puede contener la montaña que
+     *  proyecta la sombra: sin esto, una loma no proyecta nada. El fragmento marcha hacia el sol y
+     *  pregunta si el terreno tapa — sin caja y sin límite de alcance.
+     *
+     *  ⚠️ Es coste de FRAGMENTO, y a pie el suelo es casi toda la pantalla. `HARUKA_TERRAIN_SHADOW=0`
+     *  lo apaga en caliente para medir el coste real en una escena concreta. */
+    bool            terrainShadows  = true;
     bool            motionBlur      = false;
     bool            fog             = false;  // niebla atmosférica del terreno (consola: fog 0|1)
     int             chunkMemoryMB   = 0;     // terrain chunk cache budget (MB). 0 = AUTO (25% de la RAM del sistema, acotado 512–4096). Presets pueden fijar un valor explícito.

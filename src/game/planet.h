@@ -30,6 +30,7 @@
 #include "core/planet/terrain_material.h"
 #include "core/planet/prop_layer.h"
 #include "core/planet/zone_shape.h"
+#include "core/planet/orbit.h"                 // OrbitElements (Kepler con elementos precesantes)
 #include "core/terrain/planet_fields.h"        // FieldSample (fieldSampleAt)
 #include "core/weather_system.h"
 #include "tools/procgraph/proc_graph.h"
@@ -103,8 +104,9 @@ struct TerrestrialPlanetConfig {
     double orbitEcc     = 0.0;
     double orbitPeriod  = 0.0;
     double orbitPhase   = 0.0;
-    glm::dvec3 orbitU   = glm::dvec3(1, 0, 0);
-    glm::dvec3 orbitV   = glm::dvec3(0, 0, 1);
+    /// Elementos completos + tasas de precesión. La base (u,v) del plano se DERIVA de aquí en cada
+    /// frame: guardarla congelaba el plano al cargar la escena y la órbita no podía precesar.
+    Haruka::Planet::OrbitElements orbit;
 
     SurfaceConfig surface;                    // textura/mapas (paths)
     /** @brief `surfaceConfig` JSON crudo: biomePalette, materials, seed, … Lo interpreta el planeta. */
@@ -113,20 +115,22 @@ struct TerrestrialPlanetConfig {
     int faceRes = 256;
 };
 
-/**
- * @brief Paquete de texturas de bioma de la ruta "4 capas".
+/*
+ * ⚠️ AQUÍ VIVÍA `BiomeTextures` (sand/grass/land/rock × albedo/normal). Retirada entera.
  *
- * Cada bioma clásico (sand/grass/land/rock) con su albedo + normal. Los arrays de terreno
- * (una capa por material, elegidos por el proyecto) viven aparte en `albedoArray/normalArray`.
+ * Era la ruta anterior a los arrays de material: un sampler por bioma clásico. Ninguno de los ocho lo
+ * muestreaba ya ningún shader —comprobado por grep sobre `assets/shaders/`— desde que el terreno elige
+ * su textura por CAPA del array. Costaban 8 cargas de ~3 s y ~176 MB de VRAM por planeta.
+ *
+ * Y de paso se llevó por delante un bug que no se veía: esta estructura se asignaba entera
+ * (`m_biomeTex = loadBiomeTextures(...)`) DESPUÉS de que `rebuildTerrainArrays` hubiera creado los
+ * arrays de terreno, que vivían dentro de ella. La asignación borraba sus handles y filtraba 404 MB.
+ * Los arrays son ahora miembros propios del planeta: dos ciclos de vida distintos no pueden compartir
+ * una estructura que se asigna entera.
+ *
+ * La arena de la ORILLA, que era la última supervivviente, sale de la capa del array que declara
+ * `TerrainMaterialTable::shoreLayer()`.
  */
-struct BiomeTextures {
-    Haruka::RHI::TextureHandle sandAlbedo, sandNormal;
-    Haruka::RHI::TextureHandle grassAlbedo, grassNormal;
-    Haruka::RHI::TextureHandle landAlbedo, landNormal;
-    Haruka::RHI::TextureHandle rockAlbedo, rockNormal;
-    Haruka::RHI::TextureHandle albedoArray, normalArray;
-    int arrayLayers = 0;
-};
 
 /**
  * @brief Un planeta renderizable. Se construye a sí mismo en `build(config)`.
@@ -205,6 +209,16 @@ public:
     double sampleHeight(const glm::dvec3& dir) const;
 
     /**
+     * @brief Ídem, pero con el `minFeatureM` que EXIGE el render en ese punto (§9 Fase 3).
+     *
+     * La paridad de la física no se negocia: `terrainMesh` (búsqueda de colisión) muestrea cada
+     * vértice con el MISMO triM que el render usa ahí — `max(rad·0.002, 2.0)` dentro del clipmap y
+     * `max(dist·0.002, 0.5)` en el per-pixel. Con 2.0 fijo (el default) la física y el render solo
+     * coinciden en el puro pie; en el anillo 1-2 km y en el per-pixel se separan decímetros.
+     */
+    double sampleHeight(const glm::dvec3& dir, float minFeatureM) const;
+
+    /**
      * @brief Campo ecológico del planeta en una dirección: cota + clima (temp/humedad).
      *
      * Es el muestreador que el adaptador de props (`TerrainPropField`) usa como `fieldFn`/`heightFn`:
@@ -249,8 +263,11 @@ public:
     void setPosition(const glm::dvec3& p) { m_config.position = p; }
     int  orbitParent() const { return m_config.orbitParent; }
     double orbitPeriod() const { return m_config.orbitPeriod; }
+    /// Sobrecarga heredada: convierte la base (u,v) a elementos y les pone precesión por defecto.
     void setOrbit(int parent, double a, double ecc, double period, double phase,
                   const glm::dvec3& u, const glm::dvec3& v);
+    /// Camino preferente: los elementos son la fuente de verdad del plano orbital.
+    void setOrbit(int parent, const Haruka::Planet::OrbitElements& el);
     void setWeatherTime(double t) { m_weather.setTime(t); }
 
     // --- MAR DINÁMICO POR MASA (Hito 1) -------------------------------------------------------
@@ -369,7 +386,17 @@ private:
 
     // MAPA DE ELEVACIÓN del autor. Vive como miembro porque la función de altura base lo referencia
     // (le hace pareja al de zonas, que ya vivía en CPU): ambos quedan vivos toda la vida del planeta.
-    std::vector<unsigned char> m_elevCPU;   // RGBA8 equirectangular (se lee el canal rojo)
+    /** @brief Mapa de elevación equirectangular, canal rojo, normalizado a 16 BITS.
+     *
+     *  ⚠️ Era RGBA8, y esos 8 bits eran el techo REAL del relieve: sobre un rango de 20 km salen
+     *  **78 m por escalón**, así que el terreno no podía expresar nada más fino y salían mesetas
+     *  planas (medido en un máster real: gradiente horizontal con mediana 0 m/px y solo 177 valores
+     *  distintos). Subir la resolución no lo arreglaba — los escalones seguirían siendo de 78 m, solo
+     *  más juntos. Lo que hacía falta eran más bits: con 16, el escalón baja a **0,3 m**.
+     *
+     *  Un PNG de 8 bits se sigue cargando: se promociona ×257, así que el mapa antiguo da exactamente
+     *  los mismos valores que antes. */
+    std::vector<uint16_t> m_elevCPU;
     int m_elevW = 0, m_elevH = 0;
 
     // MAPAS DE DISTRIBUCIÓN de props (densityMap por capa), cargados/cacheados por ruta. Cada uno
@@ -395,6 +422,30 @@ private:
 
     // CLIPMAP — la rejilla que da los 2 m cerca del jugador.
     Haruka::RHI::BufferHandle m_clipVB, m_clipIB;
+
+    // EL SUELO CERCANO QUE VIENE DE LA FÍSICA (ver `setNearGroundRing`). El planeta no lo genera:
+    // lo recibe ya montado y solo lo dibuja con su propio material, que es el punto entero.
+    Haruka::RHI::BufferHandle m_nearRingVB{}, m_nearRingIB{}, m_nearRingUBO{};
+    uint32_t                  m_nearRingIndices = 0;
+    // Ancla del anillo en coordenadas de MUNDO. El clipmap se ancla AQUÍ y no en la cámara: si no,
+    // las dos retículas caen en celdas distintas (medido: hasta 4 m) y dejan de compartir vértices.
+    glm::dvec3                m_nearRingAnchor{0.0};
+    // ¿Se dibuja el anillo cercano ESTE frame? Solo con el clipmap sin estirar (ver ClipParams): su
+    // hueco de 192 m únicamente encaja en un borde de parche cuando el parche mide 128 m.
+    bool                      m_nearRingVisible = false;
+    bool                      m_nearRingAnchored = false;
+public:
+    /** @brief Entrega el suelo cercano ya montado por la física, en float RELATIVO a `anchorRelEye`.
+     *
+     *  `anchorRelEye` se recalcula CADA FRAME en double y solo entonces baja a float: los vértices
+     *  son relativos a un ancla fija entre reconstrucciones, y esta es la mitad que los lleva al ojo.
+     *  Sin ella el parche quedaría pegado a la cámara y se deslizaría sobre el terreno al caminar.
+     *
+     *  `verts`/`tris` solo hacen falta cuando cambia la revisión; pasar `nullptr` reusa los buffers. */
+    void setNearGroundRing(const std::vector<glm::vec3>* verts, const std::vector<uint32_t>* tris,
+                           const glm::vec3& anchorRelEye, const glm::vec3& anchorUp,
+                           const glm::dvec3& anchorWorld);
+private:
     uint32_t m_clipIndexCount = 0;
     uint32_t m_clipVertexCount = 0;
     Haruka::RHI::BufferHandle m_clipUBO;
@@ -410,6 +461,16 @@ private:
     // TESELACIÓN: mismo vertex buffer, OTRO índice (parches del quad).
     Haruka::RHI::BufferHandle m_patchIB;
     uint32_t m_patchIndexCount = 0;
+    // ── Culling de parches en GPU (terrain_cull.comp). Opt-in: HARUKA_GPU_CULL=1 ────────────────
+    // La malla base envía 393 216 parches por frame y el TCS mata casi todos (a pie se ve parte de
+    // UNO). El compute los descarta antes, con una invocación por parche en vez de cuatro, y
+    // compacta los supervivientes para dibujar con `drawIndexedIndirect`.
+    uint32_t m_patchCount = 0;                        ///< parches de la malla base
+    Haruka::RHI::BufferHandle m_patchBoundsSSBO;      ///< 4 esquinas por parche (estático)
+    Haruka::RHI::BufferHandle m_patchIdxSSBO;         ///< el índice de parches como storage (origen)
+    Haruka::RHI::BufferHandle m_patchIdxCulled;       ///< índice compactado (destino + draw)
+    Haruka::RHI::BufferHandle m_patchCullCmd;         ///< DrawElementsIndirectCommand
+    Haruka::RHI::BufferHandle m_patchCullUBO;         ///< CullParams (cámara + radio + nº parches)
 
     // Water mesh (single sphere at ocean radius)
     Haruka::RHI::BufferHandle m_waterVB;
@@ -429,7 +490,10 @@ private:
     // Texturas (legacy singles + biome 4-layer + macro/biome map)
     Haruka::RHI::TextureHandle m_albedoTex;
     Haruka::RHI::TextureHandle m_normalTex;
-    BiomeTextures m_biomeTex;
+    /// Arrays de terreno (una capa por material de la escena). FUERA de `BiomeTextures` a propósito:
+    /// ver la nota de esa estructura — compartirla borraba estos handles al reasignarla.
+    Haruka::RHI::TextureHandle m_terrainAlbedoArray, m_terrainNormalArray;
+    int m_terrainArrayLayers = 0;
     Haruka::RHI::TextureHandle m_macroTex;
     Haruka::RHI::TextureHandle m_biomeMapTex;
     float m_tiling = 100.0f;
@@ -455,8 +519,6 @@ private:
     static Haruka::RHI::TextureHandle loadTextureArray(const std::vector<std::string>& paths,
                                                        int& outLayers);
     void rebuildTerrainArrays();
-    static BiomeTextures loadBiomeTextures(const Haruka::Planet::ClimateOutput& climate,
-                                            const Haruka::Planet::GeologyOutput& geology);
     Haruka::RHI::TextureHandle generateProceduralAlbedo(int width, int height) const;
     Haruka::RHI::TextureHandle generateProceduralNormal(int width, int height) const;
     /** @brief Hornea la altura base (fase 2a) con cache en disco y la sube como R32F. */
@@ -467,7 +529,11 @@ private:
     static Haruka::RHI::PipelineHandle s_texPipeline;
     static Haruka::RHI::PipelineHandle s_biomePipeline;
     static Haruka::RHI::PipelineHandle s_tessPipeline;
+    /// Pipeline de COMPUTE del culling de parches (terrain_cull.comp). Compartido: la malla base es
+    /// del mismo tipo en todos los planetas. Inválido = el camino de siempre (draw de todo).
+    static Haruka::RHI::PipelineHandle s_cullPipeline;
     static Haruka::RHI::PipelineHandle s_clipPipeline;
+    static Haruka::RHI::PipelineHandle s_nearRingPipeline;
     static Haruka::RHI::PipelineHandle s_waterPipeline;
     static Haruka::RHI::PipelineHandle s_wirePipeline;
     static Haruka::RHI::BufferHandle s_ubo;

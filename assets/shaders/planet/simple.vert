@@ -12,8 +12,9 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
     vec4 uAmbient;
     vec4 uExtra; // x = hasTex, y = tiling
     vec4 uDebug; // x = vista de depuración (ver TerrestrialPlanet::debugView)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
 };
-out vec3 vNorm; out vec3 vFragPos; out vec3 vColor; out vec2 vUv; out vec3 vClimate;
+layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
 void main() {
     vec3 worldPos = aPos + uCenter.xyz;
     vFragPos = worldPos; vNorm = aNorm; vColor = aColor; vUv = aUv; vClimate = aClimate;

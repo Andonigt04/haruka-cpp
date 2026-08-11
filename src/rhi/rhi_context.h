@@ -82,5 +82,10 @@ namespace Haruka::RHI
                                    int w, int h) = 0;
             /** @brief Memory barrier after compute writes (GL: glMemoryBarrier). */
             virtual void memoryBarrier(uint32_t barriers = 0xFF) = 0;
+
+            // ImGui (fase 7): el host pasa el ImDrawData del frame al Context antes de endFrame(),
+            // que en Vulkan lo graba en el command buffer del frame dentro de un render pass propio
+            // (capa de UI sobre el backbuffer). `void*` mantiene el RHI ajeno a ImGui.
+            virtual void setUiDrawData(void* drawData) {}
     };
 }

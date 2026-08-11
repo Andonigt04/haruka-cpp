@@ -1,0 +1,100 @@
+#version 460 core
+/**
+ * @file terrain_cull.comp
+ * @brief Culling de PARCHES de la malla base en GPU, compactando a un índice indirecto.
+ *
+ * El problema
+ * -----------
+ * La malla base envía **393 216 parches** (6 caras × 256²) en cada frame y el TCS los mata casi
+ * todos: a altura de ojo el horizonte está a 4,65 km y un parche mide 39,1 km, así que se ve parte
+ * de UNO. Los otros 393 215 pagan invocación de TCS —cuatro por parche, ~1,5 M en total— para
+ * calcular su envolvente, hacer el test de limbo y poner los niveles de tesela a 0.
+ *
+ * Este compute hace el mismo descarte ANTES, con una invocación por parche (no cuatro), y compacta
+ * los supervivientes en un índice nuevo. El draw pasa a ser `drawIndexedIndirect` con la cuenta que
+ * escribe este shader, así que el TCS solo ve los parches que de verdad pueden salir en pantalla.
+ *
+ * Por qué es SEGURO
+ * -----------------
+ *  1. El TCS **conserva su propio test**. Este compute solo pre-filtra: si tuviera un bug solo puede
+ *     descartar de más (agujero) o de menos (sin ahorro), nunca dibujar algo mal.
+ *  2. El test es el MISMO de `patchHidden` en terrain.tesc —segmento↔esfera exacto— y encima con un
+ *     margen extra de relieve (`kMaxRelief` + `kSafetyM`), o sea **estrictamente más conservador**:
+ *     nunca puede descartar un parche que el TCS habría conservado.
+ *  3. Solo hace LIMBO, no frustum. El limbo es lo que aporta casi todo el ahorro a pie (oculta la
+ *     media esfera de la espalda y todo lo que la curvatura tapa) y no depende de la matriz de
+ *     proyección, así que no puede desincronizarse con el recorte del clipmap ni con `ringCap`.
+ *
+ * El dato por parche (centro y esquinas) se precalcula UNA vez al construir la malla: aquí no se
+ * toca el vertex buffer, que evitaría tener que replicar su layout en GLSL.
+ */
+
+layout(local_size_x = 64) in;
+
+/// Envolvente de un parche: las 4 esquinas en coords del PLANETA (sin normalizar, magnitud ≈ R).
+/// `w` de cada una queda libre (padding std430 a 16 B; alineación limpia y sin sorpresas).
+struct PatchBounds {
+    vec4 c0, c1, c2, c3;
+};
+
+layout(std430, binding = 0) readonly buffer Bounds  { PatchBounds bounds[]; };
+layout(std430, binding = 1) readonly buffer SrcIdx  { uint srcIndex[];  };   // 4 índices por parche
+layout(std430, binding = 2) writeonly buffer DstIdx { uint dstIndex[];  };   // compactado
+/// Comando indirecto (DrawElementsIndirectCommand) + el contador que lo alimenta.
+layout(std430, binding = 3) buffer Cmd {
+    uint indexCount;      // ← lo escribe este shader: 4 × supervivientes
+    uint instanceCount;   // 1 (lo inicializa la CPU)
+    uint firstIndex;      // 0
+    uint baseVertex;      // 0
+    uint baseInstance;    // 0
+};
+
+layout(std140, binding = 4) uniform CullParams {
+    vec4 uCamRel;      // xyz = cámara relativa al CENTRO del planeta · w = radio del planeta
+    vec4 uCamDir;      // xyz = dirección normalizada centro→cámara · w = nº de parches
+};
+
+// Mismo test que `patchHidden` de terrain.tesc, con margen extra. Un parche está oculto si la línea
+// de visión hasta su rincón MÁS favorable (el más cercano a la cámara, elevado a la envolvente de
+// relieve) atraviesa la esfera del planeta.
+bool patchHidden(vec3 camRel, vec3 camDir, float R, vec3 cp0, vec3 cp1, vec3 cp2, vec3 cp3) {
+    // ⚠️ Techo de relieve MÁS ALTO que el del TCS (12 km) a propósito: el margen hace este test
+    // estrictamente más permisivo, así que jamás descarta un parche que el TCS conservaría. Si algún
+    // día el relieve de un planeta pasa de esto, el TCS sigue siendo la red de seguridad.
+    const float kMaxRelief = 12000.0;
+    const float kSafetyM   =  4000.0;   // margen de seguridad sobre el techo de relieve
+
+    vec3  corner = cp0;
+    float best   = dot(corner, camDir);
+    float d1 = dot(cp1, camDir); if (d1 > best) { best = d1; corner = cp1; }
+    float d2 = dot(cp2, camDir); if (d2 > best) { best = d2; corner = cp2; }
+    float d3 = dot(cp3, camDir); if (d3 > best) { best = d3; corner = cp3; }
+    vec3 P     = normalize(corner) * (R + kMaxRelief + kSafetyM);
+    vec3 CtoP  = P - camRel;
+    float dCP2 = dot(CtoP, CtoP);
+
+    float foot = dot(camRel, camRel - P);
+    if (foot < 0.0 || foot > dCP2) return false;      // el pie cae fuera del segmento → visible
+    float dist = length(cross(camRel, P)) / sqrt(dCP2);
+    return dist < R;
+}
+
+void main() {
+    // ⚠️ `patch` es palabra RESERVADA en GLSL (cualificador de teselación): no sirve como nombre.
+    const uint patchId = gl_GlobalInvocationID.x;
+    const uint total   = uint(uCamDir.w);
+    if (patchId >= total) return;
+
+    const PatchBounds b = bounds[patchId];
+    if (patchHidden(uCamRel.xyz, uCamDir.xyz, uCamRel.w,
+                    b.c0.xyz, b.c1.xyz, b.c2.xyz, b.c3.xyz)) return;
+
+    // Sobrevive: reserva 4 huecos de golpe y copia su quad. `atomicAdd` devuelve el valor ANTERIOR,
+    // así que cada invocación se queda con un rango propio y no hace falta ninguna otra sincronía.
+    const uint dst = atomicAdd(indexCount, 4u);
+    const uint src = patchId * 4u;
+    dstIndex[dst + 0u] = srcIndex[src + 0u];
+    dstIndex[dst + 1u] = srcIndex[src + 1u];
+    dstIndex[dst + 2u] = srcIndex[src + 2u];
+    dstIndex[dst + 3u] = srcIndex[src + 3u];
+}

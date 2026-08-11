@@ -28,6 +28,8 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 
+#include "core/planet/terrain_lod.h"   // las cifras de LOD (triM y su piso) viven ahí, no aquí
+
 namespace Haruka { namespace Planet {
 
 /**
@@ -91,6 +93,54 @@ inline float detailNoise(const glm::dvec3& x) {
 
 
 /**
+ * @brief Igual que `detailNoise`, pero devuelve ADEMÁS el gradiente ∂n/∂x (adimensional).
+ *
+ * El ruido es una interpolación TRILINEAL de 8 esquinas con pesos `u = f²(3−2f)`, así que su
+ * derivada es exacta y sale de las mismas 8 esquinas que ya se leen para el valor: **el gradiente es
+ * casi gratis una vez pagados los hashes**. Eso es lo que permite quitar las dos evaluaciones extra
+ * que el render hacía por vértice solo para sacar la normal por diferencias finitas (§8: 15 → 5).
+ *
+ * ⚠️ Mismas reglas de paridad que el resto del fichero (§5): nada de `mix`, sumas escritas como
+ * `a + (b−a)·t`, y el hash entero intacto. El gradiente no toca el camino del VALOR: `detailNoise`
+ * sigue devolviendo bit a bit lo mismo, así que la paridad medida (34 µm) no se mueve.
+ */
+inline float detailNoiseGrad(const glm::dvec3& x, glm::vec3& outGrad) {
+    const glm::dvec3 id = glm::floor(x);
+    const glm::ivec3 c  = glm::ivec3(id);
+    const glm::vec3  f  = glm::vec3(x - id);
+    const glm::vec3  u  = f * f * (3.0f - 2.0f * f);
+    // du/df del smoothstep: 6f(1−f). Es lo único que hay que añadir a la regla de la cadena.
+    const glm::vec3  du = 6.0f * f * (1.0f - f);
+
+    const float a = detailHash(c);
+    const float b = detailHash(c + glm::ivec3(1, 0, 0));
+    const float cc= detailHash(c + glm::ivec3(0, 1, 0));
+    const float d = detailHash(c + glm::ivec3(1, 1, 0));
+    const float e = detailHash(c + glm::ivec3(0, 0, 1));
+    const float g = detailHash(c + glm::ivec3(1, 0, 1));
+    const float k = detailHash(c + glm::ivec3(0, 1, 1));
+    const float l = detailHash(c + glm::ivec3(1, 1, 1));
+
+    const float x00 = a  + (b - a)  * u.x;
+    const float x10 = cc + (d - cc) * u.x;
+    const float x01 = e  + (g - e)  * u.x;
+    const float x11 = k  + (l - k)  * u.x;
+    const float y0  = x00 + (x10 - x00) * u.y;
+    const float y1  = x01 + (x11 - x01) * u.y;
+
+    // ∂n/∂u por componente, y de ahí ∂n/∂f con du/df.
+    const float dnx0 = (b - a)  + ((d - cc) - (b - a))  * u.y;   // ∂/∂u.x en el plano z=0
+    const float dnx1 = (g - e)  + ((l - k)  - (g - e))  * u.y;   // ídem en z=1
+    outGrad.x = (dnx0 + (dnx1 - dnx0) * u.z) * du.x;
+    const float dny0 = x10 - x00;
+    const float dny1 = x11 - x01;
+    outGrad.y = (dny0 + (dny1 - dny0) * u.z) * du.y;
+    outGrad.z = (y1 - y0) * du.z;
+
+    return y0 + (y1 - y0) * u.z;
+}
+
+/**
  * @brief Detalle fino en metros, con las octavas ATENUADAS por lo fino que se vaya a dibujar.
  *
  * @param dir          dirección UNITARIA desde el centro del planeta.
@@ -102,9 +152,10 @@ inline float detailNoise(const glm::dvec3& x) {
  * ruido que hierve al mover la cámara. Cada octava entra solo cuando hay triángulos para ella, con
  * el criterio de Nyquist: hace falta al menos media longitud de onda por triángulo.
  *
- * ⚠️ La CPU pasa SIEMPRE el valor más fino (el del clipmap). La física solo importa donde está el
- * jugador, y ahí el clipmap da 2 m; si la CPU atenuara por distancia como el render, el suelo que
- * se pisa cambiaría según dónde mire la cámara.
+ * ⚠️ La CPU siempre ha pasado el valor más fino (2.0, el del clipmap). Desde §9 Fase 3 la física de
+ * colisión pasa POR PUNTO el mismo `minFeatureM` que el render usa ahí (`max(rad·0.002, 2.0)`:
+ * sampleTerrainHeight(dir, triM)); el resto del motor sigue usando el default de 2.0, que es lo
+ * que dibuja el clipmap bajo los pies.
  */
 inline float octaveWeight(float wavelengthM, float minFeatureM) {
     // 1 cuando el triángulo es mucho más fino que la onda, 0 cuando no llega a media onda.
@@ -129,9 +180,55 @@ inline float terrainDetail(const glm::vec3& dir, float radius, float minFeatureM
     return h;
 }
 
-/** @brief Compatibilidad: todo el detalle, como lo evalúa la física. */
+/**
+ * @brief `terrainDetail` + su GRADIENTE en coordenadas de MUNDO (m de altura por m de recorrido).
+ *
+ * Sustituye a las diferencias finitas del render. El tess eval sacaba la normal evaluando
+ * `terrainDetail` en `dir + t1·eps` y `dir + t2·eps`: **tres evaluaciones (15 ruidos) por vértice
+ * para un dato que la función ya conoce**. Con el gradiente analítico es UNA (5 ruidos), y las
+ * derivadas tangenciales son `dot(grad, t1)` y `dot(grad, t2)`.
+ *
+ * Además la normal sale MEJOR, no solo más barata: la diferencia finita mide la pendiente MEDIA
+ * sobre `eps` metros (y `eps` valía `triM`, o sea metros), mientras el gradiente es la pendiente en
+ * el punto. Donde el relieve curva dentro de `eps`, la normal vieja aplanaba.
+ *
+ * ⚠️ `p = dir·radius`, así que ∂p/∂(dir·radius) = 1 y la regla de la cadena solo mete la frecuencia
+ * de cada octava. El gradiente es perpendicular-agnóstico: es un vector 3D en el espacio de `p`; el
+ * llamante lo proyecta sobre su triedro tangente.
+ */
+inline float terrainDetailGrad(const glm::vec3& dir, float radius, float minFeatureM,
+                               glm::vec3& outGrad) {
+    outGrad = glm::vec3(0.0f);
+    if (minFeatureM >= 1428.5f) return 0.0f;
+    const glm::dvec3 p = glm::dvec3(dir) * (double)radius;
+    float h = 0.0f;
+    glm::vec3 g;
+    // MISMAS guardas, MISMAS frecuencias y MISMOS pesos que `terrainDetail`. Cada octava aporta al
+    // gradiente su amplitud · peso · frecuencia (la frecuencia entra por la regla de la cadena).
+    // ⚠️ La línea de `h` va escrita EXACTAMENTE igual que en `terrainDetail`, con el mismo orden de
+    // operaciones. Agrupar `amp·peso` en una variable y multiplicar después parece equivalente y NO
+    // lo es: cambia el redondeo y la altura se separaba 7,6 µm. El gradiente sí puede agrupar — no
+    // tiene gemelo con el que casar bit a bit, solo tiene que describir la pendiente.
+    if (minFeatureM < 1428.5f) { h += (detailNoiseGrad(p * 0.00035, g) - 0.5f) * 260.0f * octaveWeight(2857.0f, minFeatureM);
+        outGrad += g * (260.0f * octaveWeight(2857.0f, minFeatureM) * 0.00035f); }
+    if (minFeatureM <  312.5f) { h += (detailNoiseGrad(p * 0.0016,  g) - 0.5f) *  70.0f * octaveWeight( 625.0f, minFeatureM);
+        outGrad += g * ( 70.0f * octaveWeight( 625.0f, minFeatureM) * 0.0016f); }
+    if (minFeatureM <   55.5f) { h += (detailNoiseGrad(p * 0.0090,  g) - 0.5f) *  14.0f * octaveWeight( 111.0f, minFeatureM);
+        outGrad += g * ( 14.0f * octaveWeight( 111.0f, minFeatureM) * 0.0090f); }
+    if (minFeatureM <   11.0f) { h += (detailNoiseGrad(p * 0.0450,  g) - 0.5f) *   3.0f * octaveWeight(  22.0f, minFeatureM);
+        outGrad += g * (  3.0f * octaveWeight(  22.0f, minFeatureM) * 0.0450f); }
+    if (minFeatureM <   2.25f) { h += (detailNoiseGrad(p * 0.2200,  g) - 0.5f) *   0.7f * octaveWeight(   4.5f, minFeatureM);
+        outGrad += g * (  0.7f * octaveWeight(   4.5f, minFeatureM) * 0.2200f); }
+    return h;
+}
+
+/** @brief Compatibilidad: el detalle en el CAMPO CERCANO, que es donde la física trabaja.
+ *
+ *  El piso sale de `terrainTriM` (terrain_lod.h) y no de un literal: es el lado real del quad del
+ *  clipmap, así que este atajo describe la misma superficie que el render dibuja delante de la
+ *  cámara. Quien muestree lejos debe pasar su `triM` explícito — el de 3 argumentos. */
 inline float terrainDetail(const glm::vec3& dir, float radius) {
-    return terrainDetail(dir, radius, 2.0f);
+    return terrainDetail(dir, radius, terrainTriM(0.0));
 }
 
 /**

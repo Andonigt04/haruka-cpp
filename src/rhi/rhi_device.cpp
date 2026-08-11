@@ -1,7 +1,15 @@
 #include <string>
 #include "rhi/rhi_device.h"
 #include "rhi/opengl/gl_device.h"
-// #include "rhi/vulkan/vk_device.h"   // F5: cuando exista el backend Vulkan
+
+// El backend Vulkan es OPCIONAL y sigue en migración: solo se compila si el SDK está presente.
+// Sin él (máquinas sin cabeceras Vulkan), la petición de Vulkan cae al fallback de OpenGL.
+#if defined(__has_include)
+#  if __has_include(<vulkan/vulkan.h>)
+#    define HARUKA_RHI_HAS_VULKAN 1
+#    include "rhi/vulkan/vk_device.h"
+#  endif
+#endif
 
 #include <cstdio>
 #include "core/logger.h"
@@ -17,20 +25,74 @@ namespace Haruka::RHI
         return nullptr;
     }
 
-    std::unique_ptr<Device> Device::create(Backend backend, SDL_Window* window)
+#if defined(HARUKA_RHI_HAS_VULKAN)
+    static std::unique_ptr<Device> createVK(SDL_Window* window,
+                                            const std::vector<std::string>& preferredGpus)
+    {
+        auto vk = std::make_unique<vulkan::VKDevice>(window, preferredGpus);
+        if (vk && vk->ready()) return vk;
+        HARUKA_LOGE("RHI", "No se pudo crear el device Vulkan (contexto VK inválido).");
+        return nullptr;
+    }
+#endif
+
+    std::unique_ptr<Device> Device::create(Backend backend, SDL_Window* window,
+                                           const std::vector<std::string>& preferredGpus)
     {
         // El backend OpenGL del RHI (GLDevice) es el FALLBACK universal: cualquier backend
         // solicitado que no exista o falle al inicializar cae aquí. Es el camino garantizado.
         if (backend == Backend::Vulkan)
         {
-            // F5: cuando exista el backend Vulkan, intentarlo y devolverlo si arranca:
-            //   auto vk = std::make_unique<vulkan::VKDevice>(window);
-            //   if (vk && vk->ready()) return vk;
-            //   std::fprintf(stderr, "[RHI] Vulkan falló al inicializar → fallback a OpenGL (RHI).\n");
+#if defined(HARUKA_RHI_HAS_VULKAN)
+            if (auto vk = createVK(window, preferredGpus)) return vk;
+            // El backend Vulkan sigue a medias en esta rama: si no arranca, cae a GL (RHI).
             HARUKA_LOGW("RHI", "Vulkan solicitado → fallback a OpenGL.");
+#else
+            HARUKA_LOGW("RHI", "Vulkan no compilado (falta el SDK) → fallback a OpenGL.");
+#endif
         }
 
+        // ⚠️ El fallback a GL IGNORA `preferredGpus`, y no es un olvido: OpenGL no expone selección
+        // de adaptador. Qué GPU sirve un contexto GL lo decide el driver/SO antes de que el proceso
+        // arranque. Si el usuario eligió una GPU y acabamos aquí, su elección no se aplica — por eso
+        // la UI lo dice en vez de fingir que sí.
         return createGL(window);   // OpenGL del RHI: backend por defecto y fallback
+    }
+
+    // ── ENUMERAR LAS GPUs DISPONIBLES ───────────────────────────────────────────────────────────
+    //
+    // Consulta pura: no crea el device ni deja estado. En Vulkan se levanta una instancia TEMPORAL
+    // solo para preguntar y se destruye antes de volver, así que llamarlo desde el panel de ajustes
+    // no puede interferir con el device en uso.
+    std::vector<Device::AdapterInfo> Device::enumerateAdapters(Backend backend, SDL_Window* window)
+    {
+        std::vector<AdapterInfo> out;
+#if defined(HARUKA_RHI_HAS_VULKAN)
+        // ⚠️ SE ENUMERA POR VULKAN AUNQUE EL BACKEND ACTIVO SEA OPENGL, y no es un descuido.
+        //
+        // La primera versión solo listaba por Vulkan cuando Vulkan estaba seleccionado; con OpenGL
+        // devolvía `GL_RENDERER`, o sea **la GPU que ya está en uso**. En un portátil híbrido eso
+        // significa que la tarjeta dedicada NO APARECE en la lista — que es justo la que el usuario
+        // quiere elegir. Enumerar por Vulkan las ve todas porque `vkEnumeratePhysicalDevices` no
+        // depende del contexto de dibujo.
+        //
+        // Que el backend activo sea GL no invalida la lista: sirve para ELEGIR (ver el offload PRIME
+        // de `application.cpp`) y para saber qué hay. Si Vulkan no está, se cae a `GL_RENDERER`.
+        (void)backend;
+        if (vulkan::VKDevice::enumerate(window, out) && !out.empty()) return out;
+        HARUKA_LOGW("RHI", "no se pudo enumerar GPUs por Vulkan; solo se informa de la de OpenGL");
+#else
+        (void)backend;
+#endif
+        // Sin Vulkan no hay enumeración posible: GL solo sabe decir en cuál está corriendo.
+        AdapterInfo gl;
+        const char* r = SDL_GL_GetCurrentContext() ? (const char*)glGetString(GL_RENDERER) : nullptr;
+        gl.name     = r ? r : "GPU del sistema (OpenGL no enumera adaptadores)";
+        gl.discrete = false;
+        gl.usable   = true;
+        out.push_back(std::move(gl));
+        (void)window;
+        return out;
     }
 
     static Device* g_device = nullptr;

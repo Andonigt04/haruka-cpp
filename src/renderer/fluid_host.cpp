@@ -7,6 +7,7 @@
  * vacío y `Application` no referencia a FluidHost (el miembro y el hook también van gateados).
  */
 #include "fluid_host.h"
+#include "tools/profiler.h"   // sub-scopes: este bloque se comia el 97% del frame
 #include "core/modules.h" // HARUKA_MOD_FLUIDS — application.h/application_render lo incluyen
 
 #ifdef HARUKA_MOD_FLUIDS
@@ -58,8 +59,27 @@ void FluidHost::ensurePatch(const WorldPos& cameraPos) {
     const double kReanchorM = 160.0;
     const double kSpan = 420.0;
     const int    kN    = 96;
-    if (m_anchored && glm::length(cameraPos - m_anchor) < kReanchorM) return;
+    // ⚠️ Distancia TANGENCIAL (sobre la superficie), NO la 3D a la cámara.
+    //
+    // El ancla está en el SUELO (ver el comentario de abajo), así que `length(cameraPos - m_anchor)`
+    // incluye la ALTITUD. En cuanto la cámara sube más de kReanchorM sobre el terreno —volar, caer,
+    // un salto largo— la guarda deja de cumplirse SIEMPRE y esto re-ancla cada frame: 9216 muestreos
+    // del terreno procedural a ~2,15 µs cada uno = ~21 ms por frame, medidos. El parche solo tiene
+    // que seguir al jugador en HORIZONTAL; su altura da igual porque el ancla ya se proyecta al suelo.
+    if (m_anchored) {
+        double moved;
+        if (hasPlanet) {
+            const glm::dvec3 camDir = glm::normalize(cameraPos - planetCenter);
+            const glm::dvec3 ancDir = glm::normalize(m_anchor  - planetCenter);
+            moved = glm::length((camDir - ancDir) * planetRadius);   // cuerda sobre la esfera
+        } else {
+            moved = glm::length(cameraPos - m_anchor);
+        }
+        if (moved < kReanchorM) return;
+    }
     if (!terrainHeightFn) return;
+    // 96×96 = 9216 llamadas al terreno procedural. Solo al re-anclar, pero cuando pasa se nota.
+    HARUKA_PROFILE("fluid.ensurePatch(96x96 terreno)");
 
     const glm::dvec3 up  = hasPlanet ? glm::normalize(cameraPos - planetCenter) : glm::dvec3(0, 1, 0);
     const glm::dvec3 tan = basisTangent(up);
@@ -96,8 +116,9 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
     if (m_pendingRain >= 0.02f) { m_sim->addRain(m_pendingRain); m_pendingRain = 0.0f; }
 
     // Ríos/lagos: avanza la altura (modelo de tubos, sub-step CFL) y pinza la costa al mar.
-    m_sim->step(dt);
-    m_sim->applySeaLevel((float)seaLevel);
+    { HARUKA_PROFILE("fluid.sim.step(shallow water)");
+      m_sim->step(dt);
+      m_sim->applySeaLevel((float)seaLevel); }
 
     // Splash PBF: cascada por bordes de terreno pronunciados (colecta desbordes del heightfield).
     if (m_pbf) {
@@ -138,11 +159,14 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
             m_pbf->velocity.back() = glm::vec3(o.flowDir) * 1.1f;
         }
 
-        m_pbf->step(dt);
+        // ⚠️ Cada `collide` de aquí llama a `surfaceQuery`, que es `sampleTerrainHeight` COMPLETO
+        // (bilineal del bake + 5 octavas de ruido en double). Son n partículas × solverIters.
+        { HARUKA_PROFILE("fluid.pbf.step(colision vs terreno)"); m_pbf->step(dt); }
     }
 
     // Acoplador: 1) río→mar (fijar costa al nivel del mar), 2) cascada→lago (absorber splash).
     if (m_hybrid) {
+        HARUKA_PROFILE("fluid.hybrid.update");
         m_hybrid->seaLevelAlongUp = (float)seaLevel;
         m_hybrid->update(dt);
     }
@@ -155,8 +179,10 @@ void FluidHost::render(const WorldPos& cameraPos, int vpW, int vpH,
 
     // El binding 0 (PerFrameData) lo dejó puesto el llamador (application_render rebindea
     // m_uboPerFrameH antes). Dibuja el parche de ríos/lagos y luego el splash (modo superficie).
-    if (m_shallowRenderer) m_shallowRenderer->render(cameraPos);
-    if (m_fluidRenderer)   m_fluidRenderer->render(cameraPos, vpW, vpH, scenePass);
+    if (m_shallowRenderer) { HARUKA_PROFILE("fluid.render.lamina(malla 96x96/frame)");
+                             m_shallowRenderer->render(cameraPos); }
+    if (m_fluidRenderer)   { HARUKA_PROFILE("fluid.render.particulas(screen-space)");
+                             m_fluidRenderer->render(cameraPos, vpW, vpH, scenePass); }
 }
 
 } // namespace Haruka

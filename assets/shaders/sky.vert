@@ -23,6 +23,10 @@ layout(std140, binding = 5) uniform SkyParams {
     float u_time;           // segundos (movimiento de nubes)
     vec4  u_weather;        // x=humedad · y=tempC · z=precipitación · w=COBERTURA de nube (del mundo)
     vec4  u_wind;           // x=este(m/s) · y=norte(m/s) · z=racha · w=1 si es NIEVE
+    // ⚠️ AUNQUE EL VERTEX NO LO USE. GLSL exige que el bloque sea IDÉNTICO en las dos etapas del
+    // mismo programa; declararlo solo en el fragment da `struct type mismatch between shaders` al
+    // enlazar y el cielo entero deja de dibujarse.
+    vec4  u_planet;         // x=radio(m) · y=altitud del ojo(m) · z=base de nube(m)
 };
 
 layout(location = 0) out vec3 vRayDir; // dirección de vista en espacio mundo

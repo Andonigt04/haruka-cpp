@@ -1,9 +1,10 @@
 #version 460 core
-in vec3 vNorm; in vec3 vFragPos; in vec3 vColor; in vec2 vUv;
+layout(location = 0) in vec3 vNorm; layout(location = 1) in vec3 vFragPos; layout(location = 2) in vec3 vColor; layout(location = 3) in vec2 vUv;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
 };
-out vec4 fragColor;
+layout(location = 0) out vec4 fragColor;
 void main() {
     vec3 n = normalize(vNorm);
     float diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);

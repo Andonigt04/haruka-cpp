@@ -38,7 +38,21 @@ struct TerrainMaterial {
     float humMin   =  0.0f,  humMax   = 1.0f;    ///< humedad [0,1]
     float tempMin  = -1e3f,  tempMax  = 1e3f;    ///< temperatura en °C
     float slopeMin =  0.0f,  slopeMax = 1.0f;    ///< 0 llano … 1 vertical
+    /** @brief Banda de ALTURA sobre el nivel del mar, en KM. Mar<0, tierra>0.
+     *
+     *  Es el eje que faltaba, y era el más importante para "pintar el planeta a mano": sin él no se
+     *  puede decir "roca sobre 1,5 km", "nieve sobre 3 km" ni "arena solo en las cotas bajas". El
+     *  clima da la LATITUD del paisaje, la pendiente da las laderas, y la altura da los pisos
+     *  altitudinales — que es lo que hace que una montaña se lea como montaña.
+     *
+     *  ⚠️ En KM, igual que `vClimate.x` y que la elevación que maneja `biome.frag`: mezclar unidades
+     *  aquí es la clase de error que sale como "el material no aparece nunca" sin explicación. */
+    float elevMinKm = -1e3f, elevMaxKm = 1e3f;
     float feather  =  0.08f;                     ///< anchura del degradado en los límites
+    /** @brief Degradado de la banda de altura, en KM. Separado del `feather` general a propósito:
+     *  ese está en la escala [0,1] de humedad/pendiente, y aplicado a kilómetros daría 80 m de
+     *  transición — un corte duro para una ladera. 0,25 km funde el piso sobre ~500 m de desnivel. */
+    float elevFeatherKm = 0.25f;
 
     // Cómo se ve.
     glm::vec3 tint   = glm::vec3(1.0f);          ///< multiplica al color de bioma (NO lo sustituye)
@@ -159,6 +173,30 @@ struct TerrainMaterialTable {
         int next = 0;
         for (auto& m : materials)
             m.layer = m.albedo.empty() ? kNoTerrainTile : next++;
+    }
+
+    /**
+     * @brief Capa del material de ORILLA (la playa que se mezcla en la línea de agua), o -1.
+     *
+     * `biome.frag` pinta arena a los dos lados del nivel del mar ENCIMA del material que gane ahí, así
+     * que necesita una textura distinta de la del ganador — no le sirve `tile`. Antes venía de un
+     * sampler suelto (`uSandAlbedo`) que cargaba OTRA VEZ el mismo PNG que ya está en el array: dos
+     * rutas al mismo fichero, 22 MB duplicados y dos verdades sobre "cuál es la arena".
+     *
+     * El índice sale de aquí y no de un literal porque `assignLayers` lo asigna por POSICIÓN: atarlo a
+     * "0" en el shader se rompería en cuanto alguien reordenara los materiales de la escena.
+     *
+     * Se localiza por nombre. Es una heurística y se documenta como tal: lo correcto a futuro es un
+     * flag declarado en la escena (`"shore": true`), pero eso cambia el formato. Sin coincidencia
+     * devuelve -1 y la orilla se pinta con su color sin textura — degradación visible, no basura.
+     */
+    int shoreLayer() const {
+        for (const auto& m : materials) {
+            if (m.layer == kNoTerrainTile) continue;
+            if (m.name == "sand" || m.name == "arena" || m.name == "shore" || m.name == "playa")
+                return m.layer;
+        }
+        return -1;
     }
 
     /** @brief Rutas de albedo de los materiales CON textura, en orden de capa. */

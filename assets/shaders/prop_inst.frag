@@ -67,9 +67,19 @@ vec3 toonShade(vec3 baseColor, vec3 N, vec3 L, vec3 V, float metallic, float rou
     vec3  H   = normalize(L + V);
     float ndl = dot(N, L);
 
-    float band = smoothstep(-0.03, 0.22, ndl);
+    // ⚠️ COHERENCIA CON EL TERRENO. Los props se sombreaban con un modelo cel de banda muy estrecha
+    // (0,25 de `ndl`, casi un borde) y un tinte de sombra CONSTANTE, mientras el terreno usa un
+    // difuso continuo con la ambiente y el cielo REALES. El resultado era que los props "resaltaban"
+    // como pegatinas sobre el suelo, y sobre todo que al atardecer la sombra del terreno se iba
+    // cálida y la del prop se quedaba azul — porque su tinte no dependía del mundo.
+    //
+    // Se corrigen las dos cosas SIN quitar el estilo cel: la banda sigue existiendo, solo es más
+    // ancha; y el tinte de sombra pasa a derivarse de la MISMA expresión que `uAmbient` del terreno
+    // (`ambientStrength * vec3(0.55, 0.65, 0.85)`), así que los dos responden igual a la hora del día.
+    float band = smoothstep(-0.15, 0.55, ndl);
+    vec3  ambientCol = ambientStrength * vec3(0.55, 0.65, 0.85);   // idéntico a uAmbient del terreno
     vec3  litCol    = baseColor * (0.80 + 0.25 * sunLightColor);
-    vec3  shadowCol = baseColor * vec3(0.40, 0.46, 0.60) * ao;
+    vec3  shadowCol = baseColor * (ambientCol + 0.18 * sunLightColor) * ao;
     if (enableShadows == 0) shadowCol *= 1.06;
     if (enableSSAO    == 0) shadowCol *= 1.03;
     vec3  diffuse   = mix(shadowCol, litCol, band);

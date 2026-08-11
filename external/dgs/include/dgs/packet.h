@@ -167,33 +167,53 @@ namespace DGS
             {
                 // Búsqueda con índice: nunca borramos por byte (O(n²) con 64 KB de basura); movemos
                 // `scan` hacia delante y solo compactamos cuando extraemos un frame o al terminar.
+                const size_t NPOS = (size_t)-1;
+                size_t park = NPOS;   // 1er candidato PLAUSIBLE pero aún no verificable (resync)
+
                 while (scan + 4 <= pending.size())
                 {
-                    uint32_t len = (uint32_t)pending[scan]
-                                 | ((uint32_t)pending[scan + 1] << 8)
-                                 | ((uint32_t)pending[scan + 2] << 16)
-                                 | ((uint32_t)pending[scan + 3] << 24);
+                    const uint32_t len = prefixAt(scan);
 
                     if (len == 0 || len > DGS::MAX_PACKET_SIZE)
                     {
-                        // Prefijo mentiroso: desincronización. Descartamos UN byte y re-sincronizamos.
+                        // Prefijo mentiroso: desincronización. Avanzamos UN byte y re-sincronizamos.
+                        resyncing = true;
                         ++scan;
-                        ++discarded;
                         continue;
                     }
 
-                    if (scan + 4u + len > pending.size())   // payload aún incompleto → esperar
+                    const size_t end = scan + 4u + len;
+
+                    if (!resyncing)
                     {
-                        consumeScan();   // libera lo ya descartado sin tocar el frame a medias
-                        return false;
+                        // En sincronía: el prefijo es de fiar, un payload a medias solo espera.
+                        if (end > pending.size()) { compact(scan); return false; }
+                        return deliver(scan, len, out);
                     }
 
-                    out.assign(pending.begin() + scan + 4, pending.begin() + scan + 4 + len);
-                    scan += 4u + len;
-                    consumeScan();
-                    return true;
+                    // RE-SINCRONIZANDO: un prefijo "válido" puede ser una lectura desplazada de la
+                    // basura (p.ej. los bytes bajos de un largo real leídos con offset). Solo damos
+                    // por bueno un candidato VERIFICABLE con lo que ya tenemos: entero en el búfer y
+                    // seguido del fin del acumulador o de otro prefijo válido. Si no se puede
+                    // verificar por falta de bytes, lo APARCAMOS (puede ser un frame legítimo
+                    // fragmentado) y seguimos buscando uno que sí lo sea.
+                    bool verified = false;
+                    if (end <= pending.size())
+                    {
+                        const size_t rest = pending.size() - end;
+                        if (rest == 0)      verified = true;
+                        else if (rest >= 4) { const uint32_t n = prefixAt(end);
+                                              verified = (n != 0 && n <= DGS::MAX_PACKET_SIZE); }
+                        // rest 1..3 → no alcanza para mirar el siguiente prefijo: no verificable.
+                    }
+
+                    if (verified) { resyncing = false; return deliver(scan, len, out); }
+                    if (park == NPOS && end + 4u > pending.size()) park = scan;   // podría completarse
+                    ++scan;
                 }
-                consumeScan();
+
+                // Sin candidato aceptable: si hay uno plausible esperando bytes, nos quedamos ahí.
+                compact(park == NPOS ? scan : park);
                 return false;
             }
 
@@ -202,20 +222,41 @@ namespace DGS
             // Frames descartados por cabecera corrupta (desincronización). Suma a failedTransfers.
             uint64_t discards() const { return discarded; }
 
-            void clear() { pending.clear(); scan = 0; discarded = 0; }
+            void clear() { pending.clear(); scan = 0; discarded = 0; resyncing = false; }
 
         private:
-            // Compacta el buffer: descarta los bytes ya recorridos (`scan`) quedando solo el resto.
-            void consumeScan()
+            uint32_t prefixAt(size_t i) const
             {
-                if (scan == 0) return;
-                pending.erase(pending.begin(), pending.begin() + scan);
+                return (uint32_t)pending[i]
+                     | ((uint32_t)pending[i + 1] << 8)
+                     | ((uint32_t)pending[i + 2] << 16)
+                     | ((uint32_t)pending[i + 3] << 24);
+            }
+
+            // Compacta el buffer hasta `pos`: esos bytes NO formaban parte de ningún frame válido,
+            // así que se contabilizan como pérdida (→ failedTransfers).
+            void compact(size_t pos)
+            {
+                if (pos == 0) return;
+                discarded += pos;
+                pending.erase(pending.begin(), pending.begin() + pos);
                 scan = 0;
+            }
+
+            // Entrega el frame que empieza en `pos`: la basura anterior se cuenta, el frame no.
+            bool deliver(size_t pos, uint32_t len, std::vector<uint8_t>& out)
+            {
+                out.assign(pending.begin() + pos + 4, pending.begin() + pos + 4 + len);
+                compact(pos);                                   // descarte previo (0 si iba en sync)
+                pending.erase(pending.begin(), pending.begin() + 4 + len);
+                scan = 0;
+                return true;
             }
 
             std::vector<uint8_t> pending;
             size_t scan = 0;
             uint64_t discarded = 0;
+            bool resyncing = false;      // tras un prefijo corrupto, hasta re-enganchar un frame
     };
 
     using PacketHandler = std::function<void(int, Packet&)>;

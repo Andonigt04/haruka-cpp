@@ -140,6 +140,37 @@ struct PropLayer {
         return h * t * s * glm::clamp(mapDensity, 0.0f, 1.0f);
     }
 
+    /// Bits de POR QUÉ `coverage()` dio 0. Sin esto, "coverage=53753" no dice nada útil: hay SEIS
+    /// formas de anularla y cada una se arregla tocando un campo distinto del JSON.
+    enum FailBit : uint32_t {
+        FAIL_ZONE  = 1u << 0,   ///< el punto no cae en ninguna zona de `zones` (filtro DURO)
+        FAIL_WHEN  = 1u << 1,   ///< la expresión `when` no pasa
+        FAIL_HUM   = 1u << 2,   ///< humedad fuera de [humMin, humMax]
+        FAIL_TEMP  = 1u << 3,   ///< temperatura fuera de [tempMin, tempMax]
+        FAIL_SLOPE = 1u << 4,   ///< pendiente fuera de [slopeMin, slopeMax]
+        FAIL_MAP   = 1u << 5,   ///< el `densityMap` vale 0 aquí
+    };
+
+    /** @brief Qué factores de `coverage()` valen 0 en este punto, como máscara de `FailBit`.
+     *
+     *  Evalúa lo MISMO que `coverage()` —los mismos `softBand` con los mismos límites— pero en vez
+     *  de multiplicar informa de cuáles se anulan. Se llama solo desde el diagnóstico, así que
+     *  puede permitirse mirar todos los factores en vez de cortocircuitar en el primero: si tienes
+     *  la humedad Y la pendiente mal, quieres saberlo de una vez, no en dos arranques. */
+    uint32_t coverageFailMask(const FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
+                              const std::string& zoneName = {},
+                              const std::string& layerName = {}) const {
+        uint32_t m = 0;
+        if (!zoneAllowed(zoneName))                  m |= FAIL_ZONE;
+        if (!whenAllowed(layerName, zoneName))       m |= FAIL_WHEN;
+        if (softBand(fs.humidity, humMin, humMax, feather) <= 0.0f) m |= FAIL_HUM;
+        if (softBand(fs.tempC,    tempMin, tempMax, feather) <= 0.0f) m |= FAIL_TEMP;
+        if (softBand(glm::clamp(slopeRad, 0.0f, 1.0f), slopeMin, slopeMax, feather) <= 0.0f)
+            m |= FAIL_SLOPE;
+        if (glm::clamp(mapDensity, 0.0f, 1.0f) <= 0.0f) m |= FAIL_MAP;
+        return m;
+    }
+
     /// Cache del parseo de `when` (parseo perezoso; el string es el dato fuente).
     mutable std::shared_ptr<PropCond> m_when;
 };

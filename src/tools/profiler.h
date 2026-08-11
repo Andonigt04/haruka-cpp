@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cstdio>    // snprintf — volcado del arbol para la auditoria de rendimiento
 
 namespace Haruka {
 
@@ -83,9 +84,48 @@ public:
     void setEnabled(bool e) { m_enabled = e; }
     bool enabled() const { return m_enabled; }
 
+    /**
+     * @brief Vuelca el árbol COMPLETO al log, sin el umbral de 0,5 ms del HUD.
+     *
+     * El panel colapsa todo lo que baja de 0,5 ms en un "+8 < 0.5 ms", y para una auditoría eso es
+     * justo lo que hay que ver: un scope de 0,3 ms que corre 200 veces por frame no aparece, y sí es
+     * medio frame. Aquí sale todo, con su tiempo INCLUSIVO, su cuenta de entradas y —lo que de verdad
+     * señala al culpable— su tiempo PROPIO (inclusivo menos el de sus hijos).
+     *
+     * Se promedia sobre `frames` para que un pico aislado no dicte el diagnóstico.
+     */
+    std::string dumpTree(int frames = 1) const {
+        std::string out;
+        char buf[256];
+        std::snprintf(buf, sizeof buf, "%-46s %9s %9s %7s\n", "scope", "incl(ms)", "self(ms)", "veces");
+        out += buf;
+        dumpNode(0, frames, out);
+        return out;
+    }
+
     Profiler() { resetCur(); }
 
 private:
+    void dumpNode(int idx, int frames, std::string& out) const {
+        if (idx < 0 || idx >= (int)m_last.size()) return;
+        const Node& n = m_last[(size_t)idx];
+        if (idx != 0) {
+            double self = n.ms;
+            for (int c : n.children) self -= m_last[(size_t)c].ms;
+            const double f = frames > 0 ? (double)frames : 1.0;
+            char buf[256];
+            std::string indent((size_t)(n.depth - 1) * 2, ' ');
+            std::snprintf(buf, sizeof buf, "%-46s %9.3f %9.3f %7.1f\n",
+                          (indent + n.name).substr(0, 46).c_str(), n.ms / f, self / f, n.count / f);
+            out += buf;
+        }
+        // Hijos ordenados por tiempo inclusivo: lo caro arriba, que es como se lee una auditoría.
+        std::vector<int> kids = n.children;
+        std::sort(kids.begin(), kids.end(), [&](int a, int b) {
+            return m_last[(size_t)a].ms > m_last[(size_t)b].ms; });
+        for (int c : kids) dumpNode(c, frames, out);
+    }
+
     void resetCur() {
         m_cur.clear();
         m_cur.push_back(Node{});   // [0] = raíz virtual (name vacío, depth 0)

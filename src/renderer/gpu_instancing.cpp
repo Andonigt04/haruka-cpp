@@ -82,6 +82,10 @@ void GPUInstancing::appendInstanceLayout(RHI::VertexLayout& layout, uint32_t bin
                                   RHI::Format::RGBA32F, binding });
     layout.attributes.push_back({ 8, (uint32_t)offsetof(InstanceDataFloat, scale),
                                   RHI::Format::RGB32F, binding });
+    // Máscara de partes rotas (loc 10). Va en el stream de INSTANCIA porque cada árbol pierde sus
+    // propias ramas mientras comparte la malla prototipo con todos los demás.
+    layout.attributes.push_back({ 10, (uint32_t)offsetof(InstanceDataFloat, breakMask),
+                                  RHI::Format::R32F, binding });
 }
 
 }} // namespace Haruka::Renderer

@@ -12,13 +12,13 @@ Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pip
 
 Most engines render a *level*. Haruka renders a **solar system at true scale** and lets you walk on it — the same code path takes you from orbiting a star to a pebble at your feet, with no loading screens and no fake skybox.
 
-- **🪐 Real-scale planets, centimetre agreement.** Earth sits ~1 AU (1.5×10⁸ m) from the sun at its real radius (6 371 km). Rendering is **camera-relative double precision**: the world is re-centred on the camera every frame so GPU floats never lose precision, no matter how far from the origin you are. You can fly from interplanetary space down to the grass without a seam — and within the play radius, **what you see and what you collide with agree to 0.3 mm** (measured, see [Terrain status](#-terrain-status)).
+- **🪐 Real-scale planets, centimetre agreement.** Earth sits ~1 AU (1.5×10¹¹ m) from the sun at its real radius (6 371 km). Rendering is **camera-relative double precision**: the world is re-centred on the camera every frame so GPU floats never lose precision, no matter how far from the origin you are. You can fly from interplanetary space down to the grass without a seam — and within the play radius, **what you see and what you collide with agree to 0.3 mm** (measured, see [Terrain status](#-terrain-status)).
 
 - **⚡ GPU-compute terrain, streamed grueso→fino.** The planetary heightfield is generated on the **GPU via compute shaders** and harvested **asynchronously with GL fences** — the CPU never blocks on the GPU. Chunk vertex directions are **derived on the GPU** (not built and uploaded), the readback lands in **persistently-mapped buffers**, and the copy + mesh assembly happen on **worker threads**. A cube-sphere **quadtree LOD** streams chunks **progressively coarse→fine**: a node only subdivides once its parent is resident, so you **never see a black hole** while detail loads.
 
 - **🌋 Terrain by process, not by noise.** Elevation isn't a noise formula — it's the **output of a simulation** run once per seed: **plate tectonics** (Voronoi plates, noise-warped boundaries, convergence → orogeny, continental margins) feeds **hydrology and erosion** (priority-flood lakes, D8 flow accumulation, stream-power incision, thermal talus), and that in turn drives **climate** (temperature by latitude + lapse rate, humidity advected from the sea with **orographic rain shadow**). The eroded field is the **single source of truth**, shared by the terrain compute shader, the physics sampler, the water shader and prop placement — so mountains have *drainage*, rivers run *downhill into* lakes, deserts sit *behind* mountain ranges, and the coast is simply where elevation = 0.
 
-- **🧭 One ground, not three.** The surface the game runs on is the **reference surface** (`reference_surface.h`): the terrain sampled on the *same vertex lattice the renderer draws*, with the same bilinear filter. Physics, props, scripts, tests and the renderer all read it. It is **GL-free** and lives in `haruka_simbase`, so the authoritative server can evaluate the exact ground the client walks on. Before it there were three different "grounds" and you could watch the player fall through one of them.
+- **🧭 One ground, not three.** The surface the game runs on is the **reference surface** (`reference_surface.h`): the terrain sampled on the *same vertex lattice the renderer draws*, with the same bilinear filter. Physics, props, scripts, tests and the renderer all read it. It is **GL-free** and lives in `haruka_simbase`, so the authoritative server can evaluate the exact ground the client walks on. Before it there were three different "grounds" and you could watch the player fall through one of them. *(During the terrain **v4** rewrite the reference surface's sampled height is a flat-sphere fallback; it is re-parited against the new clipmap when v4 lands — see [Terrain status](#-terrain-status).)*
 
 - **🌗 Movable celestial bodies.** Planets and moons **orbit** (day/night from the sun, moonlight, sun–moon tides). Terrain chunks are stored **planet-local**, so a body can move every frame **without regenerating a single chunk**. Moons, gas giants and home worlds are declared entirely in the **scene file** (a `terran` / `moon` / `gas` generation profile), not in game code.
 
@@ -53,8 +53,8 @@ Most engines render a *level*. Haruka renders a **solar system at true scale** a
 - **Geology → hydrology → climate → terrain** — plate tectonics (`planet_geology`) drives an eroded cube-sphere field (`planet_fields`: lakes, rivers, stream-power + thermal erosion, temperature and orographic humidity), cached once per seed and sampled by CPU *and* GPU.
 - **Cube-sphere Quadtree LOD** — screen-space error driven, with a **keep radius** (the terrain around you is fine *whichever way you look*) and a **pinned ground LOD** so a single lattice exists under your feet.
 - **Reference surface** — the authoritative, camera-independent ground (see above). GL-free.
-- **Async Chunk Generation** — GPU dispatch harvested via **GL fences** into persistently-mapped buffers; copy + mesh assembly on a worker pool (never blocks the frame); LRU RAM cache + versioned disk cache (**on by default**; `HARUKA_DISKCACHE=0` disables it).
-- **MESO tiles** *(opt-in: `HARUKA_MESO=1`)* — on-demand ~5 km tiles (128², radius-derived) re-eroded locally with **inherited flow + margin** so tile borders don't seam; built on workers. Off by default as a **cost/benefit decision**, not a stability one — it no longer moves the ground (`giro` cold: 0.000 m) and no longer breaks the 1 cm requirement.
+- **Async Chunk Generation** — GPU dispatch harvested via **GL fences** into persistently-mapped buffers; copy + mesh assembly on a worker pool (never blocks the frame); LRU RAM cache + versioned disk cache. *(En reescritura v4: con el generador movido a la teselación ya no hay malla discreta que cachear — la caché desaparece como **simplificación**, no como deuda. Ver [Terrain status](#-terrain-status).)*
+- **MESO tiles** *(opt-in legacy: `HARUKA_MESO=1`)* — on-demand ~5 km tiles (128², radius-derived) re-eroded locally with **inherited flow + margin** so tile borders don't seam. *(Durante la reescritura v4, el detalle meso se hornea dentro de `terrain_gen.comp` y el interruptor runtime ya no tiene call-site.)*
 - **Floating Origin** — per-frame world re-centering on the camera.
 
 ### ⚙️ Physics & Simulation
@@ -216,9 +216,9 @@ and release.)
 
 | Variable | Effect |
 |---|---|
-| `HARUKA_DISKCACHE=0` | disable the versioned chunk disk cache (**on** by default) |
-| `HARUKA_MESO=1` | enable the ~5 km eroded meso tiles |
-| `HARUKA_GROUNDPIN=1` | pin the ground disc in the cache (see [terrain status](#-terrain-status)) |
+| `HARUKA_DISKCACHE=0` | disable the versioned chunk disk cache (**on** by default) — *legacy v3; sin call-site durante la reescritura v4 (ver [terrain status](#-terrain-status))* |
+| `HARUKA_MESO=1` | enable the ~5 km eroded meso tiles — *legacy v3; el detalle meso se hornea ahora en `terrain_gen.comp`* |
+| `HARUKA_GROUNDPIN=1` | pin the ground disc in the cache (see [terrain status](#-terrain-status)) — *legacy v3* |
 | `HARUKA_PROF_LOG=N` | dump the profiler tree to stderr every N frames |
 | `HARUKA_FIELD_DBG=1` | print the elevation range of the field uploaded to the GPU |
 
@@ -243,7 +243,9 @@ and release.)
 
 Chunks are **generated asynchronously on the GPU** from the planet's eroded geological field (not
 from raw noise), assembled on a worker pool and cached in RAM (LRU eviction, budget auto-sized from
-system RAM) with a versioned disk cache.
+system RAM) with a versioned disk cache. *(La caché RAM/disco es del camino v3; en la reescritura v4
+el generador vive en la teselación y no hay malla discreta que cachear — ver
+[Terrain status](#-terrain-status).)*
 
 ### Scene JSON Format
 
@@ -292,13 +294,26 @@ in, land and walk, dig the ground, swim, build, and the planet stays consistent 
 | Depth | **Reversed-Z + infinite far plane** — no z-fighting between terrain and water at any scale |
 | Terrain | GPU compute generation from the **eroded geological field** (tectonics → hydrology → erosion → climate) |
 | Ground | **One** reference surface, camera-independent and GL-free, read by physics, props, scripts and tests |
-| Streaming | Async LOD recompute on a worker; GPU-derived vertex grids; persistently-mapped readback; worker pool for mesh assembly; disk cache on |
+| Streaming | Async LOD recompute on a worker; GPU-derived vertex grids; persistently-mapped readback; worker pool for mesh assembly *(disk cache on — legacy v3, ver [terrain status](#-terrain-status))* |
 | Water | Ocean (Gerstner) + lakes/rivers + PBF particles; signed-depth clipping so the shoreline is exact per-pixel |
 | Weather | Deterministic fronts; precipitation implies cloud cover by construction; zenith mask; granular layer + footprints |
 | Physics | Jolt (rigid bodies, `CharacterVirtual`), radial gravity, octree broad-phase, terrain raycast |
-| Tests | **19 460 OK · 0 failures** (`haruka_tests`) — CPU↔GPU parity, water parity, LOD invariants, streaming settle, ground stability on turn/climb, orbit closure |
+| Tests | **19 460 OK · 0 failures** (`haruka_tests`) — CPU↔GPU parity, water parity, LOD invariants, streaming settle, ground stability on turn/climb, orbit closure. *⚠️ Este recuento debe re-verificarse: TODO.md declara 20 135. Ambos se corrigen cuando se re-ejecute la suite.* |
 
 ### 🎯 Terrain status
+
+> ⚠️ **Terrain v4 in rewrite.** The engine is being re-based from the v3 *chunk + quadtree* pipeline
+> to a v4 *clipmap* generator (GPU compute in the tessellation stage). The numbers below — the
+> **0.0001 / 0.0003 m** parity and the recurring "0.3 mm / 1 cm" claims — were measured on the **v3
+> chunks** code path. Until v4 is wired end-to-end and re-measured, those parity figures describe the
+> previous terrain, **not the one the current binary draws**. They will be updated (or the claim
+> re-worded) as soon as v4 ships. Nobody benefits from a number the code no longer produces.
+>
+> The consequence of switching to a clipmap: the terrain no longer builds a discrete chunk mesh to
+> cache, so the **RAM LRU cache and the versioned disk cache disappear by simplification**, not as a
+> brute omission — with the generator living in the tessellator, there is no mesh to store. The
+> reference surface stays the single source of truth for collision (GL-free, shared with the
+> authoritative server), and remains the ground to re-parity against once v4 lands.
 
 Measured today with `HARUKA_DISKCACHE=0` (cold cache — the case of a player starting a new world):
 

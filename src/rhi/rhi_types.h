@@ -46,6 +46,13 @@ namespace Haruka::RHI
         // AÑADIR SIEMPRE AL FINAL: insertar en medio desplaza los valores numéricos de los que
         // vienen detrás — inocuo si TODO se recompila, pero es una bomba de relojería gratuita.
         RGB10A2_SNORM,
+
+        // Color en sRGB: el HW linealiza (decode) ANTES de filtrar y al escribir. Para texturas de
+        // COLOR (albedo, emisión). Los mapas de DATOS (normal, roughness, metallic, ao, height) van
+        // LINEALES (RGBA8/R8). Añadido aquí para poder corregir el filtrado del albedo: con RGBA8,
+        // como el shader linealiza en el último momento (pow 2.2), se filtra en sRGB y se linealiza
+        // DESPUÉS — media con gamma ≠ gamma de la media ("gamma-incorrect filtering").
+        SRGB8_ALPHA8,
     };
 
     // Patches = entrada de la TESELACIÓN. No es un modo de dibujo más: con teselación activa el

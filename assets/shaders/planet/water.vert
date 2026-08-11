@@ -1,4 +1,5 @@
 #version 460 core
+#extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNorm;
 layout(location = 2) in vec2 aUv;
@@ -12,10 +13,11 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
     vec4 uAmbient;
     vec4 uExtra;
     vec4 uDebug; // z = hay bake de altura (16)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
 };
 // Cuerpos masivos que atraen/mueven el mar (siempre bindleado; uTide.x = 0 ⇒ neutro).
 #include "lib/tidal.glsl"
-out vec3 vNorm; out vec3 vFragPos; out vec3 vColor; out vec2 vUv; out vec3 vClimate;
+layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
 void main() {
     // Flujo de superficie relativo al CENTRO del planeta (aPos está en la esfera del océano).
     vec3 centerRel = aPos;

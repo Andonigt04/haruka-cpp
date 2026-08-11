@@ -23,6 +23,8 @@ layout(location = 9) in vec2 aUv;
 layout(location = 3) in mat4 iModel;       // ocupa loc 3,4,5,6 — ya camera-relativo
 layout(location = 7) in vec4 iColor;
 layout(location = 8) in vec3 iScale;
+layout(location = 10) in float iBreakMask; // partes ROTAS de ESTA instancia (bit p = parte p)
+layout(location = 11) in float aPart;      // parte del esqueleto de ESTE vértice (per-vertex)
 
 layout(std140, binding = 0) uniform PerFrameData {
     mat4 view;
@@ -52,6 +54,21 @@ layout(location = 2) out vec3 Color;
 layout(location = 3) out vec2 TexCoord;
 
 void main() {
+    // PARTE ROTA (rama arrancada a hachazos): la malla prototipo se comparte entre TODAS las
+    // instancias, así que una rama no se puede quitar del buffer — se quita por instancia aquí.
+    //
+    // ⚠️ SE COLAPSA A UN PUNTO, NO SE EMPUJA FUERA DEL NDC. Mandar el vértice a (2,2,2) parece
+    // equivalente y no lo es: la GPU RECORTA el triángulo contra el frustum y rasteriza el trozo que
+    // queda, ESTIRADO entre los vértices reales y los expulsados. Ese fue exactamente el origen de
+    // las bandas negras del terreno (ver terrain.tesc). Colapsando los tres vértices al MISMO punto
+    // el triángulo tiene área cero y no produce ni un fragmento — y vale porque ningún triángulo
+    // cruza dos partes (cada cono emite los suyos; lo fija el test `prop_collider`).
+    if ((uint(iBreakMask) & (1u << uint(aPart + 0.5))) != 0u) {
+        gl_Position = projection * view * vec4(iModel[3].xyz, 1.0);
+        Normal = vec3(0.0, 1.0, 0.0); FragPos = iModel[3].xyz; Color = vec3(0.0); TexCoord = vec2(0.0);
+        return;
+    }
+
     // VIENTO: solo las HOJAS (verde) ondean, más cuanto más alto en el prototipo (aPos.y = arriba
     // local). Fase por posición del prop (columna de traslación de iModel) → no van todas a la vez.
     vec3  pos  = aPos;

@@ -16,6 +16,7 @@
 
 #include <SDL3/SDL.h>
 #include <memory>
+#include <vector>
 #include <cstddef>
 
 namespace Haruka::RHI
@@ -27,8 +28,41 @@ namespace Haruka::RHI
         public:
             virtual ~Device() = default;
 
-            /** @brief Fábrica: elige backend y crea el device sobre una ventana SDL existente. */
-            static std::unique_ptr<Device> create(Backend backend, SDL_Window* window);
+            /** @brief Una GPU que el sistema ofrece para dibujar. */
+            struct AdapterInfo {
+                std::string name;              ///< Nombre del driver (`deviceName` / `GL_RENDERER`).
+                bool        discrete = false;  ///< GPU dedicada (frente a integrada o software).
+                bool        usable   = true;   ///< Tiene cola de graphics+present sobre esta ventana.
+            };
+
+            /** @brief GPUs disponibles para `backend`, en el orden en que las da el sistema.
+             *
+             *  Existe para que la UI pueda OFRECER una lista en vez de que el usuario adivine un
+             *  nombre para `HARUKA_VK_GPU`. Es una consulta pura: no crea el device ni deja estado.
+             *
+             *  ⚠️ OpenGL devuelve UNA sola entrada y no es una limitación del motor: GL no expone
+             *  enumeración de adaptadores. Qué GPU usa un contexto GL lo decide el driver/SO antes de
+             *  que el proceso arranque (`DRI_PRIME`, la configuración de Optimus/PRIME), así que en GL
+             *  la lista es informativa y elegir no puede tener efecto. La selección real es de Vulkan.
+             *
+             *  En Vulkan se crea una instancia TEMPORAL para enumerar y se destruye antes de volver:
+             *  llamarlo desde el panel de ajustes no puede interferir con el device en uso. */
+            static std::vector<AdapterInfo> enumerateAdapters(Backend backend, SDL_Window* window);
+
+            /** @brief Fábrica: elige backend y crea el device sobre una ventana SDL existente.
+             *
+             *  `preferredGpus` son NOMBRES por orden de preferencia (subcadena, sin distinguir
+             *  mayúsculas); vacío = elección automática (discreta > integrada). Es una LISTA y no un
+             *  nombre suelto a propósito: hoy solo se usa la primera, pero un reparto multi-GPU
+             *  (render en una, compute en otra) necesita expresar "esta y luego esta", y cambiar la
+             *  forma del ajuste después obligaría a migrar la configuración guardada de los usuarios.
+             *
+             *  ⚠️ Se guarda el NOMBRE, no el índice. El orden en que el sistema enumera las GPUs
+             *  cambia al actualizar drivers, al conectar un eGPU o al arrancar en otra máquina, así
+             *  que un índice guardado apunta mañana a otra tarjeta — y el usuario no entendería por
+             *  qué. Un nombre que ya no está simplemente no casa y se cae a la elección automática. */
+            static std::unique_ptr<Device> create(Backend backend, SDL_Window* window,
+                                                  const std::vector<std::string>& preferredGpus = {});
 
             // --- Creación de recursos (lo que hoy hacen los ctors de tus wrappers RAII). ---
             virtual BufferHandle       createBuffer(BufferUsage, size_t bytes, const void* data,
@@ -82,6 +116,15 @@ namespace Haruka::RHI
             // --- Frame: obtener el Context de este frame y presentarlo (swap). ---
             virtual Context* beginFrame() = 0;
             virtual void     endFrame() = 0;
+
+            // ImGui (fase 7): el host inicia el renderer de UI del backend cuando corresponde
+            // (Vulkan → ImGui_ImplVulkan; GL → no-op, se usa el impl GL existente). false = no-op.
+            virtual bool initUi() { return false; }
+
+            /** @brief Tamaño real (en píxeles) del framebuffer / swapchain del backbuffer. Devuelve 0,0
+             *         si no está disponible. Lo usa el host para alinear el viewport de ImGui con el
+             *         tamaño de presentación (físico), que puede diferir del tamaño lógico de SDL. */
+            virtual void framebufferSize(uint32_t& w, uint32_t& h) const { w = 0; h = 0; }
 
             virtual Backend backend() const = 0;
 

@@ -96,7 +96,7 @@ void IBL::setupCubemap() {
     if (RHI::Device* dev = RHI::device()) {
         RHI::TextureDesc d;
         d.width = d.height = 512;
-        d.format = RHI::Format::RGB16F;
+        d.format = RHI::Format::RGBA16F; // RGBA (NO RGB16F): Vulkan/NVIDIA no soporta muestrear 3 canales
         d.cube = true;
         d.filter = RHI::Filter::Linear;
         d.wrap = RHI::Wrap::ClampToEdge;
@@ -109,7 +109,7 @@ void IBL::generateDefaultSky(glm::vec3 skyColor) {
     if (!dev || !RHI::valid(hEnv)) return;
 
     const int sz = 512;
-    std::vector<float> data(sz * sz * 3);
+    std::vector<float> data(sz * sz * 4);
     for (unsigned int face = 0; face < 6; ++face) {
         for (int y = 0; y < sz; ++y) {
             float t = (float)y / (sz - 1);
@@ -123,13 +123,14 @@ void IBL::generateDefaultSky(glm::vec3 skyColor) {
                 color = glm::mix(horizon, skyColor, t);
             }
             for (int x = 0; x < sz; ++x) {
-                int idx = (y * sz + x) * 3;
+                int idx = (y * sz + x) * 4;
                 data[idx + 0] = color.r;
                 data[idx + 1] = color.g;
                 data[idx + 2] = color.b;
+                data[idx + 3] = 1.0f;
             }
         }
-        dev->updateCubemapFace(hEnv, face, sz, sz, RHI::Format::RGB16F, data.data());
+        dev->updateCubemapFace(hEnv, face, sz, sz, RHI::Format::RGBA16F, data.data());
     }
 
     generateIrradianceMap();
@@ -214,7 +215,7 @@ void IBL::generateIrradianceMap() {
     {
         RHI::TextureDesc d;
         d.width = d.height = 32;
-        d.format = RHI::Format::RGB16F;
+        d.format = RHI::Format::RGBA16F; // RGBA (NO RGB16F): Vulkan/NVIDIA no soporta muestrear 3 canales
         d.cube = true;
         d.filter = RHI::Filter::Linear;
         d.wrap = RHI::Wrap::ClampToEdge;
@@ -261,7 +262,7 @@ void IBL::generatePrefilterMap() {
     {
         RHI::TextureDesc d;
         d.width = d.height = 128;
-        d.format = RHI::Format::RGB16F;
+        d.format = RHI::Format::RGBA16F; // RGBA (NO RGB16F): Vulkan/NVIDIA no soporta muestrear 3 canales
         d.cube = true;
         d.mipmaps = true;
         d.filter = RHI::Filter::Linear;

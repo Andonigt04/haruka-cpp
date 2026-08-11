@@ -101,6 +101,9 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "Bloom"))          g.bloom          = atoi(val) != 0;
     else if (!strcmp(key, "BloomThreshold")) g.bloomThreshold = (float)atof(val);
     else if (!strcmp(key, "BloomStrength"))  g.bloomStrength  = (float)atof(val);
+    else if (!strcmp(key, "BloomIterations")) g.bloomIterations = atoi(val);   // radio del halo (σ ∝ √N)
+    else if (!strcmp(key, "GpuPatchCull"))   g.gpuPatchCull   = atoi(val) != 0;
+    else if (!strcmp(key, "TerrainShadows")) g.terrainShadows = atoi(val) != 0;
     else if (!strcmp(key, "WaterQuality"))   g.waterQuality   = (Settings::WaterQuality)atoi(val);
     else if (!strcmp(key, "TerrainQuality")) g.terrainQuality = (Settings::TerrainQuality)atoi(val);
     else if (!strcmp(key, "ChunkMemoryMB"))  g.chunkMemoryMB  = atoi(val);
@@ -110,6 +113,15 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "MotionBlur"))     g.motionBlur     = atoi(val) != 0;
     else if (!strcmp(key, "WindowMode"))     g.windowMode     = (Settings::WindowMode)atoi(val);
     else if (!strcmp(key, "RenderBackend"))  g.renderBackend  = (Settings::RenderBackend)atoi(val);
+    // GPUs preferidas: `Gpu0`, `Gpu1`… El índice del CLAVE es la posición en la lista de preferencia,
+    // no el índice de la GPU en el sistema (que no se guarda nunca: ver `preferredGpus`).
+    else if (!strncmp(key, "Gpu", 3) && key[3] >= '0' && key[3] <= '9') {
+        const size_t slot = (size_t)atoi(key + 3);
+        if (slot < 8) {                                   // tope de cordura contra un ini corrupto
+            if (g.preferredGpus.size() <= slot) g.preferredGpus.resize(slot + 1);
+            g.preferredGpus[slot] = val;
+        }
+    }
     else if (!strcmp(key, "MasterVolume"))   a.masterVolume   = (float)atof(val);
     else if (!strcmp(key, "MusicVolume"))    a.musicVolume    = (float)atof(val);
     else if (!strcmp(key, "SFXVolume"))      a.sfxVolume      = (float)atof(val);
@@ -129,6 +141,9 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("Bloom=%d\n",          g.bloom     ? 1 : 0);
     buf->appendf("BloomThreshold=%.2f\n", g.bloomThreshold);
     buf->appendf("BloomStrength=%.2f\n",  g.bloomStrength);
+    buf->appendf("BloomIterations=%d\n", g.bloomIterations);
+    buf->appendf("GpuPatchCull=%d\n",   g.gpuPatchCull ? 1 : 0);
+    buf->appendf("TerrainShadows=%d\n", g.terrainShadows ? 1 : 0);
     buf->appendf("WaterQuality=%d\n",   (int)g.waterQuality);
     buf->appendf("TerrainQuality=%d\n", (int)g.terrainQuality);
     buf->appendf("ChunkMemoryMB=%d\n",  g.chunkMemoryMB);
@@ -138,6 +153,9 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("MotionBlur=%d\n",     g.motionBlur ? 1 : 0);
     buf->appendf("WindowMode=%d\n",     (int)g.windowMode);
     buf->appendf("RenderBackend=%d\n",  (int)g.renderBackend);
+    for (size_t i = 0; i < g.preferredGpus.size(); ++i)
+        if (!g.preferredGpus[i].empty())
+            buf->appendf("Gpu%zu=%s\n", i, g.preferredGpus[i].c_str());
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);
     buf->appendf("SFXVolume=%.2f\n",    a.sfxVolume);
@@ -183,6 +201,12 @@ void SettingsManager::init(const std::string& iniPath) {
 }
 
 void SettingsManager::registerImGuiHandlers() {
+    // Idempotente: init() se llama desde el engine (para elegir backend ANTES de crear el device,
+    // application.cpp) y desde el juego (scripts/init.cpp). ImGui::AddSettingsHandler exige que cada
+    // TypeName se registre UNA sola vez; el segundo registro de un handler ya existente aborta.
+    static bool registered = false;
+    if (registered) return;
+    registered = true;
     {
         ImGuiSettingsHandler h{};
         h.TypeName   = "GameSettings";

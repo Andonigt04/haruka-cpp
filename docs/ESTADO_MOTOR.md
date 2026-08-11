@@ -339,6 +339,68 @@ El RHI/PSO está completo para los renderers de escena, pero siguen con GL a pel
 (`fluid_renderer.cpp:106, 177-194`, falta `blit` en el RHI) y el pase de sombra, que fija estado
 global a mano (`application_render.cpp:918-921`) precisamente porque el PSO anterior dejó reversed-Z.
 
+#### 2.5.a 🔴 Las 5 escotillas `native*` del Device — análisis por consumidor (2026-08-06)
+
+`rhi_device.h:65-73` expone `nativeTexture/nativeFramebuffer/nativeProgram/nativeBuffer` devolviendo
+`uint32_t`. En Vulkan los handles son de **64 bits** y no caben, así que el ancho es un problema —
+pero hay una diferencia enorme entre los consumidores (análisis de call-sites, 2026-08-06):
+
+| Escotilla | Consumidor | Qué devuelve | Estado |
+|---|---|---|---|
+| `nativeTexture` | `texture.cpp:40` → `Texture::ID` | GLuint | 🟢 **EN DESUSO** — `Texture::ID` no se lee en ningún sitio del árbol (`src/` no lo consume; el wrapper dibuja por `m_handle`/`bindTexture`). |
+| `nativeTexture` | `model.cpp:230` → `textureID` | GLuint | 🟢 **EN DESUSO** — se guarda en el `MeshTexture.id`, que **nunca se lee** (el mesh ya no hace GL directo). |
+| `nativeTexture` | `render_target.cpp:24` → `m_colorTexGL` (¡llamada `m_colorTexGL`!) | GLuint | 🟢 **EN DESUSO** — `getColorTextureGL()` no tiene ningún llamador. |
+| `nativeTexture` | `application_render.cpp:1910` → `getMaterialTextureGL` | GLuint | 🟢 **EN DESUSO** — `getMaterialTextureGL` no se llama desde ningún sitio. |
+| `nativeFramebuffer` | `render_target.cpp:22` → `m_fbo` | GLuint | 🟡 **ÚNICO activo real** — `ui_world_panel.cpp:71` hace `glBindFramebuffer(GL_FRAMEBUFFER, m_fbo->getFBO())` para el panel ImGui. Si `m_colorTex` no se muestrea directamente, esta es la única vía viva. |
+| `nativeProgram` | `shader.h:42,52` → `Shader::ID` | GLuint | 🟡 Legado para `Shader::use()` (`shader.cpp:7` hace `glUseProgram(ID)`) — migrado el rendering a PSO, `use()` sin llamadores. |
+| `nativeBuffer` | — | GLuint | 🟢 **SIN ningún llamador** en el árbol. |
+
+**Sospecha del MEMO confirmada solo a medias**: no es "la mayoría para ImGui" — es que el resto del
+uso es **legado muerto**. El único escape necesario hoy es `nativeFramebuffer` para el panel ImGui
+`ui_world_panel.cpp:71`.
+
+**Decisión (registrada aquí; ejecución pendiente de poder compilar)**: los handles en `uint32_t` son
+los únicos que llegan al port Vulkan de ImGui (que en realidad usa `VkDescriptorSet`, no un uint
+crudo — ensanchar a `uint64_t` **no basta**), y solo `nativeFramebuffer` tiene consumidor. Antes de
+tocar el RHI hay que:
+1. Elegir sustituir los `native*` por métodos con propósito (`getImGuiTextureId(...)` para ImGui,
+   un `shaderProgramId(...)` solo si `Shader::use` sigue vivo) — o borrar los muertos (`nativeBuffer`,
+   `nativeTexture` para `Texture`, model, render_target y `getMaterialTextureGL`).
+2. Re-hacer `RenderTarget` para que el panel ImGui no dependa del FBO crudo (ría un método
+   `RHI::Context::bindExternal` o un `beginRenderPass` al del panel), de modo que el escape desaparezca
+   y el port a Vulkan no tropiece con él.
+
+#### 2.5.b 🟡 sRGB en el orden equivocado — capacidad RHI añadida, loader PENDIENTE (2026-08-06)
+
+`final.frag:123` hace `pow(tex, vec3(2.2))` al muestrear el albedo: filtra la textura en sRGB y
+linealiza **después**, o sea la media de valores con gamma ≠ gamma de la media (bordes oscurecidos,
+mips que se tiñen). El MEMO pide subirlo al formato `GL_SRGB8_ALPHA8` para que el HW linealice *antes*
+del filtrado, y sacar el `pow` del shader (sumado al lado de salida, `final.frag:155-158` → framebuffer
+sRGB).
+
+**Lo hecho (2026-08-06)**: la pieza del RHI que faltaba — `Format::SRGB8_ALPHA8` en `rhi_types.h:50` y
+su mapeo GL `{ GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE }` en `gl_common.h:50`. Es aditivo y no
+cambia comportamiento hasta que un loader lo use.
+
+**Lo que queda, y POR QUÉ no se ha tocado el loader** (`application_assets.cpp:98-141`, cache
+`g_materialTexCache` **clave solo por ruta**):
+
+- Una textura cargada como albedo en un material podría ser el *normal map* de otro; la cache por ruta
+  mezclaría el formato. El MEMO advierte explícitamente que solo las de COLOR (albedo, emisión) van en
+  sRGB; normal/roughness/metallic/AO/height van lineales. `final.frag:142,151-153` leen normales
+  (`xyz*2-1`) y `.r` de los mapas de datos — meterlos en sRGB los descuadra (lo ha avisado el propio
+  MEMO).
+- Por eso el cambio de `<soloColor>` + quitar el `pow(2.2)` + framebuffer sRGB son UN acoplado visual
+  que no puedo verificar sin compilar, y pide una clave de cache **por (ruta, canal)** (o un
+  flag de sRGB por slot en `resolveInstancedMaterial`), no el actual por ruta.
+
+**Acción concreta (guion para cuando se pueda compilar)**:
+1. Loader `getOrLoadMaterialTexture(path, srgb)` con cache por `(path, srgb)`: albedo+emisión
+   `SRGB8_ALPHA8`, resto `RGBA8`.
+2. Quitar `pow(tex, vec3(2.2))` en `final.frag:123` (el HW ya entrega lineal).
+3. Lado salida: framebuffer sRGB en vez del `pow(color, vec3(1/2.2))` de `final.frag:158` — o dejar
+   el forecast HDR y confiar en el tonemap, decidiendo qué superficie (panel vs pantalla) renderiza.
+
 ### 2.7 🟡 Objetos de escena sin LOD ni culling
 
 Los objetos de escena se dibujan a detalle completo a cualquier distancia. Con el instancing ya
@@ -352,8 +414,13 @@ migrado, es el sitio natural para darles cull + LOD.
 Buffers con memoria tipada (`Static`/`Dynamic`/`Readback` con mapeo persistente) — es lo que hizo que
 cosechar el terreno pasara de `glGetBufferSubData` (sincroniza) a `memcpy`.
 
-🔴 `src/rhi/vulkan/` **está vacío**. La costura existe, el backend no. Falta también `blit` en la
-interfaz (lo pide el fluido).
+🔴 `src/rhi/vulkan/` está **en migración incompleta**: ya no está vacío (hay `vk_device.{h,cpp}` a
+medias, con `createInstance()` y la tabla de recursos), pero los stubs que devuelven valor **no
+devuelven nada** (`createBuffer`, etc.) → UB real si se pide Vulkan. `vk_pipeline.*` y
+`vk_swapchain.*` siguen a **0 bytes**. El `Device::create` está preparado para caer con gracia a
+OpenGL si el backend VK no arranca, y el `#include <vulkan/vulkan.h>` está condicionado a que el SDK
+esté presente (`__has_include`), de modo que una máquina sin cabeceras Vulkan sigue compilando y cae
+a GL. Falta también `blit` en la interfaz (lo pide el fluido).
 
 ---
 

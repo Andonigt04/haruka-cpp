@@ -1,10 +1,31 @@
 #version 460 core
 #extension GL_GOOGLE_include_directive : require
-layout(quads, fractional_odd_spacing, ccw) in;
-in vec2 eLocal[];
-out vec3 vNorm; out vec3 vFragPos; out vec3 vColor; out vec2 vUv; out vec3 vClimate;
+// ⚠️ `equal_spacing`, NO `fractional_odd_spacing`, y el motivo es la paridad con la colisión.
+//
+// El espaciado fraccionario reparte el parche en tramos DESIGUALES —redondea el nivel al impar
+// siguiente y encoge los dos tramos de los extremos— y además el nivel es una función CONTINUA de la
+// distancia, así que los vértices se deslizan al caminar. Resultado: los vértices del render no caen
+// en la retícula de 4 m y no dejan de moverse, mientras la malla de colisión es una retícula fija
+// anclada al mundo. No son dos aproximaciones de la misma superficie con distinto error: son dos
+// superficies muestreadas en puntos distintos, y una se mueve. Ninguna cantidad de afinado las junta.
+//
+// Con `equal_spacing` y el nivel en potencias de dos (clipmap.tesc), el vértice cae en `128/n` exacto
+// —4, 8, 16 m…— así que el conjunto del render es siempre un subconjunto de la retícula de colisión.
+//
+// Lo que se pierde es la transición continua entre niveles: al subir de nivel aparecen vértices de
+// golpe y la superficie salta de la cuerda al valor real. MEDIDO sobre esta función de terreno, ese
+// salto son 6-11 cm de mundo y **0,07-0,09 px** a la distancia donde ocurre (el nivel está topado a 32
+// por debajo de 1 km, así que solo cambia más allá). La fórmula del nivel mantiene la celda a un
+// tamaño angular constante y la sagita escala con la celda al cuadrado: en pantalla el salto se
+// encoge justo donde el nivel cambia. Si algún día el terreno se vuelve mucho más abrupto, la salida
+// es geomorphing con el factor atado a la distancia AL JUGADOR (no a la cámara, o el servidor del DGS
+// no podría reproducir la superficie).
+layout(quads, equal_spacing, ccw) in;
+layout(location = 0) in vec2 eLocal[];
+layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
 };
 layout(std140, binding = 13) uniform ClipParams {
     vec4 uClipOrigin; vec4 uClipTanU; vec4 uClipTanV; vec4 uClipCover;
@@ -78,43 +99,64 @@ void main() {
     // `triM` deja un CODO de ±1,2 m en el anillo 1400-1900 m — la "rampa" que se ve desde el suelo.
     // Mezclando los dos desniveles (el fino y el que usará la malla fuera) el relieve se desvanece
     // LINEALMENTE y el suelo no rompe en el borde. Fuera del anillo solo se evalúa un lado.
+    // ⚠️ GEMELO de `terrainTriM` (core/planet/terrain_lod.h). El piso NO es 2.0: es el lado REAL del
+    // quad del clipmap (parche 128 m / tope 32 de clipmap.tesc = 4 m). Con el piso en 2.0 la octava
+    // de 4,5 m entraba al 12,5 % sobre vértices separados 4 m — sub-Nyquist, el hervido de §3.1.
     float rad   = length(loc);
-    float clipM = max(rad * 0.002, 2.0);
-    float meshM = max(length(dir * baseR + uCenter.xyz) * 0.012, 2.0);
+    float clipM = max(rad * 0.002, 4.0);
+    float meshM = max(length(dir * baseR + uCenter.xyz) * 0.012, 4.0);
     // Anillo de mezcla dinámico (70-95 % del semi-lado): escala con la cobertura del clipmap.
     float blendStart_ = uClipCover.y;
     float blendEnd   = uClipCover.z;
     float blend = smoothstep(blendStart_, blendEnd, rad);
-    float triM  = mix(clipM, meshM, blend);
+    // (Ya no se mezcla el `triM`: lo que se mezcla son las ALTURAS y su GRADIENTE, abajo. Mezclar
+    // el triM era justo lo que dejaba el codo de ±1,2 m que describe el comentario de arriba.)
+    // Altura Y GRADIENTE juntos (§8): una evaluación fuera de la banda de mezcla, dos dentro. Antes
+    // eran 3 y 6 — la altura más dos puntos desplazados por cada lado para la normal. El gradiente
+    // se mezcla con el MISMO peso que las alturas, así que sigue describiendo la superficie que de
+    // verdad se dibuja en la transición.
     float h;
+    vec3  grad, gA, gB;
     if (rad <= blendStart_) {
-        h = harukaTerrainDetail(dir, baseR, clipM) * att;
+        h = harukaTerrainDetailGrad(dir, baseR, clipM, grad) * att;  grad *= att;
     } else if (rad >= blendEnd) {
-        h = harukaTerrainDetail(dir, baseR, meshM) * att;
+        h = harukaTerrainDetailGrad(dir, baseR, meshM, grad) * att;  grad *= att;
     } else {
-        h = mix(harukaTerrainDetail(dir, baseR, clipM) * att,
-                harukaTerrainDetail(dir, baseR, meshM) * att, blend);
+        float hA = harukaTerrainDetailGrad(dir, baseR, clipM, gA) * att;
+        float hB = harukaTerrainDetailGrad(dir, baseR, meshM, gB) * att;
+        h = mix(hA, hB, blend);
+        grad = mix(gA * att, gB * att, blend);
     }
     // La tierra no baja del nivel del mar (paridad con terrain.tese y sampleHeight): el agua es una
-    // esfera en R y solo rellena océanos.
-    if (baseH > 0.0) h = max(h, -baseH);
+    // esfera en R y solo rellena océanos. Donde el recorte muerde, la superficie es plana.
+    if (baseH > 0.0 && h < -baseH) { h = -baseH; grad = vec3(0.0); }
     vec3  world = dir * (baseR + h);
 
     vec3 t1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0,1,0)) : cross(dir, vec3(1,0,0)));
     vec3 t2 = cross(dir, t1);
-    // EPS de la normal con la MISMA mezcla que las alturas: cerca del jugador la rejilla tiene
-    // pasos de 2 m (eps=3 captura su relieve fino); en el borde exterior la rejilla tiene que
-    // sombrearse IGUAL que la malla base, que usa eps=12 — si no, las dos superficies se iluminan
-    // distinto y la rejilla se ve como una CAPA aparte flotando sobre el terreno (los "dos
-    // terrenos" al subir: el fino que sigue al jugador y el gordo que se revela alrededor).
-    float eps = mix(3.0, 12.0, blend);
-    float hu = harukaTerrainDetail(normalize(dir * baseR + t1 * eps), baseR, triM) * att;
-    float hv = harukaTerrainDetail(normalize(dir * baseR + t2 * eps), baseR, triM) * att;
-    vNorm = normalize(dir - (t1 * (hu - h) + t2 * (hv - h)) / eps);
+    // La normal sale del gradiente ya calculado con la altura: sus proyecciones sobre el triedro.
+    //
+    // ⚠️ Esto RESUELVE de raíz lo que el `eps` mezclado (3 → 12 m) intentaba parchear. Aquel truco
+    // existía porque la rejilla y la malla base sombreaban con pasos de diferencia finita distintos,
+    // y entonces la rejilla se veía como una CAPA aparte flotando sobre el terreno (los "dos
+    // terrenos" al subir). Con el gradiente no hay paso que igualar: las dos superficies derivan la
+    // MISMA función con el MISMO triM en el borde, así que se iluminan igual por construcción.
+    vNorm = normalize(dir - t1 * dot(grad, t1) - t2 * dot(grad, t2));
 
     // vFragPos relativo a la CÁMARA (igual que simple.vert): biome.frag resta uCenter para la
     // radial y las UV. Pasarlo planetario deformaba `up` y los colores giraban con el jugador.
     vFragPos = world + uCenter.xyz; vUv = loc * 0.01; vColor = vec3(1.0);
+    // ⚠️ ELEVACIÓN DE LA BASE, sin el detalle — y esto es deliberado.
+    //
+    // `biome.frag` decide con esto la arena de ORILLA (banda −30 m … +12 m) y la roca por altura, o
+    // sea DÓNDE ESTÁ LA COSTA. Y la costa la define el mapa base, no el ruido procedural: el detalle
+    // es relieve local, no estructura de continente.
+    //
+    // Sumarle el detalle (lo intenté) rompe justo aquí: el recorte del nivel del mar pinza `h` a
+    // `-baseH` donde el detalle hundiría el suelo bajo el mar, así que `baseH + h` sale EXACTAMENTE 0
+    // — el centro de la banda de arena. Resultado: arena a pleno brillo en cada zona recortada, y
+    // solo DENTRO del clipmap, porque ahí el triM de 4 m da amplitud suficiente para que el recorte
+    // muerda mientras la malla base (triM = camD·0.012) casi nunca llega.
     vClimate = vec3(baseH * 0.001, fld.y, fld.z);
     gl_Position = uMVP * vec4(world + uCenter.xyz, 1.0);
 }

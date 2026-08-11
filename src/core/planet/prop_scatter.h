@@ -126,12 +126,40 @@ struct ScatteredProp {
  * @param table    Capas de props en orden de prioridad (primero instala = mayor prioridad).
  * @return         Instancias colocadas (ya con estado/tinte deterministas), en orden de banda.
  */
+/** @brief Por qué cada capa colocó lo que colocó. Diagnóstico opcional del scatter.
+ *
+ *  Sin esto, una capa a cero es indistinguible de otra: no se sabe si sus condiciones nunca pasan o
+ *  si una capa de mayor prioridad le come las celdas antes de que le toque el turno. Son dos bugs
+ *  con arreglos opuestos —tocar la capa, o reordenar la tabla— y el motor no lo decía.
+ */
+struct PropScatterStats {
+    std::vector<int> offered;     ///< celdas en las que la capa LLEGÓ a evaluarse (tuvo turno)
+    std::vector<int> noSubmerged; ///< descartes por estar bajo el agua sin declarar `submerged`
+    std::vector<int> noCoverage;  ///< descartes por `coverage()` == 0 (total)
+    std::vector<int> noDensity;   ///< descartes por el dado de `density`
+    std::vector<int> placed;      ///< colocadas
+    // Desglose de `noCoverage` por factor: es lo que dice QUÉ campo del JSON tocar.
+    std::vector<int> failZone, failWhen, failHum, failTemp, failSlope, failMap;
+
+    // Rangos que el terreno REALMENTE tiene en las celdas visitadas. Sin esto el desglose dice
+    // "la humedad no pasa" pero no que tu banda pide 0.35-0.95 donde el terreno da 0.02-0.14.
+    float humLo = 1e9f, humHi = -1e9f, tempLo = 1e9f, tempHi = -1e9f, slopeLo = 1e9f, slopeHi = -1e9f;
+    int   cells = 0;
+
+    void resize(size_t n) { offered.assign(n,0); noSubmerged.assign(n,0); noCoverage.assign(n,0);
+                            noDensity.assign(n,0); placed.assign(n,0);
+                            failZone.assign(n,0); failWhen.assign(n,0); failHum.assign(n,0);
+                            failTemp.assign(n,0); failSlope.assign(n,0); failMap.assign(n,0); }
+};
+
 inline std::vector<ScatteredProp> scatterPropsNear(
     const IPropSphereField& field,
     const glm::dvec3& camPos,
     const glm::dvec3& planetC,
     const PropScatterParams& params,
-    const PropLayerTable& table) {
+    const PropLayerTable& table,
+    PropScatterStats* stats = nullptr) {
+    if (stats) stats->resize(table.layers.size());
 
     std::vector<ScatteredProp> out;
 
@@ -212,19 +240,49 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                 // Material del terreno en la celda: alimenta la condición booleana `when` de cada capa.
                 const std::string layer = needLayer ? field.layerAt(dir) : std::string{};
 
+                // Lo que el terreno DA aquí, para poder contrastarlo con lo que las bandas PIDEN.
+                if (stats) {
+                    ++stats->cells;
+                    stats->humLo   = std::min(stats->humLo,   fs.humidity);
+                    stats->humHi   = std::max(stats->humHi,   fs.humidity);
+                    stats->tempLo  = std::min(stats->tempLo,  fs.tempC);
+                    stats->tempHi  = std::max(stats->tempHi,  fs.tempC);
+                    stats->slopeLo = std::min(stats->slopeLo, slope);
+                    stats->slopeHi = std::max(stats->slopeHi, slope);
+                }
+
                 // El orden de la tabla es la PRIORIDAD de construcción: cada capa reclama.
                 for (int li = 0; li < (int)table.layers.size(); ++li) {
                     const PropLayer& L = table.layers[li];
                     if (L.mesh.empty()) continue;                 // capa informativa: no instala
-                    if (hM < 0.0f && !L.submerged) continue;      // sumergido: solo capas `submerged`
+                    // `offered` se cuenta AQUÍ: es el turno real. Una capa con offered=0 no es que
+                    // rechace nada — es que nunca llegó, porque otra de más prioridad hizo `break`.
+                    if (stats) ++stats->offered[(size_t)li];
+                    if (hM < 0.0f && !L.submerged) {              // sumergido: solo capas `submerged`
+                        if (stats) ++stats->noSubmerged[(size_t)li];
+                        continue;
+                    }
                     const float mapD = L.densityMap.empty() ? 1.0f
                                                             : field.mapDensityAt(dir, L.densityMap);
                     const float cov  = L.coverage(fs, slope, mapD, zone, layer);
-                    if (cov <= 0.0f) continue;
+                    if (cov <= 0.0f) {
+                        if (stats) {
+                            ++stats->noCoverage[(size_t)li];
+                            const uint32_t m = L.coverageFailMask(fs, slope, mapD, zone, layer);
+                            if (m & PropLayer::FAIL_ZONE)  ++stats->failZone[(size_t)li];
+                            if (m & PropLayer::FAIL_WHEN)  ++stats->failWhen[(size_t)li];
+                            if (m & PropLayer::FAIL_HUM)   ++stats->failHum[(size_t)li];
+                            if (m & PropLayer::FAIL_TEMP)  ++stats->failTemp[(size_t)li];
+                            if (m & PropLayer::FAIL_SLOPE) ++stats->failSlope[(size_t)li];
+                            if (m & PropLayer::FAIL_MAP)   ++stats->failMap[(size_t)li];
+                        }
+                        continue;
+                    }
 
                     // Densidad local: huecos sin patrón (hash de la celda × peso de volumen).
                     const float r = PG::WhiteNode::hashFloat((int)hc, 200 + li, 0, params.seed);
-                    if (r > L.density * cov) continue;
+                    if (r > L.density * cov) { if (stats) ++stats->noDensity[(size_t)li]; continue; }
+                    if (stats) ++stats->placed[(size_t)li];
 
                     ScatteredProp pr;
                     pr.mesh       = L.mesh;
