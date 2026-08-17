@@ -359,8 +359,13 @@ void main() {
         // solo recibe Normal/FragPos/TexCoord — no tiene la cota. Se pasa 0 para que los materiales
         // sin banda de altura declarada (el rango por defecto ±1000 km) sigan funcionando igual.
         // El camino VIVO es `planet/biome.frag`, que sí lee la cota del bake por píxel.
+        // `tileBed`/`coverW` se reciben y se IGNORAN a propósito: este es el terreno V3 por chunks,
+        // un camino muerto (el vivo es `planet/biome.frag`). Mezclar aquí las dos capas de la columna
+        // sería trabajo sobre código que no se dibuja.
+        int   tileBed_unused; float coverW_unused;
         harukaSelectMaterial(H, tempC, max(slope, rock), 0.0, vec3(0.0), false,
-                             matTint, grainAmt, detailAmt, tile, matColor, matIdx);
+                             matTint, grainAmt, detailAmt, tile, tileBed_unused, coverW_unused,
+                             matColor, matIdx);
         biomeCol = mix(biomeCol, matColor.rgb, matColor.a);
 
         // Tile del material. Con solo cuatro disponibles (sand/grass/land/rock), tundra y desierto

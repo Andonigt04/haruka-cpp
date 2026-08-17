@@ -95,7 +95,24 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
     // La humedad del CAMPO modula: el mismo frente descarga sobre la selva y cruza el desierto casi
     // vacío. Y un fondo de nube proporcional a la humedad (la selva rara vez está del todo despejada).
     const float H = glm::clamp(humidity, 0.0f, 1.0f);
-    return glm::clamp(cover * (0.45f + 0.75f * H) + 0.12f * H, 0.0f, 1.0f);
+
+    // ⚠️ EL FONDO ERA `0.12·H` Y ESO DEJABA EL PLANETA DESPEJADO. Los frentes cubren una fracción
+    // pequeña de la esfera, así que fuera de ellos la cobertura caía al fondo: con humedad 0,65 eran
+    // **0,078**. Medido sobre 24 000 muestras, la MEDIANA del planeta salía 0,111 y el 60 % estaba
+    // por debajo de 0,20 — la Tierra real ronda 0,67 de media. Con esos números NINGUNO de los dos
+    // sistemas de nube dibuja nada: el umbral del cúmulo volumétrico queda en 0,54 y el del cirro de
+    // fondo en 0,68, contra un campo cuyo máximo es 0,836. O sea que el cielo salía vacío por
+    // aritmética, y cualquier ajuste del render se estaba probando sobre un planeta sin nubes.
+    //
+    // El fondo pasa a ser el término DOMINANTE y los frentes lo que lo cierra del todo. Sigue
+    // habiendo días despejados (aire seco) y sigue mandando la humedad, que es lo que hacía que el
+    // desierto y la selva no tuvieran el mismo cielo.
+    // ⚠️ El fondo es CONSTANTE para una humedad dada, así que actúa como un SUELO plano: por debajo
+    // de él no baja nadie. Por eso se deja bajo y se refuerzan los FRENTES en su lugar — ellos sí
+    // varían en espacio y tiempo, que es de donde tiene que salir "hoy está despejado y mañana no".
+    // Un fondo alto daba cielo permanentemente cubierto, que aburre igual que el cielo vacío.
+    const float background = 0.06f + 0.30f * H;
+    return glm::clamp(cover * (0.70f + 1.00f * H) + background, 0.0f, 1.0f);
 }
 
 float WeatherSystem::cloudDensityAt(const WeatherSample& w, float altM) {
@@ -140,9 +157,14 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // Base de la nube ≈ nivel de condensación: cuanto más seco el aire, más alto condensa. Es el
     // TECHO desde el que cae la precipitación (la fase B la dibuja entre esta cota y el suelo), así
     // que no es decorativo: si está mal, la lluvia nace dentro de la nube o muy por debajo.
-    w.cloudBaseM = glm::clamp(320.0f + (1.0f - w.humidity) * 2100.0f
+    // ⚠️ EL SUELO SUBIÓ de 200 a 700 m (y el término constante de 320 a 700). Con aire húmedo y
+    // cálido la fórmula daba bases de 200-400 m, y una capa a esa altura se lee como un TECHO
+    // encima de la cabeza — el "la gris está muy cercana" que se reportó. El estratocúmulo real de
+    // un día cubierto vive entre 600 y 2000 m. Sigue siendo el techo de la lluvia, así que subirlo
+    // sube también de dónde nacen las gotas, que es lo coherente.
+    w.cloudBaseM = glm::clamp(700.0f + (1.0f - w.humidity) * 2100.0f
                               - glm::smoothstep(25.0f, -5.0f, tempC) * 260.0f,
-                              200.0f, 2600.0f);
+                              700.0f, 2900.0f);
 
     // ── TECHO: el DESARROLLO VERTICAL ───────────────────────────────────────────────────────────
     // Aquí es donde la nube deja de ser una superficie y pasa a ser un cuerpo. El grosor NO es una
@@ -156,8 +178,13 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     //   · la PRECIPITACIÓN dispara la torre (es el término convectivo, el que hace el yunque).
     // La temperatura tapona: en aire frío la convección no sube igual, así que la tormenta polar es
     // más baja que la tropical.
+    // ⚠️ EL CUERPO SUBIÓ (era 260 + 900·cover) y no es un retoque estético. Con el remapeo de altura
+    // del shader (`harukaCloudDensity`), esta losa dejó de ser "la altura de la nube" para pasar a
+    // ser el TECHO POSIBLE: cada nube ocupa la fracción de abajo que le toca por su fuerza, así que
+    // con la losa vieja hasta el cúmulo más fuerte se quedaba en 620 m de alto contra ~1400 m de
+    // ancho. Dando margen aquí, el shader tiene sitio donde levantar las torres.
     const float convect = glm::smoothstep(-10.0f, 24.0f, tempC);   // 0 = gélido, 1 = tropical
-    const float body    = 260.0f + 900.0f * w.cloudCover;
+    const float body    = 500.0f + 1400.0f * w.cloudCover;
     const float tower   = 5200.0f * w.precip * (0.35f + 0.65f * convect);
     const float thick   = glm::clamp(body + tower, 180.0f, 11000.0f);
     w.cloudTopM = w.cloudBaseM + thick;

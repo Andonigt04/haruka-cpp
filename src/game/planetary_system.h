@@ -249,6 +249,11 @@ public:
     /**
      * @brief Renderiza un SimplePlanet (pipelines RHI con shaders inline).
      */
+    /** @brief Lanza el trabajo de COMPUTE de los planetas (culling de parches). DEBE llamarse
+     *  ANTES de abrir el render pass de la escena: `vkCmdDispatch` dentro de un render pass es
+     *  ilegal en Vulkan y cerraba el programa. Ver `TerrestrialPlanet::prepare`. */
+    void prepareSimplePlanets(const glm::dvec3& cameraPos);
+
     void renderSimplePlanet(const std::string& name, const glm::dvec3& cameraPos,
                             const glm::mat4& proj, const glm::mat4& view);
 
@@ -259,6 +264,12 @@ public:
      * planetas iluminaban con una dirección fija y el terreno no respondía al sol del cielo.
      */
     void setSunLight(const glm::vec3& dir, const glm::vec3& color, float ambientStrength);
+
+    /** @brief Reparte a los planetas el estado de SUELO MOJADO/NEVADO y la máscara cenital con la que
+     *  se recorta (la misma que usa la lluvia para saber si una gota está bajo cubierto).
+     *  Ver `TerrestrialPlanet::setGroundWet`. */
+    void setGroundWet(float wet, float snow, Haruka::RHI::TextureHandle skyMask,
+                      const glm::mat4& skySpace);
 
     size_t getSimplePlanetCount() const { return m_simplePlanets.size(); }
     /** @brief Config del SimplePlanet por índice. */

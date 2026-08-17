@@ -74,6 +74,9 @@ namespace Haruka::RHI::vulkan
         VkDeviceMemory depthMemory = VK_NULL_HANDLE;
         VkImageView    depthView   = VK_NULL_HANDLE;
         uint32_t       width = 0, height = 0;
+        /// Descripción con la que se creó: hace falta para pedir la VARIANTE de render pass
+        /// según se quiera limpiar o conservar (ver `renderPassFor`).
+        RenderTargetDesc desc;
     };
 
     struct VKFence { VkFence sync = VK_NULL_HANDLE; };
@@ -102,6 +105,7 @@ namespace Haruka::RHI::vulkan
             RenderPassHandle createRenderTarget(const RenderTargetDesc&) override;
             TextureHandle    getColorTexture(RenderPassHandle, uint32_t index) override;
             TextureHandle    getDepthTexture(RenderPassHandle) override;
+            Format           backbufferDepthFormat() override;
             uint32_t         nativeTexture(TextureHandle) override;
             uint32_t         nativeFramebuffer(RenderPassHandle) override;
             uint32_t         nativeProgram(PipelineHandle) override;
@@ -184,7 +188,8 @@ namespace Haruka::RHI::vulkan
             // Render pass CARHEADO por firma de attachments (reutiliza passes entre targets con
             // el mismo formato → evita un render pass por target, que bajo churn de chunks son muchos).
             std::string renderPassKey(const RenderTargetDesc&) const;
-            VkRenderPass renderPassFor(const RenderTargetDesc&);
+            /// `loadVariant` = (clearColor?1:0)|(clearDepth?2:0). 3 = limpiar ambos (canónico).
+            VkRenderPass renderPassFor(const RenderTargetDesc&, int loadVariant = 3);
 
             // ImGui (fase 7): render pass de UN color para la UI sobre el backbuffer (loadOp LOAD,
             // preserva la escena ya dibujada; finalLayout PRESENT). Los framebuffers se montan por
@@ -236,6 +241,15 @@ namespace Haruka::RHI::vulkan
 
             std::unique_ptr<VKSwapchain> m_swapchain;
             VkRenderPass               m_backbufferPass = VK_NULL_HANDLE;
+            /// ⚠️ VARIANTES POR `loadOp`. En Vulkan el "¿limpio o conservo?" va HORNEADO en la
+            /// render pass, no en la llamada. Con una sola variante (CLEAR) cada `beginRenderPass`
+            /// borraba la pantalla, y el motor abre el pase VARIAS VECES por frame con
+            /// `clearColor=false` esperando la semántica de OpenGL ("solo ata el FBO"): el cielo se
+            /// dibujaba y el siguiente `begin` se lo comía. Resultado, pantalla NEGRA con los draws
+            /// correctos uno a uno en RenderDoc.
+            /// Índice = (clearColor ? 1 : 0) | (clearDepth ? 2 : 0). El 3 (limpiar ambos) es el
+            /// canónico y el que se usa para compatibilidad de pipelines.
+            VkRenderPass               m_backbufferPassVariant[4] = {};
 
             // Descriptor set layout y pipeline layout COMPARTIDOS (fase 4): UN descriptor set por
             // pipeline (bindings UBO 0..31 / SSBO 32..63 / textura 64..95 de PLAN_VULKAN.md §4.3).

@@ -268,6 +268,95 @@ std::size_t ConstructionState::fastenerCount() const {
     return deg / 2;   // cada arista se cuenta en sus dos extremos
 }
 
+// ── MECANISMOS, MASA y DISTANCIA (lo que un vehiculo pide de mas que un edificio) ───────────────
+
+namespace { inline std::pair<uint64_t,uint64_t> edgeKey(uint64_t a, uint64_t b) {
+    return a < b ? std::make_pair(a,b) : std::make_pair(b,a);
+} }
+
+bool ConstructionState::setJointKind(uint64_t a, uint64_t b, JointKind kind) {
+    if (!m_pieces.count(a) || !m_pieces.count(b)) return false;
+    // Si aun no estaban unidas, unirlas: montar un mecanismo ENTRE dos piezas implica que se tocan.
+    auto& va = m_adj[a];
+    if (std::find(va.begin(), va.end(), b) == va.end()) {
+        va.push_back(b);
+        m_adj[b].push_back(a);
+    }
+    if (kind == JointKind::Mechanism) m_mechanisms.insert(edgeKey(a, b));
+    else                              m_mechanisms.erase(edgeKey(a, b));
+    relabelStructures();
+    return true;
+}
+
+ConstructionState::JointKind ConstructionState::jointKind(uint64_t a, uint64_t b) const {
+    return m_mechanisms.count(edgeKey(a, b)) ? JointKind::Mechanism : JointKind::Rigid;
+}
+
+std::vector<uint64_t> ConstructionState::rigidIsland(uint64_t pieceId) const {
+    std::vector<uint64_t> out;
+    if (!m_pieces.count(pieceId)) return out;
+    std::unordered_set<uint64_t> seen{pieceId};
+    std::vector<uint64_t> stack{pieceId};
+    while (!stack.empty()) {
+        const uint64_t cur = stack.back(); stack.pop_back();
+        out.push_back(cur);
+        auto ai = m_adj.find(cur);
+        if (ai == m_adj.end()) continue;
+        for (uint64_t nb : ai->second) {
+            // La UNICA diferencia con `structureComponent`: un mecanismo no propaga la isla.
+            if (m_mechanisms.count(edgeKey(cur, nb))) continue;
+            if (!seen.count(nb) && m_pieces.count(nb)) { seen.insert(nb); stack.push_back(nb); }
+        }
+    }
+    std::sort(out.begin(), out.end());   // determinista
+    return out;
+}
+
+ConstructionState::MassProps ConstructionState::islandMass(uint64_t pieceId) const {
+    MassProps mp;
+    glm::dvec3 acc(0.0);
+    for (uint64_t id : rigidIsland(pieceId)) {
+        auto it = m_pieces.find(id); if (it == m_pieces.end()) continue;
+        const PieceType* pt = type(it->second.typeId); if (!pt) continue;
+        const double m = (double)pt->mass;
+        acc += it->second.position * m;
+        mp.massKg += m;
+    }
+    if (mp.massKg > 0.0) mp.centerOfMass = acc / mp.massKg;
+    return mp;
+}
+
+std::unordered_map<uint64_t, int> ConstructionState::distancesFrom(uint64_t from, int maxDepth) const {
+    std::unordered_map<uint64_t, int> dist;
+    if (!m_pieces.count(from)) return dist;
+    dist[from] = 0;
+    std::vector<uint64_t> frontier{from};
+    int depth = 0;
+    while (!frontier.empty() && (maxDepth < 0 || depth < maxDepth)) {
+        ++depth;
+        std::vector<uint64_t> next;
+        for (uint64_t cur : frontier) {
+            auto ai = m_adj.find(cur);
+            if (ai == m_adj.end()) continue;
+            // ⚠️ Aqui NO se filtran mecanismos: la adyacencia es de MONTAJE. Un condensador colgado
+            // de una bisagra sigue estando al lado de la camara.
+            for (uint64_t nb : ai->second)
+                if (m_pieces.count(nb) && !dist.count(nb)) { dist[nb] = depth; next.push_back(nb); }
+        }
+        // Orden estable: `m_adj` guarda vectores, pero el frontier se arma desde varios; ordenar
+        // deja el recorrido identico entre ejecuciones (el DGS valida con el MISMO codigo).
+        std::sort(next.begin(), next.end());
+        frontier.swap(next);
+    }
+    return dist;
+}
+
+int ConstructionState::pieceDistance(uint64_t from, uint64_t to) const {
+    const auto d = distancesFrom(from);
+    auto it = d.find(to);
+    return it == d.end() ? -1 : it->second;
+}
+
 void ConstructionState::relabelStructures() {
     // Componentes conexas del grafo de fijaciones. Etiqueta DETERMINISTA: recorre las piezas en orden
     // ascendente de id; cada componente nueva recibe la siguiente etiqueta (BFS sobre m_adj).
@@ -298,6 +387,9 @@ void ConstructionState::relabelStructures() {
 void ConstructionState::erasePiece(uint64_t id) {
     auto ai = m_adj.find(id);
     if (ai != m_adj.end()) {
+        // Las aristas de MECANISMO de esta pieza se van con ella: si no, quedarian entradas colgando
+        // que ya no corresponden a ninguna arista y la isla rigida se calcularia sobre basura.
+        for (uint64_t nb : ai->second) m_mechanisms.erase(edgeKey(id, nb));
         for (uint64_t nb : ai->second) {                 // borra la arista recíproca en cada vecino
             auto ni = m_adj.find(nb);
             if (ni == m_adj.end()) continue;

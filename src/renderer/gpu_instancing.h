@@ -85,7 +85,20 @@ public:
 
 private:
     std::vector<InstanceDataFloat> m_instances;
-    Haruka::RHI::BufferHandle      m_buf;
+    /// ⚠️ ANILLO DE BUFFERS, no uno solo. `render()` sube las instancias y dibuja; con un único
+    /// buffer eso vale en OpenGL —cada draw se ejecuta al vuelo— pero en Vulkan los comandos se
+    /// GRABAN y se ejecutan al final, así que TODOS los draws leerían el ÚLTIMO lote subido. El
+    /// pase de props llama a `render()` una vez por (prototipo, LOD): hasta 9 draws dibujando el
+    /// mismo conjunto de instancias con mallas distintas, o sea props apilados unos sobre otros.
+    /// Es el mismo fallo que tenía el UBO de material, y el propio motor ya lo avisaba.
+    ///
+    /// El anillo se recorre por llamada; con ~9 draws por frame y 16 entradas no se reutiliza
+    /// ninguna dentro del mismo frame. Entre frames es seguro: el device espera a la GPU en
+    /// `endFrame`.
+    static constexpr int kRing = 16;
+    std::vector<Haruka::RHI::BufferHandle> m_bufs;
+    int  m_cursor = 0;
+    Haruka::RHI::BufferHandle      m_buf;   ///< entrada actual del anillo (la que ve `buffer()`)
     int  m_maxInstances = 0;
     bool m_dirty = false;
 

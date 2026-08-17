@@ -348,6 +348,27 @@ void Application::run(const std::string& startScenePath, bool headless) {
         useVulkan = Haruka::SettingsManager::get().graphics().renderBackend
                     == Haruka::Settings::RenderBackend::Vulkan;
 
+        // `HARUKA_BACKEND=vulkan|opengl` fuerza el backend para ESTA ejecución sin tocar los
+        // ajustes. Existe para poder COMPARAR los dos backends sin editar `imgui.ini` y acordarse
+        // de deshacerlo.
+        //
+        // ⚠️ SE APLICA AQUÍ, ANTES DE CREAR LA VENTANA, y esa posición es obligatoria: el tipo de
+        // ventana (`SDL_WINDOW_VULKAN` vs `SDL_WINDOW_OPENGL`) sale de `useVulkan`. Aplicándolo más
+        // abajo —solo al device— la ventana salía de un backend y el device de otro, el contexto no
+        // se podía crear, `RHI::device()` devolvía null y el primer `createBuffer` del frame
+        // segfallaba. Medido: con el ajuste en Vulkan y `HARUKA_BACKEND=opengl`, SIGSEGV al arrancar.
+        if (const char* be = std::getenv("HARUKA_BACKEND")) {
+            if (!std::strcmp(be, "vulkan") || !std::strcmp(be, "vk")) {
+                useVulkan = true;
+                HARUKA_LOGI("RHI", "HARUKA_BACKEND=vulkan -> backend forzado (el ajuste no se toca)");
+            } else if (!std::strcmp(be, "opengl") || !std::strcmp(be, "gl")) {
+                useVulkan = false;
+                HARUKA_LOGI("RHI", "HARUKA_BACKEND=opengl -> backend forzado (el ajuste no se toca)");
+            } else {
+                HARUKA_LOGW("RHI", "HARUKA_BACKEND='%s' no reconocido (usa 'vulkan' u 'opengl')", be);
+            }
+        }
+
         // ── ELEGIR GPU TAMBIÉN EN OPENGL: offload PRIME ─────────────────────────────────────────
         //
         // OpenGL no permite elegir adaptador desde la API, pero SÍ desde el entorno — y tiene que
@@ -407,25 +428,11 @@ void Application::run(const std::string& startScenePath, bool headless) {
     // El backend se elige por el setting ya cargado arriba. Cambiarlo REQUIERE REINICIAR (el
     // device se crea aquí, una vez). Vulkan cae a OpenGL si no está o si falla al inicializar.
     const auto& gfx = Haruka::SettingsManager::get().graphics();
-    Haruka::RHI::Backend requestedBackend =
-        (gfx.renderBackend == Haruka::Settings::RenderBackend::Vulkan)
-            ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL;
+    // Sigue a `useVulkan` (ya con el override aplicado), NO al ajuste: la ventana se creó con ese
+    // criterio y device y ventana tienen que ser del mismo backend.
+    const Haruka::RHI::Backend requestedBackend =
+        useVulkan ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL;
 
-    // `HARUKA_BACKEND=vulkan|opengl` fuerza el backend para ESTA ejecución, sin tocar los ajustes.
-    // Existe para poder COMPARAR: el backend solo se elige al arrancar, así que sin esto probar
-    // Vulkan obliga a editar `imgui.ini`, reiniciar, y acordarse de deshacerlo — y una comparación
-    // que cuesta eso no se hace. No persiste: el ajuste del usuario queda intacto.
-    if (const char* be = std::getenv("HARUKA_BACKEND")) {
-        if (!std::strcmp(be, "vulkan") || !std::strcmp(be, "vk")) {
-            requestedBackend = Haruka::RHI::Backend::Vulkan;
-            HARUKA_LOGI("RHI", "HARUKA_BACKEND=vulkan -> backend forzado (el ajuste no se toca)");
-        } else if (!std::strcmp(be, "opengl") || !std::strcmp(be, "gl")) {
-            requestedBackend = Haruka::RHI::Backend::OpenGL;
-            HARUKA_LOGI("RHI", "HARUKA_BACKEND=opengl -> backend forzado (el ajuste no se toca)");
-        } else {
-            HARUKA_LOGW("RHI", "HARUKA_BACKEND='%s' no reconocido (usa 'vulkan' u 'opengl')", be);
-        }
-    }
     // La GPU preferida sale del mismo ajuste, y viaja como LISTA de nombres (ver
     // `GraphicsSettings::preferredGpus`). Vacía = automática. En OpenGL se ignora: la API no permite
     // elegir adaptador, y el panel de ajustes lo dice en vez de fingir que sí.
@@ -558,13 +565,22 @@ void Application::run(const std::string& startScenePath, bool headless) {
                     ImGui_ImplSDL3_ProcessEvent(&event);
                 if (event.type == SDL_EVENT_QUIT) running = false;
                 if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                    _window->setWidth(event.window.data1);
-                    _window->setHeight(event.window.data2);
-                    m_editorViewportW = event.window.data1;
-                    m_editorViewportH = event.window.data2;
+                    // ⚠️ EN PÍXELES, NO EN UNIDADES LÓGICAS. `event.window.data1/2` traen el tamaño
+                    // LÓGICO, y con escalado del compositor (Wayland fraccional, HiDPI) no coincide
+                    // con el del framebuffer. El swapchain de Vulkan se crea con el tamaño en
+                    // PÍXELES, así que el motor acababa creyendo 1920x1080 con un swapchain de
+                    // 1280x720: `renderArea` mayor que el framebuffer (inválido) y capturas
+                    // repetidas en horizontal. Medido en una captura de RenderDoc.
+                    int pw = event.window.data1, ph = event.window.data2;
+                    SDL_GetWindowSizeInPixels(_window->getNativeWindow(), &pw, &ph);
+                    if (pw <= 0 || ph <= 0) { pw = event.window.data1; ph = event.window.data2; }
+                    _window->setWidth((uint32_t)pw);
+                    _window->setHeight((uint32_t)ph);
+                    m_editorViewportW = pw;
+                    m_editorViewportH = ph;
                     if (RHI::Device* dev = RHI::device())
                         if (auto* c = dev->beginFrame())
-                            c->setViewport(0, 0, event.window.data1, event.window.data2);
+                            c->setViewport(0, 0, pw, ph);
                 }
             }
         }

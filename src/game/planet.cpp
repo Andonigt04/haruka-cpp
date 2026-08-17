@@ -123,8 +123,9 @@ bool settingWithEnvOverride(bool setting, const char* envVar) {
 }
 } // namespace
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_clipPipeline;
+Haruka::RHI::PipelineHandle TerrestrialPlanet::s_oceanPipeline;
+Haruka::RHI::PipelineHandle TerrestrialPlanet::s_oceanFarPipeline;
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_nearRingPipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_waterPipeline;
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_wirePipeline;
 Haruka::RHI::BufferHandle TerrestrialPlanet::s_ubo;
 bool TerrestrialPlanet::s_shadersReady = false;
@@ -178,8 +179,6 @@ void TerrestrialPlanet::ensureShaders() {
     const std::string pTessEval        = shaderDir + "terrain.tese";
     const std::string pTessVert        = shaderDir + "terrain.vert";
     const std::string pTexFrag         = shaderDir + "textured.frag";
-    const std::string pWatFrag         = shaderDir + "water.frag";
-    const std::string pWatVert         = shaderDir + "water.vert";
     const std::string pSimpleWireFrag  = shaderDir + "wire.frag";
     const std::string pSimpleWireVert  = shaderDir + "wire.vert";
 
@@ -302,19 +301,62 @@ void TerrestrialPlanet::ensureShaders() {
                     RHI::valid(s_cullPipeline) ? "ok" : "FALLO (se dibujan todos los parches)");
     }
 
-    // Water pipeline — same vertex format, blue shader, alpha blend. El vertex es water.vert (no
-    // simple.vert): recorta los vértices bajo tierra para no rasterizar el océano que el depth
-    // ocultaría de todos modos.
-    RHI::PipelineDesc wpd;
-    wpd.vertexPath   = pWatVert.c_str();
-    wpd.fragmentPath = pWatFrag.c_str();
-    wpd.vertexLayout   = withClimate(pd.vertexLayout);
-    wpd.depth.test     = true;  wpd.depth.write = false;
-    wpd.depth.compare  = RHI::CompareOp::Greater;
-    wpd.cull = RHI::CullMode::Back;
-    wpd.blend.enable = true;
-    wpd.blend.mode   = RHI::BlendMode::Alpha;
-    s_waterPipeline = dev->createPipeline(wpd);
+    // ── EL MAR ──────────────────────────────────────────────────────────────────────────────────
+    //
+    // DOS geometrías de UNA superficie, por el mismo motivo que el terreno tiene malla base y
+    // clipmap: la esfera del planeta tiene parches de 39 km y el teselador topa en 64, o sea quads
+    // de 611 m. Una ola de 60 m NO CABE ahí. Las olas necesitan quads de metros, y eso solo lo da
+    // una rejilla anclada bajo la cámara — la del clipmap, que ya existe.
+    //
+    //   · MAR CERCANO  (`ocean.*`)     — los anillos del clipmap, teselados, con Gerstner. Sin
+    //     buffers propios: reusa `m_clipVB`/`m_clipIB` y los `ClipParams` por anillo del terreno.
+    //   · MAR LEJANO   (`ocean_far.*`) — la esfera a nivel del mar, lisa. Más allá del clipmap una
+    //     ola de 60 m es subpíxel: darle geometría sería pagar vértices por un aliasing.
+    //
+    // Las dos comparten `ocean.frag`, y la ola se desvanece a 0 antes del borde del clipmap
+    // (`ocean.tese`), así que donde se relevan describen la MISMA superficie: la esfera a cota 0.
+    //
+    // ⚠️ `cull = None` en las dos, y no es descuido: con `Back`, en cuanto la cámara baja del nivel
+    // del mar mira la superficie desde DENTRO, donde no hay un solo triángulo front-facing, y el mar
+    // entero desaparece. Medido en su día sobre una captura: 0 de 405 triángulos visibles.
+    {
+        const std::string pOceanVert  = shaderDir + "ocean.vert";
+        const std::string pOceanTesc  = shaderDir + "ocean.tesc";
+        const std::string pOceanTese  = shaderDir + "ocean.tese";
+        const std::string pOceanFrag  = shaderDir + "ocean.frag";
+        const std::string pOceanFarV  = shaderDir + "ocean_far.vert";
+
+        RHI::PipelineDesc od;
+        od.vertexPath   = pOceanVert.c_str();
+        od.tessControlPath = pOceanTesc.c_str();
+        od.tessEvalPath = pOceanTese.c_str();
+        od.fragmentPath = pOceanFrag.c_str();
+        od.vertexLayout.strides    = { (uint32_t)(2 * sizeof(float)) };   // la rejilla del clipmap
+        od.vertexLayout.attributes = { { 0, 0, RHI::Format::RG32F } };
+        od.topology      = RHI::PrimitiveTopology::Patches;
+        od.patchVertices = 4;
+        od.depth.test    = true;  od.depth.write = false;
+        od.depth.compare = RHI::CompareOp::Greater;
+        od.cull          = RHI::CullMode::None;
+        od.blend.enable  = true;  od.blend.mode = RHI::BlendMode::Alpha;
+        s_oceanPipeline = dev->createPipeline(od);
+
+        RHI::PipelineDesc ofd;
+        ofd.vertexPath   = pOceanFarV.c_str();
+        ofd.fragmentPath = pOceanFrag.c_str();
+        ofd.vertexLayout.strides    = { (uint32_t)(6 * sizeof(float)) };  // pos(3) + normal(3)
+        ofd.vertexLayout.attributes = { { 0, 0, RHI::Format::RGB32F },
+                                        { 1, (uint32_t)(3 * sizeof(float)), RHI::Format::RGB32F } };
+        ofd.topology     = RHI::PrimitiveTopology::Triangles;
+        ofd.depth        = od.depth;
+        ofd.cull         = RHI::CullMode::None;
+        ofd.blend        = od.blend;
+        s_oceanFarPipeline = dev->createPipeline(ofd);
+
+        HARUKA_LOGI("SimplePlanet", "pipelines del mar: cercano(olas)=%s · lejano(esfera)=%s",
+                    RHI::valid(s_oceanPipeline)    ? "ok" : "FALLO",
+                    RHI::valid(s_oceanFarPipeline) ? "ok" : "FALLO");
+    }
 
     // Wireframe pipeline
     RHI::PipelineDesc wire;
@@ -355,16 +397,55 @@ void TerrestrialPlanet::cleanupStatics() {
     if (RHI::valid(s_pipeline))     { dev->destroy(s_pipeline);     s_pipeline = {}; }
     if (RHI::valid(s_texPipeline))  { dev->destroy(s_texPipeline);  s_texPipeline = {}; }
     if (RHI::valid(s_biomePipeline)){ dev->destroy(s_biomePipeline); s_biomePipeline = {}; }
-    if (RHI::valid(s_waterPipeline)){ dev->destroy(s_waterPipeline); s_waterPipeline = {}; }
     if (RHI::valid(s_wirePipeline)) { dev->destroy(s_wirePipeline);  s_wirePipeline = {}; }
     // ⚠️ Estos tres faltaban: los pipelines de teselación y clipmap se creaban y nunca se
     // destruían. Fuga preexistente, no del culling — pero se arregla aquí porque es el mismo sitio.
     if (RHI::valid(s_tessPipeline)) { dev->destroy(s_tessPipeline);  s_tessPipeline = {}; }
     if (RHI::valid(s_clipPipeline)) { dev->destroy(s_clipPipeline);  s_clipPipeline = {}; }
+    if (RHI::valid(s_oceanPipeline)) { dev->destroy(s_oceanPipeline); s_oceanPipeline = {}; }
+    if (RHI::valid(s_oceanFarPipeline)) { dev->destroy(s_oceanFarPipeline); s_oceanFarPipeline = {}; }
     if (RHI::valid(s_nearRingPipeline)) { dev->destroy(s_nearRingPipeline); s_nearRingPipeline = {}; }
     if (RHI::valid(s_cullPipeline)) { dev->destroy(s_cullPipeline);  s_cullPipeline = {}; }
     if (RHI::valid(s_ubo))          { dev->destroy(s_ubo);           s_ubo = {}; }
     s_shadersReady = false;
+}
+
+// ── AGUA INTERIOR: la sim de ríos/lagos publica su SUPERFICIE, no una malla ─────────────────────
+//
+// La dibuja el MAR, con su misma geometría y su mismo `ocean.frag`. Aquí solo viaja el CAMPO: la
+// cota del agua por celda y el marco del parche para localizarla desde una dirección del planeta.
+// Es lo que convierte "tres aguas con tres shaders" en una superficie con tres orígenes.
+//
+// ⚠️ Va en un SSBO y no en una textura porque el RHI no expone actualización de textura: habría que
+// destruir y recrear cada frame. El buffer se actualiza con `updateBuffer`, y de paso la bilineal
+// se hace a mano en el shader — igual que el resto de campos del terreno, y por el mismo motivo
+// (el filtrado del hardware usa pesos de 8 bits en varias GPU).
+void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n,
+                                       const glm::vec3& anchorRelEye, const glm::vec3& tan,
+                                       const glm::vec3& bit, const glm::vec3& up, float spanM) {
+    RHI::Device* dev = RHI::device();
+    if (!dev) { m_inlandWaterValid = false; return; }
+    if (!surfaceM || n <= 1 || (int)surfaceM->size() < n * n) { m_inlandWaterValid = false; return; }
+
+    const size_t bytes = surfaceM->size() * sizeof(float);
+    if (!RHI::valid(m_inlandWaterSSBO))
+        m_inlandWaterSSBO = dev->createBuffer(RHI::BufferUsage::Storage, bytes, surfaceM->data(),
+                                              RHI::BufferMemory::Dynamic);
+    else
+        dev->updateBuffer(m_inlandWaterSSBO, 0, bytes, surfaceM->data());
+
+    struct InlandParams { glm::vec4 anchor; glm::vec4 tanU; glm::vec4 tanV; glm::vec4 misc; } ip{};
+    ip.anchor = glm::vec4(anchorRelEye, 0.0f);   // ancla del parche, relativa al OJO
+    ip.tanU   = glm::vec4(tan, 0.0f);
+    ip.tanV   = glm::vec4(bit, 0.0f);
+    ip.misc   = glm::vec4(spanM, (float)n, 0.0f, 1.0f);   // w = 1 → hay campo
+    if (!RHI::valid(m_inlandWaterUBO))
+        m_inlandWaterUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(ip), &ip,
+                                             RHI::BufferMemory::Dynamic);
+    else
+        dev->updateBuffer(m_inlandWaterUBO, 0, sizeof(ip), &ip);
+    m_inlandWaterValid = RHI::valid(m_inlandWaterSSBO) && RHI::valid(m_inlandWaterUBO);
+    (void)up;   // el marco lo fijan tan/bit; `up` queda por si el parche deja de ser tangente
 }
 
 // EL SUELO CERCANO QUE VIENE DE LA FÍSICA. Solo se re-suben los buffers cuando llega geometría
@@ -589,6 +670,69 @@ void TerrestrialPlanet::buildMesh(
         m_clipVertexCount = (uint32_t)cv.size();
     }
 
+    // ── MALLA DEL MAR LEJANO: esfera a nivel del mar ────────────────────────────────────────────
+    //
+    // Solo posición y normal (6 floats): esta superficie no lleva olas —las pone el mar cercano— así
+    // que no necesita ni UV ni color ni clima. El campo ya viene desplazado para que el nivel del mar
+    // sea la cota 0, así que "aquí hay mar" y "aquí se dibuja mar" son la misma cota por construcción.
+    {
+        std::vector<float>    ov;   ov.reserve((size_t)6 * vertsPerFace * 6);
+        std::vector<uint32_t> oi;   oi.reserve((size_t)6 * res * res * 6);
+        for (int face = 0; face < 6; ++face) {
+            const PlanetFace pf = (PlanetFace)face;
+            const uint32_t base = (uint32_t)(face * vertsPerFace);
+            for (int j = 0; j <= res; ++j)
+                for (int i = 0; i <= res; ++i) {
+                    const glm::dvec3 dir = cubeFaceToDir(pf, (double)i / res * 2.0 - 1.0,
+                                                             (double)j / res * 2.0 - 1.0);
+                    const glm::dvec3 pos = dir * radius;
+                    ov.push_back((float)pos.x); ov.push_back((float)pos.y); ov.push_back((float)pos.z);
+                    ov.push_back((float)dir.x); ov.push_back((float)dir.y); ov.push_back((float)dir.z);
+                }
+            for (int j = 0; j < res; ++j)
+                for (int i = 0; i < res; ++i) {
+                    const uint32_t a = base + (uint32_t)(j * (res + 1) + i);
+                    const uint32_t b = a + 1;
+                    const uint32_t c = base + (uint32_t)((j + 1) * (res + 1) + i);
+                    const uint32_t d = c + 1;
+                    oi.push_back(a); oi.push_back(b); oi.push_back(c);
+                    oi.push_back(b); oi.push_back(d); oi.push_back(c);
+                }
+        }
+        m_oceanFarVB = dev->createBuffer(RHI::BufferUsage::Vertex, ov.size() * sizeof(float),
+                                         ov.data(), RHI::BufferMemory::Static);
+        m_oceanFarIB = dev->createBuffer(RHI::BufferUsage::Index, oi.size() * sizeof(uint32_t),
+                                         oi.data(), RHI::BufferMemory::Static);
+        m_oceanFarFaceStride = (uint32_t)(res * res * 6);
+    }
+
+    // ── SONDA: ¿QUÉ RANGO DE CLIMA PRODUCE DE VERDAD ESTE PLANETA? ─────────────────────────────
+    //
+    // ⚠️ No es decorativa. `PropScatter` descarta capas enteras por humedad y su aviso dice "la capa
+    // pide [0.35, 0.95] · el terreno da [0.12, 0.13]" — pero ese rango lo mide sobre el PARCHE que
+    // rodea al jugador, así que no distingue "el planeta es seco" de "estás en un sitio seco". Sin
+    // esa distinción, ajustar las bandas de los props es adivinar: se puede estar tapando un campo
+    // de clima roto con una banda más ancha.
+    //
+    // Esto recorre la retícula base ENTERA (la misma que alimenta al shader y a los props) y saca el
+    // rango real. Sale una vez por planeta, en la construcción, y es una pasada sobre datos que ya
+    // están en memoria.
+    {
+        float hMin = 1e9f, hMax = -1e9f, hSum = 0.0f;
+        float tMin = 1e9f, tMax = -1e9f;
+        int   nLand = 0;
+        for (const auto& v : verts) {
+            if (v.elev < 0.0f) continue;                 // el clima de props solo importa en tierra
+            hMin = std::min(hMin, v.humid); hMax = std::max(hMax, v.humid); hSum += v.humid;
+            tMin = std::min(tMin, v.temp);  tMax = std::max(tMax, v.temp);
+            ++nLand;
+        }
+        if (nLand > 0)
+            HARUKA_LOGI("Terrain", "clima del planeta (%d vértices de TIERRA): humedad [%.3f, %.3f] "
+                        "media %.3f · temperatura [%.1f, %.1f] °C",
+                        nLand, hMin, hMax, hSum / (float)nLand, tMin, tMax);
+    }
+
     // Copia CPU de la retícula de alturas: es el suelo que consultará la física.
     m_baseRes    = res;
     m_baseRadius = (float)radius;
@@ -618,47 +762,6 @@ void TerrestrialPlanet::buildMesh(
         m_baseFieldTex = dev->createTexture(fd);
     }
 
-    // Water mesh — EN el nivel del mar. El campo ya viene desplazado para que el nivel del mar sea
-    // 0, así que "aquí hay mar" y "aquí se dibuja mar" son la misma cota.
-    const double oceanRadius = radius;
-    std::vector<SimplePlanetVertex> wVerts;
-    std::vector<uint32_t> wIndices;
-    wVerts.reserve(totalVerts);
-    wIndices.reserve(totalIndices);
-
-    for (int face = 0; face < 6; ++face) {
-        const PlanetFace pf = (PlanetFace)face;
-        uint32_t base = (uint32_t)(face * vertsPerFace);
-        for (int j = 0; j <= res; ++j)
-            for (int i = 0; i <= res; ++i) {
-                const double lx = (double)i / res * 2.0 - 1.0;
-                const double ly = (double)j / res * 2.0 - 1.0;
-                const glm::dvec3 dir = cubeFaceToDir(pf, lx, ly);
-                const glm::dvec3 pos = dir * oceanRadius;
-                SimplePlanetVertex v{};
-                v.px = (float)pos.x; v.py = (float)pos.y; v.pz = (float)pos.z;
-                v.nx = (float)dir.x; v.ny = (float)dir.y; v.nz = (float)dir.z;
-                v.u = (float)i / res; v.v = (float)j / res;
-                v.cr = 0.1f; v.cg = 0.25f; v.cb = 0.55f;
-                wVerts.push_back(v);
-            }
-
-        for (int j = 0; j < res; ++j)
-            for (int i = 0; i < res; ++i) {
-                const uint32_t a = base + (uint32_t)(j * (res + 1) + i);
-                const uint32_t b = base + (uint32_t)(j * (res + 1) + i + 1);
-                const uint32_t c = base + (uint32_t)((j + 1) * (res + 1) + i);
-                const uint32_t d = base + (uint32_t)((j + 1) * (res + 1) + i + 1);
-                wIndices.push_back(a); wIndices.push_back(b); wIndices.push_back(c);
-                wIndices.push_back(b); wIndices.push_back(d); wIndices.push_back(c);
-            }
-    }
-
-    m_waterVB = dev->createBuffer(RHI::BufferUsage::Vertex, wVerts.size() * sizeof(SimplePlanetVertex), wVerts.data(), RHI::BufferMemory::Static);
-    m_waterIB = dev->createBuffer(RHI::BufferUsage::Index, wIndices.size() * sizeof(uint32_t), wIndices.data(), RHI::BufferMemory::Static);
-    m_waterIndexCount = (uint32_t)wIndices.size();
-    m_waterVertexCount = (uint32_t)wVerts.size();
-    m_waterFaceStride = (uint32_t)(res * res * 6);   // índices por cara: 6 para poder saltar caras ocultas
 }
 
 void TerrestrialPlanet::clearGPU() {
@@ -676,10 +779,12 @@ void TerrestrialPlanet::clearGPU() {
     m_patchCount = 0;
     if (RHI::valid(m_baseFieldTex)) { dev->destroy(m_baseFieldTex); m_baseFieldTex = {}; }
     if (RHI::valid(m_clipVB))       { dev->destroy(m_clipVB);       m_clipVB       = {}; }
+    if (RHI::valid(m_oceanFarVB))   { dev->destroy(m_oceanFarVB);   m_oceanFarVB   = {}; }
+    if (RHI::valid(m_oceanFarIB))   { dev->destroy(m_oceanFarIB);   m_oceanFarIB   = {}; }
     if (RHI::valid(m_clipIB))       { dev->destroy(m_clipIB);       m_clipIB       = {}; }
-    if (RHI::valid(m_clipUBO))      { dev->destroy(m_clipUBO);      m_clipUBO      = {}; }
-    if (RHI::valid(m_waterVB))      { dev->destroy(m_waterVB);      m_waterVB      = {}; }
-    if (RHI::valid(m_waterIB))      { dev->destroy(m_waterIB);      m_waterIB      = {}; }
+    if (RHI::valid(m_wetUBO)) { dev->destroy(m_wetUBO); m_wetUBO = {}; }
+    for (auto& b : m_clipUBOs) if (RHI::valid(b)) { dev->destroy(b); b = {}; }
+    m_clipUBOs.clear();
     if (RHI::valid(m_albedoTex))    { dev->destroy(m_albedoTex);    m_albedoTex    = {}; }
     if (RHI::valid(m_normalTex))    { dev->destroy(m_normalTex);    m_normalTex    = {}; }
     auto destroyTex = [&](RHI::TextureHandle& t) { if (RHI::valid(t)) { dev->destroy(t); t = {}; } };
@@ -692,7 +797,6 @@ void TerrestrialPlanet::clearGPU() {
     if (RHI::valid(m_propUBO)) { dev->destroy(m_propUBO); m_propUBO = {}; }
     m_heightCPU.clear(); m_heightW = 0; m_heightH = 0;
     m_indexCount = 0;
-    m_waterIndexCount = 0;
 }
 
 glm::vec3 TerrestrialPlanet::biomeColor(const glm::dvec3& dir, float elevKm) const {
@@ -2225,6 +2329,14 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
                 if (jm.contains("zone") && jm["zone"].is_array() && jm["zone"].size() >= 3)
                     m.zoneColor = glm::vec3(jm["zone"][0], jm["zone"][1], jm["zone"][2]);
                 m.submerged = jm.value("submerged", false);
+                // PAPEL EN LA COLUMNA: "bedrock" = roca de debajo · "cover" (por defecto) = manto
+                // suelto de encima. Ver `core/planet/terrain_strata.h`.
+                {
+                    const std::string role = jm.value("role", std::string("cover"));
+                    m.role = (role == "bedrock" || role == "lecho" || role == "roca")
+                           ? Haruka::Planet::TerrainMaterial::Role::Bedrock
+                           : Haruka::Planet::TerrainMaterial::Role::Cover;
+                }
                 // COLOR propio: sustituye al del bioma donde manda este material, en 0-1.
                 if (jm.contains("color") && jm["color"].is_array() && jm["color"].size() >= 3) {
                     m.baseColor = glm::vec3(jm["color"][0], jm["color"][1], jm["color"][2]);
@@ -2574,6 +2686,68 @@ void TerrestrialPlanet::bakeHeightMap() {
 
 // ── Render ───────────────────────────────────────────────────────────────
 
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// PREPARE: el trabajo de COMPUTE del frame, FUERA de cualquier render pass.
+//
+// ⚠️ Existe por una regla de Vulkan: `vkCmdDispatch` dentro de una instancia de render pass es
+// ILEGAL. El culling de parches vivía dentro de `render()`, o sea entre el `beginRenderPass` de la
+// escena y sus draws, porque en OpenGL eso es legal y corriente (`glDispatchCompute` con un FBO
+// atado). En Vulkan cerraba el programa.
+//
+// Y no se podía arreglar en el RHI: reabrir el pase para colar el dispatch volvería a limpiar los
+// attachments —todas las render passes del port son `loadOp CLEAR`— y borraría lo ya dibujado. La
+// única solución correcta es que el compute ocurra antes de abrir el pase, que es lo que hace esto.
+//
+// En OpenGL el cambio es inocuo: agrupar el compute antes del pase no altera el resultado.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos) {
+    m_cullReady = false;
+    if (!RHI::valid(m_vertexBuffer)) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    RHI::Context* ctx = dev->beginFrame();
+    if (!ctx) return;
+
+    // Mismas condiciones que antes. OPT-IN a propósito: un fallo aquí se ve como AGUJEROS en el
+    // planeta, y `HARUKA_GPU_CULL=0` lo apaga sin recompilar. El TCS mantiene su propio test, así
+    // que este camino solo puede quitar trabajo, nunca dibujar algo distinto.
+    const bool gpuCull = settingWithEnvOverride(
+        SettingsManager::get().graphics().gpuPatchCull, "HARUKA_GPU_CULL");
+    if (!gpuCull || !RHI::valid(s_cullPipeline) || m_patchCount <= 0 ||
+        !RHI::valid(m_patchBoundsSSBO) || !RHI::valid(m_patchIdxSSBO) ||
+        !RHI::valid(m_patchIdxCulled) || !RHI::valid(m_patchCullCmd))
+        return;
+
+    // El comando se resetea por CPU cada frame: el compute solo ACUMULA con atomicAdd, así que si no
+    // se pusiera indexCount a 0 crecería sin fin entre frames.
+    const uint32_t cmdReset[5] = { 0u, 1u, 0u, 0u, 0u };
+    dev->updateBuffer(m_patchCullCmd, 0, sizeof(cmdReset), &cmdReset);
+
+    struct CullParams { glm::vec4 camRel, camDir; } cp{};
+    const glm::dvec3 rel = cameraPos - m_config.position;
+    const double relLen = glm::length(rel);
+    cp.camRel = glm::vec4(glm::vec3(rel), (float)m_config.radius);
+    cp.camDir = glm::vec4(glm::vec3(relLen > 1e-9 ? rel / relLen : glm::dvec3(0, 1, 0)),
+                          (float)m_patchCount);
+    if (!RHI::valid(m_patchCullUBO))
+        m_patchCullUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp,
+                                           RHI::BufferMemory::Dynamic);
+    else
+        dev->updateBuffer(m_patchCullUBO, 0, sizeof(cp), &cp);
+
+    ctx->bindPipeline(s_cullPipeline);
+    ctx->bindStorageBuffer(0, m_patchBoundsSSBO);
+    ctx->bindStorageBuffer(1, m_patchIdxSSBO);
+    ctx->bindStorageBuffer(2, m_patchIdxCulled);
+    ctx->bindStorageBuffer(3, m_patchCullCmd);
+    ctx->bindUniformBuffer(4, m_patchCullUBO);
+    ctx->dispatch((m_patchCount + 63u) / 64u, 1, 1);
+    // El draw leerá lo que el compute acaba de escribir: índice, comando y storage.
+    ctx->memoryBarrier();
+
+    m_cullReady = true;
+}
+
 void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                                const glm::mat4& proj,
                                const glm::mat4& view) {
@@ -2683,9 +2857,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             if (camUnderground) break;
         }
     }
-    // Pegado al suelo (donde el fino vale la pena y la costura del cuadrado queda en el horizonte):
-    // enciende <10 m, apaga >20 m, con histéresis vía m_clipMapActive para no parpadear al cruzar.
-    // ⚠️ ALTURA SOBRE EL SUELO, no sobre la esfera. `camAlt` se mide desde el radio de referencia, así
+    // ⚠️ ALTURA SOBRE EL SUELO, no sobre la esfera. (Este número ya no enciende ni apaga nada —el
+    // clipmap vive a cualquier altura, ver abajo—, pero sigue decidiendo CUÁNTOS ANILLOS hay, así que
+    // la trampa de medirla mal sigue viva y por eso se conserva la nota.) `camAlt` se mide desde el radio de referencia, así
     // que sobre terreno a 216 m valía 218 m y la condición `< 20 m` **nunca** se cumplía: el clipmap
     // solo se encendía donde el terreno está a menos de 20 m del nivel del mar, o sea casi en ningún
     // sitio. Tierra adentro el sistema de terreno fino estaba APAGADO y la malla base dibujaba con
@@ -2714,20 +2888,133 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // fina. Con 2^k el quad pasa a 8, 16, 32 m… y la propiedad se conserva intacta.
     //
     // A ras de suelo (k=0) todo queda EXACTAMENTE como estaba: mismo quad de 4 m, misma cobertura.
-    int clipK = 0;
-    if (camAltGround > 20.0)
-        clipK = (int)std::min(5.0, std::ceil(std::log2(camAltGround / 20.0)));
-    clipK = std::max(clipK, 0);
-    const float clipScale = (float)std::exp2((double)clipK);
+    //
+    // ── ANILLOS ANIDADOS (no una sola rejilla estirada) ─────────────────────────────────────────
+    //
+    // El estiramiento global resolvía la COBERTURA y estropeaba la RESOLUCIÓN CERCANA: `clipScale`
+    // multiplica la rejilla ENTERA, así que a 640 m de altura el suelo bajo los pies también pasaba a
+    // quads de 128 m. La resolución la decidía TU ALTURA, no la distancia a lo que mirabas — y eso es
+    // la "capa nueva muy cerca" que se ve al subir.
+    //
+    // Ahora se dibujan VARIAS rejillas a la vez, cada una con el doble de escala que la anterior y con
+    // el CENTRO HUECO justo donde vive la de dentro (de ahí "anillos"): son marcos encajados.
+    //
+    //     nivel 0: quad 4 m   · ±1,9 km  (lleno, salvo el hueco del anillo de colisión)
+    //     nivel 1: quad 8 m   · ±4,0 km  (hueco central de ±1,9 km)
+    //     nivel k: quad 4·2^k · ±1,9·2^k km
+    //
+    // `clipK` deja de ser un factor de estirado y pasa a ser el ÍNDICE DEL ANILLO EXTERIOR, con la
+    // misma fórmula de antes: la cobertura total no cambia (±63 km con k=5), pero cerca se conserva
+    // el quad de 4 m a cualquier altura.
+    //
+    // ⚠️ POR QUÉ NO HAY GRIETAS ENTRE ANILLOS, que es la duda obvia:
+    //
+    //  · En ALTURA: `clipmap.tese` evalúa el detalle con `clipM = max(rad*0.002, 4)`, que depende solo
+    //    del RADIO en el plano, no del nivel. Dos anillos vecinos evalúan la MISMA función en el mismo
+    //    punto → la misma altura. No hay escalón que coser entre ellos.
+    //  · En TESELACIÓN: `edgeFactor` da nivel ∝ arista/distancia, o sea quad ≈ distancia·0,004
+    //    INDEPENDIENTE del tamaño de parche. En la frontera el anillo de fuera tiene aristas 2× más
+    //    largas y pide nivel 2× mayor, y como el nivel se redondea a potencia de dos, el quad sale
+    //    IDÉNTICO por los dos lados. Sin T-junctions.
+    //  · El hueco se descarta por PARCHE ENTERO (`clipmap.tesc`), así que el recorte es conservador:
+    //    el anillo de fuera empieza un poco ANTES de donde acaba el de dentro (64·2^k m de solape).
+    //    Se solapan dos superficies idénticas —misma altura, mismo quad— lo cual es feo pero inocuo;
+    //    un hueco, en cambio, sería un agujero por el que se ve el espacio. Se elige el solape.
+    // ── CUÁNTOS ANILLOS: LOS QUE TAPEN EL HORIZONTE ─────────────────────────────────────────────
+    //
+    // El número de anillos ya no sale de una heurística sobre la altura (`ceil(log2(alt/20))`), sino
+    // de la distancia a la que de verdad se deja de ver suelo: el HORIZONTE, `sqrt(2·R·h)`.
+    //
+    // El objetivo es que la MALLA BASE no se vea NUNCA desde el suelo. Esa malla es la rejilla
+    // antigua del planeta —cientos de metros por polígono— y es la "capa gorda" que aparece al subir:
+    // el clipmap se acababa antes que la vista y a partir de ahí dibujaba ella. Si el anillo exterior
+    // llega más lejos que el horizonte, la base queda recortada entera (`terrain.tese` la recorta con
+    // `uClipCover.x`) y no hay distancia a la que se pueda ver.
+    //
+    //   a la altura de los ojos (1,7 m): horizonte 4,7 km  -> 3 anillos (±7,9 km)
+    //   a 355 m:                         horizonte  67 km  -> 7 anillos (±127 km)
+    //   a 2,5 km (donde el clipmap se apaga): horizonte 178 km -> 8 anillos (±254 km)
+    //
+    // ⚠️ ESTO CUESTA. A ras de suelo pasa de 1 anillo a 3: ~2 433 parches contra 961. La resolución
+    // no cambia (cada anillo mantiene su quad), lo que se paga es cubrir con geometría fina lo que
+    // antes tapaba una malla basta. Es el intercambio que se pidió, pero hay que MIRAR el profiler:
+    // `planet.clipmap.draw`. Si no cabe, la salida no es volver a la malla basta sino cullear los
+    // parches fuera de cámara en el TCS (hoy el clipmap no lo hace; la malla base sí).
+    const double horizonM = std::sqrt(std::max(0.0, 2.0 * m_config.radius * std::max(camAltGround, 1.7)));
+    int ringCount = Haruka::Planet::terrainClipRingIndex(horizonM, (double)m_clipCoverM) + 1;
+    ringCount = std::max(1, std::min(ringCount, kMaxClipRings));
+    const int clipK = ringCount - 1;                // índice del anillo exterior
 
-    // Con la cobertura estirada el clipmap ya sirve desde el aire, así que el umbral sube de 20 m a
-    // lo que alcanza el factor tope (32× → quads de 128 m, ±63 km de cobertura). La histéresis se
-    // mantiene para que no parpadee al rozar el límite.
-    const double clipMaxAlt = 20.0 * std::exp2(5.0) * 4.0;   // ~2,5 km
-    const bool wantClip = m_clipMapActive ? (camAltGround < clipMaxAlt * 1.15)
-                                          : (camAltGround < clipMaxAlt);
+    // ⚠️ A/B SIN RECOMPILAR: `HARUKA_CLIP_RINGS=N` topa el número de anillos.
+    //
+    //   =1  → UN solo anillo, estirado 2^k: EXACTAMENTE el comportamiento anterior a los anillos
+    //         anidados. Es la única forma de saber si un defecto que se ve al subir lo trajo este
+    //         cambio o ya estaba — y el síntoma "aparece una capa al subir" se reportó ANTES.
+    //   =0 / sin definir → sin tope (por defecto).
+    //
+    // El anillo EXTERIOR conserva el estirado `2^k`, así que con N=1 la cobertura sigue siendo la de
+    // siempre (±63 km) y no se abre un agujero entre el clipmap y la malla base.
+    static const int s_ringCap = [] {
+        const char* e = std::getenv("HARUKA_CLIP_RINGS");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (s_ringCap > 0 && ringCount > s_ringCap) ringCount = s_ringCap;
+
+    const float clipScale = (float)std::exp2((double)clipK);   // escala del anillo EXTERIOR
+
+    // ── SONDA `HARUKA_CLIP_PROBE=1` ─────────────────────────────────────────────────────────────
+    //
+    // Imprime DÓNDE está cada frontera. Sin esto, "aparece una capa al subir" no se puede separar de
+    // "está oscuro" ni de un borde de costa: el número dice a qué distancia está el borde del
+    // clipmap, y basta compararlo con lo que se ve. Solo cuando CAMBIA algo (número de anillos o
+    // cobertura), que es justo el instante en que una capa aparece o desaparece.
+    if (std::getenv("HARUKA_CLIP_PROBE")) {
+        static int   s_lastRings = -1;
+        static float s_lastCover = -1.0f;
+        const float coverOuter = m_clipCoverM * clipScale;
+        if (ringCount != s_lastRings || std::abs(coverOuter - s_lastCover) > 0.5f) {
+            s_lastRings = ringCount;
+            s_lastCover = coverOuter;
+            std::string desglose;
+            for (int r = 0; r < ringCount; ++r) {
+                const bool   outer = (r == ringCount - 1);
+                const double sc    = outer ? (double)clipScale : std::exp2((double)r);
+                char buf[192];
+                std::snprintf(buf, sizeof(buf),
+                              "      anillo %d: quad %.0f m · borde a %.0f m · hueco %.0f m\n",
+                              r, 4.0 * sc, m_clipCoverM * sc,
+                              r == 0 ? 0.0 : m_clipCoverM * std::exp2((double)(r - 1)));
+                desglose += buf;
+            }
+            HARUKA_LOGI("ClipRings",
+                        "alt=%.1f m sobre el suelo -> k=%d · %d anillo(s) · la malla base se recorta a %.0f m\n%s",
+                        camAltGround, clipK, ringCount, (double)coverOuter, desglose.c_str());
+        }
+    }
+
+    // ── EL CLIPMAP NO SE APAGA POR ALTURA ───────────────────────────────────────────────────────
+    //
+    // ⚠️ AQUÍ HABÍA UN UMBRAL (`20·2^5·4` ≈ 2,5 km, con histéresis 2,9 km), heredado del esquema de
+    // la rejilla ESTIRADA. Al cruzarlo, el clipmap se apagaba ENTERO — y con él el descarte de la
+    // malla base, que cuelga de `uDebug.w`—, así que la rejilla gruesa reaparecía DE GOLPE encima del
+    // terreno fino. Eso era la "capa a +3 km": no una capa nueva, sino la malla base recuperando el
+    // control en un escalón.
+    //
+    // Mover el umbral solo habría movido el escalón, que es exactamente el error que ya se cometió
+    // dos veces en este terreno (el corte del relieve fino se ALEJÓ de 2 km a 20 km y la línea siguió
+    // ahí). Un interruptor duro sobre lo que se dibuja SIEMPRE se ve. Así que no hay umbral: el
+    // clipmap vive a cualquier altura.
+    //
+    // No hace falta apagarlo para que sea barato. `edgeFactor` reparte por TAMAÑO ANGULAR: desde
+    // órbita los parches piden nivel 1 y la rejilla entera colapsa a su malla mínima. Y la cobertura
+    // ya no es fija — el número de anillos sale del horizonte —, así que desde arriba el clipmap
+    // ocupa lo que debe ocupar y la malla base dibuja el resto del planeta, cosidos por el anillo de
+    // mezcla del exterior.
+    //
+    // Lo único que sigue apagándolo es estar BAJO TIERRA (`camUnderground`), que no es una cuestión
+    // de escala sino de que la rejilla no describe nada útil desde dentro del terreno.
     const bool clipActive = RHI::valid(s_clipPipeline) && RHI::valid(m_clipVB) &&
-                            RHI::valid(m_baseFieldTex) && hasBiome && !camUnderground && wantClip;
+                            RHI::valid(m_baseFieldTex) && hasBiome && !camUnderground;
     m_clipMapActive = clipActive;
     // ── QUÉ GEOMETRÍA HAY BAJO LOS PIES ─────────────────────────────────────────────────────────
     //
@@ -2746,14 +3033,23 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         if (s_lastActive != clipActive || nowSec - s_clipLogT > 2.0) {
             s_clipLogT = nowSec;
             s_lastActive = clipActive;
-            HARUKA_LOGI("TerrainDraw",
+            HARUKA_LOGDIAG("TerrainDraw",
                 "clipmap=%s · altura sobre el suelo=%.2f m · enterrado=%d · quad dibujado a los pies=%.1f m",
                 clipActive ? "SI" : "NO", camAltGround, (int)camUnderground,
                 clipActive ? Haruka::Planet::TERRAIN_CLIP_QUAD_M
                            : (double)Haruka::Planet::TERRAIN_CLIP_PATCH_M * 306.0 / 128.0);
         }
     }
-    ubo.uDebug = glm::vec4((float)m_debugView, elapsedSec,
+    // VISTA DE DEPURACIÓN POR ENTORNO. `m_debugView` lo pone el EDITOR, que no existe en la build del
+    // juego: sin esto las vistas de `biome.frag` (7 = costa, 8 = por qué está negro) son inalcanzables
+    // justo donde hay que mirar, que es el juego corriendo. `HARUKA_PLANET_DEBUG=7` las abre sin
+    // recompilar. Se lee UNA vez (getenv por frame es una búsqueda lineal en el entorno).
+    static const int s_envDebugView = []() {
+        const char* v = std::getenv("HARUKA_PLANET_DEBUG");
+        return v ? std::atoi(v) : 0;
+    }();
+    const int debugView = s_envDebugView ? s_envDebugView : m_debugView;
+    ubo.uDebug = glm::vec4((float)debugView, elapsedSec,
                            RHI::valid(m_heightTex) ? 1.0f : 0.0f,  // z = hay bake de altura (16)
                            clipActive ? 1.0f : 0.0f);              // w = el clipmap dibuja (recorte base)
 
@@ -2828,8 +3124,21 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                    std::round(m.zoneColor.g) * 256.0f   +
                    std::round(m.zoneColor.b))
                 : 0.0f;
-            table.mats[i].d = glm::vec4(m.detail, m.feather, zonePacked,
-                                        m.hasZone() ? 1.0f : 0.0f);
+            // flags: bit0 = tiene zona · bit1 = MATERIAL DE AGUA (`submerged`).
+            //
+            // ⚠️ El bit1 existe porque EL MAR SE HA RETIRADO. `main.scene` declara un material `water`
+            // con color (0.09, 0.22, 0.45) que, al no ser agua sino un ALBEDO, pintaba el lecho de
+            // azul oscuro: con la esfera del océano delante no se veía, y al quitarla queda a la vista
+            // como una "malla negra" con el borde cuantizado del mapa. Marcándolo, el shader lo salta
+            // en la selección y el lecho se sombrea con el material de tierra que le toque.
+            //
+            // Cuando el agua se rehaga, ESTE es el bit que la enciende: la capa `water` pasa a ser la
+            // fuente de verdad de dónde hay agua, en vez de una segunda superficie que mantener de
+            // acuerdo con el terreno. Por eso se marca ahora en vez de borrar el material.
+            // flags: bit0 = zona · bit1 = agua · bit2 = LECHO (el resto es cobertura).
+            const float matFlags = (m.hasZone() ? 1.0f : 0.0f) + (m.submerged ? 2.0f : 0.0f)
+                                 + (m.role == Haruka::Planet::TerrainMaterial::Role::Bedrock ? 4.0f : 0.0f);
+            table.mats[i].d = glm::vec4(m.detail, m.feather, zonePacked, matFlags);
             table.mats[i].e = m.hasColor()
                 ? glm::vec4(m.baseColor, glm::clamp(m.colorWeight, 0.0f, 1.0f))
                 : glm::vec4(0.0f);
@@ -2997,32 +3306,82 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         Haruka::Planet::terrainClipFrame(clipFrom, m_config.position, up, tu, tv,
                                          m_config.radius);
 
-        struct ClipParams { glm::vec4 origin, tanU, tanV, cover; } cp{};
-        cp.origin = glm::vec4(glm::vec3(up), (float)Haruka::Planet::TERRAIN_CLIP_PATCH_M);
-        cp.tanU   = glm::vec4(glm::vec3(tu), clipScale);   // w = factor de estirado (2^k)
-        cp.tanV   = glm::vec4(glm::vec3(tv), 0.0f);
-        // La cobertura que ven la malla base (para recortarse) y el anillo de mezcla del clipmap
-        // tiene que ir ESTIRADA también: si no, la base seguiría recortándose en ±1984 m mientras el
-        // clipmap dibuja hasta 63 km, y entre medias habría dos superficies encima la una de la otra.
-        const float half  = m_clipCoverM * clipScale;
-        const float blendS = half * 0.70f, blendE = half * 0.95f;
-        // w = semi-lado del HUECO que el clipmap deja al suelo cercano de la colisión. Solo cuando
-        // hay anillo que lo rellene: sin él, un hueco es un agujero por el que se ve el espacio.
-        // ⚠️ EL HUECO SOLO EXISTE SIN ESTIRAR (k=0). El borde del hueco tiene que caer en un borde de
-        // PARCHE, y con la rejilla estirada los parches miden `128·2^k`: sus bordes van a múltiplos
-        // impares de `64·2^k`, donde 192 ya no cae. Abrirlo igualmente dejaría una franja doble por un
-        // lado y un agujero de verdad por el otro. Estirado no hace falta: el anillo cercano tampoco
-        // se dibuja (ver el draw), porque 192 m de detalle fino bajo un jugador que está a cientos de
-        // metros no aporta nada y solo subraya el contraste con el resto.
-        const float hole = (m_nearRingIndices >= 3 && RHI::valid(m_nearRingVB) && clipScale <= 1.001f)
-                         ? (float)Haruka::Planet::TERRAIN_CLIP_HOLE_M : 0.0f;
-        m_nearRingVisible = (hole > 0.0f);
-        cp.cover = glm::vec4(half, blendS, blendE, hole);
-        if (!RHI::valid(m_clipUBO))
-            m_clipUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp, RHI::BufferMemory::Dynamic);
+        struct ClipParams { glm::vec4 origin, tanU, tanV, cover; };
+
+        // ── EL ANILLO DE COLISIÓN, que es el HUECO DEL NIVEL 0 ──────────────────────────────────
+        //
+        // Dentro del hueco el suelo lo dibuja el anillo cercano, con los mismos vértices que colisiona.
+        // Solo cuando hay anillo que lo rellene: sin él, un hueco es un agujero por el que se ve el
+        // espacio.
+        //
+        // ⚠️ SIGUE ATADO A ESTAR A RAS DE SUELO, y no por la razón de antes. Antes era obligatorio:
+        // con la rejilla estirada los parches medían `128·2^k` y el borde de 192 m ya no caía en un
+        // borde de parche. Ahora el NIVEL 0 nunca se estira, así que el hueco sería legal a cualquier
+        // altura — se mantiene la condición porque 192 m de detalle fino bajo un jugador que está a
+        // cientos de metros no aporta nada, no porque la geometría lo impida.
+        const bool nearRingOK = (m_nearRingIndices >= 3 && RHI::valid(m_nearRingVB)
+                                 && camAltGround <= 20.0);
+        const float hole0 = nearRingOK ? (float)Haruka::Planet::TERRAIN_CLIP_HOLE_M : 0.0f;
+        m_nearRingVisible = (hole0 > 0.0f);
+
+        m_clipRingCount = ringCount;
+        if ((int)m_clipUBOs.size() < ringCount) m_clipUBOs.resize((size_t)ringCount, RHI::BufferHandle{});
+
+        for (int r = 0; r < ringCount; ++r) {
+            // El anillo EXTERIOR lleva `clipScale` (2^k), no `2^r`. Sin tope los dos coinciden
+            // —`ringCount-1 == clipK`— así que esto no cambia nada en el camino normal; es lo que
+            // hace que `HARUKA_CLIP_RINGS=1` reproduzca de verdad la rejilla estirada de antes en vez
+            // de dejar una rejilla sin estirar que cubriría 32× menos.
+            const float scale = (r == ringCount - 1) ? clipScale : (float)std::exp2((double)r);
+            const float half  = m_clipCoverM * scale;
+            ClipParams cp{};
+            cp.origin = glm::vec4(glm::vec3(up), (float)Haruka::Planet::TERRAIN_CLIP_PATCH_M);
+            cp.tanU   = glm::vec4(glm::vec3(tu), scale);   // w = escala de ESTE anillo (2^r)
+            cp.tanV   = glm::vec4(glm::vec3(tv), 0.0f);
+
+            // ANILLO DE MEZCLA: SOLO EN EL EXTERIOR. Ese blend cose el clipmap con la malla base
+            // (pasa de las octavas finas a las que usa la malla), y eso solo debe ocurrir donde de
+            // verdad acaba el clipmap. Aplicarlo en un anillo interior desvanecería su relieve fino
+            // justo donde empieza el siguiente —que sí lo tiene— y dejaría un escalón circular.
+            // Fuera del exterior se empuja la banda más allá de la cobertura: el tese toma entonces
+            // siempre la rama `rad <= blendStart`, o sea detalle fino puro.
+            const bool outer = (r == ringCount - 1);
+            const float blendS = outer ? half * 0.70f : 1e9f;
+            const float blendE = outer ? half * 0.95f : 1e9f;
+
+            // HUECO: el nivel 0 deja el del anillo de colisión; los demás dejan la cobertura ENTERA
+            // del anillo de dentro. El descarte es por parche entero (`clipmap.tesc`), así que esto
+            // recorta de menos —solape de 64·2^(r-1) m— y nunca de más. Ver la nota de arriba.
+            cp.cover = glm::vec4(half, blendS, blendE,
+                                 r == 0 ? hole0 : m_clipCoverM * (float)std::exp2((double)(r - 1)));
+
+            if (!RHI::valid(m_clipUBOs[(size_t)r]))
+                m_clipUBOs[(size_t)r] = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp,
+                                                          RHI::BufferMemory::Dynamic);
+            else
+                dev->updateBuffer(m_clipUBOs[(size_t)r], 0, sizeof(cp), &cp);
+        }
+        // La malla base y el per-pixel de `biome.frag` se recortan contra el clipmap ENTERO, así que
+        // les toca el ClipParams del anillo EXTERIOR: es el que dice hasta dónde llega la rejilla. Con
+        // el de un anillo interior, la base volvería a dibujarse bajo los anillos de fuera.
+        ctx->bindUniformBuffer(13, m_clipUBOs[(size_t)(ringCount - 1)]);
+    }
+
+    // ── SUELO MOJADO / NEVADO (UBO 23 + máscara cenital en la unidad 17) ────────────────────────
+    //
+    // UN SOLO buffer: su contenido es el mismo para la malla base, los anillos del clipmap y el
+    // anillo cercano, así que no puede repetir el fallo del recurso reescrito entre draws. Se ata
+    // SIEMPRE, aunque no llueva: `biome.frag` lo declara y leer un bloque sin atar es indefinido.
+    {
+        struct WetParams { glm::mat4 skySpace; glm::vec4 wet; } wp{};
+        wp.skySpace = m_skySpace;
+        wp.wet = glm::vec4(m_groundWet, RHI::valid(m_skyMaskTex) ? 1.0f : 0.0f, m_groundSnow, 0.0f);
+        if (!RHI::valid(m_wetUBO))
+            m_wetUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(wp), &wp, RHI::BufferMemory::Dynamic);
         else
-            dev->updateBuffer(m_clipUBO, 0, sizeof(cp), &cp);
-        ctx->bindUniformBuffer(13, m_clipUBO);
+            dev->updateBuffer(m_wetUBO, 0, sizeof(wp), &wp);
+        ctx->bindUniformBuffer(23, m_wetUBO);
+        if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
     }
 
     { HARUKA_PROFILE("planet.base.draw");
@@ -3039,39 +3398,13 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         // ⚠️ Es OPT-IN a propósito. Un fallo aquí se ve como AGUJEROS en el planeta, y con una
         // variable de entorno se apaga sin recompilar ni revertir. El TCS mantiene su propio test,
         // así que este camino solo puede quitar trabajo, nunca dibujar algo distinto.
-        const bool s_gpuCull = settingWithEnvOverride(
-            SettingsManager::get().graphics().gpuPatchCull, "HARUKA_GPU_CULL");
-        const bool cullReady = s_gpuCull && RHI::valid(s_cullPipeline) && m_patchCount > 0 &&
-                               RHI::valid(m_patchBoundsSSBO) && RHI::valid(m_patchIdxSSBO) &&
-                               RHI::valid(m_patchIdxCulled) && RHI::valid(m_patchCullCmd);
-        if (cullReady) {
-            // El comando se resetea por CPU cada frame: el compute solo ACUMULA con atomicAdd, así
-            // que si no se pusiera indexCount a 0 crecería sin fin entre frames.
-            const uint32_t cmdReset[5] = { 0u, 1u, 0u, 0u, 0u };
-            dev->updateBuffer(m_patchCullCmd, 0, sizeof(cmdReset), &cmdReset);
-
-            struct CullParams { glm::vec4 camRel, camDir; } cp{};
-            const glm::dvec3 rel = cameraPos - m_config.position;
-            const double relLen = glm::length(rel);
-            cp.camRel = glm::vec4(glm::vec3(rel), (float)m_config.radius);
-            cp.camDir = glm::vec4(glm::vec3(relLen > 1e-9 ? rel / relLen : glm::dvec3(0, 1, 0)),
-                                  (float)m_patchCount);
-            if (!RHI::valid(m_patchCullUBO))
-                m_patchCullUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp,
-                                                   RHI::BufferMemory::Dynamic);
-            else
-                dev->updateBuffer(m_patchCullUBO, 0, sizeof(cp), &cp);
-
-            ctx->bindPipeline(s_cullPipeline);
-            ctx->bindStorageBuffer(0, m_patchBoundsSSBO);
-            ctx->bindStorageBuffer(1, m_patchIdxSSBO);
-            ctx->bindStorageBuffer(2, m_patchIdxCulled);
-            ctx->bindStorageBuffer(3, m_patchCullCmd);
-            ctx->bindUniformBuffer(4, m_patchCullUBO);
-            ctx->dispatch((m_patchCount + 63u) / 64u, 1, 1);
-            // El draw lee lo que el compute acaba de escribir: índice, comando y storage.
-            ctx->memoryBarrier();
-
+        // ⚠️ EL DISPATCH YA NO ESTÁ AQUÍ: lo hace `prepare()`, ANTES de abrir el render pass.
+        // `vkCmdDispatch` dentro de una instancia de render pass es ILEGAL en Vulkan (en OpenGL es
+        // legal, y por eso vivía aquí). Cerraba el programa, y el síntoma no se parecía a la causa:
+        // en una captura de RenderDoc los draws se veían bien uno a uno —el replay los ejecuta
+        // aislados— mientras en ejecución el dispositivo se perdía a mitad de frame y la pantalla
+        // quedaba negra. `m_cullReady` transporta aquí si el culling llegó a ejecutarse.
+        if (m_cullReady) {
             ctx->bindPipeline(s_tessPipeline);
             ctx->bindVertexBuffer(m_vertexBuffer);
             ctx->bindIndexBuffer(m_patchIdxCulled);
@@ -3097,15 +3430,25 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // el orden no las separa: lo que decide es el sesgo de profundidad del pipeline.
     { HARUKA_PROFILE("planet.clipmap.draw");
     if (useClip) {
-        // m_clipUBO ya se rellenó y bindeó a 13 ANTES del draw de la base (para el recorte en
-        // terrain.tese); aquí solo se re-bindea (el pipeline del clipmap lo necesita igualmente).
+        // Los ClipParams de todos los anillos ya se rellenaron ANTES del draw de la base (que se
+        // recorta contra el exterior); aquí se re-bindea el de cada anillo antes de su draw.
         ctx->bindPipeline(s_clipPipeline);
         ctx->bindUniformBuffer(0, s_ubo);
-        ctx->bindUniformBuffer(13, m_clipUBO);
+        ctx->bindUniformBuffer(23, m_wetUBO);
+        if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
         ctx->bindTexture(15, m_baseFieldTex);
         ctx->bindVertexBuffer(m_clipVB);
         ctx->bindIndexBuffer(m_clipIB);
-        ctx->drawIndexed(m_clipIndexCount);
+        // UN DRAW POR ANILLO, con la MISMA malla (misma rejilla NC×NC, mismos índices): lo único que
+        // cambia entre ellos es el ClipParams —escala y hueco—, que es lo que los convierte en marcos
+        // encajados. Por eso los anillos no cuestan memoria: comparten el buffer de vértices.
+        // De DENTRO hacia FUERA, para que el z-buffer resuelva el solape de 64·2^k m a favor del
+        // anillo fino, que es el que llega primero.
+        for (int r = 0; r < m_clipRingCount; ++r) {
+            if (!RHI::valid(m_clipUBOs[(size_t)r])) continue;
+            ctx->bindUniformBuffer(13, m_clipUBOs[(size_t)r]);
+            ctx->drawIndexed(m_clipIndexCount);
+        }
     }
     }  // fin planet.clipmap.draw
 
@@ -3119,8 +3462,12 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         && RHI::valid(m_nearRingVB) && RHI::valid(m_nearRingIB)) {
         ctx->bindPipeline(s_nearRingPipeline);
         ctx->bindUniformBuffer(0, s_ubo);
-        ctx->bindUniformBuffer(13, m_clipUBO);
+        // ClipParams del NIVEL 0: es el anillo cuyo hueco rellena este suelo. Con el del exterior
+        // vería una cobertura 2^k veces mayor y un hueco que no es el suyo.
+        ctx->bindUniformBuffer(13, m_clipUBOs[0]);
         ctx->bindUniformBuffer(22, m_nearRingUBO);
+        ctx->bindUniformBuffer(23, m_wetUBO);
+        if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
         ctx->bindTexture(15, m_baseFieldTex);
         ctx->bindVertexBuffer(m_nearRingVB);
         ctx->bindIndexBuffer(m_nearRingIB);
@@ -3128,69 +3475,110 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     }
     }  // fin planet.nearring.draw
 
-    // Draw water (transparent ocean sphere). El océano es una esfera a nivel del mar: la tierra está
-    // garantizada por encima (el detalle se recorta para no hundir el suelo bajo el nivel del mar, ver
-    // los eval de teselado), así que la esfera solo rellena los océanos y no tapa la costa. Quitarla:
-    // HARUKA_NOWATER=1 (deja a la vista el suelo sumergido, con su relieve de ruido).
-    m_lastRenderStats = RenderStats{};   // lo rellena este frame (lo que realmente dibuja)
-    int waterFacesDrawn = 0;
-    { HARUKA_PROFILE("planet.water.draw");
-    if (RHI::valid(m_waterVB) && !std::getenv("HARUKA_NOWATER")) {
-        ctx->bindPipeline(s_waterPipeline);
-        ctx->bindVertexBuffer(m_waterVB);
-        ctx->bindIndexBuffer(m_waterIB);
-        // MAR DINÁMICO POR MASA (UBO binding 21): sube la lista de cuerpos masivos que atraen el
-        // océano. Se bindea SIEMPRE (uTide.x puede ser 0 ⇒ el shader no mueve nada), para que la
-        // bind de water.vert/water.frag sea válida y no muestreen un bloque sin atar.
-        {
-            constexpr int kMaxTidals = 8;
-            struct GpuTidal { glm::vec4 body[kMaxTidals]; glm::vec4 tide; } t{};
-            const int n = (int)std::min<size_t>(m_tidalBodies.size(), (size_t)kMaxTidals);
-            for (int i = 0; i < n; ++i)
-                t.body[i] = glm::vec4(glm::vec3(m_tidalBodies[i].posCenter),
-                                      (float)m_tidalBodies[i].gm);
-            const double R = m_config.radius;
-            // Escala que convierte el potencial de marea (1/s²) en metros DIFERENCIA (≈r²/g) y lo
-            // exagera ~15× para que el abultamiento se vea en juego (la marea física real es ~1 m).
-            const float scale = (float)((R * R / 9.8) * 15.0);
-            t.tide = glm::vec4((float)n, scale, (float)(R * 0.5), (float)R);
-            if (!RHI::valid(m_tidalUBO))
-                m_tidalUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(t), &t,
-                                               RHI::BufferMemory::Dynamic);
-            else
-                dev->updateBuffer(m_tidalUBO, 0, sizeof(t), &t);
-            ctx->bindUniformBuffer(21, m_tidalUBO);
+    // ── EL MAR ──────────────────────────────────────────────────────────────────────────────────
+    //
+    // Va DESPUÉS de todo el terreno: es transparente y se mezcla sobre el fondo marino ya dibujado,
+    // que es lo que hace que el agua somera deje ver la arena y la profunda no. No escribe
+    // profundidad (`depth.write = false`), así que dos capas de agua no pueden pelearse por el
+    // z-buffer — y no las hay: los anillos se descartan por el hueco y la esfera lejana solo asoma
+    // donde el clipmap no llega.
+    //
+    // ⚠️ El ORDEN importa: primero los anillos (de dentro afuera) y después la esfera. El agua
+    // cercana lleva las olas y la lejana es lisa; si la esfera fuera primero, sus fragmentos
+    // pasarían el depth test bajo las crestas y se verían a través de ellas.
+    { HARUKA_PROFILE("planet.ocean.draw");
+    static const bool s_noWater = std::getenv("HARUKA_NOWATER") != nullptr;
+    static bool s_noWaterLogged = false;
+    if (!s_noWaterLogged) {
+        s_noWaterLogged = true;
+        HARUKA_LOGI("SimplePlanet", "MAR: %s (cercano = anillos del clipmap con oleaje Gerstner · "
+                    "lejano = esfera lisa). HARUKA_NOWATER lo apaga.",
+                    s_noWater ? "APAGADO por HARUKA_NOWATER" : "activo");
+    }
+    if (!s_noWater && RHI::valid(m_heightTex)) {
+        // ── LAS OLAS SOLO EXISTEN CERCA ─────────────────────────────────────────────────────────
+        //
+        // ⚠️ SIN ESTA COTA EL MAR CUESTA 180 ms EN ÓRBITA. `ringCount` sale del HORIZONTE, así que a
+        // 1 000 km de altura son ~11 anillos × 3 844 parches = **42 000 parches de agua teselada**,
+        // y el TCS los procesa todos aunque queden tras el planeta o fuera de cámara (esta rejilla
+        // no cullea limbo ni frustum, solo el hueco del anillo interior).
+        //
+        // Y no aportan NADA: la ola más larga del tren mide 61 m, que a 30 km ya está por debajo del
+        // píxel. Todo eso es geometría para un detalle que nadie puede ver. Por encima de la cota el
+        // mar lo describe la esfera lisa, que es una superficie idéntica —la ola se desvanece a 0 en
+        // el borde del clipmap (`ocean.tese`)— así que el relevo no tiene costura.
+        //
+        // 8 km: a esa altura una ola de 61 m mide ~0,7 píxeles a 1080p. Por debajo se ve; por
+        // encima, no.
+        const double camAltWave = glm::length(cameraPos - m_config.position) - m_config.radius;
+        const bool   wavesVisible = camAltWave < 25000.0;   // a 25 km una ola de 61 m es ~0,2 px
+
+        // MAR CERCANO: la MISMA rejilla y los MISMOS ClipParams que acaba de usar el terreno. Los
+        // anillos ya están rellenados arriba; aquí solo se cambia el pipeline y se repasan.
+        if (wavesVisible && useClip && RHI::valid(s_oceanPipeline) && RHI::valid(m_clipVB)) {
+            ctx->bindPipeline(s_oceanPipeline);
+            ctx->bindUniformBuffer(0, s_ubo);
+            ctx->bindTexture(16, m_heightTex);
+            // AGUA INTERIOR: el campo de ríos/lagos. Se ata SIEMPRE —aunque no haya sim— porque el
+            // shader declara el bloque y leer uno sin atar es indefinido; con `misc.w = 0` devuelve
+            // su centinela y el mar se queda con su nivel 0.
+            if (m_inlandWaterValid) {
+                ctx->bindUniformBuffer(24, m_inlandWaterUBO);
+                ctx->bindStorageBuffer(25, m_inlandWaterSSBO);
+            }
+            ctx->bindVertexBuffer(m_clipVB);
+            ctx->bindIndexBuffer(m_clipIB);
+            // Y ni siquiera todos los anillos que haya: solo los que caen dentro del alcance en el
+            // que la ola se ve. El anillo r cubre `clipCover·2^r`, así que con cobertura de 1 984 m
+            // son 2 anillos hasta ~4 km — el resto ya lo dibuja la esfera lisa, que a esa distancia
+            // es la misma superficie. Sin este tope, a ras de suelo se teselaban los 11 anillos.
+            // 16 km: con el fragmento del agua ya barato (ver `ocean.frag`), lo que limita
+            // el alcance es la teselación, y ésta ya se desvanece sola con `rad` en el TCS.
+            const double kWaveReachM = 16000.0;
+            for (int r = 0; r < m_clipRingCount; ++r) {
+                if ((double)m_clipCoverM * std::exp2((double)r) > kWaveReachM && r > 0) break;
+                if (!RHI::valid(m_clipUBOs[(size_t)r])) continue;
+                ctx->bindUniformBuffer(13, m_clipUBOs[(size_t)r]);
+                ctx->drawIndexed(m_clipIndexCount);
+            }
         }
-        // La costa per-pixel de water.frag lee el campo base (binding 15): se enlaza aquí
-        // SIEMPRE, no solo cuando está el clipmap, o el agua muestrearía una textura sin bindear.
-        if (RHI::valid(m_baseFieldTex)) ctx->bindTexture(15, m_baseFieldTex);
-        // Culling por CARA cúbica: la esfera de agua cubre el planeta entero (1,58 M vértices),
-        // pero desde fuera solo su hemisferio hacia la cámara es visible. A pie, 5 de las 6 caras
-        // están tras el planeta (~263 k vértices muertos de vertex shading cada una). El centro de
-        // cada cara es su eje (cubeFaceToDir(face,0,0)); si queda detrás del plano de la cámara,
-        // toda la cara es invisible (el propio planeta oculta su parte delantera). Las caras del
-        // limbo se siguen dibujando enteras — el depth test descarta lo oculto.
-        const glm::dvec3 camRelD = cameraPos - m_config.position;
-        const glm::dvec3 camDirD = camRelD / glm::length(camRelD);
-        static const glm::dvec3 kFaceAxis[6] = {
-            { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1}
-        };
-        for (int face = 0; face < 6; ++face) {
-            if (glm::dot(camDirD, kFaceAxis[face]) < 0.0) continue;   // cara tras el planeta
-            ctx->drawIndexed(m_waterFaceStride, (uint32_t)face * m_waterFaceStride);
-            ++waterFacesDrawn;
+        // MAR LEJANO: la esfera, solo por las caras cúbicas orientadas hacia la cámara. Las otras
+        // cinco están tras el planeta y su vertex shading sería trabajo tirado.
+        if (RHI::valid(s_oceanFarPipeline) && RHI::valid(m_oceanFarVB)) {
+            ctx->bindPipeline(s_oceanFarPipeline);
+            ctx->bindUniformBuffer(0, s_ubo);
+            ctx->bindTexture(16, m_heightTex);
+            if (m_inlandWaterValid) {
+                ctx->bindUniformBuffer(24, m_inlandWaterUBO);
+                ctx->bindStorageBuffer(25, m_inlandWaterSSBO);
+            }
+            ctx->bindVertexBuffer(m_oceanFarVB);
+            ctx->bindIndexBuffer(m_oceanFarIB);
+            const glm::dvec3 camRelD = cameraPos - m_config.position;
+            const glm::dvec3 camDirD = camRelD / glm::length(camRelD);
+            static const glm::dvec3 kFaceAxis[6] = {
+                { 1, 0, 0}, {-1, 0, 0}, { 0, 1, 0}, { 0,-1, 0}, { 0, 0, 1}, { 0, 0,-1}
+            };
+            for (int face = 0; face < 6; ++face) {
+                if (glm::dot(camDirD, kFaceAxis[face]) < 0.0) continue;
+                ctx->drawIndexed(m_oceanFarFaceStride, (uint32_t)face * m_oceanFarFaceStride);
+            }
         }
     }
-    }  // fin planet.water.draw
+    }  // fin planet.ocean.draw
+
+    m_lastRenderStats = RenderStats{};   // lo rellena este frame (lo que realmente dibuja)
+
     // Geometría DEL ÚLTIMO FRAME para el panel: la malla base (teselada o lisa), el clipmap solo
-    // cuando pinta, y el agua solo por las caras que se dibujaron. Triángulos = índices/3.
+    // cuando pinta,. Triángulos = índices/3.
     m_lastRenderStats.baseVertices  = m_vertexCount;
     m_lastRenderStats.baseTriangles = (useTess ? m_patchIndexCount : m_indexCount) / 3;
-    m_lastRenderStats.clipVertices  = useClip ? m_clipVertexCount : 0;
-    m_lastRenderStats.clipTriangles = useClip ? m_clipIndexCount / 3 : 0;
-    m_lastRenderStats.waterVertices  = waterFacesDrawn ? m_waterVertexCount : 0;
-    m_lastRenderStats.waterTriangles = waterFacesDrawn * (m_waterFaceStride / 3);
-    m_lastRenderStats.drawCalls = 1 + (useClip ? 1 : 0) + (waterFacesDrawn ? waterFacesDrawn : 0);
+    // × anillos: el clipmap ya no es un draw sino `m_clipRingCount`. Sin multiplicar, el panel
+    // seguiría enseñando el coste de UN anillo y el cambio saldría gratis en pantalla.
+    // (Es una cota ALTA: los anillos exteriores descartan su centro en el TCS, ~736 de 961 parches.)
+    m_lastRenderStats.clipVertices  = useClip ? m_clipVertexCount * (uint32_t)m_clipRingCount : 0;
+    m_lastRenderStats.clipTriangles = useClip ? (m_clipIndexCount / 3) * (uint32_t)m_clipRingCount : 0;
+    m_lastRenderStats.drawCalls = 1 + (useClip ? m_clipRingCount : 0);
 }
 
 }} // namespace Haruka::Planet

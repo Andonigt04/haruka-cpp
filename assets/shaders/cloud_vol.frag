@@ -98,53 +98,123 @@ void main()
     // ── MARCHA ──────────────────────────────────────────────────────────────────────────────────
     const int   STEPS = int(u_misc.y);
     const float span  = tExit - tEnter;
-    const float dt    = span / float(STEPS);
     const vec2  wind  = u_wind.xy;
     const float scale = u_misc.z;
+    const float thick = topA - baseA;
+
+    // JITTER: con 24 pasos, empezar todos los rayos en el mismo sitio pone la estructura de la
+    // marcha EN PANTALLA — anillos concéntricos alrededor del punto de fuga. Desplazar el primer
+    // paso una fracción aleatoria del intervalo convierte esas bandas en ruido, que el ojo perdona.
+    const float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
+
+    // ── PASO QUE CRECE CON LA DISTANCIA ─────────────────────────────────────────────────────────
+    // ⚠️ ESTO ERA "LA NUBE NO TIENE ALTURA", y no se arregla en el campo de densidad: el campo mide
+    // 0,82:1 (más alta que ancha). Era el MUESTREO. Repartir el recorrido en 24 pasos iguales
+    // funciona mirando arriba y se desmorona mirando al horizonte, que es justo donde se ven las
+    // nubes DE PERFIL y donde está casi toda el área de cielo. Medido sobre la losa real
+    // (1303-1887 m) contra una nube de 332 m:
+    //
+    //      cenit     0,6 km de recorrido ->  24 m de paso -> 13,6 muestras por nube
+    //      70 grados 1,7 km               ->  71 m        ->  4,7
+    //      85 grados 6,5 km               -> 271 m        ->  1,2
+    //      88 grados 14,1 km              -> 587 m        ->  0,6   <- MENOS DE UNA
+    //
+    // Con menos de una muestra por nube no queda relieve que ver: se promedia todo a un manchón
+    // uniforme. Un paso que CRECE resuelve fino lo cercano (donde la nube ocupa muchos píxeles) y
+    // grueso lo lejano (donde ya es subpíxel), con los MISMOS 24 pasos y por tanto el mismo coste.
+    // ⚠️ SEGUNDA VUELTA: con 24 pasos y crecimiento 1,32 lo cercano quedaba bien y **lo lejano
+    // seguía plano**, que es lo que se reportó. El paso iguala al tamaño de la nube a los 4,3 km:
+    // más allá de ahí no hay estructura que resolver. El presupuesto lo dio el propio HUD del juego
+    // (`renderFrameContent` 1,42 ms con este pase POR DEBAJO del umbral de 0,5 ms del panel), así
+    // que se pueden pagar muchos más pasos y crecer MÁS DESPACIO:
+    //
+    //      24 pasos x1,32  ->  resuelto hasta  4,3 km   (lo de antes: lejanas planas)
+    //      64 pasos x1,09  ->  resuelto hasta 15,3 km   <- esto
+    //
+    // Crecer más despacio importa tanto como el número de pasos: con x1,32 los últimos pasos miden
+    // kilómetros aunque haya 64.
+    const float kNearStep = 50.0;    // paso al entrar, en metros
+    const float kGrowth   = 1.09;    // 64 pasos desde 50 m alcanzan ~137 km (el tramo rasante
+                                     // extremo son 91 km: por debajo de eso, las nubes del ultimo
+                                     // trecho hacia el horizonte se quedaban SIN marchar)
+    float dt     = span / float(STEPS);
+    float growth = 1.0;
+    if (dt > kNearStep) { dt = kNearStep; growth = kGrowth; }
 
     // Base tangente para proyectar el punto de la marcha a coordenadas horizontales del campo.
     const vec3 up0 = normalize(ro);
     vec3 e1 = normalize(cross(abs(up0.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0), up0));
     vec3 e2 = cross(up0, e1);
 
-    // Umbral del campo: más cobertura, menos umbral, más nube. El rango es MÁS BAJO que el del
-    // cielo de fondo (0.70→0.32) a propósito: un telón solo tiene que sugerir la forma, mientras que
-    // un volumen que se atraviesa tiene que tener cuerpo — con el umbral alto la nube salía
-    // deshilachada y se veía el cielo a través de ella.
+    // Elevación del Sol sobre la vertical local. Manda en cuánta nube tiene que atravesar la luz
+    // para llegar a un punto: con el Sol bajo el camino es largo y el cúmulo se enciende de lado.
+    const float sunUp = max(dot(up0, u_sun.xyz), 0.10);
+
+    // Umbral del campo: más cobertura, menos umbral, más CIELO CUBIERTO. ⚠️ Ahora el umbral decide
+    // sólo QUÉ FRACCIÓN del cielo tiene nube; lo maciza que es cada una la decide la extinción. Antes
+    // decidía las dos cosas a la vez, y por eso con la cobertura mediana del planeta (0,111) las
+    // nubes existían pero eran transparentes.
     const float lo = mix(0.58, 0.20, clamp(cover, 0.0, 1.0));
 
     float optical = 0.0;   // profundidad óptica acumulada
     float lit     = 0.0;   // iluminación acumulada, ponderada por lo que aporta cada tramo
     float wsum    = 0.0;
 
-    for (int i = 0; i < STEPS; ++i) {
-        const float t = tEnter + (float(i) + 0.5) * dt;
+    float t = tEnter + jit * dt;    // el jitter desplaza el ARRANQUE, no cada muestra
+
+    for (int i = 0; i < STEPS && t < tExit; ++i, t += dt, dt *= growth) {
         const vec3  p = ro + dir * t;                 // punto respecto al centro del planeta
         const float r = length(p);
         const float alt = r - R;
 
-        // Altura relativa dentro de la losa → perfil vertical COMPARTIDO con la CPU.
-        const float f = (alt - baseA) / (topA - baseA);
-        const float prof = harukaCloudProfile(f);
-        if (prof <= 0.0) continue;
+        // Altura relativa dentro de la losa. El perfil se aplica dentro de `harukaCloudDensity`,
+        // sobre la altura remapeada al techo LOCAL de esta nube.
+        const float f = (alt - baseA) / thick;
+        if (f <= 0.0 || f >= 1.0) continue;
 
         // Coordenadas horizontales: proyección del punto sobre la base tangente. Es lo que hace que
         // la nube se quede quieta en el mundo mientras la cámara se mueve por debajo.
-        const vec2 uv = vec2(dot(p, e1), dot(p, e2)) * scale;
-        const float d = harukaCloudField(uv, wind);
+        const vec2  uv = vec2(dot(p, e1), dot(p, e2)) * scale;
+        const float s  = harukaCloudStrength(harukaCloudField(uv, wind), lo);
+        if (s <= 0.0) continue;                       // aire: el detalle 3D no se paga aquí
 
-        // Lo que este tramo aporta: cuánto supera el umbral, por el perfil, por la longitud.
-        const float dens = max(d - lo, 0.0) * prof;
+        // Detalle 3D en las MISMAS unidades del campo (uv) más la altura. Mantenerlo en este marco
+        // evita meter coordenadas de ~6,4e6 m en un `fract`, donde el ruido se cuantiza a escalones.
+        const vec3  q    = vec3(uv * 11.4, (alt - baseA) * 0.004);
+        const float dens = harukaCloudDensity(s, f, q);
         if (dens <= 0.0) continue;
 
         // EXTINCIÓN por metro. Es EL mando de la densidad y por eso viaja en el UBO en vez de estar
         // cableado: sube y la nube se vuelve opaca antes, baja y se ve el cielo a través.
         optical += dens * dt * u_misc.w;
 
-        // Autosombra barata: cuánta nube queda por encima en la dirección del Sol. Sin esto la nube
-        // es una mancha plana; con esto tiene panza oscura y cima iluminada.
-        const float towardSun = clamp(dot(normalize(p), u_sun.xyz) * 0.5 + 0.5, 0.0, 1.0);
-        lit  += (0.25 + 0.75 * towardSun) * (1.0 - f * 0.35) * dens;
+        // ── LUZ ─────────────────────────────────────────────────────────────────────────────────
+        // ⚠️ ESTO ERA LA OTRA MITAD DE "es una lámina". La versión anterior sombreaba con
+        // `dot(normalize(p), sol)`, pero `p` va referido al CENTRO DEL PLANETA: sobre una nube de
+        // 3 km, `normalize(p)` gira 4,7e-4 rad, así que ese producto escalar era CONSTANTE en toda
+        // la nube. No había sombreado que ver — un volumen iluminado con un valor único se ve
+        // exactamente igual que una calcomanía.
+        //
+        // Ahora se mide el CAMINO ÓPTICO HACIA EL SOL de forma analítica: cuánta nube queda por
+        // encima hasta salir por el techo local, dividido por la elevación solar. No cuesta ni una
+        // muestra extra del campo, y varía en horizontal porque el techo local varía con `s`: eso
+        // es lo que da cimas encendidas, panzas oscuras y relieve entre nube y nube.
+        const float localTopM = baseA + thick * mix(HARUKA_CLOUD_MINTOP, 1.0, s);
+        // ⚠️ TOPADO AL ANCHO DE LA NUBE. Con el Sol bajo, `1/sunUp` dispara el camino a decenas de
+        // km y la nube entera se apagaría justo al amanecer y al atardecer, que es cuando más se
+        // mira. Pero la luz no atraviesa 20 km de nube: SALE POR EL COSTADO en cuanto el camino
+        // supera el ancho del cúmulo (~1/escala del campo). Con el tope, el Sol rasante enciende el
+        // borde superior y deja la panza oscura, en vez de apagarlo todo.
+        const float widthM = 1.0 / scale;
+        const float toSun  = min(max(localTopM - alt, 0.0) / sunUp, widthM);
+        // La extinción de la LUZ es una fracción de la de la VISTA. No es un ajuste a ojo: un solo
+        // rebote (esto es `exp(-x)`, dispersión simple) deja negro cualquier interior de nube,
+        // mientras que una nube real es blanca PORQUE la luz rebota muchas veces dentro. Bajar el
+        // coeficiente del camino de luz es la forma barata y estándar de no perder esa energía sin
+        // integrar el multiscattering entero.
+        const float shadow = exp(-toSun * u_misc.w * 0.25 * s);
+
+        lit  += (0.18 + 0.82 * shadow) * dens;   // 0.18 = luz del cielo; sin ella la panza es negra
         wsum += dens;
 
         if (optical > 4.0) break;       // ya es opaco: seguir no cambia el píxel

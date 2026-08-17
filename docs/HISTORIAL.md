@@ -12,6 +12,110 @@ El plan por versiones está en [ROADMAP.md](../ROADMAP.md). Lo que sigue abierto
 
 ---
 
+---
+
+## Sesión 2026-08-16 — puertos, raíles, calidad, vehículos y prefabricados
+
+Suites al cerrar: motor **25922 OK · 0 fallos**; juego **53 + 43 + 35 + 24 + 23 + 18 + 77 + 10 OK · 0 fallos**
+(los 12-15 fallos de `survival_building_tests` son de determinismo y **ya estaban** — verificado con
+`git stash` sobre árbol limpio: 162 OK · 15 fallos).
+
+### Añadido
+
+**Motor** — `game/ports/port.{h,cpp}`: puertos AUTORIZADOS en el asset (montaje + interacción) y
+**raíles** (mecanismos con un grado de libertad), con puente a Jolt en `PhysicsEngine::addRail/
+railSetTarget/railGet/removeRail`. `RigidBody::Shape::Compound` (una caja por pieza → el vehículo
+tiene interior). `ConstructionState`: `JointKind::Mechanism`, `rigidIsland`, `islandMass`,
+`distancesFrom`. `game/prefab/prefab.{h,cpp}`. `HARUKA_LOGDIAG` + `HARUKA_DIAG`.
+Plan: `docs/guides/PLAN_PUERTOS.md`.
+
+**Editor** — paneles **Ports** y **Prefabs**, con gizmo de ImGuizmo sobre el puerto/pieza activa,
+superposición del eje y el barrido del raíl, selector de items leído del proyecto y vista previa del
+prefabricado como objetos de escena.
+
+**Juego** — `build_sockets` (puertos autorizados con respaldo del AABB), `placement_rules` (§9),
+`joint_health` (carga/fatiga), `local_frame` + `ride` + `vehicle_spawn` + `vehicle_runtime`
+(marco local, desanclar, ir a bordo), `quality` (escala 1..10000 + rendimiento por masa).
+Datos: 43 piezas de vehículo, 58 recetas, 12 combustibles, 3 manuales, minerales que faltaban,
+`strengthMPa`, y `stats.affinity` migrado de entero a NOMBRE.
+Diseño: `Survival/docs/VEHICULOS.md` (§1-§15).
+
+### ⚠️ Trampas (esto es lo que costó la sesión)
+
+- **`glClearDepth` y reversed-Z.** El preview 3D del inventario no pintaba NADA: el motor usa
+  reversed-Z (`CompareOp::Greater`) y deja `glClearDepth` en **0.0**; el preview limpiaba la
+  profundidad heredando ese 0 y comparaba con `GL_LESS`. Ningún fragmento puede pasar `z < 0`, y el
+  clear de COLOR sí escribe → textura vacía **sin un solo error de GL**. `ui_world_panel.cpp:73` ya
+  ponía `glClearDepth(1.0)` por lo mismo. Costó cinco rondas porque el código no comprobaba NADA:
+  ni compilación de shader, ni enlazado, ni completitud del FBO, ni `glGetError`.
+  **Regla:** un render a textura NO debe heredar estado (scissor, máscaras, depth range, stencil,
+  sample coverage, rasterizer discard, clear depth).
+
+- **`SceneManager::getObjects()` devuelve POR VALOR.** Copia la escena entera —cada `SceneObject` con
+  sus componentes— en CADA llamada. En el árbol de la jerarquía se llamaba **una vez por nodo**.
+  Con un planeta cargado → `std::bad_alloc`. Usar `getObjectsMutable()` (referencia a los
+  `shared_ptr`). Arreglado en `prefab_panel`, `scene_hierarchy` (×2) y `objects_panel`.
+
+- **Referencia colgante sobre ese mismo `getObjects()`.** `const auto& o = f()[i]` NO extiende la vida
+  del temporal (sí lo hace `const auto& v = f()`). Leerlo después es basura y construir un
+  `std::string` de basura da `bad_alloc`. La diferencia entre las dos formas es sutil y es justo la
+  que separa `ports_panel` (bien) de `prefab_panel` (mal), escritos con minutos de diferencia.
+
+- **Dos numeraciones de afinidad bajo el mismo nombre.** `materials.json` contaba
+  {1 fuego, 2 viento, 3 tierra, 4 agua, 5 vacío} y `elements.json` {fire 1, water 2, ice 3, wind 4…}.
+  Además `spell_data.cpp` exigía que `affinities` fuese un **array** siendo un **objeto**, así que el
+  bloque nunca corría y TODOS los elementos quedaban con `affinityIdx = 0`: cualquier hechizo solo
+  casaba con cuarzo/cristal, y rubí, zafiro, esmeralda y obsidiana **no conducían nada**.
+  Migrado a NOMBRE de elemento (un string no se desalinea en silencio).
+
+- **`vSurfKind` no enlazaba.** `s_biomePipeline` empareja `simple.vert` con `biome.frag`, y el vertex
+  declaraba salidas hasta la location 4 mientras el fragment espera `vSurfKind` en la 5. El programa
+  no enlazaba y esa ruta se quedaba **sin pipeline**. Vale 1.0 (malla base), como `terrain.tese`.
+
+- **`properties["building"]` ignora el `modelPath`.** Manda el objeto al pase instanciado de
+  PRIMITIVAS, que dibuja un cubo. Era la razón de ver cubos donde había planchas.
+
+- **Escalar un modelo no uniformemente NO produce la pieza, produce basura.** La caja debe salir del
+  MODELO (`getModelBounds`) y las piezas se GIRAN, no se estiran. Y los modelos están centrados en el
+  origen: hay que descontar el centro de sus *bounds* o los taladros no alinean.
+
+- **El eje de la malla no se supone, se deduce.** `armor_plate` es 1.2 × 1.2 × 0.08: su eje fino es Z,
+  así que sin girar es un panel DE PIE, no un suelo. Igual con la oruga y su eje largo.
+
+- **El cero del ángulo de un `HingeConstraint` es la POSTURA DE MONTAJE.** Con una normal arbitraria
+  la hoja nace a un ángulo cualquiera de su propio cero y los límites dejan de significar nada
+  (medido: pedía 90° y leía 123,8°). Y dos `BodyLockWrite` sueltos hacen **assertar a Jolt** por orden
+  de bloqueo: va `BodyLockMultiWrite`. El muelle por defecto del motor (2 Hz) es de suspensión, no de
+  mecanismo. Y `blocked` hay que medirlo sobre una VENTANA: un mecanismo vencido tiembla, no se queda
+  quieto.
+
+- **Los props del scatter ya traen sus partes.** `CrawlerTrack` lleva sus rodillos dentro: añadir
+  `road_wheel` aparte duplicaba geometría y creaba mecanismos para algo que no gira por su cuenta.
+
+### Decisiones de diseño que conviene no re-abrir
+
+- **Puertas, rampas, escotillas, torretas y suspensiones son MECANISMOS, no animaciones.** Una
+  animación no se bloquea contra lo que estorbe, no se cae cuando la unión cede y hay que
+  reautorizarla si el objeto se mueve.
+- **La banda de rareza NO se guarda**: se guarda el valor 1..10000 y la banda se deriva. Guardarla
+  sería volver a los cinco escalones.
+- **Un vehículo no es un tipo**: es una estructura NO ANCLADA con un propulsor. Por eso un
+  prefabricado no sabe si es un vehículo, y por eso el ensamblaje es el grafo de piezas de
+  construcción y no un árbol aparte.
+- **El vehículo MODIFICA, no SUSTITUYE**: suma su desplazamiento y su giro a lo que el jugador ya
+  hace. Reinterpretar la entrada en marco local sustituiría el significado de "adelante".
+- **Un prefabricado no funde piezas en una malla.** Cada pieza conserva item, collider e isla: es lo
+  que permite que una puerta gire, que una suspensión ceda y que un impacto arranque un trozo.
+
+### Abierto
+
+- **Marco de referencia móvil**: la matemática y la colisión compuesta están; falta que el wasd y el
+  controlador de personaje corran de verdad en el marco del vehículo.
+- Sin tracción real (hay `vempuja` como banco de pruebas).
+- `bunk_bed.glb` y `couch.glb` referenciados y ausentes.
+- Dos capas de props (`pueblo`, `build`) piden humedad [0.35, 0.95] y el terreno da [0.12, 0.13].
+- `getObjects()` sigue siendo una trampa para cualquier llamante nuevo.
+
 ## ✅ Hecho (no re-abrir sin motivo)
 
 - **RHI + PSO completo.** Renderers sin GL crudo (terrain, water, fluid, ibl, escena, partículas, bloom,

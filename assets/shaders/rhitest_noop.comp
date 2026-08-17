@@ -1,0 +1,9 @@
+/**
+ * @file rhitest_noop.comp
+ * @brief Compute que escribe una marca en un SSBO. Sirve para comprobar que un dispatch DENTRO de
+ *        un render pass no mata el dispositivo (es ilegal en Vulkan y antes cerraba el programa).
+ */
+#version 450 core
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) buffer Out { uint v[]; };
+void main() { v[gl_GlobalInvocationID.x] = 0xC0FFEEu; }

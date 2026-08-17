@@ -28,7 +28,42 @@ namespace Haruka { namespace Tools { namespace ProcGraph {
 // Roca: cluster de blobs achatados (un "guijarro de montaña").
 // `scale` multiplica el tamaño total; `squashY` aplasta el conjunto.
 // ===========================================================================
-inline TreeMeshData bakeRockMesh(int seed, float scale = 1.0f, float squashY = 0.72f) {
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ENVOLVENTES: las MISMAS constantes con las que se construye la malla.
+//
+// ⚠️ Existen porque el collider las tenía ESCRITAS A MANO y no coincidían: la roca se colisionaba
+// con una caja de y=0 a y=1.44 cuando la malla va de -0,79 a +0,79 CENTRADA EN EL ORIGEN — o sea
+// una caja flotando entera por encima de la piedra. Un collider derivado aparte de la malla acaba
+// separándose de ella; es el mismo argumento que llevó a extraer `TreeSkeleton`.
+struct PropBoxExtent {
+    glm::vec3 center{0.0f};   ///< centro de la caja, en el marco local del prop
+    glm::vec3 half{0.0f};     ///< semiejes
+};
+
+/** @brief Envolvente de la ROCA. El bloque principal es un blob en el ORIGEN de radio `1.1·scale`
+ *  achatado por `squashY`; los peñones sobresalen algo pero no dominan. */
+inline PropBoxExtent rockExtent(float scale = 1.0f, float squashY = 0.72f) {
+    const float mainR = 1.1f * scale;
+    return { glm::vec3(0.0f), glm::vec3(mainR, mainR * squashY, mainR) };
+}
+
+/** @brief Envolvente del CUERPO de la casa (muros; el tejado sobresale y no se colisiona aparte).
+ *  La altura varía por semilla, igual que en el bake, así que hay que pasarla. */
+inline PropBoxExtent houseExtent(int seed, float scale = 1.0f) {
+    const float w = 3.0f * scale;
+    const float h = 2.4f * scale * (0.95f + 0.10f * WhiteNode::hashFloat(0, 0, 0, (uint32_t)seed));
+    return { glm::vec3(0.0f, h * 0.5f, 0.0f), glm::vec3(w * 0.5f, h * 0.5f, w * 0.5f) };
+}
+
+/**
+ * @param cullFrac  fracción del radio principal bajo la cual un peñón se considera ENTERRADO y no
+ *                  se genera (ver la nota larga en el bucle de peñones). 0,83 = la esfera inscrita
+ *                  en el poliedro lat4×lon7, que es el valor correcto.
+ *                  **0 lo desactiva** — es la malla de referencia contra la que el banco compara.
+ *                  Valores > 1 recortan peñones VISIBLES: solo existen para la contraprueba.
+ */
+inline TreeMeshData bakeRockMesh(int seed, float scale = 1.0f, float squashY = 0.72f,
+                                 float cullFrac = 0.83f) {
     TreeMeshData m;
 
     struct Ctx {
@@ -107,7 +142,7 @@ inline TreeMeshData bakeRockMesh(int seed, float scale = 1.0f, float squashY = 0
     };
 
     // Blob principal achatado + 2-3 peñones encima/pegados → silueta irregular.
-    float mainR = 1.1f * scale;
+    const float mainR = rockExtent(scale, squashY).half.x;   // misma constante que el collider
     appendBlob(glm::vec3(0, 0, 0), mainR, squashY, rockCol);
     int nCrags = 2 + (int)(WhiteNode::hashFloat(0, 0, 0, seed) * 2.0f);   // 2..3
     for (int c = 0; c < nCrags; ++c) {
@@ -116,9 +151,33 @@ inline TreeMeshData bakeRockMesh(int seed, float scale = 1.0f, float squashY = 0
         float y   = mainR * squashY * (0.2f + WhiteNode::hashFloat(c, 3, 0, seed) * 0.6f);
         float br  = mainR * (0.30f + WhiteNode::hashFloat(c, 4, 0, seed) * 0.25f);
         glm::vec3 pos(std::cos(ang) * rad, y, std::sin(ang) * rad);
+        const float sy = squashY * (0.8f + 0.4f * WhiteNode::hashFloat(c, 6, 0, seed));
+
+        // ── PEÑONES COMPLETAMENTE ENTERRADOS: no se generan ─────────────────────────────────────
+        //
+        // Los peñones se colocan por sorteo (ángulo, radio, altura, tamaño) y una buena parte cae
+        // ENTERA dentro del blob principal: 36 vértices y 42 triángulos que no se ven desde ningún
+        // ángulo, pero que se transforman, se rasterizan y se descartan por el z-buffer en cada
+        // instancia de cada roca del mundo. Es overdraw puro.
+        //
+        // ⚠️ EL TEST NO ES CONTRA EL ELIPSOIDE, y esa es la trampa. El blob principal se teseló con
+        // lat=4 × lon=7, así que lo que se dibuja es un poliedro INSCRITO: sus caras son cuerdas que
+        // pasan por dentro del elipsoide. Un peñón "dentro del elipsoide" puede perfectamente asomar
+        // por el centro de una faceta plana. El radio seguro es el de la esfera INSCRITA en el
+        // poliedro: cos(π/7)·cos(π/8) = 0,901 · 0,924 ≈ 0,83 del radio nominal.
+        //
+        // El elipsoide se vuelve esfera dividiendo la Y por `squashY`; ahí la contención es la
+        // comparación de siempre: distancia al centro + radio del peñón ≤ radio seguro.
+        if (cullFrac > 0.0f) {
+            const glm::vec3 posS(pos.x, pos.y / squashY, pos.z);
+            const float cragMax = std::max(br, br * sy / squashY);   // semieje mayor del peñón
+            const float safeR   = mainR * cullFrac;                  // esfera inscrita en el poliedro
+            if (glm::length(posS) + cragMax <= safeR) continue;       // invisible: no se genera
+        }
+
         // Tinte sutil por peñón (misma roca, luz distinta del sol no hay en el vértice).
         glm::vec3 col = rockCol * (0.92f + 0.16f * WhiteNode::hashFloat(c, 5, 0, seed));
-        appendBlob(pos, br, squashY * (0.8f + 0.4f * WhiteNode::hashFloat(c, 6, 0, seed)), col);
+        appendBlob(pos, br, sy, col);
     }
 
     for (size_t i = 0; i < m.normals.size(); ++i) {

@@ -17,7 +17,8 @@ struct PrecipUBO {
     glm::vec4 camCell;  // xyz cámara MOD celda · w tiempo
     glm::vec4 look;     // xyz vista · w 1=nieve
     glm::vec4 tint;     // rgb color · a alcance de fundido (m)
-    glm::vec4 misc;     // x alto del viewport (px) · y 1 si hay máscara cenital · zw libre
+    glm::vec4 misc;     // x alto del viewport (px) · y 1 si hay máscara cenital
+                        // z base de la nube RESPECTO A LA CÁMARA (m, a lo largo del cénit) · w libre
     glm::mat4 skySpace; // matriz de la máscara cenital
 };
 static_assert(sizeof(PrecipUBO) == 160, "PrecipUBO std140 size mismatch");
@@ -104,7 +105,8 @@ void PrecipitationRenderer::render(const Params& p) {
     const glm::vec3 base = p.snow ? glm::vec3(0.94f, 0.95f, 0.98f) : glm::vec3(0.72f, 0.80f, 0.92f);
     u.tint    = glm::vec4(glm::mix(base, base * glm::max(p.sunColor, glm::vec3(0.18f)), 0.55f), kBoxM * 0.5f);
     const bool haveMask = RHI::valid(p.skyMask);
-    u.misc    = glm::vec4((float)glm::max(p.viewportHeightPx, 1), haveMask ? 1.0f : 0.0f, 0.0f, 0.0f);
+    u.misc    = glm::vec4((float)glm::max(p.viewportHeightPx, 1), haveMask ? 1.0f : 0.0f,
+                          p.cloudBaseRelCamM, 0.0f);
     u.skySpace = p.skySpace;
     dev->updateBuffer(m_ubo, 0, sizeof(u), &u);
 

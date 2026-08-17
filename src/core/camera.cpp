@@ -1,5 +1,6 @@
 #include "camera.h"
 #include <cmath>   // std::tan (proyección reversed-Z)
+#include "rhi/rhi_device.h"   // backend activo: la Y de Vulkan va al revés
 
 #include <SDL3/SDL.h>
 
@@ -71,6 +72,22 @@ static glm::mat4 reversedZInfinitePerspective(float fovYRadians, float aspect, f
     p[1][1] = f;
     p[2][3] = -1.0f;
     p[3][2] = zNear;
+
+    // ⚠️ EL EJE Y DE VULKAN VA AL REVÉS QUE EL DE OPENGL, y se compensa AQUÍ.
+    //
+    // En Vulkan la Y del clip apunta hacia abajo: con la proyección de GL el mundo se rasteriza
+    // espejado en vertical. La compensación "de manual" es un viewport de altura NEGATIVA, y se
+    // PROBÓ Y NO SIRVE en este motor: el viewport afecta a TODOS los pases, y un pase de
+    // post-proceso dibuja un quad a pantalla completa muestreando una textura — invertirlo espeja
+    // la imagen otra vez. Con el bloom iterando un número configurable de veces, la PARIDAD de
+    // espejados cambiaba y el frame salía derecho o del revés ALTERNANDO.
+    //
+    // Invirtiendo la proyección solo se toca lo que SE PROYECTA (la geometría 3D). Los quads a
+    // pantalla completa, que van directos en NDC, quedan intactos.
+    if (Haruka::RHI::Device* dev = Haruka::RHI::device())
+        if (dev->backend() == Haruka::RHI::Backend::Vulkan)
+            p[1][1] = -f;
+
     return p;
 }
 

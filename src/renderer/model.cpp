@@ -230,8 +230,8 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
         textureID = dev->nativeTexture(handle);
         if (outHandle) *outHandle = handle;
         if (needsFree) stbi_image_free(data);
-        std::cout << "Textura cargada correctamente: " << path << " (" << width << "x" << height
-                  << ", " << nrComponents << " canales)" << std::endl;
+        // El ÉXITO no se anuncia: cargar una textura es lo normal, y con `*0`/`*1` como nombre (las
+        // embebidas del .glb) la línea ni siquiera decía cuál era. El FALLO sí se reporta, justo abajo.
         return textureID;
     }
 

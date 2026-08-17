@@ -34,6 +34,11 @@ public:
         float      amount = 0.0f;      ///< [0,1] intensidad. 0 = no se dibuja nada.
         bool       snow = false;       ///< nieve (copo lento) en vez de lluvia (estela rápida)
         float      skyVisibility = 1.0f; ///< [0,1] cuánto cielo ve el observador (fase C). 0 = bajo techo.
+        /** @brief Altura de la BASE DE LA NUBE respecto a la cámara, en metros a lo largo del cénit
+         *  (negativa si la cámara está POR ENCIMA de las nubes). Por encima de ella no hay gotas: la
+         *  lluvia ocupa el volumen base→suelo, no un cubo centrado en el observador. El valor por
+         *  defecto es enorme a propósito — sin techo, o sea el comportamiento anterior. */
+        float      cloudBaseRelCamM = 1e9f;
         double     timeSeconds = 0.0;  ///< reloj del mundo
         int        viewportHeightPx = 1080; ///< alto del target en píxeles: fija el ancho MÍNIMO de la
                                             ///< gota (una gota real es sub-píxel y no se rasterizaría)

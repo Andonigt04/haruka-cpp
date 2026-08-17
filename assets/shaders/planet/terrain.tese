@@ -3,6 +3,11 @@
 layout(quads, fractional_odd_spacing, ccw) in;
 layout(location = 0) in vec3 ePos[]; layout(location = 1) in vec3 eColor[]; layout(location = 2) in vec3 eClimate[];
 layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
+// 1.0 = ESTA superficie es la MALLA BASE. Lo lee `biome.frag` para descartarla donde el clipmap ya
+// dibuja. Va como varying y no como uniform a propósito: un varying es por-draw por construcción,
+// mientras que un uniform compartido entre el draw de la base y el del clipmap se lo comerían los
+// dos en Vulkan (los comandos se graban y se ejecutan al final, leyendo el ULTIMO valor escrito).
+layout(location = 5) out float vSurfKind;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
     vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
@@ -20,6 +25,7 @@ layout(std140, binding = 13) uniform ClipParams {
 #include "lib/terrain_detail.glsl"
 
 void main() {
+    vSurfKind = 1.0;
     float u = gl_TessCoord.x, v = gl_TessCoord.y;
     float R = uExtra.w;                       // radio del planeta (m)
 

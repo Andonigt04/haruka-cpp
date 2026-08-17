@@ -48,6 +48,14 @@ namespace Haruka::RHI::vulkan
     // viewport dinámico (igual que GL): x/y/w/h directos, origen arriba-izquierda.
     static void setViewportCmd(VkCommandBuffer cmd, int x, int y, int w, int h)
     {
+        // ⚠️ AQUÍ NO SE INVIERTE LA Y. Se probó (altura negativa, la compensación "estándar") y
+        // ROMPE EL POST-PROCESO: un pase fullscreen dibuja un quad y muestrea una textura, así que
+        // invertir su viewport ESPEJA la imagen una vez más. Con el bloom iterando un número
+        // configurable de veces, la PARIDAD de espejados cambia y el frame sale derecho o del revés
+        // ALTERNANDO — exactamente el síntoma que se reportó.
+        //
+        // La inversión va en la PROYECCIÓN (ver `camera.cpp`), que solo afecta a la geometría 3D y
+        // deja intactos los quads a pantalla completa.
         VkViewport vp{};
         vp.x = (float)x;
         vp.y = (float)y;
@@ -85,10 +93,24 @@ namespace Haruka::RHI::vulkan
         uint32_t colorCount = 0;
         bool hasDepth = false;
 
+        // ── VARIANTE DE loadOp: LIMPIAR o CONSERVAR ─────────────────────────────────────────────
+        //
+        // ⚠️ AQUÍ ESTABA EL MUNDO NEGRO. En OpenGL, `beginRenderPass` con `clearColor=false` quiere
+        // decir "solo ata el FBO, no borres". En Vulkan el loadOp va HORNEADO en la render pass, así
+        // que con una sola variante (CLEAR) cada `begin` borraba la pantalla — y el motor abre el
+        // pase varias veces por frame (cielo → escena → props → …) esperando la semántica de GL. El
+        // cielo se dibujaba y el `begin` siguiente se lo comía. Por eso en RenderDoc cada draw salía
+        // BIEN por separado y el resultado compuesto era negro.
+        //
+        // Color y profundidad son INDEPENDIENTES: la máscara de cielo limpia profundidad y conserva
+        // color, así que hacen falta las cuatro combinaciones.
+        const int loadVariant = (c.clearColor ? 1 : 0) | (c.clearDepth ? 2 : 0);
+
         if (screen)
         {
             if (!m_dev.m_swapchain || !m_dev.m_swapchain->valid()) return;
-            pass = m_dev.m_backbufferPass;
+            pass = m_dev.m_backbufferPassVariant[loadVariant]
+                 ? m_dev.m_backbufferPassVariant[loadVariant] : m_dev.m_backbufferPass;
             fb = m_dev.m_swapchain->framebuffer(m_dev.m_currentImage);
             colorCount = 1;
             hasDepth = true;
@@ -97,7 +119,8 @@ namespace Haruka::RHI::vulkan
         }
         else if (const VKRenderTarget* rt = m_dev.renderTarget(target))
         {
-            pass = rt->renderPass;
+            pass = m_dev.renderPassFor(rt->desc, loadVariant);
+            if (!pass) pass = rt->renderPass;
             fb = rt->framebuffer;
             colorCount = (uint32_t)rt->colors.size();
             // Profundidad: o renderbuffer (depthView) o textura muestreada (depthTex; p.ej. shadow
@@ -108,6 +131,37 @@ namespace Haruka::RHI::vulkan
             m_extent = { rt->width, rt->height };
         }
         if (!pass || !fb) return;
+
+        // ⚠️ LOS ATTACHMENTS TIENEN QUE ESTAR EN EL LAYOUT QUE DECLARA LA RENDER PASS.
+        //
+        // La variante `LOAD` declara `initialLayout = COLOR_ATTACHMENT_OPTIMAL` — tiene que hacerlo,
+        // porque `UNDEFINED` autorizaría a descartar el contenido y entonces conservar no serviría
+        // de nada. Pero estas mismas texturas se MUESTREAN entre pases (el bloom hace ping-pong:
+        // escribe tex[0], lo lee, vuelve a escribirlo), y al muestrearlas quedan en
+        // `SHADER_READ_ONLY_OPTIMAL`. Abrir el pase declarando otro layout es comportamiento
+        // indefinido, y el driver entrega basura — que se ve como un FRAME FANTASMA.
+        //
+        // Se transiciona aquí, FUERA del pase (dentro sería ilegal sin self-dependency), y solo
+        // cuando de verdad se conserva algo: si se limpia, el layout de entrada da igual.
+        if (!screen && loadVariant != 3)
+        {
+            if (const VKRenderTarget* rt = m_dev.renderTarget(target))
+            {
+                for (TextureHandle th : rt->colors)
+                {
+                    VKTexture* t = m_dev.texture(th);
+                    if (!t || !t->image) continue;
+                    if (t->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) continue;
+                    transitionImage(m_dev.m_frameCmd, t->image, t->layout,
+                                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    VK_IMAGE_ASPECT_COLOR_BIT,
+                                    VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                    t->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                }
+            }
+        }
 
         // Todas las render passes del port son loadOp CLEAR → siempre hay que pasar clear values.
         std::vector<VkClearValue> clears(colorCount + (hasDepth ? 1u : 0u));
@@ -282,13 +336,50 @@ namespace Haruka::RHI::vulkan
         return s;
     }
 
+    // Vuelca TODO lo atado en un set recien estrenado. Sin esto, un set nuevo solo contiene el
+    // slot que se acaba de atar y el resto queda indefinido — ver la nota en vk_context.h.
+    void VKContext::flushShadowInto(VkDescriptorSet set)
+    {
+        if (!set) return;
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(m_shadowUbo.size() + m_shadowSsbo.size() + m_shadowTex.size());
+
+        auto addBuf = [&](const std::map<uint32_t, VkDescriptorBufferInfo>& src, VkDescriptorType ty) {
+            for (const auto& kv : src) {
+                VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+                w.dstSet = set;
+                w.dstBinding = kv.first;
+                w.dstArrayElement = 0;
+                w.descriptorCount = 1;
+                w.descriptorType = ty;
+                w.pBufferInfo = &kv.second;   // los infos viven en el map: siguen validos aqui
+                writes.push_back(w);
+            }
+        };
+        addBuf(m_shadowUbo,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER);
+        addBuf(m_shadowSsbo, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+        for (const auto& kv : m_shadowTex) {
+            VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            w.dstSet = set;
+            w.dstBinding = kv.first;
+            w.dstArrayElement = 0;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            w.pImageInfo = &kv.second;
+            writes.push_back(w);
+        }
+        if (!writes.empty())
+            vkUpdateDescriptorSets(m_dev.m_device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
+    }
+
     void VKContext::bindUniformBuffer(uint32_t slot, BufferHandle h)
     {
         const VKBuffer* b = m_dev.buffer(h);
         if (!b || !b->buffer) return;
-        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; }
+        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; flushShadowInto(m_curSet); }
         if (!m_curSet) return;
         VkDescriptorBufferInfo info{ b->buffer, 0, (VkDeviceSize)b->size };
+        m_shadowUbo[uboSlotToBinding(slot)] = info;   // estado pegajoso: se replica en cada set nuevo
         VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w.dstSet = m_curSet;
         w.dstBinding = uboSlotToBinding(slot);
@@ -303,9 +394,10 @@ namespace Haruka::RHI::vulkan
     {
         const VKBuffer* b = m_dev.buffer(h);
         if (!b || !b->buffer) return;
-        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; }
+        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; flushShadowInto(m_curSet); }
         if (!m_curSet) return;
         VkDescriptorBufferInfo info{ b->buffer, 0, (VkDeviceSize)b->size };
+        m_shadowSsbo[ssboSlotToBinding(slot)] = info;
         VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w.dstSet = m_curSet;
         w.dstBinding = ssboSlotToBinding(slot);
@@ -320,7 +412,7 @@ namespace Haruka::RHI::vulkan
     {
         VKTexture* t = m_dev.texture(th);
         if (!t || !t->view || !t->image) return;
-        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; }
+        if (!m_descDirty) { m_curSet = nextDescSet(); m_descDirty = true; flushShadowInto(m_curSet); }
         if (!m_curSet) return;
 
         // Textura nunca usada todavía (ni upload ni render): la pasamos a SHADER_READ. Un
@@ -349,6 +441,7 @@ namespace Haruka::RHI::vulkan
         if (!sampler) sampler = t->sampler;
 
         VkDescriptorImageInfo info{ sampler, t->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        m_shadowTex[textureSlotToBinding(slot)] = info;
         VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         w.dstSet = m_curSet;
         w.dstBinding = textureSlotToBinding(slot);
@@ -386,7 +479,7 @@ namespace Haruka::RHI::vulkan
 
         // Descriptor set: si no hay ninguno en curso, se pide uno; se bindea y se marca como usado
         // (la próxima escritura de binds pedirá otro set del ring).
-        if (!m_curSet) m_curSet = nextDescSet();
+        if (!m_curSet) { m_curSet = nextDescSet(); flushShadowInto(m_curSet); }
         if (m_curSet)
             vkCmdBindDescriptorSets(m_dev.m_frameCmd, m_compute ? VK_PIPELINE_BIND_POINT_COMPUTE
                                                                 : VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -436,6 +529,36 @@ namespace Haruka::RHI::vulkan
     void VKContext::dispatch(uint32_t x, uint32_t y, uint32_t z)
     {
         if (!m_hasPipeline || !m_compute) return;
+
+        // ⚠️ COMPUTE DENTRO DE UN RENDER PASS ES ILEGAL EN VULKAN, y cerraba el programa.
+        //
+        // La especificación prohíbe `vkCmdDispatch` dentro de una instancia de render pass. En
+        // OpenGL lo equivalente (`glDispatchCompute` con un FBO atado) es legal y corriente, así que
+        // el motor lo hace con naturalidad: el culling de parches del terreno se despacha entre el
+        // `beginRenderPass` de la escena y sus draws (ver `TerrestrialPlanet::render`).
+        //
+        // El síntoma NO se parecía a la causa: el proceso moría tras un `vkCmdBeginRenderPass`, y en
+        // una captura de RenderDoc los draws se veían BIEN uno a uno —porque el replay los ejecuta
+        // aislados— mientras que en ejecución real el dispositivo se perdía a mitad de frame y todo
+        // lo posterior se descartaba: pantalla negra.
+        //
+        // Aquí se rechaza y se avisa en vez de grabarlo, que es lo único correcto a este nivel: el
+        // arreglo de verdad es sacar el compute FUERA del pase en quien lo llama, porque
+        // reabrir el pase aquí volvería a limpiar los attachments (todas las render passes del port
+        // son `loadOp CLEAR`) y borraría lo ya dibujado.
+        if (m_inPass)
+        {
+            static bool warned = false;
+            if (!warned)
+            {
+                warned = true;
+                HARUKA_LOGE("RHI/VK", "vkCmdDispatch DENTRO de un render pass: ilegal en Vulkan. "
+                            "El dispatch se OMITE (antes cerraba el programa). Hay que mover el "
+                            "compute fuera del pase; en GL esto es legal y por eso el motor lo hace.");
+            }
+            return;
+        }
+
         if (!ensurePipeline()) return;
         vkCmdDispatch(m_dev.m_frameCmd, x, y, z);
     }

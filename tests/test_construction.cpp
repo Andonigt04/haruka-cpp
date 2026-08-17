@@ -287,3 +287,78 @@ void test_construction_placement() {
         }
     }
 }
+
+// ---------------------------------------------- TEST: lo que un VEHÍCULO pide de más (§3-bis)
+// Un vehículo NO es un tipo aparte: es una estructura no anclada con un propulsor. Lo único que
+// necesita del núcleo de construcción es que una fijación pueda ser MECANISMO. Se demuestra con
+// contraprueba en cada paso — sin ellas, un `rigidIsland` que devolviera siempre la componente
+// entera, o una masa que devolviera siempre 0, pasarían igual:
+//   · una puerta atornillada es parte RÍGIDA del casco; declarada mecanismo, deja de serlo;
+//   · pero SIGUE en el grafo de montaje (se sostiene por el casco y sigue estando "al lado");
+//   · la masa sale del build, y el centro de masas se DESPLAZA al añadir peso a un lado;
+//   · la distancia es por el GRAFO, no euclídea.
+void test_construction_vehicle() {
+    beginTest("construction_vehicle");
+    using namespace Haruka::Construction;
+    FlatWorld world;
+
+    // Catálogo: casco pesado (100 kg) y hoja ligera (10 kg), ambos cubos de 0.5 m de semieje.
+    std::vector<PieceType> cat;
+    { PieceType t; t.id = 1; t.halfExtents = glm::dvec3(0.5); t.mass = 100.0f; cat.push_back(t); }
+    { PieceType t; t.id = 2; t.halfExtents = glm::dvec3(0.5); t.mass = 10.0f;  cat.push_back(t); }
+    ConstructionState st; st.setCatalog(cat);
+
+    // Un casco de tres cubos en fila y una hoja de puerta al final.
+    const glm::dquat q(1, 0, 0, 0);
+    const uint64_t h0 = st.add(1, glm::dvec3(0, 0.5, 0), q, world);
+    const uint64_t h1 = st.add(1, glm::dvec3(1, 0.5, 0), q, world);
+    const uint64_t h2 = st.add(1, glm::dvec3(2, 0.5, 0), q, world);
+    const uint64_t door = st.add(2, glm::dvec3(3, 0.5, 0), q, world);
+    CHECK(st.size() == 4, "cuatro piezas colocadas");
+
+    // (1) Atornillada, la puerta es parte RÍGIDA del casco. Esto es el estado ANTES.
+    CHECK(st.rigidIsland(h0).size() == 4, "atornillada: la puerta va dentro de la isla rigida");
+    CHECK(st.jointKind(h2, door) == ConstructionState::JointKind::Rigid, "por defecto la union es rigida");
+
+    // (2) Declarada MECANISMO, deja de fundir. La contraprueba es el paso (1): la MISMA consulta
+    //     sobre las MISMAS piezas cambia de respuesta por el tipo de union, y por nada mas.
+    CHECK(st.setJointKind(h2, door, ConstructionState::JointKind::Mechanism), "se declara el mecanismo");
+    const auto island = st.rigidIsland(h0);
+    std::printf("    isla rigida del casco: %zu piezas (antes 4)\n", island.size());
+    CHECK(island.size() == 3, "la puerta YA NO es parte rigida del casco");
+    CHECK(st.rigidIsland(door).size() == 1, "y la hoja es su propia isla");
+    CHECK(st.jointKind(h2, door) == ConstructionState::JointKind::Mechanism, "la union quedo marcada");
+
+    // (3) ...pero SIGUE en el grafo de montaje: se sostiene por el casco y sigue estando al lado.
+    //     Si un mecanismo cortara tambien el grafo, la puerta se caeria sola al declararla.
+    CHECK(st.isSupported(door), "la hoja sigue sostenida por el casco");
+    CHECK(st.structureComponent(h0).size() == 4, "la ESTRUCTURA sigue siendo una sola");
+    CHECK(st.pieceDistance(h0, door) == 3, "y sigue a 3 piezas: la adyacencia cruza mecanismos");
+
+    // (4) MASA: sale del build. Y el centro de masas se desplaza al añadir peso a un lado, que es lo
+    //     que hace volcar a una fortaleza en una ladera sin programar el vuelco.
+    const auto m0 = st.islandMass(h0);
+    std::printf("    isla: %.0f kg  ·  centro de masas x=%.3f\n", m0.massKg, m0.centerOfMass.x);
+    CHECK(std::abs(m0.massKg - 300.0) < 1e-9, "3 cubos de 100 kg = 300 kg (la puerta ya no cuenta)");
+    CHECK(std::abs(m0.centerOfMass.x - 1.0) < 1e-9, "centrado en el cubo del medio");
+    // CONTRAPRUEBA: cuelga un cuarto cubo pesado en un extremo y el centro TIENE que moverse.
+    const uint64_t h3 = st.add(1, glm::dvec3(-1, 0.5, 0), q, world);
+    const auto m1 = st.islandMass(h0);
+    std::printf("    tras anadir peso en -X: %.0f kg  ·  centro x=%.3f\n", m1.massKg, m1.centerOfMass.x);
+    CHECK(std::abs(m1.massKg - 400.0) < 1e-9, "la masa sube con lo que atornillas");
+    CHECK(m1.centerOfMass.x < m0.centerOfMass.x - 0.2, "contraprueba: el centro de masas SE DESPLAZA");
+    CHECK(h3 != 0, "la pieza extra existe");
+
+    // (5) La distancia es por el GRAFO, no euclidea.
+    const auto d = st.distancesFrom(h0);
+    CHECK(d.at(h0) == 0 && d.at(h1) == 1 && d.at(h2) == 2, "distancias por saltos de pieza");
+    CHECK(st.pieceDistance(h1, h3) == 2, "h1 -> h0 -> h3 son dos saltos");
+    // CONTRAPRUEBA: una pieza suelta y lejana no esta conectada, por muy cerca que este en metros.
+    const uint64_t lone = st.add(1, glm::dvec3(40, 0.5, 0), q, world);
+    CHECK(st.pieceDistance(h0, lone) == -1, "contraprueba: sin camino de fijaciones, no hay distancia");
+
+    // (6) Al romper la pieza que sostenia el mecanismo, la hoja deja de estar sostenida.
+    st.breakPiece(h2);
+    CHECK(st.jointKind(h0, h1) == ConstructionState::JointKind::Rigid,
+          "las uniones restantes siguen siendo lo que eran");
+}

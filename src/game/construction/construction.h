@@ -17,6 +17,7 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <set>
 #include <cstdint>
 
 #include "physics/world_provider.h"
@@ -100,6 +101,53 @@ public:
     const std::vector<uint64_t>& fasteners(uint64_t pieceId) const;
     /** @brief ¿La pieza toca el TERRENO directamente? (raíz del soporte). */
     bool grounded(uint64_t pieceId) const { return m_grounded.count(pieceId) != 0; }
+    // ── MECANISMOS, MASA y DISTANCIA ────────────────────────────────────────────────────────────
+    // Lo que un VEHÍCULO necesita por encima de un edificio. No hace falta un tipo "vehículo": un
+    // vehículo es una estructura NO anclada con un propulsor, y eso lo decide el proyecto. Aquí solo
+    // vive lo que es estructura, que es lo mismo para una casa y para un acorazado terrestre.
+
+    /** @brief Qué clase de fijación une dos piezas. */
+    enum class JointKind : uint8_t {
+        Rigid,      ///< clavo/tornillo: FUNDE. Las dos piezas son el mismo cuerpo mientras aguante
+        Mechanism   ///< raíl (bisagra/deslizadera): NO funde, porque la hoja debe poder moverse
+    };
+
+    /** @brief Convierte en MECANISMO la fijación entre dos piezas ya unidas (o la crea).
+     *
+     *  ⚠️ Es el único concepto nuevo que pide un vehículo. Sin esto, una puerta atornillada al casco
+     *  sería parte RÍGIDA de él: la componente conexa se la tragaría y no podría girar. Un mecanismo
+     *  es una arista que CORTA la isla rígida pero SIGUE en el grafo de montaje (la puerta sigue
+     *  formando parte del vehículo, y sigue sosteniéndose por él).
+     *  Devuelve false si alguna de las dos piezas no existe. */
+    bool setJointKind(uint64_t a, uint64_t b, JointKind kind);
+    /** @brief Clase de la fijación entre dos piezas (Rigid si están unidas y nadie dijo otra cosa). */
+    JointKind jointKind(uint64_t a, uint64_t b) const;
+
+    /** @brief La ISLA RÍGIDA de una pieza: lo que se mueve como UN cuerpo.
+     *
+     *  Es `structureComponent` pero SIN cruzar mecanismos. La distinción es la que hace viable una
+     *  fortaleza: 20 000 piezas son 1 cuerpo de física, y solo sus puertas y torretas son cuerpos
+     *  aparte. */
+    std::vector<uint64_t> rigidIsland(uint64_t pieceId) const;
+
+    /** @brief Masa y centro de masas de una isla rígida. */
+    struct MassProps { double massKg = 0.0; glm::dvec3 centerOfMass{0.0}; };
+    /** @brief Masa total y centro de masas de la isla rígida de `pieceId`, en MUNDO.
+     *
+     *  La masa sale del BUILD, no se elige: si le atornillas blindaje, acelera menos. Y un centro de
+     *  masas alto es lo que hace VOLCAR a una fortaleza en una ladera, sin programar el vuelco. */
+    MassProps islandMass(uint64_t pieceId) const;
+
+    /** @brief Distancia EN PIEZAS desde `from`, por el grafo de montaje. `maxDepth` < 0 = sin tope.
+     *
+     *  ⚠️ Esta SÍ cruza mecanismos: un condensador colgado de una bisagra sigue estando al lado de la
+     *  cámara. La adyacencia es de MONTAJE; la rigidez es otra pregunta. Y es distancia por el GRAFO,
+     *  no euclídea: dos piezas pegadas pero unidas dando la vuelta al casco están lejos, que es justo
+     *  lo que se quiere para decidir si un condensador "oye" a la cámara. */
+    std::unordered_map<uint64_t, int> distancesFrom(uint64_t from, int maxDepth = -1) const;
+    /** @brief Distancia en piezas entre dos, o -1 si no están conectadas. */
+    int pieceDistance(uint64_t from, uint64_t to) const;
+
     /** @brief ¿La pieza se SOSTIENE? = conectada por el grafo a alguna pieza grounded. F3 corta aristas
      *  y re-pregunta esto: lo que deja de estar soportado, cae. DETERMINISTA (indep. del orden). */
     bool isSupported(uint64_t pieceId) const;
@@ -135,6 +183,9 @@ private:
     std::vector<PieceType>              m_catalog;
     std::unordered_map<uint64_t, Piece> m_pieces;
     std::unordered_map<uint64_t, std::vector<uint64_t>> m_adj;  // fijaciones (adyacencia simétrica)
+    // Aristas que son MECANISMO (no funden). Se guarda con la clave ordenada (min,max) para que la
+    // arista sea UNA sola cosa: guardarla dos veces invita a que las dos copias discrepen.
+    std::set<std::pair<uint64_t, uint64_t>> m_mechanisms;
     std::unordered_set<uint64_t>        m_grounded;             // piezas que tocan el terreno
     std::unordered_set<uint64_t>        m_protected;            // zonas protegidas (ancla irrompible)
     uint64_t                            m_nextId = 1;

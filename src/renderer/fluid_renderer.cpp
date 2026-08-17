@@ -3,6 +3,7 @@
 #include "physics/fluid/pbf_solver.h"
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
+#include "core/logger.h"
 
 namespace Haruka {
 
@@ -77,9 +78,9 @@ void FluidRenderer::bindParams(RHI::Context* ctx) {
     ctx->bindUniformBuffer(8, m_uboParams);
 }
 
-void FluidRenderer::ensureTargets(int w, int h) {
-    if (RHI::valid(m_depthPass) && m_fbW == w && m_fbH == h) return;
-    m_fbW = w; m_fbH = h;
+void FluidRenderer::ensureTargets(int w, int h, RHI::Format srcDepthFmt) {
+    if (RHI::valid(m_depthPass) && m_fbW == w && m_fbH == h && m_depthFmt == srcDepthFmt) return;
+    m_fbW = w; m_fbH = h; m_depthFmt = srcDepthFmt;
 
     RHI::Device* dev = RHI::device();
     if (!dev) return;
@@ -89,7 +90,11 @@ void FluidRenderer::ensureTargets(int w, int h) {
     RHI::RenderTargetDesc dep;
     dep.width = w; dep.height = h; dep.colorFormats = { RHI::Format::R32F };
     dep.colorFilter = RHI::Filter::Nearest; dep.hasDepth = true;
-    dep.depthFormat = RHI::Format::D32F;
+    // ⚠️ EL FORMATO LO DICTA LA FUENTE DEL BLIT, no este bloque: `blitDepth` exige formatos
+    // IDÉNTICOS, y cuando la escena va al BACKBUFFER su profundidad la elige SDL, no el motor.
+    // Con D32F fijo aquí, GL rechazaba el blit (`Depth formats do not match`) y las gotas ocluían
+    // contra una profundidad sin escribir. Misma causa que tenía el pase de nubes.
+    dep.depthFormat = srcDepthFmt;
     m_depthPass = dev->createRenderTarget(dep);
 
     for (int i = 0; i < 2; ++i) {
@@ -122,9 +127,22 @@ void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
     ensureGL();
 
     const int n = m_solver->count();
+    // ⚠️ EL SISTEMA DE FLUIDOS TIENE DOS RENDERERS, y confundirlos ya costó una vuelta entera:
+    // `HARUKA_NOLAMINA` apaga la lámina de ríos/lagos (ShallowWaterRenderer) y NO toca éste. Éste
+    // compone una SUPERFICIE LÍQUIDA en espacio de pantalla a partir de las partículas PBF, así que
+    // también se ve como "agua" — y como las partículas viven en el parche que sigue al jugador, se
+    // ve en un cuadrado. Se avisa la primera vez que dibuja, con cuántas partículas, para que
+    // "quién pinta el agua" no haya que deducirlo. Lo apaga `HARUKA_NO_FLUID=1`.
+    static bool s_logged = false;
+    if (!s_logged) {
+        s_logged = true;
+        HARUKA_LOGI("Fluid", "superficie PBF DIBUJANDO: %d partículas (modo %s) — es el OTRO renderer "
+                             "del fluido; lo apaga HARUKA_NO_FLUID, no HARUKA_NOLAMINA",
+                    n, m_surfaceMode ? "superficie en pantalla" : "esferas");
+    }
     uploadParticles(cameraPos, n);
 
-    if (s_surfaceMode) renderSurface(n, vpW, vpH, scenePass);
+    if (m_surfaceMode) renderSurface(n, vpW, vpH, scenePass);
     else               renderSpheres(n, (float)vpH);
 }
 
@@ -141,7 +159,10 @@ void FluidRenderer::renderSpheres(int n, float vpH) {
 }
 
 void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle scenePass) {
-    ensureTargets(w, h);
+    // La escena puede estar en el backbuffer (`scenePass` inválido) o en el target de post: el
+    // formato de profundidad de la copia tiene que seguir a ESA fuente.
+    ensureTargets(w, h, RHI::valid(scenePass) ? RHI::Format::D32F
+                                              : RHI::device()->backbufferDepthFormat());
     if (!RHI::valid(m_depthPass)) return;
     if (n <= 0) return;
 

@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cstddef>   // offsetof
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,8 @@
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_resources.h"
+#include "core/logger.h"
+#include "renderer/shader.h"   // Shader::baseDir() para los shaders del banco
 
 #include <SDL3/SDL.h>
 
@@ -84,6 +87,49 @@ static std::vector<uint8_t> makePixels(int w, int h)
 }
 
 static Device* g_dev = nullptr;
+
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// RAÍZ DE ASSETS: se BUSCA, no se supone.
+//
+// ⚠️ Los shaders se resolvían contra el DIRECTORIO DE TRABAJO, así que el banco pasaba lanzado
+// desde `build/bin` y fallaba desde `build` — con cuatro pipelines sin crear y dos tests en rojo
+// que no tenían nada que ver con el código. Un test que da un resultado distinto según desde dónde
+// lo llames no mide el motor, mide el `cd`.
+//
+// Se prueban las rutas plausibles (junto al ejecutable y relativas al cwd) y se fija la base con
+// `Shader::setBaseDir`, que es la que consume todo el motor.
+static bool locateAssets()
+{
+    auto exists = [](const std::string& f) {
+        std::FILE* h = std::fopen(f.c_str(), "rb");
+        if (h) { std::fclose(h); return true; }
+        return false;
+    };
+    // Un fichero del propio banco sirve de testigo: si está, la raíz es buena.
+    const char* kWitness = "shaders/rhitest_fullscreen.vert";
+
+    std::vector<std::string> cands;
+    if (const char* bp = SDL_GetBasePath()) {
+        cands.push_back(std::string(bp) + "assets/");
+        cands.push_back(std::string(bp) + "bin/assets/");
+        cands.push_back(std::string(bp) + "../bin/assets/");
+    }
+    cands.push_back("assets/");
+    cands.push_back("bin/assets/");
+    cands.push_back("../bin/assets/");
+    cands.push_back("../assets/");
+
+    for (const std::string& c : cands) {
+        if (!exists(c + kWitness)) continue;
+        Haruka::Shader::setBaseDir(c.c_str());
+        std::printf("== assets: %s ==\n", c.c_str());
+        return true;
+    }
+    std::printf("[FAIL] no encuentro los assets (probadas %zu rutas). "
+                "Compila con `./build.sh` para que se desplieguen.\n", cands.size());
+    return false;
+}
 
 static void testTextureFormats()
 {
@@ -265,6 +311,340 @@ static void testFrameCycle()
     CHECK(true, "frame completo (present OK)");
 }
 
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ESTADO DE BINDINGS ENTRE DRAWS Y ENTRE PIPELINES
+//
+// Lo que audita, y por qué existe: en OpenGL los bindings son ESTADO PEGAJOSO — atas el UBO 0 y
+// sigue ahí hasta que lo cambies. El motor entero está escrito con esa semántica. En Vulkan un
+// descriptor set es una TABLA COMPLETA, y el backend consume un set nuevo del ring en cada batch de
+// binds: sin cuidado, el segundo draw ve un set con basura.
+//
+// Ocurrió de verdad: los draws de escena acababan leyendo el UBO del planeta (176 B) como si fuera
+// `PerFrameData` (240 B) → `view`/`projection` basura → pantalla NEGRA. Y ninguno de los tests de
+// este banco lo cazó, porque todos probaban piezas AISLADAS y el fallo era de encadenado.
+//
+// CONTRAPRUEBA incluida: se dibuja primero con un color y luego con otro y se comprueba que el
+// píxel CAMBIA. Sin eso, "sale rojo" podría ser una casualidad de un framebuffer sin tocar.
+static void testBindingPersistence()
+{
+    BEGIN("bindings: persisten entre draws y entre pipelines");
+
+    const std::string base = Haruka::Shader::baseDir();
+    PipelineDesc pd;
+    const std::string vs = base + "shaders/rhitest_fullscreen.vert";
+    const std::string fs = base + "shaders/rhitest_solid.frag";
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.topology     = PrimitiveTopology::Triangles;
+    pd.depth.test   = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull         = CullMode::None;
+
+    PipelineHandle p1 = g_dev->createPipeline(pd);
+    PipelineHandle p2 = g_dev->createPipeline(pd);   // otro objeto: fuerza cambio de pipeline
+    CHECK(valid(p1) && valid(p2), "pipelines de prueba creados");
+    if (!valid(p1) || !valid(p2)) return;
+
+    // Dibuja llenando la pantalla con el color del UBO y devuelve el pixel central.
+    auto drawAndRead = [&](const float rgba[4], bool twoDraws, unsigned char out[4]) {
+        BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, 16, rgba, BufferMemory::Dynamic);
+
+        // ⚠️ CUÁNDO SE LEE DEPENDE DEL BACKEND, y equivocarse da un test que MIENTE.
+        //
+        // En OpenGL, tras el swap el back buffer queda INDEFINIDO: leer después de presentar
+        // devuelve un frame viejo o negro, y encima NO de forma reproducible — dos ejecuciones
+        // seguidas fallaban en casos distintos, y llegué a acusar al backend de GL de perder el UBO
+        // cuando el fallo era del test. En Vulkan es al revés: `readPixels` copia la última imagen
+        // PRESENTADA, así que hay que leer DESPUÉS del present.
+        //
+        // Así que cada uno lee en su momento. Un test que da resultados distintos entre corridas no
+        // sirve para nada: es peor que no tenerlo, porque acusa a inocentes.
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+        Context* c = g_dev->beginFrame();
+        if (!c) { g_dev->destroy(ubo); return false; }
+        ClearValues cv;
+        cv.clearColor = true;
+        cv.color[0] = 0.0f; cv.color[1] = 0.0f; cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(p1);
+        c->bindUniformBuffer(0, ubo);
+        c->draw(3);
+        if (twoDraws) {
+            // EL PUNTO DEL TEST: cambia de pipeline y vuelve a dibujar SIN reatar el UBO. En GL es
+            // lo normal; en Vulkan obliga a que el backend replique el estado en el set nuevo.
+            c->bindPipeline(p2);
+            c->draw(3);
+        }
+        c->endRenderPass();
+
+        std::memset(out, 0, 4);
+        if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);   // GL: antes del swap
+        g_dev->endFrame();
+        if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);   // VK: ya presentada
+        g_dev->destroy(ubo);
+        return true;
+    };
+
+    const float red[4]  = { 1.0f, 0.0f, 0.0f, 1.0f };
+    const float blue[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
+    unsigned char px[4] = {};
+
+    if (drawAndRead(red, false, px)) {
+        const bool isRed = px[0] > 200 && px[1] < 60 && px[2] < 60;
+        std::printf("    un solo draw (rojo): pixel = (%d,%d,%d)\n", px[0], px[1], px[2]);
+        CHECK(isRed, "un draw con su UBO atado pinta el color del UBO");
+    }
+
+    // CONTRAPRUEBA: con otro color el pixel tiene que CAMBIAR. Si no, la lectura no mide nada.
+    unsigned char pxB[4] = {};
+    if (drawAndRead(blue, false, pxB)) {
+        std::printf("    CONTRAPRUEBA, mismo camino en azul: pixel = (%d,%d,%d)\n",
+                    pxB[0], pxB[1], pxB[2]);
+        CHECK(pxB[2] > 200 && pxB[0] < 60, "CONTRAPRUEBA: cambiar el UBO cambia el pixel");
+    }
+
+    // EL CASO QUE FALLABA: segundo draw, pipeline distinto, sin reatar nada.
+    unsigned char px2[4] = {};
+    if (drawAndRead(red, true, px2)) {
+        const bool isRed = px2[0] > 200 && px2[1] < 60 && px2[2] < 60;
+        std::printf("    dos draws, pipeline distinto, SIN reatar: pixel = (%d,%d,%d)\n",
+                    px2[0], px2[1], px2[2]);
+        CHECK(isRed, "el 2o draw sigue viendo el UBO atado antes del 1o");
+    }
+
+    g_dev->destroy(p1);
+    g_dev->destroy(p2);
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// UN DISPATCH DENTRO DE UN RENDER PASS NO PUEDE MATAR EL DISPOSITIVO
+//
+// `vkCmdDispatch` dentro de una instancia de render pass es ILEGAL en Vulkan. En OpenGL el
+// equivalente es legal y corriente, así que el motor lo hacía con naturalidad: el culling de
+// parches del terreno se despachaba dentro del pase de escena. Cerraba el programa, y el síntoma no
+// se parecía a la causa — en una captura de RenderDoc los draws salían bien uno a uno, porque el
+// replay los ejecuta aislados.
+//
+// El motor ya no lo hace (`TerrestrialPlanet::prepare` lo saca fuera del pase). Esto fija el
+// CONTRATO del RHI: si alguien vuelve a colarlo, que falle el test y no la GPU.
+static void testDispatchInsideRenderPass()
+{
+    BEGIN("compute: dispatch dentro de un render pass no tumba el device");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string cs = base + "shaders/rhitest_noop.comp";
+    PipelineDesc pd;
+    pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de compute creado");
+    if (!valid(cp)) return;
+
+    uint32_t zero[4] = { 0, 0, 0, 0 };
+    BufferHandle ssbo = g_dev->createBuffer(BufferUsage::Storage, sizeof(zero), zero,
+                                            BufferMemory::Dynamic);
+
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(cp);
+        c->bindStorageBuffer(0, ssbo);
+        // El dispatch de abajo es ILEGAL A PROPÓSITO, así que la guarda del RHI va a gritar. Se
+        // silencia el log SOLO durante esa llamada: un banco en verde que imprime una línea roja
+        // hace dudar de un resultado bueno, y este error es el test funcionando, no fallando.
+        std::printf("    (se provoca un dispatch ilegal a proposito; el log se silencia)\n");
+        std::fflush(stdout);
+        const Haruka::LogLevel prevLevel = Haruka::getLogLevel();
+        Haruka::setLogLevel(Haruka::LogLevel::None);
+        c->dispatch(4, 1, 1);       // ILEGAL en Vulkan: el backend debe rechazarlo, no grabarlo
+        Haruka::setLogLevel(prevLevel);
+        c->endRenderPass();
+        g_dev->endFrame();
+    }
+    CHECK(true, "el dispatch ilegal no ha abortado el proceso");
+
+    // Lo que de verdad importa: el dispositivo SIGUE VIVO. Antes se perdía (VK_ERROR_DEVICE_LOST) y
+    // todo lo posterior del frame se descartaba — la pantalla negra.
+    bool aliveAfter = false;
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->endRenderPass();
+        g_dev->endFrame();
+        aliveAfter = true;
+    }
+    CHECK(aliveAfter, "el device sigue vivo: se completa un frame despues");
+
+    g_dev->destroy(ssbo);
+    g_dev->destroy(cp);
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// CONTENIDO DE TEXTURA: que los píxeles subidos LLEGUEN al shader.
+//
+// El banco probaba que las texturas se CREAN por formato. Eso no es lo mismo: una textura puede
+// crearse bien y llegar EN BLANCO al shader. Es lo que se sospecha en Vulkan — los props del mundo
+// salen casi blancos mientras en OpenGL tienen su corteza marrón y su copa verde, con la máscara de
+// material diciendo correctamente que hay textura.
+//
+// Se sube una textura de 2x2 con cuatro colores distintos, se muestrea un texel concreto y se lee el
+// píxel. CON CONTRAPRUEBA: muestrear OTRO texel tiene que dar OTRO color, o el test no mide nada.
+static void testTextureContent()
+{
+    BEGIN("textura: el contenido subido llega al shader");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/rhitest_fullscreen.vert";
+    const std::string fs = base + "shaders/rhitest_tex.frag";
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.topology     = PrimitiveTopology::Triangles;
+    pd.depth.test   = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull         = CullMode::None;
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    CHECK(valid(pipe), "pipeline de muestreo creado");
+    if (!valid(pipe)) return;
+
+    // 2x2 RGBA8: rojo, verde, azul, amarillo (orden de filas: abajo-izq primero en GL).
+    const unsigned char px[16] = {
+        255,0,0,255,    0,255,0,255,
+        0,0,255,255,    255,255,0,255
+    };
+    TextureDesc td;
+    td.width = 2; td.height = 2;
+    td.format = Format::RGBA8;
+    td.filter = Filter::Nearest;      // sin filtrado: cada muestra es UN texel exacto
+    td.wrap   = Wrap::ClampToEdge;
+    td.initialData = px;
+    TextureHandle tex = g_dev->createTexture(td);
+    CHECK(valid(tex), "textura 2x2 creada con datos");
+    if (!valid(tex)) { g_dev->destroy(pipe); return; }
+
+    auto sampleAt = [&](float u, float v, unsigned char out[4]) {
+        const float uv[4] = { u, v, 0.0f, 0.0f };
+        BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, 16, uv, BufferMemory::Dynamic);
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+        Context* c = g_dev->beginFrame();
+        if (!c) { g_dev->destroy(ubo); return false; }
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(pipe);
+        c->bindUniformBuffer(0, ubo);
+        c->bindTexture(0, tex);
+        c->draw(3);
+        c->endRenderPass();
+        std::memset(out, 0, 4);
+        if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+        g_dev->endFrame();
+        if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+        g_dev->destroy(ubo);
+        return true;
+    };
+
+    unsigned char a[4] = {}, b[4] = {};
+    const bool okA = sampleAt(0.25f, 0.25f, a);
+    const bool okB = sampleAt(0.75f, 0.25f, b);
+    if (okA && okB) {
+        std::printf("    texel (0.25,0.25) = (%d,%d,%d) · texel (0.75,0.25) = (%d,%d,%d)\n",
+                    a[0], a[1], a[2], b[0], b[1], b[2]);
+        // Lo que se exige: los texels tienen COLOR (no blanco ni negro) y son DISTINTOS entre sí.
+        auto isWhite = [](const unsigned char* p) { return p[0] > 200 && p[1] > 200 && p[2] > 200; };
+        auto isBlack = [](const unsigned char* p) { return p[0] < 30 && p[1] < 30 && p[2] < 30; };
+        CHECK(!isWhite(a) && !isWhite(b), "el contenido NO llega en blanco");
+        CHECK(!isBlack(a) && !isBlack(b), "el contenido NO llega en negro");
+        // CONTRAPRUEBA: dos texels distintos dan colores distintos. Sin esto, "no es blanco" podría
+        // cumplirse con una textura uniforme cualquiera.
+        const bool differ = (a[0] != b[0]) || (a[1] != b[1]) || (a[2] != b[2]);
+        CHECK(differ, "CONTRAPRUEBA: dos texels distintos dan colores distintos");
+    }
+
+    g_dev->destroy(tex);
+    g_dev->destroy(pipe);
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// ATRIBUTO DE VÉRTICE QUE NO ES LA POSICIÓN
+//
+// Los props sacan su color del COLOR POR VÉRTICE (`baseColor = Color` en prop_inst.frag), y en
+// Vulkan salían casi BLANCOS con las texturas correctas y la máscara de material bien puesta. Si un
+// atributo distinto de la posición no llega, el color por vértice sería (0,0,0) o basura y el
+// resultado, blanco o negro. Esto lo aísla: un triángulo con color por vértice y lectura del píxel.
+static void testVertexColor()
+{
+    BEGIN("vertice: un atributo que no es la posicion llega al fragment");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/rhitest_vcolor.vert";
+    const std::string fs = base + "shaders/rhitest_vcolor.frag";
+
+    struct V { float px, py, pz; float r, g, b; };
+    // Triángulo que cubre la pantalla, los tres vértices del MISMO color: así el centro es ese color
+    // exacto y no hay que razonar sobre la interpolación.
+    const V verts[3] = {
+        { -1.0f, -1.0f, 0.0f,  0.2f, 0.6f, 0.9f },
+        {  3.0f, -1.0f, 0.0f,  0.2f, 0.6f, 0.9f },
+        { -1.0f,  3.0f, 0.0f,  0.2f, 0.6f, 0.9f },
+    };
+
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)sizeof(V) };
+    pd.vertexLayout.attributes = {
+        { 0, (uint32_t)offsetof(V, px), Format::RGB32F, 0 },
+        { 2, (uint32_t)offsetof(V, r),  Format::RGB32F, 0 },   // location 2, como los props
+    };
+    pd.topology     = PrimitiveTopology::Triangles;
+    pd.depth.test   = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull         = CullMode::None;
+
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    BufferHandle   vb   = g_dev->createBuffer(BufferUsage::Vertex, sizeof(verts), verts);
+    CHECK(valid(pipe) && valid(vb), "pipeline y vertex buffer de color por vertice");
+    if (!valid(pipe) || !valid(vb)) return;
+
+    unsigned char out[4] = {};
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(pipe);
+        c->bindVertexBuffer(vb);
+        c->draw(3);
+        c->endRenderPass();
+        if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+        g_dev->endFrame();
+        if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+
+        std::printf("    color por vertice (0.2,0.6,0.9) -> pixel (%d,%d,%d) [esperado ~(51,153,229)]\n",
+                    out[0], out[1], out[2]);
+        // Se admite holgura por si hay conversión sRGB en el camino; lo que se exige es que el color
+        // sea RECONOCIBLE y que NO sea blanco ni negro.
+        const bool notWhite = !(out[0] > 230 && out[1] > 230 && out[2] > 230);
+        const bool notBlack = !(out[0] < 20 && out[1] < 20 && out[2] < 20);
+        const bool ordered  = (out[2] > out[1]) && (out[1] > out[0]);   // b > g > r, como el color
+        CHECK(notWhite, "el color por vertice NO llega en blanco");
+        CHECK(notBlack, "el color por vertice NO llega en negro");
+        CHECK(ordered,  "el color por vertice llega con sus componentes en el orden correcto");
+    }
+
+    g_dev->destroy(vb);
+    g_dev->destroy(pipe);
+}
+
 static int runBackend(Backend backend)
 {
     const char* name = (backend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
@@ -309,6 +689,10 @@ static int runBackend(Backend backend)
     testRenderTargets();
     testArrayAndCube();
     testFrameCycle();
+    testBindingPersistence();
+    testDispatchInsideRenderPass();
+    testTextureContent();
+    testVertexColor();
 
     setDevice(nullptr);
     dev.reset();
@@ -323,6 +707,8 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "uso: haruka_tests_rhi [gl|vk|all]\n");
         return 2;
     }
+
+    if (!locateAssets()) { std::printf("\n== 0 OK · 1 FALLOS ==\n"); return 1; }
 
     if (run == "gl" || run == "all") runBackend(Backend::OpenGL);
     if (run == "vk" || run == "all") runBackend(Backend::Vulkan);

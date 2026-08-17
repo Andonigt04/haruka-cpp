@@ -89,6 +89,47 @@ la esfera de agua, que es lo que descartó la primera.
 
 Todo esto tiene los tests en verde y **nadie lo ha visto funcionando**. No es lo mismo.
 
+### ⚠️ Clipmap por ANILLOS ANIDADOS (2026-08-14) — cambia lo que se ve al subir
+
+El clipmap era **una rejilla estirada** por `clipScale = 2^k` según la altura: cubría más, pero
+gruesa POR TODAS PARTES, así que a 640 m el suelo bajo los pies pasaba a quads de 128 m. Ahora se
+dibujan **varios anillos concéntricos** (nivel r: quad `4·2^r` m, alcance `±1,9·2^r` km), cada uno
+con el centro hueco donde vive el de dentro. Un draw por anillo, el mismo buffer de vértices, **un
+ClipParams por anillo** (buffers distintos: con uno solo, en Vulkan todos los anillos leerían el
+último — el fallo del UBO de material y del buffer de instancias, por tercera vez).
+
+Verificado en test (`terrain_lod_invariants`, con contraprueba): el quad coincide **exacto** a los
+dos lados de las 5 fronteras, y sin el redondeo a potencia de dos no coincidiría. Medido: a 640 m de
+altura el quad mejora **32×** a 100 m, **8×** a 3 km, **2×** a 10 km y **queda igual** a 30-63 km.
+
+- [ ] **QUE NO HAYA RENDIJAS.** Es el riesgo #1 y el test solo cubre la frontera *exacta*. Subir
+  despacio de 20 m a 2,5 km mirando al horizonte: si aparece un círculo de puntos de cielo alrededor,
+  son T-junctions. `HARUKA_NEAR_RING=0` descarta que sea el anillo de colisión.
+- [ ] **Que ya no aparezca "una capa nueva muy cerca" al subir**, que es el síntoma que originó esto.
+- [ ] **Qué cuesta.** `planet.clipmap.draw` en el profiler, a ras de suelo y a 640 m. A ras de suelo
+  tiene que ser **idéntico** al de antes (1 solo anillo, k=0); si sube, el cambio toca donde no debía.
+  A 640 m son 6 draws: cota alta 4 641 parches contra 961. **Sin medir todavía.**
+- [ ] **El solape de 64·2^r m** entre anillos (el descarte es por parche entero, así que el de fuera
+  empieza un poco antes). Deberían ser dos superficies idénticas superpuestas → invisible. Si se ve
+  un anillo más oscuro o parpadeando, es z-fighting y hace falta sesgo por nivel.
+- [ ] **Que el agua y la malla base sigan casando** en el borde exterior: el recorte de la base ahora
+  lee la cobertura del anillo EXTERIOR, no la de una rejilla estirada.
+
+### ⚠️ Peñones enterrados de la roca (2026-08-14) — el ahorro es MUCHO menor de lo que dije
+
+`bakeRockMesh` ya no genera los peñones que caen enteros dentro del blob principal. El test
+`rock_interior` lo comprueba por **rayos** (629 200 rayos desde 26 direcciones: 0 ven la diferencia)
+y trae contraprueba (recortando lo visible, sí se nota).
+
+⚠️ **Corrección de una cifra mía**: dije "62 % de los crags son interiores". **Es falso.** Medido de
+verdad sobre 200 semillas: **1,4 % de triángulos** (29 820 → 29 400). La diferencia está en que el
+test correcto no es contra el elipsoide sino contra el **poliedro inscrito** (lat 4 × lon 7 → radio
+seguro 0,83·R): con el criterio ingenuo se recortarían un 11 % de triángulos, pero 135 rayos ven la
+diferencia — o sea que asomarían por las facetas planas. El cambio es correcto y gratis, pero **no
+es una optimización que se vaya a notar**; no merece más tiempo.
+
+- [ ] Nada que mirar en pantalla: la afirmación es justo que no se ve. Si se viera, es un bug.
+
 ### ⚠️ Terreno v4 (clipmap) — qué se lleva por delante el cambio del 2026-08-06
 
 El v4 sustituye el streaming por chunks por un **clipmap con teselación hardware**
@@ -124,45 +165,76 @@ Lo que hay que confirmar antes de tocar el README, porque el documento sigue des
 > Un aviso de "en reescritura, cifras pendientes de re-medir" suma credibilidad; una cifra que el
 > código contradice la destruye.
 
-### 🔴 VULKAN: la UI se dibuja, el MUNDO 3D no (medido 2026-08-12)
+### ✅ RESUELTO: "con RenderDoc y el backend en Vulkan carga OpenGL" (2026-08-12)
 
-Ya no es "no se ve bien": está acotado. `HARUKA_BACKEND=vulkan HARUKA_SHOT_AFTER=45,x.png` da una
-captura donde **el HUD de ImGui sale perfecto** (hotbar, paneles, barras de estado) y **la escena 3D
-es negro con ruido de sal**. O sea: instancia, dispositivo, swapchain, descriptores, SPIR-V y el
-render de ImGui funcionan; lo que no llega al backbuffer es la escena.
+No elegía OpenGL: **fallaba la creación de la ventana** y el motor abortaba. El mensaje era mudo
+(`Failed to initialize Window system`) porque `Window::init` hacía `if (!m_window) return false;`
+sin registrar `SDL_GetError()`. Con eso puesto, la causa sale en una línea:
 
-Lo que el log DESCARTA (no hace falta volver a mirarlo):
-- Vulkan arranca sin fallback, elige la RTX 3050, y **todos** los pipelines dan `ok` — incluidos
-  clipmap, teselado, culling por compute, sombras de props y el pase volumétrico de nubes.
-- Ni un error de SPIR-V, ni de validación. `glslangValidator` 11:16.2.0 presente.
-- El motor funciona: paridad de terreno, física, props y anillo cercano dan valores normales.
+    [SDL] ventana VULKAN no creada: Installed Vulkan doesn't implement
+                                    the VK_KHR_wayland_surface extension
 
-- [ ] **Encontrar por qué la escena no llega al backbuffer.** El ruido de sal apunta a un color
-  attachment que nadie limpia ni escribe. Primer sitio a mirar: si los pases de escena dibujan a un
-  render target offscreen (`_postScene`) que en Vulkan nunca se compone al swapchain — ImGui sí
-  dibuja directo al backbuffer, que es justo lo único que se ve.
-- [ ] **Vulkan sale solo a los 60 s EXACTOS** (dos ejecuciones), sin error y por el camino de apagado
-  limpio; OpenGL pasa de 75 s sin inmutarse. Número redondo = temporizador, no fallo. Sin localizar.
+**RenderDoc no soporta superficies Wayland.** Al inyectar su capa, la instancia deja de anunciar
+`VK_KHR_wayland_surface` y SDL no puede crear una ventana Vulkan. No es un fallo del motor.
 
-✅ **Arreglado de paso: la captura de pantalla en Vulkan.** Daba negro absoluto (0,0,0,0) y eso
-ocultaba el bug de verdad — parecía que no se renderizaba nada. Eran TRES fallos apilados en
-`VKDevice::readPixels`, ninguno relacionado con el render:
-1. `m_swapchain->image(0)` — imagen 0 **cableada**, no la que se estaba usando.
-2. `oldLayout = VK_IMAGE_LAYOUT_UNDEFINED` — transicionar desde `UNDEFINED` **autoriza al driver a
-   descartar el contenido**; la barrera tiraba el frame justo antes de copiarlo.
-3. Leía la imagen del frame EN CURSO, cuyo command buffer sigue abierto y sin enviar cuando se llama
-   a `readPixels` (la captura ocurre a mitad de frame). Ahora se copia la última PRESENTADA.
-4. Y la copia usaba el tamaño de VENTANA en vez del del swapchain: con `e` obtenido y sin usar,
-   pedía una región fuera de la imagen → **`VK_ERROR_DEVICE_LOST`**, no un error de validación.
+**Solución, verificada:** lanzar con `SDL_VIDEODRIVER=x11` (XWayland, que RenderDoc sí soporta).
+Comprobado con `SDL_VIDEODRIVER=x11 renderdoccmd capture -d out ./survival` → *"Backend activo:
+Vulkan (solicitado, sin fallback)"*. En la GUI de RenderDoc se pone en las variables de entorno de
+la configuración de lanzamiento, junto con `HARUKA_BACKEND=vulkan` para no depender del ajuste.
 
-⚠️ Efecto secundario a saber: la captura de Vulkan va **un frame por detrás** y por tanto **incluye
-el HUD**, mientras que la de OpenGL es limpia (se toma a mitad de frame, antes de ImGui). Para
-comparar backends píxel a píxel habría que igualar eso.
+⚠️ Descartado por medida, para no repetirlo: **NO es el directorio de trabajo**. Se probó lanzando
+desde `/tmp` con el ajuste en Vulkan y arranca Vulkan igual — el `imgui.ini` se encuentra de todas
+formas, pese a que la ruta sea relativa.
 
-**Herramientas nuevas** (las dos hacían falta para poder medir esto):
-- `HARUKA_BACKEND=vulkan|opengl` — fuerza el backend sin tocar `imgui.ini` ni reiniciar ajustes.
-- `HARUKA_SHOT_AFTER=<segundos>[,ruta.png]` — espera, captura un frame y sale. Con lo anterior, da
-  dos PNG comparables del mismo escenario.
+### ✅ VULKAN RENDERIZA (2026-08-12). Nueve bugs, y ocho eran OpenGL asumido
+
+Punto de partida: bajo RenderDoc no arrancaba, y arrancando por su cuenta la UI se dibujaba pero el
+MUNDO 3D salía negro. Al final del día: cielo con degradado y sol, terreno TESELADO con relieve
+(`quad a los pies = 4.0 m`, idéntico a OpenGL), props con material, HUD, ~5 ms de
+`renderFrameContent`, 0 errores de validación.
+
+⚠️ **EL PATRÓN, que es lo reutilizable**: ninguno era "Vulkan roto" ni el backend mal escrito. En
+todos, el motor daba por buena una semántica de OpenGL que Vulkan no comparte. Cuando aparezca el
+próximo síntoma raro en Vulkan, ESA es la primera pregunta: *¿qué está asumiendo de GL?*
+
+| Síntoma | Causa | Dónde |
+|---|---|---|
+| Con RenderDoc "carga OpenGL" | RenderDoc no soporta superficies Wayland → la ventana Vulkan no se crea y el motor abortaba. Reintento automático en x11 (XWayland) | `core/window.cpp` |
+| Captura en negro absoluto | 4 fallos: `image(0)` cableada · `oldLayout=UNDEFINED` (autoriza a DESCARTAR) · leía el frame EN CURSO · copia con tamaño de ventana → `DEVICE_LOST` | `vk_device.cpp` |
+| Colores intercambiados | swapchain `B8G8R8A8`, el llamador pide RGBA | `vk_device.cpp` |
+| Manchas blancas | bindings de GL son PEGAJOSOS; un descriptor set es una TABLA. Sombra de estado que se vuelca en cada set nuevo | `vk_context.cpp` |
+| **Cerraba el programa** | `vkCmdDispatch` DENTRO de un render pass es ilegal (en GL es normal). Compute movido a `TerrestrialPlanet::prepare`, antes de abrir el pase | `game/planet.cpp` |
+| **MUNDO NEGRO** | el `loadOp` va HORNEADO en la render pass: `clearColor=false` limpiaba a negro igual, y el motor reabre el pase varias veces por frame → cada `begin` borraba lo anterior. 4 variantes por `(clearColor, clearDepth)` | `vk_device/vk_context` |
+| Frame fantasma | la variante LOAD declara `initialLayout=COLOR_ATTACHMENT`, pero esas texturas venían de ser MUESTREADAS. Transición antes de abrir el pase | `vk_context.cpp` |
+| Imagen repetida ×3 | el resize tomaba el tamaño LÓGICO; el swapchain usa PÍXELES | `application.cpp`, `window.cpp` |
+| **TERRENO EN EL CIELO** | origen del dominio de teselación: GL `lower-left`, Vulkan `upper-left` → `gl_TessCoord.y` invertido. Solo afecta a lo teselado | `vk_pipeline.cpp` |
+| Props grises | un sampler sin atar en GL lee negro; en Vulkan el descriptor es INDEFINIDO. Textura blanca 1x1 de relleno en todos los slots | `application_render.cpp` |
+
+**Eje Y — se probó DOS veces y solo la segunda forma es la correcta.** La compensación estándar
+(altura de viewport NEGATIVA) **no sirve aquí**: afecta a TODOS los pases, y un pase de post-proceso
+dibuja un quad fullscreen muestreando una textura, así que lo espeja otra vez. Con el bloom iterando
+un número configurable de veces, la PARIDAD de espejados cambiaba y el frame salía derecho o del
+revés ALTERNANDO. Va en la PROYECCIÓN (`camera.cpp`: `p[1][1] = -f`), que solo toca lo que se
+proyecta y deja intactos los quads en NDC.
+
+⚠️ **Y la trampa de método que costó una hora**: la inversión de Y se descartó al principio porque
+"no cambiaba nada" — no cambiaba nada porque el mundo estaba NEGRO por el `loadOp`. **No se puede
+refutar una hipótesis sobre una imagen en la que no se ve nada.**
+
+**Herramientas nuevas** (sin ellas nada de esto era medible):
+- `HARUKA_BACKEND=vulkan|opengl` — fuerza el backend sin tocar `imgui.ini`. ⚠️ Se aplica ANTES de
+  crear la ventana: aplicarlo solo al device daba ventana de un backend y device de otro → SIGSEGV.
+- `HARUKA_SHOT_AFTER=<segundos>[,ruta.png]` — espera, captura un frame limpio y sale.
+- Banco `haruka_tests_rhi`: **+2 tests** que cazan las dos trampas de portar GL→Vulkan (herencia de
+  bindings entre pipelines, y dispatch dentro de un pase). 68 OK en los dos backends.
+
+**NO hecho / sin verificar:**
+- [ ] **Paridad GL↔Vulkan píxel a píxel.** NUNCA se ha hecho. Lo único comparado es una sonda
+  numérica (el quad a los pies: 4,0 m en ambos), que no dice nada del relieve, el LOD ni las normales.
+- [ ] **El swapchain es 1280x720 con la ventana a 1920x1080** (escalado del compositor). Funciona,
+  pero se renderiza a menos resolución de la que se presenta. Decidir si se quiere nativa.
+- [ ] Lanzar `haruka_tests_rhi` desde `build/` o `build/bin/` da igual (localiza los assets solo),
+  pero el binario vive en `build/` y los assets en `build/bin/` — conviene unificarlo.
 
 ### ⚠️ Clima 3D (2026-08-11) — la nube ya es un volumen; falta que el ojo lo note
 
@@ -185,12 +257,134 @@ fingirlo con un efecto de pantalla. Ahora lo dibuja `cloud_vol.frag` DESPUÉS de
 profundidad a mano, marchando el rayo por la losa: estar dentro deja de ser un caso especial. El
 cirro (8 km) y el altocúmulo (4 km) siguen de fondo — nunca se cruzan.
 
+### ✅ "NO SON VOLUMÉTRICAS, SON UNA LÁMINA Y NO HAY CASI NUBES" (2026-08-14) — tres causas, medidas
+
+Reportado en pantalla por el autor. **No era un bug de código**: el pase se ejecutaba y hacía lo que
+decía. Eran tres cifras, cada una razonable por su cuenta, que se contradecían entre sí. Las tres se
+midieron con sondas ANTES de tocar nada.
+
+| # | Causa | Medida |
+|---|---|---|
+| 1 | **El campo era 2D extruido.** `harukaCloudField(uv)` no dependía de la altura, así que toda nube era un PRISMA: la misma silueta de la base al techo. Ningún raymarch arregla eso. | rasgo horizontal 2857 m contra 440-980 m de espesor = **6,5:1 a 2,9:1** |
+| 2 | **La iluminación era CONSTANTE.** Sombreaba con `dot(normalize(p), sol)`, pero `p` va referido al CENTRO DEL PLANETA: sobre una nube de 3 km ese vector gira 4,7e-4 rad. Un volumen con un único valor de luz se ve igual que una calcomanía. | 3000/6,37e6 = **4,7e-4 rad de variación en toda la nube** |
+| 3 | **La densidad era un número diminuto.** `max(campo − umbral, 0)` vale 0,054-0,21 sobre el campo real, y el umbral la encogía más cuanto menos cubierto el cielo. | cobertura **mediana del planeta 0,111**; opacidad resultante en el cénit **0,016**. El 60 % del planeta por debajo de 0,20 |
+
+**Arreglo**, en tres piezas que se corresponden una a una:
+
+1. `harukaCloudDensity` remapea la altura al **techo LOCAL** de cada nube (fuerza baja → jirón pegado
+   a la base; fuerza alta → llena la losa) y erosiona el borde con **ruido 3D** de 2 octavas. Las
+   panzas quedan todas a la misma altura y las cimas no — que es como se ve un cielo de cúmulos.
+   Además la escala del campo pasa de 0,00035 a **0,0007** (1430 m de ancho) y el cuerpo de la losa
+   de `260+900·cover` a `500+1400·cover`: relación ancho/alto **2,31:1 en el peor caso** (era 8,51:1).
+2. La luz sale del **camino óptico analítico hacia el Sol** (distancia al techo local / elevación
+   solar), que no cuesta ni una muestra extra del campo y **varía en horizontal** porque el techo
+   local varía. Topado al ancho de la nube: con el Sol rasante la luz sale por el costado, y sin el
+   tope el amanecer y el atardecer apagaban el cielo entero.
+3. `harukaCloudStrength` **normaliza la fuerza a [0,1]**, así que el núcleo vale 1 y `kCloudExtinction`
+   vuelve a ser un coeficiente por metro (0,014 → **0,008**). Medido con la fórmula nueva y la
+   cobertura mediana: opacidad **0,974** contra 0,173 de la cota superior de la vieja.
+
+Banco nuevo `cloud_shape`, con contraprueba en las tres: relación ancho/alto, visibilidad con la
+cobertura real del planeta, y que el shader siga teniendo campo 3D + remapeo + normalización (esto
+último leyendo el fichero, que es lo único que un test de CPU puede auditar del lado GLSL).
+**25849 OK · 0 fallos.** GLSL validado con `glslangValidator` en Vulkan y en GL.
+
+### ⚠️ SEGUÍA PLANA: era el MUESTREO, no el campo (2026-08-14, mismo día)
+
+Con lo de arriba puesto, el autor reportó *"aún teniendo la nube pequeña no tiene altura"*. Al medir
+la nube **que se dibuja** (columnas verticales sobre una rejilla de 6×6 km, densidad útil > 0,08) el
+campo salió **0,82:1 — más alta que ancha**. O sea que la geometría estaba bien y el aplanamiento
+venía de otro sitio.
+
+⚠️ **El apartado 1 del test medía la LOSA, no la nube.** Pasó en verde con el muestreo roto. Es el
+mismo error de método que con los peñones de la roca: **el test tiene que ir contra lo que se DIBUJA,
+no contra la superficie ideal.**
+
+**La causa: 24 pasos repartidos POR IGUAL.** Funciona mirando hacia arriba y se desmorona mirando al
+horizonte — que es justo donde se ven las nubes de perfil y donde está casi toda el área de cielo.
+Medido sobre la losa real (1303-1887 m) contra una nube de 332 m:
+
+    cenit      0,6 km de recorrido ->  24 m de paso -> 13,6 muestras por nube
+    70 grados  1,7 km              ->  71 m        ->  4,7
+    85 grados  6,5 km              -> 271 m        ->  1,2
+    88 grados 14,1 km              -> 587 m        ->  0,6   <- MENOS DE UNA
+
+Con menos de una muestra por nube no queda relieve que promediar: sale un manchón uniforme. Y mi
+cambio de escala lo **empeoró**, porque hizo las nubes la mitad de grandes.
+
+**Arreglo: paso que CRECE con la distancia** (50 m al entrar, ×1,32 por paso). Fino donde la nube
+ocupa muchos píxeles, grueso donde ya es subpíxel, con los MISMOS 24 pasos y por tanto **el mismo
+coste**. 28,6 muestras por nube contra 0,38 del paso uniforme. El alcance de los 24 pasos (122 km)
+tiene que superar el tramo rasante extremo (91 km) o las nubes del último trecho hacia el horizonte
+se quedan sin marchar — con ×1,28 no llegaba, y el test lo cazó.
+
+**25854 OK · 0 fallos.** El test nuevo incluye la contraprueba de que el paso uniforme se saltaba
+nubes enteras.
+
+### ⚠️ Y AUN ASÍ NO HABÍA NUBES: el planeta estaba DESPEJADO (2026-08-14)
+
+Hipótesis del autor: *"seguramente sean sistemas diferentes"*. **La arquitectura sí son dos sistemas**
+—`sky.frag` pinta cirro (8 km) y altocúmulo (4 km) como fondo, planos a propósito, con su propio
+`cloudField`; `cloud_vol.frag` pinta solo el cúmulo— pero **no era eso lo que escondía las nubes**.
+
+Medido: con la cobertura que tenía el mundo, **NINGUNO de los dos dibujaba nada**. El umbral del
+cúmulo volumétrico quedaba en 0,54 y el del cirro de fondo en **0,683**, contra un campo cuyo
+**máximo absoluto es 0,836** y cuyo p95 es 0,595. Cielo vacío por aritmética, en los dos sistemas.
+
+**La raíz estaba en `cloudCoverAt`.** El fondo de nube era `0.12·H` y los frentes cubren poca esfera,
+así que fuera de ellos todo caía a ese suelo: **0,078**. Mediana del planeta **0,111**, con el 60 %
+por debajo de 0,20. La Tierra real ronda 0,67 de media. Cualquier ajuste del render se estaba
+probando sobre un planeta sin nubes.
+
+Fondo → `0.06 + 0.30·H` y frentes reforzados a `×(0.70 + 1.00·H)`. El fondo se deja BAJO a propósito:
+es constante para una humedad dada, o sea un suelo plano, y subirlo daba cielo permanentemente
+cubierto. La variación tiene que venir de los frentes, que sí se mueven.
+
+| a humedad 0,65 | antes | ahora |
+|---|---|---|
+| mediana de cobertura | 0,111 | **0,302** |
+| espesor mediano de nube | 359 m | **922 m** |
+| cubierto (>0,85) | 4,6 % | 18,9 % |
+| **lloviendo** | 11,0 % | **21,3 %** |
+
+⚠️ **La lluvia casi se dobla y es INEVITABLE**: `precip` sale de la cobertura y no tiene otra fuente,
+así que un cielo más nublado llueve más. Se compensó lo que se pudo subiendo `kPrecipCover` de 0,62
+a 0,78 (sin eso habría sido 27,9 %); más arriba, la lluvia pasaría de nada a todo en una franja
+estrechísima. **Si el 21 % te molesta, el mando es el término `0.30 + 0.70·H` de `sampleAt`, que
+gradúa la INTENSIDAD, no este umbral.** Es una decisión de balance, no técnica.
+
+Efecto secundario medido: con más cobertura la losa engorda, así que la relación ancho/alto de la
+nube mejora sola a **1,63:1 en el peor caso** (era 2,31:1) y la opacidad del núcleo a 0,994.
+
+**Capturado**: con el arreglo, la cobertura en el punto de aparición pasa de 0,06 a 0,21 y en la
+captura **se ven nubes donde antes no había nada**.
+
+⚠️ **LA FORMA SIGUE SIN JUZGARSE.** Las dos capturas salieron **de noche**, y de noche el término de
+luz está en su suelo ambiental (0,18), que es justo lo que da el relieve. Hace falta una captura
+**de día**: `weather 20` para acelerar los frentes, y mirar al HORIZONTE (de perfil), no al cénit —
+desde abajo se ve la panza, que es plana por física.
+
+⚠️ El coste no está medido — ver la lista de abajo.
+
 ⚠️ **NADA DE ESTE PASE SE HA EJECUTADO.** Compila y la suite está verde, pero la suite no dibuja un
 píxel. Un raymarch recién escrito puede salir negro, invisible o costar el frame entero.
 
 - [ ] **QUE SE VEA ALGO.** Primero de todo: que haya nubes. Si el cielo sale sin cúmulos, el pase no
   está pintando (mirar el log: `[Clouds] pase volumetrico: ok|FALLO`). Apagable con
   `m_volumetricClouds = false` → vuelve al cúmulo plano de antes, que es el estado conocido bueno.
+- [ ] **QUE TENGAN FORMA DE NUBE**, que es lo que motivó el cambio: cimas abombadas y a alturas
+  distintas, panzas todas a la misma cota, borde con grumos. Si siguen leyéndose como una sábana
+  plana, el sospechoso ya no es la geometría (medida en 2,31:1) sino el ruido 3D: subir
+  `HARUKA_CLOUD_ERODE` en `lib/cloud_volume.glsl`.
+- [ ] **CUÁNTAS.** Con cobertura mediana (0,111) el cálculo da ~16 % del cielo con nube. Si sale
+  mucho más cerrado o mucho más vacío que eso, el que está mal es el umbral `lo`, no la densidad.
+- [ ] **⚠️ EL COSTE, que ha SUBIDO y no está medido.** El ruido 3D añade 16 hashes por paso donde hay
+  nube (antes: 80 del campo 2D), o sea hasta **+20 % en el peor caso**, sobre un pase que nunca se
+  midió. `scene.clouds.volumetric` en `HARUKA_PROFILE_DUMP`. `kCloudSteps` (24) es el primer número
+  a bajar; el jitter nuevo hace que bajarlo cueste menos calidad que antes.
+- [ ] **EL AMANECER Y EL ATARDECER**, que es donde el término de luz nuevo puede fallar: el borde de
+  arriba tiene que encenderse y la panza quedarse oscura. Si sale todo gris plano, el tope al ancho
+  de la nube se está quedando corto.
 - [ ] **CUÁNTO CUESTA.** `scene.clouds.volumetric` en el profiler. Es un raymarch a pantalla
   completa con `kCloudSteps = 24`: es EL número a bajar, y si no basta, el pase va a media
   resolución. Sin medirlo no sé si es 0,5 ms o 15.

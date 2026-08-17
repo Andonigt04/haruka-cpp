@@ -605,6 +605,7 @@ add_executable(haruka_tests
     tests/test_terrain.cpp      # cube-sphere / climate / weather fronts / ground layer (CPU)
     tests/test_physics.cpp      # caída radial + determinismo (sin GL)
     tests/test_construction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
+    tests/test_ports.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
     tests/test_dgs.cpp
     tests/test_simple_planet.cpp         # SimplePlanet mesh & config
     tests/test_terrain_quality.cpp       # terrain quality → resolution mappings
@@ -614,7 +615,9 @@ add_executable(haruka_tests
     tests/test_image_writer.cpp          # PNG: ida y vuelta + compresión DEFLATE
     tests/test_prop_lod.cpp              # LOD de malla de props: envolvente estable
     tests/test_prop_collider.cpp         # colliders de props por PARTE (esqueleto del arbol)
+    tests/test_rock_interior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
     tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
+    tests/test_cloud_shape.cpp           # forma de la nube: cuerpo y no lamina (ancho/alto + campo 3D)
     tests/test_clipmap_dir.cpp)          # dir del clipmap: float del marco vs double de la CPU
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # test_dgs.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre

@@ -100,6 +100,10 @@ public:
 
     const glm::dvec3& anchor() const { return m_anchor; }
     const glm::dvec3& up()     const { return m_up; }
+    /** @brief Ejes del parche en el plano tangente. Los necesita el render del AGUA para llevar una
+     *  dirección del planeta a la celda (i,j) — ver `TerrestrialPlanet::setInlandWater`. */
+    const glm::dvec3& tangent()   const { return m_tan; }
+    const glm::dvec3& bitangent() const { return m_bit; }
     // F5.3: último nivel del mar aplicado (up-relativo). El render salta las celdas cuya
     // SUPERFICIE (terreno+agua) está a/bajo este nivel → esas las dibuja el océano (sin doble lámina).
     float seaLevelAlongUp() const { return m_seaLevelAlongUp; }

@@ -77,7 +77,12 @@ void main() {
     if (hasTex(TEX_NORMAL))
         N = applyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0));
     vec3 L = normalize(sunDirection);
-    vec3 V = normalize(cameraPos - FragPos);
+    // ⚠️ EL OJO ESTÁ EN EL ORIGEN, no en `cameraPos`. Este pase dibuja CÁMARA-RELATIVO (`FragPos`
+    // es `camRel`), pero `cameraPos` del UBO es la posición ABSOLUTA — ~1,5e8 en un sistema solar.
+    // Restar una de otra daba un vector de vista casi constante apuntando al origen del sistema, o
+    // sea un especular calculado contra una dirección que no existe: con normales por cara, eso se
+    // ve como un parcheado de caras brillantes y negras, aspecto de cromo.
+    vec3 V = normalize(-FragPos);
 
     float ao = u_matPBR.z;
     if (hasTex(TEX_AO)) ao = texture(u_matAO, TexCoord).r;

@@ -1,6 +1,7 @@
 #version 460 core
 #extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 vNorm; layout(location = 1) in vec3 vFragPos; layout(location = 2) in vec3 vColor; layout(location = 3) in vec2 vUv; layout(location = 4) in vec3 vClimate;
+layout(location = 5) in float vSurfKind;   // 1 = malla base · 0 = clipmap / anillo cercano
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra;
     vec4 uDebug; // x = vista de depuración: 0=normal, 1=elev, 2=zonas, 3=bioma, 4=temp, 5=humedad
@@ -41,6 +42,15 @@ layout(binding = 16) uniform sampler2D uHeightTex;
 layout(std140, binding = 13) uniform ClipParams {
     vec4 uClipOrigin; vec4 uClipTanU; vec4 uClipTanV; vec4 uClipCover;
 };
+
+// SUELO MOJADO / NEVADO. `uWet.x` y `uWet.z` los INTEGRA la CPU (mojarse ~30 s, secarse ~4 min), así
+// que aquí llegan ya acumulados: este shader solo los pinta.
+layout(std140, binding = 23) uniform WetParams {
+    mat4 uSkySpace;   // ortográfica CENITAL: la misma con la que la lluvia decide si una gota está
+                      // bajo cubierto. Reutilizarla es lo que da la SILUETA SECA gratis.
+    vec4 uWet;        // x = mojado [0,1] · y = 1 si hay máscara cenital · z = nieve [0,1] · w libre
+};
+layout(binding = 17) uniform sampler2D uSkyMaskTerrain;
 
 #include "lib/terrain_material.glsl"
 #include "lib/prop_layer_debug.glsl"
@@ -282,6 +292,22 @@ float terrainShadow(vec3 dirRad, vec3 up, vec3 L, float R, float baseH) {
     float ndl = dot(up, L);
     if (ndl <= 0.02) return 1.0;
 
+    // ⚠️ BAJO EL NIVEL DEL MAR NO SE MARCHA. Y esto es también la CORRECCIÓN DE COSTE de haber
+    // quitado el `max(th, 0.0)` de más abajo.
+    //
+    // Aquel clamp hacía dos trabajos a la vez sin decirlo: pintaba la cuenca sumergida de negro (el
+    // bug) y, de rebote, la hacía GRATIS — con el campo aplanado a 0, un fragmento sumergido daba
+    // ocluido en el PASO 1 y salía por el `break` de `occ >= 0.999`. Al quitar el clamp esos píxeles
+    // pasaron a recorrer los 16 pasos enteros (4 lecturas del bake cada uno = 64 por píxel) sobre
+    // casi toda la pantalla, y el frame se fue a ~280 ms.
+    //
+    // Salir aquí es más barato que las dos versiones anteriores (0 pasos) y no inventa sombra: el
+    // lecho queda iluminado por el sol que le toque. Lo que se pierde es que un acantilado costero
+    // sombree el fondo contiguo — invisible en cuanto haya agua encima, porque bajo el agua la luz
+    // llega dispersa y una sombra proyectada nítida ahí no describe nada. Revisar cuando el mar
+    // vuelva, no antes.
+    if (baseH < 0.0) return 1.0;
+
     // ⚠️ COSTE. Esto corre POR PÍXEL y a pie el suelo es casi toda la pantalla. La primera versión
     // hacía 24 pasos × `harukaTerrainDetail` (5 octavas × 8 hashes) = ~1000 operaciones por píxel, y
     // medido con vsync APAGADO eso puso `present.swap` en 42 ms: la GPU pasó a ser el cuello del
@@ -328,7 +354,21 @@ float terrainShadow(vec3 dirRad, vec3 up, vec3 L, float R, float baseH) {
         // Solo el campo base: ver el recorte (1) de arriba.
         float th = harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
                                            harukaEquirectUV(pd));
-        th = max(th, 0.0);   // la tierra no baja del nivel del mar (paridad con el resto)
+        // ⚠️ AQUÍ HABÍA UN `th = max(th, 0.0)` — y era la MALLA NEGRA de la costa.
+        //
+        // Aplanaba el campo a la cota 0 bajo el agua, o sea que el marchador veía el océano entero
+        // como una MESETA al nivel del mar. Un fragmento sumergido a −200 m arranca su rayo por
+        // debajo de esa meseta inventada y da ocluido hasta que el rayo sube sobre 0: con el sol
+        // bajo, un kilómetro de marcha. Toda la cuenca sumergida salía EN SOMBRA, y el borde de esa
+        // sombra era el cruce del terreno por el nivel del mar leído en el bake (~4,9 km por téxel)
+        // — la "costa pixelada". Mientras la esfera del océano tapaba el fondo no se veía; retirado
+        // el mar, pinta la cuenca de negro.
+        //
+        // No era paridad con nada: el suelo que se pisa NO está aplanado bajo el agua (el bake trae
+        // fondos reales a −3,8 km). La regla `max(h, -baseH)` que sí existe en el resto del motor es
+        // otra cosa —impide que el DETALLE hunda la TIERRA bajo el mar— y no dice nada del lecho.
+        // Sin el clamp, además, un acantilado costero proyecta su sombra sobre la playa real y no
+        // sobre una meseta falsa.
         // Si el rayo va por debajo del terreno, está tapado. Penumbra suave con la profundidad para
         // que el borde de la sombra no sea un escalón de un solo paso.
         // La penumbra también escala con la distancia: 12 m fijos son un escalón binario a escala
@@ -346,6 +386,32 @@ float terrainShadow(vec3 dirRad, vec3 up, vec3 L, float R, float baseH) {
 }
 
 void main() {
+    // ── LA MALLA BASE NO SE DIBUJA DONDE DIBUJA EL CLIPMAP ───────────────────────────────────────
+    //
+    // ⚠️ ESTO FALTABA, y es lo que producía "una capa que tapa el terreno real".
+    //
+    // `terrain.tese` decía recortar la base dentro de la caja del clipmap, pero lo que hace es
+    // ponerle el DETALLE A CERO (`if (!inClip) h = ...`): la geometría se sigue dibujando, como una
+    // superficie LISA a la altura base. El clipmap dibuja esa misma altura MÁS el detalle, así que
+    // en todo valle —detalle negativo, o sea la mitad del terreno— la superficie lisa queda POR
+    // ENCIMA y tapa el relieve de verdad. El sesgo de profundidad solo la disimula mientras el
+    // detalle sea menor que el sesgo; en cuanto el relieve tiene metros, gana la capa lisa.
+    //
+    // No se puede resolver por parche: los de la malla base miden decenas de km y ninguno cae
+    // ENTERO dentro de la caja, así que un descarte en el TCS no eliminaría ni uno. Por píxel sí.
+    //
+    // `vSurfKind` distingue quién dibuja (ver `terrain.tese`), y `uClipCover.x` es la cobertura del
+    // anillo EXTERIOR: la misma con la que la CPU decide hasta dónde llegan los anillos.
+    if (vSurfKind > 0.5 && uDebug.w > 0.5) {
+        vec3 upv = normalize(-uCenter.xyz);
+        vec3 tuc = cross(vec3(0, 1, 0), upv);
+        if (length(tuc) < 1e-6) tuc = cross(vec3(1, 0, 0), upv);
+        tuc = normalize(tuc);
+        vec3 tvc = cross(upv, tuc);
+        if (abs(dot(vFragPos, tuc)) <= uClipCover.x && abs(dot(vFragPos, tvc)) <= uClipCover.x)
+            discard;
+    }
+
     vec3 n = normalize(vNorm);
     float diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);
     float tiling = uExtra.y;
@@ -370,7 +436,31 @@ void main() {
         // no se ve; desde altitud sí (a 2 km de altura el horizonte está a ~160 km). Es el límite
         // aceptado de la Fase 2, y el número está atado a eso, no elegido al azar: 20 km es el
         // horizonte desde ~31 m de altura.
-        if (uDebug.z > 0.5 && length(fragP) < 20000.0) {
+        // ⚠️ EL CORTE ES UNA RAMPA, NO UN ESCALÓN. Antes era `length(fragP) < 20000.0` a secas: dentro
+        // el suelo llevaba relieve fino y fuera no, con la transición en UN píxel. Eso dibuja un
+        // CÍRCULO nítido a 20 km centrado en la cámara — otra "capa" que tapa el terreno real, la
+        // hermana lejana de la que dibujaba la malla base dentro del clipmap.
+        //
+        // Alejar el corte no vale: solo mueve el círculo (ya pasó una vez, del borde del clipmap a
+        // estos 20 km). Lo que quita la línea es DESVANECER: el relieve fino se mezcla hacia el
+        // grueso en los últimos 8 km, así que no hay ninguna distancia en la que el suelo cambie de
+        // golpe. El coste no sube — fuera de `kFineEnd` sigue sin evaluarse nada.
+        // ⚠️ ERAN 12-20 km, Y ESA RAMPA SE VEÍA COMO UN CÍRCULO DIFUMINADO alrededor de la cámara.
+        // No por ser brusca, sino por estar puesta donde el relieve TODAVÍA SE VE.
+        //
+        // Lo que aporta el per-pixel sobre la malla son las octavas entre sus dos `triM`: el
+        // per-pixel evalúa con `dist·0.002` y la malla con `dist·0.012`, o sea un factor 6. A 20 km
+        // esa franja es la octava de 625 m, que lleva ±35 m de relieve — y 35 m a 20 km son **1,8
+        // píxeles**. La rampa estaba apagando algo que aún medía casi dos píxeles: por eso se nota.
+        //
+        // El aporte cae bajo el píxel cuando 35/d < 0,97e-3, o sea a partir de **36 km**. Ahí es
+        // donde el desvanecido no puede verse, porque lo que desvanece ya no se distingue. Se deja
+        // margen y la rampa ocupa 40-90 km, mucho más larga y en una zona donde no hay nada que
+        // apagar. El coste no se dispara: los pasos del sphere-trace ya bajan a 2 pasadas los 25 km.
+        const float kFineFade = 40000.0;   // por debajo de esto el relieve fino aún mide >1 px
+        const float kFineEnd  = 90000.0;   // aquí su aporte es subpíxel: apagarlo no se ve
+        float fineW = 1.0 - smoothstep(kFineFade, kFineEnd, length(fragP));
+        if (uDebug.z > 0.5 && fineW > 0.001) {
             vec3 rel = fragP;
             // Marco tangente: MISMA cuenta que `terrainClipFrame` (core/planet/terrain_lod.h), que
             // es la que llena ClipParams y la que construye la malla de colisión. Aquí había una
@@ -411,7 +501,10 @@ void main() {
                 if (baseH > 0.0 && hFine < -baseH) { hFine = -baseH; grad = vec3(0.0); }
                 vec3 t1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0,1,0)) : cross(dir, vec3(1,0,0)));
                 vec3 t2 = cross(dir, t1);
-                n = normalize(dir - t1 * dot(grad, t1) - t2 * dot(grad, t2));
+                // MEZCLA con el peso de la rampa, no sustitución. Con `fineW` = 1 es exactamente lo
+                // de antes; al acercarse a `kFineEnd` el relieve fino se apaga de forma continua.
+                vec3 nFine = normalize(dir - t1 * dot(grad, t1) - t2 * dot(grad, t2));
+                n = normalize(mix(n, nFine, fineW));
                 diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);
                 // Re-anclamos fragP y `up` para que el triplanar siga el relieve FINO.
                 //
@@ -419,8 +512,8 @@ void main() {
                 // eval. Es lo que decide la costa, y la costa es del mapa base. Sobrescribirlo aquí
                 // con `baseH + hFine` hacía que el material cambiara al cruzar el borde del clipmap
                 // (dentro se usaba la base, fuera la superficie fina), que es el salto hierba/arena.
-                fragP = p;
-                up = dir;
+                fragP = mix(fragP, p, fineW);
+                up = normalize(mix(up, dir, fineW));
             }
         }
     }
@@ -447,7 +540,25 @@ void main() {
     // pensado para el JUEGO A PIE, que es donde el fragmento pesaba: casi toda la pantalla es suelo
     // a 0-4 km, y el triplanar en la mitad lejana era subpíxel pero se pagaba entero. En órbita todo
     // supera 2,5 km → lod 0 → solo el color del bioma, que es lo único visible a esa distancia.
-    float lod = 1.0 - smoothstep(300.0, 2500.0, length(fragP));
+    // ── DOS RAMPAS, NO UNA ──────────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ ERA UNA SOLA (300 m → 2,5 km) Y APAGABA TRES COSAS A LA VEZ: el color del triplanar, el
+    // normal map y la arena de la orilla. A partir de 2,5 km solo quedaba el color plano del bioma —
+    // el suelo "difuminado, de mucha menor calidad" en cuanto te alejabas unos cientos de metros.
+    // Y como el anillo cercano acaba a 192 m y la rampa empezaba a 300, la zona nítida coincidía con
+    // él y parecía culpa del anillo.
+    //
+    // El argumento original era "a 500 m un téxel de 5 cm es subpíxel". Es cierto, pero la respuesta
+    // correcta a un detalle subpíxel es el MIPMAPPING, que ya promedia bien — no apagar la textura.
+    // Desvaneciendo a un color plano se tira también el contenido de BAJA frecuencia (las manchas,
+    // la variación de tono), que sí se ve a kilómetros. Por eso se veía lavado.
+    //
+    // Ahora van separadas porque no cuestan ni aportan lo mismo:
+    //   · COLOR (3 muestras): aporta a cualquier distancia. Llega a 12 km.
+    //   · NORMAL (3 muestras más): su relieve SÍ es subpíxel de lejos — un bache de 2 cm a 1 km no
+    //     inclina nada visible. Mantiene la rampa corta, que es donde estaba el ahorro de verdad.
+    float lod    = 1.0 - smoothstep(3000.0, 12000.0, length(fragP));   // color y arena de orilla
+    float lodNrm = 1.0 - smoothstep( 300.0,  2500.0, length(fragP));   // normal map (la cara cara)
 
     // Sample biome map for classification + color
     vec2 bUV = equirectUV(up);
@@ -475,22 +586,32 @@ void main() {
     vec3 zoneRGB = hasZoneMap ? texture(uZoneMap, bUV).rgb * 255.0 : vec3(0.0);
 
     vec3  tint; float grainAmt, detailAmt; int tile; vec4 matColor; int matIdx;
+    int   tileBed; float coverW;   // capa del LECHO y cuánto manto la tapa (ver terrain_strata.h)
     // `elev` es la cota por PÍXEL leída del bake (km): el cuarto eje de la selección.
     harukaSelectMaterial(humid, tempC, slope, elev, zoneRGB, hasZoneMap,
-                         tint, grainAmt, detailAmt, tile, matColor, matIdx);
+                         tint, grainAmt, detailAmt, tile, tileBed, coverW, matColor, matIdx);
     // El color PROPIO del material sustituye al del bioma según su peso. Con peso 0 (o sin color
     // declarado) manda el clima, que es el comportamiento de siempre.
     biomeCol = mix(biomeCol, matColor.rgb, matColor.a);
 
-    // EL SUELO DEL OCÉANO NO SE PINTA DE MATERIAL DE AGUA. El agua es la ESFERA 3D (water.frag); el
-    // material 0 de la tabla siempre gana bajo el nivel del mar y dibujaba una "capa de agua" azul
-    // sobre la textura del planeta — un segundo mar horneado que ni se ve (la esfera lo tapa) ni se
-    // quita al generar otro planeta, y que asoma con HARUKA_NOWATER. Donde `elev` (km) < 0 el
-    // fragmento está bajo el nivel del mar y debe leerse como FONDO MARINO (arena), no como agua. La
-    // transición suaviza justo en la orilla, donde la playa de arena (`sandW`) ya se encarga del
-    // borde; el `col` normal sigue pasando por textura/iluminación como el resto del suelo.
-    if (elev < 0.0)
-        biomeCol = mix(biomeCol, vec3(0.42, 0.38, 0.31), 1.0 - smoothstep(-0.4, 0.0, elev));
+    // ── EL LECHO MARINO SE CLASIFICA COMO TERRENO, SIN CASO ESPECIAL ────────────────────────────
+    //
+    // Aquí hubo un override que, bajo el nivel del mar, mezclaba `biomeCol` hacia un color plano
+    // (0.42, 0.38, 0.31). Existía porque el material de agua SIEMPRE ganaba ahí y pintaba una lámina
+    // azul sobre la textura del planeta; el parche tapaba el síntoma con otra constante.
+    //
+    // ⚠️ Y ERA LO QUE HACÍA QUE EL FONDO DEL MAR SE VIERA DE UN COLOR UNIFORME, DISTINTO DEL TERRENO,
+    // EN TODO EL PLANETA: un color constante aplastando la clasificación por clima. Da igual el
+    // bioma, la latitud o el material — todo lo sumergido salía del mismo tono.
+    //
+    // Ya no hace falta ninguna de las dos cosas. `main.scene` declara TRES materiales sumergidos
+    // (`water`, `deep_ocean`, `shelf`), los tres con color azul y ninguno con banda de altura, así
+    // que competían por clima en todo el planeta y ganaban bajo el agua. Marcados como agua, la
+    // selección los salta (ver `harukaIsWaterMat`) y bajo el nivel del mar gana un material de
+    // TIERRA — con su color, su textura y su clima, igual que la costa de al lado. El lecho deja de
+    // ser un caso especial y pasa a ser lo que es: terreno que resulta estar bajo la cota 0.
+    //
+    // Cuando el agua vuelva, lo que la dibuje irá ENCIMA de este terreno; no en su lugar.
 
     // `tiling` es METROS POR TILE. Estaba usándose al revés (`vFragPos * tiling` con un scale de
     // 0.5 encima) → un tile cada 2 cm: muy por debajo del píxel a cualquier distancia, así que la
@@ -520,8 +641,32 @@ void main() {
     // una constante del shader que dependía del asset, y que se desajustaba al cambiar una textura.
     const float kTexMean = 0.5;
     const vec3  kLumaW   = vec3(0.2126, 0.7152, 0.0722);
-    vec3 tex = (tile < 0 || lod < 0.01) ? vec3(kTexMean)
-                                       : triplanarArr(uTerrainAlbedo, float(tile), wp, n, tileScale);
+    // ── DOS CAPAS MEZCLADAS POR EL ESPESOR DEL MANTO ────────────────────────────────────────────
+    //
+    // La superficie es cobertura sobre lecho, así que se muestrean las DOS y se mezclan con
+    // `coverW`. Es lo que convierte el borde de un cortado en un degradado en vez de un recorte: al
+    // subir la pendiente el sedimento se va yendo y la roca aparece por debajo, que es lo que hace
+    // de verdad.
+    //
+    // El coste está acotado: cuando `coverW` está pegado a 0 o a 1 —o sea en casi todo el planeta,
+    // porque el manto solo se adelgaza en las laderas— se muestrea UNA sola capa. El segundo
+    // triplanar se paga únicamente en la franja de transición.
+    vec3 tex;
+    if (lod < 0.01) {
+        tex = vec3(kTexMean);
+    } else if (coverW > 0.99 || tileBed == tile) {
+        tex = (tile < 0) ? vec3(kTexMean)
+                         : triplanarArr(uTerrainAlbedo, float(tile), wp, n, tileScale);
+    } else if (coverW < 0.01) {
+        tex = (tileBed < 0) ? vec3(kTexMean)
+                            : triplanarArr(uTerrainAlbedo, float(tileBed), wp, n, tileScale);
+    } else {
+        vec3 texC = (tile    < 0) ? vec3(kTexMean)
+                                  : triplanarArr(uTerrainAlbedo, float(tile),    wp, n, tileScale);
+        vec3 texB = (tileBed < 0) ? vec3(kTexMean)
+                                  : triplanarArr(uTerrainAlbedo, float(tileBed), wp, n, tileScale);
+        tex = mix(texB, texC, coverW);
+    }
 
     // Macro variation brightness modulation
     vec4 macro = texture(uMacroVar, bUV);
@@ -575,7 +720,7 @@ void main() {
     // RELIEVE del material: la desviacion de su normal map. Solo la parte tangencial (la componente
     // a lo largo de n no inclina nada y si desnormaliza) y con fuerza baja: con sombreado cel un
     // relieve fuerte pica el terminador y saca manchas oscuras.
-    vec3 nrmDelta = (tile < 0 || lod < 0.01) ? vec3(0.0)
+    vec3 nrmDelta = (tile < 0 || lodNrm < 0.01) ? vec3(0.0)
                                              : triplanarArrNrm(uTerrainNormal, float(tile), wp, n, tileScale);
     if (dot(nrmDelta, nrmDelta) > 1e-8) {
         vec3 dTan = nrmDelta - dot(nrmDelta, n) * n;
@@ -583,7 +728,7 @@ void main() {
         // 500-2500 m es subpíxel y muestrear su desviación a plena fuerza solo mete temblor y paga
         // el mismo coste. Cerca de los pies (`lod`≈1) queda entero; `(0.5 + 0.5·lod)` mantiene al
         // menos la mitad en el plano medio en vez de un corte brusco.
-        n = normalize(n + 0.35 * detailAmt * (0.5 + 0.5 * lod) * dTan);
+        n = normalize(n + 0.35 * detailAmt * (0.5 + 0.5 * lodNrm) * dTan);
         diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar con la normal nueva
     }
 
@@ -634,8 +779,58 @@ void main() {
     }
     sunD  *= shadow;
     sheen *= shadow;
+    // ── SUELO MOJADO ────────────────────────────────────────────────────────────────────────────
+    //
+    // Dos efectos, y los dos son ópticos, no un tinte: el agua rellena los poros del suelo (baja el
+    // albedo: la tierra mojada es MÁS OSCURA) y deja una lámina especular (brillo con la vista).
+    //
+    // ⚠️ LA SILUETA SECA sale de la MÁSCARA CENITAL, la misma que usa cada gota de lluvia para saber
+    // si está bajo cubierto. Es lo que hace que bajo un árbol o un alero el suelo se quede seco sin
+    // ningún sistema nuevo: el suelo hace la misma pregunta que la gota, contra la misma textura.
+    //
+    // Y el agua se queda en lo PLANO: en una pared vertical escurre. De ahí el peso por `dot(n,up)`,
+    // que además insinúa charcos en las vaguadas sin simular ninguno.
+    if (uWet.x > 0.001) {
+        float dry = 0.0;                       // 1 = tapado desde arriba, o sea seco
+        if (uWet.y > 0.5) {
+            vec4 sp = uSkySpace * vec4(fragP, 1.0);
+            // ⚠️ MISMO CONVENIO QUE `precip.vert`, copiado de allí y no deducido: con
+            // glClipControl(ZERO_TO_ONE) la z de clip YA sale en [0,1] y solo x/y van en [-1,1].
+            // Remapear la z aquí la hundiría y saldría "todo tapado", o sea suelo seco bajo la lluvia.
+            vec3 sc = vec3(sp.xy / max(sp.w, 1e-6) * 0.5 + 0.5, sp.z / max(sp.w, 1e-6));
+            if (sc.z <= 1.0 && sc.x > 0.0 && sc.x < 1.0 && sc.y > 0.0 && sc.y < 1.0) {
+                float above = texture(uSkyMaskTerrain, sc.xy).r;
+                // El sesgo evita que el propio suelo se auto-tape por el grosor del téxel, y el
+                // fundido impide un borde recto en la vertical del alero. Más ancho que el de la
+                // lluvia (0.004): aquí el resultado se ve QUIETO sobre el suelo, y un corte duro
+                // sería una silueta recortada con tijera en vez de una sombra de lluvia.
+                dry = smoothstep(0.0, 0.010, sc.z - above - 0.0015);
+            }
+        }
+        // OJO: `flat` es palabra RESERVADA en GLSL (calificador de interpolación), igual que `patch`
+        // en los shaders de teselación. Usarla da "syntax error, unexpected FLAT" sin más pista.
+        float flatness = pow(max(dot(n, up), 0.0), 3.0);
+        float w        = uWet.x * (1.0 - dry) * flatness;
+
+        col *= mix(1.0, 0.55, w);              // los poros llenos de agua reflejan menos
+
+        // Lámina especular: estrecha (el agua quieta es casi un espejo) y sobre la normal del SUELO,
+        // no la del relieve fino, porque la lámina la alisa.
+        vec3  V   = normalize(-fragP);
+        vec3  Hw  = normalize(L + V);
+        float spc = pow(max(dot(mix(n, up, 0.6 * w), Hw), 0.0), 220.0);
+        sheen += spc * w * 0.9 * shadow;
+    }
+
     col = col * (uAmbient.xyz + sky * (0.35 + 0.65 * sunD) + uLightColor.xyz * sunD * 1.6)
         + uLightColor.xyz * sheen;
+
+    // ⚠️ EL MAR SE HA RETIRADO (provisional). Aquí se probó a que el terreno pintara su propio mar
+    // donde su geometría tapaba la esfera del océano, y NO funciona: el criterio se apoyaba en la
+    // cota de la GEOMETRÍA, que es lineal dentro de cada triángulo, así que la región pintada era un
+    // polígono de lados rectos — el mismo escalón de la costa, expresado en azul. Cuando el agua se
+    // rehaga, el criterio tiene que ser el MATERIAL (la capa `water` de la tabla), que es un dato por
+    // píxel, y no la superficie que la dibuja.
 
     // VISTAS DE DEPURACIÓN del editor: colorean el planeta para "ver cómo funciona" el terreno.
     // Se aplican DESPUÉS de la iluminación y SIN texturas: lo que importa es el dato, no el grano.
@@ -655,6 +850,16 @@ void main() {
         col = heatmap(tempC / 80.0 + 0.5);
     } else if (dbg == 5) {                // humedad [0,1]
         col = heatmap(humid);
+    } else if (dbg == 8) {
+        // ── POR QUÉ ESTÁ NEGRO (HARUKA_PLANET_DEBUG=8) ──────────────────────────────────────────
+        // Un píxel negro solo puede serlo por dos razones, y ésta las separa:
+        //   ROJO  = sombra de terreno (0 = en sombra: el sol no llega)
+        //   VERDE = sol recibido (`sunD`, ya multiplicado por la sombra)
+        //   AZUL  = luminancia del ALBEDO antes de iluminar (0 = el color del material ya es negro)
+        // Sin azul, el problema es el MATERIAL/mapa de biomas; sin rojo, es la SOMBRA.
+        col = vec3(shadow, sunD, dot(col / max(uAmbient.xyz + sky * (0.35 + 0.65 * sunD)
+                                               + uLightColor.xyz * sunD * 1.6, vec3(1e-4)),
+                                     vec3(0.299, 0.587, 0.114)));
     } else if (dbg == 6) {                // CAPAS: TODAS a la vez, cada material con su color
         col = matDebugColor(matIdx);
     } else if (dbg >= 10 && dbg < 40) {    // CAPA i: solo donde manda ese material (máscara).

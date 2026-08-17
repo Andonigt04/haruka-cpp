@@ -539,6 +539,38 @@ namespace Haruka::RHI::vulkan
         rp.pDependencies = &dep;
         if (!vkSuccess(vkCreateRenderPass(m_device, &rp, nullptr, &m_backbufferPass), "create bb render pass")) return;
 
+        // ── VARIANTES POR loadOp: LA CAUSA DEL MUNDO NEGRO ──────────────────────────────────────
+        //
+        // En Vulkan el "¿limpio o conservo?" va HORNEADO en la render pass; en OpenGL es un
+        // parámetro de la llamada. El motor abre el pase VARIAS VECES por frame con
+        // `clearColor=false` esperando la semántica de GL ("solo ata el FBO, no borres") — el cielo
+        // se dibuja, se cierra el pase, se reabre para la escena... y con una única variante CLEAR
+        // ese segundo `begin` BORRABA lo ya dibujado. Los draws salían correctos uno a uno en
+        // RenderDoc y la pantalla acababa negra, que es exactamente el síntoma que se reportó.
+        //
+        // Se crean las cuatro combinaciones (color y profundidad son independientes: el pase de
+        // máscara de cielo limpia profundidad y CONSERVA color). El índice 3 —limpiar ambos— es el
+        // canónico: es el que se usa para compatibilidad de pipelines, porque en Vulkan una render
+        // pass es compatible con otra si coinciden formatos y número de attachments, no los loadOp.
+        for (int v = 0; v < 4; ++v)
+        {
+            const bool cCol = (v & 1) != 0;
+            const bool cDep = (v & 2) != 0;
+            VkAttachmentDescription va[2] = { atts[0], atts[1] };
+            va[0].loadOp = cCol ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            va[1].loadOp = cDep ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            // Con LOAD hay que declarar el layout REAL de entrada: UNDEFINED autoriza a descartar el
+            // contenido, que es justo lo que se quiere evitar.
+            if (!cCol) va[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            if (!cDep) va[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+            VkRenderPassCreateInfo vrp = rp;
+            vrp.pAttachments = va;
+            if (!vkSuccess(vkCreateRenderPass(m_device, &vrp, nullptr, &m_backbufferPassVariant[v]),
+                           "create bb render pass (variante loadOp)"))
+                m_backbufferPassVariant[v] = m_backbufferPass;   // degradar antes que quedarse sin pase
+        }
+
         m_swapchain->attachRenderPass(m_backbufferPass);
         m_swapchain->attachBackbufferDepth(m_backbufferDepthView);
         m_swapchain->createFramebuffers();
@@ -690,6 +722,7 @@ namespace Haruka::RHI::vulkan
         rp.clearValueCount = 0;
         vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
 
+        // Sin invertir: la Y se compensa en la PROYECCIÓN, no en el viewport (ver `VKContext::setViewport`).
         VkViewport vp{ 0.0f, 0.0f, (float)e.width, (float)e.height, 0.0f, 1.0f };
         VkRect2D sc{ {0, 0}, { e.width, e.height } };
         vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1056,9 +1089,12 @@ namespace Haruka::RHI::vulkan
         return k;
     }
 
-    VkRenderPass VKDevice::renderPassFor(const RenderTargetDesc& d)
+    // `loadVariant`: (clearColor ? 1 : 0) | (clearDepth ? 2 : 0). Ver la nota larga en
+    // `createBackbufferResources`: en Vulkan el "¿limpio o conservo?" va horneado en la render pass,
+    // y con una sola variante (CLEAR) cada `beginRenderPass` borraba lo ya dibujado.
+    VkRenderPass VKDevice::renderPassFor(const RenderTargetDesc& d, int loadVariant)
     {
-        const std::string key = renderPassKey(d);
+        const std::string key = renderPassKey(d) + "|L" + std::to_string(loadVariant);
         auto it = m_renderPasses.find(key);
         if (it != m_renderPasses.end()) return it->second;
 
@@ -1069,13 +1105,16 @@ namespace Haruka::RHI::vulkan
         for (size_t i = 0; i < d.colorFormats.size(); ++i)
         {
             VkAttachmentDescription a{};
+            const bool clearCol = (loadVariant & 1) != 0;
             a.format = texFmt(d.colorFormats[i]);
             a.samples = VK_SAMPLE_COUNT_1_BIT;
-            a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            a.loadOp = clearCol ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
             a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            // Con LOAD hay que declarar el layout REAL: UNDEFINED autoriza a descartar el contenido.
+            a.initialLayout = clearCol ? VK_IMAGE_LAYOUT_UNDEFINED
+                                       : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             a.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             atts.push_back(a);
             colorRefs.push_back({ (uint32_t)i, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL });
@@ -1086,13 +1125,15 @@ namespace Haruka::RHI::vulkan
         {
             depthIdx = (uint32_t)atts.size();
             VkAttachmentDescription a{};
+            const bool clearDep = (loadVariant & 2) != 0;
             a.format = texFmt(d.depthFormat);
             a.samples = VK_SAMPLE_COUNT_1_BIT;
-            a.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            a.loadOp = clearDep ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
             a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            a.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            a.initialLayout = clearDep ? VK_IMAGE_LAYOUT_UNDEFINED
+                                       : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             a.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             atts.push_back(a);
             depthRef = { depthIdx, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
@@ -1130,7 +1171,8 @@ namespace Haruka::RHI::vulkan
         VKRenderTarget rt;
         rt.width = d.width;
         rt.height = d.height;
-        rt.renderPass = renderPassFor(d);
+        rt.desc = d;                       // para pedir variantes de loadOp después
+        rt.renderPass = renderPassFor(d);  // canónica (limpiar ambos): compatibilidad de pipelines
         if (!rt.renderPass) return {};
 
         // Color attachments (MRT). Cada uno es una textura muestreable.
@@ -1262,6 +1304,15 @@ namespace Haruka::RHI::vulkan
     {
         const VKRenderTarget* rt = renderTarget(h);
         return rt ? rt->depthTex : TextureHandle{};
+    }
+
+    // En Vulkan el backbuffer lo crea ESTE motor, no SDL: la profundidad del swapchain se declara
+    // `VK_FORMAT_D32_SFLOAT` (ver la creación de la imagen de profundidad y del render pass), así que
+    // no hay nada que preguntarle al driver. Si algún día se elige otro formato allí, este valor tiene
+    // que seguirlo o los blits de profundidad contra pantalla volverán a ser ilegales.
+    Format VKDevice::backbufferDepthFormat()
+    {
+        return Format::D32F;
     }
 
     // ------------------------------------------------------------------ escapes nativos
@@ -1723,6 +1774,7 @@ if (m_swapchain && m_swapchain->valid())
         }
         VkImage swapImg = m_swapchain->image(m_lastPresentedImage);
         const VkExtent2D e = m_swapchain->extent();
+        uint32_t cwLog = 0, chLog = 0;
         if (!submitOneShot([&](VkCommandBuffer c) {
             VkImageMemoryBarrier b0{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
             b0.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;   // CONSERVA el contenido
@@ -1743,6 +1795,7 @@ if (m_swapchain && m_swapchain->valid())
             // exactamente lo que se midio aqui.
             const uint32_t cw = (x < (int)e.width)  ? std::min((uint32_t)w, e.width  - (uint32_t)x) : 0u;
             const uint32_t ch = (y < (int)e.height) ? std::min((uint32_t)h, e.height - (uint32_t)y) : 0u;
+            cwLog = cw; chLog = ch;
             VkBufferImageCopy r{};
             r.bufferOffset = 0;
             r.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
@@ -1769,13 +1822,25 @@ if (m_swapchain && m_swapchain->valid())
         vkMapMemory(m_device, mem, 0, total, 0, &p);
         if (p) {
             std::memcpy(data, p, total);
+
+            // ⚠️ EL SWAPCHAIN ES BGRA, EL LLAMADOR PIDE RGBA. Sin esto, `readPixels` devuelve los
+            // bytes crudos y el rojo sale azul: medido en el banco del RHI, que pedía rojo y leía
+            // (0,0,255). Afecta a TODA captura de pantalla en Vulkan, así que se corrige aquí y no
+            // en cada llamador. Formato de 4 bytes: se intercambian los canales 0 y 2.
+            if ((m_swapchain->format() == VK_FORMAT_B8G8R8A8_UNORM ||
+                 m_swapchain->format() == VK_FORMAT_B8G8R8A8_SRGB) && bpp == 4)
+            {
+                uint8_t* q = (uint8_t*)data;
+                for (size_t i = 0; i + 3 < total; i += 4) std::swap(q[i], q[i + 2]);
+            }
             // Sonda: distingue "la imagen esta vacia" de "la copia no ocurrio". Sin esto las dos
             // producen el MISMO PNG en negro y no hay forma de saber cual de las dos es.
             const uint8_t* q = (const uint8_t*)p;
             uint64_t sum = 0, nz = 0;
             for (size_t i = 0; i < total; i += 97) { sum += q[i]; if (q[i]) ++nz; }
-            HARUKA_LOGI("RHI/VK", "readPixels: img=%u %dx%d %zu B · muestreo: %llu no-cero, suma=%llu",
-                        m_lastPresentedImage, w, h, total,
+            HARUKA_LOGI("RHI/VK", "readPixels: img=%u pedido %dx%d · swapchain %ux%u · copiado %ux%u"
+                        " · %zu B · muestreo: %llu no-cero, suma=%llu",
+                        m_lastPresentedImage, w, h, e.width, e.height, cwLog, chLog, total,
                         (unsigned long long)nz, (unsigned long long)sum);
         } else {
             HARUKA_LOGE("RHI/VK", "readPixels: vkMapMemory devolvio null");

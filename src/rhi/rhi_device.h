@@ -91,6 +91,21 @@ namespace Haruka::RHI
             virtual TextureHandle      getDepthTexture(RenderPassHandle) = 0;
 
             /**
+             * @brief Formato de profundidad del BACKBUFFER (el render target por defecto).
+             *
+             * ⚠️ Existe porque un blit de PROFUNDIDAD exige que los dos formatos sean IDÉNTICOS —no
+             * compatibles, idénticos— y el backbuffer no lo elige el motor: lo elige SDL/el driver.
+             * Copiar la profundidad de pantalla a un RT `D32F` daba
+             * `GL_INVALID_OPERATION: Depth formats do not match`, el blit no se hacía, y la textura de
+             * profundidad que consumen las nubes y el fluido se quedaba con basura: ocluían mal contra
+             * la escena. El síntoma era "las nubes se ven a través del terreno".
+             *
+             * Se CONSULTA en vez de suponerse: SDL no fija el tamaño del buffer de profundidad en este
+             * motor, así que 24 bits es lo habitual pero no una garantía.
+             */
+            virtual Format             backbufferDepthFormat() = 0;
+
+            /**
              * @brief Escotilla de escape: id NATIVO del backend (en GL, el GLuint de la textura).
              *
              * Necesaria SOLO durante la migración: código que aún llama a GL directo (ImGui,

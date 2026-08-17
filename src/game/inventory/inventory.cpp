@@ -3,17 +3,26 @@
 
 namespace Haruka {
 
-int Inventory::add(const std::string& id, int count, int pureza) {
+// Sin política instalada apila solo lo EXACTAMENTE igual: es lo que hacía el sistema de siempre y
+// es la opción segura. El juego instala su criterio de bandas en el arranque.
+static Inventory::StackPolicy g_stackPolicy = nullptr;
+void Inventory::setStackPolicy(StackPolicy p) { g_stackPolicy = p; }
+bool Inventory::sameStack(int a, int b) { return g_stackPolicy ? g_stackPolicy(a, b) : a == b; }
+
+int Inventory::add(const std::string& id, int count, int quality) {
     if (id.empty() || count <= 0) return count;
-    if (pureza < 0) pureza = 0; if (pureza > 4) pureza = 4;
+    if (quality < 1) quality = 1; if (quality > 10000) quality = 10000;
     const int maxStack = ItemRegistry::get().maxStack(id);
 
-    // 1) Rellena stacks existentes del MISMO item Y pureza.
+    // 1) Rellena stacks existentes del MISMO item y calidad COMPATIBLE (ver sameStack).
     for (auto& s : m_slots) {
         if (count <= 0) break;
-        if (s.id == id && s.pureza == pureza && s.count < maxStack) {
+        if (s.id == id && sameStack(s.quality, quality) && s.count < maxStack) {
             int space = maxStack - s.count;
             int put = std::min(space, count);
+            // MEDIA PONDERADA: juntar 1 mena mala con 99 buenas no puede hundir las 100. La calidad
+            // del stack es la de su contenido, no la del último que entró.
+            s.quality = (int)(((long)s.quality * s.count + (long)quality * put) / (s.count + put));
             s.count += put;
             count   -= put;
         }
@@ -23,18 +32,18 @@ int Inventory::add(const std::string& id, int count, int pureza) {
         if (count <= 0) break;
         if (s.empty()) {
             int put = std::min(maxStack, count);
-            s.id = id; s.count = put; s.pureza = pureza;
+            s.id = id; s.count = put; s.quality = quality;
             count -= put;
         }
     }
     return count; // leftover that didn't fit
 }
 
-float Inventory::avgPureza(const std::string& id) const {
+float Inventory::avgQuality(const std::string& id) const {
     long sum = 0, n = 0;
     for (const auto& s : m_slots)
-        if (s.id == id && s.count > 0) { sum += (long)s.pureza * s.count; n += s.count; }
-    return n ? (float)sum / (float)n : 1.0f;
+        if (s.id == id && s.count > 0) { sum += (long)s.quality * s.count; n += s.count; }
+    return n ? (float)sum / (float)n : 600.0f;
 }
 
 int Inventory::remove(const std::string& id, int count) {
@@ -69,10 +78,11 @@ void Inventory::moveSlot(int from, int to) {
     if (b.empty()) {              // move into empty
         b = a; a.clear(); return;
     }
-    if (a.id == b.id && a.pureza == b.pureza) { // merge same item+pureza up to maxStack
+    if (a.id == b.id && sameStack(a.quality, b.quality)) { // funde si la politica lo permite
         int maxStack = ItemRegistry::get().maxStack(a.id);
         int space = maxStack - b.count;
         int move = std::min(space, a.count);
+        b.quality = (int)(((long)b.quality * b.count + (long)a.quality * move) / (b.count + move));
         b.count += move;
         a.count -= move;
         if (a.count <= 0) a.clear();

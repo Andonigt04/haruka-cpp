@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "logger.h"
 #include <ctime>
 #include <cstring>
@@ -7,6 +8,16 @@ namespace Haruka {
 static LogLevel s_level = LogLevel::Debug;
 
 void setLogLevel(LogLevel level) { s_level = level; }
+
+// Se lee UNA vez: es un interruptor de sesión, no algo que cambie a mitad de partida, y consultar
+// el entorno en cada frame por cada traza sería peor que la traza.
+bool diagLogs() {
+    static const bool s_on = [] {
+        const char* e = std::getenv("HARUKA_DIAG");
+        return e && e[0] == '1';
+    }();
+    return s_on;
+}
 LogLevel getLogLevel() { return s_level; }
 
 static const char* levelLabel(LogLevel level) {

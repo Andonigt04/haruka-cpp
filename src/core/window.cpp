@@ -67,7 +67,51 @@ namespace Haruka::Core {
         if (vulkanWindow) {
             m_window = SDL_CreateWindow(m_data.title.c_str(), m_data.width, m_data.height,
                                         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
-            if (!m_window) return false;
+            if (!m_window) {
+                // ⚠️ SIN ESTO EL FALLO ERA MUDO. `SDL_WINDOW_VULKAN` hace que SDL cargue el loader
+                // de Vulkan, y eso puede fallar por motivos que NADA tienen que ver con el juego:
+                // capas inyectadas (RenderDoc), loader ausente, o el driver sin soporte de
+                // presentación. El único mensaje que se veía era "Failed to initialize Window
+                // system", que no distingue ninguno de esos casos.
+                const std::string err = SDL_GetError();
+                std::cerr << "[SDL] ventana VULKAN no creada: " << err << std::endl;
+
+                // ── REINTENTO EN X11 (XWayland) ─────────────────────────────────────────────────
+                //
+                // RENDERDOC NO SOPORTA SUPERFICIES WAYLAND. Al inyectar su capa, la instancia deja
+                // de anunciar `VK_KHR_wayland_surface` y SDL no puede crear la ventana:
+                //     "Installed Vulkan doesn't implement the VK_KHR_wayland_surface extension"
+                // El motor abortaba, y desde fuera parecía que "con RenderDoc arranca en OpenGL".
+                //
+                // Se puede arreglar desde fuera con `SDL_VIDEODRIVER=x11`, pero eso obliga a
+                // acordarse de ponerlo en la configuración de lanzamiento de RenderDoc — y si se
+                // olvida, el síntoma no se parece en nada a la causa. Reintentar aquí hace que
+                // capturar un frame de Vulkan funcione sin configurar nada.
+                //
+                // Solo se reintenta si el fallo menciona la superficie: cualquier otro motivo (sin
+                // loader, sin driver) no lo arregla cambiar de servidor gráfico, y reintentar a
+                // ciegas escondería el error de verdad.
+                if (err.find("surface") != std::string::npos ||
+                    err.find("Vulkan")  != std::string::npos) {
+                    std::cerr << "[SDL] reintentando con SDL_VIDEO_DRIVER=x11 (XWayland). "
+                                 "Wayland + capa de captura no ofrecen VK_KHR_wayland_surface."
+                              << std::endl;
+                    // El subsistema de vídeo ya está arrancado con el driver anterior: el hint solo
+                    // se lee al inicializarlo, así que hay que pararlo y volver a arrancarlo.
+                    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+                    SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "x11");
+                    if (SDL_InitSubSystem(SDL_INIT_VIDEO)) {
+                        m_window = SDL_CreateWindow(m_data.title.c_str(), m_data.width,
+                                                    m_data.height,
+                                                    SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+                        if (m_window)
+                            std::cerr << "[SDL] ventana VULKAN creada sobre x11" << std::endl;
+                        else
+                            std::cerr << "[SDL] tampoco con x11: " << SDL_GetError() << std::endl;
+                    }
+                }
+                if (!m_window) return false;
+            }
             applyWindowIcon(m_window, m_data.iconPath);
             return true;
         }
@@ -78,7 +122,10 @@ namespace Haruka::Core {
 
         m_window = SDL_CreateWindow(m_data.title.c_str(), m_data.width, m_data.height,
                                     SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-        if (!m_window) return false;
+        if (!m_window) {
+            std::cerr << "[SDL] ventana OPENGL no creada: " << SDL_GetError() << std::endl;
+            return false;
+        }
         applyWindowIcon(m_window, m_data.iconPath);
 
         return true;
@@ -117,8 +164,12 @@ namespace Haruka::Core {
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_EVENT_QUIT) running = false;
             else if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                m_data.width = event.window.data1;
-                m_data.height = event.window.data2;
+                // En PÍXELES: `data1/2` es el tamaño lógico y con escalado del compositor no
+                // coincide con el del framebuffer (ver la nota en application.cpp).
+                int pw = event.window.data1, ph = event.window.data2;
+                SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+                m_data.width  = (uint32_t)((pw > 0) ? pw : event.window.data1);
+                m_data.height = (uint32_t)((ph > 0) ? ph : event.window.data2);
             }
         }
     }

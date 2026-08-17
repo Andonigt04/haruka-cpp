@@ -233,6 +233,7 @@ and release.)
 | [PLAN_LOD_V3.md](docs/guides/PLAN_LOD_V3.md) | Screen-space LOD, keep radius, ground pin |
 | [PLAN_DGS_ANTICHEAT.md](docs/guides/PLAN_DGS_ANTICHEAT.md) | Authoritative server, per-project rules via `dlopen` |
 | [PLAN_CONSTRUCCION.md](docs/guides/PLAN_CONSTRUCCION.md) | Free-form building, validated placement |
+| [PLAN_PUERTOS.md](docs/guides/PLAN_PUERTOS.md) | Authored ports (mount + interact) and **rails**: doors, ramps and suspensions as mechanisms, not animations |
 | [ANALISIS_SISTEMAS.md](docs/guides/ANALISIS_SISTEMAS.md) | ObjectType, SceneManager, WorldSystem, PlanetarySystem |
 | [MODULES.md](docs/MODULES.md) | The module bitmask |
 | Doxygen | run `doxygen Doxyfile` → `docs/html/index.html` |

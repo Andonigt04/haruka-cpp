@@ -336,14 +336,35 @@ static_assert(sizeof(CloudParams) == 160, "CloudParams std140 size mismatch");
  *
  *  Empezó en 0.004 y la nube se veía translúcida — se leía el cielo a través de ella, que es lo que
  *  delata que no hay cuerpo. Subir esto hace que la profundidad óptica llegue antes a saturación
- *  (Beer-Lambert), o sea que atravesar el mismo espesor tape más. Va junto al umbral del campo en
- *  `cloud_vol.frag`: los dos gobiernan lo maciza que se ve. */
-constexpr float kCloudExtinction = 0.014f;
+ *  (Beer-Lambert), o sea que atravesar el mismo espesor tape más.
+ *
+ *  ⚠️ BAJÓ de 0.014 a 0.008 y NO es que la nube tape menos: cambió lo que multiplica. Antes la
+ *  densidad era `max(campo − umbral, 0)`, que sobre el campo real vale 0,05-0,21 — un factor de
+ *  escala accidental que había que compensar aquí. Ahora `harukaCloudStrength` normaliza a [0,1], el
+ *  núcleo de una nube vale 1 y esto vuelve a ser un coeficiente por metro de verdad. Medido con la
+ *  fórmula nueva: con 0.008 un cúmulo de 1060 m sale opaco (alpha 0,96 en el cénit) y los bordes
+ *  siguen suaves porque la suavidad la da la rampa del umbral, no la transparencia global. */
+constexpr float kCloudExtinction = 0.008f;
 
 /** @brief Pasos del raymarch de nubes. Deliberadamente POCOS: esto corre a pantalla completa, y lo
  *  que hace falta para que la nube deje de leerse como calcomanía es que el ESPESOR exista, no que
  *  la integral sea exacta. Es el primer número a tocar si el pase pesa. */
-constexpr int kCloudSteps = 24;
+/// ⚠️ SUBIÓ de 24 a 64, y el permiso lo dio una MEDIDA, no una intuición: en el HUD del juego
+/// `renderFrameContent` marcaba **1,42 ms** con este pase por debajo del umbral de 0,5 ms del panel,
+/// o sea que costaba menos del 35 % de un frame ya barato. Con 24 pasos las nubes LEJANAS seguían
+/// planas (el paso igualaba al tamaño de la nube a los 4,3 km); con 64 y un crecimiento más lento
+/// la estructura se resuelve hasta los 15,3 km. Es el primer número a bajar si el pase pesa.
+constexpr int kCloudSteps = 64;
+
+/// `HARUKA_CLOUD_VOL=0` apaga el pase VOLUMÉTRICO de cúmulos. Vive aquí y no dentro del pase porque
+/// lo consultan DOS sitios que tienen que estar de acuerdo: el propio pase y el conmutador que le
+/// dice a `sky.frag` si debe pintar el cúmulo plano de fondo. Si solo lo mirara el pase, apagarlo
+/// dejaría el cielo SIN cúmulos —ni volumétricos ni planos— y el A/B no compararía lo que dice.
+static bool cloudVolumetricOff() {
+    static const bool s_off = [] { const char* e = std::getenv("HARUKA_CLOUD_VOL");
+                                   return e && std::atoi(e) == 0; }();
+    return s_off;
+}
 } // namespace
 
 void Application::setupQuad() {
@@ -686,6 +707,19 @@ void Application::renderFrameContent() {
         frameCtx->endRenderPass();
     }
 
+    // ── TRABAJO DE COMPUTE, ANTES DE ABRIR NINGÚN RENDER PASS ───────────────────────────────────
+    //
+    // ⚠️ El orden es OBLIGATORIO, no una optimización. `vkCmdDispatch` dentro de una instancia de
+    // render pass es ILEGAL en Vulkan, y el culling de parches del terreno se despachaba dentro del
+    // pase de escena porque en OpenGL eso es legal y corriente. Cerraba el programa, y el síntoma
+    // despistaba: en una captura de RenderDoc los draws salían BIEN uno a uno —el replay los ejecuta
+    // aislados— mientras en ejecución el dispositivo se perdía a mitad de frame y quedaba la
+    // pantalla negra. Si alguien mueve esta llamada dentro de un pase, vuelve el mismo fallo.
+    if (_camera && _planetarySystem) {
+        HARUKA_PROFILE("frame.compute.prepare");
+        _planetarySystem->prepareSimplePlanets(glm::dvec3(_camera->position));
+    }
+
     // Pase de cielo procedural (gradiente + sol + estrellas) como FONDO: triángulo
     // fullscreen SIN escribir profundidad → el terreno/objetos se pintan encima.
     if (_worldSystem && _camera && _planetarySystem) {
@@ -808,7 +842,8 @@ void Application::renderFrameContent() {
                 //        buen tiempo que con tormenta; ahora lo trae el clima (~430 m de estrato
                 //        frente a >3800 m de cumulonimbo).
                 sp.planet = glm::vec4(rad, alt, wx.cloudBaseM,
-                                      m_volumetricClouds ? 0.0f : wx.cloudTopM);
+                                      (m_volumetricClouds && !cloudVolumetricOff()) ? 0.0f
+                                                                                  : wx.cloudTopM);
             }
             skyDev->updateBuffer(m_skyUBO, 0, sizeof(sp), &sp);
 
@@ -1003,7 +1038,7 @@ void Application::renderFrameContent() {
                         if (ul > 1e-9) elev = glm::dot(rel / dist, upv / ul);
                     }
                 }
-                HARUKA_LOGI("Star",
+                HARUKA_LOGDIAG("Star",
                     "'%s' dist=%.3e m radio=%.3e m diam=%.1f px | delante=%d ndc=(%.2f,%.2f) "
                     "depth=%.3e | elev=%.2f",
                     b.name.c_str(), dist, (double)b.radius, pxDiam, (int)front,
@@ -1240,11 +1275,17 @@ void Application::renderFrameContent() {
                 };
                 // Enlaza las texturas del material del grupo + su UBO (escalares/máscara) → per-pixel.
                 auto bindGroupMaterial = [&](const ConstGroupMaterial& gm) {
-                    if (RHI::valid(gm.albedo))    sceneCtx->bindTexture(0, gm.albedo);
-                    if (RHI::valid(gm.normal))    sceneCtx->bindTexture(1, gm.normal);
-                    if (RHI::valid(gm.metallic))  sceneCtx->bindTexture(2, gm.metallic);
-                    if (RHI::valid(gm.roughness)) sceneCtx->bindTexture(3, gm.roughness);
-                    if (RHI::valid(gm.ao))        sceneCtx->bindTexture(4, gm.ao);
+                    // Mismo motivo que en el pase de props: en Vulkan un slot sin atar es basura.
+                    sceneCtx->bindTexture(0, RHI::valid(gm.albedo)    ? gm.albedo
+                                             : fallbackTexture(FallbackTex::White));
+                    sceneCtx->bindTexture(1, RHI::valid(gm.normal)    ? gm.normal
+                                             : fallbackTexture(FallbackTex::Normal));
+                    sceneCtx->bindTexture(2, RHI::valid(gm.metallic)  ? gm.metallic
+                                             : fallbackTexture(FallbackTex::Metallic));
+                    sceneCtx->bindTexture(3, RHI::valid(gm.roughness) ? gm.roughness
+                                             : fallbackTexture(FallbackTex::White));
+                    sceneCtx->bindTexture(4, RHI::valid(gm.ao)        ? gm.ao
+                                             : fallbackTexture(FallbackTex::White));
                     ConstParams cp;
                     cp.matPBR = glm::vec4(gm.metallicS, gm.roughnessS, gm.aoS, (float)gm.mask);
                     uboDev->updateBuffer(m_constParamsUBO, 0, sizeof(cp), &cp);
@@ -1327,9 +1368,16 @@ void Application::renderFrameContent() {
             }
 
             // UBO del pase (binding 6): viento + tiempo + escalares del material del prototipo.
-            if (!RHI::valid(m_propParamsUBO)) {
-                m_propParamsUBO = uboDev->createBuffer(RHI::BufferUsage::Uniform,
-                                                       sizeof(PropParams), nullptr, RHI::BufferMemory::Dynamic);
+            // UNO POR PROTOTIPO: en Vulkan los draws se graban y se ejecutan después, así que un
+            // buffer compartido haría que todos leyeran el último material escrito. Ver la nota en
+            // `application.h`.
+            if ((int)m_propParamsUBOs.size() < m_propRegistry.prototypeCount()) {
+                const size_t was = m_propParamsUBOs.size();
+                m_propParamsUBOs.resize((size_t)m_propRegistry.prototypeCount());
+                for (size_t i = was; i < m_propParamsUBOs.size(); ++i)
+                    m_propParamsUBOs[i] = uboDev->createBuffer(RHI::BufferUsage::Uniform,
+                                                              sizeof(PropParams), nullptr,
+                                                              RHI::BufferMemory::Dynamic);
             }
 
             // Viento del CLIMA (m/s, marco del observador) y tiempo del cielo — el mismo que mueve
@@ -1510,7 +1558,7 @@ void Application::renderFrameContent() {
                     m_diagClock += 0.0;   // (el reloj ya lo avanza el diagnóstico de estrellas)
                     if (m_diagClock - s_lastPropLog > 2.0) {
                         s_lastPropLog = m_diagClock;
-                        HARUKA_LOGI("PropCost",
+                        HARUKA_LOGDIAG("PropCost",
                             "barrido+cull+matrices: %.2f ms para %zu instancias -> %zu dibujadas "
                             "(%.0f ns/instancia)", ms, nSwept, nKept,
                             nSwept ? ms * 1e6 / (double)nSwept : 0.0);
@@ -1651,13 +1699,30 @@ void Application::renderFrameContent() {
                         sceneCtx->bindPipeline(m_propInstPSO);   // re-bind (creación perezosa de buffers)
                         sceneCtx->bindVertexBuffer(pg.vbo[lod], 0);
                         sceneCtx->bindIndexBuffer(pg.ebo[lod]);
-                        if (RHI::valid(pg.albedo))    sceneCtx->bindTexture(0, pg.albedo);
-                        if (RHI::valid(pg.normal))    sceneCtx->bindTexture(1, pg.normal);
-                        if (RHI::valid(pg.metallic))  sceneCtx->bindTexture(2, pg.metallic);
-                        if (RHI::valid(pg.roughness)) sceneCtx->bindTexture(3, pg.roughness);
-                        if (RHI::valid(pg.ao))        sceneCtx->bindTexture(4, pg.ao);
-                        uboDev->updateBuffer(m_propParamsUBO, 0, sizeof(pp), &pp);
-                        sceneCtx->bindUniformBuffer(6, m_propParamsUBO);
+                        // ⚠️ SE ATAN LOS CINCO SLOTS SIEMPRE. Antes solo se ataba el que existía, y
+                        // en OpenGL eso vale: un sampler sin atar lee negro y el guard `hasTex()`
+                        // del shader lo ignora. En Vulkan el descriptor queda INDEFINIDO y
+                        // muestrearlo es basura — los props salían GRISES, sin el verde de la copa
+                        // ni el marrón del tronco (se vio en RenderDoc como `u_matMetallic` sin
+                        // recurso). El relleno es una textura blanca de 1x1; el shader sigue
+                        // ignorándola por la máscara, así que no cambia el resultado en GL.
+                        sceneCtx->bindTexture(0, RHI::valid(pg.albedo)    ? pg.albedo
+                                                 : fallbackTexture(FallbackTex::White));
+                        sceneCtx->bindTexture(1, RHI::valid(pg.normal)    ? pg.normal
+                                                 : fallbackTexture(FallbackTex::Normal));
+                        sceneCtx->bindTexture(2, RHI::valid(pg.metallic)  ? pg.metallic
+                                                 : fallbackTexture(FallbackTex::Metallic));
+                        sceneCtx->bindTexture(3, RHI::valid(pg.roughness) ? pg.roughness
+                                                 : fallbackTexture(FallbackTex::White));
+                        sceneCtx->bindTexture(4, RHI::valid(pg.ao)        ? pg.ao
+                                                 : fallbackTexture(FallbackTex::White));
+                        const RHI::BufferHandle ppUbo =
+                            (pi < (int)m_propParamsUBOs.size()) ? m_propParamsUBOs[(size_t)pi]
+                                                                : RHI::BufferHandle{};
+                        if (RHI::valid(ppUbo)) {
+                            uboDev->updateBuffer(ppUbo, 0, sizeof(pp), &pp);
+                            sceneCtx->bindUniformBuffer(6, ppUbo);
+                        }
                         _instancing->render(sceneCtx, pg.indexCount[lod], 1);
                         ++renderedDrawCalls;
                     }
@@ -1682,7 +1747,7 @@ void Application::renderFrameContent() {
                                           s_drawnCounts[(size_t)di]);
                             line += tmp;
                         }
-                        HARUKA_LOGI("PropDiag", "protoCount=%d instances=%zu%s", protoCount,
+                        HARUKA_LOGDIAG("PropDiag", "protoCount=%d instances=%zu%s", protoCount,
                                     m_propRegistry.instances().size(), line.c_str());
                     }
                 }
@@ -1772,6 +1837,18 @@ void Application::renderFrameContent() {
                 }
             }
 
+            // El SUELO ya sabe que está mojado (`m_groundWetness` se integra arriba) pero hasta ahora
+            // eso no llegaba al shader del terreno: el suelo se mojaba en la simulación y no cambiaba
+            // de aspecto. Se reparte aquí, DESPUÉS del pase de máscara cenital, porque la silueta seca
+            // bajo los árboles sale de esa misma textura — la que la lluvia ya usa por gota.
+            if (_planetarySystem) {
+                _planetarySystem->setGroundWet(
+                    m_groundWetness, m_snowAccum,
+                    (m_skyMaskOn && m_skyMask) ? RHI::device()->getDepthTexture(m_skyMask->pass())
+                                               : RHI::TextureHandle{},
+                    m_skySpace);
+            }
+
             // Restore scene framebuffer + viewport before drawing SimplePlanet/game objects
             // (shadow/sky-mask passes changed both and GL's endRenderPass is a no-op).
             {
@@ -1808,11 +1885,11 @@ void Application::renderFrameContent() {
             // tiene; solo el agua culla las caras tras el planeta, que es lo que refleja el desglose).
             m_terrainStats = _planetarySystem->getTerrainRenderStats();
             totalDrawCalls  += m_terrainStats.drawCalls;
-            totalVertices   += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices + m_terrainStats.waterVertices);
-            totalTriangles  += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles + m_terrainStats.waterTriangles);
+            totalVertices   += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices);
+            totalTriangles  += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles);
             renderedDrawCalls += m_terrainStats.drawCalls;
-            renderedVertices  += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices + m_terrainStats.waterVertices);
-            renderedTriangles += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles + m_terrainStats.waterTriangles);
+            renderedVertices  += (int)(m_terrainStats.baseVertices + m_terrainStats.clipVertices);
+            renderedTriangles += (int)(m_terrainStats.baseTriangles + m_terrainStats.clipTriangles);
         }
 
         _iRenderedDrawCalls = renderedDrawCalls;
@@ -1839,14 +1916,23 @@ void Application::renderFrameContent() {
         HARUKA_PROFILE("precip.draw");
         const glm::dvec3 camD = glm::dvec3(_camera->position);
         glm::dvec3 upD(0, 1, 0);
+        // Altura de la BASE DE LA NUBE respecto a la cámara. Sin planeta activo no hay cota de la que
+        // colgar la nube, así que se deja sin techo (el valor por defecto de Params).
+        float cloudBaseRelCam = 1e9f;
         if (_planetarySystem) {
             glm::dvec3 pc; double pr;
             if (_planetarySystem->getActivePlanet(pc, pr)) {
                 const glm::dvec3 r = camD - pc; const double rl = glm::length(r);
                 if (rl > 1e-9) upD = r / rl;
+                // `cloudBaseM` es cota sobre el nivel del mar, igual que la que consume el pase
+                // volumétrico (`CloudParams::slab.x`): se le resta la de la cámara para dejarla en la
+                // MISMA referencia que usa el shader de gotas (altura sobre la cámara).
+                const Haruka::WeatherSample wxP = _planetarySystem->weatherAt(camD);
+                cloudBaseRelCam = (float)(wxP.cloudBaseM - (rl - pr));
             }
         }
         Haruka::PrecipitationRenderer::Params pp;
+        pp.cloudBaseRelCamM = cloudBaseRelCam;
         pp.cameraPos   = camD;
         pp.up          = glm::vec3(upD);
         pp.lookDir     = _camera->getFront();
@@ -1912,6 +1998,15 @@ void Application::renderFrameContent() {
             } else {
                 _fluidHost->tidalSeaAlongUpFn = nullptr;
             }
+            // El agua interior la DIBUJA EL MAR: el fluido publica su campo y el planeta lo consume.
+            // Sin este enganche la sim sigue corriendo (cauces, charcos, lluvia) pero no se ve nada.
+            _fluidHost->publishInlandWater =
+                [this](const std::vector<float>& surf, int n, const glm::vec3& anchorRelEye,
+                       const glm::vec3& tan, const glm::vec3& bit, const glm::vec3& up, float span) {
+                    if (!_planetarySystem) return;
+                    if (auto* tp = _planetarySystem->activeTerrestrialMut())
+                        tp->setInlandWater(&surf, n, anchorRelEye, tan, bit, up, span);
+                };
             _fluidHost->rainPerSec = (m_rainAmount > 0.01f) ? m_rainAmount : 0.0f;
             _fluidHost->update(deltaTime > 0.0f ? deltaTime : 0.016f,
                                glm::dvec3(_camera->position));
@@ -1937,7 +2032,12 @@ void Application::renderFrameContent() {
     // una nube porque un fondo no tiene dentro. Dibujándolo aquí, con la profundidad de la escena
     // a mano, la nube es un cuerpo que se recorre: si la cámara está dentro, el rayo arranca dentro
     // y la pérdida de visibilidad sale de la integración, sin ningún efecto de pantalla añadido.
-    if (m_volumetricClouds && _camera && _planetarySystem && _worldSystem) {
+    // A/B SIN RECOMPILAR: `HARUKA_CLOUD_VOL=0` apaga el pase volumétrico. Con él apagado, `sky.frag`
+    // vuelve a pintar el cúmulo PLANO como fondo (ver su conmutador `u_planet.w`). Si el cielo se ve
+    // IGUAL con y sin, lo que estás mirando no es el pase volumétrico: son el cirro (8 km) y el
+    // altocúmulo (4 km), que son planos A PROPÓSITO —están tan alto que nunca se cruzan— y solo el
+    // CÚMULO es volumétrico.
+    if (m_volumetricClouds && !cloudVolumetricOff() && _camera && _planetarySystem && _worldSystem) {
         HARUKA_PROFILE("scene.clouds.volumetric");
         RHI::Device* dev = RHI::device();
         glm::dvec3 pcD; double prD = 0.0;
@@ -1966,17 +2066,33 @@ void Application::renderFrameContent() {
 
             // Copia del DEPTH de la escena. ⚠️ No se puede samplear la profundidad del MISMO target
             // al que se dibuja (realimentación); el fluido ya resolvía esto igual, con `blitDepth`.
+            // ⚠️ EL FORMATO DE PROFUNDIDAD LO DICTA LA FUENTE, no este bloque. Un blit de profundidad
+            // exige formatos IDÉNTICOS. Con el post-proceso apagado, `sceneTargetPass` es inválido y la
+            // escena vive en el BACKBUFFER, cuya profundidad la elige SDL (punto fijo, no D32F): pedir
+            // D32F aquí daba `GL_INVALID_OPERATION: Depth formats do not match`, el blit se caía en
+            // silencio y esta textura se quedaba SIN ESCRIBIR — o sea las nubes ocluyendo contra basura,
+            // que es el "se ven a través del terreno" reportado.
+            const RHI::Format srcDepthFmt = RHI::valid(sceneTargetPass) ? RHI::Format::D32F
+                                                                        : dev->backbufferDepthFormat();
             if (RHI::valid(m_cloudPSO) && (!RHI::valid(m_cloudDepthRT) ||
-                                           m_cloudDepthW != cw || m_cloudDepthH != ch)) {
+                                           m_cloudDepthW != cw || m_cloudDepthH != ch ||
+                                           m_cloudDepthFmt != srcDepthFmt)) {
                 if (RHI::valid(m_cloudDepthRT)) dev->destroy(m_cloudDepthRT);
                 RHI::RenderTargetDesc dd;
                 dd.width = cw; dd.height = ch;
                 dd.colorFormats = { RHI::Format::R32F };   // no se usa; el target necesita un color
                 dd.colorFilter  = RHI::Filter::Nearest;
                 dd.hasDepth     = true;
-                dd.depthFormat  = RHI::Format::D32F;
+                dd.depthFormat  = srcDepthFmt;
                 m_cloudDepthRT = dev->createRenderTarget(dd);
-                m_cloudDepthW = cw; m_cloudDepthH = ch;
+                m_cloudDepthW = cw; m_cloudDepthH = ch; m_cloudDepthFmt = srcDepthFmt;
+                // Una línea, solo al (re)crear: dice si el blit de profundidad puede ser legal. Si
+                // aquí sale un formato y la escena tiene otro, las nubes ocluyen contra basura y el
+                // síntoma es "se ven a través del terreno" — sin más aviso que un GL_INVALID_OPERATION
+                // fácil de pasar por alto.
+                HARUKA_LOGI("Clouds", "copia de profundidad %dx%d · formato %s (escena: %s)",
+                            cw, ch, srcDepthFmt == RHI::Format::D32F ? "D32F" : "D24S8",
+                            RHI::valid(sceneTargetPass) ? "target de post" : "BACKBUFFER");
             }
 
             if (RHI::valid(m_cloudPSO) && RHI::valid(m_cloudDepthRT)) {
@@ -1986,6 +2102,19 @@ void Application::renderFrameContent() {
                 float precC  = wx.precip;
                 if (m_rainOverride >= 0.0f) { precC = m_rainOverride; coverC = glm::max(coverC, precC); }
 
+                // SONDA: sin esto, "las nubes no son volumétricas" no se puede separar de "no hay
+                // nubes". El pase solo dibuja con cobertura > 1 %, así que un cielo con cirros y sin
+                // cúmulos se ve plano y el pase ni se ejecuta. Solo al cambiar de forma apreciable.
+                {
+                    static float s_lastCov = -1.0f;
+                    if (std::abs(coverC - s_lastCov) > 0.05f) {
+                        s_lastCov = coverC;
+                        HARUKA_LOGI("Clouds", "cobertura=%.2f · precip=%.2f · base=%.0f m · techo=%.0f m"
+                                    " · pasos=%d -> el cumulo volumetrico %s",
+                                    coverC, precC, wx.cloudBaseM, wx.cloudTopM, kCloudSteps,
+                                    coverC > 0.01f ? "SE DIBUJA" : "NO se dibuja (cielo plano: cirro+altocumulo)");
+                    }
+                }
                 if (coverC > 0.01f) {
                     glm::dvec3 upD = camD - pcD; const double ul = glm::length(upD);
                     upD = (ul > 1e-9) ? upD / ul : glm::dvec3(0, 1, 0);
@@ -2028,7 +2157,12 @@ void Application::renderFrameContent() {
                     const float atmoC = 1.0f - glm::smoothstep(0.0f, (float)(prD * 0.02), altEye);
                     // Pasos: pocos. Esto corre a pantalla completa y lo que hace falta es que el
                     // ESPESOR exista, no que la integral sea exacta.
-                    cp.misc = glm::vec4(atmoC, (float)kCloudSteps, 0.00035f, kCloudExtinction);
+                    // z = ESCALA del campo horizontal, en 1/metros; su inversa es el ANCHO del
+                    // cúmulo. Sale de `WeatherSystem` y no de un literal aquí porque forma pareja
+                    // con el GROSOR que calcula `sampleAt`: los dos juntos deciden si la nube se lee
+                    // como cuerpo o como lámina, y el test `cloud_shape` fija su relación.
+                    cp.misc = glm::vec4(atmoC, (float)kCloudSteps,
+                                        Haruka::WeatherSystem::kFieldScale, kCloudExtinction);
 
                     dev->updateBuffer(m_cloudUBO, 0, sizeof(cp), &cp);
 
@@ -2095,10 +2229,20 @@ void Application::renderFrameContent() {
             dev->updateBuffer(m_presentUBO, 0, sizeof(p), &p);
 
             RHI::Context* ctx = dev->beginFrame();
-            RHI::ClearValues keep;                       // el quad cubre la pantalla entera
-            keep.clearColor = false; keep.clearDepth = false;
+            // ⚠️ SE LIMPIA, aunque el quad cubra la pantalla entera. Antes ponía `clearColor=false`
+            // razonando justo eso, y en OpenGL es correcto. En Vulkan NO: desde que las render
+            // passes tienen variante `loadOp LOAD` (necesaria para que el motor pueda reabrir un
+            // pase sin borrar lo dibujado), no limpiar significa CONSERVAR lo que había en ESA
+            // imagen del swapchain — que con 3 imágenes rotando es el frame de hace 2 o 3 turnos.
+            // Cualquier píxel que el quad no cubra exactamente enseña ese frame viejo: el "frame
+            // fantasma". Limpiar aquí no cuesta nada (el quad lo sobreescribe igual) y elimina la
+            // posibilidad por construcción.
+            RHI::ClearValues clr;
+            clr.clearColor = true;
+            clr.color[0] = 0.0f; clr.color[1] = 0.0f; clr.color[2] = 0.0f; clr.color[3] = 1.0f;
+            clr.clearDepth = true; clr.depth = 0.0f;      // reversed-Z: 0 = lejano
 
-            ctx->beginRenderPass(RHI::RenderPassHandle{}, keep);  // id 0 = backbuffer (pantalla)
+            ctx->beginRenderPass(RHI::RenderPassHandle{}, clr);  // id 0 = backbuffer (pantalla)
             ctx->setViewport(0, 0, (int)width, (int)height);      // el pass a pantalla NO fija viewport
             ctx->bindPipeline(m_presentPSO);
             ctx->bindVertexBuffer(m_quadBuf);
@@ -2315,8 +2459,13 @@ void Application::renderCollisionWireframe(RHI::Context* ctx, const glm::mat4& v
 
     // Solo se re-suben los buffers cuando la física reconstruye el parche (una vez cada 48 m de
     // deriva), no cada frame: son ~88 k vértices.
-    if (rev != m_dbgLineRev) {
+    // ⚠️ La recarga mira TAMBIÉN la versión de estáticos: los OBB de props se rehacen cada ~30 m
+    // (mucho más a menudo que la malla del suelo), y sin esto el alambre de los props se quedaba
+    // congelado en las cajas del primer refresco — que es exactamente la duda que vino a resolver.
+    const uint64_t propVer = _physicsEngine->staticsVersion();
+    if (rev != m_dbgLineRev || propVer != m_dbgPropVer) {
         m_dbgLineRev = rev;
+        m_dbgPropVer = propVer;
         // ⚠️ SOLO EL ENTORNO CERCANO. El parche de colisión llega a 200 km y sus celdas del borde son
         // kilométricas: dibujarlo entero son 175 k triángulos de alambre que además tapan la pantalla.
         // Lo que hay que poder comparar es el suelo que se pisa, así que se recorta a lo que el bloque
@@ -2355,6 +2504,104 @@ void Application::renderCollisionWireframe(RHI::Context* ctx, const glm::mat4& v
             lines.push_back(fb); lines.push_back(fc);
             lines.push_back(fc); lines.push_back(fa);
         }
+        // ── CAJAS DE LOS PROPS (árboles y rocas) ────────────────────────────────────────────────
+        //
+        // Sin esto el alambre solo enseñaba el SUELO, así que "¿los árboles tienen collider y dónde?"
+        // no era una pregunta que se pudiera mirar — solo deducir. Cada OBB se dibuja con sus 12
+        // aristas, en el mismo marco relativo a `center` que el resto del buffer.
+        {
+            const auto& obbs = _physicsEngine->getPropOBBs();
+            for (const auto& o : obbs) {
+                if (glm::length(o.center - center) > kShowM) continue;
+                // Los 8 vértices de la caja: centro ± cada semieje, en el marco del OBB.
+                glm::vec3 v[8];
+                for (int k = 0; k < 8; ++k) {
+                    const glm::dvec3 sgn((k & 1) ? 1.0 : -1.0,
+                                         (k & 2) ? 1.0 : -1.0,
+                                         (k & 4) ? 1.0 : -1.0);
+                    const glm::dvec3 local = o.halfExtents * sgn;
+                    v[k] = glm::vec3((o.center + o.rot * local) - center);
+                }
+                // 12 aristas del cubo por índices de vértice.
+                static const int E[12][2] = {
+                    {0,1},{2,3},{4,5},{6,7},   // en X
+                    {0,2},{1,3},{4,6},{5,7},   // en Y
+                    {0,4},{1,5},{2,6},{3,7}    // en Z
+                };
+                for (const auto& e : E) { lines.push_back(v[e[0]]); lines.push_back(v[e[1]]); }
+            }
+
+            // ── MALLAS DE COLISIÓN (lo que la física usa de verdad) ─────────────────────────────
+            //
+            // ⚠️ Sin esto el alambre no enseñaba NADA de los props: al pasar a mallas dejaron de
+            // existir las cajas y los conos que dibujaba. Un instrumento que se queda ciego al
+            // cambiar lo que mide no sirve — es la segunda vez que pasa hoy con este mismo alambre.
+            //
+            // Se acota a un radio CORTO: son ~500 triángulos por prop y dibujarlos todos serían
+            // cientos de miles de líneas. Lo que hace falta es ver la forma alrededor del jugador.
+            {
+                const double kMeshShowM = 40.0;
+                const glm::dvec3 camNow = glm::dvec3(_camera->position);
+                for (const auto& mi : _physicsEngine->getPropMeshInstances()) {
+                    if (glm::length(mi.center - camNow) > kMeshShowM) continue;
+                    // ¿De qué prototipo/parte es esta forma? Se busca por id en el cache.
+                    const std::vector<glm::vec3>* tris = nullptr;
+                    for (const auto& [proto, ids] : m_propMeshShapes) {
+                        for (size_t part = 0; part < ids.size(); ++part) {
+                            if (ids[part] != mi.shapeId) continue;
+                            auto it = m_propMeshCpu.find(proto);
+                            if (it != m_propMeshCpu.end() && part < it->second.size())
+                                tris = &it->second[part];
+                            break;
+                        }
+                        if (tris) break;
+                    }
+                    if (!tris) continue;
+                    for (size_t t = 0; t + 2 < tris->size(); t += 3) {
+                        glm::vec3 w[3];
+                        for (int k = 0; k < 3; ++k) {
+                            const glm::dvec3 lp = glm::dvec3((*tris)[t + k]) * mi.scale;
+                            w[k] = glm::vec3((mi.center + mi.rot * lp) - center);
+                        }
+                        lines.push_back(w[0]); lines.push_back(w[1]);
+                        lines.push_back(w[1]); lines.push_back(w[2]);
+                        lines.push_back(w[2]); lines.push_back(w[0]);
+                    }
+                }
+            }
+
+            // ── CONOS (troncos y ramas) ─────────────────────────────────────────────────────────
+            //
+            // ⚠️ Se dibujan APARTE porque no están en `propOBBs`: al darles su forma real pasaron a
+            // `propCones`, y el alambre —que solo leía las cajas— dejó de enseñar los árboles justo
+            // cuando cambiaron de forma. Un instrumento que se queda ciego al tocar lo que mide es
+            // peor que no tenerlo.
+            //
+            // Se pinta el contorno de verdad: dos anillos (base y punta, con SUS radios) y unas
+            // generatrices que los unen. Así se ve el taper, que es lo que distingue el cono de la
+            // caja que había antes.
+            for (const auto& c : _physicsEngine->getPropCones()) {
+                if (glm::length(c.center - center) > kShowM) continue;
+                const int kSeg = 8;
+                glm::vec3 ringBot[kSeg], ringTop[kSeg];
+                for (int k = 0; k < kSeg; ++k) {
+                    const double a = 6.283185307179586 * (double)k / (double)kSeg;
+                    const glm::dvec3 offB(std::cos(a) * c.rBottom, -c.halfHeight, std::sin(a) * c.rBottom);
+                    const glm::dvec3 offT(std::cos(a) * c.rTop,     c.halfHeight, std::sin(a) * c.rTop);
+                    ringBot[k] = glm::vec3((c.center + c.rot * offB) - center);
+                    ringTop[k] = glm::vec3((c.center + c.rot * offT) - center);
+                }
+                for (int k = 0; k < kSeg; ++k) {
+                    const int k2 = (k + 1) % kSeg;
+                    lines.push_back(ringBot[k]); lines.push_back(ringBot[k2]);   // anillo de la base
+                    lines.push_back(ringTop[k]); lines.push_back(ringTop[k2]);   // anillo de la punta
+                    if ((k % 2) == 0) {                                          // generatrices (la mitad)
+                        lines.push_back(ringBot[k]); lines.push_back(ringTop[k]);
+                    }
+                }
+            }
+        }
+
         m_dbgLineVerts = (uint32_t)lines.size();
         if (RHI::valid(m_dbgLineVB)) { dev->destroy(m_dbgLineVB); m_dbgLineVB = {}; }
         if (m_dbgLineVerts > 0)
@@ -2557,6 +2804,40 @@ void Application::renderPropShadows(RHI::Context* ctx, const glm::mat4& lightSpa
         ctx->bindIndexBuffer(pg.ebo[sl]);
         _instancing->render(ctx, pg.indexCount[sl], 1);
     }
+}
+
+// Texturas de relleno 1x1 para los slots de material ausentes.
+//
+// ⚠️ EL VALOR NEUTRO NO ES EL MISMO EN TODOS LOS SLOTS, y ponerlo mal se ve. Al principio se rellenó
+// todo con BLANCO, y en albedo o AO es neutro pero en METALLIC blanco significa **metal puro**:
+// cualquier prop con ese slot ausente se convertía en un espejo, con caras blancas y brillantes
+// donde pegaba la luz. Los neutros correctos son:
+//     albedo    -> blanco  (multiplica por 1)
+//     normal    -> (0.5, 0.5, 1) = normal plana en espacio tangente
+//     metallic  -> NEGRO   (0 = dieléctrico; blanco = metal)
+//     roughness -> blanco  (1 = totalmente rugoso, sin especular de espejo)
+//     ao        -> blanco  (1 = sin oclusión)
+Haruka::RHI::TextureHandle Application::fallbackTexture(FallbackTex kind) {
+    const size_t k = (size_t)kind;
+    if (k < m_fallbackTex.size() && RHI::valid(m_fallbackTex[k])) return m_fallbackTex[k];
+    RHI::Device* dev = RHI::device();
+    if (!dev) return {};
+    if (m_fallbackTex.size() < (size_t)FallbackTex::Count)
+        m_fallbackTex.resize((size_t)FallbackTex::Count);
+
+    uint8_t px[4] = { 255, 255, 255, 255 };
+    switch (kind) {
+        case FallbackTex::Normal:   px[0] = 128; px[1] = 128; px[2] = 255; break;
+        case FallbackTex::Metallic: px[0] = px[1] = px[2] = 0;             break;  // 0 = NO metal
+        default: break;                                                            // blanco
+    }
+    RHI::TextureDesc td;
+    td.width = 1; td.height = 1;
+    td.format = RHI::Format::RGBA8;
+    td.filter = RHI::Filter::Nearest;
+    td.initialData = px;
+    m_fallbackTex[k] = dev->createTexture(td);
+    return m_fallbackTex[k];
 }
 
 void Application::refreshPropScatter() {
@@ -2814,6 +3095,8 @@ Application::PropHit Application::breakPropAt(const glm::dvec3& center, double r
             best.partId    = b.partId;
             best.trunk     = (b.partId == 0);
             best.lengthM   = b.length;
+            best.rBottomM  = b.rBottom;
+            best.rTopM     = b.rTop;
             best.pos       = b.center;
         }
     }
@@ -2837,6 +3120,86 @@ Application::PropHit Application::breakPropAt(const glm::dvec3& center, double r
     refreshPropColliders(planetC, planetR,
                          _camera ? glm::dvec3(_camera->position) : glm::dvec3(0.0));
     return best;
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// MALLAS DE COLISIÓN DE LOS PROTOTIPOS: la geometría REAL del prop, partida por parte.
+//
+// ⚠️ Se registran UNA vez por (prototipo, parte). Partirlas por parte no es un capricho: es lo que
+// permite seguir rompiendo una rama —cada parte es un cuerpo aparte, y la rota simplemente no se
+// coloca— sin renunciar a la forma exacta. El `MeshShape` de Jolt monta un árbol AABB y eso es lo
+// caro; con ~300 vértices por prototipo es despreciable, pero por INSTANCIA sería inviable.
+//
+// La COPA no genera colisión: sus triángulos son follaje (materialId 1) y chocar con hojas se
+// siente mal. Se filtra por material, no por parte, porque la copa cuelga del tronco.
+const std::vector<int>& Application::propMeshShapesFor(int protoIdx) {
+    auto it = m_propMeshShapes.find(protoIdx);
+    if (it != m_propMeshShapes.end()) return it->second;
+
+    std::vector<int>& ids = m_propMeshShapes[protoIdx];
+    PhysicsEngine* phys = getPhysicsEngine();
+    if (!phys || protoIdx < 0 || protoIdx >= m_propRegistry.prototypeCount()) return ids;
+
+    const auto& proto = m_propRegistry.prototype(protoIdx);
+    const auto shape = Haruka::Planet::propShapeKind(proto.name);
+
+    // Se hornea la malla del prototipo a DETALLE MÁXIMO: la colisión no depende del LOD.
+    Haruka::Tools::ProcGraph::TreeMeshData tm;
+    if (shape == Haruka::Planet::PropShapeKind::Rock) {
+        tm = Haruka::Tools::ProcGraph::bakeRockMesh((int)proto.meshSeed, 1.0f, 0.72f);
+    } else if (shape == Haruka::Planet::PropShapeKind::House) {
+        tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
+    } else {
+        const auto tp = Haruka::Planet::propTreeParams();
+        Haruka::Tools::ProcGraph::Graph g;
+        const int node = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
+            (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments, 1.0f);
+        g.compile();
+        Haruka::Tools::ProcGraph::bakeTreeMesh(g, node, tm);
+    }
+    if (tm.positions.empty() || tm.indices.empty()) return ids;
+
+    // ¿Cuántas partes? Para roca/casa, una sola (la malla entera).
+    int maxPart = 0;
+    for (unsigned char p : tm.partId) maxPart = std::max(maxPart, (int)p);
+    const int nParts = tm.partId.empty() ? 1 : (maxPart + 1);
+    ids.assign((size_t)nParts, -1);
+
+    std::vector<float>    verts;
+    std::vector<uint32_t> idx;
+    for (int part = 0; part < nParts; ++part) {
+        verts.clear(); idx.clear();
+        std::vector<int> remap(tm.positions.size(), -1);
+        for (size_t t = 0; t + 2 < tm.indices.size(); t += 3) {
+            const unsigned i0 = tm.indices[t], i1 = tm.indices[t + 1], i2 = tm.indices[t + 2];
+            // Solo triángulos de ESTA parte, y solo los SÓLIDOS (material 0 = corteza).
+            if (!tm.partId.empty() && (int)tm.partId[i0] != part) continue;
+            if (!tm.materialId.empty() && tm.materialId[i0] != 0) continue;
+            for (unsigned vi : { i0, i1, i2 }) {
+                if (remap[vi] < 0) {
+                    remap[vi] = (int)(verts.size() / 3);
+                    verts.push_back(tm.positions[vi].x);
+                    verts.push_back(tm.positions[vi].y);
+                    verts.push_back(tm.positions[vi].z);
+                }
+                idx.push_back((uint32_t)remap[vi]);
+            }
+        }
+        if (idx.size() < 3) continue;
+        ids[(size_t)part] = phys->registerPropMesh(verts.data(), verts.size() / 3,
+                                                   idx.data(), idx.size());
+        // Copia en CPU para el alambre: los mismos triángulos, en el mismo marco local.
+        auto& cpu = m_propMeshCpu[protoIdx];
+        if ((int)cpu.size() <= part) cpu.resize((size_t)part + 1);
+        cpu[(size_t)part].clear();
+        cpu[(size_t)part].reserve(idx.size());
+        for (uint32_t vi : idx)
+            cpu[(size_t)part].push_back(glm::vec3(verts[vi * 3 + 0], verts[vi * 3 + 1],
+                                                  verts[vi * 3 + 2]));
+    }
+    HARUKA_LOGD("PropCollider", "malla de colision '%s': %d parte(s) registradas",
+                proto.name.c_str(), (int)ids.size());
+    return ids;
 }
 
 void Application::refreshPropColliders(const glm::dvec3& planetC, double planetR,
@@ -2863,7 +3226,10 @@ void Application::refreshPropColliders(const glm::dvec3& planetC, double planetR
 
     const auto t0 = std::chrono::steady_clock::now();
     phys->clearPropOBBs();
+    phys->clearPropCones();
+    phys->clearPropMeshInstances();
     size_t nProps = 0, nBoxes = 0;
+    std::vector<size_t> perProtoProps((size_t)protoCount, 0), perProtoBoxes((size_t)protoCount, 0);
     for (const auto& io : m_propRegistry.instances()) {
         if (io.state != (uint32_t)Haruka::InstancedObjectState::Alive) continue;   // tocón: no estorba
         if (io.prototype < 0 || io.prototype >= protoCount) continue;
@@ -2876,19 +3242,72 @@ void Application::refreshPropColliders(const glm::dvec3& planetC, double planetR
         const auto boxes = Haruka::Planet::propWorldColliders(
             protoParts[(size_t)io.prototype], io.dir, io.heightM, io.scale, io.yaw,
             planetC, planetR, io.breakMask);
-        for (const auto& b : boxes) { phys->addPropOBB(b.center, b.halfExtents, b.rot); ++nBoxes; }
+        perProtoProps[(size_t)io.prototype]++;
+        for (const auto& b : boxes) {
+            // ⚠️ LA MALLA REAL DEL PROP. Nada de primitivas: con caja o cono siempre queda holgura
+            // o se atraviesa, y el contorno no es el del objeto. `HARUKA_PROP_BOXES=1` vuelve a las
+            // primitivas por si hace falta comparar.
+            static const bool s_forcePrims = [] {
+                const char* e = std::getenv("HARUKA_PROP_BOXES");
+                return e && e[0] == '1';
+            }();
+            const std::vector<int>& shapeIds = propMeshShapesFor(io.prototype);
+            const int partIdx = (b.partId >= 0) ? b.partId : 0;
+            const int shapeId = (!s_forcePrims && partIdx < (int)shapeIds.size())
+                              ? shapeIds[(size_t)partIdx] : -1;
+            if (shapeId >= 0) {
+                // La malla está en el marco local SIN escalar y con la base en el origen, así que
+                // la instancia solo aporta sitio, giro y escala. `wp` es el punto de superficie y
+                // la base de rotación es la MISMA que usa el render (ver `propInstanceBasis`).
+                phys->addPropMeshInstance(shapeId, wp,
+                                          Haruka::Planet::propInstanceBasis(io.dir, io.yaw),
+                                          (double)io.scale);
+            } else if (b.isCone && !s_forcePrims) {
+                phys->addPropCone(b.center, b.halfExtents.y, b.rTop, b.rBottom, b.rot);
+            } else {
+                phys->addPropOBB(b.center, b.halfExtents, b.rot);
+            }
+            ++nBoxes;
+            perProtoBoxes[(size_t)io.prototype]++;
+        }
     }
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
 
-    // Sonda: sin esto, "cuántas cajas caben" es una opinión. Se reporta una vez y luego solo si el
-    // recuento se dispara, para no ensuciar el log en cada refresco del scatter.
-    static size_t s_peakBoxes = 0;
-    if (nBoxes > s_peakBoxes + (s_peakBoxes / 4) + 32) {
-        s_peakBoxes = nBoxes;
-        HARUKA_LOGI("PropCollider", "%zu props en %.0f m -> %zu cajas (%.2f ms)",
-                    nProps, kColliderRadiusM, nBoxes, ms);
+    // Sonda: sin esto, "cuántas cajas caben" es una opinión. Reporta CADA refresco, con un contador
+    // y la posición: es lo que distingue "los colliders no siguen al jugador" de "los colliders no
+    // se generan". Estando quieto solo se refresca una vez, así que la duda solo se resuelve
+    // andando — y entonces esta línea tiene que repetirse cada ~30 m recorridos.
+    static uint32_t s_refreshN = 0;
+    ++s_refreshN;
+    // Sonda de ESCALA: compara el tamaño del collider con el de la malla dibujada. Si el árbol se
+    // ve gordo y el cono es un hilo, aquí se ve el factor.
+    {
+        static bool s_once = false;
+        if (!s_once) {
+            for (const auto& io : m_propRegistry.instances()) {
+                if (io.prototype < 0 || io.prototype >= protoCount) continue;
+                if (m_propRegistry.prototype(io.prototype).name.find("tree") == std::string::npos) continue;
+                const auto& pp = protoParts[(size_t)io.prototype];
+                if (pp.empty()) break;
+                s_once = true;
+                HARUKA_LOGD("PropCollider", "ESCALA: io.scale=%.3f · tronco malla r=%.3f h=%.3f "
+                            "-> collider r=%.3f halfH=%.3f (x%.2f)",
+                            io.scale, pp[0].radiusA, pp[0].length,
+                            pp[0].radiusA * io.scale, pp[0].half.y * io.scale, io.scale);
+                break;
+            }
+        }
     }
+
+    std::string desglose;
+    for (int pi = 0; pi < protoCount; ++pi) {
+        desglose += " · " + m_propRegistry.prototype(pi).name + "=" +
+                    std::to_string(perProtoProps[(size_t)pi]) + "props/" +
+                    std::to_string(perProtoBoxes[(size_t)pi]) + "cajas";
+    }
+    HARUKA_LOGD("PropCollider", "#%u · %zu props -> %zu cajas (%.2f ms)%s",
+                s_refreshN, nProps, nBoxes, ms, desglose.c_str());
 }
 
 unsigned int Application::getMaterialTextureGL(const std::string& path) {
@@ -3052,16 +3471,36 @@ void Application::captureScreenshotIfPending(int width, int height) {
     if (!m_screenshotPending || width <= 0 || height <= 0) return;
     m_screenshotPending = false;
 
+    // ⚠️ EL TAMAÑO SALE DEL FRAMEBUFFER REAL, NO DE LA VENTANA. Medido: con una ventana de
+    // 1920x1080 el swapchain de Vulkan era de 1280x720, así que la copia escribía filas de 1280 en
+    // un buffer que se leía como de 1920 — la captura salía REPETIDA en horizontal y comprimida en
+    // vertical. El tamaño lógico de SDL y el del framebuffer no tienen por qué coincidir (escalado
+    // del compositor, HiDPI, o un swapchain creado a otro tamaño).
+    if (RHI::Device* dev = RHI::device()) {
+        uint32_t fbw = 0, fbh = 0;
+        dev->framebufferSize(fbw, fbh);
+        if (fbw > 0 && fbh > 0) { width = (int)fbw; height = (int)fbh; }
+    }
+
     // Read the composited back buffer (RGBA8), then flip rows (GL is bottom-up).
     std::vector<unsigned char> buf((size_t)width * height * 4);
     if (RHI::Device* dev = RHI::device()) {
         dev->readPixels(0, 0, width, height, RHI::Format::RGBA8, buf.data());
     }
 
+    // ⚠️ EL VOLTEO ES SOLO DE OPENGL. GL tiene el origen ABAJO-izquierda, así que hay que dar la
+    // vuelta a las filas; las imágenes de Vulkan son top-down y ya vienen en el orden bueno.
+    // Volteando siempre, la captura de Vulkan salía DEL REVÉS — y como hasta ahora el mundo se veía
+    // negro, el fallo estaba escondido: solo se notó cuando por fin hubo algo que mirar.
+    const bool flipRows = !RHI::device() || RHI::device()->backend() == RHI::Backend::OpenGL;
     std::vector<unsigned char> flipped((size_t)width * height * 4);
     const size_t stride = (size_t)width * 4;
-    for (int y = 0; y < height; ++y)
-        std::memcpy(&flipped[(size_t)y * stride], &buf[(size_t)(height - 1 - y) * stride], stride);
+    if (flipRows) {
+        for (int y = 0; y < height; ++y)
+            std::memcpy(&flipped[(size_t)y * stride], &buf[(size_t)(height - 1 - y) * stride], stride);
+    } else {
+        flipped = buf;
+    }
 
     std::string path = m_screenshotPath;
     if (path.empty()) {

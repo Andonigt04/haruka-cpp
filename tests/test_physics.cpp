@@ -294,3 +294,121 @@ void test_physics_character() {
     CHECK(b->position.x > 1.0, "el personaje ANDA");
     CHECK(b->position.x < 2.6, "el personaje NO ATRAVIESA el muro");
 }
+
+// ---------------------------------------------- TEST: RAÍLES contra Jolt (PLAN_PUERTOS.md §4)
+// Una puerta/rampa NO es una animación: es una restricción. Se demuestra justo lo que una animación
+// no sabe hacer, y con CONTRAPRUEBA en cada caso:
+//   (1) el motor la MUEVE al objetivo pedido;
+//   (2) el LÍMITE acota lo que se pide de más — y hay que ver que LLEGA al límite, no que se quedó
+//       corta por otra razón (si no, "37° <= 90°" pasaría el test sin probar nada);
+//   (3) sin motor (Manual) el mismo objetivo NO la mueve sola — si se moviera, seguiría siendo un clip;
+//   (4) con algo estorbando, el motor se queda A MEDIAS y lo REPORTA (`blocked`);
+//   (5) con una carga por encima de `breakForce` la unión CEDE y ya no obedece.
+//
+// ⚠️ Los cuerpos arrancan MUY por encima del suelo salvo en (4): en caída libre los dos caen igual,
+// así que no hay par relativo y el mecanismo se mide limpio. Pegados al suelo, la hoja choca — que es
+// exactamente el caso (4) y hay que provocarlo a propósito, no sufrirlo en todos los demás.
+void test_rail_mechanism_jolt() {
+    beginTest("physics_rail_jolt");
+    using namespace Haruka::Physics;
+
+    // ⚠️ La ORIENTACIÓN de la bisagra decide si el mecanismo puede chocar con el suelo. Aquí "abajo"
+    // es -X (gravedad radial, cuerpos sobre el eje +X). Con el eje de giro RADIAL (1,0,0) la hoja se
+    // mueve en el plano tangente = en HORIZONTAL, y nunca toca el suelo por mucho que gire. Para que
+    // choque, el eje tiene que ser TANGENCIAL. Es el mismo motivo por el que una puerta y una rampa
+    // no son la misma pieza aunque compartan restricción.
+    auto build = [](PhysicsEngine& eng, FakeWorld& w, PhysicsEngine::RailSpec::Drive drive,
+                    double motorForce, double breakForce, double altitude,
+                    const glm::dvec3& axis, const glm::dvec3& leafOffset, int& railId) {
+        eng.setWorldProvider(&w);
+        const double r0 = w.radius + w.terrain + altitude;
+        auto hull = std::make_shared<RigidBody>();
+        hull->position = glm::dvec3(r0, 0, 0);
+        hull->radius = 1.0; hull->mass = 5000.0; hull->name = "hull";
+        hull->lockRotation = true;
+        auto leaf = std::make_shared<RigidBody>();
+        leaf->position = hull->position + leafOffset;
+        leaf->radius = 0.5; leaf->mass = 60.0; leaf->name = "leaf";
+        eng.addBody(hull); eng.addBody(leaf);
+
+        PhysicsEngine::RailSpec spec;
+        spec.dof    = PhysicsEngine::RailSpec::Dof::Hinge;
+        spec.anchor = hull->position;
+        spec.axis   = axis;
+        spec.limits = glm::dvec2(-90.0, 90.0);
+        spec.drive  = drive;
+        spec.motorForce = motorForce;
+        spec.breakForce = breakForce;
+        railId = eng.addRail("hull", "leaf", spec);
+    };
+    const double kHigh = 400.0;   // bien alto: 5 s de caída libre son ~123 m, no llega al suelo
+
+    // (1) y (2) MOTOR: llega a lo pedido, y el límite acota lo que se pide de más.
+    {
+        PhysicsEngine eng; FakeWorld w; int id = -1;
+        build(eng, w, PhysicsEngine::RailSpec::Drive::Motor, 5.0e5, 0.0, kHigh,
+              glm::dvec3(1,0,0), glm::dvec3(0,0,1), id);
+        CHECK(id >= 0, "el rail se crea sobre Jolt");
+        eng.railSetTarget(id, 45.0);
+        for (int i = 0; i < 300; ++i) eng.advance(1.0 / 60.0);
+        PhysicsEngine::RailInfo inf;
+        CHECK(eng.railGet(id, inf), "se puede leer el estado del rail");
+        std::printf("    motor: pedido 45.0 deg -> %.2f deg  (fuerza %.0f N)\n", inf.value, inf.force);
+        CHECK(std::abs(inf.value - 45.0) < 2.0, "el motor lleva la hoja al objetivo");
+        CHECK(!inf.broken && !inf.blocked, "sin estorbo ni rotura ni bloqueo");
+
+        eng.railSetTarget(id, 500.0);
+        for (int i = 0; i < 300; ++i) eng.advance(1.0 / 60.0);
+        eng.railGet(id, inf);
+        std::printf("    limite: pedido 500 deg -> %.2f deg\n", inf.value);
+        CHECK(inf.value <= 90.5, "el limite acota lo que se pide de mas");
+        // Sin esto, el caso anterior lo cumpliría un rail que no se moviese en absoluto.
+        CHECK(inf.value > 85.0, "contraprueba: y LLEGA al limite, no se queda corta");
+    }
+
+    // (3) MANUAL: mismo objetivo, sin motor → no se mueve sola. Si se moviera, sería una animación.
+    {
+        PhysicsEngine eng; FakeWorld w; int id = -1;
+        build(eng, w, PhysicsEngine::RailSpec::Drive::Manual, 0.0, 0.0, kHigh,
+              glm::dvec3(1,0,0), glm::dvec3(0,0,1), id);
+        eng.railSetTarget(id, 45.0);
+        for (int i = 0; i < 300; ++i) eng.advance(1.0 / 60.0);
+        PhysicsEngine::RailInfo inf; eng.railGet(id, inf);
+        std::printf("    manual: pedido 45.0 deg -> %.2f deg (sin motor)\n", inf.value);
+        CHECK(std::abs(inf.value) < 5.0, "contraprueba: sin motor, pedir no mueve");
+    }
+
+    // (4) BLOQUEO: una rampa con demasiado peso para su motor. El casco se apoya en el suelo y la
+    //     hoja sale en HORIZONTAL, así que la gravedad hace un par de ~589 N·m sobre la bisagra
+    //     (60 kg x 9.81 x 1 m). Con un motor de 1 N·m no puede levantarla: se queda a medias y lo
+    //     REPORTA. Es la razón 4 del plan — con animación, una rampa levanta un acorazado igual que
+    //     una pluma. Se provoca con el PAR, no con un choque: así es determinista.
+    {
+        PhysicsEngine eng; FakeWorld w; int id = -1;
+        build(eng, w, PhysicsEngine::RailSpec::Drive::Motor, 1.0, 0.0, 1.0,
+              glm::dvec3(0,0,1), glm::dvec3(0,1,0), id);
+        CHECK(id >= 0, "el rail de la rampa se crea");
+        for (int i = 0; i < 120; ++i) eng.advance(1.0 / 60.0);   // que el casco se asiente
+        eng.railSetTarget(id, -90.0);                            // LEVANTAR la rampa
+        for (int i = 0; i < 300; ++i) eng.advance(1.0 / 60.0);
+        PhysicsEngine::RailInfo inf; eng.railGet(id, inf);
+        std::printf("    bloqueo: motor 1 N-m vs carga ~589 N-m -> %.2f deg  blocked=%d\n",
+                    inf.value, (int)inf.blocked);
+        CHECK(inf.blocked, "el motor no puede con la carga: se queda a medias y lo REPORTA");
+        CHECK(inf.value > -45.0, "y de hecho NO la levanta");
+    }
+
+    // (5) ROTURA: con un breakForce ridiculo, la propia carga basta para que la union ceda.
+    {
+        PhysicsEngine eng; FakeWorld w; int id = -1;
+        build(eng, w, PhysicsEngine::RailSpec::Drive::Manual, 0.0, 1.0e-3, 0.0,
+              glm::dvec3(1,0,0), glm::dvec3(0,0,1), id);
+        for (int i = 0; i < 120; ++i) eng.advance(1.0 / 60.0);
+        PhysicsEngine::RailInfo inf; eng.railGet(id, inf);
+        std::printf("    rotura: breakForce=1e-3 N -> broken=%d\n", (int)inf.broken);
+        CHECK(inf.broken, "la union CEDE por encima de breakForce");
+        eng.railSetTarget(id, 0.0);
+        eng.railGet(id, inf);
+        CHECK(inf.broken, "roto sigue roto: no vuelve a obedecer");
+    }
+}

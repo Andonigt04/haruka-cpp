@@ -8,8 +8,8 @@
 namespace Haruka { namespace Renderer {
 
 GPUInstancing::~GPUInstancing() {
-    if (RHI::valid(m_buf))
-        if (RHI::Device* dev = RHI::device()) dev->destroy(m_buf);
+    if (RHI::Device* dev = RHI::device())
+        for (auto& b : m_bufs) if (RHI::valid(b)) dev->destroy(b);
 }
 
 void GPUInstancing::init(int maxInstances) {
@@ -17,11 +17,17 @@ void GPUInstancing::init(int maxInstances) {
     m_instances.reserve((size_t)m_maxInstances);
     RHI::Device* dev = RHI::device();
     if (!dev) return;
-    if (RHI::valid(m_buf)) dev->destroy(m_buf);
+    for (auto& b : m_bufs) if (RHI::valid(b)) dev->destroy(b);
+    m_bufs.clear();
+    m_cursor = 0;
     // Vertex buffer (no SSBO): lo consume el ensamblador de vértices como binding por-instancia.
-    m_buf = dev->createBuffer(RHI::BufferUsage::Vertex,
-                              (size_t)m_maxInstances * sizeof(InstanceDataFloat),
-                              nullptr, RHI::BufferMemory::Dynamic);
+    // UNO POR ENTRADA DEL ANILLO: cada draw necesita su copia (ver la nota en la cabecera).
+    m_bufs.reserve((size_t)kRing);
+    for (int i = 0; i < kRing; ++i)
+        m_bufs.push_back(dev->createBuffer(RHI::BufferUsage::Vertex,
+                                           (size_t)m_maxInstances * sizeof(InstanceDataFloat),
+                                           nullptr, RHI::BufferMemory::Dynamic));
+    m_buf = m_bufs.empty() ? RHI::BufferHandle{} : m_bufs[0];
 }
 
 void GPUInstancing::addInstance(const glm::vec3& position, const glm::vec3& scale,
@@ -48,9 +54,16 @@ void GPUInstancing::setInstances(const std::vector<InstanceDataFloat>& data) {
 }
 
 void GPUInstancing::upload() {
-    if (!m_dirty || m_instances.empty() || !RHI::valid(m_buf)) return;
-    if (RHI::Device* dev = RHI::device())
-        dev->updateBuffer(m_buf, 0, m_instances.size() * sizeof(InstanceDataFloat), m_instances.data());
+    if (m_instances.empty()) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    // Toma la SIGUIENTE entrada del anillo: cada draw necesita su propia copia (ver la nota en la
+    // cabecera). Se crean perezosamente y con el mismo tamaño que el buffer original.
+    if (m_bufs.empty()) return;
+    m_buf = m_bufs[(size_t)m_cursor];
+    m_cursor = (m_cursor + 1) % (int)m_bufs.size();
+    if (!RHI::valid(m_buf)) return;
+    dev->updateBuffer(m_buf, 0, m_instances.size() * sizeof(InstanceDataFloat), m_instances.data());
     m_dirty = false;
 }
 

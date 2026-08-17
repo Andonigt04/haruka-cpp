@@ -35,7 +35,10 @@ layout(std140, binding = 5) uniform PrecipParams {
     vec4 u_camCell;   // xyz = cámara MÓDULO la celda, YA en el marco local (e1,up,e2) · w = tiempo (s)
     vec4 u_look;      // xyz = dirección de vista · w = 1 si es NIEVE (copo) en vez de lluvia (raya)
     vec4 u_tint;      // rgb = color de la gota (tomado de la luz del sol) · a = alcance de fundido (m)
-    vec4 u_misc;      // x = alto del viewport en PÍXELES · y = 1 si hay máscara cenital · zw = libre
+    vec4 u_misc;      // x = alto del viewport en PÍXELES · y = 1 si hay máscara cenital
+                      // z = altura de la BASE DE LA NUBE respecto a la cámara, en metros a lo largo
+                      //     del cénit (negativa si la cámara está por encima de las nubes). Muy
+                      //     grande = sin techo. · w = libre
     mat4 u_skySpace;  // matriz de la MÁSCARA DE EXPOSICIÓN AL CIELO (ortográfica desde el cénit)
 };
 
@@ -120,6 +123,18 @@ void main() {
     float edge = 1.0 - max(max(abs(q.x), abs(q.y)), abs(q.z)) / (box * 0.5);
     float d    = length(rel);
     vFade = clamp(edge * 3.0, 0.0, 1.0) * (1.0 - smoothstep(u_tint.a * 0.5, u_tint.a, d));
+
+    // ── LA LLUVIA NACE EN LA NUBE, NO EN TODA LA CELDA ──────────────────────────────────────────
+    //
+    // Las gotas viven en un cubo CENTRADO EN EL OBSERVADOR, así que también las había por encima de
+    // la base de la nube: volando entre capas se veía llover hacia arriba, y desde el aire la lluvia
+    // acompañaba a la cámara en vez de quedarse bajo su nube. El volumen correcto es base→suelo.
+    //
+    // `q.y` es la altura de la gota SOBRE LA CÁMARA a lo largo del cénit, que es la misma referencia
+    // en la que viene `u_misc.z`. Se desvanece en vez de cortarse: un corte duro dibujaría un plano
+    // de gotas apareciendo de golpe — el mismo error que las "capas" del terreno. La banda de 30 m
+    // es corta comparada con el espesor de la nube, así que la lluvia sigue naciendo en su base.
+    vFade *= 1.0 - smoothstep(u_misc.z - 30.0, u_misc.z, q.y);
 
     // ── ¿ESTÁ ESTA GOTA BAJO CUBIERTO? ──────────────────────────────────────────────────────────
     // La pregunta es "¿hay algo ENCIMA?", y no la puede responder el depth de la escena: bajo un

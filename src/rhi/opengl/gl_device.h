@@ -61,6 +61,7 @@ namespace Haruka::RHI::opengl
             RenderPassHandle createRenderTarget(const RenderTargetDesc&) override;
             TextureHandle    getColorTexture(RenderPassHandle, uint32_t index) override;
             TextureHandle    getDepthTexture(RenderPassHandle) override;
+            Format           backbufferDepthFormat() override;
             uint32_t         nativeTexture(TextureHandle) override;
             uint32_t         nativeFramebuffer(RenderPassHandle) override;
             uint32_t         nativeProgram(PipelineHandle) override;

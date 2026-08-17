@@ -17,6 +17,9 @@
 #include <Jolt/Core/JobSystemSingleThreaded.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/TaperedCylinderShape.h>   // troncos y ramas: cono truncado
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>              // props con su malla exacta
+#include <Jolt/Physics/Collision/Shape/ScaledShape.h>            // escala por instancia
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
@@ -24,6 +27,10 @@
 #include "core/planet/terrain_lod.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+// RAÍLES (docs/guides/PLAN_PUERTOS.md §4): puertas, rampas y suspensiones son MECANISMOS, no clips.
+#include <Jolt/Physics/Constraints/HingeConstraint.h>
+#include <Jolt/Physics/Constraints/SliderConstraint.h>
+#include <Jolt/Physics/Body/BodyLockMulti.h>
 #include <unordered_map>
 #include <cstdarg>
 #include <cstring>   // memcpy — checksum de las muestras publicadas al render
@@ -69,6 +76,21 @@ struct PhysicsEngine::JoltImpl {
     BPImpl  bpli; OVBImpl ovbp; OVOImpl ovo;
     JPH::PhysicsSystem            system;
     std::unordered_map<RigidBody*, JPH::BodyID> map;
+
+    // --- RAÍLES ---------------------------------------------------------------------------------
+    // Un raíl es una restricción de Jolt más el poco estado que el juego necesita leer. `stall` cuenta
+    // pasos SIN AVANZAR con el motor pedido: es lo que distingue "va despacio" de "está BLOQUEADO",
+    // que es justo el caso que una animación resuelve mal (atravesaría lo que estorba).
+    struct RailEntry {
+        JPH::Ref<JPH::TwoBodyConstraint> c;
+        PhysicsEngine::RailSpec  spec;
+        PhysicsEngine::RailInfo  info;
+        double target = 0.0;
+        double lastValue = 0.0;
+        int    stall = 0;
+        bool   alive = false;
+    };
+    std::vector<RailEntry> rails;
     // MARCO LOCAL: Jolt usa float; a escala planetaria (Tierra a ~1.5e8 m en la escena) eso da ~16 m de
     // precisión → inservible. Simulamos TODO relativo a `origin` (posición del primer cuerpo) → floats
     // pequeños. El mundo exterior sigue en double. (Recentrar al alejarse mucho = refinamiento posterior.)
@@ -456,10 +478,30 @@ struct PhysicsEngine::JoltImpl {
 
     // Cambia un cuerpo de suelo por `shape` (en el hilo de física). El viejo se quita justo aquí, no
     // antes: hasta este instante seguía colisionando, así que nunca hay un frame sin suelo.
+    /**
+     * @brief Cambia la FORMA del suelo conservando el CUERPO.
+     *
+     * ⚠️ ANTES DESTRUÍA Y RECREABA EL CUERPO (`RemoveBody` + `DestroyBody` + `CreateAndAddBody`), y
+     * eso le daba un `BodyID` NUEVO en cada reconstrucción. El `CharacterVirtual` arrastra sus
+     * contactos entre updates identificados por `BodyID` (`mActiveContacts`, `mGroundBodyID`): al
+     * cambiar el identificador, el personaje deja de reconocer el suelo que ya pisaba y ese update
+     * empieza de cero. Un frame sin el apoyo que tenía, EN CUESTA, es resbalar hacia abajo — que es
+     * exactamente el "pelea al subir por una ladera" reportado.
+     *
+     * Y ocurría a menudo: el anillo cercano se reconstruye cada vez que salta el anclaje, o sea cada
+     * pocos metros caminando (y, antes de la banda muerta de `terrainAnchorShouldJump`, en CADA
+     * FRAME estando quieto sobre un borde de celda).
+     *
+     * `SetShape` mantiene el `BodyID`, invalida la caché de contactos de ese cuerpo y avisa al
+     * broadphase del nuevo AABB — sin ventana en la que el suelo no exista.
+     */
     void swapBody(JPH::BodyID& id, bool& have, JPH::Ref<JPH::Shape> shape) {
         if (!shape) return;
         JPH::BodyInterface& bi = system.GetBodyInterface();
-        if (have) { bi.RemoveBody(id); bi.DestroyBody(id); have = false; }
+        if (have) {
+            bi.SetShape(id, shape, /*updateMassProperties*/false, JPH::EActivation::DontActivate);
+            return;
+        }
         JPH::BodyCreationSettings s(shape, JPH::RVec3::sZero(), JPH::Quat::sIdentity(),
             JPH::EMotionType::Static, JLayers::NON_MOVING);
         id = bi.CreateAndAddBody(s, JPH::EActivation::DontActivate);
@@ -558,9 +600,26 @@ struct PhysicsEngine::JoltImpl {
     void addBody(RigidBody* b) {
         if (b->isCharacter) { addCharacter(b); return; }
         if (!originSet) { origin = b->position; originSet = true; }   // el 1er cuerpo fija el marco local
-        JPH::Ref<JPH::Shape> shape = (b->shape == RigidBody::Shape::Box)
-            ? (JPH::Shape*)new JPH::BoxShape(JPH::Vec3((float)b->halfExtents.x, (float)b->halfExtents.y, (float)b->halfExtents.z))
-            : (JPH::Shape*)new JPH::SphereShape((float)b->radius);
+        JPH::Ref<JPH::Shape> shape;
+        if (b->shape == RigidBody::Shape::Compound && !b->compound.empty()) {
+            // Una caja por pieza. El hueco del pasillo aparece solo: es donde no hay hija.
+            JPH::StaticCompoundShapeSettings cs;
+            for (const auto& c : b->compound) {
+                cs.AddShape(JPH::Vec3((float)c.center.x, (float)c.center.y, (float)c.center.z),
+                            JPH::Quat((float)c.rotation.x, (float)c.rotation.y,
+                                      (float)c.rotation.z, (float)c.rotation.w),
+                            new JPH::BoxShape(JPH::Vec3((float)c.halfExtents.x,
+                                                        (float)c.halfExtents.y,
+                                                        (float)c.halfExtents.z)));
+            }
+            auto res = cs.Create();
+            if (res.IsValid()) shape = res.Get();
+        }
+        if (!shape) {
+            shape = (b->shape == RigidBody::Shape::Box || b->shape == RigidBody::Shape::Compound)
+                ? (JPH::Shape*)new JPH::BoxShape(JPH::Vec3((float)b->halfExtents.x, (float)b->halfExtents.y, (float)b->halfExtents.z))
+                : (JPH::Shape*)new JPH::SphereShape((float)b->radius);
+        }
         const glm::dvec3 lp = b->position - origin;                   // posición en el marco local
         JPH::BodyCreationSettings s(shape,
             JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
@@ -584,6 +643,36 @@ struct PhysicsEngine::JoltImpl {
     // (`version`), no cada frame: son estáticas y cambiarlas es raro (colocar/romper algo).
     std::vector<JPH::BodyID> staticIds;
     uint64_t staticVersion = ~0ull;
+
+    /// Mallas de colisión de props, UNA por prototipo/parte y compartidas por todas sus instancias.
+    /// El `MeshShape` monta un árbol AABB (lo caro); por instancia sería inviable.
+    std::vector<JPH::Ref<JPH::Shape>> propMeshShapes;
+
+    int addMeshShape(const float* verts, size_t vertCount, const uint32_t* idx, size_t idxCount) {
+        if (!verts || !idx || vertCount < 3 || idxCount < 3) return -1;
+        JPH::VertexList vl;
+        vl.reserve(vertCount);
+        for (size_t i = 0; i < vertCount; ++i)
+            vl.push_back(JPH::Float3(verts[i * 3 + 0], verts[i * 3 + 1], verts[i * 3 + 2]));
+        JPH::IndexedTriangleList tl;
+        tl.reserve(idxCount / 3);
+        for (size_t t = 0; t + 2 < idxCount; t += 3) {
+            const uint32_t a = idx[t], b = idx[t + 1], c = idx[t + 2];
+            if (a >= vertCount || b >= vertCount || c >= vertCount) continue;
+            if (a == b || b == c || a == c) continue;            // degenerado: Jolt lo rechaza
+            tl.push_back(JPH::IndexedTriangle(a, b, c, 0));
+        }
+        if (tl.empty()) return -1;
+        JPH::MeshShapeSettings ms(vl, tl);
+        ms.SetEmbedded();
+        JPH::ShapeSettings::ShapeResult r = ms.Create();
+        if (r.HasError()) {
+            HARUKA_LOGE("Physics", "malla de prop rechazada por Jolt: %s", r.GetError().c_str());
+            return -1;
+        }
+        propMeshShapes.push_back(r.Get());
+        return (int)propMeshShapes.size() - 1;
+    }
 
     static bool finite3(const glm::dvec3& v) {
         return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -623,6 +712,85 @@ struct PhysicsEngine::JoltImpl {
         staticIds.reserve(placed.size() + props.size() + boxes.size());
         for (const StaticOBB& o : placed) addBox(o.center, o.halfExtents, glm::quat_cast(o.rot));
         for (const StaticOBB& o : props)  addBox(o.center, o.halfExtents, glm::quat_cast(o.rot));
+
+        // CONOS TRUNCADOS: la forma real de troncos y ramas. Con cajas, las esquinas sobresalen de
+        // la madera visible y se choca con aire.
+        auto addCone = [&](const StaticCone& c) {
+            // ⚠️ Jolt exige que el radio de convexidad quepa: con un radio menor que el suyo por
+            // defecto (0,05 m) la forma es inválida. Las ramas finas caen por debajo, así que el
+            // radio de convexidad se acota al propio cono en vez de descartar la rama.
+            const double rMin = std::min(c.rTop, c.rBottom);
+            const double rMax = std::max(c.rTop, c.rBottom);
+            if (c.halfHeight < 1e-3 || rMax < 1e-3) return;
+            const glm::dvec3 lp = c.center - origin;
+            const glm::dquat q0 = glm::quat_cast(c.rot);
+            const double qlen = glm::length(q0);
+            if (!finite3(lp) || qlen < 1e-9 || !std::isfinite(qlen)) return;
+            const glm::dquat q = q0 / qlen;
+            const float conv = (float)std::min(0.05, std::max(1e-3, rMin * 0.9));
+            JPH::TaperedCylinderShapeSettings cs((float)c.halfHeight, (float)c.rTop,
+                                                 (float)c.rBottom, conv);
+            JPH::ShapeSettings::ShapeResult res = cs.Create();
+            if (res.HasError()) {
+                // ⚠️ Sin este aviso el fallo es MUDO y los árboles se quedan sin collider: peor que
+                // con cajas, y sin nada en el log que lo diga.
+                static int s_warned = 0;
+                if (s_warned++ < 3)
+                    HARUKA_LOGE("Physics", "cono de prop rechazado por Jolt: hh=%.3f rT=%.3f rB=%.3f conv=%.3f -> %s",
+                                c.halfHeight, c.rTop, c.rBottom, (double)conv, res.GetError().c_str());
+                return;
+            }
+            JPH::BodyCreationSettings s(res.Get(),
+                JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
+                JPH::Quat((float)q.x, (float)q.y, (float)q.z, (float)q.w).Normalized(),
+                JPH::EMotionType::Static, JLayers::NON_MOVING);
+            staticIds.push_back(bi.CreateAndAddBody(s, JPH::EActivation::DontActivate));
+        };
+        const size_t idsBeforeCones = staticIds.size();
+        for (const StaticCone& c : eng->getPropCones()) addCone(c);
+
+        // MALLAS EXACTAS: la geometría real del prop. La forma se comparte; lo único por instancia
+        // es la transformación y la escala (`ScaledShape`, que no reconstruye el árbol AABB).
+        size_t meshMade = 0;
+        for (const StaticMeshInstance& mi : eng->getPropMeshInstances()) {
+            if (mi.shapeId < 0 || mi.shapeId >= (int)propMeshShapes.size()) continue;
+            const glm::dvec3 lp = mi.center - origin;
+            const glm::dquat q0 = glm::quat_cast(mi.rot);
+            const double qlen = glm::length(q0);
+            if (!finite3(lp) || qlen < 1e-9 || !std::isfinite(qlen) || mi.scale < 1e-4) continue;
+            const glm::dquat q = q0 / qlen;
+            JPH::Ref<JPH::Shape> shape = propMeshShapes[(size_t)mi.shapeId];
+            if (std::abs(mi.scale - 1.0) > 1e-4) {
+                JPH::Ref<JPH::Shape> sc = new JPH::ScaledShape(
+                    shape, JPH::Vec3((float)mi.scale, (float)mi.scale, (float)mi.scale));
+                shape = sc;
+            }
+            JPH::BodyCreationSettings s(shape,
+                JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
+                JPH::Quat((float)q.x, (float)q.y, (float)q.z, (float)q.w).Normalized(),
+                JPH::EMotionType::Static, JLayers::NON_MOVING);
+            staticIds.push_back(bi.CreateAndAddBody(s, JPH::EActivation::DontActivate));
+            ++meshMade;
+        }
+        {
+            static size_t s_last = ~(size_t)0;
+            if (meshMade != s_last) {
+                s_last = meshMade;
+                HARUKA_LOGD("Physics", "mallas de props -> Jolt: %zu de %zu",
+                            meshMade, eng->getPropMeshInstances().size());
+            }
+        }
+
+
+        {
+            static size_t s_lastReport = ~(size_t)0;
+            const size_t made = staticIds.size() - idsBeforeCones;
+            const size_t want = eng->getPropCones().size();
+            if (made != s_lastReport) {
+                s_lastReport = made;
+                HARUKA_LOGD("Physics", "conos de props -> Jolt: %zu de %zu creados", made, want);
+            }
+        }
         for (const StaticBox& b : boxes)
             addBox((b.bmin + b.bmax) * 0.5, (b.bmax - b.bmin) * 0.5, glm::dquat(1, 0, 0, 0));
     }
@@ -689,11 +857,186 @@ struct PhysicsEngine::JoltImpl {
             system.GetDefaultLayerFilter(JLayers::MOVING),
             JPH::BodyFilter{}, JPH::ShapeFilter{}, temp);
 
+        // ── SONDA DE CONTACTOS ──────────────────────────────────────────────────────────────────
+        //
+        // Convierte "no colisiona" en un número. `CharacterVirtual` lleva sus contactos activos: si
+        // al caminar contra un árbol esto sigue diciendo 1 contacto (el suelo), el collider NO se
+        // está probando; si sube a 2, se toca y el problema es de respuesta (deslizamiento), no de
+        // detección. Es la medida que separa los dos casos, y sin ella solo se puede opinar.
+        // Se reporta ~1 vez por segundo para no ensuciar el log.
+        {
+            static double s_lastLog = -1e9;
+            if (simTime - s_lastLog > 1.0) {
+                s_lastLog = simTime;
+                const auto& contacts = charCtrl->GetActiveContacts();
+                int nGround = 0, nOther = 0;
+                for (const auto& c : contacts) {
+                    // Contacto "de suelo": su normal apunta contra la gravedad local.
+                    const glm::dvec3 n(c.mContactNormal.GetX(), c.mContactNormal.GetY(),
+                                       c.mContactNormal.GetZ());
+                    if (glm::dot(n, up) > 0.5) ++nGround; else ++nOther;
+                }
+                HARUKA_LOGDIAG("CharContacts", "contactos=%zu (suelo=%d, laterales=%d) · onGround=%d",
+                            contacts.size(), nGround, nOther,
+                            charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround);
+            }
+        }
+
         const JPH::RVec3 p = charCtrl->GetPosition();
         const JPH::Vec3  v = charCtrl->GetLinearVelocity();
         b->position = origin + glm::dvec3(p.GetX(), p.GetY(), p.GetZ());
         b->velocity = glm::dvec3(v.GetX(), v.GetY(), v.GetZ());
         b->onGround = (charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround);
+    }
+
+    // --- RAÍLES: crear, pedir y leer ------------------------------------------------------------
+    // ⚠️ El ancla y el eje llegan en MUNDO (double) y aquí se rebajan al MARCO LOCAL (`origin`), que es
+    // donde vive Jolt. Sin esto, un raíl en un planeta a 1.5e8 m se crearía con coordenadas que el
+    // float no representa — el mismo motivo por el que todo lo demás se simula relativo a `origin`.
+    int addRail(RigidBody* a, RigidBody* b, const PhysicsEngine::RailSpec& spec) {
+        auto ia = map.find(a), ib = map.find(b);
+        if (ia == map.end() || ib == map.end()) return -1;
+
+        const glm::dvec3 la = spec.anchor - origin;
+        glm::dvec3 ax = spec.axis;
+        const double axLen = glm::length(ax);
+        if (axLen < 1e-9) return -1;
+        ax /= axLen;
+        // ⚠️ EL CERO DEL ÁNGULO ES LA POSTURA DE MONTAJE. Jolt necesita una normal perpendicular al
+        // eje para fijar dónde está el 0, y si se elige una cualquiera, la hoja NACE a un ángulo
+        // arbitrario de su propio cero: con la puerta montada a 90° de esa normal, unos límites de
+        // ±90° dejaban de significar nada (medido: pedía 90 y leía 123.8). Se toma la dirección
+        // ancla→hoja, que es lo que el diseñador ve al colocarla: "cerrada" es 0 y los límites son
+        // relativos al reposo, como dice `game/ports/port.h`.
+        glm::dvec3 n = b->position - spec.anchor;
+        n -= ax * glm::dot(n, ax);                       // perpendicular al eje
+        if (glm::length(n) < 1e-6)                       // hoja SOBRE el eje: no hay referencia
+            n = std::abs(ax.z) < 0.9 ? glm::dvec3(0, 0, 1) : glm::dvec3(1, 0, 0);
+        n = glm::normalize(n - ax * glm::dot(n, ax));
+
+        const JPH::Vec3 jp((float)la.x, (float)la.y, (float)la.z);
+        const JPH::Vec3 ja((float)ax.x, (float)ax.y, (float)ax.z);
+        const JPH::Vec3 jn((float)n.x,  (float)n.y,  (float)n.z);
+
+        // ⚠️ DOS `BodyLockWrite` sueltos NO valen: Jolt asserta por orden de bloqueo (es su defensa
+        // contra interbloqueos). `BodyLockMultiWrite` ordena los ids él mismo.
+        const JPH::BodyID ids[2] = { ia->second, ib->second };
+        JPH::BodyLockMultiWrite lock(system.GetBodyLockInterface(), ids, 2);
+        JPH::Body* jba = lock.GetBody(0);
+        JPH::Body* jbb = lock.GetBody(1);
+        if (!jba || !jbb) return -1;
+
+        RailEntry e;
+        e.spec = spec;
+        if (spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
+            JPH::HingeConstraintSettings st;
+            st.mPoint1 = st.mPoint2 = JPH::RVec3(jp);
+            st.mHingeAxis1 = st.mHingeAxis2 = ja;
+            st.mNormalAxis1 = st.mNormalAxis2 = jn;
+            st.mLimitsMin = (float)glm::radians(std::min(spec.limits.x, spec.limits.y));
+            st.mLimitsMax = (float)glm::radians(std::max(spec.limits.x, spec.limits.y));
+            if (spec.drive == PhysicsEngine::RailSpec::Drive::Motor) {
+                st.mMotorSettings.SetTorqueLimit((float)spec.motorForce);
+                // ⚠️ El muelle por defecto de Jolt (2 Hz) es de SUSPENSIÓN, no de mecanismo: una
+                // rampa tardaba decenas de segundos en acercarse al ángulo pedido y se quedaba corta.
+                // Un actuador de puerta es RÍGIDO — lo que lo frena tiene que ser la carga y el tope
+                // de par, no la blandura del muelle.
+                st.mMotorSettings.mSpringSettings.mFrequency = 20.0f;
+                st.mMotorSettings.mSpringSettings.mDamping   = 1.0f;
+            }
+            e.c = st.Create(*jba, *jbb);
+        } else {
+            JPH::SliderConstraintSettings st;
+            st.mPoint1 = st.mPoint2 = JPH::RVec3(jp);
+            st.SetSliderAxis(ja);
+            st.mLimitsMin = (float)std::min(spec.limits.x, spec.limits.y);
+            st.mLimitsMax = (float)std::max(spec.limits.x, spec.limits.y);
+            if (spec.drive == PhysicsEngine::RailSpec::Drive::Motor) {
+                st.mMotorSettings.SetForceLimit((float)spec.motorForce);
+                st.mMotorSettings.mSpringSettings.mFrequency = 20.0f;   // ver la nota del Hinge
+                st.mMotorSettings.mSpringSettings.mDamping   = 1.0f;
+            }
+            e.c = st.Create(*jba, *jbb);
+        }
+        if (!e.c) return -1;
+        system.AddConstraint(e.c);
+        e.alive = true;
+        rails.push_back(e);
+        return (int)rails.size() - 1;
+    }
+
+    void railTarget(int id, double t) {
+        if (id < 0 || id >= (int)rails.size()) return;
+        RailEntry& e = rails[(size_t)id];
+        if (!e.alive || e.info.broken) return;
+        const double lo = std::min(e.spec.limits.x, e.spec.limits.y);
+        const double hi = std::max(e.spec.limits.x, e.spec.limits.y);
+        e.target = std::clamp(t, lo, hi);
+        e.stall = 0; e.lastValue = e.info.value; e.info.blocked = false;
+        // Solo un motor OBEDECE una posición pedida. Manual lo empuja un personaje y Spring tira solo.
+        if (e.spec.drive != PhysicsEngine::RailSpec::Drive::Motor) return;
+        if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
+            auto* h = static_cast<JPH::HingeConstraint*>(e.c.GetPtr());
+            h->SetMotorState(JPH::EMotorState::Position);
+            h->SetTargetAngle((float)glm::radians(e.target));
+        } else {
+            auto* sl = static_cast<JPH::SliderConstraint*>(e.c.GetPtr());
+            sl->SetMotorState(JPH::EMotorState::Position);
+            sl->SetTargetPosition((float)e.target);
+        }
+    }
+
+    void updateRails(double dt) {
+        if (rails.empty() || dt <= 0.0) return;
+        for (auto& e : rails) {
+            if (!e.alive) continue;
+            double force = 0.0;
+            if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
+                auto* h = static_cast<JPH::HingeConstraint*>(e.c.GetPtr());
+                e.info.value = glm::degrees((double)h->GetCurrentAngle());
+                force = (double)h->GetTotalLambdaPosition().Length() / dt;
+            } else {
+                auto* sl = static_cast<JPH::SliderConstraint*>(e.c.GetPtr());
+                e.info.value = (double)sl->GetCurrentPosition();
+                force = (double)std::abs(sl->GetTotalLambdaPositionLimits()) / dt;
+            }
+            e.info.force = force;
+
+            // (a) ¿CEDE la unión? Se quita la restricción: la hoja queda suelta y se cae sola. Una
+            //     animación no puede caerse — o se reproduce o no (PLAN_PUERTOS §4, razón 2).
+            if (e.spec.breakForce > 0.0 && force > e.spec.breakForce) {
+                system.RemoveConstraint(e.c);
+                e.c = nullptr; e.alive = false;
+                e.info.broken = true; e.info.blocked = false;
+                continue;
+            }
+            // (b) ¿BLOQUEADO? Con el motor pidiendo posición y sin avanzar durante varios pasos, algo
+            //     estorba. Se mide por avance real, no por la fuerza: así vale igual para una caja en
+            //     medio que para una rampa con demasiado peso encima.
+            // "Ha llegado" necesita TOLERANCIA: un motor de posición converge con error residual, y
+            // con un umbral de 1e-3 una puerta perfectamente abierta se declaraba BLOQUEADA para
+            // siempre. Bloqueado = le falta camino DE VERDAD y no lo recorre.
+            const double arriveEps =
+                (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) ? 0.5 : 2e-3;
+            if (e.spec.drive == PhysicsEngine::RailSpec::Drive::Motor &&
+                std::abs(e.target - e.info.value) > arriveEps) {
+                // ⚠️ "No avanza" hay que medirlo sobre una VENTANA, no paso a paso. Un mecanismo
+                // atascado no se queda quieto: tiembla unas milésimas por la elasticidad del solver,
+                // y con un umbral por paso el contador se reiniciaba constantemente y NUNCA se
+                // declaraba bloqueado (medido: una rampa de 589 N·m con motor de 1 N·m reportaba
+                // blocked=0 mientras estaba claramente vencida). Media vuelta de segundo sin recorrer
+                // medio grado = bloqueada, tiemble lo que tiemble.
+                const double blockEps =
+                    (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) ? 0.5 : 2e-3;
+                if (++e.stall >= 30) {
+                    e.info.blocked = std::abs(e.info.value - e.lastValue) < blockEps;
+                    e.lastValue = e.info.value;
+                    e.stall = 0;
+                }
+            } else {
+                e.stall = 0; e.info.blocked = false; e.lastValue = e.info.value;
+            }
+        }
     }
 
     void step(double dt, PhysicsEngine* eng, IWorldProvider* w,
@@ -750,9 +1093,20 @@ struct PhysicsEngine::JoltImpl {
         // que se DIBUJA se re-ancla cada 4 m: dos retículas distintas casi todo el rato, y como ningún
         // nodo sobrevive a un cambio de ancla (medido: 8 de 257 049) la disparidad no podía bajar de
         // la sagita de la celda por mucho que se afinara la aritmética.
+        //
+        // ⚠️ CON BANDA MUERTA. Este `if` comparaba las anclas por IGUALDAD EXACTA (`> 1e-12`), y como
+        // la cuantización es un `round` duro, un jugador PARADO justo sobre un borde de celda hacía
+        // saltar el ancla en cada frame: medido en el juego, 69 reconstrucciones en 8 s alternando
+        // entre dos mallas de 18 432 triángulos, a 5-6 ms cada una — y el suelo cambiando bajo los
+        // pies con ellas. Ver `terrainAnchorShouldJump` para el porqué del umbral y de por qué la
+        // banda muerta vive aquí y no en `terrainClipFrame`.
         if (groundIsMesh && haveNear && !nearJob.valid()) {
             const glm::dvec3 a = anchorOf(w, near);
-            if (!nearAnchorSet || glm::length(a - nearAnchor) > 1e-12) {
+            const bool moved = nearAnchorSet && glm::length(a - nearAnchor) > 1e-12 &&
+                               Haruka::Planet::terrainAnchorShouldJump(
+                                   nearAnchor, near - w->activePlanetCenter(),
+                                   w->activePlanetRadius());
+            if (!nearAnchorSet || moved) {
                 nearJobAnchor = a;
                 nearJob = std::async(std::launch::async, [this, w, near] {
                     return buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
@@ -798,7 +1152,7 @@ struct PhysicsEngine::JoltImpl {
                     const double bodyR = (charBody && charBody->radius > 0.0) ? charBody->radius : 0.0;
                     feetOffset = alt - bodyR - funcH;
                 }
-                HARUKA_LOGI("TerrainParity",
+                HARUKA_LOGDIAG("TerrainParity",
                     "funcion=%.3f m  malla=%.3f m  |delta|=%.3f m  ·  celda=%.1f m  deriva=%.1f m"
                     "  ·  pies-suelo=%+.3f m (radio ya restado)",
                     funcH, meshH, std::fabs(funcH - meshH), cellM, drift, feetOffset);
@@ -868,6 +1222,7 @@ struct PhysicsEngine::JoltImpl {
                 bi.AddForce(it->second, JPH::Vec3((float)F.x, (float)F.y, (float)F.z));
         }
         system.Update((float)dt, 1, &temp, &jobs);
+        updateRails(dt);
         for (auto& sp : bodies) {
             auto it = map.find(sp.get()); if (it == map.end()) continue;
             if (sp->isKinematic) continue;   // lo mueve el juego (vuelo/nado): no le pisemos la posición
@@ -921,6 +1276,54 @@ std::shared_ptr<RigidBody> PhysicsEngine::getBody(const std::string& name) {
     auto it = std::find_if(bodies.begin(), bodies.end(),
         [&name](const std::shared_ptr<RigidBody>& b) { return b->name == name; });
     return (it != bodies.end()) ? *it : nullptr;
+}
+
+// ── RAÍLES (docs/guides/PLAN_PUERTOS.md §4) ─────────────────────────────────────────────────────
+// Sin Jolt no hay mecanismo: se devuelve -1 en vez de fingir uno. Un raíl simulado a mano sería justo
+// la animación que este sistema existe para no tener.
+int PhysicsEngine::addRail(const std::string& bodyA, const std::string& bodyB, const RailSpec& spec) {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt) return -1;
+    auto a = getBody(bodyA), b = getBody(bodyB);
+    if (!a || !b) return -1;
+    return m_jolt->addRail(a.get(), b.get(), spec);
+#else
+    (void)bodyA; (void)bodyB; (void)spec; return -1;
+#endif
+}
+
+bool PhysicsEngine::railSetTarget(int railId, double target) {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt || railId < 0 || railId >= (int)m_jolt->rails.size()) return false;
+    m_jolt->railTarget(railId, target);
+    return true;
+#else
+    (void)railId; (void)target; return false;
+#endif
+}
+
+bool PhysicsEngine::railGet(int railId, RailInfo& out) const {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt || railId < 0 || railId >= (int)m_jolt->rails.size()) return false;
+    out = m_jolt->rails[(size_t)railId].info;
+    return true;
+#else
+    (void)railId; (void)out; return false;
+#endif
+}
+
+void PhysicsEngine::removeRail(int railId) {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt || railId < 0 || railId >= (int)m_jolt->rails.size()) return;
+    auto& e = m_jolt->rails[(size_t)railId];
+    if (!e.alive) return;
+    // Se marca muerto pero NO se borra del vector: los ids que tenga el juego seguirían siendo válidos
+    // y apuntarían a otro raíl. Un hueco cuesta unos bytes; un id reutilizado cuesta un bug mudo.
+    m_jolt->system.RemoveConstraint(e.c);
+    e.c = nullptr; e.alive = false;
+#else
+    (void)railId;
+#endif
 }
 
 void PhysicsEngine::update(double deltaTime) {
@@ -1352,6 +1755,38 @@ void PhysicsEngine::clearPropOBBs() {
     ++m_staticsVersion;
 }
 
+void PhysicsEngine::addPropCone(const glm::dvec3& center, double halfHeight, double rTop,
+                                double rBottom, const glm::dmat3& rot) {
+    propCones.push_back({ center, halfHeight, rTop, rBottom, rot });
+    ++m_staticsVersion;
+}
+
+int PhysicsEngine::registerPropMesh(const float* verts, size_t vertCount,
+                                    const uint32_t* idx, size_t idxCount) {
+#ifdef HARUKA_HAS_JOLT
+    if (m_jolt) return m_jolt->addMeshShape(verts, vertCount, idx, idxCount);
+#endif
+    (void)verts; (void)vertCount; (void)idx; (void)idxCount;
+    return -1;
+}
+
+void PhysicsEngine::addPropMeshInstance(int shapeId, const glm::dvec3& center,
+                                        const glm::dmat3& rot, double scale) {
+    if (shapeId < 0) return;
+    propMeshes.push_back({ shapeId, center, rot, scale });
+    ++m_staticsVersion;
+}
+
+void PhysicsEngine::clearPropMeshInstances() {
+    propMeshes.clear();
+    ++m_staticsVersion;
+}
+
+void PhysicsEngine::clearPropCones() {
+    propCones.clear();
+    ++m_staticsVersion;
+}
+
 glm::dvec3 PhysicsEngine::resolveSphere(const glm::dvec3& center0, double radius,
                                         const glm::dvec3& up, bool& grounded) const {
     glm::dvec3 center = center0;
@@ -1392,6 +1827,18 @@ glm::dvec3 PhysicsEngine::resolveSphere(const glm::dvec3& center0, double radius
     };
     process(placedOBBs);
     process(propOBBs);
+    // El solver a mano (para cuerpos que no son de Jolt) no sabe de conos: se aproximan por su caja
+    // envolvente, que es lo que había antes para todo. Jolt sí usa la forma exacta.
+    {
+        std::vector<StaticOBB> coneBoxes;
+        coneBoxes.reserve(propCones.size());
+        for (const StaticCone& c : propCones) {
+            const double r = std::max(c.rTop, c.rBottom);
+            coneBoxes.push_back({ c.center, glm::dvec3(r, c.halfHeight, r), c.rot });
+        }
+        process(coneBoxes);
+
+    }
     return center;
 }
 

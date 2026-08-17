@@ -86,6 +86,88 @@ inline float terrainTriM(double radM) {
     return (float)(t > TERRAIN_TRIM_FLOOR ? t : TERRAIN_TRIM_FLOOR);
 }
 
+/**
+ * @brief ¿Toca RE-ANCLAR el anillo cercano? Con banda muerta, que es lo que le faltaba.
+ *
+ * El problema que resuelve (medido en el juego, 2026-08-14)
+ * --------------------------------------------------------
+ * El anclaje se cuantiza con un `round` duro (ver `terrainClipFrame`) y el disparador comparaba las
+ * anclas por IGUALDAD EXACTA. Con el jugador parado justo sobre un borde de celda, un micrón de
+ * temblor bastaba para que el ancla saltara de una celda a la otra **en cada frame**: 69
+ * reconstrucciones en 8 segundos alternando entre exactamente dos mallas (9 409 vértices y 18 432
+ * triángulos cada una, 5-6 ms), con el personaje quieto.
+ *
+ * Y se REALIMENTA, que es lo que lo volvía permanente: las dos anclas dan superficies ligeramente
+ * distintas (el twist del quad medía 0,040 m en una y 0,044 m en la otra), así que el suelo empujaba
+ * al personaje de vuelta al otro lado del borde. Un ciclo límite, y la causa más probable del
+ * "no me quedo quieto en el sitio".
+ *
+ * Por qué la banda muerta va AQUÍ y no en `terrainClipFrame`
+ * ---------------------------------------------------------
+ * Porque aquella es una función PURA de la posición, compartida por render, colisión y tests: es lo
+ * que garantiza que los tres describan el mismo suelo. Una banda muerta es, por definición, memoria
+ * del camino recorrido. Metida ahí envenenaría a los tres; aquí solo decide CUÁNDO se reconstruye,
+ * no QUÉ se construye.
+ *
+ * El umbral
+ * ---------
+ * Un punto puede estar a `quad·0,707` de su propia ancla (la diagonal de la celda), así que el
+ * umbral tiene que superar eso o se saltaría estando aún dentro de la celda de siempre. `0,75·quad`
+ * (3 m con quads de 4 m) lo cubre con margen. Retrasa el re-anclaje como mucho 3 m sobre un anillo
+ * de ±192 m: irrelevante para lo que cubre, decisivo para que deje de temblar.
+ *
+ * @param curAnchor  ancla vigente (dirección unitaria desde el centro del planeta)
+ * @param posDir     dirección actual del jugador (no hace falta normalizar)
+ * @param radiusM    radio del planeta, para pasar el ángulo a metros
+ */
+inline bool terrainAnchorShouldJump(const glm::dvec3& curAnchor, const glm::dvec3& posDir,
+                                    double radiusM) {
+    const double lc = glm::length(curAnchor), lp = glm::length(posDir);
+    if (lc < 1e-12 || lp < 1e-12) return true;
+    const double c = glm::clamp(glm::dot(curAnchor / lc, posDir / lp), -1.0, 1.0);
+    const double distM = std::acos(c) * radiusM;      // separación TANGENCIAL en metros
+    return distM > TERRAIN_CLIP_QUAD_M * 0.75;
+}
+
+// =================================================================================================
+// ANILLOS ANIDADOS del clipmap — gemelo de `clipmap.tesc` (edgeFactor) y del bucle de `planet.cpp`
+// =================================================================================================
+
+/// Nivel de teselación de una arista de longitud `arcM` a distancia `dM`. GEMELO EXACTO de
+/// `edgeFactor` en `clipmap.tesc`, redondeo a potencia de dos incluido.
+///
+/// ⚠️ El redondeo NO es cosmético y ahora carga con una segunda propiedad. Ya era lo que mantenía
+/// los vértices en múltiplos del quad (paridad con la colisión); con los anillos anidados es además
+/// lo que impide las GRIETAS entre ellos: en la frontera, el anillo de fuera tiene aristas 2× más
+/// largas y pide un nivel 2× mayor, y solo porque el nivel se redondea a potencia de dos sale el
+/// MISMO quad por los dos lados. Con un redondeo cualquiera, los dos lados se subdividen distinto y
+/// aparecen T-junctions — rendijas por las que se ve el espacio.
+inline double terrainClipEdgeLevel(double arcM, double dM) {
+    const double d = dM > 1.0 ? dM : 1.0;
+    double lvl = arcM / (d * TERRAIN_TRIM_SLOPE * 2.0);   // 0.004 = TERRAIN_TRIM_SLOPE·2
+    if (lvl < 1.0) lvl = 1.0;
+    if (lvl > TERRAIN_CLIP_TESS_CAP) lvl = TERRAIN_CLIP_TESS_CAP;
+    double p = std::exp2(std::floor(std::log2(lvl)));
+    if (p < 1.0) p = 1.0;
+    if (p > TERRAIN_CLIP_TESS_CAP) p = TERRAIN_CLIP_TESS_CAP;
+    return p;
+}
+
+/// Índice del anillo que dibuja la distancia tangente `dM`, siendo `cover0` el semi-lado del
+/// nivel 0. Cada nivel dobla escala y alcance, así que es el logaritmo en base dos.
+inline int terrainClipRingIndex(double dM, double cover0) {
+    if (dM <= cover0) return 0;
+    const int r = (int)std::ceil(std::log2(dM / cover0));
+    return r > 0 ? r : 0;
+}
+
+/// Lado real del quad dibujado a distancia `dM` con anillos anidados.
+inline double terrainClipRingQuadM(double dM, double cover0) {
+    const int    r   = terrainClipRingIndex(dM, cover0);
+    const double arc = TERRAIN_CLIP_PATCH_M * std::exp2((double)r);
+    return arc / terrainClipEdgeLevel(arc, dM);
+}
+
 // =================================================================================================
 // Rejilla por anillos de la malla de COLISIÓN (§9 Fase 3)
 // =================================================================================================

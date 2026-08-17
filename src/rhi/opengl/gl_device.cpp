@@ -702,6 +702,29 @@ namespace Haruka::RHI::opengl
         return rt ? rt->depthTex : TextureHandle{};
     }
 
+    // El formato de profundidad del BACKBUFFER, PREGUNTADO al driver.
+    //
+    // Es la única forma de que un blit de profundidad contra pantalla sea legal: GL exige que los dos
+    // formatos coincidan EXACTAMENTE, y este no lo elige el motor —lo elige SDL al crear el contexto,
+    // que en este motor no fija `SDL_GL_DEPTH_SIZE`—. Suponer 24 bits acierta casi siempre; "casi" es
+    // justo lo que producía un `GL_INVALID_OPERATION` mudo y una textura de profundidad sin escribir.
+    //
+    // El RHI solo tiene dos formatos de profundidad, así que la respuesta es binaria: coma flotante
+    // (32F) o punto fijo. Cualquier punto fijo se mapea a D24S8, que es lo que crea GL para él.
+    Format GLDevice::backbufferDepthFormat()
+    {
+        GLint prev = 0;
+        glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prev);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        GLint type = GL_NONE, bits = 0;
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_DEPTH,
+                                              GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &type);
+        glGetFramebufferAttachmentParameteriv(GL_DRAW_FRAMEBUFFER, GL_DEPTH,
+                                              GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &bits);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)prev);
+        return (type == GL_FLOAT && bits >= 32) ? Format::D32F : Format::D24S8;
+    }
+
     uint32_t GLDevice::nativeTexture(TextureHandle h)
     {
         const GLTexture* t = texture(h);

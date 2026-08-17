@@ -356,7 +356,22 @@ namespace Haruka::RHI::vulkan
         ia.topology = toTopology(d.topology);
         ia.primitiveRestartEnable = VK_FALSE;
 
+        // ⚠️ ORIGEN DEL DOMINIO DE TESELACIÓN: OpenGL usa LOWER_LEFT, Vulkan usa UPPER_LEFT.
+        //
+        // Sin declararlo, `gl_TessCoord.y` llega INVERTIDO respecto a lo que esperan unos shaders
+        // escritos para GL, y cada parche se evalúa espejado en v. El síntoma no se parece a la
+        // causa: la geometría normal sale perfecta y SOLO el terreno teselado aparece donde no debe
+        // —"terreno en el cielo"—, porque es lo único que pasa por el teselador. Se acorraló con
+        // `HARUKA_NO_TESS=1`: sin teselar, todo correcto.
+        //
+        // `VkPipelineTessellationDomainOriginStateCreateInfo` es core desde Vulkan 1.1
+        // (antes `VK_KHR_maintenance2`) y deja la convención igual que GL sin tocar un shader.
+        VkPipelineTessellationDomainOriginStateCreateInfo tdo{
+            VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO };
+        tdo.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;   // la de OpenGL
+
         VkPipelineTessellationStateCreateInfo ts{ VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO };
+        ts.pNext = &tdo;
         ts.patchControlPoints = (d.topology == PrimitiveTopology::Patches) ? d.patchVertices : 0;
 
         VkPipelineViewportStateCreateInfo vp{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };

@@ -23,6 +23,7 @@
 // ================================================================================================
 #include "test_common.h"
 #include "core/planet/prop_collider.h"
+#include "tools/procgraph/prop_mesh.h"   // bakeRockMesh / bakeHouseMesh (la malla REAL)
 
 #include <cmath>
 #include <cstdio>
@@ -65,6 +66,21 @@ void test_prop_collider() {
 
     CHECK(sk.parts.size() >= 3, "el arbol tiene tronco y al menos 2 ramas");
     CHECK(parts.size() == sk.parts.size(), "un collider por parte del esqueleto");
+
+    // El collider ENVUELVE el cono: su semieje horizontal es el radio MAYOR del segmento, no el
+    // medio. Con el medio la caja quedaba inscrita y se atravesaba la madera visible.
+    bool wrapsCone = true;
+    for (size_t i = 0; i < parts.size() && i < sk.parts.size(); ++i) {
+        const float rMax = std::max(sk.parts[i].radiusA, sk.parts[i].radiusB);
+        if (std::abs(parts[i].half.x - rMax) > 1e-5f) wrapsCone = false;
+    }
+    printf("    tronco: radio de la malla en la base %.3f m · semieje del collider %.3f m\n",
+           sk.parts[0].radiusA, parts.empty() ? 0.0f : parts[0].half.x);
+    CHECK(wrapsCone, "el collider ENVUELVE el cono (radio mayor), no queda inscrito");
+    // CONTRAPRUEBA: el radio MEDIO —lo que había antes— es MENOR que el de la base, o sea que
+    // dejaba entrar en la madera.
+    CHECK(sk.parts[0].radiusMid() < sk.parts[0].radiusA - 1e-4f,
+          "CONTRAPRUEBA: el radio medio es menor que el de la base (por eso se atravesaba)");
 
     bool axesMatch = true, lensMatch = true, idsMatch = true;
     for (size_t i = 0; i < parts.size() && i < sk.parts.size(); ++i) {
@@ -145,6 +161,58 @@ void test_prop_collider() {
         CHECK(mixedTris == 0, "ningun triangulo cruza dos partes (el colapso no deja estirados)");
     }
 
+    // --- 2c. LA CAJA DE ROCA Y CASA COINCIDE CON SU MALLA ---------------------------------------
+    //
+    // ⚠️ Esto FALLABA y nadie lo veía: las medidas estaban escritas A MANO en el collider. La roca
+    // se colisionaba con una caja de y=0 a y=1.44 mientras su malla va de -0,79 a +0,79 CENTRADA EN
+    // EL ORIGEN — la caja flotaba entera por encima de la piedra. Y la casa usaba un cubo unidad
+    // cuando mide 3 m de ancho. Aquí se hornea la malla DE VERDAD, se mide su envolvente y se
+    // compara: dos fuentes distintas, que es lo que hace que el test valga algo.
+    {
+        auto meshAabb = [](const Haruka::Tools::ProcGraph::TreeMeshData& m,
+                           glm::vec3& lo, glm::vec3& hi) {
+            lo = glm::vec3(1e9f); hi = glm::vec3(-1e9f);
+            for (const glm::vec3& p : m.positions) { lo = glm::min(lo, p); hi = glm::max(hi, p); }
+        };
+
+        // ROCA. Los peñones sobresalen del bloque principal, así que se admite holgura por arriba;
+        // lo que se exige es que la caja esté CENTRADA donde la malla y con el tamaño correcto.
+        {
+            const auto mesh = Haruka::Tools::ProcGraph::bakeRockMesh(4242, 1.0f, 0.72f);
+            glm::vec3 lo, hi; meshAabb(mesh, lo, hi);
+            const auto parts = propColliderParts("rock", 4242u);
+            CHECK(parts.size() == 1, "la roca tiene un collider");
+            if (parts.size() == 1) {
+                const glm::vec3 mc = 0.5f * (lo + hi);
+                printf("    roca: malla centro y=%.2f (%.2f..%.2f) · collider centro y=%.2f half=%.2f\n",
+                       mc.y, lo.y, hi.y, parts[0].center.y, parts[0].half.y);
+                CHECK(std::abs(parts[0].center.y - mc.y) < 0.35f,
+                      "la caja de la roca esta centrada donde la malla (no flotando encima)");
+                CHECK(parts[0].half.x > 1.0f && parts[0].half.x < 1.3f,
+                      "el radio de la roca es el de su malla (~1.1), no un 1.0 inventado");
+                // CONTRAPRUEBA: los valores viejos (centro y=0.72) NO pasan el criterio de arriba.
+                CHECK(!(std::abs(0.72f - mc.y) < 0.35f),
+                      "CONTRAPRUEBA: el centro cableado antiguo (y=0.72) SI habria fallado");
+            }
+        }
+
+        // CASA: el cuerpo de muros. El tejado sobresale y no se colisiona aparte.
+        {
+            const auto mesh = Haruka::Tools::ProcGraph::bakeHouseMesh(77, 1.0f);
+            glm::vec3 lo, hi; meshAabb(mesh, lo, hi);
+            const auto parts = propColliderParts("house", 77u);
+            CHECK(parts.size() == 1, "la casa tiene un collider");
+            if (parts.size() == 1) {
+                printf("    casa: malla ancho=%.2f alto=%.2f · collider medio-ancho=%.2f\n",
+                       hi.x - lo.x, hi.y - lo.y, parts[0].half.x);
+                CHECK(parts[0].half.x > 1.4f && parts[0].half.x < 1.6f,
+                      "el medio-ancho de la casa es 1.5 (3 m), no un cubo unidad");
+                CHECK(!(parts[0].half.x > 0.9f && parts[0].half.x < 1.1f),
+                      "CONTRAPRUEBA: el cubo unidad antiguo NO pasa");
+            }
+        }
+    }
+
     // --- 3. El collider no depende del LOD -------------------------------------------------------
     // `treeSkeleton` no toma `detail` por construcción; lo que se comprueba es que las ramas están
     // SIEMPRE, incluso a detalles donde la malla ya no las dibuja (detalle < 0.5).
@@ -177,6 +245,35 @@ void test_prop_collider() {
     const auto spun = propWorldColliders(parts, dir, 0.0f, 1.0f, 2.1f, planetC, planetR, 0u);
     const double dotSpun = glm::dot(glm::normalize(glm::dvec3(spun[0].rot[1])), glm::dvec3(dir));
     CHECK(dotSpun > 0.99, "el yaw gira el arbol pero no lo tumba");
+
+    // --- 5b. LA BASE DE LA CAJA ES UNA ROTACIÓN, NO UNA REFLEXIÓN -------------------------------
+    //
+    // ⚠️ Esto FALLABA y costó encontrarlo. Con `az = cross(ay, ax)` la base queda ZURDA
+    // (determinante −1) y `glm::quat_cast` —que asume una rotación— devuelve un cuaternión sin
+    // sentido: la física recibía una orientación arbitraria. El síntoma no señalaba a la causa:
+    // las ROCAS colisionaban y los ÁRBOLES no, porque la caja de la roca es casi isótropa y
+    // sobrevive a cualquier giro, mientras que el tronco alargado se tumbaba.
+    {
+        double worstDet = 1e9;
+        for (const auto& b : whole) worstDet = std::min(worstDet, (double)glm::determinant(b.rot));
+        // Y con orientaciones variadas, no solo la de este test.
+        for (float y : { 0.0f, 1.1f, 2.7f, 4.9f }) {
+            for (const glm::dvec3 d : { glm::dvec3(0,1,0), glm::dvec3(0.3,0.9,0.2),
+                                        glm::dvec3(-0.7,0.1,0.7), glm::dvec3(0,-1,0) }) {
+                const auto bs = propWorldColliders(parts, glm::vec3(glm::normalize(d)), 0.0f, 1.0f,
+                                                   y, planetC, planetR, 0u);
+                for (const auto& b : bs) worstDet = std::min(worstDet, (double)glm::determinant(b.rot));
+            }
+        }
+        printf("    determinante de la base: peor = %+.6f (debe ser +1)\n", worstDet);
+        CHECK(worstDet > 0.999, "la base es una ROTACION (det +1), no una reflexion");
+        // CONTRAPRUEBA: la base con el orden invertido —lo que había— da det −1.
+        const glm::dvec3 ay(0, 1, 0), ax(0, 0, 1);
+        const glm::dmat3 zurda(ax, ay, glm::cross(ay, ax));
+        printf("    CONTRAPRUEBA: la base con cross(ay,ax) da det = %+.1f\n",
+               (double)glm::determinant(zurda));
+        CHECK(glm::determinant(zurda) < 0.0, "CONTRAPRUEBA: el orden antiguo daba una reflexion");
+    }
 
     // --- 6. La escala escala ---------------------------------------------------------------------
     const auto big = propWorldColliders(parts, dir, 0.0f, 2.0f, 0.0f, planetC, planetR, 0u);

@@ -213,6 +213,85 @@ void test_terrain_lod_invariants() {
     CHECK(std::fabs(terrainTriM(1000000.0) - 1000000.0 * TERRAIN_TRIM_SLOPE) < 1e-3,
           "lejos, triM = distancia·pendiente");
     CHECK(terrainTriM(5000.0) > terrainTriM(500.0), "triM crece monótonamente con la distancia");
+
+    // (5) ANILLOS ANIDADOS: el quad tiene que coincidir EXACTO a los dos lados de cada frontera.
+    //
+    // Es la propiedad de la que cuelga todo el diseño. El clipmap dejó de ser una rejilla estirada
+    // globalmente para ser una pila de marcos encajados, y en cada frontera se tocan dos rejillas
+    // con parches de tamaño distinto (128·2^r contra 128·2^(r+1)). Si los dos lados se subdividen
+    // distinto quedan T-junctions: rendijas por las que se ve el espacio, en un círculo alrededor
+    // del jugador. Que coincidan no es suerte — es el redondeo del nivel a potencia de dos.
+    const double cover0 = 1984.0;   // NC=31 · parche 128 / 2 (calidad Low, la de referencia)
+    for (int r = 0; r < 5; ++r) {
+        const double d    = cover0 * std::exp2((double)r);          // la frontera exacta
+        const double arcIn  = TERRAIN_CLIP_PATCH_M * std::exp2((double)r);
+        const double arcOut = arcIn * 2.0;
+        const double qIn  = arcIn  / terrainClipEdgeLevel(arcIn,  d);
+        const double qOut = arcOut / terrainClipEdgeLevel(arcOut, d);
+        std::printf("    frontera r=%d a %7.0f m: quad dentro %6.1f m · fuera %6.1f m\n",
+                    r, d, qIn, qOut);
+        CHECK(std::fabs(qIn - qOut) < 1e-9,
+              "el quad coincide a los dos lados de la frontera (sin T-junctions)");
+    }
+
+    // CONTRAPRUEBA: sin el redondeo a potencia de dos, los dos lados NO coinciden. Sin esto, el
+    // bloque anterior podría estar pasando porque la fórmula da lo mismo siempre.
+    {
+        const double d = cover0;
+        auto crudo = [&](double arc) {   // el nivel SIN redondear, que es lo natural de escribir
+            double l = arc / (d * TERRAIN_TRIM_SLOPE * 2.0);
+            return arc / (l < 1.0 ? 1.0 : (l > TERRAIN_CLIP_TESS_CAP ? TERRAIN_CLIP_TESS_CAP : l));
+        };
+        const double qIn = crudo(TERRAIN_CLIP_PATCH_M), qOut = crudo(TERRAIN_CLIP_PATCH_M * 2.0);
+        std::printf("    CONTRAPRUEBA sin redondeo a 2^n: dentro %.2f m · fuera %.2f m\n", qIn, qOut);
+        CHECK(std::fabs(qIn - qOut) > 1e-6,
+              "CONTRAPRUEBA: sin el redondeo los lados difieren (el redondeo es lo que cose)");
+    }
+
+    // (6) Y el detalle CERCANO ya no depende de la altura: a 100 m del jugador el quad es el fino
+    // pase lo que pase, que es justo lo que la rejilla estirada perdía al subir.
+    CHECK(std::fabs(terrainClipRingQuadM(100.0, cover0) - TERRAIN_CLIP_QUAD_M) < 1e-9,
+          "a 100 m el quad es el fino (4 m), haya los anillos que haya");
+    CHECK(terrainClipRingIndex(100.0, cover0) == 0, "y lo dibuja el anillo 0");
+
+    // (7) BANDA MUERTA DEL ANCLAJE: un jugador PARADO sobre un borde de celda no puede hacer
+    //     temblar el ancla. Medido en el juego antes de arreglarlo: 69 reconstrucciones en 8 s,
+    //     alternando entre dos mallas de 18 432 triángulos a 5-6 ms cada una, con el personaje
+    //     quieto — y el suelo cambiando bajo sus pies con ellas.
+    {
+        const double R = 6371000.0;
+        // Un punto y su ancla: se coloca el jugador JUSTO en el borde (medio quad del ancla) y se le
+        // añade un temblor de ±1 mm, que es lo que hacía saltar el `round`.
+        const glm::dvec3 anchor = glm::normalize(glm::dvec3(1.0, 0.2, 0.3));
+        glm::dvec3 tang = glm::normalize(glm::cross(anchor, glm::dvec3(0, 1, 0)));
+        int saltos = 0;
+        for (int k = 0; k < 200; ++k) {
+            const double jitter = (k % 2 ? +0.001 : -0.001);                 // ±1 mm
+            const double offM   = TERRAIN_CLIP_QUAD_M * 0.5 + jitter;        // en el borde exacto
+            const glm::dvec3 p  = glm::normalize(anchor + tang * (offM / R));
+            if (terrainAnchorShouldJump(anchor, p, R)) ++saltos;
+        }
+        std::printf("    ancla: jugador temblando ±1 mm sobre el borde -> %d saltos de 200\n", saltos);
+        CHECK(saltos == 0, "parado en el borde, el ancla NO tiembla (era 1 salto por frame)");
+
+        // Y SIGUE SIGUIENDO AL JUGADOR: la banda muerta no puede convertirse en un ancla pegada.
+        const glm::dvec3 lejos = glm::normalize(anchor + tang * (20.0 / R));   // 20 m
+        CHECK(terrainAnchorShouldJump(anchor, lejos, R),
+              "a 20 m sí re-ancla (la banda muerta no congela el anclaje)");
+
+        // CONTRAPRUEBA: sin banda muerta —el criterio anterior, medio quad pelado— el mismo temblor
+        // SÍ dispara. Sin esto, el test pasaría igual con una implementación que no hiciera nada.
+        int saltosSin = 0;
+        for (int k = 0; k < 200; ++k) {
+            const double jitter = (k % 2 ? +0.001 : -0.001);
+            const double offM   = TERRAIN_CLIP_QUAD_M * 0.5 + jitter;
+            const glm::dvec3 p  = glm::normalize(anchor + tang * (offM / R));
+            const double c = glm::clamp(glm::dot(anchor, p), -1.0, 1.0);
+            if (std::acos(c) * R > TERRAIN_CLIP_QUAD_M * 0.5) ++saltosSin;    // el criterio de antes
+        }
+        std::printf("    CONTRAPRUEBA sin banda muerta: %d saltos de 200\n", saltosSin);
+        CHECK(saltosSin > 0, "CONTRAPRUEBA: sin banda muerta el mismo temblor SI hace saltar el ancla");
+    }
 }
 
 // TEST: la rejilla por anillos de la COLISIÓN (§9 Fase 3), la de verdad — `terrainRingGrid`.

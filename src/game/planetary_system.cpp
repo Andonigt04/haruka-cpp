@@ -526,7 +526,6 @@ Haruka::Planet::TerrestrialPlanet::RenderStats PlanetarySystem::getTerrainRender
         const auto& s = sp->lastRenderStats();
         sum.baseVertices  += s.baseVertices;  sum.baseTriangles  += s.baseTriangles;
         sum.clipVertices  += s.clipVertices;  sum.clipTriangles  += s.clipTriangles;
-        sum.waterVertices += s.waterVertices; sum.waterTriangles += s.waterTriangles;
         sum.drawCalls     += s.drawCalls;
     }
     return sum;
@@ -807,6 +806,12 @@ void PlanetarySystem::generateSimpleLOD(const std::string&, int) {
     // Single-mesh planets have no LOD — mesh is built once at full resolution.
 }
 
+// Trabajo de COMPUTE de todos los planetas, para hacerlo FUERA del render pass de la escena.
+// Ver `TerrestrialPlanet::prepare`: un dispatch dentro de un render pass es ilegal en Vulkan.
+void PlanetarySystem::prepareSimplePlanets(const glm::dvec3& cameraPos) {
+    for (auto& p : m_simplePlanets) p->prepare(cameraPos);
+}
+
 void PlanetarySystem::renderSimplePlanet(const std::string& name,
                                           const glm::dvec3& cameraPos,
                                           const glm::mat4& proj,
@@ -825,6 +830,11 @@ const PlanetarySystem::SimplePlanet& PlanetarySystem::getSimplePlanet(size_t i) 
 void PlanetarySystem::setSunLight(const glm::vec3& dir, const glm::vec3& color,
                                   float ambientStrength) {
     for (auto& p : m_simplePlanets) p->setSunLight(dir, color, ambientStrength);
+}
+
+void PlanetarySystem::setGroundWet(float wet, float snow, Haruka::RHI::TextureHandle skyMask,
+                                   const glm::mat4& skySpace) {
+    for (auto& p : m_simplePlanets) p->setGroundWet(wet, snow, skyMask, skySpace);
 }
 
 int PlanetarySystem::validateOrbits() const {

@@ -23,8 +23,15 @@ struct ItemDef {
     std::string name;               // display name, e.g. "Wood"
     std::string type;               // categoría: herramienta/comida/metal/gema/estacion/...
     int   maxStack = 99;            // how many fit in one slot (1 = non-stackable)
-    // Free-form tags/values the game interprets (tool, food value, damage, pureza…).
+    // Free-form tags/values the game interprets (tool, food value, damage, calidad…). SOLO NÚMEROS:
+    // los valores no numéricos de "stats" se ignoran aquí y se leen en su campo propio (ver `affinity`).
     std::unordered_map<std::string, float> stats;
+    // AFINIDAD por NOMBRE (clave de elements.json: "fire"/"wind"/"land"/"water"/"void"…), no por índice.
+    // Antes era un entero dentro de `stats` y había DOS numeraciones incompatibles bajo el mismo nombre
+    // (materials.json contaba fuego,viento,tierra,agua,vacío; elements.json fire,water,ice,wind,land…),
+    // así que una gema podía "casar" con el elemento equivocado sin que nada lo cantara. Un string no
+    // se desalinea en silencio. "any" = conducto neutro (cuarzo/cristal: vale para todo, más débil).
+    std::string affinity;
     std::vector<std::string> tags;  // usos/etiquetas (construccion, polvora, magia…)
     // --- ASPECTO: un item se ve de UNA de estas dos formas ---------------------------------------
     // (a) `modelPath`: un .glb de verdad (herramientas, muebles, fixtures).
@@ -72,15 +79,24 @@ private:
     std::unordered_map<std::string, ItemDef> m_defs;
 };
 
-/** @brief One slot: item id + count + pureza (0=Impuro..4=Único, universal). Los
- *  stacks separan por id Y pureza (distinta calidad = stack aparte). */
+/** @brief One slot: item id + count + CALIDAD.
+ *
+ *  La calidad es un valor CONTINUO (el juego usa 1..10000): dos objetos del mismo material pueden
+ *  diferir un 40 % y eso tiene que notarse. Antes era un entero de 0 a 4 y todo lo que cayera en el
+ *  mismo cajón era literalmente el mismo item.
+ *
+ *  ⚠️ APILADO: si dos calidades apilan juntas NO lo decide el motor, que no sabe qué es "raro".
+ *  Lo decide `setStackPolicy` (el juego instala su regla de bandas). Sin política, apila solo lo
+ *  EXACTAMENTE igual — que es el comportamiento de siempre y el seguro. Al fundirse dos stacks la
+ *  calidad resultante es la MEDIA PONDERADA por cantidad: si no, juntar 1 mena mala con 99 buenas
+ *  ascendería o hundiría las 100 de golpe. */
 struct ItemStack {
     std::string id;
     int count  = 0;
-    int pureza = 1;   // 0=Impuro 1=Común 2=No común 3=Raro 4=Único
+    int quality = 600;   // escala del juego (1..10000). 600 = común corriente
 
     bool empty() const { return id.empty() || count <= 0; }
-    void clear() { id.clear(); count = 0; pureza = 1; }
+    void clear() { id.clear(); count = 0; quality = 600; }
 };
 
 /**
@@ -98,17 +114,23 @@ public:
     const ItemStack& slot(int i) const { return m_slots[i]; }
     ItemStack&       slot(int i)       { return m_slots[i]; }
 
-    /** @brief Adds `count` de `id` con `pureza`; devuelve lo que NO cupo. Apila por id+pureza. */
-    int add(const std::string& id, int count, int pureza = 1);
+    /** @brief Adds `count` de `id` con `quality`; devuelve lo que NO cupo. Apila según la política. */
+    int add(const std::string& id, int count, int quality = 600);
 
-    /** @brief Quita hasta `count` de `id` (cualquier pureza); devuelve lo retirado. */
+    /** @brief Regla de APILADO por calidad. `nullptr` = solo apila lo exactamente igual.
+     *  El juego instala aquí su criterio de bandas; el motor no sabe qué es "raro". */
+    using StackPolicy = bool (*)(int qualityA, int qualityB);
+    static void setStackPolicy(StackPolicy p);
+    static bool sameStack(int qualityA, int qualityB);
+
+    /** @brief Quita hasta `count` de `id` (cualquier calidad); devuelve lo retirado. */
     int remove(const std::string& id, int count);
 
-    /** @brief Total de `id` en todas las purezas. */
+    /** @brief Total de `id` en todas las calidades. */
     int countOf(const std::string& id) const;
 
-    /** @brief Pureza media (ponderada por cantidad) de `id`; 1 (Común) si no hay. */
-    float avgPureza(const std::string& id) const;
+    /** @brief Calidad media (ponderada por cantidad) de `id`; 600 si no hay ninguno. */
+    float avgQuality(const std::string& id) const;
 
     /** @brief Moves/swaps/merges the stack in slot `from` onto slot `to`. */
     void moveSlot(int from, int to);

@@ -23,6 +23,7 @@
 layout(quads, equal_spacing, ccw) in;
 layout(location = 0) in vec2 eLocal[];
 layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
+layout(location = 5) out float vSurfKind;   // 0 = no es la malla base (ver terrain.tese)
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
     vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
@@ -61,6 +62,7 @@ vec3 sampleBase(vec3 dir) {
 }
 
 void main() {
+    vSurfKind = 0.0;
     float R = uExtra.w;
     vec2 l01 = mix(eLocal[0], eLocal[1], gl_TessCoord.x);
     vec2 l32 = mix(eLocal[3], eLocal[2], gl_TessCoord.x);

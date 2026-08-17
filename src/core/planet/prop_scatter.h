@@ -186,14 +186,33 @@ inline std::vector<ScatteredProp> scatterPropsNear(
 
     std::unordered_set<uint64_t> seenCells;
 
+    // ⚠️ LAS BANDAS SON ANULARES. Antes cada una recorría su radio ENTERO desde el centro y el
+    // deduplicado era POR BANDA (`cellKey ^ bi`), así que el mismo sitio recibía un prop de la banda
+    // 0, otro de la 1 y otro de la 2: en los primeros 1000 m se apilaban TRES conjuntos de props
+    // unos encima de otros. Cada banda cubre ahora solo lo que la anterior no alcanza.
+    //
+    // El corte es por distancia de CHEBYSHEV (max(|x|,|y|)) y no euclídea porque cada banda barre un
+    // CUADRADO de semilado `radiusM` (los índices van de -n a n en los dos ejes). Con un corte
+    // circular quedarían las esquinas del cuadrado interior sin cubrir por nadie: un anillo de
+    // huecos justo donde más se nota.
+    float prevRad = 0.0f;
     for (size_t bi = 0; bi < params.lods.size(); ++bi) {
         const PropScatterLod& lod = params.lods[bi];
         const float cell  = lod.cellM;
         const float rad   = lod.radiusM;
         const int   n     = (int)std::ceil(rad / cell);
+        const float inner = prevRad;      // lo que ya cubre la banda anterior
+        prevRad = rad;
 
         for (int j = -n; j <= n; ++j) {
             for (int i = -n; i <= n; ++i) {
+                // Fuera del hueco interior: la banda anterior ya sembró ahí, y sembrar otra vez es
+                // lo que ponía un prop encima de otro.
+                if (inner > 0.0f) {
+                    const float cx = std::abs((float)i * cell);
+                    const float cy = std::abs((float)j * cell);
+                    if (std::max(cx, cy) < inner) continue;
+                }
                 // Punto de la rejilla tangente (solo ENUMERA qué zona cubrir).
                 const glm::dvec3 wp = planetC + glm::dvec3(dirCam) * R
                                     + glm::dvec3(Td) * (double)(i * cell)

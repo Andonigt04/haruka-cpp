@@ -94,8 +94,20 @@ public:
     static constexpr float kSnowTempC = 1.0f;
 
     /** @brief Cobertura a partir de la cual el frente descarga. Debajo hay nube pero no llueve —
-     *  que es justo la mitad de "la lluvia cae de las nubes": nube sin lluvia SÍ existe. */
-    static constexpr float kPrecipCover = 0.62f;
+     *  que es justo la mitad de "la lluvia cae de las nubes": nube sin lluvia SÍ existe.
+     *
+     *  ⚠️ SUBIÓ de 0.62 a 0.78 POR ARRASTRE, no por decisión de balance. La lluvia sale de la
+     *  cobertura, así que al corregir el planeta despejado (mediana 0,111 → 0,30) TODO el mundo
+     *  cruzaba este umbral y la frecuencia de lluvia se disparaba sola. Medido a humedad 0,65:
+     *  llovía el 11,0 % del tiempo, con la cobertura nueva y este umbral sin tocar habría sido el
+     *  27,9 %, y con 0.78 queda en el 21,3 %.
+     *
+     *  ⚠️ **No se puede volver al 11 % sin perder las nubes**: subir más este umbral lo mete en la
+     *  cola de `smoothstep(kPrecipCover, 0.94, cover)`, o sea que la lluvia pasaría de nada a todo
+     *  en una franja estrechísima. Que un cielo más nublado llueva más es la física del sistema
+     *  —`precip` no tiene otra fuente—, así que si el 21 % molesta, el mando NO es este umbral sino
+     *  el término `0.30 + 0.70·H` de `sampleAt`, que gradúa la INTENSIDAD. */
+    static constexpr float kPrecipCover = 0.78f;
 
     /** @brief Bordes de la losa de nube, en fracción del grosor: dónde acaba de entrar y dónde
      *  empieza a deshilacharse.
@@ -109,6 +121,20 @@ public:
      *  cada uno por su cuenta. */
     static constexpr float kProfileRise = 0.28f;
     static constexpr float kProfileFall = 0.62f;
+
+    /** @brief Escala del campo horizontal de nube, en 1/metros. Su inversa es el ANCHO típico de un
+     *  cúmulo (0.0007 ⇒ ~1430 m).
+     *
+     *  ⚠️ Vive aquí, y no como literal en el pase de render, porque forma PAREJA con el grosor que
+     *  calcula `sampleAt`: juntos deciden si una nube se lee como cuerpo o como lámina. Con la
+     *  escala vieja (0.00035 ⇒ 2857 m) y el cuerpo viejo (260 + 900·cover ⇒ 440-980 m) el cúmulo de
+     *  buen tiempo era 3-6 veces más ancho que alto, y eso se ve exactamente como lo que se
+     *  reportó: una sábana. Un test (`cloud_shape`) fija la relación para que un retoque futuro de
+     *  cualquiera de los dos no la rompa en silencio. */
+    static constexpr float kFieldScale = 0.0007f;
+
+    /** @brief Ancho típico de un cúmulo en metros: la inversa de la escala del campo. */
+    static constexpr float cloudWidthM() { return 1.0f / kFieldScale; }
 
     /** @brief Fija la seed del planeta y siembra los frentes. Idempotente para la misma seed. */
     void configure(uint32_t seed);

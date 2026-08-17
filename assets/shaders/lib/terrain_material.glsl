@@ -29,6 +29,10 @@
 #ifndef HARUKA_TERRAIN_MATERIAL_GLSL
 #define HARUKA_TERRAIN_MATERIAL_GLSL
 
+// El espesor del manto que decide qué asoma en la superficie. Gemelo en CPU:
+// `core/planet/terrain_strata.h` — las dos con las mismas cifras.
+#include "lib/terrain_strata.glsl"
+
 #define MAX_TERRAIN_MATERIALS 16
 
 // `f` = banda de ALTURA en km: (elevMin, elevMax, elevFeather, libre). Gemelo de `GpuMat` en
@@ -63,6 +67,24 @@ vec3 harukaZoneColor(int i) {
 bool harukaHasZone(int i) { return mod(uMat[i].d.w, 2.0) >= 1.0; }
 
 /**
+ * @brief ¿Este material es AGUA (`submerged` en la tabla)? — flags bit1.
+ *
+ * ⚠️ EL MAR SE HA RETIRADO (provisional), y estos materiales se SALTAN en la selección. La razón:
+ * un material de agua aporta un ALBEDO azul, no una superficie de agua. Mientras la esfera del
+ * océano lo tapaba no se notaba; sin ella, el lecho se pintaba de azul oscuro — la "malla negra"
+ * con el borde cuantizado que se ve en la costa. Saltándolo, el fondo marino se sombrea con el
+ * material de tierra que le corresponda, que es lo honesto mientras no haya agua.
+ *
+ * Cuando el agua se rehaga, este bit es por dónde entra: la capa `water` como FUENTE DE VERDAD de
+ * dónde hay agua (un dato POR PÍXEL), en vez de una segunda superficie que hay que mantener de
+ * acuerdo con el terreno — que es justo lo que no funcionaba.
+ */
+bool harukaIsWaterMat(int i) { return mod(floor(uMat[i].d.w / 2.0), 2.0) >= 1.0; }
+
+/** @brief ¿Es LECHO (la roca de debajo) en vez de cobertura? — flags bit2. Ver `terrain_strata.h`. */
+bool harukaIsBedrock(int i) { return mod(floor(uMat[i].d.w / 4.0), 2.0) >= 1.0; }
+
+/**
  * Material en este píxel.
  *
  * `zoneRGB` es el color leído del mapa de zonas (0..255) y `hasZoneMap` dice si ese mapa existe.
@@ -72,12 +94,35 @@ bool harukaHasZone(int i) { return mod(uMat[i].d.w, 2.0) >= 1.0; }
  *
  * Sin mapa (o en un material sin zona declarada) se cae a las reglas de humedad/temperatura/pendiente.
  */
+/**
+ * @brief Material del suelo como COLUMNA: un LECHO, una COBERTURA y el espesor que decide cuál asoma.
+ *
+ * ⚠️ ANTES ESTO ERA UN CONCURSO ENTRE TODOS y su resultado una MEDIA. Con siete materiales sueltos
+ * el color salía (0.30, 0.38, 0.41) — un velo gris-verde sobre el planeta entero, con los azules del
+ * mar promediados hasta en el desierto — y la textura se la llevaba el primero declarado en caso de
+ * empate, así que reordenar la escena cambiaba el planeta.
+ *
+ * Ahora hay dos concursos cortos y separados por `role` (ver `terrain_strata.h`): uno entre lechos y
+ * otro entre coberturas. Nada se promedia entre grupos; se MEZCLAN por el espesor del manto, que
+ * sale de la física del sitio (pendiente, humedad, cuenca) y no de una regla de arte.
+ *
+ * Se devuelven las DOS capas de textura y el peso, no una sola: mezclar los dos triplanares en el
+ * fragmento es lo que hace que el borde de un cortado sea un degradado y no un recorte.
+ */
 void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm,
                           vec3 zoneRGB, bool hasZoneMap,
                           out vec3 tint, out float grainAmt, out float detailAmt, out int tile,
-                          out vec4 baseColor, out int matIdx)
+                          out int tileBed, out float coverW, out vec4 baseColor, out int matIdx)
 {
     tint = vec3(1.0); grainAmt = 1.0; detailAmt = 1.0; tile = 2;   // land por defecto
+    tileBed = -1;
+    float wSumB = 0.0, grainB = 0.0, detailB = 0.0, colWB = 0.0, bestB = -1.0;
+    vec3  tintB = vec3(0.0), colB = vec3(0.0);
+    int   idxB  = -1;
+    // ESPESOR DEL MANTO en este punto, y de ahí cuánto se ve de cobertura en la SUPERFICIE
+    // (profundidad 0). Cuando se pueda cavar, esta misma llamada con la profundidad de la excavación
+    // da el material del fondo del hoyo — la columna ya está descrita, solo hay que consultarla.
+    coverW = harukaCoverWeight(0.0, harukaCoverThickness(slope, humid, elevKm));
     // ⚠️ SIN ARRAY DE TERRENO, NINGÚN MATERIAL TIENE TILE.
     //
     // `uMatCount.y` dice si el array (bindings 12/13) existe de verdad. Si no existe, el sitio que lo
@@ -169,6 +214,27 @@ void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm,
         // Pintar significa "aquí este material va, aunque las reglas no lo pidieran".
         if (i == zoneMat) w += zoneW;
         if (w <= 0.0) continue;
+        if (harukaIsWaterMat(i)) continue;   // el agua no pinta terreno (ver harukaIsWaterMat)
+
+        // ── UN MATERIAL CON ZONA SOLO PINTA SU ZONA ─────────────────────────────────────────────
+        //
+        // ⚠️ ESTO ERA EL "PROMEDIO DE TODO" QUE SE VEÍA COMO UNA LÁMINA GRIS-VERDE SOBRE EL PLANETA.
+        //
+        // Las bandas por defecto son el RANGO COMPLETO (`humedad 0..1`, `temp ±1000`, `pendiente
+        // 0..1`, `altura ±1000 km`), así que un material que no declara ninguna pesa 1 en CADA PÍXEL
+        // del planeta. En la escena real había SIETE así — water, sand, land, forest, ice,
+        // deep_ocean, shelf —, pensados para pintarse a mano con el mapa de zonas pero compitiendo
+        // en todas partes. El color resultante era su media: (0.30, 0.38, 0.41), gris-verde-azulado,
+        // con los tres azules y el blanco del hielo metidos en cada píxel. Y la TEXTURA se la
+        // llevaba `sand` por ser la primera con textura en el desempate, así que salía arena hasta
+        // en el desierto y en la montaña.
+        //
+        // La zona ya sumaba un bonus DENTRO de lo pintado, pero no restaba fuera: media regla. Con
+        // ésta, declarar una zona significa lo que uno espera al pintar un mapa — "este material va
+        // AQUÍ" — y deja de significar además "y de fondo en todo el planeta".
+        //
+        // Un material sin zona sigue decidiéndose por sus bandas, que es el otro camino y no se toca.
+        if (hasZoneMap && harukaHasZone(i) && i != zoneMat) continue;
 
         // ⚠️ El bonus de zona entra en el PESO (la mezcla de aspecto) pero NO en el SCORE (quién
         // gana la textura). Si entrara en los dos, un peso de zona alto haría matemáticamente
@@ -180,23 +246,49 @@ void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm,
         // autor para decir "la roca gana en los cortados".
         float score = (w - (i == zoneMat ? zoneW : 0.0)) * uMat[i].b.w;
         if (i == zoneMat) score = max(score, 0.001 * uMat[i].b.w);   // pintado: compite, aunque poco
-        wSum      += w;
-        tintAcc   += uMat[i].c.rgb * w;
-        grainAcc  += uMat[i].c.a   * w;
-        detailAcc += uMat[i].d.x   * w;
-        colAcc    += uMat[i].e.rgb * w;
-        colW      += uMat[i].e.a   * w;
-        if (score > bestScore) {
-            bestScore = score;
-            tile = hasTileArray ? int(uMat[i].b.z) : -1;
-            matIdx = i;
+
+        // ── DOS CONCURSOS SEPARADOS, NO UNO GRANDE ──────────────────────────────────────────────
+        // El lecho compite contra lechos y la cobertura contra coberturas. Que la roca de debajo y
+        // la arena de encima se promediaran era lo que producía colores que no son de nadie.
+        if (harukaIsBedrock(i)) {
+            wSumB += w; tintB += uMat[i].c.rgb * w; grainB += uMat[i].c.a * w;
+            detailB += uMat[i].d.x * w; colB += uMat[i].e.rgb * w; colWB += uMat[i].e.a * w;
+            if (score > bestB) { bestB = score; tileBed = hasTileArray ? int(uMat[i].b.z) : -1;
+                                 idxB = i; }
+        } else {
+            wSum += w; tintAcc += uMat[i].c.rgb * w; grainAcc += uMat[i].c.a * w;
+            detailAcc += uMat[i].d.x * w; colAcc += uMat[i].e.rgb * w; colW += uMat[i].e.a * w;
+            if (score > bestScore) { bestScore = score; tile = hasTileArray ? int(uMat[i].b.z) : -1;
+                                     matIdx = i; }
         }
     }
 
+    // Sin ningún lecho declarado no hay nada que mezclar: la cobertura manda en todas partes, que es
+    // el comportamiento de siempre. Así una escena que no declare `role` se ve igual que antes.
+    if (wSumB <= 1e-4) coverW = 1.0;
+    // Ni cobertura ni espesor: asoma el lecho entero.
+    if (wSum  <= 1e-4 && wSumB > 1e-4) coverW = 0.0;
+
+    vec3  tintC = tint;   float grainC = grainAmt, detC = detailAmt;  vec4 colC = baseColor;
     if (wSum > 1e-4) {
-        tint = tintAcc / wSum; grainAmt = grainAcc / wSum; detailAmt = detailAcc / wSum;
-        baseColor = vec4(colAcc / wSum, colW / wSum);
+        tintC = tintAcc / wSum; grainC = grainAcc / wSum; detC = detailAcc / wSum;
+        colC  = vec4(colAcc / wSum, colW / wSum);
     }
+    vec3  tintBd = tintC;  float grainBd = grainC, detBd = detC;      vec4 colBd = colC;
+    if (wSumB > 1e-4) {
+        tintBd = tintB / wSumB; grainBd = grainB / wSumB; detBd = detailB / wSumB;
+        colBd  = vec4(colB / wSumB, colWB / wSumB);
+    }
+
+    // La MEZCLA es por espesor de manto, no por pesos de reglas.
+    tint      = mix(tintBd, tintC, coverW);
+    grainAmt  = mix(grainBd, grainC, coverW);
+    detailAmt = mix(detBd,  detC,  coverW);
+    baseColor = mix(colBd,  colC,  coverW);
+    // El índice para las vistas de depuración es el que de verdad se ve en la superficie.
+    if (coverW < 0.5 && idxB >= 0) matIdx = idxB;
+    if (tile    < 0) tile    = tileBed;    // cobertura sin textura: que el triplanar use el lecho
+    if (tileBed < 0) tileBed = tile;
 }
 
 #endif // HARUKA_TERRAIN_MATERIAL_GLSL

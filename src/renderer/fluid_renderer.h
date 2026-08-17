@@ -1,9 +1,9 @@
 /**
  * @file fluid_renderer.h
  * @brief Draws PBF fluid particles. Two modes:
- *   - Screen-space surface (default): depth pass → bilateral smooth → surface
- *     composite, so the particles read as one liquid surface, not spheres.
- *   - Sphere sprites (fallback, s_surfaceMode=false): the original lit point
+ *   - Screen-space surface (opt-in, `setSurfaceMode(true)`): depth pass → bilateral smooth →
+ *     surface composite, so the particles read as one liquid surface, not spheres.
+ *   - Sphere sprites (POR DEFECTO): the original lit point
  *     sprites, kept for comparison / if the surface look needs disabling.
  * Self-contained; called from the game's onRenderWorld hook.
  */
@@ -34,9 +34,26 @@ public:
                 Haruka::RHI::RenderPassHandle scenePass = {});
 
     // Switch between the screen-space surface (true) and the sphere fallback.
-    static inline bool s_surfaceMode = true;
+    /**
+     * @brief Modo de dibujado, POR INSTANCIA y en ESFERAS por defecto.
+     *
+     * ⚠️ ERA UN `static inline bool = true`, y eso era el bug. Con el modo superficie, CADA instancia
+     * —tenga las partículas que tenga— lanza el pipeline entero de líquido en espacio de pantalla:
+     * pase de profundidad, dos desenfoques bilaterales a pantalla completa y un COMPOSITE A PANTALLA
+     * COMPLETA con refracción sobre la escena. `Survival/scripts/sandbox.cpp` lo usaba para el
+     * MARCADOR DE PUNTERÍA (UNA partícula), así que apuntar al suelo componía una lámina translúcida
+     * sobre la escena entera: pegada al terreno (usa la profundidad de escena) y de lados rectos
+     * (es un quad de pantalla completa). Era la "capa mala" que sobrevivía a todos los interruptores
+     * de agua — porque no es agua.
+     *
+     * Ahora es por instancia y arranca en ESFERAS: un marcador se dibuja como lo que es. Quien
+     * quiera líquido de verdad lo pide explícitamente con `setSurfaceMode(true)`.
+     */
+    void setSurfaceMode(bool on) { m_surfaceMode = on; }
+    bool surfaceMode() const { return m_surfaceMode; }
 
 private:
+    bool m_surfaceMode = false;   ///< ver setSurfaceMode: esferas por defecto
     fluid::PBFSolver* m_solver = nullptr;
     std::vector<float> m_verts;
     float m_radius = 0.3f;
@@ -68,10 +85,14 @@ private:
 
     int    m_fbW = 0, m_fbH = 0;
 
+    /// Formato de la copia de profundidad; sigue al de la FUENTE del blit (ver ensureTargets).
+
+    Haruka::RHI::Format m_depthFmt = Haruka::RHI::Format::D32F;
+
     void ensureGL();
     /** @brief Sube m_params al UBO y lo ata (los 4 pases lo comparten). */
     void bindParams(Haruka::RHI::Context* ctx);
-    void ensureTargets(int w, int h);
+    void ensureTargets(int w, int h, Haruka::RHI::Format srcDepthFmt);
     void uploadParticles(const Haruka::WorldPos& cameraPos, int n);
     void renderSpheres(int n, float vpH);
     /** @brief Modo superficie completo: sembra oclusión/refracción desde `scenePass`

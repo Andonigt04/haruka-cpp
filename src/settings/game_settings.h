@@ -48,7 +48,15 @@ struct GraphicsSettings {
     ShadowQuality   shadowQuality   = ShadowQuality::Medium;
     AntialiasingMode antialiasing   = AntialiasingMode::TAA;
     WaterQuality    waterQuality    = WaterQuality::Medium;
-    TerrainQuality  terrainQuality  = TerrainQuality::Low; // Low = hd (2048px); sube a 4k/8k/16k según VRAM
+    // ⚠️ MEDIUM, NO LOW. Low = 2048, y los PNG del terreno son 4096: estaba tirando la MITAD de la
+    // resolución de cada textura antes de subirla, que es la pixelación del suelo que se veía de
+    // cerca. Medium = 4096 = el tamaño nativo del asset; por encima no hay nada que ganar (el
+    // reescalado nunca SUBE de resolución, así que High/Ultra con estos assets dan lo mismo).
+    //
+    // Y cabe porque la deduplicación de capas lo hizo posible: el array pasó de 9 capas a 4 (las 9
+    // contenían 4 imágenes distintas — `grass_albedo` cargada CUATRO veces). A 4096 con mipmaps son
+    // ~358 MB por array, ~716 MB entre albedo y normal. Con las 9 capas de antes habrían sido 1,6 GB.
+    TerrainQuality  terrainQuality  = TerrainQuality::Medium;
     FoliageQuality  foliageQuality  = FoliageQuality::Medium; // densidad/alcance de árboles/rocas
     float           fov             = 90.0f;
     float           renderScale     = 1.0f;

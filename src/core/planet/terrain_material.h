@@ -16,6 +16,7 @@
  */
 #pragma once
 #include <string>
+#include <utility>
 #include <vector>
 #include <glm/glm.hpp>
 
@@ -91,6 +92,23 @@ struct TerrainMaterial {
     ///@{
     glm::vec3 zoneColor = glm::vec3(-1.0f);      ///< negativo = este material no tiene zona
     bool      submerged = false;
+
+    /**
+     * @brief Papel del material en la COLUMNA del suelo (ver `terrain_strata.h`).
+     *
+     * `Bedrock` = la roca de debajo, la que asoma donde el sedimento no se agarra.
+     * `Cover`   = el manto suelto de encima (arena, tierra, regolito), con espesor.
+     *
+     * ⚠️ NO es una etiqueta decorativa: decide en QUÉ concurso entra el material. Antes todos
+     * competían contra todos y el resultado era su MEDIA — de ahí el velo gris que teñía el planeta.
+     * Con el papel, se elige un lecho y una cobertura por separado y se mezclan por espesor: dos
+     * listas cortas en vez de una larga donde todo pelea con todo.
+     *
+     * Por defecto `Cover`, que es lo que era todo hasta ahora: sin declararlo, la escena se comporta
+     * como antes salvo que el lecho lo pone quien sí lo declare.
+     */
+    enum class Role : int { Cover = 0, Bedrock = 1 };
+    Role role = Role::Cover;
     bool hasZone() const { return zoneColor.r >= 0.0f; }
     ///@}
 
@@ -170,9 +188,32 @@ struct TerrainMaterialTable {
      * síntoma sería "la roca tiene textura de hierba" sin nada que lo explique.
      */
     void assignLayers() {
+        // ⚠️ ANTES: `m.layer = next++` — una capa POR MATERIAL, mirara o no el mismo fichero.
+        //
+        // Medido en la escena real: 13 materiales daban 9 capas que contenían **4 imágenes
+        // distintas** (`grass_albedo.png` cargada CUATRO veces, `sand` y `rock` dos cada una). Cada
+        // duplicado es un PNG de 4096² descomprimido, reescalado y subido otra vez: ~220 MB de VRAM
+        // repetida entre albedo y normal, y ~18 s de arranque cargando cuatro veces la misma hierba.
+        //
+        // Y no era solo memoria. Todas las capas del array se igualan a la MÁS PEQUEÑA, así que el
+        // presupuesto que se comían los duplicados es el que obligaba a bajar de 4096 a 2048 — la
+        // mitad de la resolución de cada textura, que es la pixelación que se ve en el suelo.
+        //
+        // Ahora la capa se asigna por FICHERO: dos materiales con el mismo albedo comparten capa. El
+        // par (albedo, normal) va junto en la clave, porque son la misma capa en dos arrays y
+        // separarlos los descuadraría.
+        std::vector<std::pair<std::string, std::string>> seen;
         int next = 0;
-        for (auto& m : materials)
-            m.layer = m.albedo.empty() ? kNoTerrainTile : next++;
+        for (auto& m : materials) {
+            if (m.albedo.empty()) { m.layer = kNoTerrainTile; continue; }
+            const auto key = std::make_pair(m.albedo, m.normal);
+            int found = kNoTerrainTile;
+            for (size_t i = 0; i < seen.size(); ++i)
+                if (seen[i] == key) { found = (int)i; break; }
+            if (found != kNoTerrainTile) { m.layer = found; continue; }
+            seen.push_back(key);
+            m.layer = next++;
+        }
     }
 
     /**
@@ -200,15 +241,22 @@ struct TerrainMaterialTable {
     }
 
     /** @brief Rutas de albedo de los materiales CON textura, en orden de capa. */
-    std::vector<std::string> albedoPaths() const {
-        std::vector<std::string> v;
-        for (const auto& m : materials) if (!m.albedo.empty()) v.push_back(m.albedo);
-        return v;
-    }
+    std::vector<std::string> albedoPaths() const { return layerPaths(true); }
     /** @brief Ídem para las normales. Vacía en un material con albedo = capa plana sin relieve. */
-    std::vector<std::string> normalPaths() const {
+    std::vector<std::string> normalPaths() const { return layerPaths(false); }
+
+private:
+    /** @brief Rutas EN ORDEN DE CAPA y sin repetir: una entrada por capa real del array.
+     *  Gemela de `assignLayers` — si una asignara capas y la otra listara ficheros con otro
+     *  criterio, el `tile` de un material apuntaría a la textura de otro. */
+    std::vector<std::string> layerPaths(bool albedo) const {
         std::vector<std::string> v;
-        for (const auto& m : materials) if (!m.albedo.empty()) v.push_back(m.normal);
+        for (const auto& m : materials) {
+            if (m.layer == kNoTerrainTile) continue;
+            if (m.layer < (int)v.size()) continue;          // capa ya emitida por un material previo
+            v.resize((size_t)m.layer + 1);
+            v[(size_t)m.layer] = albedo ? m.albedo : m.normal;
+        }
         return v;
     }
 };

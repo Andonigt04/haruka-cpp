@@ -102,6 +102,33 @@ namespace Haruka::RHI::vulkan
             VkDescriptorSet m_curSet = VK_NULL_HANDLE;
             bool            m_descDirty = false;
 
+            // ── ESTADO DE BINDINGS "A LA OPENGL" ────────────────────────────────────────────────
+            //
+            // ⚠️ ESTO ES LO QUE HACÍA QUE LA ESCENA SALIERA NEGRA EN VULKAN.
+            //
+            // En OpenGL los bindings son ESTADO PEGAJOSO: atas el UBO 0 una vez y sigue ahí hasta
+            // que lo cambies. El motor está escrito con esa semántica — un pase ata sus texturas y
+            // dibuja muchas veces sin volver a atarlas.
+            //
+            // En Vulkan un descriptor set es una TABLA COMPLETA. Aquí cada batch de binds consume un
+            // set NUEVO del ring, y un set recién reservado tiene contenido indefinido: solo
+            // contiene lo que se le escriba. Sin sombra, el primer `bind*` tras un draw estrenaba un
+            // set en el que solo estaba ESE slot, y todo lo demás quedaba sin definir o —peor—
+            // heredado de otro pase. Medido en una captura: el binding 0 se ataba unas veces con
+            // `SimplePlanetUBO` (176 B) y otras con `PerFrameData` (240 B), así que los draws de
+            // escena leían el UBO del planeta como si fuera el suyo: `view`/`projection` basura,
+            // geometría fuera de pantalla, pantalla negra — mientras el terreno, que sí ata el suyo
+            // justo antes, se seguía viendo.
+            //
+            // La sombra guarda TODO lo atado y se vuelca íntegra en cada set nuevo, que es lo que
+            // devuelve la semántica pegajosa que el motor espera.
+            std::map<uint32_t, VkDescriptorBufferInfo> m_shadowUbo;   // binding final -> buffer
+            std::map<uint32_t, VkDescriptorBufferInfo> m_shadowSsbo;
+            std::map<uint32_t, VkDescriptorImageInfo>  m_shadowTex;
+
+            /// Vuelca la sombra entera en `set`. Se llama justo al estrenar un set del ring.
+            void flushShadowInto(VkDescriptorSet set);
+
                         // Cache del render a la cara/mip de un cubemap (IBL). Vivo mientras exista el context.
             // Cada framebuffer usa una image view de una cara a un mip (owned aquí: se destruyen
             // libres en el dtor). El render pass viene del device (cachado por formato).

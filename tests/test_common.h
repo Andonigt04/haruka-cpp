@@ -21,9 +21,22 @@ void beginTest(const char* name);
 
 // --- Declaraciones de TODOS los tests ---
 // CPU puro de terreno  (test_terrain.cpp)
+// Puertos autorizados y RAILES (docs/guides/PLAN_PUERTOS.md): orientacion propia (no caras de un
+// AABB), encaje por clase/kind/talla, raycast, y el mecanismo que BLOQUEA y ROMPE — con contraprueba
+// en cada uno.  (test_ports.cpp)
+void test_rail_mechanism_jolt();   // raíles contra Jolt (test_physics.cpp)
+void test_construction_vehicle();   // mecanismos, masa y distancia sobre el grafo de construcción
+void test_ports_transform();
+void test_ports_fit();
+void test_ports_raycast();
+void test_rail_mechanism();
+void test_ports_json_roundtrip();
 void test_cube_sphere_inverse();
 void test_weather_fronts();
 void test_weather_3d();
+// Forma de la nube: que sea un CUERPO y no una lamina (relacion ancho/alto, campo 3D, visibilidad
+// con la cobertura mediana del planeta). Con contraprueba de las cifras viejas en los tres.
+void test_cloud_shape();
 void test_ground_layer();
 // Paridad clipmap ↔ recorte (test_terrain.cpp): el cuadro del recorte y la rejilla que dibuja el
 // clipmap cubren EXACTAMENTE el mismo cuadrado tangente (el hueco 0-2 km no aparece).
@@ -103,6 +116,7 @@ void test_image_writer_roundtrip();
 // del salto de tamaño), que la malla baje de verdad y que detalle 1.0 siga siendo la de siempre.
 void test_prop_lod_mesh();
 void test_prop_collider();
+void test_rock_interior();   // peñones enterrados de la roca (con contraprueba por rayos)
 // La reconstrucción de `dir` del clipmap (test_clipmap_dir.cpp): el vértice del clipmap llega a su
 // dirección en FLOAT desde el marco tangente, mientras la CPU la calcula en DOUBLE desde la posición.
 // Mide cuánta altura separa eso — la única pieza del terreno que nunca se había comparado.

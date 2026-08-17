@@ -18,6 +18,7 @@ int main(int argc, char** argv) {
 
     if (want("cube") || want("mesh"))   test_cube_sphere_inverse();
     if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); }
+    if (want("cloud") || want("nube") || want("clima")) test_cloud_shape();
     if (want("capa") || want("ground"))   test_ground_layer();
     if (want("clip") || want("parity"))   test_clipmap_parity();
     if (want("lod")  || want("parity"))   test_terrain_lod_invariants();
@@ -31,7 +32,14 @@ int main(int argc, char** argv) {
     if (want("physics"))                  test_physics_static_wall();
     if (want("physics"))                  test_physics_character();
     if (want("physics"))                  test_physics_body_removal();
+    if (want("physics") || want("rail"))   test_rail_mechanism_jolt();
     if (want("construction") || want("build")) test_construction_placement();
+    if (want("construction") || want("vehicle")) test_construction_vehicle();
+    if (want("port") || want("puerto") || want("rail")) {
+        test_ports_transform(); test_ports_fit(); test_ports_raycast();
+        test_rail_mechanism(); test_ports_json_roundtrip();
+    }
+
     if (want("dgs") || want("rules"))     test_dgs_rules_module();
     if (want("dgs") || want("wire"))      test_dgs_wire_format();
     if (want("robust") || want("dgs"))    test_dgs_robust();
@@ -78,6 +86,7 @@ int main(int argc, char** argv) {
         test_image_writer_roundtrip();
         test_prop_lod_mesh();
         test_prop_collider();
+        test_rock_interior();
         test_clipmap_dir_parity();
     }
 

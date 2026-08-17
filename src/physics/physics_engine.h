@@ -38,9 +38,21 @@ struct RigidBody {
     // `halfExtents`, que colisiona con el terreno por sus 8 ESQUINAS → se apoya en su cara y vuelca
     // sobre la ARISTA de verdad (no como una esfera). `radius` sigue siendo el radio ENVOLVENTE
     // (broad-phase y colisión cuerpo-cuerpo, que sigue siendo esférica). ---
-    enum class Shape { Sphere, Box };
+    // COMPOUND: varias cajas hijas en el marco LOCAL del cuerpo. Existe porque un vehículo con una
+    // sola caja envolvente es un LADRILLO MACIZO: no hay interior donde estar, y "caminar dentro"
+    // deja de tener sentido antes de empezar. Con una caja por pieza, el pasillo es hueco porque
+    // NADIE lo rellena — el vacío no se modela, sale de no poner nada ahí.
+    enum class Shape { Sphere, Box, Compound };
     Shape      shape = Shape::Sphere;
-    glm::dvec3 halfExtents{0.5, 0.5, 0.5};   // solo si shape==Box (m)
+    glm::dvec3 halfExtents{0.5, 0.5, 0.5};   // solo si shape==Box (m); en Compound, la envolvente
+
+    /** @brief Una caja hija de un cuerpo compuesto, en el marco LOCAL del cuerpo. */
+    struct CompoundBox {
+        glm::dvec3 center{0.0};
+        glm::dquat rotation{1.0, 0.0, 0.0, 0.0};
+        glm::dvec3 halfExtents{0.5};
+    };
+    std::vector<CompoundBox> compound;        // solo si shape==Compound
 
     // El cuerpo NO GIRA (solo traslada). Un PERSONAJE es una esfera que no debe RODAR: si rueda, la
     // velocidad angular se convierte en avance por el contacto y sigue deslizándose aunque le pongas la
@@ -89,6 +101,38 @@ struct StaticBox {
 struct StaticOBB {
     glm::dvec3 center;
     glm::dvec3 halfExtents;
+    glm::dmat3 rot;
+};
+
+/** @brief UNA INSTANCIA de malla de colisión: qué forma, dónde y con qué escala.
+ *
+ *  ⚠️ La forma es la MALLA REAL del prop, no una primitiva. Un árbol no es una caja ni un cono, y
+ *  una roca no es un cajón: con primitivas siempre queda holgura o se atraviesa. La malla ya está
+ *  horneada en CPU para dibujarla, así que la colisión puede usar exactamente la misma geometría.
+ *
+ *  `shapeId` indexa el REGISTRO de mallas (`registerPropMesh`): la forma se construye UNA vez por
+ *  prototipo (y por parte, para poder romper una rama sin tocar el resto) y se comparte entre todas
+ *  sus instancias — construir un árbol AABB por instancia sería inviable. */
+struct StaticMeshInstance {
+    int        shapeId = -1;
+    glm::dvec3 center{0.0};
+    glm::dmat3 rot{1.0};
+    double     scale = 1.0;
+};
+
+/** @brief CONO TRUNCADO estático: la forma real de un tronco o una rama.
+ *
+ *  ⚠️ Existe porque una CAJA no tiene la forma de un árbol. El tronco es un cono con taper y las
+ *  ramas son conos finos inclinados; con cajas, las esquinas sobresalen ~14 cm de la madera visible
+ *  y chocas con aire. Jolt trae `TaperedCylinderShape`, que es exactamente esto, así que el
+ *  collider puede tener la forma del prop en vez de parecerse a ella.
+ *
+ *  `rot` lleva el eje Y local del cono a su dirección en el mundo (igual que en `StaticOBB`). */
+struct StaticCone {
+    glm::dvec3 center;      ///< punto medio del segmento, en el mundo
+    double     halfHeight;  ///< media longitud del segmento
+    double     rTop;        ///< radio en el extremo +Y local
+    double     rBottom;     ///< radio en el extremo -Y local
     glm::dmat3 rot;
 };
 
@@ -173,6 +217,43 @@ public:
     /** @brief Returns body by name or null when missing. */
     std::shared_ptr<RigidBody> getBody(const std::string& name);
 
+    // ── RAÍLES: mecanismos con UN grado de libertad ─────────────────────────────────────────────
+    // Puertas, rampas, escotillas, torretas y suspensiones NO son animaciones (ver
+    // `docs/guides/PLAN_PUERTOS.md` §4). Son cuerpos restringidos, y por eso pueden BLOQUEARSE contra
+    // lo que estorbe, CEDER cuando la carga supera su límite y viajar dentro de un vehículo en marcha
+    // sin reautorizar nada. Aquí solo vive el MECANISMO: el dato autorizado en el asset es
+    // `game/ports/port.h`, que traduce a esto. ⚠️ `HarukaPhysics` no puede depender de `game/`, así
+    // que la especificación se repite aquí a propósito — es la frontera de la librería, no un descuido.
+
+    struct RailSpec {
+        enum class Dof   { Hinge, Slider };
+        enum class Drive { Manual, Motor, Spring };
+        Dof        dof   = Dof::Hinge;
+        glm::dvec3 anchor{0.0};             ///< punto del eje, en MUNDO (double; se rebaja al marco local)
+        glm::dvec3 axis{0.0, 1.0, 0.0};     ///< eje del giro/deslizamiento, en MUNDO
+        glm::dvec2 limits{0.0, 90.0};       ///< [min,max]: GRADOS si Hinge, METROS si Slider
+        Drive      drive      = Drive::Manual;
+        double     motorForce = 0.0;        ///< N·m (Hinge) o N (Slider). Solo con Drive::Motor
+        double     breakForce = 0.0;        ///< la unión CEDE por encima de esto; <=0 = irrompible
+    };
+
+    struct RailInfo {
+        double value   = 0.0;    ///< posición actual (grados o metros)
+        double force   = 0.0;    ///< magnitud que atraviesa la unión ahora mismo
+        bool   blocked = false;  ///< el motor no puede con lo que se le opone → se queda a medias
+        bool   broken  = false;  ///< la unión cedió; el mecanismo ya no obedece
+    };
+
+    /** @brief Une dos cuerpos por un raíl. Devuelve el id, o -1 si algún cuerpo no existe.
+     *         `bodyA` es el marco (el casco) y `bodyB` la hoja (la puerta). */
+    int  addRail(const std::string& bodyA, const std::string& bodyB, const RailSpec& spec);
+    /** @brief PIDE una posición al motor. No la impone: si algo bloquea, se queda donde pueda. */
+    bool railSetTarget(int railId, double target);
+    /** @brief Estado actual del mecanismo. false si el id no existe. */
+    bool railGet(int railId, RailInfo& out) const;
+    /** @brief Quita el raíl (la hoja queda suelta, como cuando se rompe). */
+    void removeRail(int railId);
+
     /** @brief Registers a static AABB for scene geometry collision. */
     void addStaticBox(const glm::dvec3& center, const glm::dvec3& halfExtents);
     /** @brief Removes all static boxes (e.g. on scene reload). */
@@ -192,6 +273,28 @@ public:
     void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
     void clearPropOBBs();
     const std::vector<StaticOBB>& getPropOBBs()    const { return propOBBs; }
+
+    /** @brief Añade un CONO TRUNCADO (tronco o rama). Ver `StaticCone`: una caja no tiene la forma
+     *  de un árbol y se choca con sus esquinas. */
+    void addPropCone(const glm::dvec3& center, double halfHeight, double rTop, double rBottom,
+                     const glm::dmat3& rot);
+    void clearPropCones();
+    const std::vector<StaticCone>& getPropCones() const { return propCones; }
+
+    /** @brief Registra una MALLA de colisión y devuelve su id (o -1 si no es válida).
+     *
+     *  Se construye una sola vez por prototipo/parte: el `MeshShape` de Jolt monta un árbol AABB y
+     *  eso es lo caro (medido en este motor: 700 ms para 257k vértices), así que por instancia sería
+     *  inviable. Con ~300 vértices por prototipo el coste es despreciable.
+     *
+     *  `verts` son posiciones en el marco LOCAL del prop (base en el origen, +Y arriba, sin escalar)
+     *  e `idx` los índices de triángulo. GL-free: solo números. */
+    int  registerPropMesh(const float* verts, size_t vertCount, const uint32_t* idx, size_t idxCount);
+    /** @brief Coloca una instancia de una malla ya registrada. */
+    void addPropMeshInstance(int shapeId, const glm::dvec3& center, const glm::dmat3& rot, double scale);
+    void clearPropMeshInstances();
+    const std::vector<StaticMeshInstance>& getPropMeshInstances() const { return propMeshes; }
+
     const std::vector<StaticBox>& getStaticBoxes() const { return staticBoxes; }
     /** @brief Empuja una esfera fuera de los OBB colocados (te subes encima o te frena).
      *  Devuelve el centro corregido; pone grounded=true si el empuje fue a favor de 'up'. */
@@ -289,7 +392,9 @@ private:
     std::vector<StaticBox>                  staticBoxes;
     std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
     uint64_t                                m_staticsVersion = 0;  // ver staticsVersion()
-    std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (árboles/rocas)
+    std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (rocas/casas)
+    std::vector<StaticCone>                 propCones;    // troncos y ramas (forma real)
+    std::vector<StaticMeshInstance>         propMeshes;   // props con su MALLA exacta
     std::vector<CollisionInfo> collisions;
     glm::dvec3 gravity{0.0, -9.81, 0.0};
 

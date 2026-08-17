@@ -9,7 +9,9 @@
 #include <functional>
 #include <chrono>
 #include <algorithm>
+#include <cstdlib>   // getenv/atof: HARUKA_RAIN (ver m_rainOverride)
 #include <unordered_set>
+#include <unordered_map>
 
 #ifdef HARUKA_NETWORK
     #include "include/dgs/client.h"
@@ -101,6 +103,10 @@ public:
     Haruka::SceneManager* getCurrentScene() { return _currentScene; }
     RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
     Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+    /** @brief El host de fluidos del motor (ríos/lagos + splash). Es el ÚNICO dueño de la sim de
+     *  aguas someras: el juego le pide la suya en vez de crear otra. Puede ser null antes del
+     *  primer frame de render. */
+    Haruka::FluidHost* getFluidHost() { return _fluidHost.get(); }
     /** @brief Vista de depuración del terreno (0=normal, 1=elevación, 2=zonas, 3=bioma,
      *  4=temperatura, 5=humedad, 6=capas, 10+i=máscara de capa i). La usa el editor. */
     void setPlanetDebugView(int view) {
@@ -142,6 +148,12 @@ public:
         int         partId    = -1;
         bool        trunk     = false;  ///< true = se ha tumbado el prop entero
         double      lengthM   = 0.0;    ///< longitud del segmento roto (m), ya escalada
+        // RADIOS reales del tronco de cono roto, ya escalados. Con la longitud dan el VOLUMEN, y el
+        // volumen por la densidad del material da los KILOS — que es lo que decide cuánto material
+        // sacas. Sin esto solo se sabía "cuánto medía", y una rama fina y un tronco gordo del mismo
+        // largo rendían igual.
+        double      rBottomM  = 0.0;
+        double      rTopM     = 0.0;
         glm::dvec3  pos{0.0};           ///< punto medio de la parte rota, en el mundo
     };
     /** @brief Rompe la parte de prop más cercana al golpe (esfera `center`+`radius`), si la hay.
@@ -150,6 +162,12 @@ public:
      *  bit en `breakMask`) y REGENERA los colliders, para que lo que has roto deje de estorbar.
      *  Es PÚBLICA a propósito: el talado lo dispara el JUEGO (el hachazo), no el motor. */
     PropHit breakPropAt(const glm::dvec3& center, double radius);
+
+    /** @brief Qué valor NEUTRO necesita cada slot de material. No es el mismo: blanco en metallic
+     *  significa METAL PURO y convierte el prop en un espejo. */
+    enum class FallbackTex { White = 0, Normal, Metallic, Count };
+    /** @brief Textura de relleno 1x1 (perezosa) para slots de material ausentes. */
+    Haruka::RHI::TextureHandle fallbackTexture(FallbackTex kind);
 
     /** @brief Lo que le ha pasado a un prop concreto: talado y/o con ramas arrancadas. */
     struct PropStateDelta {
@@ -451,7 +469,16 @@ private:
     Haruka::RHI::BufferHandle   m_rainUBO;  // RainParams (binding 5)
     float                       m_rainAmount = 0.0f;  // 0..1, lo fija el pase de cielo desde el clima
     float                       m_snowAmount = 0.0f;  // 0..1, ídem (nieve: la misma precipitación, otra forma)
-    float                       m_rainOverride = -1.0f; // <0 = auto (clima); >=0 = forzado (consola `rain`)
+    // <0 = auto (clima); >=0 = forzado. Lo pone la consola (`rain`) o `HARUKA_RAIN=<0..1>`.
+    // ⚠️ La variable de entorno existe para poder CAPTURAR un cielo nublado sin depender de que pase
+    // un frente por donde estás: `HARUKA_SHOT_AFTER` sale y no da tiempo a teclear en la consola, así
+    // que sin esto "¿se ven bien las nubes?" no es una pregunta contestable con una medida. Fuerza la
+    // cobertura en LOS DOS sistemas de nube (el cúmulo volumétrico y el cirro de fondo), que es justo
+    // lo que hace falta para poder separarlos.
+    float                       m_rainOverride = [] {
+        const char* e = std::getenv("HARUKA_RAIN");
+        return (e && e[0]) ? std::max(-1.0f, std::min(1.0f, (float)std::atof(e))) : -1.0f;
+    }();
     float                       m_windSlant = 0.0f;   // inclinación de la lluvia = viento del clima (mismo vector que las nubes)
     glm::vec3                   m_windVec{0.0f};      // viento del clima (m/s, mundo): nubes, lluvia y follaje van con ESTE
     /** @brief Lluvia/nieve como GEOMETRÍA en el pase de escena (con depth), no como filtro de pantalla. */
@@ -616,9 +643,27 @@ private:
     /// dibuja (realimentación). Mismo patrón que usa el fluido para que sus partículas se ocluyan.
     Haruka::RHI::RenderPassHandle   m_cloudDepthRT;
     int  m_cloudDepthW = 0, m_cloudDepthH = 0;
+    /// Formato con el que se creó la copia de profundidad. Tiene que seguir al de la FUENTE del blit
+    /// (backbuffer o target de post), que cambia al encender/apagar el post-proceso: si no, el blit
+    /// vuelve a ser ilegal y la textura se queda sin escribir. Ver el bloque del pase de nubes.
+    Haruka::RHI::Format m_cloudDepthFmt = Haruka::RHI::Format::D32F;
     bool m_volumetricClouds = true;   ///< off = solo el cielo de fondo (nubes planas, no atravesables)
 
-    Haruka::RHI::BufferHandle       m_propParamsUBO;   // PropParams (binding 6) del pase de props
+    /// TEXTURA DE RELLENO 1x1 blanca para los slots de material que un objeto NO tiene.
+    /// ⚠️ No es cosmética: en OpenGL un sampler sin atar lee negro y el guard `hasTex()` del shader
+    /// lo hace inofensivo, pero en Vulkan el descriptor queda INDEFINIDO y muestrearlo da basura —
+    /// los props salían GRISES en vez de con su color. Se ata algo válido a TODOS los slots que el
+    /// shader declara; el shader sigue ignorándolos por la máscara.
+    std::vector<Haruka::RHI::TextureHandle> m_fallbackTex;
+
+    /// PropParams (binding 6), UNO POR PROTOTIPO.
+    /// ⚠️ Era un solo buffer reescrito entre draws. En OpenGL vale —cada draw se ejecuta al vuelo—
+    /// pero en Vulkan los comandos se GRABAN y se ejecutan después, así que todos los draws leían el
+    /// ÚLTIMO valor escrito: el material del último prototipo aplicado a todos los props. El propio
+    /// código ya lo avisaba para el UBO del bloom ("habrá que usar offsets dinámicos o un UBO por
+    /// draw"); esto es ese caso, y es lo que dejaba los props blancos y brillantes en Vulkan
+    /// (rugosidad y AO del prototipo equivocado → especular disparado).
+    std::vector<Haruka::RHI::BufferHandle> m_propParamsUBOs;
     Haruka::RHI::BufferHandle       m_constParamsUBO;  // ConstParams (binding 6) del pase de construcción
     /// Estado PERSISTENTE de los props rotos, por semilla de celda. Ver `serializePropState` para
     /// por qué no puede vivir dentro de `m_propRegistry`. Crece solo con lo que el jugador rompe.
@@ -661,6 +706,15 @@ private:
      *  tiene identidad para poder romperla. La llama `refreshPropScatter`, que es quien cambia el
      *  conjunto de instancias. */
     void refreshPropColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos);
+    /** @brief Ids de las mallas de colisión de un prototipo, una por PARTE (perezoso, cacheado).
+     *  La forma es la geometría REAL del prop; partirla por parte es lo que permite seguir
+     *  rompiendo una rama sin renunciar a la malla exacta. */
+    const std::vector<int>& propMeshShapesFor(int protoIdx);
+    std::unordered_map<int, std::vector<int>> m_propMeshShapes;
+    /// Copia en CPU de los TRIÁNGULOS de colisión por (prototipo, parte). Existe solo para que el
+    /// alambre de depuración pueda dibujar EXACTAMENTE la geometría que usa la física: sin ella el
+    /// alambre enseñaba primitivas que ya no existen, o sea nada.
+    std::unordered_map<int, std::vector<std::vector<glm::vec3>>> m_propMeshCpu;
     /// Dibuja los props del motor en el mapa de sombras (culling por la caja de la LUZ, no por la
     /// cámara: el volumen está centrado en ella e incluye lo que queda detrás).
     void renderPropShadows(Haruka::RHI::Context* ctx, const glm::mat4& lightSpace);
@@ -675,6 +729,9 @@ private:
      * es una impresión.
      */
     void renderCollisionWireframe(Haruka::RHI::Context* ctx, const glm::mat4& viewProjRotOnly);
+    /// Versión de estáticos con la que se construyó el alambre: los OBB de props cambian
+    /// mucho más a menudo que la malla del suelo y hay que recargar con ellos.
+    uint64_t m_dbgPropVer = ~0ull;
 public:
     /** @brief Activa el alambre de la malla de colisión (F-tecla del juego / editor). */
     void setCollisionWireframe(bool on);
