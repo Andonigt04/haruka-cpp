@@ -37,7 +37,10 @@
 
 // `f` = banda de ALTURA en km: (elevMin, elevMax, elevFeather, libre). Gemelo de `GpuMat` en
 // planet.cpp — si uno crece y el otro no, el UBO se desalinea y TODOS los materiales salen mal.
-struct TerrainMat { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; };
+// `g` = banda de PROFUNDIDAD en km: (depthMin, depthMax, depthFeather, libre). Los ESTRATOS.
+// ⚠️ GEMELO EXACTO de `GpuMat` en planet.cpp. Es std140: un vec4 de diferencia entre los dos
+// desalinea TODOS los materiales del UBO, no solo el campo nuevo.
+struct TerrainMat { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; vec4 g; };
 
 layout(std140, binding = 12) uniform TerrainMaterials {
     vec4 uMatCount;                              // x = cuántos hay activos
@@ -109,7 +112,7 @@ bool harukaIsBedrock(int i) { return mod(floor(uMat[i].d.w / 4.0), 2.0) >= 1.0; 
  * Se devuelven las DOS capas de textura y el peso, no una sola: mezclar los dos triplanares en el
  * fragmento es lo que hace que el borde de un cortado sea un degradado y no un recorte.
  */
-void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm,
+void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm, float depthKm,
                           vec3 zoneRGB, bool hasZoneMap,
                           out vec3 tint, out float grainAmt, out float detailAmt, out int tile,
                           out int tileBed, out float coverW, out vec4 baseColor, out int matIdx)
@@ -251,6 +254,13 @@ void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm,
         // El lecho compite contra lechos y la cobertura contra coberturas. Que la roca de debajo y
         // la arena de encima se promediaran era lo que producía colores que no son de nadie.
         if (harukaIsBedrock(i)) {
+            // ── ESTRATOS: a qué PROFUNDIDAD vive este lecho ─────────────────────────────────────
+            // Solo el LECHO tiene columna. La cobertura es el manto de encima y su espesor lo decide
+            // la física del sitio (`terrain_strata.glsl`), no una banda declarada.
+            // En superficie `depthKm` es 0, así que un cortado enseña el estrato más alto; al cavar
+            // o al abrir una cueva, la misma llamada con la profundidad real da la pared correcta.
+            w *= harukaBandWeight(depthKm, uMat[i].g.x, uMat[i].g.y, max(uMat[i].g.z, 0.0005));
+            if (w <= 0.0) continue;
             wSumB += w; tintB += uMat[i].c.rgb * w; grainB += uMat[i].c.a * w;
             detailB += uMat[i].d.x * w; colB += uMat[i].e.rgb * w; colWB += uMat[i].e.a * w;
             if (score > bestB) { bestB = score; tileBed = hasTileArray ? int(uMat[i].b.z) : -1;

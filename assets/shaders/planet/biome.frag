@@ -1,7 +1,7 @@
 #version 460 core
 #extension GL_GOOGLE_include_directive : require
 layout(location = 0) in vec3 vNorm; layout(location = 1) in vec3 vFragPos; layout(location = 2) in vec3 vColor; layout(location = 3) in vec2 vUv; layout(location = 4) in vec3 vClimate;
-layout(location = 5) in float vSurfKind;   // 1 = malla base · 0 = clipmap / anillo cercano
+layout(location = 5) in float vSurfKind;   // 1 = malla base · 0 = clipmap · -1 = anillo cercano
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra;
     vec4 uDebug; // x = vista de depuración: 0=normal, 1=elev, 2=zonas, 3=bioma, 4=temp, 5=humedad
@@ -57,6 +57,8 @@ layout(binding = 17) uniform sampler2D uSkyMaskTerrain;
 // La función de altura COMPARTIDA con C++ (harukaTerrainDetail y compañía): el per-pixel evalúa
 // exactamente lo mismo que la malla y la física, solo que con un triM de PÍXEL (§9, Fase 2).
 #include "lib/terrain_detail.glsl"
+// El cielo en armónicos esféricos: el ambiente se evalúa POR NORMAL, no como constante.
+#include "lib/sky_sh.glsl"
 layout(location = 0) out vec4 fragColor;
 
 vec2 equirectUV(vec3 dir) {
@@ -588,7 +590,9 @@ void main() {
     vec3  tint; float grainAmt, detailAmt; int tile; vec4 matColor; int matIdx;
     int   tileBed; float coverW;   // capa del LECHO y cuánto manto la tapa (ver terrain_strata.h)
     // `elev` es la cota por PÍXEL leída del bake (km): el cuarto eje de la selección.
-    harukaSelectMaterial(humid, tempC, slope, elev, zoneRGB, hasZoneMap,
+    // Profundidad 0: esto dibuja la SUPERFICIE. Cavar y las cuevas llamarán a la misma
+    // función con su profundidad real y obtendrán el estrato que toque.
+    harukaSelectMaterial(humid, tempC, slope, elev, 0.0, zoneRGB, hasZoneMap,
                          tint, grainAmt, detailAmt, tile, tileBed, coverW, matColor, matIdx);
     // El color PROPIO del material sustituye al del bioma según su peso. Con peso 0 (o sin color
     // declarado) manda el clima, que es el comportamiento de siempre.
@@ -737,7 +741,18 @@ void main() {
     // terreno "atrape" el sol igual que el agua. Antes el sol era lineal (×1.3*diff) y a ángulos
     // rasantes la cara de día salía apagada: terreno oscuro y "el sol apenas lo toca" en
     // comparación con el agua, que sí brillaba.
-    vec3 sky = vec3(0.09, 0.14, 0.22);
+    // ── AMBIENTE POR NORMAL, NO CONSTANTE ───────────────────────────────────────────────────────
+    //
+    // ⚠️ Aquí había una CONSTANTE `vec3(0.09, 0.14, 0.22)` — un cielo inventado que ni seguía el
+    // ciclo día/noche ni sabía hacia dónde miraba la superficie. Con un ambiente constante, todo lo
+    // que no recibe sol directo queda `albedo × constante`: una ladera vuelta al cielo y otra vuelta
+    // al suelo se iluminan IGUAL, así que en sombra desaparece el relieve — la "sombra plana".
+    //
+    // `harukaSkySHEval` evalúa el cielo integrado en la normal REAL del fragmento. Una cara al cénit
+    // recibe la cúpula entera; una cara al suelo, el rebote. Eso es lo que devuelve la forma a lo
+    // que está en sombra. Se divide por π porque lo que devuelve es irradiancia, no un multiplicador
+    // (misma normalización que hace la CPU en `application_render`).
+    vec3 sky = harukaSkySHEval(n, up) * 0.31830989;
     vec3 L = normalize(uLightDir.xyz);
     vec3 V = -fragP;
     V = length(V) > 1e-6 ? normalize(V) : vec3(0.0, 0.0, 1.0);
@@ -850,6 +865,25 @@ void main() {
         col = heatmap(tempC / 80.0 + 0.5);
     } else if (dbg == 5) {                // humedad [0,1]
         col = heatmap(humid);
+    } else if (dbg == 9) {
+        // ── PROCEDENCIA: QUIÉN DIBUJA ESTE PÍXEL (HARUKA_PLANET_DEBUG=9) ────────────────────────
+        //
+        // Tres superficies COPLANARES dibujan el suelo —malla base, anillos del clipmap y el anillo
+        // que viene de la malla de colisión— y a ojo son indistinguibles. Cuando aparece un borde,
+        // no hay forma de saber de cuál es, y esta sesión ya demostró que deducirlo por la FORMA del
+        // artefacto falla: un cuadrado se atribuyó primero a los anillos del mar, luego a la caja
+        // del clipmap y luego a las nubes, y no era ninguno de los tres.
+        //
+        //   ROJO  = malla base del planeta (teselada)
+        //   VERDE = clipmap (los anillos concéntricos)
+        //   AZUL  = anillo cercano, el que viene de la COLISIÓN — lo que se pisa
+        //
+        // Si el borde que se ve coincide con el límite de una mancha, ya está nombrado. Si cae DENTRO
+        // de una sola mancha, no es una frontera entre superficies: es un LOD o una rampa del propio
+        // sombreado, y hay que buscarlo en `biome.frag`, no en quién dibuja.
+        col = vSurfKind > 0.5  ? vec3(1.0, 0.0, 0.0)
+            : (vSurfKind < -0.5 ? vec3(0.0, 0.0, 1.0)
+                                : vec3(0.0, 1.0, 0.0));
     } else if (dbg == 8) {
         // ── POR QUÉ ESTÁ NEGRO (HARUKA_PLANET_DEBUG=8) ──────────────────────────────────────────
         // Un píxel negro solo puede serlo por dos razones, y ésta las separa:

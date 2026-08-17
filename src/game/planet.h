@@ -199,10 +199,29 @@ public:
      * mundo). Sin llamarla, el planeta usa su luz fija por defecto — lo que hacía que el terreno
      * NUNCA respondiera al sol que se ve en el cielo.
      */
-    void setSunLight(const glm::vec3& dir, const glm::vec3& color, float ambientStrength) {
+    /**
+     * @param ambientColor  Ambiente YA EN COLOR, no un escalar.
+     *
+     * ⚠️ Era `float ambientStrength` multiplicado por un tinte fijo `(0.55, 0.65, 0.85)` — un número
+     * inventado que no sabía nada del cielo bajo el que está el terreno. MEDIDO: el ambiente real
+     * del cielo es entre 5 y 8 veces mayor, y de otro color. Con el escalar, cualquier superficie
+     * sin sol directo caía a 0,043 de luminancia bajo un cielo de 0,60 — el agujero negro de las
+     * sombras. Ahora llega integrado del MISMO cielo que se dibuja (`sky_ambient.cpp`).
+     *
+     * No se recorta a [0,1]: es un multiplicador de albedo ya normalizado (irradiancia/π) y
+     * recortarlo volvería a inventar un techo.
+     */
+    /** @brief Los 9 coeficientes SH del cielo, para evaluar el ambiente POR NORMAL en el fragment.
+     *  Sin ellos el ambiente es una constante y todo lo que está en sombra sale PLANO. */
+    void setSkyAmbientSH(const glm::vec3 (&coef)[9]) {
+        for (int i = 0; i < 9; ++i) m_skySH[i] = glm::vec4(coef[i], 0.0f);
+        m_skySHValid = true;
+    }
+
+    void setSunLight(const glm::vec3& dir, const glm::vec3& color, const glm::vec3& ambientColor) {
         if (glm::dot(dir, dir) > 1e-12f) m_sunDir = glm::normalize(dir);
-        m_sunColor         = glm::clamp(color, 0.0f, 1.0f);
-        m_ambientStrength  = glm::clamp(ambientStrength, 0.0f, 1.0f);
+        m_sunColor     = glm::clamp(color, 0.0f, 1.0f);
+        m_ambientColor = glm::max(ambientColor, glm::vec3(0.0f));
     }
 
     /**
@@ -424,7 +443,12 @@ private:
     glm::mat4                 m_skySpace{1.0f};
     Haruka::RHI::BufferHandle m_wetUBO;
     glm::vec3 m_sunColor = glm::vec3(1.0f, 0.95f, 0.9f);
-    float m_ambientStrength = 0.18f;
+    /// Ambiente en COLOR, integrado del cielo (irradiancia/π). Ver `setSunLight`.
+    glm::vec3 m_ambientColor{0.15f, 0.18f, 0.24f};
+    glm::vec4 m_skySH[9]{};        ///< cielo en SH (ya convolucionado); ver setSkyAmbientSH
+    bool      m_skySHValid = false;
+    Haruka::RHI::BufferHandle m_skySHUBO;
+    float m_ambientStrength = 0.18f;   ///< legado: lo leen consumidores que aún esperan escalar
 
     // MAPA DE ELEVACIÓN del autor. Vive como miembro porque la función de altura base lo referencia
     // (le hace pareja al de zonas, que ya vivía en CPU): ambos quedan vivos toda la vida del planeta.

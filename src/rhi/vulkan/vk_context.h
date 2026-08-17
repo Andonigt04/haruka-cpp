@@ -145,6 +145,19 @@ namespace Haruka::RHI::vulkan
 
             // Transiciones UNDEFINED → SHADER_READ diferidas desde bindTexture dentro de un pase
             // activo (dónde una barrier es ilegal) y aplicadas en endRenderPass, ya fuera del pase.
-            std::vector<VKTexture*> m_pendingTransition;
+            /**
+             * @brief Transiciones de layout diferidas al final del pase.
+             *
+             * ⚠️ GUARDA HANDLES, NO PUNTEROS. Antes era `std::vector<VKTexture*>` y eso es un
+             * use-after-free esperando: si una textura se DESTRUYE entre su `bindTexture` y el
+             * `endRenderPass` —un rebuild de terreno, un render target que se recrea al cambiar de
+             * resolución— el puntero queda muerto. Y el guard `if (!t || !t->image)` no lo detecta,
+             * porque la memoria liberada todavía parece válida: se lee basura y el driver revienta
+             * dentro de `vkCmdPipelineBarrier` con una traza que no señala a nadie.
+             *
+             * Con el handle, `m_dev.texture(h)` devuelve null en cuanto el recurso ya no está, que
+             * es exactamente lo que un identificador con vida propia sabe hacer y un puntero no.
+             */
+            std::vector<TextureHandle> m_pendingTransition;
     };
 }

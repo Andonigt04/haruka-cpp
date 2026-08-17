@@ -2316,6 +2316,10 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
                 //   "elevKm": [-0.03, 0.012]  → la franja de orilla (lo que hoy hace el parche fijo)
                 range("elevKm",   m.elevMinKm, m.elevMaxKm);
                 m.elevFeatherKm = jm.value("elevFeatherKm", m.elevFeatherKm);
+                // ESTRATOS: a qué PROFUNDIDAD bajo el suelo vive este material (km). Solo la miran
+                // los materiales de lecho; ver `TerrainMaterial::depthMinKm`.
+                range("depthKm",  m.depthMinKm, m.depthMaxKm);
+                m.depthFeatherKm = jm.value("depthFeatherKm", m.depthFeatherKm);
                 if (jm.contains("tint") && jm["tint"].is_array() && jm["tint"].size() >= 3)
                     m.tint = glm::vec3(jm["tint"][0], jm["tint"][1], jm["tint"][2]);
                 m.grain    = jm.value("grain",    m.grain);
@@ -2802,8 +2806,23 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // el coste real en una escena concreta sin tocar el .ini.
     const bool terrainShadow = settingWithEnvOverride(
         SettingsManager::get().graphics().terrainShadows, "HARUKA_TERRAIN_SHADOW");
-    ubo.uAmbient    = glm::vec4(m_ambientStrength * glm::vec3(0.55f, 0.65f, 0.85f),
-                                terrainShadow ? 1.0f : 0.0f);
+    // El ambiente llega ya en COLOR desde el cielo integrado (ver `setSunLight`); antes era un
+    // escalar por un tinte fijo, 5-8× por debajo de la luz real del sitio.
+    ubo.uAmbient    = glm::vec4(m_ambientColor, terrainShadow ? 1.0f : 0.0f);
+
+    // ── EL CIELO EN SH (binding 28), PARA QUE LA SOMBRA NO SEA PLANA ────────────────────────────
+    //
+    // ⚠️ Se ata SIEMPRE, tenga coeficientes o no. En GL un bloque sin atar se lee como ceros; en
+    // VULKAN es INDEFINIDO — puede salir basura o NaN. Ésa es la regla que este motor ya había
+    // aprendido con el UBO de marea y que conviene no volver a romper.
+    {
+        if (!RHI::valid(m_skySHUBO))
+            m_skySHUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(m_skySH), m_skySH,
+                                           RHI::BufferMemory::Dynamic);
+        else
+            dev->updateBuffer(m_skySHUBO, 0, sizeof(m_skySH), m_skySH);
+        ctx->bindUniformBuffer(28, m_skySHUBO);
+    }
     // El camino de bioma depende del MAPA DE BIOMAS, no de que exista un PNG concreto: qué
     // texturas hay lo decide la tabla de materiales del proyecto, y una tabla legítima puede
     // no tener ninguna (terreno de color de bioma, liso).
@@ -3097,7 +3116,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         // `f` es el vec4 NUEVO: la banda de altura. Se añade en vez de robar componentes libres a
         // los otros porque `d.w` ya lleva los flags y meter dos rangos más ahí sería empaquetado
         // ilegible — y este UBO se sube una vez por planeta, no por frame: 16 bytes más da igual.
-        struct GpuMat { glm::vec4 a, b, c, d, e, f; };
+        struct GpuMat { glm::vec4 a, b, c, d, e, f, g; };
         struct GpuTable {
             glm::vec4 count;
             GpuMat    mats[Haruka::Planet::TerrainMaterialTable::kMaxMaterials];
@@ -3146,6 +3165,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // las unidades son kilómetros, así que compartirlo daría un degradado de 80 metros —
             // un corte duro para una transición que debe cubrir cientos de metros de ladera.
             table.mats[i].f = glm::vec4(m.elevMinKm, m.elevMaxKm, m.elevFeatherKm, 0.0f);
+            // ⚠️ `g` es NUEVO y su gemelo GLSL (`TerrainMat`) tiene que crecer EN EL MISMO COMMIT:
+            // el UBO es std140 y un vec4 de diferencia desalinea TODOS los materiales, no solo éste.
+            table.mats[i].g = glm::vec4(m.depthMinKm, m.depthMaxKm, m.depthFeatherKm, 0.0f);
         }
         if (!RHI::valid(m_materialUBO)) {
             m_materialUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(table),

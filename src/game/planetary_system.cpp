@@ -3,11 +3,13 @@
 #include "core/planet/terrain_grid.h"
 #include "core/planet/terrain_lod.h"   // terrainTriM: el piso del campo cercano, no un literal
 #include "core/planet/geology.h"       // GeologyConfig (addSimplePlanet/rebuildSimplePlanet)
+#include "core/planet/ocean_wave.h"   // gemelo CPU del oleaje: la física ve la MISMA ola
 #include "renderer/primitive_shapes.h"
 #include "core/components/mesh_renderer_component.h"
 #include "core/planet/prop_layer.h"           // PropLayerTable (propLayers del surfaceConfig)
 #include "tools/profiler.h"   // HARUKA_PROFILE (sub-scopes de planetary.update: lod.recompute / lod.stream)
 
+#include <chrono>
 #include <algorithm>
 #include <functional>
 #include <cmath>
@@ -628,7 +630,35 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
 double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     const Haruka::TerrainSample s = sampleSurface(worldPos);
     if (s.waterType == Haruka::WaterType::None) return kNoWater;
-    return double(s.waterLevelKm) * 1000.0;
+    const double levelM = double(s.waterLevelKm) * 1000.0;
+
+    // ── Y LA OLA, QUE HASTA AHORA NO EXISTÍA PARA LA FÍSICA ─────────────────────────────────────
+    //
+    // El render levanta olas de metro y medio con `harukaGerstner`; esto devolvía una cota plana.
+    // Resultado: una barca flota atravesando la cresta, un nadador sube y baja por una ola que para
+    // él no está, y el ahogamiento se decide contra un nivel que no es el que se ve. Es la misma
+    // discrepancia "lo que se pisa contra lo que se dibuja" del terreno, en el agua.
+    //
+    // `ocean_wave.h` es el gemelo exacto del shader: mismas cifras, mismo orden. El reloj es el
+    // mismo que alimenta `uDebug.y`, así que la ola de la física va EN FASE con la que se ve.
+    glm::dvec3 pc; double pr = 0.0;
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) return levelM;
+    const glm::dvec3 rel = worldPos - pc;
+    const double     r   = glm::length(rel);
+    if (r < 1e-9) return levelM;
+    const glm::dvec3 up  = rel / r;
+
+    // Profundidad bajo ESTE punto: el mismo criterio que el shader (nivel del agua − cota del suelo).
+    const double ground = sampleTerrainHeight(worldPos);
+    const double depth  = levelM - ground;
+    if (depth <= 0.0) return levelM;
+
+    static const auto s_clock0 = std::chrono::high_resolution_clock::now();
+    const float t = std::chrono::duration<float>(
+        std::chrono::high_resolution_clock::now() - s_clock0).count();
+    // La ola se evalúa en la superficie EN REPOSO, igual que en el tese.
+    const glm::vec3 wp = glm::vec3(up * (pr + levelM));
+    return levelM + (double)Haruka::Planet::oceanWaveHeight(wp, glm::vec3(up), t, (float)depth);
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
@@ -828,8 +858,12 @@ const PlanetarySystem::SimplePlanet& PlanetarySystem::getSimplePlanet(size_t i) 
 }
 
 void PlanetarySystem::setSunLight(const glm::vec3& dir, const glm::vec3& color,
-                                  float ambientStrength) {
-    for (auto& p : m_simplePlanets) p->setSunLight(dir, color, ambientStrength);
+                                  const glm::vec3& ambientColor) {
+    for (auto& p : m_simplePlanets) p->setSunLight(dir, color, ambientColor);
+}
+
+void PlanetarySystem::setSkyAmbientSH(const glm::vec3 (&coef)[9]) {
+    for (auto& p : m_simplePlanets) p->setSkyAmbientSH(coef);
 }
 
 void PlanetarySystem::setGroundWet(float wet, float snow, Haruka::RHI::TextureHandle skyMask,

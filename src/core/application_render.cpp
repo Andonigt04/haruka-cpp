@@ -16,6 +16,7 @@
 
 #include <algorithm>
 
+#include "core/sky_ambient.h"   // ambiente integrado del MISMO cielo que se dibuja
 #include "core/logger.h"
 
 #include <SDL3/SDL.h>
@@ -963,18 +964,60 @@ void Application::renderFrameContent() {
             : glm::vec3(1.0f, 0.98f, 0.95f);
         // Ambiente por ATMÓSFERA: de día luz ambiental clara, de noche casi nada (la
         // luna aporta el relleno). Suaviza la transición con la elevación solar.
+        //
+        // El ambiente EN COLOR que sale del cielo integrado vive aquí, en el ámbito de la función:
+        // lo calcula el bloque de abajo y lo consume el planeta un poco más allá.
+        static glm::vec3 s_skyAmbient{0.15f, 0.18f, 0.24f};
+        static glm::vec3 s_shCoef[9]{};   // los 9 coeficientes, para el fragment
         {
             float el  = _worldSystem ? _worldSystem->getSunElevation(glm::dvec3(cameraOrigin)) : 1.0f;
             float day = glm::smoothstep(-0.10f, 0.25f, el);
             // Suelo nocturno subido (0.04→0.11): el lado noche era casi negro → parecía "media
             // planeta sin dibujar". Ahora se ve TENUE (luz de estrellas/cielo), sigue siendo noche.
             frameData.ambientStrength = glm::mix(0.11f, 0.28f, day);
+
+            // ── EL AMBIENTE SALE DEL CIELO QUE SE DIBUJA ───────────────────────────────────────
+            //
+            // ⚠️ `ambientStrength` era un escalar cosido a mano, y MEDIDO estaba entre 5 y 8 veces
+            // por debajo de la luz que el cielo entrega de verdad: con sol alto daba
+            // (0.154, 0.182, 0.238) contra (0.714, 1.372, 2.611) del cielo. Por eso cualquier
+            // superficie sin sol directo caía a 0,043 de luminancia bajo un cielo de 0,60 y se leía
+            // como un agujero negro — no era un problema de sombras, era el ambiente.
+            //
+            // `sky_ambient.cpp` integra la MISMA paleta que dibuja `sky.frag` en armónicos
+            // esféricos. Estaba escrito, documentado y sin llamar por nadie.
+            //
+            // ⚠️ Devuelve IRRADIANCIA (pasa de 1 en el azul), no un multiplicador de albedo: meterla
+            // tal cual quemaría el planeta. La normalización lambertiana es dividir por π — así
+            // `albedo · ambiente` vuelve a ser la radiancia saliente correcta.
+            //
+            // Se recalcula por tramos de elevación solar: la cuadratura esférica no es cara, pero
+            // rehacerla cada frame no aporta nada cuando el sol se mueve en minutos.
+            // ⚠️ NO va en `PerFrameUBOData`: ese bloque tiene layout std140 fijado por un
+            // `static_assert` y por su gemelo en GLSL. Añadirle un campo desalinea el UBO de TODOS
+            // los shaders que lo leen. El ambiente del cielo lo consume el planeta por su propia
+            // vía (`setSunLight` → `SimplePlanetUBO`), así que vive fuera de ese struct.
+            {
+                static Haruka::SkySH s_sh;
+                static float         s_shElev = -999.0f;
+                if (std::abs(el - s_shElev) > 0.01f) {
+                    s_shElev = el;
+                    s_sh = Haruka::skyAmbientSH(el, 0.0f);
+                    for (int i = 0; i < 9; ++i) s_shCoef[i] = s_sh.coef[i];
+                }
+                const glm::vec3 up(0.0f, 1.0f, 0.0f);
+                s_skyAmbient = Haruka::skyAmbientEval(s_sh, up, up)
+                             * (1.0f / 3.14159265358979323846f);
+            }
         }
         // El terreno del planeta usa la MISMA luz que el cielo: sin esto el SimplePlanet
         // iluminaba con una dirección fija y no respondía al sol que se ve en el cielo.
         if (_planetarySystem)
             _planetarySystem->setSunLight(frameData.sunDirection, frameData.sunLightColor,
-                                          frameData.ambientStrength);
+                                          s_skyAmbient);
+            // Y los 9 coeficientes, para que el fragment evalúe el ambiente POR NORMAL. Sin esto el
+            // ambiente es una constante y todo lo que está en sombra sale plano (ver `sky_sh.glsl`).
+            _planetarySystem->setSkyAmbientSH(s_shCoef);
         // Viento atmosférico → arrastre aerodinámico de la física (por cuerpo, barato).
         if (_physicsEngine && _worldSystem)
             _physicsEngine->setWind(_worldSystem->getWind(glm::dvec3(cameraOrigin)));

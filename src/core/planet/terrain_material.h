@@ -55,6 +55,31 @@ struct TerrainMaterial {
      *  transición — un corte duro para una ladera. 0,25 km funde el piso sobre ~500 m de desnivel. */
     float elevFeatherKm = 0.25f;
 
+    /**
+     * @name Banda de PROFUNDIDAD bajo la superficie (km). Los ESTRATOS.
+     *
+     * `elevKm` dice a qué ALTURA vive un material; esto dice a qué PROFUNDIDAD. Son ejes distintos:
+     * el granito de una montaña y el de una llanura están a alturas opuestas y a la misma
+     * profundidad bajo su suelo.
+     *
+     * Es lo que convierte la columna en estratos de verdad:
+     *
+     *     "arenisca": depthKm [0.005, 0.08]     → de 5 a 80 m bajo el suelo
+     *     "granito":  depthKm [0.08,  100.0]    → de ahí para abajo
+     *
+     * Un material sin declararla ocupa toda la columna (rango completo), que es el comportamiento
+     * de siempre. Solo la miran los materiales de LECHO: la cobertura es el manto de encima y su
+     * espesor lo decide `terrain_strata.h`, no una banda.
+     *
+     * En superficie se evalúa con profundidad 0, así que un cortado enseña el estrato más alto. Al
+     * cavar —o al abrir una cueva— la misma función responde con la profundidad real, y las paredes
+     * salen del material que toque sin declarar nada aparte.
+     */
+    ///@{
+    float depthMinKm = -1e3f, depthMaxKm = 1e3f;
+    float depthFeatherKm = 0.01f;   ///< 10 m: un contacto entre estratos es NÍTIDO, no un degradado
+    ///@}
+
     // Cómo se ve.
     glm::vec3 tint   = glm::vec3(1.0f);          ///< multiplica al color de bioma (NO lo sustituye)
     float     grain  = 1.0f;                     ///< cuánto moteado aporta su textura [0..2]

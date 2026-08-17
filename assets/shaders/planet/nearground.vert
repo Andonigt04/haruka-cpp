@@ -21,7 +21,10 @@ layout(location = 0) in vec3 aPosRelAnchor;   // posición de mundo RELATIVA al 
 layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos;
 layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv;
 layout(location = 4) out vec3 vClimate;
-layout(location = 5) out float vSurfKind;   // 0 = no es la malla base (ver terrain.tese)
+layout(location = 5) out float vSurfKind;   // 1 = malla base · 0 = clipmap · -1 = ESTE anillo
+// ⚠️ -1 y no 2: el descarte de `biome.frag` es `vSurfKind > 0.5`, así que cualquier valor positivo
+// haría que el anillo cercano se descartara a sí mismo dentro de la caja del clipmap. El valor lo
+// usa la vista de PROCEDENCIA (HARUKA_PLANET_DEBUG=9) para saber quién dibuja cada píxel.
 
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
@@ -64,7 +67,7 @@ vec3 sampleBase(vec3 dir) {
 }
 
 void main() {
-    vSurfKind = 0.0;
+    vSurfKind = -1.0;   // este anillo, para la vista de procedencia
     float R = uExtra.w;
     // Del ancla al marco del planeta. `uCenter.xyz` es el centro del planeta relativo al ojo, así que
     // restarlo lleva el punto a coordenadas planetarias, que es donde vive `dir`.

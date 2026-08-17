@@ -363,7 +363,7 @@ void main() {
         // un camino muerto (el vivo es `planet/biome.frag`). Mezclar aquí las dos capas de la columna
         // sería trabajo sobre código que no se dibuja.
         int   tileBed_unused; float coverW_unused;
-        harukaSelectMaterial(H, tempC, max(slope, rock), 0.0, vec3(0.0), false,
+        harukaSelectMaterial(H, tempC, max(slope, rock), 0.0, 0.0, vec3(0.0), false,
                              matTint, grainAmt, detailAmt, tile, tileBed_unused, coverW_unused,
                              matColor, matIdx);
         biomeCol = mix(biomeCol, matColor.rgb, matColor.a);

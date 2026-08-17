@@ -203,8 +203,11 @@ namespace Haruka::RHI::vulkan
 
         // Transiciones de layout diferidas (bindTextura de UNDEFINED dentro del pase → no puede
         // emitir barrier dentro). Ahora fuera del pase sí es legal: UNDEFINED → SHADER_READ.
-        for (VKTexture* t : m_pendingTransition)
+        for (TextureHandle th : m_pendingTransition)
         {
+            // Se resuelve AHORA, no cuando se encoló: si la textura se destruyó entretanto, esto
+            // devuelve null en vez de un puntero muerto (ver la nota de `m_pendingTransition`).
+            VKTexture* t = m_dev.texture(th);
             if (!t || !t->image) continue;
             if (t->layout == VK_IMAGE_LAYOUT_UNDEFINED)
             {
@@ -425,7 +428,7 @@ namespace Haruka::RHI::vulkan
             // transición a endRenderPass (fuera del pase); la layout SIGUE UNDEFINED mientras tanto,
             // así que un próximo bind fuera de pase la retomará correctamente.
             if (m_inPass)
-                m_pendingTransition.push_back(t);
+                m_pendingTransition.push_back(th);
             else
             {
                 transitionImage(m_dev.m_frameCmd, t->image, VK_IMAGE_LAYOUT_UNDEFINED,

@@ -263,7 +263,9 @@ public:
      * La llama el orquestador cada frame con la luz real de la escena (WorldSystem); sin ella los
      * planetas iluminaban con una dirección fija y el terreno no respondía al sol del cielo.
      */
-    void setSunLight(const glm::vec3& dir, const glm::vec3& color, float ambientStrength);
+    void setSunLight(const glm::vec3& dir, const glm::vec3& color, const glm::vec3& ambientColor);
+    /** @brief Reparte los 9 coeficientes SH del cielo a todos los planetas. */
+    void setSkyAmbientSH(const glm::vec3 (&coef)[9]);
 
     /** @brief Reparte a los planetas el estado de SUELO MOJADO/NEVADO y la máscara cenital con la que
      *  se recorta (la misma que usa la lluvia para saber si una gota está bajo cubierto).
