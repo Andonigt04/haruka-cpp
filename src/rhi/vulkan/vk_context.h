@@ -122,6 +122,24 @@ namespace Haruka::RHI::vulkan
             //
             // La sombra guarda TODO lo atado y se vuelca íntegra en cada set nuevo, que es lo que
             // devuelve la semántica pegajosa que el motor espera.
+        public:
+            /**
+             * @brief Olvida un recurso DESTRUIDO del estado pegajoso de descriptores.
+             *
+             * ⚠️ SIN ESTO, DESTRUIR UN RECURSO DEJA UNA BOMBA. `flushShadowInto` replica el último
+             * descriptor atado en cada set nuevo, y guardaba `VkBuffer`/`VkImageView` EN CRUDO. Si el
+             * recurso se destruye —un render target que se recrea al cambiar de resolución, una
+             * textura de planeta al regenerarlo, un buffer temporal— el estado sigue apuntando a un
+             * objeto muerto y lo escribe en el siguiente set: SIGSEGV dentro del driver, con una
+             * traza que señala a `vkUpdateDescriptorSets` y no al culpable.
+             *
+             * Es el mismo fallo que tenía `m_pendingTransition` con sus punteros, y se arregla igual:
+             * lo que caduca tiene que poder olvidarse.
+             */
+            void forgetBuffer(VkBuffer b);
+            void forgetImageView(VkImageView v);
+
+        private:
             std::map<uint32_t, VkDescriptorBufferInfo> m_shadowUbo;   // binding final -> buffer
             std::map<uint32_t, VkDescriptorBufferInfo> m_shadowSsbo;
             std::map<uint32_t, VkDescriptorImageInfo>  m_shadowTex;

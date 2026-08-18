@@ -99,6 +99,7 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "VSync"))          g.vsync          = atoi(val) != 0;
     else if (!strcmp(key, "SSAO"))           g.ssao           = atoi(val) != 0;
     else if (!strcmp(key, "Bloom"))          g.bloom          = atoi(val) != 0;
+    else if (!strcmp(key, "HDR"))            g.hdr            = atoi(val) != 0;
     else if (!strcmp(key, "BloomThreshold")) g.bloomThreshold = (float)atof(val);
     else if (!strcmp(key, "BloomStrength"))  g.bloomStrength  = (float)atof(val);
     else if (!strcmp(key, "BloomIterations")) g.bloomIterations = atoi(val);   // radio del halo (σ ∝ √N)
@@ -138,6 +139,7 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("RenderScale=%.2f\n",  g.renderScale);
     buf->appendf("VSync=%d\n",          g.vsync     ? 1 : 0);
     buf->appendf("SSAO=%d\n",           g.ssao      ? 1 : 0);
+    buf->appendf("HDR=%d\n",            g.hdr       ? 1 : 0);
     buf->appendf("Bloom=%d\n",          g.bloom     ? 1 : 0);
     buf->appendf("BloomThreshold=%.2f\n", g.bloomThreshold);
     buf->appendf("BloomStrength=%.2f\n",  g.bloomStrength);

@@ -63,6 +63,18 @@ struct GraphicsSettings {
     bool            vsync           = false;
     bool            ssao            = true;
     bool            bloom           = true;
+    /**
+     * @brief TONEMAPPING. Sin él, lo que pasa de 1 se RECORTA y sale blanco puro.
+     *
+     * ⚠️ No es un efecto decorativo: `prop_inst.frag` y `pbr.frag` deciden dentro del shader si
+     * tonemapean (`color/(color+1)` + gamma) o si hacen `clamp(color, 0, 1)`. Con esto apagado, un
+     * prop bien iluminado se quema — que es exactamente el síntoma que se persiguió durante horas
+     * creyendo que era un fallo del backend de Vulkan.
+     *
+     * Apagarlo tiene un uso legítimo: ver los valores CRUDOS para diagnosticar qué se está pasando
+     * de rango. Como opción visible es honesto; como estado accidental era un bug invisible.
+     */
+    bool            hdr             = true;
     float           bloomThreshold  = 0.95f; // luma above which pixels bloom. OJO: el color llega ya
                                             // tonemapeado+gamma (0..1), así que 0.8 hacía brillar el 20%
                                             // MÁS CLARO de la imagen — ladrillo al sol, nubes… todo

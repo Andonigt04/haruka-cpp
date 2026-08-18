@@ -25,6 +25,9 @@
 #include "rhi/rhi_context.h"
 #include "tools/profiler.h"          // HARUKA_PROFILE: sub-scopes de simple_planet.draw (base/clipmap/agua)
 #include "core/logger.h"
+#include "core/progress_hook.h"
+
+#include <atomic>
 #include "io/image_writer.h"
 #include <thread>
 
@@ -1638,21 +1641,38 @@ static RGBAImage evaluateBiomeAlbedo(int biomeIdx,
 // mueve. `rowFn(graph, y)` pinta la fila `y` — cada thread escribe filas disjuntas, sin races.
 template<typename BuildGraphFn, typename RowFn>
 static void parallelBake(int width, int height, BuildGraphFn&& buildGraph, RowFn&& rowFn) {
+    // ⚠️ EL TOPE ERA 8 Y DEJABA MEDIA CPU PARADA. En una máquina de 16 hilos, el horneado del mapa
+    // de biomas —22 s medidos con caché fría— usaba la mitad del equipo mientras el usuario mira una
+    // ventana congelada. No había razón para el 8: este bucle escribe FILAS DISJUNTAS y cada hilo
+    // construye su propio grafo, así que no comparte nada que haya que serializar.
+    //
+    // Se deja un tope alto por cordura (una máquina de 128 hilos no gana nada repartiendo filas en
+    // 128 trozos: el coste de arrancar el hilo y construir su grafo se comería la ganancia).
     unsigned hw = std::thread::hardware_concurrency();
-    int nThreads = std::clamp<int>((int)hw, 1, 8);
+    int nThreads = std::clamp<int>((int)hw, 1, 32);
     std::vector<std::thread> threads;
     threads.reserve(nThreads);
+    std::atomic<int> rowsDone{0};
     for (int t = 0; t < nThreads; ++t) {
         const int y0 = t * height / nThreads;
         const int y1 = (t + 1) * height / nThreads;
         threads.emplace_back([&, t, y0, y1]() {
             Graph graph;                          // grafo PRIVADO de este thread (idéntico)
             buildGraph(graph);
-            for (int y = y0; y < y1; ++y) rowFn(graph, y);
+            for (int y = y0; y < y1; ++y) { rowFn(graph, y); rowsDone.fetch_add(1, std::memory_order_relaxed); }
         });
     }
+    // ⚠️ EL HILO PRINCIPAL NO SE BLOQUEA EN `join`. Bloqueado ahí son 15 s sin responder a SDL y el
+    // compositor marca la ventana como "no responde". Esperando despierto cada 30 ms el coste es
+    // ruido (los trabajadores tienen los núcleos) y la ventana sigue viva. `reportProgress` se llama
+    // SOLO desde aquí: el enganche toca SDL y no es seguro desde los trabajadores.
+    char label[64];
+    std::snprintf(label, sizeof(label), "horneando %dx%d", width, height);
+    while (rowsDone.load(std::memory_order_relaxed) < height) {
+        Haruka::reportProgress(label, (float)rowsDone.load(std::memory_order_relaxed) / (float)height);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
     for (auto& th : threads) th.join();
-    (void)width;
 }
 
 // Generate a macro-variation texture (equirectangular) that breaks tile repetition.
@@ -1942,8 +1962,16 @@ RGBAImage loadOrBake(const std::string& path, const std::function<RGBAImage()>& 
         HARUKA_LOGI("BakeCache", "cached  %s", path.c_str());
         return img;
     }
+    const auto t0Bake = std::chrono::high_resolution_clock::now();
     img = bake();
-    if (!saveBakedPNG(path, img))
+    const double bakeMs = std::chrono::duration<double, std::milli>(
+        std::chrono::high_resolution_clock::now() - t0Bake).count();
+    const auto t0Save = std::chrono::high_resolution_clock::now();
+    const bool okSave = saveBakedPNG(path, img);
+    HARUKA_LOGI("BakeCache", "%dx%d: evaluar %.0f ms · guardar PNG %.0f ms", img.width, img.height,
+                bakeMs, std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t0Save).count());
+    if (!okSave)
         HARUKA_LOGW("BakeCache", "no pude persistir %s", path.c_str());
     else
         HARUKA_LOGI("BakeCache", "baked   %s (%dx%d)", path.c_str(), img.width, img.height);
@@ -2642,17 +2670,21 @@ void TerrestrialPlanet::bakeHeightMap() {
     if (loadBakedHeightPNG16(path, field)) {
         HARUKA_LOGI("BakeCache", "cached  %s", path.c_str());
     } else {
+        const auto t0Bake = std::chrono::high_resolution_clock::now();
         field.w = w; field.h = h;
         field.data.resize((size_t)w * h);
         // Paralelo por filas: `baseHeight` solo LEE estado const (mapas, materiales, geología), así
         // que es seguro desde N threads sin grafo por hilo (no hay buffers scratch que proteger).
+        // Mismo criterio que `parallelBake`: el tope de 8 dejaba media CPU sin usar durante un
+        // horneado que bloquea el hilo principal. `baseHeight` solo lee estado const.
         unsigned hw = std::thread::hardware_concurrency();
-        int nThreads = std::clamp<int>((int)hw, 1, 8);
+        int nThreads = std::clamp<int>((int)hw, 1, 32);
         std::vector<std::thread> threads;
+        std::atomic<int> rowsDone{0};
         for (int t = 0; t < nThreads; ++t) {
             const int y0 = t * h / nThreads;
             const int y1 = (t + 1) * h / nThreads;
-            threads.emplace_back([this, &field, y0, y1, w, h]() {
+            threads.emplace_back([this, &field, &rowsDone, y0, y1, w, h]() {
                 for (int y = y0; y < y1; ++y) {
                     // Misma convención que macro/bioma (inversa de `equirectUV`): texel-center,
                     // lon 0 en la columna central, polo norte arriba. Así `texture(heightTex,
@@ -2669,11 +2701,26 @@ void TerrestrialPlanet::bakeHeightMap() {
                         val = std::clamp<long>(val, 0L, 65535L);
                         field.data[(size_t)y * w + x] = (uint16_t)val;
                     }
+                    rowsDone.fetch_add(1, std::memory_order_relaxed);
                 }
             });
         }
+        // Mismo motivo que en `parallelBake`: esperar despierto para que la ventana siga respondiendo.
+        while (rowsDone.load(std::memory_order_relaxed) < h) {
+            Haruka::reportProgress("horneando altura",
+                                   (float)rowsDone.load(std::memory_order_relaxed) / (float)h);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
         for (auto& th : threads) th.join();
-        if (!saveBakedHeightPNG16(path, field))
+        const double sampleMs = std::chrono::duration<double, std::milli>(
+            std::chrono::high_resolution_clock::now() - t0Bake).count();
+        const auto t0Save = std::chrono::high_resolution_clock::now();
+        const bool savedOk = saveBakedHeightPNG16(path, field);
+        HARUKA_LOGI("BakeCache", "height %dx%d: muestreo %.0f ms (%d hilos) · guardar PNG %.0f ms",
+                    w, h, sampleMs, nThreads,
+                    std::chrono::duration<double, std::milli>(
+                        std::chrono::high_resolution_clock::now() - t0Save).count());
+        if (!savedOk)
             HARUKA_LOGW("BakeCache", "no pude persistir %s", path.c_str());
         else
             HARUKA_LOGI("BakeCache", "baked   %s (%dx%d)", path.c_str(), field.w, field.h);

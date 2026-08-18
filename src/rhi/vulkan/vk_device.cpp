@@ -1329,6 +1329,8 @@ namespace Haruka::RHI::vulkan
     {
         if (const VKBuffer* b = buffer(h))
         {
+            // Fuera del estado pegajoso ANTES de destruirlo (ver VKContext::forgetBuffer).
+            if (m_context && b->buffer) m_context->forgetBuffer(b->buffer);
             if (b->buffer) vkDestroyBuffer(m_device, b->buffer, nullptr);
             if (b->memory) vkFreeMemory(m_device, b->memory, nullptr);
             release(m_buffers, m_freeBuffers, h.id);
@@ -1339,6 +1341,7 @@ namespace Haruka::RHI::vulkan
     {
         if (const VKTexture* t = texture(h))
         {
+            if (m_context && t->view) m_context->forgetImageView(t->view);
             if (t->sampler) vkDestroySampler(m_device, t->sampler, nullptr);
             if (t->view) vkDestroyImageView(m_device, t->view, nullptr);
             if (t->image) vkDestroyImage(m_device, t->image, nullptr);

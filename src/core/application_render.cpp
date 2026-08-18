@@ -18,6 +18,7 @@
 
 #include "core/sky_ambient.h"   // ambiente integrado del MISMO cielo que se dibuja
 #include "core/logger.h"
+#include "core/progress_hook.h"
 
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
@@ -1023,8 +1024,15 @@ void Application::renderFrameContent() {
             _physicsEngine->setWind(_worldSystem->getWind(glm::dvec3(cameraOrigin)));
         // Avanza el motor de física con TIMESTEP FIJO (determinista). Hoy solo procesa cuerpos
         // DINÁMICOS (el jugador aún es kinemático → no afecta); lo activa de verdad la Fase 2.
-        if (_physicsEngine)
+        if (_physicsEngine) {
+            // Sonda: cuánto del frame se va en física. Sin esto, "Jolt cuesta poco/mucho" era una
+            // opinión — y decisiones como el job system de UN hilo (determinismo para el DGS) solo se
+            // pueden juzgar sabiendo qué se paga por ellas. Ver HARUKA_FRAMELOG en application.cpp.
+            const auto tPhys0 = std::chrono::steady_clock::now();
             _physicsEngine->advance(deltaTime > 0.0f ? (double)deltaTime : 0.016);
+            Haruka::physicsFrameMs() = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - tPhys0).count();
+        }
         // Luz de luna (2ª luz): dirección + brillo por fase (WorldSystem), color azulado.
         {
             glm::vec3 moonDir(0.0f, 1.0f, 0.0f); float moonI = 0.0f;
@@ -1036,6 +1044,33 @@ void Application::renderFrameContent() {
         // Only advertise a feature if its GPU resources are actually allocated.
         // Enabling a flag without the corresponding FBO/texture bound causes
         // undefined behaviour in final.frag (samples from empty texture units).
+        // ── EL TONEMAPPING NO PUEDE DEPENDER DEL ORDEN DE ARRANQUE ─────────────────────────────
+        //
+        // ⚠️ `prop_inst.frag` decide DENTRO del shader si tonemapea:
+        //
+        //     if (enableHDR != 0) { color = color/(color+1); color = pow(color, 1/2.2); }
+        //     else                { color = clamp(color, 0.0, 1.0); }        // ← satura a BLANCO
+        //
+        // Y `enableHDR` exige que `_hdr` exista. Pero `_hdr` solo se creaba en `onResize`, así que
+        // cualquier camino que no pase por ahí —el viewport del Editor, que dibuja a su propio
+        // target— dejaba el puntero nulo y los props se RECORTABAN: todo lo que pasa de 1 en blanco
+        // puro. Ese es el "props quemados" que parecía un bug de Vulkan y no lo era: era el Editor
+        // contra el juego.
+        //
+        // Se crea aquí si falta. Es idempotente y no cuesta nada cuando ya existe.
+        // El AJUSTE manda: el panel lo cambia en caliente y esto lo aplica al frame siguiente.
+        setRenderFeatureHDR(Haruka::SettingsManager::get().graphics().hdr);
+        if (getRenderFeatureHDR() && !_hdr && width > 0 && height > 0)
+            _hdr = std::make_unique<HDR>((unsigned)width, (unsigned)height);
+        {
+            static bool s_logged = false;
+            if (!s_logged) {
+                s_logged = true;
+                HARUKA_LOGI("Render", "tonemapping de props: %s (feature=%d, buffer=%s)",
+                            (getRenderFeatureHDR() && _hdr) ? "ACTIVO" : "APAGADO -> clamp a blanco",
+                            (int)getRenderFeatureHDR(), _hdr ? "si" : "NO");
+            }
+        }
         frameData.enableHDR       = (int)(getRenderFeatureHDR()     && _hdr    != nullptr);
         frameData.enableBloom     = (int)(getRenderFeatureBloom()   && _bloom  != nullptr);
         frameData.enableSSAO      = (int)(getRenderFeatureSSAO()    && _ssao   != nullptr);

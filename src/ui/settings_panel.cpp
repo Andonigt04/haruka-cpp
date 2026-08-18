@@ -234,6 +234,11 @@ void SettingsPanel::tabGraphics() {
     ImGui::Checkbox(TR("gfx.vsync").c_str(), &g.vsync);
     ImGui::Checkbox(TR("gfx.ssao").c_str(),  &g.ssao);
     if (g.ssao) ImGui::TextDisabled("  %s", TR("gfx.ssaoNote").c_str());
+    // TONEMAPPING. Apagarlo RECORTA los valores altos a blanco: útil para diagnosticar qué se sale
+    // de rango, desastroso sin querer (props quemados).
+    ImGui::Checkbox(TR("gfx.hdr").c_str(), &g.hdr);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", TR("gfx.hdr.tip").c_str());
     ImGui::Checkbox(TR("gfx.bloom").c_str(), &g.bloom);
     if (g.bloom) {
         ImGui::Indent();

@@ -11,6 +11,9 @@
  * Texturas del MATERIAL: bindings 0..4 (albedo/normal/metallic/roughness/ao)
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+
+#include "lib/surface_shade.glsl"
 
 layout(location = 0) out vec4 FragColor;
 
@@ -56,19 +59,6 @@ layout(binding = 4) uniform sampler2D u_matAO;
 const int TEX_ALBEDO = 1, TEX_NORMAL = 2, TEX_METALLIC = 4, TEX_ROUGHNESS = 8, TEX_AO = 16;
 bool hasTex(int bit) { return (int(materialPBR.w) & bit) != 0; }
 
-// TBN por DERIVADAS de pantalla, no por tangentes de vértice: las primitivas del motor
-// (cubo/esfera/plano…) se generan sin tangente y un normal map sobre ellas saldría girado al azar.
-// Esto lo deriva de cómo varían posición y UV en el propio triángulo → vale para toda geometría.
-vec3 applyNormalMap(vec3 N, vec3 texN) {
-    vec3 dp1 = dFdx(FragPos), dp2 = dFdy(FragPos);
-    vec2 du1 = dFdx(TexCoord), du2 = dFdy(TexCoord);
-    float det = du1.x * du2.y - du2.x * du1.y;
-    if (abs(det) < 1e-12) return N;                 // UV degenerada (malla sin desplegar)
-    vec3 T = normalize((dp1 * du2.y - dp2 * du1.y) / det);
-    T = normalize(T - N * dot(N, T));               // Gram-Schmidt contra la normal interpolada
-    vec3 B = cross(N, T);
-    return normalize(mat3(T, B, N) * texN);
-}
 
 // --- Iluminación TOON (cel suave + rim), estilo Genshin/SAO ---
 // Mood: cálido-aventura con crudeza mística → luz cálida, sombra FRÍA y algo desaturada, terminador
@@ -82,9 +72,9 @@ vec3 toonShade(vec3 baseColor, vec3 N, vec3 L, vec3 V, float metallic, float rou
     float ndl = dot(N, L);
 
     // Terminador suave (2 tonos con el corte suavizado, no cel duro).
-    float band = smoothstep(-0.03, 0.22, ndl);
+    float band = harukaToonBand(ndl);
     vec3  litCol    = baseColor * (0.80 + 0.25 * sunLightColor);      // lado iluminado (cálido)
-    vec3  shadowCol = baseColor * vec3(0.40, 0.46, 0.60) * ao;       // sombra FRÍA, algo desaturada
+    vec3  shadowCol = baseColor * harukaToonShadowTint(ambientStrength, sunLightColor) * ao;
     if (enableShadows == 0) shadowCol *= 1.06;
     if (enableSSAO    == 0) shadowCol *= 1.03;
     vec3  diffuse   = mix(shadowCol, litCol, band);
@@ -139,7 +129,8 @@ void main() {
 
     vec3 N = normalize(Normal);
     if (hasTex(TEX_NORMAL))
-        N = applyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0));
+        N = harukaApplyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0),
+                             FragPos, TexCoord);
     vec3 L = normalize(sunDirection);
     vec3 V = normalize(cameraPos - FragPos);
 

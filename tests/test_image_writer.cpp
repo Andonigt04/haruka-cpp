@@ -172,6 +172,62 @@ void test_image_writer_roundtrip() {
         CHECK(on < raw + raw / 100 + 4096, "ruido: el respaldo stored evita que el fichero crezca");
     }
 
+    // ── (4b) IMAGEN GRANDE: el camino MULTIHILO ───────────────────────────────────────────────────
+    //
+    // ⚠️ EL RESTO DEL TEST NO LLEGA AQUÍ. Los casos de arriba miden decenas de KB y el escritor
+    // comprime en un solo trozo por debajo de 4 MB por hilo: probaban el camino serie mientras el
+    // horneado real (mapas de 18750×9375, cientos de MB) usa otro. El reparto por trozos pega
+    // bloques DEFLATE independientes con una sincronización a byte, y ese pegado o está bien o
+    // produce un fichero que PARECE plausible —cabecera válida, tamaño razonable— y que ningún
+    // decodificador lee. Solo un tamaño que cruce varias fronteras lo demuestra.
+    {
+        const int BW = 2400, BH = 2400;                 // 23 MB RGBA: varios trozos en cualquier CPU
+        std::vector<unsigned char> src((size_t)BW * BH * 4);
+        uint32_t st = 7u;
+        for (int y = 0; y < BH; ++y)
+            for (int x = 0; x < BW; ++x) {
+                const size_t i = ((size_t)y * BW + x) * 4;
+                // Suave + una pizca de ruido: comprime (ejercita LZ77 largo) pero no es constante,
+                // así que una fila mal reconstruida se nota en la comparación.
+                src[i + 0] = (unsigned char)((x * 255 / (BW - 1)) ^ (lcg(st) & 3u));
+                src[i + 1] = (unsigned char)(y * 255 / (BH - 1));
+                src[i + 2] = (unsigned char)(((x ^ y) >> 2) & 0xFF);
+                src[i + 3] = 255;
+            }
+        const std::string p = tmpPath("haruka_test_big.png");
+        CHECK(Haruka::writePNG(p, BW, BH, 4, src.data()), "grande RGBA: escribe");
+
+        int rw = 0, rh = 0, rn = 0;
+        unsigned char* got = stbi_load(p.c_str(), &rw, &rh, &rn, 4);
+        CHECK(got != nullptr && rw == BW && rh == BH, "grande RGBA: inflate AJENO lo lee entero");
+        if (got) {
+            size_t bad = 0, firstBad = 0;
+            for (size_t i = 0; i < src.size(); ++i)
+                if (got[i] != src[i]) { if (!bad) firstBad = i; ++bad; }
+            if (bad) std::printf("  %zu bytes distintos, el primero en %zu (pixel %zu, fila %zu)\n",
+                                 bad, firstBad, firstBad / 4, firstBad / 4 / (size_t)BW);
+            CHECK(bad == 0, "grande RGBA: ida y vuelta byte a byte");
+            stbi_image_free(got);
+        }
+
+        // Y el que de verdad usa el bake de altura: 16 bits, bpp=2.
+        const int GW = 3000, GH = 1500;                 // 9 MB de flujo: cruza al menos una frontera
+        std::vector<unsigned short> g16((size_t)GW * GH);
+        for (int y = 0; y < GH; ++y)
+            for (int x = 0; x < GW; ++x)
+                g16[(size_t)y * GW + x] = (unsigned short)((x * 37 + y * 911) & 0xFFFF);
+        const std::string p16 = tmpPath("haruka_test_big16.png");
+        CHECK(Haruka::writePNG16(p16, GW, GH, g16.data()), "grande 16-bit: escribe");
+        stbi_us* g = stbi_load_16(p16.c_str(), &rw, &rh, &rn, 1);
+        CHECK(g != nullptr && rw == GW && rh == GH, "grande 16-bit: legible");
+        if (g) {
+            size_t bad = 0;
+            for (size_t i = 0; i < g16.size(); ++i) if (g[i] != g16[i]) ++bad;
+            CHECK(bad == 0, "grande 16-bit: ida y vuelta muestra a muestra");
+            stbi_image_free(g);
+        }
+    }
+
     // ── (5) CASOS LÍMITE de tamaño ────────────────────────────────────────────────────────────────
     //
     // 1×1 y 1 píxel de alto rompen el LZ77 (no hay 3 bytes para hashear) y el filtro (no hay fila

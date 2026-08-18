@@ -15,10 +15,13 @@
 #include <cmath>
 #include <csignal>
 #include <atomic>
+#include <thread>
+#include <chrono>
 #include <filesystem>
 #include <cstring>
 
 #include "core/logger.h"
+#include "core/progress_hook.h"
 
 #include <SDL3/SDL.h>
 #include <imgui.h>
@@ -444,6 +447,33 @@ void Application::run(const std::string& startScenePath, bool headless) {
                         ? " (IGNORADA: OpenGL no permite elegir adaptador)" : "");
     Haruka::RHI::setDevice(_device.get());
 
+    // ── QUE LA VENTANA NO PAREZCA MUERTA MIENTRAS SE HORNEA EL PLANETA ──────────────────────────
+    //
+    // Crear o cargar un mundo con caché fría son ~21 s en el HILO PRINCIPAL (medido: bioma 14,8 s,
+    // altura 2,7 s, escribir los PNG 3,4 s). Sin nadie vaciando la cola de SDL el compositor deja
+    // de recibir respuesta y marca la ventana como "no responde" — el usuario lo describía como
+    // "se queda congelada al darle a cargar o crear mundo". Este enganche solo RESPONDE al sistema:
+    // no repinta (eso exige una pantalla de carga de verdad) y no acelera nada.
+    //
+    // Se guarda el id del hilo que instala: `reportProgress` solo debe llegar aquí desde el hilo
+    // principal, y comprobarlo es más barato que descubrir un cuelgue de SDL desde un trabajador.
+    if (!m_headless) {
+        const std::thread::id mainThread = std::this_thread::get_id();
+        Haruka::progressHook() = [mainThread](const char* stage, float frac) {
+            if (std::this_thread::get_id() != mainThread) return;
+            SDL_PumpEvents();
+            // El log va MUY espaciado a propósito: es una señal de vida para quien mira la consola,
+            // no una barra de progreso. Una línea por segundo y por etapa.
+            static std::chrono::steady_clock::time_point last{};
+            const auto now = std::chrono::steady_clock::now();
+            if (now - last > std::chrono::seconds(1)) {
+                last = now;
+                if (frac >= 0.0f) HARUKA_LOGI("Bake", "%s: %.0f %%", stage, frac * 100.0f);
+                else              HARUKA_LOGI("Bake", "%s...", stage);
+            }
+        };
+    }
+
     // ── QUÉ GPUs VE EL SISTEMA ──────────────────────────────────────────────────────────────────
     //
     // Se lista al arrancar y no solo al abrir el panel: "mi tarjeta no sale en la lista" es una
@@ -548,6 +578,33 @@ void Application::run(const std::string& startScenePath, bool headless) {
         deltaTime        = std::min(deltaTime, 0.1f); // cap: network stalls can't explode physics
         _lastFrameTimeMs = deltaTime * 1000.0f;
         _frameStart      = now;
+
+        // ── SONDA DE TIEMPO DE FRAME (HARUKA_FRAMELOG=1) ────────────────────────────────────────
+        //
+        // El overlay muestra el frame actual, que es lo que sirve jugando. Pero para comparar DOS
+        // versiones de un shader hace falta un número estable y sin nadie mirando la pantalla, y no
+        // había ninguno: cualquier afirmación de "esto cuesta poco" salía de la intuición. Media y
+        // PERCENTIL 95 sobre una ventana de 3 s — el p95 es el que delata un coste que solo aparece
+        // en ciertos ángulos, que es justo como se comporta el terreno.
+        static const bool s_frameLog = std::getenv("HARUKA_FRAMELOG") != nullptr;
+        if (s_frameLog) {
+            static std::vector<float> win;
+            static auto t0 = std::chrono::steady_clock::now();
+            win.push_back(_lastFrameTimeMs);
+            if (std::chrono::steady_clock::now() - t0 > std::chrono::seconds(3)) {
+                std::vector<float> srt = win;
+                std::sort(srt.begin(), srt.end());
+                double sum = 0.0;
+                for (float v : srt) sum += v;
+                HARUKA_LOGI("Perf", "%zu frames en 3 s · media %.2f ms · p95 %.2f ms · peor %.2f ms"
+                            " · fisica (ultimo frame) %.2f ms",
+                            srt.size(), sum / (double)srt.size(),
+                            srt[(size_t)((double)srt.size() * 0.95)], srt.back(),
+                            Haruka::physicsFrameMs());
+                win.clear();
+                t0 = std::chrono::steady_clock::now();
+            }
+        }
 
         uint32_t lastWidth  = _window->getWidth();
         uint32_t lastHeight = _window->getHeight();

@@ -11,6 +11,9 @@
  * Texturas del material del GRUPO: bindings 0..4 (albedo/normal/metallic/roughness/ao)
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+
+#include "lib/surface_shade.glsl"
 
 layout(location = 0) out vec4 FragColor;
 
@@ -50,17 +53,6 @@ layout(std140, binding = 6) uniform ConstParams {
 const int TEX_ALBEDO = 1, TEX_NORMAL = 2, TEX_METALLIC = 4, TEX_ROUGHNESS = 8, TEX_AO = 16;
 bool hasTex(int bit) { return (int(u_matPBR.w) & bit) != 0; }
 
-// TBN por DERIVADAS de pantalla, no por tangentes de vértice. Idéntico a final.frag.
-vec3 applyNormalMap(vec3 N, vec3 texN) {
-    vec3 dp1 = dFdx(FragPos), dp2 = dFdy(FragPos);
-    vec2 du1 = dFdx(TexCoord), du2 = dFdy(TexCoord);
-    float det = du1.x * du2.y - du2.x * du1.y;
-    if (abs(det) < 1e-12) return N;
-    vec3 T = normalize((dp1 * du2.y - dp2 * du1.y) / det);
-    T = normalize(T - N * dot(N, T));
-    vec3 B = cross(N, T);
-    return normalize(mat3(T, B, N) * texN);
-}
 
 // Cel suave + rim — MISMA iluminación que final.frag (mood cálido-aventura + crudeza mística). El
 // color base viene por INSTANCIA (InstanceColor × albedo del material) y el AO modula las sombras.
@@ -75,7 +67,8 @@ void main() {
 
     vec3 N = normalize(Normal);
     if (hasTex(TEX_NORMAL))
-        N = applyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0));
+        N = harukaApplyNormalMap(N, normalize(texture(u_matNormal, TexCoord).xyz * 2.0 - 1.0),
+                             FragPos, TexCoord);
     vec3 L = normalize(sunDirection);
     // ⚠️ EL OJO ESTÁ EN EL ORIGEN, no en `cameraPos`. Este pase dibuja CÁMARA-RELATIVO (`FragPos`
     // es `camRel`), pero `cameraPos` del UBO es la posición ABSOLUTA — ~1,5e8 en un sistema solar.
@@ -88,9 +81,9 @@ void main() {
     if (hasTex(TEX_AO)) ao = texture(u_matAO, TexCoord).r;
 
     float ndl  = dot(N, L);
-    float band = smoothstep(-0.03, 0.22, ndl);
+    float band = harukaToonBand(ndl);
     vec3  litCol    = baseColor * (0.80 + 0.25 * sunLightColor);
-    vec3  shadowCol = baseColor * vec3(0.40, 0.46, 0.60) * ao;
+    vec3  shadowCol = baseColor * harukaToonShadowTint(ambientStrength, sunLightColor) * ao;
     if (enableShadows == 0) shadowCol *= 1.06;
     if (enableSSAO    == 0) shadowCol *= 1.03;
     vec3  diffuse   = mix(shadowCol, litCol, band);

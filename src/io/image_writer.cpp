@@ -6,6 +6,7 @@
 #include <fstream>
 #include <filesystem>
 #include <algorithm>
+#include <thread>
 
 namespace Haruka {
 namespace {
@@ -26,10 +27,27 @@ uint32_t crc32(const uint8_t* data, size_t len) {
     return c ^ 0xFFFFFFFFu;
 }
 
+/// ⚠️ El módulo va DIFERIDO, no por byte. La versión ingenua hacía dos divisiones enteras por byte
+/// de entrada; sobre el bake de altura (351 MB de flujo crudo) eso es ~700 M de divisiones y pesaba
+/// más que buena parte de la compresión. 5552 es el máximo de iteraciones que no puede desbordar un
+/// uint32 (el valor clásico de zlib), así que el resultado es idéntico bit a bit.
 uint32_t adler32(const uint8_t* data, size_t len) {
     uint32_t a = 1, b = 0;
-    for (size_t i = 0; i < len; ++i) { a = (a + data[i]) % 65521; b = (b + a) % 65521; }
+    while (len > 0) {
+        const size_t n = (len < 5552) ? len : 5552;
+        for (size_t i = 0; i < n; ++i) { a += data[i]; b += a; }
+        a %= 65521; b %= 65521;
+        data += n; len -= n;
+    }
     return (b << 16) | a;
+}
+
+/// Cuántos hilos usar para un trabajo de `bytes`. Por debajo del umbral no compensa repartir.
+int bakeThreads(size_t bytes, size_t minPerThread) {
+    const unsigned hw = std::thread::hardware_concurrency();
+    const int cap = (int)((hw == 0) ? 4u : (hw > 32u ? 32u : hw));
+    const int want = (int)(bytes / (minPerThread ? minPerThread : 1));
+    return std::max(1, std::min(cap, want));
 }
 
 void putBE32(std::vector<uint8_t>& v, uint32_t x) {
@@ -71,6 +89,12 @@ void chunk(std::vector<uint8_t>& out, const char type[4], const std::vector<uint
 // escritor a mano: **stb_image_write no sabe escribir PNG de 16 bits**, y el bake de altura lo
 // necesita — a 8 bits la cuantización de la elevación sería de 78 m. Así que en vez de traer una
 // dependencia se implementa el DEFLATE que faltaba.
+//
+// SEGUNDA VUELTA: EL TIEMPO, NO EL TAMAÑO. Con la compresión ya puesta, el horneado de altura medía
+// «muestreo 2475 ms (16 hilos) · guardar PNG 8704 ms»: el 78 % del tiempo de una etapa que BLOQUEA el
+// hilo principal se iba en escribir, y el usuario veía la ventana congelada. Filtrado y DEFLATE están
+// ahora repartidos entre núcleos (ver `filterScanlines` y `deflateFixed`); medido en el mismo mapa de
+// 18750×9375: 8704 ms -> 2156 ms, con el fichero 509 bytes más grande sobre 64 MB (+0,0008 %).
 //
 // Se usa Huffman FIJO (BTYPE=01) y no dinámico: las tablas dinámicas darían un 5-15 % más, pero
 // obligan a un histograma y a construir códigos canónicos con su recorte de longitudes, que es donde
@@ -123,26 +147,33 @@ constexpr int kMaxMatch = 258;
 /// muy larga, así que subirlo apenas mejora y sí cuesta: estos ficheros tienen cientos de MB.
 constexpr int kChainLimit = 8;
 
-std::vector<uint8_t> deflateFixed(const std::vector<uint8_t>& raw) {
-    BitWriter bw;
-    bw.out.reserve(raw.size() / 4 + 64);
-    bw.bits(1, 1);   // BFINAL = 1 (un solo bloque; Huffman no impone límite de tamaño)
+/**
+ * @brief Emite UN bloque DEFLATE (Huffman fijo) con los bytes `raw[begin,end)`.
+ *
+ * ⚠️ Ninguna referencia LZ77 sale del rango. Es lo que permite comprimir varios trozos EN PARALELO y
+ * pegar los bloques resultantes: el descompresor los lee como un flujo normal porque el formato ya
+ * admite muchos bloques seguidos. Se paga en ratio —cada frontera arranca con la ventana vacía— y
+ * con trozos de decenas de MB eso es ruido; se gana el factor entero del número de núcleos en la
+ * etapa que MEDIDA era el 78 % del horneado (8,7 s de 11,2 s en el mapa de altura).
+ */
+void deflateBlockRange(const std::vector<uint8_t>& raw, size_t begin, size_t end, BitWriter& bw) {
+    bw.bits(0, 1);   // BFINAL = 0: el bloque final lo pone quien concatena
     bw.bits(1, 2);   // BTYPE  = 01 (Huffman fijo)
 
-    const size_t n = raw.size();
+    const size_t n = end;
     // `head` guarda posiciones ABSOLUTAS por hash; `prev` encadena, indexado por posición dentro de
     // la ventana. Indexar `prev` por `pos & kWMask` en vez de por posición absoluta es lo que hace
     // esto viable con entradas de 700 MB: son 128 KB fijos en vez de 4 bytes por byte de entrada
     // (2,8 GB). Las entradas que se sobreescriben son justo las que ya quedaron fuera de la ventana.
     std::vector<int32_t> head(65536, -1);
-    std::vector<int32_t> prev((size_t)kWindow, -1);
+    std::vector<int32_t> prev((size_t)kWindow, -1);   // ambas locales al trozo: la ventana no cruza
 
     auto hash3 = [&](size_t p) -> uint32_t {
         return (uint32_t)(((uint32_t)raw[p] << 10) ^ ((uint32_t)raw[p + 1] << 5) ^ (uint32_t)raw[p + 2])
                & 0xFFFFu;
     };
 
-    size_t pos = 0;
+    size_t pos = begin;
     while (pos < n) {
         int bestLen = 0;
         size_t bestDist = 0;
@@ -200,12 +231,43 @@ std::vector<uint8_t> deflateFixed(const std::vector<uint8_t>& raw) {
     uint32_t code; int len;
     fixedLitCode(256, code, len);                            // fin de bloque
     bw.huff(code, len);
+
+    // Sincronización a byte: cabecera de bloque "stored" vacío (BFINAL=0, BTYPE=00) + relleno hasta
+    // el byte + LEN=0/NLEN=FFFF. Sin esto los bloques quedarían pegados a nivel de BIT y no se
+    // podrían concatenar sin desplazar todo el trozo siguiente. Cuesta 5 bytes por frontera.
+    bw.bits(0, 1);
+    bw.bits(0, 2);
     bw.flush();
+    bw.out.push_back(0x00); bw.out.push_back(0x00);
+    bw.out.push_back(0xFF); bw.out.push_back(0xFF);
+}
+
+/// Comprime `raw` a un flujo zlib, repartiendo los trozos entre hilos.
+std::vector<uint8_t> deflateFixed(const std::vector<uint8_t>& raw) {
+    // Por debajo de 4 MB por hilo el reparto no compensa (y un solo trozo comprime algo mejor).
+    const int nChunks = bakeThreads(raw.size(), 4u << 20);
+
+    std::vector<BitWriter> parts((size_t)nChunks);
+    std::vector<std::thread> threads;
+    threads.reserve((size_t)nChunks);
+    for (int t = 0; t < nChunks; ++t) {
+        const size_t b = raw.size() * (size_t)t / (size_t)nChunks;
+        const size_t e = raw.size() * (size_t)(t + 1) / (size_t)nChunks;
+        threads.emplace_back([&raw, &parts, t, b, e]() {
+            parts[(size_t)t].out.reserve((e - b) / 4 + 64);
+            deflateBlockRange(raw, b, e, parts[(size_t)t]);
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    size_t total = 8;
+    for (const auto& p : parts) total += p.out.size();
 
     std::vector<uint8_t> z;
-    z.reserve(bw.out.size() + 6);
+    z.reserve(total);
     z.push_back(0x78); z.push_back(0x01);                    // cabecera zlib (CM=8, CINFO=7)
-    z.insert(z.end(), bw.out.begin(), bw.out.end());
+    for (const auto& p : parts) z.insert(z.end(), p.out.begin(), p.out.end());
+    z.push_back(0x03); z.push_back(0x00);                    // bloque final vacío (BFINAL=1, fijo)
     putBE32(z, adler32(raw.data(), raw.size()));             // Adler32 de los datos SIN comprimir
     return z;
 }
@@ -244,13 +306,21 @@ inline uint32_t absCost(const std::vector<uint8_t>& v) {
  *            con un valor mal puesto el fichero sigue siendo válido pero comprime mucho peor.
  */
 std::vector<uint8_t> filterScanlines(const uint8_t* px, size_t rowBytes, int h, size_t bpp) {
-    std::vector<uint8_t> raw;
-    raw.reserve((size_t)h * (rowBytes + 1));
+    // Cada fila de salida ocupa exactamente `rowBytes + 1` y depende SOLO de las filas `y` e `y-1`
+    // de la imagen de entrada (el filtro se calcula contra los píxeles originales, no contra los ya
+    // filtrados). Con tamaño fijo y sin dependencia en cadena, cada hilo escribe su banda
+    // directamente en el buffer final sin sincronizarse con nadie.
+    const size_t outRow = rowBytes + 1;
+    std::vector<uint8_t> raw((size_t)h * outRow);
+    const int nThreads = bakeThreads((size_t)h * rowBytes, 4u << 20);
+
+    auto band = [&](int yBegin, int yEnd) {
     std::vector<uint8_t> cand[5];
     for (int k = 0; k < 5; ++k) cand[k].resize(rowBytes);
     std::vector<uint8_t> prevRow(rowBytes, 0);
+    if (yBegin > 0) std::memcpy(prevRow.data(), px + (size_t)(yBegin - 1) * rowBytes, rowBytes);
 
-    for (int y = 0; y < h; ++y) {
+    for (int y = yBegin; y < yEnd; ++y) {
         const uint8_t* cur = px + (size_t)y * rowBytes;
         for (size_t i = 0; i < rowBytes; ++i) {
             const int a = (i >= bpp) ? cur[i - bpp] : 0;             // izquierda
@@ -269,10 +339,19 @@ std::vector<uint8_t> filterScanlines(const uint8_t* px, size_t rowBytes, int h, 
             const uint32_t cost = absCost(cand[k]);
             if (cost < bestCost) { bestCost = cost; best = k; }
         }
-        raw.push_back((uint8_t)best);
-        raw.insert(raw.end(), cand[best].begin(), cand[best].end());
+        uint8_t* dst = raw.data() + (size_t)y * outRow;
+        dst[0] = (uint8_t)best;
+        std::memcpy(dst + 1, cand[best].data(), rowBytes);
         std::memcpy(prevRow.data(), cur, rowBytes);
     }
+    };
+
+    if (nThreads <= 1) { band(0, h); return raw; }
+    std::vector<std::thread> threads;
+    threads.reserve((size_t)nThreads);
+    for (int t = 0; t < nThreads; ++t)
+        threads.emplace_back(band, t * h / nThreads, (t + 1) * h / nThreads);
+    for (auto& th : threads) th.join();
     return raw;
 }
 

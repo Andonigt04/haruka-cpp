@@ -375,6 +375,41 @@ namespace Haruka::RHI::vulkan
             vkUpdateDescriptorSets(m_dev.m_device, (uint32_t)writes.size(), writes.data(), 0, nullptr);
     }
 
+    // Ver la nota de `forgetBuffer` en la cabecera: un recurso destruido tiene que salir del estado
+    // pegajoso, o el siguiente descriptor set lo reescribe muerto.
+    void VKContext::forgetBuffer(VkBuffer b)
+    {
+        if (!b) return;
+        for (auto it = m_shadowUbo.begin(); it != m_shadowUbo.end(); )
+            it = (it->second.buffer == b) ? m_shadowUbo.erase(it) : std::next(it);
+        for (auto it = m_shadowSsbo.begin(); it != m_shadowSsbo.end(); )
+            it = (it->second.buffer == b) ? m_shadowSsbo.erase(it) : std::next(it);
+
+        // ⚠️ LOS VERTEX/INDEX BUFFERS TAMBIÉN SON ESTADO PEGAJOSO, y se quedaban fuera.
+        //
+        // Esta función se escribió para los descriptores y solo limpiaba esos. Pero `m_vbs`/`m_ib`
+        // sobreviven igual de un draw al siguiente: quien dibuja sin reatar TODOS los bindings
+        // hereda los del draw anterior. Destruir una malla dejaba ahí un VkBuffer muerto y el
+        // siguiente `vkCmdBindVertexBuffers` lo ataba:
+        //     [VVL] vkCmdBindVertexBuffers(): pBuffers[0] Invalid VkBuffer Object 0x926...
+        //     [VVL] Couldn't find VkBuffer Object ... may indicate a bug in the application
+        // y detrás, un SIGSEGV. En OpenGL el mismo patrón es inofensivo (un nombre borrado se lee
+        // como 0 y el draw no pinta nada), que es por qué solo se cae de este lado.
+        //
+        // Lo destapó `testCullWindingWithProjection`, que destruye su malla en cada llamada. En el
+        // juego lo destapa cualquier cosa que libere geometría con el streaming andando.
+        for (int i = 0; i < 8; ++i)
+            if (m_vbs[i] == b) { m_vbs[i] = VK_NULL_HANDLE; m_vbUsed[i] = false; }
+        if (m_ib == b) m_ib = VK_NULL_HANDLE;
+    }
+
+    void VKContext::forgetImageView(VkImageView v)
+    {
+        if (!v) return;
+        for (auto it = m_shadowTex.begin(); it != m_shadowTex.end(); )
+            it = (it->second.imageView == v) ? m_shadowTex.erase(it) : std::next(it);
+    }
+
     void VKContext::bindUniformBuffer(uint32_t slot, BufferHandle h)
     {
         const VKBuffer* b = m_dev.buffer(h);

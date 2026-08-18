@@ -12,6 +12,8 @@
 // reconoce). Así el mismo fichero valida en el build y compila en runtime.
 #extension GL_GOOGLE_include_directive : require
 
+#include "lib/surface_shade.glsl"
+
 layout(location = 0) out vec4 FragColor;
 
 layout(location = 0) in vec3 Normal;
@@ -597,10 +599,10 @@ void main() {
 
     // --- Iluminación TOON (cel suave + sombra FRÍA) — MISMO idioma que escena/props/follaje. El terreno
     //     es MATE (sin especular). El shadow map oscurece el lado iluminado; la luna rellena la noche. ---
-    float band = smoothstep(-0.04, 0.24, dot(N, L));         // terminador SUAVE (no duro)
+    float band = harukaToonBand(dot(N, L));
     band *= (1.0 - 0.9 * shadow);                            // los props proyectan sombra sobre el suelo
     vec3  litCol    = baseColor * (0.80 + 0.25 * sunLightColor);  // sin sobre-brillar albedos claros (nieve)
-    vec3  shadowCol = baseColor * vec3(0.42, 0.48, 0.60);    // sombra fría, algo desaturada (crudeza mística)
+    vec3  shadowCol = baseColor * harukaToonShadowTint(ambientStrength, sunLightColor);
     vec3  color = mix(shadowCol, litCol, band)
                 + moonLightColor * moonIntensity * smoothstep(0.0, 0.6, ndlMoon) * baseColor * 0.6;
 

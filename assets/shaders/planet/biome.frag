@@ -516,6 +516,36 @@ void main() {
                 // (dentro se usaba la base, fuera la superficie fina), que es el salto hierba/arena.
                 fragP = mix(fragP, p, fineW);
                 up = normalize(mix(up, dir, fineW));
+            } else {
+                // ── DENTRO DEL CLIPMAP: LA NORMAL TAMBIÉN POR PÍXEL ─────────────────────────────
+                //
+                // ⚠️ ESTE ERA EL SITIO DONDE EL SUELO SE VEÍA FACETADO, y estaba justo al revés de
+                // lo que conviene: LEJOS la normal se calculaba por píxel (la rama de arriba) y
+                // CERCA —donde el jugador está mirando— se heredaba `vNorm`, que sale del gradiente
+                // en cada VÉRTICE TESELADO. El clipmap satura el nivel de teselación en 32, o sea
+                // vértices cada 4 m: la iluminación era per-píxel sobre una normal que solo tenía
+                // detalle cada 4 metros, y el resultado se ve por triángulos aunque la luz no lo sea.
+                //
+                // Aquí NO hace falta re-anclar: dentro del clipmap la teselación ya puso el vértice
+                // en la superficie fina, la posición es correcta. Solo falta el GRADIENTE en este
+                // punto, que es lo mismo que evalúa `clipmap.tese` — misma función, mismo `triM`,
+                // misma construcción del marco tangente. Se comparte por eso: si divergieran, la
+                // normal describiría una altura distinta de la que se pisa.
+                float distC = length(fragP);
+                vec3  dirC  = frameDir(pf, fragP);
+                float baseHC = harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
+                                                       harukaEquirectUV(dirC));
+                float attC = harukaSeaLevelAttenuation(baseHC);
+                if (attC > 0.001) {
+                    vec3 gradC;
+                    harukaTerrainDetailGrad(dirC, uExtra.w + baseHC, harukaPixelTriM(distC), gradC);
+                    gradC *= attC;
+                    vec3 t1c = normalize(abs(dirC.y) < 0.99 ? cross(dirC, vec3(0,1,0))
+                                                            : cross(dirC, vec3(1,0,0)));
+                    vec3 t2c = cross(dirC, t1c);
+                    n = normalize(dirC - t1c * dot(gradC, t1c) - t2c * dot(gradC, t2c));
+                    diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);
+                }
             }
         }
     }
