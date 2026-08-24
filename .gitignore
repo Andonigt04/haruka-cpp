@@ -9,7 +9,9 @@ docs/doxygen.log
 docs/doxygen.xml
 docs/latex/
 docs/html/
+docs/xml/
 docs/theme/node_modules
 docs/theme/package-lock.json
 # Planet bake cache (deterministic on-disk textures)
 bakes/
+__pycache__/

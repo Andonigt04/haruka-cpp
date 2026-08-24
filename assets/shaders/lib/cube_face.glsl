@@ -51,3 +51,60 @@ void harukaDirToCubeFace(vec3 d, out int face, out vec2 uv) {
 }
 
 #endif // HARUKA_CUBE_FACE_GLSL
+/**
+ * @brief (cara, lx, ly) → dirección unitaria. Spherify de Cobb. **Gemelo de `cubeFaceToDir`**
+ *        (core/terrain/cube_sphere.cpp) — cualquier cambio va en los dos.
+ *
+ * ⚠️ Faltaba: este fichero solo tenía la INVERSA, porque hasta ahora ningún shader necesitaba ir de
+ * cara a dirección — el clipmap parte de un marco tangente, no de coordenadas de cara. El quadtree
+ * del v5 sí: su téxel se identifica por (cara, nivel, i, j, u, v) y la dirección se DERIVA de ahí.
+ *
+ * En DOUBLE a propósito. La coordenada de cara del nodo es exacta (sale de enteros) y redondearla a
+ * float aquí tiraría justo lo que ese diseño compra: a radio terrestre un ulp de dirección unitaria
+ * son 0,38-0,76 m de superficie.
+ */
+dvec3 harukaCubeFaceToDir(int face, double lx, double ly) {
+    // `precise`: prohíbe al compilador del driver reasociar o CONTRAER (`a*b+c` → FMA) estas
+    // expresiones. Sin ello el resultado depende del driver, y el gemelo C++ se compila con
+    // `-ffp-contract=off` (ver CMakeLists) — o sea que sin esto los dos lados hacen aritméticas
+    // distintas a propósito y no pueden coincidir bit a bit.
+    precise dvec3 p;
+    if      (face == 0) p = dvec3( 1.0LF,   ly,   -lx);    // FRONT
+    else if (face == 1) p = dvec3(-1.0LF,   ly,    lx);    // BACK
+    else if (face == 2) p = dvec3(   lx, 1.0LF,   -ly);    // TOP
+    else if (face == 3) p = dvec3(   lx,-1.0LF,    ly);    // BOTTOM
+    else if (face == 4) p = dvec3(   lx,    ly, 1.0LF);    // RIGHT
+    else                p = dvec3(  -lx,    ly,-1.0LF);    // LEFT
+    precise double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
+    precise dvec3 r = dvec3(p.x * sqrt(1.0LF - y2 / 2.0LF - z2 / 2.0LF + y2 * z2 / 3.0LF),
+                            p.y * sqrt(1.0LF - z2 / 2.0LF - x2 / 2.0LF + z2 * x2 / 3.0LF),
+                            p.z * sqrt(1.0LF - x2 / 2.0LF - y2 / 2.0LF + x2 * y2 / 3.0LF));
+    return r;
+}
+
+/**
+ * @brief La MISMA proyección en FLOAT. Existe para el vertex shader del quadtree, y el motivo es de
+ *        rendimiento MEDIDO, no de estilo.
+ *
+ * ⚠️ El `sqrt` en doble precisión va a 1/32 - 1/64 del ritmo del float en GPU de consumo. Tres por
+ * vértice, sobre ~1,1 M de vértices por frame, es lo que tenía el pase de nodos en 24 ms dibujando
+ * solo 2,1 M de triángulos — coste que no cuadraba con la geometría.
+ *
+ * ⚠️ Y NO vale para todo: la coordenada de cara `lx` SÍ tiene que calcularse en double (sale de
+ * enteros y de ella depende que el vértice caiga sobre su téxel). Lo que se degrada aquí es solo la
+ * proyección cara→esfera, cuya entrada ya es exacta. El error que introduce se mide en
+ * `terrain_node_render`.
+ */
+vec3 harukaCubeFaceToDirF(int face, float lx, float ly) {
+    vec3 p;
+    if      (face == 0) p = vec3( 1.0,   ly,  -lx);
+    else if (face == 1) p = vec3(-1.0,   ly,   lx);
+    else if (face == 2) p = vec3(  lx,  1.0,  -ly);
+    else if (face == 3) p = vec3(  lx, -1.0,   ly);
+    else if (face == 4) p = vec3(  lx,   ly,  1.0);
+    else                p = vec3( -lx,   ly, -1.0);
+    float x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
+    return vec3(p.x * sqrt(1.0 - y2 * 0.5 - z2 * 0.5 + y2 * z2 / 3.0),
+                p.y * sqrt(1.0 - z2 * 0.5 - x2 * 0.5 + z2 * x2 / 3.0),
+                p.z * sqrt(1.0 - x2 * 0.5 - y2 * 0.5 + x2 * y2 / 3.0));
+}

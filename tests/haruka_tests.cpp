@@ -40,6 +40,34 @@ int main(int argc, char** argv) {
         test_rail_mechanism(); test_ports_json_roundtrip();
     }
 
+    if (want("ocean") || want("mar") || want("agua") || want("physics")) {
+        test_ocean_wave_velocity();
+        test_ocean_float_precision();
+        test_ocean_stokes_transport();
+        test_ocean_shoaling();
+        test_ocean_buoyancy_drift();
+        test_ocean_no_water_no_float();
+        test_ocean_sea_state();
+        test_ocean_tide();
+        test_ocean_swash();
+        test_terrain_finest_octave();
+    }
+
+    if (want("node") || want("quadtree") || want("v5") || want("parity")) {
+        test_terrain_node_lattice();
+        test_terrain_node_scale();
+        test_terrain_node_content();
+        test_terrain_node_select();
+        test_terrain_node_frustum();
+        test_terrain_node_frustum_corners();
+        test_terrain_node_face_seam();
+        test_terrain_node_range();
+        test_terrain_node_pool();
+        test_terrain_node_pool_reuse();
+        test_terrain_node_stitch();
+        test_terrain_node_neighbours();
+    }
+
     if (want("dgs") || want("rules"))     test_dgs_rules_module();
     if (want("dgs") || want("wire"))      test_dgs_wire_format();
     if (want("robust") || want("dgs"))    test_dgs_robust();

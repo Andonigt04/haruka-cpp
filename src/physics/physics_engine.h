@@ -324,6 +324,31 @@ public:
     /** @brief Returns current gravity acceleration. */
     glm::dvec3 getGravity() const { return gravity; }
 
+    /**
+     * @brief FUERZA del agua sobre un cuerpo (N): empuje de Arquímedes + arrastre. 0 si no hay agua.
+     *
+     * ⚠️ VIVE AQUÍ, EN UN SOLO SITIO, PORQUE HAY DOS INTEGRADORES. Con Jolt compilado `update()`
+     * delega en él y `integrateForces()` NO SE EJECUTA — la flotación que vivía allí era código muerto
+     * en el juego real (solo corría en el camino a mano, o sea en tests y en el DGS). Duplicar la
+     * fórmula en los dos sitios habría dejado dos mares que se separan al primer retoque; esto la deja
+     * en una función que ambos llaman.
+     *
+     * Qué hace, y contra qué:
+     *  · La superficie es `IWorldProvider::waterSurfaceAt` — la cota CON LA OLA, la misma que dibuja
+     *    el shader. No una esfera de radio R (que era lo que había: la ola no existía para la física,
+     *    cualquier cuerpo bajo R flotaba aunque estuviera en un hoyo, y los lagos no contaban).
+     *  · El empuje se opone a LA GRAVEDAD, no a un "arriba" inventado: `-g·f·ratio·m`.
+     *  · El arrastre lleva la velocidad hacia la DEL AGUA (`waterVelocityAt`), no hacia cero. Eso es
+     *    lo que transporta: con arrastre hacia el marco del mundo el mar te mece y te deja donde
+     *    estabas, y nada llega nunca a la orilla.
+     *
+     * También dispara el callback de splash y mantiene `body.inWater` (por eso no es `const` en el
+     * cuerpo). `dt` solo se usa para el amortiguado; la fuerza devuelta ya es la del instante.
+     *
+     * @param gravityAcc aceleración gravitatoria en el punto (m/s²) — la misma que integra el llamador.
+     */
+    glm::dvec3 waterForceOn(RigidBody& body, const glm::dvec3& gravityAcc, double dt);
+
     /** @brief Sets the ambient WIND velocity (m/s) used for aerodynamic drag. The
      *  atmosphere (WorldSystem) provides it; the engine applies it per active body
      *  in integrateForces (O(bodies), inherentemente localizado — sin coste global). */

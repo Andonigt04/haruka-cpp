@@ -618,7 +618,9 @@ add_executable(haruka_tests
     tests/test_rock_interior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
     tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
     tests/test_cloud_shape.cpp           # forma de la nube: cuerpo y no lamina (ancho/alto + campo 3D)
-    tests/test_clipmap_dir.cpp)          # dir del clipmap: float del marco vs double de la CPU
+    tests/test_clipmap_dir.cpp           # dir del clipmap: float del marco vs double de la CPU
+    tests/test_ocean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
+    tests/test_terrain_node.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # test_dgs.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre
 # se propaga desde HarukaEngine (solo con HARUKA_NETWORK), así que se lo damos al test directamente.

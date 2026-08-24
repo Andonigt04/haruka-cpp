@@ -13,7 +13,7 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
 // ⚠️ LAS OCHO TEXTURAS SUELTAS DE BIOMA SE FUERON (bindings 1-8).
 //
 // Eran el camino anterior a los arrays de material: un sampler por bioma clásico (sand/grass/land/rock
-// × albedo/normal). Desde que el terreno elige su textura por CAPA DEL ARRAY, ninguna se muestreaba —
+// × albedo/normal). Desde que el= terreno elige su textura por CAPA DEL ARRAY, ninguna se muestreaba —
 // comprobado por grep — pero seguían declarándose, cargándose y enlazándose: 8 cargas de ~3 s y
 // ~176 MB de VRAM por planeta. Residuo de una migración a medias.
 //
@@ -59,6 +59,7 @@ layout(binding = 17) uniform sampler2D uSkyMaskTerrain;
 #include "lib/terrain_detail.glsl"
 // El cielo en armónicos esféricos: el ambiente se evalúa POR NORMAL, no como constante.
 #include "lib/sky_sh.glsl"
+#include "lib/terrain_shade.glsl"   // harukaTerrainAlbedo: LA MISMA que usa el pase de nodos
 layout(location = 0) out vec4 fragColor;
 
 vec2 equirectUV(vec3 dir) {
@@ -174,7 +175,30 @@ vec3 matDebugColor(int i) {
 // camino solo corre FUERA de la caja del clipmap, o sea con t0 ≥ 1984 m, donde t0·0.002 ≥ 3.97. El
 // piso nunca se alcanzaba. Puesto en el valor compartido, el comportamiento es idéntico y deja de
 // haber un cuarto número de LOD escrito a mano.
-float harukaPixelTriM(float t0) { return max(t0 * 0.002, 4.0); }
+// ⚠️ EL PISO YA NO ES EL DE LA GEOMETRÍA (4 m), Y ESO ES EL ARREGLO, NO UN DESCUIDO. Con 4.0 la
+// octava más fina de `terrain_detail.glsl` (λ 4,5 m, guarda `minFeatureM < 2.25`) NO SE ACTIVABA
+// NUNCA: el rasgo más fino del terreno era λ 22 m en todo el planeta. El sombreado se muestrea por
+// PÍXEL, no por vértice, así que no le aplica el Nyquist de la malla — ver la nota larga de
+// `TERRAIN_TRIM_FLOOR_PIXEL` en core/planet/terrain_lod.h, del que esto es el gemelo.
+float harukaPixelTriM(float t0) { return max(t0 * 0.002, 1.125); }   // = lambda_fina/4
+
+/**
+ * `triM` del SPHERE-TRACE, deliberadamente más grueso que el del sombreado.
+ *
+ * ⚠️ MEDIDO: bajar el piso per-píxel a 1,125 costó **12 ms por frame** (el juego pasó del tope de
+ * 60 fps a 34), y no porque una octava más sea cara: porque `reanchorToFine` la evalúa en CADA UNO
+ * de sus hasta **16 pasos**, por píxel. 17 evaluaciones para un detalle que solo se ve en una.
+ *
+ * El trazado y el sombreado necesitan cosas distintas:
+ *   · el TRAZADO busca DÓNDE está la superficie. Su umbral de convergencia ya es de 5 cm y su
+ *     resultado alimenta el triplanar y el punto donde se evalúa la normal; que se desvíe lo que
+ *     mide la octava fina (±0,7 m) es subpíxel a cualquier distancia en la que este camino corre
+ *     (fuera del clipmap, o sea >1,9 km: 0,7 m ahí son 0,4 px).
+ *   · el SOMBREADO sí la necesita, y solo la paga UNA vez.
+ *
+ * Por eso el trazado se queda en el piso de la GEOMETRÍA y el sombreado usa el fino.
+ */
+float harukaTraceTriM(float t0) { return max(t0 * 0.002, 4.0); }
 
 // ── MARCO DEL PLANETA SIN CANCELACIÓN CATASTRÓFICA ──────────────────────────────────────────────
 //
@@ -237,7 +261,7 @@ float frameAlt(PlanetFrame f, vec3 rel) {
 }
 
 vec3 reanchorToFine(vec3 rayDir, float t0) {
-    float pixelTriM = harukaPixelTriM(t0);
+    float pixelTriM = harukaTraceTriM(t0);   // GRUESO a propósito: ver la nota de harukaTraceTriM
     int steps = clamp(int(round(mix(16.0, 2.0, smoothstep(3000.0, 25000.0, t0)))), 2, 16);
     PlanetFrame f = planetFrame();
     float t = t0;
@@ -589,182 +613,39 @@ void main() {
     //   · COLOR (3 muestras): aporta a cualquier distancia. Llega a 12 km.
     //   · NORMAL (3 muestras más): su relieve SÍ es subpíxel de lejos — un bache de 2 cm a 1 km no
     //     inclina nada visible. Mantiene la rampa corta, que es donde estaba el ahorro de verdad.
+    // ── EL COLOR SALE DE `lib/terrain_shade.glsl`, COMPARTIDO CON EL PASE DE NODOS ───────────────
+    //
+    // ⚠️ Estas ~175 lineas vivian AQUI. El pase de nodos (v5) necesita exactamente el mismo color, y
+    // copiarlas habria sido la sexta copia divergida de un shader en este proyecto. Y aqui la
+    // divergencia se ve: si el nodo y el clipmap pintan distinto, la transicion entre los dos es una
+    // costura — justo lo que el v5 venia a quitar.
+    //
+    // Lo que sigue calculandose aqui es lo que el RESTO de este main necesita despues: `slope` (antes
+    // de que el normal map toque `n`), `bUV`, y los dos que salen de la libreria por out-param
+    // porque recomputarlos costaria recorrer otra vez la tabla de materiales.
     float lod    = 1.0 - smoothstep(3000.0, 12000.0, length(fragP));   // color y arena de orilla
     float lodNrm = 1.0 - smoothstep( 300.0,  2500.0, length(fragP));   // normal map (la cara cara)
-
-    // Sample biome map for classification + color
-    vec2 bUV = equirectUV(up);
-    vec4 biomeSample = texture(uBiomeMap, bUV);
-    vec3 biomeCol = biomeSample.rgb;
-    float H = biomeSample.a; // biome index / humidity [0,1]
-
-    // Rock override by slope
-    float slope = 1.0 - dot(n, up);
-    float rock = smoothstep(0.55, 0.80, slope) + smoothstep(2.0, 5.0, elev);
-
-    // --- SELECCION DE MATERIAL: se recorre la tabla -------------------------------------
-    // La humedad y la TEMPERATURA llegan por vertice (`vClimate.yz`) y hasta ahora se ignoraban:
-    // el shader leia la humedad del alfa del mapa horneado y no miraba la temperatura en absoluto,
-    // asi que no podia distinguir una taiga de una pradera.
-    float humid = clamp(vClimate.z, 0.0, 1.0);
-    float tempC = vClimate.y;
-
-    // El mapa de zonas se lee en el MISMO UV equirectangular que el mapa de biomas: los dos
-    // describen el mismo planeta y si divergieran, el color diría una cosa y el material otra.
-    // SIN ruido: la geometría (sampleHeight, nearest sin jitter) usa el mismo texel, así que el
-    // material y el borde del agua coinciden. Perturbar aquí con ruido descasaba el material del
-    // terreno (un texel ≈ 20 km a 2048) y pintaba agua azul sobre tierra en la franja de la costa.
-    bool hasZoneMap = uExtra.z > 0.5;
-    vec3 zoneRGB = hasZoneMap ? texture(uZoneMap, bUV).rgb * 255.0 : vec3(0.0);
-
-    vec3  tint; float grainAmt, detailAmt; int tile; vec4 matColor; int matIdx;
-    int   tileBed; float coverW;   // capa del LECHO y cuánto manto la tapa (ver terrain_strata.h)
-    // `elev` es la cota por PÍXEL leída del bake (km): el cuarto eje de la selección.
-    // Profundidad 0: esto dibuja la SUPERFICIE. Cavar y las cuevas llamarán a la misma
-    // función con su profundidad real y obtendrán el estrato que toque.
-    harukaSelectMaterial(humid, tempC, slope, elev, 0.0, zoneRGB, hasZoneMap,
-                         tint, grainAmt, detailAmt, tile, tileBed, coverW, matColor, matIdx);
-    // El color PROPIO del material sustituye al del bioma según su peso. Con peso 0 (o sin color
-    // declarado) manda el clima, que es el comportamiento de siempre.
-    biomeCol = mix(biomeCol, matColor.rgb, matColor.a);
-
-    // ── EL LECHO MARINO SE CLASIFICA COMO TERRENO, SIN CASO ESPECIAL ────────────────────────────
-    //
-    // Aquí hubo un override que, bajo el nivel del mar, mezclaba `biomeCol` hacia un color plano
-    // (0.42, 0.38, 0.31). Existía porque el material de agua SIEMPRE ganaba ahí y pintaba una lámina
-    // azul sobre la textura del planeta; el parche tapaba el síntoma con otra constante.
-    //
-    // ⚠️ Y ERA LO QUE HACÍA QUE EL FONDO DEL MAR SE VIERA DE UN COLOR UNIFORME, DISTINTO DEL TERRENO,
-    // EN TODO EL PLANETA: un color constante aplastando la clasificación por clima. Da igual el
-    // bioma, la latitud o el material — todo lo sumergido salía del mismo tono.
-    //
-    // Ya no hace falta ninguna de las dos cosas. `main.scene` declara TRES materiales sumergidos
-    // (`water`, `deep_ocean`, `shelf`), los tres con color azul y ninguno con banda de altura, así
-    // que competían por clima en todo el planeta y ganaban bajo el agua. Marcados como agua, la
-    // selección los salta (ver `harukaIsWaterMat`) y bajo el nivel del mar gana un material de
-    // TIERRA — con su color, su textura y su clima, igual que la costa de al lado. El lecho deja de
-    // ser un caso especial y pasa a ser lo que es: terreno que resulta estar bajo la cota 0.
-    //
-    // Cuando el agua vuelva, lo que la dibuje irá ENCIMA de este terreno; no en su lugar.
-
-    // `tiling` es METROS POR TILE. Estaba usándose al revés (`vFragPos * tiling` con un scale de
-    // 0.5 encima) → un tile cada 2 cm: muy por debajo del píxel a cualquier distancia, así que la
-    // textura se promediaba a gris plano y no aportaba ni grano ni relieve. De ahí que el terreno
-    // se viera liso por mucha resolución que tuvieran los PNG.
-    // Anclado al PLANETA, no a la cámara: vFragPos es relativo a la cámara (aPos + uCenter), así que
-    // usarlo como coordenada de textura hacía que el patrón se deslizara con el jugador.
-    //
-    // ⚠️ Y NO se reconstruye la posición planetaria (`fragP - uCenter`). Esa resta es entre dos
-    // floats de ~6,37e6 y su resultado queda cuantizado a un ulp ≈ 0,76 m POR PÍXEL, así que las
-    // derivadas que la GPU usa para elegir el mip salen 0 ó 0,76 m en vez del valor real: cada píxel
-    // muestreaba un mip arbitrario y el suelo entero era sal y pimienta (ver `planet.cpp`,
-    // `uTexAnchor`). `fragP` es relativo a la cámara (metros a km → precisión de milímetros) y el
-    // ancla ya viene reducida módulo el tile en doubles: la suma es exacta, el patrón sigue pegado al
-    // planeta y las derivadas vuelven a describir el movimiento real de la textura.
-    //
-    // ⚠️ Todo patrón que use `wp` tiene que tener PERIODO DIVISOR de `tiling`, o el módulo del ancla
-    // dejaría de ser invisible y el patrón saltaría al cruzar un múltiplo. De ahí que el grano y la
-    // arena de abajo se deriven de `tiling` en vez de llevar su propio número en metros.
-    vec3 wp = fragP + uTexAnchor.xyz;
-    float tileScale = 1.0 / max(tiling, 0.01);
-    // Una sola llamada: el material dice QUE CAPA, no que sampler. tile < 0 = sin textura (hielo,
-    // sal, lava vidriada): luminancia neutra -> grano ~1 y superficie lisa.
-    // ⚠️ LUMINANCIA MEDIA AUTORIZADA A 0.5. `tools/gen_terrain_textures.py` normaliza cada PNG a esa
-    // media exacta con estos MISMOS pesos, así que `tex / kTexMean` tiene media 1.0 y multiplicar por
-    // él es neutro en promedio. Antes el número era 0.45, medido a ojo sobre unos ficheros concretos:
-    // una constante del shader que dependía del asset, y que se desajustaba al cambiar una textura.
-    const float kTexMean = 0.5;
-    const vec3  kLumaW   = vec3(0.2126, 0.7152, 0.0722);
-    // ── DOS CAPAS MEZCLADAS POR EL ESPESOR DEL MANTO ────────────────────────────────────────────
-    //
-    // La superficie es cobertura sobre lecho, así que se muestrean las DOS y se mezclan con
-    // `coverW`. Es lo que convierte el borde de un cortado en un degradado en vez de un recorte: al
-    // subir la pendiente el sedimento se va yendo y la roca aparece por debajo, que es lo que hace
-    // de verdad.
-    //
-    // El coste está acotado: cuando `coverW` está pegado a 0 o a 1 —o sea en casi todo el planeta,
-    // porque el manto solo se adelgaza en las laderas— se muestrea UNA sola capa. El segundo
-    // triplanar se paga únicamente en la franja de transición.
-    vec3 tex;
-    if (lod < 0.01) {
-        tex = vec3(kTexMean);
-    } else if (coverW > 0.99 || tileBed == tile) {
-        tex = (tile < 0) ? vec3(kTexMean)
-                         : triplanarArr(uTerrainAlbedo, float(tile), wp, n, tileScale);
-    } else if (coverW < 0.01) {
-        tex = (tileBed < 0) ? vec3(kTexMean)
-                            : triplanarArr(uTerrainAlbedo, float(tileBed), wp, n, tileScale);
-    } else {
-        vec3 texC = (tile    < 0) ? vec3(kTexMean)
-                                  : triplanarArr(uTerrainAlbedo, float(tile),    wp, n, tileScale);
-        vec3 texB = (tileBed < 0) ? vec3(kTexMean)
-                                  : triplanarArr(uTerrainAlbedo, float(tileBed), wp, n, tileScale);
-        tex = mix(texB, texC, coverW);
-    }
-
-    // Macro variation brightness modulation
-    vec4 macro = texture(uMacroVar, bUV);
-    // El PNG aporta GRANO, no color: el color es el del bioma, que sale del clima. `grainAmt`
-    // decide cuanto se nota por material (el hielo casi nada, la roca mas que nadie).
-    float grain = mix(1.0, dot(tex, kLumaW) / kTexMean, grainAmt);
-    // El ALBEDO SE VE, no solo su luminancia: se mezcla el COLOR de la textura con el del bioma
-    // para que el patron (hierba, arena, roca) sea visible. Antes el color plano del material
-    // lo tapaba y la textura solo aportaba grano, que es como "no tener texturas".
-    float texW = clamp(grainAmt * 0.55, 0.0, 0.75) * lod;
-    vec3 col = mix(biomeCol, biomeCol * tex / kTexMean, texW) * tint * clamp(grain, 0.75, 1.25);
-
-    // ── EL GRANO YA NO SE FABRICA AQUÍ: ESTÁ EN LA TEXTURA ──────────────────────────────────────
-    //
-    // Aquí había una SEGUNDA capa triplanar de la misma imagen muestreada a ~2 m por tile, aplicada
-    // como modulación multiplicativa en los primeros 40 m. Existía porque las texturas del proyecto no
-    // tenían detalle fino: medido, su contraste a la escala más pequeña era del **0,15-0,32 %** y su
-    // espectro se aplanaba a 1,1 por octava — la firma de una imagen reescalada. El suelo salía liso y
-    // el shader lo compensaba inventándose la rugosidad.
-    //
-    // Compensar por código es inestable, y por eso se va: el resultado dependía de la distancia (una
-    // banda de fundido de 8-40 m que se ve pasar), del mip que eligiera el driver para un patrón de
-    // 2 m, y de la precisión con la que se reconstruyera `wp` — las tres cosas ya han dado problemas
-    // en este shader. Un material no cambia de aspecto porque el jugador se acerque.
-    //
-    // Ahora el detalle lo trae el asset: `tools/gen_terrain_textures.py` genera cada material con un
-    // espectro en ley de potencias sostenido hasta Nyquist (contraste fino del 1,0-2,6 %, ~10× más) y
-    // un normal map derivado de SU propia altura con la pendiente de cada material. Eso se muestrea
-    // UNA vez, con mipmaps y anisotropía, y se ve igual a un metro que a cincuenta.
-    //
-    // La variación de macro solo en TIERRA: en el mar (liso, sin tiles) su patrón de manchas se
-    // veía como círculos grises. step(0,elev) = 1 en tierra, 0 en mar.
-    col *= 0.85 + 0.30 * macro.r * step(0.0, elev);
-
-    // Sand overlay at shoreline — a los DOS lados del nivel del mar. `elev` está en km. La rampa del
-    // lado del agua sube al acercarse a la superficie (de -30 m a -2 m: arena mojada en la orilla) y
-    // la del lado de tierra baja al alejarse (0 a +12 m: playa seca). Antes solo se pintaba bajo el
-    // agua y además con la rampa invertida, así que la orilla seca salía con el color del bioma de
-    // esa latitud y la costa no se leía como costa; ahora la línea del agua tiene playa en sus dos
-    // lados y se ve como costa incluso desde lejos.
+    vec2  bUV    = equirectUV(up);
+    float humid  = clamp(vClimate.z, 0.0, 1.0);
+    float tempC  = vClimate.y;
+    float slope  = 1.0 - dot(n, up);        // ANTES del normal map, como siempre estuvo
+    bool  hasZoneMap = uExtra.z > 0.5;
+    // Solo la usa la vista de depuracion 2 (zonas del autor). Es una muestra, no vale la pena
+    // sacarla de la libreria por otro out-param.
+    vec3  zoneRGB = hasZoneMap ? texture(uZoneMap, bUV).rgb * 255.0 : vec3(0.0);
+    vec3  biomeCol; int matIdx;
+    vec3  col = harukaTerrainAlbedo(uTerrainAlbedo, uTerrainNormal, uMacroVar, uBiomeMap, uZoneMap,
+                                    true, true, hasZoneMap,
+                                    fragP, uTexAnchor.xyz, n, up,
+                                    elev, tempC, humid,
+                                    tiling, int(uMatCount.z), lod, lodNrm,
+                                    biomeCol, matIdx);
+    diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar: el normal map movio `n`
+    // La banda de ORILLA la usa tambien el barniz de arena mojada, mas abajo. Es funcion pura de
+    // `elev`, asi que se recalcula aqui en vez de sacarla de la libreria por otro out-param —
+    // gemela de la de `harukaTerrainAlbedo`: si una cambia, cambian las dos.
     float shoreF = smoothstep(-0.030, -0.002, elev) * (1.0 - smoothstep(0.0, 0.012, elev));
-    float sandW = shoreF * (1.0 - smoothstep(0.45, 0.7, slope));
-    // ×2 (periodo `tiling`/2), no ×1.4: el factor tiene que DIVIDIR el tiling para que el módulo del
-    // ancla de `wp` no se note. Con 1.4 el periodo era 71,4 m contra un ancla de 100 m.
-    // La arena de la orilla, desde la CAPA del array que declara la tabla. Con -1 (ninguna declarada)
-    // la orilla se queda con su color sin textura: degradación visible, no basura.
-    int shoreLayer = int(uMatCount.z);
-    if (lod > 0.01 && sandW > 0.001 && shoreLayer >= 0)
-        col = mix(col, triplanarArr(uTerrainAlbedo, float(shoreLayer), wp, n, tileScale * 2.0), sandW);
 
-    // RELIEVE del material: la desviacion de su normal map. Solo la parte tangencial (la componente
-    // a lo largo de n no inclina nada y si desnormaliza) y con fuerza baja: con sombreado cel un
-    // relieve fuerte pica el terminador y saca manchas oscuras.
-    vec3 nrmDelta = (tile < 0 || lodNrm < 0.01) ? vec3(0.0)
-                                             : triplanarArrNrm(uTerrainNormal, float(tile), wp, n, tileScale);
-    if (dot(nrmDelta, nrmDelta) > 1e-8) {
-        vec3 dTan = nrmDelta - dot(nrmDelta, n) * n;
-        // El relieve del normal map se apaga con la distancia igual que la textura (`lod`): a
-        // 500-2500 m es subpíxel y muestrear su desviación a plena fuerza solo mete temblor y paga
-        // el mismo coste. Cerca de los pies (`lod`≈1) queda entero; `(0.5 + 0.5·lod)` mantiene al
-        // menos la mitad en el plano medio en vez de un corte brusco.
-        n = normalize(n + 0.35 * detailAmt * (0.5 + 0.5 * lodNrm) * dTan);
-        diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar con la normal nueva
-    }
 
     // Luz del SOL + CIELO, MISMA respuesta que el agua: `sunD` satura antes (clamp(diff*1.6), igual
     // que water.frag) y con multiplicador más alto, más un destello especular tenue para que el

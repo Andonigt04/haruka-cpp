@@ -1,42 +1,234 @@
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/main.cpp:172: warning: multiple use of section label 'sec_docs' while adding section, (first occurrence: /home/andoni/Documents/Github/opengl/haruka-cpp/src/main.cpp, line 17)
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/audio/audio_loader.h:7: warning: Unsupported xml/html tag <idioma> found
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/asset_paths.h:7: warning: Unsupported xml/html tag <exe> found
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/asset_paths.h:9: warning: Unsupported xml/html tag <exe> found
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/locale.h' at line 8)
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/locale.h' at line 5)
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/modules.h:6: warning: explicit link request to 'ifdef' could not be resolved
-/home/andoni/Documents/Github/opengl/haruka-cpp/README.md:274: warning: unable to resolve reference to '/home/andoni/Documents/Github/opengl/haruka-cpp/LICENSE.md' for \ref command
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/application.h:182: warning: Unsupported xml/html tag <timestamp> found
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/terrain/floating_islands.h:57: warning: The following parameters of Haruka::generateFloatingIslandsNear(uint32_t seed, const glm::dvec3 &planetCenter, double planetRadius, const WorldGenParams &W, const glm::dvec3 &camDir, float angRadius) are not documented:
-  parameter 'seed'
-  parameter 'planetCenter'
-  parameter 'planetRadius'
-  parameter 'W'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/io/image_writer.h:17: warning: The following parameters of Haruka::writePNG(const std::string &path, int w, int h, int channels, const unsigned char *pixels) are not documented:
+warning: source 'shaders' is not a readable file or directory... skipping.
+/home/andoni/Documents/Github/haruka-cpp/src/rhi/vulkan/vk_common.h:191: warning: Reached end of file while still inside a (nested) comment. Nesting level 2 (possible line reference(s): 17, 15)
+/home/andoni/Documents/Github/haruka-cpp/src/audio/audio_loader.h:7: warning: Unsupported xml/html tag <idioma> found
+/home/andoni/Documents/Github/haruka-cpp/src/core/asset_paths.h:7: warning: Unsupported xml/html tag <exe> found
+/home/andoni/Documents/Github/haruka-cpp/src/core/asset_paths.h:9: warning: Unsupported xml/html tag <exe> found
+/home/andoni/Documents/Github/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/Github/haruka-cpp/src/core/locale.h' at line 8)
+/home/andoni/Documents/Github/haruka-cpp/src/core/locale.h:10: warning: end of comment block while expecting command </c> (Probable start '/home/andoni/Documents/Github/haruka-cpp/src/core/locale.h' at line 5)
+/home/andoni/Documents/Github/haruka-cpp/src/core/modules.h:6: warning: explicit link request to 'ifdef' could not be resolved
+/home/andoni/Documents/Github/haruka-cpp/src/game/prefab/prefab.h:21: warning: Unsupported xml/html tag <nombre> found
+/home/andoni/Documents/Github/haruka-cpp/README.md:15: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:21: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:40: warning: unable to resolve reference to '-present-in-the-tree-but-not-wired' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:41: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/ESTADO_MOTOR.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:56: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:81: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/ESTADO_MOTOR.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:219: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:221: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:231: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/ESTADO_MOTOR.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:238: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/MODULES.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:250: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:281: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/ESTADO_MOTOR.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:299: warning: unable to resolve reference to '-terrain-status' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:338: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/docs/ESTADO_MOTOR.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/README.md:364: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/LICENSE.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/docs/guides/PLAN_PLANETAS_MANUALES.md:17: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/TERRENO.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/docs/guides/PLAN_PLANETAS_MANUALES.md:19: warning: unable to resolve reference to '/home/andoni/Documents/Github/haruka-cpp/TODO.md' for \ref command
+/home/andoni/Documents/Github/haruka-cpp/src/core/application.h:396: warning: Unsupported xml/html tag <timestamp> found
+/home/andoni/Documents/Github/haruka-cpp/src/io/image_writer.h:33: warning: The following parameters of Haruka::writePNG(const std::string &path, int w, int h, int channels, const unsigned char *pixels) are not documented:
   parameter 'path'
   parameter 'w'
   parameter 'h'
   parameter 'channels'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/cinematics/cinematic_sequencer.h:42: warning: The following parameters of Haruka::CinematicSequencer::update(double dt, Camera &out, const Camera &gameplayCam) are not documented:
+/home/andoni/Documents/Github/haruka-cpp/src/io/image_writer.h:41: warning: The following parameters of Haruka::writePNG16(const std::string &path, int w, int h, const unsigned short *gray) are not documented:
+  parameter 'path'
+  parameter 'w'
+  parameter 'h'
+/home/andoni/Documents/Github/haruka-cpp/src/cinematics/cinematic_sequencer.h:42: warning: The following parameters of Haruka::CinematicSequencer::update(double dt, Camera &out, const Camera &gameplayCam) are not documented:
   parameter 'dt'
   parameter 'out'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/core/noise_generator.h:60: warning: The following parameters of Haruka::NoiseGenerator::fBm_d(const glm::vec3 &pos, glm::vec3 &outGrad, int seed=0, int octaves=4, float persistence=0.5f, float lacunarity=2.0f, float scale=1.0f) are not documented:
+/home/andoni/Documents/Github/haruka-cpp/src/core/noise_generator.h:89: warning: The following parameters of Haruka::NoiseGenerator::fBm_d(const glm::vec3 &pos, glm::vec3 &outGrad, int seed=0, int octaves=4, float persistence=0.5f, float lacunarity=2.0f, float scale=1.0f) are not documented:
   parameter 'pos'
   parameter 'seed'
   parameter 'octaves'
   parameter 'persistence'
   parameter 'lacunarity'
   parameter 'scale'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/game/planetary_system.h:98: warning: The following parameter of Haruka::PlanetarySystem::editTerrain(const glm::dvec3 &worldPos, double radius, double strength, bool dig) is not documented:
-  parameter 'dig'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/game/planetary_system.h:105: warning: The following parameters of Haruka::PlanetarySystem::levelTerrain(const glm::dvec3 &worldPos, double radius, double targetHeightM) are not documented:
-  parameter 'worldPos'
-  parameter 'radius'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/game/planetary_system.h:114: warning: The following parameters of Haruka::PlanetarySystem::levelTerrainBox(const glm::dvec3 &center, const glm::dvec3 &halfExtents, const glm::dmat3 &rot, double targetHeightM, double band) are not documented:
-  parameter 'center'
-  parameter 'targetHeightM'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/ui/ui_world_panel.h:20: warning: Unsupported xml/html tag <caller> found
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/physics/xpbd/softbody.h:52: warning: The following parameter of Haruka::xpbd::makeBox(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &size, int nx, int ny, int nz, float totalMass, float edgeCompliance=0.001f, float volumeCompliance=0.0f) is not documented:
+/home/andoni/Documents/Github/haruka-cpp/src/game/planetary_system.h:109: warning: The following parameter of Haruka::PlanetarySystem::update(double dt, const glm::dvec3 &cameraPos) is not documented:
+  parameter 'cameraPos'
+warning: Call graph for 'Haruka::Core::Application::renderFrameContent' not generated, too many nodes (67), threshold is 50. Consider increasing DOT_GRAPH_MAX_NODES.
+/home/andoni/Documents/Github/haruka-cpp/src/core/planet/soi.h:159: warning: The following parameters of Haruka::Planet::gravityAt(const std::vector< GravityBody > &bodies, const glm::dvec3 &pos, int skipIndex=-1) are not documented:
+  parameter 'bodies'
+  parameter 'pos'
+/home/andoni/Documents/Github/haruka-cpp/src/core/planet/terrain_detail.h:146: warning: argument 'dir' of command @param is not found in the argument list of Haruka::Planet::octaveWeight(float wavelengthM, float minFeatureM)
+/home/andoni/Documents/Github/haruka-cpp/src/core/planet/terrain_detail.h:146: warning: argument 'radius' of command @param is not found in the argument list of Haruka::Planet::octaveWeight(float wavelengthM, float minFeatureM)
+/home/andoni/Documents/Github/haruka-cpp/src/core/planet/terrain_detail.h:146: warning: The following parameter of Haruka::Planet::octaveWeight(float wavelengthM, float minFeatureM) is not documented:
+  parameter 'wavelengthM'
+/home/andoni/Documents/Github/haruka-cpp/src/core/planet/orbit.h:101: warning: The following parameters of Haruka::Planet::orbitBasis(double incRad, double nodeRad, double argPRad, glm::dvec3 &outU, glm::dvec3 &outV) are not documented:
+  parameter 'incRad'
+  parameter 'nodeRad'
+  parameter 'argPRad'
+/home/andoni/Documents/Github/haruka-cpp/src/game/planet.h:167: warning: The following parameter of Haruka::Planet::TerrestrialPlanet::rebuild(const Haruka::Planet::GeologyConfig &geo, int faceRes=0) is not documented:
+  parameter 'geo'
+/home/andoni/Documents/Github/haruka-cpp/src/game/planet.h:214: warning: argument 'ambientColor' of command @param is not found in the argument list of Haruka::Planet::TerrestrialPlanet::setSkyAmbientSH(const glm::vec3(&) coef[9])
+/home/andoni/Documents/Github/haruka-cpp/src/game/planet.h:214: warning: The following parameter of Haruka::Planet::TerrestrialPlanet::setSkyAmbientSH(const glm::vec3(&) coef[9]) is not documented:
+  parameter 'coef'
+warning: Caller graph for 'Haruka::RHI::device' not generated, too many nodes (105), threshold is 50. Consider increasing DOT_GRAPH_MAX_NODES.
+/home/andoni/Documents/Github/haruka-cpp/src/rhi/rhi_device.h:168: warning: explicit link request to 'include' could not be resolved
+warning: Caller graph for 'Haruka::RHI::valid' not generated, too many nodes (68), threshold is 50. Consider increasing DOT_GRAPH_MAX_NODES.
+/home/andoni/Documents/Github/haruka-cpp/src/rhi/vulkan/vk_pipeline.h:42: warning: explicit link request to 'include' could not be resolved
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/prop_mesh.h:59: warning: The following parameters of Haruka::Tools::ProcGraph::bakeRockMesh(int seed, float scale=1.0f, float squashY=0.72f, float cullFrac=0.83f) are not documented:
+  parameter 'seed'
+  parameter 'scale'
+  parameter 'squashY'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::SampleClimateNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::SampleElevationNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::SampleSlopeNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::SampleWeatherNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::BiomeClassifyNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::Node::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z)=0 are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::ConstNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::MathNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::UnaryNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::BlendNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::ColorRampNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::ClampNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::MapRangeNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::DomainNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::GradientNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::CheckerNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::PerlinNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::VoronoiNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::FBMNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::WhiteNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::VoronoiEdgeNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::KnotNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::BranchNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/tree_mesh.h:163: warning: The following parameters of Haruka::Tools::ProcGraph::TreeMeshNode::TreeMeshNode(int seed=0, float height=6.5f, float trunkRadius=0.35f, float canopySize=1.0f, int segments=8, float detail=1.0f) are not documented:
+  parameter 'seed'
+  parameter 'height'
+  parameter 'trunkRadius'
+  parameter 'canopySize'
+  parameter 'segments'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::TreeMeshNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/tools/procgraph/proc_graph.h:73: warning: The following parameters of Haruka::Tools::ProcGraph::TreeCombineRGBNode::evaluate(const Value *inputs, int numInputs, Value *outputs, int numOutputs, float x, float y, float z) are not documented:
+  parameter 'numInputs'
+  parameter 'numOutputs'
+  parameter 'x'
+  parameter 'y'
+  parameter 'z'
+/home/andoni/Documents/Github/haruka-cpp/src/ui/ui_world_panel.h:20: warning: Unsupported xml/html tag <caller> found
+/home/andoni/Documents/Github/haruka-cpp/src/physics/xpbd/softbody.h:52: warning: The following parameter of Haruka::xpbd::makeBox(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &size, int nx, int ny, int nz, float totalMass, float edgeCompliance=0.001f, float volumeCompliance=0.0f) is not documented:
   parameter 'volumeCompliance'
-/home/andoni/Documents/Github/opengl/haruka-cpp/src/physics/xpbd/softbody.h:32: warning: The following parameter of Haruka::xpbd::makeCloth(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &right, const glm::vec3 &down, int nx, int ny, float totalMass, bool pinTopRow, float compliance=0.0f, float bendCompliance=0.02f) is not documented:
+/home/andoni/Documents/Github/haruka-cpp/src/physics/xpbd/softbody.h:32: warning: The following parameter of Haruka::xpbd::makeCloth(XPBDSolver &solver, const glm::vec3 &origin, const glm::vec3 &right, const glm::vec3 &down, int nx, int ny, float totalMass, bool pinTopRow, float compliance=0.0f, float bendCompliance=0.02f) is not documented:
   parameter 'bendCompliance'

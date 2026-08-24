@@ -1,9 +1,20 @@
-// Application — lifecycle & orchestration.
-// Construction/teardown, scene loading, planetary-system bring-up, graphics
-// settings application, FBO (re)creation and the standalone main loop. The
-// per-frame rendering lives in application_render.cpp, the GL asset caches in
-// application_assets.cpp and the DGS network bridge in application_network.cpp.
-
+/**
+ * @file application.cpp
+ * @brief Application — ciclo de vida y orquestación.
+ *
+ * Construcción y destrucción, carga de escena, arranque del sistema planetario,
+ * aplicación de los ajustes gráficos, (re)creación de los FBO y el bucle
+ * principal. El trabajo por frame vive en `application_render.cpp`, las cachés de
+ * assets en `application_assets.cpp` y el puente de red en
+ * `application_network.cpp`.
+ *
+ * Dos detalles del arranque que no se ven leyendo las llamadas:
+ *
+ * - Las variables de offload de GPU (`__NV_PRIME_RENDER_OFFLOAD`, `DRI_PRIME`) se
+ *   ponen **antes** de crear el contexto. Después no tienen ningún efecto.
+ * - El backend sale del ajuste gráfico, y `HARUKA_BACKEND=vulkan|opengl` lo fuerza
+ *   sin tocar el ajuste guardado.
+ */
 #include "application.h"
 #include "application_internal.h"
 

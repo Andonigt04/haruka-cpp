@@ -14,6 +14,115 @@ El plan por versiones está en [ROADMAP.md](../ROADMAP.md). Lo que sigue abierto
 
 ---
 
+## Sesión 2026-08-18 — arranque, escritor PNG, normal per-píxel, sombreado unificado y un bug de Vulkan
+
+Suites al cerrar: motor **25927 OK · 1 fallo** (`terrain_quality_mapping: default quality is Low`,
+preexistente y ajeno) · RHI **158 OK · 0 fallos** en los DOS backends.
+
+### Arranque en frío: 34 s → 21 s
+
+**El primer intento fue al sitio equivocado, y conviene que quede escrito.** Los horneados topaban los
+hilos en 8 con 16 disponibles; lo subí a 32 y **no cambió nada** (bioma 22 s antes y después). La
+sonda que faltaba lo zanjó: `height 18750x9375: muestreo 2475 ms (16 hilos) · guardar PNG 8704 ms`.
+**El 78 % era escribir**, y escribir iba en un solo hilo.
+
+`io/image_writer.cpp` ahora paraleliza las dos etapas:
+- **Filtrado de filas** por bandas. Cada fila depende solo de las filas `y` e `y-1` de la imagen
+  ORIGINAL (no de las ya filtradas), así que no había cadena que romper.
+- **DEFLATE por trozos.** Cada hilo comprime su rango sin referencias LZ77 que crucen la frontera y
+  los bloques se pegan con una sincronización a byte (bloque *stored* vacío, 5 bytes por frontera).
+- **adler32 con módulo diferido** (bloques de 5552). La versión anterior hacía dos divisiones enteras
+  **por byte**: sobre 351 MB son ~700 M de divisiones.
+
+Resultado: guardar la altura **8704 → 2156 ms**, fichero 509 bytes mayor sobre 64 MB (+0,0008 %).
+
+⚠️ **El test que existía no cubría esto**: usaba imágenes de 273×149, por debajo del umbral de
+paralelización, o sea que solo probaba el camino serie. Añadidos dos casos grandes (2400×2400 RGBA y
+3000×1500 de 16 bits) con ida y vuelta contra el inflate de stb. **Contraprueba**: un off-by-one en una
+frontera hace fallar SOLO los casos grandes — los pequeños pasan.
+
+**Lo que NO se hizo:** escritura asíncrona. Con el escritor paralelo, escribir es el 16 % del arranque;
+sacarlo a un hilo exige copiar los mapas (+700 MB de pico) para ahorrar 3,4 s.
+
+### La ventana ya no se marca como "no responde"
+
+`core/progress_hook.h` (enganche global, vacío por defecto) + los dos bucles de horneado, que ya no
+bloquean el hilo principal en `join`: esperan despiertos cada 30 ms sobre un contador atómico y vacían
+la cola de SDL. Coste medido: 14 649 ms frente a 14 789 ms — dentro del ruido.
+**Límite honesto:** la ventana NO se repinta; esto solo evita el "no responde".
+
+### La normal del terreno era per-vértice donde más se nota
+
+`biome.frag` calculaba la normal per-píxel **solo fuera del clipmap**. Dentro —los ~2 km alrededor de
+la cámara— heredaba `vNorm`, del gradiente en cada vértice teselado, y el clipmap satura el nivel en
+32: **vértices cada 4 m**. Iluminación per-píxel sobre una normal con detalle cada 4 metros, que se ve
+por triángulos aunque la luz no lo sea. Lejos fino, cerca basto.
+
+Añadida la rama que faltaba. No re-ancla (la teselación ya puso bien la posición) y comparte función,
+`triM` y marco tangente con `clipmap.tese`. ⚠️ **Su coste en ms NO está medido**: las dos tomas no
+eran comparables (el juego arranca en estados distintos) y los rangos se solapan. Revertir es quitar
+la rama `else`, que está aislada.
+
+### Cinco copias del sombreado toon, divergidas
+
+Inventario de los 105 shaders. El mismo modelo copiado **cinco veces** con cuatro terminadores (0,25 ·
+0,28 · 0,32 · 0,70) y cuatro colores de sombra, **tres de ellos constantes** que no miran ni el cielo
+ni la hora: al atardecer todo lo sombreado seguía siendo el mismo gris azulado. Ese era el "color de
+sombra plano" reportado.
+
+`lib/surface_shade.glsl`: `harukaApplyNormalMap` (era byte a byte idéntica en 3 ficheros),
+`harukaToonBand` (0,30, el término medio) y `harukaToonShadowTint` (ambiente REAL, misma expresión que
+`uAmbient` del terreno). Aplicado a `final.frag`, `prop_inst.frag`, `construction_inst.frag`,
+`planet.frag` y `Survival/prop.frag`.
+
+⚠️ **No se unificó** el rim, el especular ni el SSS de las hojas: ahí las diferencias son de MATERIAL,
+no copias que se separaron.
+
+Verificación de que `applyNormalMap` no cambió un píxel: comparado el **perfil de instrucciones del
+SPIR-V** antes y después (8 FAdd · 7 FMul · 5 FSub · 5 Dot · 2 Select · 2 FDiv · 2 DPdy · 2 DPdx ·
+1 FOrdLessThan, idéntico), con contraprueba rompiendo el Gram-Schmidt.
+
+### Vulkan: un uso-después-de-liberar, y una hipótesis descartada
+
+`VKContext::forgetBuffer` se escribió para los descriptores y solo limpiaba esos. `m_vbs`/`m_ib`
+sobreviven igual entre draws: destruir una malla dejaba un `VkBuffer` muerto y el siguiente draw lo
+ataba → `Invalid VkBuffer Object` y **SIGSEGV**. En GL es inofensivo. Lo dispara cualquier cosa que
+libere geometría con el streaming andando.
+
+⚠️ **HIPÓTESIS DESCARTADA, no volver a perseguirla.** `camera.cpp` niega `p[1][1]` en Vulkan y
+`frontFace` es la misma constante en los dos backends, así que parece que Vulkan debe descartar las
+caras al revés. **No lo hace**: la Y del clip invertida y el origen del framebuffer arriba se cancelan.
+Demostrado con `testCullWindingWithProjection`, que existe justamente para que nadie repita el
+razonamiento. Ningún test anterior lo cubría porque todos dibujan en NDC, sin pasar por una proyección.
+
+### Sondas nuevas
+
+- `HARUKA_FRAMELOG=1` — media/p95/peor del frame cada 3 s **+ ms de física**. Es lo que hay que usar
+  para comparar dos versiones de un shader; el overlay solo da el frame actual.
+- Reparto `evaluar X ms · guardar PNG Y ms` en cada horneado.
+
+### Física: medida, y no hay nada que refinar
+
+**0,02 ms de un frame de 16,7 ms (0,1 %).** `maxBodies`, `maxBodyPairs`, el TempAllocator y los pasos
+de colisión reparten esos 0,02 ms. **No tocar el `JobSystemSingleThreaded`**: un hilo parece
+desperdicio pero Jolt no es determinista entre distintos recuentos de hilos, y eso es requisito del
+DGS — a este coste, sale gratis. Lo caro es rehacer la malla (lejano 40 ms = muestreo 28 + shapes 11),
+y ya va en `std::async`; el único frame caro es el primer build, que sí es síncrono.
+
+### Trampas de build que costaron tiempo
+
+1. **Un `.spv` que falla es INVISIBLE**: el motor cae al GLSL del driver, se ve igual y los tests
+   pasan. Nada vigila que los `.spv` existan.
+2. **`build.sh` NO construye los binarios de test.** Estuve leyendo `86 OK` de un binario viejo
+   cuando el actual daba `158 OK` — media suite no corría.
+3. **`file(GLOB)` copia shaders en tiempo de CONFIGURACIÓN**: un shader nuevo no llega a
+   `build/assets` hasta `cmake -S . -B build`.
+4. Para incluir una lib del motor desde un shader del JUEGO hacen falta
+   `#extension GL_GOOGLE_include_directive : require` **y** el `-I` del motor en el CMake del juego.
+   Con `VERBATIM`, `-I"${VAR}"` pasa las comillas LITERALES.
+
+---
+
 ## Sesión 2026-08-16 — puertos, raíles, calidad, vehículos y prefabricados
 
 Suites al cerrar: motor **25922 OK · 0 fallos**; juego **53 + 43 + 35 + 24 + 23 + 18 + 77 + 10 OK · 0 fallos**

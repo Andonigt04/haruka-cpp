@@ -8,8 +8,13 @@ Nada de plan por versión.
 | Bugs abiertos · verificaciones pendientes · ideas sin decidir. | [ROADMAP.md](ROADMAP.md) — el plan por versión de los tres proyectos. |
 | | [docs/HISTORIAL.md](docs/HISTORIAL.md) — lo cerrado, con las trampas que costaron sesiones. |
 
-**Suite**: `./haruka_tests` → **25806 OK · 0 FALLOS** (ejecutado 2026-08-11). Juego:
+**Suite**: `./haruka_tests` → **26043 OK · 1 FALLO** (2026-08-24; el fallo es
+`terrain_quality_mapping: default quality is Low`, preexistente). RHI: `./haruka_tests_rhi` →
+**219 OK · 0 FALLOS** en los dos backends.
+⚠️ **Para medir tiempos, `HARUKA_NO_VSYNC=1`**: con FIFO cualquier ms/frame se clava en 16,67 y mide
+la presentación, no la GPU. El test de coste del sombreado lo detecta y avisa, los demás no. Juego:
 `Survival/build/bin/survival_tests assets/data/magic/language/` → **53 OK**.
+⚠️ **`build.sh` NO construye los binarios de test**: `cmake --build build --target haruka_tests haruka_tests_rhi -j16`.
 *⚠️ El README sigue diciendo 19 460 y este fichero decía 20 135: los dos estaban obsoletos. El
 recuento de arriba es el de la última ejecución real, no una estimación.*
 
@@ -27,6 +32,10 @@ recuento de arriba es el de la última ejecución real, no una estimación.*
 | 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `src/rhi/` |
 | 5 | **`preview.vert` es código muerto** y además declara un `PerObjectData` DESACTUALIZADO (sin los campos de material). Nadie lo compila hoy; el día que alguien lo use, falla al LINKAR sin decir por qué. Borrarlo o actualizarlo. | `assets/shaders/preview.vert` |
 | 7 | **Nadie fija la raíz de assets salvo el editor**: `Shader::setBaseDir` no lo llama ni el motor ni Survival, así que ambos dependen de que el cwd sea el del ejecutable. El editor ya la deriva de `SDL_GetBasePath`; el resto sigue a merced de desde dónde se lance. | `renderer/shader.h` |
+| 9 | **OpenGL: un compute NO puede muestrear texturas.** `terrain_node.comp` lee el bake por `sampler2DArray` (binding 15): en Vulkan casa a 0,0007 m contra la CPU, en GL devuelve **0 en los 16 641 téxeles**. Consecuencia real: **con OpenGL el terreno del pase v5 sale sin continentes**. Descartado: el `.spv` está al día, la subida de texturas en capas es correcta, y el MISMO binding funciona en GL desde el TESE del clipmap. Nunca se había ejercido: ningún otro `.comp` del proyecto muestrea texturas. | `src/rhi/opengl/`, `terrain_node.comp` |
+| 10 | **Un render target offscreen deja el backend movido.** `testTerrainNodeShadeCost` es el único test que dibuja a un target propio, y tras él falla el siguiente que lee píxeles del framebuffer por defecto. NO lo explican ni el viewport (`beginRenderPass` lo restaura), ni destruir el target, ni un frame de restauración explícito. Mitigado poniéndolo EL ÚLTIMO del banco — mientras siga así, nadie puede añadir un test detrás sin comprobar que no hereda basura. | `src/rhi/` |
+| 11 | **`readPixels` solo sabe leer del framebuffer por defecto.** No hay forma de leer un render target offscreen, así que cualquier test que dibuje a 1080p tiene que hacer su contraprueba en la ventana. | `rhi_device.h` |
+| 12 | **Comentario obsoleto**: `planet.cpp:3358` cita `water.frag`, que ya no existe. | `src/game/planet.cpp` |
 | 8 | **El clear del frame usa el color de cielo aunque no haya cielo**: sin planeta activo `getSkyColor` devuelve 0.005 → un viewport casi negro que parece roto. Para el editor conviene un fondo neutro declarado, no el del espacio. | `application_render.cpp` |
 
 ⚠️ **Sobre el bug 5 y cualquier cambio al UBO per-object**: un bloque `uniform` debe declararse
@@ -88,6 +97,52 @@ la esfera de agua, que es lo que descartó la primera.
 ## 🔍 Verificación pendiente (el autor ejecuta; yo no)
 
 Todo esto tiene los tests en verde y **nadie lo ha visto funcionando**. No es lo mismo.
+
+### ⚠️ TERRENO v5 (2026-08-24) — cinco cosas arregladas y NINGUNA vista en pantalla
+
+Todo lo de abajo está demostrado por tests y **nada por el ojo**. El síntoma que lo arrancó
+("no se ve el terreno al alejarte") no se ha vuelto a comprobar en el juego.
+
+| Qué | Cómo está demostrado | Qué falta ver |
+|---|---|---|
+| El pase dibuja donde debe | cobertura en pantalla contra el horizonte analítico, 5 altitudes, 2 backends, error < 1,2 pts | que el terreno lejano aparezca de verdad |
+| Costura entre caras del cubo | simetría 1488/1488 cruces · arista compartida a 0,0000 m · el cosido ve el nivel del vecino | que la grieta desaparezca |
+| El nodo tiene continentes | paridad GPU↔CPU 0,0007 m con el bake · contraprueba: sin bake cambia hasta 2177 m | continentes y costa en el pase v5 (⚠️ **en OpenGL NO**, ver bug 9) |
+| Sombreado real | +0,86 ms/frame en Vulkan (×1,08), caso peor · el 100 % de los píxeles cambian | que el nodo y el clipmap se vean IGUAL (si divergen, costura) |
+| Recorte de frustum por esquinas | el cono cubre la esquina (49,66° vs 49,7°) · 0 nodos en pantalla descartados | ⚠️ el síntoma reportado ("chunks cortados") **NO se reprodujo**. Siguiente sospechoso: `nodeBelowHorizon`, que este test no toca |
+
+⚠️ **Sin resolver desde el 2026-08-24**: el autor dijo *"veo con los 3 igual"* sobre las vistas de
+depuración. No se aclaró si las tres se ven idénticas **entre sí** —lo que significaría que
+`HARUKA_TERRAIN_V5_DEBUG` nunca llegó al shader y esas observaciones no midieron nada— o si el
+terreno lejano faltaba en las tres. Ahora el nivel viaja por un `flat out` en vez del UBO, así que
+esa vista puede comportarse distinto.
+
+### ⚠️ Normal per-píxel dentro del clipmap (2026-08-18) — sin medir el coste
+
+`biome.frag` calculaba la normal per-píxel solo FUERA del clipmap; dentro heredaba `vNorm`, del
+gradiente en vértices teselados cada 4 m. Iluminación per-píxel sobre una normal basta = el suelo
+cercano se veía por triángulos. Añadida la rama que faltaba.
+
+**Sin verificar:** (a) que se vea suave, (b) **cuánto cuesta**. Las dos tomas de `HARUKA_FRAMELOG=1`
+no eran comparables (el juego arranca en estados distintos) y los rangos se solapan: sin cambio
+23,5-23,9 ms de media, con él 21-29. Hay que ponerse **quieto en el mismo sitio** y lanzar las dos.
+Revertir = quitar la rama `else` de `biome.frag`, aislada y comentada.
+
+### ⚠️ Sombreado toon unificado (2026-08-18) — cambia el aspecto de TODO lo sombreado
+
+`lib/surface_shade.glsl` unifica el terminador (**0,30**, término medio de los cuatro que había) y el
+color de sombra (**ambiente real**, no la constante fría) en `final.frag`, `prop_inst.frag`,
+`construction_inst.frag`, `planet.frag` y `Survival/prop.frag`.
+
+**Nadie lo ha visto.** Hay que mirarlo **a distintas horas**: al amanecer y al atardecer es donde se
+nota, porque antes ahí la sombra no cambiaba. `Survival/prop.frag` además perdió sus dos constantes
+por hemisferio; el gradiente arriba/abajo se conserva como factor de brillo (×1,0 → ×1,25).
+
+### ⚠️ Vulkan: el uso-después-de-liberar arreglado, sin ver en el juego (2026-08-18)
+
+`VKContext::forgetBuffer` no limpiaba `m_vbs`/`m_ib` → `Invalid VkBuffer Object` + SIGSEGV al destruir
+geometría. Reproducido y arreglado en el banco de tests. **Falta jugarlo en Vulkan** con el streaming
+moviéndose, que es cuando se disparaba.
 
 ### ⚠️ Clipmap por ANILLOS ANIDADOS (2026-08-14) — cambia lo que se ve al subir
 
@@ -529,3 +584,41 @@ Sin versión asignada porque **falta decidir**, no porque falte tiempo.
 - **Cinematics** (editor ImGui): material de vídeo para portfolio.
 - **`bolsillo`** (utilidad de almacenaje) necesita inventario espacial; hoy avisa en vez de fingir.
 - **Forma ESCRITA del idioma**: runas y grimorios como objetos del mundo.
+
+---
+
+## 🤔 Sin decidir (2026-08-24) — el mar, medido y esperando criterio
+
+| Qué | El número | La pregunta |
+|---|---|---|
+| **Escala de marea ×15** | `ocean_wave.h:167` multiplica el término P₂ por 15 → **5,6 m** de carrera de marea | La marea real de la Tierra en mar abierto son ~0,5 m; 5,6 m es la de un estuario. ¿Se queda por jugabilidad o baja a lo físico? |
+| **`buoyRatio = 1.1` a fuego** | `physics_engine.cpp:1422` — razón densidad agua/objeto, la MISMA para todo | Un tronco y una piedra flotan igual. ¿Va por material, por cuerpo, o se queda? |
+
+## 🤔 Sin decidir (2026-08-18) — medido, esperando criterio
+
+**El maestro de biomas se hornea a 25× lo que se sube.** `upload 18750x9375 -> 3750x1875`: se evalúan
+25 píxeles por cada uno que llega a la GPU. Son **14,6 s de los 21 s** del arranque en frío.
+Hornearlo a la resolución de subida lo dejaría en <1 s (arranque ~6 s), a cambio de perder el maestro
+que el streaming futuro querría y de re-hornear al subir la calidad de terreno.
+
+**393 líneas de solver a mano** (`integrateForces`, `broadPhaseAABB`, `detectCollisions`,
+`resolveCollisions`, `resolveStaticCollisions`) = el **19 % de `physics_engine.cpp`**, alcanzables
+solo con `HARUKA_JOLT=0`. No es código muerto por accidente, pero obliga a hacer cada cambio dos veces
+o se pudre en silencio — y Jolt cuesta 0,02 ms/frame.
+
+**Escalones en las costuras de la colisión lejana**, medidos y publicados en cada rebuild:
+`0.5 km:0.51 m · 2.0 km:2.38 m · 8.2 km:9.07 m · 131.1 km:113.63 m`. El arreglo acordado (sin
+implementar) es **costura bloqueada**: sustituir la altura de los nodos del borde exterior del anillo
+fino por la interpolación lineal de sus dos vecinos gruesos — el valor que `terrainRingSeamStep` ya
+calcula para MEDIR el error. Toca solo el perímetro y la sonda existente lo verifica (pasaría a
+`0.00 m`). ⚠️ Baja la fidelidad para ganar continuidad. Alternativa de fondo: los anillos lejanos
+sobran el día que haya raycast contra la función de altura.
+
+**Un test que vigile los `.spv`.** Un fallo de compilación a SPIR-V es invisible: el motor cae al GLSL
+del driver, se ve igual y los tests pasan. Comparar `assets/shaders/**` contra los `.spv` del build
+sería barato y taparía un agujero real.
+
+**Tres duplicados exactos de shader sin fusionar** (cosmético, 6 ficheros → 3):
+`planet/clipmap.vert` = `planet/ocean.vert` · `equirect_to_cubemap.vert` =
+`irradiance_convolution.vert` = `prefilter_env.vert` · `screenquad.vert` = `brdf_lut.vert`.
+

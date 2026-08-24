@@ -30,20 +30,14 @@
 
 const float HARUKA_G = 9.81;
 
-/// Número de trenes de olas. Cuatro basta para romper la periodicidad a la vista; más es coste sin
-/// lectura, porque las cortas caen bajo el píxel antes de aportar silueta.
-const int HARUKA_WAVES = 4;
-
-/// Longitud de onda (m), amplitud en AGUAS PROFUNDAS (m) y dirección de propagación (2D, en el
-/// plano tangente local; se lleva a 3D con el marco del punto). Escala humana: la de 61 m es el
-/// swell que da la silueta, la de 8,7 m el rizo que da el grano.
-const vec4 HARUKA_WAVE[HARUKA_WAVES] = vec4[HARUKA_WAVES](
-//     lambda   amp     dir.x    dir.y
-    vec4(61.0,  0.85,   1.000,   0.000),
-    vec4(37.0,  0.45,   0.766,   0.643),
-    vec4(19.0,  0.22,   0.174,  -0.985),
-    vec4( 8.7,  0.09,  -0.500,   0.866)
-);
+// El estado del mar (los cuatro trenes + la cota de la lámina) llega RESUELTO desde la CPU: aquí
+// había una tabla `const` gemela a mano de la de `ocean_wave.h`, y deja de poder serlo en cuanto el
+// oleaje depende del viento. Ver la nota larga de `ocean_params.glsl` — ahí está el porqué.
+// ⚠️ RUTA DESDE LA RAÍZ DE SHADERS, NO HERMANA. El resolvedor de `#include` del backend busca desde
+// `assets/shaders/`, no desde la carpeta del archivo que incluye. Puesto como `"ocean_params.glsl"`
+// lo buscaba en `assets/shaders/ocean_params.glsl` y no lo encontraba: `ocean.tese` no compilaba y
+// el pipeline del mar se quedaba SIN etapa de teselación, en silencio y sin que fallara ni un test.
+#include "lib/ocean_params.glsl"
 
 /**
  * @brief Bajío (shoaling): cuánto crece una ola al entrar en agua somera, y cuándo revienta.
@@ -68,6 +62,52 @@ float harukaShoalAmp(float depthM, float ampDeep) {
     float d = max(depthM, 0.05);
     float green = pow(clamp(50.0 / d, 1.0, 40.0), 0.25);   // ley de Green, acotada
     return min(ampDeep * green, 0.55 * depthM);            // límite de rompiente
+}
+
+/**
+ * @brief SWASH: cuánto TREPA la lámina por la playa en este punto (m). Gemelo de `oceanRunup`.
+ *
+ * ⚠️ SIN ESTO LA ORILLA ESTÁ CONGELADA, y era lo más flojo de la costa. El bajío hace que la
+ * amplitud vaya a 0 con el fondo (`harukaShoalAmp`), que es lo que da una línea de costa limpia —
+ * pero también implica que la lámina NO SE MUEVE justo donde más se mira. La espuma de orilla era un
+ * `smoothstep` sobre la profundidad: una banda fija, del mismo ancho a todas horas.
+ *
+ * Lo que falta no es más ola: es lo que pasa DESPUÉS de que rompa. La ola rota se convierte en un
+ * frente (bore) que sube por la arena y vuelve a bajar. Eso es un movimiento de la LÁMINA, no del
+ * oleaje, y por eso va aquí como un término aparte que se suma al nivel del agua.
+ *
+ * Se monta sobre la fase del tren DOMINANTE: la trepada sigue a la ola que rompe, no a un reloj
+ * suelto. Y el peso decae mar adentro, así que en aguas abiertas esto vale exactamente 0 y el mar de
+ * siempre no cambia.
+ *
+ * ⚠️ La amplitud se evalúa a `max(prof, 1 m)` y no a la profundidad local: `harukaShoalAmp` acota por
+ * `0.55·d`, que con `d` NEGATIVA (o sea sobre la arena seca, que es justo donde la trepada tiene que
+ * llegar) daría amplitud negativa y la lámina se hundiría en vez de subir.
+ *
+ * @param depthRest profundidad con la lámina EN REPOSO (m). Negativa sobre tierra.
+ * @param wp        posición de la superficie en reposo, relativa al centro del planeta (m).
+ * @param up        radial local.
+ * @param t         tiempo (s).
+ */
+float harukaSwash(float depthRest, vec3 wp, vec3 up, float t) {
+    vec4  W0 = harukaWaveAt(0);                       // el tren que da la silueta: el que rompe
+    float k0 = 6.2831853 / W0.x;
+    float w0 = sqrt(HARUKA_G * k0);
+    vec3  t1 = normalize(abs(up.y) < 0.99 ? cross(up, vec3(0, 1, 0)) : cross(up, vec3(1, 0, 0)));
+    vec3  t2 = cross(up, t1);
+    vec3  D0 = normalize(t1 * W0.z + t2 * W0.w);
+
+    // Altura de la ola AL ROMPER (ver la nota de arriba sobre el max).
+    float aBreak = harukaShoalAmp(max(depthRest, 1.0), W0.y);
+    // Alcance: la trepada solo existe en la franja somera. Más allá de unas pocas alturas de ola de
+    // fondo esto se apaga y el mar abierto queda intacto.
+    float reach  = max(aBreak * 6.0, 2.0);
+    float wgt    = 1.0 - smoothstep(0.0, reach, max(depthRest, 0.0));
+    // La trepada retrasa a la ola un cuarto de ciclo: el agua sube por la arena DESPUÉS de que la
+    // cresta llegue, no a la vez. Sin el desfase la lámina y la cresta laten juntas y se lee como un
+    // pulso, no como una ola que rompe y se derrama.
+    float ph = k0 * dot(D0, wp) - w0 * t - 1.5707963;
+    return aBreak * sin(ph) * wgt;
 }
 
 /**
@@ -97,12 +137,13 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fade,
     float jac = 1.0;
 
     for (int i = 0; i < HARUKA_WAVES; ++i) {
-        float lambda = HARUKA_WAVE[i].x;
+        vec4  W      = harukaWaveAt(i);          // el tren vigente (subido por la CPU)
+        float lambda = W.x;
         float k      = 6.2831853 / lambda;
-        float amp    = harukaShoalAmp(depthM, HARUKA_WAVE[i].y) * fade;
+        float amp    = harukaShoalAmp(depthM, W.y) * fade;
         if (amp <= 1e-4) continue;
         // Dirección en 3D: la 2D del tren, llevada al plano tangente del punto.
-        vec3  D  = normalize(t1 * HARUKA_WAVE[i].z + t2 * HARUKA_WAVE[i].w);
+        vec3  D  = normalize(t1 * W.z + t2 * W.w);
         float w  = sqrt(HARUKA_G * k);            // dispersión de aguas profundas
         float ph = k * dot(D, wp) - w * t;
         float c  = cos(ph), s = sin(ph);
@@ -126,7 +167,7 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fade,
     //    romper, y ocurra donde ocurra (mar abierto con viento o en la barra de la playa).
     //  · altura contra fondo: cerca de la orilla la ola alcanza su límite y revienta entera.
     float foldFoam  = smoothstep(0.55, 0.05, jac);
-    float shoreFoam = smoothstep(1.6, 0.7, depthM / max(HARUKA_WAVE[0].y * 2.0, 0.1));
+    float shoreFoam = smoothstep(1.6, 0.7, depthM / max(harukaWaveAt(0).y * 2.0, 0.1));
     outFoam = clamp(max(foldFoam, shoreFoam) * fade, 0.0, 1.0);
     return disp;
 }

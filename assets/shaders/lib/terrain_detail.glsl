@@ -116,6 +116,26 @@ float harukaOctaveWeight(float wavelengthM, float minFeatureM) {
 
 // Detalle fino en METROS, sobre la altura que ya trae la malla base.
 //   minFeatureM = tamaño del triángulo que va a llevar este vértice.
+/**
+ * @brief Detalle con la dirección en DOBLE. Gemelo de `terrainDetail(dvec3,...)` en el .h.
+ *
+ * ⚠️ La sobrecarga de abajo toma `vec3` y sube a double DENTRO: subir después de redondear no
+ * recupera nada. Da igual mientras quien llame tenga la dirección en float (el clipmap la
+ * reconstruye así), pero el quadtree del v5 la calcula EXACTA desde enteros y pasarla por una firma
+ * `vec3` desperdiciaría justo eso. No cuesta más: `harukaDetailNoise` ya trabaja en double.
+ */
+float harukaTerrainDetail(dvec3 dir, double radius, float minFeatureM) {
+    if (minFeatureM >= 1428.5) return 0.0;
+    precise dvec3 p = dir * radius;
+    float h = 0.0;
+    if (minFeatureM < 1428.5) h += (harukaDetailNoise(p * 0.00035LF) - 0.5) * 260.0 * harukaOctaveWeight(2857.0, minFeatureM);
+    if (minFeatureM <  312.5) h += (harukaDetailNoise(p * 0.0016LF)  - 0.5) *  70.0 * harukaOctaveWeight( 625.0, minFeatureM);
+    if (minFeatureM <   55.5) h += (harukaDetailNoise(p * 0.0090LF)  - 0.5) *  14.0 * harukaOctaveWeight( 111.0, minFeatureM);
+    if (minFeatureM <   11.0) h += (harukaDetailNoise(p * 0.0450LF)  - 0.5) *   3.0 * harukaOctaveWeight(  22.0, minFeatureM);
+    if (minFeatureM <   2.25) h += (harukaDetailNoise(p * 0.2200LF)  - 0.5) *   0.7 * harukaOctaveWeight(   4.5, minFeatureM);
+    return h;
+}
+
 float harukaTerrainDetail(vec3 dir, float radius, float minFeatureM) {
     // Early-out ANTES de pagar el primer ruido: si ni la octava más GRUESA (λ=2857 m) tiene
     // triángulos para ella, ninguna octava puede contribuir. `harukaOctaveWeight(2857, minFeatureM)`

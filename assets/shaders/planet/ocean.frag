@@ -16,6 +16,8 @@ layout(binding = 16) uniform sampler2D uHeightTex;
 layout(location = 0) out vec4 fragColor;
 
 #include "lib/terrain_detail.glsl"
+#include "lib/ocean_params.glsl"   // cota de la lamina (marea) — gemelo de OceanState
+#include "lib/ocean_wave.glsl"     // harukaSwash: la orilla por pixel ve la MISMA trepada
 #include "lib/ocean_shade.glsl"
 #include "lib/inland_water.glsl"
 
@@ -44,7 +46,10 @@ void main() {
     // ⚠️ La profundidad se calcula AQUÍ, no se hereda del vértice: el mar lejano (la esfera) no la
     // trae, y si se heredara su océano profundo saldría con profundidad 0 y se descartaría entero.
     // Nivel del agua en este píxel: el mar (0) o el lago/río que publique la sim. Ver inland_water.
-    float level = max(0.0, harukaInlandWaterAt(vFragPos));
+    float level = max(harukaSeaLevelM(), harukaInlandWaterAt(vFragPos));
+    // La MISMA trepada que aplicó el tese. Si el fragmento no la viera, el recorte por profundidad
+    // dibujaría la orilla donde estaba en reposo mientras la geometría ya se ha movido.
+    level += harukaSwash(level - baseH, dir * (uExtra.w + level), dir, uDebug.y);
     float depth = level - baseH;
 
     // ── EL DETALLE FINO SOLO DONDE CAMBIA ALGO ──────────────────────────────────────────────────

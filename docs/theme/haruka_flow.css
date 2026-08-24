@@ -1,0 +1,134 @@
+/* haruka_flow.css — panel "Flujo de ejecucion" inyectado por haruka_flow.js */
+
+.hf-wrap {
+  margin: 12px 0 4px;
+  border: 1px solid var(--g-border, #3a4150);
+  border-radius: 6px;
+  background: var(--g-surface, #282d38);
+  overflow: hidden;
+}
+
+.hf-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  border: 0;
+  background: transparent;
+  color: var(--g-heading, #fff);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.hf-toggle:hover { background: rgba(71, 140, 191, .14); }
+.hf-toggle-caret { color: var(--g-blue-hi, #5fb0ef); width: 10px; }
+
+.hf-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--g-panel, #232833);
+  border: 1px solid var(--g-border, #3a4150);
+  color: var(--g-muted, #8b93a3);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.hf-panel { display: none; border-top: 1px solid var(--g-border, #3a4150); }
+.hf-expanded .hf-panel { display: block; }
+
+.hf-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--g-panel, #232833);
+  border-bottom: 1px solid var(--g-border, #3a4150);
+}
+.hf-seg { display: flex; border: 1px solid var(--g-border, #3a4150); border-radius: 5px; overflow: hidden; }
+.hf-segbtn {
+  padding: 4px 10px;
+  border: 0;
+  border-right: 1px solid var(--g-border, #3a4150);
+  background: transparent;
+  color: var(--g-muted, #8b93a3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hf-segbtn:last-child { border-right: 0; }
+.hf-segbtn:hover { color: var(--g-fg, #c7ccd6); }
+.hf-segbtn.hf-on { background: var(--g-blue, #478cbf); color: #fff; }
+
+.hf-mini {
+  padding: 4px 9px;
+  border: 1px solid var(--g-border, #3a4150);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--g-muted, #8b93a3);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.hf-mini:hover { color: var(--g-fg, #c7ccd6); border-color: var(--g-blue, #478cbf); }
+.hf-hint { color: var(--g-muted, #8b93a3); font-size: 11px; }
+
+.hf-body {
+  max-height: 60vh;
+  overflow: auto;
+  padding: 6px 10px 10px;
+  font-family: "JetBrains Mono", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.hf-empty { color: var(--g-muted, #8b93a3); padding: 6px 4px; }
+
+.hf-list { list-style: none; margin: 0; padding: 0 0 0 14px; }
+.hf-body > .hf-list { padding-left: 0; }
+.hf-node > .hf-list { display: none; border-left: 1px solid var(--g-border, #3a4150); }
+.hf-node.hf-open > .hf-list { display: block; }
+
+.hf-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 0; border-radius: 3px; }
+.hf-row:hover { background: rgba(71, 140, 191, .10); }
+
+.hf-caret {
+  flex: 0 0 auto;
+  width: 14px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--g-muted, #8b93a3);
+  font: inherit;
+  cursor: pointer;
+}
+.hf-caret-empty { cursor: default; }
+.hf-icon { flex: 0 0 auto; width: 12px; text-align: center; color: var(--g-muted, #8b93a3); }
+.hf-label { flex: 1 1 auto; word-break: break-word; white-space: pre-wrap; }
+.hf-line { flex: 0 0 auto; color: var(--g-muted, #8b93a3); font-size: 11px; opacity: .7; }
+.hf-line:hover { opacity: 1; }
+
+/* color por tipo de paso */
+.hf-call    > .hf-row .hf-icon  { color: var(--g-blue-hi, #5fb0ef); }
+.hf-call    > .hf-row .hf-label { color: var(--g-fg, #c7ccd6); }
+.hf-if      > .hf-row .hf-label,
+.hf-switch  > .hf-row .hf-label,
+.hf-case    > .hf-row .hf-label,
+.hf-block   > .hf-row .hf-label { color: #d8a657; }
+.hf-loop    > .hf-row .hf-label { color: #e59b6b; }
+.hf-if      > .hf-row .hf-icon,
+.hf-switch  > .hf-row .hf-icon,
+.hf-case    > .hf-row .hf-icon,
+.hf-block   > .hf-row .hf-icon,
+.hf-loop    > .hf-row .hf-icon  { color: #d8a657; }
+.hf-assign  > .hf-row .hf-label { color: #b5e08c; }
+.hf-assign  > .hf-row .hf-icon  { color: #b5e08c; }
+.hf-var     > .hf-row .hf-label { color: var(--g-fg, #c7ccd6); }
+.hf-return  > .hf-row .hf-label { color: #c792ea; }
+.hf-return  > .hf-row .hf-icon  { color: #c792ea; }
+.hf-flow    > .hf-row .hf-label { color: var(--g-muted, #8b93a3); }
+
+.hf-link { color: var(--g-link, #6cb5ff) !important; text-decoration: none; }
+.hf-link:hover { text-decoration: underline; }

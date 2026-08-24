@@ -68,6 +68,13 @@ TREEVIEW_WIDTH         = 250
 USE_MATHJAX            = NO
 
 #---------------------------------------------------------------------------
+# XML output (lo consume tools/doc_flow.py para el arbol de ejecucion)
+#---------------------------------------------------------------------------
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+XML_PROGRAMLISTING     = NO
+
+#---------------------------------------------------------------------------
 # LaTeX (disabled by default)
 #---------------------------------------------------------------------------
 GENERATE_LATEX         = NO
@@ -107,5 +114,7 @@ COLS_IN_ALPHA_INDEX    = 3
 # --- Godot-like Tailwind theme (added) ---
 HTML_HEADER            = docs/header.html
 HTML_FOOTER            = docs/footer.html
-HTML_EXTRA_STYLESHEET  = docs/theme/haruka.css
+HTML_EXTRA_STYLESHEET  = docs/theme/haruka.css \
+                         docs/theme/haruka_flow.css
+HTML_EXTRA_FILES       = docs/theme/haruka_flow.js
 HTML_COLORSTYLE        = DARK

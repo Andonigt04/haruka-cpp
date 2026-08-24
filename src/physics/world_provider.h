@@ -66,6 +66,31 @@ public:
      *  ground-snap la usa. Cliente: malla (F10). Servidor: sampler analítico. Mismas unidades. */
     virtual double terrainHeightAt(const glm::dvec3& worldPos) const = 0;
 
+    /** @brief Centinela de "aquí no hay agua". Gemelo de `PlanetarySystem::kNoWater`. */
+    static constexpr double kNoWater = -1e30;
+
+    /**
+     * @brief Cota de la SUPERFICIE DEL AGUA en `worldPos`: metros sobre la esfera de referencia,
+     *        las mismas unidades que `terrainHeightAt`. `kNoWater` si aquí no hay agua.
+     *
+     * ⚠️ ES LA COTA CON LA OLA PUESTA, no el nivel del mar en reposo. Ésa es toda la diferencia entre
+     * flotar sobre el mar que se ve y flotar sobre la esfera de radio R — que es lo que hacía la
+     * física antes de existir esta consulta (ver `PhysicsEngine::integrateForces`).
+     *
+     * El default devuelve `kNoWater`: un proveedor que no sepa de agua (el DGS, los tests) deja la
+     * flotación apagada en vez de inventarse un mar. Un cero aquí sería un dato falso con pinta de
+     * dato — el mismo error que `groundHeightKmAtDir` documenta haber pagado ya.
+     */
+    virtual double waterSurfaceAt(const glm::dvec3& /*worldPos*/) const { return kNoWater; }
+
+    /**
+     * @brief Velocidad del agua en la superficie (m/s, marco del mundo). Cero si no hay agua.
+     *
+     * El movimiento orbital de la ola. Es lo que ARRASTRA a un cuerpo flotante: sin ella la flotación
+     * es puramente vertical y nada llega nunca a la orilla por sí solo.
+     */
+    virtual glm::dvec3 waterVelocityAt(const glm::dvec3& /*worldPos*/) const { return glm::dvec3(0.0); }
+
     /** @brief (Fase 2) Geometría LOCAL del terreno alrededor de `center` (radio `radius`, m), para
      *  colisión REAL con la malla (no una altura vertical). Rellena `outVerts` (posiciones mundo) y
      *  `outTris` (índices de triángulo, 3 por cara) y devuelve true si hay malla. Por defecto false →

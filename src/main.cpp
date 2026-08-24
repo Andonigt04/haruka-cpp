@@ -1,172 +1,142 @@
 /**
  * @file main.cpp
- * @brief Entry point of the HarukaEngine runtime.
+ * @brief Punto de entrada del runtime suelto — y **ningún target lo compila**.
  *
- * Loads the current project metadata from `project.hrk` via @ref Haruka::Project,
- * resolves the startup scene path, and then delegates execution to @ref Application::run().
- * Any uncaught exception is reported through the engine error system and
- * causes a non-zero exit.
+ * Este `main()` arranca el motor a pelo desde un `project.hrk`: lee la
+ * configuración con @ref Haruka::Project y llama a
+ * @ref Haruka::Core::Application::run(). Es el runtime antiguo.
+ *
+ * `CMakeLists.txt` lo excluye a propósito del glob de fuentes
+ * (`list(FILTER ENGINE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")`), porque metido en
+ * `libHarukaEngine.so` hacía que la librería compartida **exportara el símbolo
+ * `main`**. El punto de entrada vivo es el del juego: `template/main.cpp` (y el del
+ * proyecto real), que inyecta su @ref Haruka::GameInterface antes de arrancar:
+ *
+ * @code
+ * Application app;
+ * app.setGameInterface(getGameInterface());   // los callbacks del juego
+ * app.run(Haruka::AssetPaths::maps() + "menu");
+ * @endcode
+ *
+ * Se conserva porque sigue siendo la forma de levantar el motor sin juego, y
+ * porque es donde vive la portada de esta documentación.
  */
 
 /**
  * @mainpage HarukaEngine
  *
- * C++17 / OpenGL 4.6 runtime for space exploration, deferred rendering, and
- * procedural planetary terrain.
- *
- *  * @section sec_docs Documentation map
- * - @subpage analisis_sistemas "Análisis de Sistemas" — Architecture breakdown.
- * - @subpage diagramas_flujo "Diagramas de Flujo" — Execution and data-flow diagrams.
- * - @subpage patrones_uso "Patrones de Uso" — Implementation patterns and code examples.
- * - @subpage guia_rapida "Guía Rápida" — Quick reference and debugging tips.
- *
- * @section sec_overview Overview
- *
- * - `Application` owns the runtime loop and render pipeline.
- * - `SceneManager` stores the active scene as a flat collection of `SceneObject` records.
- * - `WorldSystem` maintains the floating origin and bridges double-precision CPU coordinates with GPU-local floats.
- * - `PlanetarySystem` owns orbital simulation, chunk generation, streaming, and LOD.
- * - `ObjectType` classifies runtime entities.
- *
- * ---
- *
- * @section sec_boot Boot sequence — `main.cpp` → `Application::run()`
- *
- * @code
- * main()
- *   ├── project.load(".")     →  read project.hrk with Project
- *   └── app.run(startScenePath)
- *         ├── create_window()          // SDL window + OpenGL 4.6 core profile
- *         ├── create_gl_context()      // SDL_GL_CreateContext + gladLoadGLLoader
- *         ├── loadScene(path)          // parse scene JSON via the scene loader
- *         ├── init(scene)              // allocate renderer/world/runtime resources
- *         └── main_loop()              // runs until SDL_EVENT_QUIT
- * @endcode
- *
- * **`create_window()`** — initializes SDL video, sets OpenGL 4.6 core profile
- * attributes, and creates the SDL3 window.
- *
- * **`create_gl_context()`** — creates the GL context via `SDL_GL_CreateContext`,
- * calls `gladLoadGLLoader(SDL_GL_GetProcAddress)` to resolve all OpenGL 4.6
- * function pointers, and enables relative mouse mode.
- *
- * **`loadScene(path)`** — deserializes a JSON scene file into the current
- * `SceneManager`. Each `SceneObject` restores its components (`Transform`,
- * `Material`, `Mesh`, `Script`, `MeshRenderer`, …) from their JSON handlers.
- * If no path is provided, the application falls back to its default bootstrap.
- *
- * **`init(scene)`** — resolves the camera and allocates renderer resources in
- * order: `GBuffer`, `HDR`, `Bloom`, `SSAO`, `Shadow`, `PointShadow`,
- * `CascadedShadowMap`, `IBL`, `GPUInstancing`, `VirtualTexturing`,
- * `ComputePostProcess`, `AssetStreamer`, `DebugOverlay`, `WorldSystem`,
- * `PlanetarySystem`, `TerrainStreamingSystem`, and physics helpers.
- *
- * ---
- *
- * @section sec_loop Per-frame loop — `main_loop()` → `renderFrame()`
- *
- * @code
- * main_loop()
- *   └── while (!quit)
- *         ├── SDL_PollEvent()          // input: mouse, resize, quit
- *         │     ├── mouse motion  →  camera.rotate()
- *         │     └── mouse wheel   →  camera.ProcessMouseScroll()
- *         ├── renderFrame()
- *         │     ├── buildRenderQueue()
- *         │     │     └── terrainStreamingSystem.update()   // async chunk load/evict
- *         │     └── renderFrameContent()
- *         │           ├── updateCascades()                  // shadow splits
- *         │           ├── cascade shadow passes  (×4)       // depth-only
- *         │           ├── geometry pass                     // fill G-buffer
- *         │           ├── lighting pass                     // deferred PBR
- *         │           ├── post-process                      // SSAO, bloom, HDR
- *         │           └── DebugOverlay::render()            // ImGui stats
- *         └── SDL_GL_SwapWindow()
- * @endcode
- *
- * **`buildRenderQueue()`** — iterates `SceneManager::getAllObjects()`, applies
- * per-layer distance culling and frustum sphere tests, then writes visible
- * pointers to the render queue. It also ticks `TerrainStreamingSystem::update()`
- * so async `generateChunk()` jobs can enqueue completed geometry.
- *
- * **`renderFrameContent()`** — drives the full render pipeline each frame:
- * cascaded shadow depth passes, G-buffer geometry pass, deferred lighting
- * (Cook-Torrance PBR + IBL + PCF shadows), SSAO, bloom bright-pass + blur,
- * HDR tone mapping, colour grading, and `DebugOverlay::render()`.
- *
- * ---
- *
- * @section sec_terrain Terrain and chunk streaming
- *
- * The planet surface is split into a **cube-sphere** grid. Each face is
- * subdivided into a configurable tile grid per face at a given LOD.
- *
- * **Streaming** (`TerrainStreamingSystem`):
- * - `WorldSystem::updateVisibleChunks()` builds the visible set from camera
- *   distance and FOV each frame.
- * - `scheduleChunkStreaming()` produces load/evict queues bounded by
- *   `maxLoadsPerFrame` / `maxEvictsPerFrame` / `maxMemoryMB`.
- * - Eviction priority: oldest `lastTouchedFrame` first, tie-broken by distance.
- * - Completed chunks register a collision proxy with `RaycastSimple` so
- *   characters can stand on freshly streamed terrain.
- * - Neighbour LOD stitching via `WorldSystem::getNeighborLods()` prevents
- *   T-junctions at LOD boundaries.
- *
- * ---
- *
- * @section sec_planet Planet and solar system
- *
- * `PlanetarySystem` owns the simulation loop and all `CelestialBody` records
- * stored in `WorldSystem`.
- *
- * @code
- * PlanetarySystem ps;
- * ps.init(scene, worldSystem);
- * ps.addStar("Sol");
- * ps.addPlanet("Earth", Units::AU, 5.972e24, Units::EARTH_RADIUS, {0.3f, 0.6f, 1.f});
- * @endcode
- *
- * - **Orbital integration** — `integrateOrbits()` advances each body with a
- *   symplectic Euler step scaled by `timeScale` (default 1000×). Positions are
- *   stored in double-precision `WorldPos` (km).
- * - **Gravity** — `calculateGravityAtPosition()` sums Newtonian contributions
- *   from all bodies. `applyPlanetaryPhysics()` applies this to the player's
- *   rigid body and adjusts the character up-vector for surface walking.
- * - **Origin shifting** — `WorldSystem::updateOrigin()` recenters the floating
- *   origin to the camera each frame, keeping single-precision render coordinates
- *   within centimetre precision at astronomical distances.
- *
- * ---
- *
- * @section sec_scene Scenes and prefabs
- *
- * A `SceneManager` is a flat collection of `SceneObject` records. Each object
- * holds:
- * - Type string and `ObjectType` enum (`MESH`, `MODEL`, `PLANET`, `STAR`, `LIGHT`, `CAMERA`, …)
- * - Transform fields (`position`, `rotation`, `scale`) in double precision
- * - A `components` map of named component handles (`Transform`, `Material`,
- *   `Mesh`, `Model`, `Script`, `MeshRenderer`, …)
- * - `parentIndex` for hierarchy (`-1` = scene root)
- *
- * **Serialization** — scene data is loaded and saved through the scene loader
- * and JSON handlers so new component types can be added without changing the
- * entry point.
- *
- * **Prefabs** — reusable scene templates are stored as JSON snapshots of a
- * `SceneObject`. They are intended for environment props, character rigs, and
- * planet templates.
- *
- * **Project** — `project.hrk` is managed through `Haruka::Project` and stores
- * the start scene path plus project metadata used by the runtime.
+ * C++17 runtime for space exploration at planetary scale: double-precision
+ * world coordinates, procedural terrain, deferred rendering over an RHI that
+ * targets **OpenGL 4.6 and Vulkan** from the same frame code.
  *
  * @section sec_docs Documentation map
  *
- * - `README.md` for build and dependency overview
- * - `docs/guides/ANALISIS_SISTEMAS.md` for the architecture breakdown
- * - `docs/guides/DIAGRAMAS_FLUJO.md` for execution and data-flow diagrams
- * - `docs/guides/PATRONES_USO.md` for implementation patterns and code examples
- * - `docs/guides/GUIA_RAPIDA.md` for quick reference and debugging tips
- * - `docs/html/index.html` for the generated API reference
+ * - @subpage flujo_interactivo "Flujo de ejecución interactivo" — the **Execution flow**
+ *   button on every function page: what it calls, which branches it takes and which
+ *   variables it writes, taken from the compiler's own AST.
+ * - @subpage analisis_sistemas "Análisis de Sistemas" — architecture breakdown.
+ * - @subpage diagramas_flujo "Diagramas de Flujo" — execution and data-flow diagrams.
+ * - @subpage patrones_uso "Patrones de Uso" — implementation patterns and examples.
+ * - @subpage guia_rapida "Guía Rápida" — quick reference and debugging tips.
+ *
+ * The design documents that are not part of this reference live next to the code:
+ * `README.md` (build and dependencies), `TERRENO.md` (terrain contract),
+ * `ROADMAP.md`, and the plans under `docs/guides/`.
+ *
+ * @note **This page does not transcribe call sequences.** Hand-written call lists
+ * rot: an earlier version of this page named sixteen functions that no longer
+ * existed anywhere in the engine. What a function does is generated from the code
+ * itself — open the function and press *Flujo de ejecución*. What stays written
+ * here is what a generator cannot infer: units, invariants, and the reasons.
+ *
+ * ---
+ *
+ * @section sec_boot Boot
+ *
+ * There are two entry points, and both end in the same call:
+ *
+ * - **The game** (`template/main.cpp`, and the real project's `main.cpp`) — the
+ *   live one. It injects its @ref Haruka::GameInterface with
+ *   `setGameInterface()` and starts at the menu scene.
+ * - **The bare runtime** (`src/main.cpp`) — reads `project.hrk` and starts its
+ *   `startScene` with no game module. No target compiles it; see the note at the
+ *   top of that file.
+ *
+ * Either way the work happens in
+ * @ref Haruka::Core::Application::run() "Application::run(startScene, headless)",
+ * which, in order:
+ *
+ * 1. Resolves the shader/asset base directory from `/proc/self/exe`, so the
+ *    binary runs from anywhere.
+ * 2. Picks the RHI backend: the graphics setting, overridable with
+ *    `HARUKA_BACKEND=vulkan|opengl`. On the GL path with a discrete GPU
+ *    requested it also sets the PRIME/`DRI_PRIME` offload variables **before**
+ *    the context exists — afterwards they have no effect.
+ * 3. Creates the @ref Haruka::Core::Window (SDL3) or its headless variant, then
+ *    the @ref Haruka::RHI::Device, published globally via `RHI::setDevice()`.
+ * 4. `loadScene()` → `init(scene)` → the game module's `onInit` →
+ *    `applyGraphicsSettings()`.
+ * 5. Installs SIGINT/SIGTERM handlers and enters the frame loop.
+ *
+ * @ref Haruka::Core::Application::init() "init()" is deliberately small: it wires
+ * @ref Haruka::WorldSystem, @ref PhysicsEngine, the camera and the planetary
+ * system, and publishes them through `MotorInstance`. The heavy renderer
+ * resources are created by the passes that need them.
+ *
+ * @section sec_loop The frame
+ *
+ * Each iteration clamps the delta to 100 ms, pumps SDL input, reacts to a resize,
+ * opens a @ref Haruka::Profiler frame, ticks the game module's `onUpdate`, and
+ * then runs the two halves of the frame:
+ *
+ * - `buildRenderQueue()` — culls the scene into the render queue, and only
+ *   rebuilds it when the scene changed (`m_renderQueueDirty`).
+ * - `renderFrameContent()` — the pipeline: cascade shadow passes, G-buffer,
+ *   deferred PBR lighting, terrain and props, weather, water and volumetric
+ *   clouds, post-process, and the ImGui overlay. It is the biggest function in
+ *   the engine; its flow tree is the practical way to read it.
+ *
+ * @section sec_scale Scale: where the precision lives
+ *
+ * A float loses metres at astronomical distances, so the engine splits the two
+ * worlds and never mixes them:
+ *
+ * - @ref Haruka::WorldSystem holds every @ref Haruka::CelestialBody in
+ *   `WorldPos` (double, km) and shifts the floating origin to the camera every
+ *   frame. `toLocal()` is the only sanctioned way down to the float the GPU sees.
+ * - @ref Haruka::PlanetarySystem owns the planets: orbits, terrain sampling
+ *   (`sampleTerrainHeight`, `sampleSurface`), water (`sampleWaterLevel`,
+ *   `getSeaSurface`), weather (`weatherAt`) and ground cover. It is also the
+ *   authority the physics asks through @ref Haruka::Physics::IWorldProvider.
+ * - @ref PhysicsEngine integrates in double precision. Jolt does the broad
+ *   phase and the solver; `HARUKA_JOLT=0` falls back to the built-in path.
+ *
+ * @section sec_terrain Terrain
+ *
+ * The surface is a cube-sphere sampled by a clipmap of 128 m patches, tessellated
+ * on the GPU up to ×32. The rule that keeps it coherent is that **every LOD number
+ * lives once**: `core/planet/terrain_lod.h` is the single definition, and
+ * `terrain_detail.h` is the declared twin of `terrain_detail.glsl` — the height
+ * function exists in two languages that are changed together, never copied.
+ * A test that rewrites one of those formulas is auditing itself; see the warning
+ * at the top of `terrain_lod.h`.
+ *
+ * @section sec_env Environment variables
+ *
+ * Switches the runtime reads at startup (the full list is in the source; these
+ * are the ones worth knowing):
+ *
+ * | Variable | Effect |
+ * |----------|--------|
+ * | `HARUKA_BACKEND` | `vulkan` \| `opengl`, forces the RHI backend |
+ * | `HARUKA_JOLT` | `0` disables Jolt and uses the built-in physics path |
+ * | `HARUKA_COLLISION_WIRE` | draws the collision meshes |
+ * | `HARUKA_PROF_LOG` | dumps profiler frames to a log |
+ * | `HARUKA_FRAMELOG` | logs the first frames after each `init()` |
+ * | `HARUKA_SHOT`, `HARUKA_SHOT_AFTER` | screenshot now / after N seconds (CI smoke tests) |
+ * | `HARUKA_DIAG` | extra diagnostics on the render path |
+ *
+ * `--headless` runs without a visible window and is what the smoke tests use.
  */
 
 #include "core/application.h"
@@ -178,10 +148,12 @@
 #include <cstring>
 
 /**
- * @brief Program entry point.
+ * @brief Entry point of the bare runtime (not compiled into any target).
  *
  * Loads `project.hrk` through `Haruka::Project`, extracts `startScene` when
- * present, and passes that path to `Application::run()`.
+ * present, and passes that path to `Application::run()`. No `GameInterface` is
+ * installed, so the game callbacks (`onInit`, `onUpdate`, `onRenderWorld`) never
+ * fire — that is what the game's own `main()` is for.
  *
  * If the project file is missing, the runtime starts with its default bootstrap
  * path. Any uncaught exception is reported through the engine error system and

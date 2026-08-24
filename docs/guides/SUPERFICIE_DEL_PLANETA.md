@@ -226,6 +226,9 @@ Dos cosas que parecen material y no lo son:
 | Una capa de props no aparece nunca | `when` referencia una zona inexistente | crear la zona o quitar el `when` |
 | Props ausentes "por humedad" | el aviso mide el **parche** local, no el planeta | comprobar el rango real del planeta antes de tocar bandas |
 | El array de texturas ocupa el triple | el mismo PNG en varios materiales | ya se deduplica por fichero |
+| El suelo cercano se ve **por triángulos** | la normal era per-vértice dentro del clipmap (cada 4 m) | arreglado 2026-08-18: `biome.frag` la calcula por píxel también dentro |
+| La sombra es del mismo gris a cualquier hora | el color de sombra era una **constante** en 4 de 5 shaders | arreglado 2026-08-18: `lib/surface_shade.glsl` lo deriva del ambiente real |
+| Tocas un shader y no cambia nada | su `.spv` no se regeneró y el motor usa el GLSL del driver | comprobar que el `.spv` existe; `cmake -S . -B build` si el shader es nuevo |
 
 Y la meta-trampa, que costó más que todas juntas: **cuando algo no cambia al tocarlo, comprueba que
 tu código llega a ejecutarse** —build de todos los repos, binario recién enlazado— antes de buscar la

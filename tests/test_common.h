@@ -121,5 +121,37 @@ void test_rock_interior();   // peñones enterrados de la roca (con contraprueba
 // dirección en FLOAT desde el marco tangente, mientras la CPU la calcula en DOUBLE desde la posición.
 // Mide cuánta altura separa eso — la única pieza del terreno que nunca se había comparado.
 void test_clipmap_dir_parity();
+// EL MAR (test_ocean.cpp): que la ola de la física sea la derivada exacta de la superficie, que el
+// agua TRANSPORTE (firma de Stokes), el bajío/rompiente que define la costa, y el acople real en el
+// motor — flotar y ser arrastrado. Con contraprueba en los cinco.
+void test_ocean_wave_velocity();
+void test_ocean_float_precision();
+void test_ocean_stokes_transport();
+void test_ocean_shoaling();
+void test_ocean_buoyancy_drift();
+void test_ocean_no_water_no_float();
+void test_ocean_sea_state();
+void test_ocean_tide();
+void test_ocean_swash();
+// La octava mas fina del terreno sigue viva (murio en silencio al bajar el tope de tesela).
+void test_terrain_finest_octave();
+// F1 del PLAN TERRENO v5 (test_terrain_node.cpp): el direccionamiento de nodos del quadtree es
+// exacto BIT A BIT — grueso subconjunto de fino, aristas sin grieta, determinista. Con contraprueba.
+void test_terrain_node_lattice();
+void test_terrain_node_scale();
+void test_terrain_node_content();
+void test_terrain_node_select();
+void test_terrain_node_frustum();
+// El cono del recorte tiene que envolver las ESQUINAS del frustum, no sus bordes: si no, los chunks
+// se cortan antes de llegar al borde de la pantalla. Verdad de referencia = los 6 planos de la matriz.
+void test_terrain_node_frustum_corners();
+// La costura entre CARAS del cubo: el vecino de un nodo del borde vive en otra cara. Oraculo doble:
+// simetria de la relacion en las 24 combinaciones, y que la arista compartida coincida en metros.
+void test_terrain_node_face_seam();
+void test_terrain_node_range();
+void test_terrain_node_pool();
+void test_terrain_node_pool_reuse();
+void test_terrain_node_stitch();
+void test_terrain_node_neighbours();
 
 #endif // HARUKA_TEST_COMMON_H

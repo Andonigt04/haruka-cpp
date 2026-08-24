@@ -1,0 +1,129 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64      : require
+/**
+ * @file terrain_node.comp
+ * @brief GENERADOR DE UN NODO del quadtree (v5, fase F1). Llena su heightmap. Una vez, no por frame.
+ *
+ * Gemelo GPU de `Haruka::Terrain::nodeFillHeights` (core/terrain/terrain_node.h). Los dos tienen que
+ * producir el MISMO contenido: `nodeContentHash` compara sus bits, y ése es el test que cierra F1.
+ *
+ * ── POR QUÉ ESTO CAMBIA EL COSTE, QUE ES EL MOTIVO DEL v5 ───────────────────────────────────────
+ *
+ * Hoy el detalle se evalúa **por vértice y por frame** en la `tese`, y encima otra vez **por píxel**
+ * en el sphere-trace de `biome.frag` (2-16 pasos, cada uno una `harukaTerrainDetail` completa). Ése
+ * es el coste que puso `present.swap` en 60 ms.
+ *
+ * Aquí se evalúa **una vez por téxel de nodo** y se reutiliza mientras el nodo viva. Al moverte no se
+ * regenera nada: los nodos están fijos al mundo (índices enteros, sin ancla), a diferencia del
+ * clipmap, donde derivar 48 m dejaba 8 nodos reutilizables de 257 049.
+ *
+ * ── LA PRECISIÓN, QUE ES LA OTRA MITAD ──────────────────────────────────────────────────────────
+ *
+ * ⚠️ TODO EL CAMINO HASTA EL RUIDO VA EN DOUBLE, y no es exceso de celo: la coordenada de cara sale
+ * de ENTEROS (exacta), y redondearla a float antes de multiplicar por el radio la cuantizaría a
+ * ~0,5 m — a radio terrestre un ulp de dirección unitaria son 0,38-0,76 m de superficie (medido:
+ * `clipmap_dir_parity`, 0,9302 m de separación). No cuesta extra: `harukaDetailNoise` ya trabajaba
+ * en double; lo que se evita es truncar ANTES de llamarla.
+ *
+ * El hash del ruido es aritmética entera (`uint` módulo 2³²), así que es bit-exacto entre CPU y GPU
+ * y entre GPUs distintas. Lo que sí puede desviarse es la contracción `a*b+c` → FMA: por eso el
+ * cálculo de la coordenada no se reordena y por eso existe el test golden.
+ */
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "lib/cube_face.glsl"        // harukaCubeFaceToDir — gemelo de cubeFaceToDir
+#include "lib/terrain_detail.glsl"   // harukaTerrainDetail(dvec3, double, float)
+
+layout(std140, binding = 0) uniform NodeParams {
+    /// x = cara [0,5] · y = nivel · z = índice i del nodo · w = índice j
+    ivec4 uNode;
+    /// x = téxeles por lado · y = celdas por lado (téxeles-1) · z = MODO DE SALIDA · w = HUECO
+    /// Modo: 0 = altura (producción) · 1 = lx · 2 = dir.x · 3 = coordenada de ruido de la octava
+    /// gruesa. Los tres últimos existen para BISECAR dónde diverge del gemelo C++ cuando el hash no
+    /// casa: sin ellos solo se sabe que difieren, no en qué etapa.
+    /// `w` es el hueco del pool en el que escribir: el SSBO guarda `capacidad` nodos contiguos y el
+    /// nodo `k` ocupa `[k·TEXELS², (k+1)·TEXELS²)`. Así el pool entero es UN buffer y el dispatch de
+    /// cada nodo solo cambia este entero — sin recrear recursos ni rebindear nada.
+    ivec4 uGrid;
+    /// x = radio del planeta (m) · y = minFeatureM del nodo · zw = 0
+    vec4  uMisc;
+};
+
+// Salida a SSBO y no a `image2D`: el RHI ya tiene `bindStorageBuffer` y camino de readback
+// (`BufferMemory::Readback` + `mappedData`), mientras que binding de storage IMAGE no existe todavía.
+// El layout es el mismo que el del gemelo CPU —fila mayor, `v * TEXELS + u`— así que
+// `nodeContentHash` puede hashear los dos y compararlos sin traducir nada.
+layout(std430, binding = 1) writeonly buffer NodeHeights { float uHeights[]; };
+
+// ⚠️ SIN ESTO EL NODO DIBUJA OTRO PLANETA: SIN CONTINENTES, SIN OCEANOS Y SIN COSTA.
+//
+// El clipmap compone su superficie como `R + baseH + detalle·atenuacion`, con recorte al nivel del
+// mar. Este compute calculaba SOLO `harukaTerrainDetail`, o sea `R + detalle`: el bake llega a
+// ±4 km, asi que le faltaba toda la estructura de continente y quedaba a una altitud distinta de la
+// del clipmap — un escalon en la transicion entre los dos.
+//
+// La retícula es la MISMA que leen la malla, el agua y la fisica (binding 15), y la bilineal se hace
+// A MANO por la misma razon que en `clipmap.tese`: el filtrado del hardware usa pesos de 8 bits en
+// varias GPU y eso bastaria para separar este suelo del de la malla en centimetros.
+layout(binding = 15) uniform sampler2DArray uBaseField;
+
+#include "lib/base_field.glsl"   // harukaSampleBaseField — la MISMA que leen clipmap y vertice
+
+void main() {
+    const uint u = gl_GlobalInvocationID.x;
+    const uint v = gl_GlobalInvocationID.y;
+    if (u >= uint(uGrid.x) || v >= uint(uGrid.x)) return;
+
+    // ── COORDENADA DE CARA DESDE ENTEROS ────────────────────────────────────────────────────────
+    //
+    // Gemelo EXACTO de `nodeTexelFaceCoord`: numerador entero, UNA división, sin float por el camino.
+    // **No reordenar** — la exactitud es la característica, no un efecto secundario, y de ella
+    // dependen las tres propiedades del quadtree (grueso ⊂ fino, aristas sin grieta, determinismo).
+    //
+    // ⚠️ El numerador se acumula en DOUBLE, no en entero, y sigue siendo exacto: un double representa
+    // enteros sin error hasta 2^53, y aquí el máximo es `i·celdas + u` = 2^20 · 128 + 128 ≈ 1,3e8.
+    // Se hace así para no exigir `GL_ARB_gpu_shader_int64` (que no todas las GPU del fleet tienen):
+    // `double(a)·double(b) + double(c)` y `double(a·b + c)` son el MISMO valor mientras la suma no
+    // pase de 2^53, así que coincide bit a bit con el `uint64_t` que usa el gemelo C++.
+    // Si algún día `TERRAIN_NODE_MAX_LEVEL` sube de 20, revisar este límite ANTES de tocar nada.
+    // `precise` por lo mismo que en `harukaCubeFaceToDir`: el gemelo C++ va con `-ffp-contract=off`.
+    precise double cells = double(uGrid.y);
+    precise double den   = double(1u << uint(uNode.y)) * cells;
+    precise double lx    = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(u)) / den);
+    precise double ly    = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(v)) / den);
+
+    const dvec3 dir = harukaCubeFaceToDir(uNode.x, lx, ly);
+
+    // `minFeatureM` sale del TÉXEL DEL NODO, no de la distancia a la cámara. Ésa es la diferencia de
+    // fondo con el clipmap: un nodo describe la misma superficie lo mires desde donde lo mires, así
+    // que su contenido se puede cachear y no cambia al acercarte.
+    float outv;
+    if      (uGrid.z == 1) outv = float(lx);
+    else if (uGrid.z == 2) outv = float(dir.x);
+    else if (uGrid.z == 3) outv = float(dir.x * double(uMisc.x) * 0.00035LF);
+    // Modo 4: la ALTURA BASE cruda del bake, y el 5 el tamaño de la retícula. Existen por lo mismo
+    // que los otros tres: cuando GPU y CPU no casan, sin bisección solo se sabe QUE difieren.
+    else if (uGrid.z == 4) outv = harukaSampleBaseField(uBaseField, vec3(dir)).x;
+    else if (uGrid.z == 5) outv = float(textureSize(uBaseField, 0).x);
+    else {
+        // GEMELO de `clipmap.tese`: base + detalle atenuado, con el detalle recortado para que no
+        // hunda el suelo por debajo del nivel del mar. Cualquier cambio va en los dos.
+        //
+        // ⚠️ `uMisc.z` dice si hay bake atado. No es opcional preguntarlo: en Vulkan un descriptor
+        // sin escribir es INDEFINIDO, no ceros, asi que muestrear un sampler que nadie ato no da
+        // negro — da basura o pierde el dispositivo. Los tests del banco corren sin planeta horneado
+        // y pasan 0 aqui.
+        float h = harukaTerrainDetail(dir, double(uMisc.x), uMisc.y);
+        if (uMisc.z > 0.5) {
+            const float baseH = harukaSampleBaseField(uBaseField, vec3(dir)).x;
+            h *= harukaSeaLevelAttenuation(baseH);
+            if (baseH > 0.0 && h < -baseH) h = -baseH;   // el detalle no hunde tierra bajo el mar
+            outv = baseH + h;
+        } else {
+            outv = h;
+        }
+    }
+
+    uHeights[uint(uGrid.w) * uint(uGrid.x) * uint(uGrid.x) + v * uint(uGrid.x) + u] = outv;
+}

@@ -1,3 +1,32 @@
+/**
+ * @file planetary_system.cpp
+ * @brief `PlanetarySystem`: los planetas, sus órbitas y todo lo que se le puede
+ *        preguntar a una superficie.
+ *
+ * Este sistema es la **autoridad sobre el terreno**. Cuando la física quiere
+ * saber a qué altura está el suelo, cuando el jugador cava, cuando el agua
+ * necesita su nivel o cuando el clima pide su muestra, la respuesta sale de aquí
+ * y no de la malla que se está dibujando. Esa es la razón de que existan
+ * `sampleTerrainHeight()`, `sampleSurface()`, `sampleWaterLevel()`,
+ * `getSeaSurface()`, `weatherAt()` y `groundCoverAt()`: son el contrato de
+ * @ref Haruka::Physics::IWorldProvider visto desde el lado del mundo.
+ *
+ * Los bloques del fichero:
+ *
+ * - **Órbitas** — `updateOrbits()`, `setPlanetOrbit()`, `validateOrbits()`.
+ * - **Escena** — `buildFromScene()` / `syncFromScene()` / `updatePlanetFromScene()`:
+ *   el planeta se construye a sí mismo desde su configuración.
+ * - **Muestreo** — las funciones de arriba, y `groundHeightKmAtDir()` para la
+ *   consulta por dirección.
+ * - **Edición** — `editTerrain()` y `levelTerrain()`, que escriben en el mapa de
+ *   alturas del autor (`editHeightsInRadius`, indexado por `dirToHeightKey`).
+ * - **Planetas simples** — los cuerpos lejanos que solo necesitan una esfera.
+ *
+ * Las cifras de LOD no se escriben aquí: vienen de `core/planet/terrain_lod.h`,
+ * que es el único sitio donde viven y el gemelo declarado de los shaders.
+ * El oleaje también tiene gemelo (`core/planet/ocean_wave.h`), para que la física
+ * y el render vean literalmente la misma ola.
+ */
 #include "planetary_system.h"
 #include "core/terrain/cube_sphere.h"
 #include "core/planet/terrain_grid.h"
@@ -197,6 +226,47 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     { HARUKA_PROFILE("lod.orbits"); updateOrbits(dt); }
     { HARUKA_PROFILE("simple.orbits"); updateSimpleOrbits(dt); }
 
+    // 2. EL ESTADO DEL MAR del frame. Va DESPUÉS de las órbitas porque la marea depende de dónde
+    //    están la luna y el sol AHORA. Se calcula una vez, se publica a la GPU y lo lee la física:
+    //    un solo cálculo, dos consumidores. Ver `OceanState`.
+    { HARUKA_PROFILE("ocean.state"); updateOceanState(cameraPos); }
+}
+
+void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
+    glm::dvec3 pc; double pr = 0.0;
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) { m_oceanState = Haruka::Planet::oceanDefaultState(); return; }
+    const glm::dvec3 rel = cameraPos - pc;
+    const double len = glm::length(rel);
+    const glm::dvec3 dir = (len > 1e-9) ? rel / len : glm::dvec3(0, 1, 0);
+
+    // ── LA MAREA ────────────────────────────────────────────────────────────────────────────────
+    // ⚠️ SE EVALÚA EN UN SOLO PUNTO (bajo la cámara) y se usa como ESCALAR para todo el mar visible.
+    // No es pereza: el término P₂ varía a escala del PLANETA. Sobre el alcance del clipmap (16 km)
+    // el coseno cambia 16/6371 = 0,0025, y como `d(3c²−1)/dc ≤ 6`, la marea se mueve ~1,5 % de su
+    // amplitud de un extremo al otro de lo que se ve — centímetros. Modelarla por vértice costaría
+    // los cuerpos en un UBO y una evaluación por vértice para eso.
+    double tideM = 0.0;
+    if (const auto* tp = activeTerrestrial()) {
+        const auto& bodies = tp->tidalBodies();
+        if (!bodies.empty()) {
+            std::vector<glm::dvec3> pos; std::vector<double> gm;
+            pos.reserve(bodies.size()); gm.reserve(bodies.size());
+            for (const auto& b : bodies) { pos.push_back(b.posCenter); gm.push_back(b.gm); }
+            tideM = Haruka::Planet::oceanTideAt(dir, pr, pos.data(), gm.data(), (int)bodies.size());
+        }
+    }
+
+    // ── EL VIENTO QUE LEVANTA EL MAR ────────────────────────────────────────────────────────────
+    // El mismo campo de clima que mueve las nubes y la lluvia. Antes el oleaje era una tabla fija:
+    // una galerna y un día en calma daban olas idénticas.
+    const Haruka::WeatherSample ws = weatherAt(cameraPos);
+    // El viento del clima viene en el marco local del planeta; sus dos primeras componentes sirven
+    // de rumbo en el plano tangente, que es lo que `oceanStateFromWind` espera.
+    const float speed = glm::length(ws.wind);
+    m_oceanState = Haruka::Planet::oceanStateFromWind(speed, ws.wind.x, ws.wind.z, (float)tideM);
+
+    // Publicarlo a quien lo DIBUJA. La física lo lee de `oceanState()`, no de otra derivación.
+    if (auto* tpm = activeTerrestrialMut()) tpm->setOceanState(m_oceanState);
 }
 
 void PlanetarySystem::updateOrbits(double /*dt*/) {
@@ -614,16 +684,64 @@ PlanetarySystem::GroundCover PlanetarySystem::groundCoverAt(const glm::dvec3& wo
     return c;
 }
 
+/**
+ * ⚠️ ESTA FUNCIÓN ERA UN STUB, Y CON ELLA TODO EL AGUA DE LA FÍSICA.
+ *
+ * Buscaba el planeta más cercano y devolvía un `TerrainSample` RECIÉN CONSTRUIDO, sin tocar. Como el
+ * valor por defecto de `waterType` es `None`, `sampleWaterLevel` salía por su primer `return` y
+ * contestaba `kNoWater` en todo el universo. Cadena completa de lo que eso apagaba:
+ *
+ *     sampleSurface (stub) → waterType=None → sampleWaterLevel=kNoWater → Application::getWaterLevelAt
+ *     → el juego nunca ve agua → no se nada, no se flota, no se ahoga
+ *
+ * Y de propina dejaba INALCANZABLE a `ocean_wave.h`, el gemelo CPU del oleaje: su única llamada está
+ * tres líneas después de ese `return`. Estaba escrito, documentado y verificado, y no se ejecutaba.
+ *
+ * Las dos decisiones de esta función, y por qué son ésas:
+ *
+ *  · LA COTA sale de `sampleTerrainHeight`, no de un muestreo propio. Es el contrato del suelo de
+ *    todo el motor (el mismo que pisa Jolt y que dibuja el clipmap). Un segundo muestreador aquí
+ *    sería otra superficie más que mantener de acuerdo — el error que este repo ya ha pagado dos
+ *    veces (el terreno, y las tres aguas del render).
+ *
+ *  · DÓNDE HAY MAR es `elevKm < 0`, que es LITERALMENTE la regla del shader: `ocean.frag` calcula
+ *    `depth = level − baseH` y descarta el fragmento con `depth <= 0`. Si la física usara cualquier
+ *    otro criterio, la orilla que se ve y la que se nada serían dos líneas distintas. El bake ya
+ *    viene desplazado para que el nivel del mar sea la cota 0, así que no hay constante que elegir.
+ */
 Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos) const {
     Haruka::TerrainSample s;
-    if (m_planets.empty()) return s;
-    const Planet* nearest = nullptr;
-    double bestDist = 1e300;
-    for (const auto& p : m_planets) {
-        double d = glm::length(p.position - worldPos);
-        if (d < bestDist) { bestDist = d; nearest = &p; }
+    glm::dvec3 pc; double pr = 0.0;
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) return s;
+    const glm::dvec3 rel = worldPos - pc;
+    const double     len = glm::length(rel);
+    if (len < 1e-9) return s;
+    const glm::dvec3 dir = rel / len;
+
+    // EL SUELO, de la fuente única. (No puede recursar: el fallback de `sampleTerrainHeight` que
+    // llamaba aquí se cortó — ver la nota de su `return` final.)
+    s.elevKm = (float)(sampleTerrainHeight(worldPos) / 1000.0);
+    s.normal = glm::vec3(dir);   // radial: la normal analítica del relieve es cosa del sampler v2
+
+    // EL AGUA, con la regla del shader. El océano está en la cota 0; un lago NO se decide aquí — lo
+    // publica la simulación de aguas someras y lo compone `HybridWater::waterLevelAlongUp`, que es
+    // quien sabe de láminas locales. Meter lagos aquí sería una tercera respuesta a "¿hay agua?".
+    // El nivel NO es 0 fijo: la marea sube y baja la lámina, y con ella la línea de costa. Es el
+    // mismo `seaLevelM` que se subió a la GPU, así que la orilla que se nada y la que se ve son una.
+    const float seaKm = m_oceanState.seaLevelM / 1000.0f;
+    if (s.elevKm < seaKm) {
+        s.waterType    = Haruka::WaterType::Ocean;
+        s.waterLevelKm = seaKm;
     }
-    if (!nearest) return s;
+
+    // EL CLIMA, del campo horneado del planeta — el MISMO con el que se pintaron los biomas y se
+    // repartieron los props. Sin esto `groundCoverAt` recibía los valores por defecto (15 °C, 0.5 de
+    // humedad) y su `arid` salía 0 siempre: la capa de arena nunca se activaba en ningún punto.
+    if (const auto* tp = activeTerrestrial()) {
+        const Haruka::FieldSample f = tp->fieldSampleAt(glm::vec3(dir));
+        s.tempC    = f.tempC;
+        s.humidity = f.humidity;
+    }
     return s;
 }
 
@@ -649,16 +767,55 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     const glm::dvec3 up  = rel / r;
 
     // Profundidad bajo ESTE punto: el mismo criterio que el shader (nivel del agua − cota del suelo).
-    const double ground = sampleTerrainHeight(worldPos);
-    const double depth  = levelM - ground;
-    if (depth <= 0.0) return levelM;
+    // La cota sale de la muestra que YA se hizo arriba: pedirla otra vez a `sampleTerrainHeight` era
+    // un segundo muestreo del terreno (el camino caliente del fluido lo llama ~1600 veces por frame) y,
+    // peor, abría la puerta a que la profundidad y la decisión "aquí hay mar" salieran de dos lecturas
+    // distintas del suelo.
+    const double depthRest = levelM - double(s.elevKm) * 1000.0;
+    if (depthRest <= 0.0) return levelM;
 
-    static const auto s_clock0 = std::chrono::high_resolution_clock::now();
-    const float t = std::chrono::duration<float>(
-        std::chrono::high_resolution_clock::now() - s_clock0).count();
+    // EL MISMO reloj que llena `uDebug.y` en el shader — ahora de verdad. Aquí había un `static` local
+    // propio: otro origen de tiempo, o sea otra fase. Ver la nota de `oceanClockSeconds()`.
+    const float t = Haruka::Planet::oceanClockSeconds();
     // La ola se evalúa en la superficie EN REPOSO, igual que en el tese.
     const glm::vec3 wp = glm::vec3(up * (pr + levelM));
-    return levelM + (double)Haruka::Planet::oceanWaveHeight(wp, glm::vec3(up), t, (float)depth);
+    // ⚠️ MISMO ORDEN QUE `ocean.tese`: primero la lámina trepa (swash), y la ola se evalúa sobre la
+    // profundidad ya trepada. Invertirlo aquí daría una cota parecida pero no la misma, y "parecida"
+    // es exactamente el fallo que se persigue — la orilla que se nada dejaría de ser la que se ve.
+    const double swash = (double)Haruka::Planet::oceanSwash((float)depthRest, wp, glm::vec3(up), t,
+                                                            m_oceanState);
+    const double level2 = levelM + swash;
+    const double depth2 = level2 - double(s.elevKm) * 1000.0;
+    if (depth2 <= 0.0) return level2;
+    const glm::vec3 wp2 = glm::vec3(up * (pr + level2));
+    return level2 + (double)Haruka::Planet::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
+                                                            1.0f, m_oceanState);
+}
+
+double PlanetarySystem::sampleWaterDepth(const glm::dvec3& worldPos) const {
+    const Haruka::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Haruka::WaterType::None) return 0.0;
+    return std::max(0.0, (double(s.waterLevelKm) - double(s.elevKm)) * 1000.0);
+}
+
+glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) const {
+    const Haruka::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Haruka::WaterType::None) return glm::dvec3(0.0);
+    glm::dvec3 pc; double pr = 0.0;
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) return glm::dvec3(0.0);
+    const glm::dvec3 rel = worldPos - pc;
+    const double     r   = glm::length(rel);
+    if (r < 1e-9) return glm::dvec3(0.0);
+    const glm::dvec3 up = rel / r;
+
+    const double levelM = double(s.waterLevelKm) * 1000.0;
+    const double depth  = levelM - double(s.elevKm) * 1000.0;
+    if (depth <= 0.0) return glm::dvec3(0.0);
+
+    const float     t  = Haruka::Planet::oceanClockSeconds();
+    const glm::vec3 wp = glm::vec3(up * (pr + levelM));
+    return glm::dvec3(Haruka::Planet::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
+                                                    1.0f, m_oceanState));
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
@@ -667,12 +824,7 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
     return sampleTerrainHeight(worldPos, Haruka::Planet::terrainTriM(0.0));
 }
 
-double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos, float minFeatureM) const {
-    const Planet* nearest = nullptr; double best = 1e300;
-    for (const auto& p : m_planets) {
-        const double d = glm::length(p.position - worldPos);
-        if (d < best) { best = d; nearest = &p; }
-    }
+PlanetarySystem::TerrainSampler PlanetarySystem::terrainSampler(const glm::dvec3& nearWorldPos) const {
     // SimplePlanet: el suelo sale de SU retícula base + el detalle compartido con la GPU. Va antes
     // que la superficie de referencia porque ésta cuelga de `sampleTerrainV2`, que en esta rama es
     // un stub que devuelve 0 — con ella la física caminaba sobre una esfera lisa.
@@ -680,38 +832,48 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos, float mi
     // son los cuerpos, y `m_simplePlanets`, que son los renderizables): si no casan exactamente, esto
     // no encuentra nada y antes se caía a la esfera lisa SIN DECIR NADA.
     const std::string& activeName = getActivePlanetName();
-    for (const auto& sp : m_simplePlanets) {
-        if (!sp || sp->config().name != activeName) continue;
-        const glm::dvec3 rel = worldPos - sp->config().position;
-        const double len = glm::length(rel);
-        if (len > 1e-9) return sp->sampleHeight(rel / len, minFeatureM);
-    }
+    for (const auto& sp : m_simplePlanets)
+        if (sp && sp->config().name == activeName) return { sp.get(), sp->config().position };
 
     // (2) Si el nombre no casó, el suelo es el del SimplePlanet MÁS CERCANO — que es el que se está
     // pisando y el que se está dibujando. Antes se pasaba directo a `ReferenceSurface`, o sea a
     // devolver 0: la física caminaba sobre una esfera lisa mientras el render pintaba relieve. Un
     // planeta renderizable a mano es infinitamente mejor suelo que el nivel del mar.
-    {
-        const Haruka::Planet::TerrestrialPlanet* best = nullptr;
-        double bestD = 1e300;
-        for (const auto& sp : m_simplePlanets) {
-            if (!sp) continue;
-            const double d = glm::length(worldPos - sp->config().position) - sp->config().radius;
-            if (d < bestD) { bestD = d; best = sp.get(); }
+    const Haruka::Planet::TerrestrialPlanet* best = nullptr;
+    double bestD = 1e300;
+    for (const auto& sp : m_simplePlanets) {
+        if (!sp) continue;
+        const double d = glm::length(nearWorldPos - sp->config().position) - sp->config().radius;
+        if (d < bestD) { bestD = d; best = sp.get(); }
+    }
+    if (best) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            HARUKA_LOGW("Terrain",
+                "el planeta activo ('%s') no casa con ningun SimplePlanet: la fisica usa el mas "
+                "cercano ('%s'). Revisa que los nombres de m_planets y m_simplePlanets coincidan.",
+                activeName.c_str(), best->config().name.c_str());
         }
-        if (best) {
-            static bool warned = false;
-            if (!warned) {
-                warned = true;
-                HARUKA_LOGW("Terrain",
-                    "el planeta activo ('%s') no casa con ningun SimplePlanet: la fisica usa el mas "
-                    "cercano ('%s'). Revisa que los nombres de m_planets y m_simplePlanets coincidan.",
-                    activeName.c_str(), best->config().name.c_str());
-            }
-            const glm::dvec3 rel = worldPos - best->config().position;
-            const double len = glm::length(rel);
-            if (len > 1e-9) return best->sampleHeight(rel / len, minFeatureM);
-        }
+        return { best, best->config().position };
+    }
+    return {};
+}
+
+double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos, float minFeatureM) const {
+    // ⚠️ LA RESOLUCIÓN DEL PLANETA ESTÁ EN `terrainSampler`, NO AQUÍ. Antes vivía en el cuerpo de esta
+    // función, y esta función es EL CAMINO CALIENTE: la malla de colisión la llama 235 564 veces por
+    // reconstrucción y cada llamada repetía lo mismo — dos bucles sobre los vectores de planetas y una
+    // comparación de `std::string` — para obtener un puntero que no cambia entre muestras. Sacarlo a un
+    // objeto reutilizable permite al llamador masivo resolverlo UNA vez (ver
+    // `WorldSystemProvider::terrainHeightFieldRings`) sin que existan dos definiciones de "qué planeta
+    // es el suelo": ésta delega en la misma.
+    if (const TerrainSampler s = terrainSampler(worldPos)) return s.heightAt(worldPos, minFeatureM);
+
+    const Planet* nearest = nullptr; double best = 1e300;
+    for (const auto& p : m_planets) {
+        const double d = glm::length(p.position - worldPos);
+        if (d < best) { best = d; nearest = &p; }
     }
 
     if (nearest && nearest->name == getActivePlanetName()) {
@@ -730,7 +892,13 @@ double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos, float mi
             return baseM;
         }
     }
-    return double(sampleSurface(worldPos).elevKm) * 1000.0;
+    // ⚠️ AQUÍ SE LLAMABA A `sampleSurface`, Y AHORA SERÍA RECURSIÓN INFINITA: desde que `sampleSurface`
+    // saca su cota de esta misma función (que es lo correcto — una sola fuente de suelo), el par se
+    // llamaría hasta desbordar la pila. No es un apaño: llegar hasta aquí significa que NO hay ningún
+    // muestreador de superficie (ni SimplePlanet, ni planeta activo que case), y en ese caso
+    // `sampleSurface` tampoco podía devolver otra cosa que su `elevKm` por defecto, que es 0. El
+    // resultado es idéntico; lo que desaparece es el ciclo.
+    return 0.0;
 }
 
 bool PlanetarySystem::groundHeightKmAtDir(const glm::dvec3& dir, float& outElevKm) const {
@@ -838,8 +1006,9 @@ void PlanetarySystem::generateSimpleLOD(const std::string&, int) {
 
 // Trabajo de COMPUTE de todos los planetas, para hacerlo FUERA del render pass de la escena.
 // Ver `TerrestrialPlanet::prepare`: un dispatch dentro de un render pass es ilegal en Vulkan.
-void PlanetarySystem::prepareSimplePlanets(const glm::dvec3& cameraPos) {
-    for (auto& p : m_simplePlanets) p->prepare(cameraPos);
+void PlanetarySystem::prepareSimplePlanets(const glm::dvec3& cameraPos, const glm::dvec3& viewDir,
+                                           double fovYRad, double aspect, double viewportH) {
+    for (auto& p : m_simplePlanets) p->prepare(cameraPos, viewDir, fovYRad, aspect, viewportH);
 }
 
 void PlanetarySystem::renderSimplePlanet(const std::string& name,

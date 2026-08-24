@@ -36,14 +36,23 @@ void main() {
     // El mar está en la cota 0 (el bake ya viene desplazado). Un lago o un río están donde diga la
     // simulación. `max` de los dos: donde no hay agua interior el centinela es -1e9 y gana el mar;
     // donde hay lago por encima del mar, gana el lago. La misma superficie sirve para los dos.
+    // El 0 de aquí era el nivel del mar CLAVADO. Ahora la cota la trae `OceanParams`, o sea que
+    // incluye la MAREA: la lámina sube y baja, y con ella la línea de costa (la orilla la decide
+    // `profundidad = nivel - suelo`, así que la pleamar cubre playa sin que nadie recorte nada).
     float inland = harukaInlandWaterAt(dir * R + uCenter.xyz);
-    float level  = max(0.0, inland);
-    vec3  wp     = dir * (R + level);         // superficie del agua EN REPOSO
+    float level  = max(harukaSeaLevelM(), inland);
+    vec3  wp     = dir * (R + level);         // superficie del agua EN REPOSO (sin swash aun)
 
     // PROFUNDIDAD: el mismo bake que dibuja el terreno y que pisa la física. `baseH` negativo = fondo
     // bajo el nivel del mar, o sea agua; positivo = tierra, y ahí no hay mar que dibujar.
     float baseH = harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
                                           harukaEquirectUV(dir));
+    // SWASH: la lámina trepa por la playa tras romper la ola. Se calcula con la profundidad EN
+    // REPOSO (si se realimentara con la ya trepada, el término se perseguiría a sí mismo) y sube el
+    // nivel, así que mueve la LÍNEA DE COSTA — la orilla sigue siendo "donde la profundidad se
+    // anula", solo que ahora esa frontera respira. Gemelo: `Haruka::Planet::oceanSwash`.
+    level += harukaSwash(level - baseH, wp, dir, uDebug.y);
+    wp     = dir * (R + level);              // la lámina ya trepada
     float depth = max(level - baseH, 0.0);    // profundidad = nivel del agua − cota del suelo
 
     // DESVANECIDO EN EL BORDE DEL CLIPMAP. La ola se apaga antes de que acabe la rejilla, para que el

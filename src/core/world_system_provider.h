@@ -22,6 +22,10 @@
 #include <utility>   // std::pair — coordenadas (x,z) de un nodo de anillo
 #include <limits>       // quiet_NaN — marca de "sin superficie" en los anillos de heightfield
 #include <algorithm>
+#include <thread>       // muestreo de anillos en paralelo (ver terrainHeightFieldRings)
+#include <atomic>
+#include <utility>
+#include "tools/profiler.h"   // HARUKA_PROFILE: el coste de llenar los anillos no se medía
 
 namespace Haruka {
 
@@ -96,6 +100,23 @@ public:
         // que no era la dibujada (7.81 m de pico con meso) y los props flotaban.
         if (!m_planetary || !hasActivePlanet()) return 0.0;
         return m_planetary->sampleTerrainHeight(worldPos);
+    }
+
+    /** @brief La superficie del agua CON LA OLA, en las mismas unidades que `terrainHeightAt`.
+     *
+     *  Misma disciplina que el suelo: la física NO tiene un mar propio. `sampleWaterLevel` es la única
+     *  respuesta a "¿qué cota tiene el agua aquí?", y evalúa el gemelo CPU del shader con el reloj
+     *  compartido — así lo que se flota es lo que se dibuja. */
+    double waterSurfaceAt(const glm::dvec3& worldPos) const override {
+        if (!m_planetary || !hasActivePlanet()) return kNoWater;
+        const double lvl = m_planetary->sampleWaterLevel(worldPos);
+        return (lvl > PlanetarySystem::kNoWater * 0.5) ? lvl : kNoWater;
+    }
+
+    /** @brief Velocidad orbital del agua en la superficie (m/s). Ver `oceanWaveVelocity`. */
+    glm::dvec3 waterVelocityAt(const glm::dvec3& worldPos) const override {
+        if (!m_planetary || !hasActivePlanet()) return glm::dvec3(0.0);
+        return m_planetary->sampleWaterVelocity(worldPos);
     }
 
 // (Fase 2b/3) Malla LOCAL del terreno para la colisión de Jolt: se muestrea la altura de la MALLA en
@@ -290,7 +311,8 @@ public:
     // Devuelve la componente RADIAL respecto al plano tangente, no la altitud: un heightfield es plano
     // y el terreno está sobre una esfera. Proyectar sobre `up` mete la caída por curvatura (x²/2R)
     // exactamente — a 262 km son 5,4 km, así que no es un detalle.
-    float ringSample(const glm::dvec3& pc, double R, const glm::dvec3& up,
+    float ringSample(const PlanetarySystem::TerrainSampler& src,
+                     const glm::dvec3& pc, double R, const glm::dvec3& up,
                      const glm::vec3& fUp, const glm::vec3& fT1, const glm::vec3& fHz, float fR,
                      const glm::dvec3& org, double x, double z) const {
         // La dirección se calcula EN FLOAT con el orden de operaciones del tese (`(tan*loc)/R`, no
@@ -301,7 +323,12 @@ public:
         // comparte bit a bit con el shader— no cambia.
         const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
         const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
-        const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);
+        // ⚠️ `src` YA RESUELTO por el llamador. Antes esto era `m_planetary->sampleTerrainHeight(...)`,
+        // que por dentro rehacía la búsqueda del planeta —dos bucles y una comparación de `std::string`—
+        // en cada una de las 235 564 muestras, para un puntero que no cambia. `heightAt` hace las mismas
+        // cuentas que hacía aquella, así que el resultado es idéntico bit a bit.
+        const glm::dvec3 wp = pc + dir * R;
+        const double h = src ? src.heightAt(wp, triM) : m_planetary->sampleTerrainHeight(wp, triM);
         return (float)glm::dot(pc + dir * (R + h) - org, up);
     }
 
@@ -337,27 +364,74 @@ public:
             Haruka::Planet::terrainRingLayout(halfExtent);
         if (firstRing >= layout.size()) return false;
         outRings.clear(); outRings.resize(layout.size() - firstRing);
+
+        // EL PLANETA SE RESUELVE UNA VEZ, no por muestra. Ver `PlanetarySystem::TerrainSampler`.
+        const PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(center);
+
+        // ── EL COSTE VIVE AQUÍ, Y HASTA AHORA NO SE MEDÍA ───────────────────────────────────────
+        //
+        // Este bucle son ~235 564 muestras del terreno procedural. `terrain_lod.h` documenta el
+        // coste de la MALLA que estos anillos sustituyeron, pero el muestreo de los anillos nunca
+        // tuvo scope propio: se sabía que los 11 `HeightFieldShape` cuestan 18,3 ms y NO cuánto
+        // cuesta llenarlos. Sin este número, cualquier rediseño del muestreo se justifica con una
+        // extrapolación. El scope es THREAD-LOCAL, así que va en el hilo que llama, no dentro de
+        // los workers.
+        HARUKA_PROFILE("terrain.rings.sample");
+
+        // ── PARALELO POR FILAS ──────────────────────────────────────────────────────────────────
+        //
+        // Las muestras son INDEPENDIENTES: cada una escribe su propio hueco y ninguna lee el de otra,
+        // así que el reparto no cambia un solo bit del resultado — el determinismo cliente↔servidor
+        // que exige el paso fijo se mantiene por construcción, no por convenio.
+        //
+        // `sampleHeight` es seguro desde varios hilos: lee solo `m_heightCPU`, inmutable tras el bake
+        // (es la misma propiedad en la que ya se apoyan `nearJob`/`groundJob` para muestrear en un
+        // worker). Se reparte por FILAS y no por anillos porque los anillos son muy desiguales — el
+        // de ±2048 m tiene 258² muestras contra las 130² de los demás, o sea que un hilo por anillo
+        // dejaría a uno con el 35 % del trabajo y a los otros esperándolo.
+        std::vector<std::pair<size_t, uint32_t>> rows;   // (índice de anillo, fila)
         for (size_t k = firstRing; k < layout.size(); ++k) {
-            const Haruka::Planet::TerrainRingSpec& spec = layout[k];
-            const uint32_t n = spec.samples;
             auto& ring = outRings[k - firstRing];
-            ring.spec = spec;
-            ring.samples.assign((size_t)n * n, 0.0f);
-            for (uint32_t j = 0; j < n; ++j) {
-                const double z = Haruka::Planet::terrainRingNode(j, spec);
-                for (uint32_t i = 0; i < n; ++i) {
-                    const double x = Haruka::Planet::terrainRingNode(i, spec);
-                    float& out = ring.samples[(size_t)j * n + i];
-                    // Sin superficie: el nodo sobrante del borde (índice 0, ver TERRAIN_RING_SAMPLES)
-                    // y el hueco central que cubre el nivel de dentro. Emitir los dos sería darle a
-                    // Jolt DOS superficies sobre el mismo suelo → contactos dobles en la frontera.
-                    if (i == 0 || j == 0 || Haruka::Planet::terrainRingHole(spec, x, z)) {
-                        out = std::numeric_limits<float>::quiet_NaN();
-                        continue;
-                    }
-                    out = ringSample(pc, R, up, fUp, fT1, fHz, fR, outOrigin, x, z);
+            ring.spec = layout[k];
+            ring.samples.assign((size_t)layout[k].samples * layout[k].samples, 0.0f);
+            for (uint32_t j = 0; j < layout[k].samples; ++j) rows.emplace_back(k - firstRing, j);
+        }
+        auto doRow = [&](size_t r) {
+            auto& ring = outRings[rows[r].first];
+            const Haruka::Planet::TerrainRingSpec& spec = ring.spec;
+            const uint32_t n = spec.samples, j = rows[r].second;
+            const double z = Haruka::Planet::terrainRingNode(j, spec);
+            for (uint32_t i = 0; i < n; ++i) {
+                const double x = Haruka::Planet::terrainRingNode(i, spec);
+                float& out = ring.samples[(size_t)j * n + i];
+                // Sin superficie: el nodo sobrante del borde (índice 0, ver TERRAIN_RING_SAMPLES)
+                // y el hueco central que cubre el nivel de dentro. Emitir los dos sería darle a
+                // Jolt DOS superficies sobre el mismo suelo → contactos dobles en la frontera.
+                if (i == 0 || j == 0 || Haruka::Planet::terrainRingHole(spec, x, z)) {
+                    out = std::numeric_limits<float>::quiet_NaN();
+                    continue;
                 }
+                out = ringSample(src, pc, R, up, fUp, fT1, fHz, fR, outOrigin, x, z);
             }
+        };
+        const unsigned hw = std::thread::hardware_concurrency();
+        // Un solo hilo si la máquina no lo dice o si hay tan poco que repartir que el arranque de los
+        // hilos costaría más que el trabajo.
+        const unsigned nThreads = (hw > 1 && rows.size() >= 64) ? std::min(hw, 16u) : 1u;
+        if (nThreads <= 1) {
+            for (size_t r = 0; r < rows.size(); ++r) doRow(r);
+        } else {
+            std::atomic<size_t> next{0};
+            std::vector<std::thread> pool;
+            pool.reserve(nThreads - 1);
+            // Reparto DINÁMICO (cada hilo coge la siguiente fila libre) y no en bloques: las filas
+            // cuestan muy distinto — las del hueco central salen por el `continue` sin muestrear nada
+            // y las de fuera evalúan hasta 4 octavas. Con bloques fijos, el hilo que pillara el anillo
+            // interior acabaría enseguida y se quedaría mirando.
+            auto worker = [&] { for (size_t r; (r = next++) < rows.size(); ) doRow(r); };
+            for (unsigned t = 1; t < nThreads; ++t) pool.emplace_back(worker);
+            worker();
+            for (auto& th : pool) th.join();
         }
         return true;
     }
@@ -423,9 +497,13 @@ public:
             }
             if (!solid) continue;
 
+            // La sonda de paridad es puntual (4 muestras), así que resolver el planeta aquí no está
+            // en ningún camino caliente — pero se usa el MISMO `TerrainSampler` que el bucle masivo
+            // para que las dos rutas no puedan describir suelos distintos.
+            const PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(worldPos);
             auto S = [&](int i, int j) {
                 const auto p = nodeXZ(i, j);
-                return (double)ringSample(pc, R, up, fUp, fT1, fHz, fR, org, p.first, p.second);
+                return (double)ringSample(src, pc, R, up, fUp, fT1, fHz, fR, org, p.first, p.second);
             };
             // La MISMA elección de triángulo y la MISMA interpolación que Jolt. No es bilineal.
             double s;

@@ -163,21 +163,43 @@ inline float octaveWeight(float wavelengthM, float minFeatureM) {
     return glm::clamp(t - 1.0f, 0.0f, 1.0f);
 }
 
-inline float terrainDetail(const glm::vec3& dir, float radius, float minFeatureM) {
-    // Early-out idéntico al gemelo GLSL: si ni la octava más gruesa (λ=2857 m) tiene triángulos para
-    // ella —`octaveWeight` es > 0 ⟺ minFeatureM < 1428.5— ninguna octava contribuye y el resultado es
-    // 0 (lo mismo que sumar los términos con peso 0, sin pagar el ruido). La CPU de la física siempre
-    // pasa minFeatureM=2.0, así que este camino no lo toca; es el render de lejos/orbita el que ahorra.
+/**
+ * @brief Detalle con la dirección en DOBLE. Es la entrada que conserva la precisión.
+ *
+ * ⚠️ EXISTE PORQUE LA VERSIÓN DE ABAJO TIRA LA PRECISIÓN EN SU PROPIA FIRMA. Toma `glm::vec3` y
+ * dentro hace `dvec3(dir) * radius`: subir a double DESPUÉS de haber redondeado a float no recupera
+ * nada. A radio terrestre un ulp de una dirección unitaria en float son **0,38-0,76 m de
+ * superficie** (medido en `clipmap_dir_parity`: 0,9302 m de separación, 0,1453 m de altura), así que
+ * la coordenada del ruido llega cuantizada a medio metro antes de evaluar la primera octava.
+ *
+ * Da igual mientras quien llame tenga la dirección en float de todos modos —el clipmap la
+ * reconstruye así— pero el quadtree del v5 la calcula EXACTA desde enteros (`terrain_node.h`), y
+ * pasarla por una firma `vec3` desperdiciaría justo lo que ese diseño compra.
+ *
+ * La de `vec3` delega aquí: una sola implementación, sin gemelo que mantener.
+ */
+inline float terrainDetail(const glm::dvec3& dir, double radius, float minFeatureM) {
     if (minFeatureM >= 1428.5f) return 0.0f;
-    const glm::dvec3 p = glm::dvec3(dir) * (double)radius;
+    const glm::dvec3 p = dir * radius;
     float h = 0.0f;
-    // Guardas con la MISMA equivalencia que las de octaveWeight (λ/2), mismo corte que el .glsl.
     if (minFeatureM < 1428.5f) h += (detailNoise(p * 0.00035) - 0.5f) * 260.0f * octaveWeight(2857.0f, minFeatureM);
     if (minFeatureM <  312.5f) h += (detailNoise(p * 0.0016)  - 0.5f) *  70.0f * octaveWeight( 625.0f, minFeatureM);
     if (minFeatureM <   55.5f) h += (detailNoise(p * 0.0090)  - 0.5f) *  14.0f * octaveWeight( 111.0f, minFeatureM);
     if (minFeatureM <   11.0f) h += (detailNoise(p * 0.0450)  - 0.5f) *   3.0f * octaveWeight(  22.0f, minFeatureM);
     if (minFeatureM <    2.25f) h += (detailNoise(p * 0.2200) - 0.5f) *   0.7f * octaveWeight(   4.5f, minFeatureM);
     return h;
+}
+
+inline float terrainDetail(const glm::vec3& dir, float radius, float minFeatureM) {
+    // Early-out idéntico al gemelo GLSL: si ni la octava más gruesa (λ=2857 m) tiene triángulos para
+    // ella —`octaveWeight` es > 0 ⟺ minFeatureM < 1428.5— ninguna octava contribuye y el resultado es
+    // 0 (lo mismo que sumar los términos con peso 0, sin pagar el ruido). La CPU de la física siempre
+    // pasa minFeatureM=2.0, así que este camino no lo toca; es el render de lejos/orbita el que ahorra.
+    // Delega en la de DOUBLE con exactamente la misma conversión que hacía aquí
+    // (`dvec3(dir) * radius`), así que el resultado es idéntico bit a bit para los llamadores
+    // existentes. Lo que cambia es que ahora hay UN cuerpo, no dos escaleras de octavas que
+    // mantener sincronizadas.
+    return terrainDetail(glm::dvec3(dir), (double)radius, minFeatureM);
 }
 
 /**

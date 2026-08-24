@@ -1,9 +1,29 @@
+/**
+ * @file physics_engine.cpp
+ * @brief El motor de rígidos: integración, colisión y el puente con Jolt.
+ *
+ * Tres bloques conviven en este fichero:
+ *
+ * 1. **JoltImpl** — el puente con Jolt Physics, que es quien hace la broad phase
+ *    y el solver de verdad. `HARUKA_JOLT=0` lo apaga y deja el camino a mano.
+ * 2. **El camino propio** — `integrateForces()`, `detectCollisions()` y
+ *    `resolveCollisions()`: integración en doble precisión con gravedad
+ *    planetaria, empuje del agua, rozamiento del suelo y el ángulo de reposo.
+ * 3. **La geometría estática** — cajas, OBB colocados, conos y mallas de props que
+ *    el mundo registra para que los cuerpos tengan contra qué chocar. Refrescar
+ *    esa malla es asíncrono a propósito: bloquear el frame para rehacerla es lo
+ *    que costaba cientos de milisegundos.
+ *
+ * Todo lo que entra y sale de aquí está en **metros y en `double`**. La conversión
+ * a las coordenadas locales que ve la GPU es cosa de @ref Haruka::WorldSystem.
+ * El terreno no se conoce: se pregunta por @ref Haruka::Physics::IWorldProvider.
+ */
 #include "physics_engine.h"
 
 #include <iostream>
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>   // std::getenv — Jolt es opt-in (HARUKA_JOLT=1) mientras se integra
+#include <cstdlib>   // std::getenv — Jolt va por defecto; HARUKA_JOLT=0 vuelve al solver a mano
 #include <future>    // refresco ASÍNCRONO de la malla de colisión (no bloquear el frame)
 #include <atomic>
 #include <mutex>
@@ -1217,7 +1237,16 @@ struct PhysicsEngine::JoltImpl {
             // planetas, así que solo aportaba el Sol y era «insignificante» como decía el comentario)
             // más un parche radial de 9.81 hacia el planeta activo. Un escombro y el jugador caían por
             // reglas distintas, y ninguna de las dos usaba la masa del cuerpo.
-            const glm::dvec3 F = gravityAtPoint(w, sp->position) * sp->mass;
+            const glm::dvec3 gAcc = gravityAtPoint(w, sp->position);
+            glm::dvec3 F = gAcc * sp->mass;
+            // ── Y EL AGUA, QUE AQUÍ NO EXISTÍA ──────────────────────────────────────────────────
+            //
+            // ⚠️ ESTE CAMINO SOLO APLICABA GRAVEDAD. Toda la flotación del motor vivía en
+            // `integrateForces`, y con Jolt compilado `update()` retorna antes de llegar allí — o sea
+            // que en el JUEGO REAL nada flotaba: los cuerpos dinámicos caían al fondo del mar. La
+            // fórmula es la misma que usa el otro integrador (una sola función, `waterForceOn`), así
+            // que los dos caminos no pueden separarse.
+            F += eng->waterForceOn(*sp, gAcc, dt);
             if (finite3(F))
                 bi.AddForce(it->second, JPH::Vec3((float)F.x, (float)F.y, (float)F.z));
         }
@@ -1354,6 +1383,58 @@ void PhysicsEngine::advance(double frameDt) {
     }
 }
 
+glm::dvec3 PhysicsEngine::waterForceOn(RigidBody& body, const glm::dvec3& gravityAcc, double dt) {
+    if (!m_world || !m_world->hasActivePlanet() || body.radius <= 1e-4 || body.mass <= 1e-9) {
+        body.inWater = false;
+        return glm::dvec3(0.0);
+    }
+    // LA COTA DEL AGUA AQUÍ, con la ola puesta. `kNoWater` = en este punto no hay mar ni lago, y
+    // entonces no hay nada que aplicar: es lo que impide que un cuerpo flote dentro de un hoyo
+    // excavado bajo el nivel del mar, que es lo que pasaba al comparar contra el radio del planeta.
+    const double waterH = m_world->waterSurfaceAt(body.position);
+    if (!(waterH > IWorldProvider::kNoWater * 0.5)) { body.inWater = false; return glm::dvec3(0.0); }
+
+    const glm::dvec3 seaCenter = m_world->activePlanetCenter();
+    const double     waterR    = m_world->activePlanetRadius() + waterH;
+    const glm::dvec3 rel  = body.position - seaCenter;
+    const double     dist = glm::length(rel);
+    const double     r    = body.radius;
+    if (dist <= 1e-6 || dist >= waterR + r) { body.inWater = false; return glm::dvec3(0.0); }
+    const glm::dvec3 up = rel / dist;
+
+    // Fracción sumergida: 0 cuando el cuerpo apenas roza la superficie por arriba (dist = waterR + r),
+    // 1 cuando está entero bajo el agua (dist <= waterR − r).
+    const double f = glm::clamp((waterR + r - dist) / (2.0 * r), 0.0, 1.0);
+
+    // SPLASH: al CRUZAR la superficie hacia dentro con velocidad apreciable, UNA vez (el flag
+    // `inWater` es quien impide que se dispare cada paso). El juego emite partículas PBF ahí.
+    if (f > 0.05 && !body.inWater) {
+        const double vDown = -glm::dot(body.velocity, up);
+        if (vDown > 1.5 && m_onWaterEntry)
+            m_onWaterEntry(seaCenter + up * waterR, body.velocity, r);
+        body.inWater = true;
+    }
+    if (f <= 0.0) return glm::dvec3(0.0);
+
+    // ARQUÍMEDES, opuesto A LA GRAVEDAD (no a un "arriba" aparte): con `ratio > 1` el empuje supera al
+    // peso cuando está sumergido del todo, así que el cuerpo sube hasta que `f` baja a `1/ratio` — ahí
+    // se equilibra y flota. Ese es el punto de reposo, no un tope artificial.
+    const double buoyRatio = 1.1;                    // densidad agua/objeto (>1 = flota)
+    glm::dvec3 F = -gravityAcc * (f * buoyRatio * body.mass);
+
+    // ARRASTRE HACIA LA VELOCIDAD DEL AGUA — lo que TRANSPORTA. Con arrastre hacia cero (lo que había)
+    // el mar mece pero no lleva: la flotación era puramente vertical y nada alcanzaba la orilla por sí
+    // solo. `waterVelocityAt` da el movimiento orbital de Gerstner, horizontal y hacia delante en la
+    // cresta (transporte de Stokes). Con agua quieta se reduce exactamente al amortiguado anterior.
+    const glm::dvec3 vWater = m_world->waterVelocityAt(body.position);
+    // Tasa de relajación (1/s) proporcional a lo sumergido. Se expresa como FUERZA para que los dos
+    // integradores (Jolt y el de aquí) la apliquen igual; con `3·f·dt << 1` coincide con el
+    // amortiguado exponencial que usaba este camino.
+    constexpr double kDragRate = 3.0;
+    F += (vWater - body.velocity) * (kDragRate * f * body.mass);
+    return F;
+}
+
 void PhysicsEngine::integrateForces(double dt) {
     // Nivel del mar del planeta activo (esfera de radio seaR). La TIERRA siempre está por
     // encima del nivel del mar → un cuerpo por debajo de esta esfera está en una cuenca
@@ -1397,32 +1478,11 @@ void PhysicsEngine::integrateForces(double dt) {
         // flota); arrastre fuerte amortigua la velocidad → el objeto se ASIENTA flotando en la
         // superficie (equilibrio a f≈1/buoyRatio) en vez de oscilar. up radial ≈ world-up cerca
         // del jugador (donde la gravedad plana -Y ya apunta hacia el planeta).
-        if (haveSea && body->radius > 1e-4) {
-            glm::dvec3 rel2 = body->position - seaCenter;
-            double dist = glm::length(rel2);
-            double r    = body->radius;
-            if (dist > 1e-6 && dist < seaR + r) {
-                glm::dvec3 up = rel2 / dist;
-                double f = glm::clamp((seaR + r - dist) / (2.0 * r), 0.0, 1.0);
-                // SPLASH: al CRUZAR la superficie hacia dentro (aire→agua) con velocidad de entrada
-                // apreciable → dispara el callback UNA vez (no cada frame, por el flag inWater). El
-                // juego emite partículas PBF ahí → el impacto salpica.
-                if (f > 0.05 && !body->inWater) {
-                    double vDown = -glm::dot(body->velocity, up); // componente hacia el agua (m/s)
-                    if (vDown > 1.5 && m_onWaterEntry)
-                        m_onWaterEntry(seaCenter + up * seaR, body->velocity, r);
-                    body->inWater = true;
-                }
-                if (f > 0.0) {
-                    double g = glm::length(gravity);
-                    const double buoyRatio = 1.1;                 // agua/objeto (>1 = flota)
-                    body->velocity += up * (f * g * buoyRatio * dt);   // Arquímedes
-                    body->velocity -= body->velocity * (1.0 - std::exp(-3.0 * f * dt)); // arrastre
-                }
-            } else {
-                body->inWater = false; // fuera del agua → rearma el splash para la próxima entrada
-            }
-        }
+        // EL AGUA, por la MISMA función que usa el camino de Jolt (ver `waterForceOn`). Aquí vivía la
+        // fórmula entera contra una esfera de radio R; ahora está en un solo sitio y contra la cota
+        // real del agua. Se integra como aceleración porque este camino integra a mano.
+        if (body->mass > 1e-9)
+            body->velocity += waterForceOn(*body, body->acceleration, dt) / body->mass * dt;
 
         body->position += body->velocity * dt;
 

@@ -76,6 +76,46 @@ inline constexpr double TERRAIN_TRIM_SLOPE = 0.002;
 inline constexpr double TERRAIN_TRIM_FLOOR = TERRAIN_CLIP_QUAD_M;
 
 /**
+ * @brief Piso de `triM` para el SOMBREADO per-píxel. **A propósito distinto del de la geometría.**
+ *
+ * ⚠️ EXISTE PORQUE LA OCTAVA MÁS FINA DEL TERRENO ESTABA MUERTA. La escalera de `terrain_detail.h`
+ * acaba en λ = 4,5 m (±0,7 m) y su guarda es `minFeatureM < 2.25`. Con el piso de la GEOMETRÍA
+ * (`TERRAIN_CLIP_QUAD_M` = 128/32 = **4 m**) esa condición no se cumple nunca, en ningún punto del
+ * planeta y a ninguna distancia: el rasgo más fino que el terreno podía tener era λ = 22 m. De pie,
+ * el bulto más pequeño del suelo medía 22 m de ancho — el "se ve basto desde todas partes".
+ *
+ * Cómo se murió: el tope de tesela bajó de 64 a 32 (4× menos teselación, decisión de coste
+ * documentada en `clipmap.tesc`). Eso llevó el quad de 2 m a 4 m y el piso con él. La octava estaba
+ * dimensionada para el quad de 2 m —`2.0 < 2.25` la activa, `4.0` no— y el cambio la apagó en
+ * silencio. El comentario del tope comprobó que λ = 22 m sobrevivía; nadie miró la siguiente.
+ *
+ * POR QUÉ PUEDEN SER DISTINTOS, que es la pregunta obvia: geometría y sombreado se muestrean a
+ * frecuencias distintas. La geometría vive en los VÉRTICES (4 m de separación) y detalle más fino que
+ * eso es sub-Nyquist — el hervido de §3.1, y por eso su piso NO se toca. El sombreado vive en los
+ * PÍXELES, y un píxel a 10 m del jugador abarca centímetros: ahí caben cuatro octavas más sin
+ * acercarse a su límite. Atarlos era confundir dos tasas de muestreo distintas.
+ *
+ * DE DÓNDE SALE EL VALOR, que NO es "el más grueso que la enciende": el peso de una octava es
+ * `octaveWeight(λ, triM) = clamp(λ/(2·triM) − 1, 0, 1)`, o sea una RAMPA, no un interruptor. Con la
+ * guarda justo rozada (`triM` = 2.0) la octava entra al **12,5 %** — ±8,75 cm en vez de sus ±0,7 m.
+ * Encenderla así es casi no encenderla. El peso llega a 1 en `λ/4`:
+ *
+ *     octaveWeight(4.5, 1.125) = 4.5/2.25 − 1 = 1.0
+ *
+ * De ahí el 1.125: es **λ_fina / 4**, el valor derivado en el que la octava aporta su amplitud
+ * completa. Bajar de ahí no compra nada (el peso ya está topado en 1) y solo pagaría evaluaciones.
+ *
+ * Y es seguro para el sombreado: λ = 4,5 m a 1 km son ~4,5 píxeles, y más cerca aún más. El
+ * sub-Nyquist que este piso NO puede provocar es el de la MALLA, y la malla no lo usa.
+ *
+ * ⚠️ NO ENTRA EN LA PARIDAD. El contrato es sobre la ALTURA (lo que se pisa contra lo que se dibuja);
+ * esto solo cambia la NORMAL con la que se ilumina. La colisión no lo lee.
+ *
+ * Gemelo de `harukaPixelTriM` en `planet/biome.frag`. Lo vigila `test_terrain_finest_octave`.
+ */
+inline constexpr double TERRAIN_TRIM_FLOOR_PIXEL = 1.125;   // = lambda_fina/4 (ver arriba)
+
+/**
  * @brief `triM` a una distancia tangente `radM` de la cámara/jugador, en metros.
  *
  * LA fuente de este número para el motor entero: clipmap, malla base, colisión y tests. Los

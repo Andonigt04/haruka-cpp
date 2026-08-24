@@ -32,6 +32,8 @@
 #include "core/planet/zone_shape.h"
 #include "core/planet/orbit.h"                 // OrbitElements (Kepler con elementos precesantes)
 #include "core/terrain/planet_fields.h"        // FieldSample (fieldSampleAt)
+#include "core/planet/ocean_wave.h"            // OceanState: el estado del mar que se sube a la GPU
+#include "core/terrain/terrain_node_renderer.h" // v5: pase de terreno por nodos (HARUKA_TERRAIN_V5=1)
 #include "core/weather_system.h"
 #include "tools/procgraph/proc_graph.h"
 #include "tools/procgraph/proc_climate.h"
@@ -188,7 +190,8 @@ public:
      *  ⚠️ No es una optimización ni un capricho de orden: `vkCmdDispatch` dentro de una instancia
      *  de render pass es ILEGAL en Vulkan, y el culling vivía dentro de `render()` porque en OpenGL
      *  eso es perfectamente legal. Cerraba el programa. Ver el comentario largo en `prepare()`. */
-    void prepare(const glm::dvec3& cameraPos);
+    void prepare(const glm::dvec3& cameraPos, const glm::dvec3& viewDir = glm::dvec3(0,0,-1),
+                 double fovYRad = 0.7854, double aspect = 1.777, double viewportH = 1080.0);
 
     void render(const glm::dvec3& cameraPos, const glm::mat4& proj, const glm::mat4& view);
 
@@ -327,6 +330,19 @@ public:
      *  frame desde el sistema orbital. */
     void setTidalBodies(std::vector<MassiveBody> bodies) { m_tidalBodies = std::move(bodies); }
     const std::vector<MassiveBody>& tidalBodies() const { return m_tidalBodies; }
+
+    /**
+     * @brief Publica EL ESTADO DEL MAR de este frame (trenes de olas + cota de la lámina).
+     *
+     * ⚠️ ES LA ÚNICA FUENTE. Los trenes eran una tabla `const` duplicada a mano entre `ocean_wave.h`
+     * y `ocean_wave.glsl`; desde que el oleaje depende del viento y la lámina de la marea, la tabla la
+     * calcula la CPU (`oceanStateFromWind`) y se sube tal cual. Quien la use para física TIENE que
+     * usar este mismo `OceanState`, no volver a derivarlo — ver `PlanetarySystem::oceanState()`.
+     *
+     * Sin llamarla, el UBO queda inválido y los shaders caen a la tabla de referencia: el mar de
+     * siempre, que es una degradación visible pero no una escena rota.
+     */
+    void setOceanState(const Haruka::Planet::OceanState& st);
 
     // --- Stats de geometría del último frame (para el panel del editor) ---------------------
     /** @brief Lo que dibujó el planeta el último render: base + clipmap + agua, separados. */
@@ -589,6 +605,14 @@ private:
     Haruka::RHI::BufferHandle  m_inlandWaterSSBO;   ///< n·n cotas del agua (m sobre el mar)
     Haruka::RHI::BufferHandle  m_inlandWaterUBO;
     bool                       m_inlandWaterValid = false;
+    /// PASE DE TERRENO v5 (quadtree + pool de nodos). Opt-in con `HARUKA_TERRAIN_V5=1`; cuando está
+    /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
+    /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
+    Haruka::Terrain::TerrainNodeRenderer m_nodeRenderer;
+
+    // ESTADO DEL MAR del frame (trenes + cota de la lámina). Ver `setOceanState`.
+    Haruka::RHI::BufferHandle  m_oceanParamsUBO;
+    bool                       m_oceanParamsValid = false;
 
     Haruka::RHI::BufferHandle m_oceanFarVB;
     Haruka::RHI::BufferHandle m_oceanFarIB;

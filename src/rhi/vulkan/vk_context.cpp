@@ -246,7 +246,8 @@ namespace Haruka::RHI::vulkan
                     if (img)
                     {
                         transitionImage(m_dev.m_frameCmd, img, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                        depthAspectOf(texFmt(rt->desc.depthFormat)),
                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                         if (RHI::valid(rt->depthTex)) m_dev.texture(rt->depthTex)->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

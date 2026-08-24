@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <vector>
+#include <cstdlib>   // getenv: HARUKA_NO_VSYNC (ver la nota del present mode)
 
 #include "core/logger.h"
 
@@ -125,7 +126,29 @@ namespace Haruka::RHI::vulkan
         sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;   // una sola familia graphics+present
         sci.preTransform = caps.currentTransform;
         sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        // ⚠️ FIFO (vsync) por defecto, y SIN vsync solo si se pide. Con FIFO, cualquier medida de
+        // tiempo por frame queda clavada en 16,6 ms —que es 1/60— y deja de medir la GPU: mide la
+        // presentacion. Paso midiendo el coste del sombreado del terreno, donde el numero de Vulkan
+        // salio 16,61 -> 16,68 ms y no significaba nada.
+        //
+        // `HARUKA_NO_VSYNC=1` pide MAILBOX (triple buffer sin espera) y, si no lo hay, IMMEDIATE.
+        // Ninguno de los dos es obligatorio en la spec, asi que se comprueba antes de pedirlo.
         sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;         // siempre soportado (vsync, como GL)
+        if (const char* nv = std::getenv("HARUKA_NO_VSYNC")) {
+            if (nv[0] == '1') {
+                uint32_t pmCount = 0;
+                vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, nullptr);
+                std::vector<VkPresentModeKHR> modes(pmCount);
+                vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, modes.data());
+                for (VkPresentModeKHR want : { VK_PRESENT_MODE_MAILBOX_KHR,
+                                               VK_PRESENT_MODE_IMMEDIATE_KHR }) {
+                    if (std::find(modes.begin(), modes.end(), want) != modes.end()) {
+                        sci.presentMode = want;
+                        break;
+                    }
+                }
+            }
+        }
         sci.clipped = VK_TRUE;
         sci.oldSwapchain = VK_NULL_HANDLE;
         if (!vkSuccess(vkCreateSwapchainKHR(m_device, &sci, nullptr, &m_swapchain), "create swapchain"))

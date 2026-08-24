@@ -1,9 +1,21 @@
-// Application — render pipeline.
-// The per-frame work: build the render queue, the deferred/forward object pass,
-// terrain/islands/water passes, the standalone post-processing composite and the
-// GPU timer. Lifecycle/orchestration lives in application.cpp; the GL asset
-// caches in application_assets.cpp.
-
+/**
+ * @file application_render.cpp
+ * @brief Application — el frame.
+ *
+ * Todo lo que ocurre entre dos `SwapBuffers`: construir la cola de render, los
+ * pases de sombra en cascada, el G-buffer, la iluminación diferida, el terreno,
+ * las islas, los props, el agua, las nubes volumétricas, el post-proceso y el
+ * temporizador de GPU. El ciclo de vida está en `application.cpp` y las cachés de
+ * assets en `application_assets.cpp`.
+ *
+ * `renderFrameContent()` es la función más grande del motor. No se lee de arriba
+ * abajo: su árbol de ejecución (@ref flujo_interactivo) enseña los pases como una
+ * lista plegable, y el nivel *Pasos grandes* deja a la vista las condiciones que
+ * activan cada uno.
+ *
+ * La cola de render solo se reconstruye cuando la escena ha cambiado
+ * (`m_renderQueueDirty`); el resto de frames se reutiliza tal cual.
+ */
 // glm/gtx/* (usado por glm::rotation del pase de props) exige la macro en GLM moderno.
 #define GLM_ENABLE_EXPERIMENTAL
 
@@ -719,7 +731,26 @@ void Application::renderFrameContent() {
     // pantalla negra. Si alguien mueve esta llamada dentro de un pase, vuelve el mismo fallo.
     if (_camera && _planetarySystem) {
         HARUKA_PROFILE("frame.compute.prepare");
-        _planetarySystem->prepareSimplePlanets(glm::dvec3(_camera->position));
+        uint32_t vpW = 0, vpH = 0;
+        if (RHI::Device* d = RHI::device()) d->framebufferSize(vpW, vpH);
+
+        // ⚠️ EL ASPECTO SALE DEL FRAMEBUFFER REAL, NO DE `_camera->aspectRatio`.
+        //
+        // El cono que envuelve al frustum lo decide la ESQUINA: atan(tan(fovY/2)·sqrt(1+aspect²)).
+        // Con 60° y 16:9 son 49,7°; con aspecto 1,0 son 39,2°. Los diez grados de diferencia son
+        // exactamente las esquinas del cuadro, y recortarlas se ve como "chunks cortados antes de
+        // que acabe la pantalla".
+        //
+        // `Camera::aspectRatio` vale 1.0f de fábrica y solo lo escribe el callback de resize
+        // (application.cpp), así que hasta el primer resize puede no valer lo que se está dibujando.
+        // El tamaño del framebuffer sí es lo que se dibuja — y en esta máquina además NO coincide con
+        // el de la ventana (el compositor escala; ver [[vulkan-is-opengl-assumed]]).
+        const double vpAspect = (vpW > 0 && vpH > 0) ? (double)vpW / (double)vpH
+                                                     : (double)_camera->aspectRatio;
+        _planetarySystem->prepareSimplePlanets(
+            glm::dvec3(_camera->position), glm::dvec3(glm::normalize(_camera->getFront())),
+            glm::radians((double)_camera->zoom), vpAspect,
+            (vpH > 0) ? (double)vpH : 1080.0);
     }
 
     // Pase de cielo procedural (gradiente + sol + estrellas) como FONDO: triángulo

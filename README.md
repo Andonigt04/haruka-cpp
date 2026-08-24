@@ -236,7 +236,8 @@ and release.)
 | [PLAN_PUERTOS.md](docs/guides/PLAN_PUERTOS.md) | Authored ports (mount + interact) and **rails**: doors, ramps and suspensions as mechanisms, not animations |
 | [ANALISIS_SISTEMAS.md](docs/guides/ANALISIS_SISTEMAS.md) | ObjectType, SceneManager, WorldSystem, PlanetarySystem |
 | [MODULES.md](docs/MODULES.md) | The module bitmask |
-| Doxygen | run `doxygen Doxyfile` → `docs/html/index.html` |
+| [FLUJO_INTERACTIVO.md](docs/guides/FLUJO_INTERACTIVO.md) | The **Execution flow** button: per-function tree of calls, branches and modified variables, taken from Clang's AST |
+| Doxygen | run `./tools/build_docs.sh` → `docs/html/index.html` (plain `doxygen Doxyfile` skips the execution trees) |
 
 ---
 

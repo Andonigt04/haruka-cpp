@@ -1,6 +1,32 @@
 #ifndef APPLICATION_H
 #define APPLICATION_H
 
+/**
+ * @file application.h
+ * @brief `Haruka::Core::Application`: el dueño del proceso, la ventana y el frame.
+ *
+ * Application es el objeto que `main()` construye y del que cuelga todo lo demás:
+ * la @ref Haruka::Core::Window, el @ref Haruka::RHI::Device, la escena activa, la
+ * cámara, el @ref Haruka::WorldSystem, el @ref Haruka::PlanetarySystem, el
+ * @ref PhysicsEngine y los recursos del renderer. Es también quien decide el
+ * backend gráfico y quien corre el bucle principal.
+ *
+ * La implementación está partida en cuatro traducciones porque son cuatro
+ * responsabilidades con ritmos distintos:
+ *
+ * | Fichero | Qué vive ahí |
+ * |---------|--------------|
+ * | `application.cpp`         | ciclo de vida: arranque, carga de escena, ajustes, bucle |
+ * | `application_render.cpp`  | el frame: cola de render y todos los pases |
+ * | `application_assets.cpp`  | cachés de mallas, texturas y materiales |
+ * | `application_network.cpp` | puente con el servidor autoritativo (DGS) |
+ *
+ * @note La clase es grande y sus métodos también. Para leer uno concreto no hace
+ * falta seguirlo a mano: en su página de documentación, el botón
+ * *Flujo de ejecución* despliega lo que llama, por qué ramas pasa y qué variables
+ * escribe, sacado del AST del compilador (@ref flujo_interactivo).
+ */
+
 #include <SDL3/SDL.h>
 #include <cstdint>
 #include <string>

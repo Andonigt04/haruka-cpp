@@ -41,25 +41,8 @@ layout(binding = 16) uniform sampler2D uHeightTex;
 // con la que se construyó la malla; ver la nota larga del propio fichero.
 #include "lib/cube_face.glsl"
 
-// Bilineal A MANO con texelFetch, no con el filtrado del hardware: el bilineal de GL usa pesos de
-// precisión limitada (8 bits en varias GPU) y eso bastaría para que el suelo del clipmap y el de la
-// malla difieran en centímetros. Aquí se replica exactamente la bilineal de la CPU.
-vec3 sampleBase(vec3 dir) {
-    int f; vec2 uv;
-    harukaDirToCubeFace(dir, f, uv);
-    int N = textureSize(uBaseField, 0).x - 1;      // lado de la retícula = faceRes
-    vec2 fxy = (uv * 0.5 + 0.5) * float(N);
-    ivec2 i0 = ivec2(floor(fxy));
-    i0 = clamp(i0, ivec2(0), ivec2(N - 1));
-    vec2 t = fxy - vec2(i0);
-    vec3 h00 = texelFetch(uBaseField, ivec3(i0 + ivec2(0,0), f), 0).rgb;
-    vec3 h10 = texelFetch(uBaseField, ivec3(i0 + ivec2(1,0), f), 0).rgb;
-    vec3 h01 = texelFetch(uBaseField, ivec3(i0 + ivec2(0,1), f), 0).rgb;
-    vec3 h11 = texelFetch(uBaseField, ivec3(i0 + ivec2(1,1), f), 0).rgb;
-    vec3 a = h00 + (h10 - h00) * t.x;
-    vec3 b = h01 + (h11 - h01) * t.x;
-    return a + (b - a) * t.y;
-}
+#include "lib/base_field.glsl"   // harukaSampleBaseField: la bilineal a mano, compartida
+#define sampleBase(d) harukaSampleBaseField(uBaseField, (d))
 
 void main() {
     vSurfKind = 0.0;

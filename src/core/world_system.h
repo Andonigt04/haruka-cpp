@@ -1,4 +1,21 @@
 #pragma once
+/**
+ * @file world_system.h
+ * @brief `WorldSystem`: la escala del universo y el origen flotante.
+ *
+ * Un `float` no llega. A la distancia de una órbita, su resolución se mide en
+ * metros y los modelos tiemblan. Por eso el motor mantiene dos mundos separados y
+ * este fichero es la frontera:
+ *
+ * - Arriba, **`double` y kilómetros**: cada @ref Haruka::CelestialBody guarda su
+ *   `WorldPos`, y ahí se simula.
+ * - Abajo, **`float` y metros relativos a la cámara**: lo único que sube a la GPU.
+ *
+ * `shiftOrigin()` recentra el universo en la cámara y `toLocal()` es la única
+ * conversión sancionada entre los dos. Cualquier `glm::vec3` que nazca de restar
+ * dos posiciones globales a mano se salta esta frontera y trae de vuelta el
+ * temblor.
+ */
 
 #include "tools/math_types.h"
 #include <vector>

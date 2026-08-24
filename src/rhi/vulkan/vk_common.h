@@ -186,5 +186,19 @@ namespace Haruka::RHI::vulkan
      *  dentro del descriptor set compartido. Mismo mapeo que los shifts de glslang. */
     inline uint32_t uboSlotToBinding(uint32_t slot)     { return slot; }
     inline uint32_t ssboSlotToBinding(uint32_t slot)    { return kSsboBindingBase + slot; }
+
+    /// ⚠️ EL ASPECTO DE UNA IMAGEN DE PROFUNDIDAD INCLUYE EL STENCIL SI EL FORMATO LO TIENE.
+    ///
+    /// Con `separateDepthStencilLayouts` desactivado, la spec EXIGE que el `aspectMask` de una
+    /// barrera sobre un formato depth+stencil lleve LOS DOS bits. El motor usaba
+    /// `VK_IMAGE_ASPECT_DEPTH_BIT` a secas, y con D24S8 —el formato por defecto de los render
+    /// targets— la validacion lo canta en cada transicion. Lo destapo el primer test que dibujo a
+    /// un target offscreen; hasta entonces ese camino no se habia ejercido.
+    inline VkImageAspectFlags depthAspectOf(VkFormat f) {
+        const bool hasStencil = (f == VK_FORMAT_D24_UNORM_S8_UINT) ||
+                                (f == VK_FORMAT_D32_SFLOAT_S8_UINT) ||
+                                (f == VK_FORMAT_D16_UNORM_S8_UINT);
+        return VK_IMAGE_ASPECT_DEPTH_BIT | (hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    }
     inline uint32_t textureSlotToBinding(uint32_t slot) { return kTextureBindingBase + slot; }
 }
