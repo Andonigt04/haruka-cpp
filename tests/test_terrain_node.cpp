@@ -585,7 +585,8 @@ void test_terrain_render_vs_collision() {
         if (lv < 0) { std::printf("    %8.0f m   (sin nodo dibujado)\n", d); continue; }
         const NodeId n{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };   // solo para el tamaño de texel
         const double triNode = nodeTexelM(n, R);
-        const double triRing = Haruka::Planet::terrainTriM(d);
+        // El corte que usa DE VERDAD la colision (`ringSample`), no el del clipmap.
+        const double triRing = Haruka::Planet::terrainTriMForCollision(d);
 
         // La MISMA composicion en los dos lados; solo cambia el corte de octavas.
         const float hNode = Haruka::Planet::terrainDetail(dir, R, (float)triNode);
@@ -598,7 +599,24 @@ void test_terrain_render_vs_collision() {
 
     // LA COTA DE CIERRE DE F4. No es 0 —no puede serlo— y esta puesta donde el numero medido la
     // deja, no donde gustaria: si sube, algo ha vuelto a divergir y hay que mirar QUE.
-    CHECK(worstNear < 1.0, "COTA F4: dibujado y pisado difieren menos de 1 m en el campo cercano");
+    // ⚠️ LA COTA BAJO DE 0,2539 m A CERO cuando la colision paso a cortar como el nodo
+    // (`TERRAIN_COLLISION_TRIM_FLOOR`). Si vuelve a subir, alguien ha desalineado los dos cortes.
+    CHECK(worstNear < 0.01, "COTA F4: dibujado y pisado coinciden en el campo cercano");
+    // CONTRAPRUEBA: con el piso VIEJO (el del clipmap, 4,0 m) la disparidad tiene que reaparecer.
+    // Sin esto, un `terrainDetail` que ignorara el corte daria 0 y se leeria como paridad.
+    double oldWorst = 0.0;
+    for (double d : { 2.0, 10.0, 50.0, 200.0 }) {
+        const glm::dvec3 dd = glm::normalize(up0 + t1 * (d / R));
+        const int lv = levelAt(dd);
+        if (lv < 0) continue;
+        const NodeId nn{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };
+        oldWorst = std::max(oldWorst, (double)std::fabs(
+            Haruka::Planet::terrainDetail(dd, R, (float)nodeTexelM(nn, R)) -
+            Haruka::Planet::terrainDetail(dd, R, Haruka::Planet::terrainTriM(d))));
+    }
+    std::printf("    CONTRAPRUEBA: con el piso VIEJO (el del clipmap, %.1f m) serian %.4f m\n",
+                Haruka::Planet::TERRAIN_TRIM_FLOOR, oldWorst);
+    CHECK(oldWorst > 0.1, "CONTRAPRUEBA: el corte de octavas SI movia el suelo (el test mide el arreglo)");
 
     // CONTRAPRUEBA: con cortes de octava DELIBERADAMENTE distintos, la diferencia tiene que dispararse.
     // Sin esto, un `terrainDetail` que ignorara `minFeatureM` daria 0 y se leeria como paridad.
@@ -735,27 +753,35 @@ void test_terrain_node_face_seam_gap() {
     // doble, asi que su superficie es literalmente otra funcion. La reticula coincide; el RELIEVE no.
     //
     // Esta es la grieta que se ve, y la de arriba nunca la habria detectado.
-    double worstH = 0.0; size_t nH = 0;
+    // ⚠️ SE MIDE LO QUE SE DIBUJA, o sea CON el morph. En la arista que linda con un vecino mas
+    // grueso el morph vale 1, asi que el nodo fino usa la altura de SU PADRE — que es exactamente lo
+    // que el vecino calcula, porque el vecino esta al nivel del padre.
+    double worstH = 0.0, worstRaw = 0.0; size_t nH = 0;
     for (uint32_t level : { 10u, 12u, 14u, 16u }) {
         const uint32_t lim = 1u << level;
         const NodeId fine{ PlanetFace::FRONT, level, lim / 3, lim / 2 };
         const NodeId coarse{ PlanetFace::FRONT, level - 1, (lim / 3) / 2, (lim / 2) / 2 };
         const float triF = (float)nodeTexelM(fine, R);
         const float triC = (float)nodeTexelM(coarse, R);
-        double w = 0.0;
+        double w = 0.0, raw = 0.0;
         for (uint32_t q = 0; q <= TERRAIN_NODE_CELLS; q += 2) {
             const glm::dvec3 d = nodeTexelDir(fine, 0, q);
-            w = std::max(w, (double)std::fabs(
-                Haruka::Planet::terrainDetail(d, R, triF) - Haruka::Planet::terrainDetail(d, R, triC)));
+            const double hFineOwn = Haruka::Planet::terrainDetail(d, R, triF);   // sin morph
+            const double hParent  = Haruka::Planet::terrainDetail(d, R, triF * 2.0f);
+            const double hCoarse  = Haruka::Planet::terrainDetail(d, R, triC);   // lo que dibuja el vecino
+            w   = std::max(w,   std::fabs(hParent  - hCoarse));   // CON morph (la arista usa el padre)
+            raw = std::max(raw, std::fabs(hFineOwn - hCoarse));   // SIN morph: lo que habia
             ++nH;
         }
-        std::printf("      nivel %2u (%.2f m/texel) contra su padre (%.2f): salto de altura %.3f m\n",
-                    level, triF, triC, w);
-        worstH = std::max(worstH, w);
+        std::printf("      nivel %2u (%.2f m/texel): con morph %.4f m · SIN morph %.3f m\n",
+                    level, triF, w, raw);
+        worstH = std::max(worstH, w); worstRaw = std::max(worstRaw, raw);
     }
-    std::printf("    GRIETA VERTICAL en la arista compartida: peor %.3f m sobre %zu vertices\n",
-                worstH, nH);
-    CHECK(worstH < 0.05, "el relieve COINCIDE en la arista compartida (si no, hay escalon vertical)");
+    std::printf("    GRIETA VERTICAL en la arista compartida: con morph %.4f m (antes %.3f m)"
+                " sobre %zu vertices\n", worstH, worstRaw, nH);
+    CHECK(worstH < 0.01, "con geomorph el relieve COINCIDE en la arista compartida");
+    // CONTRAPRUEBA: sin morph la grieta TIENE que estar. Si no, el test no mide el arreglo.
+    CHECK(worstRaw > 0.5, "CONTRAPRUEBA: sin morph la grieta existe (el test mide el arreglo)");
 }
 
 // ================================================================================================

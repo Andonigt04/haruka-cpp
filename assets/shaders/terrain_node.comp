@@ -148,5 +148,40 @@ void main() {
         }
     }
 
-    uHeights[uint(uGrid.w) * uint(uGrid.x) * uint(uGrid.x) + v * uint(uGrid.x) + u] = outv;
+    // ── DOS ALTURAS POR TEXEL: LA PROPIA Y LA DEL PADRE ─────────────────────────────────────────
+    //
+    // ⚠️ SIN ESTO HAY UN ESCALON DE HASTA 2,4 m EN CADA CAMBIO DE NIVEL, y no lo arregla el cosido.
+    //
+    // El cosido de T-junctions coloca el vertice en la POSICION correcta —medido: 0,0000 m en 126 720
+    // vertices— pero cada nodo evalua el relieve con SU corte de octavas (`nodeTexelM`), asi que un
+    // nodo y su padre describen dos funciones distintas. Medido: 2,394 m de salto al nivel 12.
+    //
+    // El geomorphing lo cierra: en la arista que linda con un vecino MAS GRUESO, el nodo fino usa la
+    // altura que tendria su padre — que es exactamente lo que ese vecino calcula, porque el vecino
+    // ESTA al nivel del padre. Y el grueso no morfea ahi, porque su vecino es mas fino. Coinciden.
+    //
+    // Cuesta el doble de VRAM por nodo (66,6 -> 133 KB) y una evaluacion mas de ruido por texel.
+    const uint base = uint(uGrid.w) * uint(uGrid.x) * uint(uGrid.x) * 2u;
+    const uint texels = uint(uGrid.x) * uint(uGrid.x);
+    uHeights[base + v * uint(uGrid.x) + u] = outv;
+
+    // La del PADRE: misma cuenta, con el corte de octavas de un nivel mas grueso (el texel dobla).
+    if (uGrid.z == 0) {
+        const float triParent = uMisc.y * 2.0;
+        if (uMisc.z > 0.5) {
+            const float  baseH = (uMisc.w > 0.5)
+                               ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
+                                                         harukaEquirectUV(vec3(dir)))
+                               : harukaSampleBaseField(uBaseField, vec3(dir)).x;
+            const double baseR = double(uMisc.x) + double(baseH);
+            float hp = harukaTerrainDetail(dir, baseR, triParent) * harukaSeaLevelAttenuation(baseH);
+            if (baseH > 0.0 && hp < -baseH) hp = -baseH;
+            uHeights[base + texels + v * uint(uGrid.x) + u] = baseH + hp;
+        } else {
+            uHeights[base + texels + v * uint(uGrid.x) + u] =
+                harukaTerrainDetail(dir, double(uMisc.x), triParent);
+        }
+    } else {
+        uHeights[base + texels + v * uint(uGrid.x) + u] = outv;   // modos de biseccion: sin morph
+    }
 }

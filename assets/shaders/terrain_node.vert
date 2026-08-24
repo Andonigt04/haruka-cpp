@@ -145,8 +145,31 @@ void main() {
     precise double ly0 = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(v0)) / den);
     vec3 dir = harukaCubeFaceToDirF(uNode.x, float(lx0), float(ly0));
 
-    const uint slotBase = uint(slot) * uint(N) * uint(N);
-    float h = uHeights[slotBase + v0 * uint(N) + u0];
+    // ⚠️ EL HUECO GUARDA DOS MAPAS: el propio y el del PADRE (ver `terrain_node.comp`).
+    const uint texels   = uint(N) * uint(N);
+    const uint slotBase = uint(slot) * texels * 2u;
+    const uint parBase  = slotBase + texels;
+
+    // ── GEOMORPH: hacia la altura del PADRE en la arista que linda con un vecino MAS GRUESO ──────
+    //
+    // El cosido pone el vertice en su sitio, pero el vecino grueso evalua OTRA funcion de relieve
+    // (su corte de octavas es el doble), asi que quedaba un escalon de hasta 2,4 m. Aqui el nodo
+    // fino adopta la altura de su padre justo en esa arista — que es exactamente lo que el vecino
+    // calcula, porque el vecino ESTA al nivel del padre. El grueso no morfea: su vecino es mas fino.
+    //
+    // La rampa entra `kMorphCells` hacia dentro para que no quede un pliegue de una celda.
+    const float kMorphCells = 8.0;
+    float morph = 0.0;
+    {
+        const float fu = float(u), fv = float(v), E = float(uGrid.y);
+        if (uEdgeCoarser.x > 0) morph = max(morph, 1.0 - min(fu / kMorphCells, 1.0));
+        if (uEdgeCoarser.y > 0) morph = max(morph, 1.0 - min((E - fu) / kMorphCells, 1.0));
+        if (uEdgeCoarser.z > 0) morph = max(morph, 1.0 - min(fv / kMorphCells, 1.0));
+        if (uEdgeCoarser.w > 0) morph = max(morph, 1.0 - min((E - fv) / kMorphCells, 1.0));
+    }
+
+    float h = mix(uHeights[slotBase + v0 * uint(N) + u0],
+                  uHeights[parBase  + v0 * uint(N) + u0], morph);
 
     if (st > 0.0) {
         // ⚠️ Se interpolan las DIRECCIONES (y las alturas) y NO se re-normaliza: la arista del vecino
@@ -156,7 +179,9 @@ void main() {
         precise double ly1 = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(v1)) / den);
         const vec3 d1 = harukaCubeFaceToDirF(uNode.x, float(lx1), float(ly1));
         dir = dir + (d1 - dir) * st;
-        h   = h + (uHeights[slotBase + v1 * uint(N) + u1] - h) * st;
+        const float h1 = mix(uHeights[slotBase + v1 * uint(N) + u1],
+                             uHeights[parBase  + v1 * uint(N) + u1], morph);
+        h   = h + (h1 - h) * st;
     }
     vHeight = h;
 
@@ -171,9 +196,13 @@ void main() {
     // (el nodo comparte esa fila con su vecino, así que la costura no se abre por esto).
     const uint um = uint(max(int(u) - 1, 0)),      up_ = uint(min(int(u) + 1, N - 1));
     const uint vm = uint(max(int(v) - 1, 0)),      vp  = uint(min(int(v) + 1, N - 1));
+    // La NORMAL sale del mismo mapa morfeado: si no, la iluminacion describiria una superficie que
+    // no es la que se dibuja justo en la banda del morph.
     const uint base = slotBase;
-    const float hL = uHeights[base + v * uint(N) + um], hR = uHeights[base + v * uint(N) + up_];
-    const float hD = uHeights[base + vm * uint(N) + u], hU = uHeights[base + vp * uint(N) + u];
+    const float hL = mix(uHeights[base + v * uint(N) + um],  uHeights[parBase + v * uint(N) + um],  morph);
+    const float hR = mix(uHeights[base + v * uint(N) + up_], uHeights[parBase + v * uint(N) + up_], morph);
+    const float hD = mix(uHeights[base + vm * uint(N) + u],  uHeights[parBase + vm * uint(N) + u],  morph);
+    const float hU = mix(uHeights[base + vp * uint(N) + u],  uHeights[parBase + vp * uint(N) + u],  morph);
     // Paso entre téxeles en metros: el lado del nodo entre sus celdas.
     const float stepM = float(uMisc.x * 1.5707963267948966LF / double(1u << uint(uNode.y))) / float(uGrid.y);
     vec3 t1 = normalize(abs(dirF.y) < 0.99 ? cross(dirF, vec3(0, 1, 0)) : cross(dirF, vec3(1, 0, 0)));

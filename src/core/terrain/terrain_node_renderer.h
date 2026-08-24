@@ -36,8 +36,13 @@ namespace Haruka { namespace Terrain {
 class TerrainNodeRenderer {
 public:
     /** @brief ¿Está activado el camino v5? Se lee UNA vez (getenv por frame es búsqueda lineal). */
+    /// ⚠️ ACTIVO POR DEFECTO desde el 2026-08-24: el pase de nodos ES el terreno. `HARUKA_TERRAIN_V5=0`
+    /// lo apaga, pero ya no hay clipmap detrás — sin él no se dibuja suelo.
     static bool enabled() {
-        static const bool s_on = std::getenv("HARUKA_TERRAIN_V5") != nullptr;
+        static const bool s_on = [] {
+            const char* e = std::getenv("HARUKA_TERRAIN_V5");
+            return !(e && e[0] == '0');
+        }();
         return s_on;
     }
 
@@ -99,6 +104,9 @@ public:
         }
         if (m_ready || !dev) return m_ready;
         m_dev = dev;
+        // El presupuesto de generación escala con el pool: con más huecos que llenar, el mismo
+        // número por frame tardaría proporcionalmente más en converger.
+        m_pool = TerrainNodePool(capacity, std::max<size_t>(43, capacity / 24));
         const std::string comp = shaderDir + "terrain_node.comp";
         if (!m_gpu.init(dev, comp.c_str(), capacity)) {
             HARUKA_LOGW("TerrenoV5", "fallo el generador (compute '%s' o el SSBO de %.1f MB)",
@@ -160,6 +168,14 @@ public:
         DrawUBO du{};
         m_ubo = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(du), &du, RHI::BufferMemory::Dynamic);
         m_ready = RHI::valid(m_vb) && m_strideCount > 0 && RHI::valid(m_ubo);
+        // ⚠️ LA VRAM DEL POOL NO ES UN DETALLE: con el geomorph cada hueco guarda DOS mapas, así que
+        // son 130 KB por nodo. 4096 huecos = 532 MB, encima de los 720 MB del array de terreno.
+        if (m_ready)
+            HARUKA_LOGI("TerrenoV5", "pool de %zu huecos = %.0f MB de VRAM (%.1f KB/nodo: mapa propio "
+                                     "+ el del padre) · generacion %zu nodos/frame",
+                        capacity, (double)m_gpu.bytes() / (1024.0 * 1024.0),
+                        (double)TerrainNodeGpu::kBytesPerNode / 1024.0,
+                        std::max<size_t>(43, capacity / 24));
         return m_ready;
     }
 
@@ -458,6 +474,10 @@ private:
     bool                m_ready = false;
     bool                m_rootsPinned = false;
     TerrainNodeGpu      m_gpu;
+    // ⚠️ SE REDIMENSIONA EN `init` CON LA MISMA CAPACIDAD QUE EL SSBO. Estaba a fuego en 1024
+    // mientras `m_gpu` sí recibía el parámetro, así que subir la capacidad agrandaba el buffer y el
+    // tope del selector pero NO los huecos: medido en el juego con 4096, `residentes 1024/4096` y
+    // **2 035 de 3 053 nodos dibujados por ancestro** — dos de cada tres más gruesos de lo pedido.
     TerrainNodePool     m_pool{ 1024, 43 };
     std::vector<NodeId> m_sel, m_drawn;
     std::vector<TerrainNodePool::Resolved> m_resolved;

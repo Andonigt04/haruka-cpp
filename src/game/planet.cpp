@@ -126,7 +126,6 @@ bool settingWithEnvOverride(bool setting, const char* envVar) {
     return setting;
 }
 } // namespace
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_clipPipeline;
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_oceanPipeline;
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_oceanFarPipeline;
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_nearRingPipeline;
@@ -173,10 +172,7 @@ void TerrestrialPlanet::ensureShaders() {
     // guarda `const char*`, no copia. Por eso son locales de esta función y no temporales.
     const std::string shaderDir = Shader::baseDir() + "shaders/planet/";
     const std::string pBiomeFrag       = shaderDir + "biome.frag";
-    const std::string pClipCtrl        = shaderDir + "clipmap.tesc";
     const std::string pTerrainCull     = shaderDir + "terrain_cull.comp";
-    const std::string pClipEval        = shaderDir + "clipmap.tese";
-    const std::string pClipVert        = shaderDir + "clipmap.vert";
     const std::string pSimpleFrag      = shaderDir + "simple.frag";
     const std::string pSimpleVert      = shaderDir + "simple.vert";
     const std::string pTessCtrl        = shaderDir + "terrain.tesc";
@@ -246,24 +242,7 @@ void TerrestrialPlanet::ensureShaders() {
         tpd.cull              = pd.cull;
         s_tessPipeline = dev->createPipeline(tpd);
 
-        RHI::PipelineDesc cpd;
-        cpd.vertexPath      = pClipVert.c_str();
-        cpd.tessControlPath = pClipCtrl.c_str();
-        cpd.tessEvalPath    = pClipEval.c_str();
-        cpd.fragmentPath    = pBiomeFrag.c_str();
-        cpd.vertexLayout.strides    = { (uint32_t)(2 * sizeof(float)) };
-        cpd.vertexLayout.attributes = { { 0, 0, RHI::Format::RG32F } };
-        cpd.topology      = RHI::PrimitiveTopology::Patches;
-        cpd.patchVertices = 4;
-        cpd.depth         = pd.depth;
-        // Coplanar con la malla del planeta A PROPÓSITO: las dos son el mismo suelo. El sesgo es lo
-        // que decide cuál gana, y tiene que ganar la rejilla fina. Positivo porque en reversed-Z
-        // "más cerca" es profundidad mayor. Sin esto no hay z-fighting bonito: gana la que se
-        // dibuje después, entera.
-        cpd.depth.biasConstant = 64.0f;
-        cpd.depth.biasSlope    = 2.0f;
-        cpd.cull          = pd.cull;
-        s_clipPipeline = dev->createPipeline(cpd);
+        // El pipeline del CLIPMAP se borró el 2026-08-24: lo sustituye el pase de nodos (v5).
 
         // ── SUELO CERCANO DESDE LA COLISIÓN ─────────────────────────────────────────────────────
         //
@@ -291,7 +270,7 @@ void TerrestrialPlanet::ensureShaders() {
                     RHI::valid(s_nearRingPipeline) ? "ok" : "FALLO");
 
         HARUKA_LOGI("SimplePlanet", "pipeline clipmap: %s",
-                    RHI::valid(s_clipPipeline) ? "ok" : "FALLO");
+                    "borrado (lo sustituye el pase v5)");
         HARUKA_LOGI("SimplePlanet", "pipeline teselado: %s",
                     RHI::valid(s_tessPipeline) ? "ok" : "FALLO (se usa la malla sin teselar)");
 
@@ -405,7 +384,6 @@ void TerrestrialPlanet::cleanupStatics() {
     // ⚠️ Estos tres faltaban: los pipelines de teselación y clipmap se creaban y nunca se
     // destruían. Fuga preexistente, no del culling — pero se arregla aquí porque es el mismo sitio.
     if (RHI::valid(s_tessPipeline)) { dev->destroy(s_tessPipeline);  s_tessPipeline = {}; }
-    if (RHI::valid(s_clipPipeline)) { dev->destroy(s_clipPipeline);  s_clipPipeline = {}; }
     if (RHI::valid(s_oceanPipeline)) { dev->destroy(s_oceanPipeline); s_oceanPipeline = {}; }
     if (RHI::valid(s_oceanFarPipeline)) { dev->destroy(s_oceanFarPipeline); s_oceanFarPipeline = {}; }
     if (RHI::valid(s_nearRingPipeline)) { dev->destroy(s_nearRingPipeline); s_nearRingPipeline = {}; }
@@ -3137,7 +3115,12 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     //
     // Lo único que sigue apagándolo es estar BAJO TIERRA (`camUnderground`), que no es una cuestión
     // de escala sino de que la rejilla no describe nada útil desde dentro del terreno.
-    const bool clipActive = RHI::valid(s_clipPipeline) && RHI::valid(m_clipVB) &&
+    // ⚠️ LA REJILLA DE ANILLOS ES DEL MAR, NO DEL CLIPMAP. Se llamaba `clipActive` y exigía que el
+    // pipeline del CLIPMAP existiera; al borrar el clipmap eso se llevaba el mar por delante, porque
+    // el mar cercano no tiene geometría propia y usa esta rejilla y sus `ClipParams`.
+    //
+    // La condición correcta es que existan la REJILLA y el bake — nada del terreno del clipmap.
+    const bool clipActive = RHI::valid(m_clipVB) && RHI::valid(m_clipIB) &&
                             RHI::valid(m_baseFieldTex) && hasBiome && !camUnderground;
     m_clipMapActive = clipActive;
     // ── QUÉ GEOMETRÍA HAY BAJO LOS PIES ─────────────────────────────────────────────────────────
@@ -3402,7 +3385,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // CLIPMAP: solo tiene sentido si la cámara está lo bastante cerca de la superficie. Con la
     // cámara en órbita la rejilla sería un punto, y el coste de decidirlo es despreciable. Misma
     // condición que `clipActive` del UBO (recorte de la malla base en terrain.tese).
-    bool useClip = clipActive;   // el pase v5, si dibuja, lo anula (ver planet.v5.nodes)
     // ⚠️ Ámbito de FUNCIÓN, no del bloque del pase: lo consultan el clipmap Y el anillo cercano, que
     // están en bloques distintos. Declarado dentro del pase, el anillo no lo veía y seguía pintando.
     bool v5Drew = false;
@@ -3607,7 +3589,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     //
     // ⚠️ SUSTITUYE al clipmap, no se suma. Añadir una cuarta superficie coplanar sería exactamente el
     // bug que el v5 viene a quitar (ver `HARUKA_PLANET_DEBUG=9`, que existe solo para saber cuál de
-    // las tres pintó un píxel). Por eso el `useClip` de abajo queda anulado cuando esto está activo.
+    // las tres pintó un píxel).
     //
     // Y con ello se salta el sphere-trace de `biome.frag::reanchorToFine` —2-16 pasos POR PÍXEL, el
     // coste que puso `present.swap` en 60 ms— porque este pase usa su propio fragmento: la geometría
@@ -3685,28 +3667,15 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             v5Drew = st.drawn > 0;
         }
     }
-    if (v5Drew) useClip = false;
-    if (useClip) {
-        // Los ClipParams de todos los anillos ya se rellenaron ANTES del draw de la base (que se
-        // recorta contra el exterior); aquí se re-bindea el de cada anillo antes de su draw.
-        ctx->bindPipeline(s_clipPipeline);
-        ctx->bindUniformBuffer(0, s_ubo);
-        ctx->bindUniformBuffer(23, m_wetUBO);
-        if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
-        ctx->bindTexture(15, m_baseFieldTex);
-        ctx->bindVertexBuffer(m_clipVB);
-        ctx->bindIndexBuffer(m_clipIB);
-        // UN DRAW POR ANILLO, con la MISMA malla (misma rejilla NC×NC, mismos índices): lo único que
-        // cambia entre ellos es el ClipParams —escala y hueco—, que es lo que los convierte en marcos
-        // encajados. Por eso los anillos no cuestan memoria: comparten el buffer de vértices.
-        // De DENTRO hacia FUERA, para que el z-buffer resuelva el solape de 64·2^k m a favor del
-        // anillo fino, que es el que llega primero.
-        for (int r = 0; r < m_clipRingCount; ++r) {
-            if (!RHI::valid(m_clipUBOs[(size_t)r])) continue;
-            ctx->bindUniformBuffer(13, m_clipUBOs[(size_t)r]);
-            ctx->drawIndexed(m_clipIndexCount);
-        }
-    }
+    // ── EL CLIPMAP SE BORRO (2026-08-24) ────────────────────────────────────────────────────────
+    //
+    // Aquí iba el draw del terreno del clipmap: un pase por anillo con `s_clipPipeline`. Lo sustituye
+    // el pase de nodos (v5), que cubre del suelo a la órbita con un solo quadtree — sin banda de
+    // mezcla, sin sesgo de profundidad y sin la malla base debajo.
+    //
+    // ⚠️ LA REJILLA DE ANILLOS **SE QUEDA**, y no es un resto: el mar cercano no tiene geometría
+    // propia y la usa con sus `ClipParams` para teselar las olas Gerstner. Por eso `clipActive` ya no
+    // mira el pipeline del clipmap sino la rejilla, y por eso `m_clipVB`/`m_clipIB` siguen vivos.
     }  // fin planet.clipmap.draw
 
     // ── SUELO CERCANO DESDE LA COLISIÓN ─────────────────────────────────────────────────────────
@@ -3863,9 +3832,11 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // × anillos: el clipmap ya no es un draw sino `m_clipRingCount`. Sin multiplicar, el panel
     // seguiría enseñando el coste de UN anillo y el cambio saldría gratis en pantalla.
     // (Es una cota ALTA: los anillos exteriores descartan su centro en el TCS, ~736 de 961 parches.)
-    m_lastRenderStats.clipVertices  = useClip ? m_clipVertexCount * (uint32_t)m_clipRingCount : 0;
-    m_lastRenderStats.clipTriangles = useClip ? (m_clipIndexCount / 3) * (uint32_t)m_clipRingCount : 0;
-    m_lastRenderStats.drawCalls = 1 + (useClip ? m_clipRingCount : 0);
+    // El clipmap ya no dibuja terreno: lo que queda de su rejilla es el mar. Las cifras del suelo
+    // salen ahora del pase de nodos (ver el log de `TerrenoV5`).
+    m_lastRenderStats.clipVertices  = 0;
+    m_lastRenderStats.clipTriangles = 0;
+    m_lastRenderStats.drawCalls = 1;
 }
 
 }} // namespace Haruka::Planet

@@ -35,7 +35,11 @@ class TerrainNodeGpu {
 public:
     /// Téxeles de un nodo (TEXELS²) y bytes que ocupa su hueco.
     static constexpr size_t kTexelsPerNode = (size_t)TERRAIN_NODE_TEXELS * TERRAIN_NODE_TEXELS;
-    static constexpr size_t kBytesPerNode  = kTexelsPerNode * sizeof(float);
+    /// ⚠️ DOS alturas por téxel: la propia y la del PADRE. La segunda es lo que cierra el escalón de
+    /// 2,4 m en cada cambio de nivel (geomorphing; ver la nota larga de `terrain_node.comp`).
+    /// El hueco `k` ocupa `[k·2·TEXELS², …)`: primero las propias, luego las del padre.
+    static constexpr size_t kFloatsPerNode = kTexelsPerNode * 2;   ///< propias + las del padre
+    static constexpr size_t kBytesPerNode  = kFloatsPerNode * sizeof(float);
 
     /** @param computePath ruta a `shaders/terrain_node.comp`. @return false si no hay device o pipeline. */
     bool init(RHI::Device* dev, const char* computePath, size_t capacity) {

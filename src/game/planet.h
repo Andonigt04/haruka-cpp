@@ -678,7 +678,6 @@ private:
     /// Pipeline de COMPUTE del culling de parches (terrain_cull.comp). Compartido: la malla base es
     /// del mismo tipo en todos los planetas. Inválido = el camino de siempre (draw de todo).
     static Haruka::RHI::PipelineHandle s_cullPipeline;
-    static Haruka::RHI::PipelineHandle s_clipPipeline;
     /** @brief Mar cercano: la rejilla del clipmap teselada con oleaje de Gerstner. */
     static Haruka::RHI::PipelineHandle s_oceanPipeline;
     /** @brief Mar lejano: la esfera lisa a nivel del mar, con el MISMO fragment. */

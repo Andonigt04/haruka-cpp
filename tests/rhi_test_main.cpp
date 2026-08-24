@@ -1788,7 +1788,10 @@ static void testTerrainNodePoolGpu()
         for (size_t slot = 0; slot < kCap && checked < 8; ++slot) {
             NodeId n; if (!pool.nodeAtSlot((int)slot, n)) continue;
             nodeFillHeights(n, R, ref.data());
-            const float* got = all + slot * TerrainNodeGpu::kTexelsPerNode;
+            // ⚠️ `kFloatsPerNode`, no `kTexelsPerNode`: cada hueco guarda DOS mapas (el propio y el
+            // del padre, para el geomorph). Con el índice viejo se leía el mapa del padre del hueco
+            // anterior y la auditoría lo cantaba como "contenido ajeno".
+            const float* got = all + slot * TerrainNodeGpu::kFloatsPerNode;
             double d = 0.0;
             for (size_t k = 0; k < TerrainNodeGpu::kTexelsPerNode; ++k)
                 d = std::max(d, std::abs((double)got[k] - (double)ref[k]));

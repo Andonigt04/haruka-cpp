@@ -925,3 +925,85 @@ entorno** (`terrain_node_renderer.h`), o sea que el clipmap es el terreno POR DE
 deja el juego **sin terreno**, y el sustituto no se ha visto funcionar en pantalla ni una vez. El
 orden obligatorio es: (1) verificar el v5 en el juego → (2) hacerlo el defecto → (3) borrar.
 El paso (1) es el único que no puedo hacer yo.
+
+## ✅ LA GRIETA VERTICAL — geomorph (2026-08-24)
+
+El cosido de T-junctions coloca el vértice en la POSICIÓN correcta: medido, **0,0000 m en 126 720
+vértices**, dentro de una cara y cruzando de cara. Pero cada nodo evalúa el relieve con **su** corte
+de octavas (`nodeTexelM`), así que un nodo y su padre describen **dos funciones distintas**. En la
+arista compartida se separaban hasta **2,394 m**. Eso es lo que se veía como "chunks cortados", y
+ningún test lo detectaba porque todos miraban el nivel del vecino o la retícula, nunca la altura.
+
+**El arreglo**: cada nodo guarda DOS alturas por téxel — la propia y **la que tendría su padre**. En
+la arista que linda con un vecino más grueso, el nodo fino usa la del padre, que es exactamente lo que
+ese vecino calcula (el vecino *está* al nivel del padre). Y el grueso no morfea ahí, porque su vecino
+es más fino. Coinciden por construcción. La rampa entra 8 celdas para que no quede un pliegue.
+
+    nivel 10 (76.35 m/texel): con morph 0.0000 m · SIN morph 0.000 m
+    nivel 12 (19.09 m/texel): con morph 0.0000 m · SIN morph 2.394 m
+    nivel 14 ( 4.77 m/texel): con morph 0.0000 m · SIN morph 1.165 m
+    nivel 16 ( 1.19 m/texel): con morph 0.0000 m · SIN morph 0.280 m
+
+**Lo que cuesta**: el hueco pasa de 66,6 a **130,0 KB** (dos mapas) y generar un nodo de 0,069 a
+**0,269 ms** (una evaluación de ruido más por téxel). Un pool de 1024 son 133 MB de VRAM.
+
+⚠️ **La normal también se morfea.** Si no, la iluminación describiría una superficie distinta de la
+que se dibuja justo en la banda del morph — el relieve se vería plano donde la geometría sí se dobla.
+
+⚠️ **`kFloatsPerNode`, no `kTexelsPerNode`.** El hueco `k` ocupa ahora `[k·2·TEXELS², …)`. La
+auditoría de F2 seguía indexando con el viejo y leía el mapa del padre del hueco anterior, cantándolo
+como "contenido ajeno" — cuatro rojos que no eran del motor.
+
+## ✅ EL POOL ERA UNA CACHE SIN CACHE (2026-08-24)
+
+Medido en el juego a 1030 m: `sel 1008 · tope del selector 1024 · residentes 1024/1024`. El selector
+iba al 98 % de su tope y el pool al 100 %: **no quedaba un hueco para lo que se acababa de dejar de
+ver**, así que el LRU desalojaba y regeneraba en bucle. Y como el tope frena la subdivisión, el nivel
+más fino se quedaba en **14 (4,77 m/téxel) en vez de 17 (0,6 m)** — seis veces más basto de lo que el
+diseño permite.
+
+El selector usa ahora el **75 %** del pool; el resto es caché de lo que sale de cuadro y vuelve (al
+andar 48 m sobrevive el 89,3 % de los nodos). `HARUKA_TERRAIN_V5_POOL` lo cambia sin recompilar.
+
+## ✅ EL CLIPMAP, BORRADO (2026-08-24)
+
+`HARUKA_TERRAIN_V5` pasa a estar **activo por defecto** (`=0` lo apaga, pero ya no hay nada detrás).
+Borrado: `clipmap.vert/.tesc/.tese`, `s_clipPipeline` y su creación, el pase de dibujo por anillo, y
+la contabilidad de `useClip`.
+
+⚠️ **LA REJILLA DE ANILLOS SE QUEDA, y no es un resto.** El mar cercano no tiene geometría propia:
+usa `m_clipVB`/`m_clipIB` y los `ClipParams` por anillo para teselar las olas Gerstner. Por eso la
+condición que la gobierna dejó de mirar el pipeline del clipmap y pasó a mirar la rejilla — sin ese
+cambio, borrar el clipmap se llevaba el mar por delante.
+
+**Lo que lo hizo posible**, en orden:
+
+1. El mar desacoplado de `useClip` (que además arreglaba un bug vivo: el v5 mataba las olas).
+2. El anillo cercano de colisión, que dibujaba una segunda superficie encima — "el terreno falso a pie".
+3. El geomorph, que cerró el escalón de 2,394 m entre niveles.
+4. El pool bien dimensionado: `m_pool{1024}` estaba a fuego mientras el SSBO crecía, así que
+   **2 035 de 3 053 nodos se dibujaban por ancestro**. Con él arreglado: `por ancestro 0`.
+
+**Medido en el juego tras el cambio** (`HARUKA_TERRAIN_V5_POOL=4096`):
+
+    sel 3058 -> dibujados 3058 (SIN HUECO 0, por ancestro 0) · niveles 6..17
+              · mas lejano 192 km · descartes: cono 1024 / horizonte 0 · residentes 4096/4096
+
+## ✅ LA DISPARIDAD RENDER↔COLISIÓN: 0,2539 m -> 0,0000 m
+
+El anillo de colisión cortaba las octavas en `TERRAIN_TRIM_FLOOR` = 4,0 m, **derivado del quad del
+clipmap**. El pase v5 corta en el téxel de su nodo más fino: 0,596 m. Dos cortes sobre el mismo campo
+son dos superficies.
+
+    dist. al jugador   corte del NODO   corte del ANILLO   |dibujado - pisado|
+           2 m           0.596 m           0.596 m             0.0000 m
+          10 m           0.596 m           0.596 m             0.0000 m
+          50 m           0.596 m           0.596 m             0.0000 m
+         200 m           0.596 m           0.596 m             0.0000 m
+        1000 m           0.596 m           2.000 m             0.1085 m
+    CONTRAPRUEBA: con el piso VIEJO (el del clipmap, 4.0 m) serian 0.2539 m
+
+⚠️ **Y NO acopla el LOD de la física al de render**, que era la objeción para no hacerlo. No se
+pregunta qué nivel eligió el selector —eso depende de la cámara y haría que el suelo cambiara según
+hacia dónde miras—: se usa el téxel del nivel **más fino**, que es una constante, y cerca del jugador
+el selector siempre llega a él.

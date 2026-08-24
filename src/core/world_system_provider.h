@@ -289,7 +289,10 @@ public:
             // Renormalizar en double NO rompe la paridad: conserva la dirección (cuya cuantización a
             // float es lo que se comparte con la GPU) y solo corrige el módulo.
             const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
-                const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
+                // ⚠️ `ForCollision`: el mismo corte de octavas que dibuja el pase de nodos. Con el piso del
+        // clipmap (4,0 m) el suelo que se pisa se separaba 0,2539 m del que se ve. Ver la nota de
+        // `TERRAIN_COLLISION_TRIM_FLOOR`.
+        const float triM = Haruka::Planet::terrainTriMForCollision(std::sqrt(x * x + z * z));
                 const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);
                 // ⚠️ Componente RADIAL respecto al plano tangente, no la altitud. Un heightfield es
                 // PLANO y el terreno está sobre una esfera: el nodo a 256 m está 5,1 mm por debajo del
@@ -322,7 +325,10 @@ public:
         // módulo en 1 ± 1,2e-7 y 6,37e6 · 1,2e-7 son 76 cm de error RADIAL. La dirección —lo que se
         // comparte bit a bit con el shader— no cambia.
         const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
-        const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
+        // ⚠️ `ForCollision`: el mismo corte de octavas que dibuja el pase de nodos. Con el piso del
+        // clipmap (4,0 m) el suelo que se pisa se separaba 0,2539 m del que se ve. Ver la nota de
+        // `TERRAIN_COLLISION_TRIM_FLOOR`.
+        const float triM = Haruka::Planet::terrainTriMForCollision(std::sqrt(x * x + z * z));
         // ⚠️ `src` YA RESUELTO por el llamador. Antes esto era `m_planetary->sampleTerrainHeight(...)`,
         // que por dentro rehacía la búsqueda del planeta —dos bucles y una comparación de `std::string`—
         // en cada una de las 235 564 muestras, para un puntero que no cambia. `heightAt` hace las mismas

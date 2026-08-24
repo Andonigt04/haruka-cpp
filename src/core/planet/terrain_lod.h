@@ -126,6 +126,28 @@ inline float terrainTriM(double radM) {
     return (float)(t > TERRAIN_TRIM_FLOOR ? t : TERRAIN_TRIM_FLOOR);
 }
 
+/// Piso de `triM` para la COLISIÓN: el téxel más fino que dibuja el pase de nodos.
+///
+/// ⚠️ **ES LA DISPARIDAD ENTRE LO QUE VES Y LO QUE PISAS, Y NO ES UN AJUSTE LIBRE.**
+///
+/// El anillo de colisión cortaba las octavas en `TERRAIN_TRIM_FLOOR` = 4,0 m, que se deriva del quad
+/// del clipmap. El pase v5 corta en el téxel de su nodo más fino: `R·(π/2) / 2^17 / 128` = **0,596 m**
+/// a radio terrestre. Dos cortes distintos sobre el mismo campo son dos superficies distintas —
+/// medido: **0,2539 m** de separación en el campo cercano (`terrain_render_vs_collision`).
+///
+/// Con este piso los dos cortan igual cerca del jugador y la disparidad es 0 POR CONSTRUCCIÓN.
+///
+/// ⚠️ NO se acopla el LOD de la física al de render, que era la objeción: no se pregunta qué nivel
+/// eligió el selector (eso depende de la cámara y haría que el suelo cambiara según hacia dónde
+/// miras). Se usa el téxel del nivel MÁS FINO, que es una constante — y cerca del jugador el
+/// selector siempre llega a él, así que coinciden sin depender de nada.
+inline constexpr double TERRAIN_COLLISION_TRIM_FLOOR = 0.5960464477539063;   // 6371 km · π/2 / 2^17 / 128
+
+inline float terrainTriMForCollision(double radM) {
+    const double t = radM * TERRAIN_TRIM_SLOPE;
+    return (float)(t > TERRAIN_COLLISION_TRIM_FLOOR ? t : TERRAIN_COLLISION_TRIM_FLOOR);
+}
+
 /**
  * @brief ¿Toca RE-ANCLAR el anillo cercano? Con banda muerta, que es lo que le faltaba.
  *
