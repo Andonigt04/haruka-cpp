@@ -591,7 +591,10 @@ void TerrestrialPlanet::buildMesh(
             bool ocean = elevKm < 0;
             v.elev = elevKm;
             v.temp = (float)m_climate.temperature(dir, elevKm, ocean);
-            v.humid = (float)m_climate.humidity(dir, elevKm, ocean);
+            // ⚠️ `groundHumidity`, NO `humidity`: este canal alimenta la SELECCIÓN DE MATERIAL, y
+            // sobre océano `humidity` devuelve 1.0 — con lo que el fondo entero ganaba el material
+            // húmedo y ~80 % del disco visible salía `green`. Ver la nota de `climate.h`.
+            v.humid = (float)m_climate.groundHumidity(dir, elevKm);
             verts[vBase + (uint32_t)idx] = v;
         }
 
@@ -783,6 +786,20 @@ void TerrestrialPlanet::buildMesh(
         m_baseFieldTex = dev->createTexture(fd);
     }
 
+}
+
+Haruka::RHI::TextureHandle TerrestrialPlanet::propWhiteTex() {
+    if (!RHI::valid(m_propWhiteTex)) {
+        const unsigned char white[4] = { 255, 255, 255, 255 };
+        RHI::TextureDesc wd;
+        wd.width = 1; wd.height = 1;
+        wd.format = RHI::Format::RGBA8;
+        wd.filter = RHI::Filter::Nearest;
+        wd.wrap   = RHI::Wrap::Repeat;
+        wd.initialData = white;
+        if (RHI::Device* wdev = RHI::device()) m_propWhiteTex = wdev->createTexture(wd);
+    }
+    return m_propWhiteTex;
 }
 
 void TerrestrialPlanet::clearGPU() {
@@ -2790,6 +2807,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         // `R + baseH + detalle`, o sea un planeta sin continentes ni costa y ±4 km por debajo de lo
         // que dibuja el clipmap — un escalón en la transición entre los dos.
         m_nodeRenderer.setBaseField(m_baseFieldTex);
+        m_nodeRenderer.setHeightTex(m_heightTex);   // la MISMA elevación que el clipmap y la física
         const double radPerPx = fovYRad / std::max(viewportH, 1.0);
         const double cone     = Haruka::Terrain::nodeFrustumConeHalfAngle(fovYRad, aspect);
         m_nodeRenderer.prepare(ctx, cameraPos, m_config.position, m_config.radius,
@@ -3324,6 +3342,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 ++instCount;
             }
         }
+        if (!RHI::valid(densityTex)) densityTex = propWhiteTex();   // nunca atar un handle inválido
         ctx->bindTexture(17, densityTex);
     }
 
@@ -3355,7 +3374,8 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                         m_config.name.c_str(), m_materialTable.albedoPaths().size());
     }
     if (RHI::valid(m_zoneTex))              ctx->bindTexture(14, m_zoneTex);
-    // El bake de altura (R32F, binding 16): lo leen terrain.tese, clipmap.tese y water.frag con la
+    // El bake de altura (R32F, binding 16): hoy lo leen terrain.tese/.tesc, clipmap.tese, biome.frag,
+    // ocean.tese/.frag, nearground.vert y el pase v5 (terrain_node.vert/.comp) — con la
     // bilineal manual compartida. Se enlaza SIEMPRE que exista, antes de cualquier draw, y aguanta
     // hasta el agua (ninguna bind intermedia toca la unidad 16).
     if (RHI::valid(m_heightTex))            ctx->bindTexture(16, m_heightTex);
@@ -3383,6 +3403,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // cámara en órbita la rejilla sería un punto, y el coste de decidirlo es despreciable. Misma
     // condición que `clipActive` del UBO (recorte de la malla base en terrain.tese).
     bool useClip = clipActive;   // el pase v5, si dibuja, lo anula (ver planet.v5.nodes)
+    // ⚠️ Ámbito de FUNCIÓN, no del bloque del pase: lo consultan el clipmap Y el anillo cercano, que
+    // están en bloques distintos. Declarado dentro del pase, el anillo no lo veía y seguía pintando.
+    bool v5Drew = false;
 
     // ClipParams (binding 13) con el SEMI-LADO real del clipmap y su anillo de mezcla: lo usan
     // BOTH terrain.tese (recorte de la base) y clipmap.tese (blend ring). Se sube y se bindea ANTES
@@ -3589,7 +3612,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // Y con ello se salta el sphere-trace de `biome.frag::reanchorToFine` —2-16 pasos POR PÍXEL, el
     // coste que puso `present.swap` en 60 ms— porque este pase usa su propio fragmento: la geometría
     // lleva el relieve, así que no hay nada que fingir. Ése es el arreglo, y es el número a medir.
-    bool v5Drew = false;
     if (Haruka::Terrain::TerrainNodeRenderer::enabled()) {
         HARUKA_PROFILE("planet.v5.nodes");
         const std::string v5Dir = Haruka::Shader::baseDir() + "shaders/";
@@ -3646,12 +3668,20 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                                                 m_config.radius, rotVP);
             static int s_log = 0;
             if ((s_log++ % 120) == 0)
-                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (sin hueco %zu, por ancestro %zu) · "
-                            "niveles %u..%u · mas lejano %.0f km · frustum descarto %zu · "
-                            "stride %u · %.1f M tris · residentes %zu · alt %.0f m",
+                // ⚠️ LOS DOS RECORTES POR SEPARADO. Con "frustum descarto" a secas no se distingue el
+                // cono del horizonte, y son dos causas distintas para el mismo sintoma ("chunks
+                // cortados"). Los dos estan probados por tests contra rayos de pantalla —cero
+                // descartes indebidos en ambos— asi que si aqui salen cifras altas, el que miente es
+                // el test, no el motor. Ese es el dato que falta.
+                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu) · "
+                            "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu"
+                            " · tope del selector %zu · stride %u · %.1f M tris · residentes %zu/%zu"
+                            " · alt %.0f m",
                             st.selected, st.drawn, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
-                            st.farthestKm, st.culledFrustum, st.stride, (double)st.tris / 1e6,
-                            st.resident, glm::length(cameraPos - m_config.position) - m_config.radius);
+                            st.farthestKm, st.culledFrustum, st.culledHorizon,
+                            m_nodeRenderer.capacity(), st.stride, (double)st.tris / 1e6,
+                            st.resident, m_nodeRenderer.capacity(),
+                            glm::length(cameraPos - m_config.position) - m_config.radius);
             v5Drew = st.drawn > 0;
         }
     }
@@ -3685,7 +3715,17 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // describen el mismo suelo y tiene que ganar éste, que es el que de verdad se pisa. Cuando el
     // paso 5 abra el hueco en el clipmap dejarán de solaparse y el sesgo sobrará.
     { HARUKA_PROFILE("planet.nearring.draw");
-    if (m_nearRingVisible && m_nearRingIndices >= 3 && RHI::valid(s_nearRingPipeline)
+    // ⚠️ CON EL v5 NO HAY HUECO QUE TAPAR, Y ESTE ANILLO ERA "EL TERRENO FALSO A PIE".
+    //
+    // El anillo cercano existe para rellenar el HUECO DEL NIVEL 0 del clipmap, dibujando la malla de
+    // colisión con sus mismos vértices. El pase de nodos no deja hueco: cubre del suelo a la órbita.
+    // Así que con v5 esto pintaba una SEGUNDA superficie —más basta, la de colisión— encima de la
+    // buena. Y con `biasConstant = 96.0` va empujada hacia la cámara, así que gana el depth siempre:
+    // a pie se veía el suelo de colisión en vez del terreno.
+    //
+    // Misma razón por la que `useClip` se anula unas líneas más arriba. `v5Drew` ya está resuelto
+    // aquí (el pase dibujó en este mismo frame), así que la condición es exacta y no una suposición.
+    if (!v5Drew && m_nearRingVisible && m_nearRingIndices >= 3 && RHI::valid(s_nearRingPipeline)
         && RHI::valid(m_nearRingVB) && RHI::valid(m_nearRingIB)) {
         ctx->bindPipeline(s_nearRingPipeline);
         ctx->bindUniformBuffer(0, s_ubo);
@@ -3742,7 +3782,21 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
 
         // MAR CERCANO: la MISMA rejilla y los MISMOS ClipParams que acaba de usar el terreno. Los
         // anillos ya están rellenados arriba; aquí solo se cambia el pipeline y se repasan.
-        if (wavesVisible && useClip && RHI::valid(s_oceanPipeline) && RHI::valid(m_clipVB)) {
+        // ⚠️ `clipActive`, NO `useClip`. LA DIFERENCIA ES QUE EL v5 MATABA LAS OLAS.
+        //
+        // `useClip` dice si dibuja el TERRENO del clipmap, y el pase v5 lo anula (`if (v5Drew)
+        // useClip = false`). El mar cercano no tiene buffers propios —reusa la rejilla de anillos y
+        // sus `ClipParams`— y estaba colgado de esa misma bandera, así que con `HARUKA_TERRAIN_V5=1`
+        // el mar cercano dejaba de dibujarse EN SILENCIO: quedaba solo el mar lejano, que es la
+        // esfera LISA. Sin olas, y sin nada que lo dijera.
+        //
+        // `clipActive` es lo correcto porque es la condición de que la REJILLA Y SUS PARÁMETROS
+        // existan (se rellenan bajo ella, más arriba), que es lo único que el mar necesita de aquí.
+        // Con el v5 apagado las dos banderas valen lo mismo, así que no cambia nada de lo de antes.
+        //
+        // ⚠️ Esto es también el PASO PREVIO para quitar el clipmap: mientras el mar dependiera de que
+        // el terreno del clipmap dibujara, borrarlo se llevaba el mar por delante.
+        if (wavesVisible && clipActive && RHI::valid(s_oceanPipeline) && RHI::valid(m_clipVB)) {
             ctx->bindPipeline(s_oceanPipeline);
             ctx->bindUniformBuffer(0, s_ubo);
             ctx->bindTexture(16, m_heightTex);

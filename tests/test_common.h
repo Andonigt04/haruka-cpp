@@ -135,6 +135,12 @@ void test_ocean_tide();
 void test_ocean_swash();
 // La octava mas fina del terreno sigue viva (murio en silencio al bajar el tope de tesela).
 void test_terrain_finest_octave();
+// F5: ¿hay relieve procedural desde orbita? Antes del 2026-08-24 era EXACTAMENTE cero a partir de
+// 119 km de camara — el planeta era solo el bake y su bilineal.
+void test_terrain_orbital_relief();
+// F5-albedo: de donde sale el color desde orbita y por que se ve uniforme. Mide las DOS fuentes
+// (tintes de material y mapa de biomas) para señalar cual es la que falla.
+void test_terrain_orbital_albedo();
 // F1 del PLAN TERRENO v5 (test_terrain_node.cpp): el direccionamiento de nodos del quadtree es
 // exacto BIT A BIT — grueso subconjunto de fino, aristas sin grieta, determinista. Con contraprueba.
 void test_terrain_node_lattice();
@@ -148,6 +154,21 @@ void test_terrain_node_frustum_corners();
 // La costura entre CARAS del cubo: el vecino de un nodo del borde vive en otra cara. Oraculo doble:
 // simetria de la relacion en las 24 combinaciones, y que la arista compartida coincida en metros.
 void test_terrain_node_face_seam();
+// La GRIETA en metros a ambos lados de una arista del cubo. El nivel correcto no implica cosido
+// correcto: el autor vio grietas con el cosido "demostrado" por el test de arriba.
+void test_terrain_node_face_seam_gap();
+// El recorte por HORIZONTE contra rayos de pantalla: ningun suelo que se ve puede caer en un nodo
+// descartado. Es el otro recorte, y el que el cono ya descartado dejaba libre de sospecha.
+void test_terrain_node_horizon_cull();
+// El planeta hornea su elevacion DOS veces (equirect para la fisica, cubo para el render). Cuanto se
+// separan los dos suelos, en metros: es la cota inferior del desajuste que F4 viene a cerrar.
+void test_terrain_two_bakes_disagree();
+// ¿Es un nodo del quadtree una rejilla REGULAR para Jolt, o hace falta convertir? La pregunta que
+// abre F4, medida en metros por nivel.
+void test_terrain_node_as_heightfield();
+// CIERRE DE F4: la cota medida entre el suelo que se DIBUJA y el que se PISA. Sustituye al criterio
+// "chord_error = 0 por construccion", que era imposible (ver terrain_node_as_heightfield).
+void test_terrain_render_vs_collision();
 void test_terrain_node_range();
 void test_terrain_node_pool();
 void test_terrain_node_pool_reuse();

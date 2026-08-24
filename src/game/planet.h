@@ -430,6 +430,12 @@ private:
     // shader para que la vista de spawn multiplique por el mapa — igual que hace el placer en CPU.
     std::unordered_map<std::string, Haruka::RHI::TextureHandle> m_propDensityTex;
     Haruka::RHI::TextureHandle m_propWhiteTex;   // 1×1 blanco: capa sin densityMap = sin recorte
+    /** @brief El 1×1 blanco, creándolo si hace falta.
+     *
+     *  ⚠️ Se creaba en un camino de inicialización que NO siempre pasa antes del primer uso, así que
+     *  el pase ataba un handle inválido cada frame. En OpenGL eso deja la ranura como estuviera; en
+     *  Vulkan un descriptor sin escribir es BASURA — y este respaldo existe justamente para eso. */
+    Haruka::RHI::TextureHandle propWhiteTex();
 
     /** @brief Carga el densityMap de una capa y lo sube a GPU (misma búsqueda de candidatos que
      *  `densityMapAt`, bilineal + mipmaps). Devuelve la textura, o la blanca si no se encontró. */

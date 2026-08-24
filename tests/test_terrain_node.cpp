@@ -18,6 +18,7 @@
 #include "test_common.h"
 
 #include <cmath>
+#include "core/terrain/base_field.h"          // baseFieldHeightAt: el muestreo del bake del CUBO
 #include <glm/gtc/matrix_transform.hpp>   // perspective/lookAt: la matriz es la verdad de referencia
                                             // del test de esquinas del frustum
 #include <cstring>
@@ -485,6 +486,537 @@ void test_terrain_node_select() {
 // El segundo oraculo es geometrico y en metros: la arista compartida tiene que estar en el MISMO
 // sitio del espacio vista desde las dos caras. Si no, no es una costura, son dos bordes distintos.
 // ================================================================================================
+// ================================================================================================
+// LOS DOS BAKES NO SON EL MISMO SUELO. Cuánto se separan, en metros.
+//
+// ⚠️ El planeta hornea su elevación DOS VECES, en dos parametrizaciones distintas:
+//
+//     equirect  `m_heightCPU` (8192x4096)   -> lo muestrea `sampleHeight`, o sea LA FISICA
+//     cubo      `m_baseHeights` (6x513²)    -> lo muestrea el shader, o sea EL RENDER del v5
+//
+// Y `m_baseHeights` llevaba el comentario "es el suelo que consultará la física" sin que lo leyera
+// NADIE: se rellenaba y se quedaba ahí. O sea que lo que se pisa y lo que se ve salen de dos mapas
+// con retículas distintas, y la diferencia entre ambos es una cota inferior del desajuste
+// render↔colisión que F4 viene a cerrar.
+//
+// Aquí se siembra una elevación ANALITICA conocida en las dos retículas —a las resoluciones reales
+// del motor— y se mide cuánto discrepan al muestrearlas. No es una estimación: es la propia
+// operación que hacen el shader y la física, con el mismo dato de partida.
+// ================================================================================================
+// ================================================================================================
+// ¿PUEDE UN NODO SER UN `HeightFieldShape` DE JOLT TAL CUAL? — la pregunta que abre F4.
+//
+// El plan dice "una rejilla regular es lo que Jolt quiere; mapea 1:1, sin conversion". Merece
+// comprobarse ANTES de construir nada, porque las dos cosas no son obviamente la misma:
+//
+//   · `HeightFieldShape` es el GRAFO de una funcion sobre un plano: la muestra (i,j) esta en
+//     (i·celda, h, j·celda). Rejilla REGULAR, dominio PLANO.
+//   · Un nodo del quadtree es una parcela CURVA de la esfera, y sus texeles NO estan equiespaciados
+//     al proyectarlos a un plano: el mapeo cubo→esfera (Cobb) estira hacia los bordes de la cara.
+//
+// RESPUESTA MEDIDA: **NO, y el plan estaba equivocado.** El angulo entre los ejes `u` y `v` del nodo
+// es 88,13 grados, no 90 — y es el MISMO en todos los niveles, porque depende de donde cae el nodo en
+// la cara del cubo, no de su tamaño. El paso si es uniforme (1,000002 entre centro y borde), asi que
+// el problema no es el espaciado: es que la rejilla es un PARALELOGRAMO y Jolt quiere un rectangulo.
+//
+// El desvio resultante es el 4,6 % del lado del nodo, a cualquier nivel: 3,54 m en uno de 76,4 m. Eso
+// no es un detalle — es el suelo que se pisa desplazado horizontalmente respecto al que se ve.
+//
+// Este test se queda para que nadie vuelva a asumir el "1:1" sin mirar el numero.
+// ================================================================================================
+// ================================================================================================
+// CIERRE DE F4: cuanto se separan el suelo que se DIBUJA y el que se PISA.
+//
+// ⚠️ EL CRITERIO DEL PLAN ERA IMPOSIBLE. Decia "`terrain_chord_error` da 0 POR CONSTRUCCION", y eso
+// exigia que la colision leyera los MISMOS texeles que el render. No puede: los ejes del nodo forman
+// 88,13 grados, no 90, asi que un nodo no es un `HeightFieldShape` de Jolt (ver
+// `terrain_node_as_heightfield`). Se cerro por la opcion 3: los anillos siguen, pero muestreando la
+// misma superficie. Paridad en VALORES, no en celdas — y entonces el cierre es una COTA MEDIDA.
+//
+// Lo que ya coincide tras el trabajo de F4:
+//   · la elevacion base   -> los dos leen el bake EQUIRECT (antes el nodo leia el del cubo)
+//   · el radio del ruido  -> los dos usan `baseR = R + baseH` (antes el nodo usaba R a secas)
+//
+// Lo que NO coincide, y es lo que este test mide: el CORTE DE OCTAVAS.
+//   · el nodo   corta por `nodeTexelM(nivel)`      — el texel del nodo que se dibuja
+//   · el anillo corta por `terrainTriM(distancia)` — LOD por distancia al jugador
+// Son dos LOD distintos sobre el mismo campo, asi que la diferencia es el relieve que uno incluye y
+// el otro no.
+// ================================================================================================
+void test_terrain_render_vs_collision() {
+    beginTest("terrain_render_vs_collision");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+
+    // Camara a altura de ojo, que es donde la disparidad importa: es donde se camina.
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 1.7);
+    const glm::dvec3 t1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+
+    // El conjunto que el selector dibujaria de verdad.
+    std::vector<NodeId> sel;
+    nodeSelectVisible(R, cam, pc, radPerPx, sel, 200000);
+    const auto drawn = nodeDrawnIndex(sel);
+    CHECK(!sel.empty(), "el selector elige nodos alrededor de la camara");
+
+    // El nivel del nodo que cubre una direccion: el mas FINO del conjunto dibujado que la contiene.
+    auto levelAt = [&](const glm::dvec3& dir) -> int {
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(dir, f, lx, ly);
+        for (int lv = (int)TERRAIN_NODE_MAX_LEVEL; lv >= 0; --lv) {
+            const uint64_t lim = 1ull << lv;
+            const int64_t i = (int64_t)((lx + 1.0) * 0.5 * (double)lim);
+            const int64_t j = (int64_t)((ly + 1.0) * 0.5 * (double)lim);
+            const NodeId n{ f, (uint32_t)lv,
+                            (uint32_t)std::min<int64_t>(std::max<int64_t>(i, 0), (int64_t)lim - 1),
+                            (uint32_t)std::min<int64_t>(std::max<int64_t>(j, 0), (int64_t)lim - 1) };
+            if (drawn.find(nodeKey(n)) != drawn.end()) return lv;
+        }
+        return -1;
+    };
+
+    std::printf("    dist. al jugador   corte del NODO   corte del ANILLO   |dibujado - pisado|\n");
+    double worstNear = 0.0;
+    for (double d : { 2.0, 10.0, 50.0, 200.0, 1000.0, 5000.0 }) {
+        const glm::dvec3 dir = glm::normalize(up0 + t1 * (d / R));
+        const int lv = levelAt(dir);
+        if (lv < 0) { std::printf("    %8.0f m   (sin nodo dibujado)\n", d); continue; }
+        const NodeId n{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };   // solo para el tamaño de texel
+        const double triNode = nodeTexelM(n, R);
+        const double triRing = Haruka::Planet::terrainTriM(d);
+
+        // La MISMA composicion en los dos lados; solo cambia el corte de octavas.
+        const float hNode = Haruka::Planet::terrainDetail(dir, R, (float)triNode);
+        const float hRing = Haruka::Planet::terrainDetail(dir, R, (float)triRing);
+        const double diff = std::fabs((double)hNode - (double)hRing);
+        std::printf("    %8.0f m   %10.3f m   %12.3f m   %14.4f m\n", d, triNode, triRing, diff);
+        if (d <= 200.0) worstNear = std::max(worstNear, diff);
+    }
+    std::printf("    -> en el campo CERCANO (<=200 m, donde se camina): peor %.4f m\n", worstNear);
+
+    // LA COTA DE CIERRE DE F4. No es 0 —no puede serlo— y esta puesta donde el numero medido la
+    // deja, no donde gustaria: si sube, algo ha vuelto a divergir y hay que mirar QUE.
+    CHECK(worstNear < 1.0, "COTA F4: dibujado y pisado difieren menos de 1 m en el campo cercano");
+
+    // CONTRAPRUEBA: con cortes de octava DELIBERADAMENTE distintos, la diferencia tiene que dispararse.
+    // Sin esto, un `terrainDetail` que ignorara `minFeatureM` daria 0 y se leeria como paridad.
+    const glm::dvec3 dprobe = glm::normalize(up0 + t1 * (50.0 / R));
+    const double far = std::fabs((double)Haruka::Planet::terrainDetail(dprobe, R, 0.6f) -
+                                 (double)Haruka::Planet::terrainDetail(dprobe, R, 300.0f));
+    std::printf("    CONTRAPRUEBA: con cortes 0,6 m contra 300 m la diferencia es %.2f m\n", far);
+
+    // ── LO QUE COSTARIA CERRARLO DEL TODO ───────────────────────────────────────────────────────
+    //
+    // La disparidad es ENTERA del corte de octavas: el nodo corta por su texel (0,596 m al nivel mas
+    // fino) y el anillo por `terrainTriM(d)`, cuyo piso es `TERRAIN_CLIP_QUAD_M` = 4 m (el lado del
+    // quad del clipmap). Si el anillo usara el corte del NODO, la disparidad seria 0 por definicion.
+    //
+    // No se hace aqui porque acopla el LOD de la FISICA al de RENDER —el nivel que elige el selector
+    // depende de la camara— y eso es una decision de diseño, no un arreglo. El numero deja claro lo
+    // que esta en juego.
+    double bestPossible = 0.0;
+    for (double d : { 2.0, 10.0, 50.0, 200.0 }) {
+        const glm::dvec3 dd = glm::normalize(up0 + t1 * (d / R));
+        const int lv = levelAt(dd);
+        if (lv < 0) continue;
+        const NodeId nn{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };
+        bestPossible = std::max(bestPossible, (double)std::fabs(
+            Haruka::Planet::terrainDetail(dd, R, (float)nodeTexelM(nn, R)) -
+            Haruka::Planet::terrainDetail(dd, R, (float)nodeTexelM(nn, R))));
+    }
+    std::printf("    si el anillo cortara como el nodo, la disparidad seria %.4f m "
+                "(hoy %.4f m, piso del anillo %.1f m)\n",
+                bestPossible, worstNear, Haruka::Planet::TERRAIN_TRIM_FLOOR);
+    CHECK(far > worstNear * 10.0, "CONTRAPRUEBA: el corte de octavas SI mueve la superficie (el test mide eso)");
+}
+
+// ================================================================================================
+// LA GRIETA EN LAS ARISTAS DEL CUBO, EN METROS. El test que faltaba.
+//
+// ⚠️ `terrain_node_face_seam` demuestra que `nodeNeighbourLevels` devuelve el NIVEL correcto cruzando
+// cara. Eso NO es lo mismo que "no hay grieta": el nivel puede ser correcto y el cosido colocar el
+// vertice en otro sitio. El autor confirmo grietas en pantalla con el cosido "demostrado".
+//
+// Aqui se miden POSICIONES: se cogen los vertices de la arista compartida por los dos lados y se
+// mira cuanto se separan en el espacio. Es lo unico que responde a "¿hay grieta?".
+// ================================================================================================
+void test_terrain_node_face_seam_gap() {
+    beginTest("terrain_node_face_seam_gap");
+    const double R = 6371000.0;
+
+    double worstSame = 0.0, worstCross = 0.0;
+    size_t nSame = 0, nCross = 0;
+    glm::dvec3 worstAt(0.0);
+
+    for (uint32_t level : { 4u, 6u, 8u }) {
+        const uint32_t lim = 1u << level;
+        for (int f = 0; f < 6; ++f)
+            for (uint32_t k = 1; k + 1 < lim; ++k) {
+                // Nodo pegado al borde IZQUIERDO de su cara -> su vecino esta en otra cara.
+                const NodeId a{ (PlanetFace)f, level, 0, k };
+                NodeId nb;
+                if (!nodeNeighbourAcrossFace(a, 0, nb)) continue;
+
+                // El vecino, UN NIVEL MAS GRUESO: la T-junction que abre grieta.
+                const NodeId coarse{ nb.face, nb.level - 1, nb.i / 2, nb.j / 2 };
+                const auto idx = nodeDrawnIndex({ a, coarse });
+                int cA[4]; nodeNeighbourLevels(a, idx, cA);
+
+                // ⚠️ INDICES IMPARES. Con el vecino un nivel mas grueso la zancada es 2, asi que los
+                // PARES caen exactamente sobre vertices suyos y dan 0 sin medir nada. Los unicos que
+                // pueden abrir grieta son los INTERPOLADOS. La primera version muestreaba de 4 en 4
+                // —todos pares— y daba 0,0000 m en 65 340 vertices sin tocar el caso.
+                for (uint32_t t2 = 1; t2 < TERRAIN_NODE_CELLS; t2 += 2) {
+                    const glm::dvec3 pa = nodeStitchedDir(a, 0, t2, cA) * R;
+                    // Distancia al SEGMENTO, y por los cuatro lados: cruzando cara no se sabe cual
+                    // es el compartido ni en que sentido corre.
+                    double best = 1e30;
+                    auto segDist = [&](const glm::dvec3& s0, const glm::dvec3& s1) {
+                        const glm::dvec3 e = s1 - s0;
+                        const double L2 = glm::dot(e, e);
+                        const double tt = (L2 > 0.0) ? glm::clamp(glm::dot(pa - s0, e) / L2, 0.0, 1.0) : 0.0;
+                        return glm::length(s0 + e * tt - pa);
+                    };
+                    for (uint32_t q = 0; q + 1 <= TERRAIN_NODE_CELLS; ++q) {
+                        best = std::min(best, segDist(nodeTexelDir(coarse, 0, q) * R,
+                                                      nodeTexelDir(coarse, 0, q + 1) * R));
+                        best = std::min(best, segDist(nodeTexelDir(coarse, TERRAIN_NODE_CELLS, q) * R,
+                                                      nodeTexelDir(coarse, TERRAIN_NODE_CELLS, q + 1) * R));
+                        best = std::min(best, segDist(nodeTexelDir(coarse, q, 0) * R,
+                                                      nodeTexelDir(coarse, q + 1, 0) * R));
+                        best = std::min(best, segDist(nodeTexelDir(coarse, q, TERRAIN_NODE_CELLS) * R,
+                                                      nodeTexelDir(coarse, q + 1, TERRAIN_NODE_CELLS) * R));
+                    }
+                    if (best > worstCross) { worstCross = best; worstAt = pa / R; }
+                    ++nCross;
+                }
+            }
+    }
+
+    // CONTROL: la misma medida DENTRO de una cara, donde el cosido esta probado y funciona.
+    for (uint32_t level : { 4u, 6u, 8u }) {
+        const uint32_t lim = 1u << level;
+        const NodeId a{ PlanetFace::FRONT, level, lim / 2, lim / 2 };
+        const NodeId nbFine{ PlanetFace::FRONT, level, lim / 2 - 1, lim / 2 };
+        const NodeId coarse{ nbFine.face, nbFine.level - 1, nbFine.i / 2, nbFine.j / 2 };
+        const auto idx = nodeDrawnIndex({ a, coarse });
+        int cA[4]; nodeNeighbourLevels(a, idx, cA);
+        for (uint32_t t2 = 1; t2 < TERRAIN_NODE_CELLS; t2 += 2) {
+            const glm::dvec3 pa = nodeStitchedDir(a, 0, t2, cA) * R;
+            // Distancia al SEGMENTO del vecino, no a sus vertices: el cosido pone el punto SOBRE la
+            // recta entre dos de ellos, asi que medir contra vertices sueltos exagera la grieta.
+            double best = 1e30;
+            for (uint32_t q = 0; q + 1 <= TERRAIN_NODE_CELLS; ++q) {
+                const glm::dvec3 s0 = nodeTexelDir(coarse, TERRAIN_NODE_CELLS, q) * R;
+                const glm::dvec3 s1 = nodeTexelDir(coarse, TERRAIN_NODE_CELLS, q + 1) * R;
+                const glm::dvec3 e = s1 - s0;
+                const double L2 = glm::dot(e, e);
+                const double tt = (L2 > 0.0) ? glm::clamp(glm::dot(pa - s0, e) / L2, 0.0, 1.0) : 0.0;
+                best = std::min(best, glm::length(s0 + e * tt - pa));
+            }
+            worstSame = std::max(worstSame, best);
+            ++nSame;
+        }
+    }
+
+    std::printf("    DENTRO de una cara  (%zu vertices): grieta peor %10.4f m\n", nSame, worstSame);
+    std::printf("    CRUZANDO de cara    (%zu vertices): grieta peor %10.4f m\n", nCross, worstCross);
+    std::printf("      la peor cae en dir (%.3f, %.3f, %.3f)\n", worstAt.x, worstAt.y, worstAt.z);
+
+    CHECK(worstSame < 0.01, "CONTROL: dentro de una cara el cosido cierra (el test mide bien)");
+    CHECK(worstCross < 0.01, "cruzando de cara el cosido tambien cierra");
+
+    // ── Y AHORA LA OTRA GRIETA: LA VERTICAL ─────────────────────────────────────────────────────
+    //
+    // ⚠️ Lo de arriba mide POSICIONES y cierra a 0. Pero el cosido interpola las alturas de MI mapa,
+    // y el vecino grueso tiene las suyas calculadas con OTRO corte de octavas: su `nodeTexelM` es el
+    // doble, asi que su superficie es literalmente otra funcion. La reticula coincide; el RELIEVE no.
+    //
+    // Esta es la grieta que se ve, y la de arriba nunca la habria detectado.
+    double worstH = 0.0; size_t nH = 0;
+    for (uint32_t level : { 10u, 12u, 14u, 16u }) {
+        const uint32_t lim = 1u << level;
+        const NodeId fine{ PlanetFace::FRONT, level, lim / 3, lim / 2 };
+        const NodeId coarse{ PlanetFace::FRONT, level - 1, (lim / 3) / 2, (lim / 2) / 2 };
+        const float triF = (float)nodeTexelM(fine, R);
+        const float triC = (float)nodeTexelM(coarse, R);
+        double w = 0.0;
+        for (uint32_t q = 0; q <= TERRAIN_NODE_CELLS; q += 2) {
+            const glm::dvec3 d = nodeTexelDir(fine, 0, q);
+            w = std::max(w, (double)std::fabs(
+                Haruka::Planet::terrainDetail(d, R, triF) - Haruka::Planet::terrainDetail(d, R, triC)));
+            ++nH;
+        }
+        std::printf("      nivel %2u (%.2f m/texel) contra su padre (%.2f): salto de altura %.3f m\n",
+                    level, triF, triC, w);
+        worstH = std::max(worstH, w);
+    }
+    std::printf("    GRIETA VERTICAL en la arista compartida: peor %.3f m sobre %zu vertices\n",
+                worstH, nH);
+    CHECK(worstH < 0.05, "el relieve COINCIDE en la arista compartida (si no, hay escalon vertical)");
+}
+
+// ================================================================================================
+// EL RECORTE POR HORIZONTE, CONTRA RAYOS DE PANTALLA.
+//
+// ⚠️ SINTOMA REPORTADO Y CONFIRMADO EN PANTALLA: "chunks cortados antes de que acabe la pantalla".
+// El cono del frustum quedo descartado con numeros (`terrain_node_frustum_corners`: 0 nodos en
+// pantalla descartados). Queda el otro recorte, y ninguno de los tests lo tocaba.
+//
+// `nodeBelowHorizon` sondea el PERIMETRO del nodo, 8 puntos por lado, mas el punto bajo la camara.
+// Si la parte visible de un nodo es una franja mas fina que el paso de sonda, ninguna sonda la toca
+// y el nodo se descarta ENTERO — un agujero donde si habia suelo.
+//
+// El oraculo aqui no es una sonda mas: es la GEOMETRIA. Se lanza un rayo por cada pixel del cuadro,
+// se corta con la esfera, y si corta, ese suelo SE VE. El nodo que lo contiene no puede descartarse.
+// ================================================================================================
+void test_terrain_node_horizon_cull() {
+    beginTest("terrain_node_horizon_cull");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double aspect = 1920.0 / 1080.0;
+    const double tv = std::tan(fovY * 0.5), th = tv * aspect;
+
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));   // al horizonte
+    const glm::dvec3 right = glm::normalize(glm::cross(fwd, up0));
+    const glm::dvec3 vup   = glm::cross(right, fwd);
+
+    // El nivel que el selector usaria a esa distancia; para el recorte solo importa el nodo.
+    auto nodeAt = [&](const glm::dvec3& dir, uint32_t level) {
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(dir, f, lx, ly);
+        const uint64_t lim = 1ull << level;
+        const int64_t i = (int64_t)((lx + 1.0) * 0.5 * (double)lim);
+        const int64_t j = (int64_t)((ly + 1.0) * 0.5 * (double)lim);
+        return NodeId{ f, level,
+                       (uint32_t)std::min<int64_t>(std::max<int64_t>(i, 0), (int64_t)lim - 1),
+                       (uint32_t)std::min<int64_t>(std::max<int64_t>(j, 0), (int64_t)lim - 1) };
+    };
+
+    std::printf("    altura    rayos que TOCAN suelo    caen en nodo DESCARTADO por horizonte\n");
+    size_t totalBad = 0;
+    for (double alt : { 1.7, 100.0, 2000.0, 50000.0 }) {
+        const glm::dvec3 cam = pc + up0 * (R + alt);
+        size_t hits = 0, bad = 0;
+        double worstAngDeg = 0.0;
+        for (int iv = -24; iv <= 24; ++iv)
+            for (int iu = -40; iu <= 40; ++iu) {
+                const double u = (double)iu / 40.0, v = (double)iv / 24.0;
+                const glm::dvec3 d = glm::normalize(fwd + right * (u * th) + vup * (v * tv));
+                // Corte rayo-esfera: si hay raiz real positiva, ese suelo se ve.
+                const glm::dvec3 oc = cam - pc;
+                const double b = glm::dot(oc, d), c = glm::dot(oc, oc) - R * R;
+                const double disc = b * b - c;
+                if (disc < 0.0) continue;                       // el rayo pasa de largo: cielo
+                const double t0 = -b - std::sqrt(disc);
+                if (t0 <= 0.0) continue;
+                ++hits;
+                const glm::dvec3 hit = glm::normalize(oc + d * t0);
+                // Se prueba a varios niveles: el recorte se aplica a cualquiera que el selector visite.
+                for (uint32_t lv : { 6u, 9u, 12u }) {
+                    if (nodeBelowHorizon(nodeAt(hit, lv), R, cam, pc)) {
+                        ++bad;
+                        const double ang = std::acos(glm::clamp(glm::dot(hit, glm::normalize(oc)),
+                                                                -1.0, 1.0)) * 180.0 / 3.14159265358979;
+                        worstAngDeg = std::max(worstAngDeg, ang);
+                        break;
+                    }
+                }
+            }
+        std::printf("    %7.0f m   %10zu             %10zu   %s\n", alt, hits, bad,
+                    bad ? "<- AGUJERO" : "");
+        totalBad += bad;
+    }
+    CHECK(totalBad == 0, "ningun rayo que toca suelo cae en un nodo descartado por horizonte");
+
+    // CONTRAPRUEBA: el recorte TIENE que descartar lo que de verdad esta detras del horizonte. Si no,
+    // un `nodeBelowHorizon` que devolviera siempre false pasaria el test de arriba sin recortar nada.
+    const glm::dvec3 cam = pc + up0 * (R + 2000.0);
+    const glm::dvec3 anti = -up0;                       // las antipodas: imposible que se vean
+    size_t culled = 0;
+    for (uint32_t lv : { 6u, 9u, 12u }) if (nodeBelowHorizon(nodeAt(anti, lv), R, cam, pc)) ++culled;
+    std::printf("    CONTRAPRUEBA: las antipodas se descartan en %zu de 3 niveles\n", culled);
+    CHECK(culled == 3, "CONTRAPRUEBA: el recorte SI descarta lo que esta detras del planeta");
+}
+
+void test_terrain_node_as_heightfield() {
+    beginTest("terrain_node_as_heightfield");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    std::printf("    nivel   lado del nodo    m/texel    desvio de la rejilla REGULAR (peor)\n");
+    bool fineOk = true;
+    for (uint32_t level : { 8u, 12u, 14u, 16u, 17u }) {
+        // Un nodo cualquiera, no centrado en la cara: los del borde son los mas distorsionados.
+        const uint32_t lim = 1u << level;
+        const NodeId n{ PlanetFace::FRONT, level, lim * 3 / 4, lim / 3 };
+
+        // ⚠️ EL MARCO SE ALINEA CON LOS EJES DEL NODO, no con el eje Y del mundo.
+        //
+        // Primera version: `t1 = cross(up, (0,1,0))`. Eso da un marco valido pero ROTADO respecto a
+        // la rejilla del nodo, asi que el "desvio" que salia era el de la rotacion, no el de la
+        // distorsion: 101 m en un nodo que mide 76 m de lado — imposible, y por eso se vio.
+        const uint32_t M = TERRAIN_NODE_CELLS / 2;
+        const glm::dvec3 c = nodeTexelDir(n, M, M);
+        const glm::dvec3 du = nodeTexelDir(n, M + 1, M) - nodeTexelDir(n, M - 1, M);
+        const glm::dvec3 dv = nodeTexelDir(n, M, M + 1) - nodeTexelDir(n, M, M - 1);
+        const glm::dvec3 t1 = glm::normalize(du - c * glm::dot(du, c));   // +u, tangente
+        const glm::dvec3 t2 = glm::normalize(dv - c * glm::dot(dv, c));   // +v, tangente
+
+        // El paso que Jolt asumiria: el de la arista central, medido de verdad.
+        const double step = glm::length(nodeTexelDir(n, M + 1, M) * R - nodeTexelDir(n, M, M) * R);
+
+        double worst = 0.0;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 8)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 8) {
+                const glm::dvec3 p   = nodeTexelDir(n, u, v) * R;
+                const glm::dvec3 rel = p - c * R;
+                // Donde CAE de verdad en el plano tangente, contra donde Jolt lo pondria.
+                const double x = glm::dot(rel, t1), z = glm::dot(rel, t2);
+                const double wantX = ((double)u - (double)M) * step;
+                const double wantZ = ((double)v - (double)M) * step;
+                worst = std::max(worst, std::hypot(x - wantX, z - wantZ));
+            }
+        const double sideM = R * 1.5707963267948966 / (double)(1u << level);
+        // ⚠️ ¿Son ORTOGONALES los ejes del nodo? Jolt asume una rejilla rectangular alineada a ejes.
+        // El mapeo cubo→esfera NO es conforme, asi que fuera del centro de la cara `u` y `v` se
+        // cruzan sesgados — y un sesgo de unos grados sobre ±38 m son metros de desvio aparente.
+        const double skewDeg = std::acos(glm::clamp(glm::dot(t1, t2), -1.0, 1.0)) * 180.0 / 3.14159265358979;
+        // Y el paso, ¿es el mismo en el centro que en el borde del nodo?
+        const double stepEdge = glm::length(nodeTexelDir(n, TERRAIN_NODE_CELLS, M) * R -
+                                            nodeTexelDir(n, TERRAIN_NODE_CELLS - 1, M) * R);
+        std::printf("     %2u    %10.1f m   %8.3f m    %10.4f m   angulo u^v %6.2f deg  "
+                    "paso centro/borde %.6f\n",
+                    level, sideM, nodeTexelM(n, R), worst, skewDeg, stepEdge / step);
+        // La colision vive en los niveles finos: ahi es donde tiene que valer.
+        // La proporcion es CONSTANTE: el desvio escala con el nodo, no se diluye al afinar.
+        if (std::fabs(worst / sideM - 0.0463) > 0.005) fineOk = false;
+    }
+    CHECK(fineOk, "el desvio es una PROPORCION constante del nodo (~4,6 %), no algo que afine");
+
+    // CONTRAPRUEBA: el desvio TIENE que crecer con el tamaño del nodo. Si saliera constante, el
+    // marco o la proyeccion estarian mal y el test no mediria la distorsion sino otra cosa.
+    auto devAt = [&](uint32_t level) {
+        const uint32_t lim = 1u << level;
+        const NodeId n{ PlanetFace::FRONT, level, lim * 3 / 4, lim / 3 };
+        const uint32_t M = TERRAIN_NODE_CELLS / 2;
+        const glm::dvec3 c = nodeTexelDir(n, M, M);
+        const glm::dvec3 du = nodeTexelDir(n, M + 1, M) - nodeTexelDir(n, M - 1, M);
+        const glm::dvec3 dv = nodeTexelDir(n, M, M + 1) - nodeTexelDir(n, M, M - 1);
+        const glm::dvec3 t1 = glm::normalize(du - c * glm::dot(du, c));
+        const glm::dvec3 t2 = glm::normalize(dv - c * glm::dot(dv, c));
+        const double step = glm::length(nodeTexelDir(n, M + 1, M) * R - nodeTexelDir(n, M, M) * R);
+        const glm::dvec3 rel = nodeTexelDir(n, 0, 0) * R - c * R;
+        return std::hypot(glm::dot(rel, t1) + (double)M * step,
+                          glm::dot(rel, t2) + (double)M * step);
+    };
+    const double d8 = devAt(8), d16 = devAt(16);
+    std::printf("    CONTRAPRUEBA: el desvio en la esquina crece con el nodo: nivel 16 = %.4f m, "
+                "nivel 8 = %.1f m  (x%.0f)\n", d16, d8, d8 / std::max(d16, 1e-9));
+    CHECK(d8 > d16 * 100.0, "CONTRAPRUEBA: la distorsion escala con el tamaño del nodo (el test mide eso)");
+
+    // Y el numero que lo explica todo: el sesgo de los ejes. Si algun dia sale 90, esto se puede
+    // reabrir — y si sale otro valor, es que el mapeo cubo→esfera ha cambiado.
+    const uint32_t M = TERRAIN_NODE_CELLS / 2;
+    const NodeId nk{ PlanetFace::FRONT, 16, (1u << 16) * 3 / 4, (1u << 16) / 3 };
+    const glm::dvec3 ck = nodeTexelDir(nk, M, M);
+    const glm::dvec3 duk = nodeTexelDir(nk, M + 1, M) - nodeTexelDir(nk, M - 1, M);
+    const glm::dvec3 dvk = nodeTexelDir(nk, M, M + 1) - nodeTexelDir(nk, M, M - 1);
+    const double skew = std::acos(glm::clamp(glm::dot(
+        glm::normalize(duk - ck * glm::dot(duk, ck)),
+        glm::normalize(dvk - ck * glm::dot(dvk, ck))), -1.0, 1.0)) * 180.0 / 3.14159265358979;
+    CHECK(std::fabs(skew - 90.0) > 1.0, "los ejes del nodo NO son ortogonales (por eso no es un heightfield de Jolt)");
+}
+
+void test_terrain_two_bakes_disagree() {
+    beginTest("terrain_two_bakes_disagree");
+
+    // Elevación analítica del orden del bake real (±4 km) con estructura a varias escalas.
+    auto elevM = [](const glm::dvec3& d) {
+        return 2500.0 * std::sin(d.x * 3.0) * std::cos(d.y * 2.0)
+             +  900.0 * std::sin(d.z * 7.0 + 1.3)
+             +  300.0 * std::cos(d.x * 17.0 + d.y * 11.0);
+    };
+
+    // --- retícula EQUIRECT, la que muestrea la física ---
+    const int EW = 2048, EH = 1024;      // 8192x4096 son 128 MB en un test; la conclusión no cambia
+    std::vector<float> eq((size_t)EW * EH);
+    for (int y = 0; y < EH; ++y)
+        for (int x = 0; x < EW; ++x) {
+            const double u = ((double)x + 0.5) / EW, v = ((double)y + 0.5) / EH;
+            const double lon = (u - 0.5) * 2.0 * 3.14159265358979;
+            const double lat = (0.5 - v) * 3.14159265358979;
+            const glm::dvec3 d(std::cos(lat) * std::cos(lon), std::sin(lat),
+                               std::cos(lat) * std::sin(lon));
+            eq[(size_t)y * EW + x] = (float)elevM(glm::normalize(d));
+        }
+
+    // --- retícula del CUBO, la que muestrea el render ---
+    const int CR = 512;                   // `faceRes` real del motor (planet.cpp: cfg.faceRes ? : 512)
+    const int C1 = CR + 1;
+    std::vector<float> cube((size_t)6 * C1 * C1);
+    for (int f = 0; f < 6; ++f)
+        for (int j = 0; j < C1; ++j)
+            for (int i = 0; i < C1; ++i) {
+                const double lx = -1.0 + 2.0 * (double)i / CR;
+                const double ly = -1.0 + 2.0 * (double)j / CR;
+                cube[((size_t)f * C1 * C1) + (size_t)j * C1 + i] =
+                    (float)elevM(cubeFaceToDir((PlanetFace)f, lx, ly));
+            }
+    std::printf("    equirect %dx%d (%.1f M texeles)  ·  cubo 6x%d² (%.1f M texeles)\n",
+                EW, EH, EW * (double)EH / 1e6, C1, 6.0 * C1 * C1 / 1e6);
+
+    // --- ¿cuánto discrepan al muestrear? ---
+    double worst = 0.0, sum = 0.0; size_t n = 0;
+    glm::dvec3 worstDir(0.0);
+    for (int a = 0; a < 90; ++a)
+        for (int b = 0; b < 180; ++b) {
+            const double lat = (-89.0 + a * 2.0) * 3.14159265358979 / 180.0;
+            const double lon = (-179.0 + b * 2.0) * 3.14159265358979 / 180.0;
+            const glm::dvec3 d = glm::normalize(glm::dvec3(
+                std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)));
+            const float hEq = Haruka::Planet::sampleHeightField(
+                Haruka::Planet::equirectUV(glm::vec3(d)), EW, EH, eq.data());
+            const float hCu = Haruka::Terrain::baseFieldHeightAt(cube.data(), CR, d);
+            const double e = std::fabs((double)hEq - (double)hCu);
+            if (e > worst) { worst = e; worstDir = d; }
+            sum += e; ++n;
+        }
+    std::printf("    la FISICA (equirect) contra el RENDER (cubo): peor %.2f m · media %.3f m"
+                "  sobre %zu direcciones\n", worst, sum / (double)n, n);
+    std::printf("      el peor cae en dir (%.3f, %.3f, %.3f)\n", worstDir.x, worstDir.y, worstDir.z);
+
+    // No hay cota que aprobar: esto MIDE el desajuste, no lo bendice. La cifra es la entrada de F4.
+    CHECK(n > 0 && worst >= 0.0, "los dos bakes se muestrean y se comparan");
+
+    // CONTRAPRUEBA: que el muestreador del cubo REPRODUZCA su origen. Sin esto, uno roto —que
+    // devolviera siempre 0, o una constante— daria "los dos bakes discrepan poco" y se leeria como
+    // paridad cuando lo que hay es un muestreador mudo.
+    //
+    // ⚠️ La primera version afirmaba `self < worst`, o sea "cada bake es mas fiel a su origen que al
+    // otro". FALSO, y lo dijo el numero: self 0,19 m > worst 0,15 m. Las dos reticulas remuestrean la
+    // MISMA funcion suave, asi que sus errores de interpolacion estan correlacionados y se cancelan
+    // en parte al compararlas entre si. La premisa era mia, no del codigo.
+    double self = 0.0;
+    for (int a = 0; a < 45; ++a)
+        for (int b = 0; b < 90; ++b) {
+            const double lat = (-88.0 + a * 4.0) * 3.14159265358979 / 180.0;
+            const double lon = (-178.0 + b * 4.0) * 3.14159265358979 / 180.0;
+            const glm::dvec3 d = glm::normalize(glm::dvec3(
+                std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)));
+            self = std::max(self, (double)std::fabs(
+                Haruka::Terrain::baseFieldHeightAt(cube.data(), CR, d) - (float)elevM(d)));
+        }
+    std::printf("    CONTRAPRUEBA: el muestreador del cubo contra la funcion ANALITICA: peor %.2f m"
+                "  (la elevacion abarca +-3700 m -> %.4f %% )\n", self, 100.0 * self / 3700.0);
+    CHECK(self > 1e-6, "CONTRAPRUEBA: el muestreador NO devuelve una constante (interpola de verdad)");
+    CHECK(self < 3700.0 * 0.001, "CONTRAPRUEBA: y reproduce su origen dentro del 0,1 % de la amplitud");
+}
+
 void test_terrain_node_face_seam() {
     beginTest("terrain_node_face_seam");
     const double R = 6371000.0;

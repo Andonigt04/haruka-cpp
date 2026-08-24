@@ -27,6 +27,8 @@ struct ClimateOutput {
     // Query at any unit direction + elevation (km)
     double temperature(const glm::dvec3& dir, double elevationKm, bool isOcean) const;
     double humidity(const glm::dvec3& dir, double elevationKm, bool isOcean) const; // 0-1
+    /// Humedad del SUELO (ignora que esté bajo el agua). La que debe leer la selección de material.
+    double groundHumidity(const glm::dvec3& dir, double elevationKm) const;
     double precipitation(const glm::dvec3& dir, double elevationKm, bool isOcean) const; // m/year
 };
 
@@ -49,8 +51,26 @@ inline double ClimateOutput::temperature(const glm::dvec3& dir, double elevation
     return t;
 }
 
+/**
+ * @brief Humedad del SUELO, ignorando que esté bajo el agua.
+ *
+ * ⚠️ EXISTE PORQUE `humidity()` DEVUELVE 1.0 SOBRE OCÉANO Y ESO PINTABA EL PLANETA DE VERDE.
+ *
+ * Ese 1.0 es correcto como CLIMA —el mar es la fuente de humedad, y así alimenta la precipitación de
+ * la tierra de al lado— pero no como "aquí crece hierba". La selección de material lo leía tal cual,
+ * así que el fondo oceánico entero ganaba el material húmedo: medido en su día, **~80 % del disco
+ * visible clasificado como `green`**. De ahí que el planeta se viera de un verde uniforme desde
+ * órbita, y no de la paleta de biomas — que sí tiene 58 colores y RMS 0,27 de dispersión.
+ *
+ * El suelo submarino sigue siendo SUELO: se clasifica con la misma fórmula que la tierra emergida,
+ * por latitud y temperatura. Lo que hay encima lo dibuja el agua, no el material.
+ */
+inline double ClimateOutput::groundHumidity(const glm::dvec3& dir, double elevationKm) const {
+    return humidity(dir, elevationKm, false);
+}
+
 inline double ClimateOutput::humidity(const glm::dvec3& dir, double elevationKm, bool isOcean) const {
-    if (isOcean) return 1.0;                 // el mar ES la fuente de humedad
+    if (isOcean) return 1.0;                 // el mar ES la fuente de humedad (ver `groundHumidity`)
 
     const double lat    = std::asin(glm::clamp(std::abs(dir.y), 0.0, 1.0));
     const double latDeg = lat * 180.0 / glm::pi<double>();

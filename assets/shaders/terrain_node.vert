@@ -40,7 +40,8 @@ layout(std140, binding = 0) uniform NodeDraw {
     ivec4 uNodeUnused;  // (libre: era el nodo, ahora por instancia)
     ivec4 uGrid;        // x = téxeles · y = celdas · zw = 0
     ivec4 uEdgeUnused;  // (libre: eran los bordes, ahora por instancia)
-    vec4  uMisc;        // x = radio del planeta (m) · y = 0 · z = vista de depuración · w = ¿bake?
+    vec4  uMisc;        // x = radio del planeta (m) · y = ¿hay bake EQUIRECT? ·
+                        // z = vista de depuración · w = ¿hay campo del cubo?
     // ⚠️ ESTOS TRES NO LOS USA EL VERTICE, Y AUN ASI TIENEN QUE ESTAR. Un bloque uniforme es UNA
     // definicion compartida por las etapas: si el fragment declara mas campos, GL rechaza el enlace
     // con "buffer block with binding 0 has mismatching definitions". Vulkan NO se queja —enlaza por
@@ -79,7 +80,8 @@ struct NodeInst {
 };
 layout(std430, binding = 2) readonly buffer NodeInsts { NodeInst uInst[]; };
 
-#include "lib/cube_face.glsl"   // harukaCubeFaceToDir — el mismo gemelo que usa el compute
+#include "lib/cube_face.glsl"     // harukaCubeFaceToDir — el mismo gemelo que usa el compute
+#include "lib/terrain_detail.glsl" // harukaEquirectUV + harukaSampleHeightField (el bake equirect)
 #include "lib/base_field.glsl"  // harukaSampleBaseField — el bake, para el CLIMA
 
 // ⚠️ EL CLIMA SALE DEL BAKE, NO DE LA ALTURA DEL POOL.
@@ -89,6 +91,7 @@ layout(std430, binding = 2) readonly buffer NodeInsts { NodeInst uInst[]; };
 // error que `clipmap.tese` documenta al reves. Asi que se vuelve a muestrear el bake aqui, que es
 // exactamente lo que hace el clipmap por vertice teselado.
 layout(binding = 15) uniform sampler2DArray uBaseField;
+layout(binding = 16) uniform sampler2D      uHeightTex;   // el bake EQUIRECT: ver terrain_node.comp
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec3 vFragPos;
@@ -181,7 +184,13 @@ void main() {
     vUp         = dirF;
     // uMisc.w > 0.5 = hay bake atado. Ver la nota de `terrain_node.comp`: en Vulkan un descriptor
     // sin escribir es INDEFINIDO, no ceros, asi que no se muestrea a ciegas.
+    // El CLIMA (temp, humedad) sale siempre del campo del cubo; la ELEVACION del mismo sitio que la
+    // usan el clipmap y la fisica. Gemelo de `clipmap.tese`, que hace exactamente este reparto.
     const vec3 fld = (uMisc.w > 0.5) ? harukaSampleBaseField(uBaseField, dirF) : vec3(0.0);
-    vClimate    = vec3(fld.x * 0.001, fld.y, fld.z);
+    const float baseH = (uMisc.y > 0.5)
+                      ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
+                                                harukaEquirectUV(dirF))
+                      : fld.x;
+    vClimate    = vec3(baseH * 0.001, fld.y, fld.z);
     gl_Position = uMVP * vec4(vFragPos, 1.0);
 }

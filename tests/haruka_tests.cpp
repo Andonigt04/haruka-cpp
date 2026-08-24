@@ -51,6 +51,8 @@ int main(int argc, char** argv) {
         test_ocean_tide();
         test_ocean_swash();
         test_terrain_finest_octave();
+        test_terrain_orbital_relief();
+        test_terrain_orbital_albedo();
     }
 
     if (want("node") || want("quadtree") || want("v5") || want("parity")) {
@@ -61,6 +63,11 @@ int main(int argc, char** argv) {
         test_terrain_node_frustum();
         test_terrain_node_frustum_corners();
         test_terrain_node_face_seam();
+        test_terrain_node_face_seam_gap();
+        test_terrain_node_horizon_cull();
+        test_terrain_two_bakes_disagree();
+        test_terrain_node_as_heightfield();
+        test_terrain_render_vs_collision();
         test_terrain_node_range();
         test_terrain_node_pool();
         test_terrain_node_pool_reuse();

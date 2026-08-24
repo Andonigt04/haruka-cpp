@@ -1,4 +1,5 @@
 /**
+#include <cstdlib>   // getenv: HARUKA_GL_TEXPROBE
  * @file gl_context.cpp
  * @brief Implementación OpenGL de RHI::Context: traduce cada comando a llamadas GL inmediatas.
  */
@@ -202,7 +203,21 @@ namespace Haruka::RHI::opengl
     void GLContext::bindTexture(uint32_t slot, TextureHandle th, SamplerHandle sh)
     {
         const GLTexture* t = m_device->texture(th);
-        if (!t) return;
+        if (!t) {
+            // ⚠️ UNA VEZ POR RANURA, NO POR FRAME. Este aviso salio gritando 60 veces por segundo en
+            // el juego y lo dejo inservible para probar. Un diagnostico que impide diagnosticar no
+            // sirve — pero callarlo del todo tampoco: un slot sin atar es BASURA en Vulkan, y estos
+            // respaldos existen justamente para que eso no pase.
+            static bool warned[64] = {};
+            if (slot < 64 && !warned[slot]) {
+                warned[slot] = true;
+                HARUKA_LOGW("RHI/GL", "bindTexture(%u): handle sin textura — el respaldo de esa ranura "
+                                      "no existe (solo se avisa la primera vez)", slot);
+            }
+            return;
+        }
+        if (std::getenv("HARUKA_GL_TEXPROBE"))
+            HARUKA_LOGI("RHI/GL", "bindTexture(slot=%u) -> id=%u", slot, (unsigned)t->id);
         glBindTextureUnit(slot, t->id);
 
         if (const GLSampler* s = m_device->sampler(sh))
@@ -244,6 +259,18 @@ namespace Haruka::RHI::opengl
 
     void GLContext::dispatch(uint32_t x, uint32_t y, uint32_t z)
     {
+        if (std::getenv("HARUKA_GL_TEXPROBE")) {
+            // ¿Que ve GL en las unidades justo ANTES del dispatch? Es la pregunta que las sondas
+            // anteriores no hacian: todas miraban NUESTRO camino, no el estado del driver.
+            GLint prog = 0; glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+            for (GLuint u = 3; u <= 4; ++u) {
+                GLint arr = 0, t2d = 0;
+                glGetIntegeri_v(GL_TEXTURE_BINDING_2D_ARRAY, u, &arr);
+                glGetIntegeri_v(GL_TEXTURE_BINDING_2D,       u, &t2d);
+                HARUKA_LOGI("RHI/GL", "  pre-dispatch prog=%d unidad %u: 2D_ARRAY=%d 2D=%d",
+                            prog, u, arr, t2d);
+            }
+        }
         glDispatchCompute(x, y, z);
         glMemoryBarrier(GL_ALL_BARRIER_BITS);   // conservador: asegura visibilidad tras el compute
     }

@@ -86,7 +86,17 @@ public:
         return s_px;
     }
 
+    /**
+     * @param capacity huecos del pool. ⚠️ **El selector solo usa el 75 %**: el resto es la cache de
+     *        lo que acaba de salir de cuadro. Con 1024 el juego medía `sel 1008 / residentes
+     *        1024/1024` — sin margen, y el nivel más fino se quedaba en 14 en vez de 17.
+     *        `HARUKA_TERRAIN_V5_POOL` lo cambia sin recompilar: cada hueco son 66,6 KB de VRAM.
+     */
     bool init(RHI::Device* dev, const std::string& shaderDir, size_t capacity = 1024) {
+        if (const char* e = std::getenv("HARUKA_TERRAIN_V5_POOL")) {
+            const long v = std::strtol(e, nullptr, 10);
+            if (v >= 64 && v <= 65536) capacity = (size_t)v;
+        }
         if (m_ready || !dev) return m_ready;
         m_dev = dev;
         const std::string comp = shaderDir + "terrain_node.comp";
@@ -200,6 +210,9 @@ public:
     /// `TerrainNodeGpu::setBaseField`. Lo usan el compute (altura) y el vértice (clima).
     void setBaseField(RHI::TextureHandle t) { m_gpu.setBaseField(t); m_baseField = t; }
 
+    /// El bake EQUIRECT de altura: la MISMA fuente de elevación que el clipmap y la física.
+    void setHeightTex(RHI::TextureHandle t) { m_gpu.setHeightTex(t); }
+
     /**
      * @brief Lo que hace falta para sombrear como el clipmap: mismas texturas, mismo UBO de
      *        materiales, misma ancla de patrón. Sin esto el pase pinta la luz plana de geometría.
@@ -221,6 +234,9 @@ public:
 
     /// Las cifras del último frame dibujado (nodos, triángulos, niveles…).
     const FrameStats& stats() const { return m_stats; }
+
+    /// Huecos del pool. Si `selected` se acerca a esto, el selector deja de afinar (no abre agujeros).
+    size_t capacity() const { return m_gpu.capacity(); }
 
     FrameStats prepare(RHI::Context* ctx, const glm::dvec3& camPos, const glm::dvec3& planetCenter,
                        double planetRadiusM, const glm::dvec3& viewDir,
@@ -249,8 +265,19 @@ public:
         }
 
         m_pool.beginFrame();
+        // ⚠️ EL SELECTOR NO PUEDE PEDIR TODO EL POOL: SI LO HACE, LA CACHE DEJA DE SER UNA CACHE.
+        //
+        // Medido en el juego a 1030 m: `sel 1008 · tope 1024 · residentes 1024/1024`. El selector iba
+        // al 98 % de su tope y el pool al 100 %, así que NO quedaba un solo hueco para lo que se
+        // acababa de dejar de ver — el LRU desaloja y regenera en bucle, y como el tope frena la
+        // subdivisión, el terreno se queda en el nivel 14 (4,77 m/téxel) en vez de bajar al 17 (0,6).
+        //
+        // El pool es una CACHE: tiene que ser mayor que el conjunto visible, no igual. Se reserva un
+        // 25 % para lo que sale de cuadro y va a volver (medido: al andar 48 m sobreviven el 89,3 %
+        // de los nodos, así que ese margen se aprovecha de verdad).
+        const size_t selBudget = m_gpu.capacity() - m_gpu.capacity() / 4;
         nodeSelectVisible(planetRadiusM, camPos, planetCenter, radPerPx, m_sel,
-                          m_gpu.capacity(), errorPx(), &viewDir, coneHalfAngle,
+                          selBudget, errorPx(), &viewDir, coneHalfAngle,
                           5000.0, &TerrainNodePool::rangeFnAdapter, &m_pool);
         fs.selected = m_sel.size();
         // Cuánto descarta cada recorte, por separado: sin el desglose no se sabe cuál se pasa.
@@ -347,7 +374,8 @@ public:
         du.grid[1] = (int32_t)TERRAIN_NODE_CELLS;
         du.misc[0] = (float)planetRadiusM;
         du.misc[2] = (float)debugView();
-        du.misc[3] = RHI::valid(m_baseField) ? 1.0f : 0.0f;   // ¿hay bake que muestrear en el vértice?
+        du.misc[1] = m_gpu.hasHeightTex() ? 1.0f : 0.0f;      // ¿hay bake EQUIRECT? (el preferido)
+        du.misc[3] = RHI::valid(m_baseField) ? 1.0f : 0.0f;   // ¿hay campo del cubo? (clima + respaldo)
 
         const bool shadeOn = m_shade.on && RHI::valid(m_shade.albedo) &&
                              RHI::valid(m_shade.materialUBO);
@@ -373,6 +401,7 @@ public:
         // es de OTRO TIPO (un sampler2D donde el shader declara sampler2DArray) el draw entero pasa
         // a ser invalido. Costó dos tests del banco que no tenian nada que ver con esto.
         ctx->bindTexture(15, m_gpu.baseFieldOrDummy());
+        ctx->bindTexture(16, m_gpu.heightTexOrDummy());
         if (shadeOn) {
             ctx->bindUniformBuffer(12, m_shade.materialUBO);
             ctx->bindTexture(12, m_shade.albedo);

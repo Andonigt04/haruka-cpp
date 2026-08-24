@@ -179,9 +179,25 @@ inline float octaveWeight(float wavelengthM, float minFeatureM) {
  * La de `vec3` delega aquí: una sola implementación, sin gemelo que mantener.
  */
 inline float terrainDetail(const glm::dvec3& dir, double radius, float minFeatureM) {
-    if (minFeatureM >= 1428.5f) return 0.0f;
+    if (minFeatureM >= 6000.0f) return 0.0f;   // la octava mas gruesa es lambda 12 km -> Nyquist 6 km
     const glm::dvec3 p = dir * radius;
     float h = 0.0f;
+    // ── LAS DOS OCTAVAS CONTINENTALES (F5) ──────────────────────────────────────────────────────
+    //
+    // ⚠️ Cubren el HUECO DE ESCALA que nadie cubría: el bake resuelve >= ~5-10 km (su téxel) y la
+    // escalera acababa en λ 2857 m, así que de ~3 km a ~10 km NO había fuente. Esa banda es justo la
+    // que da forma a un continente visto desde arriba, y por eso desde órbita el planeta era una bola
+    // lisa: solo el bake y su interpolación bilineal.
+    //
+    // Los números NO son inventados: salen de la ley de la propia escalera. `freq = 1/λ` exacta en
+    // las cinco octavas, y la amplitud sigue `amp = 0.1763·λ^0.9169` (ajuste log-log sobre las cinco).
+    // La guarda es `λ/2`, que es Nyquist: por debajo de dos muestras por longitud de onda, aliasea.
+    //
+    // ⚠️ ESTO REESCULPE EL PLANETA: el relieve procedural pasa de ±174 m a ±915 m (×5,3). No es un
+    // efecto secundario, es el objetivo — pero cambia el suelo en TODAS partes, y con él el hash
+    // golden, la colisión y la costa.
+    if (minFeatureM < 6000.0f) h += (detailNoise(p * 0.0000833) - 0.5f) * 969.3f * octaveWeight(12000.0f, minFeatureM);
+    if (minFeatureM < 3000.0f) h += (detailNoise(p * 0.0001667) - 0.5f) * 513.4f * octaveWeight( 6000.0f, minFeatureM);
     if (minFeatureM < 1428.5f) h += (detailNoise(p * 0.00035) - 0.5f) * 260.0f * octaveWeight(2857.0f, minFeatureM);
     if (minFeatureM <  312.5f) h += (detailNoise(p * 0.0016)  - 0.5f) *  70.0f * octaveWeight( 625.0f, minFeatureM);
     if (minFeatureM <   55.5f) h += (detailNoise(p * 0.0090)  - 0.5f) *  14.0f * octaveWeight( 111.0f, minFeatureM);
@@ -221,10 +237,16 @@ inline float terrainDetail(const glm::vec3& dir, float radius, float minFeatureM
 inline float terrainDetailGrad(const glm::vec3& dir, float radius, float minFeatureM,
                                glm::vec3& outGrad) {
     outGrad = glm::vec3(0.0f);
-    if (minFeatureM >= 1428.5f) return 0.0f;
+    if (minFeatureM >= 6000.0f) return 0.0f;
     const glm::dvec3 p = glm::dvec3(dir) * (double)radius;
     float h = 0.0f;
     glm::vec3 g;
+    // Las dos octavas continentales de F5 — ver la nota en `terrainDetail`. GEMELAS: si una escalera
+    // cambia y la otra no, el gradiente deja de describir la altura y la iluminacion miente.
+    if (minFeatureM < 6000.0f) { h += (detailNoiseGrad(p * 0.0000833, g) - 0.5f) * 969.3f * octaveWeight(12000.0f, minFeatureM);
+        outGrad += g * (969.3f * octaveWeight(12000.0f, minFeatureM) * 0.0000833f); }
+    if (minFeatureM < 3000.0f) { h += (detailNoiseGrad(p * 0.0001667, g) - 0.5f) * 513.4f * octaveWeight( 6000.0f, minFeatureM);
+        outGrad += g * (513.4f * octaveWeight( 6000.0f, minFeatureM) * 0.0001667f); }
     // MISMAS guardas, MISMAS frecuencias y MISMOS pesos que `terrainDetail`. Cada octava aporta al
     // gradiente su amplitud · peso · frecuencia (la frecuencia entra por la regla de la cadena).
     // ⚠️ La línea de `h` va escrita EXACTAMENTE igual que en `terrainDetail`, con el mismo orden de

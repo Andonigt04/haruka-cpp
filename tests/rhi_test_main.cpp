@@ -39,6 +39,7 @@
 #include "core/sky_ambient.h"   // gemelo CPU del ambiente (paridad)
 #include "core/terrain/terrain_node.h"   // v5 F1: referencia CPU del nodo + hash golden
 #include "core/terrain/terrain_node_pool.h"
+#include "core/terrain/base_field.h"   // baseFieldHeightAt: el gemelo CPU que este test valida
 #include "core/terrain/terrain_node_gpu.h"
 #include "core/terrain/terrain_node_renderer.h"   // Shader::baseDir() para los shaders del banco
 
@@ -311,6 +312,11 @@ static void testArrayAndCube()
 // un síntoma que parece un cuelgue de GPU y no lo es.
 //
 // Se llama tras cada `endFrame`, que es donde el frame acaba de presentarse.
+/// Copia y ESPERA antes de leer el mapeo. Ver la nota larga en su definición: no esperar no da error,
+/// da datos a medio llenar — y eso se lee como si el shader hubiera calculado mal.
+static void copyThenWait(Haruka::RHI::BufferHandle src, Haruka::RHI::BufferHandle dst,
+                         size_t srcOff, size_t bytes);
+
 static void pumpWindowEvents()
 {
     SDL_Event e;
@@ -1949,8 +1955,8 @@ static void testTerrainNodeRender()
     // solo él — falsifica a los que vienen detrás.
     //
     // `submitOneShot` espera a que su propio envío acabe, así que aquí no hace falta ninguna fence.
-    g_dev->copyBuffer(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode, 0,
-                      ref.size() * sizeof(float));
+    copyThenWait(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode,
+                 ref.size() * sizeof(float));
     const float* got = (const float*)g_dev->mappedData(rb);
     if (got) {
         double worstPos = 0.0;
@@ -1964,6 +1970,9 @@ static void testTerrainNodeRender()
                 worstPos = std::max(worstPos, glm::length(pGpu - pCpu));
             }
         std::printf("    posicion del vertice: GPU vs referencia CPU -> peor %.4f m\n", worstPos);
+        // ⚠️ AQUI SALIAN 399,59 m EN OPENGL Y 0,0001 EN VULKAN, y se leyo como "los dos backends
+        // producen suelos distintos". No era cierto: faltaba la fence DESPUES de `copyBuffer` (ver
+        // `copyThenWait`). Con ella, GL da 0,0204 m. La generacion siempre fue correcta.
         std::printf("      (hoy, render vs colision: 0,1453 m de `clipmap_dir_parity`)\n");
         CHECK(worstPos < 0.05, "el vertice cae sobre la superficie del nodo, dentro de la tolerancia");
     }
@@ -2181,34 +2190,18 @@ static void testTerrainNodeCoverage()
 // El test de paridad de F1 no lo veia porque corre SIN bake, o sea por la rama `uMisc.z == 0`. Este
 // ata un campo base SINTETICO y conocido, y exige que GPU y CPU sigan siendo gemelos POR ESE CAMINO.
 // ================================================================================================
-static float g_testBaseElevM(const glm::dvec3& dir, void* ctx);
-
+// El campo sintetico que se sube a la GPU. El muestreo de CPU NO se reimplementa aqui: se usa
+// `baseFieldHeightAt`, que es el gemelo de verdad que usara la fisica. Asi este test no valida una
+// copia privada del test — valida la funcion del motor.
 struct TestBaseField {
-    int      res = 0;                 // lado de la reticula = res+1 texeles
-    std::vector<float> texels;        // 6 capas RGBA32F
-    float at(int f, int x, int y) const {
-        const int N1 = res + 1;
-        return texels[(((size_t)f * N1 * N1) + (size_t)y * N1 + x) * 4];
-    }
+    int res = 0;                      // lado de la reticula = res+1 texeles
+    std::vector<float> heights;       // [face][j][i], metros
 };
 
 static float g_testBaseElevM(const glm::dvec3& dir, void* ctx)
 {
     const TestBaseField& bf = *(const TestBaseField*)ctx;
-    Haruka::PlanetFace f; double lx, ly;
-    Haruka::dirToCubeFace(dir, f, lx, ly);
-    // ⚠️ La MISMA bilineal a mano que hacen `clipmap.tese` y `terrain_node.comp`. Con el filtrado del
-    // hardware no valdria: usa pesos de 8 bits en varias GPU y separaria los dos suelos.
-    const int N = bf.res;
-    const double fx = (lx * 0.5 + 0.5) * (double)N, fy = (ly * 0.5 + 0.5) * (double)N;
-    int i0 = (int)std::floor(fx), j0 = (int)std::floor(fy);
-    i0 = std::min(std::max(i0, 0), N - 1);
-    j0 = std::min(std::max(j0, 0), N - 1);
-    const double tx = fx - i0, ty = fy - j0;
-    const float h00 = bf.at((int)f, i0,     j0),     h10 = bf.at((int)f, i0 + 1, j0);
-    const float h01 = bf.at((int)f, i0,     j0 + 1), h11 = bf.at((int)f, i0 + 1, j0 + 1);
-    const double a = h00 + (h10 - h00) * tx, b = h01 + (h11 - h01) * tx;
-    return (float)(a + (b - a) * ty);
+    return Haruka::Terrain::baseFieldHeightAt(bf.heights.data(), bf.res, dir);
 }
 
 static void testTerrainNodeBaseField()
@@ -2225,19 +2218,22 @@ static void testTerrainNodeBaseField()
     // las dos direcciones para que un error de indexado o de cara se note.
     TestBaseField bf; bf.res = 64;
     const int N1 = bf.res + 1;
-    bf.texels.assign((size_t)6 * N1 * N1 * 4, 0.0f);
+    bf.heights.assign((size_t)6 * N1 * N1, 0.0f);
+    std::vector<float> rgba((size_t)6 * N1 * N1 * 4, 0.0f);   // lo que ve la GPU: RGBA32F
     for (int f = 0; f < 6; ++f)
         for (int y = 0; y < N1; ++y)
             for (int x = 0; x < N1; ++x) {
                 const double u = (double)x / bf.res, v = (double)y / bf.res;
                 const float e = (float)(3000.0 * std::sin(u * 6.0 + f) * std::cos(v * 4.0 + f * 0.7));
-                bf.texels[(((size_t)f * N1 * N1) + (size_t)y * N1 + x) * 4] = e;
+                const size_t k = ((size_t)f * N1 * N1) + (size_t)y * N1 + x;
+                bf.heights[k] = e;
+                rgba[k * 4]   = e;
             }
 
     TextureDesc td;
     td.width = td.height = (uint32_t)N1; td.layers = 6;
     td.format = Format::RGBA32F; td.filter = Filter::Nearest; td.wrap = Wrap::ClampToEdge;
-    td.initialData = bf.texels.data();
+    td.initialData = rgba.data();
     TextureHandle tex = g_dev->createTexture(td);
     CHECK(valid(tex), "textura del campo base creada");
     if (!valid(tex)) return;
@@ -2259,8 +2255,7 @@ static void testTerrainNodeBaseField()
                                           BufferMemory::Readback);
     // ⚠️ FUERA de todo frame: `copyBuffer` hace `submitOneShot` y meterlo dentro de uno abierto
     // pierde el dispositivo (paso hoy, y envenenó los ~17 tests siguientes).
-    g_dev->copyBuffer(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode, 0,
-                      count * sizeof(float));
+    copyThenWait(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode, count * sizeof(float));
 
     const float* got = (const float*)g_dev->mappedData(rb);
     if (got) {
@@ -2272,21 +2267,7 @@ static void testTerrainNodeBaseField()
         }
         std::printf("    la referencia abarca %.1f .. %.1f m  ·  diferencia GPU<->CPU peor %.4f m\n",
                     refMin, refMax, worst);
-        // ⚠️ EN OPENGL EL SAMPLER DEL COMPUTE NO DEVUELVE NADA — GAP DEL RHI, NO DEL TERRENO.
-        //
-        // Vulkan casa a 0,0007 m. OpenGL devuelve EXACTAMENTE 0,00 en los 16 641 texeles, que es lo
-        // que sale si `sampleBase` da 0: `seaLevelAttenuation(0)` anula el detalle y queda 0 + 0.
-        // Descartado: el .spv esta al dia, la subida de texturas en capas de GL es correcta y el
-        // MISMO binding 15 funciona en GL desde el TESE del clipmap. Lo que NO se ha ejercido nunca
-        // en este RHI es compute + sampler en GL: ningun otro .comp del proyecto muestrea texturas.
-        //
-        // Se declara PENDIENTE en vez de dejar el banco en rojo mudo, pero la consecuencia es real y
-        // hay que decirla: CON OPENGL EL PASE DE NODOS SIGUE SIN CONTINENTES.
-        const bool glBlind = (g_dev->backend() == Backend::OpenGL) && (std::fabs(got[0]) < 1e-6);
-        if (glBlind) {
-            std::printf("    PENDIENTE (gap del RHI): en OpenGL el sampler del compute devuelve 0, "
-                        "asi que el nodo sale sin bake. En Vulkan casa. Ver la nota de este test.\n");
-        } else {
+        {
             CHECK(worst < 0.05, "GPU y CPU siguen siendo gemelos CON el bake (0,05 m declarados)");
         }
 
@@ -2497,6 +2478,268 @@ static void testTerrainNodeShadeCost()
     r.shutdown();
 }
 
+
+// ================================================================================================
+// BUG 9 — ¿PUEDE UN COMPUTE MUESTREAR UN `sampler2DArray`? Repro minimo.
+//
+// `terrain_node.comp` lee el bake del planeta asi y en OpenGL devolvia 0 en los 16 641 texeles
+// —terreno SIN CONTINENTES— mientras Vulkan casaba a 0,0007 m. Sobre el pase entero no se podia
+// aislar: hay pool, parametros, publicacion y 150 lineas de shader por medio.
+//
+// ⚠️ Y no es solo el v5: `clipmap.tese` saca el CLIMA (temperatura, humedad) del mismo
+// `sampler2DArray`. Si en GL devolviera 0, la seleccion de material saldria degenerada en todo el
+// planeta — que es exactamente el sintoma de "verde uniforme" que F5 no consiguio explicar.
+// ================================================================================================
+
+// ⚠️ TRAS `copyBuffer` HAY QUE ESPERAR ANTES DE LEER EL MAPEO. Y no esperar no da un error: da datos
+// A MEDIO LLENAR, que se leen como si el shader hubiera calculado mal.
+//
+// Esto costó una sesión entera. Sin esta espera, en OpenGL:
+//   · `testTerrainNodeBaseField` leía 0,00 en los 16 641 téxeles -> "en GL el terreno no tiene
+//     continentes" (bug 9). FALSO: la generación siempre fue correcta.
+//   · `testTerrainNodeRender` daba 399,59 m contra la CPU -> "GL y Vulkan producen suelos distintos".
+//     FALSO: el mismo dato leído directo del pool da 0,0242 m, idéntico al camino de control.
+// En Vulkan no se notaba, así que parecía un fallo del backend de GL. Era del banco.
+static void copyThenWait(Haruka::RHI::BufferHandle src, Haruka::RHI::BufferHandle dst,
+                         size_t srcOff, size_t bytes)
+{
+    g_dev->copyBuffer(src, dst, srcOff, 0, bytes);
+    FenceHandle f{};
+    if (Context* c = g_dev->beginFrame()) {
+        c->memoryBarrier(); f = c->signalFence();
+        g_dev->endFrame();
+        if (Context* c2 = g_dev->beginFrame()) {
+            c2->waitFence(f, 10000000000ull); c2->deleteFence(f); g_dev->endFrame();
+        }
+    }
+}
+
+static void testComputeArraySampler()
+{
+    BEGIN("compute: un sampler2DArray se muestrea desde un COMPUTE");
+
+    // 6 capas de 2x2, cada una con un valor propio: (capa+1)*10.
+    const int W = 2, L = 6;
+    std::vector<float> px((size_t)W * W * L * 4, 0.0f);
+    for (int l = 0; l < L; ++l)
+        for (int k = 0; k < W * W; ++k)
+            px[((size_t)l * W * W + k) * 4] = (float)((l + 1) * 10);
+    TextureDesc td;
+    td.width = td.height = (uint32_t)W; td.layers = (uint32_t)L;
+    td.format = Format::RGBA32F; td.filter = Filter::Nearest; td.wrap = Wrap::ClampToEdge;
+    td.initialData = px.data();
+    TextureHandle tex = g_dev->createTexture(td);
+    // Control: la MISMA imagen como sampler2D de una sola capa.
+    TextureDesc t2; t2.width = t2.height = (uint32_t)W; t2.layers = 1;
+    t2.format = Format::RGBA32F; t2.filter = Filter::Nearest; t2.wrap = Wrap::ClampToEdge;
+    t2.initialData = px.data();
+    TextureHandle tex2d = g_dev->createTexture(t2);
+    CHECK(valid(tex) && valid(tex2d), "texturas 2x2x6 y 2x2 RGBA32F creadas");
+    if (!valid(tex) || !valid(tex2d)) return;
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/rhitest_arraysample.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline del repro creado");
+    if (!valid(cp)) { g_dev->destroy(tex); return; }
+
+    const size_t N = 20;   // 0-15 datos, 16 el canario
+    std::vector<float> init(N, -1.0f);
+    // ⚠️ EL SSBO DE SALIDA NO PUEDE SER `Readback`. Estaba creado asi y en OpenGL el compute no
+    // escribia NADA — el canario salia 0. Un buffer de readback vive donde la CPU lo puede mapear, y
+    // escribir en el desde un compute no funciona en GL. El camino bueno es el que ya usa el test de
+    // paridad de F1: escribir en un SSBO normal y COPIAR despues a uno de readback.
+    //
+    // Esto invalidaba el diagnostico entero del bug 9: se leia "el sampler devuelve 0" cuando lo que
+    // pasaba es que el shader no llegaba a ejecutarse.
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), init.data(),
+                                           BufferMemory::Dynamic);
+    if (Context* c = g_dev->beginFrame()) {
+        c->bindPipeline(cp);
+        c->bindStorageBuffer(1, out);
+        c->bindTexture(3, tex);
+        c->bindTexture(4, tex2d);
+        c->dispatch(1, 1, 1);
+        c->memoryBarrier();
+        // ⚠️ FENCE, como hace el test de coste de F1 que SI funciona en GL. Con solo `memoryBarrier`
+        // el canario salia 0 en OpenGL y parecia que el compute no se ejecutaba.
+        FenceHandle f = c->signalFence();
+        g_dev->endFrame();
+        if (Context* c2 = g_dev->beginFrame()) {
+            c2->waitFence(f, 5000000000ull); c2->deleteFence(f); g_dev->endFrame();
+        }
+    }
+    // `copyBuffer` (submitOneShot) FUERA de todo frame: dentro pierde el dispositivo en Vulkan.
+    BufferHandle rb = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                          BufferMemory::Readback);
+    copyThenWait(out, rb, 0, N * sizeof(float));
+    const float* got = (const float*)g_dev->mappedData(rb);
+    if (!got) { CHECK(false, "readback del repro"); g_dev->destroy(tex); return; }
+
+    std::printf("    textureSize que ve el shader: %.0f x ? x %.0f capas  (esperado 2 x ? x 6)\n",
+                got[12], got[13]);
+    std::printf("    texelFetch por capa: %.0f %.0f %.0f %.0f %.0f %.0f  (esperado 10..60)\n",
+                got[0], got[1], got[2], got[3], got[4], got[5]);
+    std::printf("    texture()  por capa: %.0f %.0f %.0f %.0f %.0f %.0f\n",
+                got[6], got[16], got[8], got[9], got[10], got[11]);
+
+    std::printf("    CONTROL sampler2D: tamaño %.0f · valor %.0f  (esperado 2 · 10)\n",
+                got[14], got[15]);
+    std::printf("    CANARIO (el dispatch escribio?): %.0f  (esperado 12345)\n", got[16]);
+    CHECK(got[16] == 12345.0f, "el compute SE EJECUTA y escribe en el SSBO");
+
+    // ⚠️ ESTE TEST NACIO PARA CAZAR EL "BUG 9" — Y DEMOSTRO QUE NO EXISTIA.
+    //
+    // Durante una sesion entera "en OpenGL un compute no puede muestrear texturas" fue un hecho: el
+    // generador de nodos devolvia 0,00 en los 16 641 texeles y el terreno salia sin continentes. Era
+    // FALSO. Todos los sintomas venian de una fence que faltaba DESPUES de `copyBuffer` (ver
+    // `copyThenWait`): se leia el destino a medio llenar y se interpretaba como que el shader habia
+    // calculado mal. En Vulkan no se notaba, asi que parecia un fallo del backend de GL.
+    //
+    // El CANARIO es lo que lo desenredo, y llego el ultimo: sin el, un dispatch que no escribe y un
+    // sampler que devuelve cero son indistinguibles. Deberia haber sido lo primero.
+    CHECK(got[14] == (float)W, "un sampler2D normal llega al compute");
+    CHECK(got[12] == (float)W && got[13] == (float)L, "el shader ve el TAMAÑO de la textura");
+    bool allOk = true;
+    for (int l = 0; l < L; ++l)
+        if (got[l] != (float)((l + 1) * 10) || got[6 + l] != (float)((l + 1) * 10)) allOk = false;
+    CHECK(allOk, "cada capa devuelve SU valor, con texelFetch y con texture()");
+
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(cp);
+    g_dev->destroy(tex); g_dev->destroy(tex2d);
+}
+
+
+// ================================================================================================
+// BUG 9 — BISECCION: ¿el compute, o el ADAPTADOR? Los dos caminos, mismo nodo, misma ejecucion.
+//
+// El dato que abrio esto: para el MISMO nodo y el MISMO backend (OpenGL),
+//
+//     F1 (pipeline y UBO propios, dispatch directo)   0.024231 m   <- bien
+//     F3 (via TerrainNodeGpu::generatePending)       399.5896 m    <- roto
+//
+// O sea que el compute de GL NO esta roto: lo que difiere es el adaptador. Este test corre los dos
+// caminos seguidos, sobre el mismo nodo, y compara cada uno con la referencia de CPU **y entre si**.
+// Si A casa y B no, el fallo esta en lo que B hace de mas: el anillo de UBOs por dispatch, el hueco
+// del pool, o el numero de grupos de trabajo.
+// ================================================================================================
+static void testNodeGpuAdapterBisect()
+{
+    BEGIN("bug 9: bisecar compute directo contra TerrainNodeGpu");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const NodeId node{ Haruka::PlanetFace::FRONT, 14, 4200, 3100 };   // el mismo de F1 y F3
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+    const size_t count = (size_t)N * N;
+
+    std::vector<float> ref(count);
+    nodeFillHeights(node, R, ref.data());
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/terrain_node.comp";
+
+    // ── CAMINO A: dispatch directo, UBO propio (lo que hace F1) ─────────────────────────────────
+    std::vector<float> a(count, -1.0f);
+    {
+        PipelineDesc pd; pd.computePath = cs.c_str();
+        PipelineHandle cp = g_dev->createPipeline(pd);
+        if (!valid(cp)) { CHECK(false, "pipeline directo"); return; }
+        struct ParamsUBO { int32_t node[4]; int32_t grid[4]; float misc[4]; } up{};
+        up.node[0] = (int32_t)node.face; up.node[1] = (int32_t)node.level;
+        up.node[2] = (int32_t)node.i;    up.node[3] = (int32_t)node.j;
+        up.grid[0] = (int32_t)N; up.grid[1] = (int32_t)TERRAIN_NODE_CELLS;
+        up.grid[2] = 0; up.grid[3] = 0;                       // modo produccion, hueco 0
+        up.misc[0] = (float)R; up.misc[1] = (float)nodeTexelM(node, R);
+        BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(up), &up,
+                                               BufferMemory::Dynamic);
+        // ⚠️ EL PATRON DE LECTURA ES EL DE F1, Y NO ES INTERCAMBIABLE: SSBO de salida creado ya como
+        // `Readback` (mapeo persistente) + fence + `mappedData` DIRECTO. Sin `copyBuffer`.
+        //
+        // Con `Storage/Dynamic` + `copyBuffer` + `mappedData` de otro buffer, en OpenGL se lee BASURA
+        // (1,7e38): el destino nunca se llena. Ese era el patron de mi repro del bug 9 y el de
+        // `testTerrainNodeBaseField` — o sea que sus dos veredictos sobre OpenGL median el readback,
+        // no el shader.
+        std::vector<float> sentinel(count, -1.0f);
+        BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, count * sizeof(float),
+                                               sentinel.data(), BufferMemory::Readback);
+        FenceHandle f{};
+        if (Context* c = g_dev->beginFrame()) {
+            c->bindPipeline(cp); c->bindUniformBuffer(0, ubo); c->bindStorageBuffer(1, out);
+            c->dispatch((N + 7) / 8, (N + 7) / 8, 1);
+            c->memoryBarrier();
+            f = c->signalFence();
+            g_dev->endFrame();
+            if (Context* c2 = g_dev->beginFrame()) {
+                c2->waitFence(f, 10000000000ull); c2->deleteFence(f); g_dev->endFrame();
+            }
+        }
+        if (const float* g = (const float*)g_dev->mappedData(out)) std::memcpy(a.data(), g, count * sizeof(float));
+        g_dev->destroy(out); g_dev->destroy(ubo); g_dev->destroy(cp);
+    }
+
+    // ── CAMINO B: el adaptador de verdad ────────────────────────────────────────────────────────
+    std::vector<float> b(count, -1.0f);
+    int slot = -1;
+    {
+        // Capacidad 1: el nodo cae en el hueco 0 y el buffer tiene el tamaño de UN nodo, igual que
+        // el camino directo. Si con esto casa, el fallo esta en el desplazamiento por hueco.
+        TerrainNodePool pool(1);
+        TerrainNodeGpu  gpu;
+        if (!gpu.init(g_dev, cs.c_str(), 1)) { CHECK(false, "init del adaptador"); return; }
+        pool.beginFrame(); pool.request(node);
+        gpu.generatePending(pool, R);
+        slot = pool.request(node).slot;
+        // ⚠️ FENCE ANTES DE COPIAR. `generatePending` acaba con `memoryBarrier` + `endFrame`, y eso
+        // ordena los comandos, pero NO dice cuando la copia puede leer lo escrito. Sin esto, en
+        // OpenGL salian 399 m de "divergencia" que eran datos a medio escribir.
+        {
+            FenceHandle fb{};
+            if (Context* c = g_dev->beginFrame()) {
+                c->memoryBarrier(); fb = c->signalFence();
+                g_dev->endFrame();
+                if (Context* c2 = g_dev->beginFrame()) {
+                    c2->waitFence(fb, 10000000000ull); c2->deleteFence(fb); g_dev->endFrame();
+                }
+            }
+        }
+        BufferHandle rb = g_dev->createBuffer(BufferUsage::Storage, count * sizeof(float), nullptr,
+                                              BufferMemory::Readback);
+        g_dev->copyBuffer(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode, 0,
+                          count * sizeof(float));
+        // ⚠️ LA FENCE VA **DESPUES** DE LA COPIA, NO ANTES. Esta es LA causa de todo el enredo del
+        // "bug 9": con la fence antes, `mappedData` leia el destino a medio llenar y salian 399 m de
+        // divergencia contra la CPU — solo en OpenGL. La generacion SIEMPRE fue correcta.
+        {
+            FenceHandle fc{};
+            if (Context* c = g_dev->beginFrame()) {
+                c->memoryBarrier(); fc = c->signalFence();
+                g_dev->endFrame();
+                if (Context* c2 = g_dev->beginFrame()) {
+                    c2->waitFence(fc, 10000000000ull); c2->deleteFence(fc); g_dev->endFrame();
+                }
+            }
+        }
+        if (const float* g = (const float*)g_dev->mappedData(rb)) std::memcpy(b.data(), g, count * sizeof(float));
+        g_dev->destroy(rb);
+        gpu.shutdown();
+    }
+
+    double wA = 0.0, wB = 0.0, wAB = 0.0;
+    for (size_t k = 0; k < count; ++k) {
+        wA  = std::max(wA,  (double)std::fabs(a[k] - ref[k]));
+        wB  = std::max(wB,  (double)std::fabs(b[k] - ref[k]));
+        wAB = std::max(wAB, (double)std::fabs(a[k] - b[k]));
+    }
+    std::printf("    el nodo cayo en el hueco %d\n", slot);
+    std::printf("    A  dispatch DIRECTO   vs CPU: %10.4f m\n", wA);
+    std::printf("    B  TerrainNodeGpu     vs CPU: %10.4f m\n", wB);
+    std::printf("    A vs B (los dos caminos entre si): %10.4f m\n", wAB);
+
+    CHECK(wA < 0.05, "el camino DIRECTO casa con la CPU (la tolerancia declarada)");
+    CHECK(wB < 0.05, "el camino del ADAPTADOR casa con la CPU");
+    CHECK(wAB < 0.05, "los dos caminos producen LO MISMO (si no, el fallo esta en el adaptador)");
+}
+
 static int runBackend(Backend backend)
 {
     const char* name = (backend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
@@ -2542,6 +2785,8 @@ static int runBackend(Backend backend)
     testArrayAndCube();
     testFrameCycle();
     testBindingPersistence();
+    testComputeArraySampler();
+    testNodeGpuAdapterBisect();
     testDispatchInsideRenderPass();
     testTerrainNodeGpuParity();
     testTerrainNodeGpuCost();

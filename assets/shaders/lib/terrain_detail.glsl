@@ -125,9 +125,25 @@ float harukaOctaveWeight(float wavelengthM, float minFeatureM) {
  * `vec3` desperdiciaría justo eso. No cuesta más: `harukaDetailNoise` ya trabaja en double.
  */
 float harukaTerrainDetail(dvec3 dir, double radius, float minFeatureM) {
-    if (minFeatureM >= 1428.5) return 0.0;
+    if (minFeatureM >= 6000.0) return 0.0;   // la octava mas gruesa es lambda 12 km -> Nyquist 6 km
     precise dvec3 p = dir * radius;
     float h = 0.0;
+    // ── LAS DOS OCTAVAS CONTINENTALES (F5) ──────────────────────────────────────────────────────
+    //
+    // ⚠️ Cubren el HUECO DE ESCALA que nadie cubría: el bake resuelve >= ~5-10 km (su téxel) y la
+    // escalera acababa en λ 2857 m, así que de ~3 km a ~10 km NO había fuente. Esa banda es justo la
+    // que da forma a un continente visto desde arriba, y por eso desde órbita el planeta era una bola
+    // lisa: solo el bake y su interpolación bilineal.
+    //
+    // Los números NO son inventados: salen de la ley de la propia escalera. `freq = 1/λ` exacta en
+    // las cinco octavas, y la amplitud sigue `amp = 0.1763·λ^0.9169` (ajuste log-log sobre las cinco).
+    // La guarda es `λ/2`, que es Nyquist: por debajo de dos muestras por longitud de onda, aliasea.
+    //
+    // ⚠️ ESTO REESCULPE EL PLANETA: el relieve procedural pasa de ±174 m a ±915 m (×5,3). No es un
+    // efecto secundario, es el objetivo — pero cambia el suelo en TODAS partes, y con él el hash
+    // golden, la colisión y la costa.
+    if (minFeatureM < 6000.0) h += (harukaDetailNoise(p * 0.0000833LF) - 0.5) * 969.3 * harukaOctaveWeight(12000.0, minFeatureM);
+    if (minFeatureM < 3000.0) h += (harukaDetailNoise(p * 0.0001667LF) - 0.5) * 513.4 * harukaOctaveWeight( 6000.0, minFeatureM);
     if (minFeatureM < 1428.5) h += (harukaDetailNoise(p * 0.00035LF) - 0.5) * 260.0 * harukaOctaveWeight(2857.0, minFeatureM);
     if (minFeatureM <  312.5) h += (harukaDetailNoise(p * 0.0016LF)  - 0.5) *  70.0 * harukaOctaveWeight( 625.0, minFeatureM);
     if (minFeatureM <   55.5) h += (harukaDetailNoise(p * 0.0090LF)  - 0.5) *  14.0 * harukaOctaveWeight( 111.0, minFeatureM);
@@ -167,10 +183,15 @@ float harukaTerrainDetail(vec3 dir, float radius, float minFeatureM) {
 // operaciones. Agrupar `amp·peso` en una variable cambia el redondeo y rompe la paridad de §5.
 float harukaTerrainDetailGrad(vec3 dir, float radius, float minFeatureM, out vec3 grad) {
     grad = vec3(0.0);
-    if (minFeatureM >= 1428.5) return 0.0;
+    if (minFeatureM >= 6000.0) return 0.0;
     dvec3 p = dvec3(dir) * double(radius);
     float h = 0.0;
     vec3 g;
+    // Las dos octavas continentales de F5 — gemelas de `harukaTerrainDetail` y de las dos de CPU.
+    if (minFeatureM < 6000.0) { h += (harukaDetailNoiseGrad(p * 0.0000833LF, g) - 0.5) * 969.3 * harukaOctaveWeight(12000.0, minFeatureM);
+        grad += g * (969.3 * harukaOctaveWeight(12000.0, minFeatureM) * 0.0000833); }
+    if (minFeatureM < 3000.0) { h += (harukaDetailNoiseGrad(p * 0.0001667LF, g) - 0.5) * 513.4 * harukaOctaveWeight( 6000.0, minFeatureM);
+        grad += g * (513.4 * harukaOctaveWeight( 6000.0, minFeatureM) * 0.0001667); }
     if (minFeatureM < 1428.5) { h += (harukaDetailNoiseGrad(p * 0.00035LF, g) - 0.5) * 260.0 * harukaOctaveWeight(2857.0, minFeatureM);
         grad += g * (260.0 * harukaOctaveWeight(2857.0, minFeatureM) * 0.00035); }
     if (minFeatureM <  312.5) { h += (harukaDetailNoiseGrad(p * 0.0016LF,  g) - 0.5) *  70.0 * harukaOctaveWeight( 625.0, minFeatureM);

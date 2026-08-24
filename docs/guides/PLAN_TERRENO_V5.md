@@ -488,12 +488,14 @@ y reabriría la grieta, más pequeña pero grieta.
 
 ### F4 — Colisión sobre los mismos nodos
 
-- `HeightFieldShape` de Jolt directamente sobre el téxel del nodo (una rejilla regular es lo que Jolt
-  quiere; mapea 1:1, sin conversión).
+> ⚠️ **LA PREMISA DE ABAJO ES FALSA Y ESTÁ MEDIDA (2026-08-24).** Ver el bloque del final.
+
+- ~~`HeightFieldShape` de Jolt directamente sobre el téxel del nodo (una rejilla regular es lo que
+  Jolt quiere; mapea 1:1, sin conversión).~~
 - Se retiran los 11 anillos.
 
-**Cierra con**: `terrain_chord_error` da 0 **por construcción**, con contraprueba de que el test
-seguiría detectando una divergencia si la hubiera.
+**Cierra con**: ~~`terrain_chord_error` da 0 **por construcción**~~ → **una COTA MEDIDA de 0,254 m**
+en el campo cercano. El 0 no es alcanzable: ver el bloque del paralelogramo. Cerrado el 2026-08-24.
 
 ### F5 — Definición desde órbita
 
@@ -505,7 +507,9 @@ Dos problemas distintos, y el segundo probablemente pesa más:
   antes que por el relieve. Hoy el planeta es de **un verde uniforme**. Aunque la geometría sea
   perfecta, sin variación de material seguirá pareciendo una bola lisa.
 
-**Cierra con**: captura desde órbita contra la de F0.
+**Cierra con**: ~~captura desde órbita contra la de F0~~ → geometría cerrada con medida (2026-08-24);
+albedo **diagnosticado**: las dos fuentes de color medidas, ninguna plana. Ver los dos bloques del
+final. La captura sigue haciendo falta para localizar dónde se pierde el color.
 
 ---
 
@@ -649,3 +653,275 @@ la luz`, `el marchador de sombras`, `props` y `mar` siguen pasando en los dos ba
 - ⚠️ Y uno SIN arreglar: el test de coste deja el backend en un estado que hace fallar al siguiente
   que lee píxeles del framebuffer por defecto. Ni el viewport, ni destruir el target, ni un frame de
   restauración lo explican. Está puesto EL ÚLTIMO como mitigación, no como arreglo.
+
+### F4 — arranque: el suelo de la física y el del render salen de DOS BAKES (2026-08-24)
+
+Antes de tocar la colisión hacía falta saber sobre qué se está caminando. El planeta hornea su
+elevación **dos veces**, en dos parametrizaciones distintas:
+
+| Retícula | Resolución real | Quién la muestrea |
+|---|---|---|
+| **equirect** `m_heightCPU` | 8192×4096 | `TerrestrialPlanet::sampleHeight` → **la física** |
+| **cubo** `m_baseHeights` | 6 × 513² (`faceRes` 512) | los shaders → **el render**, y ahora el pase v5 |
+
+⚠️ **`m_baseHeights` llevaba el comentario "es el suelo que consultará la física" y no lo leía
+NADIE.** Se rellenaba en el bake y se quedaba ahí, dato muerto, mientras la física iba contra el
+equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`src/core/terrain/base_field.h`),
+gemelo CPU de `lib/base_field.glsl` — y **está demostrado, no solo escrito**: el test de paridad del
+bake lo valida contra la GPU a **0,0007 m** en Vulkan.
+
+**Cuánto se separan los dos suelos** (`test_terrain_two_bakes_disagree`, elevación analítica de
+±3700 m sembrada en las dos retículas a resolución real, 16 200 direcciones):
+
+    la FISICA (equirect) contra el RENDER (cubo)   peor 0.15 m  ·  media 0.022 m
+    CONTRAPRUEBA: el muestreador del cubo contra su origen analitico   0.19 m (0,0052 % de la amplitud)
+
+**0,15 m es poco**, y esa es la noticia: la doble parametrización **no** es la causa principal del
+desajuste render↔colisión. Compárese con lo ya medido: 0,1453 m de `clipmap_dir_parity` (mismo orden)
+y los 295 m de `meshTerrainHeightKm`. Lo caro está en otro sitio — el tamaño de celda y la sagita,
+no en qué mapa se muestrea.
+
+⚠️ **Con la reserva de que el campo de prueba es SUAVE.** Donde el bake real tiene aristas —una
+costa— las dos retículas discrepan más que aquí, y este número es una cota optimista.
+
+⚠️ **Trampa de método, otra vez la misma:** la primera contraprueba afirmaba "cada bake es más fiel a
+su origen que al otro". Es FALSO y lo dijo el número (0,19 > 0,15): las dos retículas remuestrean la
+MISMA función suave, así que sus errores de interpolación se correlacionan y se cancelan en parte al
+compararlas entre sí. La premisa era mía, no del código.
+
+**Lo que queda de F4**: `HeightFieldShape` sobre el téxel del nodo, retirar los 11 anillos, y cerrar
+con `terrain_chord_error` = 0 por construcción.
+
+
+### ⚠️ F4 — UN NODO **NO** ES UN `HeightFieldShape` DE JOLT (2026-08-24)
+
+El plan decía "una rejilla regular es lo que Jolt quiere; mapea 1:1, sin conversión". **Es falso**, y
+el número lo dice (`test_terrain_node_as_heightfield`):
+
+    nivel   lado del nodo    m/texel    desvio de la rejilla REGULAR   angulo u^v   paso centro/borde
+      8       39092.0 m    305.406 m        1857.1699 m                88.12 deg      1.001077
+     12        2443.2 m     19.088 m         113.3239 m                88.13 deg      1.000066
+     14         610.8 m      4.772 m          28.2969 m                88.13 deg      1.000017
+     16         152.7 m      1.193 m           7.0721 m                88.13 deg      1.000004
+     17          76.4 m      0.596 m           3.5358 m                88.13 deg      1.000002
+
+**El ángulo entre los ejes `u` y `v` del nodo es 88,13°, no 90°.** Y es el MISMO en todos los
+niveles, porque depende de dónde cae el nodo en la cara del cubo, no de su tamaño: el mapeo
+cubo→esfera (Cobb) no es conforme. El paso sí es uniforme (1,000002 entre centro y borde), así que el
+problema no es el espaciado — **es que la rejilla es un PARALELOGRAMO y `HeightFieldShape` exige un
+rectángulo alineado a ejes.**
+
+El desvío resultante es el **4,6 % del lado del nodo, a cualquier nivel** (3,54 m en uno de 76,4 m).
+No se diluye al afinar: es una proporción constante. Traducido: el suelo que se pisa quedaría
+desplazado **horizontalmente** respecto al que se ve, y eso se nota en cualquier ladera.
+
+⚠️ **Trampa de método:** la primera versión de este test dio 101 m de desvío en un nodo de 76 m —
+imposible, y por eso se vio. El marco tangente se derivaba del eje Y del MUNDO, así que estaba rotado
+respecto a la rejilla del nodo y medía la rotación, no la distorsión. El marco tiene que alinearse
+con los ejes del propio nodo.
+
+**Las salidas, y ninguna es "1:1":**
+
+| Opción | Qué cuesta |
+|---|---|
+| Remuestrear el nodo a una rejilla ortogonal | es una conversión, y rompe "los dos leen el mismo téxel" |
+| `MeshShape` sobre los triángulos del nodo | es lo que los anillos vinieron a sustituir: 802-1274 ms de árbol AABB contra 18,3 ms |
+| **Dejar los anillos y traerles las ALTURAS del nodo** | paridad en VALORES (0,0007 m), no en celdas. `terrain_chord_error` no da 0 por construcción, pero queda acotado por la celda del anillo — que ya se mide |
+
+**Recomendada la tercera**: conserva el ahorro de 800 ms que justifica los anillos y cierra el hueco
+que de verdad importa (que la física muestree el mismo suelo que el render, hoy el bake equirect
+contra el del cubo). El "0 por construcción" del plan hay que sustituirlo por una cota medida.
+
+
+### F4 — opción 3, y DOS divergencias que salieron al mirarla (2026-08-24)
+
+Elegida la opción 3 (los anillos siguen, pero muestreando lo mismo que el render). Al ir a cablearla
+salieron dos cosas que hacían que el nodo describiera otra superficie:
+
+**1. El radio del detalle.** `terrainDetail` muestrea el ruido en `p = dir·radius`. El clipmap
+(`clipmap.tese`) y la física (`sampleHeight`) usan **`baseR = R + baseH`**; el nodo usaba **R a
+secas**. Con `baseH` de 4 km, la octava fina (`p·0.22`) se desplaza **880 unidades de ruido**: campo
+completamente distinto, o sea otro relieve, hasta la amplitud entera del detalle (±174 m). Corregido
+en los dos gemelos (`terrain_node.comp` y `nodeFillHeights`).
+
+⚠️ Y al corregirlo saltó otra: **`seaLevelAttenuation(0)` vale 0**, así que aplicarla sin bake deja
+el nodo PLANO. Lo cazaron el hash golden y los tests de contenido — pasaron de 1 fallo a 5 en el acto.
+La atenuación va dentro de la puerta "hay bake", no fuera.
+
+**2. La fuente de la elevación base. El primer cableado era el equivocado.** Se le dio al nodo el
+campo del CUBO (`m_baseFieldTex`, binding 15). Pero `clipmap.tese` hace:
+
+    baseH = uDebug.z > 0.5 ? harukaSampleHeightField(uHeightTex, ...) : fld.x;
+
+y el motor pone ese flag a **1 siempre que existe el bake equirect**. O sea: el clipmap usa el
+**equirect**, la física usa el **equirect**, y el campo del cubo es solo el respaldo. El que
+divergía era el nodo — de los otros dos, que sí coinciden entre sí.
+
+Corregido: el nodo prefiere el equirect (binding 16) y cae al campo del cubo solo si no hay. El
+CLIMA (temperatura, humedad) sí sigue saliendo del campo del cubo, que es su fuente — el mismo
+reparto que hace `clipmap.tese`.
+
+**Lo que esto deja**: render (clipmap **y** nodo) y física muestreando la misma elevación base y
+evaluando el detalle con el mismo radio. Lo que queda para cerrar F4 es traerle a los anillos las
+alturas por esa vía y sustituir el criterio "`terrain_chord_error` = 0 por construcción" por una cota
+medida — el 0 no es alcanzable, ver el bloque anterior sobre el paralelogramo.
+
+
+## ✅ F4 CERRADO (2026-08-24) — con una cota medida, no con un 0
+
+El criterio original (`terrain_chord_error` = 0 **por construcción**) exigía que la colisión leyera
+los MISMOS téxeles que el render. **No es alcanzable**: los ejes de un nodo forman 88,13°, así que no
+es un `HeightFieldShape` de Jolt. Se cerró por la **opción 3** — los anillos siguen (18,3 ms contra
+802-1274 ms de un árbol AABB sobre malla), muestreando la misma superficie. Paridad en VALORES, no en
+celdas, y el cierre es una cota.
+
+**Lo que se alineó** (dos divergencias reales, ambas corregidas en los dos gemelos):
+
+| | Antes | Ahora |
+|---|---|---|
+| Elevación base | nodo → campo del CUBO · clipmap y física → EQUIRECT | los tres → **EQUIRECT** |
+| Radio del ruido | nodo → `R` · clipmap y física → `R + baseH` | los tres → **`R + baseH`** |
+
+**La cota** (`test_terrain_render_vs_collision`, cámara a altura de ojo):
+
+    dist. al jugador   corte del NODO   corte del ANILLO   |dibujado - pisado|
+           2 m           0.596 m            4.000 m             0.2539 m
+          10 m           0.596 m            4.000 m             0.0151 m
+          50 m           0.596 m            4.000 m             0.1209 m
+         200 m           0.596 m            4.000 m             0.0383 m
+        1000 m           0.596 m            4.000 m             0.1240 m
+
+    campo CERCANO (<=200 m, donde se camina):  peor 0.2539 m
+    CONTRAPRUEBA: con cortes 0,6 m contra 300 m la diferencia es 29.03 m  (x114: el test tiene dientes)
+
+**0,254 m**, contra los 0,1453 m de `clipmap_dir_parity` (mismo orden) y los **295 m** de
+`meshTerrainHeightKm`. La disparidad es **entera del corte de octavas**: el nodo corta por su téxel
+(0,596 m al nivel más fino) y el anillo por `terrainTriM(d)`, cuyo piso es `TERRAIN_CLIP_QUAD_M` = 4 m.
+
+⚠️ **Se puede llevar a 0,0000 m y NO se ha hecho.** Si el anillo cortara como el nodo, la disparidad
+sería nula por definición (medido en el mismo test). No se hace porque **acopla el LOD de la física al
+de render** —el nivel que elige el selector depende de la cámara—, y eso es una decisión de diseño,
+no un arreglo. El número queda escrito para que la decisión se tome con él delante.
+
+**Sin verificar en pantalla**, como todo lo demás del v5.
+
+## F5 — GEOMETRÍA: las dos octavas continentales (2026-08-24)
+
+El hueco que el propio plan identificó: el bake resuelve ≥ ~5-10 km (su téxel) y la escalera acababa
+en λ 2857 m, así que **de ~3 km a ~10 km no había fuente** — y esa banda es la que da forma a un
+continente visto desde arriba. Peor: el corte era `minFeatureM >= 1428.5 → 0`, o sea que **a partir
+de 119 km de cámara el planeta no tenía NI UNA octava procedural**.
+
+**Los números salen de la ley de la propia escalera**, no de la intuición. Ajuste sobre las cinco que
+ya había: `freq = 1/λ` exacta, y `amp = 0.1763·λ^0.9169` (log-log). La guarda es `λ/2`, que es
+Nyquist. De ahí:
+
+    lambda  6000 m -> freq 0.0001667  amp  513.4 m  guarda 3000
+    lambda 12000 m -> freq 0.0000833  amp  969.3 m  guarda 6000
+
+**Lo que se gana** (`test_terrain_orbital_relief`, 1 152 direcciones repartidas por el planeta):
+
+    altura de camara    triM        relieve procedural (pico a pico)
+          50 km           600 m         1333.4 m
+         119 km          1428 m         1266.6 m
+         200 km          2400 m          998.9 m    <- antes aqui era 0
+         400 km          4800 m          233.6 m    <- antes aqui era 0
+         500 km          6000 m            0.0 m
+         700 km          8400 m            0.0 m
+
+⚠️ **DESDE 500 km SIGUE SIENDO UNA BOLA LISA**, y esto es un techo estructural, no un ajuste
+pendiente. `triM = camD·0.012`, así que a 500 km vale 6000 m — exactamente la guarda Nyquist de la
+octava de λ 12 km. Para tener relieve a 500+ km haría falta λ 24 km, cuya amplitud por la misma ley
+serían **1830 m**: ya compite con la estructura del propio bake (±4 km). Las salidas reales son subir
+la resolución del bake o cambiar la ley de `triM`, no seguir apilando octavas.
+
+**Lo que cuesta**, y no es gratis:
+
+| | Antes | Ahora |
+|---|---|---|
+| Relieve procedural total | ±173,8 m | **±915,2 m** (×5,3) |
+| Generar un nodo (GPU, nivel 18) | 0,045 ms | **0,069 ms** (GL) · 0,136 ms (VK) |
+| Paridad GPU↔CPU del nodo | 0,000031 m | **0,024231 m** (tolerancia declarada 0,05 m) |
+
+⚠️ **El planeta cambia de forma en TODAS partes**, no solo desde órbita: ±915 m de relieve procedural
+contra los ±174 m de antes. Cambia el suelo que se pisa, la costa y el hash golden. Es el objetivo
+declarado del plan ("la banda que da forma a un continente"), pero es un cambio de diseño, no una
+corrección.
+
+⚠️ **La paridad GPU↔CPU se degradó 780×** (0,000031 → 0,024231 m). Sigue dentro de la tolerancia
+declarada de 0,05 m, pero el margen pasó de tres órdenes a uno: las octavas gruesas tienen amplitud
+~1 km y su coordenada de ruido es diminuta (`p·0.0000833`), así que amplifican la divergencia float.
+
+⚠️ **La escalera vive en CUATRO sitios** y los cuatro hay que tocarlos a la vez: `terrainDetail` y
+`terrainDetailGrad` en `terrain_detail.h`, y sus dos gemelos en `terrain_detail.glsl`. Actualizar
+tres de cuatro lo cazó `terrain_detail_gradient` en el acto — el gradiente dejaba de describir la
+altura y la iluminación mentía.
+
+**SIN HACER — el albedo**, que el plan dice que pesa más: desde 500 km un continente se lee por el
+color antes que por el relieve, y el planeta sigue siendo de un verde uniforme.
+
+## F5 — ALBEDO: la premisa del plan era falsa (2026-08-24)
+
+El plan decía: *"desde 500 km un continente se lee por el color… Hoy el planeta es de **un verde
+uniforme**. Aunque la geometría sea perfecta, sin variación de material seguirá pareciendo una bola
+lisa."* Eso apunta a un culpable —la falta de variación de material— y **ese culpable no lo es**.
+
+"Verde uniforme" es una observación de PANTALLA, y una observación de pantalla no dice DÓNDE está la
+causa. En órbita (`lod` = 0, sin triplanar) la cadena del color se reduce a dos fuentes:
+
+    col = biomeCol * tint          <- `texW` = 0 y `grain` = 1, no queda nada mas
+    biomeCol = mix(mapaDeBiomas, matColor.rgb, matColor.a)
+
+**Las dos, medidas** (`test_terrain_orbital_albedo`):
+
+| Fuente | Medida | Veredicto |
+|---|---|---|
+| Tintes de material | 6 materiales, **0 con color propio**, el más separado del blanco un **12 %** | No es la fuente del color. Tocarlos no puede arreglar nada |
+| Paleta de biomas | **58 colores** distintos en tierra · RMS **0,2723** · el dominante solo el **17,8 %** | **Sí varía**, y a escala continental |
+
+    CONTRAPRUEBA: jungla (0.13,0.31,0.11) · desierto (0.62,0.53,0.35) · hielo (0.86,0.89,0.93)
+
+**O sea que ninguna de las dos fuentes es plana**, y añadir variación de material —lo que el plan
+proponía— habría movido como mucho un 12 % sobre un color que ya varía. La uniformidad que se ve está
+**aguas abajo** del color: candidatos que NO se pueden medir sin pantalla — dispersión atmosférica a
+distancia orbital, el mapa sin atar en ese pase, o la iluminación saturando.
+
+⚠️ **TRAMPA DE MÉTODO, y esta casi cierra F5 con la conclusión contraria:** la primera versión midió
+`BiomesOutput::color`, que es la tabla de **visualización**. Daba RMS 0,40 y 10 biomas — "hay variedad
+de sobra, el problema está en otro sitio". Pero el que hornea el mapa es `BiomeClassifyNode`, y usa
+**otra paleta**: `BiomeConfig::evaluate(humedad, tempC)`. Medir la tabla equivocada da la respuesta
+correcta a la pregunta equivocada. (La conclusión resultó ser la misma, pero por suerte, no por
+método.)
+
+**F5 queda así**: geometría **hecha y medida**; albedo **diagnosticado, no arreglado** — porque el
+arreglo que el plan asumía está descartado con números, y localizar la causa real necesita el ojo.
+
+## Quitar el clipmap — el bloqueo levantado, y por qué el borrado todavía no (2026-08-24)
+
+**El objetivo es quitarlo.** Lo que impedía hacerlo no era una decisión pendiente: era que **el mar
+cercano no tiene buffers propios** y cuelga de la rejilla de anillos del terreno (`m_clipVB`,
+`m_clipIB`, los `ClipParams` por anillo). Borrar el clipmap se llevaba el mar por delante.
+
+⚠️ **Y al mirarlo salió un bug vivo: activar el v5 MATABA LAS OLAS.** El mar cercano estaba
+condicionado a `useClip`, que es "¿dibuja el TERRENO del clipmap?" — y el pase v5 lo anula
+(`if (v5Drew) useClip = false`). Con `HARUKA_TERRAIN_V5=1` el mar cercano dejaba de dibujarse **en
+silencio**: quedaba solo el mar lejano, que es la esfera lisa. Sin olas y sin nada que lo dijera.
+
+Arreglado condicionándolo a `clipActive`, que es lo correcto: la condición de que la REJILLA y sus
+parámetros existan, que es lo único que el mar necesita de ahí. Con el v5 apagado las dos banderas
+valen lo mismo, así que no cambia nada de antes.
+
+**Lo que queda del borrado, y lo que cuesta:**
+
+    clipmap.tesc/.tese/.vert            236 lineas
+    el bloque de draw en planet.cpp      86 lineas
+    reanchorToFine en biome.frag         27 lineas
+    + la banda de mezcla, el sesgo de profundidad, el recorte de la malla base y HARUKA_PLANET_DEBUG=9
+
+La rejilla de anillos y sus `ClipParams` **se quedan**: son del mar ahora.
+
+⚠️ **NO SE BORRA TODAVÍA, y la razón es concreta**: `HARUKA_TERRAIN_V5` es **opt-in por variable de
+entorno** (`terrain_node_renderer.h`), o sea que el clipmap es el terreno POR DEFECTO. Borrarlo hoy
+deja el juego **sin terreno**, y el sustituto no se ha visto funcionar en pantalla ni una vez. El
+orden obligatorio es: (1) verificar el v5 en el juego → (2) hacerlo el defecto → (3) borrar.
+El paso (1) es el único que no puedo hacer yo.

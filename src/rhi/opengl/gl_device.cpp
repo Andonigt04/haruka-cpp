@@ -34,14 +34,22 @@ namespace Haruka::RHI::opengl
         if (gSpirvChecked) return gUseSpirv;
         gSpirvChecked = true;
 
+        // ⚠️ ESTA VARIABLE SOLO SABIA ENCENDER. `HARUKA_GL_SPIRV=0` no apagaba nada: `forced` salia
+        // false y se caia al camino automatico, que enciende SPIR-V en cualquier GL 4.6. Con eso, un
+        // experimento que creia estar comparando "SPIR-V si / SPIR-V no" comparaba SPIR-V consigo
+        // mismo — y me dio por descartada una hipotesis correcta.
         const char* opt = std::getenv("HARUKA_GL_SPIRV");
-        const bool forced = (opt && *opt && *opt != '0' && *opt != 'n');
+        const bool asked = (opt && *opt);
+        const bool forcedOn  = asked && (*opt != '0' && *opt != 'n');
+        const bool forcedOff = asked && !forcedOn;
 
         const bool haveFuncs = glShaderBinary && glSpecializeShader;
         const char* version = (const char*)glGetString(GL_VERSION);
         bool core = version && atoi(version) >= 4 && version[2] >= '6';
 
-        if (forced)
+        if (forcedOff)
+            gUseSpirv = false;
+        else if (forcedOn)
             gUseSpirv = haveFuncs;
         else if (core && haveFuncs)
             gUseSpirv = true;
@@ -51,7 +59,7 @@ namespace Haruka::RHI::opengl
         if (!gUseSpirv)
             HARUKA_LOGW("RHI/GL", "GL=VK por driver (SPIR-V GL no disponible%s%s).",
                         haveFuncs ? "" : ": faltan glShaderBinary/glSpecializeShader",
-                        (!forced && !core) ? ": GL < 4.6" : "");
+                        (!asked && !core) ? ": GL < 4.6" : "");
         return gUseSpirv;
     }
 
@@ -363,8 +371,16 @@ namespace Haruka::RHI::opengl
         // z_ndc ∈ [0,1], así que GL DEBE mapear [0,1]→depth (glClipControl(GL_ZERO_TO_ONE)); sin
         // esta llamada GL asume [-1,1] y comprime toda la profundidad a [0.5,1] — el z-buffer pierde
         // la mitad de su precisión a escala planetaria (z-fight del clipmap y del agua↔lecho).
-        if (glad_glClipControl)
+        // ⚠️ SI NO ESTA, HAY QUE DECIRLO. El `if` silencioso era el fallo: sin `glClipControl` el
+        // motor sigue dibujando —el ORDEN de profundidad es correcto— y solo se nota como z-fighting
+        // donde no deberia haberlo. Un modo degradado que no se anuncia es indistinguible de un bug.
+        if (glad_glClipControl) {
             glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        } else {
+            HARUKA_LOGE("RHI/GL", "SIN glClipControl: el reversed-Z pierde LA MITAD de su precision "
+                                  "(GL asume [-1,1] y la profundidad util queda en (0.5,1]). "
+                                  "Esperable: z-fighting del clipmap y del agua contra el lecho.");
+        }
         m_context = std::make_unique<GLContext>(this);
     }
 
@@ -527,6 +543,19 @@ namespace Haruka::RHI::opengl
             glDeleteShader(cs);
             if (!linked) { glDeleteProgram(p.program); return {}; }
             p.compute = true;
+            if (std::getenv("HARUKA_GL_TEXPROBE")) {
+                GLint nUni = 0;
+                glGetProgramiv(p.program, GL_ACTIVE_UNIFORMS, &nUni);
+                for (GLint i = 0; i < nUni; ++i) {
+                    char nm[128]; GLsizei len = 0; GLint sz = 0; GLenum ty = 0;
+                    glGetActiveUniform(p.program, (GLuint)i, sizeof(nm), &len, &sz, &ty, nm);
+                    const GLint loc = glGetUniformLocation(p.program, nm);
+                    GLint val = -1;
+                    if (loc >= 0) glGetUniformiv(p.program, loc, &val);
+                    HARUKA_LOGI("RHI/GL", "  compute uniform '%s' tipo=0x%X loc=%d valor=%d",
+                                nm, (unsigned)ty, loc, val);
+                }
+            }
         }
         else
         {

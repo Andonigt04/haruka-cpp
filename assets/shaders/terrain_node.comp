@@ -68,6 +68,16 @@ layout(std430, binding = 1) writeonly buffer NodeHeights { float uHeights[]; };
 // varias GPU y eso bastaria para separar este suelo del de la malla en centimetros.
 layout(binding = 15) uniform sampler2DArray uBaseField;
 
+// ⚠️ LA ELEVACION BASE SALE DEL BAKE EQUIRECT, NO DEL CAMPO DEL CUBO. Gemelo de `clipmap.tese`:
+//
+//     baseH = uDebug.z > 0.5 ? harukaSampleHeightField(uHeightTex, ...) : fld.x;
+//
+// El motor pone ese flag a 1 SIEMPRE que existe el bake equirect (planet.cpp), asi que el camino
+// normal es el equirect y el campo del cubo es solo el respaldo. La fisica (`sampleHeight`) tambien
+// va contra el equirect. Cablear aqui el del cubo —que fue el primer intento— dejaba al nodo
+// discrepando de los OTROS DOS, que si coinciden entre si.
+layout(binding = 16) uniform sampler2D uHeightTex;
+
 #include "lib/base_field.glsl"   // harukaSampleBaseField — la MISMA que leen clipmap y vertice
 
 void main() {
@@ -114,14 +124,27 @@ void main() {
         // sin escribir es INDEFINIDO, no ceros, asi que muestrear un sampler que nadie ato no da
         // negro — da basura o pierde el dispositivo. Los tests del banco corren sin planeta horneado
         // y pasan 0 aqui.
-        float h = harukaTerrainDetail(dir, double(uMisc.x), uMisc.y);
+        // ⚠️ EL DETALLE SE EVALUA CON `baseR = R + baseH`, NO CON R. No es un matiz.
+        //
+        // `terrainDetail` muestrea el ruido en `p = dir·radius`, y la octava mas fina en `p·0.22`.
+        // Un `baseH` de 4 km desplaza esa coordenada 880 unidades: campo de ruido COMPLETAMENTE
+        // distinto. Con R a secas, el nodo evaluaba otro relieve que el clipmap (`clipmap.tese` usa
+        // `baseR`) y que la fisica (`sampleHeight`, idem) en todo punto con elevacion base.
+        // ⚠️ SIN BAKE NO SE ATENUA. `harukaSeaLevelAttenuation(0)` vale **0**, asi que aplicarla a
+        // ciegas deja el nodo PLANO — que es lo que paso y lo cazaron los tests del hash golden.
+        // Con bake, la atenuacion y el recorte son los del clipmap; sin el, el nodo es detalle puro
+        // sobre R, que es lo que era antes de que existiera el bake.
         if (uMisc.z > 0.5) {
-            const float baseH = harukaSampleBaseField(uBaseField, vec3(dir)).x;
-            h *= harukaSeaLevelAttenuation(baseH);
+            const float  baseH = (uMisc.w > 0.5)
+                               ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
+                                                         harukaEquirectUV(vec3(dir)))
+                               : harukaSampleBaseField(uBaseField, vec3(dir)).x;
+            const double baseR = double(uMisc.x) + double(baseH);
+            float h = harukaTerrainDetail(dir, baseR, uMisc.y) * harukaSeaLevelAttenuation(baseH);
             if (baseH > 0.0 && h < -baseH) h = -baseH;   // el detalle no hunde tierra bajo el mar
             outv = baseH + h;
         } else {
-            outv = h;
+            outv = harukaTerrainDetail(dir, double(uMisc.x), uMisc.y);
         }
     }
 

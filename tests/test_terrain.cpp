@@ -2,6 +2,13 @@
 // Tests de TERRENO puros-CPU (sin GL): cubemap inversa, clima, capa granular.
 // ================================================================================================
 #include "test_common.h"
+#include <map>
+#include <algorithm>
+// F5-albedo: las dos fuentes de color en órbita, medidas contra sus propias tablas.
+#include "core/planet/terrain_material.h"
+#include "core/planet/climate.h"
+#include "core/planet/biomes.h"
+#include "tools/procgraph/proc_climate.h"   // BiomeConfig: la paleta que DE VERDAD se hornea
 
 #include <algorithm>
 #include <cmath>
@@ -640,9 +647,19 @@ void test_terrain_detail_gradient() {
     CHECK(worstAbs < 0.02 * peakSlope, "el peor desvío absoluto se queda por debajo del 2% del pico");
 
     // (3) Donde no hay octavas activas, el gradiente es cero (no basura).
+    // ⚠️ EL CORTE SE MOVIO DE 1428,5 A 6000 m (F5, 2026-08-24). Este test usaba 5000 m esperando
+    // cero: con las dos octavas continentales (λ 6 km y 12 km) ahi YA hay relieve, asi que 5000 ya no
+    // es "sin octavas activas". El numero sigue atado a la escalera, no elegido: es la guarda de la
+    // octava mas gruesa (λ/2 = 6000) mas un margen.
     glm::vec3 g0(1.0f);
-    const float hFar = Haruka::Planet::terrainDetailGrad(glm::vec3(0,0,1), R, 5000.0f, g0);
-    CHECK(hFar == 0.0f && g0 == glm::vec3(0.0f), "sin octavas activas: altura 0 y gradiente 0");
+    const float hFar = Haruka::Planet::terrainDetailGrad(glm::vec3(0,0,1), R, 7000.0f, g0);
+    CHECK(hFar == 0.0f && g0 == glm::vec3(0.0f), "sin octavas activas (>6000 m): altura 0 y gradiente 0");
+
+    // Y la CONTRAPRUEBA de que el corte esta donde se dice: justo por debajo SI hay relieve. Sin
+    // esto, subir el corte a un numero enorme pasaria el test de arriba sin que nada funcionara.
+    glm::vec3 g1(0.0f);
+    const float hNear6k = Haruka::Planet::terrainDetailGrad(glm::vec3(0,0,1), R, 5000.0f, g1);
+    CHECK(hNear6k != 0.0f, "CONTRAPRUEBA: a 5000 m (bajo la guarda de 6000) la octava continental SI aporta");
 }
 
 // TEST: la inversa cube-sphere (dir ↔ cara+UV) es precisa y determinista
@@ -1065,4 +1082,203 @@ void test_terrain_ring_tiling() {
                 "%d sin cubrir, %d con solape\n", badGaps, badOverlaps);
     CHECK(badGaps + badOverlaps > 100,
           "la disposicion ASIMETRICA falla este mismo test (si no, no esta midiendo nada)");
+}
+
+// ================================================================================================
+// F5 — ¿HAY RELIEVE DESDE ORBITA? Antes: exactamente CERO.
+//
+// ⚠️ El corte era `minFeatureM >= 1428.5 -> return 0`. Con `triM = camD·0.012`, eso significa que a
+// partir de **119 km de camara** el planeta no tenia NI UNA octava procedural: era solo el bake y su
+// interpolacion bilineal, o sea una bola lisa. Y habia un hueco de escala que nadie cubria — el bake
+// resuelve >= ~5-10 km (su texel) y la escalera acababa en λ 2857 m: de ~3 km a ~10 km, sin fuente.
+// Esa banda es justo la que da forma a un continente visto desde arriba.
+//
+// F5 añade dos octavas (λ 6 km y 12 km) con los numeros sacados de la LEY de la propia escalera:
+// `freq = 1/λ` exacta, `amp = 0.1763·λ^0.9169` (ajuste log-log sobre las cinco que ya habia), guarda
+// en `λ/2` que es Nyquist. Este test mide lo que aportan a cada altura.
+// ================================================================================================
+void test_terrain_orbital_relief() {
+    beginTest("terrain_orbital_relief");
+    const float R = 6371000.0f;
+
+    // Direcciones repartidas por el planeta, no un punto suelto.
+    std::vector<glm::vec3> dirs;
+    for (int a = 0; a < 24; ++a)
+        for (int b = 0; b < 48; ++b) {
+            const double lat = (-82.0 + a * 7.0) * 3.14159265358979 / 180.0;
+            const double lon = (-176.0 + b * 7.5) * 3.14159265358979 / 180.0;
+            dirs.push_back(glm::normalize(glm::vec3(
+                (float)(std::cos(lat) * std::cos(lon)), (float)std::sin(lat),
+                (float)(std::cos(lat) * std::sin(lon)))));
+        }
+
+    std::printf("    altura de camara    triM        relieve procedural (pico a pico)\n");
+    double reliefAtOrbit = 0.0;
+    for (double camKm : { 50.0, 119.0, 200.0, 400.0, 500.0, 700.0 }) {
+        const float triM = (float)(camKm * 1000.0 * 0.012);
+        double lo = 1e30, hi = -1e30;
+        for (const glm::vec3& d : dirs) {
+            const double h = Haruka::Planet::terrainDetail(d, R, triM);
+            lo = std::min(lo, h); hi = std::max(hi, h);
+        }
+        const double pk = (hi > lo) ? hi - lo : 0.0;
+        std::printf("    %8.0f km      %8.0f m   %12.1f m %s\n", camKm, triM, pk,
+                    (triM >= 1428.5f && pk > 0.0) ? "  <- antes aqui era 0" : "");
+        if (std::fabs(camKm - 400.0) < 1.0) reliefAtOrbit = pk;
+    }
+
+    CHECK(reliefAtOrbit > 100.0, "desde 400 km hay relieve procedural de verdad (antes: 0)");
+
+    // CONTRAPRUEBA 1: por encima de la guarda de la octava mas gruesa TIENE que seguir siendo 0.
+    // Si no, el corte no esta donde se dice y el coste se paga a cualquier distancia.
+    double loF = 1e30, hiF = -1e30;
+    for (const glm::vec3& d : dirs) {
+        const double h = Haruka::Planet::terrainDetail(d, R, 6500.0f);
+        loF = std::min(loF, h); hiF = std::max(hiF, h);
+    }
+    std::printf("    CONTRAPRUEBA: con triM 6500 m (sobre la guarda de 6000) el relieve es %.4f m\n",
+                hiF - loF);
+    CHECK(hiF == 0.0 && loF == 0.0, "CONTRAPRUEBA: sobre la guarda no se paga ni una octava");
+
+    // CONTRAPRUEBA 2: la banda que estaba vacia (~3-10 km) es la que aportan las nuevas. Se comprueba
+    // apagandolas: con triM justo bajo 1428,5 el relieve tiene que ser MUCHO menor que el de 3000.
+    double lo3 = 1e30, hi3 = -1e30, lo1 = 1e30, hi1 = -1e30;
+    for (const glm::vec3& d : dirs) {
+        const double a = Haruka::Planet::terrainDetail(d, R, 3000.0f);   // solo las continentales
+        const double b = Haruka::Planet::terrainDetail(d, R, 1400.0f);   // + la escalera vieja
+        lo3 = std::min(lo3, a); hi3 = std::max(hi3, a);
+        lo1 = std::min(lo1, b); hi1 = std::max(hi1, b);
+    }
+    std::printf("    CONTRAPRUEBA: solo las continentales (triM 3000) = %.1f m · con la escalera "
+                "vieja tambien (triM 1400) = %.1f m\n", hi3 - lo3, hi1 - lo1);
+    CHECK(hi3 - lo3 > 100.0, "CONTRAPRUEBA: las nuevas octavas aportan por si solas (no son ruido de fondo)");
+}
+
+// ================================================================================================
+// F5 — EL ALBEDO: ¿por que el planeta se ve de un verde uniforme desde orbita?
+//
+// El plan dice que esto pesa MAS que la geometria: desde 500 km un continente se lee por el COLOR
+// —bioma, nieve, rios, zonas aridas— antes que por el relieve. Pero "verde uniforme" es una
+// observacion de PANTALLA, y una observacion de pantalla no dice DONDE esta la causa. Aqui se mide,
+// que es lo unico que la senala.
+//
+// La cadena del color en orbita (con `lod` = 0, o sea sin triplanar) se reduce a:
+//
+//     col = biomeCol * tint          <- y nada mas: `texW` = 0 y `grain` = 1
+//     biomeCol = mix(mapaDeBiomas, matColor.rgb, matColor.a)
+//
+// O sea que solo hay DOS fuentes de color, y este test mide cuanto aporta cada una.
+// ================================================================================================
+void test_terrain_orbital_albedo() {
+    beginTest("terrain_orbital_albedo");
+
+    // ── FUENTE 1: los tintes de la tabla de materiales ──────────────────────────────────────────
+    const auto table = Haruka::Planet::TerrainMaterialTable::defaults();
+    double worstTint = 0.0; size_t withOwnColor = 0;
+    for (const auto& m : table.materials) {
+        worstTint = std::max(worstTint, (double)std::max(std::max(
+            std::fabs(m.tint.r - 1.0f), std::fabs(m.tint.g - 1.0f)), std::fabs(m.tint.b - 1.0f)));
+        if (m.hasColor()) ++withOwnColor;
+    }
+    std::printf("    %zu materiales · con COLOR propio: %zu · el tinte mas separado del blanco: %.1f %%\n",
+                table.materials.size(), withOwnColor, 100.0 * worstTint);
+    CHECK(withOwnColor == 0, "ningun material por defecto tiene color propio: manda el mapa de biomas");
+    CHECK(worstTint < 0.15, "los tintes son casi blancos (aportan <15 %): el color NO sale de ahi");
+
+    // ── FUENTE 2: el mapa de biomas ─────────────────────────────────────────────────────────────
+    //
+    // ⚠️ SE MIDE LA PALETA QUE DE VERDAD SE HORNEA. Primera version: `BiomesOutput::color`, que es la
+    // tabla de VISUALIZACION y da RMS 0,40 — parecia que habia variedad de sobra. Pero el que hornea
+    // el mapa es `BiomeClassifyNode`, y ese usa `BiomeConfig::evaluate(humedad, tempC)`, que es OTRA
+    // paleta. Medir la tabla equivocada habria cerrado F5 diciendo "el color ya varia, el problema
+    // esta en otro sitio" — y no lo esta.
+    const Haruka::Planet::ClimateOutput climate{};
+    const Haruka::Tools::ProcGraph::BiomeConfig cfg{};
+    std::map<int, size_t> hist;
+    glm::dvec3 sum(0.0); std::vector<glm::vec3> cols;
+    size_t n = 0;
+    for (int a = 0; a < 90; ++a)
+        for (int b = 0; b < 180; ++b) {
+            const double lat = (-89.0 + a * 2.0) * 3.14159265358979 / 180.0;
+            const double lon = (-179.0 + b * 2.0) * 3.14159265358979 / 180.0;
+            const glm::dvec3 d = glm::normalize(glm::dvec3(
+                std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)));
+            // Elevacion del relieve procedural (el bake no esta disponible headless): es la que
+            // decide oceano/tierra y el gradiente vertical de temperatura.
+            const double elevKm = Haruka::Planet::terrainDetail(glm::vec3(d), 6371000.0f, 600.0f) / 1000.0;
+            const bool ocean = elevKm < 0.0;
+            const double t = climate.temperature(d, elevKm, ocean);
+            const double pr = climate.precipitation(d, elevKm, ocean);
+            // ⚠️ SE MIDE EL DISCO ENTERO, MAR INCLUIDO — porque el fondo oceánico TAMBIEN se
+            // clasifica y se pinta, y era ahi donde estaba el "verde uniforme": `humidity` devuelve
+            // 1.0 sobre oceano, asi que el lecho entero ganaba el material humedo.
+            const double hum = climate.groundHumidity(d, elevKm);
+            const glm::vec3 c = cfg.evaluate((float)hum, (float)t);
+            // Histograma por color redondeado: dos biomas con el mismo color son el MISMO color.
+            hist[(int)(c.r * 20) * 10000 + (int)(c.g * 20) * 100 + (int)(c.b * 20)]++;
+            cols.push_back(c); sum += glm::dvec3(c); ++n;
+        }
+    const glm::dvec3 mean = sum / (double)n;
+    double var = 0.0, worstDev = 0.0;
+    for (const glm::vec3& c : cols) {
+        const glm::dvec3 dv = glm::dvec3(c) - mean;
+        const double e = glm::length(dv);
+        var += e * e; worstDev = std::max(worstDev, e);
+    }
+    const double rms = std::sqrt(var / (double)n);
+    std::printf("    DISCO ENTERO: %zu colores distintos sobre %zu direcciones · medio (%.2f, %.2f, %.2f)\n",
+                hist.size(), n, mean.r, mean.g, mean.b);
+    std::printf("    dispersion del color: RMS %.4f · maxima %.4f  (0 = un solo color, 1.73 = maxima posible)\n",
+                rms, worstDev);
+    // Los tres biomas que mas superficie ocupan: si uno solo se lleva casi todo, ahi esta el verde.
+    std::vector<std::pair<size_t,int>> top;
+    for (const auto& kv : hist) top.emplace_back(kv.second, kv.first);
+    std::sort(top.rbegin(), top.rend());
+    for (size_t k = 0; k < std::min<size_t>(3, top.size()); ++k) {
+        const int key = top[k].second;
+        std::printf("      color (%.2f, %.2f, %.2f): %5.1f %% del disco\n",
+                    (key / 10000) / 20.0f, ((key / 100) % 100) / 20.0f, (key % 100) / 20.0f,
+                    100.0 * (double)top[k].first / (double)n);
+    }
+
+    CHECK(hist.size() > 1, "el clasificador produce mas de un color");
+    // LA CIFRA QUE DECIDE: si el bioma dominante se lleva mas del 60 %, el planeta ES uniforme y no
+    // hay tinte de material que lo arregle (aportan <15 %).
+    const double dominant = 100.0 * (double)top[0].first / (double)n;
+    std::printf("    -> el color dominante ocupa el %.1f %% del disco  (con `humidity` en vez de "
+                "`groundHumidity` era el ~80 %%: el verde uniforme)\n", dominant);
+    // LA COTA DEL BUG B/C: ningun color puede llevarse el disco entero. 80 % era el sintoma.
+    CHECK(dominant < 40.0, "COTA B/C: ningun color domina el disco (el fondo oceanico ya no es `green`)");
+
+    // CONTRAPRUEBA: con la humedad de CLIMA (1.0 sobre oceano) el dominio TIENE que dispararse. Sin
+    // esto, un clasificador que devolviera variedad por accidente pasaria el test de arriba.
+    std::map<int, size_t> histOld; size_t nOld = 0;
+    for (int a = 0; a < 90; ++a)
+        for (int b = 0; b < 180; ++b) {
+            const double lat = (-89.0 + a * 2.0) * 3.14159265358979 / 180.0;
+            const double lon = (-179.0 + b * 2.0) * 3.14159265358979 / 180.0;
+            const glm::dvec3 d = glm::normalize(glm::dvec3(
+                std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)));
+            const double elevKm = Haruka::Planet::terrainDetail(glm::vec3(d), 6371000.0f, 600.0f) / 1000.0;
+            const bool oc = elevKm < 0.0;
+            const glm::vec3 c = cfg.evaluate((float)climate.humidity(d, elevKm, oc),
+                                             (float)climate.temperature(d, elevKm, oc));
+            histOld[(int)(c.r * 20) * 10000 + (int)(c.g * 20) * 100 + (int)(c.b * 20)]++;
+            ++nOld;
+        }
+    size_t topOld = 0;
+    for (const auto& kv : histOld) topOld = std::max(topOld, kv.second);
+    const double domOld = 100.0 * (double)topOld / (double)nOld;
+    std::printf("    CONTRAPRUEBA: con la humedad de CLIMA el dominante sube al %.1f %% del disco\n", domOld);
+    CHECK(domOld > dominant + 15.0, "CONTRAPRUEBA: la humedad de oceano SI aplastaba la clasificacion");
+
+    // CONTRAPRUEBA: que el clasificador RESPONDE al clima. Si devolviera siempre lo mismo, todo lo
+    // de arriba saldria "uniforme" sin que el problema estuviera donde se dice.
+    const glm::vec3 cJungla  = cfg.evaluate(0.95f, 28.0f);
+    const glm::vec3 cDesierto = cfg.evaluate(0.05f, 35.0f);
+    const glm::vec3 cHielo    = cfg.evaluate(0.50f, -30.0f);
+    std::printf("    CONTRAPRUEBA: jungla (%.2f,%.2f,%.2f) · desierto (%.2f,%.2f,%.2f) · "
+                "hielo (%.2f,%.2f,%.2f)\n", cJungla.r, cJungla.g, cJungla.b,
+                cDesierto.r, cDesierto.g, cDesierto.b, cHielo.r, cHielo.g, cHielo.b);
+    CHECK(glm::length(cJungla - cDesierto) > 0.2f, "CONTRAPRUEBA: la paleta SI separa climas opuestos");
 }

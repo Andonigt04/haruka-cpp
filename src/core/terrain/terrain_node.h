@@ -314,16 +314,22 @@ inline void nodeFillHeights(const NodeId& n, double planetRadiusM, float* out,
     for (uint32_t v = 0; v < TERRAIN_NODE_TEXELS; ++v)
         for (uint32_t u = 0; u < TERRAIN_NODE_TEXELS; ++u) {
             const glm::dvec3 d = nodeTexelDir(n, u, v);
-            float h = Haruka::Planet::terrainDetail(d, planetRadiusM, triM);
-            // ⚠️ GEMELO de `terrain_node.comp`: base + detalle atenuado, con el detalle recortado
-            // para que no hunda tierra bajo el nivel del mar. Sin `baseFn` esto es SOLO detalle —
-            // que es lo que habia antes, y lo que hacia que el nodo describiera un planeta sin
-            // continentes ni costa, ±4 km por debajo de lo que dibuja el clipmap.
+            // ⚠️ GEMELO de `terrain_node.comp`, y el RADIO importa: el detalle se evalúa con
+            // `baseR = R + baseH`, igual que `clipmap.tese` y que `TerrestrialPlanet::sampleHeight`.
+            // `terrainDetail` muestrea el ruido en `dir·radius`; 4 km de diferencia desplazan la
+            // octava fina 880 unidades de ruido, o sea un relieve distinto. Sin `baseFn` esto es SOLO
+            // detalle sobre R — un planeta sin continentes ni costa.
+            // ⚠️ SIN `baseFn` NO SE ATENUA: `seaLevelAttenuation(0)` vale **0** y dejaría el nodo
+            // PLANO. Lo cazó el hash golden. Con bake, la composición es la del clipmap.
+            float h;
             if (baseFn) {
                 const float baseH = baseFn(d, baseCtx);
-                h *= Haruka::Planet::seaLevelAttenuation(baseH);
+                h = Haruka::Planet::terrainDetail(d, planetRadiusM + (double)baseH, triM)
+                  * Haruka::Planet::seaLevelAttenuation(baseH);
                 if (baseH > 0.0f && h < -baseH) h = -baseH;
                 h += baseH;
+            } else {
+                h = Haruka::Planet::terrainDetail(d, planetRadiusM, triM);
             }
             out[(size_t)v * TERRAIN_NODE_TEXELS + u] = h;
             rg.minM = std::min(rg.minM, h);

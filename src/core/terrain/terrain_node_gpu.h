@@ -59,6 +59,13 @@ public:
         static const float zeros[6 * 4] = {};
         dd.initialData = zeros;
         m_baseDummy = m_dev->createTexture(dd);
+        RHI::TextureDesc hd;                       // 1x1 de relleno para el binding 16
+        hd.width = hd.height = 1; hd.layers = 1;
+        hd.format = RHI::Format::R32F;
+        hd.filter = RHI::Filter::Nearest; hd.wrap = RHI::Wrap::ClampToEdge;
+        static const float zero1 = 0.0f;
+        hd.initialData = &zero1;
+        m_heightDummy = m_dev->createTexture(hd);
         return RHI::valid(m_heights) && RHI::valid(m_params);
     }
 
@@ -68,6 +75,7 @@ public:
         for (auto& b : m_paramRing) if (RHI::valid(b)) m_dev->destroy(b);
         m_paramRing.clear();
         if (RHI::valid(m_baseDummy)) { m_dev->destroy(m_baseDummy); m_baseDummy = {}; }
+        if (RHI::valid(m_heightDummy)) { m_dev->destroy(m_heightDummy); m_heightDummy = {}; }
         if (RHI::valid(m_heights)) { m_dev->destroy(m_heights); m_heights = {}; }
         if (RHI::valid(m_pipe))    { m_dev->destroy(m_pipe);    m_pipe    = {}; }
         m_dev = nullptr;
@@ -100,6 +108,7 @@ public:
         ctx->bindStorageBuffer(1, m_heights);
         const bool hasBase = RHI::valid(m_baseField);
         ctx->bindTexture(15, baseFieldOrDummy());
+        ctx->bindTexture(16, heightTexOrDummy());
 
         size_t issued = 0;
         for (const NodeId& n : pending) {
@@ -115,7 +124,8 @@ public:
             p.grid[3] = slot;
             p.misc[0] = (float)planetRadiusM;
             p.misc[1] = (float)nodeTexelM(n, planetRadiusM);
-            p.misc[2] = hasBase ? 1.0f : 0.0f;   // ¿hay bake que muestrear? (ver `setBaseField`)
+            p.misc[2] = hasBase ? 1.0f : 0.0f;         // ¿hay campo del cubo? (ver `setBaseField`)
+            p.misc[3] = hasHeightTex() ? 1.0f : 0.0f;  // ¿hay bake EQUIRECT? Es el preferido.
             // ⚠️ UN UBO POR DISPATCH. REESCRIBIR UNO SOLO ENTRE DISPATCHES NO FUNCIONA EN VULKAN.
             //
             // Esto era `updateBuffer(m_params, ...)` seguido de `dispatch`, en bucle. En OpenGL el
@@ -132,12 +142,19 @@ public:
             // y los datos por nodo en un SSBO). Aquí basta con que cada dispatch tenga su propio UBO:
             // son 48 B, se reutilizan entre frames y no obliga a tocar el shader — que importa porque
             // los tests de bisección de F1 montan su propio UBO contra el mismo binding.
+            // El buffer se crea con los datos ya dentro cuando es nuevo; los reutilizados van por
+            // `updateBuffer`. (Se probó como hipótesis para una divergencia de 399 m en OpenGL y NO
+            // era la causa — se conserva porque evita un `updateBuffer` en el estreno, no porque
+            // arregle nada.)
+            RHI::BufferHandle pb;
             if (m_paramRing.size() <= issued) {
-                m_paramRing.push_back(m_dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(p),
-                                                          nullptr, RHI::BufferMemory::Dynamic));
+                pb = m_dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(p), &p,
+                                         RHI::BufferMemory::Dynamic);
+                m_paramRing.push_back(pb);
+            } else {
+                pb = m_paramRing[issued];
+                m_dev->updateBuffer(pb, 0, sizeof(p), &p);
             }
-            const RHI::BufferHandle pb = m_paramRing[issued];
-            m_dev->updateBuffer(pb, 0, sizeof(p), &p);
             ctx->bindUniformBuffer(0, pb);
             const uint32_t g = (TERRAIN_NODE_TEXELS + 7u) / 8u;
             ctx->dispatch(g, g, 1);
@@ -159,6 +176,14 @@ public:
      * ata un 1x1 de relleno y el shader lo salta por `uMisc.z`.
      */
     void setBaseField(RHI::TextureHandle t) { m_baseField = t; }
+
+    /// El bake EQUIRECT de altura (binding 16). Es la fuente de elevación que usan el clipmap y la
+    /// física; el campo del cubo es el respaldo. Ver la nota de `terrain_node.comp`.
+    void setHeightTex(RHI::TextureHandle t) { m_heightTex = t; }
+    RHI::TextureHandle heightTexOrDummy() const {
+        return RHI::valid(m_heightTex) ? m_heightTex : m_heightDummy;
+    }
+    bool hasHeightTex() const { return RHI::valid(m_heightTex); }
 
     /// Modo de salida del compute para BISECAR (0 = producción). Ver `uGrid.z` en el shader.
     void setDebugMode(int m) { m_debugMode = m; }
@@ -182,6 +207,7 @@ private:
     RHI::BufferHandle   m_heights{};
     int                 m_debugMode = 0;
     RHI::TextureHandle  m_baseField{}, m_baseDummy{};
+    RHI::TextureHandle  m_heightTex{}, m_heightDummy{};
     RHI::BufferHandle   m_params{};
     /// Un UBO por dispatch de la tanda (ver la nota en `generatePending`). Crece y no encoge.
     std::vector<RHI::BufferHandle> m_paramRing;

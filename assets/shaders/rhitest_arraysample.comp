@@ -1,0 +1,32 @@
+#version 460 core
+/**
+ * @file rhitest_arraysample.comp
+ * @brief REPRO MINIMO: ¿puede un COMPUTE muestrear un `sampler2DArray` en cada backend?
+ *
+ * Existe porque `terrain_node.comp` lee el bake del planeta por esta vía y en OpenGL devolvía 0 en
+ * los 16 641 téxeles —terreno sin continentes— mientras en Vulkan casaba a 0,0007 m. Sobre el pase
+ * entero no se podía aislar: hay pool, parámetros, publicación y un shader de 150 líneas de por
+ * medio. Aquí solo queda la pregunta.
+ *
+ * Escribe en el SSBO, por capa: el valor muestreado y el tamaño que el shader cree que tiene.
+ */
+layout(local_size_x = 1) in;
+
+layout(binding = 3) uniform sampler2DArray uArr;
+layout(binding = 4) uniform sampler2D      uTex;   // control: ¿falla CUALQUIER sampler, o solo los array?
+layout(std430, binding = 1) writeonly buffer Out { float uOut[]; };
+
+void main() {
+    // ⚠️ CANARIO. Sin esto, un dispatch que NO se ejecute deja el buffer como estaba y se lee como
+    // "el sampler devuelve 0" — acusando a la textura de un fallo que es del dispatch.
+    uOut[16] = 12345.0;   // hueco PROPIO: 0-15 los usan las capas y los controles
+    const int n = textureSize(uArr, 0).x;
+    for (int layer = 0; layer < 6; ++layer) {
+        uOut[layer]     = texelFetch(uArr, ivec3(0, 0, layer), 0).r;
+        uOut[6 + layer] = texture(uArr, vec3(0.5, 0.5, float(layer))).r;
+    }
+    uOut[12] = float(n);                       // 0 aquí = el sampler no está atado
+    uOut[13] = float(textureSize(uArr, 0).z);  // capas que ve el shader
+    uOut[14] = float(textureSize(uTex, 0).x);  // el control: sampler2D normal
+    uOut[15] = texelFetch(uTex, ivec2(0, 0), 0).r;
+}

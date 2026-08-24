@@ -688,9 +688,20 @@ void Application::renderFrameContent() {
 
     // Cielo atmosférico: color por elevación solar + altitud (azul de día → cálido al
     // amanecer/atardecer → oscuro de noche → negro en el espacio). Fallback oscuro.
-    glm::vec3 sky(0.01f);
-    if (_worldSystem && _camera) { HARUKA_PROFILE("world.getSkyColor");
-        sky = _worldSystem->getSkyColor(glm::dvec3(_camera->position)); }
+    // ⚠️ SIN PLANETA ACTIVO EL CIELO NO ES "OSCURO": ES QUE NO HAY CIELO.
+    //
+    // `getSkyColor` devuelve ~0,005 cuando no hay planeta —lo correcto para el espacio— y el frame se
+    // limpiaba con eso. En el editor, o con la escena vacía, el resultado es un viewport casi negro
+    // que parece roto: no distingues "no hay nada que dibujar" de "el render ha fallado".
+    //
+    // Ahora el fondo neutro es EXPLÍCITO y solo se usa cuando de verdad no hay mundo del que sacar
+    // un cielo. Con planeta activo no cambia nada.
+    constexpr glm::vec3 kNoWorldClear(0.12f, 0.13f, 0.15f);   // gris azulado declarado, no un cielo
+    glm::vec3 sky = kNoWorldClear;
+    if (_worldSystem && _camera && _worldSystem->hasActivePlanet()) {
+        HARUKA_PROFILE("world.getSkyColor");
+        sky = _worldSystem->getSkyColor(glm::dvec3(_camera->position));
+    }
     RHI::Device* frameDev = RHI::device();
     RHI::Context* frameCtx = nullptr;
     { HARUKA_PROFILE("rhi.beginFrame"); frameCtx = frameDev ? frameDev->beginFrame() : nullptr; }
