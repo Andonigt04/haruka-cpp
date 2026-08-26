@@ -364,9 +364,34 @@ public:
         // que por dentro rehacía la búsqueda del planeta —dos bucles y una comparación de `std::string`—
         // en cada una de las 235 564 muestras, para un puntero que no cambia. `heightAt` hace las mismas
         // cuentas que hacía aquella, así que el resultado es idéntico bit a bit.
-        const glm::dvec3 wp = pc + dir * R;
+        // ⚠️ SE MUESTREABA A NIVEL DEL MAR Y EL VERTICE REPRESENTA EL PUNTO A `R+h`.
+        //
+        // `dir` es la direccion del nodo tangente `(x,z)` medido sobre la esfera de radio R. Pero el
+        // vertice que Jolt coloca en `(x,z)` de su rejilla PLANA representa el punto de SUPERFICIE, a
+        // radio `R+h` — y ese punto no cae en la tangente `x`, cae en `x·(R+h)/R`, porque el rayo se
+        // abre con el radio. O sea que la altura guardada era la del terreno en OTRO punto,
+        // desplazado lateralmente `x·h/R`.
+        //
+        // Con el jugador a 991 m eso son **4,08 cm de desplazamiento a 256 m** de radio
+        // (`terrain_ring_sample_lateral_shift`), y el error de altura que produce es ese
+        // desplazamiento por la PENDIENTE local — por eso aparece como picos donde el terreno tiene
+        // aristas y no se nota donde es llano. El autotest del alambre lo veia como "el vertice no
+        // cae sobre la funcion": media 1,4 mm, picos de 2-4 cm.
+        //
+        // Una sola iteracion basta: se toma la altura a nivel del mar, se corrige la direccion con
+        // ella y se vuelve a muestrear donde el vertice va a estar DE VERDAD. La correccion es de
+        // 1e-4 relativo, asi que la segunda iteracion no compraria nada.
+        const double h0 = src ? src.heightAt(pc + dir * R, triM)
+                              : m_planetary->sampleTerrainHeight(pc + dir * R, triM);
+        // ⚠️ EL FACTOR VA AL REVES DE LO QUE PARECE, Y SE PROBO MAL PRIMERO (media 0,0014 -> 0,0034).
+        // El vertice que Jolt coloca en `(x, altura, z)` esta a distancia `R + altura` del centro,
+        // asi que la razon tangencial de SU direccion es `r/(R+h)` — MENOR que la de `dir`, que es
+        // `r/R`. Para muestrear donde el vertice va a estar hay que CERRAR el rayo, no abrirlo.
+        const double k = R / (R + h0);
+        const glm::dvec3 dir2 = glm::normalize(up + (t1d * (x * k)) / R + (hzd * (z * k)) / R);
+        const glm::dvec3 wp = pc + dir2 * (R + h0);
         const double h = src ? src.heightAt(wp, triM) : m_planetary->sampleTerrainHeight(wp, triM);
-        return (float)glm::dot(pc + dir * (R + h) - org, up);
+        return (float)glm::dot(pc + dir2 * (R + h) - org, up);
     }
 
     // EL TERRENO COMO PILA DE ANILLOS (ver IWorldProvider). Nivel 0 = el bloque cercano de siempre;

@@ -29,6 +29,7 @@ int main(int argc, char** argv) {
     if (want("physics"))                  test_physics_mesh_ground();
     if (want("physics"))                  test_physics_static_wall();
     if (want("physics"))                  test_physics_character();
+    if (want("physics"))                  test_physics_character_resting_velocity();
     if (want("physics"))                  test_physics_body_removal();
     if (want("physics") || want("rail"))   test_rail_mechanism_jolt();
     if (want("construction") || want("build")) test_construction_placement();
@@ -91,12 +92,16 @@ int main(int argc, char** argv) {
         test_terrain_node_pool();
         test_terrain_node_pool_reuse();
         test_terrain_node_pool_chain();
+        test_terrain_node_overlap_on_turn();
         test_terrain_node_normal_matches_geometry();
         test_terrain_node_radial_noise_shift();
         test_terrain_node_octave_cut_nyquist();
         test_terrain_node_quad_diagonal_bias();
         test_terrain_node_float_dir_quantisation();
         test_terrain_collision_walkability();
+        test_terrain_ring_anchor_drift();
+        test_terrain_render_vs_reference_cut();
+        test_terrain_ring_sample_lateral_shift();
         test_terrain_node_stride_history_loss();
         test_terrain_node_winding();
         test_terrain_node_stitch();

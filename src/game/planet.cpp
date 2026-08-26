@@ -3669,6 +3669,13 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // se dibuja: una barrera dentro del render pass invalida el command buffer en Vulkan.
             const auto st = m_nodeRenderer.draw(ctx, cameraPos, m_config.position,
                                                 m_config.radius, rotVP);
+            // ⚠️ EL PICO, NO EL INSTANTE. La sabana gruesa al girar dura UN frame, y este log muestrea
+            // 1 de cada 120: el valor instantaneo casi siempre sale 0 aunque el bug este vivo. Se
+            // guarda el maximo de la ventana, que es lo que hay que mirar para decir que no pasa.
+            static size_t s_peakAnc = 0, s_peakCov = 0; static uint32_t s_peakDrop = 0;
+            s_peakAnc = std::max(s_peakAnc, st.ancestors);
+            s_peakCov = std::max(s_peakCov, st.covered);
+            s_peakDrop = std::max(s_peakDrop, st.coveredDrop);
             static int s_log = 0;
             if ((s_log++ % 120) == 0)
                 // ⚠️ LOS DOS RECORTES POR SEPARADO. Con "frustum descarto" a secas no se distingue el
@@ -3676,19 +3683,21 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 // cortados"). Los dos estan probados por tests contra rayos de pantalla —cero
                 // descartes indebidos en ambos— asi que si aqui salen cifras altas, el que miente es
                 // el test, no el motor. Ese es el dato que falta.
-                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu) · "
+                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu, TAPADOS %zu) · "
                             "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu"
                             " · tope del selector %zu%s · stride %u..%u en %u draws · %.1f M tris · residentes %zu/%zu"
                             " · SIN RANGO %zu"
-                            " · alt %.0f m",
-                            st.selected, st.drawn, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
+                            " · alt %.0f m · desalojos %zu · publish RECHAZADO %zu · PICO en 120 frames: por ancestro %zu, TAPADOS %zu a %u niveles",
+                            st.selected, st.drawn, st.noSlot, st.ancestors, st.covered, st.levelMin, st.levelMax,
                             st.farthestKm, st.culledFrustum, st.culledHorizon,
                             st.selBudget,
                             (st.selBudget > 0 && st.selected + 8 >= st.selBudget) ? " SATURADO" : "",
                             st.strideMin, st.stride, st.drawCalls,
                             (double)st.tris / 1e6,
                             st.resident, m_nodeRenderer.capacity(), st.rangeMissing,
-                            glm::length(cameraPos - m_config.position) - m_config.radius);
+                            glm::length(cameraPos - m_config.position) - m_config.radius,
+                            st.evicted, st.pubFailed, s_peakAnc, s_peakCov, s_peakDrop),
+                (void)(s_peakAnc = 0), (void)(s_peakCov = 0), (void)(s_peakDrop = 0);
             v5Drew = st.drawn > 0;
         }
     }

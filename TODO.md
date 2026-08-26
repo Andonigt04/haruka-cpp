@@ -8,8 +8,11 @@ Nada de plan por versión.
 | Bugs abiertos · verificaciones pendientes · ideas sin decidir. | [ROADMAP.md](ROADMAP.md) — el plan por versión de los tres proyectos. |
 | | [docs/HISTORIAL.md](docs/HISTORIAL.md) — lo cerrado, con las trampas que costaron sesiones. |
 
-**Suite**: `./haruka_tests` → **26062 OK · 0 FALLOS** · RHI: `./haruka_tests_rhi` →
-**226 OK · 0 FALLOS** en los dos backends (2026-08-24). ⚠️ El rojo de `terrain_quality_mapping` que
+**Suite**: `./haruka_tests` → **26 071 OK · 0 FALLOS** · RHI: `./haruka_tests_rhi` →
+**270 OK · 0 FALLOS** en los dos backends (2026-08-25).
+⚠️ **Los tiempos dependen del ÁRBOL**: `Survival/build` está en `RelWithDebInfo` y la suite CPU entera
+tarda **~95 s**; `haruka-cpp/build` está en **`Debug`** y ahí no termina en 260 s. Mirar
+`CMAKE_BUILD_TYPE` antes de citar un tiempo. ⚠️ El rojo de `terrain_quality_mapping` que
 arrastraba desde el 2026-08-18 **no era un bug del código**: el test esperaba `Low` desde antes de que
 la deduplicación de capas (9 → 4 imágenes, 1,6 GB → 716 MB) hiciera asequible `Medium` por defecto.
 ⚠️ **Para medir tiempos, `HARUKA_NO_VSYNC=1`**: con FIFO cualquier ms/frame se clava en 16,67 y mide
@@ -21,7 +24,45 @@ recuento de arriba es el de la última ejecución real, no una estimación.*
 
 ---
 
+## ✅ Sesión del 2026-08-25 — los pinchos del terreno, cerrados
+
+Andoni los reportó y sobrevivieron a nueve causas medidas y descartadas. **La causa era de precisión y
+ningún test podía verla: todos calculan en double.** Lo destapó mirar el VS Output en RenderDoc
+(los pinchos estaban en la GEOMETRÍA) y medir el período de la estría sobre el PNG.
+
+| qué | antes | ahora |
+|---|---|---|
+| **Dirección del vértice en FLOAT** (`terrain_node.vert` usaba `harukaCubeFaceToDirF`, el compute la de double) | **0,2148 m = 36 % del téxel**, ruido a la frecuencia de la malla | double, y el producto de magnitud planetaria también |
+| Grietas entre nodos (T-junction del cosido) | 8-21 px en 7 encuadres | **0 en los 7** |
+| Escalón entre niveles | 2,747 m | **0,785 m** (mapa del ABUELO en el hueco) |
+| Grieta del morph por nodo | 10,07 m | **0 exacto** (morph por VÉRTICE) |
+| Corrugado del sombreado | marco tangente inventado | ejes reales del téxel |
+| Suelo de colisión reesculpiéndose al andar | ancla saltaba 3,785 m = **0,430 de celda** | **0,000 de celda** |
+
+**Reglas que salieron de los intentos fallidos, y conviene no volver a romperlas:**
+
+1. **El morph tiene que ser función SOLO de (nivel, posición del vértice).** En cuanto mira a los
+   vecinos, dos nodos del mismo nivel con vecindarios distintos evalúan distinto el punto que
+   comparten. Cinco parches murieron por esto (rampas, estrechamiento, apagado junto a vecino fino,
+   clamp de arista, mapa por stride sin ajustar el morph).
+2. **Un gemelo en double no puede medir un fallo de precisión float.** Es estructural: el instrumento
+   y el fallo viven en aritméticas distintas.
+3. **Un cambio que deja los números EXACTAMENTE iguales es un no-op.** Pasó dos veces en la sesión.
+4. **¿Sobre cuántos puntos se ha medido?** El test de grietas daba 0 con UN encuadre (1030 m) y 21 con
+   siete — la altitud que se medía era la más limpia de todas.
+
+**Borrado por medida:** el morph por ARISTA entero (2,747 m con y sin él; 8/11 px en GPU antes y
+después). Eran dos capas de parche que no cerraban nada.
+
+**Herramientas nuevas:** vista de depuración **5** (nivel/cara/stride exactos por píxel, para leer con
+`readPixels` y atribuir un agujero) y **6** (la normal como color). `HARUKA_CHAR_STEPUP` /
+`HARUKA_CHAR_STEPDOWN` para A/B-ear el controlador sin recompilar. El autotest del alambre de colisión
+ahora dice **dónde** está el peor vértice, no solo cuánto.
+
+---
+
 ## 🐛 Bugs abiertos
+
 
 ### Motor
 
@@ -48,6 +89,145 @@ recuento de arriba es el de la última ejecución real, no una estimación.*
 **IDÉNTICO en todas las etapas del mismo programa**. Declararlo con menos campos en una de ellas da
 `definitions of uniform block do not match` **al LINKAR**, no al compilar, y el pase se queda mudo
 sin error visible. `simple.vert` linka con `final.frag` **y** con `preview.frag`: los tres van a la vez.
+
+### 🔴 ABIERTO — la colisión no coincide con el render (2026-08-25)
+
+Andoni lo confirmó mirando el alambre (`HARUKA_COLLISION_WIRE=1`): *"no son iguales"*. El autotest del
+propio motor lo mide y dice explícitamente que debería ser ~0:
+
+    AUTOTEST del alambre: peor 0,0418 m · media 0,0014 m · radio tangente 6..274 m
+    distribucion: 4 de 141 por encima de 2 cm · 0 por encima de 5 cm  ->  OUTLIERS
+    el PEOR: radio tangente 76,7 m · malla 991,652 m vs funcion 991,694 m (delta -0,0418 m)
+
+**Es la forma de "me engancho en sitios concretos"**, no de "el suelo entero está mal": 4 vértices de
+141 pasan de 2 cm, la media es 1,4 mm. Rango observado del pico entre ejecuciones: 0,04-0,10 m.
+
+**Ya descartado, con medida:**
+- **No es el corte de octavas.** El render corta en el téxel (0,5965 m) y la referencia en
+  `TERRAIN_TRIM_FLOOR` (0,5 m), y la diferencia de altura es **0,0000 m**: las dos cotas caen bajo la
+  guarda de la octava fina, que entra con peso 1 en ambas (`terrain_render_vs_reference_cut`).
+- **No es el LOD.** Las columnas `triM0` y `triMr` del autotest dan lo mismo.
+- **No es la forma del terreno.** 13,8° de pendiente máxima entre celdas de colisión y 0,123 m de
+  desnivel, contra un límite de 50° y un escalón de 0,40 m (`terrain_collision_walkability`).
+- **No es el ancla** (arreglado hoy: 0,000 de celda de desfase).
+- **No es la dirección de muestreo en float** (arreglada hoy en `ringSample`; el twist del propio
+  motor bajó 0,035 → 0,029 m).
+
+**Encontrado un contribuyente real, medido, que explica la MEDIA pero no el pico**
+(`terrain_ring_sample_lateral_shift`): `ringSample` muestrea la altura en `pc + dir·R` —a **nivel del
+mar**— pero el vértice representa el punto a `R+h`, que cae en la tangente `x·(R+h)/R`, no en `x`.
+Jolt lo coloca en `x`. Con el jugador a 991 m:
+
+| radio | desplazamiento lateral | error de altura |
+|---|---|---|
+| 77 m | 0,0121 m | 0,0025 m |
+| 256 m | **0,0408 m** | 0,0074 m |
+
+✅ **ARREGLADO (2026-08-25)**: `ringSample` corrige la dirección con la altura y vuelve a muestrear
+donde el vértice va a estar de verdad (una sola iteración; la corrección es de 1e-4 relativo).
+
+| autotest del alambre | antes | ahora |
+|---|---|---|
+| media | 0,0014 m | **0,0004 m** |
+| vértices por encima de 2 cm | 4 de 146 | **1 de 146** |
+| pico | 0,0418 m | 0,0418 m (el mismo vértice) |
+
+⚠️ **El factor va al revés de lo que parece, y se probó mal primero** (media 0,0014 → 0,0034 y de 4 a
+10 outliers): el vértice que Jolt coloca en `(x, altura, z)` está a `R + altura` del centro, así que
+la razón tangencial de SU dirección es `r/(R+h)` — **menor** que la de `dir`. Hay que CERRAR el rayo
+(`k = R/(R+h)`), no abrirlo.
+
+**Queda UN outlier**, siempre el mismo: radio 78,4 m, delta −0,0418 m, anillo 2 (celda 2 m). No lo
+mueve la corrección, así que es de otra causa y está sin identificar.
+
+⚠️ Medir esto con solo el detalle (sin la altitud base) da 0,0001 m y parece despreciable: el efecto
+es proporcional a `h/R` y **la base es 991 m de los 991**. Un test sin bake mide otro problema.
+
+⚠️ Y un efecto colateral medido que nadie evaluó: la celda del anillo fino bajó de **4 m a 0,5 m** por
+paridad, y la cápsula pasó de tocar 1-2 triángulos a **7 estando quieta** (`CharContacts`, con
+`HARUKA_DIAG=1`). Con `mWalkStairsStepUp = 0,40 m` sobre baches de 0,12 m, el camino de «subir
+escalera» de Jolt se dispara en terreno normal. `HARUKA_CHAR_STEPUP` / `HARUKA_CHAR_STEPDOWN` lo dejan
+probar sin recompilar.
+
+### ✅ CERRADO — "me atasco, me deslizo, va pesado y me muevo estando quieto" (2026-08-26)
+
+**No era la forma del suelo.** El personaje PARADO acumulaba la caída sin tope. La sonda `CharContacts`,
+quieto sobre terreno llano (`HARUKA_DIAG=1`):
+
+    onGround=1 · v radial -11.4 m/s · v TANGENCIAL 0.005 m/s
+    onGround=1 · v radial -21.4 m/s · v TANGENCIAL 0.005 m/s
+    ...
+    onGround=1 · v radial -83.4 m/s · v TANGENCIAL 0.005 m/s      ← ≈ -10 m/s por segundo
+
+`CharacterVirtual` **no devuelve la velocidad cancelada por el contacto** (no es un rígido), y
+`physics_engine.cpp` integraba `gvec * dt` en TODOS los pasos. A 83 m/s el personaje pide meterse
+**1,3 m dentro del terreno cada frame** y la colisión lo expulsa: caro (pesado), inestable (el sentido
+de la expulsión depende de qué triángulos toque → "me redirige", "pisa un montículo") y errático con el
+paso de escalera. Los cuatro síntomas, una causa. La tangencial era 0,005 m/s: **no resbalaba**.
+
+**Arreglo** (patrón de los ejemplos de Jolt): la gravedad se integra **sólo en el aire**; apoyado se
+anula la componente que empuja contra el suelo. A `ExtendedUpdate` se le sigue pasando `inGravity`,
+que la usa para el escalón y el pegado al suelo.
+
+| quieto sobre el suelo | antes | ahora |
+|---|---|---|
+| v radial tras 8 s | −83,4 m/s | **±0,000 m/s** |
+| v tangencial | 0,005 m/s | 0,000 m/s |
+
+Test de regresión `physics_character_resting_velocity`, con **contraprueba del propio test**: con el
+`if` desactivado a mano da 78,5 m/s y FALLA; con el arreglo, 0,163 m/s. Y dos contrapruebas dentro
+(sin ellas lo aprobaría un motor sin gravedad, que es peor que el bug): **(B)** en el aire la gravedad
+sigue viva (−9,802 m/s tras 1 s) y **(C)** apoyado, la velocidad tangencial que se le impone sobrevive
+(anda a 4,00 m/s). ⚠️ `Y=0,500` en los dos casos: **no se hundía**, sólo se clavaba — por eso el bug
+era invisible mirando la posición.
+
+### ✅ CERRADO — "al girar la cámara aparece un segundo terreno encima" (2026-08-26)
+
+**El fallback por ancestro dibuja el nodo ancestro ENTERO**, y un ancestro cubre a sus cuatro hijos, no
+solo al que falta. Si una hoja no está residente pero sus hermanas sí, se emiten las dos cosas: el
+padre (que tapa las cuatro cuartas partes) y las hermanas finas. Dos superficies en el mismo sitio. Y
+como el ancestro puede estar muchos niveles por encima, **una sola hoja que falta en el borde del
+frustum pinta una sábana sobre toda la vista**.
+
+Medido con la cámara girando y el pool **caliente** (`terrain_node_overlap_on_turn`, 60 frames de
+calentamiento antes de medir — hacerlo en frío mide la carga inicial, que es otra cosa):
+
+| girando | emitidos | tapados por un ancestro |
+|---|---|---|
+| como estaba | 499 | **457 (91,6 %)** |
+| re-resolviendo | 252 | **0** |
+| quieto (contraprueba) | 252 | 0 |
+
+Las dos superficies se separan hasta **20,6 m** (el peor tapado, 7 niveles bajo su ancestro).
+
+**No era falta de recursos**, y esto descartó la explicación fácil: 0 desalojos, 364 residentes de
+2048, y 8-20 fallos por frame contra un presupuesto de 170. Lo que faltaba era **usar lo que ya se
+había generado antes de dibujar**: la resolución se hacía ANTES de generar, así que la hoja nueva se
+resolvía contra un pool que todavía no la tenía. Traza por frame del giro:
+
+    f1 tapados  59 (caida 4 niv)    f4 tapados 274 (caida 7 niv)
+    f2 tapados  18 (caida 2 niv)    f5 tapados  35 (caida 2 niv)
+
+Un destello de un frame, cada dos frames, mientras giras.
+
+**Dos arreglos, los dos medidos:**
+1. **Re-resolver tras generar**, en el mismo frame (`terrain_node_renderer.h`). 457 tapados → 0, y de
+   regalo el conjunto dibujado baja de 499 a 252 instancias: los ancestros gordos ya no se emiten.
+2. **`nodeCoveredMask`** deja el conjunto como una PARTICIÓN (solo los maximales) para cuando el
+   presupuesto no dé de sí. No abre agujeros —lo que se quita estaba tapado por algo que sigue— y **no
+   empeora el LOD: el peor error en pantalla es el mismo, 31,9 px**, porque el ancestro ya se dibujaba.
+   Solo corre si hubo alguna caída por ancestro; en régimen no corre.
+
+⚠️ **El log casi lo esconde.** `TerrenoV5` imprime 1 de cada 120 frames y el valor instantáneo daba
+`TAPADOS 0` siempre. Con el **pico de la ventana**, el mismo log en el juego da `TAPADOS 1238 a 14
+niveles` — peor que en el banco headless. Para un artefacto de un frame hay que loguear el máximo del
+intervalo. (Y el vsync no revela un destello, lo **alarga**: con los fps capados dura más en pantalla.)
+
+**Lo que queda, y es OTRA cosa:** el pico residual de 14 niveles sale en dos sitios, ninguno es girar:
+la **carga inicial** y el momento en que el pool llega a 2048/2048 y empieza a desalojar. Con
+`HARUKA_TERRAIN_V5_POOL=3072` los desalojos se paran en 4 811 y quedan **doce ventanas seguidas a 0**.
+`publish RECHAZADO 0` en todos los casos, así que no es que no quepa: es el LRU rompiendo eslabones de
+la cadena mientras el conjunto de trabajo todavía crece. Sin decidir si compensa la VRAM (195 KB/nodo).
 
 ### Reportado por el autor, sin reproducir
 
@@ -97,7 +277,7 @@ la esfera de agua, que es lo que descartó la primera.
 | 7 | **¿El personaje se desliza, o son los edificios?** Los edificios son estáticos, así que un deslizamiento relativo apunta al PERSONAJE o al origin-shift del render a gran distancia. **Cómo separarlo**: pararse quieto mirando un edificio y ver si DERIVA (→ render/precisión) o si solo pasa al andar (→ controlador). | Sin diagnosticar |
 | 8 | **Cintas de mar**: si el recorte del shader (`kSeaMinDepthKm=0.006`) no basta, la raíz es la generación (mid-relief hundiendo tierra bajo el mar) → riesgo de paridad. Tocarlo **con el test delante**. | Mitigado, no resuelto |
 | 10 | **Los props no casan con el suelo que se dibuja** (reportado 2026-08-25). Se anclan con `sampleHeight`, que NO aplica el **geomorph por distancia** que sí aplica el render: `nodeParentMorph` mueve la superficie hacia la altura del padre según te acercas o alejas (hasta ~0,039 m a un nivel), y el prop se queda donde se plantó. Síntoma esperado: se hunden y salen **al moverte**, no estando quieto. **Descartado por medida**: el corte de octavas NO es la causa — en el nivel 17 `terrainTriM(0)`=0,5 m y el téxel 0,596 m dan la MISMA altura (0,0000 m), y donde difieren (0,333 m en nivel 15) cae a 0,14 px porque error y distancia escalan juntos. Ver `terrain_prop_anchor_mismatch`. **Cómo separarlo**: acercarse y alejarse de un árbol; si se hunde/sale → geomorph; si está mal puesto y quieto → otra cosa. | Causa acotada, sin arreglar |
-| 11 | **Pinchos por caída profunda a ancestro** (reportado 2026-08-25). El SELECTOR sale 2:1 (0 saltos de >1 nivel), pero el conjunto DIBUJADO no: un nodo sin hueco cae a un ancestro y aparecen saltos de hasta 4 niveles (191 parejas de 11 304 con 23 nodos caídos). El cosido coloca la arista pero el geomorph apunta al PADRE, así que a 4 niveles quedan **1,372 m** de escalón (0,339 m ya a dos). ⚠️ **Equilibrar bajando de nivel está DESCARTADO por medida**: arrastra descendientes en cascada y deja **2 902 nodos en 277**. El arreglo va en la política del POOL (garantizar el padre de lo seleccionado). Ver `terrain_node_level_balance`. | Causa medida, arreglo descartado |
+| ~~11~~ | ✅ **CERRADOS (2026-08-25)**: no era la caída a ancestro (el juego reporta `por ancestro 0`). Era la dirección del vértice en FLOAT — 0,2148 m, el **36 % del téxel**, ruido a la frecuencia de la malla. Ver la sección de la sesión. La cadena de ancestros del pool se implementó igualmente (11 → 5 niveles al girar), pero el A/B demostró que las caídas profundas eran **transitorias**, no un estado estable. | `terrain_node.vert` |
 | 12 | **Desde órbita el terreno se recorta / no se muestra bien en las esquinas** (reportado 2026-08-25). ⚠️ **NO es el recorte de nodos**: medido con rayos por el cuadro a 500/1000/2000/20000 km, **0 píxeles de planeta sin nodo que los cubra**, con presupuesto infinito y con el real del juego (3072). Y desde órbita el selector solo pide 638-1031 nodos, así que tampoco satura. El cono circunscribe las esquinas por construcción (`atan(t·√(1+aspect²))`). Ver `terrain_node_orbit_coverage`. **Quedan por descartar**: (a) el POOL — nodos elegidos sin hueco al llegar a órbita, 638 nuevos a 170/frame = ~4 frames; el log lo dice en `SIN HUECO n`; (b) la PROYECCIÓN — plano lejano / reversed-Z a distancia orbital, que recortaría geometría ya dibujada. | Selector descartado; causa sin encontrar |
 | 9 | **Perf de la colisión**: parche frío de frontera ~43 ms. Mitigado por el refresco async (no bloquea el frame). Optimizar solo si molesta. | Aceptable |
 

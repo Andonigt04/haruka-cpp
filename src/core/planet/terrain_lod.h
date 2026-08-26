@@ -708,13 +708,36 @@ inline void terrainClipFrame(const glm::dvec3& cameraPos, const glm::dvec3& plan
     // longitudinal se encoge con el coseno de la latitud, así que el anclaje NO es uniforme en
     // metros — da igual: lo que hace falta es que no se MUEVA entre saltos, no que sea equiespaciado.
     if (snapRadius > 0.0) {
-        const double step = TERRAIN_CLIP_QUAD_M / snapRadius;    // radianes por celda
-        if (step > 0.0) {
+        // ⚠️ EL PASO TIENE QUE SER UNIFORME EN METROS, Y AQUI NO LO ERA.
+        //
+        // Antes se cuantizaba lat y lon con el MISMO paso en radianes, con esta justificacion:
+        // *"el paso longitudinal se encoge con el coseno de la latitud, asi que el anclaje NO es
+        // uniforme en metros — da igual: lo que hace falta es que no se MUEVA entre saltos"*.
+        //
+        // **No da igual.** Los nodos de los anillos de colision son offsets FIJOS desde el ancla, asi
+        // que lo que importa no es que el ancla este quieta entre saltos: es que cuando SALTE, lo
+        // haga un multiplo exacto de la celda del anillo. Solo entonces cada muestra nueva aterriza
+        // donde ya habia una y la superficie que Jolt colisiona es IDENTICA antes y despues.
+        //
+        // Con el paso en radianes el salto salia `QUAD_M · cos(lat)` — medido a lat 18,9°:
+        // **3,785 m contra los 4,000 m del quad**, o sea un desfase de **0,430 de celda**, casi el
+        // peor posible. Cada pocos metros de caminata el suelo se re-muestreaba en posiciones
+        // sub-celda distintas y cambiaba de forma sin que el terreno cambiara: reportado como
+        // "me atasco, me deslizo y va pesado" (`terrain_ring_anchor_drift`).
+        //
+        // El paso de LATITUD ya era uniforme (`QUAD_M/R` radianes = QUAD_M metros). El de LONGITUD
+        // necesita dividirse ademas por `cos(lat)`. Se usa la latitud YA CUANTIZADA para que la
+        // reticula de longitud no dependa de la posicion exacta dentro de la banda.
+        const double stepLat = TERRAIN_CLIP_QUAD_M / snapRadius;   // radianes = QUAD_M metros
+        if (stepLat > 0.0) {
             const double lat = std::asin(glm::clamp(up.y, -1.0, 1.0));
             const double lon = std::atan2(up.z, up.x);
-            const double latS = std::round(lat / step) * step;
-            const double lonS = std::round(lon / step) * step;
-            const double cl = std::cos(latS);
+            const double latS = std::round(lat / stepLat) * stepLat;
+            const double cl   = std::cos(latS);
+            // Cerca del polo el paralelo se encoge a cero y el paso tenderia a infinito: ahi se deja
+            // el de latitud, que es lo unico con sentido (y el terreno polar no es caso de uso hoy).
+            const double stepLon = (cl > 1e-3) ? (stepLat / cl) : stepLat;
+            const double lonS = std::round(lon / stepLon) * stepLon;
             up = glm::dvec3(cl * std::cos(lonS), std::sin(latS), cl * std::sin(lonS));
         }
     }

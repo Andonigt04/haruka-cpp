@@ -57,6 +57,7 @@ void test_physics_radial_fall();
 void test_physics_mesh_ground();
 void test_physics_static_wall();
 void test_physics_character();
+void test_physics_character_resting_velocity();
 void test_physics_body_removal();
 // Sistema de construcción  (test_construction.cpp)
 void test_construction_placement();
@@ -196,6 +197,7 @@ void test_terrain_node_pool_reuse();
 // La caida por ancestro no puede saltarse niveles: el selector solo pide HOJAS, asi que el pool
 // tiene que encolar tambien la cadena. A/B con `setChainAncestors`, con el presupuesto real.
 void test_terrain_node_pool_chain();
+void test_terrain_node_overlap_on_turn();
 // La normal se calculaba a ±1 texel mientras la geometria se dibuja cada `stride`: iluminacion de una
 // superficie que no existe, y se lee como pinchos DENTRO del nodo.
 void test_terrain_node_normal_matches_geometry();
@@ -214,6 +216,15 @@ void test_terrain_node_float_dir_quantisation();
 // Pendiente del suelo QUE SE PISA a la escala de la celda de colision, contra los limites del
 // controlador (50 gr, escalon 0,40 m). Contesta "andar se hace dificil" con numeros.
 void test_terrain_collision_walkability();
+// Los puntos de muestreo de la colision son offsets desde un ancla que salta con el jugador: cuando
+// salta, el suelo se re-muestrea en otros sitios. El render no tiene ese problema (enteros).
+void test_terrain_ring_anchor_drift();
+// El render corta las octavas en el TEXEL del nodo (0,596 m) y la referencia en TERRAIN_TRIM_FLOOR
+// (0,5 m): dos superficies distintas EN TODAS PARTES, no en vertices sueltos.
+void test_terrain_render_vs_reference_cut();
+// `ringSample` muestrea a nivel del mar y el vertice representa el punto a R+h: el punto real cae en
+// `x*(R+h)/R`, no en `x`. Mide ese desplazamiento lateral y el error de altura que produce.
+void test_terrain_ring_sample_lateral_shift();
 // La histeresis del stride se PIERDE cuando un nodo sale del conjunto dibujado un frame: vuelve sin
 // banda muerta. Es el hueco entre `walk_shimmer` (historia perfecta) y `stride_pop` (tamano del pop).
 void test_terrain_node_stride_history_loss();

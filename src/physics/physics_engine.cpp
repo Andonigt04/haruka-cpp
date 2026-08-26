@@ -862,15 +862,60 @@ struct PhysicsEngine::JoltImpl {
         // `inGravity` solo sirve para empujar hacia abajo cuando estás encima de algo). Sin esto el
         // personaje anda y choca pero NUNCA CAE.
         if (finite3(b->velocity)) {
-            const glm::dvec3 vel = b->velocity + gvec * dt;
+            // ⚠️ EN EL SUELO NO SE ACUMULA LA CAIDA. Aqui se integraba la gravedad SIEMPRE, y como
+            // `CharacterVirtual` no devuelve la velocidad cancelada por el contacto, la componente
+            // radial crecia sin tope mientras el personaje estaba QUIETO sobre el suelo. Medido con
+            // la sonda `CharContacts`:
+            //
+            //     onGround=1 · v radial -11.4 -> -21.4 -> -31.7 ... -83.4 m/s  (10 m/s cada segundo)
+            //
+            // A 83 m/s el personaje intenta meterse **1,3 m dentro del terreno cada frame** y la
+            // colision lo expulsa: caro (se siente pesado), inestable (la direccion de expulsion
+            // depende de que triangulos toque) y errático con el paso de escalera. Los tres sintomas
+            // que reporto Andoni —"me atasco, me deslizo y va pesado, y me muevo estando quieto"—
+            // salen de aqui, no de la forma del suelo (13,8° de pendiente maxima, medida).
+            //
+            // El patron correcto es el de los ejemplos de Jolt: la gravedad se integra SOLO en el
+            // aire; apoyado, la componente que empuja contra el suelo se anula. `inGravity` se le
+            // sigue pasando a `ExtendedUpdate`, que la usa para el escalon y el "pegado al suelo".
+            const bool restingNow =
+                charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround;
+            glm::dvec3 vel = b->velocity;
+            const double vRad = glm::dot(vel, up);
+            if (restingNow && vRad < 0.0) vel -= up * vRad;   // apoyado: no se acumula caida
+            else                          vel += gvec * dt;   // en el aire: cae
             charCtrl->SetLinearVelocity(JPH::Vec3((float)vel.x, (float)vel.y, (float)vel.z));
         }
 
         // Escalones y "pegado al suelo" en el marco RADIAL (por defecto Jolt los da en ±Y del mundo,
         // que en una esfera solo vale en el polo).
+        // ⚠️ ESTOS DOS NUMEROS SE ELIGIERON CON UNA REJILLA DE COLISION DE 4 m, Y HOY ES DE 0,5 m.
+        //
+        // La celda del anillo fino bajo de 4 m a 0,5 m para perseguir la paridad con el texel del
+        // render (`TERRAIN_RING_FINE_CELL`). Efecto colateral no evaluado: la huella de la capsula
+        // pasa de tocar 1-2 triangulos a tocar ~7 — medido con la sonda `CharContacts`, **7 contactos
+        // de suelo estando QUIETO**. Y con `stepUp = 0,40 m` sobre baches de 0,12 m
+        // (`terrain_collision_walkability`), el camino de "subir escalera" de Jolt se dispara
+        // constantemente donde antes no habia nada que subir: es mas caro y mas brusco que el de
+        // andar normal, y se siente como atascarse y ir pesado.
+        //
+        // Ajustables sin recompilar porque la SENSACION no se mide desde un test: hay que andar.
+        //   HARUKA_CHAR_STEPUP    (m, def 0.40) — cuanto sube sin saltar. Bajarlo a ~0,15 lo saca del
+        //                          camino de escalera en terreno normal y lo deja para escalones de verdad.
+        //   HARUKA_CHAR_STEPDOWN  (m, def 0.50) — cuanto "se pega" al suelo al bajar.
+        static const float s_stepUp = [] {
+            const char* e = std::getenv("HARUKA_CHAR_STEPUP");
+            return e ? (float)std::atof(e) : 0.40f;
+        }();
+        static const float s_stepDown = [] {
+            const char* e = std::getenv("HARUKA_CHAR_STEPDOWN");
+            return e ? (float)std::atof(e) : 0.50f;
+        }();
         JPH::CharacterVirtual::ExtendedUpdateSettings us;
-        us.mStickToFloorStepDown = JPH::Vec3((float)(-up.x * 0.5), (float)(-up.y * 0.5), (float)(-up.z * 0.5));
-        us.mWalkStairsStepUp     = JPH::Vec3((float)( up.x * 0.4), (float)( up.y * 0.4), (float)( up.z * 0.4));
+        us.mStickToFloorStepDown = JPH::Vec3((float)(-up.x * s_stepDown), (float)(-up.y * s_stepDown),
+                                             (float)(-up.z * s_stepDown));
+        us.mWalkStairsStepUp     = JPH::Vec3((float)( up.x * s_stepUp),   (float)( up.y * s_stepUp),
+                                             (float)( up.z * s_stepUp));
 
         charCtrl->ExtendedUpdate((float)dt,
             JPH::Vec3((float)gvec.x, (float)gvec.y, (float)gvec.z), us,
@@ -897,9 +942,21 @@ struct PhysicsEngine::JoltImpl {
                                        c.mContactNormal.GetZ());
                     if (glm::dot(n, up) > 0.5) ++nGround; else ++nOther;
                 }
-                HARUKA_LOGDIAG("CharContacts", "contactos=%zu (suelo=%d, laterales=%d) · onGround=%d",
+                // ⚠️ Y LA VELOCIDAD, PARTIDA EN RADIAL Y TANGENCIAL. `CharacterVirtual` NO tiene
+                // friccion: se mueve con la velocidad que se le da. Aqui se integra la gravedad
+                // ENTERA cada frame, y Jolt solo cancela lo que entra en el suelo — la componente
+                // TANGENCIAL sobrevive, asi que en cualquier pendiente el personaje se desliza
+                // cuesta abajo estando quieto. Reportado como "me muevo por el terreno aun parado".
+                // Sin partirla no se puede distinguir "cae" de "resbala".
+                const JPH::Vec3 vNow = charCtrl->GetLinearVelocity();
+                const glm::dvec3 vg(vNow.GetX(), vNow.GetY(), vNow.GetZ());
+                const double vRad = glm::dot(vg, up);
+                const double vTan = glm::length(vg - up * vRad);
+                HARUKA_LOGDIAG("CharContacts", "contactos=%zu (suelo=%d, laterales=%d) · onGround=%d "
+                            "· v radial %+.3f m/s · v TANGENCIAL %.3f m/s",
                             contacts.size(), nGround, nOther,
-                            charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround);
+                            charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround,
+                            vRad, vTan);
             }
         }
 

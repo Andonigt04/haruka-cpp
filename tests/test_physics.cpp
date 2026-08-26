@@ -295,6 +295,67 @@ void test_physics_character() {
     CHECK(b->position.x < 2.6, "el personaje NO ATRAVIESA el muro");
 }
 
+// QUIETO EN EL SUELO NO SE ACUMULA LA CAÍDA.
+//
+// `CharacterVirtual` no es un rígido: el contacto con el suelo NO le devuelve la velocidad cancelada.
+// El motor integraba la gravedad en TODOS los pasos, así que la componente radial de un personaje
+// PARADO crecía sin tope. Medido en el juego con la sonda `CharContacts`, quieto sobre terreno llano:
+//
+//     onGround=1 · v radial -11.4 → -21.4 → -31.7 → ... → -83.4 m/s   (≈ -10 m/s por segundo)
+//
+// A 83 m/s el personaje pide meterse 1,3 m dentro del suelo cada frame y la colisión lo expulsa: se
+// atasca, se desliza y "va pesado", y el sentido de la expulsión depende de qué triángulos toque —
+// de ahí que pareciera que "pisa un montículo" estando quieto. La forma del suelo no tenía la culpa.
+//
+// ⚠️ CONTRAPRUEBAS (si no, este test lo aprobaría un motor SIN gravedad, que es peor que el bug):
+//   (B) EN EL AIRE la gravedad sigue viva y la velocidad SÍ crece;
+//   (C) apoyado, la velocidad TANGENCIAL que se le impone sobrevive — no se anula todo el vector.
+void test_physics_character_resting_velocity() {
+    beginTest("physics_character_resting_velocity");
+    using namespace Haruka::Physics;
+
+    auto spawn = [](PhysicsEngine& eng, double y) {
+        auto b = std::make_shared<RigidBody>();
+        b->position    = glm::dvec3(0.0, y, 0.0);
+        b->radius      = 0.5; b->mass = 70.0; b->name = "player";
+        b->isCharacter = true;
+        eng.addBody(b);
+        return b;
+    };
+
+    // (A) APOYADO: 6 s quieto. Con el bug esto llegaba a ~-59 m/s; el listón es 1 m/s.
+    PhysicsEngine eng; FlatMeshWorld w(glm::dvec3(0.0)); eng.setWorldProvider(&w);
+    auto b = spawn(eng, 2.0);
+    for (int i = 0; i < 120; ++i) eng.advance(1.0 / 60.0);          // 2 s: cae y se asienta
+    CHECK(b->onGround, "(A) el personaje está APOYADO antes de medir (si no, mide caída libre)");
+
+    double vMax = 0.0;
+    for (int i = 0; i < 360; ++i) {                                  // 6 s SIN tocar la velocidad
+        eng.advance(1.0 / 60.0);
+        vMax = std::max(vMax, glm::length(b->velocity));
+    }
+    const double vFree = 9.81 * 6.0;                                 // lo que daría el bug: caída libre
+    std::printf("    (A) quieto 6 s: |v| max %.3f m/s · Y=%.3f · el bug daba ~%.1f m/s\n",
+                vMax, b->position.y, vFree);
+    CHECK(vMax < 1.0, "(A) QUIETO en el suelo la velocidad NO se acumula (no se clava contra el terreno)");
+    CHECK(vMax < vFree * 0.1, "(A) y está un orden de magnitud por debajo de la caída libre del bug");
+
+    // (B) CONTRAPRUEBA: en el AIRE la gravedad sigue integrándose. Sin esto, "vMax<1" lo cumpliría
+    //     también un motor al que le hubiéramos apagado la gravedad entera.
+    PhysicsEngine air; FlatMeshWorld wAir(glm::dvec3(0.0)); air.setWorldProvider(&wAir);
+    auto f = spawn(air, 400.0);                                      // muy alto: no llega al suelo
+    for (int i = 0; i < 60; ++i) air.advance(1.0 / 60.0);            // 1 s de caída
+    std::printf("    (B) contraprueba en el aire tras 1 s: vY=%+.3f m/s (esperado ≈ -9.8) · Y=%.1f\n",
+                f->velocity.y, f->position.y);
+    CHECK(!f->onGround, "(B) el cuerpo de contraprueba SIGUE en el aire (si no, no prueba nada)");
+    CHECK(f->velocity.y < -9.0, "(B) EN EL AIRE la gravedad sigue viva (no se ha apagado, sólo no se acumula apoyado)");
+
+    // (C) CONTRAPRUEBA: apoyado, lo que se le manda en tangencial NO se borra.
+    for (int i = 0; i < 60; ++i) { b->velocity.x = 4.0; eng.advance(1.0 / 60.0); }
+    std::printf("    (C) contraprueba andando: vX=%+.3f m/s · x=%.2f m\n", b->velocity.x, b->position.x);
+    CHECK(b->position.x > 1.0, "(C) apoyado, la velocidad TANGENCIAL sobrevive (anda; no se anula el vector entero)");
+}
+
 // ---------------------------------------------- TEST: RAÍLES contra Jolt (PLAN_PUERTOS.md §4)
 // Una puerta/rampa NO es una animación: es una restricción. Se demuestra justo lo que una animación
 // no sabe hacer, y con CONTRAPRUEBA en cada caso:

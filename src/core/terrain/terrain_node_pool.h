@@ -75,6 +75,7 @@ public:
         size_t resident = 0, capacity = 0;
         size_t hitsExact = 0, hitsAncestor = 0, misses = 0;
         size_t generated = 0, evicted = 0;
+        size_t publishFailed = 0;  ///< `publish` que devolvio -1: nada desalojable ese frame
     };
 
     /**
@@ -243,7 +244,7 @@ public:
                 if (!s.used || s.pinned || s.lastUsed == m_frame) continue;
                 if (s.lastUsed < oldest) { oldest = s.lastUsed; slot = (int)i; }
             }
-            if (slot < 0) return -1;                         // todo en uso: entra más tarde
+            if (slot < 0) { ++m_stats.publishFailed; return -1; }   // todo en uso: entra más tarde
             m_index.erase(nodeKey(m_slots[(size_t)slot].node));
             ++m_stats.evicted;
         }
@@ -454,6 +455,53 @@ inline int nodeNeighbourFinerMask(const NodeId& n,
         }
     }
     return mask;
+}
+
+/**
+ * @brief Marca lo que NO debe dibujarse para que el conjunto sea una PARTICIÓN de la superficie.
+ *
+ * ⚠️ EL FALLBACK POR ANCESTRO EMITE EL ANCESTRO **ENTERO**, y un ancestro cubre a sus cuatro hijos, no
+ * solo al que falta. Si una hoja no está residente pero sus hermanas sí, se dibujan las dos cosas: el
+ * padre (que tapa las cuatro cuartas partes) y las hermanas finas. Dos superficies en el mismo sitio.
+ * Y como el ancestro puede estar muchos niveles por encima, **una sola hoja que falta en el borde del
+ * frustum arrastra una sábana gruesa sobre toda la vista**. Medido con la cámara girando
+ * (`terrain_node_overlap_on_turn`): 457 de 499 nodos dibujados tenían un ancestro también dibujado, el
+ * peor 7 niveles por encima, con las dos superficies separadas **20,6 m**. Quieto, 0 de 499 — es el
+ * transitorio del giro. Eso es el "segundo terreno encima al girar la cámara".
+ *
+ * Aquí se dejan solo los elementos MAXIMALES (los más gruesos) del conjunto emitido, más una copia de
+ * cada nodo. El resultado es una anticadena, y una anticadena que cubría la superficie la sigue
+ * cubriendo: lo que se quita estaba **debajo** de algo que sigue dibujándose, así que no abre agujeros.
+ *
+ * @param drop se redimensiona a `drawn.size()`; 1 = no dibujar.
+ * @return cuántos se quitan.
+ */
+inline size_t nodeCoveredMask(const std::vector<NodeId>& drawn, std::vector<uint8_t>& drop,
+                              uint32_t* worstDropLevels = nullptr) {
+    drop.assign(drawn.size(), 0);
+    std::unordered_map<uint64_t, uint32_t> emitted;
+    emitted.reserve(drawn.size() * 2);
+    for (const NodeId& n : drawn) emitted[nodeKey(n)] = n.level;
+
+    std::unordered_map<uint64_t, uint32_t> kept;
+    kept.reserve(drawn.size() * 2);
+    size_t n_drop = 0;
+    for (size_t i = 0; i < drawn.size(); ++i) {
+        const NodeId& n = drawn[i];
+        if (!kept.emplace(nodeKey(n), n.level).second) {   // el mismo ancestro, una vez por hija
+            drop[i] = 1; ++n_drop; continue;
+        }
+        NodeId a = n;
+        while (a.level > 0) {
+            a.level--; a.i /= 2; a.j /= 2;
+            if (emitted.find(nodeKey(a)) != emitted.end()) {
+                drop[i] = 1; ++n_drop;
+                if (worstDropLevels) *worstDropLevels = std::max(*worstDropLevels, n.level - a.level);
+                break;
+            }
+        }
+    }
+    return n_drop;
 }
 
 /** @brief Índice `clave -> nivel` del conjunto que se va a dibujar. Lo consume `nodeNeighbourLevels`. */

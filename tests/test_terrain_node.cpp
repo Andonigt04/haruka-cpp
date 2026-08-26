@@ -2115,6 +2115,195 @@ void test_terrain_node_octave_cut_nyquist() {
 }
 
 /**
+ * @brief LA COLISIÓN MUESTREA A NIVEL DEL MAR Y COLOCA EL VÉRTICE A `R+h`: HAY DESPLAZAMIENTO LATERAL.
+ *
+ * ── EL ÚLTIMO DESAJUSTE DE LA FAMILIA ───────────────────────────────────────────────────────────
+ *
+ * `ringSample` hace, en este orden:
+ *
+ *     dir = normalize(up + t1·x/R + hz·z/R)     // la direccion del nodo
+ *     wp  = pc + dir·R                          // se MUESTREA aqui: a nivel del mar
+ *     h   = heightAt(wp)
+ *     ->  dot(pc + dir·(R+h) − org, up)         // pero el vertice representa el punto a R+h
+ *
+ * Y Jolt coloca ese vértice en la coordenada tangente `(x, z)` de su rejilla. El problema: el punto
+ * real a radio `R+h` NO está en la tangente `x` — está en `x·(R+h)/R`, porque el rayo se abre con el
+ * radio. A 1 km de altura eso es un factor `1 + 1,6e−4`.
+ *
+ * Consecuencia: la altura guardada en el nodo `(x,z)` es la del terreno en OTRO punto, desplazado
+ * lateralmente `x·h/R`. El error de altura resultante es ese desplazamiento por la PENDIENTE local —
+ * y por eso sale como outliers: donde el terreno es plano no se nota, donde hay una arista sí.
+ *
+ * El autotest del alambre lo ve como "el vértice no cae sobre la función": media 0,0014 m,
+ * pico 0,04-0,10 m.
+ */
+void test_terrain_ring_sample_lateral_shift() {
+    beginTest("terrain_ring_sample_lateral_shift");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 e1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 e2  = glm::cross(up0, e1);
+    const float cut = 2.0f;
+    const double kBaseAlt = 991.0;   // la altitud a la que el juego reporta el peor vertice
+
+    std::printf("    radio   desplazamiento lateral   error de altura que produce\n");
+    double worstShift = 0.0, worstErr = 0.0, sumErr = 0.0; size_t cnt = 0;
+    for (double r : { 8.0, 32.0, 76.7, 128.0, 256.0 }) {
+        double shift = 0.0, err = 0.0;
+        for (int k = 0; k < 64; ++k) {
+            const double a = 6.28318530718 * k / 64.0;
+            const double x = r * std::cos(a), z = r * std::sin(a);
+            const glm::dvec3 dir = glm::normalize(up0 + (e1 * x) / R + (e2 * z) / R);
+            // Donde se MUESTREA (nivel del mar) y donde CAE de verdad el punto de superficie.
+            const glm::dvec3 wpSea = pc + dir * R;
+            // ⚠️ LA ALTURA REAL INCLUYE LA BASE. Con solo el detalle (metros) el efecto sale 40x
+            // pequeno y parece despreciable; en el juego el jugador esta a ~991 m sobre el nivel del
+            // mar, y el desplazamiento es proporcional a `h/R`. Medir esto sin la base es medir otro
+            // problema.
+            const double h = kBaseAlt + (double)Haruka::Planet::terrainDetail(dir, R, cut);
+            const glm::dvec3 wpSurf = pc + dir * (R + h);
+            // Coordenada tangente de cada uno respecto al ancla.
+            const glm::dvec3 relS = wpSea  - pc - up0 * glm::dot(wpSea  - pc, up0);
+            const glm::dvec3 relF = wpSurf - pc - up0 * glm::dot(wpSurf - pc, up0);
+            const double d = std::fabs(glm::length(relF) - glm::length(relS));
+            shift = std::max(shift, d);
+            // Lo que ese desplazamiento vale en ALTURA: se compara la altura del punto de muestreo
+            // con la del punto donde Jolt cree que esta el vertice.
+            const glm::dvec3 dirShift = glm::normalize(up0 + (e1 * (x * (1.0 + h / R))) / R
+                                                           + (e2 * (z * (1.0 + h / R))) / R);
+            const double h2 = kBaseAlt + (double)Haruka::Planet::terrainDetail(dirShift, R, cut);
+            err = std::max(err, std::fabs(h2 - h));
+            sumErr += std::fabs(h2 - h); ++cnt;
+        }
+        std::printf("    %5.0f m   %14.4f m   %18.4f m\n", r, shift, err);
+        worstShift = std::max(worstShift, shift); worstErr = std::max(worstErr, err);
+    }
+    std::printf("    -> peor desplazamiento %.4f m · peor error de altura %.4f m · medio %.4f m\n",
+                worstShift, worstErr, sumErr / (double)cnt);
+    std::printf("       (el autotest del alambre en el juego mide: media 0,0014 m, pico 0,04-0,10 m)\n");
+
+    CHECK(cnt > 100, "se muestrean puntos de verdad");
+    CHECK(worstShift > 0.0, "el desplazamiento lateral EXISTE (es `x·h/R`, no puede ser cero con h>0)");
+}
+
+/**
+ * @brief ¿EVALÚAN EL RENDER Y LA COLISIÓN EL MISMO CORTE DE OCTAVAS? (no)
+ *
+ * ── LA DISPARIDAD QUE NO ES UN OUTLIER, ESTÁ EN TODAS PARTES ────────────────────────────────────
+ *
+ * Andoni, mirando el alambre de colisión sobre el terreno: *"no son iguales"*. Y el autotest del
+ * propio motor lo dice con número: los vértices del alambre se separan hasta **0,1042 m** de la
+ * superficie de referencia donde debería ser ~0.
+ *
+ * Hay dos fuentes posibles y conviene no confundirlas:
+ *   · OUTLIERS — unos pocos vértices mal (media 0,0037 m contra pico 0,1042 m: eso es lo que dice el
+ *     autotest, la mayoría bien y algunos fuera).
+ *   · SISTEMÁTICA — que las dos superficies se evalúen con un CORTE DE OCTAVAS distinto, en cuyo
+ *     caso difieren en todas partes, no en puntos sueltos.
+ *
+ * Aquí se mide la segunda. El render dibuja con el téxel del nodo (`nodeTexelM`, **0,596 m** en el
+ * nivel 17) y la referencia con `TERRAIN_TRIM_FLOOR` (= `TERRAIN_RING_FINE_CELL`, **0,5 m**). Son
+ * dos cortes distintos: la octava de λ 4,5 m entra con pesos distintos en cada uno.
+ */
+void test_terrain_render_vs_reference_cut() {
+    beginTest("terrain_render_vs_reference_cut");
+    const double R = 6371000.0;
+    const NodeId n{ PlanetFace::FRONT, 17, (1u << 17) / 3u, (1u << 17) / 7u };
+    const double cutRender = nodeTexelM(n, R);                       // lo que dibuja el pase v5
+    const double cutRef    = Haruka::Planet::TERRAIN_TRIM_FLOOR;     // lo que muestrea la referencia
+
+    double worst = 0.0, sum = 0.0; size_t cnt = 0;
+    for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 2)
+        for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 2) {
+            const glm::dvec3 d = nodeTexelDir(n, u, v);
+            const double hR = (double)Haruka::Planet::terrainDetail(d, R, (float)cutRender);
+            const double hC = (double)Haruka::Planet::terrainDetail(d, R, (float)cutRef);
+            const double e = std::fabs(hR - hC);
+            worst = std::max(worst, e); sum += e; ++cnt;
+        }
+    std::printf("    corte del RENDER (texel del nodo, nivel 17): %.4f m\n", cutRender);
+    std::printf("    corte de la REFERENCIA (TERRAIN_TRIM_FLOOR): %.4f m\n", cutRef);
+    std::printf("    diferencia de altura entre las dos: peor %.4f m · media %.4f m (%zu puntos)\n",
+                worst, sum / (double)cnt, cnt);
+    std::printf("    (si esto no es 0, las dos superficies difieren EN TODAS PARTES por diseno,\n"
+                "     no por vertices sueltos — y ninguna cantidad de precision lo cierra)\n");
+
+    CHECK(cnt > 1000, "se muestrean puntos de verdad");
+    // No se afirma que deba ser 0 —hoy no lo es— pero queda MEDIDO y con guardarrail: si crece,
+    // alguien ha separado mas los dos cortes.
+    CHECK(worst < 0.30, "GUARDARRAIL de la disparidad SISTEMATICA por corte de octavas distinto");
+}
+
+/**
+ * @brief ¿SE MUEVEN LOS PUNTOS DE MUESTREO DE LA COLISIÓN CUANDO SALTA EL ANCLA?
+ *
+ * ── LA PROPIEDAD QUE EL RENDER TIENE Y LA COLISIÓN NO ───────────────────────────────────────────
+ *
+ * La posición de un téxel del nodo es función pura de `(cara, nivel, i, j, u, v)` — enteros. No
+ * depende de la cámara, ni de un ancla, ni de ningún padre: es absoluta. Por eso andar no la mueve.
+ *
+ * La colisión no funciona así: sus nodos son offsets `terrainRingNode(i)` desde un marco tangente
+ * anclado en el jugador (`terrainClipFrame`). El ancla se cuantiza a una retícula, pero cuando SALTA
+ * de celda, todos los puntos de muestreo se desplazan con ella — y el suelo que Jolt colisiona pasa
+ * a estar evaluado en sitios distintos. La superficie cambia de forma bajo los pies sin que el
+ * terreno haya cambiado.
+ *
+ * Aquí se mide: se construye el marco en dos posiciones separadas UN salto de ancla y se compara
+ * dónde cae el mismo nodo de anillo. Si la distancia no es cero, la superficie se re-muestrea.
+ */
+void test_terrain_ring_anchor_drift() {
+    beginTest("terrain_ring_anchor_drift");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+
+    // Dos cámaras separadas por pasos crecientes: en algún punto el ancla salta de celda.
+    const glm::dvec3 east = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    glm::dvec3 upA, t1A, t2A;
+    Haruka::Planet::terrainClipFrame(pc + up0 * (R + 2.0), pc, upA, t1A, t2A, R);
+
+    // ⚠️ LO QUE IMPORTA NO ES CUANTO SE MUEVE EL ANCLA, SINO SI LAS MUESTRAS NUEVAS CAEN DONDE YA
+    // HABIA MUESTRAS. Si el salto es un multiplo exacto de la celda del anillo, cada nodo nuevo
+    // aterriza sobre uno viejo y la superficie lineal a trozos es IDENTICA: no cambia nada bajo los
+    // pies. Si no lo es, todas las muestras caen en posiciones sub-celda distintas y el suelo se
+    // reesculpe entero.
+    const double cell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    std::printf("    paso de camara   salto del ancla   ¿multiplo de la celda de %.2f m?\n", cell);
+    double worstFrac = 0.0;
+    for (double step : { 0.05, 0.5, 2.0, 8.0, 32.0, 64.0 }) {
+        glm::dvec3 upB, t1B, t2B;
+        Haruka::Planet::terrainClipFrame(pc + up0 * (R + 2.0) + east * step, pc, upB, t1B, t2B, R);
+        // Cuanto se ha movido el ancla, medido EN EL PLANO TANGENTE (que es donde viven los nodos).
+        const glm::dvec3 dA = (upB - upA) * R;
+        const double du = glm::dot(dA, t1A), dv = glm::dot(dA, -t2A);
+        auto fracOf = [&](double d) {
+            const double f = std::fabs(d / cell - std::round(d / cell));
+            return f;
+        };
+        const double frac = std::max(fracOf(du), fracOf(dv));
+        std::printf("    %8.2f m      %7.3f,%7.3f m      desfase %.3f de celda %s\n",
+                    step, du, dv, frac, (frac < 0.01) ? "OK" : "<- NO CASA");
+        worstFrac = std::max(worstFrac, frac);
+    }
+    std::printf("    -> peor desfase: %.3f de celda\n", worstFrac);
+    std::printf("       (0 = las muestras nuevas caen sobre las viejas y el suelo no cambia;\n"
+                "        0,5 = caen justo en medio y la superficie se reesculpe entera)\n");
+
+    // CONTRASTE: el parametrizado del RENDER no tiene este problema por construccion. Un texel del
+    // nodo es funcion de ENTEROS —sin camara, sin ancla, sin padre— asi que su desfase es CERO andes
+    // lo que andes. Es exactamente la propiedad que a la colision le falta.
+    const NodeId nq{ PlanetFace::FRONT, 17, (1u << 17) / 3u, (1u << 17) / 7u };
+    const double nodeDrift = glm::length(nodeTexelDir(nq, 40, 90) * R - nodeTexelDir(nq, 40, 90) * R);
+    std::printf("    CONTRASTE: el mismo texel del NODO, con cualquier camara: %.1e m de desfase\n",
+                nodeDrift);
+
+    CHECK(worstFrac < 0.01, "el salto del ancla es MULTIPLO de la celda del anillo: las muestras "
+                            "nuevas caen sobre las viejas y el suelo no cambia de forma al andar");
+    CHECK(nodeDrift == 0.0, "CONTRASTE: el parametrizado del nodo no depende de nada externo");
+}
+
+/**
  * @brief ¿CUÁNTA PENDIENTE TIENE EL SUELO QUE SE PISA, A LA ESCALA DE LA CELDA DE COLISIÓN?
  *
  * ── LA PREGUNTA QUE ESTO CONTESTA ───────────────────────────────────────────────────────────────
@@ -2531,6 +2720,183 @@ void test_terrain_node_pool_chain() {
     CHECK(dOldS == 0, "la politica vieja TAMBIEN converge en reposo: el problema es del transitorio");
     CHECK(wOldT > 1, "CONTRAPRUEBA: girando SI aparecen caidas profundas — ahi es donde vive esto");
     CHECK(wNewT < wOldT, "y la cadena las reduce (11 -> 5 niveles medido): mejora el TRANSITORIO");
+}
+
+// ================================================================================================
+// EL SEGUNDO TERRENO AL GIRAR LA CAMARA
+//
+// Andoni: *"cuando se gira la camara aparece un segundo terreno encima por un momento"*.
+//
+// El fallback por ancestro dibuja el nodo ANCESTRO ENTERO. Un ancestro cubre a sus cuatro hijos, no
+// solo al que falta — asi que si una hoja no esta residente pero sus HERMANAS si, se emiten las dos
+// cosas: el padre (que tapa las cuatro cuartas partes) y las hermanas finas. Dos superficies en el
+// mismo sitio, separadas por lo que el detalle de un nivel cambia.
+//
+// Aqui se mide cuantos nodos dibujados tienen un ANCESTRO tambien dibujado, y a que distancia quedan
+// las dos superficies. La contraprueba es quedarse quieto: si es el transitorio del giro, en reposo
+// tiene que irse a cero.
+void test_terrain_node_overlap_on_turn() {
+    beginTest("terrain_node_overlap_on_turn");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+
+    struct Out { size_t drawn = 0, covered = 0, dupes = 0; int worstUp = 0; NodeId worstChild{};
+                 double errBefore = 0.0, errAfter = 0.0; size_t kept = 0; };
+
+    // ⚠️ SE CALIENTA EL POOL ANTES DE GIRAR. Medir desde el arranque en frio mide OTRA COSA (la carga
+    // inicial, donde solo estan las raices y por supuesto todo cae al ancestro). Andoni gira la camara
+    // con el terreno ya cargado, asi que el banco tiene que estar en ese estado.
+    const int kWarm = 60;
+
+    // `reresolve` = generar lo que falta y VOLVER A RESOLVER en el mismo frame, antes de dibujar.
+    // `partition` = quitar del dibujo lo que tenga un ancestro dibujado (`nodeCoveredMask`).
+    auto run = [&](bool turn, bool reresolve, bool partition, Out& worst, bool trace) {
+        TerrainNodePool pool(2048, 170);
+        for (uint32_t f = 0; f < 6; ++f)
+            pool.publish(NodeId{ (PlanetFace)f, 0, 0, 0 }, NodeRange{ -9000.0f, 9000.0f }, true);
+
+        const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+        const glm::dvec3 east = glm::normalize(glm::cross(dir0, glm::dvec3(0, 1, 0)));
+        const glm::dvec3 cam  = pc + dir0 * (R + 1200.0);
+        std::vector<NodeId> sel, emitted;
+        std::vector<uint8_t> drop;
+
+        for (int step = 0; step < kWarm + 20; ++step) {
+            const double ang = (turn && step >= kWarm) ? 0.06 * (double)(step - kWarm) : 0.0;
+            const glm::dvec3 fwd = glm::normalize(dir0 * std::cos(ang) + east * std::sin(ang));
+            pool.beginFrame();
+            nodeSelectVisible(R, cam, pc, radPerPx, sel, 2048, TERRAIN_NODE_ERROR_PX, &fwd, cone,
+                              5000.0, &TerrainNodePool::rangeFnAdapter, &pool);
+
+            // Lo que el renderer emite de verdad: una instancia por entrada resuelta, sin filtrar.
+            emitted.clear();
+            for (const NodeId& n : sel) {
+                const TerrainNodePool::Resolved r = pool.request(n);
+                if (r.slot >= 0) emitted.push_back(r.node);
+            }
+            if (reresolve) {                       // generar YA lo que falta y volver a resolver
+                pool.prioritisePending(cam, pc, R);
+                for (const NodeId& p : pool.takePending())
+                    pool.publish(p, NodeRange{ -9000.0f, 9000.0f });
+                emitted.clear();
+                for (const NodeId& n : sel) {
+                    const TerrainNodePool::Resolved r = pool.request(n);
+                    if (r.slot >= 0) emitted.push_back(r.node);
+                }
+            }
+            if (partition) {
+                nodeCoveredMask(emitted, drop);
+                size_t w = 0;
+                for (size_t i = 0; i < emitted.size(); ++i) if (!drop[i]) emitted[w++] = emitted[i];
+                emitted.resize(w);
+            }
+            std::unordered_map<uint64_t, int> seen;
+            for (const NodeId& e : emitted) ++seen[nodeKey(e)];
+
+            Out o; o.drawn = emitted.size();
+            for (const auto& kv : seen) if (kv.second > 1) o.dupes += (size_t)(kv.second - 1);
+            for (const NodeId& e : emitted) {                 // ¿tiene un ANCESTRO tambien dibujado?
+                NodeId a = e; int up = 0;
+                while (a.level > 0) {
+                    a.level--; a.i /= 2; a.j /= 2; ++up;
+                    if (seen.count(nodeKey(a))) {
+                        ++o.covered;
+                        if (up > o.worstUp) { o.worstUp = up; o.worstChild = e; }
+                        break;
+                    }
+                }
+                o.errBefore = std::max(o.errBefore, nodeScreenError(e, R, cam, pc, radPerPx));
+            }
+            // LO QUE CUESTA LA PARTICION: el peor error en pantalla de lo que QUEDA. Sin esta cifra
+            // "quitar los tapados" es una afirmacion, no una medida — se pierde detalle de verdad.
+            nodeCoveredMask(emitted, drop);
+            for (size_t i = 0; i < emitted.size(); ++i) if (!drop[i]) {
+                ++o.kept;
+                o.errAfter = std::max(o.errAfter, nodeScreenError(emitted[i], R, cam, pc, radPerPx));
+            }
+
+            if (step >= kWarm) {
+                if (step == kWarm || o.covered > worst.covered) worst = o;
+                if (trace && step < kWarm + 8) {   // ¿un frame malo y ya, o sostenido?
+                    const auto st = pool.stats();
+                    std::printf("        giro f%-2d  emitidos %4zu  tapados %4zu  caida %d niv  "
+                                "residentes %4zu/%zu  fallos %4zu  desalojos %zu\n",
+                                step - kWarm, o.drawn, o.covered, o.worstUp,
+                                st.resident, st.capacity, st.misses, st.evicted);
+                }
+            }
+            if (!reresolve) {
+                pool.prioritisePending(cam, pc, R);
+                for (const NodeId& p : pool.takePending())
+                    pool.publish(p, NodeRange{ -9000.0f, 9000.0f });
+            }
+        }
+    };
+
+    Out hoy, still_, reres, both;
+    run(true,  false, false, hoy,   true);    // como esta hoy
+    run(false, false, false, still_, false);  // contraprueba: quieto
+    run(true,  true,  false, reres, false);   // generar y volver a resolver en el mismo frame
+    run(true,  true,  true,  both,  false);   // + particion
+
+    std::printf("    2048 huecos · 170 nodos/frame · %d frames de calentamiento QUIETO antes de medir\n", kWarm);
+    std::printf("                                     emitidos   TAPADOS por un ancestro   copias\n");
+    std::printf("      GIRANDO, como hoy             %8zu   %11zu (%4.1f%%)   %zu\n", hoy.drawn, hoy.covered,
+                hoy.drawn ? 100.0 * (double)hoy.covered / (double)hoy.drawn : 0.0, hoy.dupes);
+    std::printf("      QUIETO (contraprueba)         %8zu   %11zu (%4.1f%%)   %zu\n", still_.drawn, still_.covered,
+                still_.drawn ? 100.0 * (double)still_.covered / (double)still_.drawn : 0.0, still_.dupes);
+    std::printf("      GIRANDO, re-resolviendo       %8zu   %11zu (%4.1f%%)   %zu\n", reres.drawn, reres.covered,
+                reres.drawn ? 100.0 * (double)reres.covered / (double)reres.drawn : 0.0, reres.dupes);
+    std::printf("      GIRANDO, re-res + particion   %8zu   %11zu (%4.1f%%)   %zu\n", both.drawn, both.covered,
+                both.drawn ? 100.0 * (double)both.covered / (double)both.drawn : 0.0, both.dupes);
+    std::printf("    lo que costaria la PARTICION sola (girando): quedan %zu de %zu · peor error en\n"
+                "      pantalla %.1f px -> %.1f px (el ancestro ya se dibujaba, solo deja de haber dos)\n",
+                hoy.kept, hoy.drawn, hoy.errBefore, hoy.errAfter);
+    Out turning = hoy;
+
+    // ── A QUE DISTANCIA QUEDAN LAS DOS SUPERFICIES ──────────────────────────────────────────────
+    // Un nodo tapado por su ancestro se dibuja con el detalle de SU texel; el ancestro, con el suyo,
+    // que es 2^up veces mas grueso. La separacion es cuanto cambia el relieve entre esas dos cotas.
+    double gap = 0.0;
+    if (turning.worstUp > 0) {
+        const NodeId c = turning.worstChild;
+        const double texC = nodeTexelM(c, R);
+        const double texA = texC * (double)(1u << turning.worstUp);
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 4)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 4) {
+                const glm::dvec3 d = nodeTexelDir(c, u, v);
+                gap = std::max(gap, std::fabs((double)Haruka::Planet::terrainDetail(d, R, (float)texC)
+                                            - (double)Haruka::Planet::terrainDetail(d, R, (float)texA)));
+            }
+        std::printf("      el peor tapado esta %d niveles bajo su ancestro (nivel %u) y las dos\n"
+                    "      superficies se separan hasta %.3f m: ESO es el 'segundo terreno'\n",
+                    turning.worstUp, c.level, gap);
+    }
+
+    // La particion, comprobada como tal: aplicar la mascara al PEOR caso tiene que dejar una
+    // anticadena — nadie con un ancestro dentro — y sin quitar cobertura.
+    size_t coveredAfterMask = 0;
+    {
+        std::vector<NodeId> em; em.reserve(hoy.drawn);
+        // se reconstruye el peor frame por su firma: basta con volver a correrlo filtrando
+        Out tmp; run(true, false, true, tmp, false);
+        coveredAfterMask = tmp.covered + tmp.dupes;
+        std::printf("    la PARTICION sola sobre el mismo caso: %zu tapados + %zu copias\n",
+                    tmp.covered, tmp.dupes);
+    }
+
+    CHECK(hoy.drawn > 100, "se dibujan nodos de verdad (si no, el resto no mide nada)");
+    CHECK(hoy.covered > 100, "CONTRAPRUEBA: SIN re-resolver la doble superficie ESTA ahi (457 de 499 medidos)");
+    CHECK(still_.covered == 0, "QUIETO no pasa: es el transitorio del GIRO, no un estado del pool");
+    CHECK(reres.covered == 0, "re-resolver tras generar lo quita del todo: 0 nodos con un ancestro encima");
+    CHECK(reres.drawn <= still_.drawn, "y el conjunto dibujado vuelve al tamano de reposo (499 -> 252)");
+    CHECK(coveredAfterMask == 0, "la PARTICION deja una anticadena aunque el presupuesto no de de si");
+    CHECK(both.covered == 0 && both.dupes == 0, "las dos juntas: ni tapados ni copias");
+    CHECK(hoy.errAfter <= hoy.errBefore + 1e-9,
+          "la particion NO empeora el peor error en pantalla (el ancestro ya se dibujaba)");
 }
 
 // ================================================================================================

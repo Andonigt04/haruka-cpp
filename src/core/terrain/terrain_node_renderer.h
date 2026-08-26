@@ -268,6 +268,10 @@ public:
 
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
+        size_t covered = 0;   ///< instancias quitadas por tener un ANCESTRO dibujado encima
+        uint32_t coveredDrop = 0;  ///< y a cuantos NIVELES estaba el ancestro mas lejano
+        size_t evicted = 0;   ///< desalojos ACUMULADOS del pool (si sube, hay thrash)
+        size_t pubFailed = 0; ///< publicaciones rechazadas por no haber hueco desalojable
         uint32_t stride = 1;      ///< el MAS GRUESO del frame (los nodos ya no comparten stride)
         uint32_t strideMin = 1;   ///< el mas fino: es el que hay bajo tus pies
         uint32_t drawCalls = 0;   ///< uno por grupo de stride con nodos, <= 7
@@ -405,6 +409,64 @@ public:
         // ⚠️ ORDENAR ANTES DE GENERAR. El presupuesto es el mismo; lo que cambia es CUÁLES entran.
         m_pool.prioritisePending(camPos, planetCenter, planetRadiusM);
         fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM);
+
+        // ── VOLVER A RESOLVER CON LO QUE SE ACABA DE GENERAR ────────────────────────────────────
+        //
+        // Esto era el "aparece un segundo terreno encima al girar la cámara". La resolución de arriba
+        // es ANTERIOR a la generación, así que una hoja que entra nueva por el borde del frustum se
+        // resuelve contra un pool que todavía no la tiene, cae a un ancestro muy grueso, y **el
+        // ancestro se dibuja ENTERO**: cubre a sus cuatro hijos, no solo al que falta, y a 7 niveles
+        // eso es una sábana sobre toda la vista. Un frame después ya está generada y desaparece.
+        // Medido con la cámara girando y el pool CALIENTE (`terrain_node_overlap_on_turn`):
+        //
+        //     giro f1  tapados  59  caida 4 niveles      giro f4  tapados 274  caida 7 niveles
+        //     giro f2  tapados  18  caida 2 niveles      giro f5  tapados  35  caida 2 niveles
+        //
+        // El destello de un frame, cada dos frames, mientras giras. Y NO era falta de recursos: 0
+        // desalojos, 364 residentes de 2048, y 8-20 fallos por frame contra un presupuesto de 170.
+        // Lo que faltaba era usar lo que ya se había generado ANTES de dibujar.
+        //
+        //     girando, como estaba    499 emitidos · 457 tapados (91,6 %)
+        //     girando, re-resolviendo 252 emitidos ·   0 tapados     <- igual que estando quieto
+        //
+        // De regalo, casi la mitad de instancias: los ancestros gordos ya no se emiten.
+        if (fs.generated > 0) {
+            m_resolved.clear();
+            for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
+        }
+
+        // ── Y AUN ASI, EL CONJUNTO DIBUJADO TIENE QUE SER UNA PARTICION ─────────────────────────
+        //
+        // Re-resolver cierra el hueco cuando el presupuesto da de sí; si no da (descenso rápido desde
+        // órbita, arranque en frío), el fallback vuelve a emitir ancestros que tapan a sus hijos. Esto
+        // deja solo los MAXIMALES: sin duplicados y sin nadie dibujado debajo de otro. No abre
+        // agujeros —lo que se quita estaba tapado por algo que sigue— y no empeora el LOD: medido, el
+        // peor error en pantalla es el MISMO (31,9 px), porque el ancestro ya se estaba dibujando.
+        //
+        // ⚠️ Y SOLO SE PAGA CUANDO PUEDE HABER ALGO QUE QUITAR. El selector emite HOJAS de un quadtree,
+        // que por construcción no son ancestros unas de otras: sin ninguna caída por ancestro no puede
+        // haber un solo nodo tapado. En régimen eso es el caso (medido en el juego: `por ancestro 0` en
+        // doce ventanas seguidas), así que la máscara no corre y el coste es una comparación.
+        {
+            bool anyAncestor = false;
+            for (const auto& r : m_resolved) if (r.slot >= 0 && !r.exact) { anyAncestor = true; break; }
+            m_drawn.clear();
+            if (anyAncestor) {
+                m_drawn.reserve(m_resolved.size());
+                for (const auto& r : m_resolved) if (r.slot >= 0) m_drawn.push_back(r.node);
+            }
+            uint32_t covDrop = 0;
+            const size_t nCov = anyAncestor ? nodeCoveredMask(m_drawn, m_drop, &covDrop) : 0;
+            if (nCov > 0) {
+                size_t w = 0, k = 0;
+                for (size_t i = 0; i < m_resolved.size(); ++i) {
+                    if (m_resolved[i].slot < 0) { m_resolved[w++] = m_resolved[i]; continue; }
+                    if (!m_drop[k++]) m_resolved[w++] = m_resolved[i];
+                }
+                m_resolved.resize(w);
+            }
+            fs.covered = nCov; fs.coveredDrop = covDrop;
+        }
 
         // ── EL CONJUNTO DIBUJADO NO CUMPLE 2:1, Y EQUILIBRARLO AQUI NO ES LA SOLUCION ───────────
         //
@@ -671,6 +733,7 @@ public:
             ++fs.drawCalls;
         }
         fs.resident = m_pool.residentCount();
+        { const auto ps = m_pool.stats(); fs.evicted = ps.evicted; fs.pubFailed = ps.publishFailed; }
         m_stats = fs;
         return fs;
     }
@@ -744,6 +807,7 @@ private:
     // **2 035 de 3 053 nodos dibujados por ancestro** — dos de cada tres más gruesos de lo pedido.
     TerrainNodePool     m_pool{ 1024, 43 };
     std::vector<NodeId> m_sel, m_drawn;
+    std::vector<uint8_t> m_drop;   // mascara de `nodeCoveredMask`
     std::vector<TerrainNodePool::Resolved> m_resolved;
 
 };

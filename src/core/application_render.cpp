@@ -2751,6 +2751,14 @@ void Application::renderCollisionWireframe(RHI::Context* ctx, const glm::mat4& v
                 //           está cogiendo lo que se cree que coge (con triM plano ambos han de coincidir).
                 double worst = 0.0, sum = 0.0, worstR = 0.0, sumR = 0.0;
                 double radMin = 1e300, radMax = 0.0; int n = 0;
+                double worstD = 0.0, worstRad = 0.0, worstAlt = 0.0, worstFunc = 0.0;
+                int    over05 = 0, over02 = 0;
+                // ⚠️ LOS OUTLIERS, CON SUS COORDENADAS. Con solo "el peor" no se puede decidir nada:
+                // cuatro puntos con su radio y su signo dicen enseguida si comparten anillo, si caen
+                // en una frontera de hueco o si estan repartidos. Es lo que cerro los dos bugs
+                // anteriores de esta caza.
+                struct Outlier { double rad, delta, alt; };
+                std::vector<Outlier> outliers;
                 const size_t stride = std::max<size_t>(1, s_verts.size() / 400);
                 for (size_t i = 0; i < s_verts.size(); i += stride) {
                     const glm::dvec3& v = s_verts[i];
@@ -2765,16 +2773,44 @@ void Application::renderCollisionWireframe(RHI::Context* ctx, const glm::mat4& v
                     const double funcR = _planetarySystem->sampleTerrainHeight(
                                              v, Haruka::Planet::terrainTriM(radM));
                     const double d = std::abs(alt - func), dR = std::abs(alt - funcR);
+                    // ⚠️ DONDE, no solo cuanto. La media (3,7 mm) y el pico (0,104 m) dicen que son
+                    // OUTLIERS, no una desviacion repartida: unos pocos vertices fuera de sitio. Un
+                    // numero suelto no permite ir a mirarlos; su radio y su altura si.
+                    if (d > worstD) { worstD = d; worstRad = radM; worstAlt = alt; worstFunc = func; }
                     worst = std::max(worst, d); sum += d;
+                    if (d > 0.05) ++over05;
+                    if (d > 0.02) { ++over02; if (outliers.size() < 12) outliers.push_back({ radM, alt - func, alt }); }
                     worstR = std::max(worstR, dR); sumR += dR;
                     radMin = std::min(radMin, radM); radMax = std::max(radMax, radM);
                     ++n;
                 }
-                if (n > 0)
+                if (n > 0) {
                     HARUKA_LOGI("CollisionWire", "AUTOTEST del alambre: %d vertices · triM0: peor %.4f "
                                 "media %.4f · triMr: peor %.4f media %.4f · radio tangente %.0f..%.0f m "
                                 "(deberia ser ~0: en un vertice la malla ES la funcion)",
                                 n, worst, sum / n, worstR, sumR / n, radMin, radMax);
+                    // La DISTRIBUCION separa "todo un poco mal" de "casi todo bien y unos pocos
+                    // fuera": son dos causas distintas y el pico solo no lo dice.
+                    HARUKA_LOGI("CollisionWire", "  distribucion: %d de %d por encima de 2 cm · %d por "
+                                "encima de 5 cm  ->  %s",
+                                over02, n, over05,
+                                (over02 * 20 < n) ? "OUTLIERS (pocos vertices fuera de sitio)"
+                                                  : "DESVIACION REPARTIDA (toda la malla)");
+                    HARUKA_LOGI("CollisionWire", "  el PEOR: radio tangente %.1f m · malla %.3f m vs "
+                                "funcion %.3f m (delta %+.4f m)",
+                                worstRad, worstAlt, worstFunc, worstAlt - worstFunc);
+                    for (const Outlier& o : outliers) {
+                        // El anillo al que pertenece el radio: si todos caen en el mismo, o en una
+                        // frontera entre dos, la causa es del anillo y no del terreno.
+                        const auto lay = Haruka::Planet::terrainRingLayout(o.rad * 1.5 + 8.0);
+                        int ring = -1; double cellM = 0.0;
+                        for (size_t k = 0; k < lay.size(); ++k)
+                            if (o.rad <= lay[k].extent) { ring = (int)k; cellM = lay[k].cell; break; }
+                        HARUKA_LOGI("CollisionWire", "    outlier: radio %7.1f m · delta %+.4f m · "
+                                    "alt %.2f m · anillo %d (celda %.2f m)",
+                                    o.rad, o.delta, o.alt, ring, cellM);
+                    }
+                }
             }
         }
         HARUKA_LOGI("CollisionWire", "malla de colision: %zu triangulos en total, %u vertices de "
