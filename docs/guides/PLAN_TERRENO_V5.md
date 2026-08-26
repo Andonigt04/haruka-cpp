@@ -670,7 +670,7 @@ equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`src/core/ter
 gemelo CPU de `lib/base_field.glsl` — y **está demostrado, no solo escrito**: el test de paridad del
 bake lo valida contra la GPU a **0,0007 m** en Vulkan.
 
-**Cuánto se separan los dos suelos** (`test_terrain_two_bakes_disagree`, elevación analítica de
+**Cuánto se separan los dos suelos** (`test_terrain_backup_bake_cost`, elevación analítica de
 ±3700 m sembrada en las dos retículas a resolución real, 16 200 direcciones):
 
     la FISICA (equirect) contra el RENDER (cubo)   peor 0.15 m  ·  media 0.022 m
@@ -1007,3 +1007,111 @@ son dos superficies.
 pregunta qué nivel eligió el selector —eso depende de la cámara y haría que el suelo cambiara según
 hacia dónde miras—: se usa el téxel del nivel **más fino**, que es una constante, y cerca del jugador
 el selector siempre llega a él.
+
+## ✅ EL CRITERIO DE SUBDIVISIÓN MEDÍA AL NIVEL DEL MAR (2026-08-24)
+
+Reportado como: *"en una pendiente, mirando cuesta arriba hay disparidad; cuesta abajo no, pero se ve
+inestable"*. **Parecía direccional y no lo era.** `nodeShouldSplit` medía la distancia a
+`planetCenter + dir·R` —el nivel del mar— ignorando el relieve. En una ladera de +2 km el suelo real
+está 2 km **más cerca** de una cámara por encima, así que sobreestimaba la distancia y subdividía DE
+MENOS. Como el error depende de la elevación local, el síntoma se manifiesta según hacia dónde miras.
+
+    cota del nodo    altura de camara    nivel SIN cota -> CON cota
+         500 m             50 m           17 -> 17
+        2000 m            500 m           15 -> 17   (el viejo se quedaba corto)
+        5000 m             50 m           14 -> 17   (el viejo se quedaba corto)
+    CONTRAPRUEBA: con cota 0 los dos criterios coinciden
+
+**Hasta 3 niveles**, o sea téxeles **8× más bastos**: 4,77 m en vez de 0,596 sobre una montaña de
+5 km — mientras la colisión sí usaba el fino. Ésa era la disparidad.
+
+⚠️ Se usa la cota **máxima** del nodo: un pico es lo más cercano a una cámara que está arriba. Sin
+rango conocido vale 0, que es exactamente el comportamiento anterior — por eso la contraprueba con
+cota 0 tiene que dar lo mismo, y da.
+
+⚠️ **Esto PIDE MÁS NODOS donde hay relieve.** El pool tendrá que crecer, o el selector tocará su tope
+antes. Es el precio de dibujar la montaña a la resolución que se pisa.
+
+## ✅ COSTURAS DE LA COLISIÓN, COSIDAS (2026-08-24)
+
+Medido en el juego: hasta **122,65 m de escalón** a 131 km (celda de 4 km) — la peor disparidad
+ver↔pisar que quedaba, 500× la del campo cercano. Es la misma T-junction que el pase de nodos ya
+resuelve: el vértice del anillo fino sin gemelo grueso no cae sobre la recta que une a sus dos vecinos.
+Ahora se mueve a esa recta, así que el escalón es 0 por construcción.
+
+⚠️ **Los índices se copian LITERALMENTE de `terrainRingSeamStep`**, la función que lo mide. Escritos a
+ojo salían `{0, 2·half}` cuando la medida usa `{half+1-half, half+1+half}`: habría cosido la fila de al
+lado, el escalón habría seguido ahí y el banco en verde.
+
+## ✅ EL POPPING AL MOVER LA CÁMARA — geomorph por DISTANCIA (2026-08-24)
+
+Reportado como *"disparidad sobre todo al mover la cámara"*. El geomorph de aristas cierra el escalón
+entre nodos que se dibujan **a la vez**; no dice nada de cuando un nodo **desaparece** y lo releva su
+padre. Ahí la superficie salta de una función a otra.
+
+`nodeParentMorph` lo cierra en el TIEMPO: el nodo va adoptando la altura de su padre conforme se
+acerca el relevo, así que cuando ocurre ya son idénticos. El umbral sale de la propia regla de
+subdivisión, no de un número elegido: un nodo es hoja mientras su error ≤ `errorPx`, y su padre —cuyo
+téxel es el doble— releva cuando el del nodo baja a `errorPx/2`. Ésa es la ventana.
+
+    nivel 11: SIN morph saltaria 1.231 m · morph al relevo 0.996 · salto real 0.0098 m
+    nivel 13: SIN morph saltaria 0.035 m · morph al relevo 0.997 · salto real 0.0003 m
+    nivel 17: SIN morph saltaria 0.024 m · morph al relevo 0.999 · salto real 0.0002 m
+
+Los dos morphs se combinan con **máximo, no suma**: apuntan al mismo destino (la altura del padre).
+
+⚠️ **DOS ERRORES DEL TEST antes de que midiera nada** — los dos daban verde:
+1. El nodo de prueba no estaba **bajo la cámara**, así que el barrido nunca entró en la ventana donde
+   ese nodo es hoja: la distancia la dominaba el desplazamiento lateral. Salía "salto 0,0000 m".
+2. Al modelar la cadena, cuando el nodo está SUBDIVIDIDO asumí que se dibuja su padre. Se dibujan sus
+   **hijos**, que están morfeados hacia él. Eso metía un salto de 1,22 m que era del test.
+
+## ❌ RECHAZADO: alinear el corte de octavas de la colisión con el del nodo
+
+Se probó bajar el piso de la colisión a 0,596 m (el téxel del nodo más fino) para cerrar la disparidad
+ver↔pisar de 0,2539 m. **Funcionaba y era un error.** La celda del anillo cercano mide 4 m, así que
+alimentarlo con octavas de 0,6 m es sub-Nyquist — exactamente lo que la nota de `TERRAIN_TRIM_FLOOR`
+lleva documentado. Medido en el juego:
+
+    twist del quad de 4 m:  0.035 -> 0.108 m a <8 m del jugador  (0.082 -> 0.225 peor en el bloque)
+
+Tres veces peor justo donde se camina. **La disparidad de 0,2539 m es ESTRUCTURAL**: dos rejillas de
+resolución distinta (4 m contra 0,596 m). Cerrarla exige afinar la de colisión —45× más muestras,
+~135 ms— no mover el corte.
+
+
+## ⚠️ LA DISPARIDAD VER↔PISAR: diagnosticada, NO arreglada
+
+**Reportada como** "en una pendiente, mirando al lado ascendente hay disparidad; hacia abajo no", y
+**quieto** — o sea que no es la deriva de la malla de colisión (que se reconstruye cada 48 m).
+
+**Medida: 0,1548-0,2539 m, CONSTANTE.** No depende de la cota (×1,0 entre 0 y 5 km) ni del ángulo (el
+nivel de un punto es el mismo en 24 azimuts). Por qué parece direccional: un hueco vertical constante
+se ve muchísimo más mirando **a lo largo** de una ladera que mirándola desde arriba, donde queda
+escorzado. **No es el ángulo: el ángulo lo hace visible.**
+
+**La causa**: el pase de nodos dibuja a **0,596 m/téxel**; el anillo de colisión tiene celdas de **4 m**
+y corta las octavas en 4 m. Dos resoluciones del mismo campo son dos superficies. Antes del v5 no
+pasaba: el clipmap también dibujaba a 4 m.
+
+**Dos intentos, los dos descartados con números:**
+
+1. **Bajar el corte de octavas del anillo a 0,596 m.** Cierra la disparidad a 0 — y es sub-Nyquist
+   para una celda de 4 m: el twist del quad se triplicó (0,035 -> **0,108 m** a menos de 8 m del
+   jugador). Justo lo que la nota de `TERRAIN_TRIM_FLOOR` advierte. Revertido.
+2. **Afinar la rejilla de colisión** (empezar la pila en ±32 m con celda 0,5 m en vez de ±256 m con
+   4 m, y bajar el piso de octavas con ella). Es **el arreglo correcto** y compila, pero rompe **8
+   contratos medidos** —`terrain_lod_invariants`, `terrain_ring_tiling`, `terrain_chord_error`,
+   `terrain_finest_octave`— porque todos codifican el diseño de la era clipmap ("el piso de triM ES el
+   lado del quad", "el anillo 0 es ±256 m", "11 anillos", "múltiplo del quad"). Y además redefine el
+   suelo que pisa la física en TODO el planeta. Revertido: no por equivocado, por no hacerlo a medias.
+
+**Lo que queda, en orden:**
+
+1. Re-derivar esos cuatro tests con la rejilla nueva: el piso de `triM` sigue a la celda del anillo más
+   fino, no al quad del clipmap borrado. El razonamiento de Nyquist NO cambia — cambia la rejilla.
+2. `TERRAIN_RING_FINE_CELL = 0.5` y `TERRAIN_TRIM_FLOOR = TERRAIN_RING_FINE_CELL`.
+3. Medir el coste: tres anillos finos más, 16 900 muestras cada uno (del orden del bloque de ±256 m
+   que ya se paga; su muestreo son hoy 2-3 ms).
+4. Medir el twist DESPUÉS: con celda 0,5 m y piso 0,5 m ya no es sub-Nyquist, así que debería quedarse
+   donde estaba. Si sube, la premisa está mal.

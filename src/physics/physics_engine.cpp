@@ -223,7 +223,8 @@ struct PhysicsEngine::JoltImpl {
         // ── EL TWIST DEL QUAD: la disparidad que NINGUNA comparación de nodos puede ver ──────────
         //
         // Los cuatro nodos de un quad los comparten render y colisión EXACTAMENTE (eso ya está
-        // demostrado: `clipmap_vertex_lattice`, 0 de 59 785 fuera de la retícula). Pero un quad no es
+        // demostrado: 0 de 59 785 fuera de la retícula, medido por `clipmap_vertex_lattice` antes de
+        // borrarlo con el clipmap). Pero un quad no es
         // plano: para dibujarlo hay que partirlo en dos triángulos, y las dos diagonales posibles dan
         // superficies DISTINTAS que solo coinciden en los cuatro nodos. En el centro del quad se
         // separan por `|h00 + h11 − h10 − h01| / 4`.

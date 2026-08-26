@@ -35,10 +35,23 @@ class TerrainNodeGpu {
 public:
     /// Téxeles de un nodo (TEXELS²) y bytes que ocupa su hueco.
     static constexpr size_t kTexelsPerNode = (size_t)TERRAIN_NODE_TEXELS * TERRAIN_NODE_TEXELS;
-    /// ⚠️ DOS alturas por téxel: la propia y la del PADRE. La segunda es lo que cierra el escalón de
-    /// 2,4 m en cada cambio de nivel (geomorphing; ver la nota larga de `terrain_node.comp`).
-    /// El hueco `k` ocupa `[k·2·TEXELS², …)`: primero las propias, luego las del padre.
-    static constexpr size_t kFloatsPerNode = kTexelsPerNode * 2;   ///< propias + las del padre
+    /// ⚠️ TRES alturas por téxel: la propia, la del PADRE y la del ABUELO. El hueco `k` ocupa
+    /// `[k·3·TEXELS², …)` en ese orden.
+    ///
+    /// La del padre cierra el escalón de 2,4 m al cambiar de nivel (geomorphing). La del ABUELO se
+    /// añadió el 2026-08-25 y cierra el que quedaba: el nodo fino morfeaba hacia la altura CRUDA de
+    /// su padre, pero el vecino grueso —que ESTÁ en ese nivel— se morfea a su vez hacia el suyo, así
+    /// que los dos lados dibujaban superficies distintas sobre la arista compartida. Medido: 2,747 m
+    /// de escalón, y el 100 % de las grietas en pantalla caían en fronteras de nivel
+    /// (`v5 F3: grietas entre nodos vecinos`). Con el abuelo, el fino puede apuntar a lo que el
+    /// grueso DIBUJA —`mix(padre, abuelo, m(L−1))`— en vez de a su altura cruda.
+    ///
+    /// ⚠️ Cuesta un 50 % más de VRAM: 130 → 195 KB por nodo, o sea 260 → 390 MB con 2048 huecos.
+    /// Se probaron antes DOS alternativas sin memoria extra —estrechar las rampas del morph por
+    /// arista, y apagar el morph del grueso junto a un vecino fino— y las dos cambiaron un pincho por
+    /// otro. La razón es estructural y está en `terrain_node.vert`: el morph tiene que ser función
+    /// SOLO de (nivel, posición del vértice), y toda solución sin el abuelo depende de los vecinos.
+    static constexpr size_t kFloatsPerNode = kTexelsPerNode * 3;   ///< propias + padre + abuelo
     static constexpr size_t kBytesPerNode  = kFloatsPerNode * sizeof(float);
 
     /** @param computePath ruta a `shaders/terrain_node.comp`. @return false si no hay device o pipeline. */
@@ -101,23 +114,53 @@ public:
      *
      * @return cuántos nodos se han dispatchado.
      */
-    size_t generatePending(TerrainNodePool& pool, double planetRadiusM) {
-        if (!m_dev || !RHI::valid(m_pipe)) return 0;
+    /**
+     * @brief Muestreador de la altura de superficie (m) para estimar el rango de cada nodo.
+     *
+     * Sin el, `nodeEstimateRange` devuelve invalido y todo vuelve a medirse al nivel del mar.
+     */
+    void setHeightSampler(NodeBaseHeightFn fn, void* ctx) { m_heightFn = fn; m_heightCtx = ctx; }
+
+    /**
+     * @brief Genera los nodos pendientes. **El `ctx` lo pone el llamador, y no es un detalle.**
+     *
+     * ⚠️ ESTO ABRIA SU PROPIO FRAME (`m_dev->beginFrame()` / `endFrame()`), y en OpenGL
+     * `GLDevice::endFrame()` es **`SDL_GL_SwapWindow`**. O sea que cada vez que habia nodos que
+     * generar, el generador de terreno PRESENTABA LA VENTANA a media escena, antes de que el propio
+     * terreno se dibujara. Y solo pasa cuando hay cola de generacion — al andar o girar—, que es
+     * exactamente cuando se reportaron el parpadeo y los pinchos.
+     *
+     * Ningun test headless podia verlo: la aritmetica esta bien (reconstruida vertice a vertice, el
+     * pase no anade ni 0,0001 m de discontinuidad sobre el campo). El fallo no estaba en QUE se
+     * dibuja sino en CUANDO se presenta.
+     *
+     * `prepare` ya corre **fuera del render pass** —esta documentado justo para poder despachar
+     * compute ahi—, asi que su `ctx` vale y no hace falta abrir nada.
+     */
+    size_t generatePending(RHI::Context* ctx, TerrainNodePool& pool, double planetRadiusM) {
+        if (!m_dev || !RHI::valid(m_pipe) || !ctx) return 0;
         const std::vector<NodeId> pending = pool.takePending();   // copia: `publish` toca el pool
         if (pending.empty()) return 0;
 
-        RHI::Context* ctx = m_dev->beginFrame();
-        if (!ctx) return 0;
         ctx->bindPipeline(m_pipe);
         ctx->bindStorageBuffer(1, m_heights);
         const bool hasBase = RHI::valid(m_baseField);
         ctx->bindTexture(15, baseFieldOrDummy());
         ctx->bindTexture(16, heightTexOrDummy());
 
+        // ⚠️ EL TOPE SE APLICA AQUI TAMBIEN. `prioritisePending` lo recorta antes, pero si alguien
+        // genera sin ordenar (un test, otro llamador) el presupuesto no puede saltarse en silencio:
+        // 170 nodos a 0,27 ms serian 45 ms de frame.
+        const size_t budget = pool.genPerFrame();
         size_t issued = 0;
         for (const NodeId& n : pending) {
+            if (issued >= budget) break;
             if (!nodeIndicesValid(n)) continue;          // petición mal formada: no se dispatcha
-            const int slot = pool.publish(n, NodeRange{});
+            // ⚠️ EL RANGO, NO `NodeRange{}`. Publicar vacio dejaba a `rangeOf` devolviendo invalido
+            // SIEMPRE (medido en el juego: `SIN RANGO 3070` de 3070), y de eso viven el criterio de
+            // subdivision, el stride por nodo y la envolvente del frustum. Ver `nodeEstimateRange`.
+            const int slot = pool.publish(n, nodeEstimateRange(n, planetRadiusM,
+                                                               m_heightFn, m_heightCtx));
             if (slot < 0) continue;                      // pool lleno de visibles: el frame que viene
 
             ParamsUBO p{};
@@ -167,7 +210,6 @@ public:
         // UNA barrera para toda la tanda: los dispatch escriben en rangos disjuntos del mismo buffer,
         // así que no necesitan ordenarse entre sí — solo frente a quien lea después.
         ctx->memoryBarrier();
-        m_dev->endFrame();
         return issued;
     }
 
@@ -203,6 +245,8 @@ public:
     size_t bytes()    const { return m_capacity * kBytesPerNode; }
 
 private:
+    NodeBaseHeightFn m_heightFn = nullptr;
+    void*            m_heightCtx = nullptr;
     /// Gemelo del bloque `NodeParams` de `terrain_node.comp`. std140: tres vec4 de 16 B, sin relleno.
     struct ParamsUBO { int32_t node[4]; int32_t grid[4]; float misc[4]; };
 

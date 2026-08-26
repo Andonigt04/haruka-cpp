@@ -19,6 +19,8 @@ layout(location = 2) in float vHeight;
 layout(location = 3) flat in int vLevel;
 layout(location = 4) in vec3 vClimate;
 layout(location = 5) in vec3 vUp;
+layout(location = 6) flat in int vStride;
+layout(location = 7) flat in int vFace;
 
 // ⚠️ EL COLOR SALE DE LA MISMA LIBRERIA QUE EL CLIPMAP, NO DE UNA COPIA. Si el nodo y el clipmap
 // divergen en color, la transicion entre los dos se ve como una costura — justo lo que el v5 venia
@@ -33,7 +35,11 @@ layout(binding = 13) uniform sampler2DArray uTerrainNormal;
 layout(binding = 14) uniform sampler2D      uZoneMap;
 
 layout(std140, binding = 0) uniform NodeDraw {
-    mat4  uMVP; vec4 uCenter; ivec4 uNodeUnused; ivec4 uGrid; ivec4 uEdgeUnused; vec4 uMisc;
+    // ⚠️ ESTE BLOQUE ES GEMELO EXACTO DE `terrain_node.vert` Y DE `DrawUBO`. Un campo de mas o de
+    // menos aqui no da error de compilacion: desplaza TODO lo que viene detras y el shader lee
+    // basura de otro campo. `uCenterLo` se anadio el 2026-08-25 y hay que llevarlo en los tres.
+    mat4  uMVP; vec4 uCenter; vec4 uCenterLo; vec4 uLod; ivec4 uGrid; ivec4 uEdgeUnused;
+    vec4  uMisc;
     // x = metros por tile · y = capa de arena de orilla · z = bits de mapas presentes
     // (1 macro | 2 biomas | 4 zonas) · w = 1 si se sombrea de verdad, 0 = luz plana de geometría
     vec4  uShade;
@@ -53,6 +59,13 @@ layout(location = 0) out vec4 fragColor;
  *       o recorte — no sombreado.
  *   3 = por PROFUNDIDAD (gl_FragCoord.z, reversed-Z: cerca=1, lejos=0). Delata si el lejano cae al
  *       0 exacto, que con la comparación GREATER contra un clear de 0 no pasaría el test.
+ *   4 = por STRIDE del nodo, sin iluminar. Si un pincho cae justo en una frontera de color,
+ *       viene del stride por nodo o de su cosido; si cae en medio de un color, no.
+ *   6 = LA NORMAL como color (sin iluminar): separa un pliegue de GEOMETRIA de uno de la NORMAL.
+ *   5 = ATRIBUCION EXACTA, para leer con `readPixels` (no para mirar). R = nivel x 8, G = cara x 40,
+ *       B = 200 + stride x 8 (marca de "aqui hay terreno" Y el stride, para atribuir). La 1 pinta por nivel pero con una paleta ciclica de
+ *       8, asi que el nivel 7 y el 15 salen del mismo color: sirve para mirar y NO para atribuir.
+ *       Con esta, cada agujero se puede achacar a una frontera concreta — de nivel o de CARA.
  */
 vec3 debugLevelColor(int lv) {
     const vec3 pal[8] = vec3[8](vec3(1,0,0), vec3(1,0.5,0), vec3(1,1,0), vec3(0,1,0),
@@ -63,8 +76,21 @@ vec3 debugLevelColor(int lv) {
 void main() {
     const int dbg = int(uMisc.z);
     if (dbg == 1) { fragColor = vec4(debugLevelColor(vLevel), 1.0); return; }
+    if (dbg == 5) {   // atribucion: se LEE, no se mira. Ver la nota de arriba.
+        // B lleva DOS cosas: sigue siendo la marca de "aqui hay terreno" (>=200 siempre) y ademas
+        // codifica el stride, para poder achacar un agujero que caiga DENTRO de un nivel — donde el
+        // escalon entre niveles no puede explicarlo y el sospechoso es el cosido o el stride.
+        fragColor = vec4(float(vLevel) * 8.0 / 255.0, float(vFace) * 40.0 / 255.0,
+                         (200.0 + float(vStride) * 8.0) / 255.0, 1.0);
+        return;
+    }
     if (dbg == 2) { fragColor = vec4(1.0); return; }
+    // 6 = LA NORMAL como color, sin iluminacion. Es lo que separa "la superficie tiene pliegues"
+    // de "la normal los tiene": si aqui hay aristas duras, el fallo es de sombreado; si sale suave,
+    // los pliegues son geometria de verdad. Ninguna vista anterior podia contestar eso.
+    if (dbg == 6) { fragColor = vec4(normalize(vNormal) * 0.5 + 0.5, 1.0); return; }
     if (dbg == 3) { fragColor = vec4(vec3(pow(gl_FragCoord.z, 0.15)), 1.0); return; }
+    if (dbg == 4) { fragColor = vec4(debugLevelColor(vStride * 3), 1.0); return; }
     vec3 n = normalize(vNormal);
 
     // ⚠️ LA LUZ PLANA SE CONSERVA A PROPOSITO (uShade.w = 0). No es codigo muerto: es el lado A del

@@ -642,12 +642,13 @@ void TerrestrialPlanet::buildMesh(
     m_patchCullCmd = dev->createBuffer(RHI::BufferUsage::Indirect, sizeof(cmdInit), cmdInit,
                                        RHI::BufferMemory::Dynamic);
 
-    // REJILLA DEL CLIPMAP: N x N parches de 128 m con la cámara en el centro; la rejilla no se
-    // regenera nunca, solo se reorienta con el marco tangente del UBO. El TAMAÑO depende de la
-    // calidad de terreno (TerrainQuality): el fino cubre más en calidad alta para empujar la malla
-    // gruesa a mayor distancia. El semi-lado resultante (m_clipCoverM) se pasa a los shaders por
-    // ClipParams (binding 13): el recorte de la malla base (terrain.tese) y el anillo de mezcla del
-    // clipmap (clipmap.tese) leen ESE valor, nunca literales.
+    // REJILLA DE PARCHES: N x N parches de 128 m con la cámara en el centro; la rejilla no se
+    // regenera nunca, solo se reorienta con el marco tangente del UBO. Sobrevivió al borrado del
+    // pipeline del clipmap porque la reusan los anillos de MAR (ver el bloque de `m_clipVB` en el
+    // draw). El TAMAÑO depende de la calidad de terreno (TerrainQuality): el fino cubre más en
+    // calidad alta para empujar la malla gruesa a mayor distancia. El semi-lado resultante
+    // (m_clipCoverM) se pasa a los shaders por ClipParams (binding 13): el recorte de la malla base
+    // (terrain.tese) y los anillos de mar (ocean.vert/.tesc/.tese) leen ESE valor, nunca literales.
     {
         const float PATCH = (float)Haruka::Planet::TERRAIN_CLIP_PATCH_M;
         const int   quality = (int)SettingsManager::get().graphics().terrainQuality;
@@ -2784,6 +2785,14 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         // ⚠️ EL BAKE, ANTES DE GENERAR NADA. Sin él el nodo sale `R + detalle` en vez de
         // `R + baseH + detalle`, o sea un planeta sin continentes ni costa y ±4 km por debajo de lo
         // que dibuja el clipmap — un escalón en la transición entre los dos.
+        // ⚠️ EL MUESTREADOR DE ALTURA, o el pool publica rangos vacios y TODO se mide al nivel del
+        // mar: el criterio de subdivision, el stride por nodo y la envolvente del frustum. El log lo
+        // decia con `SIN RANGO 3070` de 3070. Se usa `sampleHeight`, que es la MISMA altura que
+        // consulta la fisica — asi la cota que decide el LOD y la que se pisa no pueden divergir.
+        m_nodeRenderer.setHeightSampler(
+            [](const glm::dvec3& dir, void* ctx) -> float {
+                return (float)static_cast<const TerrestrialPlanet*>(ctx)->sampleHeight(dir);
+            }, this);
         m_nodeRenderer.setBaseField(m_baseFieldTex);
         m_nodeRenderer.setHeightTex(m_heightTex);   // la MISMA elevación que el clipmap y la física
         const double radPerPx = fovYRad / std::max(viewportH, 1.0);
@@ -3602,6 +3611,18 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         if (!s_initLogged) {
             s_initLogged = true;
             HARUKA_LOGI("TerrenoV5", "init %s · dir='%s'", v5Ok ? "OK" : "FALLO", v5Dir.c_str());
+            // ⚠️ QUE EL LOG DIGA SI EL INTERRUPTOR LLEGÓ. Sin esto, un experimento de bisección que
+            // no surte efecto es indistinguible de "esta causa no era": los tres arranques se ven
+            // iguales y se concluye lo contrario de lo que ha pasado. Ya ocurrió una vez con
+            // `HARUKA_TERRAIN_V5_DEBUG` ("veo con los 3 igual") y costó dar por descartada una
+            // hipótesis correcta. `STRIDE` además se puede contrastar con el `stride a..b` de abajo.
+            {
+                using V5 = Haruka::Terrain::TerrainNodeRenderer;
+                const uint32_t fs = V5::forcedStride();
+                HARUKA_LOGI("TerrenoV5", "biseccion: STRIDE=%s · NOMORPH=%s · DEBUG=%d · VERTPX=%.1f",
+                            fs ? std::to_string(fs).c_str() : "(no)",
+                            V5::noMorph() ? "SI" : "no", V5::debugView(), V5::vertexPx());
+            }
         }
         if (v5Ok) {
             // ⚠️ AQUI SE SACABAN fovY, ASPECTO Y CONO DE `proj`, Y EN VULKAN ESO DA UN CONO NEGATIVO.
@@ -3657,12 +3678,16 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 // el test, no el motor. Ese es el dato que falta.
                 HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu) · "
                             "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu"
-                            " · tope del selector %zu · stride %u · %.1f M tris · residentes %zu/%zu"
+                            " · tope del selector %zu%s · stride %u..%u en %u draws · %.1f M tris · residentes %zu/%zu"
+                            " · SIN RANGO %zu"
                             " · alt %.0f m",
                             st.selected, st.drawn, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
                             st.farthestKm, st.culledFrustum, st.culledHorizon,
-                            m_nodeRenderer.capacity(), st.stride, (double)st.tris / 1e6,
-                            st.resident, m_nodeRenderer.capacity(),
+                            st.selBudget,
+                            (st.selBudget > 0 && st.selected + 8 >= st.selBudget) ? " SATURADO" : "",
+                            st.strideMin, st.stride, st.drawCalls,
+                            (double)st.tris / 1e6,
+                            st.resident, m_nodeRenderer.capacity(), st.rangeMissing,
                             glm::length(cameraPos - m_config.position) - m_config.radius);
             v5Drew = st.drawn > 0;
         }

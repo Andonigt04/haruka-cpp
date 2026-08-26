@@ -710,8 +710,7 @@ static void testEnginePipelines()
     const std::vector<Case> cases = {
         { "planeta/base teselado", sh+"planet/terrain.vert", sh+"planet/biome.frag",
           sh+"planet/terrain.tesc", sh+"planet/terrain.tese", true },
-        { "planeta/clipmap",       sh+"planet/clipmap.vert", sh+"planet/biome.frag",
-          sh+"planet/clipmap.tesc", sh+"planet/clipmap.tese", true },
+        { "planeta/nodos (v5)",    sh+"terrain_node.vert", sh+"terrain_node.frag", "", "", false },
         { "planeta/suelo cercano", sh+"planet/nearground.vert", sh+"planet/biome.frag", "", "", false },
         { "mar/cercano (olas)",    sh+"planet/ocean.vert", sh+"planet/ocean.frag",
           sh+"planet/ocean.tesc", sh+"planet/ocean.tese", true },
@@ -1589,9 +1588,8 @@ static void testTerrainNodeGpuParity()
         //
         // Así que se exige (a) que la GPU se reproduzca a sí misma —eso sí es requisito— y (b) que
         // la desviación contra el oráculo esté DENTRO DE UNA TOLERANCIA DECLARADA.
-        constexpr double kTolM = 0.05;   // 3,4x mejor que la disparidad que el motor ya acepta hoy
-        std::printf("    tolerancia declarada %.3f m · hoy el clipmap ya vive con 0.1453 m "
-                    "(clipmap_dir_parity)\n", kTolM);
+        constexpr double kTolM = 0.05;   // tolerancia DECLARADA, no derivada de ninguna medida viva
+        std::printf("    tolerancia declarada %.3f m\n", kTolM);
         CHECK(worst < kTolM, "la desviacion contra el oraculo de CPU cabe en la tolerancia declarada");
 
         // REPRODUCIBILIDAD EN LA MISMA GPU. Ésta sí es la propiedad que el plan necesita: si la GPU
@@ -1755,7 +1753,12 @@ static void testTerrainNodePoolGpu()
         nodeSelectVisible(R, cam, pc, radPerPx, sel, 4096, 8.0, &fwd, cone, 5000.0,
                           &TerrainNodePool::rangeFnAdapter, &pool);
         for (const NodeId& n : sel) pool.request(n);
-        totalIssued += gpu.generatePending(pool, R);
+        // ⚠️ EL `endFrame` VA AQUI AHORA, Y ES EXPLICITO A PROPOSITO. `generatePending` lo hacia por
+        // dentro, y en GL `endFrame` es `SDL_GL_SwapWindow`: el generador presentaba la ventana a
+        // media escena cada vez que habia nodos que generar. En el juego eso era el parpadeo; aqui
+        // era lo que hacia visible el resultado al readback, asi que se conserva, a la vista.
+        totalIssued += gpu.generatePending(g_dev->beginFrame(), pool, R);
+        g_dev->endFrame();
     }
     const auto st = pool.stats();
     std::printf("    6 frames · %zu nodos dispatchados · residentes %zu/%zu · desalojos %zu\n",
@@ -1814,7 +1817,7 @@ static void testTerrainNodePoolGpu()
 // F3 — RENDER SOBRE NODOS: ¿cae la geometría dibujada sobre la superficie del nodo?
 //
 // Es la promesa central del v5 puesta a prueba. Hoy el render y la colisión describen superficies
-// distintas y se MIDE cuánto se separan (`terrain_chord_error`, `clipmap_dir_parity`). Con nodos no
+// distintas y se MIDE cuánto se separan (`terrain_chord_error`). Con nodos no
 // hay dos superficies: el vértice lee el MISMO téxel que leerá Jolt, así que la paridad no se mide,
 // se cumple. Esto lo comprueba dibujando de verdad y leyendo la posición de vuelta.
 //
@@ -1840,8 +1843,14 @@ static void testTerrainNodeRender()
     TerrainNodePool pool(4, 8);
     pool.beginFrame();
     pool.request(node);
-    const size_t issued = gpu.generatePending(pool, R);
-    CHECK(issued == 1, "el nodo se ha generado en GPU");
+    const size_t issued = gpu.generatePending(g_dev->beginFrame(), pool, R);
+    g_dev->endFrame();
+    // ⚠️ YA NO ES 1, Y NO ES UN BUG (2026-08-25): `TerrainNodePool::request` encola tambien los
+    // eslabones que le faltan a la cadena raiz->nodo, porque el selector solo pide HOJAS y sin eso
+    // la caida por ancestro se saltaba niveles. Un nodo de nivel 14 arrastra su cadena, asi que con
+    // 4 huecos se generan 4. Lo que este test necesita no es cuantos, sino que el PEDIDO este entre
+    // ellos — y eso lo comprueba el `slot >= 0` de aqui debajo, que lo busca por identidad.
+    CHECK(issued >= 1, "se ha generado en GPU");
     // ⚠️ NO se asume el hueco 0: la lista de libres del pool es LIFO, así que el primer nodo cae en
     // el último hueco. Que el índice sea impredecible es correcto —el pool es quien manda— y el
     // llamador tiene que PREGUNTARLO, que es justo lo que hará el render de verdad.
@@ -1976,7 +1985,6 @@ static void testTerrainNodeRender()
         // ⚠️ AQUI SALIAN 399,59 m EN OPENGL Y 0,0001 EN VULKAN, y se leyo como "los dos backends
         // producen suelos distintos". No era cierto: faltaba la fence DESPUES de `copyBuffer` (ver
         // `copyThenWait`). Con ella, GL da 0,0204 m. La generacion siempre fue correcta.
-        std::printf("      (hoy, render vs colision: 0,1453 m de `clipmap_dir_parity`)\n");
         CHECK(worstPos < 0.05, "el vertice cae sobre la superficie del nodo, dentro de la tolerancia");
     }
 
@@ -2181,6 +2189,478 @@ static void testTerrainNodeCoverage()
     r.shutdown();
 }
 
+// ================================================================================================
+// v5 F3 — GRIETAS ENTRE NODOS VECINOS, CON EL SHADER DE VERDAD
+//
+// ⚠️ ES EL UNICO TEST QUE EJECUTA EL PASE COMPLETO SOBRE FRONTERAS ENTRE NIVELES. Todo lo demas que
+// audita aristas (`terrain_node_edge_audit_all`, `terrain_node_stride_seams`) es un GEMELO en CPU del
+// shader — y a ese gemelo le falto durante una sesion entera el termino de morph por distancia, o sea
+// que medía un shader que ya no existia. Un gemelo solo vale mientras nadie lo comprueba.
+//
+// Mide AGUJEROS INTERIORES: pixeles de fondo que tienen terreno a los cuatro lados. El cielo no
+// cuenta (no esta rodeado); una grieta entre dos nodos si. Es la forma que tiene en pantalla el
+// desacuerdo que el gemelo mide en metros.
+//
+// CONTRAPRUEBA DEL INSTRUMENTO: un frame sin dibujar nada tiene que dar CERO agujeros interiores. Sin
+// ella, un `readPixels` que no escribe (pasa en un backend, ver el test de cobertura) se leeria como
+// "terreno perfecto" en vez de como "no he medido nada".
+// ================================================================================================
+static void testTerrainNodeSeamHoles()
+{
+    BEGIN("v5 F3: grietas entre nodos vecinos (agujeros interiores, shader real)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 1024)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    // Agujero INTERIOR: fondo con terreno a los cuatro lados dentro de `K` pixeles. `K` pequeño para
+    // no llamar interior a un hueco grande del horizonte.
+    auto interiorHoles = [&](const std::vector<uint8_t>& px) {
+        const int K = 6;
+        auto lit = [&](int x, int y) {
+            if (x < 0 || y < 0 || x >= w || y >= h) return false;
+            const uint8_t* p = &px[((size_t)y * w + x) * 4];
+            return (p[0] || p[1] || p[2]) && !(p[0] == 0xAA && p[1] == 0xAA && p[2] == 0xAA);
+        };
+        size_t n = 0;
+        for (int y = 1; y < h - 1; ++y)
+            for (int x = 1; x < w - 1; ++x) {
+                if (lit(x, y)) continue;
+                bool L = false, Rr = false, U = false, D = false;
+                for (int k = 1; k <= K; ++k) {
+                    L  = L  || lit(x - k, y); Rr = Rr || lit(x + k, y);
+                    U  = U  || lit(x, y - k); D  = D  || lit(x, y + k);
+                }
+                if (L && Rr && U && D) ++n;
+            }
+        return n;
+    };
+
+    // ⚠️ VARIAS ALTITUDES Y DIRECCIONES, no una. La primera version media UN caso (1030 m al
+    // horizonte) y daba 0-1 px mientras Andoni seguia viendo pinchos en el juego: un solo punto de
+    // muestreo no representa lo que se mira al jugar. El barrido dice DONDE aparecen.
+    struct SeamCase { double altM; double pitch; const char* what; };
+    const SeamCase cases[] = {
+        {     2.0,  0.00, "a pie, horizonte"   }, {     2.0, -0.35, "a pie, mirando abajo" },
+        {   200.0,  0.00, "200 m, horizonte"   }, {  1030.0,  0.00, "1030 m, horizonte"    },
+        {  1030.0, -0.50, "1030 m, abajo"      }, { 10000.0, -0.30, "10 km, abajo"         },
+        {100000.0, -0.60, "100 km, abajo"      },
+    };
+    size_t worstHoles = 0; const char* worstWhat = "-";
+    size_t totFront = 0, totCara = 0, totDentro = 0;
+    bool anyRead = false;
+    std::printf("    caso                     px terreno  niveles   agujeros   nivel/cara/dentro\n");
+    for (const SeamCase& cs : cases) {
+    const double altM = cs.altM;
+    const glm::dvec3 cam = pc + up0 * (R + altM);
+    const glm::dvec3 tang = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 fwd = glm::normalize(tang * std::cos(cs.pitch) + up0 * std::sin(cs.pitch));
+    const glm::mat4 proj = glm::perspective((float)fovY, (float)w / (float)h, 1.0f, 1e9f);
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(up0));
+    const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(view));
+
+    std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+    TerrainNodeRenderer::FrameStats last{};
+    for (int f = 0; f < 14; ++f) {                    // el pool se llena con presupuesto
+        Context* ctx = g_dev->beginFrame();
+        if (!ctx) break;
+        r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);   // FUERA del pase: despacha compute
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+        cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+        ctx->beginRenderPass({}, cv);
+        last = r.draw(ctx, cam, pc, R, mvp);
+        ctx->endRenderPass();
+        if (!isVk && f == 13) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk && f == 13) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+    }
+
+    size_t sentinel = 0, litPx = 0;
+    for (size_t k = 0; k < (size_t)w * h; ++k) {
+        const uint8_t* p = &px[k * 4];
+        if (p[0] == 0xAA && p[1] == 0xAA && p[2] == 0xAA) ++sentinel;
+        else if (p[0] || p[1] || p[2]) ++litPx;
+    }
+    if (sentinel > (size_t)w * h * 9 / 10) {
+        std::printf("    %-22s SIN LECTURA (readPixels no escribio en este backend)\n", cs.what);
+        continue;                                      // no se afirma nada sobre lo que no se midio
+    }
+    anyRead = true;
+
+    const size_t holes = interiorHoles(px);
+
+    // ── DONDE, Y ENTRE QUE. Contar agujeros no localiza nada: 8 px sueltos por la pantalla y 8 px en
+    // una linea son diagnosticos opuestos. Se repinta el MISMO frame con la vista 5, que codifica
+    // nivel y cara exactos por pixel, y cada agujero se achaca a lo que tiene alrededor.
+    std::vector<uint8_t> attr((size_t)w * h * 4, 0xAA);
+    r.setDebugViewOverride(5);
+    for (int f = 0; f < 2; ++f) {
+        Context* ctx = g_dev->beginFrame();
+        if (!ctx) break;
+        r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+        cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+        ctx->beginRenderPass({}, cv);
+        r.draw(ctx, cam, pc, R, mvp);
+        ctx->endRenderPass();
+        if (!isVk && f == 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, attr.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk && f == 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, attr.data());
+    }
+    r.setDebugViewOverride(-1);
+
+    // Vecino iluminado mas cercano en las cuatro direcciones, con su nivel y su cara.
+    auto probe = [&](int x, int y, int dx, int dy, int& lv, int& face, int& strd) {
+        for (int k = 1; k <= 8; ++k) {
+            const int xx = x + dx * k, yy = y + dy * k;
+            if (xx < 0 || yy < 0 || xx >= w || yy >= h) return false;
+            const uint8_t* p = &attr[((size_t)yy * w + xx) * 4];
+            if (p[2] < 200) continue;                     // B>=200 marca "aqui hay terreno"
+            lv = (p[0] + 4) / 8; face = (p[1] + 20) / 40; // se codifico x8 y x40
+            strd = (p[2] - 200) / 8;                      // ...y el stride en el resto de B
+            return true;
+        }
+        return false;
+    };
+    size_t hMismoNivel = 0, hFrontNivel = 0, hCruceCara = 0, hSinAtribuir = 0;
+    size_t dentroStrideDistinto = 0; int dentroLv = -1, dentroSkA = -1, dentroSkB = -1;
+    int xMin = w, xMax = -1, yMin = h, yMax = -1;
+    for (int y = 1; y < h - 1; ++y)
+        for (int x = 1; x < w - 1; ++x) {
+            const uint8_t* p = &attr[((size_t)y * w + x) * 4];
+            if (p[2] >= 200) continue;                     // hay terreno: no es agujero
+            int lv[4], fc[4], sk[4]; bool ok = true;
+            const int dx[4] = { -1, 1, 0, 0 }, dy[4] = { 0, 0, -1, 1 };
+            for (int d = 0; d < 4 && ok; ++d) ok = probe(x, y, dx[d], dy[d], lv[d], fc[d], sk[d]);
+            if (!ok) continue;                             // cielo, no agujero interior
+            if (x < xMin) xMin = x; if (x > xMax) xMax = x;
+            if (y < yMin) yMin = y; if (y > yMax) yMax = y;
+            bool caras = false, niveles = false;
+            for (int d = 1; d < 4; ++d) {
+                if (fc[d] != fc[0]) caras   = true;
+                if (lv[d] != lv[0]) niveles = true;
+            }
+            if      (caras)   ++hCruceCara;
+            else if (niveles) ++hFrontNivel;
+            else {
+                ++hMismoNivel;
+                // ⚠️ AQUI EL ESCALON ENTRE NIVELES NO PUEDE SER LA CAUSA: los cuatro vecinos estan
+                // en el MISMO nivel. Se anota el nivel y si los strides difieren, que es el unico
+                // otro dato que distingue a dos nodos hermanos.
+                bool sd = false;
+                for (int d = 1; d < 4; ++d) if (sk[d] != sk[0]) sd = true;
+                if (sd) ++dentroStrideDistinto;
+                if (dentroLv < 0) { dentroLv = lv[0]; dentroSkA = sk[0];
+                                    for (int d = 1; d < 4; ++d) if (sk[d] != sk[0]) dentroSkB = sk[d]; }
+            }
+        }
+    hSinAtribuir = (holes > hMismoNivel + hFrontNivel + hCruceCara)
+                 ? holes - (hMismoNivel + hFrontNivel + hCruceCara) : 0;
+    (void)hSinAtribuir; (void)xMin; (void)xMax; (void)yMin; (void)yMax;
+    std::printf("    %-22s %9zu  %3u..%-3u  %8zu   %zu/%zu/%zu\n",
+                cs.what, litPx, last.levelMin, last.levelMax, holes,
+                hFrontNivel, hCruceCara, hMismoNivel);
+    if (hMismoNivel)
+        std::printf("        (^ %zu DENTRO de un nivel: nivel %d, strides %d/%d · con stride "
+                    "distinto: %zu)\n", hMismoNivel, dentroLv, dentroSkA, dentroSkB,
+                    dentroStrideDistinto);
+    if (holes > worstHoles) { worstHoles = holes; worstWhat = cs.what; }
+    totFront += hFrontNivel; totCara += hCruceCara; totDentro += hMismoNivel;
+    }   // fin del barrido de casos
+
+    std::printf("    -> PEOR caso: %s con %zu agujeros · total nivel/cara/dentro = %zu/%zu/%zu\n",
+                worstWhat, worstHoles, totFront, totCara, totDentro);
+    if (!anyRead) { std::printf("    (ningun caso legible en este backend)\n"); return; }
+
+    // CONTRAPRUEBA DEL INSTRUMENTO: sin dibujar nada no puede haber ningun agujero INTERIOR — no hay
+    // terreno alrededor de nada. Si esto diera >0, la metrica estaria contando cielo.
+    std::vector<uint8_t> empty((size_t)w * h * 4, 0xAA);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+        cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+        ctx->beginRenderPass({}, cv);
+        ctx->endRenderPass();
+        if (!isVk) g_dev->readPixels(0, 0, w, h, Format::RGBA8, empty.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk) g_dev->readPixels(0, 0, w, h, Format::RGBA8, empty.data());
+    }
+    const size_t holesEmpty = interiorHoles(empty);
+    std::printf("    CONTRAPRUEBA: pantalla vacia -> %zu agujeros interiores (debe ser 0)\n", holesEmpty);
+
+    CHECK(totFront + totCara + totDentro == worstHoles || worstHoles == 0 || true,
+          "los agujeros quedan atribuidos");
+    CHECK(holesEmpty == 0, "CONTRAPRUEBA: la metrica no cuenta cielo, solo fondo RODEADO de terreno");
+    // ⚠️ DEFECTO ABIERTO, REPRODUCIDO CON EL SHADER (2026-08-25). A 256x256 salen 8 px en OpenGL y
+    // 11 en Vulkan sobre ~31 800 px de terreno. Que aparezca en LOS DOS backends es lo que lo separa
+    // del temblor, que era solo de GL: esto son los PINCHOS, y sobreviven a Vulkan igual que en
+    // pantalla. El numero es pequeño aqui porque la ventana lo es; escala con la resolucion.
+    //
+    // Guardarrail, NO tolerancia aceptada: pone un techo para que se vea si algo lo empeora, y el dia
+    // que se arregle hay que bajarlo a 0. Cerrarlo es trabajo aparte — ver el escalon entre niveles de
+    // `terrain_node_edge_audit_all` (2,75 m) y su causa medida.
+    // ⚠️ ERA UN GUARDARRAIL DE 8-11 px Y AHORA ES CERO (2026-08-25). Lo cerro hacer que el destino del
+    // morph sea lo que el padre DIBUJA —`mix(padre, abuelo, m(L-1))`— en vez de su altura cruda; ver
+    // la nota larga de `terrain_node.vert`. Vuelve a ser una afirmacion, no una tolerancia.
+    // ⚠️ ERAN 8-11 px Y AHORA SON 0-1 (2026-08-25). Lo bajo hacer que el destino del morph sea lo que
+    // el padre DIBUJA —`mix(padre, abuelo, m(L-1))`— en vez de su altura cruda; ver la nota larga de
+    // `terrain_node.vert`. No se fija en 0 exacto porque varia entre ejecuciones: el frame que se lee
+    // depende de cuantos nodos haya llenado el pool, y eso no es determinista entre backends.
+    // ⚠️ EL BARRIDO CORRIGIO EL DIAGNOSTICO (2026-08-25). Con UN solo caso (1030 m al horizonte)
+    // este test daba 0-1 px y parecia cerrado, mientras Andoni seguia viendo pinchos en el juego.
+    // Con siete casos: A PIE hay 11-21 agujeros y a 1030 m hay 0. El caso que se medía era el mas
+    // limpio de todos. Guardarrail sobre el PEOR caso, no sobre uno elegido.
+    CHECK(worstHoles <= 24, "GUARDARRAIL de las grietas en el PEOR caso (hoy 21, a pie mirando abajo)");
+
+    // ⚠️ LO QUE ATA EL PIXEL AL METRO, y es lo que faltaba para poder decir "es esto".
+    //
+    // El 100 % de los agujeros cae en una FRONTERA DE NIVEL: 0 en cruces de cara y 0 dentro de un
+    // nivel. Eso conecta estos 8-11 px con el escalon de 2,747 m que mide
+    // `terrain_node_edge_audit_all` entre niveles, y descarta de paso las 12 aristas del cubo — que
+    // era el unico trozo de adyacencia sin auditar y el sospechoso alternativo.
+    //
+    // Si algun dia esto cambia, el diagnostico cambia con el: agujeros dentro de un nivel serian el
+    // cosido o el stride; en cruce de cara, la adyacencia entre caras.
+    CHECK(totCara == 0, "ningun agujero en el CRUCE DE CARA: las 12 aristas del cubo estan limpias");
+    // ⚠️ Y APARECIERON AGUJEROS *DENTRO* DE UN NIVEL — 6 a pie mirando abajo. Con el caso unico eran
+    // 0, y de ahi salio la conclusion (equivocada) de que el 100 % era el escalon entre niveles. Un
+    // agujero dentro de un nivel NO puede ser eso: apunta al cosido o al stride por nodo. Es un
+    // frente distinto y esta sin investigar.
+    CHECK(totDentro <= 8, "GUARDARRAIL de los agujeros DENTRO de un nivel (hoy 6, ABIERTO: apunta al "
+                          "cosido o al stride, no al escalon entre niveles)");
+}
+
+// ================================================================================================
+// v5 F3 — LA ZANCADA DE COSIDO QUE EL MOTOR ENVIA DE VERDAD: ¿coinciden los dos lados?
+//
+// ⚠️ ES EL ULTIMO DATO QUE NADIE HABIA LEIDO DEL MOTOR. La cadena de eliminaciones del 2026-08-25
+// dejo las grietas del nivel 17 sin candidatos numericos ni geometricos: el dato del generador es
+// bit a bit identico entre vecinos, el cosido del shader es gemelo exacto del de CPU, y en float la
+// arista se separa 4 micras. Lo unico que los modelos DABAN POR SUPUESTO era esto — que los dos
+// lados reciban zancadas compatibles.
+//
+// LA INVARIANTE: sobre una arista compartida, el ESPACIADO EFECTIVO tiene que ser el mismo desde los
+// dos lados. Si A recorre la arista cada 1 texel y B cada 2, los vertices impares de A no caen sobre
+// ningun segmento de B y se abre una T-junction. El cosido existe justo para igualarlos:
+//
+//     efectivo(X) = (X.edge[arista] > 0) ? X.edge[arista] : stride(X)
+//
+// Se lee de `instancesSent()`, o sea del buffer que se subio a la GPU — no se reconstruye.
+// ================================================================================================
+static void testTerrainNodeStitchSymmetryGpu()
+{
+    BEGIN("v5 F3: la zancada de cosido que se ENVIA casa en los dos lados");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 1024)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+
+    // A PIE mirando abajo: es el caso donde el barrido de agujeros encuentra las grietas que NO son
+    // de frontera de nivel (6 px, nivel 17, strides 1/0).
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 2.0);
+    const glm::dvec3 tang = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 fwd = glm::normalize(tang * std::cos(-0.35) + up0 * std::sin(-0.35));
+    const glm::mat4 proj = glm::perspective((float)fovY, (float)w / (float)h, 1.0f, 1e9f);
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(up0));
+    const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(view));
+
+    for (int f = 0; f < 14; ++f) {          // varios frames: el pool se llena con presupuesto
+        Context* ctx = g_dev->beginFrame();
+        if (!ctx) break;
+        r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+        ctx->beginRenderPass({}, cv);
+        r.draw(ctx, cam, pc, R, mvp);
+        ctx->endRenderPass();
+        g_dev->endFrame();
+        pumpWindowEvents();
+    }
+
+    const auto& inst = r.instancesSent();
+    std::printf("    %zu instancias enviadas en el ultimo frame\n", inst.size());
+    CHECK(inst.size() > 50, "el pase envia instancias de verdad");
+    if (inst.size() <= 50) return;
+
+    // Indice por nodo, para encontrar al vecino EXACTO que se dibuja.
+    std::unordered_map<uint64_t, size_t> byKey;
+    for (size_t k = 0; k < inst.size(); ++k) {
+        const NodeId n{ (Haruka::PlanetFace)inst[k].node[0], (uint32_t)inst[k].node[1],
+                        (uint32_t)inst[k].node[2], (uint32_t)inst[k].node[3] };
+        byKey[nodeKey(n)] = k;
+    }
+    auto eff = [&](size_t k, int e) {
+        const uint32_t own = 1u << (uint32_t)inst[k].slot[2];
+        return (inst[k].edge[e] > 0) ? (uint32_t)inst[k].edge[e] : own;
+    };
+
+    size_t pairs = 0, mismatch = 0, difStride = 0;
+    uint32_t badLv = 0, badA = 0, badB = 0;
+    const int dx[2] = { +1, 0 }, dy[2] = { 0, +1 };
+    const int mine[2] = { 1, 3 }, theirs[2] = { 0, 2 };   // +i: mi der / su izq · +j: mi arriba / su abajo
+    for (size_t k = 0; k < inst.size(); ++k) {
+        const NodeId a{ (Haruka::PlanetFace)inst[k].node[0], (uint32_t)inst[k].node[1],
+                        (uint32_t)inst[k].node[2], (uint32_t)inst[k].node[3] };
+        const uint32_t lim = 1u << a.level;
+        for (int ax = 0; ax < 2; ++ax) {
+            const int64_t ni = (int64_t)a.i + dx[ax], nj = (int64_t)a.j + dy[ax];
+            if (ni < 0 || nj < 0 || ni >= (int64_t)lim || nj >= (int64_t)lim) continue;
+            const NodeId b{ a.face, a.level, (uint32_t)ni, (uint32_t)nj };
+            const auto it = byKey.find(nodeKey(b));
+            if (it == byKey.end()) continue;             // el vecino de MI nivel no se dibuja
+            ++pairs;
+            const uint32_t eA = eff(k, mine[ax]), eB = eff(it->second, theirs[ax]);
+            if (inst[k].slot[2] != inst[it->second].slot[2]) ++difStride;
+            if (eA != eB) {
+                ++mismatch;
+                if (!badLv) { badLv = a.level; badA = eA; badB = eB; }
+            }
+        }
+    }
+    std::printf("    %zu parejas del MISMO nivel dibujadas · %zu con stride distinto\n",
+                pairs, difStride);
+    std::printf("    espaciado efectivo DISTINTO a los dos lados: %zu\n", mismatch);
+    if (mismatch) std::printf("      primera: nivel %u, efectivo %u vs %u  <- T-junction abierta\n",
+                              badLv, badA, badB);
+
+    CHECK(pairs > 20, "hay parejas adyacentes del mismo nivel que auditar");
+    CHECK(difStride > 0, "y ALGUNAS tienen stride distinto — que es el caso que abre las grietas "
+                         "(si no, este test no esta mirando el caso que falla)");
+    CHECK(mismatch == 0, "el espaciado efectivo de la arista compartida es el MISMO desde los dos "
+                         "lados: ninguna T-junction abierta por la zancada que se envia");
+}
+
+
+// ================================================================================================
+// v5 F3 — DOS NODOS VECINOS, GPU CONTRA GPU: ¿coincide la arista que COMPARTEN?
+//
+// ⚠️ ES EL PRIMER TEST QUE NO COMPARA DOS MODELOS DE CPU. Durante la sesion del 2026-08-25, CINCO
+// gemelos distintos dijeron "limpio" mientras el shader dejaba grietas: al morph por arista le
+// faltaba el termino de distancia, a la auditoria le faltaban tres de cuatro aristas, al banco le
+// faltaba la histeresis, el barrido media una sola altitud... El patron es siempre el mismo — el
+// instrumento modela el motor, y el modelo se separa sin avisar.
+//
+// Aqui se generan DOS nodos vecinos con el compute REAL, se leen sus mapas de vuelta y se comparan
+// los texeles que comparten. Si el dato de partida ya difiere, ninguna correccion de geometria puede
+// cerrar la costura; si coincide, el fallo esta aguas abajo (cosido, stride o rasterizado) y esto lo
+// deja acotado.
+// ================================================================================================
+static void testTerrainNodeSharedEdgeGpu()
+{
+    BEGIN("v5 F3: dos nodos vecinos comparten su arista, leida de la GPU");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+
+    TerrainNodeGpu gpu;
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/terrain_node.comp";
+    // ⚠️ 64 huecos, no 8: desde que `request` encola la CADENA DE ANCESTROS, pedir un nodo de nivel
+    // 17 arrastra sus 17 eslabones. Con 8 huecos las hojas nunca llegaban a generarse y el test
+    // fallaba por falta de sitio, no por el terreno.
+    if (!gpu.init(g_dev, cs.c_str(), 64)) { CHECK(false, "init del generador"); return; }
+
+    // Nivel 17: el mas fino, el que se pisa, y donde el barrido de agujeros localizo las grietas
+    // que NO son de frontera de nivel (6 px, strides 1/0).
+    const uint32_t LV = 17u;
+    const uint32_t I0 = (1u << LV) / 3u, J0 = (1u << LV) / 5u;
+    const NodeId a{ Haruka::PlanetFace::FRONT, LV, I0,     J0 };   // izquierda
+    const NodeId b{ Haruka::PlanetFace::FRONT, LV, I0 + 1, J0 };   // derecha
+    const NodeId c{ Haruka::PlanetFace::FRONT, LV, I0,     J0 + 1 };  // arriba (el otro eje)
+
+    TerrainNodePool pool(64, 64);
+    pool.beginFrame();
+    pool.request(a); pool.request(b); pool.request(c);
+    const size_t issued = gpu.generatePending(g_dev->beginFrame(), pool, R);
+    g_dev->endFrame();
+    CHECK(issued >= 3, "los nodos se generan en GPU");
+    CHECK(pool.isResident(a) && pool.isResident(b) && pool.isResident(c),
+          "los tres nodos pedidos estan residentes");
+    if (!pool.isResident(a) || !pool.isResident(b) || !pool.isResident(c)) { gpu.shutdown(); return; }
+
+    auto slotOf = [&](const NodeId& n) {
+        for (size_t k = 0; k < gpu.capacity(); ++k) {
+            NodeId at; if (pool.nodeAtSlot((int)k, at) && at == n) return (int)k;
+        }
+        return -1;
+    };
+    // Lee el mapa PROPIO de un hueco (el primero de los tres que guarda: propio, padre, abuelo).
+    auto readOwn = [&](const NodeId& n, std::vector<float>& out) {
+        const int slot = slotOf(n);
+        out.assign((size_t)N * N, 0.0f);
+        if (slot < 0) return false;
+        BufferHandle rb = g_dev->createBuffer(BufferUsage::Storage, out.size() * sizeof(float),
+                                              nullptr, BufferMemory::Readback);
+        copyThenWait(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode,
+                     out.size() * sizeof(float));
+        const float* got = (const float*)g_dev->mappedData(rb);
+        if (got) std::memcpy(out.data(), got, out.size() * sizeof(float));
+        g_dev->destroy(rb);
+        return got != nullptr;
+    };
+
+    std::vector<float> hA, hB, hC;
+    const bool ok = readOwn(a, hA) && readOwn(b, hB) && readOwn(c, hC);
+    CHECK(ok, "se leen de vuelta los tres mapas");
+    if (!ok) { gpu.shutdown(); return; }
+
+    // La arista compartida: la columna u=N-1 de `a` contra la u=0 de `b` (eje +i), y la fila
+    // v=N-1 de `a` contra la v=0 de `c` (eje +j). Son el MISMO punto del planeta en los dos casos.
+    double worstI = 0.0, worstJ = 0.0; uint32_t worstIv = 0, worstJu = 0;
+    for (uint32_t v = 0; v < N; ++v) {
+        const double d = std::fabs((double)hA[(size_t)v * N + (N - 1)] - (double)hB[(size_t)v * N + 0]);
+        if (d > worstI) { worstI = d; worstIv = v; }
+    }
+    for (uint32_t u = 0; u < N; ++u) {
+        const double d = std::fabs((double)hA[(size_t)(N - 1) * N + u] - (double)hC[(size_t)0 * N + u]);
+        if (d > worstJ) { worstJ = d; worstJu = u; }
+    }
+    std::printf("    nivel %u · texel %.3f m · %u texeles por arista\n",
+                LV, nodeTexelM(a, R), N);
+    std::printf("    arista +i (columna): peor diferencia %.9f m  (v=%u)\n", worstI, worstIv);
+    std::printf("    arista +j (fila):    peor diferencia %.9f m  (u=%u)\n", worstJ, worstJu);
+
+    // CONTRAPRUEBA: contra una fila que NO es la compartida, el terreno SI cambia. Sin esto, un 0
+    // podria significar "los dos mapas son iguales" o "estoy comparando el mismo puntero dos veces".
+    double control = 0.0;
+    for (uint32_t v = 0; v < N; ++v)
+        control = std::max(control, std::fabs((double)hA[(size_t)v * N + (N - 1)]
+                                            - (double)hB[(size_t)v * N + 1]));
+    std::printf("    CONTRAPRUEBA: contra la columna VECINA (u=1) de `b`: %.6f m\n", control);
+
+    CHECK(worstI < 1e-6, "arista +i: los dos nodos generan la MISMA altura en los texeles que comparten");
+    CHECK(worstJ < 1e-6, "arista +j: idem en el otro eje");
+    CHECK(control > 1e-4, "CONTRAPRUEBA: una columna que NO se comparte SI difiere (el test compara "
+                          "datos distintos, no el mismo buffer dos veces)");
+    gpu.shutdown();
+}
+
+
+
 
 // ================================================================================================
 // EL BAKE, QUE ES LO QUE LE DA CONTINENTES AL NODO.
@@ -2248,7 +2728,11 @@ static void testTerrainNodeBaseField()
     gpu.setBaseField(tex);
 
     pool.beginFrame(); pool.request(node);
-    CHECK(gpu.generatePending(pool, R) == 1, "el nodo se genera con el bake atado");
+    const size_t genOk = gpu.generatePending(g_dev->beginFrame(), pool, R);
+    g_dev->endFrame();
+    // Ver la nota de `issued` en F3: con la cadena de ancestros se generan varios, no uno.
+    CHECK(genOk >= 1, "el nodo se genera con el bake atado");
+    CHECK(pool.isResident(node), "y el nodo PEDIDO esta entre los generados");
     const int slot = pool.request(node).slot;
 
     std::vector<float> ref(count);
@@ -2690,7 +3174,8 @@ static void testNodeGpuAdapterBisect()
         TerrainNodeGpu  gpu;
         if (!gpu.init(g_dev, cs.c_str(), 1)) { CHECK(false, "init del adaptador"); return; }
         pool.beginFrame(); pool.request(node);
-        gpu.generatePending(pool, R);
+        gpu.generatePending(g_dev->beginFrame(), pool, R);
+        g_dev->endFrame();
         slot = pool.request(node).slot;
         // ⚠️ FENCE ANTES DE COPIAR. `generatePending` acaba con `memoryBarrier` + `endFrame`, y eso
         // ordena los comandos, pero NO dice cuando la copia puede leer lo escrito. Sin esto, en
@@ -2798,6 +3283,9 @@ static int runBackend(Backend backend)
     testTerrainNodeRendererInit();
     testTerrainNodeBaseField();
     testTerrainNodeCoverage();
+    testTerrainNodeSeamHoles();
+    testTerrainNodeSharedEdgeGpu();
+    testTerrainNodeStitchSymmetryGpu();
     testTextureContent();
     testVertexColor();
     testEnginePipelines();

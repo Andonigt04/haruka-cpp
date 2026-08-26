@@ -161,8 +161,8 @@ public:
         // que llaman también el test y (como gemelo declarado) los shaders.
         // ── LA DIRECCIÓN SE CALCULA COMO LA CALCULA EL SHADER, no "equivalente" ──────────────────
         //
-        // Aquí había DOS fallos que juntos separaban el suelo que se pisa del que se ve, medidos por
-        // `clipmap_dir_parity`:
+        // Aquí había DOS fallos que juntos separaban el suelo que se pisa del que se ve (los medía
+        // `clipmap_dir_parity`, borrado junto con el clipmap: las cifras son históricas):
         //
         //  1. ORIGEN SIN ANCLAR (0,58 m de altura). La línea era
         //         normalize(rel + t1*x + t2*z)
@@ -289,10 +289,20 @@ public:
             // Renormalizar en double NO rompe la paridad: conserva la dirección (cuya cuantización a
             // float es lo que se comparte con la GPU) y solo corrige el módulo.
             const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
-                // ⚠️ `ForCollision`: el mismo corte de octavas que dibuja el pase de nodos. Con el piso del
-        // clipmap (4,0 m) el suelo que se pisa se separaba 0,2539 m del que se ve. Ver la nota de
-        // `TERRAIN_COLLISION_TRIM_FLOOR`.
-        const float triM = Haruka::Planet::terrainTriMForCollision(std::sqrt(x * x + z * z));
+                // ⚠️ EL CORTE VA CON LA CELDA DE ESTE ANILLO, NO CON EL TÉXEL DEL RENDER. NO REINTENTARLO.
+        //
+        // Se probó bajar el piso a 0,596 m (el téxel del nodo más fino) para que el suelo que se pisa
+        // y el que se ve coincidieran: la disparidad bajaba de 0,2539 m a 0. **Y era un error**, del
+        // tipo exacto que `TERRAIN_TRIM_FLOOR` documenta: la celda del anillo cercano mide 4 m, así
+        // que meterle octavas de 0,6 m es SUB-NYQUIST — el "hervido". Medido en el juego:
+        //
+        //     twist del quad de 4 m:  0.035 m -> 0.108 m a <8 m del jugador  (0.082 -> 0.225 peor)
+        //
+        // Tres veces peor justo donde se camina, y encima inestable al moverse. La disparidad de
+        // 0,2539 m es ESTRUCTURAL: la colisión es una rejilla de 4 m y el render de 0,596 m. La única
+        // forma de cerrarla es afinar la rejilla de colisión — 45× más muestras, ~135 ms — no mover
+        // el corte de octavas.
+        const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
                 const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);
                 // ⚠️ Componente RADIAL respecto al plano tangente, no la altitud. Un heightfield es
                 // PLANO y el terreno está sobre una esfera: el nodo a 256 m está 5,1 mm por debajo del
@@ -316,19 +326,40 @@ public:
     // exactamente — a 262 km son 5,4 km, así que no es un detalle.
     float ringSample(const PlanetarySystem::TerrainSampler& src,
                      const glm::dvec3& pc, double R, const glm::dvec3& up,
-                     const glm::vec3& fUp, const glm::vec3& fT1, const glm::vec3& fHz, float fR,
+                     const glm::dvec3& t1d, const glm::dvec3& hzd,
                      const glm::dvec3& org, double x, double z) const {
-        // La dirección se calcula EN FLOAT con el orden de operaciones del tese (`(tan*loc)/R`, no
-        // `tan*(loc/R)`): en float no son la misma cuenta y un ulp son 0,38-0,76 m de superficie.
-        const glm::vec3 dirF = glm::normalize(fUp + (fT1 * (float)x) / fR + (fHz * (float)z) / fR);
-        // Renormalizar en DOUBLE antes de multiplicar por el radio: `normalize` en float deja el
-        // módulo en 1 ± 1,2e-7 y 6,37e6 · 1,2e-7 son 76 cm de error RADIAL. La dirección —lo que se
-        // comparte bit a bit con el shader— no cambia.
-        const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
-        // ⚠️ `ForCollision`: el mismo corte de octavas que dibuja el pase de nodos. Con el piso del
-        // clipmap (4,0 m) el suelo que se pisa se separaba 0,2539 m del que se ve. Ver la nota de
-        // `TERRAIN_COLLISION_TRIM_FLOOR`.
-        const float triM = Haruka::Planet::terrainTriMForCollision(std::sqrt(x * x + z * z));
+        // ⚠️ LA DIRECCION VA EN DOUBLE. ANTES SE CALCULABA EN FLOAT A PROPOSITO, Y ESE ERA EL SUELO
+        // QUE SE PISABA.
+        //
+        // El comentario original decía: *"se calcula EN FLOAT con el orden de operaciones del tese"*,
+        // para casar bit a bit con `clipmap.tese`. **Ese shader se borró el 2026-08-24**: hoy el
+        // render es el pase de nodos, que saca la dirección de ENTEROS en double y es exacta. Así que
+        // la razón para bajar a float desapareció, y lo que quedó fue solo su coste.
+        //
+        // Y el coste no es teórico: un ulp de un vector unitario en float son **0,38-0,76 m de
+        // superficie** (`float-ulp-precision-wall`), y el redondeo es INDEPENDIENTE muestra a
+        // muestra. Sobre una rejilla de colisión de 0,5-4 m eso no es una deformación suave: es ruido
+        // a la frecuencia de la rejilla — micro-pendientes que el controlador del personaje pelea
+        // frame a frame. Reportado como "me atasco, me deslizo y va pesado", con el terreno REAL
+        // midiendo 13,8° de pendiente máxima entre celdas (`terrain_collision_walkability`).
+        //
+        // Es el MISMO fallo que se acaba de arreglar en `terrain_node.vert`, por el otro lado: allí
+        // deformaba lo que se ve, aquí lo que se pisa.
+        const glm::dvec3 dir = glm::normalize(up + (t1d * x) / R + (hzd * z) / R);
+        // ⚠️ EL CORTE VA CON LA CELDA DE ESTE ANILLO, NO CON EL TÉXEL DEL RENDER. NO REINTENTARLO.
+        //
+        // Se probó bajar el piso a 0,596 m (el téxel del nodo más fino) para que el suelo que se pisa
+        // y el que se ve coincidieran: la disparidad bajaba de 0,2539 m a 0. **Y era un error**, del
+        // tipo exacto que `TERRAIN_TRIM_FLOOR` documenta: la celda del anillo cercano mide 4 m, así
+        // que meterle octavas de 0,6 m es SUB-NYQUIST — el "hervido". Medido en el juego:
+        //
+        //     twist del quad de 4 m:  0.035 m -> 0.108 m a <8 m del jugador  (0.082 -> 0.225 peor)
+        //
+        // Tres veces peor justo donde se camina, y encima inestable al moverse. La disparidad de
+        // 0,2539 m es ESTRUCTURAL: la colisión es una rejilla de 4 m y el render de 0,596 m. La única
+        // forma de cerrarla es afinar la rejilla de colisión — 45× más muestras, ~135 ms — no mover
+        // el corte de octavas.
+        const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
         // ⚠️ `src` YA RESUELTO por el llamador. Antes esto era `m_planetary->sampleTerrainHeight(...)`,
         // que por dentro rehacía la búsqueda del planeta —dos bucles y una comparación de `std::string`—
         // en cada una de las 235 564 muestras, para un puntero que no cambia. `heightAt` hace las mismas
@@ -417,7 +448,7 @@ public:
                     out = std::numeric_limits<float>::quiet_NaN();
                     continue;
                 }
-                out = ringSample(src, pc, R, up, fUp, fT1, fHz, fR, outOrigin, x, z);
+                out = ringSample(src, pc, R, up, t1, hz, outOrigin, x, z);
             }
         };
         const unsigned hw = std::thread::hardware_concurrency();
@@ -438,6 +469,62 @@ public:
             for (unsigned t = 1; t < nThreads; ++t) pool.emplace_back(worker);
             worker();
             for (auto& th : pool) th.join();
+        }
+
+        // ── COSER LAS COSTURAS ENTRE ANILLOS ────────────────────────────────────────────────────
+        //
+        // ⚠️ MEDIDO EN EL JUEGO: hasta **122,65 m de escalón** a 131 km (celda de 4 km). Es la peor
+        // disparidad entre lo que se ve y lo que se pisa que queda en el motor — 500 veces la del
+        // campo cercano.
+        //
+        // Es la MISMA T-junction que el pase de nodos ya resuelve: el vértice del anillo fino que no
+        // tiene gemelo en el grueso no cae sobre la recta que une a sus dos vecinos gruesos, así que
+        // el suelo se parte en la costura. `terrainRingSeamStep` lo mide exactamente así.
+        //
+        // Aquí se cierra POR CONSTRUCCIÓN: ese vértice se mueve a la recta. Adapta el FINO al grueso,
+        // que es la dirección correcta —el grueso no puede representar lo que el fino ve— y es lo
+        // mismo que hace `nodeStitch`.
+        {
+            HARUKA_PROFILE("terrain.rings.stitch");
+            auto at = [](Haruka::Physics::IWorldProvider::TerrainRing& r, int i, int j) -> float& {
+                return r.samples[(size_t)j * r.spec.samples + (size_t)i];
+            };
+            for (size_t k = 1; k < outRings.size(); ++k) {
+                auto& F = outRings[k - 1];
+                auto& C = outRings[k];
+                const double e = F.spec.extent;
+                if (std::abs(C.spec.hole - e) > 1e-9) continue;      // no comparten costura
+                const double rho = C.spec.cell / F.spec.cell;
+                if (!(rho > 1.0)) continue;
+                const int cq = (int)std::llround(e / C.spec.cell);
+                // ⚠️ LOS MISMOS INDICES QUE `terrainRingSeamStep`, literalmente. Los escribí a ojo
+                // como {0, 2·half} y la medida usa {half+1-half, half+1+half} = {1, 2·half+1}: habría
+                // cosido la fila de al lado y el escalón habría seguido ahí, con el test en verde.
+                const int fineEdge[2]   = { F.spec.half + 1 - F.spec.half, F.spec.half + 1 + F.spec.half };
+                const int coarseEdge[2] = { C.spec.half + 1 - cq, C.spec.half + 1 + cq };
+                for (int side = 0; side < 2; ++side) {
+                    if (coarseEdge[side] < 0 || coarseEdge[side] >= (int)C.spec.samples) continue;
+                    for (int m = -F.spec.half; m <= F.spec.half; ++m) {
+                        const double u  = (double)m / rho;
+                        const double u0 = std::floor(u);
+                        if (std::abs(u - u0) < 1e-9) continue;       // tiene gemelo grueso: ya coincide
+                        const double w  = u - u0;
+                        const int jf = m + F.spec.half + 1;
+                        const int c0 = (int)u0 + C.spec.half + 1, c1 = c0 + 1;
+                        if (c0 < 0 || c1 >= (int)C.spec.samples) continue;
+                        if (jf < 0 || jf >= (int)F.spec.samples) continue;
+                        auto lerp = [&](float a, float b) { return (float)(a + (b - a) * w); };
+                        // La costura es un CUADRADO: hay columnas (x fijo) y filas (z fijo).
+                        const float colC = lerp(at(C, coarseEdge[side], c0), at(C, coarseEdge[side], c1));
+                        const float rowC = lerp(at(C, c0, coarseEdge[side]), at(C, c1, coarseEdge[side]));
+                        // NaN = nodo sin superficie (hueco): no se toca, o se rellenaría el agujero.
+                        float& colF = at(F, fineEdge[side], jf);
+                        float& rowF = at(F, jf, fineEdge[side]);
+                        if (colF == colF && colC == colC) colF = colC;
+                        if (rowF == rowF && rowC == rowC) rowF = rowC;
+                    }
+                }
+            }
         }
         return true;
     }
@@ -509,7 +596,7 @@ public:
             const PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(worldPos);
             auto S = [&](int i, int j) {
                 const auto p = nodeXZ(i, j);
-                return (double)ringSample(src, pc, R, up, fUp, fT1, fHz, fR, org, p.first, p.second);
+                return (double)ringSample(src, pc, R, up, t1, hz, org, p.first, p.second);
             };
             // La MISMA elección de triángulo y la MISMA interpolación que Jolt. No es bilineal.
             double s;

@@ -120,10 +120,9 @@ void test_ocean_float_precision() {
         std::printf("      lambda %5.1f m: ULP %.4f rad = %.2f %% del ciclo = %.3f m de cresta\n",
                     lambda, ulp, 100.0 * ulp / 6.2831853, crestM);
     }
-    // Es un desplazamiento SUB-MÉTRICO de dónde cae la cresta, del orden del error que ya tiene la
-    // reconstrucción de `dir` del clipmap (0,93 m, ver test_clipmap_dir_parity). Si algún día sube de
-    // ahí, la ola empezaría a engancharse a una rejilla visible y habría que restar un origen local
-    // ANTES de multiplicar por k — en los DOS lados (shader y gemelo), o se rompe la paridad.
+    // Es un desplazamiento SUB-MÉTRICO de dónde cae la cresta. Si algún día pasa del metro que exige
+    // el CHECK, la ola empezaría a engancharse a una rejilla visible y habría que restar un origen
+    // local ANTES de multiplicar por k — en los DOS lados (shader y gemelo), o se rompe la paridad.
     CHECK(worstCrestM < 1.0, "la cuantizacion de fase desplaza la cresta menos de 1 m");
 
     // Y LO QUE DE VERDAD IMPORTA: que la ola SE MUEVA. La cuantización es espacial; si además comiera
@@ -572,16 +571,23 @@ void test_terrain_finest_octave() {
     CHECK(TERRAIN_TRIM_FLOOR_PIXEL >= (double)kFinestLambda / 4.0 - 1e-6,
           "y no baja de lambda/4 (por debajo se paga sin ganar amplitud)");
 
-    // (c) CONTRAPRUEBA — la que le da dientes. Con el piso de la GEOMETRIA la octava sigue MUERTA
-    // (peso exactamente 0). Sin esto, (a) pasaria igual si alguien volviera a igualar los dos pisos.
-    std::printf("    CONTRAPRUEBA: con el piso de la geometria el peso es %.3f\n", wGeom);
-    CHECK(wGeom <= 0.0f,
-          "CONTRAPRUEBA: con el piso de la geometria la octava sigue muerta (por eso hacen falta dos)");
-
-    // (d) El piso de la GEOMETRIA sigue atado al quad real: es lo que impide el sub-Nyquist
-    // ("hervido"), y ese si depende de la separacion entre vertices.
-    std::printf("    quad real del clipmap: %.2f m (parche %.0f / tope %.0f)\n",
-                TERRAIN_CLIP_QUAD_M, TERRAIN_CLIP_PATCH_M, TERRAIN_CLIP_TESS_CAP);
-    CHECK(TERRAIN_TRIM_FLOOR == TERRAIN_CLIP_QUAD_M,
-          "el piso de la GEOMETRIA sigue siendo el quad real (Nyquist, no un literal)");
+    // (c) ⚠️ ESTA CONTRAPRUEBA SE DIO LA VUELTA AL BORRARSE EL CLIPMAP (2026-08-24), y el cambio ES
+    // el arreglo, no un efecto colateral.
+    //
+    // Exigia que con el piso de la GEOMETRIA la octava siguiera MUERTA: con quads de 4 m lo estaba, y
+    // por eso hacian falta dos pisos. Ahora la geometria de colision son celdas de 0,5 m, asi que esa
+    // octava SI cabe (Nyquist pide < 2,25 m) — y que entre es justo lo que hace que el suelo que se
+    // pisa tenga el relieve que se ve. Era la disparidad ver<->pisar de 0,15-0,25 m.
+    std::printf("    con el piso de la geometria (%.2f m) el peso es %.3f\n", TERRAIN_TRIM_FLOOR, wGeom);
+    CHECK(wGeom > 0.99f, "con la rejilla fina la octava tambien entra en la GEOMETRIA");
+    // La contraprueba con dientes pasa a ser esta: con el piso VIEJO (el quad del clipmap) estaba
+    // muerta. Sin este numero no se veria lo que se ha arreglado.
+    const float wOld = weight(kFinestLambda, (float)TERRAIN_CLIP_QUAD_M);
+    std::printf("    CONTRAPRUEBA: con el piso VIEJO (quad del clipmap, %.2f m) el peso era %.3f\n",
+                TERRAIN_CLIP_QUAD_M, wOld);
+    CHECK(wOld <= 0.0f, "CONTRAPRUEBA: con el quad de 4 m la octava estaba MUERTA (era la disparidad)");
+    // (d) El piso de la GEOMETRIA sigue atado a la rejilla que lo consume — misma regla, otra
+    // rejilla: antes el quad del clipmap, ahora la celda del anillo de colision mas fino.
+    CHECK(TERRAIN_TRIM_FLOOR == TERRAIN_RING_FINE_CELL,
+          "el piso de la GEOMETRIA sigue atado a su rejilla (Nyquist, no un literal)");
 }

@@ -20,12 +20,10 @@ int main(int argc, char** argv) {
     if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); }
     if (want("cloud") || want("nube") || want("clima")) test_cloud_shape();
     if (want("capa") || want("ground"))   test_ground_layer();
-    if (want("clip") || want("parity"))   test_clipmap_parity();
     if (want("lod")  || want("parity"))   test_terrain_lod_invariants();
     if (want("ring") || want("parity"))   test_terrain_ring_grid();
     if (want("ring") || want("parity"))   test_terrain_ring_tiling();
     if (want("chord") || want("parity"))  test_terrain_chord_error();
-    if (want("clipmap") || want("parity"))  test_clipmap_vertex_lattice();
     if (want("grad")  || want("parity"))  test_terrain_detail_gradient();
     if (want("physics"))                  test_physics_radial_fall();
     if (want("physics"))                  test_physics_mesh_ground();
@@ -53,6 +51,7 @@ int main(int argc, char** argv) {
         test_terrain_finest_octave();
         test_terrain_orbital_relief();
         test_terrain_orbital_albedo();
+        test_terrain_twist_vs_cell();
     }
 
     if (want("node") || want("quadtree") || want("v5") || want("parity")) {
@@ -65,12 +64,41 @@ int main(int argc, char** argv) {
         test_terrain_node_face_seam();
         test_terrain_node_face_seam_gap();
         test_terrain_node_horizon_cull();
-        test_terrain_two_bakes_disagree();
+        test_terrain_node_split_uses_elevation();
+        test_terrain_node_morph_no_pop();
+        test_terrain_node_stride_per_node();
+        test_terrain_node_stride_pop();
+        test_terrain_node_stride_seams();
+        test_terrain_node_ancestor_disparity();
+        test_terrain_node_budget_starvation();
+        test_terrain_node_walk_shimmer();
+        test_terrain_node_ucenter_jitter();
+        test_terrain_node_level_balance();
+        test_terrain_prop_anchor_mismatch();
+        test_terrain_node_orbit_coverage();
+        test_terrain_node_range_published();
+        test_terrain_node_demand_with_range();
+        test_terrain_node_inherited_range_flicker();
+        test_terrain_node_spike_hunt();
+        test_terrain_node_finer_neighbour_step();
+        test_terrain_node_edge_audit_all();
+        test_terrain_node_distance_morph_per_vertex();
+        test_terrain_node_angle_independence();
+        test_terrain_backup_bake_cost();
         test_terrain_node_as_heightfield();
         test_terrain_render_vs_collision();
         test_terrain_node_range();
         test_terrain_node_pool();
         test_terrain_node_pool_reuse();
+        test_terrain_node_pool_chain();
+        test_terrain_node_normal_matches_geometry();
+        test_terrain_node_radial_noise_shift();
+        test_terrain_node_octave_cut_nyquist();
+        test_terrain_node_quad_diagonal_bias();
+        test_terrain_node_float_dir_quantisation();
+        test_terrain_collision_walkability();
+        test_terrain_node_stride_history_loss();
+        test_terrain_node_winding();
         test_terrain_node_stitch();
         test_terrain_node_neighbours();
     }
@@ -122,7 +150,6 @@ int main(int argc, char** argv) {
         test_prop_lod_mesh();
         test_prop_collider();
         test_rock_interior();
-        test_clipmap_dir_parity();
     }
 
     std::printf("\n== %d OK · %d FALLOS ==\n", g_pass, g_fail);

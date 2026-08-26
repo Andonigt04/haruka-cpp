@@ -60,115 +60,6 @@ glm::dvec3 clipGridVertex(const glm::dvec3& up, const glm::dvec3& tu, const glm:
 }
 }  // namespace
 
-void test_clipmap_parity() {
-    beginTest("clipmap_parity");
-    const double R     = 6371000.0;
-    const double alts[] = { 1.7, 800.0, 5000.0 };
-    const int    NCs[]  = { 31, 47, 63, 95 };
-    const double PATCH  = Haruka::Planet::TERRAIN_CLIP_PATCH_M;   // del motor, no un literal del test
-
-    double worstErr = 0.0;
-    for (int q = 0; q < 4; ++q) {
-        const int    NC    = NCs[q];
-        const double cover = NC * PATCH * 0.5;
-        CHECK(std::fabs(PATCH - 128.0) < 1e-9,
-              "el parche del clipmap sigue siendo de 128 m (si cambia, cover y recorte se mueven)");
-        for (double alt : alts) {
-            const glm::dvec3 cam = glm::dvec3(0.0, 0.0, R + alt);
-            glm::dvec3 up, tu, tv;
-            Haruka::Planet::terrainClipFrame(cam, glm::dvec3(0.0), up, tu, tv);   // el marco REAL
-            // 4 esquinas (±cover, ±cover) + 4 puntos medios de arista: el borde de la rejilla.
-            const double edge[8][2] = {
-                { cover,  cover}, { cover, -cover}, {-cover,  cover}, {-cover, -cover},
-                { cover,  0.0}, {0.0, cover}, {-cover, 0.0}, {0.0, -cover},
-            };
-            for (const double (&g)[2] : edge) {
-                const glm::dvec3 P   = clipGridVertex(up, tu, tv, R, g[0], g[1]);
-                const glm::dvec3 rel = P - cam;
-                const double wx = glm::dot(rel, tu);
-                const double wy = glm::dot(rel, tv);
-                worstErr = std::max(worstErr, std::fabs(wx - g[0]));
-                worstErr = std::max(worstErr, std::fabs(wy - g[1]));
-                CHECK(std::fabs(wx) <= cover + 1e-3 && std::fabs(wy) <= cover + 1e-3,
-                      "vértice del borde de la rejilla sigue DENTRO del recorte (<= cover)");
-            }
-        }
-    }
-    std::printf("    rejilla ↔ recorte: error de proyección máximo %.4f m\n", (double)worstErr);
-    CHECK(worstErr < 1e-2, "el borde de la rejilla y el del recorte CASAN (no hay hueco entre ambos)");
-
-    const glm::dvec3 planetC(0.0, 0.0, 0.0);
-    const glm::dvec3 cam = glm::dvec3(123456.0, -654321.0, R + 400.0);
-    glm::dvec3 upA, tuA, tvA;
-    Haruka::Planet::terrainClipFrame(cam, planetC, upA, tuA, tvA);
-    // El shader no recibe la cámara: recibe `uCenter = centro − cámara` y reconstruye el marco desde
-    // ahí. Que las dos vías den el MISMO triedro es lo que evita que el recorte y la rejilla estén
-    // rotados uno respecto del otro.
-    const glm::dvec3 uCenter = planetC - cam;
-    glm::dvec3 upB, tuB, tvB;
-    Haruka::Planet::terrainClipFrame(planetC - uCenter, planetC, upB, tuB, tvB);
-    CHECK(glm::dot(upA, upB) > 1.0 - 1e-12 && glm::length(tuA - tuB) < 1e-9 &&
-          glm::length(tvA - tvB) < 1e-9,
-          "marco del recorte == marco del ClipParams UBO (misma cuenta en CPU y GLSL)");
-
-    // ── ANCLAJE A LA RETÍCULA DEL MUNDO ────────────────────────────────────────────────────────
-    // Sin anclar, `up` se recalcula desde la posición EXACTA de la cámara y la rejilla entera se
-    // desliza con ella: la superficie dibujada se re-muestrea cada frame (el terreno "nada") y la
-    // colisión no puede casar con un objetivo móvil. Anclado, `up` salta en escalones del tamaño del
-    // quad y entre saltos los vértices están QUIETOS en el mundo. Se comprueba justo eso.
-    {
-        const glm::dvec3 pc(0.0);
-        const double alt = 1.7;
-        // Dos cámaras separadas 40 cm — un décimo del quad de 4 m: NO debe cambiar la rejilla.
-        const glm::dvec3 camA = glm::normalize(glm::dvec3(0.3, 0.5, 0.81)) * (R + alt);
-        glm::dvec3 tanU = glm::normalize(glm::cross(glm::dvec3(0,1,0), glm::normalize(camA)));
-        const glm::dvec3 camB = camA + tanU * 0.4;
-
-        glm::dvec3 upFree1, tuFree1, tvFree1, upFree2, tuFree2, tvFree2;
-        Haruka::Planet::terrainClipFrame(camA, pc, upFree1, tuFree1, tvFree1);           // sin anclar
-        Haruka::Planet::terrainClipFrame(camB, pc, upFree2, tuFree2, tvFree2);
-        glm::dvec3 upS1, tuS1, tvS1, upS2, tuS2, tvS2;
-        Haruka::Planet::terrainClipFrame(camA, pc, upS1, tuS1, tvS1, R);                 // anclado
-        Haruka::Planet::terrainClipFrame(camB, pc, upS2, tuS2, tvS2, R);
-
-        // Sin anclar, moverse 40 cm mueve el origen ~40 cm: la rejilla entera se arrastra.
-        const double freeShift = glm::length(upFree2 - upFree1) * R;
-        const double snapShift = glm::length(upS2 - upS1) * R;
-        std::printf("    anclaje: 40 cm de camara mueven la rejilla %.3f m sin anclar · %.3f m anclada\n",
-                    freeShift, snapShift);
-        CHECK(freeShift > 0.3, "sin anclar la rejilla SÍ se arrastra con la cámara (es el bug)");
-        CHECK(snapShift < 1e-6, "anclada, moverse menos de un quad NO mueve la rejilla");
-
-        // Y el anclaje no puede alejar el centro más de un quad: el clipmap sigue centrado en ti.
-        const double off = glm::length(upS1 - glm::normalize(camA)) * R;
-        CHECK(off <= Haruka::Planet::TERRAIN_CLIP_QUAD_M,
-              "el anclaje desplaza el centro menos de un quad (el clipmap sigue centrado)");
-        // Anclado sigue siendo un triedro válido: unitario y ortonormal.
-        CHECK(std::fabs(glm::length(upS1) - 1.0) < 1e-12 &&
-              std::fabs(glm::dot(upS1, tuS1)) < 1e-12 &&
-              glm::length(glm::cross(tuS1, tvS1) - upS1) < 1e-12,
-              "el marco anclado sigue siendo ortonormal y dextrógiro");
-    }
-
-    // Dextrógiro: `cross(tu,tv) == up`. No es cosmético — fija la orientación de las celdas y con
-    // ella el winding de la malla de colisión, que comparte este mismo marco.
-    CHECK(glm::length(glm::cross(tuA, tvA) - upA) < 1e-12,
-          "triedro dextrógiro (cross(tu,tv)==up): fija el winding de la colisión");
-
-    // Caso POLAR: con la cámara sobre el eje Y el producto vectorial auxiliar es CERO. Normalizarlo
-    // sin comprobar daría NaN —no un vector corto— y el marco entero se envenenaría en silencio.
-    for (int s = 0; s < 2; ++s) {
-        const glm::dvec3 polarCam = (s ? glm::dvec3(0, -R - 10.0, 0) : glm::dvec3(0, R + 10.0, 0));
-        glm::dvec3 up, tu, tv;
-        Haruka::Planet::terrainClipFrame(polarCam, planetC, up, tu, tv);
-        CHECK(std::isfinite(tu.x) && std::isfinite(tv.x) && std::isfinite(up.x),
-              "fallback polar: marco FINITO (el eje auxiliar se elige antes de normalizar)");
-        CHECK(std::fabs(glm::length(tu) - 1.0) < 1e-12 && std::fabs(glm::length(tv) - 1.0) < 1e-12,
-              "fallback polar: marco no degenerado");
-        CHECK(std::fabs(glm::dot(tu, tv)) < 1e-12 && std::fabs(glm::dot(up, tu)) < 1e-12 &&
-              std::fabs(glm::dot(up, tv)) < 1e-12, "marco polar ortonormal");
-    }
-}
 
 // ⚠️ AQUÍ ESTABA `detail_triM_parity`, y era una TAUTOLOGÍA. Calculaba `meshTriM` y `clipTriM` con
 // la misma expresión escrita dos veces, evaluaba `terrainDetail` con ambas y comprobaba que el
@@ -197,21 +88,33 @@ void test_terrain_lod_invariants() {
     CHECK(std::fabs(TERRAIN_MAX_TESS_GEN_LEVEL - 64.0) < 1e-9,
           "el máximo del hardware sigue siendo 64 (silicio, igual en GL/Vulkan/D3D)");
 
-    // (2) EL INVARIANTE QUE SE ROMPIÓ: el piso de `triM` tiene que ser el lado REAL del quad. Con el
-    // piso en 2.0 y quads de 4 m, la octava de 4,5 m entraba al 12,5 % sobre vértices separados 4 m
-    // — sub-Nyquist, el hervido de §3.1. Derivado del quad, no puede volver a desalinearse.
-    CHECK(std::fabs(TERRAIN_CLIP_QUAD_M - TERRAIN_CLIP_PATCH_M / TERRAIN_CLIP_TESS_CAP) < 1e-12,
-          "el quad del clipmap es parche/tope, no un literal");
-    CHECK(std::fabs(TERRAIN_TRIM_FLOOR - TERRAIN_CLIP_QUAD_M) < 1e-12,
-          "el piso de triM ES el lado del quad (Nyquist: no se evalúa lo que el triángulo no lleva)");
-    std::printf("    parche %.0f m / tope %.0f → quad %.2f m · piso de triM %.2f m\n",
-                TERRAIN_CLIP_PATCH_M, TERRAIN_CLIP_TESS_CAP, TERRAIN_CLIP_QUAD_M, TERRAIN_TRIM_FLOOR);
+    // (2) EL INVARIANTE, ACTUALIZADO AL BORRARSE EL CLIPMAP (2026-08-24).
+    //
+    // Sigue siendo el mismo: **el piso de `triM` tiene que ser el lado real de la celda que lo
+    // consume**, o se evalúa relieve que esa celda no puede representar — sub-Nyquist, el hervido.
+    // Lo que cambió es QUIÉN lo consume: antes el quad del clipmap (4 m), ahora la celda del anillo
+    // de colisión más fino (0,5 m), porque el clipmap ya no existe y el render dibuja a 0,596 m.
+    CHECK(std::fabs(TERRAIN_TRIM_FLOOR - TERRAIN_RING_FINE_CELL) < 1e-12,
+          "el piso de triM ES la celda del anillo mas fino (Nyquist, misma regla, otra rejilla)");
+    // Y que esa celda siga siendo <= el texel del render: si el render afinara mas, volveria la
+    // disparidad. 0,596 m es `R·(pi/2)/2^17/128` a radio terrestre.
+    const double nodeTexelM = 6371000.0 * 1.5707963267948966 / 131072.0 / 128.0;
+    CHECK(TERRAIN_RING_FINE_CELL <= nodeTexelM,
+          "la celda de colision es al menos tan fina como el texel del render (si no, hay disparidad)");
+    std::printf("    celda del anillo fino %.3f m · texel del render %.3f m · piso de triM %.3f m\n",
+                TERRAIN_RING_FINE_CELL, nodeTexelM, TERRAIN_TRIM_FLOOR);
 
     // (3) La octava más fina que el piso deja pasar tiene que estar POR ENCIMA de Nyquist: una
     // octava λ solo puede dibujarse si el triángulo mide < λ/2. Es la comprobación que convierte el
     // invariante anterior en algo con sentido físico, no en dos números que casan por casualidad.
-    CHECK(Haruka::Planet::octaveWeight(4.5f, (float)TERRAIN_TRIM_FLOOR) <= 0.0f,
-          "con el piso actual la octava de 4,5 m NO se evalúa (está bajo Nyquist)");
+    // ⚠️ ESTA COMPROBACION SE DIO LA VUELTA, Y ES EL PUNTO. Antes exigia que la octava de 4,5 m NO
+    // se evaluara: con quads de 4 m era sub-Nyquist. Con celdas de 0,5 m SI cabe (Nyquist pide celda
+    // < λ/2 = 2,25 m), y que se evalue es justamente lo que hace que el suelo que se pisa tenga el
+    // mismo relieve que el que se ve.
+    CHECK(TERRAIN_TRIM_FLOOR < 4.5 / 2.0,
+          "la octava mas fina (4,5 m) esta POR ENCIMA de Nyquist para la celda actual");
+    CHECK(Haruka::Planet::octaveWeight(4.5f, (float)TERRAIN_TRIM_FLOOR) > 0.0f,
+          "y por tanto SI se evalua: es el relieve que antes la colision no veia");
     CHECK(Haruka::Planet::octaveWeight(22.0f, (float)TERRAIN_TRIM_FLOOR) > 0.99f,
           "la octava de 22 m sí entra entera: el relieve que se camina sigue ahí");
 
@@ -474,7 +377,14 @@ void test_terrain_chord_error() {
     // que las coordenadas no salen del mismo cálculo que el quad).
     CHECK(wCross < 1e-9, "a pie, lo que se dibuja y lo que se pisa es la MISMA superficie (0 m)");
     CHECK(sumCross/n < 1e-12, "y la separación típica es exactamente 0");
-    CHECK(wRender < 0.25, "la cuerda del quad del render está acotada");
+    // ⚠️ LA COTA SUBIO PORQUE EL SUELO TIENE MAS RELIEVE, no porque nada empeorara. Con el piso de
+    // `triM` en 4 m la octava de 4,5 m estaba MUERTA; con la rejilla fina (0,5 m) se evalua, y esos
+    // ±0,70 m de relieve son justo los que la colision antes no veia. La cuerda de un quad de 4 m
+    // sobre un terreno con mas detalle es mayor — y da igual, porque el render ya no dibuja con quads
+    // de 4 m: lo que importa es la linea de arriba, RENDER vs COLISION, que sigue en 0.
+    std::printf("    (la cuerda del quad de 4 m ya no describe el render: el pase v5 dibuja a %.3f m)\n",
+                6371000.0 * 1.5707963267948966 / 131072.0 / 128.0);
+    CHECK(wRender < 1.0, "la cuerda de un quad de 4 m sobre el relieve NUEVO sigue acotada");
     // Y las dos se separan de la FUNCIÓN por lo mismo, que es la sagita del quad: si una de las dos
     // teselara distinto, este par dejaría de coincidir.
     CHECK(std::fabs(wRender - wPhys) < 1e-9,
@@ -890,81 +800,6 @@ void test_ground_layer() {
 // CPU no puede ver lo que hace el silicio. Lo que sí hace es dejar la suposición ESCRITA y romperse
 // si alguien cambia el reparto del nivel, el tamaño del parche o la rejilla de colisión.
 // =================================================================================================
-void test_clipmap_vertex_lattice() {
-    using namespace Haruka::Planet;
-    beginTest("clipmap_vertex_lattice");
-
-    // Gemelo de `edgeFactor` en clipmap.tesc, incluido el redondeo a potencia de dos.
-    auto edgeFactor = [](double mx, double mz, double arc) {
-        const double d = std::max(std::sqrt(mx*mx + mz*mz), 1.0);
-        double lvl = std::min(std::max(arc / (d * 0.004), 1.0), TERRAIN_CLIP_TESS_CAP);
-        return std::min(std::max(std::exp2(std::floor(std::log2(lvl))), 1.0), TERRAIN_CLIP_TESS_CAP);
-    };
-    const double P = TERRAIN_CLIP_PATCH_M;
-
-    // Paso que el render dibuja EN EL EJE X dentro del parche que contiene (x,z). El nivel interior
-    // de esa dirección es `max` de las dos aristas opuestas, igual que en el control shader.
-    auto renderStepX = [&](double x, double z) {
-        const double px = std::floor(x / P) * P, pz = std::floor(z / P) * P;
-        // aristas z=pz y z=pz+P (las que corren en X): sus puntos medios
-        const double lo = edgeFactor(px + P*0.5, pz,       P);
-        const double hi = edgeFactor(px + P*0.5, pz + P,   P);
-        return P / std::max(lo, hi);
-    };
-
-    // Radio en el que el render está al TOPE de teselación, o sea dibujando el quad de 4 m: es donde la
-    // propiedad puede exigirse, y no por casualidad es el terreno que se pisa y donde se construye.
-    const double fullR = TERRAIN_CLIP_PATCH_M / (TERRAIN_CLIP_TESS_CAP * 0.004);   // 1000 m
-
-    const std::vector<double> grid = terrainRingGrid(200000.0);
-    long nearChecked = 0, nearOff = 0, farChecked = 0, farOff = 0;
-    double worstOff = 0.0, worstX = 0.0, worstZ = 0.0;
-    for (double x : grid) {
-        if (std::fabs(x) > TERRAIN_CLIP_COVER_MIN_M) continue;   // solo dentro de la caja del clipmap
-        for (double z : grid) {
-            if (std::fabs(z) > TERRAIN_CLIP_COVER_MIN_M) continue;
-            const double step = renderStepX(x, z);
-            // ¿es `x` un múltiplo exacto del paso del render, medido desde el origen del parche?
-            const double px  = std::floor(x / P) * P;
-            const double q   = (x - px) / step;
-            const double off = std::fabs(q - std::round(q)) * step;   // en METROS fuera de la retícula
-            const bool   near = std::sqrt(x*x + z*z) <= fullR;
-            if (near) { ++nearChecked; if (off > 1e-9) ++nearOff; }
-            else      { ++farChecked;  if (off > 1e-9) ++farOff;  }
-            if (off > worstOff) { worstOff = off; worstX = x; worstZ = z; }
-        }
-    }
-    std::printf("    dentro de %.0f m (render al tope, quad 4 m): %ld nodos · %ld fuera de la reticula\n",
-                fullR, nearChecked, nearOff);
-    std::printf("    fuera de %.0f m: %ld nodos · %ld fuera (%.1f %%) · peor desvio %.1f m en (%.0f,%.0f)\n",
-                fullR, farChecked, farOff, 100.0 * (double)farOff / (double)std::max(1L, farChecked),
-                worstOff, worstX, worstZ);
-
-    CHECK(nearChecked > 10000, "el barrido cubre de verdad la zona de teselacion maxima");
-    CHECK(nearOff == 0, "donde el render esta al tope, TODO nodo de colision es un vertice suyo");
-
-    // ⚠️ FUERA DE ESE RADIO LA PROPIEDAD NO SE CUMPLE, Y NO ES UN AJUSTE PENDIENTE: es geométrico. La
-    // rejilla de colisión es SEPARABLE (el producto de dos listas 1D, porque así se indexa una
-    // `MeshShape`) y el LOD del render es RADIAL. En (x=-252, z=1900) el render dibuja a paso 8 por su
-    // distancia 2D mientras la colisión va a paso 4 por su |x|: ninguna rejilla separable puede seguir
-    // a una radial en todo el plano. Se acota en vez de exigirse cero, y se deja escrito el número.
-    CHECK(farOff < farChecked / 2, "fuera del tope, el desajuste esta acotado (menos de la mitad)");
-
-    // Y la contraprueba, que es lo que impide que el CHECK de arriba sea otra tautología: con la
-    // progresión ×1,12 de antes (10, 16, 25 m — ningún múltiplo del quad) esto TIENE que fallar. Si no
-    // fallara, el test no estaría mirando lo que dice mirar.
-    long badOff = 0;
-    for (double r = 300.0; r < 1900.0; r += 11.0) {
-        double s = 4.0, acc = 0.0;
-        while (acc < r) { acc += std::min(s, 25.0); s *= 1.12; }   // la rejilla vieja
-        const double step = renderStepX(acc, 0.0), px = std::floor(acc / P) * P;
-        const double q = (acc - px) / step;
-        if (std::fabs(q - std::round(q)) * step > 1e-9) ++badOff;
-    }
-    std::printf("    contraprueba (rejilla vieja x1,12): %ld nodos de %d caen FUERA de la reticula\n",
-                badOff, (int)((1900.0 - 300.0) / 11.0) + 1);
-    CHECK(badOff > 100, "la rejilla ANTERIOR falla este mismo test (si no, no esta midiendo nada)");
-}
 
 // =================================================================================================
 // ANILLOS DE HEIGHTFIELD: que TESELEN el plano — ni hueco ni solape
@@ -982,10 +817,22 @@ void test_terrain_ring_tiling() {
     beginTest("terrain_ring_tiling");
     using namespace Haruka::Planet;
 
+    // ⚠️ LA PILA EMPIEZA MAS FINA (2026-08-24): ±32 m con celda 0,5 m en vez de ±256 m con 4 m. El
+    // numero de anillos crece con ello — tres mas para llegar al mismo alcance, porque cada uno dobla.
+    // El contrato que importa NO es "cuantos hay" sino que TAPICEN sin hueco ni solape, que es lo que
+    // comprueba el resto de este test. Aqui solo se fija el arranque y el alcance.
     const std::vector<TerrainRingSpec> L = terrainRingLayout(200000.0);
-    CHECK(L.size() == 11, "11 anillos alcanzan los 200 km pedidos");
-    CHECK(std::fabs(L[0].extent - TERRAIN_COLLIDE_UNIFORM_M) < 1e-9,
-          "el anillo 0 es exactamente el bloque cercano de siempre (+-256 m)");
+    std::printf("    %zu anillos · el mas fino: celda %.2f m alcance +-%.0f m · el mas grueso: "
+                "celda %.0f m alcance +-%.0f m\n",
+                L.size(), L.front().cell, L.front().extent, L.back().cell, L.back().extent);
+    CHECK(L.back().extent >= 200000.0, "la pila alcanza los 200 km pedidos");
+    CHECK(std::fabs(L[0].cell - TERRAIN_RING_FINE_CELL) < 1e-9,
+          "el anillo 0 tiene la celda MAS FINA: la que iguala al texel del render");
+    // CONTRAPRUEBA: el bloque de ±256 m de siempre sigue existiendo, ahora como un anillo interior
+    // mas. Si desapareciera, el salto de resolucion seria brusco donde antes era continuo.
+    bool has256 = false;
+    for (const auto& r : L) if (std::fabs(r.extent - TERRAIN_COLLIDE_UNIFORM_M) < 1e-9) has256 = true;
+    CHECK(has256, "CONTRAPRUEBA: el bloque de +-256 m sigue en la pila (la escalera no se rompio)");
     CHECK(L.back().extent >= 200000.0, "el ultimo anillo cubre el radio pedido");
     for (const auto& r : L) std::printf("    anillo: celda %6.0f m  half %4d  alcance +-%8.0f m  "
                                        "hueco +-%8.0f m  %ux%u muestras\n",
@@ -1019,10 +866,13 @@ void test_terrain_ring_tiling() {
     bool onLattice = true;
     for (const auto& r : L)
         for (uint32_t i = 1; i < r.samples; ++i) {
-            const double q = terrainRingNode(i, r) / TERRAIN_CLIP_QUAD_M;
+            // ⚠️ LA RETICULA DE REFERENCIA ES LA CELDA MAS FINA, no el quad del clipmap borrado. Es
+            // lo que garantiza que un anillo grueso tenga sus vertices SOBRE los del fino: sin eso la
+            // costura entre anillos no podria coserse (`terrainRingSeamStep` da 0 por construccion).
+            const double q = terrainRingNode(i, r) / TERRAIN_RING_FINE_CELL;
             if (std::fabs(q - std::round(q)) > 1e-9) onLattice = false;
         }
-    CHECK(onLattice, "todo nodo util cae en la reticula del render (multiplo del quad)");
+    CHECK(onLattice, "todo nodo util cae en la reticula de la celda mas fina (multiplo exacto)");
 
     // ── COBERTURA: cada punto en EXACTAMENTE un anillo ──────────────────────────────────────────
     // Un anillo cubre un punto si la celda que lo contiene tiene sus 4 nodos con superficie (Jolt
@@ -1281,4 +1131,113 @@ void test_terrain_orbital_albedo() {
                 "hielo (%.2f,%.2f,%.2f)\n", cJungla.r, cJungla.g, cJungla.b,
                 cDesierto.r, cDesierto.g, cDesierto.b, cHielo.r, cHielo.g, cHielo.b);
     CHECK(glm::length(cJungla - cDesierto) > 0.2f, "CONTRAPRUEBA: la paleta SI separa climas opuestos");
+}
+
+// ================================================================================================
+// ¿QUE CELDA DE COLISION HACE FALTA PARA UN TWIST DADO?
+//
+// El "twist" es lo que Jolt te hace pisar de mas o de menos EN EL CENTRO de cada celda: parte el
+// cuadrado en dos triangulos por una diagonal, asi que la superficie que colisiona no es la bilineal
+// de sus cuatro esquinas. La diferencia es `|h00 + h11 - h10 - h01| / 2`.
+//
+// ⚠️ ES EL ULTIMO "ves una cosa y pisas otra" que queda, y NO se arregla con el corte de octavas:
+// existe aunque el campo sea perfecto, porque es la forma del collider. Solo baja afinando la celda.
+//
+// Y tiene una trampa: al afinar la celda tambien baja el piso de `triM`, o sea que entra MAS relieve
+// fino — la curvatura local sube justo cuando la celda baja. Este test mide el resultado NETO, no
+// la formula ideal.
+// ================================================================================================
+void test_terrain_twist_vs_cell() {
+    beginTest("terrain_twist_vs_cell");
+    using namespace Haruka::Planet;
+    const double R = 6371000.0;
+
+    // Marco tangente en un punto cualquiera con relieve.
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 t1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 t2  = glm::cross(up0, t1);
+
+    // ⚠️ EL RENDER NO DIBUJA UN VERTICE POR TEXEL. El pase v5 usa un STRIDE: con `vertexPx` = 4 y
+    // `errorPx` = 1 dibuja uno cada 4 texeles, o sea vertices cada 0,596·4 = **2,384 m**. El heightmap
+    // guarda 0,596 m; la GEOMETRIA es 4x mas basta. Alinear la colision con el TEXEL en vez de con el
+    // VERTICE fue un error: dejo la colision mas fina que el render, con relieve que no se dibuja.
+    {
+        const double texel = 6371000.0 * 1.5707963267948966 / 131072.0 / 128.0;
+        std::printf("    el render: texel %.3f m · stride 4 -> VERTICES cada %.3f m\n",
+                    texel, texel * 4.0);
+        // Error de cuerda del render: lo que su triangulo se separa del campo que el propio nodo
+        // guarda. Es la disparidad que queda aunque la colision sea perfecta.
+        // El compromiso, con numeros: `HARUKA_TERRAIN_V5_VERTPX` elige cuantos texeles por vertice.
+        std::printf("    stride  vertices cada   error de cuerda   triangulos (x)\n");
+        double wAt4 = 0.0;
+        for (int stride : { 1, 2, 4, 8 }) {
+            auto hAt = [&](double x) {
+                const glm::dvec3 d = glm::normalize(up0 + t1 * (x / R));
+                return (double)terrainDetail(d, R, (float)texel);
+            };
+            const double span = texel * stride;
+            double wR = 0.0;
+            for (int k = -60; k <= 60; ++k) {
+                const double x0 = k * span;
+                for (int m = 1; m < 8; ++m) {
+                    const double f = m / 8.0, xm = x0 + span * f;
+                    const double lin = hAt(x0) + (hAt(x0 + span) - hAt(x0)) * f;
+                    wR = std::max(wR, std::fabs(hAt(xm) - lin));
+                }
+            }
+            std::printf("    %6d  %10.3f m   %13.4f m   %12.1f\n",
+                        stride, span, wR, 16.0 / (double)(stride * stride));
+            if (stride == 4) wAt4 = wR;
+        }
+        std::printf("    -> con el stride 4 de hoy, la disparidad que queda AUNQUE la colision sea\n"
+                    "       exacta es %.4f m. Es el termino DOMINANTE: el twist es 0,0076 m.\n", wAt4);
+    }
+
+    std::printf("    celda      piso de triM   twist PEOR   twist medio   muestras en +-32 m\n");
+    double cellFor1cm = 0.0, twistAtCurrent = -1.0, twistAt2m = 0.0, twistAt1m = 0.0;
+    for (double cell : { 4.0, 2.0, 1.0, 0.5, 0.25, 0.125 }) {
+        // El piso de `triM` sigue a la celda: es la regla de Nyquist del motor.
+        const float triM = (float)cell;
+        double worst = 0.0, sum = 0.0; size_t n = 0;
+        for (int j = -20; j <= 20; ++j)
+            for (int i = -20; i <= 20; ++i) {
+                auto h = [&](double x, double z) {
+                    const glm::dvec3 d = glm::normalize(up0 + t1 * (x / R) + t2 * (z / R));
+                    return (double)terrainDetail(d, R, triM);
+                };
+                const double x0 = i * cell, z0 = j * cell;
+                const double tw = std::fabs(h(x0, z0) + h(x0 + cell, z0 + cell)
+                                          - h(x0 + cell, z0) - h(x0, z0 + cell)) * 0.5;
+                worst = std::max(worst, tw); sum += tw; ++n;
+            }
+        const double samples = std::pow(2.0 * 32.0 / cell + 2.0, 2.0);
+        std::printf("    %6.3f m   %8.3f m   %10.4f m   %10.4f m   %12.0f\n",
+                    cell, (double)triM, worst, sum / (double)n, samples);
+        if (cellFor1cm == 0.0 && worst < 0.01) cellFor1cm = cell;
+        if (std::fabs(cell - TERRAIN_RING_FINE_CELL) < 1e-9) twistAtCurrent = worst;
+        if (std::fabs(cell - 2.0) < 1e-9) twistAt2m = worst;
+        if (std::fabs(cell - 1.0) < 1e-9) twistAt1m = worst;
+    }
+    if (cellFor1cm > 0.0)
+        std::printf("    -> para twist < 1 cm hace falta celda <= %.3f m\n", cellFor1cm);
+    else
+        std::printf("    -> ninguna celda probada baja de 1 cm\n");
+
+    // LA COTA: la celda que el motor usa DE VERDAD tiene que dejar el twist bajo 1 cm. Si alguien
+    // sube `TERRAIN_RING_FINE_CELL`, esto salta.
+    std::printf("    con la celda REAL del motor (%.3f m) el twist es %.4f m\n",
+                TERRAIN_RING_FINE_CELL, twistAtCurrent);
+    CHECK(twistAtCurrent >= 0.0 && twistAtCurrent < 0.01,
+          "con la celda del motor el twist queda por debajo de 1 cm");
+
+    // ⚠️ CONTRAPRUEBA, Y NO ES LA QUE PARECE: afinar la celda NO baja el twist de forma monotona.
+    // De 2 m a 1 m EMPEORA (medido: 0,0459 -> 0,0492 m). Es que el piso de octavas sigue a la celda,
+    // asi que al afinar entra relieve mas fino y la curvatura local sube justo cuando la celda baja.
+    // Los dos efectos compiten. Quien lea la tabla esperando una curva limpia se equivocaria de
+    // conclusion; este numero esta aqui para impedirlo.
+    std::printf("    CONTRAPRUEBA: de 2 m a 1 m el twist %s (%.4f -> %.4f m): NO es monotono, porque\n"
+                "      el piso de octavas sigue a la celda y entra mas relieve al afinar\n",
+                twistAt1m > twistAt2m ? "SUBE" : "baja", twistAt2m, twistAt1m);
+    CHECK(twistAt1m > twistAt2m,
+          "CONTRAPRUEBA: afinar la celda NO baja el twist monotonamente (el piso la sigue)");
 }

@@ -7,11 +7,12 @@
  *
  * ── QUÉ RESUELVE, Y POR QUÉ NO ES "OTRA FORMA DE HACER LO MISMO" ────────────────────────────────
  *
- * Hoy el clipmap deriva la posición de cada vértice de un MARCO TANGENTE EN FLOAT que se re-ancla
- * con el jugador. Eso tiene dos consecuencias medidas, y las dos desaparecen aquí:
+ * El clipmap derivaba la posición de cada vértice de un MARCO TANGENTE EN FLOAT que se re-anclaba
+ * con el jugador. Eso tenía dos consecuencias medidas, y las dos desaparecen aquí:
  *
- *   1. `test_clipmap_dir_parity`: la `dir` reconstruida en float se separa **0,9302 m** de la que
- *      calcula la CPU en double, lo que produce hasta **0,1453 m** de diferencia de altura.
+ *   1. La `dir` reconstruida en float se separa **0,9302 m** de la que calcula la CPU en double, lo
+ *      que produce hasta **0,1453 m** de diferencia de altura. Lo medía `test_clipmap_dir_parity`,
+ *      borrado con el clipmap; hoy la propiedad la vigila `terrain_node_lattice` (ver abajo).
  *   2. `collision-mesh-rebuild-cost`: al derivar 48 m, **8 de 257 049** nodos son reutilizables —
  *      porque el ancla se mueve y con ella TODOS los nodos.
  *
@@ -39,12 +40,12 @@
  *     mismo denominador → la misma dirección. La costura no puede abrirse.
  *   · **Determinismo**: mismos enteros, mismos bits, en cualquier máquina y en cualquier orden.
  *
- * Es la misma garantía que el clipmap compraba redondeando el nivel de tesela a potencia de dos
- * (`clipmap.tesc::edgeFactor`), pero por construcción y sin perder resolución en el redondeo.
+ * Es la misma garantía que el clipmap compraba redondeando el nivel de tesela a potencia de dos,
+ * pero por construcción y sin perder resolución en el redondeo.
  *
  * Medido en `terrain_node_lattice` contra el camino que esto sustituye —reconstruir la dirección por
- * un marco tangente en float, como hacen `ringSample` y `clipmap.tese`— la diferencia es **0 bits
- * aquí contra 0,2290 m de superficie allí**, sobre los mismos puntos.
+ * un marco tangente en float, como sigue haciendo `ringSample`— la diferencia es **0 bits aquí
+ * contra 0,2290 m de superficie allí**, sobre los mismos puntos.
  *
  * ⚠️ NO duplica la proyección. La cara→esfera es `cubeFaceToDir` (Cobb), que ya existe, es GL-free
  * y tiene gemelo GLSL en `lib/cube_face.glsl`. Aquí solo se decide QUÉ (lx, ly) evaluar.
@@ -246,24 +247,67 @@ struct StitchRef {
  * Las ESQUINAS no necesitan caso especial: su índice es 0 o CELLS, que son múltiplos de cualquier
  * potencia de dos, así que caen sobre un vértice del grueso y el peso sale 0 solo.
  */
-inline StitchRef nodeStitch(uint32_t u, uint32_t v, const int coarser[4]) {
+inline StitchRef nodeStitchStep(uint32_t u, uint32_t v, const uint32_t step[4]) {
     StitchRef r{ u, v, u, v, 0.0 };
     const uint32_t E = TERRAIN_NODE_CELLS;
     int edge = -1; uint32_t idx = 0;
-    if      (u == 0 && coarser[0] > 0) { edge = 0; idx = v; }
-    else if (u == E && coarser[1] > 0) { edge = 1; idx = v; }
-    else if (v == 0 && coarser[2] > 0) { edge = 2; idx = u; }
-    else if (v == E && coarser[3] > 0) { edge = 3; idx = u; }
+    if      (u == 0 && step[0] > 1) { edge = 0; idx = v; }
+    else if (u == E && step[1] > 1) { edge = 1; idx = v; }
+    else if (v == 0 && step[2] > 1) { edge = 2; idx = u; }
+    else if (v == E && step[3] > 1) { edge = 3; idx = u; }
     if (edge < 0) return r;
 
-    const uint32_t stride = 1u << (uint32_t)coarser[edge];
+    const uint32_t stride = step[edge];
     const uint32_t b = (idx / stride) * stride;
     const uint32_t nxt = std::min(b + stride, E);
     if (nxt == b) return r;
-    r.t = (double)(idx - b) / (double)(nxt - b);
     if (edge <= 1) { r.v0 = b; r.v1 = nxt; }          // aristas verticales: varía v
     else           { r.u0 = b; r.u1 = nxt; }          // horizontales: varía u
+
+    // ── ⚠️ EL VÉRTICE SOBRANTE SE COLAPSA (t = 0), NO SE INTERPOLA ──────────────────────────────
+    //
+    // Aquí ponía `r.t = (idx - b) / (nxt - b)`: el vértice se colocaba INTERPOLADO sobre la recta del
+    // vecino grueso. Era correcto en el mundo —los tests lo miden en 0,000000 m y el careo GPU↔GPU da
+    // 0 bits— **y roto en pantalla**: topológicamente seguía siendo un vértice que el otro lado no
+    // tiene, o sea una T-JUNCTION. El rasterizador cuantiza a una rejilla sub-píxel, así que dos
+    // aristas matemáticamente coincidentes se separan una fracción de píxel y dejan pinholes.
+    //
+    // Es lo único que ningún modelo de world-space podía ver, y costó SIETE candidatos eliminados con
+    // medida antes de llegar aquí (el dato del generador, la fórmula, la precisión float, el morph,
+    // la histéresis, el punto de evaluación del morph y la zancada enviada — todos limpios).
+    //
+    // Colapsando sobre el vértice del grueso, los triángulos que lo usaban quedan DEGENERADOS (área
+    // cero, ni un fragmento) y la arista pasa a tener exactamente los mismos vértices que el vecino.
+    // Medido con el shader (`v5 F3: grietas entre nodos vecinos`, barrido de 7 casos): de 21 agujeros
+    // en el peor caso a **0 en los siete**.
+    //
+    // `u1`/`v1` se conservan: el shader los usa para la NORMAL, y quitarlos cambiaría el sombreado.
+    r.t = 0.0;
     return r;
+}
+
+/**
+ * @brief Envoltura histórica: `coarser[e]` = **cuántos niveles más grueso** es el vecino.
+ *
+ * Equivale a una zancada de `2^coarser` téxeles. Sigue valiendo mientras los dos lados dibujen con
+ * el MISMO stride; en cuanto los strides difieren hay que dar la zancada explícita
+ * (`nodeStitchStep`), porque la densidad de vértices ya no la fija solo el nivel.
+ */
+inline StitchRef nodeStitch(uint32_t u, uint32_t v, const int coarser[4]) {
+    uint32_t step[4];
+    for (int e = 0; e < 4; ++e)
+        step[e] = (coarser[e] > 0) ? (1u << (uint32_t)coarser[e]) : 0u;
+    return nodeStitchStep(u, v, step);
+}
+
+/** @brief Como `nodeStitchedDir` pero con la ZANCADA dada en téxeles (ver `nodeStitchStep`). */
+inline glm::dvec3 nodeStitchedDirStep(const NodeId& n, uint32_t u, uint32_t v,
+                                      const uint32_t step[4]) {
+    const StitchRef s = nodeStitchStep(u, v, step);
+    if (s.identity()) return nodeTexelDir(n, u, v);
+    const glm::dvec3 a = nodeTexelDir(n, s.u0, s.v0);
+    const glm::dvec3 b = nodeTexelDir(n, s.u1, s.v1);
+    return a + (b - a) * s.t;
 }
 
 /** @brief Dirección del vértice YA COSIDA. Idéntica a `nodeTexelDir` cuando no hay nada que coser. */
@@ -305,6 +349,44 @@ struct NodeRange {
 /// Altura base del bake (m) en una dirección. Es el `sampleBase(dir).x` de los shaders, inyectado
 /// para que `terrain_node.h` NO dependa del planeta ni de la GPU (sigue siendo testeable headless).
 using NodeBaseHeightFn = float (*)(const glm::dvec3& dir, void* ctx);
+
+/**
+ * @brief Rango de elevación de un nodo, muestreando la superficie en una rejilla gruesa.
+ *
+ * ── POR QUÉ ESTO TENÍA QUE EXISTIR ──────────────────────────────────────────────────────────────
+ *
+ * `TerrainNodeGpu::generatePending` publicaba `NodeRange{}` — **vacío** — para todos los nodos. El
+ * log del juego lo delató: `SIN RANGO 3070` de 3070. Y `rangeOf` alimenta a TRES sitios:
+ *
+ *   · `nodeShouldSplit` — sin cota, la distancia se mide al NIVEL DEL MAR. En una ladera de +1 km
+ *     el suelo está 1 km más cerca de lo que cree, así que subdivide de MENOS justo donde más se
+ *     mira. Es el bug "mirando cuesta arriba sale disparidad" que se dio por arreglado y nunca
+ *     llegó a funcionar en el juego, porque el arreglo dependía de un rango que nadie rellenaba.
+ *   · `nodeStrideIndex` — igual: con el jugador a 2 m del suelo pero 1028 m sobre el mar, cree que
+ *     el nodo está a 1028 m y deja el stride en 4. Síntoma: `stride 4..4` en vez de `1..4`.
+ *   · `nodeOutsideFrustum` — cae al bound conservador de 5000 m.
+ *
+ * Se muestrea en 5×5 y se ensancha un 25 % de la amplitud, porque 25 puntos no ven el pico. Errar
+ * por ARRIBA es el lado seguro: el nodo parece más cerca y se subdivide de más.
+ */
+inline NodeRange nodeEstimateRange(const NodeId& n, double planetRadiusM,
+                                   NodeBaseHeightFn heightFn, void* ctx) {
+    NodeRange r;
+    if (!heightFn) return r;
+    const uint32_t step = TERRAIN_NODE_CELLS / 4;      // 5x5 puntos contando los bordes
+    for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += step)
+        for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += step) {
+            const float h = heightFn(nodeTexelDir(n, u, v), ctx);
+            r.minM = std::min(r.minM, h);
+            r.maxM = std::max(r.maxM, h);
+        }
+    if (!r.valid()) return NodeRange{};
+    const float pad = 0.25f * (r.maxM - r.minM);
+    r.minM -= pad; r.maxM += pad;
+    (void)planetRadiusM;
+    return r;
+}
+
 
 inline void nodeFillHeights(const NodeId& n, double planetRadiusM, float* out,
                             NodeRange* outRange = nullptr,
@@ -375,9 +457,31 @@ inline uint32_t nodeContentHash(const float* heights, size_t count) {
 // salen a 4,1 px constantes a >1 km pero a **20,6 px a 200 m** (el tope de tesela satura, medido).
 // Con error en pantalla no hay tal saturación: un nodo se parte hasta cumplir el presupuesto.
 
-/// Presupuesto de error, en píxeles. 1 px = el error geométrico de un nodo no llega a moverse un
-/// píxel en pantalla, así que subdividir más no se puede ver.
-inline constexpr double TERRAIN_NODE_ERROR_PX = 1.0;
+/// Presupuesto de error, en píxeles: cuántos TÉXELES DE HEIGHTMAP hay por píxel de pantalla.
+///
+/// ⚠️ **NO ES LA DENSIDAD DE TRIÁNGULOS.** Esa la fija `vertexPx` (4) junto con el stride. Con este
+/// valor en 1 el heightmap tenía un téxel por píxel mientras se dibujaba un vértice cada cuatro:
+/// **16 téxeles por vértice**, o sea VRAM y nodos gastados en detalle que ninguna geometría podía
+/// mostrar.
+///
+/// ⚠️ **ESTABA EN 1,0 Y ERA INSOSTENIBLE** desde que el pool publica rangos de verdad (antes salían
+/// vacíos y el criterio medía al nivel del mar, subdividiendo de menos). Con el rango bueno la
+/// demanda mide **6 811 nodos contra un presupuesto de 3 072** — hambre ×2,2 permanente. Y un
+/// selector hambriento produce las dos cosas que se reportaron a la vez: vecinos con más de un nivel
+/// de diferencia (**pinchos**, el geomorph solo cierra uno) y un reparto que cambia con el menor
+/// movimiento de cámara (**parpadeo**).
+///
+/// Medido en `terrain_node_demand_with_range`:
+///
+///     errorPx   demanda   hambre   triángulos
+///        1        6 811    2,2x      13,9 M
+///        2        2 187    0,7x      17,9 M   <- cabe
+///        3        1 160    0,4x      38,0 M
+///
+/// Cerca NO se pierde nada: a 2 m del suelo el nodo de nivel 17 comete 634 px de error, así que se
+/// alcanza el nivel máximo con cualquier umbral razonable y la paridad con la colisión se mantiene.
+/// Lo que se recorta es el campo medio. `HARUKA_TERRAIN_V5_ERRPX` lo cambia sin recompilar.
+inline constexpr double TERRAIN_NODE_ERROR_PX = 2.0;
 
 /**
  * @brief ¿Hay que subdividir este nodo? Criterio de error en pantalla.
@@ -389,20 +493,202 @@ inline constexpr double TERRAIN_NODE_ERROR_PX = 1.0;
  * `dist` es a la ESQUINA MÁS CERCANA del nodo, no a su centro: con el centro, un nodo grande a tus
  * pies (cuyo centro cae lejos) no se subdividiría y tendrías el suelo basto justo donde miras.
  */
-inline bool nodeShouldSplit(const NodeId& n, double planetRadiusM,
-                            const glm::dvec3& camPos, const glm::dvec3& planetCenter,
-                            double radPerPx, double errorPx = TERRAIN_NODE_ERROR_PX) {
-    if (n.level >= TERRAIN_NODE_MAX_LEVEL) return false;
-    // Distancia al punto del nodo más cercano a la cámara. Se muestrea su borde y su centro: es
-    // barato y no hace falta la distancia exacta a un parche curvo — solo decidir un entero.
+/// Error en píxeles del nodo: su téxel proyectado a la distancia a la que de verdad está el terreno.
+/// Es la métrica que decide subdividir y también cuánto morfea hacia el padre — una sola definición.
+inline double nodeScreenError(const NodeId& n, double planetRadiusM,
+                              const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                              double radPerPx, double nodeElevM = 0.0) {
     double best = 1e300;
+    const double surfR = planetRadiusM + nodeElevM;
     for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += TERRAIN_NODE_CELLS / 2)
         for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += TERRAIN_NODE_CELLS / 2) {
-            const glm::dvec3 p = planetCenter + nodeTexelDir(n, u, v) * planetRadiusM;
+            const glm::dvec3 p = planetCenter + nodeTexelDir(n, u, v) * surfR;
             best = std::min(best, glm::length(p - camPos));
         }
     const double dist = std::max(best, 1.0);
-    return (nodeTexelM(n, planetRadiusM) / (dist * radPerPx)) > errorPx;
+    return nodeTexelM(n, planetRadiusM) / (dist * radPerPx);
+}
+
+/**
+ * @brief Téxeles por vértice de UN nodo, como índice de potencia de dos (0 → 1, 1 → 2, 2 → 4…).
+ *
+ * ── POR QUÉ NO PUEDE SER GLOBAL ─────────────────────────────────────────────────────────────────
+ *
+ * Aquí había un stride único para todo el frame, con este argumento: *"el selector ya iguala el
+ * tamaño en pantalla de los nodos, así que todos quieren el mismo"*. Es cierto **para la pantalla**
+ * y falso para lo que de verdad fallaba: el nodo bajo tus pies se dibujaba a `stride 4`, o sea un
+ * vértice cada 2,386 m, mientras la colisión bajo esos mismos pies tiene celdas de 0,5 m. Medido:
+ * el triángulo del render se separa **0,0727 m** del campo que el propio nodo guarda. Eso es la
+ * disparidad ver↔pisar que quedaba, y es DIEZ VECES el twist (0,0076 m) que se estuvo puliendo
+ * mientras este término ni se medía, porque se dio por hecho que el render dibujaba al téxel.
+ *
+ * ── LOS DOS TOPES ───────────────────────────────────────────────────────────────────────────────
+ *
+ *   · **PANTALLA** — `vertexPx / errorPx`, la regla de siempre. Cuántos téxeles caben en el
+ *     tamaño de vértice que se quiere en píxeles.
+ *   · **COLISIÓN** — la malla que se pisa NO tiene celda constante: escalona con la distancia
+ *     igual que los anillos (`terrainRingLayout`), celda `fineCell·2^k` con medio alcance
+ *     `fineCell·2^k·CELLS/2`. Despejando, a distancia `d` la celda que hay bajo esa `d` es
+ *     `max(fineCell, d/(CELLS/2))`. El render no necesita ser más fino que eso: sería gastar
+ *     triángulos en relieve que la física no tiene.
+ *
+ * Se toma el MENOR de los dos: los dos son cotas superiores del stride y hay que respetar ambas.
+ * Lejos manda la pantalla (y sale el mismo 4 de antes); cerca manda la colisión y baja a 1.
+ *
+ * ⚠️ La transición entre strides SÍ mueve la superficie —es el mismo efecto medido arriba— y NO está
+ * morfeada: el geomorph existente va entre NIVELES, no entre strides. O sea que es un pop real al
+ * caminar. Medido en `test_terrain_node_stride_pop`, en píxeles y no en metros, porque 5 cm a 3 m se
+ * ven y a 300 m no:
+ *
+ *     1→2 a  76 m: 0,0133 m = 0,185 px      2→4 a 153 m: 0,0354 m = 0,247 px
+ *     4→8 a 305 m: 0,1877 m = 0,654 px  ← el peor, y sigue por debajo del píxel
+ *
+ * Cae dentro del píxel en las tres fronteras porque el brinco crece más despacio que la distancia a
+ * la que ocurre. Si algún día se afina `TERRAIN_RING_FINE_CELL` o se ensancha el fov, eso deja de
+ * ser verdad y hará falta morfear también entre strides — el test lo dirá antes que el ojo.
+ *
+ * @param collisionFineCellM celda del anillo más fino de la física (`TERRAIN_RING_FINE_CELL`).
+ * @param maxIndex           mayor índice con index buffer construido.
+ */
+inline double nodeStrideWant(const NodeId& n, double planetRadiusM,
+                             const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                             double errorPx, double vertexPx,
+                             double collisionFineCellM, double nodeElevM = 0.0) {
+    const double screenWant = vertexPx / std::max(errorPx, 1e-3);
+
+    const double surfR = planetRadiusM + nodeElevM;
+    double nearest = 1e300;
+    for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += TERRAIN_NODE_CELLS / 2)
+        for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += TERRAIN_NODE_CELLS / 2)
+            nearest = std::min(nearest,
+                               glm::length(planetCenter + nodeTexelDir(n, u, v) * surfR - camPos));
+    const double cellM    = std::max(collisionFineCellM,
+                                     nearest / (double)(TERRAIN_NODE_CELLS / 2));
+    const double collWant = cellM / std::max(nodeTexelM(n, planetRadiusM), 1e-9);
+
+    return std::min(screenWant, collWant);
+}
+
+/**
+ * @brief El stride, ya cuantizado a potencia de dos. `prevIndex` da HISTERESIS.
+ *
+ * ── POR QUÉ HACE FALTA LA HISTÉRESIS, Y QUÉ PASA SIN ELLA ───────────────────────────────────────
+ *
+ * Sin `prevIndex` esto es una función pura de la distancia, y ahí está el fallo: un nodo parado
+ * JUSTO en un umbral cambia de stride en cuanto la cámara se mueve un milímetro. Medido en
+ * `terrain_node_walk_shimmer` con el micro-temblor de cualquier controlador de personaje (±1 cm):
+ * **119 cambios en 120 frames**, y cada uno mueve la superficie ~1 cm. Eso es exactamente el
+ * "el terreno tiembla al mover el personaje" que se reportó.
+ *
+ * ⚠️ Un salto aislado al cruzar un umbral es un POP y ya está medido como sub-píxel. Lo que se ve no
+ * es el salto: es que se repita ida y vuelta cada frame. La cota en píxeles del pop NO dice nada
+ * sobre el parpadeo, y confundir las dos cosas fue lo que dejó esto pasar.
+ *
+ * La banda muerta es del 25 %: para cambiar de stride hay que pasarse del umbral un cuarto, no
+ * rozarlo. El temblor de 1 cm a 110 m es un 0,01 % — tres órdenes de magnitud por debajo.
+ *
+ * @param prevIndex el stride que este nodo tuvo el frame pasado, o `kNoPrevStride` si es nuevo.
+ */
+inline constexpr uint32_t kNoPrevStride = 0xFFFFFFFFu;
+
+inline uint32_t nodeStrideQuantise(double want, uint32_t maxIndex,
+                                   uint32_t prevIndex = kNoPrevStride) {
+    uint32_t sk = 0;
+    while (sk + 1 <= maxIndex && (double)(1u << (sk + 1)) <= want) ++sk;
+    if (prevIndex == kNoPrevStride || prevIndex > maxIndex || sk == prevIndex) return sk;
+
+    const double kBand = 0.25;
+    if (sk > prevIndex) {                     // quiere ENGROSAR: exigir pasarse del umbral
+        if (want < (double)(1u << (prevIndex + 1)) * (1.0 + kBand)) return prevIndex;
+    } else {                                  // quiere AFINAR: idem por el otro lado
+        if (want > (double)(1u << prevIndex) / (1.0 + kBand)) return prevIndex;
+    }
+    return sk;
+}
+
+/** @brief Atajo sin histeria ni historia: para tests y para el primer frame de un nodo. */
+inline uint32_t nodeStrideIndex(const NodeId& n, double planetRadiusM,
+                                const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                                double errorPx, double vertexPx,
+                                double collisionFineCellM, uint32_t maxIndex,
+                                double nodeElevM = 0.0, uint32_t prevIndex = kNoPrevStride) {
+    return nodeStrideQuantise(nodeStrideWant(n, planetRadiusM, camPos, planetCenter, errorPx,
+                                             vertexPx, collisionFineCellM, nodeElevM),
+                              maxIndex, prevIndex);
+}
+
+inline bool nodeShouldSplit(const NodeId& n, double planetRadiusM,
+                            const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                            double radPerPx, double errorPx = TERRAIN_NODE_ERROR_PX,
+                            double nodeElevM = 0.0) {
+    if (n.level >= TERRAIN_NODE_MAX_LEVEL) return false;
+    // ⚠️ LA DISTANCIA VA AL TERRENO, NO A LA ESFERA DE REFERENCIA.
+    //
+    // Esto medía a `planetCenter + dir·R`, o sea al nivel del mar, ignorando el relieve. En una
+    // ladera de +2 km el suelo real está 2 km MÁS CERCA de una cámara por encima, así que el criterio
+    // sobreestimaba la distancia y **subdividía de menos**: terreno basto justo donde más se mira.
+    //
+    // Y el error depende de la elevación LOCAL, así que el síntoma es direccional — mirando cuesta
+    // arriba salía disparidad y cuesta abajo no. Reportado así, y es lo que lo explica: no era el
+    // ángulo, era la altura del terreno que hay en esa dirección.
+    //
+    // Se usa la cota MÁXIMA del nodo porque un pico es lo más cercano a una cámara que está arriba;
+    // sin rango conocido vale 0 y esto es exactamente lo que había.
+    return nodeScreenError(n, planetRadiusM, camPos, planetCenter, radPerPx, nodeElevM) > errorPx;
+}
+
+/**
+ * @brief Cuánto MORFEA este nodo hacia su padre: 0 recién nacido, 1 justo antes de fundirse en él.
+ *
+ * ⚠️ ESTO ES LO QUE QUITA EL POPPING AL MOVER LA CÁMARA, y es distinto del cosido entre vecinos.
+ *
+ * El geomorph de aristas cierra el escalón entre dos nodos que se dibujan A LA VEZ. Pero cuando te
+ * alejas y un nodo se funde en su padre, la superficie SALTA de una función a otra — reportado como
+ * "sobre todo al mover la cámara". Aquí se cierra en el TIEMPO: el nodo va adoptando la altura de su
+ * padre conforme se acerca el relevo, así que cuando ocurre ya son idénticos y no hay salto.
+ *
+ * El umbral sale de la propia regla de subdivisión, no de un número elegido: un nodo es hoja mientras
+ * su error <= `errorPx`, y su padre —cuyo téxel es el doble, o sea error doble— pasa a serlo cuando
+ * el del nodo baja a `errorPx/2`. Ésa es exactamente la ventana del morph.
+ */
+inline float nodeParentMorph(const NodeId& n, double planetRadiusM,
+                             const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                             double radPerPx, double errorPx = TERRAIN_NODE_ERROR_PX,
+                             double nodeElevM = 0.0) {
+    if (n.level == 0) return 0.0f;                     // una raíz no tiene padre en el que fundirse
+    const double e = nodeScreenError(n, planetRadiusM, camPos, planetCenter, radPerPx, nodeElevM);
+    const double t = 2.0 * (errorPx - e) / std::max(errorPx, 1e-9);
+    return (float)glm::clamp(t, 0.0, 1.0);
+}
+
+/**
+ * @brief Morph hacia el padre de UN VÉRTICE. Gemelo exacto de `terrain_node.vert`.
+ *
+ * ── POR QUÉ NO PUEDE SER POR NODO ───────────────────────────────────────────────────────────────
+ *
+ * `nodeParentMorph` (arriba) devuelve un escalar para todo el nodo, y esa es justo la razón de que
+ * el pase v5 no pudiera casar en las aristas: dos vecinos a distancias distintas evalúan el MISMO
+ * punto 3D de la arista compartida como `mix(propia, padre, morphA)` por un lado y `morphB` por el
+ * otro. La grieta es `|morphA − morphB| · (padre − propia)`, y medida sobre un frame real daba
+ * **10,07 m** con 1175 de 1327 parejas adyacentes discrepando.
+ *
+ * Aquí la entrada es la DIRECCIÓN del vértice, que las dos caras de una arista compartida calculan
+ * bit a bit igual (ésa es la propiedad de la retícula, `terrain_node_lattice`). Mismo nivel y misma
+ * dirección → mismo morph, así que sobre una arista compartida la grieta no puede existir.
+ *
+ * ⚠️ El radio es el BASE, sin relieve: el relieve es lo que se está mezclando, y además cada lado
+ * tiene su propio mapa de alturas — usarlo rompería justo la entrada que los dos comparten.
+ */
+inline float nodeVertexMorph(uint32_t level, const glm::dvec3& texelDir, double planetRadiusM,
+                             const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                             double radPerPx, double errorPx = TERRAIN_NODE_ERROR_PX) {
+    if (level == 0) return 0.0f;                        // una raíz no tiene padre en el que fundirse
+    const glm::dvec3 p = planetCenter + texelDir * planetRadiusM;
+    const double dist = std::max(glm::length(p - camPos), 1.0);
+    const double texM = (planetRadiusM * 1.5707963267948966 / (double)(1ull << level))
+                      / (double)TERRAIN_NODE_CELLS;     // gemelo de `nodeTexelM` para ese nivel
+    const double e = texM / (dist * radPerPx);
+    return (float)glm::clamp(2.0 * (errorPx - e) / std::max(errorPx, 1e-9), 0.0, 1.0);
 }
 
 /**
@@ -560,15 +846,71 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
                               double errorPx = TERRAIN_NODE_ERROR_PX,
                               const glm::dvec3* viewDir = nullptr,
                               double coneHalfAngle = 0.0, double terrainBoundM = 5000.0,
-                              NodeRangeFn rangeFn = nullptr, void* rangeUser = nullptr) {
+                              NodeRangeFn rangeFn = nullptr, void* rangeUser = nullptr,
+                              size_t* outCulledHorizon = nullptr,
+                              size_t* outCulledFrustum = nullptr) {
     out.clear();
-    std::vector<NodeId> stack;
-    for (int f = 0; f < 6; ++f) stack.push_back(NodeId{ (PlanetFace)f, 0, 0, 0 });
-    while (!stack.empty()) {
-        const NodeId n = stack.back(); stack.pop_back();
+    // ── EL PRESUPUESTO VA AL QUE MAS ERROR TIENE, NO AL QUE EL RECORRIDO PILLE ANTES ─────────────
+    //
+    // Esto era una PILA (LIFO) sembrada con las seis caras del cubo. Mientras sobra presupuesto da
+    // igual el orden: todo el que quiere dividirse se divide. En cuanto `room` se agota deja de dar
+    // igual, porque el que se queda sin dividir se dibuja BASTO — y quien se quedaba basto lo
+    // decidia el orden de recorrido, no la necesidad.
+    //
+    // Medido en `terrain_node_budget_starvation`, apretando el tope: nodos bastos a 485 m mientras
+    // se dibujaba fino a 1405 m. Y como el orden efectivo cambia con lo que recorta el cono, el
+    // reparto cambiaba AL GIRAR LA CAMARA — que es como se reporto el sintoma.
+    //
+    // Con un monticulo por error en pantalla, al agotarse el presupuesto lo que queda en la cola es
+    // por construccion lo de MENOS error, y eso es lo que se emite basto. La degradacion deja de ser
+    // arbitraria y pasa a ser la correcta.
+    //
+    // ⚠️ EL DESEMPATE VA POR CLAVE, no "da igual": dos nodos con el mismo error tienen que salir
+    // siempre en el mismo orden o el selector deja de ser determinista, que es una propiedad
+    // declarada de este fichero (mismos enteros, mismos bits, en cualquier maquina).
+    // ⚠️ DOS PASADAS, Y LA CARA SOLO CUANDO HACE FALTA. Ordenar por error cuesta **x1,56** medido en
+    // -O2 (2,12 -> 3,32 ms), o sea +1,2 ms de frame, y NO sirve de nada mientras sobre presupuesto:
+    // si todo el que quiere dividirse puede, el corte final es el mismo salga en el orden que salga
+    // (comprobado: mismo conjunto y mismo peor error a 2000 y 2500 nodos).
+    //
+    // Asi que primero va la pila barata. Si NUNCA se quedo sin sitio, su resultado ya es el optimo y
+    // se devuelve tal cual. Solo si se agoto el presupuesto se repite ordenando por error — que son
+    // los frames donde importa quien se queda basto.
+    struct Cand { double err; uint64_t key; NodeId n; };
+    const auto worse = [](const Cand& a, const Cand& b) {
+        return (a.err != b.err) ? (a.err < b.err) : (a.key > b.key);
+    };
+    std::vector<Cand> stack;
+    bool byError = false, starved = false;
+    // Clave local: `nodeKey` vive en el pool y depender de el aqui invertiria la direccion del
+    // include. Solo hace falta que sea inyectiva y estable, no que coincida con la del pool.
+    const auto keyOf = [](const NodeId& n) {
+        return ((uint64_t)n.face << 58) | ((uint64_t)n.level << 52)
+             | ((uint64_t)n.i << 26) | (uint64_t)n.j;
+    };
+    const auto errOf = [&](const NodeId& n) {
+        double elevM = 0.0;
+        if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) elevM = r.maxM; }
+        return nodeScreenError(n, planetRadiusM, camPos, planetCenter, radPerPx, elevM);
+    };
+    // ⚠️ RECORTAR AL METER, NO AL SACAR. La pila descartaba al sacar, que con una pila da igual —
+    // meter es gratis—. Con un monticulo NO: meter cuesta un `push_heap` y, sobre todo, calcular el
+    // error en pantalla (nueve direcciones). Hacerlo para nodos que el horizonte va a tirar salia
+    // **x1,51** frente a la pila. Recortando antes de meter, ese trabajo no se hace nunca.
+    // ⚠️ LOS DESCARTES SE CUENTAN AQUI DENTRO, y no re-ejecutando el selector fuera.
+    //
+    // El renderer los sacaba llamando DOS VECES MAS a `nodeSelectVisible` y restando tamaños... con
+    // los MISMOS argumentos en las dos llamadas. O sea que la resta era siempre 0 y el log decia
+    // `horizonte 0` en todos los frames por construccion, atribuyendole al cono todo lo que
+    // descartaban los dos. Ademas costaba dos pasadas enteras del selector por frame (~4,5 ms en
+    // -O2) para producir una constante.
+    const auto admit = [&](const NodeId& n) {
         // HORIZONTE PRIMERO: descartar lo que no se ve antes de gastarle presupuesto. Ver
         // `nodeBelowHorizon` — sin esto la cara oculta se come las plazas del campo cercano.
-        if (nodeBelowHorizon(n, planetRadiusM, camPos, planetCenter)) continue;
+        if (nodeBelowHorizon(n, planetRadiusM, camPos, planetCenter)) {
+            if (outCulledHorizon) ++*outCulledHorizon;
+            return;
+        }
         // FRUSTUM después del horizonte: los dos descartan, pero el de horizonte es más barato
         // (sin acos ni asin) y se lleva por delante media esfera antes de que el otro mire nada.
         if (viewDir) {
@@ -576,15 +918,40 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
             double bound = terrainBoundM;
             if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) bound = r.boundM(); }
             if (nodeOutsideFrustum(n, planetRadiusM, camPos, planetCenter,
-                                   *viewDir, coneHalfAngle, bound)) continue;
+                                   *viewDir, coneHalfAngle, bound)) {
+                if (outCulledFrustum) ++*outCulledFrustum;
+                return;
+            }
         }
+        stack.push_back(Cand{ errOf(n), keyOf(n), n });
+        if (byError) std::push_heap(stack.begin(), stack.end(), worse);
+    };
+    for (int pass = 0; pass < 2; ++pass) {
+    byError = (pass == 1);
+    out.clear(); stack.clear(); starved = false;
+    // La segunda pasada rehace el recorrido entero: los contadores se reinician o saldrian dobles.
+    if (outCulledHorizon) *outCulledHorizon = 0;
+    if (outCulledFrustum) *outCulledFrustum = 0;
+    for (int f = 0; f < 6; ++f) admit(NodeId{ (PlanetFace)f, 0, 0, 0 });
+    while (!stack.empty()) {
+        if (byError) std::pop_heap(stack.begin(), stack.end(), worse);
+        const Cand cand = stack.back(); stack.pop_back();
+        const NodeId n = cand.n;
+        // La cota del nodo, si el pool la sabe: decide la DISTANCIA real al terreno (ver la nota de
+        // `nodeShouldSplit`). Se resuelve una vez y sirve para el recorte y para la subdivisión.
+        // El error ya viaja con el candidato: se calculo al meterlo, con la misma cota del pool que
+        // usaria `nodeShouldSplit`. No se recalcula.
         const bool room = (out.size() + stack.size() + 4) <= maxNodes;
-        if (room && nodeShouldSplit(n, planetRadiusM, camPos, planetCenter, radPerPx, errorPx)) {
+        const bool wants = (n.level < TERRAIN_NODE_MAX_LEVEL && cand.err > errorPx);
+        if (!room && wants) starved = true;   // alguien se queda basto: el orden pasa a importar
+        if (room && wants) {
             NodeId kids[4]; nodeChildren(n, kids);
-            for (const NodeId& k : kids) stack.push_back(k);
+            for (const NodeId& k : kids) admit(k);
         } else {
             out.push_back(n);
         }
+    }
+    if (!starved) break;      // sobro presupuesto: este corte ya es el optimo, no hay que reordenar
     }
 }
 

@@ -22,8 +22,9 @@
  *
  * ⚠️ TODO EL CAMINO HASTA EL RUIDO VA EN DOUBLE, y no es exceso de celo: la coordenada de cara sale
  * de ENTEROS (exacta), y redondearla a float antes de multiplicar por el radio la cuantizaría a
- * ~0,5 m — a radio terrestre un ulp de dirección unitaria son 0,38-0,76 m de superficie (medido:
- * `clipmap_dir_parity`, 0,9302 m de separación). No cuesta extra: `harukaDetailNoise` ya trabajaba
+ * ~0,5 m — a radio terrestre un ulp de dirección unitaria son 0,38-0,76 m de superficie (0,9302 m
+ * de separación cuando lo medía `clipmap_dir_parity`, borrado junto con el clipmap; hoy la propiedad
+ * la vigila `terrain_node_lattice`). No cuesta extra: `harukaDetailNoise` ya trabajaba
  * en double; lo que se evita es truncar ANTES de llamarla.
  *
  * El hash del ruido es aritmética entera (`uint` módulo 2³²), así que es bit-exacto entre CPU y GPU
@@ -161,27 +162,33 @@ void main() {
     // ESTA al nivel del padre. Y el grueso no morfea ahi, porque su vecino es mas fino. Coinciden.
     //
     // Cuesta el doble de VRAM por nodo (66,6 -> 133 KB) y una evaluacion mas de ruido por texel.
-    const uint base = uint(uGrid.w) * uint(uGrid.x) * uint(uGrid.x) * 2u;
     const uint texels = uint(uGrid.x) * uint(uGrid.x);
-    uHeights[base + v * uint(uGrid.x) + u] = outv;
+    const uint base   = uint(uGrid.w) * texels * 3u;
+    const uint off    = v * uint(uGrid.x) + u;
+    uHeights[base + off] = outv;
 
-    // La del PADRE: misma cuenta, con el corte de octavas de un nivel mas grueso (el texel dobla).
-    if (uGrid.z == 0) {
-        const float triParent = uMisc.y * 2.0;
-        if (uMisc.z > 0.5) {
-            const float  baseH = (uMisc.w > 0.5)
-                               ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
-                                                         harukaEquirectUV(vec3(dir)))
-                               : harukaSampleBaseField(uBaseField, vec3(dir)).x;
-            const double baseR = double(uMisc.x) + double(baseH);
-            float hp = harukaTerrainDetail(dir, baseR, triParent) * harukaSeaLevelAttenuation(baseH);
-            if (baseH > 0.0 && hp < -baseH) hp = -baseH;
-            uHeights[base + texels + v * uint(uGrid.x) + u] = baseH + hp;
+    // El PADRE (k=1) y el ABUELO (k=2): la misma cuenta con el corte de octavas al doble y al
+    // cuadruple. El abuelo hace falta porque el vecino grueso no dibuja su altura cruda — se esta
+    // morfeando hacia la SUYA—, asi que el fino tiene que poder apuntar a `mix(padre, abuelo, ...)`.
+    for (uint k = 1u; k <= 2u; ++k) {
+        float outCoarse;
+        if (uGrid.z != 0) {
+            outCoarse = outv;                       // modos de biseccion: sin morph
         } else {
-            uHeights[base + texels + v * uint(uGrid.x) + u] =
-                harukaTerrainDetail(dir, double(uMisc.x), triParent);
+            const float triC = uMisc.y * float(1u << k);
+            if (uMisc.z > 0.5) {
+                const float baseH = (uMisc.w > 0.5)
+                                  ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
+                                                            harukaEquirectUV(vec3(dir)))
+                                  : harukaSampleBaseField(uBaseField, vec3(dir)).x;
+                const double baseR = double(uMisc.x) + double(baseH);
+                float hp = harukaTerrainDetail(dir, baseR, triC) * harukaSeaLevelAttenuation(baseH);
+                if (baseH > 0.0 && hp < -baseH) hp = -baseH;
+                outCoarse = baseH + hp;
+            } else {
+                outCoarse = harukaTerrainDetail(dir, double(uMisc.x), triC);
+            }
         }
-    } else {
-        uHeights[base + texels + v * uint(uGrid.x) + u] = outv;   // modos de biseccion: sin morph
+        uHeights[base + texels * k + off] = outCoarse;
     }
 }

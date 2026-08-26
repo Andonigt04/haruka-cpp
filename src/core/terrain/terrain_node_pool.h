@@ -24,7 +24,9 @@
 
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 
 #include "terrain_node.h"
@@ -87,9 +89,16 @@ public:
         for (size_t i = 0; i < capacity; ++i) m_free.push_back((int)i);
     }
 
+    /// Política de cadena: encolar también los ancestros no residentes de lo que se pide, y
+    /// generarlos ANTES que sus hijos. Encendida por defecto; apagarla reproduce el comportamiento
+    /// anterior al 2026-08-25 y existe para que el test pueda medir el A/B en vez de afirmarlo.
+    void setChainAncestors(bool on) { m_chainAncestors = on; }
+    bool chainAncestors() const { return m_chainAncestors; }
+
     void beginFrame() {
         ++m_frame;
         m_pending.clear();
+        m_pendingSet.clear();
         m_stats.hitsExact = m_stats.hitsAncestor = m_stats.misses = 0;
     }
 
@@ -104,33 +113,113 @@ public:
      *
      * La raíz de cada cara se marca residente al publicarla y no se desaloja nunca (`pin`), así que
      * siempre hay un ancestro que devolver.
+     *
+     * ── ⚠️ Y POR QUÉ SE PIDE TAMBIÉN LA CADENA DE ANCESTROS ────────────────────────────────────────
+     *
+     * El selector solo pide **HOJAS**. Un nodo interior quedaba residente solo por accidente —porque
+     * fue hoja en algún frame anterior— así que la caída por ancestro podía saltarse varios niveles de
+     * golpe: medido, hasta **4 niveles**, o sea 1,372 m de escalón donde el geomorph solo sabe cerrar
+     * uno (apunta al PADRE). Eso son los pinchos por caída profunda.
+     *
+     * Aquí cada eslabón que falta de la cadena raíz→n se encola también. El conjunto residente pasa a
+     * ser un SUBÁRBOL CONEXO desde la raíz, y entonces el ancestro más profundo de cualquier hoja
+     * pedida es su padre — que es exactamente la hipótesis con la que el geomorph está escrito.
+     *
+     * Y los ancestros hay que TOCARLOS además de tenerlos: un padre al que nadie pide se vuelve el
+     * menos recientemente usado y el LRU se lo lleva, rompiendo la cadena justo donde importa.
      */
     Resolved request(const NodeId& n) {
         auto it = m_index.find(nodeKey(n));
         if (it != m_index.end()) {
             Slot& s = m_slots[(size_t)it->second];
             s.lastUsed = m_frame;
+            touchAncestors(n);
             ++m_stats.hitsExact;
             return Resolved{ it->second, true, n };
         }
         // No está: encolar (con presupuesto) y buscar ancestro.
         ++m_stats.misses;
-        if (m_pending.size() < m_genPerFrame) m_pending.push_back(n);
+        // ⚠️ SE ENCOLAN TODOS, Y EL PRESUPUESTO SE APLICA DESPUES DE ORDENAR. Antes se cortaba aquí,
+        // así que los que se generaban eran los que el recorrido visitó primero — un orden espacial
+        // arbitrario, no el de lo que se nota. Ver `prioritisePending`.
+        enqueue(n);
         NodeId a = n;
         while (a.level > 0) {
             a.level--; a.i /= 2; a.j /= 2;
             auto ia = m_index.find(nodeKey(a));
             if (ia != m_index.end()) {
                 m_slots[(size_t)ia->second].lastUsed = m_frame;
+                touchAncestors(a);
                 ++m_stats.hitsAncestor;
                 return Resolved{ ia->second, false, a };
             }
+            if (m_chainAncestors) enqueue(a);   // el eslabón que falta: sin él la caída salta niveles
         }
         return Resolved{ -1, false, n };
     }
 
     /** @brief Nodos a generar este frame (ya acotados por `genPerFrame`). */
+    /**
+     * @brief Ordena la cola de generación por CERCANÍA y la recorta al presupuesto.
+     *
+     * ⚠️ ES LO QUE HACE QUE GIRAR NO SE VEA BASTO. Medido: girar 90° pide **935 nodos nuevos de
+     * 3 616 (26 %)**, y con 170 por frame eso son ~6 frames. Durante esos frames los que faltan se
+     * dibujan por ANCESTRO, o sea más gruesos — que es la "disparidad al mover la cámara".
+     *
+     * No se puede evitar la espera sin más VRAM, pero SÍ se puede elegir qué se resuelve primero. Lo
+     * que se nota es lo cercano: un nodo a 200 m ocupa media pantalla, uno a 100 km son cuatro
+     * píxeles. Antes el orden era el del recorrido del quadtree — espacial y arbitrario.
+     */
+    /**
+     * ⚠️ Y EL PADRE ENTRA ANTES QUE EL HIJO, aunque el hijo esté más cerca. La distancia sigue
+     * mandando en QUÉ zona se resuelve primero, pero dentro de una zona el orden es de grueso a fino:
+     * generar una hoja cuyo padre no está residente no arregla nada —la hoja de al lado seguirá
+     * cayendo varios niveles— mientras que el padre cierra el salto para sus cuatro hijos a la vez.
+     */
+    void prioritisePending(const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                           double planetRadiusM) {
+        if (m_pending.empty()) return;
+        std::sort(m_pending.begin(), m_pending.end(),
+                  [&](const NodeId& a, const NodeId& b) {
+                      const glm::dvec3 pa = planetCenter +
+                          nodeTexelDir(a, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2) * planetRadiusM;
+                      const glm::dvec3 pb = planetCenter +
+                          nodeTexelDir(b, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2) * planetRadiusM;
+                      // Cuadrado a mano: `glm::length2` vive en una extension experimental
+                      // de GLM y no vale la pena arrastrarla por una comparacion.
+                      const glm::dvec3 da = pa - camPos, db = pb - camPos;
+                      return glm::dot(da, da) < glm::dot(db, db);
+                  });
+        if (!m_chainAncestors) {                       // comportamiento anterior al 2026-08-25
+            if (m_pending.size() > m_genPerFrame) m_pending.resize(m_genPerFrame);
+            return;
+        }
+        // Recorrido por cercanía, pero emitiendo la cadena raíz→nodo de lo que aún no es residente,
+        // del más grueso al más fino. Así el presupuesto nunca produce un hijo huérfano.
+        std::vector<NodeId> out; out.reserve(std::min(m_pending.size(), m_genPerFrame));
+        std::unordered_set<uint64_t> taken;
+        std::vector<NodeId> chain;
+        for (const NodeId& n : m_pending) {
+            if (out.size() >= m_genPerFrame) break;
+            chain.clear();
+            for (NodeId a = n;; ) {
+                const uint64_t k = nodeKey(a);
+                if (m_index.find(k) == m_index.end() && taken.find(k) == taken.end())
+                    chain.push_back(a);
+                if (a.level == 0) break;
+                a.level--; a.i /= 2; a.j /= 2;
+            }
+            for (auto ic = chain.rbegin(); ic != chain.rend(); ++ic) {   // grueso -> fino
+                if (out.size() >= m_genPerFrame) break;
+                if (taken.insert(nodeKey(*ic)).second) out.push_back(*ic);
+            }
+        }
+        m_pending.swap(out);
+    }
+
     const std::vector<NodeId>& takePending() const { return m_pending; }
+    /// Nodos que se pueden generar por frame. Lo aplican `prioritisePending` y el generador.
+    size_t genPerFrame() const { return m_genPerFrame; }
 
     /**
      * @brief Publica un nodo ya generado. Devuelve el hueco asignado, o -1 si no cabe.
@@ -207,6 +296,26 @@ public:
     Stats  stats()         const { Stats s = m_stats; s.resident = m_index.size(); s.capacity = m_capacity; return s; }
 
 private:
+    /// Encola sin duplicar: un ancestro lo piden hasta 4^k descendientes y sin esto se comería el
+    /// presupuesto consigo mismo.
+    void enqueue(const NodeId& n) {
+        if (m_pendingSet.insert(nodeKey(n)).second) m_pending.push_back(n);
+    }
+
+    /// Marca la cadena de ancestros como usada ESTE frame, para que el LRU no la desaloje: nadie los
+    /// pide directamente (el selector solo pide hojas) y sin esto el padre es siempre el candidato
+    /// más viejo. Para en cuanto encuentra uno ya tocado: ese ya subió el resto de la cadena.
+    void touchAncestors(NodeId a) {
+        while (a.level > 0) {
+            a.level--; a.i /= 2; a.j /= 2;
+            auto ia = m_index.find(nodeKey(a));
+            if (ia == m_index.end()) continue;
+            Slot& s = m_slots[(size_t)ia->second];
+            if (s.lastUsed == m_frame) break;
+            s.lastUsed = m_frame;
+        }
+    }
+
     struct Slot {
         bool      used = false, pinned = false;
         NodeId    node;
@@ -214,11 +323,13 @@ private:
         uint64_t  lastUsed = 0;
     };
     size_t   m_capacity, m_genPerFrame;
+    bool     m_chainAncestors = true;
     uint64_t m_frame = 0;
     std::vector<Slot> m_slots;
     std::vector<int>  m_free;
     std::unordered_map<uint64_t, int> m_index;
     std::vector<NodeId> m_pending;
+    std::unordered_set<uint64_t> m_pendingSet;   ///< dedup de `m_pending` dentro del frame
     Stats m_stats;
 };
 
@@ -240,8 +351,13 @@ private:
  */
 inline void nodeNeighbourLevels(const NodeId& n,
                                 const std::unordered_map<uint64_t, uint32_t>& drawnLevel,
-                                int outCoarser[4]) {
+                                int outCoarser[4],
+                                NodeId* outNb = nullptr) {
     for (int e = 0; e < 4; ++e) outCoarser[e] = 0;
+    // ⚠️ El vecino por defecto es UNO MISMO, no un nodo inválido: quien lo consuma le va a preguntar
+    // el stride, y un `NodeId{}` sin rellenar es la cara 0 nivel 0 — el nodo más grueso del planeta,
+    // que pediría coser contra una zancada gigante en las aristas donde NO hay vecino dibujado.
+    if (outNb) for (int e = 0; e < 4; ++e) outNb[e] = n;
     const uint64_t lim = 1ull << n.level;
     const int dx[4] = { -1, +1,  0,  0 };
     const int dy[4] = {  0,  0, -1, +1 };
@@ -270,12 +386,74 @@ inline void nodeNeighbourLevels(const NodeId& n,
             if (it != drawnLevel.end()) {
                 outCoarser[e] = (int)n.level - (int)nb.level;
                 if (outCoarser[e] < 0) outCoarser[e] = 0;   // el vecino es MÁS fino: cose él, no yo
+                if (outNb) outNb[e] = nb;
                 break;
             }
             if (nb.level == 0) break;
             nb.level--; nb.i /= 2; nb.j /= 2;
         }
     }
+}
+
+/**
+ * @brief Cuántos niveles tiene que BAJAR `n` para que ningún vecino dibujado le saque más de uno.
+ *
+ * ── LA CONDICIÓN 2:1, Y POR QUÉ NO BASTA CON QUE EL SELECTOR LA CUMPLA ──────────────────────────
+ *
+ * El cosido coloca la arista sobre la recta del vecino grueso, pero el geomorph que cierra el
+ * escalón de RELIEVE apunta a la altura del **padre** — y eso solo vale si el vecino ESTÁ al nivel
+ * del padre, o sea un nivel de diferencia. Con dos o más, el padre no es el vecino y queda un
+ * escalón: medido, **0,339 m a dos niveles y 1,372 m a cuatro**. Eso se ve como pinchos.
+ *
+ * El árbol que devuelve `nodeSelectVisible` ya es 2:1 (medido: 0 saltos de más de uno a cualquier
+ * presupuesto). El que se DIBUJA no, porque un nodo sin hueco en el pool cae a un ancestro y puede
+ * caer varios niveles de golpe. Por eso la condición hay que reimponerla sobre el conjunto dibujado.
+ *
+ * Devuelve 0 si no hay nada que hacer. Es la ÚNICA definición de la regla: la usan el renderer (que
+ * además tiene que pedirle el ancestro al pool) y el test que la verifica.
+ */
+inline int nodeBalanceDrop(const NodeId& n,
+                           const std::unordered_map<uint64_t, uint32_t>& drawnLevel) {
+    if (n.level == 0) return 0;
+    int c[4]; NodeId nb[4];
+    nodeNeighbourLevels(n, drawnLevel, c, nb);
+    int drop = 0;
+    for (int e = 0; e < 4; ++e) if (c[e] > 1) drop = std::max(drop, c[e] - 1);
+    return drop;
+}
+
+/**
+ * @brief Aristas de `n` cuyo vecino DIBUJADO es MÁS FINO. Bits: 1=izq 2=der 4=abajo 8=arriba.
+ *
+ * ⚠️ HACE FALTA PORQUE `nodeNeighbourLevels` NO PUEDE CONTESTAR ESTO. Aquella sube por los ancestros
+ * hasta encontrar uno dibujado, y nunca baja: por construcción devuelve siempre un vecino de nivel
+ * MENOR O IGUAL. Su `if (outCoarser[e] < 0) outCoarser[e] = 0` sugiere que el caso existía, pero no
+ * puede darse — así que preguntar «¿es más fino?» por ahí devuelve siempre «no», en silencio.
+ *
+ * Me costó una medida: una máscara construida con `nb[e].level > n.level` salió SIEMPRE 0 y el
+ * arreglo del escalón no movió un decimal. El síntoma de una consulta imposible es un cero perfecto.
+ *
+ * Aquí se mira hacia ABAJO: si alguno de los cuatro hijos del vecino de mi nivel está dibujado,
+ * entonces esa arista linda con terreno más fino. Basta con un nivel: el selector garantiza 2:1.
+ */
+inline int nodeNeighbourFinerMask(const NodeId& n,
+                                  const std::unordered_map<uint64_t, uint32_t>& drawnLevel) {
+    int mask = 0;
+    const int64_t lim = (int64_t)1 << n.level;
+    const int dx[4] = { -1, +1,  0,  0 };
+    const int dy[4] = {  0,  0, -1, +1 };
+    for (int e = 0; e < 4; ++e) {
+        const int64_t ni = (int64_t)n.i + dx[e], nj = (int64_t)n.j + dy[e];
+        if (ni < 0 || nj < 0 || ni >= lim || nj >= lim) continue;   // el cruce de cara, aparte
+        const NodeId nbSame{ n.face, n.level, (uint32_t)ni, (uint32_t)nj };
+        if (drawnLevel.find(nodeKey(nbSame)) != drawnLevel.end()) continue;   // mismo nivel
+        for (uint32_t c = 0; c < 4 && !(mask & (1 << e)); ++c) {
+            const NodeId child{ n.face, n.level + 1,
+                                nbSame.i * 2 + (c & 1u), nbSame.j * 2 + (c >> 1) };
+            if (drawnLevel.find(nodeKey(child)) != drawnLevel.end()) mask |= (1 << e);
+        }
+    }
+    return mask;
 }
 
 /** @brief Índice `clave -> nivel` del conjunto que se va a dibujar. Lo consume `nodeNeighbourLevels`. */

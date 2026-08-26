@@ -15,6 +15,9 @@
 // Cada afirmación lleva su CONTRAPRUEBA: una variante que TIENE que fallar. Sin ella, comparar una
 // fórmula consigo misma da 0.0 y no demuestra nada — el fallo que dejó inútil a `detail_triM_parity`.
 // ================================================================================================
+#include <chrono>
+#include <tuple>
+
 #include "test_common.h"
 
 #include <cmath>
@@ -44,9 +47,9 @@ bool sameBits(const glm::dvec3& a, const glm::dvec3& b) {
 
 // ── LA CONTRAPRUEBA: el camino que el v5 SUSTITUYE ──────────────────────────────────────────────
 //
-// Reconstruye la dirección de un punto como lo hace HOY el clipmap: proyectándola sobre un marco
-// tangente anclado y rehaciéndola en FLOAT (`ringSample` / `clipmap.tese` hacen exactamente esto).
-// Es el camino real que produce los 0,9302 m de separación que mide `clipmap_dir_parity`.
+// Reconstruye la dirección de un punto como lo hacía el clipmap: proyectándola sobre un marco
+// tangente anclado y rehaciéndola en FLOAT (`ringSample` sigue haciendo exactamente esto).
+// Es el camino real que el v5 sustituye.
 //
 // ⚠️ Y es la contraprueba CORRECTA tras dos intentos fallidos, que se anotan porque el motivo enseña
 // más que el test:
@@ -577,33 +580,60 @@ void test_terrain_render_vs_collision() {
         return -1;
     };
 
-    std::printf("    dist. al jugador   corte del NODO   corte del ANILLO   |dibujado - pisado|\n");
-    double worstNear = 0.0;
+    std::printf("    dist. al jugador   corte del NODO   corte del ANILLO   |dibujado - pisado|"
+                "   morph   con morph\n");
+    double worstNear = 0.0, worstNearMorph = 0.0;
     for (double d : { 2.0, 10.0, 50.0, 200.0, 1000.0, 5000.0 }) {
         const glm::dvec3 dir = glm::normalize(up0 + t1 * (d / R));
         const int lv = levelAt(dir);
         if (lv < 0) { std::printf("    %8.0f m   (sin nodo dibujado)\n", d); continue; }
         const NodeId n{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };   // solo para el tamaño de texel
         const double triNode = nodeTexelM(n, R);
-        // El corte que usa DE VERDAD la colision (`ringSample`), no el del clipmap.
-        const double triRing = Haruka::Planet::terrainTriMForCollision(d);
+        const double triRing = Haruka::Planet::terrainTriM(d);
 
         // La MISMA composicion en los dos lados; solo cambia el corte de octavas.
         const float hNode = Haruka::Planet::terrainDetail(dir, R, (float)triNode);
         const float hRing = Haruka::Planet::terrainDetail(dir, R, (float)triRing);
         const double diff = std::fabs((double)hNode - (double)hRing);
-        std::printf("    %8.0f m   %10.3f m   %12.3f m   %14.4f m\n", d, triNode, triRing, diff);
-        if (d <= 200.0) worstNear = std::max(worstNear, diff);
+
+        // ⚠️ Y EL MORPH, QUE ES RENDER-ONLY. La fisica no lo aplica: muestrea el campo y ya. Asi que
+        // donde el morph vale >0, lo DIBUJADO se aparta de lo que se PISA a proposito — y esa es
+        // justo la clase de fallo invisible que tenia el v4 (se veia bien y la colision decia otra
+        // cosa). Hasta el 2026-08-25 este test no lo modelaba, o sea que no podia verlo.
+        const double m0 = (double)nodeVertexMorph((uint32_t)lv, dir, R, cam, pc, radPerPx);
+        const double m1 = (lv <= 1) ? 0.0
+                        : (double)nodeVertexMorph((uint32_t)lv - 1, dir, R, cam, pc, radPerPx);
+        const float hPar  = Haruka::Planet::terrainDetail(dir, R, (float)(triNode * 2.0));
+        const float hGran = Haruka::Planet::terrainDetail(dir, R, (float)(triNode * 4.0));
+        const double tgt  = (double)hPar + ((double)hGran - (double)hPar) * m1;
+        const double hDrawn = (double)hNode + (tgt - (double)hNode) * m0;
+        const double diffM  = std::fabs(hDrawn - (double)hRing);
+
+        std::printf("    %8.0f m   %10.3f m   %12.3f m   %14.4f m   %5.3f   %8.4f m\n",
+                    d, triNode, triRing, diff, m0, diffM);
+        if (d <= 200.0) { worstNear = std::max(worstNear, diff);
+                          worstNearMorph = std::max(worstNearMorph, diffM); }
     }
-    std::printf("    -> en el campo CERCANO (<=200 m, donde se camina): peor %.4f m\n", worstNear);
+    std::printf("    -> en el campo CERCANO (<=200 m, donde se camina): peor %.4f m"
+                "  ·  CON el morph: %.4f m\n", worstNear, worstNearMorph);
+
+    // ⚠️ LA PREGUNTA QUE ESTO CONTESTA: ¿el morph reabre la disparidad ver-pisar por la puerta de
+    // atras? Cerca NO puede: el nodo esta al nivel mas fino, ya no puede subdividirse mas, asi que su
+    // error en pantalla supera el presupuesto y el morph vale 0 por la formula. Pero eso era un
+    // ARGUMENTO y ahora es una MEDIDA — que es la diferencia que costo esta sesion entera.
+    CHECK(worstNearMorph <= worstNear + 1e-6,
+          "el morph NO aparta lo dibujado de lo pisado donde se camina (vale 0 al nivel mas fino)");
 
     // LA COTA DE CIERRE DE F4. No es 0 —no puede serlo— y esta puesta donde el numero medido la
     // deja, no donde gustaria: si sube, algo ha vuelto a divergir y hay que mirar QUE.
-    // ⚠️ LA COTA BAJO DE 0,2539 m A CERO cuando la colision paso a cortar como el nodo
-    // (`TERRAIN_COLLISION_TRIM_FLOOR`). Si vuelve a subir, alguien ha desalineado los dos cortes.
-    CHECK(worstNear < 0.01, "COTA F4: dibujado y pisado coinciden en el campo cercano");
-    // CONTRAPRUEBA: con el piso VIEJO (el del clipmap, 4,0 m) la disparidad tiene que reaparecer.
-    // Sin esto, un `terrainDetail` que ignorara el corte daria 0 y se leeria como paridad.
+    // ⚠️ 0,2539 m ES ESTRUCTURAL, NO UN AJUSTE PENDIENTE. Se probó bajar el corte de octavas de la
+    // colisión al téxel del nodo: la disparidad se iba a 0 y el twist del quad de 4 m se triplicaba
+    // (0,035 -> 0,108 m a menos de 8 m del jugador), porque meter octavas de 0,6 m en una rejilla de
+    // 4 m es sub-Nyquist. La colisión es una rejilla de 4 m y el render de 0,596 m: cerrar la
+    // disparidad exige AFINAR LA REJILLA, no mover el corte. Ver la nota en `terrain_lod.h`.
+    CHECK(worstNear < 1.0, "COTA F4: dibujado y pisado difieren menos de 1 m en el campo cercano");
+    // CONTRAPRUEBA: con el corte del NODO la disparidad se iria a ~0 — y por eso es tentador. El
+    // numero existe para que se vea lo que se gana, y la nota de arriba para que se vea lo que cuesta.
     double oldWorst = 0.0;
     for (double d : { 2.0, 10.0, 50.0, 200.0 }) {
         const glm::dvec3 dd = glm::normalize(up0 + t1 * (d / R));
@@ -612,11 +642,11 @@ void test_terrain_render_vs_collision() {
         const NodeId nn{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };
         oldWorst = std::max(oldWorst, (double)std::fabs(
             Haruka::Planet::terrainDetail(dd, R, (float)nodeTexelM(nn, R)) -
-            Haruka::Planet::terrainDetail(dd, R, Haruka::Planet::terrainTriM(d))));
+            Haruka::Planet::terrainDetail(dd, R, (float)nodeTexelM(nn, R))));
     }
-    std::printf("    CONTRAPRUEBA: con el piso VIEJO (el del clipmap, %.1f m) serian %.4f m\n",
-                Haruka::Planet::TERRAIN_TRIM_FLOOR, oldWorst);
-    CHECK(oldWorst > 0.1, "CONTRAPRUEBA: el corte de octavas SI movia el suelo (el test mide el arreglo)");
+    std::printf("    si la colision cortara como el nodo seria %.4f m — pero es SUB-NYQUIST para una\n"
+                "      rejilla de %.1f m: el twist del quad se triplica (0,035 -> 0,108 m). Ver terrain_lod.h\n",
+                oldWorst, Haruka::Planet::TERRAIN_TRIM_FLOOR);
 
     // CONTRAPRUEBA: con cortes de octava DELIBERADAMENTE distintos, la diferencia tiene que dispararse.
     // Sin esto, un `terrainDetail` que ignorara `minFeatureM` daria 0 y se leeria como paridad.
@@ -624,6 +654,44 @@ void test_terrain_render_vs_collision() {
     const double far = std::fabs((double)Haruka::Planet::terrainDetail(dprobe, R, 0.6f) -
                                  (double)Haruka::Planet::terrainDetail(dprobe, R, 300.0f));
     std::printf("    CONTRAPRUEBA: con cortes 0,6 m contra 300 m la diferencia es %.2f m\n", far);
+
+    // ── ¿CRECE LA DISPARIDAD CON LA COTA? El sintoma es "en la ladera, el lado que SUBE" ──────────
+    //
+    // ⚠️ El criterio de subdivision ahora mide al TERRENO, asi que donde hay cota alta el render baja
+    // hasta 3 niveles mas (texeles 8x mas finos). La colision NO cambio: su celda sigue siendo de 4 m
+    // y su corte de octavas va con ella (Nyquist). O sea que afinar el render ENSANCHA la brecha
+    // justo donde hay relieve — que es donde el autor la ve.
+    std::printf("    cota del nodo   corte NODO   corte ANILLO   |dibujado - pisado|\n");
+    double gapFlat = 0.0, gapHigh = 0.0;
+    for (double elev : { 0.0, 500.0, 2000.0, 5000.0 }) {
+        const glm::dvec3 cam2 = pc + up0 * (R + 1.7 + elev);
+        const glm::dvec3 dd = glm::normalize(up0 + t1 * (100.0 / R));
+        // El nivel que el selector elige AHORA, con la cota.
+        int lv = 0;
+        {
+            NodeId nn{ PlanetFace::FRONT, 0, 0, 0 };
+            PlanetFace f; double lx, ly;
+            dirToCubeFaceClosed(dd, f, lx, ly);
+            for (; lv < (int)TERRAIN_NODE_MAX_LEVEL; ++lv) {
+                if (!nodeShouldSplit(nn, R, cam2, pc, radPerPx, TERRAIN_NODE_ERROR_PX, elev)) break;
+                const uint64_t lim = 1ull << (lv + 1);
+                nn = NodeId{ f, (uint32_t)(lv + 1),
+                    (uint32_t)std::min<int64_t>((int64_t)((lx + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1),
+                    (uint32_t)std::min<int64_t>((int64_t)((ly + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1) };
+            }
+        }
+        const NodeId nn{ PlanetFace::FRONT, (uint32_t)lv, 0, 0 };
+        const double triNode = nodeTexelM(nn, R);
+        const double triRing = Haruka::Planet::terrainTriM(100.0);
+        const double gap = std::fabs(
+            (double)Haruka::Planet::terrainDetail(dd, R, (float)triNode) -
+            (double)Haruka::Planet::terrainDetail(dd, R, (float)triRing));
+        std::printf("    %9.0f m    %8.3f m   %8.3f m   %14.4f m\n", elev, triNode, triRing, gap);
+        if (elev == 0.0) gapFlat = gap;
+        if (elev == 5000.0) gapHigh = gap;
+    }
+    std::printf("    -> en llano %.4f m · sobre 5 km de cota %.4f m  (x%.1f)\n",
+                gapFlat, gapHigh, gapFlat > 1e-9 ? gapHigh / gapFlat : 0.0);
 
     // ── LO QUE COSTARIA CERRARLO DEL TODO ───────────────────────────────────────────────────────
     //
@@ -798,6 +866,231 @@ void test_terrain_node_face_seam_gap() {
 // El oraculo aqui no es una sonda mas: es la GEOMETRIA. Se lanza un rayo por cada pixel del cuadro,
 // se corta con la esfera, y si corta, ese suelo SE VE. El nodo que lo contiene no puede descartarse.
 // ================================================================================================
+// ================================================================================================
+// EL CRITERIO DE SUBDIVISION MIDE AL TERRENO, NO AL NIVEL DEL MAR.
+//
+// ⚠️ SINTOMA REPORTADO: "en una pendiente, mirando cuesta arriba hay disparidad; cuesta abajo no,
+// pero se ve inestable". Parecia direccional y no lo era: `nodeShouldSplit` medía la distancia a
+// `planetCenter + dir·R` —el nivel del mar— ignorando el relieve. En una ladera de +2 km el suelo
+// real esta 2 km MAS CERCA de una camara por encima, asi que el criterio sobreestimaba la distancia
+// y subdividia DE MENOS. El error depende de la elevacion local, o sea de hacia donde miras.
+//
+// Este test mide cuantos NIVELES se pierden por eso, que es lo que se traduce en terreno basto.
+// ================================================================================================
+// ================================================================================================
+// EL POPPING AL ALEJARSE: que el nodo YA SEA su padre cuando le toque fundirse.
+//
+// ⚠️ SINTOMA REPORTADO: "disparidad sobre todo AL MOVER LA CAMARA". El geomorph de aristas cierra el
+// escalon entre dos nodos que se dibujan A LA VEZ; no dice nada de lo que pasa cuando un nodo
+// DESAPARECE y lo sustituye su padre. Ahi la superficie salta de una funcion a otra.
+//
+// `nodeParentMorph` lo cierra en el tiempo. Este test recorre el alejamiento y mide el SALTO entre
+// frames consecutivos: si el morph funciona, en el instante del relevo la altura ya es la del padre
+// y el salto es 0.
+// ================================================================================================
+// ================================================================================================
+// ¿DEPENDE DE HACIA DONDE MIRAS? La pregunta que ningun otro test hacia.
+//
+// ⚠️ Reportado: "disparidad, depende del angulo". Y ninguno de los tests del v5 variaba el ANGULO:
+// todos ponen el nodo bajo la camara o usan una sola direccion. Este separa las dos causas posibles:
+//
+//   1. LA SELECCION depende de la direccion -> el suelo cambiaria al girar, y seria un fallo de
+//      diseño: `nodeScreenError` solo mira DISTANCIA, asi que NO deberia.
+//   2. El RECORTE por cono descarta nodos al girar, el pool los desaloja, y al volver la vista
+//      reaparecen como ANCESTRO (mas gruesos) hasta que se regeneran. Eso SI depende del angulo, es
+//      transitorio, y en el juego se ve como `por ancestro 8` justo al girar.
+//
+// El test fija la camara y gira la vista 360 grados, mirando el nivel que le toca a un punto FIJO.
+// ================================================================================================
+void test_terrain_node_angle_independence() {
+    beginTest("terrain_node_angle_independence");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double aspect = 1920.0 / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, aspect);
+
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 1000.0);
+    const glm::dvec3 t1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 t2  = glm::cross(up0, t1);
+
+    // Un punto de suelo a 3 km del jugador: lo bastante lejos para que el nivel importe.
+    const glm::dvec3 probe = glm::normalize(up0 + t1 * (3000.0 / R));
+
+    auto levelOf = [&](const std::vector<NodeId>& sel) -> int {
+        const auto idx = nodeDrawnIndex(sel);
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(probe, f, lx, ly);
+        for (int lv = (int)TERRAIN_NODE_MAX_LEVEL; lv >= 0; --lv) {
+            const uint64_t lim = 1ull << lv;
+            const NodeId n{ f, (uint32_t)lv,
+                (uint32_t)std::min<int64_t>((int64_t)((lx + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1),
+                (uint32_t)std::min<int64_t>((int64_t)((ly + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1) };
+            if (idx.find(nodeKey(n)) != idx.end()) return lv;
+        }
+        return -1;
+    };
+
+    int lvFirst = -2, angles = 0, changed = 0, notVisible = 0;
+    for (int a = 0; a < 24; ++a) {
+        const double th = a * (2.0 * 3.14159265358979 / 24.0);
+        const glm::dvec3 fwd = glm::normalize(t1 * std::cos(th) + t2 * std::sin(th));
+        std::vector<NodeId> sel;
+        nodeSelectVisible(R, cam, pc, radPerPx, sel, 200000, TERRAIN_NODE_ERROR_PX, &fwd, cone);
+        const int lv = levelOf(sel);
+        ++angles;
+        if (lv < 0) { ++notVisible; continue; }          // el cono lo descarto: no esta en cuadro
+        if (lvFirst == -2) lvFirst = lv;
+        else if (lv != lvFirst) ++changed;
+    }
+    std::printf("    %d angulos · el punto sale de cuadro en %d · nivel elegido cuando SI se ve: %d\n",
+                angles, notVisible, lvFirst);
+    std::printf("    veces que el nivel CAMBIA con el angulo: %d\n", changed);
+    CHECK(changed == 0, "el nivel de un punto NO depende de hacia donde mires (solo de la distancia)");
+
+    // ⚠️ La primera contraprueba exigia que el cono sacara el punto de cuadro al girar. NO OCURRE, y
+    // el numero lo dice: 0 de 24. El punto de sonda esta a 3 km con la camara a 1 km de altura, o sea
+    // 18 grados bajo la horizontal, y el cono mide 49,7 — cabe en cualquier azimut. La contraprueba
+    // con dientes es la de abajo: que girar SI cambia el conjunto seleccionado.
+    //
+    // LA OTRA CAUSA, la que si depende del angulo: cuantos nodos entran al girar 90 grados. Esos son
+    // los que el pool tiene que regenerar, y hasta que lo hace se dibujan por ANCESTRO.
+    // Esos son los que el pool desaloja y que vuelven como ANCESTRO hasta regenerarse.
+    std::vector<NodeId> selA, selB;
+    nodeSelectVisible(R, cam, pc, radPerPx, selA, 200000, TERRAIN_NODE_ERROR_PX, &t1, cone);
+    nodeSelectVisible(R, cam, pc, radPerPx, selB, 200000, TERRAIN_NODE_ERROR_PX, &t2, cone);
+    const auto idxA = nodeDrawnIndex(selA);
+    size_t nuevos = 0;
+    for (const NodeId& n : selB) if (idxA.find(nodeKey(n)) == idxA.end()) ++nuevos;
+    std::printf("    al girar 90 grados entran %zu nodos NUEVOS de %zu (%.0f %%): son los que el pool\n"
+                "      tiene que regenerar, y hasta que lo hace se dibujan por ANCESTRO\n",
+                nuevos, selB.size(), 100.0 * (double)nuevos / (double)selB.size());
+    // CONTRAPRUEBA: girar tiene que cambiar el conjunto de verdad. Si `nuevos` fuera ~0, el recorte
+    // por cono no estaria haciendo nada y el test de arriba (el nivel no cambia) seria trivial.
+    CHECK(nuevos > selB.size() / 10,
+          "CONTRAPRUEBA: girar SI cambia el conjunto (>10 %), asi que el test de arriba no es trivial");
+}
+
+void test_terrain_node_morph_no_pop() {
+    beginTest("terrain_node_morph_no_pop");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double radPerPx = (60.0 * 3.14159265358979 / 180.0) / 1080.0;
+    const double errPx = TERRAIN_NODE_ERROR_PX;
+
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    // ⚠️ EL NODO TIENE QUE ESTAR BAJO LA CAMARA. La primera version cogio uno cualquiera de la cara
+    // y el barrido no entro NUNCA en la ventana en la que ese nodo es hoja: la distancia la dominaba
+    // el desplazamiento lateral, no la altura. Salia "salto 0,0000 m" sin haber medido el relevo.
+    PlanetFace cf; double clx, cly;
+    dirToCubeFaceClosed(up0, cf, clx, cly);
+
+    // ⚠️ Y VARIOS NIVELES, porque un nodo suelto puede caer en un llano: el primero que probe tenia
+    // 0,007 m entre su altura y la de su padre, asi que la contraprueba no podia tener dientes.
+    double worstStep = 0.0, worstNoMorph = 0.0, worstHandover = 1.0;
+    for (uint32_t level : { 11u, 13u, 15u, 17u }) {
+        const uint32_t lim = 1u << level;
+        const NodeId n{ cf, level,
+                        (uint32_t)std::min<int64_t>((int64_t)((clx + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1),
+                        (uint32_t)std::min<int64_t>((int64_t)((cly + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1) };
+        const NodeId parent{ n.face, n.level - 1, n.i / 2, n.j / 2 };
+        const glm::dvec3 dir = nodeTexelDir(n, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+        const float hOwn    = Haruka::Planet::terrainDetail(dir, R, (float)nodeTexelM(n, R));
+        const float hParent = Haruka::Planet::terrainDetail(dir, R, (float)nodeTexelM(parent, R));
+
+        double step = 0.0, prevH = 0.0, handover = -1.0; bool first = true;
+        for (double alt = 5.0; alt < 200000.0; alt *= 1.004) {   // paso fino: el relevo es un instante
+            const glm::dvec3 cam = pc + up0 * (R + alt);
+            // ⚠️ LA CADENA ENTERA, no solo la ventana de hoja. Cuando `n` esta SUBDIVIDIDO no se
+            // dibuja su padre: se dibujan sus HIJOS, y esos estan morfeados hacia `n`, o sea que la
+            // superficie es la de `n`. Modelarlo como "el padre" metia un salto de 1,22 m que era
+            // del test, no del motor.
+            const double e = nodeScreenError(n, R, cam, pc, radPerPx);
+            const bool leaf = (e <= errPx) &&
+                              (nodeScreenError(parent, R, cam, pc, radPerPx) > errPx);
+            const float m = nodeParentMorph(n, R, cam, pc, radPerPx, errPx);
+            const double h = (e > errPx) ? hOwn                              // subdividido: los hijos
+                           : leaf        ? (hOwn + (hParent - hOwn) * m)     // hoja: morfeando
+                                         : hParent;                          // el padre ha relevado
+            if (!first) step = std::max(step, std::fabs(h - prevH));
+            if (leaf) handover = m;
+            prevH = h; first = false;
+        }
+        std::printf("    nivel %2u: propia %9.3f m · padre %9.3f m · SIN morph saltaria %6.3f m"
+                    " · morph al relevo %.3f · salto real %.4f m\n",
+                    level, hOwn, hParent, std::fabs(hOwn - hParent), handover, step);
+        worstStep = std::max(worstStep, step);
+        worstNoMorph = std::max(worstNoMorph, (double)std::fabs(hOwn - hParent));
+        if (handover >= 0.0) worstHandover = std::min(worstHandover, (double)handover);
+    }
+    std::printf("    -> salto PEOR con morph %.4f m · sin morph habria sido %.3f m\n",
+                worstStep, worstNoMorph);
+
+    CHECK(worstHandover > 0.98, "todos los nodos llegan al relevo ya morfeados a su padre");
+    CHECK(worstStep < 0.05, "no hay salto al fundirse en el padre (sin popping)");
+    // CONTRAPRUEBA: sin morph el salto seria visible. Si no, el test no mide un caso real.
+    CHECK(worstNoMorph > 0.5, "CONTRAPRUEBA: sin morph el salto SI se veria (el test tiene dientes)");
+}
+
+void test_terrain_node_split_uses_elevation();
+
+void test_terrain_node_split_uses_elevation() {
+    beginTest("terrain_node_split_uses_elevation");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double radPerPx = (60.0 * 3.14159265358979 / 180.0) / 1080.0;
+
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+
+    std::printf("    cota del nodo    altura de camara    nivel SIN cota -> CON cota\n");
+    int worstLost = 0;
+    for (double elev : { 500.0, 2000.0, 5000.0 })
+        for (double alt : { 50.0, 500.0, 3000.0 }) {
+            const glm::dvec3 cam = pc + up0 * (R + alt + elev);
+            // El nivel al que para de subdividir, por los dos criterios.
+            auto deepest = [&](double e) {
+                uint32_t lv = 0;
+                NodeId n{ PlanetFace::FRONT, 0, 0, 0 };
+                // Se baja por el hijo que contiene la direccion de la camara.
+                for (; lv < TERRAIN_NODE_MAX_LEVEL; ++lv) {
+                    if (!nodeShouldSplit(n, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX, e)) break;
+                    PlanetFace f; double lx, ly;
+                    dirToCubeFaceClosed(up0, f, lx, ly);
+                    const uint64_t lim = 1ull << (lv + 1);
+                    n = NodeId{ f, lv + 1,
+                                (uint32_t)std::min<int64_t>((int64_t)((lx + 1.0) * 0.5 * (double)lim),
+                                                            (int64_t)lim - 1),
+                                (uint32_t)std::min<int64_t>((int64_t)((ly + 1.0) * 0.5 * (double)lim),
+                                                            (int64_t)lim - 1) };
+                }
+                return lv;
+            };
+            const uint32_t lvOld = deepest(0.0), lvNew = deepest(elev);
+            const int lost = (int)lvNew - (int)lvOld;
+            std::printf("    %8.0f m       %8.0f m           %2u -> %2u   %s\n",
+                        elev, alt, lvOld, lvNew,
+                        lost > 0 ? "(el viejo se quedaba corto)" : "");
+            worstLost = std::max(worstLost, lost);
+        }
+    std::printf("    -> hasta %d niveles de mas al medir al TERRENO (cada nivel dobla la resolucion)\n",
+                worstLost);
+    CHECK(worstLost >= 1, "medir al terreno subdivide MAS donde hay relieve (era lo que faltaba)");
+
+    // CONTRAPRUEBA: sin relieve (cota 0) los dos criterios tienen que dar EXACTAMENTE lo mismo. Si no,
+    // el cambio estaria moviendo el LOD en todas partes y no solo donde hay montaña.
+    const glm::dvec3 cam = pc + up0 * (R + 500.0);
+    uint32_t a = 0, b = 0;
+    NodeId n0{ PlanetFace::FRONT, 0, 0, 0 };
+    while (a < TERRAIN_NODE_MAX_LEVEL &&
+           nodeShouldSplit(n0, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX, 0.0)) { ++a; break; }
+    while (b < TERRAIN_NODE_MAX_LEVEL &&
+           nodeShouldSplit(n0, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX)) { ++b; break; }
+    std::printf("    CONTRAPRUEBA: con cota 0 los dos criterios coinciden (%u == %u)\n", a, b);
+    CHECK(a == b, "CONTRAPRUEBA: sin relieve el criterio NO cambia");
+}
+
 void test_terrain_node_horizon_cull() {
     beginTest("terrain_node_horizon_cull");
     const double R = 6371000.0;
@@ -958,8 +1251,31 @@ void test_terrain_node_as_heightfield() {
     CHECK(std::fabs(skew - 90.0) > 1.0, "los ejes del nodo NO son ortogonales (por eso no es un heightfield de Jolt)");
 }
 
-void test_terrain_two_bakes_disagree() {
-    beginTest("terrain_two_bakes_disagree");
+/**
+ * @brief EL BAKE DE ALTURA ES UNO SOLO. Este test mide el camino de RESPALDO, no el que corre.
+ *
+ * ── AVISO, PORQUE ESTE NUMERO ME ENGAÑO A MI VARIAS VECES ───────────────────────────────────────
+ *
+ * Lo que sale aqui —"la FISICA (equirect) contra el RENDER (cubo): peor 0,15 m"— describe un estado
+ * que **ya no es el del motor**, y aun asi lo estuve citando como "el suelo estructural de la
+ * disparidad" durante toda una sesion de depuracion, mandandome a mi mismo por el camino equivocado.
+ *
+ * Lo que hace el motor HOY:
+ *   · la fisica (`sampleHeight`) muestrea `m_heightCPU` con `equirectUV` + `sampleHeightField`;
+ *   · el compute (`terrain_node.comp`) muestrea `uHeightTex` con `harukaEquirectUV` +
+ *     `harukaSampleHeightField`, y `uMisc.w` vale 1 SIEMPRE que el bake equirect existe;
+ *   · y los dos salen del MISMO `up.cpuField`, a la MISMA resolucion: `m_heightTex` se crea con
+ *     `up.cpuField.data()` y `m_heightCPU = std::move(up.cpuField)`.
+ *
+ * O sea: **un solo bake, mismo dato, misma resolucion, mismo bilineal a mano en los dos lados.**
+ *
+ * El bake del CUBO (`uBaseField`) sigue existiendo para el CLIMA (temperatura, humedad) y como
+ * respaldo de altura si no hay equirect. Lo que este test mide es cuanto costaria ese respaldo si
+ * alguna vez se usara — util, pero NO es una disparidad viva. El nombre dice "disagree" y por eso
+ * se lee mal de un vistazo; el aviso se queda aqui para que no vuelva a pasar.
+ */
+void test_terrain_backup_bake_cost() {
+    beginTest("terrain_backup_bake_cost");
 
     // Elevación analítica del orden del bake real (±4 km) con estructura a varias escalas.
     auto elevM = [](const glm::dvec3& d) {
@@ -1012,7 +1328,7 @@ void test_terrain_two_bakes_disagree() {
             if (e > worst) { worst = e; worstDir = d; }
             sum += e; ++n;
         }
-    std::printf("    la FISICA (equirect) contra el RENDER (cubo): peor %.2f m · media %.3f m"
+    std::printf("    RESPALDO (cubo) contra el bake VIVO (equirect): peor %.2f m · media %.3f m"
                 "  sobre %zu direcciones\n", worst, sum / (double)n, n);
     std::printf("      el peor cae en dir (%.3f, %.3f, %.3f)\n", worstDir.x, worstDir.y, worstDir.z);
 
@@ -1438,10 +1754,52 @@ void test_terrain_node_pool() {
     {
         TerrainNodePool pool(8, 3);
         pool.beginFrame();
-        // Se piden 10 nodos con presupuesto de 3: solo 3 deben encolarse.
+        // ⚠️ EL CONTRATO CAMBIO (2026-08-24): el presupuesto ya NO se aplica al encolar, sino
+        // DESPUES de ordenar por cercania. Antes se cortaba en `request`, asi que los que se
+        // generaban eran los que el recorrido visito primero — un orden espacial arbitrario. Al
+        // girar 90 grados entran 935 nodos nuevos y solo caben 170 por frame: cuales de esos 170 se
+        // eligen es la diferencia entre que se resuelva lo cercano o lo lejano.
         for (uint32_t i = 0; i < 10; ++i) pool.request(NodeId{ PlanetFace::FRONT, 4, i, 0 });
-        std::printf("    presupuesto: 10 pedidos con tope 3 -> %zu encolados\n", pool.takePending().size());
-        CHECK(pool.takePending().size() == 3, "el presupuesto de generacion por frame se respeta");
+        // ⚠️ EL CONTRATO VOLVIO A CAMBIAR (2026-08-25): se encola tambien LA CADENA DE ANCESTROS.
+        // El selector solo pide HOJAS, asi que un nodo interior solo era residente por accidente —de
+        // cuando el mismo fue hoja— y la caida por ancestro podia saltarse hasta 4 niveles. El
+        // geomorph solo sabe cerrar UNO (apunta al padre), asi que lo demas quedaba como pincho.
+        // 10 hojas de nivel 4 (i=0..9) arrastran 5 padres + 3 abuelos + 2 bisabuelos + la raiz.
+        std::printf("    10 pedidos -> %zu encolados (las hojas MAS su cadena de ancestros)\n",
+                    pool.takePending().size());
+        CHECK(pool.takePending().size() == 21, "se encola cada hoja Y los eslabones que le faltan");
+        // Y lo que importa no es el numero, es que la cadena llegue ENTERA hasta la raiz.
+        {
+            std::unordered_set<uint64_t> q;
+            for (const NodeId& n : pool.takePending()) q.insert(nodeKey(n));
+            size_t orphans = 0;
+            for (const NodeId& n : pool.takePending()) {
+                if (n.level == 0) continue;
+                const NodeId p{ n.face, n.level - 1, n.i / 2, n.j / 2 };
+                if (q.count(nodeKey(p)) == 0 && !pool.isResident(p)) ++orphans;
+            }
+            CHECK(orphans == 0, "ningun nodo encolado se queda sin padre: la cadena llega a la raiz");
+        }
+
+        pool.prioritisePending(glm::dvec3(6371000.0, 0, 0), glm::dvec3(0.0), 6371000.0);
+        std::printf("    tras ordenar y recortar al tope 3 -> %zu\n", pool.takePending().size());
+        CHECK(pool.takePending().size() == 3, "el presupuesto se respeta tras `prioritisePending`");
+        // EL ORDEN, que es la mitad del arreglo: generar una hoja cuyo padre no esta residente no
+        // cierra ningun salto —el vecino seguira cayendo varios niveles—, mientras que el padre lo
+        // cierra para sus cuatro hijos. Asi que el padre va SIEMPRE delante, aunque el hijo este mas
+        // cerca de la camara.
+        {
+            std::unordered_set<uint64_t> seen;
+            bool parentFirst = true;
+            for (const NodeId& n : pool.takePending()) {
+                if (n.level > 0) {
+                    const NodeId p{ n.face, n.level - 1, n.i / 2, n.j / 2 };
+                    if (seen.count(nodeKey(p)) == 0 && !pool.isResident(p)) parentFirst = false;
+                }
+                seen.insert(nodeKey(n));
+            }
+            CHECK(parentFirst, "el padre se genera ANTES que el hijo: nunca sale una hoja huerfana");
+        }
 
         // Llenar el pool por encima de su capacidad.
         for (uint32_t i = 0; i < 20; ++i) {
@@ -1540,6 +1898,641 @@ void test_terrain_node_pool_reuse() {
     CHECK(farPct < 10.0, "CONTRAPRUEBA: saltar medio planeta NO reutiliza (el pool no miente)");
 }
 
+/**
+ * @brief EL BOBINADO DE LA REJILLA ES CCW DESDE FUERA — EN LAS SEIS CARAS.
+ *
+ * Es el requisito para poder dibujar el pase v5 con `CullMode::Back`. Hasta el 2026-08-25 iba con
+ * `CullMode::None`, así que **cada nodo rasterizaba sus dos caras**: en el limbo y a distancia
+ * rasante la cara de delante y la de detrás del mismo relieve compiten por el depth, que es
+ * parpadeo, y además se paga el doble de fragmentos.
+ *
+ * El comentario del bobinado en `terrain_node_renderer.h` razona sobre la cara FRONT. Eso no basta:
+ * las seis caras tienen su propia orientación y reflejo, y con una sola mal el culling BORRARÍA el
+ * terreno de esa cara. Por eso se comprueban las seis, a varios niveles y strides, con la normal
+ * geométrica del triángulo contra la radial.
+ */
+void test_terrain_node_winding() {
+    beginTest("terrain_node_winding");
+    const double R = 6371000.0;
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+    size_t checked = 0, outward = 0, outwardRev = 0;
+    double worstDot = 1e300;
+    int badFace = -1;
+    for (uint32_t f = 0; f < 6; ++f) {
+        for (uint32_t level : { 0u, 3u, 9u }) {
+            const uint32_t lim = 1u << level;
+            const NodeId n{ (PlanetFace)f, level, lim / 3u, (lim * 2u) / 3u };
+            for (uint32_t st : { 1u, 4u }) {
+                for (uint32_t v = 0; v + st < N; v += 37u * st)
+                    for (uint32_t u = 0; u + st < N; u += 41u * st) {
+                        // Los MISMOS cuatro del bucle de indices: a=(u,v) b=(u+st,v) c=(u,v+st) d=+ambos
+                        const glm::dvec3 pa = nodeTexelDir(n, u, v) * R;
+                        const glm::dvec3 pb = nodeTexelDir(n, u + st, v) * R;
+                        const glm::dvec3 pc = nodeTexelDir(n, u, v + st) * R;
+                        const glm::dvec3 pd = nodeTexelDir(n, u + st, v + st) * R;
+                        const glm::dvec3 out = glm::normalize(pa);
+                        // ...y los DOS triangulos con el orden real: (a,b,c) y (c,b,d).
+                        const glm::dvec3 t1 = glm::cross(pb - pa, pc - pa);
+                        const glm::dvec3 t2 = glm::cross(pb - pc, pd - pc);
+                        for (const glm::dvec3& tn : { t1, t2 }) {
+                            const double d = glm::dot(glm::normalize(tn), out);
+                            ++checked;
+                            if (d > 0.0) ++outward; else if (badFace < 0) badFace = (int)f;
+                            if (-d > 0.0) ++outwardRev;
+                            worstDot = std::min(worstDot, d);
+                        }
+                    }
+            }
+        }
+    }
+    std::printf("    %zu triangulos de las 6 caras · %zu con la normal HACIA FUERA · peor dot %.4f\n",
+                checked, outward, worstDot);
+    if (badFace >= 0) std::printf("    ⚠️ primera cara con el bobinado al reves: %d\n", badFace);
+    std::printf("    CONTRAPRUEBA: con el orden invertido (a,c,b) apuntarian hacia fuera %zu\n",
+                outwardRev);
+
+    CHECK(checked > 100, "se comprueban triangulos de verdad, en las seis caras");
+    CHECK(outward == checked, "TODOS los triangulos son CCW vistos desde fuera: se puede activar "
+                              "CullMode::Back sin borrar ninguna cara");
+    CHECK(outwardRev == 0, "CONTRAPRUEBA: con el orden invertido NINGUNO lo seria (el test distingue "
+                           "los dos ordenes, no dice que si a todo)");
+}
+
+/**
+ * @brief LA HISTÉRESIS DEL STRIDE SE PIERDE CUANDO UN NODO SALE DEL CONJUNTO DIBUJADO.
+ *
+ * `terrain_node_walk_shimmer` mide la histéresis sobre UN nodo que está siempre presente, y ahí sale
+ * perfecta: 0 cambios en 120 frames con temblor. Pero el renderer guarda la historia en `m_skNow`,
+ * que **se vacía cada frame** (`m_skNow.clear()`), y sólo se rellena con lo que se dibuja. Un nodo
+ * que desaparece del conjunto un solo frame vuelve con `kNoPrevStride`: **sin banda muerta**, libre
+ * de caer al otro lado del umbral en el que estaba.
+ *
+ * Es el hueco entre los dos tests que había: uno mide la histéresis con historia perfecta y el otro
+ * mide el tamaño del pop, y ninguno mira lo que pasa cuando la historia se pierde.
+ *
+ * Aquí se cuentan las REAPARICIONES sobre un recorrido real y cuántas cambian de stride, con la
+ * política de hoy contra una historia PERSISTENTE (que no se borra al salir).
+ */
+void test_terrain_node_stride_history_loss() {
+    beginTest("terrain_node_stride_history_loss");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+    const double vertPx = 4.0, fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+
+    const glm::dvec3 up0  = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 east = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+
+    auto run = [&](bool persist, size_t& reappear, size_t& flipped, size_t& drawnLast) {
+        std::unordered_map<uint64_t, uint32_t> prevFrame;   // lo que hace el motor: se vacía cada frame
+        std::unordered_map<uint64_t, uint32_t> everSeen;    // el último stride conocido, no se borra
+        std::vector<NodeId> sel;
+        reappear = 0; flipped = 0; drawnLast = 0;
+        // Andar a 5 m/s (0,083 m/frame) MIENTRAS SE GIRA: girar es lo que hace entrar y salir nodos
+        // del cono (medido aparte: 26 % nuevos al girar 90°). Andando en linea recta no churnea nada
+        // y la pregunta no llega a plantearse — la primera version de este test hacia justo eso.
+        const glm::dvec3 north = glm::normalize(glm::cross(up0, east));
+        for (int f = 0; f < 120; ++f) {
+            const double ang = 0.02 * (double)f;              // ~137 grados en los 120 frames
+            const glm::dvec3 cam = pc + up0 * (R + 1028.0) + east * (0.083 * (double)f);
+            const glm::dvec3 fwd = glm::normalize(east * std::cos(ang) + north * std::sin(ang));
+            nodeSelectVisible(R, cam, pc, radPerPx, sel, 1536, TERRAIN_NODE_ERROR_PX, &fwd, cone,
+                              5000.0, nullptr, nullptr);
+            std::unordered_map<uint64_t, uint32_t> now;
+            now.reserve(sel.size() * 2);
+            for (const NodeId& n : sel) {
+                const uint64_t k = nodeKey(n);
+                const auto itP = prevFrame.find(k);
+                uint32_t prev = kNoPrevStride;
+                if (itP != prevFrame.end()) prev = itP->second;
+                else if (persist) {
+                    const auto itE = everSeen.find(k);
+                    if (itE != everSeen.end()) prev = itE->second;
+                }
+                const double want = nodeStrideWant(n, R, cam, pc, TERRAIN_NODE_ERROR_PX, vertPx,
+                                                   fineCell, 0.0);
+                const uint32_t sk = nodeStrideQuantise(want, maxIdx, prev);
+                // ¿Vuelve tras haber salido? Entonces es donde la historia importa.
+                if (itP == prevFrame.end()) {
+                    const auto itE = everSeen.find(k);
+                    if (itE != everSeen.end()) { ++reappear; if (itE->second != sk) ++flipped; }
+                }
+                now[k] = sk; everSeen[k] = sk;
+            }
+            drawnLast = sel.size();
+            prevFrame.swap(now);
+        }
+    };
+
+    size_t rA = 0, fA = 0, nA = 0, rB = 0, fB = 0, nB = 0;
+    run(false, rA, fA, nA);
+    run(true,  rB, fB, nB);
+
+    std::printf("    120 frames andando a 5 m/s · %zu nodos dibujados en el ultimo\n", nA);
+    std::printf("      historia que SE PIERDE al salir (lo que hace el motor): %zu reapariciones · "
+                "%zu cambian de stride\n", rA, fA);
+    std::printf("      historia PERSISTENTE:                                   %zu reapariciones · "
+                "%zu cambian de stride\n", rB, fB);
+    std::printf("      (cada cambio mueve la superficie del nodo ~1 cm; lo que se ve no es el salto,\n"
+                "       es que se repita — ver la nota de `nodeStrideQuantise`)\n");
+
+    CHECK(nA > 100, "se dibujan nodos de verdad");
+    CHECK(rA > 0, "el conjunto dibujado CHURNEA: hay nodos que salen y vuelven");
+    CHECK(fB <= fA, "recordar el stride al salir nunca puede empeorar el parpadeo");
+}
+
+/**
+ * @brief EL CORTE DE OCTAVAS ESTÁ EN EL TÉXEL, Y NYQUIST PIDE EL DOBLE.
+ *
+ * ── DE DÓNDE SALEN LOS PINCHOS A RAS DE SUELO ───────────────────────────────────────────────────
+ *
+ * `terrain_node_spike_hunt` mide el laplaciano del campo CRUDO —sin cosido, sin morph, sin stride— y
+ * encuentra **4 200 vértices que rompen más de 0,5 m**, con el pase v5 añadiendo **−0,038 m**, o sea
+ * nada. Los picos no los mete el pase: ya están en el campo de altura.
+ *
+ * La causa candidata es de muestreo, no de ruido: el corte de octavas se hace en `triM` = el téxel,
+ * y muestrear una onda de longitud λ con un paso de λ es exactamente Nyquist — el caso en que el
+ * muestreo ya no describe la onda. A nivel 14 el téxel mide 4,77 m y la octava más fina es λ = 4,5 m:
+ * justo ahí. Para que una octava quede resuelta hace falta `λ ≥ 2·paso`.
+ *
+ * Aquí se mide el laplaciano del campo con el corte en el téxel y con el corte al DOBLE. Si el
+ * segundo elimina los picos, el arreglo es mover el corte, no tocar el ruido.
+ */
+void test_terrain_node_octave_cut_nyquist() {
+    beginTest("terrain_node_octave_cut_nyquist");
+    const double R = 6371000.0;
+
+    // ⚠️ EL CORTE POR TEXEL ES CORRECTO. Las guardas de `terrainDetail` estan en `lambda/2` exacto
+    // (la octava de 4,5 m solo entra si el texel baja de 2,25), o sea Nyquist bien puesto. Cortar
+    // "al doble" no arregla aliasing: solo atenua una octava legitima, que es perder detalle.
+    //
+    // El problema es OTRO: el corte se calcula con el TEXEL y la malla se dibuja cada TEXEL x STRIDE.
+    // Con stride 2 se admiten octavas resueltas para el texel y se muestrean al doble de paso, que es
+    // donde de verdad se cae por debajo de Nyquist. No sobra detalle: sobra STRIDE para el detalle
+    // que se admitio.
+    //
+    // Aqui se mide el laplaciano SOBRE LA MALLA QUE SE DIBUJA (paso = texel x stride) con el corte
+    // actual (texel) y con el corte al paso real. Si el segundo lo aplana, el arreglo es alinear el
+    // corte con lo que se dibuja — y con stride 1, que es lo que hay bajo los pies, NO CAMBIA NADA.
+    std::printf("    nivel  texel   stride  paso real   corte=TEXEL   corte=PASO REAL\n");
+    double worstTex = 0.0, worstStep = 0.0;
+    for (uint32_t lv : { 13u, 14u, 15u }) {
+        const NodeId n{ PlanetFace::FRONT, lv, (1u << lv) / 3u, (1u << lv) / 7u };
+        const double triM = nodeTexelM(n, R);
+        for (uint32_t st : { 1u, 2u, 4u }) {
+            const double stepM = triM * (double)st;
+            auto lapAt = [&](uint32_t u, uint32_t v, double cut) {
+                auto P = [&](uint32_t uu, uint32_t vv) {
+                    const glm::dvec3 d = nodeTexelDir(n, uu, vv);
+                    return d * (R + (double)Haruka::Planet::terrainDetail(d, R, (float)cut));
+                };
+                const glm::dvec3 c = P(u, v);
+                const glm::dvec3 avg = (P(u - st, v) + P(u + st, v)
+                                      + P(u, v - st) + P(u, v + st)) * 0.25;
+                return glm::length(c - avg);
+            };
+            double wT = 0.0, wS = 0.0;
+            for (uint32_t v = st; v + st <= TERRAIN_NODE_CELLS; v += st)
+                for (uint32_t u = st; u + st <= TERRAIN_NODE_CELLS; u += st) {
+                    wT = std::max(wT, lapAt(u, v, triM));
+                    wS = std::max(wS, lapAt(u, v, stepM));
+                }
+            std::printf("    %4u  %6.3f    %2u    %7.3f m   %8.4f m     %8.4f m\n",
+                        lv, triM, st, stepM, wT, wS);
+            if (st > 1) { worstTex = std::max(worstTex, wT); worstStep = std::max(worstStep, wS); }
+        }
+    }
+    std::printf("    -> con stride > 1: corte por TEXEL %.4f m · corte al PASO REAL %.4f m\n",
+                worstTex, worstStep);
+    std::printf("       (con stride 1 las dos columnas son la MISMA cuenta: bajo los pies no cambia)\n");
+
+    CHECK(worstTex > 0.0, "el campo tiene relieve (si no, no habria nada que medir)");
+    CHECK(worstStep <= worstTex,
+          "alinear el corte con el paso que SE DIBUJA nunca aumenta la rugosidad de la malla");
+}
+
+/**
+ * @brief ¿CUÁNTA PENDIENTE TIENE EL SUELO QUE SE PISA, A LA ESCALA DE LA CELDA DE COLISIÓN?
+ *
+ * ── LA PREGUNTA QUE ESTO CONTESTA ───────────────────────────────────────────────────────────────
+ *
+ * "Andar se hace difícil" no es un fallo de paridad ni de render: es que el suelo que Jolt colisiona
+ * sea demasiado abrupto para el controlador. El personaje tiene `mMaxSlopeAngle = 50°` (más empinado
+ * = resbalas) y `mWalkStairsStepUp = 0,4 m`.
+ *
+ * La física corta las octavas en `minFeatureM = 2.0`, que **sí** admite la más fina (λ 4,5 m,
+ * amplitud ±0,35 m), y muestrea en celdas de 0,5 m. Aquí se mide la distribución real de pendientes
+ * entre celdas contiguas: qué fracción pasa de 50° (resbalas) y qué fracción del escalón de 0,4 m se
+ * come una sola celda.
+ *
+ * ⚠️ No decide nada: pone el número al lado del límite del controlador, que es lo que falta para
+ * saber si el problema es el terreno, el controlador o ninguno de los dos.
+ */
+void test_terrain_collision_walkability() {
+    beginTest("terrain_collision_walkability");
+    const double R = 6371000.0;
+    const double cellM = Haruka::Planet::TERRAIN_RING_FINE_CELL;   // la celda del anillo fino
+    const float  cutM  = 2.0f;                                     // lo que pasa la fisica
+
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 e1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 e2  = glm::cross(up0, e1);
+    auto hAt = [&](double x, double y) {
+        const glm::dvec3 d = glm::normalize(up0 + e1 * (x / R) + e2 * (y / R));
+        return (double)Haruka::Planet::terrainDetail(d, R, cutM);
+    };
+
+    const int N = 400;
+    size_t over50 = 0, over30 = 0, total = 0;
+    double worstDeg = 0.0, worstStep = 0.0;
+    for (int j = 0; j < N; ++j)
+        for (int i = 0; i < N; ++i) {
+            const double x = i * cellM, y = j * cellM;
+            const double dh = hAt(x + cellM, y) - hAt(x, y);
+            const double deg = std::atan2(std::fabs(dh), cellM) * 180.0 / 3.14159265358979;
+            worstDeg = std::max(worstDeg, deg);
+            worstStep = std::max(worstStep, std::fabs(dh));
+            if (deg > 50.0) ++over50;
+            if (deg > 30.0) ++over30;
+            ++total;
+        }
+    std::printf("    celda de colision %.2f m · corte de octavas de la fisica %.1f m\n", cellM, cutM);
+    std::printf("    pendiente entre celdas contiguas: peor %.1f gr · desnivel peor %.3f m\n",
+                worstDeg, worstStep);
+    std::printf("    por encima de 50 gr (el limite del personaje): %.2f %% de %zu celdas\n",
+                100.0 * (double)over50 / (double)total, total);
+    std::printf("    por encima de 30 gr:                            %.2f %%\n",
+                100.0 * (double)over30 / (double)total);
+    std::printf("    (el controlador: mMaxSlopeAngle=50 gr · mWalkStairsStepUp=0,40 m)\n");
+
+    CHECK(total > 1000, "se muestrea terreno de verdad");
+    CHECK(worstDeg > 0.0, "el terreno tiene pendiente (si no, no habria nada que medir)");
+}
+
+/**
+ * @brief LA DIRECCION EN FLOAT CUANTIZA LA SUPERFICIE A MEDIO METRO. **Eso son los pinchos.**
+ *
+ * ── EL MURO QUE SE DABA POR INOFENSIVO ──────────────────────────────────────────────────────────
+ *
+ * `terrain_node.vert` construia la direccion del vertice con `harukaCubeFaceToDirF` —la version
+ * FLOAT— mientras `terrain_node.comp` usa la de DOUBLE para el MISMO punto. Un ulp de un vector
+ * unitario en float son ~6e-8, y a radio terrestre eso son **0,38-0,76 m de superficie**.
+ *
+ * El comentario de `vFragPos` daba por bueno ese muro: *"ese error es ESTATICO por vertice, asi que
+ * distorsiona el terreno una vez y no se ve"*. Es falso, y este test lo cuantifica: los vertices del
+ * nivel 17 estan a **0,596 m** unos de otros, asi que un error de redondeo de ese mismo orden no
+ * "distorsiona" — **cuantiza la superficie a una rejilla de medio metro**. Y el redondeo es
+ * independiente vertice a vertice, asi que no es una deformacion suave: es ruido a la frecuencia de
+ * la malla. Eso es exactamente lo que se ve en la captura de RenderDoc como crestas finas, y lo que
+ * ningun test de este banco podia ver porque TODOS calculan en double.
+ */
+void test_terrain_node_float_dir_quantisation() {
+    beginTest("terrain_node_float_dir_quantisation");
+    const double R = 6371000.0;
+
+    std::printf("    nivel  texel     error por vertice (float vs double)      relativo al texel\n");
+    double worstRel = 0.0;
+    for (uint32_t lv : { 14u, 15u, 17u }) {
+        const NodeId n{ PlanetFace::FRONT, lv, (1u << lv) / 3u, (1u << lv) / 7u };
+        const double triM = nodeTexelM(n, R);
+        double worst = 0.0, sum = 0.0; size_t cnt = 0;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 3)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 3) {
+                const glm::dvec3 dD = nodeTexelDir(n, u, v);            // como el compute: double
+                const glm::vec3  dF = glm::vec3(dD);                    // como el vertex shader: float
+                // La posicion que sale de cada una, a radio terrestre.
+                const glm::dvec3 pD = dD * R;
+                const glm::dvec3 pF = glm::dvec3(dF) * R;
+                const double e = glm::length(pD - pF);
+                worst = std::max(worst, e); sum += e; ++cnt;
+            }
+        const double rel = worst / triM;
+        std::printf("    %4u  %6.3f m   peor %.4f m · medio %.4f m            %5.1f %% del texel\n",
+                    lv, triM, worst, sum / (double)cnt, 100.0 * rel);
+        worstRel = std::max(worstRel, rel);
+    }
+    std::printf("    -> el redondeo llega al %.0f %% de la separacion entre vertices\n", 100.0 * worstRel);
+    std::printf("       (y es INDEPENDIENTE vertice a vertice: no deforma suave, mete ruido a la\n"
+                "        frecuencia de la malla — que es como se ve, crestas finas)\n");
+
+    CHECK(worstRel > 0.10, "el redondeo de la direccion en FLOAT es una fraccion GRANDE del texel: "
+                           "no es despreciable, es del orden del paso de la malla");
+}
+
+/**
+ * @brief LA DIAGONAL FIJA DEL QUAD SESGA LA SUPERFICIE SIEMPRE HACIA EL MISMO LADO.
+ *
+ * ── EL ARTEFACTO QUE NINGUN TEST DE ESTE BANCO PODIA VER ────────────────────────────────────────
+ *
+ * Todos los instrumentos de la sesion miden POSICIONES DE VERTICE: la retícula, las costuras, el
+ * morph, el laplaciano. Y los vértices están bien — caen exactamente sobre el campo. Lo que ninguno
+ * mira es **qué triángulos unen esos vértices**.
+ *
+ * La rejilla parte cada quad SIEMPRE por la misma diagonal (`{a,b,c},{c,b,d}` en
+ * `terrain_node_renderer.h`). Un quad no es plano, así que el centro del quad queda por encima o por
+ * debajo del campo según qué diagonal se use — y con una diagonal FIJA ese error tiene **el mismo
+ * signo en todo el nodo**. No se cancela: se acumula en crestas alineadas con la diagonal. Es lo que
+ * en la captura de RenderDoc se ve como líneas rectas finas y paralelas por todo el suelo.
+ *
+ * Aquí se mide el error CON SIGNO en el centro de cada quad. Con la diagonal fija la media se separa
+ * de cero (sesgo); alternándola en damero, los dos signos se compensan.
+ */
+void test_terrain_node_quad_diagonal_bias() {
+    beginTest("terrain_node_quad_diagonal_bias");
+    const double R = 6371000.0;
+
+    std::printf("    nivel  texel     media CON SIGNO (sesgo)      |media| fija / alterna\n");
+    double worstFixed = 0.0, worstAlt = 0.0;
+    for (uint32_t lv : { 14u, 15u, 17u }) {
+        const NodeId n{ PlanetFace::FRONT, lv, (1u << lv) / 3u, (1u << lv) / 7u };
+        const double triM = nodeTexelM(n, R);
+        auto hAt = [&](uint32_t u, uint32_t v) {
+            return (double)Haruka::Planet::terrainDetail(nodeTexelDir(n, u, v), R, (float)triM);
+        };
+        double sumFix = 0.0, sumAlt = 0.0; size_t cnt = 0;
+        for (uint32_t v = 0; v + 1 <= TERRAIN_NODE_CELLS; ++v)
+            for (uint32_t u = 0; u + 1 <= TERRAIN_NODE_CELLS; ++u) {
+                const double h00 = hAt(u, v), h10 = hAt(u + 1, v);
+                const double h01 = hAt(u, v + 1), h11 = hAt(u + 1, v + 1);
+                // El centro del quad segun cada diagonal, contra la media de los cuatro (el campo).
+                const double centreD1 = (h00 + h11) * 0.5;      // diagonal a-d
+                const double centreD2 = (h10 + h01) * 0.5;      // diagonal b-c
+                const double field    = (h00 + h10 + h01 + h11) * 0.25;
+                sumFix += centreD1 - field;                     // SIEMPRE la misma: se acumula
+                sumAlt += (((u + v) & 1u) ? centreD2 : centreD1) - field;   // en damero: se cancela
+                ++cnt;
+            }
+        const double mFix = sumFix / (double)cnt, mAlt = sumAlt / (double)cnt;
+        std::printf("    %4u  %6.3f m   fija %+9.5f m · alterna %+9.5f m    %8.5f / %8.5f\n",
+                    lv, triM, mFix, mAlt, std::fabs(mFix), std::fabs(mAlt));
+        worstFixed = std::max(worstFixed, std::fabs(mFix));
+        worstAlt   = std::max(worstAlt,   std::fabs(mAlt));
+    }
+    std::printf("    -> sesgo peor: diagonal FIJA %.5f m · ALTERNA %.5f m\n", worstFixed, worstAlt);
+    std::printf("       (un sesgo con signo constante no es rugosidad: son crestas alineadas con la\n"
+                "        diagonal, que es como se ve en pantalla)\n");
+
+    CHECK(worstFixed > 0.0, "la diagonal fija introduce un sesgo (si fuera 0, el quad seria plano)");
+    CHECK(worstAlt < worstFixed, "alternar la diagonal en damero CANCELA el sesgo");
+}
+
+/**
+ * @brief EL RUIDO SE MUESTREA EN `dir·(R + baseH)`, Y `baseH` CAMBIA ENTRE TÉXELES VECINOS.
+ *
+ * ── POR QUÉ ESTO PUEDE SER UN PINCHO A RAS DE SUELO ─────────────────────────────────────────────
+ *
+ * `terrainDetail` evalúa el ruido en `p = dir · radius`, y el radio que se le pasa es `R + baseH`
+ * (así lo exige la paridad con la física y con el clipmap: ver `terrain_node.comp`). Pero `baseH`
+ * varía de un téxel al siguiente — es el propio relieve del bake.
+ *
+ * Consecuencia: entre dos vértices contiguos el punto de muestreo no se mueve solo TANGENCIALMENTE
+ * (0,596 m en el nivel 17) sino también RADIALMENTE, tanto como cambie `baseH`. Si esa variación es
+ * del orden de la octava más fina (λ = 4,5 m), dos vértices contiguos caen en fases distintas del
+ * mismo ruido y la superficie se dispara. Eso es un pincho, y no depende del stride ni de las
+ * costuras — por eso ningún instrumento de este banco lo veía.
+ *
+ * Aquí se separan las dos contribuciones: cuánto cambia el detalle por moverse TANGENCIALMENTE (lo
+ * legítimo) y cuánto por el desplazamiento RADIAL (el sospechoso).
+ */
+void test_terrain_node_radial_noise_shift() {
+    beginTest("terrain_node_radial_noise_shift");
+    const double R = 6371000.0;
+
+    // Un bake sintético con relieve REALISTA a escala de decenas de metros: es lo que hace que
+    // `baseH` cambie entre téxeles vecinos. Sin variación de `baseH` el efecto no existe por
+    // definición, así que un bake plano haría el test trivialmente verde.
+    auto baseHAt = [&](const glm::dvec3& d) {
+        return 600.0 * std::sin(d.x * 900.0) * std::cos(d.y * 700.0)
+             + 120.0 * std::sin(d.z * 5000.0);
+    };
+
+    std::printf("    nivel   texel      d(baseH) vecino   detalle: TANGENCIAL   RADIAL\n");
+    double worstTan = 0.0, worstRad = 0.0;
+    for (uint32_t lv : { 14u, 15u, 16u, 17u }) {
+        const NodeId n{ PlanetFace::FRONT, lv, (1u << lv) / 3u, (1u << lv) / 7u };
+        const double triM = nodeTexelM(n, R);
+        double dB = 0.0, tan_ = 0.0, rad = 0.0;
+        for (uint32_t v = 8; v + 8 <= TERRAIN_NODE_CELLS; v += 7)
+            for (uint32_t u = 8; u + 8 <= TERRAIN_NODE_CELLS; u += 7) {
+                const glm::dvec3 d0 = nodeTexelDir(n, u, v), d1 = nodeTexelDir(n, u + 1, v);
+                const double b0 = baseHAt(d0), b1 = baseHAt(d1);
+                dB = std::max(dB, std::fabs(b1 - b0));
+                // TANGENCIAL: los dos vecinos con el MISMO radio. Es el relieve real del terreno.
+                const double t0 = (double)Haruka::Planet::terrainDetail(d0, R + b0, (float)triM);
+                const double t1 = (double)Haruka::Planet::terrainDetail(d1, R + b0, (float)triM);
+                tan_ = std::max(tan_, std::fabs(t1 - t0));
+                // RADIAL: el MISMO punto, con el radio del vecino. Es puro artefacto de muestreo.
+                const double r1 = (double)Haruka::Planet::terrainDetail(d0, R + b1, (float)triM);
+                rad = std::max(rad, std::fabs(r1 - t0));
+            }
+        std::printf("    %4u   %6.3f m   %10.2f m        %8.4f m   %8.4f m\n",
+                    lv, triM, dB, tan_, rad);
+        worstTan = std::max(worstTan, tan_); worstRad = std::max(worstRad, rad);
+    }
+    std::printf("    -> peor por moverse tangencialmente %.4f m · peor por el salto RADIAL %.4f m\n",
+                worstTan, worstRad);
+    std::printf("       (el radial no es relieve: son dos vertices contiguos leyendo el ruido en\n"
+                "        fases distintas. Si domina, ES un pincho y no depende del stride.)\n");
+
+    CHECK(worstTan > 0.0, "el terreno tiene relieve de verdad entre texeles vecinos");
+    // No se afirma que sea el fallo: se MIDE su tamaño relativo. Si el radial fuera despreciable,
+    // esta hipotesis quedaria descartada como las siete anteriores.
+    CHECK(worstRad >= 0.0, "medido");
+}
+
+/**
+ * @brief LA NORMAL TIENE QUE DESCRIBIR LA SUPERFICIE QUE SE DIBUJA, NO OTRA MÁS FINA.
+ *
+ * ── EL PINCHO QUE NO ERA UNA GRIETA ─────────────────────────────────────────────────────────────
+ *
+ * `terrain_node.vert` calculaba la diferencia finita de la normal SIEMPRE a ±1 téxel, mientras la
+ * geometría se dibuja cada `stride` téxeles. Con stride 2 o 4, un triángulo abarca 2-4 téxeles y sus
+ * vértices recibían normales de rugosidad SUB-TRIÁNGULO: al interpolarlas a lo largo del triángulo,
+ * el sombreado salta. Se lee como pinchos **dentro de cada nodo**, y por eso ningún instrumento de
+ * costuras lo veía — no es una grieta, es iluminación describiendo una superficie que no existe.
+ *
+ * Aquí se mide el ángulo entre la normal SOMBREADA y la GEOMÉTRICA del quad que de verdad se
+ * rasteriza, con la regla vieja (±1) y con la nueva (±stride). La contraprueba es la propia regla
+ * vieja: si no empeorara con el stride, este cambio no estaría arreglando nada.
+ */
+void test_terrain_node_normal_matches_geometry() {
+    beginTest("terrain_node_normal_matches_geometry");
+    const double R = 6371000.0;
+    const NodeId n{ PlanetFace::FRONT, 15, (1u << 15) / 3u, (1u << 15) / 7u };
+    const double texM = nodeTexelM(n, R);
+
+    auto hAt = [&](uint32_t u, uint32_t v) {
+        return (double)Haruka::Planet::terrainDetail(nodeTexelDir(n, u, v), R, (float)texM);
+    };
+    auto posAt = [&](uint32_t u, uint32_t v) { return nodeTexelDir(n, u, v) * (R + hAt(u, v)); };
+
+    // Normal por diferencia finita con paso `k`, como la calcula el shader.
+    auto shadeN = [&](uint32_t u, uint32_t v, uint32_t k) {
+        const glm::dvec3 d = nodeTexelDir(n, u, v);
+        const uint32_t um = (u > k) ? u - k : 0u, up = std::min(u + k, TERRAIN_NODE_CELLS);
+        const uint32_t vm = (v > k) ? v - k : 0u, vp = std::min(v + k, TERRAIN_NODE_CELLS);
+        glm::dvec3 t1 = glm::normalize(std::fabs(d.y) < 0.99 ? glm::cross(d, glm::dvec3(0, 1, 0))
+                                                             : glm::cross(d, glm::dvec3(1, 0, 0)));
+        const glm::dvec3 t2 = glm::cross(d, t1);
+        const double du = (double)(up - um) * texM, dv = (double)(vp - vm) * texM;
+        return glm::normalize(d - t1 * ((hAt(up, v) - hAt(um, v)) / du)
+                                - t2 * ((hAt(u, vp) - hAt(u, vm)) / dv));
+    };
+    // La normal GEOMETRICA del quad que se dibuja: el que va de `u-s` a `u+s`.
+    auto geomN = [&](uint32_t u, uint32_t v, uint32_t s) {
+        const glm::dvec3 a = posAt(u - s, v), b = posAt(u + s, v);
+        const glm::dvec3 c = posAt(u, v - s), e = posAt(u, v + s);
+        glm::dvec3 g = glm::cross(b - a, e - c);
+        if (glm::dot(g, nodeTexelDir(n, u, v)) < 0.0) g = -g;
+        return glm::normalize(g);
+    };
+    auto degBetween = [](const glm::dvec3& a, const glm::dvec3& b) {
+        return std::acos(glm::clamp(glm::dot(a, b), -1.0, 1.0)) * 180.0 / 3.14159265358979;
+    };
+
+    // ⚠️ LA METRICA CORRECTA NO ES "cuanto se aparta de la faceta". Esa mezcla la rugosidad propia
+    // del terreno —una normal analitica y una de faceta difieren ~29 gr sobre relieve rugoso, con
+    // CUALQUIER paso— y no distingue las dos reglas (medido: 28,79 contra 28,59). Lo que se ve como
+    // PINCHO es otra cosa: que dos vertices CONTIGUOS del mismo triangulo reciban normales muy
+    // distintas, porque al interpolarlas a lo largo del triangulo el sombreado pega un salto.
+    //
+    // Con paso ±1 y stride 4, dos vertices dibujados contiguos muestrean vecindarios DISJUNTOS: sus
+    // normales no estan correlacionadas. Con paso ±stride se solapan, y varian suave.
+    std::printf("    stride   salto de normal entre vertices CONTIGUOS del mismo triangulo\n");
+    std::printf("             con paso ±1 texel     con paso ±stride\n");
+    double worstOld = 0.0, worstNew = 0.0;
+    for (uint32_t s : { 1u, 2u, 4u, 8u }) {
+        double dOld = 0.0, dNew = 0.0;
+        for (uint32_t v = 2u * s; v + 2u * s <= TERRAIN_NODE_CELLS; v += s)
+            for (uint32_t u = 2u * s; u + 3u * s <= TERRAIN_NODE_CELLS; u += s) {
+                dOld = std::max(dOld, degBetween(shadeN(u, v, 1u), shadeN(u + s, v, 1u)));
+                dNew = std::max(dNew, degBetween(shadeN(u, v, s),  shadeN(u + s, v, s)));
+            }
+        std::printf("    %4u       %9.2f gr          %9.2f gr\n", s, dOld, dNew);
+        if (s > 1) { worstOld = std::max(worstOld, dOld); worstNew = std::max(worstNew, dNew); }
+    }
+    std::printf("    -> con stride > 1: el salto peor pasa de %.2f gr a %.2f gr\n", worstOld, worstNew);
+    (void)geomN;
+
+    CHECK(worstNew < worstOld, "al paso del STRIDE, dos vertices contiguos ya no reciben normales "
+                               "descorrelacionadas: el sombreado deja de saltar dentro del triangulo");
+    // CONTRAPRUEBA: si la regla vieja no saltara, el cambio no arreglaria nada y sobraria.
+    // ⚠️ El liston esta donde la medida lo deja (10,34 gr con la regla vieja), no donde gustaria.
+    // Y ojo con lo que este test NO dice: **con stride 1 las dos reglas son la misma cosa** (2,59 gr
+    // en las dos columnas). Cerca del jugador el tope de colision fuerza stride 1, asi que este
+    // arreglo suaviza el sombreado a media y larga distancia y NO toca lo que se ve bajo los pies.
+    CHECK(worstOld > 5.0, "CONTRAPRUEBA: la regla vieja SI daba saltos entre vertices contiguos "
+                          "(si no, este arreglo no estaria arreglando nada)");
+}
+
+/**
+ * @brief LA CAÍDA POR ANCESTRO NO PUEDE SALTARSE NIVELES, Y ESO LO DECIDE LA POLÍTICA DEL POOL.
+ *
+ * El geomorph cierra el escalón contra el vecino grueso apuntando a la altura del **padre**. Eso solo
+ * vale si el vecino está a UN nivel: con dos quedan 0,339 m y con cuatro **1,372 m**, que es lo que
+ * se ve como pinchos.
+ *
+ * El árbol que devuelve `nodeSelectVisible` ya es 2:1 (0 saltos de más de uno a cualquier
+ * presupuesto). El que se DIBUJA no lo era, y la causa está en el pool: **el selector solo pide
+ * HOJAS**, así que un nodo interior solo llegaba a ser residente por accidente —de cuando él mismo
+ * fue hoja— y un nodo sin hueco caía al ancestro residente más profundo, que podía estar a cuatro.
+ *
+ * Desde el 2026-08-25 `request` encola también los eslabones que le faltan a la cadena raíz→nodo y
+ * `prioritisePending` los emite de grueso a fino, así que lo residente es un SUBÁRBOL CONEXO desde
+ * la raíz y el ancestro más profundo de una hoja pedida es su padre.
+ *
+ * ⚠️ Se mide el A/B con `setChainAncestors`, no se afirma. Y con el presupuesto REAL del motor: con
+ * uno infinito todo es residente y no hay caída que medir — el test pasaría sin comprobar nada.
+ *
+ * ── ⚠️ LO QUE LA MEDIDA CORRIGIÓ (2026-08-25) ──────────────────────────────────────────────────
+ *
+ * `TODO.md` daba por hecho que *"el arreglo va en la política del POOL"*. La medida dice otra cosa:
+ * **en reposo la política vieja también converge a 0 caídas profundas.** No eran un estado estable,
+ * son transitorias — del presupuesto, mientras entran nodos nuevos. La cadena baja la caída peor
+ * girando de **11 a 5 niveles** (9 nodos → 4), que es una mejora real del transitorio, pero no es
+ * la causa de un pincho que se vea estando quieto. Para eso hay que mirar a otro sitio.
+ */
+void test_terrain_node_pool_chain() {
+    beginTest("terrain_node_pool_chain");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+
+    // `holdFrames` = frames QUIETO tras el giro. Separa las dos preguntas: cuánto se cae MIENTRAS
+    // giras (eso es presupuesto: 170 nodos por frame y punto) y cuánto queda cuando el pool ya ha
+    // tenido tiempo (eso sí es la política). Sin separarlas, un número malo no dice cuál de las dos.
+    auto run = [&](bool chain, int holdFrames,
+                   int& worstDrop, size_t& deepNodes, size_t& drawnTotal) {
+        TerrainNodePool pool(2048, 170);          // el presupuesto real: 2048 huecos, 170 por frame
+        pool.setChainAncestors(chain);
+        for (uint32_t f = 0; f < 6; ++f)          // raíces fijadas, como hace el motor
+            pool.publish(NodeId{ (PlanetFace)f, 0, 0, 0 }, NodeRange{ -9000.0f, 9000.0f }, true);
+
+        const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+        const glm::dvec3 east = glm::normalize(glm::cross(dir0, glm::dvec3(0, 1, 0)));
+        const glm::dvec3 cam  = pc + dir0 * (R + 1200.0);
+        std::vector<NodeId> sel;
+        worstDrop = 0; deepNodes = 0; drawnTotal = 0;
+        // Veinte frames GIRANDO, que es cuando entran nodos nuevos de golpe y el pool va por detrás.
+        for (int step = 0; step < 20 + holdFrames; ++step) {
+            const double ang = 0.06 * (double)std::min(step, 19);   // tras el 19 la camara se para
+            const glm::dvec3 fwd = glm::normalize(dir0 * std::cos(ang) + east * std::sin(ang));
+            pool.beginFrame();
+            nodeSelectVisible(R, cam, pc, radPerPx, sel, 2048, TERRAIN_NODE_ERROR_PX, &fwd, cone,
+                              5000.0, &TerrainNodePool::rangeFnAdapter, &pool);
+            worstDrop = 0; deepNodes = 0; drawnTotal = 0;   // solo interesa el estado ESTABLE
+            for (const NodeId& n : sel) {
+                const TerrainNodePool::Resolved r = pool.request(n);
+                if (r.slot < 0) continue;
+                ++drawnTotal;
+                const int d = (int)n.level - (int)r.node.level;
+                worstDrop = std::max(worstDrop, d);
+                if (d > 1) ++deepNodes;
+            }
+            pool.prioritisePending(cam, pc, R);
+            for (const NodeId& p : pool.takePending())
+                pool.publish(p, NodeRange{ -9000.0f, 9000.0f });
+        }
+    };
+
+    int wOldT = 0, wNewT = 0, wOldS = 0, wNewS = 0;
+    size_t dOldT = 0, dNewT = 0, dOldS = 0, dNewS = 0, nOldT = 0, nNewT = 0, nOldS = 0, nNewS = 0;
+    run(false, 0,  wOldT, dOldT, nOldT);
+    run(true,  0,  wNewT, dNewT, nNewT);
+    run(false, 30, wOldS, dOldS, nOldS);
+    run(true,  30, wNewS, dNewS, nNewS);
+
+    std::printf("    2048 huecos · 170 nodos/frame · peor caida por ancestro, en NIVELES\n");
+    std::printf("                          GIRANDO            QUIETO (30 frames despues)\n");
+    std::printf("      SIN cadena     %3d niveles (%zu nodos)   %3d niveles (%zu nodos)\n",
+                wOldT, dOldT, wOldS, dOldS);
+    std::printf("      CON cadena     %3d niveles (%zu nodos)   %3d niveles (%zu nodos)\n",
+                wNewT, dNewT, wNewS, dNewS);
+    std::printf("      (dibujados: %zu / %zu · el geomorph apunta al PADRE, asi que a 2 niveles\n"
+                "       quedan 0,339 m y a 4, 1,372 m: todo lo que pase de 1 se ve como pincho)\n",
+                nOldS, nNewS);
+
+    CHECK(nNewS > 100, "se dibujan nodos de verdad");
+    CHECK(wNewS <= 1 && dNewS == 0, "CON cadena, en reposo: ninguna caida de mas de un nivel");
+
+    // ⚠️ Y AQUI EL TEST CORRIGIO LA HIPOTESIS CON LA QUE SE ESCRIBIO. Se esperaba que la politica
+    // vieja siguiera cayendo varios niveles aunque se esperase —eso habria hecho de la cadena EL
+    // arreglo—. **No es cierto: tambien converge a 0.** O sea que las caidas profundas nunca fueron
+    // un estado estable del pool, son TRANSITORIAS: aparecen mientras entran nodos nuevos y el
+    // presupuesto va por detras. La cadena no las cura, las REDUCE a la mitad.
+    //
+    // Consecuencia, y hay que tenerla presente antes de buscar por aqui: si los pinchos se ven
+    // ESTANDO QUIETO, la caida por ancestro NO los explica y la causa esta en otra parte.
+    CHECK(dOldS == 0, "la politica vieja TAMBIEN converge en reposo: el problema es del transitorio");
+    CHECK(wOldT > 1, "CONTRAPRUEBA: girando SI aparecen caidas profundas — ahi es donde vive esto");
+    CHECK(wNewT < wOldT, "y la cadena las reduce (11 -> 5 niveles medido): mejora el TRANSITORIO");
+}
+
 // ================================================================================================
 // F3 — LA COSTURA entre niveles distintos: que no quede grieta, y sin faldas
 //
@@ -1574,12 +2567,19 @@ void test_terrain_node_stitch() {
         const glm::dvec3 raw  = nodeTexelDir(fine, 0, v);                   // sin coser (en la esfera)
         const glm::dvec3 sew  = nodeStitchedDir(fine, 0, v, coarser);       // cosido
         worstRaw      = std::max(worstRaw,      glm::length(raw - onLine) * R);
-        worstStitched = std::max(worstStitched, glm::length(sew - onLine) * R);
+        // ⚠️ EL COSIDO YA NO INTERPOLA: COLAPSA (ver la nota larga de `nodeStitchStep`). El vertice
+        // sobrante no va al punto MEDIO de la recta del grueso — va a uno de sus EXTREMOS, para no
+        // dejar una T-junction que el rasterizador convierte en pinholes. Asi que la propiedad que
+        // hay que medir es "cae SOBRE EL SEGMENTO", no "cae en el punto interpolado": lo segundo era
+        // cierto con la regla vieja y ya no lo es.
+        const glm::dvec3 ab = g1 - g0;
+        const double tt = glm::clamp(glm::dot(sew - g0, ab) / glm::dot(ab, ab), 0.0, 1.0);
+        worstStitched = std::max(worstStitched, glm::length(sew - (g0 + ab * tt)) * R);
         (void)none;
     }
     std::printf("    vertice impar del borde vs la recta del vecino grueso:\n");
     std::printf("      SIN coser: %.4f m de separacion  <- esto es la grieta\n", worstRaw);
-    std::printf("      COSIDO:    %.3e m\n", worstStitched);
+    std::printf("      COSIDO (distancia al SEGMENTO): %.3e m\n", worstStitched);
     CHECK(worstRaw > 1e-4, "sin coser SI hay grieta (si no, el test no probaria nada)");
     CHECK(worstStitched < 1e-6, "cosido, el vertice cae sobre la recta del grueso: no hay grieta");
 
@@ -1614,11 +2614,14 @@ void test_terrain_node_stitch() {
         if (nx == b) continue;
         const glm::dvec3 g0 = nodeTexelDir(coarse2, TERRAIN_NODE_CELLS, b / 4);
         const glm::dvec3 g1 = nodeTexelDir(coarse2, TERRAIN_NODE_CELLS, b / 4 + 1);
-        const double t = (double)(v - b) / (double)(nx - b);
-        const glm::dvec3 onLine = g0 + (g1 - g0) * t;
-        worst2 = std::max(worst2, glm::length(nodeStitchedDir(fine, 0, v, coarser2) - onLine) * R);
+        // Igual que arriba: se mide la distancia al SEGMENTO, porque el cosido colapsa en vez de
+        // interpolar (ver `nodeStitchStep`).
+        const glm::dvec3 sew = nodeStitchedDir(fine, 0, v, coarser2);
+        const glm::dvec3 ab = g1 - g0;
+        const double tt = glm::clamp(glm::dot(sew - g0, ab) / glm::dot(ab, ab), 0.0, 1.0);
+        worst2 = std::max(worst2, glm::length(sew - (g0 + ab * tt)) * R);
     }
-    std::printf("    salto de DOS niveles (stride 4): separacion peor %.3e m\n", worst2);
+    std::printf("    salto de DOS niveles (stride 4): distancia al segmento %.3e m\n", worst2);
     CHECK(worst2 < 1e-6, "el cosido aguanta saltos de mas de un nivel");
 
     // CONTRAPRUEBA: sin declarar vecino grueso, el cosido NO debe hacer nada en ningun sitio.
@@ -1681,4 +2684,2138 @@ void test_terrain_node_neighbours() {
     int c4[4]; nodeNeighbourLevels(edge[0], i4, c4);
     std::printf("    borde de CARA (i=0): izq = %d — limitacion declarada, no se cose entre caras\n", c4[0]);
     CHECK(c4[0] == 0, "en el borde de cara devuelve 0, como se documenta");
+}
+
+/**
+ * @brief El STRIDE POR NODO: ¿cierra la disparidad ver↔pisar sin abrir grietas?
+ *
+ * ── QUÉ SE MIDE Y POR QUÉ ───────────────────────────────────────────────────────────────────────
+ *
+ * El render dibuja un vértice cada `téxel · stride`, no cada téxel. Con el stride GLOBAL de 4 el
+ * nodo bajo los pies daba vértices cada 2,386 m contra celdas de colisión de 0,5 m, y el triángulo
+ * se separaba 0,0727 m del campo. Ese era el término dominante de la disparidad — diez veces el
+ * twist— y estuvo sin medir porque se dio por hecho que el render dibujaba al téxel.
+ *
+ * Tres preguntas, y la tercera es la que puede tumbar el arreglo:
+ *   1. ¿el nodo bajo la cámara baja de verdad a stride 1, y el lejano se queda en 4? (si no, o no
+ *      arregla nada o cuesta el triple)
+ *   2. ¿cuánto cae el error de cuerda donde se pisa?
+ *   3. ⚠️ ¿el cosido aguanta entre dos nodos del MISMO nivel con strides distintos? Esa T-junction
+ *      no existía antes —el stride global la hacía imposible— y es el riesgo que introduce esto.
+ */
+void test_terrain_node_stride_per_node() {
+    beginTest("terrain_node_stride_per_node");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4;
+    const double errPx = 1.0, vertPx = 4.0;
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+
+    // Cámara justo encima de un nodo del nivel más fino.
+    const NodeId foot{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const glm::dvec3 dir = nodeTexelDir(foot, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    const glm::dvec3 cam = center + dir * (R + 2.0);           // 2 m sobre el suelo
+
+    const uint32_t skFoot = nodeStrideIndex(foot, R, cam, center, errPx, vertPx, fineCell, maxIdx);
+    const double texM = nodeTexelM(foot, R);
+    std::printf("    nodo BAJO LOS PIES: texel %.3f m · stride %u -> vertices cada %.3f m\n",
+                texM, 1u << skFoot, texM * (double)(1u << skFoot));
+    CHECK(skFoot == 0, "bajo los pies el stride baja a 1 (la colision manda)");
+
+    // ⚠️ Y CON EL NODO A COTA, que es el caso del juego: el jugador esta a 2 m del SUELO, pero el
+    // suelo esta a ~1026 m sobre el nivel del mar. Si el pool no ha publicado el rango del nodo,
+    // `nodeElevM` vale 0, la superficie se supone en R y la distancia sale de 1028 m en vez de 2:
+    // `want` pasa de 0,84 a 27 y el stride se queda en 4. El log del juego lo delata con
+    // `stride 4..4` cuando deberia decir `1..4`.
+    {
+        const double elevG = 1026.0;
+        const glm::dvec3 camG = center + dir * (R + elevG + 2.0);
+        const double wKnown = nodeStrideWant(foot, R, camG, center, errPx, vertPx, fineCell, elevG);
+        const double wLost  = nodeStrideWant(foot, R, camG, center, errPx, vertPx, fineCell, 0.0);
+        std::printf("    con el suelo a %.0f m y el jugador 2 m encima:\n", elevG);
+        std::printf("      cota del nodo CONOCIDA: want %6.2f -> stride %u\n",
+                    wKnown, 1u << nodeStrideQuantise(wKnown, maxIdx));
+        std::printf("      cota PERDIDA (elev 0):  want %6.2f -> stride %u   <- lo que da 'stride 4..4'\n",
+                    wLost, 1u << nodeStrideQuantise(wLost, maxIdx));
+        CHECK(nodeStrideQuantise(wKnown, maxIdx) == 0, "con la cota conocida baja a stride 1");
+        CHECK(nodeStrideQuantise(wLost, maxIdx) > 0, "CONTRAPRUEBA: sin la cota se queda basto — la "
+                                                     "regla depende de que el pool publique el rango");
+    }
+
+    // Un nodo del mismo nivel pero lejos: debe quedarse en el stride que pide la pantalla.
+    uint32_t skFar = 0; double farM = 0.0;
+    {
+        NodeId far = foot; far.i += 4000;                       // ~2,4 km de lado
+        skFar = nodeStrideIndex(far, R, cam, center, errPx, vertPx, fineCell, maxIdx);
+        const glm::dvec3 p = center + nodeTexelDir(far, TERRAIN_NODE_CELLS/2, TERRAIN_NODE_CELLS/2) * R;
+        farM = glm::length(p - cam);
+        std::printf("    nodo a %.0f m: stride %u (la pantalla pide %u)\n",
+                    farM, 1u << skFar, (unsigned)(vertPx / errPx));
+    }
+    CHECK((1u << skFar) == (uint32_t)(vertPx / errPx), "lejos manda la pantalla: el stride de siempre");
+
+    // ── 2. EL ERROR DE CUERDA DONDE SE PISA ─────────────────────────────────────────────────────
+    const glm::dvec3 t1 = glm::normalize(glm::cross(dir, glm::dvec3(0, 0, 1)));
+    auto chordErr = [&](double spanM) {
+        auto hAt = [&](double x) {
+            return (double)Haruka::Planet::terrainDetail(glm::normalize(dir + t1 * (x / R)), R, (float)texM);
+        };
+        double w = 0.0;
+        for (int k = -40; k <= 40; ++k) {
+            const double x0 = k * spanM;
+            for (int m = 1; m < 8; ++m) {
+                const double f = m / 8.0;
+                w = std::max(w, std::fabs(hAt(x0 + spanM * f)
+                                          - (hAt(x0) + (hAt(x0 + spanM) - hAt(x0)) * f)));
+            }
+        }
+        return w;
+    };
+    const double eNew = chordErr(texM * (double)(1u << skFoot));
+    const double eOld = chordErr(texM * 4.0);
+    std::printf("    error de cuerda a pie: stride GLOBAL 4 = %.4f m -> POR NODO = %.4f m (%.0fx)\n",
+                eOld, eNew, eOld / std::max(eNew, 1e-9));
+    CHECK(eNew < 0.01, "la disparidad que deja el render baja de 1 cm");
+    CHECK(eOld > 0.05, "CONTRAPRUEBA: con el stride global de antes NO bajaba (si esto pasa, "
+                       "el test no esta midiendo lo que cree)");
+
+    // ── 3. LA T-JUNCTION NUEVA: mismo nivel, strides distintos ──────────────────────────────────
+    //
+    // El vecino dibuja uno de cada 4 texeles; yo uno de cada 1. Mis vertices intermedios se salen de
+    // SU recta salvo que los cosa contra su zancada.
+    //
+    // ⚠️ LA GRIETA ESTA EN LA ALTURA, NO EN LA DIRECCION. El primer intento midio solo la desviacion
+    // del entramado de direcciones y dio 0,0000 m — correctamente: la sagita de un arco de 2,4 m
+    // sobre un radio de 6371 km es 0,1 MICRAS. Lo que se separa es el RELIEVE que hay entre los dos
+    // vertices que el vecino grueso si tiene, o sea el mismo error de cuerda de la parte 2. Sin
+    // meter alturas, la contraprueba pasaba en verde midiendo ruido de redondeo.
+    {
+        const NodeId fine = foot;
+        const uint32_t sNb = 4;                                 // el vecino dibuja a stride 4
+        const uint32_t stepFine[4] = { 0, sNb, 0, 0 };          // mi arista derecha se cose a 4
+        auto hOf = [&](uint32_t u, uint32_t v) {
+            return (double)Haruka::Planet::terrainDetail(nodeTexelDir(fine, u, v), R, (float)texM);
+        };
+        auto posOf = [&](uint32_t u, uint32_t v) {
+            return nodeTexelDir(fine, u, v) * (R + hOf(u, v));
+        };
+
+        double worstSewn = 0.0, worstRaw = 0.0, worstOld = 0.0;
+        const int coarserOld[4] = { 0, 0, 0, 0 };               // mismo nivel -> "nada que coser"
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; ++v) {
+            const uint32_t E2 = TERRAIN_NODE_CELLS;
+            const uint32_t b = (v / sNb) * sNb, nx = std::min(b + sNb, E2);
+            const double t = (nx == b) ? 0.0 : (double)(v - b) / (double)(nx - b);
+            // La RECTA que de verdad rasteriza el vecino grueso entre sus dos vertices.
+            const glm::dvec3 pa = posOf(E2, b), pb = posOf(E2, nx);
+            const glm::dvec3 onCoarse = pa + (pb - pa) * t;
+
+            // COSIDO: el shader COLAPSA el vertice sobrante sobre el del grueso (`sr.t = 0`, ver la
+            // nota larga de `nodeStitchStep`), no lo interpola. Asi que la propiedad que hay que
+            // medir es "cae SOBRE EL SEGMENTO que el grueso rasteriza", no "cae en el punto
+            // interpolado": lo segundo describia la regla vieja, la que dejaba T-junction.
+            const Haruka::Terrain::StitchRef sr = nodeStitchStep(E2, v, stepFine);
+            const glm::dvec3 dA = nodeTexelDir(fine, sr.u0, sr.v0), dB = nodeTexelDir(fine, sr.u1, sr.v1);
+            const double hA = hOf(sr.u0, sr.v0), hB = hOf(sr.u1, sr.v1);
+            const glm::dvec3 sewn = (dA + (dB - dA) * sr.t) * (R + hA + (hB - hA) * sr.t);
+
+            const glm::dvec3 seg = pb - pa;
+            const double tt = glm::clamp(glm::dot(sewn - pa, seg) / glm::dot(seg, seg), 0.0, 1.0);
+            worstSewn = std::max(worstSewn, glm::length(sewn - (pa + seg * tt)));
+            worstRaw  = std::max(worstRaw,  glm::length(posOf(E2, v) - onCoarse));
+            // El cosido VIEJO (solo por diferencia de nivel) es un no-op aqui: mismo nivel.
+            const Haruka::Terrain::StitchRef so = nodeStitch(E2, v, coarserOld);
+            const glm::dvec3 dO = nodeTexelDir(fine, so.u0, so.v0);
+            worstOld = std::max(worstOld, glm::length(dO * (R + hOf(so.u0, so.v0)) - onCoarse));
+        }
+        std::printf("    T-junction stride 1 vs 4 (MISMO nivel), con alturas:\n");
+        std::printf("      sin coser          %.4f m   <- la grieta que abre el stride por nodo\n", worstRaw);
+        std::printf("      cosido POR NIVEL   %.4f m   <- el de antes: no la ve, mismo nivel\n", worstOld);
+        std::printf("      cosido POR ZANCADA %.6f m\n", worstSewn);
+        CHECK(worstSewn < 1e-3, "cosido con la zancada del vecino: la arista casa");
+        CHECK(worstRaw > 0.01, "CONTRAPRUEBA: sin coser SI hay grieta — la T-junction es real");
+        CHECK(worstOld > 0.01, "CONTRAPRUEBA: el cosido por NIVEL no cubre este caso (es por lo que "
+                               "hizo falta pasar la zancada explicita)");
+    }
+
+    // ── 4. LO QUE CUESTA ────────────────────────────────────────────────────────────────────────
+    {
+        size_t trisOld = 0, trisNew = 0, fineNodes = 0;
+        const uint32_t half = TERRAIN_NODE_CELLS / 2;
+        for (int di = -6; di <= 6; ++di)
+            for (int dj = -6; dj <= 6; ++dj) {
+                NodeId n = foot; n.i += di; n.j += dj;
+                const uint32_t sk = nodeStrideIndex(n, R, cam, center, errPx, vertPx, fineCell, maxIdx);
+                const uint32_t cOld = TERRAIN_NODE_CELLS / 4, cNew = TERRAIN_NODE_CELLS / (1u << sk);
+                trisOld += (size_t)cOld * cOld * 2;
+                trisNew += (size_t)cNew * cNew * 2;
+                if (sk == 0) ++fineNodes;
+            }
+        (void)half;
+        std::printf("    169 nodos alrededor: %zu a stride 1 · triangulos %.2f M -> %.2f M (x%.1f)\n",
+                    fineNodes, (double)trisOld / 1e6, (double)trisNew / 1e6,
+                    (double)trisNew / (double)trisOld);
+        CHECK(fineNodes > 0 && fineNodes < 169, "solo los de cerca se afinan, no todos");
+    }
+}
+
+/**
+ * @brief El PRECIO del stride por nodo: al cruzar una frontera, la superficie BRINCA.
+ *
+ * Un nodo que pasa de stride 1 a 2 deja de dibujar la mitad de sus vértices, y los triángulos que
+ * quedan cortan la curva por otro sitio. Ese salto no está morfeado (el geomorph existente va entre
+ * NIVELES, no entre strides), así que es un pop real mientras caminas.
+ *
+ * No basta con medirlo en metros: 5 cm a 3 m se ven y a 300 m no. Lo que decide es si subtiende
+ * menos de un píxel, así que la cota va en PÍXELES a la distancia donde de verdad ocurre.
+ */
+void test_terrain_node_stride_pop() {
+    beginTest("terrain_node_stride_pop");
+    const double R = 6371000.0;
+    const double radPerPx = 9.4e-4;                       // 1080p, fov 60 — el del juego
+    const NodeId n{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const glm::dvec3 dir = nodeTexelDir(n, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    const glm::dvec3 t1  = glm::normalize(glm::cross(dir, glm::dvec3(0, 0, 1)));
+    const double texM = nodeTexelM(n, R);
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+
+    auto chordErr = [&](double spanM) {
+        auto hAt = [&](double x) {
+            return (double)Haruka::Planet::terrainDetail(glm::normalize(dir + t1 * (x / R)), R,
+                                                         (float)texM);
+        };
+        double w = 0.0;
+        for (int k = -40; k <= 40; ++k) {
+            const double x0 = k * spanM;
+            for (int m = 1; m < 8; ++m) {
+                const double f = m / 8.0;
+                w = std::max(w, std::fabs(hAt(x0 + spanM * f)
+                                          - (hAt(x0) + (hAt(x0 + spanM) - hAt(x0)) * f)));
+            }
+        }
+        return w;
+    };
+
+    // La frontera del stride `k -> k+1` cae donde `max(fineCell, d/(CELLS/2))` cruza `texM·2^(k+1)`.
+    std::printf("    salto   frontera    brinco    lo que subtiende   veredicto\n");
+    double worstPx = 0.0;
+    for (uint32_t k = 0; k < 3; ++k) {
+        const double dBoundary = texM * (double)(1u << (k + 1)) * (double)(TERRAIN_NODE_CELLS / 2);
+        const double jump = std::fabs(chordErr(texM * (double)(1u << (k + 1)))
+                                      - chordErr(texM * (double)(1u << k)));
+        const double px = jump / (dBoundary * radPerPx);
+        worstPx = std::max(worstPx, px);
+        std::printf("    %u->%u   %7.1f m   %.4f m   %8.3f px        %s\n",
+                    1u << k, 1u << (k + 1), dBoundary, jump, px,
+                    px < 1.0 ? "invisible" : "SE VE");
+    }
+    (void)fineCell;
+    std::printf("    -> el peor brinco subtiende %.3f px; por debajo de 1 px cae dentro del pixel\n",
+                worstPx);
+    CHECK(worstPx < 1.0, "ningun cambio de stride llega a un pixel: el pop no es visible");
+
+    // ⚠️ CONTRAPRUEBA: si la frontera se pusiera al doble de cerca, el mismo brinco SI se veria. Sin
+    // esto, la cota de arriba podria estar pasando por medir siempre distancias enormes.
+    {
+        const double dHalf = texM * 2.0 * (double)(TERRAIN_NODE_CELLS / 2) / 8.0;
+        const double jump  = std::fabs(chordErr(texM * 2.0) - chordErr(texM));
+        std::printf("    CONTRAPRUEBA: la misma frontera a %.1f m subtenderia %.2f px\n",
+                    dHalf, jump / (dHalf * radPerPx));
+        CHECK(jump / (dHalf * radPerPx) > 1.0, "acercando la frontera el mismo brinco SI se veria: "
+                                               "la cota mide distancia, no un cero trivial");
+    }
+}
+
+/**
+ * @brief AUDITORÍA DE COSTURAS sobre un frame REAL, con el stride por nodo puesto.
+ *
+ * ── POR QUÉ SOBRE EL FRAME ENTERO Y NO SOBRE UN PAR A MANO ──────────────────────────────────────
+ *
+ * `terrain_node_stride_per_node` construye la pareja fina↔gruesa que quiere probar, así que solo
+ * demuestra que ESE caso se cose. Andoni reporta costuras en el juego con el arreglo puesto, o sea
+ * que hay una combinación que no se me ocurrió construir. Esto corre el selector de verdad, saca el
+ * conjunto que se dibujaría y audita TODAS las parejas adyacentes.
+ *
+ * ⚠️ Se limita a vecinos de la MISMA CARA y del MISMO NIVEL. No es pereza: entre niveles distintos la
+ * grieta la cierra el geomorph hacia el padre (los dos lados evalúan escaleras de octavas distintas)
+ * y modelarlo aquí sería reimplementar el shader. El caso mismo-nivel-distinto-stride es el que
+ * INTRODUJO el stride por nodo, comparte función de altura en los dos lados, y por eso se puede
+ * comparar limpio: cualquier separación aquí es culpa del cosido, de nadie más.
+ */
+void test_terrain_node_stride_seams() {
+    beginTest("terrain_node_stride_seams");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, errPx = 1.0, vertPx = 4.0;
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+
+    const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam  = center + dir0 * (R + 2.0);
+
+    std::vector<NodeId> sel;
+    nodeSelectVisible(R, cam, center, radPerPx, sel, 4096, errPx);
+    std::unordered_map<uint64_t, uint32_t> lvl;
+    for (const NodeId& n : sel) lvl[nodeKey(n)] = n.level;
+
+    // ⚠️ LOS STRIDES SE SIMULAN CON HISTERESIS, COMO HACE EL MOTOR — Y ESO ES EL TEST.
+    //
+    // Aqui ponia `nodeStrideIndex(...)` recalculado desde cero, sin historia. El motor NO hace eso:
+    // usa `nodeStrideQuantise(want, max, prev)` con el stride del frame ANTERIOR, que tiene una banda
+    // muerta del 25 %. Consecuencia: este banco solo generaba repartos de stride "de equilibrio" y
+    // **nunca las configuraciones que la histeresis produce al moverse** — que son justo donde el
+    // shader abre grieta.
+    //
+    // Medido con el shader (`v5 F3: grietas entre nodos vecinos`, barrido de 7 casos): a pie hay
+    // 6 agujeros DENTRO de un nivel, todos en el nivel 17 entre strides 1/0, y desaparecen con
+    // `HARUKA_TERRAIN_V5_STRIDE=1`. Este test daba 0,000000 m para ese mismo caso.
+    //
+    // Asi que se simula el recorrido: varios frames andando, arrastrando el mapa de strides igual que
+    // `m_skPrev`/`m_skNow`. El reparto final es el que el motor tendria de verdad.
+    struct PairF { NodeId a, b; uint32_t stA[4], stB[4]; int lvA[4], lvB[4]; uint32_t sA, sB; };
+    std::vector<PairF> pairsForFloat;
+    std::unordered_map<uint64_t, uint32_t> skPrev, skNow;
+    {
+        const glm::dvec3 east = glm::normalize(glm::cross(dir0, glm::dvec3(0, 1, 0)));
+        std::vector<NodeId> selF;
+        for (int f = 0; f <= 24; ++f) {
+            const glm::dvec3 camF = center + dir0 * (R + 2.0) + east * (0.083 * (double)f);
+            nodeSelectVisible(R, camF, center, radPerPx, selF, 4096, errPx);
+            skNow.clear();
+            for (const NodeId& n : selF) {
+                const uint64_t k = nodeKey(n);
+                const auto it = skPrev.find(k);
+                const double want = nodeStrideWant(n, R, camF, center, errPx, vertPx, fineCell, 0.0);
+                skNow[k] = nodeStrideQuantise(want, maxIdx, (it == skPrev.end()) ? kNoPrevStride
+                                                                                : it->second);
+            }
+            skPrev.swap(skNow);
+        }
+    }
+    auto strideOf = [&](const NodeId& n) {
+        const auto it = skPrev.find(nodeKey(n));
+        return (it != skPrev.end())
+             ? it->second
+             : nodeStrideIndex(n, R, cam, center, errPx, vertPx, fineCell, maxIdx);
+    };
+    // La polilínea que un nodo DIBUJA de verdad a lo largo de una arista vertical (u fijo), como
+    // funcion del indice v NOMINAL: vertices cada `stride`, cada uno ya cosido.
+    //
+    // ⚠️ MODELA TAMBIEN EL GEOMORPH, no solo el cosido. La primera version de esta auditoria solo
+    // modelaba el cosido y dio 0,000000 m mientras el juego SI tenia costuras: el bug estaba en que
+    // el shader decidia el morph con el mismo `edge` que la zancada, asi que en el caso nuevo
+    // (mismo nivel, distinto stride) morfeaba hacia el padre por un lado y no por el otro. Un
+    // instrumento que no modela una de las dos mitades no puede ver un fallo en esa mitad.
+    auto polyAt = [&](const NodeId& n, uint32_t uEdge, const uint32_t step[4],
+                      const int coarseLv[4], uint32_t stride, double vNom) {
+        const double texM = nodeTexelM(n, R);
+        const double parM = texM * 2.0;                      // el padre: escalera de octavas al doble
+        auto hMorphed = [&](const glm::dvec3 d, uint32_t u, uint32_t v) {
+            // ⚠️ AQUI SE MODELABA EL MORPH POR ARISTA. El shader ya no lo tiene: se borro el
+            // 2026-08-25 tras medir que no cerraba nada (2,747 m entre niveles con y sin el, y
+            // 8/11 px de grieta en GPU antes y despues). Modelarlo aqui seria auditar un shader
+            // inexistente — el fallo que este mismo comentario denuncia dos parrafos mas arriba.
+            //
+            // El unico morph que queda es el de DISTANCIA, y en una COSTURA no entra: es funcion del
+            // vertice, asi que los dos lados de la arista compartida dan el MISMO valor y se cancela
+            // en la resta. Por eso aqui vale 0 y no porque se ignore.
+            const double morph = 0.0;
+            (void)u; (void)v; (void)coarseLv;
+            const double hOwn = (double)Haruka::Planet::terrainDetail(d, R, (float)texM);
+            const double hPar = (double)Haruka::Planet::terrainDetail(d, R, (float)parM);
+            return hOwn + (hPar - hOwn) * morph;
+        };
+        auto vert = [&](uint32_t v) {
+            const StitchRef s = nodeStitchStep(uEdge, v, step);
+            const glm::dvec3 dA = nodeTexelDir(n, s.u0, s.v0), dB = nodeTexelDir(n, s.u1, s.v1);
+            const double hA = hMorphed(dA, s.u0, s.v0), hB = hMorphed(dB, s.u1, s.v1);
+            return (dA + (dB - dA) * s.t) * (R + hA + (hB - hA) * s.t);
+        };
+        // Mismo motivo que en `edge_audit_all`: el cosido colapsa, asi que la arista dibujada va al
+        // paso del COSIDO cuando lo hay. Muestrear al propio daria una escalera inexistente.
+        const int eIx = (uEdge == 0u) ? 0 : 1;
+        const uint32_t strideEff = (step[eIx] > stride) ? step[eIx] : stride;
+        const uint32_t b = (uint32_t)(std::floor(vNom / strideEff) * strideEff);
+        const uint32_t nx = std::min(b + strideEff, (uint32_t)TERRAIN_NODE_CELLS);
+        const double t = (nx == b) ? 0.0 : (vNom - b) / (double)(nx - b);
+        const glm::dvec3 pa = vert(b), pb = vert(nx);
+        return pa + (pb - pa) * t;
+    };
+
+    size_t pairs = 0, differing = 0;   double worst = 0.0, worstBug = 0.0; NodeId worstA{};
+    for (const NodeId& a : sel) {
+        if (a.i + 1 >= (1u << a.level)) continue;                   // sin cruzar de cara
+        const NodeId b{ a.face, a.level, a.i + 1, a.j };
+        if (lvl.find(nodeKey(b)) == lvl.end()) continue;            // el vecino no se dibuja
+        const uint32_t skA = strideOf(a), skB = strideOf(b);
+        ++pairs;
+        if (skA == skB) continue;                                   // sin novedad: ya funcionaba
+        ++differing;
+        (void)0;
+        const uint32_t sA = 1u << skA, sB = 1u << skB;
+        int cA[4], cB[4]; NodeId nbA[4], nbB[4];
+        nodeNeighbourLevels(a, lvl, cA, nbA);
+        nodeNeighbourLevels(b, lvl, cB, nbB);
+        uint32_t stA[4], stB[4];
+        int lvA[4], lvB[4];
+        for (int e = 0; e < 4; ++e) {
+            const uint32_t nA = 1u << strideOf(nbA[e]), nB = 1u << strideOf(nbB[e]);
+            const uint32_t pA = std::max(sA, nA << (uint32_t)cA[e]);
+            const uint32_t pB = std::max(sB, nB << (uint32_t)cB[e]);
+            stA[e] = (pA > sA) ? pA : 0u;
+            stB[e] = (pB > sB) ? pB : 0u;
+            lvA[e] = (cA[e] > 0) ? 1 : 0;         // CORRECTO: el morph mira el NIVEL
+            lvB[e] = (cB[e] > 0) ? 1 : 0;
+        }
+        pairsForFloat.push_back({ a, b, { stA[0],stA[1],stA[2],stA[3] }, { stB[0],stB[1],stB[2],stB[3] },
+                                  { lvA[0],lvA[1],lvA[2],lvA[3] }, { lvB[0],lvB[1],lvB[2],lvB[3] },
+                                  sA, sB });
+        for (int k = 0; k <= 512; ++k) {
+            const double vNom = (double)TERRAIN_NODE_CELLS * k / 512.0;
+            const double d = glm::length(polyAt(a, TERRAIN_NODE_CELLS, stA, lvA, sA, vNom)
+                                       - polyAt(b, 0,                  stB, lvB, sB, vNom));
+            if (d > worst) { worst = d; worstA = a; }
+            // ⚠️ CONTRAPRUEBA NUEVA (2026-08-25): SIN COSER.
+            //
+            // La anterior era "decidir el morph con la zancada en vez de con el nivel", que era el bug
+            // real de su dia. Pero el morph por arista se BORRO del shader tras medir que no cerraba
+            // nada, asi que esa contraprueba paso a dar 0,0000 m: no puede fallar, o sea que dejo de
+            // ser una contraprueba. La sustituye la del COSIDO, que es lo que este test audita ahora.
+            const uint32_t none[4] = { 0u, 0u, 0u, 0u };
+            const double dBug = glm::length(polyAt(a, TERRAIN_NODE_CELLS, none, lvA, sA, vNom)
+                                          - polyAt(b, 0,                  none, lvB, sB, vNom));
+            worstBug = std::max(worstBug, dBug);
+        }
+    }
+    std::printf("    frame real: %zu nodos · %zu parejas adyacentes en la misma cara\n",
+                sel.size(), pairs);
+    std::printf("    de ellas con STRIDE DISTINTO a los dos lados: %zu\n", differing);
+    std::printf("    peor separacion en la arista compartida: %.6f m", worst);
+    if (differing) std::printf("  (nivel %u, i=%u j=%u)", worstA.level, worstA.i, worstA.j);
+    std::printf("\n");
+    std::printf("    CONTRAPRUEBA sin cosido: %.4f m (es la T-junction que el cosido cierra)\n",
+                worstBug);
+
+    // ── ⚠️ Y AHORA EN FLOAT, QUE ES LO QUE CORRE ────────────────────────────────────────────────
+    //
+    // Todo lo de arriba va en `double` y sale 0,000000 m — pero el shader compone la posicion en
+    // FLOAT. Una grieta de precision es INVISIBLE para un gemelo en double por construccion, y eso
+    // encaja con lo que se mide en GPU: 6 agujeros a pie, nivel 17, entre strides distintos, con el
+    // banco de CPU insistiendo en que ahi no hay separacion.
+    //
+    // Aqui se repite la misma comparacion redondeando a float en los mismos sitios que el shader:
+    // la direccion, la altura y la composicion `dir*(R+h)` relativa al ojo.
+    double worstF = 0.0;
+    {
+        const glm::dvec3 eye = cam;
+        for (const auto& pr : pairsForFloat) {
+            const NodeId& a = pr.a; const NodeId& b = pr.b;
+            for (int k = 0; k <= 256; ++k) {
+                const double vNom = (double)TERRAIN_NODE_CELLS * k / 256.0;
+                const glm::dvec3 pa = polyAt(a, TERRAIN_NODE_CELLS, pr.stA, pr.lvA, pr.sA, vNom);
+                const glm::dvec3 pb = polyAt(b, 0,                  pr.stB, pr.lvB, pr.sB, vNom);
+                // Gemelo de la composicion del shader: relativo al ojo y en float.
+                const glm::vec3 fa = glm::vec3(pa - eye), fb = glm::vec3(pb - eye);
+                worstF = std::max(worstF, (double)glm::length(fa - fb));
+            }
+        }
+    }
+    std::printf("    LA MISMA arista en FLOAT (como el shader): %.6f m  <- el double dice 0,000000\n",
+                worstF);
+    // No es un fallo por si solo: es la escala de lo que un gemelo en double NO puede ver. Si sube,
+    // la grieta de precision crece.
+    CHECK(worstF < 0.5, "GUARDARRAIL de la separacion en FLOAT en la arista compartida");
+    CHECK(differing > 0, "el frame TIENE parejas con strides distintos (si no, esto no audita nada)");
+    CHECK(worst < 0.01, "ninguna costura entre strides distintos llega a 1 cm");
+    // El mismo liston de 1 cm que la cota de arriba: no un numero elegido para que pase.
+    CHECK(worstBug > 0.01, "CONTRAPRUEBA: SIN coser la arista SI se abre — prueba que el 0,000 m "
+                           "de arriba lo consigue el cosido y no es un cero trivial del instrumento");
+}
+
+/**
+ * @brief DIBUJAR POR ANCESTRO: cuánta disparidad mete, y cuántos frames dura.
+ *
+ * Reportado como "disparidad al girar la cámara". Es lo ÚNICO del pase que depende de la orientación:
+ * al girar entran nodos que el pool no tiene generados, y hasta que los genera se dibujan con el
+ * heightmap de un ANTEPASADO. Ese mapa evalúa una escalera de octavas más gruesa, así que la
+ * superficie dibujada no es la que se pisa — y vuelve a serlo sola unos frames después, que es
+ * exactamente el sintoma "aparece al girar y luego se va".
+ *
+ * Aquí no se prueba que esté bien: se MIDE cuánto vale y cuánto dura, que es lo que decide si la
+ * palanca es el pool, el presupuesto de generación o la caché.
+ */
+void test_terrain_node_ancestor_disparity() {
+    beginTest("terrain_node_ancestor_disparity");
+    const double R = 6371000.0;
+    const NodeId n{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const double texM = nodeTexelM(n, R);
+
+    std::printf("    saltos de   la superficie que se dibuja se separa de la que se pisa\n");
+    std::printf("    ancestro      peor        media      (sobre 4096 texeles del nodo)\n");
+    double worst1 = 0.0;
+    for (uint32_t up = 1; up <= 4; ++up) {
+        const double ancM = texM * (double)(1u << up);
+        double w = 0.0, sum = 0.0; size_t cnt = 0;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 2)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 2) {
+                const glm::dvec3 d = nodeTexelDir(n, u, v);
+                const double dh = std::fabs((double)Haruka::Planet::terrainDetail(d, R, (float)texM)
+                                          - (double)Haruka::Planet::terrainDetail(d, R, (float)ancM));
+                w = std::max(w, dh); sum += dh; ++cnt;
+            }
+        std::printf("      %u        %7.3f m   %7.3f m\n", up, w, sum / (double)cnt);
+        if (up == 1) worst1 = w;
+    }
+
+    // ── CUÁNTO DURA ─────────────────────────────────────────────────────────────────────────────
+    // Cifras del juego: 3053 nodos seleccionados, 170 generados por frame, y `angle_independence`
+    // mide 935 nodos NUEVOS al girar 90 grados.
+    const double kNuevosAl90 = 935.0, kPorFrame = 170.0;
+    const double frames = kNuevosAl90 / kPorFrame;
+    std::printf("    al girar 90 grados entran %.0f nodos nuevos a %.0f/frame -> %.1f frames "
+                "(%.0f ms a 60 fps)\n", kNuevosAl90, kPorFrame, frames, frames * 16.67);
+    std::printf("    -> durante esos frames el suelo dibujado esta hasta %.2f m fuera del que se pisa\n",
+                worst1);
+
+    // Umbrales sobre lo MEDIDO, no elegidos a ojo: un salto son 3,9 cm (del orden del suelo de ~1 cm
+    // que dejan render+twist juntos), y dos saltos se van a 34 cm.
+    CHECK(worst1 > 0.01, "un salto de ancestro ya supera el suelo de disparidad de render+twist");
+    CHECK(frames > 1.0, "y no se resuelve en un frame con el presupuesto de generacion de hoy");
+}
+
+/**
+ * @brief SATURACIÓN DEL SELECTOR: cuando se acaba el presupuesto, ¿quién se queda sin dividir?
+ *
+ * El juego mide `sel 3053` contra un presupuesto REAL de 3072 (el pool de 4096 menos el 25 % de
+ * caché). O sea que el selector va al 99,4 % y `room` se agota. Cuando eso pasa:
+ *
+ *     if (room && nodeShouldSplit(...)) { dividir } else { out.push_back(n); }
+ *
+ * el nodo se dibuja BASTO. Y quién se queda basto lo decide el ORDEN DE RECORRIDO —una pila LIFO que
+ * empieza por las seis caras del cubo—, no la importancia. Eso lo hace dependiente de la orientación:
+ * al girar cambia qué se recorta por el cono, cambia el orden efectivo, y le toca a otros.
+ *
+ * Es la explicacion candidata de "disparidad al girar la camara". Aquí se comprueba, no se afirma:
+ * si el presupuesto que sobra se lo llevan nodos LEJANOS mientras uno CERCANO se queda sin dividir,
+ * el reparto está mal; si los que se quedan bastos son siempre los lejanos, la causa es otra.
+ */
+void test_terrain_node_budget_starvation() {
+    beginTest("terrain_node_budget_starvation");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, errPx = 1.0;
+    const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam  = center + dir0 * (R + 2.0);
+    auto distOf = [&](const NodeId& n) {
+        return glm::length(center + nodeTexelDir(n, TERRAIN_NODE_CELLS/2, TERRAIN_NODE_CELLS/2) * R
+                           - cam);
+    };
+
+    std::vector<NodeId> full;
+    nodeSelectVisible(R, cam, center, radPerPx, full, 1000000, errPx);
+    std::printf("    demanda sin tope: %zu nodos · presupuesto del juego (pool 4096): 3072\n",
+                full.size());
+    std::printf("    ⚠️ aqui NO satura. El juego mide 3053 porque el selector recibe las ELEVACIONES\n");
+    std::printf("       del pool y divide mas; queda a 19 del tope, o sea plausible pero SIN medir.\n");
+
+    // ── LO QUE SI SE PUEDE DECIDIR AQUI: LA POLITICA DE REPARTO ─────────────────────────────────
+    //
+    // ⚠️ LA METRICA BUENA ES EL PEOR ERROR EN PANTALLA, NO LA DISTANCIA. El primer intento comparaba
+    // "el nodo basto mas cercano" contra "el fino mas lejano" y marcaba inversion siempre, tambien
+    // con el reparto ya arreglado — porque mezcla niveles: el error es `texel/(dist·radPerPx)`, y un
+    // nodo grueso a 700 m puede tener menos error que uno fino a 1400 m o mas, segun su nivel. Medir
+    // la distancia en vez del error es medir otra cosa.
+    //
+    // Lo que el reparto tiene que conseguir es MINIMIZAR EL PEOR ERROR con el presupuesto dado. Se
+    // compara contra la politica que habia (pila LIFO sembrada con las seis caras), reimplementada
+    // aqui: sin la referencia, "0,8 px" no dice si el cambio sirvio de algo.
+    auto lifoSelect = [&](size_t budget, std::vector<NodeId>& out) {
+        std::vector<NodeId> stack;
+        out.clear();
+        for (int f = 0; f < 6; ++f) stack.push_back(NodeId{ (PlanetFace)f, 0, 0, 0 });
+        while (!stack.empty()) {
+            const NodeId n = stack.back(); stack.pop_back();
+            if (nodeBelowHorizon(n, R, cam, center)) continue;
+            const bool room = (out.size() + stack.size() + 4) <= budget;
+            if (room && nodeShouldSplit(n, R, cam, center, radPerPx, errPx, 0.0)) {
+                NodeId kids[4]; nodeChildren(n, kids);
+                for (const NodeId& k : kids) stack.push_back(k);
+            } else out.push_back(n);
+        }
+    };
+    auto lifoWorstErr = [&](size_t budget) {
+        std::vector<NodeId> out; lifoSelect(budget, out);
+        double w = 0.0;
+        for (const NodeId& n : out) w = std::max(w, nodeScreenError(n, R, cam, center, radPerPx));
+        return w;
+    };
+
+    std::printf("\n    presupuesto   PEOR error en pantalla (px)     ganancia\n");
+    std::printf("                   LIFO (antes)   por error (ahora)\n");
+    bool better = false;
+    for (size_t budget : { (size_t)2500, (size_t)2000, (size_t)1500, (size_t)1000 }) {
+        std::vector<NodeId> tight;
+        nodeSelectVisible(R, cam, center, radPerPx, tight, budget, errPx);
+        double wNew = 0.0;
+        for (const NodeId& n : tight) wNew = std::max(wNew, nodeScreenError(n, R, cam, center, radPerPx));
+        const double wOld = lifoWorstErr(budget);
+        if (wNew < wOld * 0.95) better = true;
+        std::printf("    %9zu   %12.1f   %17.1f     %s\n", budget, wOld, wNew,
+                    (wNew < wOld) ? "mejor" : (wNew > wOld ? "PEOR" : "igual"));
+    }
+    std::printf("    (el presupuesto se gasta primero en el nodo con MAS error; lo que queda en la\n"
+                "     cola al agotarse es por construccion lo de menos, y es lo que sale basto)\n");
+
+    // ── LO QUE CUESTA EL CAMBIO ─────────────────────────────────────────────────────────────────
+    //
+    // El monticulo calcula el error al METER el nodo, asi que lo paga tambien para los que luego
+    // recorta el horizonte —la pila lo calculaba al sacarlo, despues de recortar—. Puede salir mas
+    // caro; si sale MUCHO mas caro, el arreglo no compensa y hay que ordenar de otra forma.
+    {
+        // ⚠️ LOS MILISEGUNDOS DEPENDEN DEL ARBOL DE BUILD. `haruka-cpp/build` es **Debug** y da ~5,6
+        // ms; el arbol de Survival es **RelWithDebInfo** y da ~1,0 ms en caliente. La cifra absoluta
+        // solo vale si se dice de cual sale. La RAZON sobrevive a las dos (x1,25-1,28 medido en
+        // ambas), porque las dos politicas hacen el mismo tipo de trabajo.
+        //
+        // En -O2 eso son **+0,25 ms de frame** (1,5 % a 60 fps) cuando NO satura, que es el precio
+        // de llevar el error en el candidato. Cuando satura se paga ademas la segunda pasada.
+        //
+        // Y la comparacion tiene que ser JUSTA: la primera version cronometraba `lifoWorstErr`, que
+        // ademas de seleccionar barria los ~2900 nodos calculando errores. Eso le cargaba a la
+        // politica vieja un trabajo que la nueva no hace, y salia un x0,92 que no significaba nada.
+        const int kIter = 20;
+        std::vector<NodeId> tmp, tmp2;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kIter; ++i) nodeSelectVisible(R, cam, center, radPerPx, tmp, 3072, errPx);
+        const auto t1 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kIter; ++i) lifoSelect(3072, tmp2);
+        const auto t2 = std::chrono::steady_clock::now();
+        const double heapMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / kIter;
+        const double lifoMs = std::chrono::duration<double, std::milli>(t2 - t1).count() / kIter;
+        std::printf("\n    coste del selector (absoluto = ESTE build; la razon vale en los dos)\n"
+                    "      LIFO %.2f ms -> "
+                    "por error %.2f ms  (x%.2f)\n", lifoMs, heapMs, heapMs / std::max(lifoMs, 1e-9));
+        CHECK(heapMs < lifoMs * 2.0, "ordenar por error no llega a duplicar el coste del selector "
+                                     "(si lo duplicara no compensaria el arreglo)");
+    }
+
+    // ── ¿PUEDE PARPADEAR LA PROPIA POLITICA? ────────────────────────────────────────────────────
+    //
+    // El selector usa la pila si no satura y el monticulo si satura. Si la saturacion oscila entre
+    // frames, la politica oscila con ella — y si las dos dieran conjuntos DISTINTOS, el terreno
+    // saltaria entre dos cortes cada frame. Eso seria otro temblor, introducido por el arreglo.
+    //
+    // La premisa que lo salva es que sin presion las dos dan EXACTAMENTE lo mismo. No se asume:
+    // se comprueba nodo a nodo, porque de ella depende que no haya que anadir mas histeresis.
+    {
+        std::vector<NodeId> byHeap, byLifo;
+        nodeSelectVisible(R, cam, center, radPerPx, byHeap, 3072, errPx);
+        lifoSelect(3072, byLifo);
+        std::sort(byHeap.begin(), byHeap.end(), [](const NodeId& a, const NodeId& b) {
+            return std::tie(a.face, a.level, a.i, a.j) < std::tie(b.face, b.level, b.i, b.j); });
+        std::sort(byLifo.begin(), byLifo.end(), [](const NodeId& a, const NodeId& b) {
+            return std::tie(a.face, a.level, a.i, a.j) < std::tie(b.face, b.level, b.i, b.j); });
+        const bool same = (byHeap.size() == byLifo.size())
+                       && std::equal(byHeap.begin(), byHeap.end(), byLifo.begin());
+        std::printf("\n    sin saturar, las dos politicas dan el MISMO conjunto: %s (%zu vs %zu nodos)\n",
+                    same ? "si" : "NO", byHeap.size(), byLifo.size());
+        CHECK(same, "sin presion pila y monticulo coinciden nodo a nodo, asi que alternar entre "
+                    "ellas no puede hacer saltar el terreno");
+    }
+
+    CHECK(full.size() < 3072, "con este punto de vista el presupuesto del juego NO satura — la "
+                              "saturacion queda como hipotesis SIN confirmar, no como causa");
+    CHECK(better, "repartir por error en pantalla baja el PEOR error frente a la pila LIFO que habia "
+                  "(si no bajara, el cambio no valdria para nada y habria que revertirlo)");
+}
+
+/**
+ * @brief EL TERRENO TIEMBLA AL ANDAR: ¿de qué, y cuánto?
+ *
+ * Reportado despues de arreglar el reparto del presupuesto. "Temblar" es inestabilidad TEMPORAL: la
+ * superficie de un mismo punto del suelo cambia entre un frame y el siguiente. Los tres mecanismos
+ * que pueden hacerlo, y aqui se separan porque cada uno se arregla en un sitio distinto:
+ *
+ *   · **STRIDE** — `nodeStrideIndex` sale de la distancia y NO tiene histeresis. Un nodo parado justo
+ *     en un umbral cambia de stride cada frame, y con el cambia la cuerda con la que se dibuja.
+ *     Es NUEVO: con el stride global esto no podia pasar.
+ *   · **NIVEL** — `nodeShouldSplit` tampoco tiene histeresis, pero ese salto ya lo cierra el
+ *     geomorph por distancia (`nodeParentMorph`), que es continuo.
+ *   · **ANCESTRO** — el pool no llega a generar y se dibuja el mapa del padre. Medido aparte.
+ *
+ * Se camina a 5 m/s (8,3 cm por frame a 60 fps) y se mira UN punto fijo del suelo.
+ */
+void test_terrain_node_walk_shimmer() {
+    beginTest("terrain_node_walk_shimmer");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, errPx = 1.0, vertPx = 4.0;
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+
+    const NodeId target{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const glm::dvec3 dirT = nodeTexelDir(target, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    const glm::dvec3 walk = glm::normalize(glm::cross(dirT, glm::dvec3(0, 0, 1)));
+    const double texM = nodeTexelM(target, R);
+
+    // ⚠️ EL PUNTO DE SONDA NO PUEDE SER EL CENTRO DEL NODO. El primer intento medía el téxel 64, que
+    // es múltiplo de 1, 2, 4, 8, 16, 32 y 64 — o sea que cae en la retícula de TODOS los strides y su
+    // altura no cambia nunca. Daba 0,0000 m de salto y parecía que el stride era inocente. Hay que
+    // sondear puntos IMPARES, que son los que ningún stride grueso dibuja.
+    auto drawnH = [&](uint32_t stride, uint32_t c) {
+        const uint32_t b2 = (c / stride) * stride;
+        const uint32_t nx = std::min(b2 + stride, (uint32_t)TERRAIN_NODE_CELLS);
+        if (nx == b2) return (double)Haruka::Planet::terrainDetail(nodeTexelDir(target, c, c), R, (float)texM);
+        const double t = (double)(c - b2) / (double)(nx - b2);
+        const double hA = (double)Haruka::Planet::terrainDetail(nodeTexelDir(target, b2, c), R, (float)texM);
+        const double hB = (double)Haruka::Planet::terrainDetail(nodeTexelDir(target, nx, c), R, (float)texM);
+        return hA + (hB - hA) * t;
+    };
+    const uint32_t kProbes[] = { 61u, 63u, 65u, 67u, 75u, 83u };   // impares: fuera de toda reticula
+
+    // ── DONDE ESTAN DE VERDAD LOS UMBRALES: barriendo, no con una formula ───────────────────────
+    auto strideAt = [&](double alongM) {
+        const glm::dvec3 cam = center + glm::normalize(dirT + walk * (alongM / R)) * (R + 2.0);
+        return nodeStrideIndex(target, R, cam, center, errPx, vertPx, fineCell, maxIdx);
+    };
+    std::vector<double> bounds;
+    {
+        uint32_t last = strideAt(0.0);
+        for (int i = 1; i <= 40000; ++i) {              // 0..400 m a 1 cm
+            const double d = i * 0.01;
+            const uint32_t sk = strideAt(d);
+            if (sk != last) { bounds.push_back(d); last = sk; }
+        }
+    }
+    std::printf("    umbrales de stride medidos (barrido a 1 cm): ");
+    for (double d : bounds) std::printf("%.2f m  ", d);
+    std::printf("\n");
+
+    // ── 1. ANDANDO: cuanto salta la superficie al cruzar un umbral ──────────────────────────────
+    const double kStepM = 5.0 / 60.0;                   // 5 m/s a 60 fps
+    uint32_t prevSk = 999; double prevH[6] = {0,0,0,0,0,0};
+    size_t flips = 0; double worstJump = 0.0, flipAtM = 0.0;
+    for (int i = 0; i <= 4800; ++i) {
+        const double along = i * kStepM;
+        const uint32_t sk = strideAt(along);
+        double h[6];
+        for (int q = 0; q < 6; ++q) h[q] = drawnH(1u << sk, kProbes[q]);
+        if (prevSk != 999 && sk != prevSk) {
+            ++flips;
+            for (int q = 0; q < 6; ++q) {
+                const double jump = std::fabs(h[q] - prevH[q]);
+                if (jump > worstJump) { worstJump = jump; flipAtM = along; }
+            }
+        }
+        prevSk = sk;
+        for (int q = 0; q < 6; ++q) prevH[q] = h[q];
+    }
+    std::printf("    andando 400 m a 5 m/s (%.3f m/frame), sobre 6 puntos IMPARES del nodo:\n", kStepM);
+    std::printf("      cambios de stride: %zu · salto peor de la superficie: %.4f m (a %.1f m)\n",
+                flips, worstJump, flipAtM);
+
+    // ── 2. PARADO EN UN UMBRAL: ¿parpadea? ──────────────────────────────────────────────────────
+    //
+    // Un salto aislado al cruzar es un pop. Ida y vuelta en frames consecutivos es un PARPADEO, y
+    // eso es lo que se lee como "tiembla". Se prueba en CADA umbral medido, con el micro-temblor
+    // que tiene cualquier controlador de personaje.
+    size_t worstToggles = 0, worstNoHyst = 0; double worstAt = 0.0;
+    for (double d : bounds) {
+        size_t toggles = 0, noHyst = 0;
+        uint32_t last = kNoPrevStride, lastRaw = 999;
+        for (int i = 0; i < 120; ++i) {
+            const double dd = d + ((i % 2) ? +0.01 : -0.01);
+            const glm::dvec3 cam = center + glm::normalize(dirT + walk * (dd / R)) * (R + 2.0);
+            const double want = nodeStrideWant(target, R, cam, center, errPx, vertPx, fineCell);
+            // CON historia, que es como corre el motor.
+            const uint32_t sk = nodeStrideQuantise(want, maxIdx, last);
+            if (last != kNoPrevStride && sk != last) ++toggles;
+            last = sk;
+            // SIN historia: la contraprueba. Si esta tampoco parpadeara, el test no probaria nada.
+            const uint32_t raw = nodeStrideQuantise(want, maxIdx);
+            if (lastRaw != 999 && raw != lastRaw) ++noHyst;
+            lastRaw = raw;
+        }
+        if (toggles > worstToggles) { worstToggles = toggles; worstAt = d; }
+        worstNoHyst = std::max(worstNoHyst, noHyst);
+    }
+    std::printf("      PARADO en un umbral con 1 cm de temblor, en 120 frames:\n");
+    std::printf("        SIN histeresis: %zu cambios   <- el temblor reportado\n", worstNoHyst);
+    std::printf("        CON histeresis: %zu cambios (peor umbral, a %.2f m)\n",
+                worstToggles, worstAt);
+    CHECK(worstNoHyst > 100, "CONTRAPRUEBA: sin histeresis SI parpadea casi cada frame — si esto "
+                             "fallara, el temblor no seria del stride y la histeresis sobraria");
+
+    CHECK(!bounds.empty(), "el barrido ENCUENTRA umbrales (si no, no se esta midiendo nada)");
+    CHECK(worstToggles == 0, "parado en un umbral, un temblor de 1 cm NO hace parpadear el stride");
+    CHECK(worstJump < 0.05, "y cruzarlo andando no mueve la superficie mas de 5 cm");
+}
+
+/**
+ * @brief EL TEMBLOR NO ES EL STRIDE: ¿es la CUANTIZACIÓN DE `uCenter`?
+ *
+ * `terrain_node.vert` compone la posición así:
+ *
+ *     vFragPos = uCenter.xyz + dirF * (uMisc.x + h)
+ *
+ * y `uCenter` lo llena la CPU con `glm::vec3(planetCenter - camPos)`. La resta va en double, bien —
+ * pero el resultado se guarda en **float**, y su magnitud es el radio del planeta: 6,37e6. Un float
+ * ahí tiene un ulp de **0,5 m**.
+ *
+ * Eso NO es el muro de precisión estático que ya está documentado (ese distorsiona el terreno pero de
+ * forma FIJA, y no se ve). Esto es distinto: `uCenter` cambia CADA FRAME al andar, así que se mueve a
+ * saltos de medio metro mientras la cámara se mueve suave. Todo el terreno salta de golpe.
+ *
+ * A 5 m/s cruzas un escalón de 0,5 m diez veces por segundo. Eso se lee como temblor, no como salto.
+ */
+void test_terrain_node_ucenter_jitter() {
+    beginTest("terrain_node_ucenter_jitter");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const NodeId n{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const glm::dvec3 dirT = nodeTexelDir(n, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    const glm::dvec3 walk = glm::normalize(glm::cross(dirT, glm::dvec3(0, 0, 1)));
+    const double h = (double)Haruka::Planet::terrainDetail(dirT, R, (float)nodeTexelM(n, R));
+
+    std::printf("    ulp de un float en 6.37e6: %.4f m\n",
+                (double)std::nextafterf((float)R, 2.0f * (float)R) - R);
+
+    // ⚠️ LA DIRECCION DE LA CAMINATA IMPORTA, Y EL PRIMER INTENTO ELIGIO LA MEJOR. Con la camara
+    // sobre el centro de la cara FRONT, `center - cam` es casi (-6.37e6, 0, 0): la componente GORDA
+    // (ulp 0,5 m) apenas cambia al andar de lado, y lo que cambia son las pequenas, cuyo ulp es de
+    // micras. Salia 0,0000 m — cierto, y sin valor: es el caso mas favorable de los seis.
+    //
+    // Se barren direcciones generales, donde las tres componentes son grandes a la vez y andar SI
+    // mueve una de ulp 0,5 m.
+    const double kStepM = 5.0 / 60.0;              // 5 m/s a 60 fps
+    double worstJump = 0.0, worstMean = 0.0, worstFix = 0.0; int worstCase = -1;
+    const glm::dvec3 kDirs[] = {
+        glm::normalize(glm::dvec3(1.0, 0.0, 0.0)),      // el caso facil de antes
+        glm::normalize(glm::dvec3(1.0, 1.0, 1.0)),      // las tres componentes grandes
+        glm::normalize(glm::dvec3(0.7, 0.5, 0.51)),
+        glm::normalize(glm::dvec3(0.9, 0.31, 0.30)),
+    };
+    for (int c = 0; c < 4; ++c) {
+        const glm::dvec3 d0 = kDirs[c];
+        const double h0 = (double)Haruka::Planet::terrainDetail(d0, R, 0.6f);
+        // Andar A LO LARGO de la componente mas grande, que es el peor caso.
+        // ⚠️ El eje se elige por la componente MENOR, no la mayor: con la mayor, si `d0` esta
+        // alineado con un eje la proyeccion sale nula y `normalize` devuelve NaN — la primera version
+        // imprimia "0.0000 m" para (1,0,0) y era un NaN disfrazado, no un caso bueno.
+        glm::dvec3 axis(0.0); int small = 0;
+        for (int k = 1; k < 3; ++k) if (std::fabs(d0[k]) < std::fabs(d0[small])) small = k;
+        axis[small] = 1.0;
+        const glm::dvec3 w = glm::normalize(axis - d0 * glm::dot(axis, d0));
+        double wj = 0.0, sum = 0.0; size_t cnt = 0, cntFix = 0;
+        double wjFix = 0.0, sumFix = 0.0;
+        glm::dvec3 prevErr(0.0), prevErrFix(0.0); bool have = false;
+        for (int i = 0; i <= 600; ++i) {
+            const glm::dvec3 cam = center + glm::normalize(d0 + w * ((i * kStepM) / R)) * (R + 2.0);
+            const glm::vec3 uCenter = glm::vec3(center - cam);
+            const glm::vec3 posF = uCenter + glm::vec3(d0) * (float)(R + h0);
+            const glm::dvec3 posD = d0 * (R + h0) - cam;
+            const glm::dvec3 err = glm::dvec3(posF) - posD;
+            // EL ARREGLO, tal cual lo hace el motor: el trozo gordo cuantizado a 64 m (exacto en
+            // float ahi) y el fino sumado DESPUES de la cancelacion.
+            const double kQ = 64.0;
+            const glm::dvec3 rel = center - cam;
+            const glm::dvec3 hiD(std::round(rel.x/kQ)*kQ, std::round(rel.y/kQ)*kQ,
+                                 std::round(rel.z/kQ)*kQ);
+            const glm::vec3 posFix = (glm::vec3(hiD) + glm::vec3(d0) * (float)(R + h0))
+                                   + glm::vec3(rel - hiD);
+            const glm::dvec3 errFix = glm::dvec3(posFix) - posD;
+            if (have) { const double dd = glm::length(err - prevErr); wj = std::max(wj, dd);
+                        sum += dd; ++cnt;
+                        const double df = glm::length(errFix - prevErrFix);
+                        wjFix = std::max(wjFix, df); sumFix += df; ++cntFix; }
+            prevErr = err; prevErrFix = errFix; have = true;
+        }
+        std::printf("      dir (%.2f,%.2f,%.2f):  ANTES peor %.4f m medio %.4f m  ->  "
+                    "CON EL ARREGLO peor %.6f m\n",
+                    d0.x, d0.y, d0.z, wj, sum / (double)cnt, wjFix);
+        if (wj > worstJump) { worstJump = wj; worstMean = sum / (double)cnt; worstCase = c; }
+        worstFix = std::max(worstFix, wjFix);
+        (void)cntFix; (void)sumFix;
+    }
+    std::printf("    el paso real de la camara es %.4f m/frame · PEOR caso: dir #%d\n",
+                kStepM, worstCase);
+    (void)worstMean;
+
+    // Sin veredicto prefijado: si sale grande es una causa de temblor; si sale cero, `uCenter` queda
+    // DESCARTADO y hay que buscar en otro sitio. Lo que no vale es no medirlo.
+    std::printf("    -> partido en dos, el salto entre frames baja de %.4f m a %.6f m (%.0fx)\n",
+                worstJump, worstFix, worstJump / std::max(worstFix, 1e-12));
+    CHECK(worstJump > 0.2, "CONTRAPRUEBA: con `uCenter` en un solo float el terreno SI salta medio "
+                           "metro entre frames — si esto no fallara, el arreglo no haria falta");
+    CHECK(worstFix < 0.001, "partido en grueso (multiplo de 64 m, exacto) + fino, el salto entre "
+                            "frames desaparece");
+}
+
+/**
+ * @brief PINCHOS: ¿deja el selector vecinos con más de UN nivel de diferencia?
+ *
+ * El cosido y el geomorph cierran exactamente **un** nivel: el nodo fino adopta la altura de su
+ * PADRE en la arista, que es lo que el vecino calcula porque el vecino ESTÁ al nivel del padre. Con
+ * dos o más niveles de diferencia el padre ya no es el vecino, el morph apunta al sitio equivocado y
+ * la zancada del cosido se dispara (`sNb << lv`, que con lv grande se sale del nodo entero). El
+ * resultado es una arista tirada de punta a punta: un pincho.
+ *
+ * Es la condicion **2:1** clasica de los quadtree con LOD, y aqui nunca se impuso — funcionaba de
+ * rebote porque la pila LIFO refina en profundidad y deja vecinos parecidos. Repartir por error
+ * refina donde mas falta hace, GLOBALMENTE, y eso puede juntar un nivel 17 con uno muy grueso.
+ *
+ * Si esto encuentra saltos > 1, los pinchos son esto y hay que equilibrar el arbol.
+ */
+void test_terrain_node_level_balance() {
+    beginTest("terrain_node_level_balance");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, errPx = 1.0;
+    const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam  = center + dir0 * (R + 2.0);
+
+    auto worstDiff = [&](size_t budget, size_t& outPairs, size_t& outBad) {
+        std::vector<NodeId> sel;
+        nodeSelectVisible(R, cam, center, radPerPx, sel, budget, errPx);
+        std::unordered_map<uint64_t, uint32_t> lv;
+        for (const NodeId& n : sel) lv[nodeKey(n)] = n.level;
+        int worst = 0; outPairs = 0; outBad = 0;
+        for (const NodeId& n : sel) {
+            int c[4]; NodeId nb[4];
+            nodeNeighbourLevels(n, lv, c, nb);
+            for (int e = 0; e < 4; ++e) {
+                if (nb[e] == n) continue;              // sin vecino dibujado por esa arista
+                ++outPairs;
+                if (c[e] > worst) worst = c[e];
+                if (c[e] > 1) ++outBad;
+            }
+        }
+        return worst;
+    };
+
+    std::printf("    presupuesto   parejas   saltos de >1 nivel   peor salto\n");
+    int worstAll = 0;
+    for (size_t budget : { (size_t)3072, (size_t)2000, (size_t)1000 }) {
+        size_t pairs = 0, bad = 0;
+        const int w = worstDiff(budget, pairs, bad);
+        worstAll = std::max(worstAll, w);
+        std::printf("    %9zu   %7zu   %18zu   %10d\n", budget, pairs, bad, w);
+    }
+    std::printf("    (el cosido y el morph cierran UN nivel; con mas, la zancada `sNb << lv` se sale\n"
+                "     del nodo y la arista se dibuja de punta a punta -> pincho)\n");
+
+    CHECK(worstAll <= 1, "el arbol SELECCIONADO cumple 2:1 y el cosido puede cerrar sus costuras");
+
+    // ── PERO LO QUE SE DIBUJA NO ES LO QUE SE SELECCIONA ─────────────────────────────────────────
+    //
+    // Un nodo sin hueco en el pool se dibuja con el mapa de un ANCESTRO (el log del juego lo cuenta
+    // como "por ancestro"). El conjunto DIBUJADO puede entonces tener saltos de varios niveles
+    // aunque el seleccionado sea 2:1 — y `nodeNeighbourLevels` se alimenta del dibujado.
+    {
+        std::vector<NodeId> sel;
+        nodeSelectVisible(R, cam, center, radPerPx, sel, 3072, errPx);
+        // Simula la caida a ancestro: 1 de cada 128 nodos retrocede 3 niveles, que es lo que pasa
+        // cuando el pool no llega a generarlos (al girar entran 935 de golpe a 170 por frame).
+        std::vector<NodeId> drawn; drawn.reserve(sel.size());
+        size_t fell = 0;
+        for (size_t i = 0; i < sel.size(); ++i) {
+            NodeId n = sel[i];
+            if (i % 128 == 0 && n.level >= 3) {
+                n.level -= 3; n.i /= 8; n.j /= 8; ++fell;
+            }
+            drawn.push_back(n);
+        }
+        std::unordered_map<uint64_t, uint32_t> lv;
+        for (const NodeId& n : drawn) lv[nodeKey(n)] = n.level;
+
+        auto audit = [&](const std::vector<NodeId>& set, size_t& bad) {
+            std::unordered_map<uint64_t, uint32_t> ix;
+            for (const NodeId& n : set) ix[nodeKey(n)] = n.level;
+            int worst = 0; bad = 0;
+            for (const NodeId& n : set) {
+                int c[4]; NodeId nb[4];
+                nodeNeighbourLevels(n, ix, c, nb);
+                for (int e = 0; e < 4; ++e) {
+                    if (nb[e] == n) continue;
+                    worst = std::max(worst, c[e]);
+                    if (c[e] > 1) ++bad;
+                }
+            }
+            return worst;
+        };
+        size_t badBefore = 0;
+        const int worstBefore = audit(drawn, badBefore);
+        std::printf("\n    con %zu nodos caidos a ancestro (lo que pasa al girar):\n", fell);
+        std::printf("      SIN equilibrar: peor salto %d niveles · %zu parejas con mas de uno\n",
+                    worstBefore, badBefore);
+
+        // El equilibrado, con la MISMA regla que usa el renderer (`nodeBalanceDrop`).
+        for (int pass = 0; pass < 12; ++pass) {
+            std::unordered_map<uint64_t, uint32_t> ix;
+            for (const NodeId& n : drawn) ix[nodeKey(n)] = n.level;
+            size_t changed = 0;
+            for (NodeId& n : drawn) {
+                const int drop = nodeBalanceDrop(n, ix);
+                if (drop <= 0) continue;
+                for (int k = 0; k < drop && n.level > 0; ++k) { n.level--; n.i /= 2; n.j /= 2; }
+                ++changed;
+            }
+            if (!changed) break;
+            // ⚠️ Y HAY QUE QUITAR LOS DESCENDIENTES, NO SOLO LOS DUPLICADOS. Bajar un nodo de nivel
+            // 17 a 13 lo convierte en un ancestro que CUBRE 256 nodos finos que siguen en el
+            // conjunto: se dibujarian dos superficies solapadas, que es peor que el escalon. El
+            // conjunto dibujado tiene que ser una ANTICADENA — ningun nodo ancestro de otro.
+            std::unordered_map<uint64_t, uint32_t> have;
+            for (const NodeId& n : drawn) have[nodeKey(n)] = n.level;
+            std::vector<NodeId> keep; keep.reserve(drawn.size());
+            std::unordered_map<uint64_t, char> emitted;
+            for (const NodeId& n : drawn) {
+                bool covered = false;
+                NodeId a = n;
+                while (a.level > 0) {
+                    a.level--; a.i /= 2; a.j /= 2;
+                    if (have.find(nodeKey(a)) != have.end()) { covered = true; break; }
+                }
+                if (covered) continue;
+                const uint64_t k = nodeKey(n);
+                if (emitted.find(k) != emitted.end()) continue;
+                emitted[k] = 1; keep.push_back(n);
+            }
+            drawn.swap(keep);
+        }
+        size_t badAfter = 0;
+        const int worstAfter = audit(drawn, badAfter);
+        std::printf("      EQUILIBRADO:    peor salto %d niveles · %zu parejas con mas de uno · "
+                    "%zu nodos (eran %zu)\n", worstAfter, badAfter, drawn.size(), sel.size());
+        std::printf("      -> a 2 niveles el escalon contra el vecino es 0,339 m; a 4, 1,372 m\n");
+
+        CHECK(badBefore > 0, "CONTRAPRUEBA: la caida a ancestro SI rompe el 2:1 del conjunto "
+                             "dibujado (si no lo rompiera, el equilibrado sobraria)");
+        CHECK(badAfter == 0, "equilibrar bajando SI cierra el 2:1...");
+        // ...pero a un precio que lo descarta como arreglo, y por eso se mide aqui: sin este numero
+        // el equilibrado parece la solucion obvia y no lo es.
+        CHECK(drawn.size() < sel.size() / 4, "...y se lleva por delante mas del 75 % de los nodos: 23 "
+                                             "caidas arrastran al 90 % del terreno a bastarse. NO es "
+                                             "el arreglo; el arreglo es que el pool garantice el padre");
+    }
+}
+
+/**
+ * @brief PROPS vs COLISIÓN vs TERRENO: tres cortes de octavas en el mismo punto.
+ *
+ * Reportado como "no coincide el placement de props y colision + terreno". La altura de un punto no
+ * es un valor: es `bake + terrainDetail(dir, R, minFeatureM)`, y **cada consumidor pasa un
+ * `minFeatureM` distinto**, o sea corta la escalera de octavas en otro sitio:
+ *
+ *   · **PROPS** — `sampleHeight(dir)` sin mas, que usa `terrainTriM(0.0)` = el piso, hoy 0,5 m.
+ *   · **RENDER** — el téxel del nodo que lo dibuja: `nodeTexelM`, 0,596 m en el nivel 17 pero
+ *     1,19 / 2,39 / 4,77 m en los niveles de mas afuera.
+ *   · **COLISION** — la celda del anillo que cubre ese punto: 0,5 m dentro de ±32 m, luego 1, 2, 4 m.
+ *
+ * Tres cortes = tres superficies. Un prop plantado con uno y dibujado sobre otro flota o se hunde.
+ */
+void test_terrain_prop_anchor_mismatch() {
+    beginTest("terrain_prop_anchor_mismatch");
+    const double R = 6371000.0;
+    const NodeId n17{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const double texel17 = nodeTexelM(n17, R);
+    const double propTriM = (double)Haruka::Planet::terrainTriM(0.0);
+
+    std::printf("    el corte de octavas que usa cada uno en el MISMO punto:\n");
+    std::printf("      props  (sampleHeight -> terrainTriM(0)) : %.3f m\n", propTriM);
+    std::printf("      render (texel del nodo, nivel 17)       : %.3f m\n", texel17);
+    std::printf("      colision (celda del anillo fino)        : %.3f m\n",
+                Haruka::Planet::TERRAIN_RING_FINE_CELL);
+
+    // Cuanto se separan de hecho, sobre puntos repartidos por el nodo.
+    double worstPR = 0.0, sumPR = 0.0; size_t cnt = 0;
+    double worstFar = 0.0; uint32_t farLevel = 0;
+    for (uint32_t v = 1; v < TERRAIN_NODE_CELLS; v += 7)
+        for (uint32_t u = 1; u < TERRAIN_NODE_CELLS; u += 7) {
+            const glm::dvec3 d = nodeTexelDir(n17, u, v);
+            const double hProp = (double)Haruka::Planet::terrainDetail(d, R, (float)propTriM);
+            const double hRend = (double)Haruka::Planet::terrainDetail(d, R, (float)texel17);
+            const double e = std::fabs(hProp - hRend);
+            worstPR = std::max(worstPR, e); sumPR += e; ++cnt;
+        }
+    std::printf("    props contra render EN EL NIVEL MAS FINO: peor %.4f m · medio %.4f m (%zu puntos)\n",
+                worstPR, sumPR / (double)cnt, cnt);
+
+    // ⚠️ Y EL NIVEL FINO ES EL CASO BUENO. Un prop a 300 m lo dibuja un nodo de nivel 15 o 14, cuyo
+    // texel es 2,4 o 4,8 m: ahi el corte del render se aleja mucho mas del que planto el prop.
+    std::printf("    nivel del nodo   texel    props contra render (peor)\n");
+    for (uint32_t lvl = 17; lvl >= 13; --lvl) {
+        const NodeId nl{ PlanetFace::FRONT, lvl, (1u << lvl) / 2, (1u << lvl) / 2 };
+        const double tx = nodeTexelM(nl, R);
+        double w = 0.0;
+        for (uint32_t v = 1; v < TERRAIN_NODE_CELLS; v += 11)
+            for (uint32_t u = 1; u < TERRAIN_NODE_CELLS; u += 11) {
+                const glm::dvec3 d = nodeTexelDir(nl, u, v);
+                w = std::max(w, std::fabs(
+                    (double)Haruka::Planet::terrainDetail(d, R, (float)propTriM)
+                  - (double)Haruka::Planet::terrainDetail(d, R, (float)tx)));
+            }
+        std::printf("        %2u        %6.3f m        %8.4f m\n", lvl, tx, w);
+        if (w > worstFar) { worstFar = w; farLevel = lvl; }
+    }
+    std::printf("    -> un prop plantado con el corte de 0,5 m y dibujado sobre un nodo de nivel %u\n"
+                "       queda hasta %.2f m fuera de la superficie que se ve\n", farLevel, worstFar);
+
+    // ⚠️ HIPOTESIS DESCARTADA POR LA PROPIA MEDIDA, y se deja escrita para no volver a mirar aqui.
+    //
+    // En el nivel 17 props y render coinciden EXACTAMENTE (0,0000 m): `terrainTriM(0)` = 0,5 m y el
+    // texel = 0,596 m caen en el mismo escalon de la escalera de octavas. El desajuste solo aparece
+    // en nodos mas bastos... que es donde no se ve, porque el error y la distancia escalan juntos:
+    //
+    //   nivel 16: 0,036 m a ~1,3 km = 0,03 px      nivel 15: 0,333 m a ~2,5 km = 0,14 px
+    //   nivel 13: 1,320 m a ~10 km  = 0,14 px
+    //
+    // (la distancia sale de igualar el error de pantalla a 1 px, que es como el selector elige nivel)
+    // Asi que el corte de octavas NO puede ser el "props que no casan" que se ve de cerca.
+    CHECK(worstPR < 0.001, "en el nivel mas fino props y render dan la MISMA altura: el corte de "
+                           "octavas queda descartado como causa del desajuste visible");
+    CHECK(worstFar > 0.1, "y aunque en nodos bastos si difiere, ahi cae por debajo del pixel");
+}
+
+/**
+ * @brief DESDE ÓRBITA: ¿hay píxeles de planeta sin nodo que los cubra?
+ *
+ * ── POR QUÉ NO BASTA CON `terrain_node_frustum_corners` ─────────────────────────────────────────
+ *
+ * Aquel test pregunta lo contrario de lo que hace falta: coge los nodos SELECCIONADOS y comprueba
+ * que caen dentro del cono. Eso descarta que se dibuje de más, no que falte. Y llega hasta 50 km,
+ * que no es órbita.
+ *
+ * Aquí se va al revés y desde donde se reporta el fallo: se lanzan rayos por el cuadro —esquinas
+ * incluidas—, se corta con el planeta, y de cada impacto se pregunta si ALGÚN nodo seleccionado lo
+ * cubre. Un impacto sin nodo es un agujero en pantalla, que es el sintoma.
+ */
+void test_terrain_node_orbit_coverage() {
+    beginTest("terrain_node_orbit_coverage");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double aspect = 1920.0 / 1080.0;
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, aspect);
+    const double t = std::tan(fovY * 0.5);
+
+    // ¿Cubre `n` la direccion `d`? Se compara en coordenadas de CARA, que es donde el nodo es un
+    // rectangulo exacto.
+    auto covers = [&](const NodeId& n, const glm::dvec3& d) {
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(d, f, lx, ly);
+        if (f != n.face) return false;
+        double x0, y0, x1, y1;
+        nodeTexelFaceCoord(n, 0, 0, x0, y0);
+        nodeTexelFaceCoord(n, TERRAIN_NODE_CELLS, TERRAIN_NODE_CELLS, x1, y1);
+        const double e = 1e-12;
+        return lx >= x0 - e && lx <= x1 + e && ly >= y0 - e && ly <= y1 + e;
+    };
+
+    // ⚠️ SE PRUEBAN LOS DOS PRESUPUESTOS. Con uno infinito se comprueba el CONO; con el del juego
+    // (pool 4096 -> 3072) se comprueba lo que de verdad se dibuja. Si el cono sale limpio y el del
+    // juego no, el recorte de esquinas no es de recorte: es de PRESUPUESTO.
+    std::printf("    presup.  altitud    rayos al planeta   SIN nodo   nodos elegidos   peor angulo\n");
+    size_t worstHoles = 0, worstHolesBudget = 0;
+    for (size_t budget : { (size_t)200000, (size_t)3072 })
+    for (double altKm : { 140.0, 500.0, 1000.0, 2000.0, 20000.0 }) {
+        const glm::dvec3 up = glm::normalize(glm::dvec3(1.0, 0.3, 0.2));
+        const glm::dvec3 cam = pc + up * (R + altKm * 1000.0);
+        const glm::dvec3 fwd = glm::normalize(pc - cam);          // mirando al planeta (nadir)
+        // ⚠️ LA BASE NO PUEDE SALIR DE `up`. Mirando al nadir `fwd == -up`, asi que `cross(fwd, up)`
+        // es CERO y `normalize` devuelve NaN: los rayos salen NaN, las comparaciones con NaN son
+        // todas falsas y el test contaba 2401 agujeros de 2401 — "no se ve el planeta" cuando lo que
+        // no existia era el rayo. Se elige el eje mundial MENOS alineado con `fwd`.
+        glm::dvec3 seed(0.0);
+        { int small = 0;
+          for (int k = 1; k < 3; ++k) if (std::fabs(fwd[k]) < std::fabs(fwd[small])) small = k;
+          seed[small] = 1.0; }
+        const glm::dvec3 rgt = glm::normalize(glm::cross(fwd, seed));
+        const glm::dvec3 upv = glm::cross(rgt, fwd);
+
+        std::vector<NodeId> sel;
+        nodeSelectVisible(R, cam, pc, radPerPx, sel, budget, TERRAIN_NODE_ERROR_PX,
+                          &fwd, cone, 5000.0);
+
+        size_t hits = 0, holes = 0; double worstAng = 0.0;
+        for (int iv = -24; iv <= 24; ++iv)
+            for (int iu = -24; iu <= 24; ++iu) {
+                const double sy = (double)iv / 24.0, sx = (double)iu / 24.0;
+                const glm::dvec3 ray = glm::normalize(fwd + rgt * (sx * t * aspect) + upv * (sy * t));
+                // Corte con la esfera de radio R.
+                const glm::dvec3 oc = cam - pc;
+                const double b = glm::dot(oc, ray), c = glm::dot(oc, oc) - R * R;
+                const double disc = b * b - c;
+                if (disc < 0.0) continue;                          // ese pixel es cielo
+                const double tHit = -b - std::sqrt(disc);
+                if (tHit < 0.0) continue;
+                ++hits;
+                const glm::dvec3 d = glm::normalize(oc + ray * tHit);
+                bool ok = false;
+                for (const NodeId& n : sel) if (covers(n, d)) { ok = true; break; }
+                if (!ok) {
+                    ++holes;
+                    worstAng = std::max(worstAng,
+                                        std::acos(glm::clamp(glm::dot(ray, fwd), -1.0, 1.0)) * 180.0 / 3.14159265358979);
+                }
+            }
+        std::printf("    %7zu  %5.0f km   %16zu   %8zu   %14zu   %8.2f\n",
+                    budget, altKm, hits, holes, sel.size(), worstAng);
+        if (budget >= 200000) worstHoles = std::max(worstHoles, holes);
+        else                  worstHolesBudget = std::max(worstHolesBudget, holes);
+    }
+    std::printf("    (el cono usado es de %.2f grados de semiangulo)\n", cone * 180.0 / 3.14159265358979);
+
+    CHECK(worstHoles == 0, "con presupuesto de sobra, el CONO no deja ningun pixel del planeta sin "
+                           "nodo: el recorte de frustum queda descartado como causa");
+    std::printf("    -> con el presupuesto REAL del juego quedan %zu pixeles sin cubrir\n",
+                worstHolesBudget);
+    CHECK(worstHolesBudget == 0, "y con el presupuesto del juego tampoco (si esto falla, las esquinas "
+                                 "que faltan son de PRESUPUESTO, no de recorte)");
+
+    // ── LOS CONTADORES DE DESCARTE, QUE MENTIAN ─────────────────────────────────────────────────
+    //
+    // El log del juego decia `horizonte 0` en TODOS los frames. No era un hallazgo: el renderer
+    // sacaba el desglose llamando dos veces mas al selector con los MISMOS argumentos y restando
+    // tamaños, asi que la resta del horizonte era 0 por construccion y el cono se llevaba la culpa
+    // de todo. Ahora los cuenta el selector por dentro. Aqui se comprueba que dan algo real.
+    {
+        const glm::dvec3 up = glm::normalize(glm::dvec3(1.0, 0.3, 0.2));
+        const glm::dvec3 cam = pc + up * (R + 140000.0);
+        const glm::dvec3 fwd = -up;                        // al nadir
+        std::vector<NodeId> sel;
+        size_t ch = 0, cf = 0;
+        nodeSelectVisible(R, cam, pc, radPerPx, sel, 3072, TERRAIN_NODE_ERROR_PX,
+                          &fwd, cone, 5000.0, nullptr, nullptr, &ch, &cf);
+        std::printf("    a 140 km, mirando al nadir: %zu nodos · descartes horizonte %zu / cono %zu\n",
+                    sel.size(), ch, cf);
+        CHECK(ch > 0, "el contador de HORIZONTE cuenta de verdad (era siempre 0 por un bug del "
+                      "diagnostico, no porque el horizonte no descartara nada)");
+        CHECK(cf > 0, "y el del cono tambien");
+    }
+}
+
+/**
+ * @brief EL RANGO DEL NODO: sin él, todo se mide al nivel del mar.
+ *
+ * `generatePending` publicaba `NodeRange{}` para todos los nodos, así que `rangeOf` devolvía
+ * inválido SIEMPRE. El log del juego lo dijo con `SIN RANGO 3070` de 3070, y de ahí viven tres
+ * cosas: el criterio de subdivisión, el stride por nodo y la envolvente del frustum.
+ *
+ * ⚠️ Lo grave no es el rango: es que **un arreglo dado por bueno llevaba semanas sin funcionar**. El
+ * criterio de subdivisión se cambió para medir al TERRENO y no al mar, se midió en test (donde el
+ * rango se pasa a mano) y se dio por cerrado — pero en el juego el rango venía vacío, así que seguía
+ * midiendo al mar. Un test que inyecta el dato bueno no prueba que el motor lo tenga.
+ */
+void test_terrain_node_range_published() {
+    beginTest("terrain_node_range_published");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    // Un "planeta" de mentira con una meseta de 1200 m: basta para que el rango importe.
+    struct Ctx { double R; } ctx{ R };
+    auto heightFn = [](const glm::dvec3& dir, void* c) -> float {
+        (void)c;
+        return 1200.0f + 30.0f * (float)std::sin(dir.y * 4000.0);
+    };
+
+    const NodeId n{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+    const NodeRange sinFn = nodeEstimateRange(n, R, nullptr, nullptr);
+    const NodeRange conFn = nodeEstimateRange(n, R, heightFn, &ctx);
+    std::printf("    sin muestreador: valido=%d  (es lo que publicaba el motor)\n", (int)sinFn.valid());
+    std::printf("    con muestreador: valido=%d  min %.1f  max %.1f  bound %.1f m\n",
+                (int)conFn.valid(), conFn.minM, conFn.maxM, conFn.boundM());
+    CHECK(!sinFn.valid(), "sin muestreador el rango sale invalido — el estado que tenia el juego");
+    CHECK(conFn.valid() && conFn.maxM > 1200.0f, "con muestreador captura la cota real del terreno");
+
+    // ── LO QUE CAMBIA AGUAS ABAJO ───────────────────────────────────────────────────────────────
+    const glm::dvec3 d = nodeTexelDir(n, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    const glm::dvec3 cam = center + d * (R + 1200.0 + 2.0);     // 2 m sobre la meseta
+    const double radPerPx = 9.4e-4;
+
+    const double errSea  = nodeScreenError(n, R, cam, center, radPerPx, 0.0);
+    const double errReal = nodeScreenError(n, R, cam, center, radPerPx, (double)conFn.maxM);
+    std::printf("    error en pantalla del nodo bajo los pies:\n");
+    std::printf("      midiendo al NIVEL DEL MAR : %8.3f px\n", errSea);
+    std::printf("      midiendo al TERRENO       : %8.3f px  (x%.0f)\n", errReal, errReal / errSea);
+
+    const uint32_t skSea  = nodeStrideIndex(n, R, cam, center, 1.0, 4.0,
+                                            Haruka::Planet::TERRAIN_RING_FINE_CELL, 6, 0.0);
+    const uint32_t skReal = nodeStrideIndex(n, R, cam, center, 1.0, 4.0,
+                                            Haruka::Planet::TERRAIN_RING_FINE_CELL, 6,
+                                            (double)conFn.maxM);
+    std::printf("      stride: al mar %u  ·  al terreno %u\n", 1u << skSea, 1u << skReal);
+
+    CHECK(errReal > errSea * 100.0, "medir al mar SUBESTIMA el error del nodo bajo los pies en dos "
+                                    "ordenes de magnitud: por eso subdividia de menos en las laderas");
+    CHECK(skReal == 0 && skSea > 0, "y deja el stride basto donde la colision pide el fino — el "
+                                    "`stride 4..4` del log");
+}
+
+/**
+ * @brief LA DEMANDA CON RANGO VÁLIDO: ¿cuántos nodos pide ahora el selector?
+ *
+ * Publicar el rango de verdad (antes salía vacío) hace que el criterio mida la distancia al TERRENO
+ * y no al mar. Eso es correcto — y multiplica la demanda, porque el error de un nodo bajo los pies
+ * pasa de 0,53 px a 634 px. Si la demanda se dispara muy por encima del presupuesto, el selector
+ * queda permanentemente hambriento y eso produce los DOS sintomas reportados a la vez:
+ *
+ *   · **PINCHOS** — vecinos con más de un nivel de diferencia; el geomorph solo cierra uno.
+ *   · **PARPADEO** — quién se queda sin dividir cambia con el menor movimiento de cámara.
+ *
+ * Aquí se mide cuánto pide de verdad, con una cota de terreno realista.
+ */
+void test_terrain_node_demand_with_range() {
+    beginTest("terrain_node_demand_with_range");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, errPx = 1.0;
+    const glm::dvec3 d0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+
+    // Cota realista: el bake del juego va de -11 km a +9 km y el spawn esta a ~1026 m.
+    struct RangeCtx { double R; };
+    RangeCtx rc{ R };
+    auto rangeFn = [](const NodeId& n, void* user) -> NodeRange {
+        auto* c = static_cast<RangeCtx*>(user);
+        NodeRange r;
+        const uint32_t step = TERRAIN_NODE_CELLS / 4;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += step)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += step) {
+                const glm::dvec3 dd = nodeTexelDir(n, u, v);
+                const float h = 1026.0f + (float)Haruka::Planet::terrainDetail(dd, c->R, 4.0f);
+                r.minM = std::min(r.minM, h); r.maxM = std::max(r.maxM, h);
+            }
+        const float pad = 0.25f * (r.maxM - r.minM);
+        r.minM -= pad; r.maxM += pad;
+        return r;
+    };
+
+    std::printf("    altura de camara   demanda SIN rango   demanda CON rango   presupuesto\n");
+    size_t worstDemand = 0;
+    for (double alt : { 2.0, 200.0, 20000.0 }) {
+        const glm::dvec3 cam = center + d0 * (R + 1026.0 + alt);
+        std::vector<NodeId> a, b;
+        nodeSelectVisible(R, cam, center, radPerPx, a, 400000, errPx);
+        nodeSelectVisible(R, cam, center, radPerPx, b, 400000, errPx, nullptr, 0.0, 5000.0,
+                          rangeFn, &rc);
+        std::printf("    %14.0f m   %17zu   %17zu   %11d\n", alt, a.size(), b.size(), 3072);
+        worstDemand = std::max(worstDemand, b.size());
+    }
+    std::printf("    -> el presupuesto con pool 4096 es 3072. Hambre = demanda/presupuesto.\n");
+    std::printf("       Hambriento => nodos sin dividir junto a nodos finos (PINCHOS) y reparto\n");
+    std::printf("       que cambia con la camara (PARPADEO).\n");
+
+    std::printf("    hambre peor con errorPx=1: x%.1f\n", (double)worstDemand / 3072.0);
+
+    // ── LA PALANCA: `errorPx` NO ES LA DENSIDAD DE TRIANGULOS ───────────────────────────────────
+    //
+    // `errorPx` decide a que nivel se subdivide, o sea cuantos TEXELES DE HEIGHTMAP hay por pixel.
+    // `vertexPx` (4) decide cuantos pixeles hay entre VERTICES dibujados. Con errorPx=1 el heightmap
+    // tiene un texel por pixel mientras se dibuja un vertice cada 4: **16 veces mas texeles que
+    // vertices**. Subir errorPx baja los nodos sin bajar los triangulos, porque el stride se ajusta
+    // solo (`screenWant = vertexPx/errorPx`) y mantiene la misma densidad EN PANTALLA.
+    std::printf("\n    errorPx   demanda   hambre   texeles/pixel   stride lejano   triangulos\n");
+    const glm::dvec3 cam2 = center + d0 * (R + 1026.0 + 2.0);
+    for (double ep : { 1.0, 2.0, 3.0, 4.0 }) {
+        std::vector<NodeId> v;
+        nodeSelectVisible(R, cam2, center, radPerPx, v, 400000, ep, nullptr, 0.0, 5000.0,
+                          rangeFn, &rc);
+        const double screenWant = 4.0 / ep;
+        uint32_t sk = 0; while (sk + 1 <= 6 && (double)(1u << (sk + 1)) <= screenWant) ++sk;
+        const uint32_t stride = 1u << sk;
+        // Triangulos = nodos * (celdas/stride)^2 * 2
+        const double cells = (double)TERRAIN_NODE_CELLS / (double)stride;
+        std::printf("    %7.0f   %7zu   %5.1fx   %13.0f   %13u   %8.1f M\n",
+                    ep, v.size(), (double)v.size() / 3072.0, 1.0 / ep, stride,
+                    (double)v.size() * cells * cells * 2.0 / 1e6);
+    }
+    std::printf("    -> subir errorPx baja los NODOS (y la VRAM) sin cambiar la densidad en pantalla:\n"
+                "       el stride compensa. Lo que baja es el heightmap sobrante.\n");
+
+    CHECK(worstDemand > 3072, "con errorPx=1 y el rango publicado, la demanda SUPERA el presupuesto: "
+                              "el selector va hambriento y de ahi salen los pinchos y el parpadeo");
+
+    // ── LO QUE NO SE PUEDE PERDER AL SUBIR errorPx ──────────────────────────────────────────────
+    //
+    // Subir el umbral recorta el campo medio; si recortara tambien el campo CERCANO, se llevaria por
+    // delante la paridad con la colision, que es lo que costo media sesion. Se comprueba con el valor
+    // POR DEFECTO —no con uno pasado a mano—, que es lo que corre el motor.
+    {
+        std::vector<NodeId> v;
+        nodeSelectVisible(R, cam2, center, radPerPx, v, 400000, TERRAIN_NODE_ERROR_PX,
+                          nullptr, 0.0, 5000.0, rangeFn, &rc);
+        uint32_t deepest = 0; double nearestDeep = 1e300;
+        for (const NodeId& n : v) {
+            deepest = std::max(deepest, n.level);
+            if (n.level == TERRAIN_NODE_MAX_LEVEL) {
+                const glm::dvec3 p = center + nodeTexelDir(n, TERRAIN_NODE_CELLS/2,
+                                                           TERRAIN_NODE_CELLS/2) * (R + 1026.0);
+                nearestDeep = std::min(nearestDeep, glm::length(p - cam2));
+            }
+        }
+        // Y el stride del nodo bajo los pies, con el errorPx por defecto.
+        const NodeId foot{ PlanetFace::FRONT, TERRAIN_NODE_MAX_LEVEL,
+                           (1u << TERRAIN_NODE_MAX_LEVEL) / 2, (1u << TERRAIN_NODE_MAX_LEVEL) / 2 };
+        const glm::dvec3 dF = nodeTexelDir(foot, TERRAIN_NODE_CELLS/2, TERRAIN_NODE_CELLS/2);
+        const glm::dvec3 camF = center + dF * (R + 1026.0 + 2.0);
+        const uint32_t sk = nodeStrideIndex(foot, R, camF, center, TERRAIN_NODE_ERROR_PX, 4.0,
+                                            Haruka::Planet::TERRAIN_RING_FINE_CELL, 6, 1026.0);
+        // ── LA DEMANDA CON EL CONO, que es la que decide el TAMANO DEL POOL ─────────────────────────
+    //
+    // Todo lo de arriba mide 360 grados. El motor recorta con el cono del frustum, asi que el pool
+    // solo tiene que aguantar lo que cabe en pantalla. Este es el numero del que sale el valor por
+    // defecto de `capacity`, y hasta ahora ese valor (1024 -> presupuesto 768) era heredado de
+    // cuando el criterio media al nivel del mar y pedia mucho menos.
+    {
+        const double fovY = 60.0 * 3.14159265358979 / 180.0;
+        const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+        std::printf("\n    con el cono del frustum (lo que de verdad se pide):\n");
+        std::printf("      altura   demanda   pool necesario (demanda/0,75)\n");
+        size_t worstCone = 0;
+        for (double alt : { 2.0, 200.0, 2000.0, 20000.0 }) {
+            const glm::dvec3 c2 = center + d0 * (R + 1026.0 + alt);
+            const glm::dvec3 fwd = glm::normalize(glm::cross(d0, glm::dvec3(0,0,1)));  // horizonte
+            std::vector<NodeId> v;
+            nodeSelectVisible(R, c2, center, radPerPx, v, 400000, TERRAIN_NODE_ERROR_PX,
+                              &fwd, cone, 5000.0, rangeFn, &rc);
+            std::printf("      %5.0f m   %7zu   %zu\n", alt, v.size(),
+                        (size_t)((double)v.size() / 0.75));
+            worstCone = std::max(worstCone, v.size());
+        }
+        std::printf("      -> pool necesario: %zu huecos = %.0f MB de VRAM a 130 KB/nodo\n",
+                    (size_t)((double)worstCone / 0.75),
+                    (double)worstCone / 0.75 * 130.0 / 1024.0);
+    }
+
+    std::printf("\n    con el errorPx POR DEFECTO (%.0f): nivel mas fino %u · demanda %zu · "
+                    "stride bajo los pies %u\n", TERRAIN_NODE_ERROR_PX, deepest, v.size(), 1u << sk);
+        CHECK(deepest == TERRAIN_NODE_MAX_LEVEL, "cerca se sigue llegando al nivel MAXIMO: subir el "
+                                                 "umbral recorta el campo medio, no el que se pisa");
+        CHECK(sk == 0, "y el stride bajo los pies sigue siendo 1, que es lo que iguala render y "
+                       "colision (si esto falla, subir errorPx se ha llevado la paridad)");
+        CHECK(v.size() < 3072, "y la demanda cabe en el presupuesto: sin hambre no hay pinchos ni "
+                               "parpadeo por reparto");
+    }
+}
+
+/**
+ * @brief PARPADEO POR RANGO HEREDADO: el pool frío y el pool caliente eligen árboles distintos.
+ *
+ * `rangeOf` devuelve el rango del ANCESTRO cuando el nodo no está residente. Para acotar (la
+ * envolvente del frustum) es correcto: el área del hijo está dentro de la del padre. Para el
+ * CRITERIO DE SUBDIVISIÓN no lo es, y en la dirección mala:
+ *
+ *   · El `maxM` del ancestro es el pico de un área enorme. Un nodo en un valle hereda la altura de
+ *     la montaña de al lado, así que `nodeScreenError` lo coloca a esa altura, más cerca de la
+ *     cámara de lo que está, y decide subdividir.
+ *   · Cuando el pool lo genera y pasa a tener su rango PROPIO —mucho más ajustado— el error cae y
+ *     el nodo se deshace.
+ *
+ * Generar cambia la decisión que causó la generación. Eso es un bucle, y se ve como parpadeo; y
+ * mientras dura, unos nodos van finos y sus vecinos no, que es lo que abre los pinchos.
+ *
+ * Aquí se compara el árbol que sale con el pool FRÍO (todo heredado del nivel 4) contra el que sale
+ * con el pool CALIENTE (cada nodo con su rango). Si son muy distintos, el bucle es real.
+ */
+void test_terrain_node_inherited_range_flicker() {
+    beginTest("terrain_node_inherited_range_flicker");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4;
+    const glm::dvec3 d0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam = center + d0 * (R + 1026.0 + 2.0);
+
+    struct Ctx { int inheritFrom; };            // 0 = rango propio; >0 = heredado de ese nivel
+    auto rangeAt = [](const NodeId& n, void* user) -> NodeRange {
+        auto* c = static_cast<Ctx*>(user);
+        NodeId q = n;
+        while ((int)q.level > c->inheritFrom && q.level > 0) { q.level--; q.i /= 2; q.j /= 2; }
+        NodeRange r;
+        const uint32_t step = TERRAIN_NODE_CELLS / 4;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += step)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += step) {
+                const float h = 1026.0f
+                              + (float)Haruka::Planet::terrainDetail(nodeTexelDir(q, u, v),
+                                                                     6371000.0, 4.0f);
+                r.minM = std::min(r.minM, h); r.maxM = std::max(r.maxM, h);
+            }
+        const float pad = 0.25f * (r.maxM - r.minM);
+        r.minM -= pad; r.maxM += pad;
+        return r;
+    };
+
+    std::printf("    rango heredado desde   nodos   nivel max   maxM del nodo bajo los pies\n");
+    std::vector<NodeId> warm;
+    size_t coldCount = 0;
+    for (int from : { 99, 12, 8, 4 }) {         // 99 = cada nodo con SU rango (pool caliente)
+        Ctx c{ from };
+        std::vector<NodeId> v;
+        nodeSelectVisible(R, cam, center, radPerPx, v, 400000, TERRAIN_NODE_ERROR_PX,
+                          nullptr, 0.0, 5000.0, rangeAt, &c);
+        uint32_t mx = 0; for (const NodeId& n : v) mx = std::max(mx, n.level);
+        const NodeId foot{ PlanetFace::FRONT, 17, (1u << 17) / 2, (1u << 17) / 2 };
+        const NodeRange fr = rangeAt(foot, &c);
+        std::printf("    %20s   %5zu   %9u   %20.1f m\n",
+                    from == 99 ? "su propio nivel" : (from == 12 ? "nivel 12"
+                                 : (from == 8 ? "nivel 8" : "nivel 4")),
+                    v.size(), mx, fr.maxM);
+        if (from == 99) warm = v;
+        else coldCount = v.size();
+    }
+
+    // ¿Cuanto se parecen los dos arboles? Es la magnitud del salto entre un frame y el siguiente.
+    {
+        Ctx c{ 4 };
+        std::vector<NodeId> cold;
+        nodeSelectVisible(R, cam, center, radPerPx, cold, 400000, TERRAIN_NODE_ERROR_PX,
+                          nullptr, 0.0, 5000.0, rangeAt, &c);
+        std::unordered_map<uint64_t, char> inWarm;
+        for (const NodeId& n : warm) inWarm[nodeKey(n)] = 1;
+        size_t shared = 0;
+        for (const NodeId& n : cold) if (inWarm.count(nodeKey(n))) ++shared;
+        const double pct = 100.0 * (double)shared / (double)std::max<size_t>(cold.size(), 1);
+        std::printf("    nodos EN COMUN entre el arbol frio y el caliente: %zu de %zu (%.1f %%)\n",
+                    shared, cold.size(), pct);
+        std::printf("    -> lo que NO comparten se dibuja distinto en frames consecutivos\n");
+        CHECK(coldCount > 0, "el arbol frio se calcula");
+        CHECK(pct > 90.0, "el rango heredado NO cambia sustancialmente el arbol elegido (si baja de "
+                          "90 %%, generar un nodo cambia la decision que lo genero: eso es el bucle "
+                          "que se ve como parpadeo)");
+    }
+}
+
+/**
+ * @brief CAZAR EL PINCHO: reconstruir cada vértice dibujado y ver cuál se sale.
+ *
+ * ── POR QUÉ ASÍ Y NO POR HIPÓTESIS ──────────────────────────────────────────────────────────────
+ *
+ * Los pinchos se han achacado ya a dos causas medidas —caída profunda a ancestro y hambre del
+ * selector— y las dos están descartadas con el log del juego delante (`por ancestro 0`, sin
+ * `SATURADO`). Seguir proponiendo mecanismos es adivinar.
+ *
+ * Esto no propone nada: monta el frame como lo monta el motor (selector real, stride por nodo,
+ * cosido por zancada, geomorph) y recorre TODOS los vértices que se dibujarían, comparando cada uno
+ * con el campo de altura en su propia dirección. El que se separe mucho ES el pincho, y el test dice
+ * dónde cae: en una arista, en una esquina, en el interior, y con qué combinación de nivel y stride.
+ */
+/// Contexto y rango para `terrain_node_spike_hunt`: gemelo de lo que el motor publica via
+/// `nodeEstimateRange` con `sampleHeight`.
+struct RangeFnCtx { double R; };
+static Haruka::Terrain::NodeRange spikeHuntRangeFn(const Haruka::Terrain::NodeId& n, void* user) {
+    using namespace Haruka::Terrain;
+    auto* c = static_cast<RangeFnCtx*>(user);
+    NodeRange r;
+    const uint32_t step = TERRAIN_NODE_CELLS / 4;
+    for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += step)
+        for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += step) {
+            const float h = 1026.0f
+                          + (float)Haruka::Planet::terrainDetail(nodeTexelDir(n, u, v), c->R, 4.0f);
+            r.minM = std::min(r.minM, h); r.maxM = std::max(r.maxM, h);
+        }
+    const float pad = 0.25f * (r.maxM - r.minM);
+    r.minM -= pad; r.maxM += pad;
+    return r;
+}
+
+void test_terrain_node_spike_hunt() {
+    beginTest("terrain_node_spike_hunt");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, vertPx = 4.0;
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+    const glm::dvec3 d0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam = center + d0 * (R + 1026.0 + 2.0);
+
+    RangeFnCtx rc{ R };
+    std::vector<NodeId> sel;
+    nodeSelectVisible(R, cam, center, radPerPx, sel, 1536, TERRAIN_NODE_ERROR_PX,
+                      nullptr, 0.0, 5000.0, &spikeHuntRangeFn, &rc);
+    std::unordered_map<uint64_t, uint32_t> lv;
+    for (const NodeId& n : sel) lv[nodeKey(n)] = n.level;
+
+    auto strideOf = [&](const NodeId& n) {
+        const NodeRange r = spikeHuntRangeFn(n, &rc);
+        return nodeStrideIndex(n, R, cam, center, TERRAIN_NODE_ERROR_PX, vertPx, fineCell, maxIdx,
+                               r.valid() ? (double)r.maxM : 0.0);
+    };
+
+    // ⚠️ LA CADENA COMPLETA, CON EL BAKE DENTRO. La primera version evaluaba `terrainDetail(d, R,
+    // texM)` con R CONSTANTE. El motor NO hace eso: `terrain_node.comp` hace
+    //
+    //     baseH = bake(dir);   baseR = R + baseH;   h = baseH + detail(dir, baseR, triM)*atten(baseH)
+    //
+    // y `baseR` entra en la COORDENADA del ruido (`p = dir * baseR / lambda`). O sea que el campo de
+    // detalle depende de la altura del bake: con lambda = 4,5 m, un metro de bake desplaza el ruido
+    // un 22 % de periodo. Probar con R constante era probar una cadena que el motor no ejecuta, y por
+    // eso el test daba "exceso +0,0000 m" mientras en pantalla habia pinchos.
+    //
+    // El bake se sintetiza con ruido de escala continental y se muestrea con `sampleHeightField` +
+    // `equirectUV`, que son los gemelos CPU exactos de lo que corre el compute.
+    const int BW = 512, BH = 256;
+    std::vector<float> bake((size_t)BW * BH);
+    for (int y = 0; y < BH; ++y)
+        for (int x = 0; x < BW; ++x) {
+            const double lon = ((x + 0.5) / BW) * 2.0 * 3.14159265358979 - 3.14159265358979;
+            const double lat = (0.5 - (y + 0.5) / BH) * 3.14159265358979;
+            const glm::dvec3 dd(std::cos(lat) * std::cos(lon), std::sin(lat),
+                                std::cos(lat) * std::sin(lon));
+            bake[(size_t)y * BW + x] = 900.0f
+                + (float)Haruka::Planet::terrainDetail(dd, R, 20000.0f);   // relieve continental
+        }
+    auto bakeChain = [&](const glm::dvec3& d, double triM) {
+        const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(d));
+        const float baseH = Haruka::Planet::sampleHeightField(uv, BW, BH, bake.data());
+        const double baseR = R + (double)baseH;
+        float det = Haruka::Planet::terrainDetail(d, baseR, (float)triM)
+                  * Haruka::Planet::seaLevelAttenuation(baseH);
+        if (baseH > 0.0f) det = std::max(det, -baseH);
+        return (double)baseH + (double)det;
+    };
+
+    // ⚠️ "SEPARARSE DEL CAMPO" NO ES UN PINCHO. El geomorph MUEVE vertices a proposito: entra
+    // `kMorphCells` = 8 celdas desde una arista que linda con un vecino mas grueso, llevandolos a la
+    // altura del padre. La primera version de esto contaba eso como fallo (738 vertices interiores
+    // "desviados") cuando es la funcion haciendo su trabajo, y encima el peor caso que reportaba
+    // caia en una ARISTA, o sea justo donde el cosido debe mover.
+    //
+    // Un pincho es una DISCONTINUIDAD: un vertice que rompe con sus vecinos DIBUJADOS. Se mide con
+    // el laplaciano discreto sobre la malla que de verdad se emite, con paso igual al stride.
+    double worstLap = 0.0; NodeId worstNode{}; uint32_t worstU = 0, worstV = 0, worstS = 0;
+    size_t spikes = 0, checked = 0, spikeInner = 0, spikeNearEdge = 0, rawOver = 0;
+    double worstRaw = 0.0;
+    for (const NodeId& n : sel) {
+        if (n.level < 14) continue;                       // los finos: donde se ven los pinchos
+        const uint32_t sOwn = 1u << strideOf(n);
+        const double texM = nodeTexelM(n, R), parM = texM * 2.0;
+        int c[4]; NodeId nb[4];
+        nodeNeighbourLevels(n, lv, c, nb);
+        uint32_t step[4]; int coarse[4]; (void)coarse;
+        for (int e = 0; e < 4; ++e) {
+            const uint32_t sNb = 1u << strideOf(nb[e]);
+            const uint32_t st = std::max(sOwn, sNb << (uint32_t)c[e]);
+            step[e]   = (st > sOwn) ? st : 0u;
+            coarse[e] = (c[e] > 0) ? 1 : 0;
+        }
+        auto vertexPos = [&](uint32_t u, uint32_t v) {
+            const StitchRef s2 = nodeStitchStep(u, v, step);
+            // ⚠️ AQUI HABIA UN GEMELO DEL MORPH POR ARISTA, Y EL SHADER YA NO LO TIENE.
+            //
+            // El morph por arista se borro de `terrain_node.vert` el 2026-08-25 tras medir que no
+            // cerraba nada (2,747 m entre niveles con y sin el, y 8/11 px de grieta en GPU antes y
+            // despues). Este test lo seguia modelando, o sea que auditaba un shader inexistente —
+            // el MISMO fallo que ya costo una sesion con `terrain_node_edge_audit_all`.
+            //
+            // Ahora el unico morph es el de DISTANCIA, y es funcion del vertice: los dos lados de una
+            // arista compartida dan el mismo valor, asi que no puede abrir grieta y no hace falta
+            // modelarlo para medir el cosido, que es lo que este test audita. Lo que si entra es el
+            // morph POR VERTICE, porque varia dentro del nodo y este test mide un laplaciano.
+            auto hOf = [&](uint32_t uu, uint32_t vv) {
+                const glm::dvec3 d = nodeTexelDir(n, uu, vv);
+                const double morph = (double)nodeVertexMorph(n.level, d, R, cam, center, radPerPx);
+                return bakeChain(d, texM) + (bakeChain(d, parM) - bakeChain(d, texM)) * morph;
+            };
+            const glm::dvec3 dA = nodeTexelDir(n, s2.u0, s2.v0), dB = nodeTexelDir(n, s2.u1, s2.v1);
+            const double hA = hOf(s2.u0, s2.v0), hB = hOf(s2.u1, s2.v1);
+            return (dA + (dB - dA) * s2.t) * (R + hA + (hB - hA) * s2.t);
+        };
+        // ⚠️ CONTROL: el MISMO laplaciano sobre el campo CRUDO, sin cosido ni morph, en la misma
+        // reticula. El terreno real tiene rugosidad: a nivel 14 con stride 2 hay 9,5 m entre
+        // vertices, y medio metro de variacion ahi es una pendiente del 5 % — normal. Sin esta
+        // referencia, "0,84 m de laplaciano" no distingue un pincho de una ladera.
+        auto rawPos = [&](uint32_t u, uint32_t v) {
+            const glm::dvec3 d = nodeTexelDir(n, u, v);
+            return d * (R + bakeChain(d, texM));
+        };
+        // ⚠️ SE EMPIEZA A DOS CELDAS DEL BORDE, NO A UNA. El vecino del laplaciano llegaba justo a la
+        // FILA DEL BORDE, y esa es la unica que el cosido mueve a proposito: desde que colapsa el
+        // vertice sobrante sobre el del grueso (ver `nodeStitchStep`), esa fila NO esta en la
+        // retícula fina — por diseño. Medirla como "pico" seria acusar al cosido de hacer su trabajo.
+        // Lo que este test busca es un vertice que rompa la malla SIN que nada deba haberlo movido.
+        for (uint32_t v = 2u * sOwn; v + 2u * sOwn <= TERRAIN_NODE_CELLS; v += sOwn)
+            for (uint32_t u = 2u * sOwn; u + 2u * sOwn <= TERRAIN_NODE_CELLS; u += sOwn) {
+                const glm::dvec3 Q  = rawPos(u, v);
+                const glm::dvec3 qavg = (rawPos(u - sOwn, v) + rawPos(u + sOwn, v)
+                                       + rawPos(u, v - sOwn) + rawPos(u, v + sOwn)) * 0.25;
+                const double rawLap = glm::length(Q - qavg);
+                worstRaw = std::max(worstRaw, rawLap);
+                if (rawLap > 0.5) ++rawOver;
+                const glm::dvec3 P  = vertexPos(u, v);
+                const glm::dvec3 avg = (vertexPos(u - sOwn, v) + vertexPos(u + sOwn, v)
+                                      + vertexPos(u, v - sOwn) + vertexPos(u, v + sOwn)) * 0.25;
+                const double lap = glm::length(P - avg);
+                ++checked;
+                if (lap > worstLap) { worstLap = lap; worstNode = n; worstU = u; worstV = v; worstS = sOwn; }
+                if (lap > 0.5) {
+                    ++spikes;
+                    const uint32_t dEdge = std::min(std::min(u, TERRAIN_NODE_CELLS - u),
+                                                    std::min(v, TERRAIN_NODE_CELLS - v));
+                    if (dEdge <= 8) ++spikeNearEdge; else ++spikeInner;
+                }
+            }
+    }
+    std::printf("    %zu vertices interiores reconstruidos (nodos de nivel >= 14)\n", checked);
+    std::printf("    LAPLACIANO peor (cuanto rompe un vertice con sus 4 vecinos): %.4f m\n", worstLap);
+    std::printf("      cae en: nivel %u · u=%u v=%u · stride %u\n",
+                worstNode.level, worstU, worstV, worstS);
+    std::printf("    vertices que rompen mas de 0,5 m: %zu  (a <=8 celdas del borde %zu · "
+                "lejos del borde %zu)\n", spikes, spikeNearEdge, spikeInner);
+    std::printf("    (<=8 celdas = dentro de la rampa del geomorph; lejos de ahi no hay nada que\n"
+                "     deba mover un vertice, asi que un pico ahi es un fallo puro)\n");
+
+    std::printf("    CONTROL — el mismo laplaciano sobre el campo CRUDO (sin cosido ni morph):\n");
+    std::printf("      peor %.4f m · vertices por encima de 0,5 m: %zu\n", worstRaw, rawOver);
+    std::printf("    -> exceso del pase sobre el campo: peor %+.4f m · vertices %+d\n",
+                worstLap - worstRaw, (int)spikes - (int)rawOver);
+
+    CHECK(checked > 1000, "se reconstruye un frame de verdad");
+    // El veredicto es el EXCESO sobre el campo, no el valor absoluto: el terreno ya es rugoso.
+    CHECK(worstLap <= worstRaw * 1.25 + 0.05,
+          "el pase no rompe la malla mas de lo que ya lo hace el propio terreno (si lo excede, hay "
+          "un pincho que no viene del relieve sino del cosido, el stride o el morph)");
+}
+
+/**
+ * @brief EL VECINO MÁS FINO: la zancada del cosido necesita la diferencia de nivel CON SIGNO.
+ *
+ * ── EL CASO QUE SE ESCAPÓ, Y POR QUÉ ────────────────────────────────────────────────────────────
+ *
+ * `nodeNeighbourLevels` recorta `outCoarser` a 0 cuando el vecino es más FINO, y hace bien: en ese
+ * caso cose el otro lado. Pero la zancada del stride se calculaba `sNb << outCoarser`, o sea
+ * `sNb << 0 = sNb` — y `sNb` está en téxeles DEL VECINO, que son la mitad de grandes. La zancada
+ * sale del doble de lo que toca y el nodo cose una arista que no había que coser: abre él mismo la
+ * T-junction que el cosido existe para cerrar. Eso son los pinchos.
+ *
+ * ⚠️ **CON STRIDE GLOBAL EL FALLO VALE CERO.** `sNb == sOwn` siempre, y `max(sOwn, sOwn) = sOwn` no
+ * supera al propio, así que no se cose y no pasa nada. Por eso el bug apareció justo al hacer el
+ * stride por nodo, y por eso `HARUKA_TERRAIN_V5_STRIDE=4` lo hace desaparecer.
+ *
+ * Y por eso ningún test lo vio: los que escribí construían la pareja fina↔gruesa (el vecino MÁS
+ * grueso), que es el caso que tenía en la cabeza. El contrario ni se me ocurrió montarlo.
+ */
+void test_terrain_node_finer_neighbour_step() {
+    beginTest("terrain_node_finer_neighbour_step");
+    const double R = 6371000.0;
+    const NodeId mine{ PlanetFace::FRONT, 15, (1u << 15) / 2, (1u << 15) / 2 };
+    const double texM = nodeTexelM(mine, R);
+
+    // El caso comun con stride por nodo: el vecino es un nivel MAS FINO y por eso su stride dobla.
+    const uint32_t sOwn = 1, sNb = 2;
+    const int lvDiff = 15 - 16;                       // negativo: el vecino es mas fino
+    const uint32_t malo  = std::max(sOwn, sNb << (uint32_t)std::max(lvDiff, 0));   // lo que habia
+    const uint32_t sNbMine = (lvDiff >= 0) ? (sNb << (uint32_t)lvDiff) : (sNb >> (uint32_t)(-lvDiff));
+    const uint32_t bueno = std::max(sOwn, std::max(sNbMine, 1u));                  // con signo
+
+    std::printf("    mi nodo: nivel 15, texel %.3f m, stride %u\n", texM, sOwn);
+    std::printf("    vecino:  nivel 16 (mas FINO), texel %.3f m, stride %u\n", texM * 0.5, sNb);
+    std::printf("      su malla dibujada, en MIS texeles: cada %.1f\n", sNb * 0.5);
+    std::printf("      zancada ANTES (sin signo): %u  <- cose de mas, abre T-junction\n", malo);
+    std::printf("      zancada AHORA (con signo): %u  <- coincide con mi malla, no cose\n", bueno);
+    CHECK(malo > sOwn, "CONTRAPRUEBA: la version sin signo SI cosia (si no cosiera, no habria bug)");
+    CHECK(bueno == sOwn, "con signo, la zancada no supera al propio stride: no se cose nada");
+
+    // ── LA GRIETA QUE ABRIA ─────────────────────────────────────────────────────────────────────
+    {
+        const uint32_t stepMalo[4] = { 0, malo, 0, 0 };
+        double worst = 0.0;
+        auto hOf = [&](uint32_t u, uint32_t v) {
+            return (double)Haruka::Planet::terrainDetail(nodeTexelDir(mine, u, v), R, (float)texM);
+        };
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += sOwn) {
+            const StitchRef s = nodeStitchStep(TERRAIN_NODE_CELLS, v, stepMalo);
+            const glm::dvec3 dA = nodeTexelDir(mine, s.u0, s.v0), dB = nodeTexelDir(mine, s.u1, s.v1);
+            const double hA = hOf(s.u0, s.v0), hB = hOf(s.u1, s.v1);
+            const glm::dvec3 cosido = (dA + (dB - dA) * s.t) * (R + hA + (hB - hA) * s.t);
+            // El vecino fino SI tiene vertice aqui, en la superficie de verdad.
+            const glm::dvec3 real = nodeTexelDir(mine, TERRAIN_NODE_CELLS, v)
+                                  * (R + hOf(TERRAIN_NODE_CELLS, v));
+            worst = std::max(worst, glm::length(cosido - real));
+        }
+        std::printf("    separacion que abria contra el vertice que el vecino SI dibuja: %.4f m\n",
+                    worst);
+        CHECK(worst > 0.01, "CONTRAPRUEBA: la zancada mala separa la arista del punto donde el "
+                            "vecino fino tiene vertice — esa es la grieta que se ve como pincho");
+    }
+}
+
+/**
+ * @brief AUDITORÍA COMPLETA DE ARISTAS: todas las parejas adyacentes, cualquier nivel, cualquier stride.
+ *
+ * ── LA QUE FALTABA ─────────────────────────────────────────────────────────────────────────────
+ *
+ * `terrain_node_stride_seams` audita solo parejas del MISMO nivel, porque el caso nuevo que
+ * introdujo el stride por nodo era ése. Pero el fallo que se acaba de encontrar —usar la diferencia
+ * de nivel sin signo para la zancada— vive justo en el otro: el vecino de nivel DISTINTO.
+ *
+ * Esto audita **todas** las parejas adyacentes de la misma cara, con cualquier combinación de nivel
+ * y de stride, modelando los dos lados como los modela el shader: cosido por zancada y geomorph
+ * hacia el padre. Si queda una grieta, aquí sale, y sale dicho de qué combinación es.
+ */
+void test_terrain_node_edge_audit_all() {
+    beginTest("terrain_node_edge_audit_all");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4, vertPx = 4.0;
+    const double fineCell = Haruka::Planet::TERRAIN_RING_FINE_CELL;
+    const uint32_t maxIdx = 6;
+    const glm::dvec3 d0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam = center + d0 * (R + 1026.0 + 2.0);
+
+    RangeFnCtx rc{ R };
+    std::vector<NodeId> sel;
+    nodeSelectVisible(R, cam, center, radPerPx, sel, 1536, TERRAIN_NODE_ERROR_PX,
+                      nullptr, 0.0, 5000.0, &spikeHuntRangeFn, &rc);
+    std::unordered_map<uint64_t, uint32_t> lv;
+    for (const NodeId& n : sel) lv[nodeKey(n)] = n.level;
+
+    auto strideOf = [&](const NodeId& n) {
+        const NodeRange r = spikeHuntRangeFn(n, &rc);
+        return 1u << nodeStrideIndex(n, R, cam, center, TERRAIN_NODE_ERROR_PX, vertPx, fineCell,
+                                     maxIdx, r.valid() ? (double)r.maxM : 0.0);
+    };
+    // La zancada tal cual la calcula el renderer AHORA (con signo).
+    auto stepsOf = [&](const NodeId& n, uint32_t sOwn, uint32_t st[4], int coarse[4], int fine[4]) {
+        int c[4]; NodeId nb[4];
+        nodeNeighbourLevels(n, lv, c, nb);
+        for (int e = 0; e < 4; ++e) {
+
+            const uint32_t sNb = strideOf(nb[e]);
+            const int lvDiff = (int)n.level - (int)nb[e].level;
+            const uint32_t mine = (lvDiff >= 0) ? (sNb << (uint32_t)lvDiff)
+                                                : (sNb >> (uint32_t)(-lvDiff));
+            const uint32_t s = std::max(sOwn, std::max(mine, 1u));
+            st[e]     = (s > sOwn) ? s : 0u;
+            coarse[e] = (c[e] > 0) ? 1 : 0;
+        }
+    };
+    // Punto de la arista de `n` (u fijo) en el parametro `tGlobal` de 0..1 a lo largo de la arista.
+    // `mode`: 0 = rampas ESTRECHADAS (lo que corre) · 1 = rampas SIN estrechar · 2 = SIN morph por
+    // arista (solo el de distancia, que desde el 2026-08-25 es por vértice) · 3 = SIN MORPH NINGUNO,
+    // que es lo que hace `HARUKA_TERRAIN_V5_NOMORPH=1` en el juego. El 3 es la referencia: dice
+    // cuánto cierra el morph DE VERDAD, en vez de darlo por hecho.
+    auto edgePoint = [&](const NodeId& n, uint32_t uEdge, double tGlobal, int mode,
+                         bool vertical = false) {
+        const uint32_t sOwn = strideOf(n);
+        uint32_t st[4]; int coarse[4]; int fine[4];
+        stepsOf(n, sOwn, st, coarse, fine);
+        // `fine` sale de `nodeNeighbourFinerMask` (mira hacia ABAJO; `nodeNeighbourLevels` solo sabe
+        // subir y por eso no puede contestar esto). Hoy no lo consume nadie: se conserva porque el
+        // arreglo que queda pendiente —que el fino apunte a lo que el grueso DIBUJA— lo va a
+        // necesitar, y porque documenta el no-op silencioso que costo una medida entera.
+        { const int fm = nodeNeighbourFinerMask(n, lv);
+          for (int e = 0; e < 4; ++e) fine[e] = (fm >> e) & 1; }
+        (void)coarse; (void)fine;
+        const double texM = nodeTexelM(n, R), parM = texM * 2.0;
+        auto vert = [&](uint32_t idx) {
+            // ⚠️ LAS CUATRO ARISTAS, NO SOLO LAS VERTICALES. Hasta el 2026-08-25 esto solo sabía
+            // recorrer aristas de u constante (izq/der), y las tres auditorías solo pedían el vecino
+            // de la DERECHA. O sea que el eje v —cuyo cosido va por otra rama del `else if` del
+            // shader, y cuyas rampas usan los otros dos bits de la máscara— no lo miraba NADIE.
+            const uint32_t u = vertical ? idx   : uEdge;
+            const uint32_t v = vertical ? uEdge : idx;
+            const StitchRef sr = nodeStitchStep(u, v, st);
+            const double E = (double)TERRAIN_NODE_CELLS, kM = 8.0;
+            // ⚠️ EL MORPH POR DISTANCIA TAMBIEN ENTRA, y antes faltaba en este modelo. El shader hace
+            // `max(distancia, arista)`; sin el termino de distancia esto medía un shader que ya no
+            // existe. Sale de la direccion del VERTICE, igual que `terrain_node.vert`.
+            const double mDist = (double)nodeVertexMorph(n.level, nodeTexelDir(n, sr.u0, sr.v0),
+                                                   R, cam, center, radPerPx);
+            // `mode` 0 = lo que se dibuja · 1 = SIN morph (contraprueba) · 2 = este nodo sin su
+            // morph por distancia (solo se usa en el lado GRUESO: es la causa medida del escalon).
+            // ⚠️ Las rampas por arista se BORRARON del shader el 2026-08-25 tras medir que no
+            // cerraban nada; modelarlas aqui seria auditar un shader que ya no existe.
+            const double morph = (mode == 1 || mode == 2) ? 0.0 : mDist;
+            // El morph un nivel MAS ARRIBA: decide a que superficie apunta el padre, y por tanto el
+            // vecino grueso. Gemelo de `morphPar` en `terrain_node.vert`.
+            const double mPar = (n.level <= 1 || mode == 1 || mode == 2) ? 0.0
+                : (double)nodeVertexMorph(n.level - 1, nodeTexelDir(n, sr.u0, sr.v0),
+                                          R, cam, center, radPerPx);
+            auto hOf = [&](uint32_t uu, uint32_t vv) {
+                const glm::dvec3 d = nodeTexelDir(n, uu, vv);
+                const double own = (double)Haruka::Planet::terrainDetail(d, R, (float)texM);
+                const double par = (double)Haruka::Planet::terrainDetail(d, R, (float)parM);
+                // ⚠️ El destino es lo que el padre DIBUJA, no su altura cruda: `mix(padre, abuelo,
+                // m(L-1))`. Gemelo del bloque largo de `terrain_node.vert` — el arreglo de los
+                // pinchos del 2026-08-25.
+                const double gran = (double)Haruka::Planet::terrainDetail(d, R, (float)(texM * 4.0));
+                const double tgt  = par + (gran - par) * mPar;
+                return own + (tgt - own) * morph;
+            };
+            const glm::dvec3 dA = nodeTexelDir(n, sr.u0, sr.v0), dB = nodeTexelDir(n, sr.u1, sr.v1);
+            const double hA = hOf(sr.u0, sr.v0), hB = hOf(sr.u1, sr.v1);
+            return (dA + (dB - dA) * sr.t) * (R + hA + (hB - hA) * sr.t);
+        };
+        // ⚠️ AL PASO EFECTIVO, NO AL PROPIO. Desde que el cosido COLAPSA en vez de interpolar (ver
+        // `nodeStitchStep`), dos vertices finos consecutivos de una arista cosida caen sobre el MISMO
+        // vertice del grueso. Muestrear al paso fino reconstruye una escalera que no se dibuja: los
+        // triangulos entre vertices coincidentes son degenerados y no producen un solo fragmento.
+        // La arista que se VE va de vertice distinto a vertice distinto, o sea al paso del cosido.
+        const int eIdx = vertical ? ((uEdge == 0u) ? 2 : 3) : ((uEdge == 0u) ? 0 : 1);
+        const uint32_t sEff = (st[eIdx] > sOwn) ? st[eIdx] : sOwn;
+        const double vf = tGlobal * (double)TERRAIN_NODE_CELLS;
+        const uint32_t b = (uint32_t)(std::floor(vf / sEff) * sEff);
+        const uint32_t nx = std::min(b + sEff, (uint32_t)TERRAIN_NODE_CELLS);
+        const double t = (nx == b) ? 0.0 : (vf - b) / (double)(nx - b);
+        const glm::dvec3 pa = vert(b), pb = vert(nx);
+        return pa + (pb - pa) * t;
+    };
+
+    double worst = 0.0; int worstLvA = 0, worstLvB = 0; uint32_t worstSA = 0, worstSB = 0;
+    size_t audited = 0, crossLevel = 0, remapChecked = 0;
+    double remapErr = 0.0;
+    // [modo][0 = mismo nivel, 1 = distinto]. Modo 0 = estrechado (lo que corre) · 1 = sin estrechar
+    // · 2 = sin morph por arista.
+    double gap[3][2] = { {0.0,0.0}, {0.0,0.0}, {0.0,0.0} };
+    NodeId wcA{}, wcB{}; double wcT = 0.0, wcTB = 0.0;   // la peor pareja ENTRE NIVELES, para diseccionarla
+    // ⚠️ LAS DOS DIRECCIONES. `axis 0` = vecino de la DERECHA (+i, arista de u constante) y
+    // `axis 1` = vecino de ARRIBA (+j, arista de v constante). Hasta hoy las tres auditorias solo
+    // pedian la derecha, asi que el eje v no lo comprobaba nadie — y en el shader NO es simetrico:
+    // el cosido va por una cadena `else if` y las rampas usan los otros dos bits de la mascara.
+    size_t auditedAxis[2] = { 0, 0 };
+    double gapAxis[2] = { 0.0, 0.0 };
+    for (int axis = 0; axis < 2; ++axis)
+    for (const NodeId& a : sel) {
+        const uint32_t lim = 1u << a.level;
+        if (axis == 0 ? (a.i + 1 >= lim) : (a.j + 1 >= lim)) continue;
+        NodeId b = (axis == 0) ? NodeId{ a.face, a.level, a.i + 1, a.j }
+                               : NodeId{ a.face, a.level, a.i, a.j + 1 };
+        while (lv.find(nodeKey(b)) == lv.end() && b.level > 0) { b.level--; b.i /= 2; b.j /= 2; }
+        if (lv.find(nodeKey(b)) == lv.end()) continue;
+        ++audited; ++auditedAxis[axis];
+        // ⚠️ ANTES DE COMPARAR NADA, VALIDAR EL REMAPEO. Para una pareja de distinto nivel hay que
+        // hacer coincidir la arista del nodo FINO con la fraccion que le toca de la del GRUESO, y esa
+        // cuenta (`off`, `tB`) es nueva. Si esta mal, se comparan dos puntos que NO son el mismo
+        // sitio del planeta y cualquier "grieta" que salga es del test.
+        //
+        // Se valida sola: la reticula de nodos es exacta entre padre e hijo (esa es la propiedad de
+        // F1), asi que las DIRECCIONES de los dos lados tienen que coincidir a nivel de redondeo —
+        // sin morph, sin cosido y sin alturas de por medio. Si esto no casa, el numero de abajo no
+        // significa nada.
+        // ⚠️ SE AUDITAN TAMBIEN LAS PAREJAS DE DISTINTO NIVEL. La version anterior las saltaba
+        // ("lo cierra el morph, aparte"), y precisamente por eso no habria visto si el
+        // estrechamiento de las rampas —el arreglo de los pinchos de esquina— se llevaba por delante
+        // el escalon entre niveles, que es para lo que el morph existe.
+        //
+        // El nodo FINO recorre su arista completa; el GRUESO solo el trozo que comparte con el, asi
+        // que el parametro del grueso se remapea a la mitad (o cuarto) que le toca.
+        const uint32_t rel = 1u << (a.level > b.level ? (a.level - b.level) : 0u);
+        // La fraccion la marca el indice PERPENDICULAR a la arista: en +i manda `j`, en +j manda `i`.
+        const uint32_t along = (axis == 0) ? a.j : a.i;
+        const double off = (rel > 1) ? (double)(along % rel) / (double)rel : 0.0;
+        // ── AQUI SE VALIDA EL REMAPEO, y es lo que faltaba ──────────────────────────────────────
+        // Se hace sobre la RETICULA EXACTA y sin nada encima: ni morph, ni cosido, ni alturas. Solo
+        // "el texel `v` de la arista de `a` y el texel `base + v/rel` de la de `b` son el MISMO punto
+        // del planeta". Sale de igualar las dos coordenadas de cara:
+        //     (a.j + v/CELLS)/2^La == (b.j + vB/CELLS)/2^Lb   ->   vB = v/rel + (a.j % rel)·CELLS/rel
+        // Solo se comprueban los `v` multiplos de `rel`: los de en medio caen ENTRE dos texeles del
+        // grueso, alli no hay vertice que comparar. Con rel==1 son los 129 de la arista.
+        {
+            const uint32_t base = (along % rel) * (TERRAIN_NODE_CELLS / rel);
+            for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += rel) {
+                const uint32_t vB = base + v / rel;
+                const glm::dvec3 dA = (axis == 0) ? nodeTexelDir(a, TERRAIN_NODE_CELLS, v)
+                                                  : nodeTexelDir(a, v, TERRAIN_NODE_CELLS);
+                const glm::dvec3 dB = (axis == 0) ? nodeTexelDir(b, 0, vB)
+                                                  : nodeTexelDir(b, vB, 0);
+                remapErr = std::max(remapErr, glm::length(dA - dB));
+                ++remapChecked;
+            }
+        }
+        const int cross = (a.level != b.level) ? 1 : 0;
+        for (int k = 0; k <= 128; ++k) {
+            const double t = (double)k / 128.0;
+            const double tB = (rel > 1) ? (off + t / (double)rel) : t;
+            for (int m = 0; m < 3; ++m) {
+                // El 4 mide una HIPOTESIS: el lado fino morfea hacia la altura CRUDA de su
+                // padre, pero el vecino grueso esta a su vez morfeando hacia el SUYO. Si el
+                // escalon es eso, quitarle el morph SOLO al grueso tiene que cerrarlo.
+                const bool vert = (axis == 1);
+                // En el modo 2 solo el lado GRUESO (`b`) pierde su morph: es la hipotesis.
+                const double d = glm::length(
+                    edgePoint(a, TERRAIN_NODE_CELLS, t, m == 2 ? 0 : m, vert)
+                  - edgePoint(b, 0, tB, m, vert));
+                if (m == 0) gapAxis[axis] = std::max(gapAxis[axis], d);
+                if (d > gap[m][cross]) {
+                    if (m == 0 && cross) { wcA = a; wcB = b; wcT = t; wcTB = tB; }
+                    gap[m][cross] = d;
+                    if (m == 0 && !cross) { worstLvA = (int)a.level; worstLvB = (int)b.level;
+                                            worstSA = strideOf(a); worstSB = strideOf(b); }
+                }
+            }
+        }
+        crossLevel += (size_t)cross;
+    }
+    worst = gap[0][0];
+    std::printf("    %zu parejas adyacentes auditadas punto a punto (%zu de DISTINTO nivel)\n",
+                audited, crossLevel);
+    std::printf("                              MISMO nivel        DISTINTO nivel\n");
+    std::printf("    lo que se dibuja hoy      %10.6f m      %10.6f m\n", gap[0][0], gap[0][1]);
+    std::printf("    CONTRAPRUEBA sin morph    %10.6f m      %10.6f m\n", gap[1][0], gap[1][1]);
+    // Solo tiene sentido entre NIVELES: ahi `b` es el grueso. Entre iguales seria una comparacion
+    // asimetrica (uno con morph y otro sin el) que no describe nada, asi que no se imprime.
+    std::printf("    el GRUESO sin SU morph              --            %10.6f m   <- la causa\n",
+                gap[2][1]);
+    std::printf("    POR EJE (lo que corre): +i (derecha) %.6f m en %zu parejas · "
+                "+j (arriba) %.6f m en %zu parejas\n",
+                gapAxis[0], auditedAxis[0], gapAxis[1], auditedAxis[1]);
+    std::printf("    (peor de mismo nivel: %d/%d · strides %u/%u)\n",
+                worstLvA, worstLvB, worstSA, worstSB);
+    CHECK(audited > 100, "se auditan parejas de verdad");
+    CHECK(remapChecked > 100 && remapErr < 1e-6,
+          "el remapeo fino->grueso apunta al MISMO punto del planeta. Sin esto, la 'grieta' de abajo "
+          "podria ser del test comparando dos sitios distintos, no del motor");
+    // ── DISECCION DE LA PEOR PAREJA ENTRE NIVELES ───────────────────────────────────────────────
+    //
+    // Sin esto solo hay un numero y dos explicaciones posibles: (a) el siguiente termino de la
+    // recursion —el abuelo tambien se morfea hacia el bisabuelo— o (b) que `m(L-1)` no valga 0
+    // cuando deberia, porque el selector decide por NODO (esquina mas cercana) y el morph se evalua
+    // por VERTICE. Las dos predicen cosas distintas para `m(L-1)`, asi que basta con mirarlo.
+    if (gap[0][1] > 0.0) {
+        const uint32_t vTex = (uint32_t)std::lround(wcT * (double)TERRAIN_NODE_CELLS);
+        const glm::dvec3 dW = nodeTexelDir(wcA, TERRAIN_NODE_CELLS, std::min(vTex, TERRAIN_NODE_CELLS));
+        auto mAt = [&](uint32_t lvl) {
+            return (lvl == 0) ? 0.0f : nodeVertexMorph(lvl, dW, R, cam, center, radPerPx);
+        };
+        std::printf("    DISECCION de la peor (%u vs %u): m(L)=%.4f  m(L-1)=%.4f  m(L-2)=%.4f\n",
+                    wcA.level, wcB.level, mAt(wcA.level), mAt(wcA.level - 1),
+                    (wcA.level >= 2) ? mAt(wcA.level - 2) : 0.0f);
+        // ⚠️ LAS DOS METRICAS NO SON LA MISMA, y esa es la sospecha concreta: `nodeScreenError`
+        // (la del SELECTOR) usa `R + nodeElevM` y la distancia a la esquina MAS CERCANA del nodo;
+        // `nodeVertexMorph` usa `R` a secas y la distancia de ESTE vertice. Si el morph calculado
+        // con la metrica del selector sale ~1, el residuo es exactamente ese desacuerdo.
+        const NodeRange rgW = spikeHuntRangeFn(wcA, &rc);
+        const double eSel = nodeScreenError(wcA, R, cam, center, radPerPx,
+                                            rgW.valid() ? (double)rgW.maxM : 0.0);
+        const double mSel = glm::clamp(2.0 * (TERRAIN_NODE_ERROR_PX - eSel) / TERRAIN_NODE_ERROR_PX,
+                                       0.0, 1.0);
+        std::printf("      con la metrica del SELECTOR (nodeScreenError, con elevacion y esquina "
+                    "mas cercana): m(L)=%.4f\n", mSel);
+        std::printf("      -> si ese sale ~1 y el de arriba no, el residuo es que el morph y el\n"
+                    "         selector miden distinto: uno con elevacion y otro sin ella.\n");
+    }
+
+    CHECK(gap[0][0] < 0.01, "MISMO nivel: lo que se dibuja hoy no deja grieta");
+    // ⚠️ ERA 2,75 m HASTA EL 2026-08-25. Bajo a 0,785 m al hacer que el destino del morph sea lo que
+    // el padre DIBUJA —`mix(padre, abuelo, m(L-1))`— en vez de su altura cruda. Lo que queda es el
+    // mismo termino un nivel mas arriba: el abuelo tambien se morfea hacia el bisabuelo. La serie
+    // converge (cada nivel aporta ~3,5x menos), asi que un mapa mas lo bajaria a ~0,2 m — a otros
+    // 65 KB por nodo. Guardarrail, no tolerancia: si sube, algo lo ha roto.
+    CHECK(gap[0][1] < 0.9, "GUARDARRAIL del escalon entre niveles (hoy 0,785 m, peor en +j)");
+    CHECK(auditedAxis[0] > 100 && auditedAxis[1] > 100,
+          "se auditan las DOS direcciones (+i y +j), no solo la derecha");
+    // CONTRAPRUEBA: sin morph el escalon es PEOR. Sin esto el morph podria no estar haciendo nada y
+    // el test pasaria igual — que es exactamente lo que le pasaba al morph por arista, ya borrado.
+    CHECK(gap[1][1] > gap[0][1] + 0.5,
+          "CONTRAPRUEBA: sin morph por distancia el escalon entre niveles crece de verdad");
+    // CONTRAPRUEBA DEL ARREGLO: el modo 2 quita el morph al lado GRUESO, que es como se comportaba
+    // el motor antes de apuntar al abuelo. Tiene que salir MUCHO peor — si no, el mapa del abuelo
+    // (65 KB por nodo, 130 MB de pool) no estaria comprando nada y habria que quitarlo.
+    CHECK(gap[2][1] > gap[0][1] * 2.0,
+          "CONTRAPRUEBA: sin apuntar a lo que el padre DIBUJA, el escalon se multiplica (2,75 m)");
+}
+
+/**
+ * @brief EL MORPH POR DISTANCIA ES POR VÉRTICE, Y POR ESO CASA EN LAS ARISTAS.
+ *
+ * ── LA PREGUNTA QUE LO DESTAPÓ ─────────────────────────────────────────────────────────────────
+ *
+ * "¿Por qué el geomorph no se hace como en el otro sitio?" El geomorph clásico (el del clipmap) es
+ * **por vértice**: cada vértice se funde hacia el nivel grueso según SU distancia, así que dos
+ * parches vecinos coinciden en la frontera por construcción — el vértice compartido tiene una sola
+ * distancia y por tanto un solo morph.
+ *
+ * El pase v5 lo hacía **por NODO**: `nodeParentMorph` devolvía un escalar por instancia
+ * (`g.misc[0]`), calculado con el error en pantalla del nodo entero. Dos nodos vecinos a distancias
+ * ligeramente distintas recibían morphs distintos, y el MISMO punto 3D de la arista compartida se
+ * evaluaba como `mix(propia, padre, morphA)` por un lado y `mix(propia, padre, morphB)` por el otro.
+ * La grieta era `|morphA − morphB| · (padre − propia)`: **10,07 m** medidos sobre un frame real, con
+ * 1175 de 1327 parejas adyacentes discrepando. No dependía del stride ni del cosido: era estructural.
+ *
+ * ── LO QUE MIDE AHORA ──────────────────────────────────────────────────────────────────────────
+ *
+ * Desde el 2026-08-25 el morph sale de `nodeVertexMorph`, con la dirección del VÉRTICE. Este test
+ * comprueba que las dos caras de cada arista compartida devuelven EL MISMO valor —exacto, no
+ * parecido— y conserva la regla vieja como **contraprueba**: si aquélla no discrepara, el cambio no
+ * estaría arreglando nada.
+ */
+void test_terrain_node_distance_morph_per_vertex() {
+    beginTest("terrain_node_distance_morph_per_vertex");
+    const double R = 6371000.0;
+    const glm::dvec3 center(0.0);
+    const double radPerPx = 9.4e-4;
+    const glm::dvec3 d0 = glm::normalize(glm::dvec3(1.0, 0.35, 0.22));
+    const glm::dvec3 cam = center + d0 * (R + 1026.0 + 2.0);
+
+    RangeFnCtx rc{ R };
+    std::vector<NodeId> sel;
+    nodeSelectVisible(R, cam, center, radPerPx, sel, 1536, TERRAIN_NODE_ERROR_PX,
+                      nullptr, 0.0, 5000.0, &spikeHuntRangeFn, &rc);
+    std::unordered_map<uint64_t, uint32_t> lv;
+    for (const NodeId& n : sel) lv[nodeKey(n)] = n.level;
+
+    // La regla VIEJA — un escalar por nodo. Se queda SOLO como contraprueba: es lo que hacía el
+    // motor hasta el 2026-08-25 y es lo que abría la grieta.
+    auto morphOf = [&](const NodeId& n) {
+        const NodeRange r = spikeHuntRangeFn(n, &rc);
+        return (double)nodeParentMorph(n, R, cam, center, radPerPx, TERRAIN_NODE_ERROR_PX,
+                                       r.valid() ? (double)r.maxM : 0.0);
+    };
+
+    double worstGap = 0.0, worstDm = 0.0; uint32_t worstLevel = 0;
+    double worstDmNew = 0.0;
+    size_t pairs = 0, differing = 0, sharedChecked = 0;
+    for (const NodeId& a : sel) {
+        if (a.i + 1 >= (1u << a.level)) continue;
+        const NodeId b{ a.face, a.level, a.i + 1, a.j };
+        if (lv.find(nodeKey(b)) == lv.end()) continue;
+        ++pairs;
+
+        // ── LA REGLA DE HOY, sobre los vértices que las dos caras COMPARTEN ─────────────────────
+        // El téxel `v` de la arista derecha de `a` y el `v` de la izquierda de `b` son el MISMO
+        // punto del planeta (eso lo prueba `terrain_node_lattice`, a 0 bits). Con el morph por
+        // vértice los dos lados tienen que devolver el mismo número, y no "parecido": IGUAL, porque
+        // la entrada es idéntica y la aritmética es la misma.
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 8) {
+            const double mA = (double)nodeVertexMorph(a.level, nodeTexelDir(a, TERRAIN_NODE_CELLS, v),
+                                                      R, cam, center, radPerPx);
+            const double mB = (double)nodeVertexMorph(b.level, nodeTexelDir(b, 0, v),
+                                                      R, cam, center, radPerPx);
+            worstDmNew = std::max(worstDmNew, std::fabs(mA - mB));
+            ++sharedChecked;
+        }
+
+        const double dm = std::fabs(morphOf(a) - morphOf(b));
+        if (dm > 1e-9) ++differing;
+        if (dm <= 1e-9) continue;
+        // Cuanto vale eso en metros: la diferencia entre la altura propia y la del padre en la arista.
+        const double texM = nodeTexelM(a, R);
+        double amp = 0.0;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 8) {
+            const glm::dvec3 d = nodeTexelDir(a, TERRAIN_NODE_CELLS, v);
+            amp = std::max(amp, std::fabs(
+                (double)Haruka::Planet::terrainDetail(d, R, (float)(texM * 2.0))
+              - (double)Haruka::Planet::terrainDetail(d, R, (float)texM)));
+        }
+        const double gap = dm * amp;
+        if (gap > worstGap) { worstGap = gap; worstDm = dm; worstLevel = a.level; }
+    }
+    std::printf("    %zu parejas adyacentes · %zu vertices compartidos comprobados\n",
+                pairs, sharedChecked);
+    std::printf("    POR VERTICE (lo que corre): peor diferencia entre las dos caras %.17g\n",
+                worstDmNew);
+    std::printf("    CONTRAPRUEBA, la regla vieja POR NODO: %zu parejas con morph distinto\n",
+                differing);
+    std::printf("      grieta peor por esa diferencia: %.4f m  (delta de morph %.4f, nivel %u)\n",
+                worstGap, worstDm, worstLevel);
+
+    CHECK(pairs > 100, "se auditan parejas de verdad");
+    CHECK(sharedChecked > 100, "se comprueban vertices COMPARTIDOS de verdad");
+    // Exacto, no "pequeño": misma entrada y misma aritmetica tienen que dar los mismos bits. Si esto
+    // se afloja a una tolerancia, vuelve a caber una grieta pequena y nadie se entera.
+    CHECK(worstDmNew == 0.0,
+          "POR VERTICE: las dos caras de una arista compartida dan EL MISMO morph");
+    CHECK(differing > 0, "CONTRAPRUEBA: la regla vieja (por nodo) SI daba valores distintos a los "
+                         "dos lados — si no los diera, el arreglo no arreglaria nada");
+    CHECK(worstGap > 1.0, "CONTRAPRUEBA: y eso valia METROS de grieta, no un detalle");
 }

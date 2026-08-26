@@ -2460,7 +2460,8 @@ struct PlanetSphereField : Haruka::Planet::IPropSphereField {
 // ±256 m y pasa a dibujar los mismos vértices y los mismos triángulos que Jolt colisiona.
 //
 // Por qué no basta con afinar el shader: los cuatro nodos de cada quad ya coinciden exactamente
-// (`clipmap_vertex_lattice`, 0 de 59 785 fuera de la retícula), pero un quad no es plano y hay que
+// (0 de 59 785 fuera de la retícula, medido por `clipmap_vertex_lattice` antes de borrarlo con el
+// clipmap), pero un quad no es plano y hay que
 // partirlo en dos triángulos. Jolt parte por `(i,j)→(i+1,j+1)`; el teselador de la GPU parte por
 // donde quiera, porque el spec de OpenGL NO lo fija para `layout(quads, ...)`. La diferencia en el
 // centro del quad, medida sobre el terreno real, son 2-4 cm bajo los pies. Mientras el teselador

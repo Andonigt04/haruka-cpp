@@ -169,7 +169,8 @@ inline float octaveWeight(float wavelengthM, float minFeatureM) {
  * ⚠️ EXISTE PORQUE LA VERSIÓN DE ABAJO TIRA LA PRECISIÓN EN SU PROPIA FIRMA. Toma `glm::vec3` y
  * dentro hace `dvec3(dir) * radius`: subir a double DESPUÉS de haber redondeado a float no recupera
  * nada. A radio terrestre un ulp de una dirección unitaria en float son **0,38-0,76 m de
- * superficie** (medido en `clipmap_dir_parity`: 0,9302 m de separación, 0,1453 m de altura), así que
+ * superficie** (0,9302 m de separación y 0,1453 m de altura cuando lo medía `clipmap_dir_parity`,
+ * borrado junto con el clipmap; hoy la propiedad la vigila `terrain_node_lattice`), así que
  * la coordenada del ruido llega cuantizada a medio metro antes de evaluar la primera octava.
  *
  * Da igual mientras quien llame tenga la dirección en float de todos modos —el clipmap la

@@ -367,6 +367,17 @@ namespace Haruka::RHI::opengl
             glEnable(GL_DEPTH_TEST);
             m_ownsContext = true;
         }
+        // ⚠️ QUÉ GPU ESTÁ CORRIENDO DE VERDAD. Vulkan ya lo dice (`GPU = …`) y GL no decía nada, así
+        // que "OpenGL contra Vulkan" y "una GPU contra otra" quedaban CONFUNDIDOS en la misma medida:
+        // en un portátil híbrido GL va por donde diga el offload PRIME y Vulkan elige por su cuenta.
+        // Sin esta línea no se puede atribuir una diferencia entre backends a la API.
+        {
+            const char* vend = (const char*)glGetString(GL_VENDOR);
+            const char* rend = (const char*)glGetString(GL_RENDERER);
+            const char* vers = (const char*)glGetString(GL_VERSION);
+            HARUKA_LOGI("RHI/GL", "GPU = %s · %s · GL %s", vend ? vend : "(?)",
+                        rend ? rend : "(?)", vers ? vers : "(?)");
+        }
         // Reversed-Z con near→1, infinito→0 (ver Camera::getProjectionMatrix). La matriz emite
         // z_ndc ∈ [0,1], así que GL DEBE mapear [0,1]→depth (glClipControl(GL_ZERO_TO_ONE)); sin
         // esta llamada GL asume [-1,1] y comprime toda la profundidad a [0.5,1] — el z-buffer pierde

@@ -19,10 +19,12 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <cstdlib>
 #include <string>
 #include <vector>
 
+#include "core/planet/terrain_lod.h"   // TERRAIN_RING_FINE_CELL: la celda de la malla que se PISA
 #include "terrain_node.h"
 #include "terrain_node_pool.h"
 #include "terrain_node_gpu.h"
@@ -75,10 +77,46 @@ public:
      * El clipmap dibuja quads de 4,1 px, y por eso 4 es el valor que hace la comparación justa.
      */
     /** @brief Vista de depuración del pase (`HARUKA_TERRAIN_V5_DEBUG`). Ver `terrain_node.frag`. */
+    /// Fuerza la vista de depuración desde código (>=0). `debugView()` la lee de una variable de
+    /// entorno UNA vez, así que un test no puede cambiarla: esto es la puerta para hacerlo.
+    void setDebugViewOverride(int v) { m_debugOverride = v; }
+
     static int debugView() {
         static const int s_v = []() {
             const char* v = std::getenv("HARUKA_TERRAIN_V5_DEBUG");
             return v ? std::atoi(v) : 0;
+        }();
+        return s_v;
+    }
+
+    /**
+     * @brief INTERRUPTORES DE BISECCION (`HARUKA_TERRAIN_V5_*`). Existen para responder "¿desde
+     *        cuando?" en una ejecucion en vez de en una tarde de hipotesis.
+     *
+     * ⚠️ Se anadieron el 2026-08-25 porque los pinchos reportados sobrevivieron a CUATRO causas
+     * medidas y descartadas (caida profunda a ancestro, hambre del selector, rango vacio, el
+     * `SwapWindow` del generador). Reconstruir los 3,07 M de vertices en CPU da **+0,0000 m** de
+     * exceso sobre el campo, asi que la aritmetica no es. Lo que queda es aislar POR SUBSISTEMA.
+     *
+     *   · `STRIDE=n`  fija el stride de TODOS los nodos a n (1,2,4…), como antes de que fuera por
+     *                 nodo. Si los pinchos se van, son del stride por nodo o de su cosido.
+     *   · `NOMORPH=1` apaga el geomorph entero (ni por distancia ni por arista). Si se van, es el
+     *                 morph. ⚠️ Sin morph REAPARECEN los escalones entre niveles (2,4 m medidos):
+     *                 es un diagnostico, no un modo de juego.
+     */
+    static uint32_t forcedStride() {
+        static const uint32_t s_v = []() -> uint32_t {
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_STRIDE");
+            if (!v) return 0;
+            const long n = std::strtol(v, nullptr, 10);
+            return (n >= 1 && n <= 64) ? (uint32_t)n : 0u;
+        }();
+        return s_v;
+    }
+    static bool noMorph() {
+        static const bool s_v = []() {
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_NOMORPH");
+            return v && v[0] == '1';
         }();
         return s_v;
     }
@@ -97,7 +135,26 @@ public:
      *        1024/1024` — sin margen, y el nivel más fino se quedaba en 14 en vez de 17.
      *        `HARUKA_TERRAIN_V5_POOL` lo cambia sin recompilar: cada hueco son 66,6 KB de VRAM.
      */
-    bool init(RHI::Device* dev, const std::string& shaderDir, size_t capacity = 1024) {
+    /**
+     * ⚠️ **EL 1024 DE ANTES SE QUEDO CORTO Y NO ERA OBVIO.** Venia de cuando el pool publicaba rangos
+     * vacios y el criterio media la distancia al NIVEL DEL MAR, o sea subdividiendo de menos. Con el
+     * rango de verdad la demanda REAL —ya recortada por el cono del frustum— es de **1 013 nodos a
+     * pie**, contra un presupuesto de 768 (el 75 % de 1024). Saturado permanentemente, y de un
+     * selector hambriento salen las dos cosas que se reportaron juntas: vecinos con mas de un nivel
+     * de diferencia (pinchos) y reparto que cambia con la camara (parpadeo). El log lo decia:
+     * `tope del selector 768 SATURADO · por ancestro 180` de 767.
+     *
+     * Medido en `terrain_node_demand_with_range`:
+     *
+     *     altura    demanda con cono    pool necesario (demanda / 0,75)
+     *        2 m         1 013                1 350
+     *      200 m           955                1 273
+     *    2 000 m           528                  704
+     *
+     * 2048 deja el presupuesto en 1 536, un 50 % por encima del pico medido — margen para girar (que
+     * mete nodos nuevos de golpe) y para mirar a una ladera, que pide mas. Son 399 MB a 195 KB/nodo (tres mapas: propio, padre y abuelo).
+     */
+    bool init(RHI::Device* dev, const std::string& shaderDir, size_t capacity = 2048) {
         if (const char* e = std::getenv("HARUKA_TERRAIN_V5_POOL")) {
             const long v = std::strtol(e, nullptr, 10);
             if (v >= 64 && v <= 65536) capacity = (size_t)v;
@@ -121,6 +178,21 @@ public:
         pd.vertexLayout.strides = { (uint32_t)(2 * sizeof(float)) };
         pd.vertexLayout.attributes.push_back({ 0, 0, RHI::Format::RG32F, 0 });
         pd.depth.test = true; pd.depth.write = true;
+        // ⚠️ SIGUE EN `None`, Y NO POR DESCUIDO — ESTÁ PROBADO Y REVERTIDO (2026-08-25).
+        //
+        // Con `None` cada nodo rasteriza SUS DOS CARAS: en el limbo y a distancia rasante la de
+        // delante y la de detrás del mismo relieve compiten por el depth (parpadeo) y se pagan el
+        // doble de fragmentos sobre 9,8 M de triángulos. O sea que activarlo interesa.
+        //
+        // El bobinado NO es el problema: `terrain_node_winding` lo verifica CCW-desde-fuera en las
+        // seis caras, 612/612, con contraprueba. Aun así, con `CullMode::Back` medido en el banco:
+        //     OpenGL  cobertura en pantalla 97,4 %   (correcto)
+        //     Vulkan  cobertura en pantalla  3,4 %   (se descarta la cara BUENA)
+        // `vk_pipeline.cpp` fija `VK_FRONT_FACE_COUNTER_CLOCKWISE`, y otros pipelines con
+        // `cull = Back` (props, malla base, `nearground.vert`) sí se ven bien en Vulkan — así que la
+        // causa es específica de este pase y no un fallo general del RHI. Sin entender ESO, activarlo
+        // deja el planeta casi vacío en un backend. Es la primera pregunta del hilo `vulkan-is-opengl-assumed`:
+        // ¿qué está asumiendo de GL este pase que los otros no?
         m_pipe = dev->createPipeline(pd);
         if (!RHI::valid(m_pipe)) {
             HARUKA_LOGW("TerrenoV5", "fallo el pipeline de dibujo ('%s' + '%s')", vs.c_str(), fs.c_str());
@@ -169,10 +241,11 @@ public:
         m_ubo = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(du), &du, RHI::BufferMemory::Dynamic);
         m_ready = RHI::valid(m_vb) && m_strideCount > 0 && RHI::valid(m_ubo);
         // ⚠️ LA VRAM DEL POOL NO ES UN DETALLE: con el geomorph cada hueco guarda DOS mapas, así que
-        // son 130 KB por nodo. 4096 huecos = 532 MB, encima de los 720 MB del array de terreno.
+        // son 195 KB por nodo (propio + padre + abuelo). 4096 huecos = 798 MB, encima de los
+        // 720 MB del array de terreno — a partir de 2048 hay que mirar la VRAM de verdad.
         if (m_ready)
-            HARUKA_LOGI("TerrenoV5", "pool de %zu huecos = %.0f MB de VRAM (%.1f KB/nodo: mapa propio "
-                                     "+ el del padre) · generacion %zu nodos/frame",
+            HARUKA_LOGI("TerrenoV5", "pool de %zu huecos = %.0f MB de VRAM (%.1f KB/nodo: propio "
+                                     "+ padre + abuelo) · generacion %zu nodos/frame",
                         capacity, (double)m_gpu.bytes() / (1024.0 * 1024.0),
                         (double)TerrainNodeGpu::kBytesPerNode / 1024.0,
                         std::max<size_t>(43, capacity / 24));
@@ -182,8 +255,10 @@ public:
     void shutdown() {
         if (!m_dev) return;
         if (RHI::valid(m_ubo)) { m_dev->destroy(m_ubo); m_ubo = {}; }
-        for (uint32_t k = 0; k < m_strideCount; ++k)
-            if (RHI::valid(m_ibs[k])) { m_dev->destroy(m_ibs[k]); m_ibs[k] = {}; }
+        for (uint32_t k = 0; k < kStrides; ++k) {
+            if (RHI::valid(m_ibs[k]))      { m_dev->destroy(m_ibs[k]);      m_ibs[k] = {}; }
+            if (RHI::valid(m_instSSBO[k])) { m_dev->destroy(m_instSSBO[k]); m_instSSBO[k] = {}; m_instCap[k] = 0; }
+        }
         m_strideCount = 0;
         if (RHI::valid(m_vb))  { m_dev->destroy(m_vb);  m_vb  = {}; }
         if (RHI::valid(m_pipe)){ m_dev->destroy(m_pipe);m_pipe= {}; }
@@ -193,7 +268,19 @@ public:
 
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
-        uint32_t stride = 1;
+        uint32_t stride = 1;      ///< el MAS GRUESO del frame (los nodos ya no comparten stride)
+        uint32_t strideMin = 1;   ///< el mas fino: es el que hay bajo tus pies
+        uint32_t drawCalls = 0;   ///< uno por grupo de stride con nodos, <= 7
+        /// ⚠️ EL TOPE REAL, no la capacidad. El log imprimia `capacity()` (4096) mientras el selector
+        /// corria con `capacity - capacity/4` (3072), asi que "sel 3053 · tope 4096" parecia holgado
+        /// cuando estaba a 19 del limite. Saturar significa dibujar nodos BASTOS, y quien se queda
+        /// basto lo decide el orden de recorrido, no la cercania (`terrain_node_budget_starvation`).
+        size_t   selBudget = 0;
+        /// ⚠️ Nodos dibujados SIN rango publicado por el pool. No es contabilidad: sin rango,
+        /// `nodeStrideIndex` cree que la superficie esta en R y mide la distancia al NIVEL DEL MAR.
+        /// A 1026 m de cota eso convierte 2 m en 1028 y el stride se queda en 4 donde tocaba 1 —
+        /// el sintoma es `stride 4..4` en vez de `1..4`. Ver `terrain_node_stride_per_node`.
+        size_t   rangeMissing = 0;
         // Diagnóstico: sin esto, "falta terreno" no se puede separar de "no se selecciona",
         // "no cabe en el pool" o "se recorta". Cada causa se arregla en un sitio distinto.
         size_t   selected = 0, culledHorizon = 0, culledFrustum = 0, noSlot = 0;
@@ -224,6 +311,9 @@ public:
      */
     /// El bake del planeta, que el pase necesita para que el nodo tenga continentes. Ver
     /// `TerrainNodeGpu::setBaseField`. Lo usan el compute (altura) y el vértice (clima).
+    /// @brief Muestreador de altura para el rango de los nodos. Ver `TerrainNodeGpu::setHeightSampler`.
+    void setHeightSampler(NodeBaseHeightFn fn, void* ctx) { m_gpu.setHeightSampler(fn, ctx); }
+
     void setBaseField(RHI::TextureHandle t) { m_gpu.setBaseField(t); m_baseField = t; }
 
     /// El bake EQUIRECT de altura: la MISMA fuente de elevación que el clipmap y la física.
@@ -274,7 +364,7 @@ public:
         if (!m_rootsPinned) {
             m_pool.beginFrame();
             for (int f = 0; f < 6; ++f) m_pool.request(NodeId{ (PlanetFace)f, 0, 0, 0 });
-            if (m_gpu.generatePending(m_pool, planetRadiusM) > 0) {
+            if (m_gpu.generatePending(ctx, m_pool, planetRadiusM) > 0) {
                 for (int f = 0; f < 6; ++f) m_pool.pin(NodeId{ (PlanetFace)f, 0, 0, 0 });
                 m_rootsPinned = true;
             }
@@ -294,18 +384,13 @@ public:
         const size_t selBudget = m_gpu.capacity() - m_gpu.capacity() / 4;
         nodeSelectVisible(planetRadiusM, camPos, planetCenter, radPerPx, m_sel,
                           selBudget, errorPx(), &viewDir, coneHalfAngle,
-                          5000.0, &TerrainNodePool::rangeFnAdapter, &m_pool);
-        fs.selected = m_sel.size();
-        // Cuánto descarta cada recorte, por separado: sin el desglose no se sabe cuál se pasa.
-        {
-            std::vector<NodeId> noCull, horizOnly;
-            nodeSelectVisible(planetRadiusM, camPos, planetCenter, radPerPx, noCull,
-                              m_gpu.capacity(), errorPx());
-            nodeSelectVisible(planetRadiusM, camPos, planetCenter, radPerPx, horizOnly,
-                              m_gpu.capacity(), errorPx());
-            fs.culledHorizon = noCull.size() > horizOnly.size() ? noCull.size() - horizOnly.size() : 0;
-            fs.culledFrustum = horizOnly.size() > m_sel.size() ? horizOnly.size() - m_sel.size() : 0;
-        }
+                          5000.0, &TerrainNodePool::rangeFnAdapter, &m_pool,
+                          &fs.culledHorizon, &fs.culledFrustum);
+        fs.selected  = m_sel.size();
+        fs.selBudget = selBudget;
+        // El desglose lo cuenta el propio selector (ver `nodeSelectVisible`): aqui se hacia
+        // re-ejecutandolo dos veces con los MISMOS argumentos y restando, o sea siempre 0 para el
+        // horizonte, y costaba dos pasadas por frame.
         for (const NodeId& n : m_sel) {
             fs.levelMin = std::min(fs.levelMin, n.level);
             fs.levelMax = std::max(fs.levelMax, n.level);
@@ -317,24 +402,69 @@ public:
         // generación de lo que falta se paga en paralelo, no bloqueando el dibujo.
         m_resolved.clear(); m_resolved.reserve(m_sel.size());
         for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
-        fs.generated = m_gpu.generatePending(m_pool, planetRadiusM);
+        // ⚠️ ORDENAR ANTES DE GENERAR. El presupuesto es el mismo; lo que cambia es CUÁLES entran.
+        m_pool.prioritisePending(camPos, planetCenter, planetRadiusM);
+        fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM);
 
-        // Niveles de vecino para el cosido, sobre el conjunto que DE VERDAD se va a dibujar (que no
-        // es el seleccionado: los que cayeron a un ancestro dibujan el ancestro).
+        // ── EL CONJUNTO DIBUJADO NO CUMPLE 2:1, Y EQUILIBRARLO AQUI NO ES LA SOLUCION ───────────
+        //
+        // El SELECTOR sale 2:1 (medido: 0 saltos de mas de un nivel a cualquier presupuesto). Lo que
+        // se DIBUJA no: un nodo sin hueco cae a un ancestro y aparecen saltos de hasta 4 niveles —
+        // 191 parejas de 11 304 con solo 23 nodos caidos. El cosido coloca bien la arista pero el
+        // geomorph apunta al PADRE, y a 4 niveles el padre no es el vecino: quedan **1,372 m** de
+        // escalon (0,339 m ya a dos niveles). Es una causa real de pinchos.
+        //
+        // ⚠️ SE PROBO A EQUILIBRARLO AQUI, BAJANDO DE NIVEL AL FINO, Y ES PEOR. Bajar un nodo lo
+        // convierte en ancestro de otros que siguen dibujandose, asi que hay que quitar tambien sus
+        // descendientes — y esa onda se propaga: medido, **2 902 nodos se quedan en 277**. Veintitres
+        // nodos caidos arrastran al 90 % del terreno. `terrain_node_level_balance` guarda la medida
+        // para que nadie lo vuelva a intentar por este lado.
+        //
+        // La direccion correcta es que no haya caidas profundas: que el pool garantice el PADRE de lo
+        // que se selecciona. Eso es politica del pool, no del renderer, y esta sin hacer.
         m_drawn.clear(); m_drawn.reserve(m_resolved.size());
         for (const auto& r : m_resolved) if (r.slot >= 0) m_drawn.push_back(r.node);
         const auto index = nodeDrawnIndex(m_drawn);
 
-        // STRIDE GLOBAL, no por nodo: el selector ya iguala el tamaño en pantalla de los nodos (eso
-        // es lo que hace su métrica de error), así que todos quieren el mismo. Uno global además NO
-        // crea T-junctions nuevas — dos nodos vecinos dibujan la misma densidad.
-        uint32_t sk = 0;
-        {
-            const double want = vertexPx() / std::max(errorPx(), 1e-3);   // téxeles por vértice
-            while (sk + 1 < m_strideCount && (double)(1u << (sk + 1)) <= want) ++sk;
+        // ── STRIDE POR NODO ─────────────────────────────────────────────────────────────────────
+        //
+        // Era global, con el argumento de que el selector ya iguala el tamaño en pantalla de todos
+        // los nodos. Cierto para la pantalla; falso para la disparidad ver↔pisar, que solo importa
+        // donde pisas. Ver `nodeStrideIndex` para las cifras.
+        //
+        // ⚠️ CON HISTERESIS, Y POR ESO HACE FALTA MEMORIA. Sin ella el stride es funcion pura de la
+        // distancia y un nodo parado en un umbral parpadea CADA FRAME con el micro-temblor del
+        // personaje (medido: 119 de 120 frames), moviendo la superficie ~1 cm cada vez. Eso era el
+        // "el terreno tiembla al moverse".
+        //
+        // ⚠️ Y el mapa se consulta TAMBIEN para el vecino al coser (ver `draw`). Recalcular alli el
+        // stride del vecino daria el valor SIN historia, que puede no ser el que el vecino esta
+        // usando de verdad — y coser contra una zancada que el otro lado no tiene es una grieta.
+        m_skOf.clear(); m_skOf.reserve(m_resolved.size());
+        m_skNow.clear(); m_skNow.reserve(m_resolved.size() * 2);
+        for (const auto& r : m_resolved) {
+            if (r.slot < 0) { m_skOf.push_back(0); continue; }
+            double elevM = 0.0;
+            { const NodeRange rg = m_pool.rangeOf(r.node); if (rg.valid()) elevM = rg.maxM; }
+            if (elevM == 0.0) ++fs.rangeMissing;
+            const uint64_t key = nodeKey(r.node);
+            const auto it = m_skPrev.find(key);
+            const uint32_t prev = (it == m_skPrev.end()) ? kNoPrevStride : it->second;
+            const double want = nodeStrideWant(r.node, planetRadiusM, camPos, planetCenter,
+                                               errorPx(), vertexPx(),
+                                               Planet::TERRAIN_RING_FINE_CELL, elevM);
+            uint32_t sk = nodeStrideQuantise(want, m_strideCount - 1, prev);
+            if (const uint32_t f = forcedStride()) {          // biseccion: stride global, como antes
+                sk = 0; while ((1u << sk) < f && sk + 1 < m_strideCount) ++sk;
+            }
+            m_skOf.push_back(sk);
+            m_skNow[key] = sk;
         }
-        fs.stride = 1u << sk;
-        m_sk = sk; m_index = index;
+        m_skPrev.swap(m_skNow);   // lo de este frame pasa a ser la historia del siguiente
+        fs.stride    = m_skOf.empty() ? 1u : (1u << *std::max_element(m_skOf.begin(), m_skOf.end()));
+        fs.strideMin = m_skOf.empty() ? 1u : (1u << *std::min_element(m_skOf.begin(), m_skOf.end()));
+        m_lastRadPerPx = radPerPx;
+        m_index = index;
         m_stats = fs;
         return fs;
     }
@@ -348,7 +478,6 @@ public:
                     double planetRadiusM, const glm::mat4& mvp) {
         FrameStats fs = m_stats;
         if (!m_ready || !ctx) return fs;
-        const uint32_t sk = m_sk;
         const auto& index = m_index;
 
         // ── UN SOLO DRAW INSTANCIADO. No es una optimización: es lo único correcto en Vulkan. ──
@@ -360,36 +489,140 @@ public:
         // 365 seleccionados, 365 dibujados, 747 520 triángulos emitidos y la pantalla negra.
         //
         // Los datos por nodo se suben de una vez a un SSBO y el shader los indexa por instancia.
+        // ⚠️ AGRUPADO POR STRIDE. Cada stride tiene su propio index buffer, así que un draw
+        // instanciado solo puede cubrir nodos que compartan stride. Se ordenan por grupo y se emite
+        // un draw por grupo — como mucho `m_strideCount` (7), no uno por nodo.
         m_inst.clear(); m_inst.reserve(m_resolved.size());
-        for (const auto& r : m_resolved) {
-            if (r.slot < 0) { ++fs.noSlot; continue; }
+        m_group.assign(m_strideCount + 1, 0);
+        for (uint32_t pass = 0; pass < m_strideCount; ++pass) {
+        for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
+            const auto& r = m_resolved[ri];
+            const uint32_t skOwn = (ri < m_skOf.size()) ? m_skOf[ri] : 0u;
+            if (skOwn != pass) continue;
+            if (r.slot < 0) { if (pass == 0) ++fs.noSlot; continue; }
             if (!r.exact) ++fs.ancestors;
             NodeInstGPU g{};
             g.node[0] = (int32_t)r.node.face; g.node[1] = (int32_t)r.node.level;
             g.node[2] = (int32_t)r.node.i;    g.node[3] = (int32_t)r.node.j;
-            nodeNeighbourLevels(r.node, index, g.edge);
+            // ── COSIDO CON STRIDES DISTINTOS ────────────────────────────────────────────────────
+            //
+            // La zancada del cosido ya no la fija sola la diferencia de nivel: un vecino del MISMO
+            // nivel pero con el doble de stride tiene la mitad de vértices en la arista, y eso abre
+            // exactamente la misma grieta que un nivel de diferencia. La arista compartida tiene que
+            // usar la MÁS GRUESA de las dos densidades, y el lado fino es el que cede.
+            NodeId nb[4];
+            nodeNeighbourLevels(r.node, index, g.edge, nb);
+            const uint32_t sOwn = 1u << skOwn;
+            int32_t fineMask = 0;
+            for (int e = 0; e < 4; ++e) {
+                // El stride que el vecino esta usando DE VERDAD este frame, historia incluida. Si no
+                // esta en el mapa es que no se dibuja, y `nodeNeighbourLevels` ya devolvio `r.node`
+                // como vecino: entonces vale el propio y no hay nada que coser.
+                const auto itNb = m_skPrev.find(nodeKey(nb[e]));
+                const uint32_t sNb = 1u << ((itNb == m_skPrev.end()) ? skOwn : itNb->second);
+                // ⚠️ LA DIFERENCIA DE NIVEL VA CON SIGNO, Y AQUI ESTABA EL PINCHO.
+                //
+                // `nodeNeighbourLevels` recorta `outCoarser` a 0 cuando el vecino es MAS FINO —
+                // correcto para el cosido por nivel, porque en ese caso cose el otro—. Pero la
+                // zancada del stride necesita la diferencia REAL: un vecino un nivel mas fino tiene
+                // texeles la mitad de grandes, asi que su stride en MIS unidades es `sNb/2`, no
+                // `sNb`. Usando el 0 recortado se sobreestima la zancada y se cose una arista que no
+                // habia que coser: yo mismo abro la T-junction que el cosido venia a cerrar.
+                //
+                // Y con stride por nodo el caso NO es raro, es el comun: el vecino mas fino esta mas
+                // cerca, su `collWant` dobla y le toca `sNb = 2·sOwn` — que en mis unidades es
+                // exactamente mi propia malla, o sea nada que coser.
+                //
+                // Con stride GLOBAL esto era invisible: `sNb == sOwn` siempre, y `sOwn << 0` da
+                // `sOwn`, que no supera a `sOwn` y no cose. Por eso los pinchos aparecieron con el
+                // stride por nodo y desaparecen con `HARUKA_TERRAIN_V5_STRIDE=4`.
+                const int lvDiff = (int)r.node.level - (int)nb[e].level;
+                const uint32_t sNbMine = (lvDiff >= 0) ? (sNb << (uint32_t)lvDiff)
+                                                       : (sNb >> (uint32_t)(-lvDiff));
+                const uint32_t step = std::max(sOwn, std::max(sNbMine, 1u));
+                // ⚠️ DOS COSAS DISTINTAS QUE ANTES ERAN LA MISMA. La zancada del cosido y el
+                // geomorph hacia el padre se leían los dos de `edge`, porque mientras `edge` era
+                // "niveles más grueso" las dos preguntas tenían la misma respuesta. Con stride por
+                // nodo ya no: un vecino del MISMO nivel y otro stride necesita cosido pero NO
+                // morph —evalúa la misma escalera de octavas, no la del padre—, y morfear ahí
+                // levanta mi arista hacia el padre mientras la suya se queda. Eso es una costura,
+                // y la introduje yo al cambiar el significado de `edge`.
+                // (la mascara de morph por arista se borro: no cerraba nada. Ver terrain_node.vert)
+                // ⚠️ Y LA MASCARA ESPEJO: aristas donde el vecino es MAS FINO.
+                //
+                // El vecino fino morfea hacia la altura CRUDA de su padre —o sea la MIA—, pero yo
+                // estoy a mi vez morfeando hacia el mio, asi que los dos lados apuntan a superficies
+                // distintas. Medido en `terrain_node_edge_audit_all`: de los 2,75 m de escalon entre
+                // niveles, **2,25 m son esto** (quitandome el morph aqui baja a 0,495 m).
+                //
+                // No se puede arreglar por el otro lado: el fino necesitaria `mix(padre, abuelo, ...)`
+                // y su hueco solo guarda dos mapas. Asi que lo cede el GRUESO: junto a esa arista deja
+                // de morfear y vuelve a su propia altura, que es justo a la que el fino apunta.
+                // (la mascara de vecino FINO se calcula fuera del bucle: hay que mirar hacia
+                //  ABAJO, y `nodeNeighbourLevels` solo sabe subir — ver `nodeNeighbourFinerMask`.)
+                g.edge[e] = (step > sOwn) ? (int32_t)step : 0;
+            }
             g.slot[0] = r.slot;
+            g.slot[1] = 0;   // libre: era la mascara del morph por arista, borrado por medida
+            // Ver la nota larga de `terrain_node.vert`: probado, medido y revertido.
+            fineMask = 0;
+            g.slot[3] = fineMask;      // aristas con vecino MAS FINO: ahi no morfeo (ver arriba)
+            g.slot[2] = (int32_t)skOwn;   // solo para la vista 4: color por STRIDE
+            // ⚠️ EL MORPH POR DISTANCIA YA NO VIAJA POR AQUI. Era `nodeParentMorph`, un escalar por
+            // NODO, y por eso mismo no podía casar en las aristas: dos vecinos a distancias distintas
+            // evaluaban el mismo punto compartido con morphs distintos (medido: hasta 10,07 m). Ahora
+            // el vértice lo calcula con SU distancia, a partir de `du.lod` — ver `terrain_node.vert`.
+            g.misc[0] = 0.0f;
             m_inst.push_back(g);
             ++fs.drawn;
         }
+        m_group[pass + 1] = m_inst.size();       // fin del grupo `pass`, inicio del siguiente
+        }
         if (m_inst.empty()) { m_stats = fs; return fs; }
 
-        const size_t needB = m_inst.size() * sizeof(NodeInstGPU);
-        if (needB > m_instCap) {                       // crece y no encoge: evita recrear cada frame
-            if (RHI::valid(m_instSSBO)) m_dev->destroy(m_instSSBO);
-            m_instCap  = needB * 2;
-            m_instSSBO = m_dev->createBuffer(RHI::BufferUsage::Storage, m_instCap,
-                                             nullptr, RHI::BufferMemory::Dynamic);
+        // ⚠️ UN SSBO POR GRUPO, NO UNO CON DESPLAZAMIENTO. `drawIndexed` no tiene `baseInstance`, así
+        // que cada draw empieza a contar instancias en 0 y necesita ver SOLO las suyas. Meter el
+        // desplazamiento en el UBO y reescribirlo entre draws es exactamente el fallo que documenta
+        // el bloque de arriba: en Vulkan los draws GRABADOS leerían todos el último valor. Cambiar
+        // de HANDLE sí se graba bien — es una escritura de descriptor, no un memcpy.
+        for (uint32_t k = 0; k < m_strideCount; ++k) {
+            const size_t n = m_group[k + 1] - m_group[k];
+            if (n == 0) continue;
+            const size_t needB = n * sizeof(NodeInstGPU);
+            if (needB > m_instCap[k]) {                // crece y no encoge: evita recrear cada frame
+                if (RHI::valid(m_instSSBO[k])) m_dev->destroy(m_instSSBO[k]);
+                m_instCap[k]  = needB * 2;
+                m_instSSBO[k] = m_dev->createBuffer(RHI::BufferUsage::Storage, m_instCap[k],
+                                                    nullptr, RHI::BufferMemory::Dynamic);
+            }
+            m_dev->updateBuffer(m_instSSBO[k], 0, needB, m_inst.data() + m_group[k]);
         }
-        m_dev->updateBuffer(m_instSSBO, 0, needB, m_inst.data());
 
         DrawUBO du{};
         du.mvp     = mvp;
-        du.center  = glm::vec4(glm::vec3(planetCenter - camPos), 0.0f);
+        // ⚠️ PARTIDO EN DOS, y la resta en double antes de partir. Un float de 6,37e6 tiene un ulp de
+        // 0,5 m, asi que meter esto entero en `vec4` hacia saltar el terreno medio metro cada vez que
+        // la camara cruzaba un escalon — 0,53 m entre frames andando a 5 m/s, medido. El trozo gordo
+        // se cuantiza a 64 m (exacto en float a esta magnitud) y el fino viaja aparte.
+        const glm::dvec3 rel = planetCenter - camPos;
+        const double kQ = 64.0;
+        const glm::dvec3 hi(std::round(rel.x / kQ) * kQ, std::round(rel.y / kQ) * kQ,
+                            std::round(rel.z / kQ) * kQ);
+        du.center   = glm::vec4(glm::vec3(hi), 0.0f);
+        du.centerLo = glm::vec4(glm::vec3(rel - hi), 0.0f);
+        // ── LO QUE EL VERTICE NECESITA PARA SU PROPIO MORPH ─────────────────────────────────────
+        // Antes esto se calculaba en CPU por nodo (`nodeParentMorph` -> `g.misc[0]`) y salia UN
+        // escalar constante en toda su superficie: dos vecinos daban valores distintos sobre la
+        // arista que comparten y eso abria hasta 10,07 m de grieta. Ahora se manda la REGLA y la
+        // aplica cada vertice con su propia distancia, que es lo unico que los dos lados comparten.
+        du.lod[0] = (float)m_lastRadPerPx;
+        du.lod[1] = (float)errorPx();
+        du.lod[2] = (float)(planetRadiusM * 1.5707963267948966);   // gemelo de `nodeSpanM` en nivel 0
+        du.lod[3] = noMorph() ? 0.0f : 1.0f;
         du.grid[0] = (int32_t)TERRAIN_NODE_TEXELS;
         du.grid[1] = (int32_t)TERRAIN_NODE_CELLS;
         du.misc[0] = (float)planetRadiusM;
-        du.misc[2] = (float)debugView();
+        du.misc[2] = (float)((m_debugOverride >= 0) ? m_debugOverride : debugView());
         du.misc[1] = m_gpu.hasHeightTex() ? 1.0f : 0.0f;      // ¿hay bake EQUIRECT? (el preferido)
         du.misc[3] = RHI::valid(m_baseField) ? 1.0f : 0.0f;   // ¿hay campo del cubo? (clima + respaldo)
 
@@ -408,7 +641,7 @@ public:
         ctx->bindPipeline(m_pipe);
         ctx->bindUniformBuffer(0, m_ubo);
         ctx->bindStorageBuffer(1, m_gpu.heights());
-        ctx->bindStorageBuffer(2, m_instSSBO);
+        // La ranura 2 la reata cada grupo justo antes de su draw (abajo).
         // ⚠️ TODOS los samplers que el shader DECLARA se atan, se usen o no. En Vulkan un descriptor
         // sin escribir es INDEFINIDO —no ceros— y muestrearlo puede perder el dispositivo. Los flags
         // de `uShade.z` deciden si se LEEN; atarlos es obligatorio igual.
@@ -427,25 +660,50 @@ public:
             if (RHI::valid(m_shade.zone))  ctx->bindTexture(14, m_shade.zone);
         }
         ctx->bindVertexBuffer(m_vb);
-        ctx->bindIndexBuffer(m_ibs[sk]);
-        ctx->drawIndexed(m_indexCount[sk], 0, (uint32_t)m_inst.size());
-
-        fs.tris = fs.drawn * (size_t)(m_indexCount[sk] / 3);
+        fs.tris = 0;
+        for (uint32_t k = 0; k < m_strideCount; ++k) {
+            const size_t n = m_group[k + 1] - m_group[k];
+            if (n == 0 || !RHI::valid(m_instSSBO[k])) continue;
+            ctx->bindStorageBuffer(2, m_instSSBO[k]);
+            ctx->bindIndexBuffer(m_ibs[k]);
+            ctx->drawIndexed(m_indexCount[k], 0, (uint32_t)n);
+            fs.tris += n * (size_t)(m_indexCount[k] / 3);
+            ++fs.drawCalls;
+        }
         fs.resident = m_pool.residentCount();
         m_stats = fs;
         return fs;
     }
 
+    /// Gemelo de `NodeInst` de `terrain_node.vert`. std430: 4 ivec4/vec4 = 64 B, alineado a 16.
+    /// `node` = cara/nivel/i/j · `edge` = zancada del cosido por arista (0 = no coser) ·
+    /// `slot` = hueco / (libre) / índice de stride / (libre) · `misc` = (libre).
+    struct NodeInstGPU { int32_t node[4]; int32_t edge[4]; int32_t slot[4]; float misc[4]; };
+    static_assert(sizeof(NodeInstGPU) == 64, "NodeInst std430 descuadrado");
+
+    /**
+     * @brief Lo que el pase ENVÍA de verdad este frame, para auditarlo.
+     *
+     * ⚠️ Es público a propósito. Durante la caza de grietas del 2026-08-25, SEIS modelos de CPU
+     * dijeron "limpio" mientras el shader dejaba costura, y el último dato que nadie había leído del
+     * motor era precisamente éste: la zancada de cosido que cada nodo recibe. Un test que la
+     * reconstruye vuelve a ser un gemelo; uno que la LEE, no.
+     *
+     * Válido después de `draw()` y hasta el siguiente. No se copia: es el buffer que se subió.
+     */
+    const std::vector<NodeInstGPU>& instancesSent() const { return m_inst; }
+
 private:
-    /// Gemelo de `NodeInst` de `terrain_node.vert`. std430: 3 ivec4 = 48 B, alineado a 16.
-    struct NodeInstGPU { int32_t node[4]; int32_t edge[4]; int32_t slot[4]; };
-    static_assert(sizeof(NodeInstGPU) == 48, "NodeInst std430 descuadrado");
 
     /// Gemelo del bloque `NodeDraw` de `terrain_node.vert`. std140: mat4 + 4 vec4 de 16 B.
     struct DrawUBO {
         glm::mat4 mvp{1.0f};
-        glm::vec4 center{0.0f};
-        int32_t node[4]{}; int32_t grid[4]{}; int32_t edge[4]{};
+        glm::vec4 center{0.0f};      ///< parte GRUESA, multiplo de 64 m: exacta en float
+        glm::vec4 centerLo{0.0f};    ///< el resto. Gemelo de `uCenterLo`; ver la nota del .vert
+        /// x = radianes por píxel · y = errorPx · z = arco del nivel 0 (m) · w = ¿morph encendido?
+        /// Es lo que el vértice necesita para decidir su PROPIO morph; ver `terrain_node.vert`.
+        float   lod[4]{};
+        int32_t grid[4]{}; int32_t edge[4]{};
         float   misc[4]{};
         float   shade[4]{};
         glm::vec4 texAnchor{0.0f};
@@ -455,13 +713,17 @@ private:
 
     Shade                    m_shade;
     RHI::TextureHandle       m_baseField{};
-    std::vector<NodeInstGPU> m_inst;
-    RHI::BufferHandle        m_instSSBO{};
-    size_t                   m_instCap = 0;
+    std::vector<NodeInstGPU> m_inst;      ///< ORDENADO por grupo de stride; `m_group` los delimita
+    std::vector<size_t>      m_group;     ///< `m_group[k]` = primera instancia del stride `k`
+    std::vector<uint32_t>    m_skOf;      ///< stride de cada `m_resolved[i]`, de `prepare`
+    /// Stride por nodo del frame ANTERIOR: es lo que da histeresis y quita el parpadeo. Tras el
+    /// `swap` de `prepare` contiene el de ESTE frame, que es lo que `draw` consulta para el vecino.
+    std::unordered_map<uint64_t, uint32_t> m_skPrev, m_skNow;
 
     // Estado que cruza de `prepare` a `draw` (ver la nota de arriba sobre por qué son dos).
     FrameStats                          m_stats;
-    uint32_t                            m_sk = 0;
+    int                                 m_debugOverride = -1;   ///< ver setDebugViewOverride
+    double                              m_lastRadPerPx = 1.0;   ///< de `prepare`, lo usa el morph
     std::unordered_map<uint64_t, uint32_t> m_index;
 
     RHI::Device*        m_dev = nullptr;
@@ -470,6 +732,8 @@ private:
     RHI::BufferHandle   m_vb{}, m_ubo{};
     RHI::BufferHandle   m_ibs[kStrides]{};
     uint32_t            m_indexCount[kStrides]{};
+    RHI::BufferHandle   m_instSSBO[kStrides]{};   ///< uno por grupo: `drawIndexed` no tiene baseInstance
+    size_t              m_instCap[kStrides]{};
     uint32_t            m_strideCount = 0;
     bool                m_ready = false;
     bool                m_rootsPinned = false;

@@ -66,6 +66,14 @@ inline constexpr double TERRAIN_MAX_TESS_GEN_LEVEL = 64.0;
 /// malla de colisión. Es un ángulo: el triángulo crece con lo que abarca en pantalla.
 inline constexpr double TERRAIN_TRIM_SLOPE = 0.002;
 
+/// Celda del anillo de colisión MÁS FINO, y con ella el piso de `triM`.
+///
+/// ⚠️ ES EL TÉXEL DEL RENDER, redondeado a la baja a potencia de dos. El pase de nodos dibuja a
+/// `R·(π/2)/2^17/128` = **0,596 m** por téxel; la colisión tenía celdas de 4 m heredadas del quad del
+/// clipmap, así que lo que se veía y lo que se pisaba eran dos superficies separadas 0,15-0,25 m.
+/// Potencia de dos para que la retícula siga siendo múltiplo exacto al doblar hacia fuera.
+inline constexpr double TERRAIN_RING_FINE_CELL = 0.5;
+
 /// Piso de `triM` en el campo cercano — y, con él, la definición de LA SUPERFICIE que se pisa.
 ///
 /// ⚠️ No es una constante de antialiasing: la altura DEPENDE de `triM` (el freno de Nyquist de §3.1
@@ -73,7 +81,13 @@ inline constexpr double TERRAIN_TRIM_SLOPE = 0.002;
 /// Por eso se DERIVA del quad real en vez de escribirse: con el piso en 2.0 y quads de 4 m, la
 /// octava de 4,5 m entraba al 12,5 % (±8,7 cm) en vértices separados 4 m — sub-Nyquist, o sea el
 /// hervido que §3.1 describe. Derivado, el piso sigue al quad y eso no puede volver a desalinearse.
-inline constexpr double TERRAIN_TRIM_FLOOR = TERRAIN_CLIP_QUAD_M;
+/// ⚠️ SIGUE A LA CELDA DEL ANILLO DE COLISIÓN MÁS FINO, NO AL QUAD DEL CLIPMAP (que ya no existe).
+///
+/// El razonamiento de arriba NO cambia —el piso tiene que seguir a la rejilla que lo consume, o se
+/// entra en sub-Nyquist— pero la rejilla sí cambió: el clipmap se borró y lo que consume este piso
+/// son los anillos de colisión, que ahora empiezan en 0,5 m. Dejarlo en 4 m hacía inútil afinarlos:
+/// se pagan las muestras y se sigue cortando el mismo relieve.
+inline constexpr double TERRAIN_TRIM_FLOOR = TERRAIN_RING_FINE_CELL;
 
 /**
  * @brief Piso de `triM` para el SOMBREADO per-píxel. **A propósito distinto del de la geometría.**
@@ -399,9 +413,10 @@ inline constexpr uint32_t TERRAIN_HF_SAMPLES = 128;
 /// ⚠️ ASIMÉTRICO POR UNA CELDA, y es inevitable: un número PAR de muestras no puede repartirse
 /// simétricamente alrededor del 0 sobre una retícula que tiene un nodo EN el 0. Se elige empezar en
 /// `-TERRAIN_COLLIDE_UNIFORM_M` y terminar una celda antes por el lado positivo, en vez de centrarlo,
-/// porque así **todos los nodos siguen siendo múltiplos exactos del quad** — que es la propiedad que
-/// `clipmap_vertex_lattice` exige y sin la cual el heightfield dejaría de compartir vértices con el
-/// render.
+/// porque así **todos los nodos siguen siendo múltiplos exactos del quad** — sin lo cual el
+/// heightfield dejaría de compartir vértices con el render.
+/// ⚠️ Esta propiedad la exigía `clipmap_vertex_lattice`, borrado junto con el clipmap: hoy NADA la
+/// vigila. Si se toca este reparto, hay que volver a comprobarla a mano.
 inline constexpr double TERRAIN_HF_LO = -TERRAIN_COLLIDE_UNIFORM_M;                     // -256 m
 
 /// Coordenada tangente del ÚLTIMO nodo. Derivada, no escrita: sigue a las muestras y al quad.
@@ -542,13 +557,18 @@ inline std::vector<TerrainRingSpec> terrainRingLayout(
     std::vector<TerrainRingSpec> out;
     double inner = 0.0;                                   // alcance del anillo de dentro
     for (int k = 0; k < 32; ++k) {
+        // ⚠️ LA PILA EMPIEZA EN ±32 m CON CELDA 0,5 m, no en ±256 m con 4 m. Afinar la rejilla es la
+        // ÚNICA forma de cerrar la disparidad ver↔pisar: bajar solo el corte de octavas con celdas de
+        // 4 m es sub-Nyquist y triplica el twist (probado y revertido). Y no hace falta 0,5 m sobre
+        // ±256 m —serían 45× más muestras—: basta sobre el radio donde se camina, porque la pila
+        // dobla hacia fuera y en tres anillos ya está en los 4 m de antes.
         const double extent = (k == 0)
-            ? (double)TERRAIN_RING_BASE_HALF * TERRAIN_CLIP_QUAD_M   // ±256 m = el bloque cercano
+            ? (double)TERRAIN_RING_BASE_HALF * TERRAIN_RING_FINE_CELL   // ±32 m, celda 0,5 m
             : 2.0 * inner;
         double cell = extent / (double)TERRAIN_RING_BASE_HALF;
         // El tope se aplica si el anillo EMPIEZA dentro de la caja: es donde el render dibuja fino.
         if (inner < boxRadius) cell = std::min(cell, cellCap);
-        cell = std::max(cell, TERRAIN_CLIP_QUAD_M);
+        cell = std::max(cell, TERRAIN_RING_FINE_CELL);
         TerrainRingSpec r;
         r.cell    = cell;
         r.half    = (int)std::llround(extent / cell);
@@ -624,7 +644,8 @@ inline std::vector<double> terrainRingGrid(double halfExtent,
             // tiene que caer además en un MÚLTIPLO de esa celda, o la retícula gruesa queda desfasada
             // media celda respecto a la fina y no comparte ni un vértice.
             //
-            // Es el fallo que destapó `clipmap_vertex_lattice`: el bloque uniforme acaba en 256, los
+            // Es el fallo que destapó `clipmap_vertex_lattice` (test ya borrado): el bloque uniforme
+            // acaba en 256, los
             // pasos de 8 m llegan a 504, y 504 no es múltiplo de 16 — así que al doblar a 16 todos los
             // nodos siguientes quedaban en 504, 520, 536… o sea ≡8 (mod 16). 19 256 de 140 625 nodos
             // fuera de la retícula del render, con 8 m de desvío. El tamaño era correcto y la

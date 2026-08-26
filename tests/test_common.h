@@ -38,9 +38,6 @@ void test_weather_3d();
 // con la cobertura mediana del planeta). Con contraprueba de las cifras viejas en los tres.
 void test_cloud_shape();
 void test_ground_layer();
-// Paridad clipmap ↔ recorte (test_terrain.cpp): el cuadro del recorte y la rejilla que dibuja el
-// clipmap cubren EXACTAMENTE el mismo cuadrado tangente (el hueco 0-2 km no aparece).
-void test_clipmap_parity();
 // Las cifras de LOD (terrain_lod.h) casan entre sí y con el hardware: ningún tope de teselación por
 // encima de GL_MAX_TESS_GEN_LEVEL, y el piso de triM == el lado real del quad (Nyquist).
 void test_terrain_lod_invariants();
@@ -49,7 +46,6 @@ void test_terrain_ring_grid();
 // La disparidad REAL en metros entre la superficie que se DIBUJA y la que se PISA: las dos son
 // poligonales, con celdas distintas, así que se separan por la sagita de la celda.
 void test_terrain_chord_error();
-void test_clipmap_vertex_lattice();
 // El gradiente ANALÍTICO del detalle coincide con las diferencias finitas: es lo que permite bajar
 // de 3 evaluaciones por vértice a 1 (§8) sin que la iluminación deje de describir la geometría.
 void test_terrain_detail_gradient();
@@ -117,10 +113,6 @@ void test_image_writer_roundtrip();
 void test_prop_lod_mesh();
 void test_prop_collider();
 void test_rock_interior();   // peñones enterrados de la roca (con contraprueba por rayos)
-// La reconstrucción de `dir` del clipmap (test_clipmap_dir.cpp): el vértice del clipmap llega a su
-// dirección en FLOAT desde el marco tangente, mientras la CPU la calcula en DOUBLE desde la posición.
-// Mide cuánta altura separa eso — la única pieza del terreno que nunca se había comparado.
-void test_clipmap_dir_parity();
 // EL MAR (test_ocean.cpp): que la ola de la física sea la derivada exacta de la superficie, que el
 // agua TRANSPORTE (firma de Stokes), el bajío/rompiente que define la costa, y el acople real en el
 // motor — flotar y ser arrastrado. Con contraprueba en los cinco.
@@ -141,6 +133,9 @@ void test_terrain_orbital_relief();
 // F5-albedo: de donde sale el color desde orbita y por que se ve uniforme. Mide las DOS fuentes
 // (tintes de material y mapa de biomas) para señalar cual es la que falla.
 void test_terrain_orbital_albedo();
+// Que celda de colision hace falta para un twist dado. El twist es la forma del collider de Jolt
+// (dos triangulos por celda), no el campo: solo baja afinando la celda.
+void test_terrain_twist_vs_cell();
 // F1 del PLAN TERRENO v5 (test_terrain_node.cpp): el direccionamiento de nodos del quadtree es
 // exacto BIT A BIT — grueso subconjunto de fino, aristas sin grieta, determinista. Con contraprueba.
 void test_terrain_node_lattice();
@@ -160,9 +155,35 @@ void test_terrain_node_face_seam_gap();
 // El recorte por HORIZONTE contra rayos de pantalla: ningun suelo que se ve puede caer en un nodo
 // descartado. Es el otro recorte, y el que el cono ya descartado dejaba libre de sospecha.
 void test_terrain_node_horizon_cull();
-// El planeta hornea su elevacion DOS veces (equirect para la fisica, cubo para el render). Cuanto se
-// separan los dos suelos, en metros: es la cota inferior del desajuste que F4 viene a cerrar.
-void test_terrain_two_bakes_disagree();
+// El criterio de subdivision medía al NIVEL DEL MAR, no al terreno: en una ladera subdividia de
+// menos, y el sintoma parecia direccional. Cuantos niveles se perdian.
+void test_terrain_node_split_uses_elevation();
+// El POPPING al alejarse: que el nodo ya sea su padre cuando le toque fundirse en el. Es el otro
+// geomorph, el del TIEMPO — el de aristas solo cose vecinos que se dibujan a la vez.
+void test_terrain_node_morph_no_pop();
+void test_terrain_node_stride_per_node();
+void test_terrain_node_stride_pop();
+void test_terrain_node_stride_seams();
+void test_terrain_node_ancestor_disparity();
+void test_terrain_node_budget_starvation();
+void test_terrain_node_walk_shimmer();
+void test_terrain_node_ucenter_jitter();
+void test_terrain_node_level_balance();
+void test_terrain_prop_anchor_mismatch();
+void test_terrain_node_orbit_coverage();
+void test_terrain_node_range_published();
+void test_terrain_node_demand_with_range();
+void test_terrain_node_inherited_range_flicker();
+void test_terrain_node_spike_hunt();
+void test_terrain_node_finer_neighbour_step();
+void test_terrain_node_edge_audit_all();
+void test_terrain_node_distance_morph_per_vertex();
+// ¿El suelo depende de hacia donde miras? Separa las dos causas: la SELECCION (no debe) y el pool
+// desalojando lo que sale de cuadro (si, y es transitorio).
+void test_terrain_node_angle_independence();
+// ⚠️ NO es una disparidad viva. El bake de altura es UNO: fisica y render leen el MISMO equirect. El
+// bake del CUBO solo queda como RESPALDO, y esto mide en metros lo que costaria si llegara a usarse.
+void test_terrain_backup_bake_cost();
 // ¿Es un nodo del quadtree una rejilla REGULAR para Jolt, o hace falta convertir? La pregunta que
 // abre F4, medida en metros por nivel.
 void test_terrain_node_as_heightfield();
@@ -172,6 +193,33 @@ void test_terrain_render_vs_collision();
 void test_terrain_node_range();
 void test_terrain_node_pool();
 void test_terrain_node_pool_reuse();
+// La caida por ancestro no puede saltarse niveles: el selector solo pide HOJAS, asi que el pool
+// tiene que encolar tambien la cadena. A/B con `setChainAncestors`, con el presupuesto real.
+void test_terrain_node_pool_chain();
+// La normal se calculaba a ±1 texel mientras la geometria se dibuja cada `stride`: iluminacion de una
+// superficie que no existe, y se lee como pinchos DENTRO del nodo.
+void test_terrain_node_normal_matches_geometry();
+// El ruido se muestrea en dir*(R+baseH) y `baseH` cambia entre texeles: dos vertices contiguos leen
+// el ruido en fases distintas. Separa lo tangencial (relieve) de lo radial (artefacto).
+void test_terrain_node_radial_noise_shift();
+// El corte de octavas esta en el TEXEL y Nyquist pide el doble: mide si los picos del campo crudo son
+// aliasing de la octava mas fina.
+void test_terrain_node_octave_cut_nyquist();
+// La rejilla parte cada quad por la MISMA diagonal, asi que el error de faceta tiene el mismo signo
+// en todo el nodo y se acumula en crestas. Mide el sesgo con signo, fija contra alterna.
+void test_terrain_node_quad_diagonal_bias();
+// La direccion del vertice en FLOAT cuantiza la superficie a ~0,5 m, del orden del texel: ruido a la
+// frecuencia de la malla. Es lo que se ve como crestas finas.
+void test_terrain_node_float_dir_quantisation();
+// Pendiente del suelo QUE SE PISA a la escala de la celda de colision, contra los limites del
+// controlador (50 gr, escalon 0,40 m). Contesta "andar se hace dificil" con numeros.
+void test_terrain_collision_walkability();
+// La histeresis del stride se PIERDE cuando un nodo sale del conjunto dibujado un frame: vuelve sin
+// banda muerta. Es el hueco entre `walk_shimmer` (historia perfecta) y `stride_pop` (tamano del pop).
+void test_terrain_node_stride_history_loss();
+// El bobinado de la rejilla es CCW desde fuera en las SEIS caras: requisito para dibujar el pase v5
+// con CullMode::Back en vez de None (que rasteriza las dos caras -> parpadeo en el limbo).
+void test_terrain_node_winding();
 void test_terrain_node_stitch();
 void test_terrain_node_neighbours();
 
