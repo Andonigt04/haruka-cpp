@@ -1,4 +1,4 @@
-# LICENCIA DE USO DEL MOTOR [NOMBRE DE TU MOTOR]
+# LICENCIA DE USO DEL MOTOR HARUKA ENGINE
 Versión 1.0 - Junio 2026
 
 Por la presente se concede permiso a cualquier persona que obtenga una copia de este 
