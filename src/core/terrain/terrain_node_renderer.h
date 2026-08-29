@@ -124,7 +124,17 @@ public:
     static double vertexPx() {
         static const double s_px = []() {
             const char* v = std::getenv("HARUKA_TERRAIN_V5_VERTPX");
-            return v ? std::atof(v) : 4.0;
+            // ⚠️ 8, NO 4, Y LA DECISION ES DE ANDONI MIRANDO. Con 4 px entre vertices el pase de
+            // terreno emite 6,9 M de triangulos y cuesta **~22 ms de GPU**; con 8 son 2,0 M y 4,3 ms.
+            // Medido con `HARUKA_NO_VSYNC=1` y el profiler (`present.swap`), Vulkan:
+            //
+            //     VERTPX=4   GPU 29,8-32,8 ms   frame 35,1 ms   6,9 M tris
+            //     VERTPX=8   GPU 12,2-12,6 ms   frame 16,9 ms   2,0 M tris
+            //     sin pase   GPU  7,9- 8,1 ms   frame 17,0 ms
+            //
+            // O sea: **18 ms de GPU** por un cambio que Andoni juzgo *"se sigue viendo bien"*. El coste
+            // del terreno NUNCA fue generarlo (85 nodos = 4,7 ms) sino dibujarlo.
+            return v ? std::atof(v) : 8.0;
         }();
         return s_px;
     }
@@ -154,7 +164,10 @@ public:
      * 2048 deja el presupuesto en 1 536, un 50 % por encima del pico medido — margen para girar (que
      * mete nodos nuevos de golpe) y para mirar a una ladera, que pide mas. Son 399 MB a 195 KB/nodo (tres mapas: propio, padre y abuelo).
      */
-    bool init(RHI::Device* dev, const std::string& shaderDir, size_t capacity = 2048) {
+    /// ⚠️ 4 096, Y BAJA LA VRAM IGUAL. Con tres mapas por nodo (195 KB) 2 048 huecos costaban 390 MB
+    /// y aun asi no cubrian el pico medido de **2 445 nodos VIVOS a la vez** — de ahi las caidas por
+    /// ancestro. Con un solo mapa (65 KB) 4 096 huecos son 266 MB: mas cobertura y menos memoria.
+    bool init(RHI::Device* dev, const std::string& shaderDir, size_t capacity = 4096) {
         if (const char* e = std::getenv("HARUKA_TERRAIN_V5_POOL")) {
             const long v = std::strtol(e, nullptr, 10);
             if (v >= 64 && v <= 65536) capacity = (size_t)v;
@@ -163,7 +176,25 @@ public:
         m_dev = dev;
         // El presupuesto de generación escala con el pool: con más huecos que llenar, el mismo
         // número por frame tardaría proporcionalmente más en converger.
-        m_pool = TerrainNodePool(capacity, std::max<size_t>(43, capacity / 24));
+        // ── EL PRESUPUESTO NO SE ATA A LA CAPACIDAD ─────────────────────────────────────────────
+        //
+        // ⚠️ Era `capacity/24`, asi que al subir el pool a 4 096 huecos —que se hizo por COBERTURA, no
+        // por ritmo— el presupuesto salto solo de 85 a 170 nodos por frame, y con el el coste de
+        // generacion del frame. Son dos decisiones distintas y ahora estan separadas.
+        //
+        // El numero sale de la medida, no de una proporcion. Coste por nodo con fence, nivel 18,
+        // tanda amortizada (`v5 F1: coste de generar nodos en GPU`):
+        //
+        //     tres mapas por nodo (antes)   0,1393 ms/nodo  ->  85 nodos = 11,8 ms de frame
+        //     un mapa por nodo   (ahora)    0,0555 ms/nodo  ->  85 nodos =  4,7 ms
+        //                                                      170 nodos =  9,4 ms
+        //
+        // Con 85 se paga menos de la mitad que antes por el mismo ritmo de carga. Y el reparto dice
+        // que no hay mas que rascar por nodo: el 73 % es evaluar el relieve —56 hashes por texel, 8
+        // esquinas x 7 octavas— y eso no se abarata sin cambiar los valores, que romperia la paridad
+        // con la fisica. Lo que queda por rascar es CUANTOS nodos, no cuanto cuesta cada uno.
+        m_genPerFrameBase = 85;
+        m_pool = TerrainNodePool(capacity, m_genPerFrameBase);
         const std::string comp = shaderDir + "terrain_node.comp";
         if (!m_gpu.init(dev, comp.c_str(), capacity)) {
             HARUKA_LOGW("TerrenoV5", "fallo el generador (compute '%s' o el SSBO de %.1f MB)",
@@ -193,6 +224,10 @@ public:
         // causa es específica de este pase y no un fallo general del RHI. Sin entender ESO, activarlo
         // deja el planeta casi vacío en un backend. Es la primera pregunta del hilo `vulkan-is-opengl-assumed`:
         // ¿qué está asumiendo de GL este pase que los otros no?
+        // A/B sin recompilar mientras se investiga el descarte en Vulkan.
+        { static const bool s_cull = [] { const char* e = std::getenv("HARUKA_TERRAIN_V5_CULL");
+                                          return e && e[0] == '1'; }();
+          if (s_cull) pd.cull = RHI::CullMode::Back; }
         m_pipe = dev->createPipeline(pd);
         if (!RHI::valid(m_pipe)) {
             HARUKA_LOGW("TerrenoV5", "fallo el pipeline de dibujo ('%s' + '%s')", vs.c_str(), fs.c_str());
@@ -244,11 +279,11 @@ public:
         // son 195 KB por nodo (propio + padre + abuelo). 4096 huecos = 798 MB, encima de los
         // 720 MB del array de terreno — a partir de 2048 hay que mirar la VRAM de verdad.
         if (m_ready)
-            HARUKA_LOGI("TerrenoV5", "pool de %zu huecos = %.0f MB de VRAM (%.1f KB/nodo: propio "
-                                     "+ padre + abuelo) · generacion %zu nodos/frame",
+            HARUKA_LOGI("TerrenoV5", "pool de %zu huecos = %.0f MB de VRAM (%.1f KB/nodo)"
+                                     " · generacion %zu nodos/frame",
                         capacity, (double)m_gpu.bytes() / (1024.0 * 1024.0),
                         (double)TerrainNodeGpu::kBytesPerNode / 1024.0,
-                        std::max<size_t>(43, capacity / 24));
+                        m_genPerFrameBase);
         return m_ready;
     }
 
@@ -268,10 +303,8 @@ public:
 
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
-        size_t covered = 0;   ///< instancias quitadas por tener un ANCESTRO dibujado encima
-        uint32_t coveredDrop = 0;  ///< y a cuantos NIVELES estaba el ancestro mas lejano
-        size_t evicted = 0;   ///< desalojos ACUMULADOS del pool (si sube, hay thrash)
-        size_t pubFailed = 0; ///< publicaciones rechazadas por no haber hueco desalojable
+        size_t live = 0;      ///< nodos que hacen falta A LA VEZ este frame: lo que debe caber
+        double nodesPerSec = 0.0;  ///< ritmo REAL de streaming: `generated / dt`
         uint32_t stride = 1;      ///< el MAS GRUESO del frame (los nodos ya no comparten stride)
         uint32_t strideMin = 1;   ///< el mas fino: es el que hay bajo tus pies
         uint32_t drawCalls = 0;   ///< uno por grupo de stride con nodos, <= 7
@@ -350,10 +383,20 @@ public:
 
     FrameStats prepare(RHI::Context* ctx, const glm::dvec3& camPos, const glm::dvec3& planetCenter,
                        double planetRadiusM, const glm::dvec3& viewDir,
-                       double radPerPx, double coneHalfAngle) {
+                       double radPerPx, double coneHalfAngle,
+                       double dtSeconds = 1.0 / 60.0) {
         FrameStats fs;
         m_stats = fs;
         if (!m_ready || !ctx) return fs;
+
+        // ⚠️ EL RITMO DE CARGA DEPENDE DE LOS FPS, Y NO SE PUEDE COMPENSAR SUBIENDO EL PRESUPUESTO.
+        // Es `capacity/24` nodos POR FRAME, asi que a 30 fps carga la mitad que a 60 — justo al reves
+        // de lo que hace falta, porque a 30 fps la camara avanza el doble entre frames. Se probo a
+        // repartirlo por SEGUNDO (`rate * dt`, tope 3x) y es peor: generar cuesta ~0,046 ms/nodo, asi
+        // que la tanda alarga el frame, que alarga el dt, que sube la tanda. Medido con
+        // `HARUKA_FRAMELOG=1`: media 35,9 -> 68,6 ms y el p95 clavado en el tope de 100 ms, sin que
+        // mejorara ni una de las cifras del terreno. La palanca es hacer el FRAME mas rapido.
+        // `dtSeconds` se queda como INSTRUMENTO: publica el ritmo real de nodos por segundo.
 
         // ── LAS RAÍCES SE FIJAN, Y SIN ESTO HAY AGUJEROS ────────────────────────────────────────
         //
@@ -409,6 +452,7 @@ public:
         // ⚠️ ORDENAR ANTES DE GENERAR. El presupuesto es el mismo; lo que cambia es CUÁLES entran.
         m_pool.prioritisePending(camPos, planetCenter, planetRadiusM);
         fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM);
+        fs.nodesPerSec = (dtSeconds > 0.0) ? (double)fs.generated / dtSeconds : 0.0;
 
         // ── VOLVER A RESOLVER CON LO QUE SE ACABA DE GENERAR ────────────────────────────────────
         //
@@ -435,39 +479,6 @@ public:
             for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
         }
 
-        // ── Y AUN ASI, EL CONJUNTO DIBUJADO TIENE QUE SER UNA PARTICION ─────────────────────────
-        //
-        // Re-resolver cierra el hueco cuando el presupuesto da de sí; si no da (descenso rápido desde
-        // órbita, arranque en frío), el fallback vuelve a emitir ancestros que tapan a sus hijos. Esto
-        // deja solo los MAXIMALES: sin duplicados y sin nadie dibujado debajo de otro. No abre
-        // agujeros —lo que se quita estaba tapado por algo que sigue— y no empeora el LOD: medido, el
-        // peor error en pantalla es el MISMO (31,9 px), porque el ancestro ya se estaba dibujando.
-        //
-        // ⚠️ Y SOLO SE PAGA CUANDO PUEDE HABER ALGO QUE QUITAR. El selector emite HOJAS de un quadtree,
-        // que por construcción no son ancestros unas de otras: sin ninguna caída por ancestro no puede
-        // haber un solo nodo tapado. En régimen eso es el caso (medido en el juego: `por ancestro 0` en
-        // doce ventanas seguidas), así que la máscara no corre y el coste es una comparación.
-        {
-            bool anyAncestor = false;
-            for (const auto& r : m_resolved) if (r.slot >= 0 && !r.exact) { anyAncestor = true; break; }
-            m_drawn.clear();
-            if (anyAncestor) {
-                m_drawn.reserve(m_resolved.size());
-                for (const auto& r : m_resolved) if (r.slot >= 0) m_drawn.push_back(r.node);
-            }
-            uint32_t covDrop = 0;
-            const size_t nCov = anyAncestor ? nodeCoveredMask(m_drawn, m_drop, &covDrop) : 0;
-            if (nCov > 0) {
-                size_t w = 0, k = 0;
-                for (size_t i = 0; i < m_resolved.size(); ++i) {
-                    if (m_resolved[i].slot < 0) { m_resolved[w++] = m_resolved[i]; continue; }
-                    if (!m_drop[k++]) m_resolved[w++] = m_resolved[i];
-                }
-                m_resolved.resize(w);
-            }
-            fs.covered = nCov; fs.coveredDrop = covDrop;
-        }
-
         // ── EL CONJUNTO DIBUJADO NO CUMPLE 2:1, Y EQUILIBRARLO AQUI NO ES LA SOLUCION ───────────
         //
         // El SELECTOR sale 2:1 (medido: 0 saltos de mas de un nivel a cualquier presupuesto). Lo que
@@ -484,8 +495,24 @@ public:
         //
         // La direccion correcta es que no haya caidas profundas: que el pool garantice el PADRE de lo
         // que se selecciona. Eso es politica del pool, no del renderer, y esta sin hacer.
+        // ── LA HUELLA ES LA DE LA HOJA, AUNQUE LOS DATOS VENGAN DE UN ANCESTRO ──────────────────
+        //
+        // ⚠️ ESTO ERA EL FALLO DE ARQUITECTURA. La identidad geometrica de un nodo estaba atada a su
+        // slot de datos: si la hoja no estaba residente, el pool devolvia un ancestro y se dibujaba
+        // **la huella del ancestro**, que cubre 4^k hojas. Medido con la camara girando y el pool
+        // caliente (`terrain_node_fallback_footprint`): **DOS** hojas sin residencia rompian el
+        // 101,66 % de lo visible, contra el 0,12 % que ocupan ellas — 820x su propia area.
+        //
+        // Y no habia salida decidiendo "dibujar o no": quitar el ancestro deja un agujero y dejarlo
+        // tapa media pantalla. Las dos se probaron en el juego y las dos se vieron mal. Lo que hay que
+        // cambiar es QUE SUPERFICIE OCUPA lo que se dibuja: la hoja se dibuja en SU sitio y lee el
+        // sub-rectangulo que le corresponde dentro de la rejilla del ancestro (ver `terrain_node.vert`).
+        //
+        // Aqui el conjunto dibujado pasa a ser el de las HOJAS pedidas. De paso el cosido deja de ver
+        // ancestros donde el selector pidio hojas, que era otra fuente de zancadas mal calculadas.
         m_drawn.clear(); m_drawn.reserve(m_resolved.size());
-        for (const auto& r : m_resolved) if (r.slot >= 0) m_drawn.push_back(r.node);
+        for (size_t i = 0; i < m_resolved.size(); ++i)
+            if (m_resolved[i].slot >= 0) m_drawn.push_back(m_sel[i]);
         const auto index = nodeDrawnIndex(m_drawn);
 
         // ── STRIDE POR NODO ─────────────────────────────────────────────────────────────────────
@@ -504,15 +531,17 @@ public:
         // usando de verdad — y coser contra una zancada que el otro lado no tiene es una grieta.
         m_skOf.clear(); m_skOf.reserve(m_resolved.size());
         m_skNow.clear(); m_skNow.reserve(m_resolved.size() * 2);
-        for (const auto& r : m_resolved) {
+        for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
+            const auto& r = m_resolved[ri];
             if (r.slot < 0) { m_skOf.push_back(0); continue; }
+            const NodeId leaf = m_sel[ri];          // la huella que se dibuja, no el slot que la surte
             double elevM = 0.0;
-            { const NodeRange rg = m_pool.rangeOf(r.node); if (rg.valid()) elevM = rg.maxM; }
+            { const NodeRange rg = m_pool.rangeOf(leaf); if (rg.valid()) elevM = rg.maxM; }
             if (elevM == 0.0) ++fs.rangeMissing;
-            const uint64_t key = nodeKey(r.node);
+            const uint64_t key = nodeKey(leaf);
             const auto it = m_skPrev.find(key);
             const uint32_t prev = (it == m_skPrev.end()) ? kNoPrevStride : it->second;
-            const double want = nodeStrideWant(r.node, planetRadiusM, camPos, planetCenter,
+            const double want = nodeStrideWant(leaf, planetRadiusM, camPos, planetCenter,
                                                errorPx(), vertexPx(),
                                                Planet::TERRAIN_RING_FINE_CELL, elevM);
             uint32_t sk = nodeStrideQuantise(want, m_strideCount - 1, prev);
@@ -563,9 +592,10 @@ public:
             if (skOwn != pass) continue;
             if (r.slot < 0) { if (pass == 0) ++fs.noSlot; continue; }
             if (!r.exact) ++fs.ancestors;
+            const NodeId leaf = (ri < m_sel.size()) ? m_sel[ri] : r.node;
             NodeInstGPU g{};
-            g.node[0] = (int32_t)r.node.face; g.node[1] = (int32_t)r.node.level;
-            g.node[2] = (int32_t)r.node.i;    g.node[3] = (int32_t)r.node.j;
+            g.node[0] = (int32_t)leaf.face; g.node[1] = (int32_t)leaf.level;
+            g.node[2] = (int32_t)leaf.i;    g.node[3] = (int32_t)leaf.j;
             // ── COSIDO CON STRIDES DISTINTOS ────────────────────────────────────────────────────
             //
             // La zancada del cosido ya no la fija sola la diferencia de nivel: un vecino del MISMO
@@ -573,7 +603,7 @@ public:
             // exactamente la misma grieta que un nivel de diferencia. La arista compartida tiene que
             // usar la MÁS GRUESA de las dos densidades, y el lado fino es el que cede.
             NodeId nb[4];
-            nodeNeighbourLevels(r.node, index, g.edge, nb);
+            nodeNeighbourLevels(leaf, index, g.edge, nb);
             const uint32_t sOwn = 1u << skOwn;
             int32_t fineMask = 0;
             for (int e = 0; e < 4; ++e) {
@@ -598,7 +628,7 @@ public:
                 // Con stride GLOBAL esto era invisible: `sNb == sOwn` siempre, y `sOwn << 0` da
                 // `sOwn`, que no supera a `sOwn` y no cose. Por eso los pinchos aparecieron con el
                 // stride por nodo y desaparecen con `HARUKA_TERRAIN_V5_STRIDE=4`.
-                const int lvDiff = (int)r.node.level - (int)nb[e].level;
+                const int lvDiff = (int)leaf.level - (int)nb[e].level;
                 const uint32_t sNbMine = (lvDiff >= 0) ? (sNb << (uint32_t)lvDiff)
                                                        : (sNb >> (uint32_t)(-lvDiff));
                 const uint32_t step = std::max(sOwn, std::max(sNbMine, 1u));
@@ -625,7 +655,13 @@ public:
                 g.edge[e] = (step > sOwn) ? (int32_t)step : 0;
             }
             g.slot[0] = r.slot;
-            g.slot[1] = 0;   // libre: era la mascara del morph por arista, borrado por medida
+            // ⚠️ CUANTOS NIVELES POR ENCIMA DE LA HUELLA ESTAN LOS DATOS. Cero es el caso normal (el
+            // slot es el de la propia hoja). Si es mayor, el slot es el de un ANCESTRO y el shader
+            // tiene que leer solo el sub-rectangulo que le toca dentro de su rejilla: la hoja ocupa
+            // el cuadrado `[i mod 2^k, +1] x [j mod 2^k, +1]` en coordenadas normalizadas del
+            // ancestro. El shader lo deduce de `uNode` y de esta k, asi que no hace falta mandar el
+            // desplazamiento. Ver `terrain_node.vert`.
+            g.slot[1] = (int32_t)((int)leaf.level - (int)r.node.level);
             // Ver la nota larga de `terrain_node.vert`: probado, medido y revertido.
             fineMask = 0;
             g.slot[3] = fineMask;      // aristas con vecino MAS FINO: ahi no morfeo (ver arriba)
@@ -634,7 +670,32 @@ public:
             // NODO, y por eso mismo no podía casar en las aristas: dos vecinos a distancias distintas
             // evaluaban el mismo punto compartido con morphs distintos (medido: hasta 10,07 m). Ahora
             // el vértice lo calcula con SU distancia, a partir de `du.lod` — ver `terrain_node.vert`.
-            g.misc[0] = 0.0f;
+            // ── EL MORPH LEE EL HUECO DEL PADRE, NO UNA COPIA DENTRO DEL MIO ────────────────────
+            //
+            // ⚠️ Cada nodo guardaba TRES mapas de altura —el suyo, el del padre y el del abuelo— solo
+            // para poder fundirse hacia arriba: 195 KB por nodo, o sea **390 MB para 2 048 huecos**
+            // (lo dice el propio log de arranque). Y el pico medido de nodos VIVOS a la vez es
+            // **2 445**, asi que no caben: de ahi salen las caidas por ancestro.
+            //
+            // Con el muestreo por sub-rectangulo ya no hace falta la copia: el padre esta en su
+            // propio hueco y su superficie sobre MI huella es el sub-rectangulo `k = 1` de su rejilla
+            // (el abuelo, `k = 2`). Se manda su indice de hueco y el shader lo lee ahi.
+            //
+            // ⚠️ Y SI EL PADRE NO ESTA RESIDENTE, NO HAY MORPH. Antes la copia estaba siempre; ahora
+            // depende de la cadena. `-1` significa "no morfees", que el shader respeta.
+            {
+                int parSlot = -1, granSlot = -1;
+                if (leaf.level > 0) {
+                    const NodeId par{ leaf.face, leaf.level - 1, leaf.i / 2, leaf.j / 2 };
+                    parSlot = m_pool.slotOf(par);
+                    if (par.level > 0) {
+                        const NodeId gran{ par.face, par.level - 1, par.i / 2, par.j / 2 };
+                        granSlot = m_pool.slotOf(gran);
+                    }
+                }
+                g.misc[0] = (float)parSlot;
+                g.misc[1] = (float)granSlot;
+            }
             m_inst.push_back(g);
             ++fs.drawn;
         }
@@ -733,7 +794,7 @@ public:
             ++fs.drawCalls;
         }
         fs.resident = m_pool.residentCount();
-        { const auto ps = m_pool.stats(); fs.evicted = ps.evicted; fs.pubFailed = ps.publishFailed; }
+        fs.live = m_pool.stats().live;
         m_stats = fs;
         return fs;
     }
@@ -807,7 +868,7 @@ private:
     // **2 035 de 3 053 nodos dibujados por ancestro** — dos de cada tres más gruesos de lo pedido.
     TerrainNodePool     m_pool{ 1024, 43 };
     std::vector<NodeId> m_sel, m_drawn;
-    std::vector<uint8_t> m_drop;   // mascara de `nodeCoveredMask`
+    size_t m_genPerFrameBase = 85;   ///< presupuesto nominal por frame a 60 fps (`capacity/24`)
     std::vector<TerrainNodePool::Resolved> m_resolved;
 
 };

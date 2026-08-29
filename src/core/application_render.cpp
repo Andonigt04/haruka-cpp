@@ -515,7 +515,8 @@ RHI::TextureHandle Application::renderBloom(RHI::TextureHandle srcColorTex) {
         pd.fragmentPath   = fsBlur.c_str();
         m_bloomBlurPSO    = dev->createPipeline(pd);
 
-        m_bloomUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(BloomParams), nullptr,
+        m_bloomUBOs.clear();
+        (void)dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(BloomParams), nullptr,
                                        RHI::BufferMemory::Dynamic);
     }
     // Si los pipelines no se pudieron crear (shader ausente/roto — createPipeline ya lo logueó),
@@ -535,17 +536,26 @@ RHI::TextureHandle Application::renderBloom(RHI::TextureHandle srcColorTex) {
     // OJO (Vulkan): en GL cada draw se ejecuta al vuelo, así que reescribir el MISMO UBO entre
     // draws es correcto. En Vulkan habrá que usar offsets dinámicos o un UBO por draw (los comandos
     // se graban y se ejecutan después). Anotado para cuando entre el VKContext.
-    auto setParams = [&](float threshold, float horizontal) {
+    // Un UBO por draw (ver la nota de `m_bloomUBOs` en application.h). Se crean bajo demanda y se
+    // reutilizan entre frames; el tope real es 1 + 2x8 = 17 con `bloomIterations` acotado a 8.
+    size_t uboSlot = 0;
+    auto setParams = [&](float threshold, float horizontal) -> RHI::BufferHandle {
+        if (uboSlot >= m_bloomUBOs.size())
+            m_bloomUBOs.push_back(dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(BloomParams),
+                                                    nullptr, RHI::BufferMemory::Dynamic));
+        const RHI::BufferHandle b = m_bloomUBOs[uboSlot++];
         const BloomParams p{ threshold, horizontal, 0.0f, 0.0f };
-        dev->updateBuffer(m_bloomUBO, 0, sizeof(p), &p);
+        dev->updateBuffer(b, 0, sizeof(p), &p);
+        return b;
     };
 
     // 1. Bright-pass: scene color -> tex[0].
-    setParams(Haruka::SettingsManager::get().graphics().bloomThreshold, 0.0f);
+    const RHI::BufferHandle uboExtract =
+        setParams(Haruka::SettingsManager::get().graphics().bloomThreshold, 0.0f);
     ctx->beginRenderPass(m_bloomPass[0], keep);   // bindea FBO + viewport(bw,bh)
     ctx->bindPipeline(m_bloomExtractPSO);
     ctx->bindVertexBuffer(m_quadBuf);
-    ctx->bindUniformBuffer(2, m_bloomUBO);
+    ctx->bindUniformBuffer(2, uboExtract);
     ctx->bindTexture(0, srcColorTex);
     ctx->draw(4);
 
@@ -557,19 +567,19 @@ RHI::TextureHandle Application::renderBloom(RHI::TextureHandle srcColorTex) {
     // pantalla sin aportar nada — y ambos extremos son fáciles de escribir por error en el .json.
     const int iterations = std::clamp(Haruka::SettingsManager::get().graphics().bloomIterations, 1, 8);
     for (int i = 0; i < iterations; ++i) {
-        setParams(0.0f, 1.0f);                          // horizontal -> tex[1]
+        const RHI::BufferHandle uboH = setParams(0.0f, 1.0f);   // horizontal -> tex[1]
         ctx->beginRenderPass(m_bloomPass[1], keep);
         ctx->bindPipeline(m_bloomBlurPSO);
         ctx->bindVertexBuffer(m_quadBuf);
-        ctx->bindUniformBuffer(2, m_bloomUBO);
+        ctx->bindUniformBuffer(2, uboH);
         ctx->bindTexture(0, src);
         ctx->draw(4);
 
-        setParams(0.0f, 0.0f);                          // vertical -> tex[0]
+        const RHI::BufferHandle uboV = setParams(0.0f, 0.0f);   // vertical -> tex[0]
         ctx->beginRenderPass(m_bloomPass[0], keep);
         ctx->bindPipeline(m_bloomBlurPSO);
         ctx->bindVertexBuffer(m_quadBuf);
-        ctx->bindUniformBuffer(2, m_bloomUBO);
+        ctx->bindUniformBuffer(2, uboV);
         ctx->bindTexture(0, m_bloomTexH[1]);
         ctx->draw(4);
         src = m_bloomTexH[0];
@@ -624,7 +634,14 @@ void Application::renderFrameContent() {
     const auto& gpost  = Haruka::SettingsManager::get().graphics();
     const float rscale = std::min(std::max(gpost.renderScale, 0.5f), 2.0f);
     const bool  wantFXAA = (gpost.antialiasing == Haruka::Settings::AntialiasingMode::FXAA);
-    const bool  wantBloom = gpost.bloom;
+    // ⚠️ `HARUKA_NOBLOOM=1` apaga SOLO el bloom, no el pase. Existe para atribuir GPU por diferencia
+    // (el profiler mide CPU y todo el coste de GPU cae en `present.swap`). El primer intento saltaba
+    // el pase ENTERO con un `return`, y esa medida NO VALE: el composite es quien vuelca la escena al
+    // swapchain, asi que sin el no hay nada que presentar y `present.swap` sale en 1 ms sin que eso
+    // signifique que el post cueste 11.
+    static const bool s_noBloom = [] { const char* e = std::getenv("HARUKA_NOBLOOM");
+                                       return e && e[0] == '1'; }();
+    const bool  wantBloom = gpost.bloom && !s_noBloom;
     const int   renderW  = std::max(1, (int)(width  * rscale));
     const int   renderH  = std::max(1, (int)(height * rscale));
     m_postActive = !_editorTarget && (rscale != 1.0f || wantFXAA || wantBloom);
@@ -1461,7 +1478,12 @@ void Application::renderFrameContent() {
         // Objetos del scatter global (árboles/rocas/…) con un PROTOTIPO compartido por tipo: una
         // malla (con color de vértice + UV) y un material del node graph (albedo/normal/…), y por
         // instancia solo {transform, tinte, escala, estado}. 1 draw por prototipo vía GPUInstancing.
-        if (m_propScatterEnabled && m_propRegistry.prototypeCount() > 0 && RHI::valid(m_scenePSO)) {
+        // A/B de atribucion de GPU: `HARUKA_NOPROPS=1` salta el pase. Existe porque el profiler mide
+        // CPU y todo el coste de GPU cae agregado en `present.swap`; sin timestamps de GPU, la unica
+        // forma de repartir esos milisegundos es apagar pases y restar.
+        static const bool s_noProps = [] { const char* e = std::getenv("HARUKA_NOPROPS");
+                                           return e && e[0] == '1'; }();
+        if (!s_noProps && m_propScatterEnabled && m_propRegistry.prototypeCount() > 0 && RHI::valid(m_scenePSO)) {
             HARUKA_PROFILE("scene.prop.instanced");
             if (!RHI::valid(m_propInstPSO)) {                 // PSO instanciado de props (una vez)
                 const std::string vs = Shader::baseDir() + "shaders/prop_inst.vert";
@@ -1505,9 +1527,23 @@ void Application::renderFrameContent() {
             glm::vec3 windWorld(0.0f, 0.0f, 0.0f);
             if (_worldSystem)
                 windWorld = _worldSystem->getWind(glm::dvec3(_camera->position));
+            // ⚠️ ESTE RELOJ ES DE PARED, no el de simulacion — asi que la fase del balanceo de los
+            // arboles depende de cuanto tardo en cargar el proceso. Dos ejecuciones del MISMO binario
+            // capturan las ramas en sitios distintos, y eso metia un **20 % de diferencia** entre dos
+            // capturas identicas de Vulkan (5,7 % en OpenGL, que arranca mas parejo). Con ese ruido
+            // encima, ninguna comparacion GL<->Vulkan de la escena significaba nada.
+            //
+            // `HARUKA_PROP_TIME=<segundos>` lo fija. Es la quinta pata de una captura comparable,
+            // junto con `HARUKA_DAY_ANGLE`, `HARUKA_SIM_TIME`, `HARUKA_CAM_PITCH` y esperar a que el
+            // terreno converja.
             static const auto s_propT0 = std::chrono::steady_clock::now();
-            const float propTime = std::chrono::duration<float>(
-                std::chrono::steady_clock::now() - s_propT0).count();
+            static const float s_propFixed = [] {
+                const char* e = std::getenv("HARUKA_PROP_TIME");
+                return e ? (float)std::atof(e) : -1.0f;
+            }();
+            const float propTime = (s_propFixed >= 0.0f) ? s_propFixed
+                                 : std::chrono::duration<float>(
+                                       std::chrono::steady_clock::now() - s_propT0).count();
 
             if (RHI::valid(m_propInstPSO)) {
                 if (!_instancing) { _instancing = std::make_unique<GPUInstancing>(); _instancing->init(20000); }
@@ -1555,6 +1591,14 @@ void Application::renderFrameContent() {
                     const float px = (radius / dist) / tanV * vpPx;
                     if (px < kMinPropPixels) return 2;                // sub-pixel
                     outLod = (px >= kLodPx0) ? 0 : (px >= kLodPx1 ? 1 : 2);
+                    // A/B: `HARUKA_PROP_LOD=0..2` fuerza el nivel para TODOS los props. Andoni ve los
+                    // arboles lejanos BLANCOS y el cercano correcto en Vulkan, mientras en OpenGL
+                    // salen bien los dos — la firma de un fallo que solo afecta a los niveles > 0.
+                    // Esto lo confirma o lo descarta en una ejecucion, sin recompilar.
+                    { static const int s_force = [] {
+                          const char* e = std::getenv("HARUKA_PROP_LOD");
+                          return e ? std::atoi(e) : -1; }();
+                      if (s_force >= 0) outLod = std::min(s_force, PropPrototypeGpu::kLods - 1); }
                     return 0;
                 };
 
@@ -2489,6 +2533,37 @@ void Application::updateNearGroundRing() {
         s_env = (e && e[0] == '0') ? 0 : 1;
         if (s_env == 0) HARUKA_LOGW("NearGround", "APAGADO por HARUKA_NEAR_RING=0: el suelo cercano "
                                     "vuelve a salir del teselador y la paridad deja de ser exacta");
+    }
+    // ── ⚠️ Y NO SE DIBUJA SI EL PASE v5 ESTA ACTIVO ─────────────────────────────────────────────
+    //
+    // El anillo nacio contra el CLIPMAP, **que le abria un hueco de 192 m**. El pase de nodos v5 no
+    // abre ese hueco: dibuja la superficie entera, incluida esa franja. Resultado, dos superficies
+    // coplanares describiendo el mismo relieve peleando por el z-buffer — que es literalmente lo que
+    // la cabecera de `terrain_node_renderer.h` dice que el v5 viene a quitar.
+    //
+    // Andoni lo vio como *"las lineas de triangulos son blanco-azuladas"*. Medido en el juego con la
+    // hora congelada, energia de borde (|dif| con el pixel de al lado; las lineas finas la disparan):
+    //
+    //     OpenGL   anillo ON 5,33   ·   anillo OFF 1,42
+    //     Vulkan   anillo ON 5,34   ·   anillo OFF 1,43
+    //
+    // Identico en los dos backends: no era Vulkan. Y el post no influye (5,41 con, 5,43 sin).
+    //
+    // ⚠️ LO QUE SE PIERDE, dicho con su numero: la paridad EXACTA triangulo-a-triangulo cerca del
+    // jugador. Ya no hace falta — el autotest del alambre mide **0,0004 m de media** entre lo que se
+    // dibuja y lo que se pisa, con un unico outlier de 0,0418 m. Como mucho 4 cm en el peor vertice.
+    // `HARUKA_NEAR_RING=1` lo fuerza otra vez para poder comparar sin recompilar.
+    {
+        const char* force = std::getenv("HARUKA_NEAR_RING");
+        const bool forced = force && force[0] == '1';
+        if (!forced && Haruka::Terrain::TerrainNodeRenderer::enabled()) {
+            static bool s_said = false;
+            if (!s_said) { s_said = true;
+                HARUKA_LOGI("NearGround", "no se dibuja: el pase v5 ya cubre esa franja y las dos "
+                            "superficies peleaban por el z-buffer (borde 5,33 -> 1,42). "
+                            "HARUKA_NEAR_RING=1 lo fuerza."); }
+            return;
+        }
     }
     if (s_env != 1 || !_physicsEngine || !_camera || !_planetarySystem) return;
 

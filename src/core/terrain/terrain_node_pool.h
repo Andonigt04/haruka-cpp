@@ -75,7 +75,10 @@ public:
         size_t resident = 0, capacity = 0;
         size_t hitsExact = 0, hitsAncestor = 0, misses = 0;
         size_t generated = 0, evicted = 0;
-        size_t publishFailed = 0;  ///< `publish` que devolvio -1: nada desalojable ese frame
+        /// Nodos TOCADOS este frame (hojas pedidas + toda su cadena de ancestros). Es exactamente lo
+        /// que el pool tiene que sostener a la vez: si `capacity` no llega, hay nodos que NO CABEN y
+        /// la caida por ancestro se dispara sin que ninguna politica de desalojo pueda evitarlo.
+        size_t live = 0;
     };
 
     /**
@@ -101,6 +104,7 @@ public:
         m_pending.clear();
         m_pendingSet.clear();
         m_stats.hitsExact = m_stats.hitsAncestor = m_stats.misses = 0;
+        m_stats.live = 0;
     }
 
     /**
@@ -133,6 +137,7 @@ public:
         auto it = m_index.find(nodeKey(n));
         if (it != m_index.end()) {
             Slot& s = m_slots[(size_t)it->second];
+            if (s.lastUsed != m_frame) ++m_stats.live;
             s.lastUsed = m_frame;
             touchAncestors(n);
             ++m_stats.hitsExact;
@@ -140,6 +145,7 @@ public:
         }
         // No está: encolar (con presupuesto) y buscar ancestro.
         ++m_stats.misses;
+        ++m_stats.live;               // no esta, pero hace falta: cuenta para la capacidad
         // ⚠️ SE ENCOLAN TODOS, Y EL PRESUPUESTO SE APLICA DESPUES DE ORDENAR. Antes se cortaba aquí,
         // así que los que se generaban eran los que el recorrido visitó primero — un orden espacial
         // arbitrario, no el de lo que se nota. Ver `prioritisePending`.
@@ -149,6 +155,7 @@ public:
             a.level--; a.i /= 2; a.j /= 2;
             auto ia = m_index.find(nodeKey(a));
             if (ia != m_index.end()) {
+                if (m_slots[(size_t)ia->second].lastUsed != m_frame) ++m_stats.live;
                 m_slots[(size_t)ia->second].lastUsed = m_frame;
                 touchAncestors(a);
                 ++m_stats.hitsAncestor;
@@ -238,13 +245,18 @@ public:
         if (!m_free.empty()) { slot = m_free.back(); m_free.pop_back(); }
         else {
             // LRU: el menos recientemente usado, y NUNCA uno usado este frame ni fijado.
+            // ⚠️ SE PROBO A PROTEGER AQUI A LOS NODOS CON HIJOS RESIDENTES —para que el LRU no pudiera
+            // romper la cadena raiz->hoja— Y ES UN NO-OP: `touchAncestors` marca toda la cadena con
+            // `lastUsed = m_frame` y la linea de abajo ya rechaza cualquier hueco usado este frame,
+            // asi que el padre que hace falta es inmune de serie. La regla saltaba 146-205 huecos en
+            // el barrido, ninguno era el elegido, y el resultado salia identico al ultimo digito.
             uint64_t oldest = UINT64_MAX;
             for (size_t i = 0; i < m_slots.size(); ++i) {
                 const Slot& s = m_slots[i];
                 if (!s.used || s.pinned || s.lastUsed == m_frame) continue;
                 if (s.lastUsed < oldest) { oldest = s.lastUsed; slot = (int)i; }
             }
-            if (slot < 0) { ++m_stats.publishFailed; return -1; }   // todo en uso: entra más tarde
+            if (slot < 0) return -1;                         // todo en uso: entra más tarde
             m_index.erase(nodeKey(m_slots[(size_t)slot].node));
             ++m_stats.evicted;
         }
@@ -252,6 +264,16 @@ public:
         s.used = true; s.pinned = pin; s.node = n; s.range = range; s.lastUsed = m_frame;
         m_index[nodeKey(n)] = slot;
         ++m_stats.generated;
+        // ⚠️ Y SUS ANCESTROS TAMBIEN CUENTAN COMO USADOS. `touchAncestors` corta en cuanto encuentra
+        // un eslabon ya marcado con este frame —da por hecho que entonces los de arriba tambien lo
+        // estan—, y esa suposicion la rompia justo esta linea de arriba: un nodo recien publicado
+        // queda con `lastUsed = m_frame` SIN que nadie haya tocado a su padre. La siguiente hoja que
+        // sube por la cadena se para aqui, el padre se queda con la marca vieja, y el LRU se lo lleva.
+        //
+        // Se midio en el juego contando los desalojos que se llevaban un nodo CON hijos residentes:
+        // **358-1303 por ventana de 120 frames**. ⚠️ El banco headless daba CERO —regenera todo cada
+        // frame y el orden nunca lo destapa—, asi que la conclusion salio del juego, no del test.
+        touchAncestors(n);
         return slot;
     }
 
@@ -293,6 +315,18 @@ public:
 
     bool   isResident(const NodeId& n) const { return m_index.count(nodeKey(n)) != 0; }
     size_t residentCount() const { return m_index.size(); }
+
+    /**
+     * @brief Hueco de un nodo si esta residente, o -1. NO toca el LRU.
+     *
+     * Lo usa el renderer para que el morph lea el mapa del PADRE de su propio hueco en vez de una
+     * copia guardada dentro del hueco del hijo. Sin `touch` a proposito: quien mantiene viva la cadena
+     * es `request` (via `touchAncestors`), y contar tambien esta consulta falsearia el LRU.
+     */
+    int slotOf(const NodeId& n) const {
+        const auto it = m_index.find(nodeKey(n));
+        return (it == m_index.end()) ? -1 : it->second;
+    }
     size_t capacity()      const { return m_capacity; }
     Stats  stats()         const { Stats s = m_stats; s.resident = m_index.size(); s.capacity = m_capacity; return s; }
 
@@ -313,7 +347,7 @@ private:
             if (ia == m_index.end()) continue;
             Slot& s = m_slots[(size_t)ia->second];
             if (s.lastUsed == m_frame) break;
-            s.lastUsed = m_frame;
+            s.lastUsed = m_frame; ++m_stats.live;
         }
     }
 
@@ -455,53 +489,6 @@ inline int nodeNeighbourFinerMask(const NodeId& n,
         }
     }
     return mask;
-}
-
-/**
- * @brief Marca lo que NO debe dibujarse para que el conjunto sea una PARTICIÓN de la superficie.
- *
- * ⚠️ EL FALLBACK POR ANCESTRO EMITE EL ANCESTRO **ENTERO**, y un ancestro cubre a sus cuatro hijos, no
- * solo al que falta. Si una hoja no está residente pero sus hermanas sí, se dibujan las dos cosas: el
- * padre (que tapa las cuatro cuartas partes) y las hermanas finas. Dos superficies en el mismo sitio.
- * Y como el ancestro puede estar muchos niveles por encima, **una sola hoja que falta en el borde del
- * frustum arrastra una sábana gruesa sobre toda la vista**. Medido con la cámara girando
- * (`terrain_node_overlap_on_turn`): 457 de 499 nodos dibujados tenían un ancestro también dibujado, el
- * peor 7 niveles por encima, con las dos superficies separadas **20,6 m**. Quieto, 0 de 499 — es el
- * transitorio del giro. Eso es el "segundo terreno encima al girar la cámara".
- *
- * Aquí se dejan solo los elementos MAXIMALES (los más gruesos) del conjunto emitido, más una copia de
- * cada nodo. El resultado es una anticadena, y una anticadena que cubría la superficie la sigue
- * cubriendo: lo que se quita estaba **debajo** de algo que sigue dibujándose, así que no abre agujeros.
- *
- * @param drop se redimensiona a `drawn.size()`; 1 = no dibujar.
- * @return cuántos se quitan.
- */
-inline size_t nodeCoveredMask(const std::vector<NodeId>& drawn, std::vector<uint8_t>& drop,
-                              uint32_t* worstDropLevels = nullptr) {
-    drop.assign(drawn.size(), 0);
-    std::unordered_map<uint64_t, uint32_t> emitted;
-    emitted.reserve(drawn.size() * 2);
-    for (const NodeId& n : drawn) emitted[nodeKey(n)] = n.level;
-
-    std::unordered_map<uint64_t, uint32_t> kept;
-    kept.reserve(drawn.size() * 2);
-    size_t n_drop = 0;
-    for (size_t i = 0; i < drawn.size(); ++i) {
-        const NodeId& n = drawn[i];
-        if (!kept.emplace(nodeKey(n), n.level).second) {   // el mismo ancestro, una vez por hija
-            drop[i] = 1; ++n_drop; continue;
-        }
-        NodeId a = n;
-        while (a.level > 0) {
-            a.level--; a.i /= 2; a.j /= 2;
-            if (emitted.find(nodeKey(a)) != emitted.end()) {
-                drop[i] = 1; ++n_drop;
-                if (worstDropLevels) *worstDropLevels = std::max(*worstDropLevels, n.level - a.level);
-                break;
-            }
-        }
-    }
-    return n_drop;
 }
 
 /** @brief Índice `clave -> nivel` del conjunto que se va a dibujar. Lo consume `nodeNeighbourLevels`. */

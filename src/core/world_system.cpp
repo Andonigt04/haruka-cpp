@@ -186,6 +186,17 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
         m_dayAngle += dt * (2.0 * M_PI / kDayLengthSeconds);
 
+        // ⚠️ `HARUKA_DAY_ANGLE=<radianes>` CONGELA la hora del dia. No es para jugar: es para poder
+        // COMPARAR dos capturas. El angulo se acumula con el dt, asi que depende del tiempo de carga
+        // y del ritmo de frames — dos ejecuciones del mismo binario cogen el Sol en sitios distintos y
+        // la imagen cambia de brillo. Midiendo asi llegue a atribuir a Vulkan un frame "1,64x mas
+        // claro" que en realidad estaba dentro de esa variacion: el mismo OpenGL daba 29,5 y 50,1 de
+        // media en dos arranques. Sin fijar la hora, cualquier careo de color entre backends miente.
+        { static const double s_fixed = [] {
+              const char* e = std::getenv("HARUKA_DAY_ANGLE");
+              return e ? std::atof(e) : -1.0; }();
+          if (s_fixed >= 0.0) m_dayAngle = s_fixed; }
+
         // Rotación del Sol alrededor del EJE DEL PLANETA, que va INCLINADO ~23.5° (como el eje
         // real de la Tierra) en vez del eje Y recto → el terminador día/noche cruza en DIAGONAL y
         // la altura del Sol cambia con la latitud (sensación de estaciones/eje inclinado). Rodrigues.

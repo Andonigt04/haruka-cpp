@@ -888,6 +888,22 @@ namespace Haruka::RHI::vulkan
         t.array = (d.layers > 1) && !d.cube;
         t.layers = d.cube ? 6 : std::max(1u, d.layers);
         t.mipLevels = (d.mipmaps && d.width && d.height) ? (uint32_t)(1 + std::floor(std::log2((float)std::max(d.width, d.height)))) : 1;
+        // ⚠️ Y SOLO SI EL FORMATO ADMITE BLIT LINEAL. Si no, se anuncia UN nivel: mas vale perder el
+        // filtrado por distancia que reservar niveles que nadie va a rellenar — que es justo el bug
+        // que esto viene a cerrar (ver `generateMips`).
+        if (t.mipLevels > 1)
+        {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(m_physical, t.format, &fp);
+            if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ||
+                !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
+                !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+            {
+                HARUKA_LOGW("RHI/VK", "el formato %d no admite blit lineal: se crea SIN mips "
+                            "(perdemos filtrado a distancia, pero no se muestrea basura)", (int)t.format);
+                t.mipLevels = 1;
+            }
+        }
 
         const bool isDepth = (d.format == Format::D24 || d.format == Format::D24S8 || d.format == Format::D32F);
 
@@ -899,7 +915,10 @@ namespace Haruka::RHI::vulkan
         ii.arrayLayers = t.layers;
         ii.samples = VK_SAMPLE_COUNT_1_BIT;
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // ⚠️ TRANSFER_SRC ademas de DST: los mips se generan con un blit de cada nivel al siguiente,
+        // asi que la propia imagen es ORIGEN. Sin este bit la cadena de abajo es ilegal.
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                 | VK_IMAGE_USAGE_SAMPLED_BIT;
         if (d.renderTarget) ii.usage |= isDepth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
                                                 : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
         if (d.cube) ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
@@ -926,7 +945,7 @@ namespace Haruka::RHI::vulkan
         iv.viewType = d.cube ? VK_IMAGE_VIEW_TYPE_CUBE
                              : (t.array ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D);
         iv.format = t.format;
-        iv.subresourceRange = { isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, t.mipLevels, 0, t.layers };
+        iv.subresourceRange = { (VkImageAspectFlags)(isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT), 0, t.mipLevels, 0, t.layers };
         if (!vkSuccess(vkCreateImageView(m_device, &iv, nullptr, &t.view), "create image view"))
         {
             vkDestroyImage(m_device, t.image, nullptr);
@@ -945,7 +964,13 @@ namespace Haruka::RHI::vulkan
         si.addressModeV = toWrap(d.wrap);
         si.addressModeW = toWrap(d.wrap);
         si.mipLodBias = d.lodBias;
-        si.maxLod = (float)t.mipLevels;
+        // ⚠️ PRUEBA: `HARUKA_VK_MIP0=1` capa el muestreo al nivel 0. Los mips 1..N se RESERVAN aqui
+        // pero NADIE los escribe (no hay `vkCmdBlitImage` ni ningun `baseMipLevel > 0` en todo el
+        // backend), mientras OpenGL llama a `glGenerateTextureMipmap`. Si con esto los props lejanos
+        // dejan de salir blancos, el fallo es ese: se esta muestreando memoria indefinida.
+        { static const bool s_mip0 = [] { const char* e = std::getenv("HARUKA_VK_MIP0");
+                                          return e && e[0] == '1'; }();
+          si.maxLod = s_mip0 ? 0.0f : (float)t.mipLevels; }
         if (d.maxAnisotropy > 1.0f)
         {
             VkPhysicalDeviceProperties pp;
@@ -980,7 +1005,7 @@ namespace Haruka::RHI::vulkan
                         b0.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                         b0.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                         b0.image = t.image;
-                        b0.subresourceRange = { isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+                        b0.subresourceRange = { (VkImageAspectFlags)(isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT),
                                                 0, t.mipLevels, 0, t.layers };
                         b0.srcAccessMask = 0;
                         b0.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -991,11 +1016,93 @@ namespace Haruka::RHI::vulkan
                         r.bufferOffset = 0;
                         r.bufferRowLength = 0;   // datos apretados (rowBytes = width*bpp)
                         r.bufferImageHeight = 0;
-                        r.imageSubresource = { isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT,
+                        r.imageSubresource = { (VkImageAspectFlags)(isDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT),
                                                0, 0, t.layers };
                         r.imageExtent = { d.width, d.height, 1 };
                         vkCmdCopyBufferToImage(c, staging, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
 
+                        // ── LOS MIPS SE GENERAN AQUI, Y ANTES NO SE GENERABAN EN ABSOLUTO ──────
+                        //
+                        // ⚠️ ESTE ERA EL BUG QUE SE VEIA COMO "los arboles lejanos salen BLANCOS, y
+                        // solo en Vulkan". Se reservaban `mipLevels` niveles, el muestreador los
+                        // permitia (`maxLod = mipLevels`) y **nadie escribia ninguno**: memoria
+                        // INDEFINIDA. Como el nivel lo elige la DISTANCIA, de cerca se veia bien
+                        // (nivel 0, el unico subido) y de lejos salia basura. OpenGL no lo sufria
+                        // porque llama a `glGenerateTextureMipmap`.
+                        //
+                        // Confirmado capando el muestreo al nivel 0 (`HARUKA_VK_MIP0=1`), color medio
+                        // de los arboles lejanos:
+                        //     Vulkan normal          123,1 121,8 129,2   <- verde el canal MAS BAJO
+                        //     Vulkan capado a mip 0  128,4 134,1 122,1
+                        //     OpenGL (referencia)    125,8 130,5 118,2
+                        // Con el tope, Vulkan reproduce OpenGL.
+                        //
+                        // Afecta a todo lo que pide `mipmaps`: props, las cuatro capas de terreno, el
+                        // IBL y las texturas procedurales.
+                        //
+                        // La cadena es la estandar: cada nivel se blitea del anterior a la mitad de
+                        // tamano, con el origen en TRANSFER_SRC y el destino en TRANSFER_DST, y cada
+                        // nivel ya consumido pasa a SHADER_READ_ONLY. `layerCount` cubre los arrays
+                        // de una vez (el terreno son 4 capas).
+                        if (t.mipLevels > 1 && !isDepth)
+                        {
+                            int32_t mw = (int32_t)d.width, mh = (int32_t)d.height;
+                            for (uint32_t level = 1; level < t.mipLevels; ++level)
+                            {
+                                VkImageMemoryBarrier bs{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                                bs.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                bs.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                                bs.image = t.image;
+                                bs.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 1, 0, t.layers };
+                                bs.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                                bs.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                                bs.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                                bs.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                                vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     0, 0, nullptr, 0, nullptr, 1, &bs);
+
+                                const int32_t nw = (mw > 1) ? mw / 2 : 1;
+                                const int32_t nh = (mh > 1) ? mh / 2 : 1;
+                                VkImageBlit bl{};
+                                bl.srcOffsets[0] = { 0, 0, 0 };
+                                bl.srcOffsets[1] = { mw, mh, 1 };
+                                bl.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, t.layers };
+                                bl.dstOffsets[0] = { 0, 0, 0 };
+                                bl.dstOffsets[1] = { nw, nh, 1 };
+                                bl.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, 0, t.layers };
+                                vkCmdBlitImage(c,
+                                               t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                               t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                               1, &bl, VK_FILTER_LINEAR);
+
+                                // el nivel que acaba de servir de origen ya no se toca mas
+                                VkImageMemoryBarrier br = bs;
+                                br.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                                br.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                br.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                                br.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                                vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                                     0, 0, nullptr, 0, nullptr, 1, &br);
+                                mw = nw; mh = nh;
+                            }
+                            // el ULTIMO nivel nunca fue origen: sigue en TRANSFER_DST
+                            VkImageMemoryBarrier bl1{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                            bl1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            bl1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            bl1.image = t.image;
+                            bl1.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, t.mipLevels - 1, 1, 0, t.layers };
+                            bl1.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                            bl1.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                            bl1.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                            bl1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                                 0, 0, nullptr, 0, nullptr, 1, &bl1);
+                        }
+                        else
+                        {
                         VkImageMemoryBarrier b1 = b0;
                         b1.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
                         b1.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -1003,6 +1110,7 @@ namespace Haruka::RHI::vulkan
                         b1.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
                         vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                                              0, 0, nullptr, 0, nullptr, 1, &b1);
+                        }
                     });
                     vkDestroyBuffer(m_device, staging, nullptr);
                     vkFreeMemory(m_device, mem, nullptr);
@@ -1324,6 +1432,24 @@ namespace Haruka::RHI::vulkan
     uint32_t VKDevice::nativeProgram(PipelineHandle)     { return 0; }
     uint32_t VKDevice::nativeBuffer(BufferHandle)        { return 0; }
 
+    uint64_t VKDevice::imguiTextureId(TextureHandle h)
+    {
+        // ImGui_ImplVulkan quiere un VkDescriptorSet, no un id de imagen. Se crea una vez por
+        // textura y se guarda: AddTexture consume un slot del pool interno del backend (1000).
+        if (!m_imguiActive) return 0;                    // aun no hay pool: el llamante reintentara
+        const VKTexture* t = texture(h);
+        if (!t || !t->view || !t->sampler) return 0;
+
+        auto it = m_imguiTextures.find(h.id);
+        if (it != m_imguiTextures.end()) return (uint64_t)it->second;
+
+        VkDescriptorSet ds = ImGui_ImplVulkan_AddTexture(
+            t->sampler, t->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        if (!ds) { HARUKA_LOGW("RHI/VK", "ImGui_ImplVulkan_AddTexture fallo"); return 0; }
+        m_imguiTextures.emplace(h.id, ds);
+        return (uint64_t)ds;
+    }
+
     // ------------------------------------------------------------------ destrucción
     void VKDevice::destroy(BufferHandle h)
     {
@@ -1341,6 +1467,12 @@ namespace Haruka::RHI::vulkan
     {
         if (const VKTexture* t = texture(h))
         {
+            // El descriptor set de ImGui apunta a este view/sampler: soltarlo ANTES de destruirlos.
+            if (auto it = m_imguiTextures.find(h.id); it != m_imguiTextures.end())
+            {
+                if (m_imguiActive) ImGui_ImplVulkan_RemoveTexture(it->second);
+                m_imguiTextures.erase(it);
+            }
             if (m_context && t->view) m_context->forgetImageView(t->view);
             if (t->sampler) vkDestroySampler(m_device, t->sampler, nullptr);
             if (t->view) vkDestroyImageView(m_device, t->view, nullptr);
@@ -1557,6 +1689,36 @@ namespace Haruka::RHI::vulkan
             if (!vkSuccess(vkAllocateDescriptorSets(m_device, &sai, m_descRing.data()), "alloc desc ring")) return nullptr;
         }
         m_setCursor = 0;
+
+        // ── EL SWAPCHAIN NO SE ENTERA SOLO DE QUE LA VENTANA HA CRECIDO ─────────────────────────
+        //
+        // ⚠️ Esperar a `OUT_OF_DATE` es asumir una semantica que Wayland NO da. Ahi el surface
+        // responde `currentExtent = 0xFFFFFFFF` ("decide tu") y **no marca el swapchain como
+        // obsoleto** al redimensionar: si nadie mira, se queda con el tamano que tuviera al crearse.
+        //
+        // Y se creaba pronto, con la ventana todavia en su tamano inicial. Medido:
+        //
+        //     swapchain extent: surface dice 0xFFFFFFFF (indefinido) · SDL en pixeles 1280x720
+        //     ...mas tarde, ya en juego: SDL en pixeles 1920x1080, swapchain SEGUIA en 1280x720
+        //
+        // O sea que **todo el juego se renderizaba a 720p y se estiraba a 1080p**. Se noto por la UI
+        // ("ImGui no es nitido"): su atlas se rasterizaba a 8,7 px y se agrandaba x1,5. Y ademas
+        // falseaba cualquier comparativa de rendimiento contra OpenGL, que si sigue a la ventana:
+        // Vulkan estaba dibujando el 44 % de los pixeles.
+        //
+        // Aqui se compara el tamano REAL en pixeles con el del swapchain y se recrea si no casan. Es
+        // barato (dos enteros por frame) y no depende de que el driver avise.
+        if (m_swapchain && m_swapchain->window()) {
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(m_swapchain->window(), &pw, &ph);
+            const VkExtent2D cur = m_swapchain->extent();
+            if (pw > 0 && ph > 0 && ((uint32_t)pw != cur.width || (uint32_t)ph != cur.height)) {
+                HARUKA_LOGI("RHI/VK", "la ventana es %dx%d y el swapchain %ux%u: recreando",
+                            pw, ph, cur.width, cur.height);
+                onSwapchainResize();
+                return nullptr;
+            }
+        }
 
         // Sync completo: el frame anterior terminó (fence esperada en endFrame) → la imagen que
         // devuelva acquire no está en uso. Adquirir + abrir el command buffer del frame.
@@ -1868,6 +2030,8 @@ if (m_swapchain && m_swapchain->valid())
         // ImGui (fase 7): shutdown del backend de UI y de su render pass/framebuffers propios.
         if (m_imguiActive)
         {
+            // Shutdown destruye el pool interno: los sets cacheados mueren con el, solo hay que olvidarlos.
+            m_imguiTextures.clear();
             ImGui_ImplVulkan_Shutdown();
             m_imguiActive = false;
         }

@@ -113,11 +113,21 @@ void main() {
     const float lodNrm = 1.0 - smoothstep( 300.0,  2500.0, dist);
 
     vec3 ignoredCol; int ignoredMat;   // solo los usa `biome.frag`, para sus vistas de depuracion
+    vec3 rawTex; float texW;           // vistas 7 y 8: la muestra cruda y su peso
     vec3 col = harukaTerrainAlbedo(uTerrainAlbedo, uTerrainNormal, uMacroVar, uBiomeMap, uZoneMap,
                                    (maps & 1) != 0, (maps & 2) != 0, (maps & 4) != 0,
                                    vFragPos, uTexAnchor.xyz, n, normalize(vUp),
                                    vClimate.x, vClimate.y, clamp(vClimate.z, 0.0, 1.0),
-                                   uShade.x, int(uShade.y), lod, lodNrm, ignoredCol, ignoredMat);
+                                   uShade.x, int(uShade.y), lod, lodNrm, ignoredCol, ignoredMat,
+                                   rawTex, texW);
+
+    // ⚠️ VISTAS PARA PARTIR "EL SUELO SALE LISO" EN DOS. Medido: el detalle local del suelo esta al
+    // nivel del CIELO (que es un degradado, o sea liso) en los DOS backends, cuando con `grain ~1` y
+    // `lod = 1` a los pies el albedo deberia aportar el 55 % del color.
+    //   · vista 7 = la muestra triplanar CRUDA. Si sale plana, el fallo es el MUESTREO.
+    //   · vista 8 = el PESO con que entra (`texW`), en gris. Si sale negro, la mezcla la anula.
+    if (dbg == 7) { fragColor = vec4(rawTex, 1.0); return; }
+    if (dbg == 8) { fragColor = vec4(vec3(texW), 1.0); return; }
 
     // `harukaTerrainAlbedo` MODIFICA `n` con el normal map, asi que la iluminacion va despues.
     const float d = max(dot(n, normalize(uLightDir.xyz)), 0.0);

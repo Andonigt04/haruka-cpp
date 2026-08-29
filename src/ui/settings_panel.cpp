@@ -163,16 +163,22 @@ void SettingsPanel::tabGraphics() {
         const std::string preview = chosen() ? *chosen() : autoLabel;
         if (ImGui::BeginCombo("Tarjeta gráfica", preview.c_str())) {
             if (ImGui::Selectable(autoLabel.c_str(), chosen() == nullptr)) g.preferredGpus.clear();
-            for (const auto& a : s_adapters) {
+            for (size_t ai = 0; ai < s_adapters.size(); ++ai) {
+                const auto& a = s_adapters[ai];
                 const std::string* cur = chosen();
                 const bool sel = cur && *cur == a.name;
                 std::string label = a.name + (a.discrete ? "  [dedicada]" : "");
+                // PushID por ÍNDICE: ImGui saca el id del texto, y dos tarjetas IGUALES (un multi-GPU
+                // con dos placas del mismo modelo) darían el mismo nombre y por tanto el mismo id;
+                // las dos filas se pisarían el estado y una no se podría elegir.
+                ImGui::PushID((int)ai);
                 if (ImGui::Selectable(label.c_str(), sel)) {
                     // Se escribe en el PUESTO 0 conservando el resto: la lista es de preferencia y
                     // un multi-GPU futuro poblará los siguientes puestos.
                     if (g.preferredGpus.empty()) g.preferredGpus.emplace_back();
                     g.preferredGpus[0] = a.name;
                 }
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -265,7 +271,12 @@ static void deviceCombo(const char* label, bool recording, std::string& sel) {
             const char* name = SDL_GetAudioDeviceName(ids[i]);
             if (!name) continue;
             bool chosen = (sel == name);
+            // PushID por índice: los nombres de dispositivo de audio SE REPITEN a menudo (dos placas
+            // iguales, dos cascos USB del mismo modelo). Sin esto las dos filas comparten id, se pisan
+            // el estado y una no se puede elegir — y ImGui avisa con "conflicting ID".
+            ImGui::PushID(i);
             if (ImGui::Selectable(name, chosen)) sel = name;
+            ImGui::PopID();
         }
         ImGui::EndCombo();
     }
@@ -288,9 +299,13 @@ void SettingsPanel::tabAudio() {
         const char* preview = a.outputDevice.empty() ? def.c_str() : a.outputDevice.c_str();
         if (ImGui::BeginCombo(TR("audio.output").c_str(), preview)) {
             if (ImGui::Selectable(def.c_str(), a.outputDevice.empty())) a.outputDevice.clear();
-            for (const auto& d : AudioManager::playbackDevices()) {
+            const auto& devs = AudioManager::playbackDevices();
+            for (size_t di = 0; di < devs.size(); ++di) {
+                const std::string& d = devs[di];
                 bool sel = (a.outputDevice == d);
+                ImGui::PushID((int)di);      // mismo motivo que en deviceCombo: nombres repetidos
                 if (ImGui::Selectable(d.c_str(), sel)) a.outputDevice = d;
+                ImGui::PopID();
             }
             ImGui::EndCombo();
         }
@@ -392,6 +407,12 @@ void SettingsPanel::tabControls() {
             // Current bindings as chips
             ImGui::TableSetColumnIndex(1);
             auto keys = action->keys();
+            // ⚠️ Acotado por ACCIÓN, no solo por índice. Las tablas de ImGui NO meten la fila en la
+            // pila de ids (solo la columna, y eso en las cabeceras), así que dos acciones con la MISMA
+            // tecla en la misma posición —perfectamente posible: la misma tecla sirve para dos cosas en
+            // contextos distintos— daban `PushID(i)` + la misma etiqueta = el mismo id, y pulsar un chip
+            // reasignaba el de la otra fila.
+            ImGui::PushID(action->name.c_str());
             for (size_t i = 0; i < keys.size(); ++i) {
                 const char* kname = SDL_GetScancodeName(keys[i]);
                 ImGui::PushID((int)i);
@@ -407,6 +428,7 @@ void SettingsPanel::tabControls() {
                 ImGui::PopID();
                 if (i + 1 < keys.size()) ImGui::SameLine(0, 4);
             }
+            ImGui::PopID();
 
             // Add / clear buttons
             ImGui::TableSetColumnIndex(2);

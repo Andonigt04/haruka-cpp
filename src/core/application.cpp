@@ -32,6 +32,7 @@
 #include <cstring>
 
 #include "core/logger.h"
+#include "core/build_info.h"
 #include "core/progress_hook.h"
 
 #include <SDL3/SDL.h>
@@ -56,6 +57,10 @@ static void handleSigint(int) { g_sigintReceived.store(true); }
 
 Application::Application() : _window(nullptr) {
     _frameStart = std::chrono::high_resolution_clock::now();
+    // Lo PRIMERO del log: sin saber contra que build se probo, un reporte de fallo no se puede
+    // confirmar ni descartar. Va aqui y no tras la inicializacion porque si el arranque revienta es
+    // cuando mas falta hace saber que binario reviento.
+    HARUKA_LOGI("Haruka", "Haruka %s", Haruka::buildString().c_str());
 }
 
 Application::~Application() {
@@ -272,7 +277,8 @@ void Application::cleanup() {
     if (RHI::Device* dev = RHI::device()) {
         if (RHI::valid(m_bloomExtractPSO)) { dev->destroy(m_bloomExtractPSO); m_bloomExtractPSO = {}; }
         if (RHI::valid(m_bloomBlurPSO))    { dev->destroy(m_bloomBlurPSO);    m_bloomBlurPSO    = {}; }
-        if (RHI::valid(m_bloomUBO))        { dev->destroy(m_bloomUBO);        m_bloomUBO        = {}; }
+        for (auto& b : m_bloomUBOs) if (RHI::valid(b)) dev->destroy(b);
+        m_bloomUBOs.clear();
         if (RHI::valid(m_presentPSO))      { dev->destroy(m_presentPSO);      m_presentPSO      = {}; }
         if (RHI::valid(m_presentUBO))      { dev->destroy(m_presentUBO);      m_presentUBO      = {}; }
         if (RHI::valid(m_skyPSO))          { dev->destroy(m_skyPSO);          m_skyPSO          = {}; }
@@ -723,6 +729,60 @@ void Application::run(const std::string& startScenePath, bool headless) {
                     }
                 }
             }
+
+            // ── SONDA DEL ESCALADO DE LA UI (`HARUKA_UI_SCALE_LOG=1`) ───────────────────────────
+            //
+            // "ImGui no es nitido, creo que es por el escalado en pantalla completa" es una hipotesis
+            // que no se puede confirmar mirando: hay TRES tamanos distintos en juego y el texto sale
+            // borroso en cuanto dos no casan.
+            //   · ventana LOGICA        — lo que reporta SDL
+            //   · framebuffer FISICO    — lo que tiene el swapchain de verdad
+            //   · DisplaySize x FramebufferScale — el rectangulo que ImGui cree que esta pintando
+            // Si el atlas se rasterizo para una escala y se dibuja a otra, el texto es un bitmap
+            // ESTIRADO: nitidez perdida sin que nada falle. Se imprime solo cuando algo CAMBIA, para
+            // poder pasar a pantalla completa y ver que se movio.
+            if (const char* ul = getenv("HARUKA_UI_SCALE_LOG")) {
+                if (ul[0] == '1' && !m_headless) {
+                    ImGuiIO& io = ImGui::GetIO();
+                    uint32_t fbw = 0, fbh = 0;
+                    if (_device) _device->framebufferSize(fbw, fbh);
+                    static float lw = -1, lh = -1, lsx = -1, lsy = -1;
+                    static uint32_t lfw = 0, lfh = 0;
+                    const bool moved = (io.DisplaySize.x != lw || io.DisplaySize.y != lh ||
+                                        io.DisplayFramebufferScale.x != lsx ||
+                                        io.DisplayFramebufferScale.y != lsy ||
+                                        fbw != lfw || fbh != lfh);
+                    if (moved) {
+                        lw = io.DisplaySize.x; lh = io.DisplaySize.y;
+                        lsx = io.DisplayFramebufferScale.x; lsy = io.DisplayFramebufferScale.y;
+                        lfw = fbw; lfh = fbh;
+                        int atlasW = 0, atlasH = 0;
+                        if (io.Fonts) io.Fonts->GetTexDataAsRGBA32(nullptr, &atlasW, &atlasH);
+                        const float uiW = io.DisplaySize.x * io.DisplayFramebufferScale.x;
+                        const float uiH = io.DisplaySize.y * io.DisplayFramebufferScale.y;
+                        // ⚠️ Y LO QUE DICE SDL, QUE ES LA FUENTE DE VERDAD. El motor puede estar
+                        // devolviendo el tamano PEDIDO (el de los ajustes) en vez del REAL que dio el
+                        // compositor: si esos dos no casan, todo lo demas hereda el error.
+                        int sw = 0, sh = 0, spw = 0, sph = 0;
+                        if (auto* wnd = _window->getNativeWindow()) {
+                            SDL_GetWindowSize(reinterpret_cast<::SDL_Window*>(wnd), &sw, &sh);
+                            SDL_GetWindowSizeInPixels(reinterpret_cast<::SDL_Window*>(wnd), &spw, &sph);
+                        }
+                        HARUKA_LOGI("UIScale", "SDL: ventana logica %dx%d · en PIXELES %dx%d", sw, sh, spw, sph);
+                        HARUKA_LOGI("UIScale",
+                            "ventana %ux%u · framebuffer %ux%u · DisplaySize %.0fx%.0f · "
+                            "FramebufferScale %.3fx%.3f -> la UI pinta %.0fx%.0f%s · atlas %dx%d px "
+                            "· FontGlobalScale %.3f",
+                            _window->getWidth(), _window->getHeight(), fbw, fbh,
+                            io.DisplaySize.x, io.DisplaySize.y,
+                            io.DisplayFramebufferScale.x, io.DisplayFramebufferScale.y, uiW, uiH,
+                            (fbw && (std::fabs(uiW - (float)fbw) > 1.0f ||
+                                     std::fabs(uiH - (float)fbh) > 1.0f))
+                                ? "  ⚠️ NO COINCIDE con el framebuffer: el texto se ESTIRA" : "",
+                            atlasW, atlasH, io.FontGlobalScale);
+                    }
+                }
+            }
             ImGui::NewFrame();
         }
 
@@ -736,6 +796,57 @@ void Application::run(const std::string& startScenePath, bool headless) {
             Camera* gameCam = _gameInterface->getCamera();
             if (gameCam && _camera)
                 *_camera = *gameCam;
+        }
+
+        // ── CAMARA FIJA PARA CAPTURAS (`HARUKA_CAM_PITCH=<grados>`) ─────────────────────────────
+        //
+        // ⚠️ EXISTE PORQUE CONGELAR SOLO LA HORA NO BASTA. Con `HARUKA_DAY_ANGLE` dos ejecuciones
+        // comparten el Sol, pero NO adonde mira la camara — y entonces una region fija de la pantalla
+        // no significa nada. Me mordio tres veces el mismo dia: una medida cayo sobre la barra de
+        // objetos, otra sobre el fondo entre arboles, y la tercera sobre el CIELO entero (el pase de
+        // terreno cubria el 0,3 % del cuadro y yo creia estar midiendo el suelo). Las tres dieron
+        // numeros creibles y falsos.
+        //
+        // El angulo es respecto al HORIZONTE LOCAL, no global: sobre una esfera un pitch absoluto no
+        // quiere decir nada. Se conserva el rumbo que tenga la camara y solo se fija la inclinacion:
+        // 0 = al horizonte · -90 = al nadir (el suelo llena el cuadro) · +90 = al cenit.
+        {
+            static const double s_pitch = [] {
+                const char* e = std::getenv("HARUKA_CAM_PITCH");
+                return e ? std::atof(e) : 1e9;   // 1e9 = sin fijar
+            }();
+            if (s_pitch < 1e8 && _camera) {
+                glm::dvec3 pc(0.0);
+                bool haveP = false;
+#ifdef HARUKA_MOD_PLANETS
+                if (_planetarySystem)
+                    if (const auto* tp = _planetarySystem->activeTerrestrial()) {
+                        pc = tp->position(); haveP = true;
+                    }
+#endif
+                const glm::dvec3 pos = glm::dvec3(_camera->position);
+                const glm::dvec3 up  = haveP ? glm::normalize(pos - pc) : glm::dvec3(0, 1, 0);
+                glm::dvec3 fwd = glm::dvec3(_camera->getFront());
+                // rumbo = la parte de `fwd` tangente al planeta; si mira justo al cenit, uno cualquiera
+                glm::dvec3 head = fwd - up * glm::dot(fwd, up);
+                if (glm::length(head) < 1e-6) {
+                    head = glm::cross(up, glm::dvec3(0, 1, 0));
+                    if (glm::length(head) < 1e-6) head = glm::cross(up, glm::dvec3(1, 0, 0));
+                }
+                head = glm::normalize(head);
+                const double a = glm::radians(s_pitch);
+                const glm::dvec3 dir = glm::normalize(head * std::cos(a) + up * std::sin(a));
+                // ⚠️ `dir`, NO `-dir`. `glm::quatLookAt(d, up)` ya devuelve la orientacion cuyo
+                // FRENTE (el -Z de la camara) es `d`; negarlo invertia el pitch. Medido: con el signo
+                // mal, "mirar 60 grados abajo" daba 40 % de terreno en el cuadro y "mirar 5 grados
+                // arriba" daba 100 % — al reves de lo que tiene que pasar.
+                _camera->orientation = Haruka::Rotation(glm::quatLookAt(dir, up));
+                static bool s_said = false;
+                if (!s_said) { s_said = true;
+                    HARUKA_LOGI("Camera", "pitch FIJADO a %.1f grados sobre el horizonte local "
+                                "(HARUKA_CAM_PITCH) — para que dos capturas miren al MISMO sitio",
+                                s_pitch); }
+            }
         }
 
         // 3D render pass (calls onRenderWorld inside renderFrameContent)
@@ -759,6 +870,30 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         // DEBUG TEMPORAL: HARUKA_SHOT=<ruta.ppm> vuelca el framebuffer tras N segundos (HARUKA_SHOT_SEC,
         // por defecto 900) y sale. Para inspeccionar lo que se renderiza sin capturar la pantalla.
+
+        // ⚠️ MEDIR EL SWAP no es cosmético: es donde se hace visible el coste de la GPU. La CPU solo
+        // ENCOLA los draws (por eso `simple_planet.draw` marca <0,5 ms aunque el terreno cueste
+        // decenas de ms de GPU); el bloqueo real aparece aquí, cuando el driver espera a que la GPU
+        // termine o a que llegue el vsync. Sin este scope, un frame limitado por GPU parece tiempo
+        // "perdido" dentro del render y se acaba optimizando el sitio equivocado.
+        if (RHI::device()) {
+            HARUKA_PROFILE("present.swap(espera GPU/vsync)");
+            RHI::device()->endFrame();
+        }
+
+        // ── LA CAPTURA VA DESPUES DEL PRESENT ────────────────────────────────────────────────
+        //
+        // ⚠️ ESTABA ANTES, Y EN VULKAN DEVOLVIA UNA IMAGEN QUE NO ERA LA ESCENA. `readPixels` copia
+        // la ultima imagen PRESENTADA del swapchain; llamarlo a mitad de frame lee algo que no
+        // corresponde. Medido con la hora del dia congelada (`HARUKA_DAY_ANGLE`), que es lo que
+        // permite comparar dos ejecuciones del mismo binario:
+        //
+        //     opengl   a=1.1   7,6 15,1 13,3  ·  a=4.2  113,6 181,5 96,7   -> cambia 355,8
+        //     vulkan   a=1.1  49,5 54,3 62,9  ·  a=4.2   49,5  54,3 62,9   -> cambia 0,0
+        //
+        // Vulkan devolvia lo MISMO pase lo que pase en la escena — hasta con el terreno apagado. Es
+        // la regla que el banco de RHI ya documentaba y que aqui no se seguia: GL lee ANTES del swap
+        // (su back buffer queda indefinido despues) y Vulkan DESPUES.
         if (const char* shot = getenv("HARUKA_SHOT")) {
             static bool taken = false;
             const int secs = getenv("HARUKA_SHOT_SEC") ? atoi(getenv("HARUKA_SHOT_SEC")) : 70;
@@ -779,23 +914,20 @@ void Application::run(const std::string& startScenePath, bool headless) {
                             size_t dst = (size_t)y * w * 3 + (size_t)x * 3;
                             rgb[dst] = px[src]; rgb[dst+1] = px[src+1]; rgb[dst+2] = px[src+2];
                         }
-                    for (int y = h - 1; y >= 0; --y)
+                    // ⚠️ EL ORDEN DE LAS FILAS DEPENDE DEL BACKEND. `readPixels` devuelve OpenGL
+                    // de ABAJO ARRIBA y Vulkan de ARRIBA ABAJO; volcar siempre invertido —como se
+                    // hacia— deja la captura de Vulkan boca abajo, y con ella cualquier comparacion.
+                    const bool vkOrder = RHI::device() &&
+                                         RHI::device()->backend() == RHI::Backend::Vulkan;
+                    for (int i2 = 0; i2 < h; ++i2) {
+                        const int y = vkOrder ? i2 : (h - 1 - i2);
                         fwrite(&rgb[(size_t)y * w * 3], 1, (size_t)w * 3, f);
+                    }
                     fclose(f);
                     HARUKA_LOGI("Shot", "escrito %s (%dx%d)", shot, w, h);
                 }
                 running = false;
             }
-        }
-
-        // ⚠️ MEDIR EL SWAP no es cosmético: es donde se hace visible el coste de la GPU. La CPU solo
-        // ENCOLA los draws (por eso `simple_planet.draw` marca <0,5 ms aunque el terreno cueste
-        // decenas de ms de GPU); el bloqueo real aparece aquí, cuando el driver espera a que la GPU
-        // termine o a que llegue el vsync. Sin este scope, un frame limitado por GPU parece tiempo
-        // "perdido" dentro del render y se acaba optimizando el sitio equivocado.
-        if (RHI::device()) {
-            HARUKA_PROFILE("present.swap(espera GPU/vsync)");
-            RHI::device()->endFrame();
         }
 
         // Frame-rate cap (battery/heat on laptops; 0 = uncapped). With vsync on,

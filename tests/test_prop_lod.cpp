@@ -32,7 +32,7 @@ using namespace Haruka::Tools::ProcGraph;
 namespace {
 
 struct Baked {
-    size_t tris = 0, verts = 0;
+    size_t tris = 0, verts = 0, colors = 0, uvs = 0, parts = 0;
     glm::vec3 lo{0.0f}, hi{0.0f};
     bool ok = false;
 };
@@ -47,6 +47,7 @@ Baked bakeAt(int seed, float detail) {
     b.ok = true;
     b.tris = m.indices.size() / 3;
     b.verts = m.positions.size();
+    b.colors = m.colors.size(); b.uvs = m.uvs.size(); b.parts = m.partId.size();
     b.lo = glm::vec3(1e9f); b.hi = glm::vec3(-1e9f);
     for (const glm::vec3& p : m.positions) { b.lo = glm::min(b.lo, p); b.hi = glm::max(b.hi, p); }
     return b;
@@ -56,7 +57,33 @@ Baked bakeAt(int seed, float detail) {
 /// cambia allí sin tocarlos aquí, el test deja de auditar lo que se dibuja — de ahí el comentario.
 const float kLevels[3] = { 1.0f, 0.60f, 0.45f };
 
+
 } // namespace
+
+/// ⚠️ CADA VERTICE TIENE QUE TRAER SU COLOR, EN TODOS LOS NIVELES DE LOD.
+///
+/// `application_render.cpp` sube los vertices asi:
+///     pv.color = (vi < tm.colors.size()) ? tm.colors[vi] : glm::vec3(1.0f);
+/// El respaldo es **BLANCO**. Un LOD que devuelva menos colores que posiciones no falla, no avisa y
+/// no rompe ningun test: simplemente pinta el prop de blanco. Andoni lo reporto mirando —los arboles
+/// del fondo salen blancos y el de delante, coloreado— y eso es exactamente la firma de un LOD sin
+/// colores. Lo mismo vale para uv y partId: `partId` de mas se lee como "parte 0", que al romper el
+/// prop se lleva el objeto entero.
+void test_prop_lod_attributes() {
+    beginTest("prop_lod_attributes");
+    std::printf("    nivel   vertices   colores   uv    partId\n");
+    bool todos = true;
+    for (int i = 0; i < 3; ++i) {
+        const Baked b = bakeAt(1234, kLevels[i]);
+        CHECK(b.ok, "el nivel hornea");
+        if (!b.ok) { todos = false; continue; }
+        std::printf("    %.2f    %8zu   %7zu   %4zu  %6zu%s\n",
+                    kLevels[i], b.verts, b.colors, b.uvs, b.parts,
+                    (b.colors == b.verts) ? "" : "   <- FALTAN COLORES: se dibuja BLANCO");
+        if (b.colors != b.verts) todos = false;
+    }
+    CHECK(todos, "todos los niveles de LOD traen un color por vertice (si no, el prop sale BLANCO)");
+}
 
 void test_prop_lod_mesh() {
     beginTest("prop_lod_mesh");

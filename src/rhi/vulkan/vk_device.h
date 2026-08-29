@@ -110,6 +110,7 @@ namespace Haruka::RHI::vulkan
             uint32_t         nativeFramebuffer(RenderPassHandle) override;
             uint32_t         nativeProgram(PipelineHandle) override;
             uint32_t         nativeBuffer(BufferHandle) override;
+            uint64_t         imguiTextureId(TextureHandle) override;
             const void*      mappedData(BufferHandle) override;
             void             updateCubemapFace(TextureHandle tex, int face, int width, int height,
                                                 Format format, const void* data) override;
@@ -296,6 +297,9 @@ namespace Haruka::RHI::vulkan
 
             std::vector<VKBuffer>       m_buffers;
             std::vector<VKTexture>      m_textures;
+            /// Descriptor sets de ImGui por textura. La clave es TextureHandle::id, que se RECICLA:
+            /// hay que borrar la entrada al destruir la textura o la siguiente heredaria el set.
+            std::map<uint32_t, VkDescriptorSet> m_imguiTextures;
             std::vector<VKSampler>      m_samplers;
             std::vector<VKPipeline>     m_pipelines;
             std::vector<VKRenderTarget> m_targets;

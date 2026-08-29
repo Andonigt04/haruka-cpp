@@ -64,7 +64,12 @@ vec3 harukaTerrainAlbedo(sampler2DArray albedoTex, sampler2DArray normalTex,
                          vec3 fragP, vec3 texAnchor, inout vec3 n, vec3 up,
                          float elevKm, float tempC, float humid,
                          float tiling, int shoreLayer, float lod, float lodNrm,
-                         out vec3 outBiomeCol, out int outMatIdx)
+                         out vec3 outBiomeCol, out int outMatIdx,
+                         // ⚠️ SOLO PARA DEPURAR: la muestra triplanar CRUDA y el peso con que entra
+                         // en el color final. Sirve para partir "el suelo sale liso" en dos: si `tex`
+                         // ya viene plano, el fallo esta en el MUESTREO (array sin atar, capa mala,
+                         // escala absurda); si viene con detalle, el fallo esta en la MEZCLA.
+                         out vec3 outRawTex, out float outTexW)
 {
     vec2 bUV = harukaEquirectUVDir(up);
     vec3 biomeCol = hasBiome ? texture(biomeTex, bUV).rgb : vec3(0.5);
@@ -79,6 +84,7 @@ vec3 harukaTerrainAlbedo(sampler2DArray albedoTex, sampler2DArray normalTex,
     // El llamador los necesita despues (vistas de depuracion, cobertura de props), y recomputarlos
     // fuera significaria volver a recorrer la tabla de materiales: salen por aqui.
     outBiomeCol = biomeCol;
+    outRawTex = vec3(0.5); outTexW = 0.0;   // por si se sale antes
     outMatIdx   = matIdx;
 
     // ⚠️ El patrón se ancla al PLANETA, no a la cámara, y NO se reconstruye la posición planetaria
@@ -112,6 +118,7 @@ vec3 harukaTerrainAlbedo(sampler2DArray albedoTex, sampler2DArray normalTex,
 
     float grain = mix(1.0, dot(tex, kLumaW) / kTexMean, grainAmt);
     float texW = clamp(grainAmt * 0.55, 0.0, 0.75) * lod;
+    outRawTex = tex; outTexW = texW;
     vec3 col = mix(biomeCol, biomeCol * tex / kTexMean, texW) * tint * clamp(grain, 0.75, 1.25);
     if (hasMacro) col *= 0.85 + 0.30 * texture(macroTex, bUV).r * step(0.0, elevKm);
 

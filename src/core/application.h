@@ -561,7 +561,13 @@ private:
     Haruka::RHI::RenderPassHandle m_bloomPass[2];   // render targets RHI
     Haruka::RHI::TextureHandle    m_bloomTexH[2];   // handles de color (Context::bindTexture)
     Haruka::RHI::PipelineHandle   m_bloomExtractPSO, m_bloomBlurPSO; // horneados 1 vez (shader+layout+estado)
-    Haruka::RHI::BufferHandle     m_bloomUBO;       // BloomParams (binding 2)
+    /// ⚠️ UN UBO POR DRAW, NO UNO COMPARTIDO. En OpenGL cada draw se ejecuta al vuelo y reescribir
+    /// el mismo buffer entre draws funciona; en Vulkan los comandos se GRABAN y todos acaban leyendo
+    /// el ULTIMO valor escrito. El bloom hace 1 + 2xN draws con parametros distintos, asi que en
+    /// Vulkan el extract se quedaba con `threshold = 0` —la escena ENTERA entraba al bloom— y el
+    /// desenfoque horizontal se volvia vertical. Medido: el frame salia **1,48x mas claro** que en GL,
+    /// y con el bloom apagado los dos backends daban la MISMA imagen hasta la decima.
+    std::vector<Haruka::RHI::BufferHandle> m_bloomUBOs;   // BloomParams (binding 2), uno por draw
     int m_bloomW = 0, m_bloomH = 0;
     // Present/composite (pase 2 migrado): FXAA + bloom + upscale a pantalla.
     Haruka::RHI::PipelineHandle   m_presentPSO;

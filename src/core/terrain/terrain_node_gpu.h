@@ -51,7 +51,15 @@ public:
     /// arista, y apagar el morph del grueso junto a un vecino fino— y las dos cambiaron un pincho por
     /// otro. La razón es estructural y está en `terrain_node.vert`: el morph tiene que ser función
     /// SOLO de (nivel, posición del vértice), y toda solución sin el abuelo depende de los vecinos.
-    static constexpr size_t kFloatsPerNode = kTexelsPerNode * 3;   ///< propias + padre + abuelo
+    /// ⚠️ UNO, no tres. Cada hueco guardaba tambien el mapa del PADRE y el del ABUELO —copias del
+    /// mismo terreno con el corte de octavas al doble y al cuadruple— porque el vertex shader solo
+    /// sabia leer su propio hueco para morfear hacia arriba. Costaban 195 KB por nodo: **390 MB para
+    /// 2 048 huecos**, contra un pico medido de **2 445 nodos VIVOS a la vez**. No cabian, y de no
+    /// caber salen las caidas por ancestro que se ven como parpadeo.
+    ///
+    /// Desde el 2026-08-26 el .vert lee el sub-rectangulo del hueco del padre (`harukaNodeSample`),
+    /// asi que las copias sobran: 65 KB por nodo y el triple de huecos por la misma VRAM.
+    static constexpr size_t kFloatsPerNode = kTexelsPerNode;
     static constexpr size_t kBytesPerNode  = kFloatsPerNode * sizeof(float);
 
     /** @param computePath ruta a `shaders/terrain_node.comp`. @return false si no hay device o pipeline. */

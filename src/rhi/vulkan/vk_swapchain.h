@@ -63,6 +63,9 @@ namespace Haruka::RHI::vulkan
             VkSwapchainKHR swapchain() const      { return m_swapchain; }
             VkFormat      format() const          { return m_format; }
             VkExtent2D    extent() const          { return m_extent; }
+            /// La ventana a la que sigue. La consulta `beginFrame` para detectar un resize
+            /// que Wayland NO señala con OUT_OF_DATE (ver la nota en `VKDevice::beginFrame`).
+            SDL_Window*   window() const          { return m_window; }
             VkSurfaceKHR  surface() const         { return m_surface; }
             uint32_t      minImageCount() const   { return m_minImageCount; }
             bool          valid() const           { return m_swapchain != VK_NULL_HANDLE; }

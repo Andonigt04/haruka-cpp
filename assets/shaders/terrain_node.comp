@@ -163,32 +163,13 @@ void main() {
     //
     // Cuesta el doble de VRAM por nodo (66,6 -> 133 KB) y una evaluacion mas de ruido por texel.
     const uint texels = uint(uGrid.x) * uint(uGrid.x);
-    const uint base   = uint(uGrid.w) * texels * 3u;
+    // ⚠️ UN SOLO MAPA POR HUECO. Antes se escribian TRES —el propio, el del padre y el del abuelo—
+    // porque el vertex shader necesitaba fundirse hacia arriba y solo sabia leer su propio hueco. Eran
+    // 195 KB por nodo: **390 MB para 2 048 huecos**, con un pico medido de 2 445 nodos VIVOS a la vez,
+    // o sea que no cabian. Desde que el .vert sabe leer el sub-rectangulo del hueco del PADRE, las
+    // copias sobran: 65 KB por nodo y el triple de huecos por el mismo dinero.
+    const uint base   = uint(uGrid.w) * texels;
     const uint off    = v * uint(uGrid.x) + u;
     uHeights[base + off] = outv;
 
-    // El PADRE (k=1) y el ABUELO (k=2): la misma cuenta con el corte de octavas al doble y al
-    // cuadruple. El abuelo hace falta porque el vecino grueso no dibuja su altura cruda — se esta
-    // morfeando hacia la SUYA—, asi que el fino tiene que poder apuntar a `mix(padre, abuelo, ...)`.
-    for (uint k = 1u; k <= 2u; ++k) {
-        float outCoarse;
-        if (uGrid.z != 0) {
-            outCoarse = outv;                       // modos de biseccion: sin morph
-        } else {
-            const float triC = uMisc.y * float(1u << k);
-            if (uMisc.z > 0.5) {
-                const float baseH = (uMisc.w > 0.5)
-                                  ? harukaSampleHeightField(uHeightTex, textureSize(uHeightTex, 0),
-                                                            harukaEquirectUV(vec3(dir)))
-                                  : harukaSampleBaseField(uBaseField, vec3(dir)).x;
-                const double baseR = double(uMisc.x) + double(baseH);
-                float hp = harukaTerrainDetail(dir, baseR, triC) * harukaSeaLevelAttenuation(baseH);
-                if (baseH > 0.0 && hp < -baseH) hp = -baseH;
-                outCoarse = baseH + hp;
-            } else {
-                outCoarse = harukaTerrainDetail(dir, double(uMisc.x), triC);
-            }
-        }
-        uHeights[base + texels * k + off] = outCoarse;
-    }
 }

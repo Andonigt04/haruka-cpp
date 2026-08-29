@@ -789,6 +789,13 @@ namespace Haruka::RHI::opengl
         return b ? b->id : 0;
     }
 
+    uint64_t GLDevice::imguiTextureId(TextureHandle h)
+    {
+        // ImGui_ImplOpenGL3: el ImTextureID ES el nombre de textura de GL.
+        const GLTexture* t = texture(h);
+        return t ? (uint64_t)t->id : 0;
+    }
+
     const void* GLDevice::mappedData(BufferHandle h)
     {
         const GLBuffer* b = buffer(h);

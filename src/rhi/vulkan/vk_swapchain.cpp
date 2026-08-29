@@ -72,9 +72,19 @@ namespace Haruka::RHI::vulkan
     // ya trae el tamaño real y lo respetamos.
     VkExtent2D VKSwapchain::chooseExtent(const VkSurfaceCapabilitiesKHR& caps)
     {
+        int spw = 0, sph = 0;
+        SDL_GetWindowSizeInPixels(m_window, &spw, &sph);
+        // ⚠️ SONDA: el swapchain salia a 1280x720 con la ventana a 1920x1080 (SDL lo confirmaba en
+        // pixeles), asi que TODO el juego se renderizaba a 720p y se estiraba — y con el la UI, que
+        // es como se noto ("ImGui no es nitido"). Esto dice quien manda en ese tamano.
+        HARUKA_LOGI("RHI/VK", "swapchain extent: surface dice %ux%u%s · SDL en pixeles %dx%d · min %ux%u max %ux%u",
+                    caps.currentExtent.width, caps.currentExtent.height,
+                    (caps.currentExtent.width == 0xFFFFFFFFu) ? " (indefinido: mando yo)" : "",
+                    spw, sph,
+                    caps.minImageExtent.width, caps.minImageExtent.height,
+                    caps.maxImageExtent.width, caps.maxImageExtent.height);
         if (caps.currentExtent.width != 0xFFFFFFFFu) return caps.currentExtent;
-        int pw = 0, ph = 0;
-        SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+        const int pw = spw, ph = sph;
         VkExtent2D e{ (uint32_t)pw, (uint32_t)ph };
         e.width  = std::clamp(e.width,  caps.minImageExtent.width,  caps.maxImageExtent.width);
         e.height = std::clamp(e.height, caps.minImageExtent.height, caps.maxImageExtent.height);

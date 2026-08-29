@@ -2723,6 +2723,224 @@ void test_terrain_node_pool_chain() {
 }
 
 // ================================================================================================
+// EL SUB-RECTANGULO: leer el slot de un ancestro SIN moverse de su sitio
+//
+// Gemelo de `harukaNodeSample` en `terrain_node.vert`. Cuando la hoja no esta residente, se dibuja
+// igualmente en SU huella y lee los datos `k` niveles mas arriba. El texel `t` de la hoja cae, en
+// texeles del ancestro, en `(cells*sub + t) / 2^k` con `sub = indice mod 2^k`.
+//
+// Lo que hay que demostrar es que esa coordenada apunta AL MISMO PUNTO de la cara del cubo que el
+// texel de la hoja. Si no, el terreno de relleno saldria desplazado — y un desplazamiento pequeno es
+// justo lo que nadie ve mirando y todo el mundo nota andando.
+void test_terrain_node_subrect_mapping() {
+    beginTest("terrain_node_subrect_mapping");
+    const double R = 6371000.0;
+    const double cells = (double)TERRAIN_NODE_CELLS;
+
+    // Coordenada local de un texel sobre la cara, en [-1,1]. Es la misma cuenta que hace el .vert.
+    auto localOf = [&](uint32_t level, uint32_t idx, double texel) {
+        return -1.0 + 2.0 * ((double)idx * cells + texel) / (cells * (double)(1u << level));
+    };
+
+    double worst = 0.0, worstOffBy1 = 0.0, worstNoShift = 0.0;
+    size_t cases = 0;
+    for (uint32_t lvl : { 6u, 11u, 17u })
+        for (int kUp = 1; kUp <= 8 && (uint32_t)kUp <= lvl; ++kUp) {
+            // Una hoja cualquiera con indices que NO sean multiplos de 2^k: el caso que destapa el
+            // fallo de redondeo. Con indices alineados el mapeo sale bien hasta estando mal.
+            const uint32_t lim = 1u << lvl;
+            const uint32_t li = (lim / 3u) | 1u, lj = (lim / 7u) | 1u;
+            const uint32_t sub = (1u << kUp) - 1u;
+            const uint32_t ai = li >> kUp, aj = lj >> kUp;
+            const uint32_t si = li & sub,  sj = lj & sub;
+            const double inv = 1.0 / (double)(1u << kUp);
+            for (uint32_t t = 0; t <= TERRAIN_NODE_CELLS; t += 8) {
+                const double au = (cells * (double)si + (double)t) * inv;
+                const double av = (cells * (double)sj + (double)t) * inv;
+                worst = std::max(worst, std::fabs(localOf(lvl, li, (double)t) - localOf(lvl - kUp, ai, au)));
+                worst = std::max(worst, std::fabs(localOf(lvl, lj, (double)t) - localOf(lvl - kUp, aj, av)));
+                // CONTRAPRUEBAS: los dos errores que este mapeo invita a cometer.
+                const double bad1 = (cells * (double)si + (double)t + 1.0) * inv;      // un texel de mas
+                const double bad2 = (double)t * inv;                                   // olvidar el sub-indice
+                worstOffBy1 = std::max(worstOffBy1,
+                    std::fabs(localOf(lvl, li, (double)t) - localOf(lvl - kUp, ai, bad1)));
+                worstNoShift = std::max(worstNoShift,
+                    std::fabs(localOf(lvl, li, (double)t) - localOf(lvl - kUp, ai, bad2)));
+                ++cases;
+            }
+        }
+
+    // De coordenada local a metros sobre la superficie: la cara mide un cuarto de meridiano de lado.
+    const double m_per_local = R * 3.14159265358979 / 2.0 / 2.0;
+    std::printf("    %zu casos (nivel 6/11/17 x k=1..8, indices NO alineados)\n", cases);
+    std::printf("      mapeo correcto          : %.3e local = %.6f m\n", worst, worst * m_per_local);
+    std::printf("      CONTRAPRUEBA +1 texel   : %.3e local = %.3f m\n",
+                worstOffBy1, worstOffBy1 * m_per_local);
+    std::printf("      CONTRAPRUEBA sin sub-idx: %.3e local = %.0f m\n",
+                worstNoShift, worstNoShift * m_per_local);
+
+    CHECK(cases > 100, "se prueban casos de verdad");
+    CHECK(worst * m_per_local < 1e-6, "el sub-rectangulo cae EXACTAMENTE sobre el texel de la hoja");
+    CHECK(worstOffBy1 * m_per_local > 0.1,
+          "CONTRAPRUEBA: un texel de mas ya se sale del milimetro (el test detecta el fallo)");
+    CHECK(worstNoShift * m_per_local > 1000.0,
+          "CONTRAPRUEBA: olvidar el sub-indice desplaza el relleno kilometros");
+}
+
+// ================================================================================================
+// LA HUELLA DEL FALLBACK: el ancestro se dibuja ENTERO, y esa es la decision de arquitectura
+//
+// Hoy la identidad GEOMETRICA de un nodo esta atada a su SLOT DE DATOS: `g.node` y el hueco salen los
+// dos de `Resolved`. Cuando una hoja no esta residente, el pool devuelve un ancestro y el renderer
+// dibuja **la huella del ancestro**, no la de la hoja que falta. Un ancestro k niveles por encima
+// cubre 4^k hojas, asi que **una sola hoja que falta estropea 4^k veces su propia area**.
+//
+// Lo que mide este test es cuanto vale desacoplarlo: dibujar la huella de LA HOJA con los datos del
+// ancestro (un sub-rectangulo de su rejilla de 129x129). El area estropeada pasaria de la del
+// ancestro a la de la hoja. Es la cifra que justifica —o no— tocar el shader.
+void test_terrain_node_fallback_footprint() {
+    beginTest("terrain_node_fallback_footprint");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+
+    // Area de un nodo en unidades de "nodo de nivel 0": 4^-level. Es exacta para comparar huellas.
+    auto areaOf = [](const NodeId& n) { return std::pow(0.25, (double)n.level); };
+
+    TerrainNodePool pool(2048, 85);
+    for (uint32_t f = 0; f < 6; ++f)
+        pool.publish(NodeId{ (PlanetFace)f, 0, 0, 0 }, NodeRange{ -9000.0f, 9000.0f }, true);
+
+    const glm::dvec3 dir0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 east = glm::normalize(glm::cross(dir0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 cam  = pc + dir0 * (R + 1200.0);
+    std::vector<NodeId> sel;
+
+    double worstRatio = 0.0, worstAnc = 0.0, worstLeaf = 0.0, worstTotal = 0.0;
+    double worstRule = 0.0, worstRuleHole = 0.0, worstAgg = 0.0, worstAggHole = 0.0;
+    double ruleArea = 0.0, ruleHoleArea = 0.0, aggArea = 0.0, aggHoleArea = 0.0;
+    int    worstUp = 0; size_t worstMisses = 0;
+    const int kWarm = 60;
+
+    for (int step = 0; step < kWarm + 30; ++step) {
+        const double ang = (step >= kWarm) ? 0.06 * (double)(step - kWarm) : 0.0;
+        const glm::dvec3 fwd = glm::normalize(dir0 * std::cos(ang) + east * std::sin(ang));
+        pool.beginFrame();
+        nodeSelectVisible(R, cam, pc, radPerPx, sel, 2048, TERRAIN_NODE_ERROR_PX, &fwd, cone,
+                          5000.0, &TerrainNodePool::rangeFnAdapter, &pool);
+
+        std::vector<std::pair<NodeId, NodeId>> pairs;   // (hoja pedida, nodo resuelto)
+        for (const NodeId& n : sel) {
+            const TerrainNodePool::Resolved r = pool.request(n);
+            if (r.slot >= 0) pairs.emplace_back(n, r.node);
+        }
+        pool.prioritisePending(cam, pc, R);
+        for (const NodeId& p : pool.takePending())
+            pool.publish(p, NodeRange{ -9000.0f, 9000.0f });
+
+        if (step < kWarm) continue;
+
+        // HOY: el area rota es la de los ancestros emitidos, contada UNA vez cada uno.
+        // CON SUB-RECTANGULO: es la de las hojas que fallan, cada una en su sitio.
+        std::unordered_map<uint64_t, double> ancArea;
+        double leafArea = 0.0, total = 0.0;
+        int up = 0; size_t misses = 0;
+        for (const auto& pr : pairs) {
+            total += areaOf(pr.first);
+            if (nodeKey(pr.first) == nodeKey(pr.second)) continue;   // exacta: no rompe nada
+            ancArea[nodeKey(pr.second)] = areaOf(pr.second);
+            leafArea += areaOf(pr.first);
+            up = std::max(up, (int)pr.first.level - (int)pr.second.level);
+            ++misses;
+        }
+        double aArea = 0.0; for (const auto& kv : ancArea) aArea += kv.second;
+
+        // ── EL DILEMA, MEDIDO: NINGUNA REGLA DE "DIBUJAR O NO" SE SALVA ────────────────────────
+        //
+        // Solo hay dos formas de decidir sobre un fallback sin tocar el shader, y las dos pierden:
+        //   AGRESIVA — quitarlo si tiene ALGUN descendiente dibujado. Quita la sabana entera... y
+        //              deja sin dibujar todo lo que ese ancestro tapaba y nadie mas cubre.
+        //   SEGURA   — quitarlo solo si le tapan la huella ENTERA. No abre agujeros, pero lejos casi
+        //              nunca se cumple, asi que la sabana se queda.
+        // Lo unico que escapa del dilema es cambiar la HUELLA: dibujar la hoja con datos del ancestro.
+        {
+            std::unordered_map<uint64_t, double> cov;      // cuanto le tapan los EXACTOS a cada nodo
+            std::unordered_set<uint64_t> hasDesc;
+            for (const auto& pr : pairs) {
+                if (nodeKey(pr.first) != nodeKey(pr.second)) continue;   // solo los exactos acreditan
+                NodeId a = pr.second; double f = 1.0;
+                while (a.level > 0) { a.level--; a.i /= 2; a.j /= 2; f *= 0.25;
+                                      cov[nodeKey(a)] += f; hasDesc.insert(nodeKey(a)); }
+            }
+            std::unordered_set<uint64_t> seenA, seenS;
+            double aggBad = 0.0, aggHole = 0.0, safeBad = 0.0, safeHole = 0.0;
+            for (const auto& pr : pairs) {
+                if (nodeKey(pr.first) == nodeKey(pr.second)) continue;   // exacta: no rompe nada
+                const uint64_t k = nodeKey(pr.second);
+                const bool any  = hasDesc.count(k) != 0;
+                const auto  ic  = cov.find(k);
+                const bool full = (ic != cov.end() && ic->second >= 1.0 - 1e-9);
+                if (any)  aggHole  += areaOf(pr.first);
+                else if (seenA.insert(k).second) aggBad += areaOf(pr.second);
+                if (full) safeHole += areaOf(pr.first);
+                else if (seenS.insert(k).second) safeBad += areaOf(pr.second);
+            }
+            aggArea = aggBad; aggHoleArea = aggHole; ruleArea = safeBad; ruleHoleArea = safeHole;
+        }
+        if (total <= 0.0) continue;
+        const double ratio = (leafArea > 0.0) ? (aArea / leafArea) : 0.0;
+        if (ratio > worstRatio) {
+            worstRatio = ratio; worstAnc = aArea; worstLeaf = leafArea;
+            worstTotal = total; worstUp = up; worstMisses = misses;
+            worstRule = ruleArea; worstRuleHole = ruleHoleArea;
+            worstAgg  = aggArea;  worstAggHole  = aggHoleArea;
+        }
+    }
+
+    std::printf("    el peor frame del giro: %zu hojas sin residencia, caida maxima %d niveles\n",
+                worstMisses, worstUp);
+    std::printf("      area que se dibuja MAL hoy (huella del ancestro) : %.2f %% de lo visible\n",
+                100.0 * worstAnc / worstTotal);
+    std::printf("      area con la huella de la HOJA (sub-rectangulo)   : %.2f %% de lo visible\n",
+                100.0 * worstLeaf / worstTotal);
+    std::printf("      ninguna regla de DIBUJAR-O-NO escapa del dilema:\n");
+    std::printf("        quitar si tiene ALGUN descendiente : rompe %.2f %% · AGUJERO %.2f %%\n",
+                100.0 * worstAgg / worstTotal, 100.0 * worstAggHole / worstTotal);
+    std::printf("        quitar si le tapan la huella ENTERA: rompe %.2f %% · AGUJERO %.2f %%\n",
+                100.0 * worstRule / worstTotal, 100.0 * worstRuleHole / worstTotal);
+    std::printf("      -> el fallback estropea %.0fx su propia area, y la salida es la HUELLA\n",
+                worstRatio);
+
+    CHECK(worstMisses > 0, "hay hojas sin residencia de verdad (si no, el resto no mide nada)");
+    CHECK(worstUp > 1, "y la caida pasa de un nivel: es el caso que importa");
+    CHECK(worstRatio > 10.0,
+          "el ancestro rompe MAS DE DIEZ VECES el area de la hoja que falta: la huella es el problema");
+    CHECK(worstLeaf < worstAnc,
+          "CONTRAPRUEBA: con la huella de la hoja el area rota es ESTRICTAMENTE menor");
+    // ── LAS DOS REGLAS DE "DIBUJAR O NO", Y POR QUE NINGUNA VALE ────────────────────────────────
+    //
+    // Se probaron LAS DOS en el juego, y las dos las juzgo Andoni mirando:
+    //   agresiva (basta un descendiente) -> *"ha mejorado, por lo menos el cercano, el lejano sigue
+    //                                        con mal pero mejor"*
+    //   segura   (tapado ENTERO)         -> *"con este cambio es peor en general"*
+    //
+    // ⚠️ Y ESTE BANCO NO REPRODUCE EL CASO QUE DECIDE. Aqui la agresiva abre un agujero de 0,12 %,
+    // o sea que parece gratis; en el juego la sonda midio **99,995 % de lo visible**, porque el caso
+    // malo es el LEJANO —entra una region entera de golpe, no hay nada fino debajo— y este banco gira
+    // sobre terreno ya cargado. Si alguien vuelve por aqui: la cifra del banco NO autoriza a encender
+    // la regla. (Y la sonda del juego pesa por area de superficie, no por pixeles, asi que tampoco
+    // esa cifra vale para decidir: hay que pesar por pixeles.)
+    //
+    // La mascara ademas costaba 530 MB de RSS (1 358 contra 827) y esta APAGADA por defecto.
+    CHECK(worstAggHole > 0.0 && worstAgg == 0.0,
+          "la agresiva quita la sabana entera pero SIEMPRE deja sin dibujar la huella de la hoja");
+    CHECK(worstRuleHole == 0.0 && worstRule > worstAnc * 0.5,
+          "y la segura no abre agujero pero deja la sabana intacta: el dilema no tiene salida aqui");
+}
+
+// ================================================================================================
 // EL SEGUNDO TERRENO AL GIRAR LA CAMARA
 //
 // Andoni: *"cuando se gira la camara aparece un segundo terreno encima por un momento"*.
@@ -2744,7 +2962,8 @@ void test_terrain_node_overlap_on_turn() {
     const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
 
     struct Out { size_t drawn = 0, covered = 0, dupes = 0; int worstUp = 0; NodeId worstChild{};
-                 double errBefore = 0.0, errAfter = 0.0; size_t kept = 0; };
+                 double errBefore = 0.0, errAfter = 0.0; size_t kept = 0;
+                 size_t ancCount = 0, ancExact = 0; };
 
     // ⚠️ SE CALIENTA EL POOL ANTES DE GIRAR. Medir desde el arranque en frio mide OTRA COSA (la carga
     // inicial, donde solo estan las raices y por supuesto todo cae al ancestro). Andoni gira la camara
@@ -2762,7 +2981,7 @@ void test_terrain_node_overlap_on_turn() {
         const glm::dvec3 east = glm::normalize(glm::cross(dir0, glm::dvec3(0, 1, 0)));
         const glm::dvec3 cam  = pc + dir0 * (R + 1200.0);
         std::vector<NodeId> sel, emitted;
-        std::vector<uint8_t> drop;
+        std::vector<uint8_t> drop, exFlags;
 
         for (int step = 0; step < kWarm + 20; ++step) {
             const double ang = (turn && step >= kWarm) ? 0.06 * (double)(step - kWarm) : 0.0;
@@ -2772,51 +2991,46 @@ void test_terrain_node_overlap_on_turn() {
                               5000.0, &TerrainNodePool::rangeFnAdapter, &pool);
 
             // Lo que el renderer emite de verdad: una instancia por entrada resuelta, sin filtrar.
-            emitted.clear();
+            emitted.clear(); exFlags.clear();
             for (const NodeId& n : sel) {
                 const TerrainNodePool::Resolved r = pool.request(n);
-                if (r.slot >= 0) emitted.push_back(r.node);
+                if (r.slot >= 0) { emitted.push_back(r.node); exFlags.push_back(r.exact ? 1u : 0u); }
             }
             if (reresolve) {                       // generar YA lo que falta y volver a resolver
                 pool.prioritisePending(cam, pc, R);
                 for (const NodeId& p : pool.takePending())
                     pool.publish(p, NodeRange{ -9000.0f, 9000.0f });
-                emitted.clear();
+                emitted.clear(); exFlags.clear();
                 for (const NodeId& n : sel) {
                     const TerrainNodePool::Resolved r = pool.request(n);
-                    if (r.slot >= 0) emitted.push_back(r.node);
+                    if (r.slot >= 0) { emitted.push_back(r.node); exFlags.push_back(r.exact ? 1u : 0u); }
                 }
-            }
-            if (partition) {
-                nodeCoveredMask(emitted, drop);
-                size_t w = 0;
-                for (size_t i = 0; i < emitted.size(); ++i) if (!drop[i]) emitted[w++] = emitted[i];
-                emitted.resize(w);
             }
             std::unordered_map<uint64_t, int> seen;
             for (const NodeId& e : emitted) ++seen[nodeKey(e)];
 
             Out o; o.drawn = emitted.size();
             for (const auto& kv : seen) if (kv.second > 1) o.dupes += (size_t)(kv.second - 1);
+            std::unordered_map<uint64_t, uint8_t> exOf;
+            for (size_t i = 0; i < emitted.size(); ++i) exOf[nodeKey(emitted[i])] = exFlags[i];
+            std::unordered_set<uint64_t> coveringAnc, coveringExact;
             for (const NodeId& e : emitted) {                 // ¿tiene un ANCESTRO tambien dibujado?
                 NodeId a = e; int up = 0;
                 while (a.level > 0) {
                     a.level--; a.i /= 2; a.j /= 2; ++up;
                     if (seen.count(nodeKey(a))) {
                         ++o.covered;
+                        coveringAnc.insert(nodeKey(a));
+                        if (exOf[nodeKey(a)]) coveringExact.insert(nodeKey(a));
                         if (up > o.worstUp) { o.worstUp = up; o.worstChild = e; }
                         break;
                     }
                 }
                 o.errBefore = std::max(o.errBefore, nodeScreenError(e, R, cam, pc, radPerPx));
             }
+            o.ancCount = coveringAnc.size(); o.ancExact = coveringExact.size();
             // LO QUE CUESTA LA PARTICION: el peor error en pantalla de lo que QUEDA. Sin esta cifra
             // "quitar los tapados" es una afirmacion, no una medida — se pierde detalle de verdad.
-            nodeCoveredMask(emitted, drop);
-            for (size_t i = 0; i < emitted.size(); ++i) if (!drop[i]) {
-                ++o.kept;
-                o.errAfter = std::max(o.errAfter, nodeScreenError(emitted[i], R, cam, pc, radPerPx));
-            }
 
             if (step >= kWarm) {
                 if (step == kWarm || o.covered > worst.covered) worst = o;
@@ -2850,21 +3064,14 @@ void test_terrain_node_overlap_on_turn() {
                 still_.drawn ? 100.0 * (double)still_.covered / (double)still_.drawn : 0.0, still_.dupes);
     std::printf("      GIRANDO, re-resolviendo       %8zu   %11zu (%4.1f%%)   %zu\n", reres.drawn, reres.covered,
                 reres.drawn ? 100.0 * (double)reres.covered / (double)reres.drawn : 0.0, reres.dupes);
-    std::printf("      GIRANDO, re-res + particion   %8zu   %11zu (%4.1f%%)   %zu\n", both.drawn, both.covered,
-                both.drawn ? 100.0 * (double)both.covered / (double)both.drawn : 0.0, both.dupes);
-    std::printf("    lo que costaria la PARTICION sola (girando): quedan %zu de %zu · peor error en\n"
-                "      pantalla %.1f px -> %.1f px (el ancestro ya se dibujaba, solo deja de haber dos)\n",
-                hoy.kept, hoy.drawn, hoy.errBefore, hoy.errAfter);
-    Out turning = hoy;
-
     // ── A QUE DISTANCIA QUEDAN LAS DOS SUPERFICIES ──────────────────────────────────────────────
     // Un nodo tapado por su ancestro se dibuja con el detalle de SU texel; el ancestro, con el suyo,
     // que es 2^up veces mas grueso. La separacion es cuanto cambia el relieve entre esas dos cotas.
     double gap = 0.0;
-    if (turning.worstUp > 0) {
-        const NodeId c = turning.worstChild;
+    if (hoy.worstUp > 0) {
+        const NodeId c = hoy.worstChild;
         const double texC = nodeTexelM(c, R);
-        const double texA = texC * (double)(1u << turning.worstUp);
+        const double texA = texC * (double)(1u << hoy.worstUp);
         for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += 4)
             for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += 4) {
                 const glm::dvec3 d = nodeTexelDir(c, u, v);
@@ -2873,19 +3080,7 @@ void test_terrain_node_overlap_on_turn() {
             }
         std::printf("      el peor tapado esta %d niveles bajo su ancestro (nivel %u) y las dos\n"
                     "      superficies se separan hasta %.3f m: ESO es el 'segundo terreno'\n",
-                    turning.worstUp, c.level, gap);
-    }
-
-    // La particion, comprobada como tal: aplicar la mascara al PEOR caso tiene que dejar una
-    // anticadena — nadie con un ancestro dentro — y sin quitar cobertura.
-    size_t coveredAfterMask = 0;
-    {
-        std::vector<NodeId> em; em.reserve(hoy.drawn);
-        // se reconstruye el peor frame por su firma: basta con volver a correrlo filtrando
-        Out tmp; run(true, false, true, tmp, false);
-        coveredAfterMask = tmp.covered + tmp.dupes;
-        std::printf("    la PARTICION sola sobre el mismo caso: %zu tapados + %zu copias\n",
-                    tmp.covered, tmp.dupes);
+                    hoy.worstUp, c.level, gap);
     }
 
     CHECK(hoy.drawn > 100, "se dibujan nodos de verdad (si no, el resto no mide nada)");
@@ -2893,10 +3088,7 @@ void test_terrain_node_overlap_on_turn() {
     CHECK(still_.covered == 0, "QUIETO no pasa: es el transitorio del GIRO, no un estado del pool");
     CHECK(reres.covered == 0, "re-resolver tras generar lo quita del todo: 0 nodos con un ancestro encima");
     CHECK(reres.drawn <= still_.drawn, "y el conjunto dibujado vuelve al tamano de reposo (499 -> 252)");
-    CHECK(coveredAfterMask == 0, "la PARTICION deja una anticadena aunque el presupuesto no de de si");
-    CHECK(both.covered == 0 && both.dupes == 0, "las dos juntas: ni tapados ni copias");
-    CHECK(hoy.errAfter <= hoy.errBefore + 1e-9,
-          "la particion NO empeora el peor error en pantalla (el ancestro ya se dibujaba)");
+    CHECK(hoy.ancExact == 0, "los que tapan son SIEMPRE fallbacks, nunca hojas legitimas del selector");
 }
 
 // ================================================================================================

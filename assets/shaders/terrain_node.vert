@@ -106,11 +106,47 @@ layout(location = 5) out vec3 vUp;          // radial: la normal "del planeta", 
 layout(location = 6) flat out int vStride;  // indice de stride del nodo (vista de depuracion 4)
 layout(location = 7) flat out int vFace;    // cara del cubo (vista 5: atribuir un agujero)
 
+// ── LEER UN SLOT QUE NO ES EL MIO: EL SUB-RECTANGULO ────────────────────────────────────────────
+//
+// ⚠️ ESTO ES EL ARREGLO DE ARQUITECTURA DEL 2026-08-26. Antes, si la hoja pedida no estaba residente,
+// el pool devolvia un ANCESTRO y se dibujaba la huella del ancestro — que cubre 4^k hojas. Dos hojas
+// que faltaban rompian el 101,66 % de lo visible frente al 0,12 % que ocupan ellas (medido en
+// `terrain_node_fallback_footprint`): **820 veces su propia area**. Y no habia salida decidiendo
+// "dibujar o no": quitar el ancestro deja agujero, dejarlo tapa media pantalla; las dos se probaron
+// en el juego y las dos se vieron mal.
+//
+// Ahora la hoja se dibuja SIEMPRE en su propia huella, y si los datos vienen de `k` niveles mas
+// arriba lee solo el trozo que le corresponde: en coordenadas normalizadas del ancestro ocupa el
+// cuadrado `[sub/2^k, (sub+1)/2^k]`, con `sub = indice mod 2^k`. En texeles del ancestro, el texel
+// `t` de la hoja cae en `(cells*sub + t) / 2^k` — que es fraccionario, de ahi la bilineal.
+//
+// Con `k = 0` (el caso normal) se lee el texel exacto, sin tocar nada: misma ruta de antes.
+float harukaNodeSample(uint base, int tu, int tv, int kUp, int subI, int subJ) {
+    const int N1 = uGrid.x;
+    if (kUp <= 0) return uHeights[base + uint(tv) * uint(N1) + uint(tu)];
+    const float cells = float(uGrid.y);
+    const float inv   = 1.0 / float(1 << kUp);
+    float au = clamp((float(subI) * cells + float(tu)) * inv, 0.0, cells);
+    float av = clamp((float(subJ) * cells + float(tv)) * inv, 0.0, cells);
+    const int iu = int(floor(au)), iv = int(floor(av));
+    const int ju = min(iu + 1, N1 - 1), jv = min(iv + 1, N1 - 1);
+    const float fu = au - float(iu), fv = av - float(iv);
+    const float h00 = uHeights[base + uint(iv) * uint(N1) + uint(iu)];
+    const float h10 = uHeights[base + uint(iv) * uint(N1) + uint(ju)];
+    const float h01 = uHeights[base + uint(jv) * uint(N1) + uint(iu)];
+    const float h11 = uHeights[base + uint(jv) * uint(N1) + uint(ju)];
+    return mix(mix(h00, h10, fu), mix(h01, h11, fu), fv);
+}
+
 void main() {
     const NodeInst  IN = uInst[INSTANCE_INDEX];
     const ivec4 uNode        = IN.node;
     const ivec4 uEdgeCoarser = IN.edge;
     const int   slot         = IN.slot.x;
+    // Niveles por encima de la HUELLA de los que vienen los datos (0 = el slot es de esta hoja).
+    const int   kUp  = max(IN.slot.y, 0);
+    const int   subI = (kUp > 0) ? (uNode.z & ((1 << kUp) - 1)) : 0;
+    const int   subJ = (kUp > 0) ? (uNode.w & ((1 << kUp) - 1)) : 0;
     const int N = uGrid.x;
     const uint u = uint(clamp(int(aTexel.x), 0, N - 1));
     const uint v = uint(clamp(int(aTexel.y), 0, N - 1));
@@ -212,7 +248,12 @@ void main() {
     // lee el de la ZANCADA DEL COSIDO. Esa zancada es `max(mio, del vecino)` y los DOS lados la
     // calculan igual, asi que sobre la arista compartida ambos leen el MISMO mapa — la regla de que
     // la altura sea funcion solo de (nivel, posicion del vertice) se mantiene.
-    uint skMap = uint(clamp(IN.slot.z, 0, 2));
+    uint skMap = (kUp > 0) ? 0u : uint(clamp(IN.slot.z, 0, 2));
+    // El stride lee `skMap` niveles por encima, y esos niveles ahora viven en huecos ajenos: si no
+    // estan residentes hay que quedarse donde se pueda en vez de leer un hueco que no es el mio.
+    { const int parS = int(IN.misc.x), granS = int(IN.misc.y);
+      if (skMap >= 2u && granS < 0) skMap = 1u;
+      if (skMap >= 1u && parS  < 0) skMap = 0u; }
     {
         const uint E2 = uint(uGrid.y);
         int se = 0;
@@ -220,15 +261,40 @@ void main() {
         else if (u == E2 && uEdgeCoarser.y > 1) se = uEdgeCoarser.y;
         else if (v == 0u && uEdgeCoarser.z > 1) se = uEdgeCoarser.z;
         else if (v == E2 && uEdgeCoarser.w > 1) se = uEdgeCoarser.w;
-        if (se > 1) {
+        if (se > 1 && kUp == 0) {
             uint k = 0u;
             while (k < 2u && (1 << int(k + 1u)) <= se) ++k;      // log2 acotado a los 3 mapas
             skMap = max(skMap, k);
         }
     }
-    const uint slotBase = uint(slot) * texels * 3u + texels * skMap;
-    const uint parBase  = uint(slot) * texels * 3u + texels * min(skMap + 1u, 2u);
-    const uint granBase = uint(slot) * texels * 3u + texels * 2u;
+    // ── DE DONDE SALE CADA UNO DE LOS TRES NIVELES ──────────────────────────────────────────────
+    //
+    // ⚠️ Antes los tres mapas vivian DENTRO del hueco de este nodo: `slot*3 + {0,1,2}`. Eran copias
+    // —el mismo terreno con el corte de octavas al doble y al cuadruple— y costaban 195 KB por nodo,
+    // o sea 390 MB para 2 048 huecos, cuando el pico de nodos VIVOS medido es 2 445. No caben, y de
+    // no caber salen las caidas por ancestro.
+    //
+    // Ya no hacen falta: el padre esta en SU hueco, y su superficie sobre mi huella es el
+    // sub-rectangulo `k = 1` de su rejilla (el abuelo, `k = 2`). El renderer manda los dos indices.
+    // ⚠️ Y ADEMAS ES MAS FIEL: el vecino grueso dibuja TRIANGULOS entre sus muestras, no la funcion
+    // evaluada en mi punto. Leer su rejilla interpolada es exactamente la superficie contra la que
+    // hay que cerrar la costura; la copia apuntaba a otra cosa parecida.
+    const int  parSlot  = int(IN.misc.x);
+    const int  granSlot = int(IN.misc.y);
+    const uint slotBase = uint(slot) * texels;
+    const uint parBase  = uint(max(parSlot,  0)) * texels;
+    const uint granBase = uint(max(granSlot, 0)) * texels;
+
+    // `S` = cuantos niveles por encima de MI huella esta el dato. Con datos propios (`kUp == 0`) el
+    // nivel S vive en el hueco del ancestro S-esimo y le corresponde el sub-rectangulo `k = S`. Con
+    // datos de un fallback (`kUp > 0`) solo se usa S = 0, porque alli el morph esta apagado.
+    #define HARUKA_NODE_BASE(S) ((S) == 0 ? slotBase : ((S) == 1 ? parBase : granBase))
+    #define HARUKA_NODE_K(S)    ((kUp > 0) ? kUp : (S))
+    #define HARUKA_NODE_SUB(S, IDX) ((kUp > 0) ? ((IDX) & ((1 << kUp) - 1)) \
+                                               : ((IDX) & ((1 << (S)) - 1)))
+    #define HARUKA_NODE_AT(S, TU, TV) harukaNodeSample(HARUKA_NODE_BASE(S), (TU), (TV), \
+                                          HARUKA_NODE_K(S), \
+                                          HARUKA_NODE_SUB(S, uNode.z), HARUKA_NODE_SUB(S, uNode.w))
 
     // ── GEOMORPH: hacia la altura del PADRE en la arista que linda con un vecino MAS GRUESO ──────
     //
@@ -287,6 +353,19 @@ void main() {
         // pantalla es `2·e` — no hace falta ningun dato nuevo, solo la misma formula.
         morphPar = (lvRead <= 1) ? 0.0
                                  : clamp(2.0 * (uLod.y - e * 2.0) / uLod.y, 0.0, 1.0) * uLod.w;
+
+        // ⚠️ CON DATOS DE UN ANCESTRO NO SE MORFEA. El morph funde hacia el padre para cerrar el
+        // salto al alejarse, pero un vertice que ya esta leyendo `k` niveles por encima YA esta
+        // mostrando una superficie mas basta: encima de eso, morfear seria bastecer dos veces. Y el
+        // morph solo cierra costuras mientras la altura es funcion de (nivel, posicion), cosa que un
+        // fallback rompe por definicion. Es un transitorio de un frame; se deja explicito.
+        if (kUp > 0) { morph = 0.0; morphPar = 0.0; }
+
+        // ⚠️ Y SIN PADRE RESIDENTE TAMPOCO. El mapa del padre ya no es una copia guardada dentro de
+        // mi hueco: vive en el suyo, asi que puede no estar. `-1` es "no esta" y aqui se respeta en
+        // vez de leer basura del hueco 0, que seria un trozo de planeta cualquiera.
+        if (parSlot  < 0) { morph = 0.0; morphPar = 0.0; }
+        if (granSlot < 0) { morphPar = 0.0; }
 
         // ⚠️ AQUI SE PROBO APAGAR EL MORPH JUNTO A UN VECINO MAS FINO, Y SE REVIRTIO CON MEDIDA.
         //
@@ -359,9 +438,11 @@ void main() {
     // Es el QUINTO parche de esta familia que hace lo mismo. La regla que los explica todos: el morph
     // tiene que ser funcion SOLO de (nivel, posicion del vertice); en cuanto mira a los vecinos, dos
     // nodos del mismo nivel con vecindarios distintos evaluan distinto el punto que comparten.
-    const float hPar0 = mix(uHeights[parBase  + v0 * uint(N) + u0],
-                            uHeights[granBase + v0 * uint(N) + u0], morphPar);
-    float h = mix(uHeights[slotBase + v0 * uint(N) + u0], hPar0, morph);
+    const int sOwn = int(skMap);                    // el stride sube de nivel, no de "mapa"
+    const int sPar = int(min(skMap + 1u, 2u));
+    const float hPar0 = mix(HARUKA_NODE_AT(sPar, int(u0), int(v0)),
+                            HARUKA_NODE_AT(2,    int(u0), int(v0)), morphPar);
+    float h = mix(HARUKA_NODE_AT(sOwn, int(u0), int(v0)), hPar0, morph);
 
     // ── EL VERTICE SOBRANTE SE COLAPSA, NO SE INTERPOLA ─────────────────────────────────────────
     //
@@ -437,16 +518,16 @@ void main() {
     const uint vm = uint(max(int(v) - nStep, 0)),  vp  = uint(min(int(v) + nStep, N - 1));
     // La NORMAL sale del mismo mapa morfeado: si no, la iluminacion describiria una superficie que
     // no es la que se dibuja justo en la banda del morph.
-    const uint base = slotBase;
     // La misma composicion de tres niveles que arriba: si la normal usara otra, la iluminacion
     // describiria una superficie distinta de la que se dibuja.
-    #define HARUKA_NODE_H(IDX) mix(uHeights[base + (IDX)], \
-                                   mix(uHeights[parBase + (IDX)], uHeights[granBase + (IDX)], morphPar), \
+    #define HARUKA_NODE_H(TU, TV) mix(HARUKA_NODE_AT(sOwn, (TU), (TV)), \
+                                   mix(HARUKA_NODE_AT(sPar, (TU), (TV)), \
+                                       HARUKA_NODE_AT(2,    (TU), (TV)), morphPar), \
                                    morph)
-    const float hL = HARUKA_NODE_H(v * uint(N) + um);
-    const float hR = HARUKA_NODE_H(v * uint(N) + up_);
-    const float hD = HARUKA_NODE_H(vm * uint(N) + u);
-    const float hU = HARUKA_NODE_H(vp * uint(N) + u);
+    const float hL = HARUKA_NODE_H(int(um),  int(v));
+    const float hR = HARUKA_NODE_H(int(up_), int(v));
+    const float hD = HARUKA_NODE_H(int(u),   int(vm));
+    const float hU = HARUKA_NODE_H(int(u),   int(vp));
     #undef HARUKA_NODE_H
     // Paso entre téxeles en metros: el lado del nodo entre sus celdas.
     const float stepM = float(uMisc.x * 1.5707963267948966LF / double(1u << uint(uNode.y))) / float(uGrid.y);

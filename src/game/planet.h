@@ -196,6 +196,16 @@ public:
     void render(const glm::dvec3& cameraPos, const glm::mat4& proj, const glm::mat4& view);
 
     /**
+     * @brief El dt del frame, EL MISMO que usan física, órbitas y clima.
+     *
+     * ⚠️ Lo pone `PlanetarySystem::update`, que lo recibe de `Application::deltaTime` (capado a 0,1 s).
+     * No se mide aquí con un reloj propio a propósito: dos relojes distintos dan dos números distintos
+     * para el mismo frame, y entonces el terreno avanza a un ritmo y todo lo demás a otro.
+     */
+    void   setFrameDelta(double dt) { m_frameDt = dt; }
+    double frameDelta() const { return m_frameDt; }
+
+    /**
      * @brief Luz del SOL que ilumina el terreno (dirección HACIA el sol, color, ambiente).
      *
      * La pone el orquestador cada frame desde la escena (`WorldSystem` → la estrella real del
@@ -615,6 +625,7 @@ private:
     /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
     /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
     Haruka::Terrain::TerrainNodeRenderer m_nodeRenderer;
+    double m_frameDt = 1.0 / 60.0;   ///< dt canónico del motor; lo pone `PlanetarySystem::update`
 
     // ESTADO DEL MAR del frame (trenes + cota de la lámina). Ver `setOceanState`.
     Haruka::RHI::BufferHandle  m_oceanParamsUBO;

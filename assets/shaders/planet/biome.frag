@@ -634,12 +634,13 @@ void main() {
     // sacarla de la libreria por otro out-param.
     vec3  zoneRGB = hasZoneMap ? texture(uZoneMap, bUV).rgb * 255.0 : vec3(0.0);
     vec3  biomeCol; int matIdx;
+    vec3 ignoredRawTex; float ignoredTexW;   // solo los usa la vista 7/8 de `terrain_node.frag`
     vec3  col = harukaTerrainAlbedo(uTerrainAlbedo, uTerrainNormal, uMacroVar, uBiomeMap, uZoneMap,
                                     true, true, hasZoneMap,
                                     fragP, uTexAnchor.xyz, n, up,
                                     elev, tempC, humid,
                                     tiling, int(uMatCount.z), lod, lodNrm,
-                                    biomeCol, matIdx);
+                                    biomeCol, matIdx, ignoredRawTex, ignoredTexW);
     diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar: el normal map movio `n`
     // La banda de ORILLA la usa tambien el barniz de arena mojada, mas abajo. Es funcion pura de
     // `elev`, asi que se recalcula aqui en vez de sacarla de la libreria por otro out-param —

@@ -120,6 +120,10 @@ namespace Haruka::RHI
             /** @brief Escotilla de escape: id NATIVO de un buffer (GLuint en GL).
              *  Para el ensamblado de VAO/attrib-pointers que sigue en GL hasta el refactor PSO. */
             virtual uint32_t           nativeBuffer(BufferHandle) = 0;
+            /** @brief Id de una textura para ImGui (lo que va en un `ImTextureID`).
+             *  GL: el propio nombre de textura. Vulkan: un VkDescriptorSet cacheado por textura.
+             *  Devuelve 0 si el backend de UI aun no esta activo o el handle no es valido. */
+            virtual uint64_t           imguiTextureId(TextureHandle) = 0;
 
             // --- Destrucción (lo que hoy hacen los dtors ~VertexBuffer, etc.). ---
             virtual void destroy(BufferHandle) = 0;

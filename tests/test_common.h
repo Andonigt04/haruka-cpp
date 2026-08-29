@@ -112,6 +112,7 @@ void test_image_writer_roundtrip();
 // LOD de malla de props (test_prop_lod.cpp): que la envolvente NO cambie entre niveles (el artefacto
 // del salto de tamaño), que la malla baje de verdad y que detalle 1.0 siga siendo la de siempre.
 void test_prop_lod_mesh();
+void test_prop_lod_attributes();
 void test_prop_collider();
 void test_rock_interior();   // peñones enterrados de la roca (con contraprueba por rayos)
 // EL MAR (test_ocean.cpp): que la ola de la física sea la derivada exacta de la superficie, que el
@@ -197,6 +198,8 @@ void test_terrain_node_pool_reuse();
 // La caida por ancestro no puede saltarse niveles: el selector solo pide HOJAS, asi que el pool
 // tiene que encolar tambien la cadena. A/B con `setChainAncestors`, con el presupuesto real.
 void test_terrain_node_pool_chain();
+void test_terrain_node_subrect_mapping();
+void test_terrain_node_fallback_footprint();
 void test_terrain_node_overlap_on_turn();
 // La normal se calculaba a ±1 texel mientras la geometria se dibuja cada `stride`: iluminacion de una
 // superficie que no existe, y se lee como pinchos DENTRO del nodo.

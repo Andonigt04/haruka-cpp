@@ -92,6 +92,8 @@ int main(int argc, char** argv) {
         test_terrain_node_pool();
         test_terrain_node_pool_reuse();
         test_terrain_node_pool_chain();
+        test_terrain_node_subrect_mapping();
+        test_terrain_node_fallback_footprint();
         test_terrain_node_overlap_on_turn();
         test_terrain_node_normal_matches_geometry();
         test_terrain_node_radial_noise_shift();
@@ -153,6 +155,7 @@ int main(int argc, char** argv) {
     {   // Escritor de PNG: ida y vuelta con decodificador independiente + compresión
         test_image_writer_roundtrip();
         test_prop_lod_mesh();
+        test_prop_lod_attributes();
         test_prop_collider();
         test_rock_interior();
     }

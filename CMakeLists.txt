@@ -6,26 +6,37 @@ else()
     set(HARUKA_BUILD_NUMBER "local")
 endif()
 
-execute_process(
-    COMMAND git rev-parse --short HEAD
-    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    OUTPUT_VARIABLE HARUKA_BUILD_HASH
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_QUIET
-)
-
-if(NOT HARUKA_BUILD_HASH)
-    set(HARUKA_BUILD_HASH "unknown")
-endif()
-
-configure_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.h.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h"
-)
-
 set(VERSION "1.0.0" CACHE STRING "Engine version (used as build/install subdirectory)")
 
 project(HarukaEngine VERSION ${VERSION})
+
+# --- version.h -----------------------------------------------------------------------------------
+# ⚠️ Esto va DESPUES de project() a proposito. Antes se generaba en la linea 21, o sea ANTES de que
+# project() definiera PROJECT_VERSION — asi que `HARUKA_VERSION` no cogia la version del MOTOR sino la
+# del proyecto padre: compilado dentro de Survival decia "0.2" (la de Survival) y compilado suelto
+# decia "" (vacio, porque aun no habia ninguna). Y como no lo incluia nadie, nunca se noto.
+#
+# El hash, ademas, se capturaba al CONFIGURAR, asi que entre commit y commit el binario seguia
+# diciendo el anterior. Ahora lo regenera un target en cada compilacion (ver cmake/version_gen.cmake,
+# que solo reescribe el fichero si cambia para no arrastrar recompilaciones).
+set(HARUKA_VERSION_IN  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version.h.in")
+set(HARUKA_VERSION_OUT "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h")
+set(HARUKA_VERSION_ARGS
+    -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+    -DIN_FILE=${HARUKA_VERSION_IN}
+    -DOUT_FILE=${HARUKA_VERSION_OUT}
+    -DPROJECT_VERSION=${PROJECT_VERSION}
+    -DPROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    -DPROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    -DPROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+    -DHARUKA_BUILD_NUMBER=${HARUKA_BUILD_NUMBER}
+)
+# Una pasada al configurar para que el fichero EXISTA antes de la primera compilacion.
+execute_process(COMMAND ${CMAKE_COMMAND} ${HARUKA_VERSION_ARGS} -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_gen.cmake")
+add_custom_target(haruka_version ALL
+    COMMAND ${CMAKE_COMMAND} ${HARUKA_VERSION_ARGS} -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/version_gen.cmake"
+    COMMENT "version.h (hash de git del momento)"
+)
 
 set(OpenGL_GL_PREFERENCE GLVND)
 set(CMAKE_CXX_STANDARD 17)
@@ -357,6 +368,8 @@ add_library(HarukaEngine SHARED
 )
 
 
+add_dependencies(HarukaEngine haruka_version)   # version.h fresco antes de compilar
+
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
@@ -432,7 +445,11 @@ if(NOT SHADER_OUT_DIR)
 endif()
 file(MAKE_DIRECTORY "${SHADER_OUT_DIR}")
 
-file(GLOB SHADER_SOURCES
+# CONFIGURE_DEPENDS por la MISMA razón que en SHADER_LIBS más abajo: sin él el glob solo se evalúa al
+# configurar, así que un shader NUEVO no se compila hasta relanzar cmake a mano — y el fallo es mudo,
+# porque falta el .spv, el pipeline no se crea y lo que fuera a dibujar simplemente no aparece. Se
+# añadió tras perder un rato con exactamente eso al portar el preview de items al RHI.
+file(GLOB SHADER_SOURCES CONFIGURE_DEPENDS
     "${SHADER_SRC_DIR}/*.vert"
     "${SHADER_SRC_DIR}/*.frag"
     "${SHADER_SRC_DIR}/*.geom"

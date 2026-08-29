@@ -44,6 +44,9 @@
 #include "core/terrain/terrain_node_renderer.h"   // Shader::baseDir() para los shaders del banco
 
 #include <SDL3/SDL.h>
+#include <array>
+#include <map>
+#include <unordered_set>
 
 // --- mini-framework (mismo estilo que tests/test_common.h) ---
 static int  g_pass = 0, g_fail = 0;
@@ -96,6 +99,186 @@ static std::vector<uint8_t> makePixels(int w, int h)
 }
 
 static Device* g_dev = nullptr;
+
+// ================================================================================================
+// CAREO GL ↔ VULKAN: el banco compara cada backend CONSIGO MISMO, nunca uno contra otro
+//
+// ⚠️ ESE ERA EL HUECO. Cada test dibuja, lee pixeles y comprueba una propiedad; los dos backends
+// corren en el MISMO proceso, uno detras de otro, y nadie compara las dos imagenes. Aqui se guarda la
+// captura de cada uno bajo un nombre y al terminar los dos se carean. Es lo que convierte un "se ve
+// raro" en un numero.
+struct Shot { int w = 0, h = 0; std::vector<uint8_t> px; };
+static std::map<std::string, Shot> g_shots[2];      // 0 = OpenGL · 1 = Vulkan
+
+static void recordShot(const char* name, int w, int h, const std::vector<uint8_t>& px)
+{
+    const int b = (g_dev && g_dev->backend() == Backend::Vulkan) ? 1 : 0;
+    g_shots[b][name] = Shot{ w, h, px };
+}
+
+/// Compara las capturas de los dos backends. Se llama desde `main` DESPUES de correr los dos.
+static void compareBackends()
+{
+    BEGIN("careo GL <-> Vulkan de las imagenes");
+    if (g_shots[0].empty() || g_shots[1].empty()) {
+        std::printf("    solo se ha corrido un backend: nada que carear\n");
+        return;
+    }
+    std::printf("    %-28s  tamano      pixeles distintos   |delta| medio   peor canal\n", "captura");
+    size_t compared = 0, plain = 0;
+    for (const auto& kv : g_shots[0]) {
+        const auto it = g_shots[1].find(kv.first);
+        if (it == g_shots[1].end()) {
+            std::printf("    %-28s  SOLO EN OPENGL\n", kv.first.c_str());
+            continue;
+        }
+        const Shot& a = kv.second; const Shot& b = it->second;
+        if (a.w != b.w || a.h != b.h || a.px.size() != b.px.size()) {
+            std::printf("    %-28s  %dx%d vs %dx%d  TAMANOS DISTINTOS\n",
+                        kv.first.c_str(), a.w, a.h, b.w, b.h);
+            CHECK(false, "las dos capturas tienen el mismo tamano");
+            continue;
+        }
+        // ⚠️ CONTRAPRUEBA DEL PROPIO CAREO: una imagen PLANA (todo el mismo color) casa con
+        // cualquier otra imagen plana del mismo color, asi que "0 % distinto" no probaria nada.
+        // Se mide la varianza de la de OpenGL y se avisa si no tiene contenido.
+        // ⚠️ "Plana" = SIN RANGO, no "casi todo igual al primer pixel". Con el criterio anterior una
+        // imagen de cobertura (mitad blanca, mitad negra) se descartaba por plana y TAPABA el fallo.
+        size_t distinct = 0;
+        { uint8_t lo = 255, hi = 0;
+          for (size_t k = 0; k < a.px.size(); k += 4)
+              for (int ch = 0; ch < 3; ++ch) { lo = std::min(lo, a.px[k+ch]); hi = std::max(hi, a.px[k+ch]); }
+          distinct = (hi - lo > 16) ? a.px.size() : 0; }
+        const size_t n = a.px.size() / 4;
+
+        // ⚠️ Y LO PRIMERO ES DESCARTAR UN FALLO DE ESTE MISMO CAREO. `readPixels` devuelve la imagen
+        // de OpenGL de ABAJO ARRIBA y la de Vulkan de ARRIBA ABAJO. Comparar a ciegas dos imagenes
+        // espejadas da ~50 % de pixeles distintos en cualquier escena no simetrica — que se leeria
+        // como "Vulkan dibuja la mitad" siendo solo el origen de la lectura. Se mide de las dos
+        // formas y se informa de cual casa: si gana la espejada, el motor esta bien y lo que hay que
+        // arreglar es el banco.
+        auto measure = [&](bool mirrorB, double& outPct, double& outMean, int& outWorst) {
+            size_t d8 = 0; double sum = 0.0; int worst = 0;
+            for (int y = 0; y < a.h; ++y)
+                for (int x = 0; x < a.w; ++x) {
+                    const size_t ka = ((size_t)y * a.w + x) * 4;
+                    const int yb = mirrorB ? (a.h - 1 - y) : y;
+                    const size_t kb = ((size_t)yb * a.w + x) * 4;
+                    int mx = 0;
+                    for (int ch = 0; ch < 3; ++ch) {
+                        const int d = std::abs((int)a.px[ka+ch] - (int)b.px[kb+ch]);
+                        sum += d; mx = std::max(mx, d);
+                    }
+                    worst = std::max(worst, mx);
+                    if (mx > 8) ++d8;
+                }
+            outPct = n ? 100.0 * (double)d8 / (double)n : 0.0;
+            outMean = sum / (double)(n * 3);
+            outWorst = worst;
+        };
+        double pctD = 0, meanD = 0, pctM = 0, meanM = 0; int worstD = 0, worstM = 0;
+        measure(false, pctD, meanD, worstD);
+        measure(true,  pctM, meanM, worstM);
+        const bool mirrored = pctM < pctD;
+        const double pct = mirrored ? pctM : pctD;
+
+        // ⚠️ "% de pixeles distintos" no distingue MAS CLARO de MAS OSCURO, y ese es justo el sintoma
+        // que reporta Andoni ("se ve quemado o sin luz"). El color medio y el rango lo dicen: si un
+        // backend sale sistematicamente mas alto es exposicion; si sale con menos rango, es que le
+        // falta la luz y todo tiende a plano.
+        auto stats = [](const Shot& sh, double m[3], int lo[3], int hi[3]) {
+            double acc[3] = {0,0,0};
+            for (int c = 0; c < 3; ++c) { lo[c] = 255; hi[c] = 0; }
+            const size_t n = sh.px.size() / 4;
+            for (size_t k = 0; k < sh.px.size(); k += 4)
+                for (int c = 0; c < 3; ++c) {
+                    const int v = sh.px[k+c];
+                    acc[c] += v; lo[c] = std::min(lo[c], v); hi[c] = std::max(hi[c], v);
+                }
+            for (int c = 0; c < 3; ++c) m[c] = n ? acc[c] / (double)n : 0.0;
+        };
+        double ma[3], mb[3]; int la[3], ha[3], lb[3], hb[3];
+        stats(a, ma, la, ha); stats(b, mb, lb, hb);
+        std::printf("    %-28s  %4dx%-4d   %8.2f %%          %8.2f       %3d%s%s\n",
+                    kv.first.c_str(), a.w, a.h, pct,
+                    mirrored ? meanM : meanD, mirrored ? worstM : worstD,
+                    mirrored ? "   [ESPEJADA EN Y: casa mejor al invertir]" : "",
+                    (distinct * 20 < n) ? "   (imagen casi PLANA)" : "");
+        if (mirrored)
+            std::printf("      %-26s  directo %.2f %% · espejado %.2f %% -> el origen de lectura NO coincide\n",
+                        "", pctD, pctM);
+        std::printf("      color medio  OpenGL %5.1f %5.1f %5.1f (rango %d-%d)  ·  "
+                    "Vulkan %5.1f %5.1f %5.1f (rango %d-%d)%s\n",
+                    ma[0], ma[1], ma[2], la[1], ha[1], mb[0], mb[1], mb[2], lb[1], hb[1],
+                    ((mb[0]+mb[1]+mb[2]) > (ma[0]+ma[1]+ma[2]) * 1.15) ? "   Vulkan MAS CLARO"
+                  : ((ma[0]+ma[1]+ma[2]) > (mb[0]+mb[1]+mb[2]) * 1.15) ? "   Vulkan MAS OSCURO" : "");
+        if (distinct * 20 < n) { ++plain; continue; }
+        ++compared;
+
+        // ── LA FORMA DEL ARTEFACTO IDENTIFICA LA CAUSA ──────────────────────────────────────────
+        //
+        // Es la regla que ya cerro las "capas que tapan el terreno" (ver TODO): una mancha, un
+        // circulo y un cuadrado eran tres bugs distintos y lo que los separo fue mirar la FORMA, no
+        // depurar. Aqui no hay pantalla, asi que se imprime: el mapa dice de un vistazo si falta la
+        // mitad de arriba (eje Y), bandas (viewport/escala), un damero (instancias) o disperso
+        // (profundidad).
+        if (pct >= 5.0) {
+            const int BW = 24, BH = 12;
+            // ⚠️ EL MAPA DE DIFERENCIAS SOLO DICE DONDE, NO QUE. Que la mitad de abajo "difiera del
+            // todo" es compatible con "uno dibuja y el otro no" y con "los dos dibujan cosas
+            // distintas", que son bugs distintos. Asi que primero se imprime lo que dibuja CADA UNO.
+            auto mapOf = [&](const Shot& sh, const char* who) {
+                std::printf("      %s (espacio: - vacio  : oscuro  * medio  # claro):\n", who);
+                for (int by = 0; by < BH; ++by) {
+                    std::printf("        ");
+                    for (int bx = 0; bx < BW; ++bx) {
+                        double acc = 0.0; int cnt = 0;
+                        for (int y = by * sh.h / BH; y < (by + 1) * sh.h / BH; ++y)
+                            for (int x = bx * sh.w / BW; x < (bx + 1) * sh.w / BW; ++x) {
+                                const size_t k = ((size_t)y * sh.w + x) * 4;
+                                acc += (sh.px[k] + sh.px[k+1] + sh.px[k+2]) / 3.0; ++cnt;
+                            }
+                        const double m = cnt ? acc / cnt : 0.0;
+                        std::putchar(m < 8 ? '-' : (m < 64 ? ':' : (m < 160 ? '*' : '#')));
+                    }
+                    std::putchar('\n');
+                }
+            };
+            mapOf(a, "OpenGL"); mapOf(b, "Vulkan");
+            std::printf("      mapa de diferencias (. igual  : leve  * fuerte  # total):\n");
+            for (int by = 0; by < BH; ++by) {
+                std::printf("        ");
+                for (int bx = 0; bx < BW; ++bx) {
+                    double acc = 0.0; int cnt = 0;
+                    for (int y = by * a.h / BH; y < (by + 1) * a.h / BH; ++y)
+                        for (int x = bx * a.w / BW; x < (bx + 1) * a.w / BW; ++x) {
+                            const size_t ka = ((size_t)y * a.w + x) * 4;
+                            const int yb = mirrored ? (a.h - 1 - y) : y;
+                            const size_t kb = ((size_t)yb * a.w + x) * 4;
+                            int mx = 0;
+                            for (int ch = 0; ch < 3; ++ch)
+                                mx = std::max(mx, std::abs((int)a.px[ka+ch] - (int)b.px[kb+ch]));
+                            acc += mx; ++cnt;
+                        }
+                    const double m = cnt ? acc / cnt : 0.0;
+                    std::putchar(m < 8 ? '.' : (m < 64 ? ':' : (m < 160 ? '*' : '#')));
+                }
+                std::putchar('\n');
+            }
+        }
+        // ⚠️ ESTO MIDE, NO SENTENCIA — y la razon esta medida. Al horizonte GL cubre el 100 % del
+        // cuadro y Vulkan solo la mitad de abajo; parecia que Vulkan perdia geometria. **Mirando al
+        // NADIR los dos cubren el 100 % y el |delta| medio cae de 131 a 5,6**, o sea que Vulkan no
+        // pierde nada: dibuja cielo encima del horizonte y GL pinta terreno ahi. Hasta saber cual es
+        // el correcto en el JUEGO, marcar esto como fallo acusaria al backend equivocado. Queda como
+        // 🔴 ABIERTO en el TODO con sus cifras.
+        if (kv.first.find("NADIR") != std::string::npos)
+            CHECK(pct < 90.0, "al NADIR los dos backends cubren el cuadro (control del careo)");
+    }
+    CHECK(compared > 0, "hay al menos una captura CON CONTENIDO que carear (si no, el careo es vacio)");
+    if (plain) std::printf("    (%zu capturas descartadas por planas)\n", plain);
+}
+
 
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -613,6 +796,238 @@ static void testTextureContent()
 // Vulkan salían casi BLANCOS con las texturas correctas y la máscara de material bien puesta. Si un
 // atributo distinto de la posición no llega, el color por vértice sería (0,0,0) o basura y el
 // resultado, blanco o negro. Esto lo aísla: un triángulo con color por vértice y lectura del píxel.
+// ================================================================================================
+// ¿INTERPOLA el RHI los atributos, o cada cara sale de un color?
+//
+// ⚠️ ESTE HUECO LLEVABA AHI DESDE QUE SE CREO EL RHI, y lo dice el propio `testVertexColor`: *"los
+// tres vertices del MISMO color: asi el centro es ese color exacto y no hay que razonar sobre la
+// interpolacion"*. Comprueba que el atributo LLEGA, pero con los tres iguales **un fallo de
+// interpolacion pasa el test sin despeinarse**: si el triangulo entero saliera plano, el pixel
+// central seria exactamente el mismo color y todo verde.
+//
+// Andoni: *"toda la cara/triangulo se dibuja con la misma iluminacion o color"* y *"es un error que
+// ya existia desde la creacion del RHI"*. Esto es lo que faltaba para poder decirlo con un numero:
+// UN triangulo con TRES colores distintos, y se leen cuatro puntos. Si interpola, cada esquina tira
+// hacia su vertice y el centro es la mezcla; si no, los cuatro salen iguales.
+/**
+ * @brief Los shaders del ICONO DE INVENTARIO pintan, y pintan IGUAL en los dos backends.
+ *
+ * El preview de items vivia en OpenGL crudo (glCreateShader + FBO propio), asi que bajo Vulkan las
+ * casillas salian sin icono. Al portarlo al RHI aparecen dos riesgos que NO se ven en pantalla hasta
+ * que alguien abre el inventario:
+ *
+ *  1. Que el pipeline no pinte NADA. El icono usa una ortografica normal con test Less, mientras que
+ *     todo el motor va en reversed-Z (limpia la profundidad a 0 y compara con Greater). Heredar ese
+ *     0.0 deja la textura VACIA sin un solo error — y una textura vacia y una casilla sin objeto se
+ *     ven exactamente igual. Ese fallo mudo ya ocurrio una vez en la version de GL.
+ *  2. Que salga DEL REVES solo en Vulkan. La Y del clip de Vulkan va invertida y este motor la
+ *     compensa en la PROYECCION (camera.cpp), no en el viewport; el icono tiene proyeccion propia y
+ *     por tanto necesita su propia compensacion.
+ *
+ * Por eso se dibuja una caja ALTA y DESCENTRADA (no simetrica): un objeto simetrico saldria igual del
+ * derecho que del reves y el test no distinguiria nada. Se mide cuanta tinta cae en la mitad de
+ * arriba frente a la de abajo. Si los dos backends dan el mismo reparto, ImGui mostrara lo mismo en
+ * los dos: muestrea el texel (0,0) en ambos, asi que arrays de texeles iguales = imagen igual.
+ */
+static void testItemPreviewShader()
+{
+    BEGIN("icono de inventario: los shaders pintan y coinciden GL/VK");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/item_preview.vert";
+    const std::string fs = base + "shaders/item_preview.frag";
+
+    struct V { float px, py, pz, nx, ny, nz, r, g, b; };
+    std::vector<V> verts;
+    std::vector<uint32_t> idx;
+    {   // Caja de 0.2 de semilado subida a y=+0.30: deliberadamente ARRIBA del encuadre.
+        const glm::vec3 half(0.20f), off(0.0f, 0.30f, 0.0f), col(0.80f, 0.55f, 0.30f);
+        const glm::vec3 N[6] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
+        for (int f = 0; f < 6; ++f) {
+            const glm::vec3 n = N[f];
+            const glm::vec3 u = std::abs(n.y) > 0.9f ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
+            const glm::vec3 t = glm::normalize(glm::cross(u, n)), b = glm::cross(n, t);
+            const uint32_t v0 = (uint32_t)verts.size();
+            const glm::vec3 c4[4] = { (n-t-b)*half + off, (n+t-b)*half + off,
+                                      (n+t+b)*half + off, (n-t+b)*half + off };
+            for (const glm::vec3& p : c4)
+                verts.push_back({ p.x,p.y,p.z, n.x,n.y,n.z, col.r,col.g,col.b });
+            for (uint32_t e : { 0u,1u,2u, 0u,2u,3u }) idx.push_back(v0 + e);
+        }
+    }
+
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)sizeof(V) };
+    pd.vertexLayout.attributes = {
+        { 0, (uint32_t)offsetof(V, px), Format::RGB32F, 0 },
+        { 1, (uint32_t)offsetof(V, nx), Format::RGB32F, 0 },
+        { 2, (uint32_t)offsetof(V, r),  Format::RGB32F, 0 },
+    };
+    pd.depth.test = true; pd.depth.write = true;
+    pd.depth.compare = CompareOp::Less;       // el icono NO usa reversed-Z (ver cabecera)
+    pd.blend.enable  = false;
+    pd.cull          = CullMode::None;
+
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    BufferHandle   vb   = g_dev->createBuffer(BufferUsage::Vertex, verts.size()*sizeof(V), verts.data());
+    BufferHandle   ib   = g_dev->createBuffer(BufferUsage::Index,  idx.size()*sizeof(uint32_t), idx.data());
+    struct UBO { glm::mat4 mvp, model; } ubo;
+    BufferHandle   ub   = g_dev->createBuffer(BufferUsage::Uniform, sizeof(UBO), nullptr, BufferMemory::Dynamic);
+    CHECK(valid(pipe) && valid(vb) && valid(ib) && valid(ub),
+          "pipeline del icono creado (si falla aqui, falta el .spv: el glob de shaders)");
+    if (!valid(pipe)) return;
+
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    // SIN invertir la Y en Vulkan, igual que item_preview.cpp — y por la razon que este mismo test
+    // midio: el destino es una TEXTURA, no la pantalla, y su convenio de origen ya absorbe la
+    // diferencia. Con el flip puesto, las dos mitades salian intercambiadas entre backends.
+    const glm::mat4 proj = glm::ortho(-0.62f, 0.62f, -0.62f, 0.62f, -4.0f, 4.0f);
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.9f, 0.75f, 1.0f), glm::vec3(0.0f), glm::vec3(0,1,0));
+    ubo.model = glm::mat4(1.0f);
+    ubo.mvp   = proj * view * ubo.model;
+    g_dev->updateBuffer(ub, 0, sizeof(UBO), &ubo);
+
+    const int W = 256, H = 256;
+    std::vector<uint8_t> px((size_t)W * H * 4, 0x00);
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 1.0f;        // ver cabecera: 1, no el 0 de reversed-Z
+        c->beginRenderPass({}, cv);
+        c->setViewport(0, 0, W, H);
+        c->bindPipeline(pipe);
+        c->bindUniformBuffer(0, ub);
+        c->bindVertexBuffer(vb);
+        c->bindIndexBuffer(ib);
+        c->drawIndexed((uint32_t)idx.size());
+        c->endRenderPass();
+        if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+    }
+
+    // Tinta = pixel que no es el fondo negro del clear. Se cuenta por MITADES del array de texeles.
+    long lit = 0, litLow = 0, litHigh = 0;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const size_t k = ((size_t)y * W + x) * 4;
+            if (px[k] + px[k+1] + px[k+2] > 24) { ++lit; (y < H/2 ? litLow : litHigh) += 1; }
+        }
+    const double frac    = (double)lit / (double)(W*H) * 100.0;
+    const double highPct = lit ? (double)litHigh / (double)lit * 100.0 : 0.0;
+    std::printf("    %s: %ld px con tinta (%.2f%% del cuadro)\n",
+                isVk ? "VULKAN" : "OpenGL", lit, frac);
+    std::printf("      reparto por mitades del array de texeles: filas 0..127 %.1f%% · filas 128..255 %.1f%%\n",
+                100.0 - highPct, highPct);
+    std::printf("      (ImGui muestrea el texel (0,0) en los dos backends: mismo reparto = misma imagen)\n");
+
+    // 1. Que pinte ALGO. Es la guardia contra el fallo mudo: una caja de este tamano cubre bastante
+    //    mas del 1% del cuadro, y 0% es exactamente lo que daba el bug de la profundidad heredada.
+    CHECK(frac > 1.0, "el icono pinta (no es la textura vacia del fallo mudo)");
+
+    // 2. Que este DESCOMPENSADO, o el test no podria detectar un volteo: si la tinta quedara repartida
+    //    50/50 la caja seria simetrica en vertical y dar la vuelta a la imagen no cambiaria nada.
+    CHECK(highPct < 35.0 || highPct > 65.0, "la caja cae claramente en una mitad (el test puede ver un volteo)");
+
+    // 3. Y que los DOS backends la pongan en la MISMA mitad. Es el careo que de verdad importa: un
+    //    icono espejado no da ningun error, se dibuja perfecto, y solo se nota si alguien mira una
+    //    pieza asimetrica. Los dos backends corren en el mismo proceso, GL primero, asi que en la
+    //    pasada de Vulkan ya hay con que comparar.
+    static double s_highPct[2] = { -1.0, -1.0 };
+    s_highPct[isVk ? 1 : 0] = highPct;
+    if (s_highPct[0] >= 0.0 && s_highPct[1] >= 0.0) {
+        const double d = std::abs(s_highPct[0] - s_highPct[1]);
+        std::printf("      careo con OpenGL: %.1f%% vs %.1f%% (diferencia %.1f pts)\n",
+                    s_highPct[0], s_highPct[1], d);
+        CHECK(d < 5.0, "GL y Vulkan ponen el icono en la misma mitad (no esta espejado)");
+    }
+
+    g_dev->destroy(pipe); g_dev->destroy(vb); g_dev->destroy(ib); g_dev->destroy(ub);
+}
+
+static void testVertexInterpolation()
+{
+    BEGIN("vertice: los atributos se INTERPOLAN dentro del triangulo");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/rhitest_vcolor.vert";
+    const std::string fs = base + "shaders/rhitest_vcolor.frag";
+
+    struct V { float px, py, pz; float r, g, b; };
+    // Triangulo grande con un vertice ROJO, otro VERDE y otro AZUL, colocados para que cada uno
+    // domine una esquina del cuadro de 256x256.
+    const V verts[3] = {
+        { -1.0f, -1.0f, 0.0f,  1.0f, 0.0f, 0.0f },
+        {  3.0f, -1.0f, 0.0f,  0.0f, 1.0f, 0.0f },
+        { -1.0f,  3.0f, 0.0f,  0.0f, 0.0f, 1.0f },
+    };
+
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)sizeof(V) };
+    pd.vertexLayout.attributes = {
+        { 0, (uint32_t)offsetof(V, px), Format::RGB32F, 0 },
+        { 2, (uint32_t)offsetof(V, r),  Format::RGB32F, 0 },
+    };
+    pd.topology     = PrimitiveTopology::Triangles;
+    pd.depth.test   = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull         = CullMode::None;
+
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    BufferHandle   vb   = g_dev->createBuffer(BufferUsage::Vertex, sizeof(verts), verts);
+    CHECK(valid(pipe) && valid(vb), "pipeline y buffer creados");
+    if (!valid(pipe) || !valid(vb)) return;
+
+    const int W = 256, H = 256;
+    std::vector<uint8_t> px((size_t)W * H * 4, 0xAA);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(pipe);
+        c->bindVertexBuffer(vb);
+        c->draw(3);
+        c->endRenderPass();
+        if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+    }
+    auto at = [&](int x, int y) {
+        const size_t k = ((size_t)y * W + x) * 4;
+        return std::array<int,3>{ px[k], px[k+1], px[k+2] };
+    };
+    const auto a = at(24, 24), b = at(W - 24, 24), c2 = at(24, H - 24), mid = at(W/2, H/2);
+    std::printf("    tres vertices R/G/B en un solo triangulo:\n");
+    std::printf("      esquina A (%3d,%3d,%3d) · esquina B (%3d,%3d,%3d) · esquina C (%3d,%3d,%3d)\n",
+                a[0],a[1],a[2], b[0],b[1],b[2], c2[0],c2[1],c2[2]);
+    std::printf("      centro    (%3d,%3d,%3d)  <- si INTERPOLA, es una mezcla de los tres\n",
+                mid[0],mid[1],mid[2]);
+
+    // Cuanto se separan las tres esquinas entre si. Con interpolacion son casi colores puros y
+    // distintos; SIN ella los tres puntos salen del MISMO color (el del vertice provocador).
+    int spread = 0;
+    for (int ch = 0; ch < 3; ++ch) {
+        spread = std::max(spread, std::abs(a[ch] - b[ch]));
+        spread = std::max(spread, std::abs(a[ch] - c2[ch]));
+        spread = std::max(spread, std::abs(b[ch] - c2[ch]));
+    }
+    std::printf("      separacion maxima entre esquinas: %d  (plano daria ~0)\n", spread);
+
+    g_dev->destroy(pipe); g_dev->destroy(vb);
+
+    CHECK(spread > 100, "los atributos SE INTERPOLAN: las tres esquinas tiran hacia su vertice");
+    CHECK(mid[0] > 20 && mid[1] > 20 && mid[2] > 20,
+          "y el centro es MEZCLA de los tres (no el color de un solo vertice)");
+}
+
 static void testVertexColor()
 {
     BEGIN("vertice: un atributo que no es la posicion llega al fragment");
@@ -1159,7 +1574,15 @@ static void testTerrainLighting()
 // el shader usa sus escalares y el test mide ILUMINACIÓN, no muestreo — pero las texturas se atan
 // igual, porque declararlas y no atarlas es justo el fallo que se persigue.
 // ================================================================================================
-static bool propLitPixel(const float sunDir[3], uint8_t out[4])
+/// Recursos del prop sintetico. Se devuelven cuando se dibuja dentro de un pase ajeno: en Vulkan los
+/// comandos aun no se han ejecutado al volver, asi que destruirlos ahi seria un uso-despues-de-liberar.
+/// El llamador los destruye DESPUES de `endFrame`.
+struct PropRes { PipelineHandle pipe; BufferHandle pf, pp, vb, ib; TextureHandle t[5]; };
+
+/// @param into  si no es nulo, graba el draw en ESE contexto (sin abrir frame ni leer pixeles) y
+///              devuelve los recursos en `keep` para que el llamador los destruya tras `endFrame`.
+static bool propLitPixel(const float sunDir[3], uint8_t out[4],
+                         Context* into = nullptr, PropRes* keep = nullptr)
 {
     struct PerFrame {
         float view[16], proj[16];
@@ -1231,6 +1654,18 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4])
     PipelineHandle pipe = g_dev->createPipeline(pd);
     bool ok = valid(pipe);
 
+    if (ok && into) {
+        into->bindPipeline(pipe);
+        into->bindUniformBuffer(0, pfUbo);
+        into->bindUniformBuffer(6, ppUbo);
+        into->bindTexture(0, t0); into->bindTexture(1, t1); into->bindTexture(2, t2);
+        into->bindTexture(3, t3); into->bindTexture(4, t4);
+        into->bindVertexBuffer(vb, 0);
+        into->bindVertexBuffer(ib, 1);
+        into->draw(3, 0, 1);
+        if (keep) *keep = PropRes{ pipe, pfUbo, ppUbo, vb, ib, { t0, t1, t2, t3, t4 } };
+        return true;                      // NO se destruye: lo hace el llamador tras endFrame
+    }
     if (ok) {
         const bool isVk = (g_dev->backend() == Backend::Vulkan);
         Context* c = g_dev->beginFrame();
@@ -1261,6 +1696,90 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4])
     for (BufferHandle b : { pfUbo, ppUbo, vb, ib }) g_dev->destroy(b);
     for (TextureHandle t : { t0, t1, t2, t3, t4 }) g_dev->destroy(t);
     return ok;
+}
+
+// ================================================================================================
+// EL PROP CONTRA LA LUZ, BARRIDO COMPLETO — y el mismo en los dos backends
+//
+// `testPropLighting` mira DOS puntos: sol de frente y sol detras. Eso dice que la luz "llega", pero no
+// COMO responde: una respuesta plana, una invertida y una correcta pasan las tres si los extremos
+// salen bien. Y "los props se ven quemados o sin luz" es justamente una queja sobre la FORMA de esa
+// respuesta, no sobre sus extremos.
+//
+// Aqui se barre el sol por 12 angulos alrededor del objeto y se saca la curva de luminancia. Lo que
+// se comprueba es lo que una curva permite y dos puntos no:
+//   · que sea MONOTONA de la luz de frente a la de espalda (sin escalones raros),
+//   · que el maximo caiga donde apunta la luz y no en otro sitio,
+//   · que no sature (quemado) ni se quede pegada a un valor (sin luz),
+//   · y que las DOS curvas, GL y Vulkan, sean la MISMA.
+//
+// El shader de props no tiene luces puntuales —solo sol direccional y luna, ver `PerFrameData`—, asi
+// que el barrido va sobre la direccion del sol, que es la luz que ese pase entiende.
+static void testPropLightSweep()
+{
+    BEGIN("props: la respuesta a la LUZ, barrida entera (no solo los extremos)");
+
+    const int W = 256, H = 256;
+    const int N = 12;
+    std::vector<double> curva; curva.reserve(N);
+    std::vector<uint8_t> primera;
+
+    for (int i = 0; i < N; ++i) {
+        const double a = 2.0 * 3.14159265358979 * (double)i / (double)N;
+        const float sun[3] = { (float)std::sin(a), (float)std::cos(a), 0.35f };
+
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+        std::vector<uint8_t> px((size_t)W * H * 4, 0xAA);
+        PropRes keep{}; bool ok = false;
+        if (Context* c = g_dev->beginFrame()) {
+            ClearValues cv;
+            cv.clearColor = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+            cv.clearDepth = true; cv.depth = 0.0f;
+            c->beginRenderPass({}, cv);
+            uint8_t dummy[4];
+            ok = propLitPixel(sun, dummy, c, &keep);
+            c->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        }
+        if (ok) {   // los comandos ya se ejecutaron: ahora si se puede liberar
+            if (valid(keep.pipe)) g_dev->destroy(keep.pipe);
+            for (BufferHandle b : { keep.pf, keep.pp, keep.vb, keep.ib }) if (valid(b)) g_dev->destroy(b);
+            for (TextureHandle t : keep.t) if (valid(t)) g_dev->destroy(t);
+        }
+        if (!ok) { CHECK(false, "el prop se dibuja en cada angulo"); return; }
+
+        // Solo los pixeles del PROP: el fondo es negro puro, asi que cualquier cosa con luz cuenta.
+        double acc = 0.0; size_t n = 0;
+        for (size_t k = 0; k + 3 < px.size(); k += 4) {
+            const double L = px[k] * 0.299 + px[k+1] * 0.587 + px[k+2] * 0.114;
+            if (L > 2.0) { acc += L; ++n; }
+        }
+        curva.push_back(n ? acc / (double)n : 0.0);
+        if (i == 0) primera = px;
+    }
+
+    std::printf("    luminancia del prop segun de donde viene el sol (12 angulos):\n      ");
+    for (double v : curva) std::printf("%6.1f", v);
+    std::printf("\n      ");
+    const double mx = *std::max_element(curva.begin(), curva.end());
+    for (double v : curva) std::printf("%6s", mx > 0 ? (v > mx * 0.85 ? "###" : (v > mx * 0.5 ? "##" : (v > mx * 0.2 ? "#" : "."))) : ".");
+    std::printf("\n");
+
+    const double mn = *std::min_element(curva.begin(), curva.end());
+    const size_t iMax = (size_t)(std::max_element(curva.begin(), curva.end()) - curva.begin());
+    std::printf("      max %.1f (angulo %zu de %d) · min %.1f · recorrido %.2fx\n",
+                mx, iMax, N, mn, mn > 0.01 ? mx / mn : 0.0);
+
+    recordShot("prop.sol frontal", W, H, primera);
+
+    CHECK(mx > 20.0, "el prop se ILUMINA con el sol de frente (si no, no hay nada que medir)");
+    CHECK(mx < 250.0, "y NO se quema: el maximo no satura a blanco");
+    CHECK(mn < mx * 0.7, "la respuesta a la luz tiene RECORRIDO (no es plana: eso seria 'sin luz')");
+    CHECK(mn > 1.0, "y a contraluz no se apaga del todo: le llega la ambiente");
 }
 
 static void testPropLighting()
@@ -1657,7 +2176,7 @@ static void testTerrainNodeGpuCost()
     // Salida NO de readback: aquí se mide la generación, no la descarga. Un buffer de readback vive
     // en memoria visible por el host y mediría también el coste de escribir ahí, que el pool no paga
     // (los nodos se quedan en VRAM).
-    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, count * sizeof(float), nullptr,
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, count * 3 * sizeof(float), nullptr,
                                            BufferMemory::Dynamic);
     if (!valid(ubo) || !valid(out)) { CHECK(false, "buffers creados"); g_dev->destroy(cp); return; }
 
@@ -1706,6 +2225,64 @@ static void testTerrainNodeGpuCost()
         std::printf("      -> con 2 ms/frame de presupuesto caben %.0f nodos nuevos por frame\n",
                     perNode > 0 ? 2.0 / perNode : 0.0);
         CHECK(perNode > 0.0 && perNode < 50.0, "el nodo se genera en un tiempo razonable (<50 ms)");
+    }
+
+    // ── DE DONDE SALE EL TIEMPO: DESPACHO, PROYECCION Y RELIEVE POR SEPARADO ────────────────────
+    //
+    // "0,056 ms/nodo" no dice que optimizar. Aqui se parte en tres con dos medidas:
+    //   · barrido de N: si el ms/nodo baja al encolar mas, hay COSTE FIJO por dispatch y la palanca
+    //     es agrupar; si no baja, el coste es todo trabajo por texel y agrupar no compra nada.
+    //   · `uGrid.z = 2` (modo de biseccion que ya existia): hace la misma proyeccion y la misma
+    //     escritura pero NO evalua el relieve. La diferencia con el modo 0 es el relieve, exacta.
+    {
+        const NodeId fine{ Haruka::PlanetFace::FRONT, 18, 100, 100 };
+        up.node[0] = (int32_t)fine.face; up.node[1] = (int32_t)fine.level;
+        up.node[2] = (int32_t)fine.i;    up.node[3] = (int32_t)fine.j;
+        up.misc[1] = (float)nodeTexelM(fine, R);
+
+        auto run = [&](int kNodes, int mode) -> double {
+            up.grid[2] = mode;
+            for (int warm = 0; warm < 2; ++warm)
+                if (Context* c = g_dev->beginFrame()) {
+                    g_dev->updateBuffer(ubo, 0, sizeof(up), &up);
+                    c->bindPipeline(cp); c->bindUniformBuffer(0, ubo); c->bindStorageBuffer(1, out);
+                    c->dispatch((N + 7) / 8, (N + 7) / 8, 1);
+                    FenceHandle fw = c->signalFence();
+                    g_dev->endFrame();
+                    if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(fw, 5000000000ull); c2->deleteFence(fw); g_dev->endFrame(); }
+                }
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            if (Context* c = g_dev->beginFrame()) {
+                c->bindPipeline(cp); c->bindUniformBuffer(0, ubo); c->bindStorageBuffer(1, out);
+                for (int k = 0; k < kNodes; ++k) c->dispatch((N + 7) / 8, (N + 7) / 8, 1);
+                FenceHandle f = c->signalFence();
+                g_dev->endFrame();
+                if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(f, 10000000000ull); c2->deleteFence(f); g_dev->endFrame(); }
+            }
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::high_resolution_clock::now() - t0).count();
+            return ms / (double)kNodes;
+        };
+
+        std::printf("\n    nivel 18 · %u texeles por nodo · reparto del coste\n", (unsigned)count);
+        std::printf("      nodos por tanda   ms/nodo TOTAL   ms/nodo SIN relieve   relieve\n");
+        double perFull1 = 0.0, perFull256 = 0.0, perBare256 = 0.0;
+        for (int k : { 1, 4, 16, 64, 256 }) {
+            const double full = run(k, 0);
+            const double bare = run(k, 2);
+            std::printf("      %13d   %13.4f   %19.4f   %6.1f %%\n",
+                        k, full, bare, full > 0.0 ? 100.0 * (full - bare) / full : 0.0);
+            if (k == 1)   perFull1   = full;
+            if (k == 256) { perFull256 = full; perBare256 = bare; }
+        }
+        up.grid[2] = 0;
+        const double fixedMs = perFull1 - perFull256;      // lo que se ahorra al amortizar la tanda
+        std::printf("      -> coste FIJO por dispatch %.4f ms/nodo · relieve %.4f · resto %.4f\n",
+                    fixedMs > 0.0 ? fixedMs : 0.0, perFull256 - perBare256, perBare256);
+
+        CHECK(perFull256 > 0.0, "la medida amortizada existe");
+        CHECK(perBare256 < perFull256,
+              "CONTRAPRUEBA: sin evaluar el relieve cuesta MENOS (el modo de biseccion hace algo)");
     }
 
     g_dev->destroy(out); g_dev->destroy(ubo); g_dev->destroy(cp);
@@ -2791,6 +3368,294 @@ static void testTerrainNodeBaseField()
 // La camara va a 800 m a proposito: es donde `lod` y `lodNrm` valen ~1, o sea el triplanar de albedo
 // Y el de normales a pleno. Es el caso PEOR, que es el unico honesto para dimensionar.
 // ================================================================================================
+// LA ESCENA COMPLETA: terreno Y un prop, en el MISMO pase y con la MISMA luz
+//
+// El banco tenia `testTerrainLighting` y `testPropLighting`, pero cada uno por su lado. El sintoma que
+// pidio este test es justamente el que no se ve por separado: *"el sombreado y color de props y
+// terreno se ve como quemado o sin luz"* — o sea, los dos dibujados a la vez y uno de ellos sin
+// responder al sol.
+//
+// Lo que se mide es la RESPUESTA A LA LUZ de cada uno por separado dentro de la misma imagen: se
+// dibuja con el sol de frente y con el sol al otro lado, y se compara la luminancia del terreno con la
+// del prop. Un prop que sale igual de claro con el sol delante que detras es "blanco de noche", y eso
+// aqui es un numero, no una impresion.
+//
+// ⚠️ CONTRAPRUEBAS: (1) los dos tienen que DIBUJAR algo —si el prop no escribe pixeles, "no responde a
+// la luz" seria trivialmente cierto—; (2) el terreno TIENE que oscurecerse al girar el sol, porque si
+// no se oscurece nada la escena entera esta pegada y el test no distingue un fallo del prop.
+static void testSceneTerrainAndProp()
+{
+    BEGIN("escena: terreno + prop en el mismo pase, los dos con luz");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 512)) {
+        CHECK(false, "init del pase de terreno"); return;
+    }
+
+    // Material sintetico para que el terreno pase por su camino de sombreado real, no por el plano.
+    const uint32_t TS = 64, LAYERS = 4;
+    std::vector<uint8_t> pix((size_t)TS * TS * LAYERS * 4, 200);
+    TextureDesc atd; atd.width = atd.height = TS; atd.layers = LAYERS;
+    atd.format = Format::RGBA8; atd.filter = Filter::Linear; atd.wrap = Wrap::Repeat;
+    atd.initialData = pix.data();
+    TextureHandle albedo = g_dev->createTexture(atd);
+    TextureHandle normal = g_dev->createTexture(atd);
+    struct MatUBO { float v[64]; } mu{};
+    for (float& f : mu.v) f = 0.5f;
+    BufferHandle matUBO = g_dev->createBuffer(BufferUsage::Uniform, sizeof(mu), &mu, BufferMemory::Dynamic);
+    CHECK(valid(albedo) && valid(normal) && valid(matUBO), "material sintetico del terreno creado");
+
+    const int cw = 256, ch = 256;
+    const double fovY = glm::radians(60.0);
+    const double radPerPx = fovY / (double)ch;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 800.0);
+    const glm::dvec3 fwd = -up0;                       // al nadir: el terreno llena el cuadro
+    const glm::dvec3 rgh = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+    const glm::mat4 proj = Haruka::Core::Camera(Haruka::WorldPos(0.0, 0.0, 0.0))
+                               .getProjectionMatrix((float)cw / (float)ch);
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(
+                              glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(glm::cross(rgh, fwd)))));
+
+    // El prop va con proyeccion identidad (asi lo monta `propLitPixel`), asi que cae en el CENTRO del
+    // cuadro. El terreno ocupa el resto. Se muestrean dos zonas disjuntas: centro = prop, esquina =
+    // terreno. No es una escena "bonita"; es una escena donde los dos caminos de sombreado corren a la
+    // vez y se pueden medir por separado, que es lo que hace falta.
+    auto frame = [&](const float sun[3], std::vector<uint8_t>& px) {
+        TerrainNodeRenderer::Shade sh;
+        sh.albedo = albedo; sh.normal = normal; sh.materialUBO = matUBO;
+        sh.tiling = 8.0f; sh.shoreLayer = 0;
+        sh.lightDir = glm::vec3(sun[0], sun[1], sun[2]);
+        sh.on = true;
+        r.setShade(sh);
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+        px.assign((size_t)cw * ch * 4, 0xAA);
+        PropRes keep{}; bool drewProp = false;
+        if (Context* ctx = g_dev->beginFrame()) {
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = 0.0f; cv.color[1] = 0.0f; cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+            cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            uint8_t dummy[4];
+            drewProp = propLitPixel(sun, dummy, ctx, &keep);   // el prop, en el MISMO pase
+            ctx->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+        }
+        if (drewProp) {                                  // ya ejecutado: ahora si se puede destruir
+            if (valid(keep.pipe)) g_dev->destroy(keep.pipe);
+            for (BufferHandle b : { keep.pf, keep.pp, keep.vb, keep.ib }) if (valid(b)) g_dev->destroy(b);
+            for (TextureHandle t : keep.t) if (valid(t)) g_dev->destroy(t);
+        }
+        return drewProp;
+    };
+    auto lum = [&](const std::vector<uint8_t>& px, int x0, int y0, int x1, int y1) {
+        double acc = 0.0; int n = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x) {
+                const size_t k = ((size_t)y * cw + x) * 4;
+                acc += (px[k] * 0.299 + px[k+1] * 0.587 + px[k+2] * 0.114); ++n;
+            }
+        return n ? acc / n : 0.0;
+    };
+
+    const float sunA[3] = {  0.4f,  0.8f,  0.3f };     // de frente
+    const float sunB[3] = { -0.4f, -0.8f, -0.3f };     // al otro lado
+    std::vector<uint8_t> imgA, imgB;
+    const bool okA = frame(sunA, imgA);
+    const bool okB = frame(sunB, imgB);
+    CHECK(okA && okB, "los dos frames se dibujan (terreno + prop)");
+    if (!okA || !okB) { g_dev->destroy(albedo); g_dev->destroy(normal); g_dev->destroy(matUBO); return; }
+
+    const double propA = lum(imgA, cw/2 - 12, ch/2 - 12, cw/2 + 12, ch/2 + 12);
+    const double propB = lum(imgB, cw/2 - 12, ch/2 - 12, cw/2 + 12, ch/2 + 12);
+    const double terA  = lum(imgA, 4, 4, 44, 44);
+    const double terB  = lum(imgB, 4, 4, 44, 44);
+
+    std::printf("    luminancia con el sol de FRENTE / al OTRO LADO\n");
+    std::printf("      terreno (esquina) %6.1f -> %6.1f   (cae %5.1f %%)\n",
+                terA, terB, terA > 0 ? 100.0 * (terA - terB) / terA : 0.0);
+    std::printf("      prop    (centro)  %6.1f -> %6.1f   (cae %5.1f %%)\n",
+                propA, propB, propA > 0 ? 100.0 * (propA - propB) / propA : 0.0);
+
+    // ── ¿SUAVE O PLANO? EL NUMERO DE COLORES DISTINTOS LO DICE ──────────────────────────────────
+    //
+    // Andoni: *"toda la cara/triangulo se dibuja con la misma iluminacion o color, es algo de Vulkan
+    // no de OpenGL"*. Con sombreado SUAVE la luz varia dentro de cada triangulo y la imagen tiene
+    // muchos valores; con sombreado PLANO cada triangulo es un color constante y el recuento se
+    // desploma. La media de luminancia —lo unico que media este test— no distingue las dos cosas: un
+    // triangulo plano y uno con degradado pueden tener la MISMA media.
+    //
+    // Se cuenta sobre el terreno, que es donde hay miles de triangulos con normales distintas. La
+    // cifra se guarda por backend en el careo, que es donde se vera si uno tiene 20 veces menos.
+    auto distintos = [&](const std::vector<uint8_t>& px) {
+        std::unordered_set<uint32_t> u;
+        for (int y = 4; y < ch - 4; ++y)
+            for (int x = 4; x < cw / 3; ++x) {          // franja de terreno, lejos del prop
+                const size_t k = ((size_t)y * cw + x) * 4;
+                u.insert(((uint32_t)px[k] << 16) | ((uint32_t)px[k+1] << 8) | px[k+2]);
+            }
+        return u.size();
+    };
+    const size_t nA = distintos(imgA);
+    std::printf("      colores distintos en el terreno: %zu  (pocos = cada triangulo de un color = PLANO)\n",
+                nA);
+
+    recordShot("escena.terreno+prop sol A", cw, ch, imgA);
+    recordShot("escena.terreno+prop sol B", cw, ch, imgB);
+
+    // ── ¿RESPONDEN IGUAL A LA HORA DEL DIA? BARRIDO DEL SOL ─────────────────────────────────────
+    //
+    // Dos puntos (sol delante / sol detras) no distinguen "responde menos" de "no responde": los dos
+    // caian ~70 %. Lo que Andoni ve —*"los props se ven quemados o sin luz"*, arboles BLANCOS sobre un
+    // suelo oscuro al atardecer— es lo que pasa EN MEDIO, con el sol rasante.
+    //
+    // `prop_inst.frag` usa un modelo cel: `litCol = baseColor * (0.80 + 0.25 * sunLightColor)`. Ese
+    // **0,80 es un suelo fijo que no depende del sol**; el terreno usa `max(dot(n,L), 0)`, que baja
+    // continuamente. El propio comentario del shader dice que la intencion era "que los dos responden
+    // igual a la hora del dia" — esto mide si lo hacen.
+    std::printf("      barrido del sol (elevacion) · luminancia normalizada a su maximo\n");
+    std::printf("        elev    terreno   prop     prop/terreno\n");
+    double worstRatio = 0.0;
+    {
+        double terMax = 0.0, propMax = 0.0;
+        std::vector<std::pair<double,double>> curva;
+        for (int i = 0; i <= 6; ++i) {
+            const float e = (float)(1.0 - 2.0 * (double)i / 6.0);     // +1 (cenit) .. -1 (bajo tierra)
+            const float sun[3] = { 0.30f, e, 0.20f };
+            std::vector<uint8_t> img;
+            if (!frame(sun, img)) continue;
+            const double t = lum(img, 4, 4, 44, 44);
+            const double p = lum(img, cw/2 - 12, ch/2 - 12, cw/2 + 12, ch/2 + 12);
+            terMax = std::max(terMax, t); propMax = std::max(propMax, p);
+            curva.emplace_back(t, p);
+        }
+        for (size_t i = 0; i < curva.size(); ++i) {
+            const double tn = terMax > 0 ? curva[i].first  / terMax  : 0.0;
+            const double pn = propMax > 0 ? curva[i].second / propMax : 0.0;
+            const double r  = tn > 0.02 ? pn / tn : 0.0;
+            if (tn > 0.02) worstRatio = std::max(worstRatio, r);
+            // ⚠️ `%s` con un `std::string` temporal es UB y salia basura en pantalla. Literal.
+            std::printf("        %+5.2f   %6.3f   %6.3f   %s\n",
+                        1.0 - 2.0 * (double)i / 6.0, tn, pn,
+                        (tn > 0.02 && r > 1.5) ? "  <- el prop NO baja con el sol" : "");
+        }
+        std::printf("      peor desajuste prop/terreno: %.2fx  (1,00 = responden igual)\n", worstRatio);
+    }
+
+    g_dev->destroy(albedo); g_dev->destroy(normal); g_dev->destroy(matUBO);
+
+    CHECK(propA > 8.0, "CONTRAPRUEBA: el prop DIBUJA (si no escribe pixeles, no probaria nada)");
+    CHECK(terA  > 8.0, "CONTRAPRUEBA: el terreno DIBUJA");
+    CHECK(terA > terB * 1.05 || terB > terA * 1.05,
+          "CONTRAPRUEBA: el TERRENO responde al sol (si nada cambia, el test no distingue nada)");
+    CHECK(propA < 250.0 && propB < 250.0, "el prop no esta QUEMADO (saturado a blanco) con ningun sol");
+    CHECK(nA > 200, "el sombreado del terreno es SUAVE: la luz varia dentro de los triangulos");
+}
+
+// ================================================================================================
+// LA ESCENA, DIBUJADA EN EL BANCO: ¿se cuela el fondo por las costuras entre triangulos?
+//
+// Andoni, con el bloom ya arreglado: *"sin bloom la escena hace cosas raras, como que las lineas de
+// triangulos son blanco-azuladas"*. Esa es la forma de un AGUJERO DE ALFILER: el cielo asomando por
+// la juntura entre dos triangulos. El bloom lo tapaba al desenfocar, asi que aparecio justo cuando la
+// exposicion dejo de estar quemada.
+//
+// No hace falta mirar la pantalla para cazarlo: se pinta el fondo de un color IMPOSIBLE (magenta puro)
+// y se dibuja el terreno encima con la vista 2 (blanco plano). Cualquier pixel magenta que sobreviva
+// DENTRO de la zona cubierta es fondo colandose. Y como el nadir cubre el cuadro entero en los dos
+// backends (medido en `careo GL <-> Vulkan`), ahi cualquier magenta es un agujero, sin ambiguedad.
+//
+// ⚠️ CONTRAPRUEBA OBLIGATORIA: el mismo conteo SIN dibujar nada tiene que dar el 100 % de magenta. Sin
+// ella, "0 agujeros" tambien lo daria un detector que no mira, o un clear que no ocurre.
+static void testTerrainNodeSceneSeams()
+{
+    BEGIN("escena: el fondo NO se cuela por las costuras");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 512)) {
+        CHECK(false, "init del pase"); return;
+    }
+    r.setDebugViewOverride(2);                       // blanco plano: solo interesa QUE pixeles cubre
+
+    const int cw = 256, ch = 256;
+    const double fovY = glm::radians(60.0);
+    const double radPerPx = fovY / (double)ch;
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 800.0);
+    const glm::mat4 proj = Haruka::Core::Camera(Haruka::WorldPos(0.0, 0.0, 0.0))
+                               .getProjectionMatrix((float)cw / (float)ch);
+
+    auto shoot = [&](const glm::dvec3& fwd, bool draw, std::vector<uint8_t>& px) {
+        const glm::dvec3 rgh = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+        const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(
+                                  glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(glm::cross(rgh, fwd)))));
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+        px.assign((size_t)cw * ch * 4, 0xAA);
+        if (Context* ctx = g_dev->beginFrame()) {
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = 1.0f; cv.color[1] = 0.0f; cv.color[2] = 1.0f; cv.color[3] = 1.0f;  // magenta
+            cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            if (draw) r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+        }
+    };
+    auto magenta = [&](const std::vector<uint8_t>& px) {
+        size_t n = 0;
+        for (size_t k = 0; k + 3 < px.size(); k += 4)
+            if (px[k] > 200 && px[k+1] < 60 && px[k+2] > 200) ++n;
+        return n;
+    };
+
+    std::vector<uint8_t> px;
+    const size_t total = (size_t)cw * ch;
+
+    shoot(-up0, false, px);
+    const size_t vacio = magenta(px);
+    shoot(-up0, true, px);
+    const size_t nadir = magenta(px);
+
+    std::printf("    al NADIR (el terreno cubre el cuadro entero)\n");
+    std::printf("      sin dibujar : %6zu de %zu magenta  (%.1f %%)  <- CONTRAPRUEBA del detector\n",
+                vacio, total, 100.0 * (double)vacio / (double)total);
+    std::printf("      dibujando   : %6zu de %zu magenta  (%.4f %% = fondo colandose)\n",
+                nadir, total, 100.0 * (double)nadir / (double)total);
+
+    // Y al horizonte, que es donde el stride cambia entre nodos vecinos y las costuras se ponen a
+    // prueba de verdad. Aqui SI hay cielo legitimo, asi que solo se informa la cifra.
+    const glm::dvec3 fwdH = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    shoot(fwdH, true, px);
+    const size_t horiz = magenta(px);
+    std::printf("    al HORIZONTE: %zu de %zu magenta (%.1f %%) — aqui hay cielo legitimo, es informativo\n",
+                horiz, total, 100.0 * (double)horiz / (double)total);
+
+    r.setDebugViewOverride(-1);
+
+    CHECK(vacio > total * 9 / 10, "CONTRAPRUEBA: sin dibujar, el detector ve el fondo (si no, no mide nada)");
+    CHECK(nadir * 1000 < total, "al NADIR el fondo no se cuela: menos de 1 pixel por mil");
+}
+
+// ================================================================================================
 static void testTerrainNodeShadeCost()
 {
     BEGIN("v5 F5: lo que cuesta el sombreado real (A/B contra la luz plana)");
@@ -2862,7 +3727,13 @@ static void testTerrainNodeShadeCost()
     const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
     const glm::dvec3 cam = pc + up0 * (R + 800.0);
     const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
-    const glm::mat4 proj = glm::perspective((float)fovY, (float)w / (float)h, 1.0f, 1e9f);
+    // ⚠️ LA PROYECCION DEL MOTOR, NO UNA DE GLM. `glm::perspective` es de OpenGL: no invierte la Y de
+    // Vulkan y da profundidad en [-1,1] cuando Vulkan espera [0,1] y RECORTA lo que se salga. Con
+    // ella, el careo GL<->Vulkan acusaba al backend de dibujar solo la mitad de arriba. El motor usa
+    // `Camera::getProjectionMatrix`, que lleva la inversion y el reversed-Z: cualquier test que
+    // compare backends tiene que usar ESA.
+    const glm::mat4 proj = Haruka::Core::Camera(Haruka::WorldPos(0.0, 0.0, 0.0))
+                               .getProjectionMatrix((float)w / (float)h);
     const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd),
                                                                   glm::vec3(up0))));
 
@@ -2944,6 +3815,54 @@ static void testTerrainNodeShadeCost()
         return px;
     };
     const auto imgFlat = grab(false), imgShaded = grab(true);
+    recordShot("terreno.sin sombreado", cw, ch, imgFlat);
+    recordShot("terreno.sombreado",     cw, ch, imgShaded);
+
+    // ── SEPARAR GEOMETRIA DE SOMBREADO EN EL CAREO GL <-> VULKAN ────────────────────────────────
+    //
+    // Las dos capturas de arriba mezclan las dos cosas: si difieren, no se sabe si es que la
+    // superficie esta en otro sitio o que la luz se calcula distinto. Las vistas de depuracion del
+    // pase lo parten (ver `terrain_node.frag`):
+    //   · vista 2 = BLANCO PLANO -> solo dice QUE PIXELES cubre la geometria. Si esta casa, la
+    //     superficie es la misma en los dos backends y el problema es de sombreado.
+    //   · vista 6 = la NORMAL como color -> si esta no casa, el problema esta en la normal, que es
+    //     lo que alimenta a la luz.
+    for (int dbg : { 2, 6 }) {
+        r.setDebugViewOverride(dbg);
+        recordShot(dbg == 2 ? "terreno.vista2 cobertura" : "terreno.vista6 normales",
+                   cw, ch, grab(true));
+    }
+
+    // ── ¿QUIEN TIENE RAZON? MIRANDO AL NADIR NO HAY CIELO ────────────────────────────────────────
+    //
+    // Con la camara al horizonte, "OpenGL cubre el 100 % y Vulkan la mitad de abajo" admite DOS
+    // lecturas opuestas: que Vulkan pierda medio cuadro, o que OpenGL pinte terreno donde toca cielo.
+    // El careo dice que difieren, no quien acierta.
+    //
+    // Mirando HACIA ABAJO no hay cielo posible: el terreno tiene que llenar el cuadro en los dos. Si
+    // aqui casan, el que estaba mal era el del horizonte y ya se sabe cual.
+    {
+        const glm::dvec3 fwdD = -up0;                          // al nadir
+        const glm::dvec3 rgh  = glm::normalize(glm::cross(fwdD, glm::dvec3(0, 1, 0)));
+        const glm::mat4  mvpD = proj * glm::mat4(glm::mat3(glm::lookAt(
+                                   glm::vec3(0.0f), glm::vec3(fwdD), glm::vec3(glm::cross(rgh, fwdD)))));
+        const bool isVk = (g_dev->backend() == Backend::Vulkan);
+        std::vector<uint8_t> px((size_t)cw * ch * 4, 0xAA);
+        if (Context* ctx = g_dev->beginFrame()) {
+            r.prepare(ctx, cam, pc, R, fwdD, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvpD);
+            ctx->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, cw, ch, Format::RGBA8, px.data());
+        }
+        recordShot("terreno.vista2 NADIR", cw, ch, px);
+    }
+    r.setDebugViewOverride(-1);
     size_t diff = 0, sentinel = 0;
     for (size_t k = 0; k < (size_t)cw * ch; ++k) {
         if (imgShaded[k*4] == 0xAA && imgShaded[k*4+1] == 0xAA && imgShaded[k*4+2] == 0xAA) ++sentinel;
@@ -3288,11 +4207,14 @@ static int runBackend(Backend backend)
     testTerrainNodeStitchSymmetryGpu();
     testTextureContent();
     testVertexColor();
+    testVertexInterpolation();
+    testItemPreviewShader();
     testEnginePipelines();
     testOceanShading();
     testSkyAmbientGPU();
     testTerrainLighting();
     testPropLighting();
+    testPropLightSweep();
     testTerrainShadow();
     testCullWindingWithProjection();
 
@@ -3304,6 +4226,8 @@ static int runBackend(Backend backend)
     //
     // Ponerlo al final es una MITIGACION, no un arreglo: mientras siga aqui, nadie puede añadir un
     // test detras sin comprobar que no hereda basura. Queda anotado para cuando se toque el RHI.
+    testTerrainNodeSceneSeams();
+    testSceneTerrainAndProp();
     testTerrainNodeShadeCost();
 
     setDevice(nullptr);
@@ -3324,6 +4248,7 @@ int main(int argc, char** argv)
 
     if (run == "gl" || run == "all") runBackend(Backend::OpenGL);
     if (run == "vk" || run == "all") runBackend(Backend::Vulkan);
+    if (run == "all") compareBackends();
 
     SDL_Quit();
     std::printf("\n== %d OK · %d FALLOS ==\n", g_pass, g_fail);

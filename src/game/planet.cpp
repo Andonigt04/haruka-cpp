@@ -1070,6 +1070,7 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::loadTextureArray(
     };
 
     const int target = terrainQualityTarget();
+    const auto t0Load = std::chrono::steady_clock::now();
     std::vector<std::vector<unsigned char>> layerData;
     std::vector<int> layerW, layerH;
     layerData.reserve(paths.size());
@@ -1077,35 +1078,76 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::loadTextureArray(
     layerH.reserve(paths.size());
     int minLong = 0;
 
-    for (const std::string& path : paths) {
-        if (path.empty()) { layerData.emplace_back(); layerW.push_back(0); layerH.push_back(0); continue; }
-        int w = 0, h = 0;
-        unsigned char* data = nullptr;
-        int bestArea = 0;   // persiste entre las dos raíces, se resetea por capa
-        std::string bestPath;
-        takeBest(Haruka::AssetPaths::textures(), path, w, h, data, bestArea, bestPath);
-        takeBest(Haruka::AssetPaths::projectTextures(), path, w, h, data, bestArea, bestPath);
-        if (data) HARUKA_LOGI("Terrain", "capa '%s': gana %s (%dx%d)",
-                              path.c_str(), bestPath.c_str(), w, h);
-        if (!data) {
-            HARUKA_LOGW("Terrain", "capa '%s' no encontrada -> gris neutro", path.c_str());
-            layerData.emplace_back(); layerW.push_back(0); layerH.push_back(0);
-            continue;
-        }
-        std::vector<unsigned char> layer;
-        const int f = qualityDownscaleFactor(std::max(w, h), target);
-        if (f > 1) {
-            boxDownsample(data, w, h, f, layer);
-            w = w / f; h = h / f;
-        } else {
-            layer.assign(data, data + (size_t)w * h * 4);
-        }
-        stbi_image_free(data);
-        layerData.push_back(std::move(layer));
-        layerW.push_back(w); layerH.push_back(h);
-        const int l = std::max(w, h);
+    // ── LAS CAPAS SE DECODIFICAN EN PARALELO ────────────────────────────────────────────────────
+    //
+    // ⚠️ ESTE BUCLE ERA SERIE Y ES EL ARRANQUE ENTERO. Un `perf record` de 40 s del juego sale
+    // dominado por el decodificador de PNG, no por el render:
+    //
+    //     15,71 %  stbi__create_png_image_raw      5,34 %  stbi__fill_bits
+    //     12,83 %  stbi__parse_zlib                3,81 %  memmove
+    //
+    // ~35 % de TODOS los ciclos del proceso descomprimiendo PNG, y ni un punto caliente de render en
+    // CPU (el frame es GPU-bound: `present.swap` se lleva el 83 %). Medido aqui: **4 240 ms + 5 654 ms
+    // = 9,9 s** para las ocho capas de 4096x4096.
+    //
+    // Las capas son INDEPENDIENTES —cada una escribe su propio hueco y nada mas— asi que el bucle es
+    // paralelo por construccion. `minLong` se calcula DESPUES de unir, que es lo unico compartido.
+    layerData.resize(paths.size());
+    layerW.assign(paths.size(), 0);
+    layerH.assign(paths.size(), 0);
+    {
+        // `HARUKA_TEX_SERIAL=1` vuelve a un solo hilo. No es simetria cosmetica: es lo que permite
+        // demostrar que el paralelo carga LO MISMO, comparando las dos imagenes del juego.
+        static const bool s_serial = [] { const char* e = std::getenv("HARUKA_TEX_SERIAL");
+                                          return e && e[0] == '1'; }();
+        const unsigned hw = s_serial ? 1u : std::max(1u, std::thread::hardware_concurrency());
+        const size_t nThreads = std::min<size_t>(paths.size(), hw);
+        std::atomic<size_t> next{ 0 };
+        auto worker = [&]() {
+            for (;;) {
+                const size_t i = next.fetch_add(1);
+                if (i >= paths.size()) return;
+                const std::string& path = paths[i];
+                if (path.empty()) continue;
+                int w = 0, h = 0;
+                unsigned char* data = nullptr;
+                int bestArea = 0;   // persiste entre las dos raices, se resetea por capa
+                std::string bestPath;
+                takeBest(Haruka::AssetPaths::textures(), path, w, h, data, bestArea, bestPath);
+                takeBest(Haruka::AssetPaths::projectTextures(), path, w, h, data, bestArea, bestPath);
+                if (!data) {
+                    HARUKA_LOGW("Terrain", "capa '%s' no encontrada -> gris neutro", path.c_str());
+                    continue;
+                }
+                HARUKA_LOGI("Terrain", "capa '%s': gana %s (%dx%d)",
+                            path.c_str(), bestPath.c_str(), w, h);
+                std::vector<unsigned char> layer;
+                const int f = qualityDownscaleFactor(std::max(w, h), target);
+                if (f > 1) {
+                    boxDownsample(data, w, h, f, layer);
+                    w = w / f; h = h / f;
+                } else {
+                    layer.assign(data, data + (size_t)w * h * 4);
+                }
+                stbi_image_free(data);
+                layerData[i] = std::move(layer);
+                layerW[i] = w; layerH[i] = h;
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(nThreads > 0 ? nThreads - 1 : 0);
+        for (size_t t = 1; t < nThreads; ++t) pool.emplace_back(worker);
+        worker();                                    // este hilo tambien trabaja
+        for (std::thread& t : pool) t.join();
+    }
+    for (size_t i = 0; i < paths.size(); ++i) {
+        if (layerW[i] <= 0) continue;
+        const int l = std::max(layerW[i], layerH[i]);
         minLong = (minLong == 0) ? l : std::min(minLong, l);
     }
+    HARUKA_LOGI("Terrain", "%zu capas decodificadas en %.0f ms", paths.size(),
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0Load).count());
     if (minLong <= 0) return {};
 
     int W = 0, H = 0;
@@ -2798,7 +2840,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         const double radPerPx = fovYRad / std::max(viewportH, 1.0);
         const double cone     = Haruka::Terrain::nodeFrustumConeHalfAngle(fovYRad, aspect);
         m_nodeRenderer.prepare(ctx, cameraPos, m_config.position, m_config.radius,
-                               viewDir, radPerPx, cone);
+                               viewDir, radPerPx, cone, m_frameDt);
     }
 
     if (!RHI::valid(m_vertexBuffer)) return;
@@ -3672,10 +3714,13 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // ⚠️ EL PICO, NO EL INSTANTE. La sabana gruesa al girar dura UN frame, y este log muestrea
             // 1 de cada 120: el valor instantaneo casi siempre sale 0 aunque el bug este vivo. Se
             // guarda el maximo de la ventana, que es lo que hay que mirar para decir que no pasa.
-            static size_t s_peakAnc = 0, s_peakCov = 0; static uint32_t s_peakDrop = 0;
-            s_peakAnc = std::max(s_peakAnc, st.ancestors);
-            s_peakCov = std::max(s_peakCov, st.covered);
-            s_peakDrop = std::max(s_peakDrop, st.coveredDrop);
+            // ⚠️ EL PICO, NO EL INSTANTE. Un fallo de un frame es invisible en un log que muestrea 1
+            // de cada 120: el valor instantaneo salia 0 con el bug bien vivo. Y el ritmo tambien va
+            // por pico, porque el frame del log rara vez es uno de los que generan.
+            static size_t s_peakAnc = 0, s_peakLive = 0; static double s_peakRate = 0.0;
+            s_peakAnc  = std::max(s_peakAnc,  st.ancestors);
+            s_peakLive = std::max(s_peakLive, st.live);
+            s_peakRate = std::max(s_peakRate, st.nodesPerSec);
             static int s_log = 0;
             if ((s_log++ % 120) == 0)
                 // ⚠️ LOS DOS RECORTES POR SEPARADO. Con "frustum descarto" a secas no se distingue el
@@ -3683,12 +3728,12 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 // cortados"). Los dos estan probados por tests contra rayos de pantalla —cero
                 // descartes indebidos en ambos— asi que si aqui salen cifras altas, el que miente es
                 // el test, no el motor. Ese es el dato que falta.
-                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu, TAPADOS %zu) · "
+                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu) · "
                             "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu"
-                            " · tope del selector %zu%s · stride %u..%u en %u draws · %.1f M tris · residentes %zu/%zu"
-                            " · SIN RANGO %zu"
-                            " · alt %.0f m · desalojos %zu · publish RECHAZADO %zu · PICO en 120 frames: por ancestro %zu, TAPADOS %zu a %u niveles",
-                            st.selected, st.drawn, st.noSlot, st.ancestors, st.covered, st.levelMin, st.levelMax,
+                            " · tope del selector %zu%s · stride %u..%u en %u draws · %.1f M tris"
+                            " · residentes %zu/%zu · SIN RANGO %zu · alt %.0f m"
+                            " · PICO en 120 frames: VIVOS %zu, por ancestro %zu, %.0f nodos/s",
+                            st.selected, st.drawn, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
                             st.farthestKm, st.culledFrustum, st.culledHorizon,
                             st.selBudget,
                             (st.selBudget > 0 && st.selected + 8 >= st.selBudget) ? " SATURADO" : "",
@@ -3696,8 +3741,8 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                             (double)st.tris / 1e6,
                             st.resident, m_nodeRenderer.capacity(), st.rangeMissing,
                             glm::length(cameraPos - m_config.position) - m_config.radius,
-                            st.evicted, st.pubFailed, s_peakAnc, s_peakCov, s_peakDrop),
-                (void)(s_peakAnc = 0), (void)(s_peakCov = 0), (void)(s_peakDrop = 0);
+                            s_peakLive, s_peakAnc, s_peakRate),
+                (void)(s_peakAnc = 0), (void)(s_peakLive = 0), (void)(s_peakRate = 0.0);
             v5Drew = st.drawn > 0;
         }
     }

@@ -8,8 +8,8 @@ Nada de plan por versión.
 | Bugs abiertos · verificaciones pendientes · ideas sin decidir. | [ROADMAP.md](ROADMAP.md) — el plan por versión de los tres proyectos. |
 | | [docs/HISTORIAL.md](docs/HISTORIAL.md) — lo cerrado, con las trampas que costaron sesiones. |
 
-**Suite**: `./haruka_tests` → **26 071 OK · 0 FALLOS** · RHI: `./haruka_tests_rhi` →
-**270 OK · 0 FALLOS** en los dos backends (2026-08-25).
+**Suite**: `./haruka_tests` → **26 083 OK · 0 FALLOS** · RHI: `./haruka_tests_rhi` →
+**308 OK · 0 FALLOS** en los dos backends (2026-08-26).
 ⚠️ **Los tiempos dependen del ÁRBOL**: `Survival/build` está en `RelWithDebInfo` y la suite CPU entera
 tarda **~95 s**; `haruka-cpp/build` está en **`Debug`** y ahí no termina en 260 s. Mirar
 `CMAKE_BUILD_TYPE` antes de citar un tiempo. ⚠️ El rojo de `terrain_quality_mapping` que
@@ -223,11 +223,683 @@ Un destello de un frame, cada dos frames, mientras giras.
 niveles` — peor que en el banco headless. Para un artefacto de un frame hay que loguear el máximo del
 intervalo. (Y el vsync no revela un destello, lo **alarga**: con los fps capados dura más en pantalla.)
 
-**Lo que queda, y es OTRA cosa:** el pico residual de 14 niveles sale en dos sitios, ninguno es girar:
-la **carga inicial** y el momento en que el pool llega a 2048/2048 y empieza a desalojar. Con
-`HARUKA_TERRAIN_V5_POOL=3072` los desalojos se paran en 4 811 y quedan **doce ventanas seguidas a 0**.
-`publish RECHAZADO 0` en todos los casos, así que no es que no quepa: es el LRU rompiendo eslabones de
-la cadena mientras el conjunto de trabajo todavía crece. Sin decidir si compensa la VRAM (195 KB/nodo).
+### 🟡 ABIERTO — la caída por ancestro llega a 14 niveles, y SOLO mientras entra terreno (2026-08-26)
+
+Con la doble superficie ya quitada, queda el otro artefacto: la caída por ancestro se va a **14
+niveles** (una hoja de nivel 17 resolviendo a un nivel 3) y con la partición eso dibuja **el nodo
+grueso en vez de** los finos que tapa. Un frame, pero se ve.
+
+**Lo que la medida SÍ dice** (sonda `TerrenoV5`, picos por ventana de 120 frames):
+
+    res 1624/2048  desal    0 (rompen    0)  VIVOS 2451/2048  TAPADOS 1246 a 14 niv · SIN GENERAR 0
+    res 1624/2048  desal    0 (rompen    0)  VIVOS  188/2048  TAPADOS    0 a  0 niv · SIN GENERAR 0
+    res 2048/2048  desal  373 (rompen    0)  VIVOS 1555/2048  TAPADOS  204 a  5 niv · SIN GENERAR 0
+    res 2048/2048  desal 5894 (rompen  872)  VIVOS 1685/2048  TAPADOS 1124 a 14 niv · SIN GENERAR 0
+    res 2048/2048  desal 8227 (rompen 1335)  VIVOS 1709/2048  TAPADOS 1209 a 14 niv · SIN GENERAR 0
+
+- **`SIN GENERAR 0` en TODAS las ventanas.** No hay ni un solo evento en un frame que no estuviera
+  generando nodos: **no es un fallo de estado, es el transitorio del streaming**. Esa columna es la que
+  decide y por eso está separada — un único número no distingue las dos cosas.
+- **`rompen cadena` sigue a los desalojos**: 0, 0, 0, 872, 1335. El LRU sí rompe eslabones, pero solo
+  cuando ya está desalojando.
+- **La capacidad ayuda y no cura**: a 4096 quedan 197 roturas y 12 niveles (contra 872-1335 y 14). Y
+  `residentes == capacidad` NO es señal de nada: cualquier LRU acaba lleno, también a 4096.
+
+**Lo que se probó y NO sirve, con la medida, para que nadie lo repita:**
+- **Proteger en el LRU a los nodos con hijos residentes.** Llegaba a saltar 146-205 huecos en el
+  barrido, pero ninguno era el que el LRU iba a elegir: resultado idéntico al último dígito en los tres
+  regímenes. Revertido. `terrain_node_pool_chain_eviction` guarda la medida.
+- ⚠️ **Y ese test headless daba `rompen cadena = 0` mientras el juego daba 358-1335.** El banco no
+  reproducía la condición (regenera todo cada frame y el orden nunca la destapa). **La conclusión buena
+  salió del juego, no del test** — anotado porque el error fue creer al banco.
+
+**Lo que sí se arregló de camino:** `publish` ponía `lastUsed = m_frame` en el nodo nuevo **sin tocar a
+sus ancestros**, y `touchAncestors` corta en cuanto ve un eslabón ya marcado con este frame. La
+siguiente hoja que sube se paraba ahí y el padre se quedaba con la marca vieja. Es una violación real
+de la suposición del corte. ⚠️ **Arreglado, pero NO se le puede atribuir mejora**: la varianza entre
+ejecuciones (358, 565, 872, 1303, 1335) se come el efecto.
+
+**A ojo, para distinguir los dos artefactos** (son distintos y solo mirándolos se separan):
+`HARUKA_TERRAIN_V5_NOPART=1` apaga la partición — con ella se ve un parche GRUESO, sin ella se ven las
+DOS superficies peleando por el z-buffer.
+
+### ✅ CERRADO — la huella del fallback y los 390 MB del pool eran el mismo problema (2026-08-26)
+
+Andoni: *"creo que es de arquitectura y cómo está creado más que de presupuesto"*. Lo era.
+
+**El fallo.** La identidad GEOMÉTRICA de un nodo estaba atada a su slot de datos. Si la hoja pedida no
+estaba residente, el pool devolvía un ancestro y se dibujaba **la huella del ancestro**, que cubre 4^k
+hojas. Medido con la cámara girando y el pool caliente (`terrain_node_fallback_footprint`):
+
+    2 hojas sin residencia, caida de 5 niveles
+      area rota con la huella del ANCESTRO : 101,66 % de lo visible
+      area rota con la huella de la HOJA   :   0,12 %
+      -> el fallback estropea 820x su propia area
+
+**DOS hojas de ~250 rompían la pantalla entera.** Por eso ningún ajuste del pool movía el número, y
+por eso las tres cosas que probé antes (proteger la cadena en el LRU, presupuesto por segundo, más
+capacidad) no sirvieron: atacaban la frecuencia del fallo, no su amplificación.
+
+**Y no había regla de "dibujar o no" que saliera del dilema** — las dos se probaron EN EL JUEGO:
+
+| regla | veredicto | qué pasa |
+|---|---|---|
+| basta un descendiente dibujado | *"ha mejorado, por lo menos el cercano, el lejano sigue mal"* | quita la sábana pero deja sin dibujar la huella de la hoja |
+| tapado ENTERO | *"con este cambio es peor en general"* | no abre agujero, pero lejos no se cumple y la sábana se queda |
+
+**EL ARREGLO — la hoja se dibuja SIEMPRE en su propia huella.** Si los datos vienen de `k` niveles más
+arriba, lee el sub-rectángulo que le corresponde en la rejilla del ancestro: el téxel `t` cae en
+`(cells·sub + t) / 2^k` con `sub = índice mod 2^k`, con bilineal entre téxeles
+(`harukaNodeSample` en `terrain_node.vert`). Ni sábana ni agujero: un trozo menos detallado, del
+tamaño que le toca, que se afina al frame siguiente.
+
+`terrain_node_subrect_mapping` prueba que la coordenada apunta **al mismo punto de la cara del cubo**
+que el téxel de la hoja: **0,000000 m** en 374 casos (niveles 6/11/17 × k=1..8, con índices NO
+alineados a propósito). Contrapruebas: un téxel de más desplaza **1 221 m**; olvidar el sub-índice,
+**3 283 km**.
+
+**Y de ahí sale el otro problema, el de la memoria.** Cada nodo guardaba TRES mapas —el suyo, el del
+padre y el del abuelo— sólo para poder fundirse hacia arriba, porque el shader únicamente sabía leer
+su propio hueco. Sabiendo leer el sub-rectángulo del hueco del padre, las copias sobran:
+
+| | antes | ahora |
+|---|---|---|
+| por nodo | 195 KB (3 mapas) | **65 KB (1 mapa)** |
+| huecos | 2 048 | **4 096** |
+| VRAM del pool | 390 MB | **260 MB** |
+| pico de nodos VIVOS a la vez | 2 445 — **no cabían** | 1 747-2 385, caben |
+
+⚠️ **Es además MÁS fiel**: el vecino grueso dibuja TRIÁNGULOS entre sus muestras, no la función
+evaluada en mi punto. Leer su rejilla interpolada es exactamente la superficie contra la que hay que
+cerrar la costura; la copia apuntaba a otra cosa parecida.
+
+⚠️ **Contrapartida declarada**: el morph ahora depende de que el PADRE esté residente (antes la copia
+estaba siempre). Si no está, `parSlot = -1` y no se morfea, en vez de leer el hueco 0 —que sería un
+trozo de planeta cualquiera—. Lo mismo para el abuelo y para el salto de mapa por stride.
+
+En el juego: `sel N -> dibujados N` con **SIN HUECO 0** siempre, y el pico de `por ancestro` baja de
+520-1 200 a **0-216** pasada la carga.
+
+⚠️ **LO QUE NO SE PUEDE AFIRMAR, Y YO LO AFIRMÉ**: que el RSS total del proceso bajara. Seis tomas del
+mismo binario dan **823, 1 063, 1 322 MB con 2 048 huecos y 1 334, 1 038, 1 244 MB con 4 096**: los
+rangos se solapan enteros. La dispersión entre ejecuciones (±500 MB) se come el efecto. Por el mismo
+motivo, el *"la máscara costaba 530 MB"* que escribí antes (1 358 contra 827) **no está sostenido** —
+cae dentro de esta misma dispersión. Lo único determinista es lo que el motor reserva y loguea.
+**Para hablar de RSS hace falta un método que controle esa varianza.**
+
+### 🔴 ABIERTO — el coste real del frame: NO es generar, es DIBUJAR (2026-08-26)
+
+Andoni: *"se ve como el terreno se reconstruye"* y *"hay como 30 ms en juego sin mostrar en panel"*.
+Las dos cosas tienen la misma respuesta y sale del profiler.
+
+**Los 30 ms que faltaban en el panel.** El panel mide scopes de **CPU**, y la CPU no hace nada:
+
+    game.onUpdate                      0.15 ms
+    renderFrameContent                 2.33 ms   <- TODO el trabajo de CPU
+      frame.compute.prepare              1.03 ms
+      scene.prop.instanced               0.61 ms
+      planet.v5.nodes                    0.12 ms
+    present.swap(espera GPU/vsync)    31.24 ms   <- AQUI, y con HARUKA_NO_VSYNC=1
+
+O sea: el frame es **espera de GPU**, y el profiler no tiene timers de GPU, asi que todo el coste
+aparece agregado en `present.swap`. **Falta instrumentar la GPU por pase.**
+
+**Coste de GENERAR un nodo**, medido con fence (`v5 F1: coste de generar nodos en GPU`), nivel 18,
+16 641 texeles por nodo, tanda amortizada de 256:
+
+| nodos por tanda | ms/nodo total | sin evaluar relieve | relieve |
+|---|---|---|---|
+| 1 | 0,1175 | — | (una sola tanda: ruido) |
+| 16 | 0,0592 | 0,0183 | 69 % |
+| 256 | **0,0555** | 0,0151 | **73 %** |
+
+Reparto: **relieve 0,0404 ms/nodo · proyeccion+escritura 0,0151**. Y el A/B del cambio de esta sesion
+(tres mapas por nodo -> uno): **0,1393 -> 0,0555 ms/nodo, 2,5x mas barato** (backend lento: 0,2016 ->
+0,1228, 1,64x).
+
+⚠️ **No hay mas que rascar por nodo**: el 73 % es evaluar el relieve — **56 hashes por texel** (8
+esquinas x 7 octavas) — y eso no se abarata sin cambiar los valores, lo que romperia la paridad con la
+fisica. El ruido ya hace el `floor` en double y el hash y la interpolacion en float.
+
+**PERO GENERAR NO ES EL PROBLEMA.** A/B sobre el mismo binario (Vulkan, sin vsync):
+
+| config | `present.swap` (GPU) | frame | triangulos |
+|---|---|---|---|
+| base (VERTPX=4) | **29,8-32,8 ms** | 35,1 ms | 6,9 M |
+| VERTPX=8 | **12,2-12,6 ms** | 16,9 ms | 2,0 M |
+| sin pase v5 (`HARUKA_TERRAIN_V5=0`) | **7,9-8,1 ms** | 17,0 ms | — |
+
+**El pase de terreno cuesta ~22 ms de GPU**, y baja a 4,3 ms con 3,5x menos triangulos. Generar 85
+nodos son 4,7 ms; **dibujarlos, 22**. Confirmado ademas por el A/B del presupuesto: bajarlo de 170 a
+85 nodos/frame **no movio el frame** (OpenGL 70-73 ms, Vulkan 33,4-33,9).
+
+✅ **DECIDIDO POR ANDONI MIRANDO: `VERTPX = 8` pasa a ser el valor por defecto.** Su veredicto con 8:
+*"se sigue viendo bien y sin 20 ms de GPU"*. Son **18 ms de GPU** por una diferencia visual que el
+autor da por buena. El coste del terreno nunca fue generarlo, sino dibujarlo.
+
+**Reparto de la GPU con VERTPX = 8** (Vulkan, `HARUKA_NO_VSYNC=1`, por diferencia entre configs):
+
+| A/B | GPU (`present.swap`) | lo que atribuye |
+|---|---|---|
+| base | 12,65-12,89 ms | — |
+| `HARUKA_NOBLOOM=1` | 11,17-11,52 ms | **bloom ≈ 1,4 ms** |
+| `HARUKA_TERRAIN_V5=0` | 8,05-8,13 ms | **terreno ≈ 4,6 ms** |
+| las dos | 5,28-5,90 ms | **fondo ≈ 5,6 ms** (cielo, mar, props, nubes, composite, UI) |
+
+Descartados con medida: props ≈ 0-0,4 ms · sombra ≈ 0 · agua ≈ 0,4 ms · `RenderScale = 1,00` (no hay
+supersampling) · apagar las nubes sale **mas caro** (13,4 contra 12,0: el camino alternativo de
+`sky.frag` cuesta mas que el volumetrico).
+
+⚠️ **UNA MEDIDA MIA QUE NO VALIA, Y POR QUE.** El primer interruptor de post saltaba el pase ENTERO con
+un `return` y daba "1,0 ms", que leido a la ligera dice "el post cuesta 11,5 ms". Es falso: **ese pase
+es quien vuelca la escena al swapchain**, asi que sin el no hay nada que presentar y `present.swap` no
+espera a nada. El interruptor bueno apaga SOLO el bloom (`HARUKA_NOBLOOM`) y deja el composite. Regla:
+un interruptor de A/B que ademas quita el trabajo de presentar no mide un pase, mide otra cosa.
+
+⚠️ **Y FALTA LO DE FONDO: EL PROFILER NO MIDE GPU.** Todo esto se ha sacado apagando pases y restando,
+porque el RHI no tiene *timestamp queries* y las fences señalan al ENVIAR el frame, asi que no sirven
+para cronometrar dentro. Mientras no las haya, el panel seguira enseñando 2,5 ms de CPU y escondiendo
+el resto en `present.swap`. **Instrumentar la GPU por pase es la tarea que desbloquea las demas.**
+
+⚠️ Y de camino se separo el presupuesto de generacion de la capacidad del pool: era `capacity/24`, asi
+que subir el pool a 4 096 por COBERTURA doblo tambien el ritmo de generacion a 170 nodos/frame sin que
+nadie lo pidiera. Ahora es 85 fijo, documentado con la medida.
+
+### ⏸️ PAUSA en terreno/rendimiento — siguiente frente: VULKAN POR DEFECTO (2026-08-26)
+
+Decision de Andoni: *"apuntar todo, hacer una pausa con esto y arreglar por completo el vulkan para
+que se vea bien y sea el default definitivo"*.
+
+**Estado en el que se deja el terreno** (todo medido, nada pendiente de verificar salvo lo que se dice):
+
+| pieza | estado |
+|---|---|
+| gravedad del personaje acumulandose apoyado | ✅ cerrado, con test y contraprueba |
+| "segundo terreno al girar" (resolver antes de generar) | ✅ cerrado, 457 tapados -> 0 |
+| huella del fallback (sub-rectangulo) | ✅ cerrado, 820x -> 1x, mapeo exacto a 0,000000 m |
+| 3 mapas por nodo -> 1 | ✅ 195 -> 65 KB/nodo · pool 2 048 -> 4 096 huecos · 390 -> 260 MB |
+| presupuesto atado a la capacidad | ✅ separado, 85 nodos/frame fijos |
+| `VERTPX` 4 -> 8 | ✅ por defecto, validado a ojo por Andoni: −18 ms de GPU |
+| reparto de la GPU | ✅ terreno 4,6 ms · bloom 1,4 ms · fondo 5,6 ms |
+
+**Lo que queda apuntado y SIN hacer**, por orden de lo que desbloquea:
+1. **Timestamps de GPU por pase en el RHI.** Es la tarea que desbloquea las demas: hoy el panel enseña
+   2,5 ms de CPU y esconde el resto en `present.swap`, y todo el reparto de arriba ha salido apagando
+   pases y restando. Las fences no sirven (señalan al ENVIAR el frame).
+2. **Tope de stride para los nodos lejanos.** Llegaba a 4 porque solo habia tres mapas; con el
+   sub-rectangulo ese limite ya no existe. Quita triangulos **donde no se notan**, al reves que
+   `VERTPX`, que los quita en todas partes.
+3. El outlier del alambre de colision (radio 78,4 m, −0,0418 m, anillo 2).
+4. El escalon de 0,785 m entre niveles (techo estructural del morph: un nodo dibujado siempre tiene
+   `morph < 1`).
+5. Esquinas en orbita · props sin geomorph.
+
+### 🔴 EN CURSO — Vulkan bien visto y por defecto (2026-08-26)
+
+**Primera pista, y encaja con `vulkan-is-opengl-assumed`**: `camera.cpp` compensa el eje Y de Vulkan
+con `p[1][1] = -f` (invertir el VIEWPORT se probo y rompe el post: espeja los quads a pantalla
+completa y con el bloom iterando cambia la PARIDAD de espejados). Pero invertir la PROYECCION **espeja
+la geometria 3D**, y con ella el bobinado efectivo que ve el rasterizador — mientras
+`vk_pipeline.cpp` declara `VK_FRONT_FACE_COUNTER_CLOCKWISE` **siempre**.
+
+Hipotesis: para geometria 3D, Vulkan deberia tratar como frontal el bobinado CONTRARIO al de GL. Eso
+explicaria exactamente lo unico que esta medido de este fallo:
+
+    con CullMode::Back    OpenGL cobertura 97,4 %   ·   Vulkan 3,4 %  (descarta la cara BUENA)
+
+⚠️ Y lo que hay que explicar ANTES de tocarlo: otros pipelines con `cull = Back` (props, malla base,
+`nearground.vert`) *parecen* verse bien en Vulkan. O su malla esta bobinada al reves y los dos
+espejados se cancelan, o estan igual de mal y nadie lo ha mirado. **Hasta saber cual de las dos, no se
+toca `frontFace`**: es un cambio global.
+
+❌ **HIPOTESIS DEL BOBINADO: REFUTADA.** `testCullWindingWithProjection` ya lo prueba y pasa en los
+dos backends: un triangulo antihorario con la proyeccion REAL del motor y `cull = Back` **se ve** en
+GL y en Vulkan. El convenio de cara frontal no esta invertido.
+
+### ✅ CERRADO — Vulkan renderizaba TODO a 720p y lo estiraba a 1080p (2026-08-26)
+
+Andoni: *"imgui no es nitido pero creo que es por el escalado en pantalla completa"*. La intuicion era
+correcta y el alcance mucho mayor: **no era la UI, era el juego entero**.
+
+Sonda `HARUKA_UI_SCALE_LOG=1`, que imprime los TRES tamanos que tienen que casar:
+
+    OpenGL   SDL en pixeles 1920x1080 · DisplaySize 1920x1080 · escala 1.000 -> la UI pinta 1920x1080
+    Vulkan   SDL en pixeles 1920x1080 · framebuffer 1280x720  · escala 0.667 -> la UI pinta 1280x720
+                                                                 FontGlobalScale 1.500
+
+**Causa raiz** (sonda en `VKSwapchain::chooseExtent`):
+
+    swapchain extent: surface dice 0xFFFFFFFF (indefinido: mando yo) · SDL en pixeles 1280x720
+
+La ventana **arranca a 1280×720** y crece despues. En Wayland el surface responde "decide tu"
+(`currentExtent = 0xFFFFFFFF`) y **no marca el swapchain como obsoleto al redimensionar**: esperar a
+`OUT_OF_DATE` es asumir una semantica que Wayland no da. OpenGL no lo sufre porque su framebuffer por
+defecto sigue a la ventana solo. Es otra vez el patron de `vulkan-is-opengl-assumed`.
+
+**Arreglo**: `VKDevice::beginFrame` compara el tamano REAL en pixeles con el del swapchain y lo recrea
+si no casan. Dos enteros por frame, sin depender de que el driver avise.
+
+    la ventana es 1920x1080 y el swapchain 1280x720: recreando
+    ventana 1920x1080 · framebuffer 1920x1080 · escala 1.000 · FontGlobalScale 1.000
+
+La UI sale nitida porque su atlas deja de rasterizarse a 8,7 px para agrandarse x1,5.
+
+⚠️ **Y ESTO INVALIDA TODAS LAS COMPARATIVAS GL↔VULKAN DE RENDIMIENTO DE ESTA SESION.** "Vulkan 35 ms
+contra OpenGL 70 ms" comparaba **el 44 % de los pixeles** contra el 100 %. Los repartos de GPU por pase
+(terreno 4,6 ms, bloom 1,4 ms, fondo 5,6 ms) se midieron TODOS en Vulkan a 720p: **las proporciones
+entre pases siguen valiendo, las cifras absolutas no**. Hay que rehacerlas.
+
+### ✅ CERRADO — "props y terreno se ven quemados" en Vulkan: era el BLOOM (2026-08-26)
+
+**El bug**: el pase de bloom hace 1 + 2xN draws con parametros distintos y los escribia todos en el
+MISMO UBO. En OpenGL cada draw se ejecuta al vuelo y eso funciona; **en Vulkan los comandos se GRABAN
+y todos leen el ULTIMO valor**. Resultado: el bright-pass se quedaba con `threshold = 0` —la escena
+ENTERA entraba al bloom— y el desenfoque horizontal se volvia vertical.
+
+⚠️ **El propio codigo lo avisaba y nadie lo cerro**: *"OJO (Vulkan): ... habra que usar offsets
+dinamicos o un UBO por draw. Anotado para cuando entre el VKContext."* Es el MISMO fallo que ya se
+arreglo en el pase de terreno (un SSBO por grupo). **Van dos; hace falta un test del banco que lo cace
+a la tercera**: dos draws con valores distintos en el mismo UBO y blend aditivo, que con el bug daria
+`B+B` en vez de `A+B`. Sin hacer.
+
+**Arreglo**: `m_bloomUBOs`, uno por draw, creados bajo demanda y reutilizados entre frames (tope real
+1 + 2x8 = 17).
+
+| hora congelada | OpenGL | Vulkan | ratio |
+|---|---|---|---|
+| antes, a=1.1 | 7,6 15,1 13,3 | 11,3 23,3 19,4 | 1,50 |
+| antes, a=4.2 | 113,6 181,5 96,7 | 187,7 235,0 158,6 | 1,48 (el verde ya saturando a 235) |
+| **ahora, a=1.1** | 7,6 15,1 13,3 | **7,6 15,1 13,3** | **1,00** |
+| **ahora, a=4.2** | 113,6 181,5 96,7 | **113,6 181,5 96,6** | **1,00** |
+
+**Y NADA DE ESTO SE PODIA MEDIR AL PRINCIPIO.** Hicieron falta tres herramientas, cada una porque la
+medida anterior mentia:
+
+1. **`HARUKA_DAY_ANGLE=<radianes>` congela la hora del dia.** El angulo del Sol se acumula con el `dt`,
+   asi que dependia del tiempo de carga: el MISMO OpenGL dio `29,5 32,8 38,3` y `50,1 96,3 60,2` en dos
+   tomas. Con esa varianza llegue a atribuir a Vulkan un frame "1,64x mas claro" — **retirado**.
+2. **La captura del juego va DESPUES del present.** `readPixels` copia la ultima imagen PRESENTADA;
+   llamarlo a mitad de frame devolvia en Vulkan algo que no era la escena: daba los MISMOS valores con
+   el Sol en cualquier sitio y hasta con el terreno apagado (`cambia 0,0` contra `355,8` en GL). Es la
+   regla que el banco de RHI ya documentaba y que `application.cpp` no seguia.
+3. **El volcado invertia las filas siempre** (convenio de GL), asi que la captura de Vulkan salia boca
+   abajo. Ahora el orden depende del backend.
+
+**Bisecar fue lo que lo cerro**, no mirar: con `HARUKA_NOBLOOM=1` los dos backends daban la MISMA
+imagen (`112,8 182,2 96,2` contra `112,8 182,3 96,2`), y con el bloom encendido 1,48x. Eso señalaba el
+pase sin ambiguedad.
+
+### ✅ CERRADO — "las lineas de triangulos son blanco-azuladas": el ANILLO CERCANO sobraba (2026-08-26)
+
+**No era el cielo colandose por las costuras**, y no era Vulkan. Test nuevo del banco (`escena: el
+fondo NO se cuela por las costuras`): fondo MAGENTA, terreno encima con la vista 2, y se cuenta el
+magenta superviviente. Al nadir, donde el terreno cubre el cuadro entero:
+
+    sin dibujar :  65 536 de 65 536 magenta (100,0 %)   <- CONTRAPRUEBA del detector
+    dibujando   :       0 de 65 536 magenta ( 0,0000 %)
+
+Cero agujeros, en los dos backends.
+
+**Era el anillo cercano peleando por el z-buffer.** Energia de borde en la captura del juego (|dif| con
+el pixel de al lado; las lineas finas la disparan), hora congelada, con el post ENCENDIDO:
+
+| | anillo ON | anillo OFF |
+|---|---|---|
+| OpenGL | 5,33 | **1,42** |
+| Vulkan | 5,34 | **1,43** |
+
+**Identico en los dos backends: no era un problema de backend.** El anillo dibuja dentro de ±192 m los
+MISMOS triangulos que se pisan, y se diseño contra el CLIPMAP, **que le abria un hueco de 192 m**. El
+pase v5 nunca abrio ese hueco: dos superficies coplanares sobre el mismo relieve. Literalmente lo que
+la cabecera del v5 dice que viene a quitar.
+
+**Arreglo**: no se dibuja cuando el pase v5 esta activo. `HARUKA_NEAR_RING=1` lo fuerza para comparar.
+Lo que se pierde es la paridad EXACTA triangulo-a-triangulo cerca del jugador, y ya no hace falta: el
+autotest del alambre mide **0,0004 m de media** con un unico outlier de 0,0418 m — 4 cm en el peor
+vertice. Verificado por defecto: **borde 1,42 en OpenGL y 1,43 en Vulkan**.
+
+⚠️ **DOS MEDIDAS MIAS QUE NO VALIAN, Y POR QUE:**
+- **`HARUKA_NOBLOOM=1` NO apaga solo el bloom.** `m_postActive = (rscale != 1 || wantFXAA ||
+  wantBloom)`, asi que con escala 1 y sin FXAA apaga **todo el post** y la escena deja de pasar por el
+  target offscreen. La primera bisecion ("el bloom cuesta 1,48x") comparaba dos CAMINOS DE RENDER
+  distintos. ⚠️ El arreglo del bloom (un UBO por draw) sigue en pie por otra via: la verificacion final
+  fue con bloom ENCENDIDO en los dos backends y dio ratio 1,00.
+- **Y el camino directo al backbuffer NO es la causa de nada aqui**: medido, la energia de borde es la
+  misma con post (5,41) y sin post (5,43) en los dos backends. La hipotesis de la profundidad en punto
+  fijo era plausible —OpenGL no pide `SDL_GL_DEPTH_SIZE` y Vulkan si crea su backbuffer en D32_SFLOAT—
+  pero **la medida la descarta**. Queda anotada por si aparece otro sintoma por ahi.
+
+### ✅ AÑADIDO — el banco ya dibuja UNA ESCENA: terreno + prop con luz (2026-08-26)
+
+Pedido por Andoni: *"quiero que un test de motor dibuje una prueba de terreno y objeto como un prop con
+iluminacion"*. El banco tenia `testTerrainLighting` y `testPropLighting` por separado, y el sintoma que
+se persigue —*"props y terreno se ven quemados o sin luz"*— es justamente el que no se ve asi.
+
+`escena: terreno + prop en el mismo pase, los dos con luz` dibuja los dos en el MISMO render pass con
+la MISMA direccion de sol, dos veces (sol de frente y al otro lado), y mide la luminancia de cada uno
+por separado dentro de la misma imagen — el prop en el centro, el terreno en una esquina:
+
+    terreno (esquina)  137,8 -> 42,0   (cae 69,5 %)
+    prop    (centro)   204,6 -> 58,6   (cae 71,3 %)
+
+**Los dos responden al sol, y casi en la misma proporcion.** Asi que el camino de sombreado del prop NO
+esta roto: lo blanco que se ve en el juego viene de otro sitio (material real sin albedo, tinte de
+instancia o LOD), no del shader. Es un negativo util: acota donde NO buscar.
+
+Para dibujar los dos en un pase hubo que partir `propLitPixel`: ahora acepta un `Context*` y devuelve
+sus recursos en `PropRes`. ⚠️ No se destruyen dentro — en Vulkan los comandos aun no se han ejecutado
+al volver y seria un uso-despues-de-liberar; los destruye el llamador tras `endFrame`.
+
+Las dos capturas entran ademas en el careo GL↔Vulkan, y ahi el resultado es el que se queria ver:
+
+    escena.terreno+prop sol A   0,00 % de pixeles distintos · |delta| medio 0,02 · peor canal 1
+    color medio  OpenGL 203,5 205,0 206,4  ·  Vulkan 203,5 205,0 206,4
+
+**Identicos.** Con el bloom y el swapchain arreglados, los dos backends dibujan la misma escena.
+
+### 🟡 ABIERTO — "toda la cara con la misma luz, y es de Vulkan": CINCO hipotesis refutadas (2026-08-26)
+
+Reportado por Andoni. **No he podido reproducirlo**: todas las medidas dicen que los dos backends
+dibujan lo mismo. Lo que se ha descartado, con su dato, para que nadie lo repita:
+
+| hipotesis | medida | veredicto |
+|---|---|---|
+| Calificador `flat` desajustado entre vertice y fragmento | 80 emparejamientos plausibles sacados del C++ | **0 desajustes** |
+| Color por vertice leido como por INSTANCIA | captura .rdc: Vulkan 24 bindings `RATE_VERTEX` + 4 `INSTANCE`; GL, divisores 0 salvo dos bindings a 1 | correcto en los dos |
+| Provoking vertex / polygon mode | 29 pipelines, todos `POLYGON_MODE_FILL`, sin la extension | descartado |
+| Los backends dibujan distinto | diff pixel a pixel del juego, hora congelada | **solo difiere el texto del profiler** (esquina sup. izq.); \|delta\| medio 0,05 |
+| Mi cambio de `VERTPX` 4 -> 8 (la mitad de vertices, normales mas bastas) | mismo suelo, A/B | **identico**: 17 colores y 99,5 % de vecinos iguales en los dos |
+
+Y en el banco, la escena de terreno+prop carea **0,00 % de pixeles distintos** entre backends.
+
+⚠️ **Una metrica mia que NO sirve para esto**: contar colores distintos / vecinos identicos no
+distingue sombreado plano de degradado suave a 8 bits. El CIELO —degradado por construccion— da 40
+colores y 99,6 % de vecinos iguales, igual que el suelo. Solo vale para A/B como el de `VERTPX`.
+
+Las dos capturas (`testVColor.rdc` de Vulkan y `testGLColor.rdc` de OpenGL) envian geometria
+comparable: 36 draws / 1 335 463 indices / 8 355 instancias contra 28 / 1 331 278 / 8 169. Son de
+momentos distintos, asi que no se pueden carear draw a draw.
+
+✅ **Y EL HUECO DEL BANCO QUE SÍ ERA REAL, cerrado.** Andoni: *"es un error que ya existia desde la
+creacion del RHI"*. El hueco lo estaba: `testVertexColor` lo dice en su propio comentario —*"los tres
+vertices del MISMO color: asi el centro es ese color exacto y no hay que razonar sobre la
+interpolacion"*—. Comprueba que el atributo LLEGA, pero **con los tres iguales un fallo de
+interpolacion lo pasa sin despeinarse**: un triangulo plano daria exactamente el mismo pixel central.
+
+Nuevo `testVertexInterpolation`: UN triangulo con TRES colores (R/G/B) y cuatro puntos leidos.
+
+    esquina A (231, 12, 12) · esquina B (127,116, 12) · esquina C (127, 12,116)
+    centro    (127, 64, 64)
+    separacion maxima entre esquinas: 104   (plano daria ~0)
+
+**El RHI SI interpola**, y con cifras identicas en los dos backends. Asi que la hipotesis tampoco es
+esa — pero el test que faltaba desde el principio ya esta, y a partir de ahora un fallo de
+interpolacion no puede colarse.
+
+**Lo que hace falta para seguir**: el EID del draw concreto que se ve mal en RenderDoc. Con eso se
+puede mirar SUS entradas en el XML convertido en vez de razonar sobre el frame entero.
+
+### ✅ CERRADO — el arranque estaba dominado por DESCOMPRIMIR PNG (2026-08-26)
+
+`perf record` de 40 s del juego (Vulkan, RTX 3050). El perfil **no habla del frame, habla de la carga**:
+
+    15,71 %  stbi__create_png_image_raw       5,34 %  stbi__fill_bits
+    12,83 %  stbi__parse_zlib                 3,81 %  memmove
+     1,71 %  stbi__create_png_alpha_expand8   2,40 %  bakeHeightMap
+
+**~35 % de TODOS los ciclos del proceso descomprimiendo PNG**, y ni un punto caliente de render en
+CPU — coherente con que el frame sea GPU-bound (`present.swap` se lleva el 83 %). ⚠️ Por eso un
+profiler de CPU en este motor engaña por omision: mide el arranque, no el frame.
+
+Las 8 capas de terreno de 4096x4096 se decodificaban **en serie**, una detras de otra:
+
+    antes    4 240 ms + 5 654 ms = 9,9 s
+    ahora    1 211 ms + 1 642 ms = 2,9 s     <- 3,5x, siete segundos menos de arranque
+
+Son independientes (cada una escribe su propio hueco), asi que el bucle es paralelo por construccion;
+`minLong` se calcula al unir, que es lo unico compartido.
+
+⚠️ **Y se demuestra que carga LO MISMO, no se supone.** `HARUKA_TEX_SERIAL=1` vuelve a un hilo, y
+comparando la captura del juego con la hora congelada: **0,0000 % de pixeles distintos, peor canal 0**.
+Byte a byte igual.
+
+**Lo que queda por ahi**: el bake sigue costando (`bakeHeightMap` 2,4 %) y las texturas se guardan en
+PNG. Un formato ya descomprimido o comprimido para GPU (BCn/KTX2) quitaria el 35 % entero en vez de
+repartirlo entre hilos. Sin hacer.
+
+### ⚠️ MÉTODO — congelar la hora NO basta: hay que congelar la CÁMARA (2026-08-26)
+
+`HARUKA_DAY_ANGLE` hace comparables dos ejecuciones en cuanto al Sol, pero **no en cuanto a adónde
+mira la cámara**. Y sin eso, una región fija de la pantalla no significa nada. Me costó **tres
+conclusiones falsas el mismo día**, y las tres dieron números creíbles:
+
+1. Una medida de "suelo" cayó sobre la **barra de objetos** (colores planos de UI).
+2. Otra sobre el **fondo entre los árboles**, no sobre los árboles.
+3. La peor: sobre el **CIELO entero**. Concluí que *"la textura del terreno no llega a la pantalla"*
+   con detalle local 0,12 — y era cielo. **Mirando al suelo de verdad da 8,30.** ❌ Retirada.
+
+Añadido `HARUKA_CAM_PITCH=<grados>`, **respecto al horizonte LOCAL** (sobre una esfera un pitch
+absoluto no quiere decir nada): conserva el rumbo y fija la inclinación. 0 = horizonte · −60 = el suelo
+llena el cuadro · +90 = cenit.
+
+⚠️ **Y una trampa que se llevó por delante otra medida**: `HARUKA_TERRAIN_V5_DEBUG=2` saca BLANCO del
+shader del terreno, pero lo que llega al framebuffer ha pasado por atmósfera, nubes y post — así que
+llega oscuro. Contar píxeles blancos daba "el pase v5 cubre el 0,3 % del cuadro". Contando los que
+**CAMBIAN** al activar la vista, sin umbral de color: **89,3 %**. Para medir la huella de un pase, la
+diferencia entre dos vistas es fiable; un umbral absoluto sobre el resultado final, no.
+
+**Lo que sobrevive de las medidas de hoy** (cuadro completo o pares con la misma cámara en los dos
+lados, así que no dependen de dónde se mire): el swapchain, el bloom, el anillo cercano, la carga de
+texturas y el careo GL↔Vulkan. **Lo que no**: cualquier cifra por región anterior a este cambio.
+
+### 🔴 ABIERTO — la luz de los props es un ESCALON, no una curva (2026-08-26)
+
+**Lo encontro una idea de Andoni**: *"por que no pruebas a hacer un prop con luz en RHI completo?"*.
+`testPropLighting` solo miraba DOS puntos —sol de frente y sol detras—, y con los extremos bien pasan
+igual una respuesta correcta, una plana y una invertida. `testPropLightSweep` barre 12 angulos:
+
+    204.7 204.6 204.3  82.2  58.7  58.7  58.7  58.7  58.7  82.2 204.3 204.6
+      ###   ###   ###     #     #     #     #     #     #     #   ###   ###
+
+**No es una curva, es un escalon.** La luz gira 60 grados y el prop no cambia ni una decima; hay UN
+solo valor de transicion; medio circulo pegado a 58,7.
+
+Y el numero lo identifica: **204,7 ≈ 0,80 × 255**, o sea el suelo constante de
+`litCol = baseColor * (0.80 + 0.25 * sunLightColor)` en `prop_inst.frag`. Dentro de la banda iluminada
+el prop **no responde al angulo de la luz en absoluto**.
+
+Eso es, en un grafico, las dos quejas del autor: *"quemado"* (80 % fijo del albedo) y *"toda la cara
+con la misma iluminacion"* (respuesta binaria). Y el terreno al lado usa `max(dot(n,L), 0)`, continuo
+— por eso conviven mal: facetas planas y siluetas claras sobre un suelo suave.
+
+⚠️ **Yo habia descartado esta hipotesis con una medida mal planteada.** El barrido de
+`testSceneTerrainAndProp` movia la ELEVACION del sol, que apaga `sunLightColor` y hace bajar a los dos
+por igual (peor desajuste 1,11x). Moviendo la DIRECCION a intensidad constante, el escalon salta a la
+vista. **Barrer el parametro equivocado da un "responden igual" perfectamente creible y falso.**
+
+Los dos backends dan la MISMA curva (204,7/204,6/204,3 contra 204,7/204,6/204,4): no es de Vulkan.
+
+**Lo que queda es una decision de estilo, no un bug que medir**: que `litCol` siga a `N·L` en vez de
+saltar a un suelo fijo, o al menos que la banda de transicion sea ancha. El comentario del propio
+shader dice que la intencion era que props y terreno *"responden igual a la hora del dia"* — el suelo
+de 0,80 lo rompe. Sin tocar: hay que verlo, no medirlo.
+
+### ✅ CERRADO — VULKAN NO GENERABA LOS MIPMAPS: "los arboles lejanos salen blancos" (2026-08-26)
+
+**El bug que Andoni llevaba toda la sesion señalando, y que yo negue tres veces.**
+
+    OpenGL   glGenerateTextureMipmap(t.id)        <- genera los mips
+    Vulkan   ii.mipLevels = t.mipLevels           <- los RESERVA
+             si.maxLod    = (float)t.mipLevels    <- y permite muestrearlos
+             (ni un vkCmdBlitImage ni un baseMipLevel > 0 en TODO el backend)
+
+Los niveles 1..N eran **memoria indefinida**, y el nivel lo elige la DISTANCIA: de cerca se veia bien
+(nivel 0, el unico subido) y de lejos salia basura, blanca en este driver. Es la misma familia que el
+motor ya tenia escrita: *"en Vulkan un descriptor sin escribir es INDEFINIDO, no ceros"*.
+
+Afecta a todo lo que pide `mipmaps`: props, **las cuatro capas de terreno**, IBL y texturas procedurales.
+
+**Confirmado antes de tocar nada**, capando el muestreo al nivel 0 (`HARUKA_VK_MIP0=1`), color medio
+de los arboles lejanos:
+
+    Vulkan normal          123,1 121,8 129,2   <- el verde es el canal MAS BAJO
+    Vulkan capado a mip 0  128,4 134,1 122,1
+    OpenGL (referencia)    125,8 130,5 118,2
+
+**Arreglo**: cadena de `vkCmdBlitImage` nivel a nivel en `createTexture`, con `TRANSFER_SRC` añadido al
+uso de la imagen y `layerCount` cubriendo los arrays de una vez. Si el formato no admite blit lineal se
+crea con UN nivel y se avisa — antes que anunciar niveles que nadie rellena.
+
+**Verificado**: cero errores de validacion, y los dos backends coinciden hasta la decima:
+
+    Vulkan   136,1 128,7 136,4
+    OpenGL   136,1 128,6 136,4
+    GL contra Vulkan (escena): 2,42 %   (ruido del banco ~3 %)
+
+⚠️ **Y POR QUE TARDE TANTO EN VERLO.** Le dije tres veces que los backends dibujaban igual. Salia de un
+banco cuyo ruido tapaba justo esto: **20 % en Vulkan** por el balanceo de los props, **93 %** por
+capturar antes de que el terreno cargue, y regiones que median cielo creyendo medir suelo. Cada vez que
+Andoni insistio tenia razon. **Un careo cuyo ruido no se ha medido no puede sostener un "son
+iguales"** — y yo lo sostuve.
+
+### 🔴 ABIERTO — el banco no comparaba los backends, y al hacerlo salen dos cosas (2026-08-26)
+
+**Hueco del banco, y era el de fondo**: cada test dibuja, lee pixeles y comprueba una propiedad
+*consigo mismo*. Los dos backends corren en el MISMO proceso, uno detras de otro, y **nadie comparaba
+las dos imagenes**. Por eso una diferencia asi podia estar a la vista y pasar por buena:
+
+    OpenGL   99,8 % de los pixeles cambian al encender el sombreado
+    Vulkan   48,8 %                     <- misma escena, mismo test, la MITAD
+
+Añadido `compareBackends()` en `tests/rhi_test_main.cpp`: guarda la captura de cada backend bajo un
+nombre y al terminar los dos las carea — % de pixeles distintos, |delta| medio, peor canal, **mapa
+ASCII de lo que dibuja CADA UNO** y del sitio donde difieren. La forma identifica la causa, que es la
+regla que ya cerro las "capas que tapan el terreno".
+
+⚠️ **Trae dos auto-comprobaciones, y las dos hicieron falta**:
+- **Espejado en Y**: `readPixels` devuelve GL de ABAJO ARRIBA y Vulkan de ARRIBA ABAJO. Comparar a
+  ciegas da ~50 % de diferencia en cualquier escena no simetrica, que se leeria como "Vulkan dibuja la
+  mitad" siendo solo el origen de lectura. Se mide de las dos formas y se dice cual casa.
+- **Imagen plana**: una captura sin rango casa con cualquier otra igual de plana. El primer criterio
+  ("pixeles distintos del primero") descartaba por plana justo la captura de cobertura y **TAPO el
+  fallo**; ahora se mide por RANGO.
+
+**HALLAZGO 1 — el banco asumia OpenGL, como el motor en su dia.** Cinco tests construyen su proyeccion
+con `glm::perspective`, que es de GL: **no invierte la Y de Vulkan y da profundidad en [-1,1]** cuando
+Vulkan espera [0,1] y recorta lo que se salga. Ningun careo a traves de ellos era valido. Arreglado en
+`testTerrainNodeShadeCost` (usa `Camera::getProjectionMatrix`); **quedan cuatro**.
+
+**HALLAZGO 2 — al horizonte los dos backends dibujan cosas distintas, y el sospechoso es GL.**
+Con la proyeccion del motor y la vista 2 (blanco plano = solo cobertura), camara a 800 m:
+
+    OpenGL   ########  el terreno cubre el 100 % del cuadro
+    Vulkan   --------  cielo arriba
+             ########  terreno abajo
+
+Parecia que Vulkan perdia medio cuadro. **No lo pierde**: apuntando al NADIR —donde no puede haber
+cielo— los dos cubren el 100 % y el |delta| medio cae de **131 a 5,6**. O sea que Vulkan dibuja cielo
+encima del horizonte y **OpenGL pinta terreno ahi**. Con `cull = None` el pase rasteriza tambien la
+cara de ATRAS del planeta; si el depth la rechaza, queda cielo. **La hipotesis a comprobar es que el
+descarte por profundidad no esta haciendo lo mismo en los dos backends, y que el que falla es GL.**
+
+Cifras del careo (256x256, con la proyeccion del motor):
+
+| captura | pixeles distintos | \|delta\| medio | peor canal |
+|---|---|---|---|
+| vista2 cobertura (horizonte) | 51,56 % | 131,48 | 255 |
+| vista2 NADIR (control) | 65,81 % | **5,61** | 33 |
+| sin sombreado | 70,05 % | 22,55 | 65 |
+| sombreado | 98,76 % | 50,95 | 151 |
+
+⚠️ El careo **mide y no sentencia**: solo el caso NADIR tiene `CHECK`, porque hasta saber quien acierta
+en el JUEGO marcar fallo acusaria al backend equivocado. La suite sigue en 0 fallos a proposito.
+
+### 🟡 HECHO A FALTA DE MIRARLO — previews de iconos del inventario en Vulkan (2026-08-29)
+
+Eran DOS problemas, y el segundo era el grande. El primero, el que se veia venir: el HUD pasaba a ImGui
+un id de textura ENTERO (`unsigned int itemPreviewTexture`), que solo funciona con `ImGui_ImplOpenGL3`
+—donde `ImTextureID` ES el nombre de textura de GL— mientras que `ImGui_ImplVulkan` quiere un
+`VkDescriptorSet`. El segundo, al abrir el fichero: **`item_preview.cpp` no usaba el RHI**. Eran 345
+lineas con **114 llamadas de OpenGL crudo** (shaders, FBO, renderbuffers, VAO y ~40 lineas de salvar y
+restaurar estado para poder dibujar a mitad del frame de otro). Bajo Vulkan no hay contexto GL, asi que
+no habia nada que puentear: habia que portar un renderer entero.
+
+**Lo hecho:**
+
+  · Motor: `Device::imguiTextureId(TextureHandle) -> uint64_t`. En GL devuelve el nombre de textura; en
+    Vulkan un `VkDescriptorSet` de `ImGui_ImplVulkan_AddTexture` cacheado por textura. La clave del
+    cache es `TextureHandle::id`, que se RECICLA, asi que `destroy(TextureHandle)` borra la entrada
+    (con `RemoveTexture`) o la siguiente textura heredaria el descriptor de la anterior.
+  · Shaders `assets/shaders/item_preview.vert/.frag`: el GLSL en linea del RHI es solo-GL
+    (`PipelineDesc`, opcion C), asi que para Vulkan tienen que ser ficheros que el build pase a .spv.
+    Los uniforms sueltos pasan a UBO en `binding = 0` (en Vulkan no hay uniforms fuera de bloque).
+  · Juego: `itemPreviewTexture` devuelve `uint64_t` y renderiza con el RHI (render target + pipeline +
+    UBO). Las ~40 lineas de salvar/restaurar estado de GL desaparecen: el pipeline trae el suyo.
+  · **UN UBO POR ITEM**, no uno compartido. Al abrir el inventario se generan muchos iconos en el mismo
+    frame, y en Vulkan los comandos se GRABAN: con un UBO compartido los N dibujos leerian el ULTIMO
+    valor y todos saldrian con las matrices del ultimo item. Es el mismo fallo ya medido en el bloom.
+  · `CONFIGURE_DEPENDS` en el glob de `SHADER_SOURCES` (CMakeLists). Sin el, un shader NUEVO no se
+    compila hasta relanzar cmake a mano, y el fallo es mudo: falta el .spv, el pipeline no se crea y lo
+    que fuera a dibujar no aparece. Se perdio un rato con exactamente eso.
+
+**Lo medido** (test nuevo del banco RHI, "icono de inventario", caja alta y descentrada a proposito
+porque una simetrica saldria igual del derecho que del reves):
+
+    OpenGL  11688 px con tinta (17.83% del cuadro)  filas 0..127  1.9% · filas 128..255 98.1%
+    VULKAN  11688 px con tinta (17.83% del cuadro)  filas 0..127  1.9% · filas 128..255 98.1%
+    careo: 98.1% vs 98.1% (diferencia 0.0 pts)
+
+**Y la trampa que solo aparecio al medir:** la primera version SI invertia la Y en la proyeccion para
+Vulkan, copiando lo que hace `camera.cpp`. Parece lo correcto y no lo es — aquello corrige la imagen que
+se PRESENTA, y un icono es una textura que se MUESTREA: el tejel (0,0) ya es el de NDC y=-1 en GL y el
+de y=+1 en Vulkan, asi que el convenio ya esta en el destino e invertir ademas la proyeccion lo aplica
+DOS VECES. Con el flip la tinta caia en las filas 128..255 en GL y en las 0..127 en Vulkan (espejado, 0
+errores, se dibujaba perfecto); sin el, identicos. El test lo deja comprobado con un CHECK, no impreso.
+
+**FALTA MIRARLO.** Nada de esto demuestra que se vea un icono en pantalla: la partida corre en Vulkan 30 s
+con 0 errores de validacion, pero el inventario no se abrio, asi que el camino del preview no llego a
+ejecutarse en la partida real. Hay que abrir el inventario con objetos dentro y mirar. Aparte, si en GL
+los iconos ya salian del reves (ImGui dibuja el tejel (0,0) ARRIBA, y en una textura de FBO de GL ese
+tejel es el de ABAJO), ahora Vulkan sale igual de al reves: se igualo a GL a proposito, que es la
+referencia mirada. Si al mirarlo estan volteados los dos, el arreglo es pasar `uv0=(0,1), uv1=(1,0)` en
+los `AddImage` de `survival_hud.cpp` — no tocar la proyeccion.
+
+### 🟢 ARREGLADO — "id duplicado": era de ImGui, y NO estaba en la pantalla de carga (2026-08-29)
+
+Andoni sospechaba que era de ImGui y no de Vulkan, y acertaba. Es el detector del propio ImGui,
+encendido por defecto (`imgui.h`, `ConfigDebugHighlightIdConflicts = true`).
+
+**Pero no podia venir del loading**, y eso descarto el sitio donde se estaba mirando: durante la carga
+`init.cpp` solo dibuja `g_loading.render()` y vuelve, y ahi dentro no hay UN SOLO widget con id —
+`TextColored` y `ProgressBar` se registran con id 0, que el detector ignora. Ademas el aviso solo salta
+**al pasar el raton por encima** de un item cuyo id comparten varios visibles (`imgui.cpp`: se compara
+contra `HoveredIdPreviousFrame`), asi que lo que se vio venia de otra pantalla — el menu, que es lo
+inmediatamente anterior.
+
+**Ningun widget del motor ni del juego repite una etiqueta LITERAL** (auditado; los dos `##log` estan en
+ventanas padre distintas, y el id de un hijo se acota al padre). Los conflictos estaban todos en
+etiquetas DINAMICAS, que es donde ImGui saca el id de un texto que resulta no ser unico:
+
+    menu.cpp:54          lista de partidas: el id salia de la etiqueta entera (nombre + mapa + fecha +
+                         horas). Dos partidas creadas seguidas con el nombre por defecto -> mismo mapa,
+                         misma fecha al minuto, 0h00m -> MISMO ID. Es el candidato de lo que se vio.
+                         Cada guardado ya tenia un `s.id` unico sin usar.   <-- LA CAUSA PROBABLE
+    settings_panel:170   lista de GPUs: dos placas del mismo modelo -> mismo nombre -> mismo id.
+    settings_panel:274   dispositivos de audio de entrada (SDL): los nombres SE REPITEN a menudo.
+    settings_panel:299   dispositivos de salida (OpenAL): igual.
+    settings_panel:414   chips de teclas: acotados por indice pero NO por accion. Las tablas de ImGui
+                         no meten la FILA en la pila de ids (solo la columna, y solo en las cabeceras
+                         — verificado en imgui_tables.cpp), asi que dos acciones con la misma tecla en
+                         la misma posicion compartian id y pulsar un chip reasignaba el de la otra fila.
+
+Los cinco arreglados con `PushID` por elemento (el id real donde lo hay, el indice donde no). No es
+cosmetico: dos widgets con el mismo id se pisan el estado, y en la lista de partidas eso significaba
+que una de las dos no se podia seleccionar.
+
+**Sin mirar:** el arreglo no esta visto en pantalla. La partida arranca y sale limpia (0 asserts de
+`Mismatching PushID/PopID`, que ImGui comprueba, y 0 errores de validacion), pero para confirmar que el
+aviso desaparecio hay que tener dos partidas con el mismo nombre y pasar el raton por encima. El caso de
+prueba es exactamente ese: crear dos mundos seguidos sin cambiar el nombre.
 
 ### Reportado por el autor, sin reproducir
 

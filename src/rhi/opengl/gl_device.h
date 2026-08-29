@@ -66,6 +66,7 @@ namespace Haruka::RHI::opengl
             uint32_t         nativeFramebuffer(RenderPassHandle) override;
             uint32_t         nativeProgram(PipelineHandle) override;
             uint32_t         nativeBuffer(BufferHandle) override;
+            uint64_t         imguiTextureId(TextureHandle) override;
             const void*      mappedData(BufferHandle) override;
             void             updateCubemapFace(TextureHandle tex, int face, int width, int height,
                                                 Format format, const void* data) override;

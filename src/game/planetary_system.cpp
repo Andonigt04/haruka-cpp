@@ -211,6 +211,23 @@ void PlanetarySystem::rebuildPlanetMeshes() {
 void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     m_simulationTime += dt;
 
+    // ⚠️ `HARUKA_SIM_TIME=<segundos>` CONGELA EL RELOJ DE SIMULACION. No es para jugar: es la segunda
+    // mitad de lo que hace comparables dos capturas. `HARUKA_DAY_ANGLE` fija el Sol, pero el clima,
+    // las nubes y la marea van con ESTE reloj, que se acumula con el `dt` — asi que dos backends con
+    // ritmos distintos llegan al mismo segundo de reloj de pared con distinto tiempo simulado.
+    //
+    // Sin esto, el mismo careo GL<->Vulkan daba **0,40 % a hora 1,6 y 49 % a hora 1,5**: dos angulos
+    // casi iguales con resultados opuestos. Esa contradiccion no era de los backends, era de aqui.
+    { static const double s_fixed = [] {
+          const char* e = std::getenv("HARUKA_SIM_TIME");
+          return e ? std::atof(e) : -1.0; }();
+      if (s_fixed >= 0.0) m_simulationTime = s_fixed; }
+
+    // ⚠️ UN SOLO dt PARA TODO EL FRAME. El terreno lo necesita para repartir su presupuesto de
+    // streaming por SEGUNDO (ver `TerrainNodeRenderer::prepare`), y tiene que ser exactamente el
+    // mismo número que mueve las órbitas, el clima y la física — no un reloj propio del renderer.
+    if (auto* tpm = activeTerrestrialMut()) tpm->setFrameDelta(dt);
+
     // CLIMA: la seed del planeta activo siembra los frentes (idempotente) y el reloj del MUNDO los
     // mueve. Va con `m_simulationTime` y no con un steady_clock a propósito: es el mismo número que
     // usan las órbitas, y es el que el servidor puede replicar para ver la misma tormenta.
