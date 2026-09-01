@@ -20,6 +20,8 @@ layout(location = 3) flat in int vLevel;
 layout(location = 4) in vec3 vClimate;
 layout(location = 5) in vec3 vUp;
 layout(location = 6) flat in int vStride;
+layout(location = 8) flat in int vKUp;   // vista 9: profundidad de caida a ancestro
+layout(location = 9) in float vDispM;   // vista 10: disparidad dibujado-dato, en metros
 layout(location = 7) flat in int vFace;
 
 // ⚠️ EL COLOR SALE DE LA MISMA LIBRERIA QUE EL CLIPMAP, NO DE UNA COPIA. Si el nodo y el clipmap
@@ -27,6 +29,7 @@ layout(location = 7) flat in int vFace;
 // a quitar. Ver `lib/terrain_shade.glsl`.
 #include "lib/terrain_material.glsl"   // harukaSelectMaterial + su UBO (binding 12)
 #include "lib/terrain_shade.glsl"      // harukaTerrainAlbedo
+#include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
 
 layout(binding = 10) uniform sampler2D      uMacroVar;
 layout(binding = 11) uniform sampler2D      uBiomeMap;
@@ -61,6 +64,8 @@ layout(location = 0) out vec4 fragColor;
  *       0 exacto, que con la comparación GREATER contra un clear de 0 no pasaría el test.
  *   4 = por STRIDE del nodo, sin iluminar. Si un pincho cae justo en una frontera de color,
  *       viene del stride por nodo o de su cosido; si cae en medio de un color, no.
+ *  10 = DISPARIDAD dibujado-dato en metros: verde <5cm · amarillo 0,5 m · rojo >=2 m · azul sin dato.
+ *   9 = CAIDA A ANCESTRO: verde = datos propios · amarillo->rojo = k niveles por encima.
  *   6 = LA NORMAL como color (sin iluminar): separa un pliegue de GEOMETRIA de uno de la NORMAL.
  *   5 = ATRIBUCION EXACTA, para leer con `readPixels` (no para mirar). R = nivel x 8, G = cara x 40,
  *       B = 200 + stride x 8 (marca de "aqui hay terreno" Y el stride, para atribuir). La 1 pinta por nivel pero con una paleta ciclica de
@@ -91,6 +96,67 @@ void main() {
     if (dbg == 6) { fragColor = vec4(normalize(vNormal) * 0.5 + 0.5, 1.0); return; }
     if (dbg == 3) { fragColor = vec4(vec3(pow(gl_FragCoord.z, 0.15)), 1.0); return; }
     if (dbg == 4) { fragColor = vec4(debugLevelColor(vStride * 3), 1.0); return; }
+    // ── 11 = MAPA DE "LO QUE SE VE MENOS LO QUE SE PISA", EN METROS ─────────────────────────────
+    //
+    // ⚠️ ESTA ES LA VISTA QUE FALTABA, Y LA RAZON DE QUE FALTARA ES EL PATRON DE SIEMPRE: toda la
+    // caza de esta disparidad se hizo con sondas NUMERICAS que dan centimetros, mientras en pantalla
+    // se ve medio metro. La vista 10 (dibujado contra el texel del nodo) no vale para esto: compara
+    // contra el dato del propio vertice, donde coinciden por construccion, y por eso salia verde.
+    //
+    // Aqui la referencia es la SUPERFICIE DE COLISION: `harukaTerrainDetail` con el corte que usa
+    // `world_system_provider.h`, o sea `terrainTriM(radM) = max(radM*0,002 , 0,5)` con `radM` medido
+    // desde el punto del planeta bajo el ojo. Verde <5 cm · amarillo 0,25 m · rojo >= 1 m.
+    //
+    // ⚠️ EN DOUBLE, Y NO ES OPCIONAL: un float a 6,37e6 tiene un ulp de 0,5 m, que es justo lo que se
+    // quiere medir. `vFragPos` si puede ser float porque es relativo al OJO (escala de km).
+    //
+    // ⚠️ Y `radM` POR LA CUERDA, no con `acos`: un nodo de nivel 17 subtiende 6e-6 rad, `cos` de eso
+    // es 1,0 exacto en float y `acos` devolvia 0. La sonda del banco se comio ese fallo hasta que la
+    // contraprueba de perturbar la pendiente no cambio nada.
+    if (dbg == 11) {
+        const dvec3  rel    = dvec3(vFragPos) - dvec3(uCenter.xyz) - dvec3(uCenterLo.xyz);
+        const double r      = length(rel);
+        const dvec3  dir    = rel / r;
+        const dvec3  anchor = normalize(-(dvec3(uCenter.xyz) + dvec3(uCenterLo.xyz)));
+        // Gemelos de TERRAIN_TRIM_SLOPE y TERRAIN_TRIM_FLOOR (`terrain_lod.h`).
+        const double radM = double(uMisc.x) * length(dir - anchor);
+        const float  cut  = float(max(radM * 0.002LF, 0.5LF));
+        const double href = double(harukaTerrainDetail(dir, double(uMisc.x), cut));
+        const double err  = r - (double(uMisc.x) + href);      // + = se DIBUJA por encima de lo que se pisa
+        const float  a    = float(abs(err));
+        vec3 col = (a < 0.05) ? vec3(0.0, 0.6, 0.1)
+                 : (a < 0.25) ? mix(vec3(0.0,0.6,0.1), vec3(0.9,0.9,0.0), (a - 0.05) / 0.20)
+                 : (a < 1.00) ? mix(vec3(0.9,0.9,0.0), vec3(1.0,0.0,0.0), (a - 0.25) / 0.75)
+                              : vec3(1.0, 0.0, 1.0);           // magenta: fuera de escala
+        // El SIGNO en el azul: oscuro = el terreno se dibuja por DEBAJO de lo que se pisa, que es
+        // justo como Andoni describe el sintoma ("el terreno esta por debajo").
+        col.b = mix(col.b, 0.35, err < 0.0 ? 1.0 : 0.0);
+        fragColor = vec4(col, 1.0);
+        return;
+    }
+    // ⚠️ VISTA 9 = CAIDA A ANCESTRO. Verde: el nodo dibuja con SUS datos (k=0), que es el caso sano.
+    // Del amarillo al rojo, cuantos niveles por encima esta leyendo. Existe porque "escalon dentro de
+    // un nodo" tiene causas distintas segun si ese nodo cayo o no, y a ojo son indistinguibles: un
+    // nodo caido dibuja la superficie de su ancestro sobre su propia huella, asi que se ve terreno
+    // normal, solo que mas basto de lo que le toca.
+    // ⚠️ VISTA 10 = MAPA DE DISPARIDAD, la que faltaba. Verde oscuro: lo dibujado coincide con el
+    // dato (< 5 cm). Amarillo: medio metro. Rojo: dos metros o mas. Azul: el nodo lee de un ancestro
+    // y no hay texel fino con que comparar. La ESCALA IMPORTA — sin ella "se ve rojo" no dice cuanto.
+    if (dbg == 10) {
+        if (vDispM < -0.5) { fragColor = vec4(0.15, 0.25, 0.85, 1.0); return; }   // sin dato fino
+        const float a = abs(vDispM);
+        const float t = clamp(a / 2.0, 0.0, 1.0);
+        vec3 c = (a < 0.05) ? vec3(0.05, 0.35, 0.10)
+                            : mix(vec3(0.95, 0.90, 0.15), vec3(0.90, 0.08, 0.05), t);
+        fragColor = vec4(c, 1.0);
+        return;
+    }
+    if (dbg == 9) {
+        if (vKUp <= 0) { fragColor = vec4(0.10, 0.65, 0.20, 1.0); return; }   // sano
+        const float t = clamp(float(vKUp) / 7.0, 0.0, 1.0);                    // 7 = el mas hondo medido
+        fragColor = vec4(mix(vec3(0.95, 0.90, 0.10), vec3(0.90, 0.10, 0.05), t), 1.0);
+        return;
+    }
     vec3 n = normalize(vNormal);
 
     // ⚠️ LA LUZ PLANA SE CONSERVA A PROPOSITO (uShade.w = 0). No es codigo muerto: es el lado A del

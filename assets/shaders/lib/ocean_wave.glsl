@@ -39,6 +39,143 @@ const float HARUKA_G = 9.81;
 // el pipeline del mar se quedaba SIN etapa de teselación, en silencio y sin que fallara ni un test.
 #include "lib/ocean_params.glsl"
 
+/// Ley de Green sola: cuánto crece la amplitud al perder fondo, SIN el límite de rompiente.
+/// ⚠️ GEMELO de `oceanGreenGain` (core/planet/ocean_wave.h). Cualquier cambio va en los dos.
+float harukaGreenGain(float depthM) {
+    float d = max(depthM, 0.05);
+    return pow(clamp(50.0 / d, 1.0, 40.0), 0.25);
+}
+
+/// Longitud de onda por debajo de la cual una ola deja de existir como GEOMETRÍA: el doble del
+/// segmento de teselación de `ocean.tesc` (4 m), que es lo que pide Nyquist.
+/// ⚠️ GEMELO de `OCEAN_MIN_QUAD_M`.
+#define HARUKA_MIN_QUAD_M 4.0   // el segmento de teselacion mas fino de `ocean.tesc`
+
+/**
+ * @brief NÚMERO DE ONDA LOCAL en profundidad finita. ⚠️ GEMELO de `oceanWaveNumber`.
+ *
+ * ⚠️ AQUÍ ESTABA `sqrt(g·k)` —dispersión de AGUAS PROFUNDAS— usándose también en 30 cm de agua, y de
+ * eso colgaban dos limitaciones. La relación correcta es `ω² = g·k·tanh(k·d)`: lo que se conserva al
+ * entrar en el bajío es la FRECUENCIA, no la longitud de onda, así que `k` crece y `λ` se ACORTA
+ * mientras la altura sube. Ésa es la razón física de que una ola rompa, y sin ella `H/λ ≈ 0,016` en
+ * agua somera y el pliegue era imposible.
+ *
+ * Arranque explícito de Fenton-McKee (`k·d = x·[tanh(x^{3/4})]^{-2/3}`, con `x = k₀·d`), exacto en
+ * los dos límites, más dos pasos de Newton.
+ *
+ * ⚠️ SALIDA RÁPIDA CON `x >= 10`, y no es una optimización: `1−tanh(10) = 2,1e-9` está por debajo del
+ * eps del float, así que devolver `k₀` da EL MISMO BIT que el solver. El mar profundo no cambia.
+ */
+float harukaWaveNumber(float k0, float depthM) {
+    float d = max(depthM, 0.02);
+    float x = k0 * d;                             // = ω²d/g
+    if (x >= 10.0) return k0;                     // aguas profundas: tanh(x) == 1 en float
+    float t34 = tanh(pow(x, 0.75));
+    float k = (x * pow(t34, -2.0 / 3.0)) / d;
+    float w2 = HARUKA_G * k0;
+    for (int it = 0; it < 2; ++it) {
+        float th = tanh(k * d);
+        float f  = HARUKA_G * k * th - w2;
+        float df = HARUKA_G * th + HARUKA_G * k * d * (1.0 - th * th);
+        if (abs(df) < 1e-12) break;
+        k -= f / df;
+        if (!(k > 0.0)) { k = k0; break; }
+    }
+    return k;
+}
+
+/**
+ * @brief Desvanecido de las olas que se han hecho MÁS CORTAS QUE LA REJILLA.
+ *        ⚠️ GEMELO de `oceanShortWaveFade`.
+ *
+ * Consecuencia directa de la dispersión finita: este TCS tesela a 4 m por segmento porque la ola más
+ * corta medía 8,7 m, y con `λ` variable ese mismo tren mide 4 m en 30 cm de agua — Nyquist justo, y
+ * por debajo más allá. Sin esto, muaré exactamente en la orilla.
+ */
+float harukaShortWaveFade(float k, float quadM) {
+    // ⚠️ DE `quad` A `2·quad`, y estuvo una octava corrida: con λ = 2·quad la ola YA CABE (Nyquist) y
+    // ahí tiene que valer 1. Estaba valiendo 0, y con el quad fino de 4 m eso dejaba el tren de 8,7 m
+    // al 8,75 % a los pies del jugador — el mar se veía PLANO.
+    float lo = max(quadM, HARUKA_MIN_QUAD_M);
+    float hi = lo * 2.0;
+    float lambda = 6.2831853 / max(k, 1e-6);
+    return clamp((lambda - lo) / (hi - lo), 0.0, 1.0);
+}
+
+/// "El viento tiene aquí todo el recorrido que quiera": el océano.
+/// ⚠️ GEMELO de `Haruka::Planet::WATER_FETCH_UNLIMITED`.
+#define HARUKA_FETCH_UNLIMITED 1.0e7
+
+/**
+ * @brief Cuánta ola cabe con el FETCH que hay. ⚠️ GEMELO de `oceanFetchFactor`.
+ *
+ * ⚠️ ES LO QUE IMPIDE QUE UN LAGO DE MONTAÑA TENGA OLAS DE MAR ABIERTO. El oleaje sale de UN estado
+ * global (el viento sobre el océano) y el bajío lo AMPLIFICA en agua somera: medido, un lago de
+ * 3,21 m de fondo recibía 3,46 m de ola. Pierson-Moskowitz describe el mar plenamente desarrollado
+ * (fetch infinito); JONSWAP el limitado por fetch: `Hs = 0,0016·U·sqrt(F/g)`.
+ *
+ * El viento se DEDUCE del estado (`Hs = 4·sqrt(Σa²/2)`, `U = sqrt(Hs·g/0,21)`) en vez de pasarlo:
+ * así el factor no puede desincronizarse de la ola que corrige.
+ */
+float harukaFetchFactor(float fetchM) {
+    if (fetchM <= 0.0 || fetchM >= HARUKA_FETCH_UNLIMITED * 0.5) return 1.0;
+    float sum2 = 0.0;
+    for (int i = 0; i < HARUKA_WAVES; ++i) { float a = harukaWaveAt(i).y; sum2 += a * a; }
+    float Hs = 4.0 * sqrt(sum2 * 0.5);
+    if (Hs <= 1e-4) return 1.0;
+    float U   = sqrt(Hs * HARUKA_G / 0.21);
+    float HsF = 0.0016 * U * sqrt(fetchM / HARUKA_G);
+    return clamp(HsF / Hs, 0.0, 1.0);
+}
+
+/**
+ * @brief Factor COMÚN que impone el límite de rompiente sobre la SUMA de los trenes.
+ *        ⚠️ GEMELO de `oceanBreakScale` (core/planet/ocean_wave.h).
+ *
+ * ⚠️ ESTE ERA EL BUG, Y VIVIÓ AQUÍ MIENTRAS LA CPU YA ESTABA ARREGLADA. El tope `0.55·d` se aplicaba
+ * a CADA tren por separado dentro de `harukaShoalAmp` y luego se sumaban los cuatro, así que la
+ * altura total podía llegar a `4 × 0.55·d = 2,2·d`: más del doble de lo que hay de agua. El índice de
+ * rompiente es una afirmación sobre la altura TOTAL de la ola, no sobre cada componente.
+ *
+ * Se veía en toda la costa, pero saltaba a la vista en los lagos de montaña, someros enteros: un lago
+ * de 3,21 m de fondo recibía una ola de 5,93 m pico a pico — más alta que profundo era el lago.
+ *
+ * Se devuelve un factor común y no un tope por tren para que el REPARTO entre trenes no cambie: la
+ * ola se encoge entera conservando su forma, en vez de recortarle la cresta a los trenes grandes.
+ */
+float harukaBreakScale(float depthM, float fetchM, float quadM) {
+    float green = harukaGreenGain(depthM) * harukaFetchFactor(fetchM);
+    float sum = 0.0;
+    // ⚠️ CON EL DESVANECIDO DE ONDA CORTA DENTRO: el tope habla de la altura que de verdad hay.
+    for (int i = 0; i < HARUKA_WAVES; ++i) {
+        float k0 = 6.2831853 / harukaWaveAt(i).x;
+        sum += harukaWaveAt(i).y * harukaShortWaveFade(harukaWaveNumber(k0, depthM), quadM);
+    }
+    float total = sum * green;
+    float limit = 0.55 * max(depthM, 0.0);
+    return (total > limit && total > 1e-6) ? (limit / total) : 1.0;
+}
+
+/// Cuánto está rompiendo la ola aquí: 0 en agua honda, →1 cuando el tope la aplasta.
+/// ⚠️ GEMELO de `oceanBreakiness`.
+float harukaBreakiness(float depthM, float fetchM, float quadM) {
+    return clamp(1.0 - harukaBreakScale(depthM, fetchM, quadM), 0.0, 1.0);
+}
+
+/**
+ * @brief ESCARPADO (Q) de un tren. ⚠️ GEMELO de `oceanSteepness`.
+ *
+ * El parámetro `breakiness` NO se usa, y eso es deliberado: se intentó abrir Q en la franja de
+ * rompiente para que la cresta se enrollara (la voluta) y **se revirtió**. Como `Q = presupuesto /
+ * (k·A·N)`, el desplazamiento horizontal `Q·A` no depende de la amplitud: en un lago de 30 cm de
+ * fondo salían los mismos ~3 m que en mar abierto y la lámina se plegaba sobre sí misma. La voluta
+ * de verdad pide shoaling de longitud de onda, que es otro trabajo. El parámetro se queda para que
+ * la firma no cambie el día que se retome.
+ */
+float harukaSteepness(float k, float amp, float breakiness) {
+    return min(0.75 / (k * amp * float(HARUKA_WAVES) + 1e-4), 1.0);
+}
+
 /**
  * @brief Bajío (shoaling): cuánto crece una ola al entrar en agua somera, y cuándo revienta.
  *
@@ -59,9 +196,7 @@ const float HARUKA_G = 9.81;
  * @param ampDeep amplitud en aguas profundas (m).
  */
 float harukaShoalAmp(float depthM, float ampDeep) {
-    float d = max(depthM, 0.05);
-    float green = pow(clamp(50.0 / d, 1.0, 40.0), 0.25);   // ley de Green, acotada
-    return min(ampDeep * green, 0.55 * depthM);            // límite de rompiente
+    return min(ampDeep * harukaGreenGain(depthM), 0.55 * depthM);
 }
 
 /**
@@ -91,8 +226,10 @@ float harukaShoalAmp(float depthM, float ampDeep) {
  */
 float harukaSwash(float depthRest, vec3 wp, vec3 up, float t) {
     vec4  W0 = harukaWaveAt(0);                       // el tren que da la silueta: el que rompe
-    float k0 = 6.2831853 / W0.x;
-    float w0 = sqrt(HARUKA_G * k0);
+    float kDeep0 = 6.2831853 / W0.x;
+    // La trepada sigue al tren que rompe: fase con el `k` LOCAL, frecuencia con la profunda.
+    float k0 = harukaWaveNumber(kDeep0, max(depthRest, 0.05));
+    float w0 = sqrt(HARUKA_G * kDeep0);
     vec3  t1 = normalize(abs(up.y) < 0.99 ? cross(up, vec3(0, 1, 0)) : cross(up, vec3(1, 0, 0)));
     vec3  t2 = cross(up, t1);
     vec3  D0 = normalize(t1 * W0.z + t2 * W0.w);
@@ -123,12 +260,35 @@ float harukaSwash(float depthRest, vec3 wp, vec3 up, float t) {
  * @param outFoam   0..1: cuánto está rompiendo aquí (cresta sobre-escarpada + límite de rompiente).
  * @return desplazamiento a sumar a `wp`.
  */
-vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fade,
+/**
+ * ⚠️ `quadM` ES EL LADO DEL QUAD QUE VA A LLEVAR ESTA OLA, y sin el el mar aliaseaba desde 2 km.
+ *
+ * La teselacion se desvanece con la distancia (`ocean.tesc`: a 2 km el quad ya mide 8 m, a 9 km
+ * 1 024 m) y la amplitud se desvanecia MUCHO mas lejos, por un radio fijo. Entre medias se dibujaba
+ * ola a plena amplitud sobre una rejilla que no podia llevarla. Medido antes de esto:
+ *
+ *     2 000 m -> 1,09 muestras por onda corta  ·  amplitud 1,00
+ *     5 000 m -> 0,54                          ·  amplitud 1,00
+ *     9 000 m -> 0,01 (quad 1 024 m)           ·  amplitud 1,00
+ *
+ * Con el quad local, cada tren se apaga cuando su longitud baja de dos quads — Nyquist, el mismo
+ * criterio que ya usa el desvanecido por profundidad. El alcance de la ola deja de ser un radio
+ * elegido a mano y pasa a salir de lo que la geometria puede representar.
+ */
+vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float quadM, float fade,
                     out vec3 outNormal, out float outFoam) {
     // Marco tangente local estable: se construye del propio `up`, no de un uniform, para que dos
     // puntos vecinos den marcos vecinos (y la normal no salte).
     vec3 t1 = normalize(abs(up.y) < 0.99 ? cross(up, vec3(0, 1, 0)) : cross(up, vec3(1, 0, 0)));
     vec3 t2 = cross(up, t1);
+
+    // ⚠️ BAJÍO POR TREN, TOPE COMÚN. Igual que `oceanWaveHeight`/`oceanWaveVelocity` en el gemelo de
+    // CPU: cada longitud de onda crece a su ritmo (Green), pero el límite de rompiente se aplica UNA
+    // vez sobre la suma. Se calculan fuera del bucle porque no dependen del tren.
+    float qm         = max(quadM, HARUKA_MIN_QUAD_M);
+    float green      = harukaGreenGain(depthM) * harukaFetchFactor(fetchM);
+    float scale      = harukaBreakScale(depthM, fetchM, qm);
+    float breakiness = clamp(1.0 - scale, 0.0, 1.0);
 
     vec3  disp = vec3(0.0);
     // Derivadas del desplazamiento respecto a las dos tangentes: de ahí sale la normal SIN muestrear
@@ -138,19 +298,20 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fade,
 
     for (int i = 0; i < HARUKA_WAVES; ++i) {
         vec4  W      = harukaWaveAt(i);          // el tren vigente (subido por la CPU)
-        float lambda = W.x;
-        float k      = 6.2831853 / lambda;
-        float amp    = harukaShoalAmp(depthM, W.y) * fade;
+        // ⚠️ `W.x` ES LA LONGITUD DE AGUAS PROFUNDAS. La local sale de la dispersión finita; `w` —la
+        // frecuencia, que es lo que se conserva— sigue saliendo de la profunda.
+        float k0     = 6.2831853 / W.x;
+        float k      = harukaWaveNumber(k0, depthM);
+        float amp    = W.y * green * scale * fade * harukaShortWaveFade(k, qm);
         if (amp <= 1e-4) continue;
         // Dirección en 3D: la 2D del tren, llevada al plano tangente del punto.
         vec3  D  = normalize(t1 * W.z + t2 * W.w);
-        float w  = sqrt(HARUKA_G * k);            // dispersión de aguas profundas
+        float w  = sqrt(HARUKA_G * k0);           // la frecuencia NO cambia con el fondo
         float ph = k * dot(D, wp) - w * t;
         float c  = cos(ph), s = sin(ph);
         // Q = escarpado. 1 sería la cúspide exacta (la ola justo a punto de plegarse); se reparte
         // entre los trenes para que la suma no se pliegue sola en mar abierto.
-        float Q  = 0.75 / (k * amp * float(HARUKA_WAVES) + 1e-4);
-        Q = min(Q, 1.0);
+        float Q  = harukaSteepness(k, amp, breakiness);
 
         disp += D * (Q * amp * c) + up * (amp * s);
         // d(disp)/d(dirección de propagación) — lo que afila la cresta y, si pasa de 1, la pliega.

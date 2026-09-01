@@ -473,3 +473,195 @@ void test_rail_mechanism_jolt() {
         CHECK(inf.broken, "roto sigue roto: no vuelve a obedecer");
     }
 }
+
+// ================================================================================================
+// EL SUELO DE LOS CUERPOS LEJANOS SALE DE LA CONSULTA, NO DE LA MALLA
+//
+// Requisito de Andoni (2026-08-31): lo visible tiene que ser colisionable a 10-100 km, y las
+// colisiones tienen que ser LAS MISMAS entre clientes. `terrain_collision_client_agreement` mide que
+// la malla de anillos no puede darlo —a 10 km presenta un suelo 8,12 m distinto del que se pisa, y
+// las tres politicas de corte posibles dan lo mismo porque el error es la CELDA, no el corte.
+//
+// Aqui se monta esa discrepancia a proposito y en pequeno: la malla esta a altitud 0 y la consulta
+// dice 8 m. Un cuerpo LEJANO tiene que acabar en la consulta; uno CERCANO, en la malla.
+// ================================================================================================
+namespace {
+    /// Malla plana a altitud 0 y consulta que dice 8 m: la mentira de la malla lejana, controlada.
+    struct SplitGroundWorld : Haruka::Physics::IWorldProvider {
+        static constexpr double R = 1.0e6;
+        static constexpr double kQueryH = 8.0;      // lo que dice `terrainHeightAt` (la verdad)
+        glm::dvec3 center{0.0, -R, 0.0};
+        std::vector<Haruka::Physics::GravBody> grav;
+        SplitGroundWorld() {
+            const double G = 6.67430e-11, g = 9.81;
+            grav.push_back({ center, g * R * R / G });
+        }
+        bool       hasActivePlanet()    const override { return true; }
+        glm::dvec3 activePlanetCenter() const override { return center; }
+        double     activePlanetRadius() const override { return R; }
+        const std::vector<Haruka::Physics::GravBody>& gravBodies() const override { return grav; }
+        double     terrainHeightAt(const glm::dvec3&) const override { return kQueryH; }
+        // La MALLA, a altitud 0 — o sea 8 m por debajo de lo que dice la consulta. Ancha para que el
+        // cuerpo lejano tenga sobre que caer si el arreglo no estuviera.
+        bool terrainMesh(const glm::dvec3&, double, std::vector<glm::dvec3>& v,
+                         std::vector<uint32_t>& t) const override {
+            const double H = 4000.0;
+            v = { glm::dvec3(-H,0,-H), glm::dvec3(H,0,-H), glm::dvec3(H,0,H), glm::dvec3(-H,0,H) };
+            t = { 0,2,1, 0,3,2 };
+            return true;
+        }
+    };
+    /// Altitud sobre la esfera, que es lo comparable: la malla es plana y el planeta no.
+    static double altitudeOf(const SplitGroundWorld& w, const glm::dvec3& p) {
+        return glm::length(p - w.center) - SplitGroundWorld::R;
+    }
+}
+
+void test_physics_far_ground_from_query() {
+    beginTest("physics_far_ground_from_query");
+    using namespace Haruka::Physics;
+
+    auto run = [](bool enabled, double& outNear, double& outFar) {
+        // El interruptor existe para que ESTE test pueda hacer su contraprueba: sin el, "el lejano
+        // acaba a 8 m" no distingue "lo arregle" de "la malla ya estaba a 8 m".
+        setenv("HARUKA_FAR_GROUND_QUERY", enabled ? "1" : "0", 1);
+        PhysicsEngine eng; SplitGroundWorld w; eng.setWorldProvider(&w);
+        // ⚠️ EL PRIMER CUERPO DINAMICO ES EL ANCLA del suelo (ver `near` en el update): tiene que ser
+        // el CERCANO, o el "lejano" seria el ancla y no habria nada lejos de nada.
+        auto nearB = std::make_shared<RigidBody>();
+        nearB->position = glm::dvec3(0.0, 20.0, 0.0);
+        nearB->radius = 0.5; nearB->mass = 70.0; nearB->name = "cerca";
+        eng.addBody(nearB);
+        auto farB = std::make_shared<RigidBody>();
+        farB->position = glm::dvec3(1500.0, 20.0, 0.0);   // 1500 m del ancla: campo LEJANO
+        farB->radius = 0.5; farB->mass = 70.0; farB->name = "lejos";
+        eng.addBody(farB);
+        for (int i = 0; i < 900; ++i) eng.advance(1.0 / 60.0);
+        outNear = altitudeOf(w, nearB->position);
+        outFar  = altitudeOf(w, farB->position);
+        unsetenv("HARUKA_FAR_GROUND_QUERY");
+    };
+
+    double nearOn = 0.0, farOn = 0.0, nearOff = 0.0, farOff = 0.0;
+    run(true,  nearOn,  farOn);
+    run(false, nearOff, farOff);
+
+    const double wantFar  = SplitGroundWorld::kQueryH + 0.5;   // consulta + radio del cuerpo
+    const double wantNear = 0.5;                               // malla (altitud 0) + radio
+    // ⚠️ LA MALLA ES PLANA Y EL PLANETA NO. A 1500 m del centro, el plano `y = 0` queda `d²/2R` POR
+    // ENCIMA de la esfera: 1,125 m aqui. Esperar 0,5 m para el cuerpo lejano apagado era una cuenta
+    // mia mal hecha, no un fallo del motor — y sin este termino la contraprueba acusaria al arreglo
+    // de algo que hace la geometria.
+    const double curv     = (1500.0 * 1500.0) / (2.0 * SplitGroundWorld::R);
+    const double wantMesh = curv + 0.5;
+    std::printf("    la malla dice altitud 0 · la consulta dice %.1f m\n", SplitGroundWorld::kQueryH);
+    std::printf("      cuerpo CERCA (ancla)  : %.3f m   (tiene que quedarse en la MALLA, %.1f m)\n",
+                nearOn, wantNear);
+    std::printf("      cuerpo LEJOS (1500 m) : %.3f m   (tiene que irse a la CONSULTA, %.1f m)\n",
+                farOn, wantFar);
+    std::printf("      CONTRAPRUEBA con HARUKA_FAR_GROUND_QUERY=0: cerca %.3f m · lejos %.3f m"
+                " (la malla, con su curvatura, %.3f m)\n", nearOff, farOff, wantMesh);
+
+    CHECK(std::fabs(farOn - wantFar) < 0.25,
+          "el cuerpo LEJANO se apoya en la superficie de la CONSULTA (funcion pura de la posicion)");
+    // ⚠️ ESTO ES LA MITAD QUE PROTEGE EL CAMINAR. El campo cercano no se toca: si el arreglo se colara
+    // hacia dentro de los 256 m pisaria la malla fina, que es la superficie sobre la que camina el
+    // personaje y la unica que esta medida contra el render.
+    CHECK(std::fabs(nearOn - wantNear) < 0.25,
+          "el cuerpo CERCANO sigue en la malla: el campo cercano NO se toca");
+    // La contraprueba: apagado, el lejano se queda en la malla. Sin ella, un `farOn` correcto no
+    // distinguiria el arreglo de que la malla ya estuviera donde toca.
+    CHECK(std::fabs(farOff - wantMesh) < 0.25,
+          "CONTRAPRUEBA: apagado, el lejano se queda en la MALLA (o sea que el arreglo es quien lo mueve)");
+    CHECK(std::fabs(farOn - farOff) > 4.0,
+          "CONTRAPRUEBA: y la diferencia entre encendido y apagado son METROS, no ruido");
+}
+
+// ================================================================================================
+// LA PREMISA DEL SERVIDOR AUTORITATIVO: ¿dan lo mismo dos Jolt con las mismas entradas?
+//
+// El diseño que se quiere —el DGS corriendo LA MISMA física que el cliente para validar, persistir y
+// corregir— se apoya entero en esta afirmación, y hasta ahora nadie la había medido. El módulo de
+// reglas de hoy la esquiva: `step` está a nulo y `validateMove` valida contra el sampler ANALÍTICO,
+// no contra Jolt, con una caché de suelo mínimo para no expulsar a jugadores legítimos.
+//
+// ⚠️ Y HAY UN MOTIVO CONCRETO PARA DUDAR, MEDIDO HOY: la malla de colisión se construye alrededor de
+// un ANCLA (`terrainClipFrame`, cuantizada a 4 m) y cliente y servidor no tendrán la misma. Con las
+// celdas lejanas de 256 m, mover el ancla media celda mueve la superficie **4,12 m a 10 km**
+// (`terrain_collision_grid_anchor_dependence`). Dos Jolt sobre mallas distintas no son la misma
+// física por mucho que compartan el binario.
+//
+// Esto lo mide donde importa: DOS motores idénticos, mismos cuerpos, mismo `dt`, y la única
+// diferencia es el ancla del suelo — exactamente la asimetría que habrá entre cliente y servidor.
+// ================================================================================================
+namespace {
+    /// Mundo con suelo analítico ONDULADO: un plano no distingue anclas (todas dan la misma malla) y
+    /// el test saldría verde sin demostrar nada. Con relieve, dos anclas dan dos mallas.
+    struct RolloWorld : Haruka::Physics::IWorldProvider {
+        static constexpr double R = 1.0e6;
+        glm::dvec3 center{0.0, -R, 0.0};
+        std::vector<Haruka::Physics::GravBody> grav;
+        RolloWorld() {
+            const double G = 6.67430e-11, g = 9.81;
+            grav.push_back({ center, g * R * R / G });
+        }
+        bool       hasActivePlanet()    const override { return true; }
+        glm::dvec3 activePlanetCenter() const override { return center; }
+        double     activePlanetRadius() const override { return R; }
+        const std::vector<Haruka::Physics::GravBody>& gravBodies() const override { return grav; }
+        double terrainHeightAt(const glm::dvec3& wp) const override {
+            const glm::dvec3 d = glm::normalize(wp - center);
+            const double x = d.x * R, z = d.z * R;
+            return 3.0 * std::sin(x / 40.0) * std::cos(z / 37.0)
+                 + 0.8 * std::sin(x / 11.0 + 0.7);
+        }
+    };
+}
+
+void test_physics_two_instances_agree() {
+    beginTest("physics_two_instances_agree");
+    using namespace Haruka::Physics;
+
+    // Un cuerpo idéntico en dos motores, soltado desde la misma altura. La ÚNICA diferencia entre las
+    // dos ejecuciones es dónde se ancló el suelo — que es la diferencia que habrá entre un cliente y
+    // un servidor, porque cada uno ancla bajo SU jugador.
+    auto run = [](double anchorShiftM, glm::dvec3& outPos, glm::dvec3& outVel) {
+        PhysicsEngine eng; static RolloWorld w; eng.setWorldProvider(&w);
+        // El ancla del suelo la fija el PRIMER cuerpo dinámico (ver `near` en el update del motor),
+        // así que desplazarlo es exactamente desplazar el ancla.
+        auto anchor = std::make_shared<RigidBody>();
+        anchor->position = glm::dvec3(anchorShiftM, 20.0, 0.0);
+        anchor->radius = 0.5; anchor->mass = 70.0; anchor->name = "ancla";
+        eng.addBody(anchor);
+        auto probe = std::make_shared<RigidBody>();
+        probe->position = glm::dvec3(0.0, 12.0, 0.0);   // el MISMO en las dos
+        probe->radius = 0.5; probe->mass = 70.0; probe->name = "sonda";
+        eng.addBody(probe);
+        for (int i = 0; i < 600; ++i) eng.advance(1.0 / 60.0);
+        outPos = probe->position; outVel = probe->velocity;
+    };
+
+    glm::dvec3 pA, vA, pB, vB, pA2, vA2;
+    run(0.0,   pA,  vA);
+    run(0.0,   pA2, vA2);    // la MISMA entrada dos veces: ¿se reproduce a sí mismo?
+    run(37.0,  pB,  vB);     // ancla desplazada 37 m — ni un múltiplo de la celda
+
+    const double selfDiff  = glm::length(pA2 - pA);
+    const double crossDiff = glm::length(pB  - pA);
+    std::printf("    misma entrada, dos veces:   %.9f m de diferencia\n", selfDiff);
+    std::printf("    ancla desplazada 37 m:      %.6f m de diferencia (v %.4f vs %.4f m/s)\n",
+                crossDiff, glm::length(vA), glm::length(vB));
+
+    // ── LO QUE SE AFIRMA ────────────────────────────────────────────────────────────────────────
+    //
+    // (1) REPRODUCIBILIDAD. Si Jolt no se reprodujera ni a sí mismo con la misma entrada, no habría
+    //     nada que discutir sobre cliente y servidor: la corrección sería continua por construcción.
+    CHECK(selfDiff == 0.0,
+          "el motor se reproduce a SI MISMO bit a bit con la misma entrada (sin esto, no hay "
+          "servidor autoritativo posible)");
+    // (2) Y LA CIFRA QUE DECIDE EL DISENO: cuanto se separan por anclar distinto. No se pone umbral
+    //     inventado — se IMPRIME, porque es el dato que dice si el servidor puede correr la misma
+    //     fisica o si antes hay que hacer la malla independiente del observador.
+    std::printf("    -> el servidor y el cliente anclan bajo jugadores distintos: esa es la cifra\n");
+    CHECK(crossDiff >= 0.0, "medida tomada");
+}

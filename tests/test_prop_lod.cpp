@@ -22,9 +22,11 @@
 // ================================================================================================
 #include "test_common.h"
 #include "tools/procgraph/tree_mesh.h"
+#include "core/planet/prop_scatter.h"   // scatterPropsNear: el alcance del scatter
 
 #include <cmath>
 #include <cstdio>
+#include <unordered_set>
 #include <vector>
 
 using namespace Haruka::Tools::ProcGraph;
@@ -83,6 +85,186 @@ void test_prop_lod_attributes() {
         if (b.colors != b.verts) todos = false;
     }
     CHECK(todos, "todos los niveles de LOD traen un color por vertice (si no, el prop sale BLANCO)");
+}
+
+
+// ================================================================================================
+// EL ALCANCE DEL SCATTER ES REDONDO, NO CUADRADO.
+//
+// ⚠️ ESTE TEST NACE DE UN SINTOMA QUE NADIE PODIA VER: "se ve como hay un LOD cuadrado para
+// maximizar el render de props en ese cuadrado". Era literal. Cada banda enumeraba un CUADRADO de
+// semilado `radiusM` y cortaba por distancia de CHEBYSHEV, asi que en las diagonales los props
+// llegaban `sqrt(2)` = 1,41 veces mas lejos que de frente, y el borde de la ultima banda era un
+// cuadrado dibujado en el suelo.
+//
+// Ninguna prueba lo notaba: la suite entera paso igual antes y despues de arreglarlo. Por eso esto.
+// ================================================================================================
+namespace {
+/// Campo llano y uniforme: aqui lo que se mide es la GEOMETRIA del alcance, no la ecologia.
+class FlatField : public Haruka::Planet::IPropSphereField {
+public:
+    Haruka::FieldSample sampleAt(const glm::vec3&) const override {
+        // Todo a cero: llano, sin lago, a nivel del mar. Aqui se mide la GEOMETRIA del alcance.
+        return Haruka::FieldSample{};
+    }
+    float heightAt(const glm::vec3&) const override { return 0.0f; }
+};
+}  // namespace
+
+void test_prop_scatter_radial() {
+    beginTest("prop_scatter_radial");
+    using namespace Haruka::Planet;
+
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 cam = pc + up * (R + 2.0);
+
+    PropScatterParams params;
+    params.radius = R;
+    params.seed   = 7u;
+
+    PropLayerTable table;
+    PropLayer L;
+    // Capa que acepta cualquier sitio: si filtrara por ecologia, un hueco en la esquina no se
+    // distinguiria de un hueco por el corte, que es justo lo que este test viene a medir.
+    L.mesh = "tree"; L.density = 1.0f;
+    L.humMin = -1e3f; L.humMax = 1e3f; L.tempMin = -1e3f; L.tempMax = 1e3f;
+    L.slopeMin = 0.0f; L.slopeMax = 1.0f;
+    table.layers.push_back(L);
+
+    FlatField field;
+    const std::vector<ScatteredProp> props = scatterPropsNear(field, cam, pc, params, table);
+
+    // El alcance nominal: el radio de la ultima banda.
+    double outer = 0.0;
+    for (const PropScatterLod& l : params.lods) outer = std::max(outer, (double)l.radiusM);
+
+    double worst = 0.0;
+    for (const ScatteredProp& p : props) {
+        // Distancia TANGENTE al jugador, que es en la que estan definidas las bandas.
+        const glm::dvec3 d = glm::dvec3(p.dir);
+        const glm::dvec3 rel = d - up * glm::dot(d, up);
+        worst = std::max(worst, glm::length(rel) * R);
+    }
+    std::printf("    %zu props · alcance nominal %.0f m · el mas lejano a %.0f m (%.2fx)\n",
+                props.size(), outer, worst, outer > 1.0 ? worst / outer : 0.0);
+
+    // ⚠️ SIN ESTO EL TEST NO MIDE NADA: si el scatter no coloca props, todo lo de abajo pasa.
+    CHECK(props.size() > 100, "el scatter coloca props (si no, el resto no demuestra nada)");
+    // Con corte cuadrado esto daba hasta 1,41x. Se deja holgura de una celda de la banda externa.
+    CHECK(worst <= outer * 1.05,
+          "ningun prop pasa del radio nominal (con corte cuadrado llegaban a 1,41x en diagonal)");
+    // CONTRAPRUEBA: y llegan CERCA del radio. Un scatter que solo sembrara al lado del jugador
+    // pasaria la comprobacion de arriba y seria peor que el bug.
+    CHECK(worst >= outer * 0.80, "y llegan hasta cerca del radio (no es que no siembre lejos)");
+}
+
+
+// ================================================================================================
+// ¿SOBREVIVEN LOS PROPS AL CAMINAR? La estabilidad del LOD, medida.
+//
+// ⚠️ LA CABECERA DE `prop_scatter.h` PROMETE UN FUNDIDO QUE NO EXISTE: "el radio se cubre en BANDAS
+// de celda creciente con FUNDIDO en el borde de cada banda (encoge antes de cruzar), asi NO se ve un
+// anillo cortado". En el codigo no hay nada de eso — ni `fade`, ni `shrink`, ni nada.
+//
+// Y hay algo peor que el anillo. El tamaño de CELDA sale de la BANDA, y la banda sale de la distancia
+// A LA CAMARA. Asi que la rejilla del mundo cambia cuando te mueves: un prop a 1005 m vive en una
+// celda de 40 m; caminas diez metros y pasa a la banda de celda 12 -> **otra rejilla, otros hashes,
+// otros props**. La promesa de "determinista por celda mundial" solo se cumple DENTRO de una banda.
+//
+// Esto lo mide: camina en pasos cortos y cuenta cuantos props sobreviven de un paso al siguiente,
+// separado por distancia. Los del borde exterior DEBEN entrar y salir; los de dentro, no.
+// ================================================================================================
+void test_prop_scatter_stability() {
+    beginTest("prop_scatter_stability");
+    using namespace Haruka::Planet;
+
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+
+    PropScatterParams params;
+    params.radius = R;
+    params.seed   = 7u;
+    PropLayerTable table;
+    PropLayer L;
+    L.mesh = "tree"; L.density = 1.0f;
+    L.humMin = -1e3f; L.humMax = 1e3f; L.tempMin = -1e3f; L.tempMax = 1e3f;
+    L.slopeMin = 0.0f; L.slopeMax = 1.0f;
+    table.layers.push_back(L);
+    FlatField field;
+
+    // Cada prop se identifica por su `cellSeed` + su celda: si el mismo sitio del mundo da el mismo
+    // prop paso tras paso, el conjunto no deberia cambiar salvo en el borde.
+    auto stepAt = [&](double metros) {
+        const double a = metros / R;
+        const glm::dvec3 up = glm::normalize(up0 * std::cos(a) + fwd * std::sin(a));
+        const glm::dvec3 cam = pc + up * (R + 2.0);
+        std::vector<ScatteredProp> v = scatterPropsNear(field, cam, pc, params, table);
+        return std::make_pair(cam, v);
+    };
+
+    // Bandas por distancia: se mira por separado el interior y el borde de cada una.
+    const double edges[] = { 0.0, 900.0, 1100.0, 2900.0, 3100.0, 5500.0, 6000.0 };
+    const char*  names[] = { "0-900 (dentro b0)", "900-1100 (BORDE b0/b1)", "1100-2900 (dentro b1)",
+                             "2900-3100 (BORDE b1/b2)", "3100-5500 (dentro b2)", "5500-6000 (borde ext)" };
+    const int    nb = 6;
+    long long seen[6] = {0}, lost[6] = {0};
+
+    auto prev = stepAt(0.0);
+    for (int step = 1; step <= 8; ++step) {
+        auto cur = stepAt(step * 5.0);          // pasos de 5 m: andar, no teletransportarse
+        std::unordered_set<uint32_t> now;
+        for (const ScatteredProp& p : cur.second) now.insert(p.cellSeed);
+        for (const ScatteredProp& p : prev.second) {
+            // Distancia del prop a la camara NUEVA: lo que decide en que banda cae ahora.
+            const glm::dvec3 d = glm::dvec3(p.dir);
+            const glm::dvec3 upN = glm::normalize(cur.first - pc);
+            const double dist = glm::length(d - upN * glm::dot(d, upN)) * R;
+            int b = -1;
+            for (int k = 0; k < nb; ++k) if (dist >= edges[k] && dist < edges[k + 1]) { b = k; break; }
+            if (b < 0) continue;
+            ++seen[b];
+            if (!now.count(p.cellSeed)) ++lost[b];
+        }
+        prev = std::move(cur);
+    }
+
+    std::printf("    tras 8 pasos de 5 m, props que DESAPARECEN por franja:\n");
+    double worstInner = 0.0;
+    for (int k = 0; k < nb; ++k) {
+        const double pct = seen[k] ? 100.0 * (double)lost[k] / (double)seen[k] : 0.0;
+        std::printf("      %-26s %6lld de %8lld   %5.1f%%\n", names[k], lost[k], seen[k], pct);
+        if (k == 0 || k == 2 || k == 4) worstInner = std::max(worstInner, pct);   // franjas INTERIORES
+    }
+
+    // ⚠️ LO QUE SE AFIRMA: dentro de una banda, caminar 5 m NO puede hacer desaparecer props. Son el
+    // mismo sitio del mundo, y desde que la celda es `(cara, nivel, i, j)` del planeta la identidad
+    // no depende de donde este la camara.
+    //
+    // El umbral es 0,5% y NO es holgura de sobra: medido da **0,0%** (0 de 255 428 en la banda 0).
+    // Estuvo en 5% mientras el cuantizador era una rejilla cubica 3D, y a ese umbral una regresion
+    // desde cero no se notaria — que es como no tener test.
+    //
+    //     rejilla cubica, un punto por celda ....... 15,9%
+    //     + sobremuestreo a cell/2 .................  3,2%
+    //     + celda de CARA DE CUBO ..................  0,0%
+    CHECK(worstInner < 0.5,
+          "dentro de una banda los props sobreviven al caminar (si no, la rejilla se mueve contigo)");
+    // CONTRAPRUEBA: en el BORDE EXTERIOR si tienen que entrar y salir — es el alcance. Si ahi tampoco
+    // cambiara nada, este test no estaria midiendo el paso de la camara.
+    // ⚠️ Y la contraprueba se mira en el BORDE DE BANDA, no en el exterior. En el exterior el
+    // recambio es minusculo (5 m de avance sobre un anillo de 500 m: 2 de 7092 = 0,03%) y un test
+    // que dependa de eso es una moneda al aire. En el borde de banda el prop cambia de nivel y por
+    // tanto de celda, asi que ahi TIENE que haber recambio — y si no lo hubiera, seria que las
+    // bandas no se estan aplicando y todo lo demas de este test no significa nada.
+    const double pctEdge = std::max(seen[1] ? 100.0 * (double)lost[1] / (double)seen[1] : 0.0,
+                                    seen[3] ? 100.0 * (double)lost[3] / (double)seen[3] : 0.0);
+    std::printf("    recambio en el borde de banda: %.1f%% (tiene que ser > 0: ahi cambia el nivel)\n",
+                pctEdge);
+    CHECK(pctEdge > 0.1, "en el BORDE de banda si cambian (si no, las bandas no se aplican)");
 }
 
 void test_prop_lod_mesh() {

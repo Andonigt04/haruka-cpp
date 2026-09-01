@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>   // getenv: HARUKA_COLLISION_WIRE
 #include "application.h"
+#include "core/planet/water_fill.h"   // WATER_FILL_DRY: el centinela del mapa de lagos
 #include "application_internal.h"
 #include "rhi/rhi_context.h"   // ruta PSO: comandos de dibujo del frame (bloom migrado)
 
@@ -2124,8 +2125,25 @@ void Application::renderFrameContent() {
     // escena ya están completos, que es lo que el modo superficie del fluido necesita para sembrar
     // refracción y oclusión (blit de escena). El binding 0 se restaura al UBO per-frame del
     // engine (el planeta lo pisa con su SimplePlanetUBO; softbody/fluido esperan PerFrameData).
-    if (!_fluidHost) _fluidHost = std::make_unique<Haruka::FluidHost>();
-    if (_fluidHost && _planetarySystem && _camera) {
+    // ── PUERTA RÁPIDA DEL CUERPO SECO ───────────────────────────────────────────────────────────
+    //
+    // ⚠️ ESTE STACK CORRÍA SIEMPRE, HUBIERA AGUA O NO. `ensurePatch` re-muestrea 9 216 celdas del
+    // terreno procedural cada 160 m de marcha, `seedLakes` hace un priority-flood sobre ellas y
+    // `sim.step`/`pbf.step`/`hybrid.update` van cada frame — en una luna sin una gota. Y peor que el
+    // coste: `seedLakes` llena las hondonadas mire lo que mire, así que un cuerpo seco tenía LAGOS.
+    //
+    // `hasWater()` sale del campo horneado (`bakeWaterMap`), no de la configuración: sin téxeles bajo
+    // el nivel del mar no hay semilla para el relleno y el cuerpo es seco por construcción. Andoni lo
+    // pidió explícitamente: *"quiero que haya planetas sin agua... igual se gasta en que espera agua
+    // cuando no tiene nunca"*.
+    //
+    // ⚠️ Y NO SE CONSTRUYE EL HOST SIQUIERA. Crearlo y no usarlo reservaría el solver PBF y la malla
+    // del heightfield para nada; el `unique_ptr` sigue vacío hasta que se pise un mundo con agua.
+    const bool bodyHasWater = _planetarySystem && _planetarySystem->activeTerrestrial()
+                            ? _planetarySystem->activeTerrestrial()->hasWater()
+                            : true;   // sin planeta terrestre resuelto, no se decide aquí
+    if (!_fluidHost && bodyHasWater) _fluidHost = std::make_unique<Haruka::FluidHost>();
+    if (_fluidHost && bodyHasWater && _planetarySystem && _camera) {
         HARUKA_PROFILE("fluid.setup+render(rios/lagos)");
         glm::dvec3 pc; double pr;
             if (_planetarySystem->getActivePlanet(pc, pr)) {
@@ -2135,6 +2153,18 @@ void Application::renderFrameContent() {
             }
             _fluidHost->terrainHeightFn = [this](const glm::dvec3& wp) -> double {
                 return _planetarySystem->sampleTerrainHeight(wp);
+            };
+            // El campo de lagos HORNEADO: con él, la siembra del parche deja de depender de su borde.
+            _fluidHost->bakedWaterFn = [this](const glm::dvec3& wp) -> double {
+                const auto* t = _planetarySystem ? _planetarySystem->activeTerrestrial() : nullptr;
+                if (!t) return (double)Haruka::Planet::WATER_FILL_DRY;
+                glm::dvec3 pc; double pr = 0.0;
+                if (!_planetarySystem->getActivePlanet(pc, pr) || pr <= 0.0)
+                    return (double)Haruka::Planet::WATER_FILL_DRY;
+                const glm::dvec3 rel = wp - pc;
+                const double len = glm::length(rel);
+                if (len < 1e-9) return (double)Haruka::Planet::WATER_FILL_DRY;
+                return (double)t->lakeLevelAt(rel / len);
             };
             const auto* tp = _planetarySystem->activeTerrestrial();
             if (tp) {
@@ -2653,6 +2683,66 @@ void Application::renderCollisionWireframe(RHI::Context* ctx, const glm::mat4& v
     uint64_t rev = 0;
     if (!_physicsEngine->getCollisionMeshDebug(s_verts, s_tris, center, rev)) return;
 
+    // ── LA MALLA QUE DE VERDAD ESTA EN JOLT, CONTRA LA SUPERFICIE QUE DICE LA FUNCION ────────────
+    //
+    // ⚠️ ES LO UNICO QUE NUNCA SE HABIA COMPROBADO, y por eso merece estar aqui. Todas las sondas del
+    // motor comparan FUNCIONES (`sampleHeight` con dos cortes de octava) o DATOS (el heightmap del
+    // nodo). Ninguna mira si los vertices que Jolt colisiona de verdad estan donde la funcion dice.
+    // Un desplazamiento ahi seria invisible para todas ellas — y explicaria una diferencia
+    // render/colision que ninguna medida encuentra. Se reporta una vez por revision de la malla, que
+    // es cuando puede cambiar.
+    if (_planetarySystem) {
+        static uint64_t s_lastRev = ~0ull;
+        if (rev != s_lastRev) {
+            s_lastRev = rev;
+            glm::dvec3 pc; double pr = 0.0;
+            if (_planetarySystem->getActivePlanet(pc, pr) && !s_verts.empty()) {
+                double worst = 0.0, sum = 0.0; size_t n = 0;
+                double worstN = 0.0, sumN = 0.0; size_t nN = 0;   // solo el entorno CERCANO
+                // ⚠️ SIN MUESTREAR EN EL ENTORNO INMEDIATO. Un paso de 1 de cada N reparte 500
+                // puntos por 256 m: demasiado disperso para ver un problema LOCAL, que es justo
+                // donde se reporta ("bajo mis pies"). Cerca se miran TODOS los vertices.
+                const glm::dvec3 eye = glm::dvec3(_camera->position);
+                double worstF = 0.0, sumF = 0.0; size_t nF = 0;   // < 10 m del jugador
+                for (size_t vi = 0; vi < s_verts.size(); ++vi) {
+                    if (glm::length(s_verts[vi] - eye) < 10.0) {
+                        const glm::dvec3 wf = s_verts[vi];
+                        const double rf = glm::length(wf - pc);
+                        if (rf > 1.0) {
+                            const double df = (rf - pr) - _planetarySystem->sampleTerrainHeight(wf);
+                            worstF = std::max(worstF, std::abs(df)); sumF += df; ++nF;
+                        }
+                    }
+                }
+                const size_t stepV = std::max<size_t>(1, s_verts.size() / 500);
+                for (size_t vi = 0; vi < s_verts.size(); vi += stepV) {
+                    // ⚠️ `s_verts` YA ESTA EN MUNDO. `center` es el ANCLA y el dibujo la RESTA (ver
+                    // abajo); sumarla aqui daba desvios de 136 000 km — el instrumento, no la malla.
+                    const glm::dvec3 w = s_verts[vi];
+                    const double r = glm::length(w - pc);
+                    if (r < 1.0) continue;
+                    const double alt  = r - pr;                     // cota del vertice de Jolt
+                    const double real = _planetarySystem->sampleTerrainHeight(w);
+                    const double d = alt - real;
+                    worst = std::max(worst, std::abs(d)); sum += d; ++n;
+                    // Cerca es donde se pisa y donde se compara con lo dibujado; lejos las celdas son
+                    // kilometricas y un desvio grande ahi no significa lo mismo.
+                    if (glm::length(w - center) < Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M) {
+                        worstN = std::max(worstN, std::abs(d)); sumN += d; ++nN;
+                    }
+                }
+                HARUKA_LOGI("Sonda", "BAJO LOS PIES (<10 m): %zu vertices · desvio medio %+.4f m "
+                            "· peor %.4f m", nF, nF ? sumF / (double)nF : 0.0, worstF);
+                if (n) HARUKA_LOGI("Sonda", "malla de JOLT vs funcion de altura: TODO %zu vert "
+                                   "medio %+.4f m peor %.4f m · CERCA (<%.0f m) %zu vert "
+                                   "medio %+.4f m peor %.4f m",
+                                   n, sum / (double)n, worst,
+                                   Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M,
+                                   nN, nN ? sumN / (double)nN : 0.0, worstN);
+            }
+        }
+    }
+
     // Solo se re-suben los buffers cuando la física reconstruye el parche (una vez cada 48 m de
     // deriva), no cada frame: son ~88 k vértices.
     // ⚠️ La recarga mira TAMBIÉN la versión de estáticos: los OBB de props se rehacen cada ~30 m
@@ -3073,7 +3163,34 @@ Haruka::RHI::TextureHandle Application::fallbackTexture(FallbackTex kind) {
 }
 
 void Application::refreshPropScatter() {
-    if (!m_propScatterEnabled) {
+    // ⚠️ `HARUKA_NOPROPS=1` APAGA EL CAMINO ENTERO, no solo el dibujo. Antes solo saltaba el pase de
+    // render (ver `scene.prop.instanced`), asi que el scatter seguia sembrando y los colliders
+    // seguian entrando en Jolt: como biseccion no servia, porque dejaba vivo justo lo que se queria
+    // descartar. Cortando aqui no hay props colocados, ni colliders, ni dibujo.
+    //
+    // ⚠️ AQUI DECIA QUE EL ANCLAJE DE LOS PROPS ESTABA "17x MAS BASTO QUE EL RENDER A 5 km" Y YA NO
+    // ES CIERTO. Lo era cuando se escribio; el tope de stride de cerca
+    // (`TERRAIN_NODE_STRIDE_MATCH_M`) cambio el corte con el que dibuja el render y eso lo arreglo de
+    // rebote. Medido hoy, altura del prop (corte `terrainTriM`) contra la del suelo DIBUJADO:
+    //
+    //     dist      corte prop   corte render   |dif| media    en pixeles
+    //        5 m      0,500 m      0,596 m       0,000 m        0,00 px
+    //      150 m      0,500 m      0,596 m       0,000 m        0,00 px
+    //      600 m      1,200 m      2,386 m       0,092 m        0,16 px
+    //     2500 m      5,000 m      9,544 m       0,364 m        0,15 px
+    //
+    // **Sub-pixel en todo el rango, y exacto dentro de 150 m.** Un prop no se ve flotar. Sigue
+    // siendo verdad que hereda una ley de LOD de un sistema borrado, y eso conviene arreglarlo por
+    // limpieza — pero ya no es un defecto visible, y montar un subsistema por 0,16 px seria trabajo
+    // sin sintoma. Lo que NO cubre esta medida es el reparto del scatter (cuantos props hay a cada
+    // distancia y si cambian al caminar), que es otra cosa y no esta medida.
+    //
+    // El interruptor se queda: permite descartar los props enteros de una ejecucion al bisecar.
+    static const bool s_noProps = [] {
+        const char* e = std::getenv("HARUKA_NOPROPS");
+        return e && e[0] == '1';
+    }();
+    if (!m_propScatterEnabled || s_noProps) {
         if (m_propRegistry.prototypeCount() > 0) m_propRegistry.reset();
         m_propScatterDebug.clear();
         m_propScatterPlanet.clear();

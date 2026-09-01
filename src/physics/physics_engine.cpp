@@ -159,7 +159,16 @@ struct PhysicsEngine::JoltImpl {
     // alambre enseñaría medio suelo. El lector los concatena.
     mutable std::vector<glm::dvec3> debugMeshVerts[2];
     mutable std::vector<uint32_t>   debugMeshTris[2];
-    mutable glm::dvec3      debugMeshCenter{0.0};
+    /// ⚠️ UN CENTRO POR SLOT. Habia UNO compartido y se sobrescribia con cada reconstruccion, pero
+    /// los vertices de cada slot se emiten relativos al ancla `near` DE SU PROPIA construccion — y el
+    /// cercano se rehace cada ~48 m mientras el lejano casi nunca. Resultado: el slot que no se
+    /// reconstruyo el ultimo se dibujaba desplazado por toda la deriva acumulada entre las dos.
+    ///
+    /// No afectaba a la fisica (esto solo alimenta el alambre de `HARUKA_COLLISION_WIRE`), pero hacia
+    /// que el overlay MINTIERA justo sobre lo que se usa para juzgar: si la colision casa con el
+    /// suelo dibujado. Costo una sesion entera de perseguir una disparidad que el instrumento se
+    /// estaba inventando.
+    mutable glm::dvec3      debugMeshCenter[2]{ glm::dvec3(0.0), glm::dvec3(0.0) };
     mutable uint64_t        debugMeshRevision = 0;
 
     // EL ANILLO CERCANO PUBLICADO AL RENDER (ver `PhysicsEngine::getNearGroundRing`). Se guarda
@@ -185,6 +194,30 @@ struct PhysicsEngine::JoltImpl {
     // El suelo como PILA DE ANILLOS de heightfield. Devuelve null si el provider no los da (servidor,
     // tests) → el llamante cae a la malla. Ver `terrain_lod.h` para por qué esto sustituye a medio
     // millón de triángulos: el árbol AABB de la MeshShape son 802-1274 ms medidos, y aquí no hay.
+    /**
+     * @brief Primer anillo del suelo LEJANO: el primero cuyo hueco ya alcanza el borde del cercano.
+     *
+     * ⚠️ ESTO ERA UN LITERAL `1` EN DOS SITIOS Y SOLO SE ARREGLO UNO. El build inicial pasó a
+     * derivarlo (10 anillos, 854 KB) y la RECONSTRUCCION se quedó con el `1` (13 anillos, 1052 KB),
+     * asi que el suelo lejano volvia a duplicar los anillos 1-3 del cercano en cuanto derivabas.
+     * En el log de Andoni se ve el salto exacto: `10 anillos · 854 KB` al arrancar y `13 anillos ·
+     * 1052 KB` a los 50 segundos.
+     *
+     * ⚠️ Y NO ES SOLO MEMORIA TIRADA, COMO DECIA EL COMENTARIO ANTERIOR. Ese comentario razonaba que
+     * la geometria duplicada es identica —mismos specs, mismas muestras— y que por tanto el
+     * personaje se apoya igual en cualquiera de las dos. **Falso, y el log lo desmiente**: los dos
+     * cuerpos se reconstruyen con cadencias muy distintas (12 revisiones del cercano contra 3 del
+     * lejano en cinco segundos), asi que las dos copias son de INSTANTES y ANCLAS distintos. Son dos
+     * superficies diferentes ocupando el mismo sitio, y el personaje se apoya en la mas alta.
+     */
+    static size_t farFirstRing() {
+        const std::vector<Haruka::Planet::TerrainRingSpec> probe =
+            Haruka::Planet::terrainRingLayout(200000.0);
+        for (size_t k = 0; k < probe.size(); ++k)
+            if (probe[k].hole >= Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M - 1e-9) return k;
+        return 1;
+    }
+
     JPH::Ref<JPH::Shape> buildGroundRings(IWorldProvider* w, const glm::dvec3& near,
                                           size_t firstRing, double halfExtent, int slot) const {
         using Clock = std::chrono::steady_clock;
@@ -325,7 +358,7 @@ struct PhysicsEngine::JoltImpl {
             std::lock_guard<std::mutex> lk(debugMeshMx);
             debugMeshVerts[slot] = std::move(dv);
             debugMeshTris[slot]  = std::move(dt);
-            debugMeshCenter = near;
+            debugMeshCenter[slot] = near;
             ++debugMeshRevision;
         }
 
@@ -425,11 +458,12 @@ struct PhysicsEngine::JoltImpl {
         // pagarlos por si acaso en cada reconstrucción no tiene sentido.
         if (debugCaptureGround.load(std::memory_order_relaxed)) {
             std::lock_guard<std::mutex> lk(debugMeshMx);
+            debugMeshCenter[1] = near;
             debugMeshVerts[1] = verts;
             debugMeshTris[1]  = tris;
             debugMeshVerts[0].clear();
             debugMeshTris[0].clear();
-            debugMeshCenter = near;
+            debugMeshCenter[0] = near;
             ++debugMeshRevision;
         }
         JPH::VertexList jv; jv.reserve(verts.size());
@@ -558,7 +592,21 @@ struct PhysicsEngine::JoltImpl {
         JPH::Ref<JPH::Shape> nearShape =
             buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
         if (nearShape) {
-            JPH::Ref<JPH::Shape> farShape = buildGroundRings(w, near, 1, 200000.0, 1);
+            // ⚠️ EL LEJANO EMPIEZA DONDE ACABA EL CERCANO, NO EN EL ANILLO 1.
+            //
+            // Los anillos teselan el plano sin solaparse: el 0 cubre [0, 32 m], el 1 [32, 64], el 2
+            // [64, 128], el 3 [128, 256]... El cuerpo CERCANO se construye con `halfExtent` = 256 m,
+            // o sea los anillos 0..3. Y el LEJANO empezaba en el 1 — asi que los anillos 1, 2 y 3
+            // estaban en LOS DOS: de 32 a 256 m habia dos superficies de colision identicas,
+            // muestreadas dos veces, subidas a Jolt dos veces y consultadas dos veces por consulta.
+            //
+            // No daba un fallo visible porque la geometria duplicada es la MISMA (mismos specs de
+            // anillo, mismas muestras), asi que el personaje se apoya igual en cualquiera de las dos.
+            // Era trabajo y memoria tirados, no un bug de comportamiento.
+            //
+            // El primer anillo del lejano se DERIVA del alcance del cercano en vez de ser un literal:
+            // asi no pueden separarse si alguien cambia `TERRAIN_COLLIDE_UNIFORM_M`.
+            JPH::Ref<JPH::Shape> farShape = buildGroundRings(w, near, farFirstRing(), 200000.0, 1);
             swapBody(nearId, haveNear, nearShape);
             swapBody(farId,  haveFar,  farShape);
             groundIsMesh = true; meshCenter = near; meshBuildElev = w->terrainHeightAt(near);
@@ -1238,7 +1286,25 @@ struct PhysicsEngine::JoltImpl {
         }
 
         const bool drifted = groundIsMesh && glm::length(near - meshCenter) > 48.0;
-        const bool refined = groundIsMesh && std::abs(w->terrainHeightAt(near) - meshBuildElev) > 0.5;
+        // ⚠️ EL UMBRAL VA A LA ESCALA DEL CUERPO LEJANO, NO A 0,5 m. Esto dispara la reconstruccion
+        // del suelo LEJANO (±262 km, 45-51 ms), y estaba en medio metro: **treinta veces mas fino que
+        // la celda de su propio anillo interior** (16 m). Bajando una cuesta, la altura del ancla
+        // cambia medio metro cada pocos pasos, asi que se reconstruian ±262 km de malla cada 0,25 s
+        // —el rate-limit— sin que la superficie resultante cambiara de forma apreciable. En el log de
+        // Andoni: doce reconstrucciones del lejano en diez segundos, a 41-51 ms cada una, andando.
+        //
+        // El 0,5 m venia de cuando el suelo era UN cuerpo que incluia los anillos finos; al separarse
+        // el cercano (que tiene su propia cadencia) el umbral se quedo con la escala del que ya no
+        // esta. Ahora se deriva de la celda del primer anillo lejano, para que no puedan divergir.
+        double farCellM = 16.0;
+        {
+            const std::vector<Haruka::Planet::TerrainRingSpec> lay =
+                Haruka::Planet::terrainRingLayout(200000.0);
+            const size_t k = farFirstRing();
+            if (k < lay.size()) farCellM = lay[k].cell;
+        }
+        const bool refined = groundIsMesh
+                          && std::abs(w->terrainHeightAt(near) - meshBuildElev) > farCellM * 0.5;
         // onSphere: el primer build cayó al fallback de ESFERA (terrainMesh falló ese instante, p.ej. el
         // planeta aún no estaba listo). La esfera es PLANA a la altura de un punto → el terreno aparece
         // decenas de m desplazado. Hay que SEGUIR intentando la malla (si no, se queda clavado en la
@@ -1251,7 +1317,11 @@ struct PhysicsEngine::JoltImpl {
             groundJob = std::async(std::launch::async, [this, w, near] {
                 // Solo los anillos de FUERA: el 0 lo lleva `nearJob` con su propia cadencia. Si el
                 // provider no da anillos, `buildGroundShape` cae a la malla/esfera de respaldo.
-                if (JPH::Ref<JPH::Shape> r = buildGroundRings(w, near, 1, 200000.0, 1)) return r;
+                // ⚠️ `farFirstRing()`, NO UN 1. Ver la nota de la funcion: este era el sitio que se
+                // quedo con el literal cuando el build inicial paso a derivarlo, y por eso el suelo
+                // lejano volvia a 13 anillos en cuanto se reconstruia.
+                if (JPH::Ref<JPH::Shape> r = buildGroundRings(w, near, farFirstRing(), 200000.0, 1))
+                    return r;
                 return buildGroundShape(w, near);
             });
             lastRebuildT = simTime;
@@ -1308,8 +1378,61 @@ struct PhysicsEngine::JoltImpl {
             if (finite3(F))
                 bi.AddForce(it->second, JPH::Vec3((float)F.x, (float)F.y, (float)F.z));
         }
-        system.Update((float)dt, 1, &temp, &jobs);
+        // ⚠️ SUB-PASOS SEGUN EL `dt`, NO UNO FIJO. Aqui iba `1` a secas con el `dt` crudo del frame.
+        //
+        // Jolt pide no pasar de ~1/60 s por paso de colision: por encima, el integrador avanza al
+        // personaje mas de lo que su forma puede resolver contra la geometria y aparecen enganches y
+        // atravesados. Y este motor ya corre por encima de ese limite SIN que nadie lo tocara —
+        // medido en partida: el frame va de 17 a 32 ms, o sea 1/59 a 1/31, con un solo paso.
+        //
+        // Se noto al subir el presupuesto de generacion del terreno: +4,7 ms de frame y el personaje
+        // empezaba a atascarse (habia que saltar para soltarse). La causa no era el terreno — era que
+        // la fisica no aguanta un `dt` grande y cualquier cosa que encarezca el frame la rompe. Con
+        // los sub-pasos, el coste de un frame caro deja de convertirse en un bug de movimiento.
+        //
+        // El tope de 4 acota el trabajo si un frame se dispara de verdad (una carga, un autoguardado):
+        // preferimos avanzar menos preciso un frame suelto que gastar 20 pasos y encadenar el tiron.
+        const int kSteps = std::min(4, std::max(1, (int)std::ceil(dt * 60.0)));
+        system.Update((float)dt, kSteps, &temp, &jobs);
         updateRails(dt);
+
+        // ── EL SUELO DE LOS CUERPOS LEJANOS SALE DE LA CONSULTA, NO DE LA MALLA ─────────────────
+        //
+        // Requisito de Andoni (2026-08-31): **lo visible tiene que ser colisionable, 10-100 km**, y
+        // las colisiones tienen que ser LAS MISMAS entre clientes. La malla de anillos no puede dar
+        // eso, y no es cuestion de afinarla: esta medido en `terrain_collision_client_agreement`.
+        //
+        //     distancia   celda      lo que presenta el anillo vs el suelo que SE PISA
+        //       10000 m   256.00 m      media 3,12 m · peor  8,12 m
+        //      100000 m  2048.00 m      media 23,6 m · peor 39,4 m
+        //
+        // ⚠️ Y NO SE ARREGLA CAMBIANDO EL CORTE DE OCTAVAS. Se probaron las tres politicas posibles
+        // y las tres dan lo mismo a 10 km: por distancia (8,12 m), por celda del anillo (18,15 m —
+        // PEOR, y ese era el arreglo que parecia obvio) y con el corte del pie (8,08 m). El error no
+        // es que octavas se evaluan: es que **una celda de 256 m no puede llevar relieve de 4,5 m**, y
+        // la cuerda entre vertices vale 8 m pongas lo que pongas en ellos.
+        //
+        // La consulta si puede, porque no tiene rejilla NI OBSERVADOR: `terrainHeightAt` usa
+        // `terrainTriM(0)`, constante, asi que es funcion pura de la posicion en el mundo. Dos
+        // clientes a cualquier distancia obtienen el MISMO numero por construccion, no por tolerancia.
+        // Coste medido: **109 ns por consulta** (Release), o sea 9 150 consultas por ms — una por
+        // cuerpo lejano y por paso es ruido al lado de los 0,02 ms/frame que cuesta Jolt entero.
+        //
+        // ⚠️ NO SE TOCA EL CAMPO CERCANO. Dentro de `TERRAIN_COLLIDE_UNIFORM_M` (256 m) manda la malla
+        // fina, que ahi ya casa con lo que se pisa (0,0376 m peor a 100 m) y es sobre la que camina el
+        // personaje. El jugador nunca esta a 10 km de si mismo, asi que este camino no puede
+        // estropear el caminar — es lo que lo hace seguro.
+        const bool farQuery = groundIsMesh && w && w->hasActivePlanet()
+                           && !(std::getenv("HARUKA_FAR_GROUND_QUERY")
+                                && std::getenv("HARUKA_FAR_GROUND_QUERY")[0] == '0');
+        const glm::dvec3 pcW = farQuery ? w->activePlanetCenter() : glm::dvec3(0.0);
+        const double     Rw  = farQuery ? w->activePlanetRadius() : 0.0;
+        // La celda del anillo a cada distancia acota cuanto puede mentir la malla, y con ella la banda
+        // en la que un cuerpo "apoyado" se considera apoyado en la superficie EQUIVOCADA.
+        const std::vector<Haruka::Planet::TerrainRingSpec> ringLay =
+            farQuery ? Haruka::Planet::terrainRingLayout(200000.0)
+                     : std::vector<Haruka::Planet::TerrainRingSpec>{};
+
         for (auto& sp : bodies) {
             auto it = map.find(sp.get()); if (it == map.end()) continue;
             if (sp->isKinematic) continue;   // lo mueve el juego (vuelo/nado): no le pisemos la posición
@@ -1321,6 +1444,41 @@ struct PhysicsEngine::JoltImpl {
             sp->velocity    = glm::dvec3(v.GetX(), v.GetY(), v.GetZ());
             sp->orientation = glm::dquat(q.GetW(), q.GetX(), q.GetY(), q.GetZ());
             sp->angularVel  = glm::dvec3(a.GetX(), a.GetY(), a.GetZ());
+
+            // ⚠️ EL PERSONAJE NO PASA POR AQUI: lo lleva `CharacterVirtual` en `stepCharacter`, y
+            // ademas siempre esta en el campo cercano. Pisarle la posicion desde fuera es justo el
+            // fallo que documenta `charactervirtual-no-cancela-gravedad`.
+            if (!farQuery || sp->isCharacter || Rw <= 0.0) continue;
+            const double distAnchor = glm::length(sp->position - meshCenter);
+            if (distAnchor <= Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M) continue;
+
+            const glm::dvec3 rel = sp->position - pcW;
+            const double     r   = glm::length(rel);
+            if (r < 1.0) continue;
+            const glm::dvec3 upB  = rel / r;
+            // `radius` es el radio ENVOLVENTE tambien para Box/Compound (ver RigidBody::shape), asi
+            // que sirve de apoyo conservador sin depender de la forma.
+            const double surf = Rw + w->terrainHeightAt(sp->position) + sp->radius;
+            double cellM = ringLay.empty() ? 0.0 : ringLay.back().cell;
+            for (const auto& rs : ringLay) if (rs.extent >= distAnchor) { cellM = rs.cell; break; }
+
+            // Dos casos, y el segundo es el que de verdad hacia falta:
+            //  · POR DEBAJO de la superficie -> subirlo (aterrizaje, o la malla lo dejo hundido).
+            //  · APOYADO POR ENCIMA -> la malla lo sostiene sobre una superficie que no existe, hasta
+            //    8 m mas arriba. Sin este caso el cuerpo se quedaria flotando y el arreglo no serviria
+            //    de nada. Se exige que este QUIETO en radial y dentro de una celda del anillo, para no
+            //    confundirlo con algo que esta cayendo o volando.
+            const double vRad = glm::dot(sp->velocity, upB);
+            const bool   restingHigh = std::fabs(vRad) < 1.0 && (r - surf) > 0.0 && (r - surf) < cellM;
+            if (r >= surf && !restingHigh) continue;
+
+            sp->position = pcW + upB * surf;
+            if (vRad < 0.0) { sp->velocity -= upB * vRad; }   // mata solo lo que entra en el suelo
+            const glm::dvec3 lp2 = sp->position - origin;
+            bi.SetPosition(it->second, JPH::RVec3((JPH::Real)lp2.x, (JPH::Real)lp2.y, (JPH::Real)lp2.z),
+                           JPH::EActivation::DontActivate);
+            bi.SetLinearVelocity(it->second, JPH::Vec3((float)sp->velocity.x, (float)sp->velocity.y,
+                                                       (float)sp->velocity.z));
         }
     }
 };
@@ -2123,13 +2281,34 @@ bool PhysicsEngine::getCollisionMeshDebug(std::vector<glm::dvec3>& outVerts,
     outVerts.clear(); outTris.clear();
     outVerts.reserve(m_jolt->debugMeshVerts[0].size() + m_jolt->debugMeshVerts[1].size());
     outTris.reserve(m_jolt->debugMeshTris[0].size() + m_jolt->debugMeshTris[1].size());
+    // ⚠️ LOS DOS SLOTS YA ESTAN EN MUNDO. NO SE REBASA NADA, Y REBASARLOS ERA UN BUG.
+    //
+    // Aqui hubo un `shift = debugMeshCenter[slot] - ref` que sumaba a cada vertice la diferencia
+    // entre las dos anclas, con el comentario "cada slot vive en su propio marco". **Es falso**:
+    // `emitRing` emite `ringPoint`, que es `org + rx·x + rz·z + rup·h` — coordenadas de MUNDO. El
+    // `debugMeshCenter` no es el origen de esos vertices, solo el ancla con la que se construyeron.
+    //
+    // El efecto: el cercano y el lejano se reconstruyen con cadencias MUY distintas (el lejano solo
+    // al derivar 48 m), asi que en cuanto el cercano se rehacia las dos anclas dejaban de coincidir
+    // y el cuerpo LEJANO salia dibujado desplazado justo esa deriva. En el log se ve exacto:
+    //
+    //     rev 1 (anclas iguales)      autotest del alambre: peor 0,0051 m
+    //     rev 2 (el cercano se rehizo)                      peor 2,2039 m   <- anillo 4, el lejano
+    //     rev 3                                             peor 2,4276 m
+    //
+    // Y el alambre es el instrumento con el que se estaba juzgando la disparidad, asi que se estaba
+    // midiendo con una regla que se torcia sola al caminar. `outCenter` es solo el origen de
+    // rebasado para el dibujo (el consumidor hace `v - outCenter` y la matriz lo devuelve): vale
+    // cualquier punto cercano a la malla, y por eso el bug original —los dos slots compartiendo UN
+    // centro— no era tal.
+    const glm::dvec3 ref = m_jolt->debugMeshVerts[0].empty() ? m_jolt->debugMeshCenter[1]
+                                                             : m_jolt->debugMeshCenter[0];
     for (int slot = 0; slot < 2; ++slot) {
         const uint32_t base = (uint32_t)outVerts.size();
-        outVerts.insert(outVerts.end(), m_jolt->debugMeshVerts[slot].begin(),
-                        m_jolt->debugMeshVerts[slot].end());
+        for (const glm::dvec3& v : m_jolt->debugMeshVerts[slot]) outVerts.push_back(v);
         for (uint32_t i : m_jolt->debugMeshTris[slot]) outTris.push_back(base + i);
     }
-    outCenter   = m_jolt->debugMeshCenter;
+    outCenter   = ref;
     outRevision = m_jolt->debugMeshRevision;
     return true;
 #else

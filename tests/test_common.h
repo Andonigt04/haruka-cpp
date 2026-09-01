@@ -59,6 +59,10 @@ void test_physics_static_wall();
 void test_physics_character();
 void test_physics_character_resting_velocity();
 void test_physics_body_removal();
+// El suelo de los cuerpos LEJANOS sale de la consulta world-pure, no de la malla de anillos.
+void test_physics_far_ground_from_query();
+// La premisa del servidor autoritativo: dos Jolt con las mismas entradas, y con anclas distintas.
+void test_physics_two_instances_agree();
 // Sistema de construcción  (test_construction.cpp)
 void test_construction_placement();
 // Módulo de reglas DGS  (test_dgs.cpp)
@@ -113,6 +117,8 @@ void test_image_writer_roundtrip();
 // del salto de tamaño), que la malla baje de verdad y que detalle 1.0 siga siendo la de siempre.
 void test_prop_lod_mesh();
 void test_prop_lod_attributes();
+void test_prop_scatter_radial();
+void test_prop_scatter_stability();
 void test_prop_collider();
 void test_rock_interior();   // peñones enterrados de la roca (con contraprueba por rayos)
 // EL MAR (test_ocean.cpp): que la ola de la física sea la derivada exacta de la superficie, que el
@@ -125,8 +131,27 @@ void test_ocean_shoaling();
 void test_ocean_buoyancy_drift();
 void test_ocean_no_water_no_float();
 void test_ocean_sea_state();
+// Dispersion en profundidad FINITA: la ola se acorta al perder fondo (era de aguas profundas).
+void test_ocean_finite_depth();
+// Agua interior como CAMPO DEL MUNDO: priority-flood global sobre el bake (sustituye al parche).
+void test_water_fill_global();
+// FETCH: un lago de montana deja de heredar el swell del oceano (JONSWAP contra Pierson-Moskowitz).
+void test_ocean_fetch();
+// El LIMITE del campo de agua horneado: que lago mas pequeno cabe en el bake.
+void test_water_bake_resolution_limit();
+// Hasta donde hay olas y si hay huecos: la rejilla del mar es la CUADRADA del clipmap.
+void test_ocean_wave_reach();
+// Nyquist: ¿puede la rejilla del agua llevar la ola que se le pide, a cada distancia?
+void test_ocean_grid_carries_wave();
 void test_ocean_tide();
 void test_ocean_swash();
+void test_ocean_break_limit();
+void test_ocean_break_fold();
+void test_shallow_water_reanchor_stability();
+void test_shallow_water_mountain_coverage();
+void test_shallow_water_inherits_ocean_swell();
+// FISICA del agua interior: conservacion, nivelado, desbordamiento y rotura de presa (con Ritter).
+void test_shallow_water_physics();
 // La octava mas fina del terreno sigue viva (murio en silencio al bajar el tope de tesela).
 void test_terrain_finest_octave();
 // F5: ¿hay relieve procedural desde orbita? Antes del 2026-08-24 era EXACTAMENTE cero a partir de
@@ -172,6 +197,15 @@ void test_terrain_node_walk_shimmer();
 void test_terrain_node_ucenter_jitter();
 void test_terrain_node_level_balance();
 void test_terrain_prop_anchor_mismatch();
+// ¿Cuanto depende del OBSERVADOR el suelo que se pisa? Criterio de aceptacion del multijugador:
+// Andoni fijo "lo visible tiene que ser colisionable, 10-100 km".
+void test_terrain_collision_observer_dependence();
+// El criterio de verdad: la superficie que presenta un cliente LEJANO contra la que se PISA.
+void test_terrain_collision_client_agreement();
+// El PRECIO del acuerdo: cuanta celda hace falta para cerrar los 8,12 m, y cuanto cuesta.
+void test_terrain_collision_refine_cost();
+// Coste de resolver el suelo por CONSULTA (decide si la consulta world-pure es viable). Solo Release.
+void test_terrain_ground_query_cost();
 void test_terrain_node_orbit_coverage();
 void test_terrain_node_range_published();
 void test_terrain_node_demand_with_range();

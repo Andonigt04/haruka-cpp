@@ -41,6 +41,9 @@
 #include "core/terrain/terrain_node_pool.h"
 #include "core/terrain/base_field.h"   // baseFieldHeightAt: el gemelo CPU que este test valida
 #include "core/terrain/terrain_node_gpu.h"
+#include "core/planet/ocean_wave.h"   // gemelo CPU de la ola (paridad con lib/ocean_wave.glsl)
+#include "io/image_writer.h"          // HARUKA_WATER_PNG: volcar las formas para MIRARLAS
+#include "core/planet/water_fill.h"   // el relleno de cuencas: gemelo del campo que lee la GPU
 #include "core/terrain/terrain_node_renderer.h"   // Shader::baseDir() para los shaders del banco
 
 #include <SDL3/SDL.h>
@@ -829,6 +832,441 @@ static void testTextureContent()
  * arriba frente a la de abajo. Si los dos backends dan el mismo reparto, ImGui mostrara lo mismo en
  * los dos: muestrea el texel (0,0) en ambos, asi que arrays de texeles iguales = imagen igual.
  */
+// ── EL MAR SOBRE CUALQUIER FORMA, Y LA OLA QUE SE VE == LA OLA QUE SE NADA ──────────────────────
+//
+// La ola vive DOS VECES: `assets/shaders/lib/ocean_wave.glsl` (la que se dibuja) y
+// `src/core/planet/ocean_wave.h` (la que usa la fisica para flotar y arrastrar). Estan escritas como
+// gemelas, cada una con comentarios que apuntan a la otra, y NO HABIA NI UN TEST QUE LAS COMPARASE.
+// Si divergen, lo que se ve y lo que se nada dejan de ser lo mismo — y esa es exactamente la clase de
+// fallo que no da error, no rompe nada y solo se nota como "el agua esta rara".
+//
+// Se sube a la GPU el MISMO banco de trenes que usa la CPU (`oceanDefaultState`), asi que cualquier
+// diferencia es de la formula y no de los datos.
+
+/// Gemelo del bloque `OceanParams` de lib/ocean_params.glsl (binding 29).
+struct OceanParamsUBO { float wave[4][4]; float misc[4]; };
+
+static BufferHandle makeOceanStateUBO(const Haruka::Planet::OceanState& st)
+{
+    OceanParamsUBO u{};
+    for (int i = 0; i < 4; ++i)
+        for (int c = 0; c < 4; ++c) u.wave[i][c] = st.wave[i][c];
+    u.misc[0] = st.seaLevelM;
+    u.misc[1] = 1.0f;              // "el bloque trae datos validos": sin esto el shader usaria su
+                                   // tabla de respaldo y el careo no probaria nada del estado subido.
+    return g_dev->createBuffer(BufferUsage::Uniform, sizeof(u), &u, BufferMemory::Dynamic);
+}
+
+static void testOceanWaveParity()
+{
+    BEGIN("mar: la ola de la GPU == la ola de la CPU (gemelas)");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/rhitest_fullscreen.vert";
+    const std::string fs = base + "shaders/rhitest_waveprobe.frag";
+
+    // Barrido determinista: cada pixel es una muestra. La profundidad recorre de 0,5 m a ~12 m, o
+    // sea toda la franja de rompiente, que es donde el modelo hace mas cosas y donde estaba el bug
+    // del tope por tren. Con solo mar abierto el careo pasaria sin tocar nada de eso.
+    // ⚠️ EL TAMANO ES EL DE LA VENTANA DEL BANCO (256x256) A PROPOSITO. En OpenGL el viewport es
+    // estado GLOBAL: un test que lo deja en 128x128 hace que TODOS los siguientes dibujen en una
+    // esquina mientras leen la ventana entera. Costo 6 fallos en tests que no tienen nada que ver
+    // (cielo, descarte de caras, costuras, luz de props) y solo en GL — en Vulkan el viewport es
+    // estado dinamico del pase y se refija solo, asi que la tanda de Vulkan salia limpia y la de GL
+    // no. Si algun dia hace falta otro tamano, hay que restaurarlo antes de endRenderPass.
+    const int W = 256, H = 256;
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::vec3 origin(1000.0f, 0.0f, -500.0f);
+    const glm::vec3 stepX(0.7f, 0.0f, 0.11f);
+    const glm::vec3 stepY(0.13f, 0.0f, 0.9f);
+    const float     t0 = 12.75f;
+    const float     depth0 = 0.5f, depthStep = 0.09f;
+
+    struct ProbeUBO {
+        float origin[4], stepX[4], stepY[4], up[4], depth[4];
+    } pu{};
+    pu.origin[0]=origin.x; pu.origin[1]=origin.y; pu.origin[2]=origin.z; pu.origin[3]=t0;
+    pu.stepX[0]=stepX.x;   pu.stepX[1]=stepX.y;   pu.stepX[2]=stepX.z;
+    pu.stepY[0]=stepY.x;   pu.stepY[1]=stepY.y;   pu.stepY[2]=stepY.z;
+    pu.up[0]=up.x;         pu.up[1]=up.y;         pu.up[2]=up.z;
+    pu.depth[0]=depth0;    pu.depth[1]=depthStep; pu.depth[2]=(float)H;
+
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.depth.test = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull = CullMode::None;
+
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    BufferHandle   ub   = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pu), &pu, BufferMemory::Dynamic);
+    const Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    BufferHandle   ocean = makeOceanStateUBO(st);
+    CHECK(valid(pipe) && valid(ub) && valid(ocean), "pipeline y UBOs de la sonda creados");
+    if (!valid(pipe)) return;
+
+    std::vector<uint8_t> px((size_t)W * H * 4, 0xAA);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0]=cv.color[1]=cv.color[2]=0.0f; cv.color[3]=1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->setViewport(0, 0, W, H);
+        c->bindPipeline(pipe);
+        c->bindUniformBuffer(0, ub);
+        c->bindUniformBuffer(29, ocean);
+        c->draw(3);
+        c->endRenderPass();
+        if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+    }
+
+    // ⚠️ Si el readback no escribe, el buffer sigue en 0xAA y decodificarlo daria una altura
+    // constante que casaria mal con TODO — y el test acusaria al shader de un fallo del instrumento.
+    bool wrote = false;
+    for (size_t k = 0; k < px.size(); k += 4) if (px[k] != 0xAA || px[k+1] != 0xAA) { wrote = true; break; }
+    CHECK(wrote, "el readback escribio (si no, el careo no significaria nada)");
+    if (!wrote) { std::printf("    SIN LECTURA: no se puede carear\n"); return; }
+
+    const float kRange = 4.0f;   // el mismo que codifica el shader
+    auto decode = [&](int x, int y) {
+        const size_t k = ((size_t)y * W + x) * 4;
+        const float scaled = px[k] * 65536.0f + px[k+1] * 256.0f + px[k+2];
+        return (scaled / 16777215.0f) * 2.0f * kRange - kRange;
+    };
+
+    double worst = 0.0, sum = 0.0; int n = 0, worstX = 0, worstY = 0;
+    float worstGpu = 0.0f, worstCpu = 0.0f;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const glm::vec3 wp = origin + stepX * (float)x + stepY * (float)y;
+            const float depth  = depth0 + depthStep * (float)y;
+            const float hCpu = Haruka::Planet::oceanWaveHeight(wp, up, t0, depth, 1.0f, st);
+            const float hGpu = decode(x, y);
+            const double d = std::abs((double)hGpu - (double)hCpu);
+            sum += d; ++n;
+            if (d > worst) { worst = d; worstX = x; worstY = y; worstGpu = hGpu; worstCpu = hCpu; }
+        }
+
+    const double mean = n ? sum / n : 0.0;
+    std::printf("    %d muestras · profundidad de %.2f a %.2f m (la franja de rompiente entera)\n",
+                n, depth0, depth0 + depthStep * (H - 1));
+    std::printf("    diferencia GPU vs CPU: media %.6f m · peor %.6f m\n", mean, worst);
+    std::printf("      peor punto (%d,%d) a %.2f m de fondo: GPU %+.4f m · CPU %+.4f m\n",
+                worstX, worstY, depth0 + depthStep * worstY, worstGpu, worstCpu);
+
+    // El suelo de ruido no es cero: la altura viaja codificada en 24 bits sobre un rango de +-4 m,
+    // o sea ~0,5 micras de cuantizacion, y las dos partes usan float de 32 bits con `sin` de
+    // implementaciones distintas. Un milimetro es holgado para eso y estrecho para una divergencia
+    // real de formula (el bug del tope por tren daba METROS).
+    CHECK(worst < 1e-3, "la ola dibujada y la ola simulada son la misma (< 1 mm)");
+
+    // CONTRAPRUEBA: con el estado CAMBIADO la diferencia tiene que dispararse. Sin esto, un careo que
+    // comparase cualquier cosa consigo misma daria 0 y pasaria igual.
+    Haruka::Planet::OceanState alt = st;
+    alt.wave[0][1] *= 1.5f;                       // el tren dominante, un 50% mas alto
+    double worstAlt = 0.0;
+    for (int y = 0; y < H; y += 4)
+        for (int x = 0; x < W; x += 4) {
+            const glm::vec3 wp = origin + stepX * (float)x + stepY * (float)y;
+            const float depth  = depth0 + depthStep * (float)y;
+            const float hAlt = Haruka::Planet::oceanWaveHeight(wp, up, t0, depth, 1.0f, alt);
+            worstAlt = std::max(worstAlt, std::abs((double)decode(x, y) - (double)hAlt));
+        }
+    std::printf("    CONTRAPRUEBA: con el tren dominante un 50%% mas alto, la peor diferencia sube a %.4f m\n",
+                worstAlt);
+    CHECK(worstAlt > 0.05, "el careo detecta un cambio del estado (no compara algo consigo mismo)");
+
+    g_dev->destroy(pipe); g_dev->destroy(ub); g_dev->destroy(ocean);
+}
+
+/**
+ * @brief La ola sobre FORMAS que no son un planeta: un anillo cilindrico y un cubo.
+ *
+ * Responde a una pregunta de diseno con una medida en vez de con una opinion: ¿el mar depende de que
+ * haya una esfera debajo? El modelo solo pide posicion, normal y profundidad, y construye su marco
+ * tangente del propio `up` — asi que deberia valer para cualquier superficie. Aqui se dibuja sobre
+ * dos que no tienen nada que ver con un planeta.
+ *
+ * El CUBO es el caso duro a proposito: en una arista la normal salta de golpe y con ella el marco
+ * tangente. Si la ola dependiera del marco de manera inestable, ahi se veria una costura.
+ *
+ * Se mide cobertura y color medio en los dos backends. La imagen queda ademas guardada en `g_shots`
+ * para que el careo GL<->Vulkan de `compareBackends()` la incluya como una escena mas.
+ */
+static void testWaterShapes()
+{
+    BEGIN("mar: la ola sobre un anillo y sobre un cubo (no hace falta planeta)");
+
+    const std::string base = Haruka::Shader::baseDir();
+    const std::string vs = base + "shaders/rhitest_watershape.vert";
+    const std::string fs = base + "shaders/rhitest_watershape.frag";
+
+    struct V { float px, py, pz, nx, ny, nz; };
+
+    // --- ANILLO CILINDRICO (un TORO): la normal barre TODAS las direcciones — hacia fuera, hacia
+    //     dentro, arriba y abajo — asi que es la prueba dura de que el marco tangente se reconstruye
+    //     bien en cualquier orientacion.
+    //
+    // ⚠️ La primera version era una BANDA cilindrica abierta y no valia: con `cull = None` se veia el
+    // interior por las bocas y la silueta no se leia como un anillo. Un toro es cerrado y solo tiene
+    // una lectura posible, que es lo que un test visual necesita.
+    std::vector<V> ringV; std::vector<uint32_t> ringI;
+    {
+        const int major = 160, minor = 40;      // vueltas larga y corta
+        const float R = 0.52f, r = 0.155f;      // radios mayor y menor
+        for (int i = 0; i <= major; ++i) {
+            const float a = 6.2831853f * (float)i / (float)major;
+            const float ca = std::cos(a), sa = std::sin(a);
+            for (int j = 0; j <= minor; ++j) {
+                const float b = 6.2831853f * (float)j / (float)minor;
+                const float cb = std::cos(b), sb = std::sin(b);
+                // Normal del toro: radial respecto a la CIRCUNFERENCIA GUIA, no al centro.
+                const glm::vec3 n(ca * cb, sb, sa * cb);
+                const glm::vec3 p(ca * (R + r * cb), r * sb, sa * (R + r * cb));
+                ringV.push_back({ p.x, p.y, p.z, n.x, n.y, n.z });
+            }
+        }
+        const int stride = minor + 1;
+        for (int i = 0; i < major; ++i)
+            for (int j = 0; j < minor; ++j) {
+                const uint32_t a = (uint32_t)(i * stride + j);
+                for (uint32_t e : { 0u, 1u, (uint32_t)stride,
+                                    1u, (uint32_t)(stride + 1), (uint32_t)stride })
+                    ringI.push_back(a + e);
+            }
+    }
+
+    // --- CUBO: `up` es la normal de cada cara, constante dentro de la cara y DISCONTINUA en la arista.
+    std::vector<V> cubeV; std::vector<uint32_t> cubeI;
+    {
+        const float h = 0.42f;
+        const glm::vec3 N[6] = {{0,0,1},{0,0,-1},{1,0,0},{-1,0,0},{0,1,0},{0,-1,0}};
+        for (int f = 0; f < 6; ++f) {
+            const glm::vec3 n = N[f];
+            const glm::vec3 u = std::abs(n.y) > 0.9f ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
+            const glm::vec3 t = glm::normalize(glm::cross(u, n)), b = glm::cross(n, t);
+            const uint32_t v0 = (uint32_t)cubeV.size();
+            // Subdividido: sin vertices intermedios la ola no tendria donde desplazar nada.
+            const int S = 24;
+            for (int j = 0; j <= S; ++j)
+                for (int i = 0; i <= S; ++i) {
+                    const float fu = (float)i / S * 2.0f - 1.0f, fv = (float)j / S * 2.0f - 1.0f;
+                    const glm::vec3 p = (n + t * fu + b * fv) * h;
+                    cubeV.push_back({ p.x, p.y, p.z, n.x, n.y, n.z });
+                }
+            for (int j = 0; j < S; ++j)
+                for (int i = 0; i < S; ++i) {
+                    const uint32_t a = v0 + (uint32_t)(j * (S + 1) + i);
+                    for (uint32_t e : { 0u, 1u, (uint32_t)(S+1), 1u, (uint32_t)(S+2), (uint32_t)(S+1) })
+                        cubeI.push_back(a + e);
+                }
+        }
+    }
+
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)sizeof(V) };
+    pd.vertexLayout.attributes = {
+        { 0, (uint32_t)offsetof(V, px), Format::RGB32F, 0 },
+        { 1, (uint32_t)offsetof(V, nx), Format::RGB32F, 0 },
+    };
+    pd.depth.test = true; pd.depth.write = true; pd.depth.compare = CompareOp::Less;
+    pd.blend.enable = false;
+    pd.cull = CullMode::None;
+
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    const Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    BufferHandle ocean = makeOceanStateUBO(st);
+    CHECK(valid(pipe) && valid(ocean), "pipeline de formas de agua creado");
+    if (!valid(pipe)) return;
+
+    struct ShapeUBO { float vp[16]; float misc[4]; };
+    // Camara fija mirando las dos piezas de tres cuartos. Ortografica: sin perspectiva la cobertura
+    // en pixeles es comparable entre backends sin depender de la matriz de proyeccion.
+    glm::mat4 proj = glm::ortho(-1.0f, 1.0f, -1.0f, 1.0f, -4.0f, 4.0f);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    (void)isVk;
+    const glm::mat4 view = glm::lookAt(glm::vec3(1.15f, 0.95f, 1.3f), glm::vec3(0.0f), glm::vec3(0,1,0));
+
+    // MAR EN CALMA: el mismo estado con las cuatro amplitudes a cero. Es la CONTRAPRUEBA del
+    // contraste: sin ella, "la pieza tiene relieve" se cumpliria igual por el propio brillo especular
+    // sobre un toro liso, y el test no estaria midiendo la ola sino la forma.
+    Haruka::Planet::OceanState calmSt = st;
+    for (int i = 0; i < 4; ++i) calmSt.wave[i][1] = 0.0f;
+    BufferHandle calm = makeOceanStateUBO(calmSt);
+
+    struct Shape { const char* name; std::vector<V>* v; std::vector<uint32_t>* i; float depth; bool flat; };
+    Shape shapes[] = {
+        { "anillo, mar abierto (40 m)", &ringV, &ringI, 40.0f, false },
+        { "anillo, rompiendo  (1,5 m)", &ringV, &ringI,  1.5f, false },
+        { "anillo, EN CALMA (amp 0)",   &ringV, &ringI, 40.0f, true  },
+        { "cubo,   mar abierto (40 m)", &cubeV, &cubeI, 40.0f, false },
+        { "cubo,   rompiendo  (1,5 m)", &cubeV, &cubeI,  1.5f, false },
+    };
+
+    const int W = 256, H = 256;   // el de la ventana: ver la nota del viewport en testOceanWaveParity
+    auto shotBase = [&](const Shape& s2) {
+        return std::string("agua_") + (s2.v == &ringV ? "anillo" : "cubo") +
+               (s2.depth > 10.0f ? "_hondo" : "_rompiendo");
+    };
+    long   cover[5] = { 0, 0, 0, 0, 0 };
+    double contrast[5] = { 0, 0, 0, 0, 0 };
+    std::vector<std::vector<uint8_t>> frames(5);
+    int    shapeIdx = 0;
+    for (const Shape& sh : shapes) {
+        BufferHandle vb = g_dev->createBuffer(BufferUsage::Vertex, sh.v->size()*sizeof(V), sh.v->data());
+        BufferHandle ib = g_dev->createBuffer(BufferUsage::Index,  sh.i->size()*sizeof(uint32_t), sh.i->data());
+        ShapeUBO su{};
+        const glm::mat4 vp = proj * view;
+        std::memcpy(su.vp, &vp[0][0], sizeof(su.vp));
+        su.misc[0] = 9.5f;        // tiempo
+        su.misc[1] = sh.depth;    // profundidad del agua
+        // Metros por unidad de forma. Con 47 el toro mide 24,4 m de radio mayor, o sea 153 m de
+        // vuelta: unas 2,5 longitudes de onda del tren dominante (61 m). Con el 22 de antes daba
+        // 1,4 crestas — una sola ondulacion, que no deja ver si la ola recorre la pieza.
+        su.misc[2] = 47.0f;
+        BufferHandle ub = g_dev->createBuffer(BufferUsage::Uniform, sizeof(su), &su, BufferMemory::Dynamic);
+
+        std::vector<uint8_t> px((size_t)W * H * 4, 0xAA);
+        if (Context* c = g_dev->beginFrame()) {
+            ClearValues cv;
+            cv.clearColor = true; cv.color[0]=cv.color[1]=cv.color[2]=0.0f; cv.color[3]=1.0f;
+            cv.clearDepth = true; cv.depth = 1.0f;   // test Less: el lejano es 1
+            c->beginRenderPass({}, cv);
+            c->setViewport(0, 0, W, H);
+            c->bindPipeline(pipe);
+            c->bindUniformBuffer(0, ub);
+            c->bindUniformBuffer(29, sh.flat ? calm : ocean);
+            c->bindVertexBuffer(vb);
+            c->bindIndexBuffer(ib);
+            c->drawIndexed((uint32_t)sh.i->size());
+            c->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        }
+
+        // CONTRASTE de la pieza: desviacion tipica de la luminancia sobre los pixeles de agua. Es la
+        // medida de "se ve relieve": una superficie lisa da un degradado suave (desviacion baja) y una
+        // rizada enciende y apaga el especular (desviacion alta). Sustituye al conteo de espuma, que
+        // no informaba de nada — a 1,5 m la espuma de ORILLA vale 1,0 en todo el cuadro por definicion.
+        // ⚠️ CONTRASTE **LOCAL**, no la desviacion global. La global no servia y la contraprueba lo
+        // demostro: el toro en calma daba MAS sigma (23,7) que el toro con olas (23,1), porque ese
+        // numero lo domina el degradado suave del cuerpo —lado iluminado contra lado en sombra— y el
+        // rizado, que es de alta frecuencia y poca amplitud, se pierde dentro. La diferencia entre
+        // pixeles VECINOS ignora el degradado por construccion y solo ve el detalle fino.
+        auto lum = [&](int x, int y) {
+            const size_t k = ((size_t)y * W + x) * 4;
+            return 0.2126 * px[k] + 0.7152 * px[k+1] + 0.0722 * px[k+2];
+        };
+        auto isWater = [&](int x, int y) {
+            const size_t k = ((size_t)y * W + x) * 4;
+            return px[k] + px[k+1] + px[k+2] > 24;
+        };
+        long lit = 0; double gradSum = 0.0; long gradN = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                if (!isWater(x, y)) continue;
+                ++lit;
+                // Solo pares interiores: en la silueta el salto al fondo negro es enorme y no es rizado.
+                if (x + 1 < W && isWater(x + 1, y)) { gradSum += std::abs(lum(x+1,y) - lum(x,y)); ++gradN; }
+                if (y + 1 < H && isWater(x, y + 1)) { gradSum += std::abs(lum(x,y+1) - lum(x,y)); ++gradN; }
+            }
+        const double sd = gradN ? gradSum / gradN : 0.0;
+        std::printf("    %-28s %6ld px de agua (%.1f%%) · detalle fino (grad. local) %5.2f\n",
+                    sh.name, lit, 100.0 * lit / (double)(W*H), sd);
+        CHECK(lit > (long)(W*H) / 50, "la forma se dibuja con agua encima");
+        cover[shapeIdx] = lit; contrast[shapeIdx] = sd; frames[shapeIdx] = px; ++shapeIdx;
+
+        // HARUKA_WATER_PNG=<dir> vuelca las cuatro formas a disco. El test AFIRMA que la silueta se
+        // conserva, pero si la ola se ve bien o no es un juicio visual y hace falta poder mirarla.
+        if (const char* dir = std::getenv("HARUKA_WATER_PNG")) {
+            // readPixels de GL devuelve las filas de abajo arriba y las de Vulkan de arriba abajo:
+            // sin voltear la de GL, los dos PNG saldrian espejados entre si.
+            std::vector<uint8_t> img(px.size());
+            for (int y = 0; y < H; ++y) {
+                const int src = isVk ? y : (H - 1 - y);
+                std::memcpy(&img[(size_t)y * W * 4], &px[(size_t)src * W * 4], (size_t)W * 4);
+            }
+            const std::string path = std::string(dir) + "/" + (isVk ? "vk_" : "gl_") +
+                                     shotBase(sh) + ".png";
+            Haruka::writePNG(path, W, H, 4, img.data());
+            std::printf("      -> %s\n", path.c_str());
+        }
+
+        // La captura entra en el careo GL<->Vulkan que hace compareBackends().
+        recordShot(shotBase(sh).c_str(), W, H, px);
+
+        g_dev->destroy(vb); g_dev->destroy(ib); g_dev->destroy(ub);
+    }
+
+    // ⚠️ La espuma NO demuestra que la cresta se pliegue, y decirlo seria pasarse. A 1,5 m el termino
+    // de ESPUMA DE ORILLA (`shoreFoam`, que solo mira la profundidad) ya vale ~0,9 por si solo, asi
+    // que satura el cuadro entero. Lo que este test demuestra es lo otro: que la ola se aplica sobre
+    // un cilindro y sobre un cubo sin costuras ni huecos, o sea que NO necesita un planeta debajo.
+    // El pliegue de verdad se mide en la CPU, sobre el jacobiano: `test_ocean_break_fold`.
+    // ⚠️ LA SILUETA SE CONSERVA. Es la guardia contra el fallo que tenia la primera version: `disp`
+    // sale en METROS y se sumaba a una posicion en unidades de forma, asi que la ola no rizaba la
+    // pieza — la INFLABA. Medido entonces: el anillo pasaba del 16,6% al 48,0% de cobertura entre
+    // mar abierto y rompiente, o sea que dejaba de ser un anillo. Con las unidades bien, la
+    // profundidad cambia el RIZADO y no el tamano.
+    const int pairs[2][2] = { { 0, 1 }, { 3, 4 } };
+    for (int p = 0; p < 2; ++p) {
+        const double a = (double)cover[pairs[p][0]], b = (double)cover[pairs[p][1]];
+        const double drift = a > 0.0 ? 100.0 * std::abs(b - a) / a : 100.0;
+        std::printf("    %-6s: silueta %.1f%% -> %.1f%% al pasar de mar abierto a rompiente (deriva %.1f%%)\n",
+                    p == 0 ? "anillo" : "cubo", 100.0 * a / (W*H), 100.0 * b / (W*H), drift);
+        CHECK(drift < 10.0, "la ola riza la forma, no la infla (las unidades del desplazamiento casan)");
+    }
+
+    // ⚠️ LA OLA SOBRE UNA PIEZA DE ESTE TAMANO ES SUTIL, Y CONVIENE DECIRLO CON NUMEROS EN VEZ DE
+    // PROMETER LO CONTRARIO. Se intento afirmar "la ola se VE" por contraste y no se sostiene: con
+    // olas el detalle fino da 1,81 y en calma 1,74 — un 4%. El motivo es geometrico y no un fallo:
+    // la pieza abarca +-31,7 m, o sea UNA longitud de onda del tren dominante (61 m), asi que la ola
+    // no la riza sino que la INCLINA entera, y una inclinacion uniforme no genera detalle local. (El
+    // arco del toro no cuenta: la ola es un plano en 3D, lo que importa es la extension LINEAL.)
+    // Ademas el oleaje real es tendido: con H/lambda ~ 5,6%, cualquier vista que abarque varias
+    // longitudes de onda muestra ondulaciones del 5%. El mar es asi.
+    //
+    // Lo que SI se puede afirmar sin adornos es que la ola hace algo, y se mide comparando el mismo
+    // toro con olas y en calma pixel a pixel. Es mas sensible que cualquier estadistico de contraste
+    // y no es tautologico: calma y oleaje son entradas distintas de verdad.
+    {
+        const std::vector<uint8_t>& A = frames[0];   // anillo con olas
+        const std::vector<uint8_t>& B = frames[2];   // el mismo anillo en calma
+        long diff = 0, both = 0; double sumAbs = 0.0; int worst = 0;
+        for (size_t k = 0; k + 3 < A.size() && k + 3 < B.size(); k += 4) {
+            const bool wa = A[k] + A[k+1] + A[k+2] > 24;
+            const bool wb = B[k] + B[k+1] + B[k+2] > 24;
+            if (!wa && !wb) continue;
+            ++both;
+            int mx = 0;
+            for (int ch = 0; ch < 3; ++ch) {
+                const int d = std::abs((int)A[k+ch] - (int)B[k+ch]);
+                sumAbs += d; mx = std::max(mx, d);
+            }
+            worst = std::max(worst, mx);
+            if (mx > 8) ++diff;
+        }
+        std::printf("    con olas vs EN CALMA (el mismo anillo): %.1f%% de pixeles distintos · |delta| medio %.2f · peor canal %d\n",
+                    both ? 100.0 * diff / both : 0.0, both ? sumAbs / (both * 3) : 0.0, worst);
+        std::printf("      (detalle fino: con olas %.2f · en calma %.2f — la ola INCLINA la pieza mas que rizarla,\n"
+                    "       porque abarca ~1 longitud de onda; para verla rizada hace falta una superficie de varias)\n",
+                    contrast[0], contrast[2]);
+        CHECK(both > 1000, "hay pieza que comparar entre las dos versiones");
+        CHECK(diff > both / 20, "el oleaje cambia la pieza respecto al mar en calma (la ola hace algo)");
+    }
+
+    std::printf("    (la espuma a 1,5 m es la de ORILLA, que solo mira la profundidad: no prueba pliegue)\n");
+    g_dev->destroy(pipe); g_dev->destroy(ocean); g_dev->destroy(calm);
+}
+
 static void testItemPreviewShader()
 {
     BEGIN("icono de inventario: los shaders pintan y coinciden GL/VK");
@@ -1127,9 +1565,11 @@ static void testEnginePipelines()
           sh+"planet/terrain.tesc", sh+"planet/terrain.tese", true },
         { "planeta/nodos (v5)",    sh+"terrain_node.vert", sh+"terrain_node.frag", "", "", false },
         { "planeta/suelo cercano", sh+"planet/nearground.vert", sh+"planet/biome.frag", "", "", false },
-        { "mar/cercano (olas)",    sh+"planet/ocean.vert", sh+"planet/ocean.frag",
-          sh+"planet/ocean.tesc", sh+"planet/ocean.tese", true },
-        { "mar/lejano (esfera)",   sh+"planet/ocean_far.vert", sh+"planet/ocean.frag", "", "", false },
+        // ⚠️ AQUI HABIA DOS ENTRADAS DE MAR (`ocean.*` teselado y `ocean_far.*`) Y SUS SHADERS YA NO
+        // EXISTEN. El agua se migro al pase de nodos el 2026-09-01: dejo de tener geometria propia,
+        // asi que dejo de tener pipelines propios. La entrada nueva es la que hay que vigilar.
+        { "agua/nodos (v5)",       sh+"terrain_node_water.vert", sh+"terrain_node_water.frag",
+          "", "", false },
         { "cielo",                 sh+"sky.vert",  sh+"sky.frag",  "", "", false },
         { "nubes volumétricas",    sh+"cloud_vol.vert", sh+"cloud_vol.frag", "", "", false },
         { "props instanciados",    sh+"prop_inst.vert", sh+"prop_inst.frag", "", "", false },
@@ -1261,29 +1701,11 @@ static bool oceanDrawsPixels(float bakeHeightM, uint8_t out[4])
     return true;
 }
 
-static void testOceanShading()
-{
-    BEGIN("mar: dibuja agua y descarta tierra");
-    uint8_t sea[4] = {0}, land[4] = {0};
-    const bool okSea  = oceanDrawsPixels(-1000.0f, sea);    // fondo a 1 km → hay mar
-    const bool okLand = oceanDrawsPixels(+1000.0f, land);   // cota +1 km → es tierra
-    CHECK(okSea && okLand, "el pipeline del mar se crea y dibuja");
-    if (!okSea || !okLand) return;
-
-    // El clear es ROJO puro. Si el shader escribió, el píxel deja de serlo.
-    const bool seaWrote  = !(sea[0]  > 200 && sea[1]  < 60 && sea[2]  < 60);
-    const bool landWrote = !(land[0] > 200 && land[1] < 60 && land[2] < 60);
-
-    CHECK(seaWrote,   "sobre OCEANO (fondo -1000 m) el mar escribe pixeles");
-    CHECK(!landWrote, "sobre TIERRA (cota +1000 m) el mar se DESCARTA (queda el clear)");
-    // Discriminación: si los dos casos dan lo mismo, el shader no esta mirando la profundidad.
-    CHECK(seaWrote != landWrote, "el mar DISCRIMINA agua de tierra (no es un test tautologico)");
-    // Y el agua tiene que parecer agua: azul dominante, sin saturar a blanco.
-    if (seaWrote) {
-        CHECK(sea[2] >= sea[0], "el agua es azulada (B >= R)");
-        CHECK(!(sea[0] > 250 && sea[1] > 250 && sea[2] > 250), "el agua no sale quemada a blanco");
-    }
-}
+// (Aqui vivia `testOceanShading`, que dibujaba un triangulo a pantalla completa con
+// `ocean_far.vert` + `ocean.frag` para comprobar que el mar dibuja agua y DESCARTA la tierra. Los dos
+// shaders se borraron al migrar el agua al pase de nodos el 2026-09-01, y la propiedad que probaba la
+// cubre ahora `testNodeWaterDraws`: la misma pregunta, pero sobre el pase REAL, con contraprueba de
+// tierra y con centinela del readback.)
 
 
 // ================================================================================================
@@ -2097,13 +2519,30 @@ static void testTerrainNodeGpuParity()
         //
         // La bisección de arriba localiza la divergencia: `lx` coincide EXACTO (0.000e+00, el
         // direccionamiento por enteros funciona) y entra en `harukaCubeFaceToDir`, a nivel ~1e-8
-        // relativo. Eso es `sqrt` sobre `double`: GLSL **no** exige redondeo correcto para dobles,
-        // así que el driver puede resolverlo con iteraciones y no coincidir con el `std::sqrt` de la
-        // CPU. No es un gemelo divergido ni contracción FMA (se probó `precise`: no cambia nada).
+        // relativo.
         //
-        // Y no bloquea el plan, porque el v5 decide **GPU obligatoria también en el servidor**: la
-        // identidad que hace falta es GPU↔GPU, no CPU↔GPU. La referencia de CPU es el ORÁCULO del
-        // test, no un camino de producción.
+        // ⚠️⚠️ LA EXPLICACION QUE HABIA AQUI ERA FALSA, Y DECIDIA ARQUITECTURA. Decia: "eso es `sqrt`
+        // sobre `double`; GLSL no exige redondeo correcto para dobles, así que el driver puede
+        // resolverlo con iteraciones y no coincidir con la CPU — y por eso el v5 exige **GPU también
+        // en el servidor**, porque la identidad alcanzable es GPU↔GPU y no CPU↔GPU".
+        //
+        // Medido el 2026-08-31 en las cuatro combinaciones de este equipo (`testGpuFp64` con las
+        // entradas por SSBO, y `testBakeStageBisect` sobre los 16 641 téxeles):
+        //
+        //     AMD RENOIR + OpenGL   bake peor 0,0253 m · 85 % de téxeles > 1 mm   <- el unico roto
+        //     AMD RENOIR + Vulkan   bake peor 0,0001 m · 0 téxeles > 1 mm
+        //     NVIDIA 3050 + OpenGL  bake peor 0,0002 m · 0 téxeles > 1 mm
+        //     NVIDIA 3050 + Vulkan  bake peor 0,0001 m · 0 téxeles > 1 mm
+        //
+        // El `sqrt` de doble NO es el problema: en tres de las cuatro celdas `harukaCubeFaceToDir`
+        // casa con `cubeFaceToDir` de C++ **hasta el ultimo bit** (residuo sub-float identico). Lo
+        // que rompia era el compilador de GLSL del driver de OpenGL de AMD, que degrada
+        // `inversesqrt(double)` a precision de float. Ver [[amd-opengl-degrada-fp64]].
+        //
+        // ⚠️ CONSECUENCIA PARA EL PLAN: **el servidor NO necesita GPU.** Lo que queda entre CPU y GPU
+        // son 0,0001-0,0002 m, y eso es el redondeo en float de la suma de octavas, no la geometria.
+        // La premisa de "GPU obligatoria en el servidor" se apoyaba en una medida de una sola maquina
+        // con el unico backend roto de los cuatro.
         //
         // Así que se exige (a) que la GPU se reproduzca a sí misma —eso sí es requisito— y (b) que
         // la desviación contra el oráculo esté DENTRO DE UNA TOLERANCIA DECLARADA.
@@ -2477,11 +2916,28 @@ static void testTerrainNodeRender()
     const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(target - cam), glm::vec3(upv));
     const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 1.0f, 20000.0f);
 
-    struct DrawUBO { glm::mat4 mvp; glm::vec4 center; int32_t node[4]; int32_t grid[4]; int32_t edge[4]; float misc[4]; } du{};
-    du.mvp = proj * view;
-    du.center = glm::vec4(glm::vec3(glm::dvec3(0.0) - cam), 0.0f);   // centro del planeta rel. al ojo
-    du.node[0] = (int32_t)node.face; du.node[1] = (int32_t)node.level;
-    du.node[2] = (int32_t)node.i;    du.node[3] = (int32_t)node.j;
+    // ⚠️ ESTE BLOQUE ESTABA DESCUADRADO Y EL TEST NO PODIA VERLO.
+    //
+    // Era `{ mat4 mvp; vec4 center; ivec4 node; ivec4 grid; ivec4 edge; vec4 misc; }`, y el bloque
+    // real de `terrain_node.vert` es `{ mvp, center, centerLo, lod, grid, edgeUnused, misc, shade,
+    // texAnchor, lightDir }`. Faltaban `centerLo` y `lod`, asi que TODO lo de despues caia 32 bytes
+    // antes: el `grid` del test aterrizaba en `uLod`, y su `misc[0] = R` en `uEdgeUnused`. **El
+    // shader leia el radio del planeta como 0.**
+    //
+    // Un bloque uniforme mal copiado no da error de compilacion —lee el campo de al lado— y aqui
+    // encima el test seguia pasando, porque lo que comprueba despues es el SSBO de alturas y no lo
+    // dibujado. Dibujaba basura y nadie miraba. El `static_assert` es lo que impide que vuelva.
+    struct DrawUBO {
+        glm::mat4 mvp; glm::vec4 center; glm::vec4 centerLo;
+        float lod[4]; int32_t grid[4]; int32_t edge[4];
+        float misc[4]; float shade[4]; glm::vec4 texAnchor; glm::vec4 lightDir;
+    } du{};
+    static_assert(sizeof(DrawUBO) == 208, "el gemelo de NodeDraw se ha descuadrado");
+    du.mvp      = proj * view;
+    du.center   = glm::vec4(glm::vec3(glm::dvec3(0.0) - cam), 0.0f);  // centro del planeta rel. al ojo
+    du.centerLo = glm::vec4(0.0f);
+    du.lod[0] = (float)(glm::radians(60.0) / 256.0); du.lod[1] = 2.0f;
+    du.lod[2] = (float)(R * 1.5707963267948966); du.lod[3] = 0.0f;    // w = 0: morph apagado
     du.grid[0] = (int32_t)N; du.grid[1] = (int32_t)TERRAIN_NODE_CELLS; du.grid[2] = slot;
     du.misc[0] = (float)R;
     BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(du), &du, BufferMemory::Dynamic);
@@ -2570,6 +3026,993 @@ static void testTerrainNodeRender()
 }
 
 
+// ================================================================================================
+// LA SONDA QUE FALTABA: la geometria DIBUJADA contra el CAMPO de terreno.
+//
+// ⚠️ EL BANCO MEDIA LOS DOS EXTREMOS DE LA CADENA Y NO EL TRAMO DE EN MEDIO. Hasta hoy habia:
+//
+//     bake (terrain_node.comp) vs referencia CPU ....... 0,02 m   ✔ medido
+//     malla de colision        vs campo real ........... 0,04 m   ✔ medido
+//     textura -> terrain_node.vert -> posicion ......... NADA
+//
+// `testTerrainNodeRender` dibuja el nodo, pero lo que compara despues es el SSBO de alturas: su
+// comentario dice "se lee la POSICION" y lee el buffer. Asi que el vertex shader —donde viven `dirD`,
+// el cosido de aristas, el morph y la cancelacion con `uCenter`— nunca se ha comprobado contra nada.
+// Ahi es donde tiene que estar la disparidad reportada, porque los otros dos tramos dan centimetros.
+//
+// La referencia es `harukaTerrainDetail` evaluada EN EL PIXEL, que es independiente del bake (el bake
+// evalua en el centro del texel). Lo que debe quedar es el error de cuerda de la rejilla: centimetros.
+// ================================================================================================
+static void testTerrainNodeDrawnVsField()
+{
+    BEGIN("v5 F3: la geometria DIBUJADA cae sobre el campo (el tramo sin medir)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    // ⚠️ NIVEL 17, NO 14, Y LA DIFERENCIA IMPORTA. Con el 14 (texel 4,77 m) esto media un nodo que
+    // solo se dibuja a kilometros, y sus cifras se leyeron como si fueran las del suelo que se pisa.
+    // Bajo los pies el selector esta en el 17: texel 0,596 m, que es donde el corte del render y el
+    // de la colision (0,5 m) caen en las MISMAS octavas y la disparidad deberia ser de centimetros.
+    const NodeId node{ Haruka::PlanetFace::FRONT, 17, 33600, 24800 };
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+
+    TerrainNodeGpu gpu;
+    const std::string base = Haruka::Shader::baseDir();
+    // 32 huecos: `request` encola la cadena raiz->nodo entera, y con 4 (lo que usa el test de al
+    // lado, que va al nivel 14) el padre y el abuelo se caen del pool — el shader leeria su propio
+    // mapa con stride 2 y 4, y el barrido daria tres veces la misma cifra.
+    if (!gpu.init(g_dev, (base + "shaders/terrain_node.comp").c_str(), 32)) {
+        CHECK(false, "TerrainNodeGpu::init"); return;
+    }
+    TerrainNodePool pool(32, 8);
+    pool.beginFrame();
+    pool.request(node);
+    // ⚠️ `endFrame` VA SIEMPRE. Esto era `for (...; generatePending(beginFrame(),...); ++pass)
+    // endFrame();`: cuando no quedaba nada por generar la condicion abria un frame y salia sin
+    // cerrarlo, asi que el dibujo de despues encontraba el device con un frame abierto y pintaba
+    // 1,9% de pantalla. Lo canto el guardia de cobertura, no yo.
+    for (int pass = 0; pass < 24; ++pass) {
+        Context* ctx = g_dev->beginFrame();
+        const size_t n = ctx ? gpu.generatePending(ctx, pool, R) : 0;
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (n == 0) break;
+    }
+    int slot = -1;
+    for (size_t k = 0; k < gpu.capacity(); ++k) {
+        NodeId at; if (pool.nodeAtSlot((int)k, at) && at == node) { slot = (int)k; break; }
+    }
+    CHECK(slot >= 0, "el nodo esta residente");
+    if (slot < 0) { gpu.shutdown(); return; }
+    double worstByStride[3] = { 0.0, 0.0, 0.0 };
+    double worstCollByStride[3] = { 0.0, 0.0, 0.0 };
+    double worstSanity = 0.0;
+
+    PipelineDesc pd;
+    const std::string vs = base + "shaders/terrain_node.vert";
+    const std::string fs = base + "shaders/terrain_node_probe.frag";
+    pd.vertexPath = vs.c_str(); pd.fragmentPath = fs.c_str();
+    pd.vertexLayout.strides = { (uint32_t)(2 * sizeof(float)) };
+    pd.vertexLayout.attributes.push_back({ 0, 0, Format::RG32F, 0 });
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    CHECK(valid(pipe), "pipeline de la sonda creado");
+    if (!valid(pipe)) { gpu.shutdown(); return; }
+
+    // ⚠️ EL BARRIDO DE STRIDE ES EL PUNTO DE ESTE TEST. Con stride 1 se dibuja un vertice por texel y
+    // el error es el de cuerda del texel — pero el juego NO dibuja asi: reparte stride por nodo con
+    // histeresis, y la malla sale cada TEXEL x STRIDE. El propio `terrain_node.vert` lo tiene
+    // apuntado (nivel 14, stride 4: el corte efectivo pasa de 1,41 a 0,43 m), pero eso es el corte de
+    // OCTAVAS; lo que aqui se mide es lo otro: cuanto se separa del campo la superficie DIBUJADA.
+    // mode 2 = CONTRAPRUEBA: la misma referencia de colision con la pendiente x50. No mide nada del
+    // motor; existe solo para demostrar que `uProbe.z` llega al shader. Hacia falta porque a nivel 17
+    // los modos 0 y 1 dan cifras IDENTICAS —el corte de la colision (0,5 m) y el del nodo (0,596 m)
+    // caen en las mismas octavas— y comparar los dos entre si daba un falso fallo.
+    for (int mode = 0; mode < 3; ++mode) {
+    const bool vsColl = (mode >= 1);
+    std::printf("  -- referencia: %s\n", mode == 0
+                ? "EL CAMPO con el corte del nodo (¿esta bien puesto el vertice?)"
+                : mode == 1 ? "LA SUPERFICIE DE COLISION (lo que se ve contra lo que se pisa)"
+                            : "contraprueba: la de colision con la pendiente x50");
+    for (int sIdx = 0; sIdx <= 2; ++sIdx) {
+    const uint32_t step = 1u << sIdx;
+    std::vector<float> verts;
+    for (uint32_t v = 0; v < N; v += step)
+        for (uint32_t u = 0; u < N; u += step) { verts.push_back((float)u); verts.push_back((float)v); }
+    const uint32_t side = (N + step - 1) / step;
+    std::vector<uint32_t> idx;
+    for (uint32_t v = 0; v + 1 < side; ++v)
+        for (uint32_t u = 0; u + 1 < side; ++u) {
+            const uint32_t a = v * side + u, b = a + 1, c = a + side, d = c + 1;
+            idx.insert(idx.end(), { a, c, b, b, c, d });
+        }
+    BufferHandle vb = g_dev->createBuffer(BufferUsage::Vertex, verts.size() * sizeof(float),
+                                          verts.data(), BufferMemory::Static);
+    BufferHandle ib = g_dev->createBuffer(BufferUsage::Index, idx.size() * sizeof(uint32_t),
+                                          idx.data(), BufferMemory::Static);
+
+    // Camara a 300 m sobre el centro del nodo y mirando abajo: se quiere el suelo LLENANDO la
+    // pantalla y visto de cerca, que es donde el usuario reporta el sintoma (bajo sus pies).
+    const glm::dvec3 c   = nodeTexelDir(node, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+    // ⚠️ LA ALTURA SE MIDE DESDE EL TERRENO, NO DESDE EL RADIO. Estaba en `c * (R + span*0.7)`, o
+    // sea 53 m sobre la ESFERA — y como ahi el terreno pasa de esa cota, la camara quedaba enterrada:
+    // 1,9% de pantalla y tres strides dando la misma cifra. A nivel 14 colaba de casualidad porque
+    // 300 m tapaba el relieve. Sin el guardia de cobertura habria publicado esas cifras.
+    const double nodeSpanM = nodeTexelM(node, R) * (double)TERRAIN_NODE_CELLS;
+    const double hCentre   = (double)Haruka::Planet::terrainDetail(c, R, (float)nodeTexelM(node, R));
+    const glm::dvec3 cam = c * (R + hCentre + nodeSpanM * 0.7);
+    const glm::dvec3 tgt = c * (R + hCentre);
+    const glm::dvec3 upv = glm::normalize(glm::cross(c, glm::dvec3(0, 1, 0)));
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(tgt - cam), glm::vec3(upv));
+    const glm::mat4 proj = glm::perspective(glm::radians(60.0f), 1.0f, 1.0f, 20000.0f);
+
+    // ⚠️ LAYOUT COPIADO A MANO Y POR ESO CON `static_assert`. `TerrainNodeRenderer::DrawUBO` es
+    // privado, asi que aqui hay un gemelo. El de `testTerrainNodeRender` ESTA DESCUADRADO (le faltan
+    // `centerLo` y `lod`, asi que su `grid` y su `misc` caen sobre otros campos) — un bloque uniforme
+    // mal copiado no da error de compilacion, solo lee basura del campo de al lado.
+    struct DrawUBO {
+        glm::mat4 mvp; glm::vec4 center; glm::vec4 centerLo;
+        float lod[4]; int32_t grid[4]; int32_t edge[4];
+        float misc[4]; float shade[4]; glm::vec4 texAnchor; glm::vec4 lightDir;
+    } du{};
+    static_assert(sizeof(DrawUBO) == 208, "el gemelo de NodeDraw se ha descuadrado");
+    du.mvp      = proj * view;
+    du.center   = glm::vec4(glm::vec3(glm::dvec3(0.0) - cam), 0.0f);
+    du.centerLo = glm::vec4(0.0f);
+    du.lod[0] = (float)(glm::radians(60.0) / 256.0); du.lod[1] = 2.0f;
+    du.lod[2] = (float)(R * 1.5707963267948966); du.lod[3] = 0.0f;   // w = 0: morph APAGADO
+    du.grid[0] = (int32_t)N; du.grid[1] = (int32_t)TERRAIN_NODE_CELLS; du.grid[2] = slot;
+    du.misc[0] = (float)R;
+    BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(du), &du, BufferMemory::Dynamic);
+
+    // El corte de octavas del nodo: si la sonda evaluara el campo con otro, mediria el CORTE en vez
+    // de la colocacion del vertice — que es un efecto real pero distinto y ya medido aparte.
+    const float minFeatureM = (float)nodeTexelM(node, R);
+    // ⚠️ FONDO DE ESCALA DE ±64 m, Y NO ES HOLGURA DE SOBRA. Con ±4 m saturaba el 100% de los pixeles
+    // en cuanto el stride pasaba de 1, y "media 4,0000 · peor 4,0000" no es una medida: es el tope
+    // del codificado. Sobre 16 bits, ±64 m sigue dando 2 mm de resolucion.
+    const float fullScaleM  = 64.0f;
+    struct ProbeUBO { float p[4]; glm::vec4 anchor; } pu{
+        { minFeatureM, fullScaleM,
+          vsColl ? (float)(Haruka::Planet::TERRAIN_TRIM_SLOPE * (mode == 2 ? 50.0 : 1.0)) : 0.0f,
+          (float)Haruka::Planet::TERRAIN_TRIM_FLOOR },
+        glm::vec4(glm::vec3(c), 0.0f) };
+    BufferHandle pubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pu), &pu, BufferMemory::Dynamic);
+
+    TerrainNodeRenderer::NodeInstGPU inst{};
+    inst.node[0] = (int32_t)node.face; inst.node[1] = (int32_t)node.level;
+    inst.node[2] = (int32_t)node.i;    inst.node[3] = (int32_t)node.j;
+    inst.slot[0] = slot;
+    inst.slot[2] = sIdx;                 // log2 del stride: el shader hace `1 << slot.z`
+    // ⚠️ SIN ESTO LA SONDA MIDE BASURA, Y ME LO TRAGUE UNA VEZ: con `misc` a cero el shader creia que
+    // el padre vivia en el hueco 0 —un hueco VALIDO, ocupado por otro nodo de la cadena— y leia SU
+    // mapa de alturas. Salieron 62 m de error y por un momento parecio el hallazgo del dia. El
+    // relieve a 4,77 m no puede valer 62 m: cuando una sonda da un numero imposible, lo primero que
+    // falla es la sonda. Con -1 el shader sabe que no estan y se queda en su propio mapa.
+    const NodeId par { node.face, node.level - 1, node.i / 2, node.j / 2 };
+    const NodeId gran{ par.face,  par.level  - 1, par.i  / 2, par.j  / 2 };
+    inst.misc[0] = (float)pool.slotOf(par);
+    inst.misc[1] = (float)pool.slotOf(gran);
+    BufferHandle instSSBO = g_dev->createBuffer(BufferUsage::Storage, sizeof(inst), &inst,
+                                                BufferMemory::Dynamic);
+
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int W = (uw > 0) ? (int)uw : 256, H = (uh > 0) ? (int)uh : 256;
+    std::vector<uint8_t> px((size_t)W * H * 4, 0);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    if (Context* ctx = g_dev->beginFrame()) {
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+        cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+        ctx->beginRenderPass({}, cv);
+        ctx->bindPipeline(pipe);
+        ctx->bindUniformBuffer(0, ubo);
+        ctx->bindStorageBuffer(1, gpu.heights());
+        ctx->bindStorageBuffer(2, instSSBO);
+        ctx->bindUniformBuffer(3, pubo);
+        ctx->bindVertexBuffer(vb);
+        ctx->bindIndexBuffer(ib);
+        ctx->drawIndexed((uint32_t)idx.size(), 0, 1);
+        ctx->endRenderPass();
+        // GL lee del framebuffer por defecto ANTES del swap; Vulkan, ya presentado. Ver la nota de
+        // `testClearReadback`: invertirlo da una imagen en negro y se lee como "no se dibujo nada".
+        if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        pumpWindowEvents();
+    }
+
+    size_t covered = 0; double sum = 0.0, worst = 0.0; int saturated = 0;
+    for (size_t i = 0; i < (size_t)W * H; ++i) {
+        if (px[i * 4 + 2] < 128) continue;                 // B = 0 -> el clear, ahi no hay terreno
+        ++covered;
+        const uint32_t q = ((uint32_t)px[i * 4 + 0] << 8) | (uint32_t)px[i * 4 + 1];
+        const double err = ((double)q / 65535.0) * 2.0 * fullScaleM - fullScaleM;
+        if (q == 0 || q == 65535) ++saturated;
+        sum += std::fabs(err); worst = std::max(worst, std::fabs(err));
+    }
+    const double cov = (double)covered / (double)(W * H) * 100.0;
+    std::printf("    stride %u (celda %.2f m · lee el mapa del %s) · %zu px con terreno (%.1f%%) · "
+                "%s: "
+                "media %.4f m · peor %.4f m · saturados %d\n",
+                step, minFeatureM * (double)step,
+                sIdx == 0 ? "nodo" : (sIdx == 1 ? "padre" : "abuelo"), covered, cov,
+                vsColl ? "VER vs PISAR" : "dibujado vs campo",
+                covered ? sum / (double)covered : 0.0, worst, saturated);
+    // ⚠️ SIN COBERTURA NO HAY MEDIDA. Si el nodo no sale en pantalla, las estadisticas de abajo dan
+    // 0,0000 m y se leerian como paridad perfecta: el fallo mas caro que puede tener esta sonda.
+    CHECK(covered > (size_t)(W * H) / 10, "el nodo cubre la pantalla (si no, las cifras no valen)");
+    CHECK(saturated == 0, "ningun pixel satura el fondo de escala (si satura, el peor es mayor)");
+    if      (mode == 0) worstByStride[sIdx]     = worst;
+    else if (mode == 1) worstCollByStride[sIdx] = worst;
+    else if (sIdx == 0) worstSanity              = worst;
+
+    g_dev->destroy(pubo); g_dev->destroy(instSSBO); g_dev->destroy(ubo);
+    g_dev->destroy(ib); g_dev->destroy(vb);
+    }   // fin del barrido de stride
+    }   // fin de los dos modos de referencia
+
+    // ⚠️ CONTRAPRUEBA: el error TIENE que crecer con el stride. Si saliera plano seria que `slot.z`
+    // no llega al shader y las tres pasadas dibujan lo mismo — la sonda estaria midiendo una sola
+    // configuracion tres veces y sus tres cifras iguales se leerian como "el stride no influye".
+    std::printf("    peor error por stride: 1 -> %.4f m · 2 -> %.4f m · 4 -> %.4f m\n",
+                worstByStride[0], worstByStride[1], worstByStride[2]);
+    CHECK(worstByStride[2] > worstByStride[0] * 1.5,
+          "el error crece con el stride (si no, `slot.z` no esta llegando al shader)");
+    std::printf("    ver-vs-pisar por stride: 1 -> %.4f m · 2 -> %.4f m · 4 -> %.4f m\n",
+                worstCollByStride[0], worstCollByStride[1], worstCollByStride[2]);
+    // ⚠️ CONTRAPRUEBA DEL SEGUNDO MODO. Comparar los modos 0 y 1 entre si NO vale: a nivel 17 dan lo
+    // mismo porque los dos cortes caen en las mismas octavas, y eso es un RESULTADO, no un fallo. Lo
+    // que hay que demostrar es que el uniform llega, y para eso se perturba a proposito.
+    std::printf("    contraprueba (pendiente x50): peor %.4f m contra %.4f m del campo\n",
+                worstSanity, worstByStride[0]);
+    CHECK(worstSanity > worstByStride[0] * 1.5,
+          "perturbar el corte de la colision CAMBIA la medida (si no, `uProbe.z` no llega)");
+
+    g_dev->destroy(pipe);
+    gpu.shutdown();
+}
+
+
+// ================================================================================================
+// EL COSTE DEL TOPE DE STRIDE DE CERCA, A ALTURA DE OJO.
+//
+// ⚠️ EL BANCO DE COSTE QUE HABIA MIDE A 800 m DE ALTITUD, y ahi este tope casi no aplica: desde 800 m
+// el nodo mas cercano ya esta a cientos de metros. Medir alli habria dado "no cuesta nada" y habria
+// sido una cifra correcta contestando a la pregunta equivocada. La disparidad se ve DE PIE.
+//
+// Se barre el radio (0 = apagado, o sea la linea base) y se leen los triangulos del contador DEL
+// MOTOR, no de un modelo: un modelo por bandas dio 1,77x y hay que ver cuanto es de verdad.
+// ================================================================================================
+static void testTerrainStrideMatchCost()
+{
+    BEGIN("v5: coste del tope de stride de cerca (a altura de ojo)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 2048)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int W = (uw > 0) ? (int)uw : 256, H = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)H;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)W / (double)H);
+
+    // De pie: 1,7 m sobre la superficie, mirando al horizonte. Es donde se reporto el sintoma.
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 cam = pc + up0 * (R + 1.7);
+    const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(up0));
+    const glm::mat4 proj = glm::perspective((float)fovY, (float)W / (float)H, 1.0f, 40000.0f);
+    const glm::mat4 mvp  = proj * view;
+
+    std::printf("    radio    nodos    triangulos   ms/frame\n");
+    double trisOff = 0.0, msOff = 0.0;
+    for (double radius : { 0.0, 150.0, 300.0, 600.0 }) {
+        // ⚠️ El radio va por ENV y `strideMatchM()` lo cachea en un `static`, asi que hay que
+        // pasarlo por el parametro: cachearlo haria que las cuatro pasadas midieran la primera.
+        r.setStrideMatchOverride(radius);
+        double ms = 0.0; size_t nodes = 0, tris = 0;
+        for (int f = 0; f < 24; ++f) {
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            Context* ctx = g_dev->beginFrame(); if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (f >= 8) {   // los 8 primeros llenan el pool y compilan; no cuentan
+                ms += std::chrono::duration<double, std::milli>(
+                          std::chrono::high_resolution_clock::now() - t0).count();
+                const auto st = r.stats(); nodes = st.drawn; tris = st.tris;
+            }
+        }
+        ms /= 16.0;
+        std::printf("    %5.0f m  %6zu   %8.2f M   %6.2f%s\n", radius, nodes,
+                    (double)tris / 1e6, ms, radius == 0.0 ? "   <- linea base" : "");
+        if (radius == 0.0) { trisOff = (double)tris; msOff = ms; }
+        else if (radius == 300.0 && trisOff > 0.0)
+            std::printf("      -> a 300 m: x%.2f triangulos · x%.2f ms\n",
+                        (double)tris / trisOff, msOff > 1e-6 ? ms / msOff : 0.0);
+    }
+    r.setStrideMatchOverride(-1.0);   // volver al valor del entorno
+
+    // ⚠️ CONTRAPRUEBA: si el radio no llegara a `nodeStrideWant`, las cuatro filas darian el MISMO
+    // numero de triangulos y se leerian como "el tope es gratis" — la conclusion mas cara posible.
+    CHECK(trisOff > 0.0, "la linea base dibuja algo");
+    r.shutdown();
+}
+
+
+// ================================================================================================
+// ¿`double` ES DOUBLE EN ESTA GPU? El test que le faltaba al banco, y que explica una sesion entera.
+//
+// La sonda `terrain_node_drawn_vs_field` da, con el MISMO shader y el MISMO dato:
+//
+//     OpenGL sobre NVIDIA   stride 1 -> media 0,0015 m · peor 0,0107 m
+//     OpenGL sobre AMD      stride 1 -> media 0,0405 m · peor 0,0889 m     27x peor
+//
+// No es el backend —Vulkan sobre NVIDIA da las mismas cifras que GL sobre NVIDIA— es la GPU. Y el
+// sospechoso es la aritmetica en double del vertex shader, que es justo lo que se puso para que el
+// ulp del float (0,38-0,76 m a radio terrestre) dejara de verse.
+//
+// Aqui no se mide terreno: se mide si `double` es double, con casos que en float colapsan a CERO.
+// ================================================================================================
+static void testGpuFp64()
+{
+    BEGIN("¿la GPU hace la aritmetica en DOUBLE, o la degrada a float?");
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/fp64_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de fp64_probe.comp creado");
+    if (!valid(cp)) return;
+
+    const size_t N = 12;
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Readback);
+
+    // ⚠️ LAS ENTRADAS VAN POR SSBO Y ESO ES EL TEST, NO FONTANERIA. Escritas como literales en el
+    // shader, el driver plegaba los nueve casos en tiempo de compilacion y pasaban en cualquier GPU:
+    // se medi­a el plegador de constantes del compilador, no la ALU. Ver la cabecera del .comp.
+    // Todos son exactos en float, asi que `double(uIn[k])` vale exactamente lo que se pretende.
+    const float inputs[10] = { 6371000.0f, 1.0e-10f, 0.001f, 2.0f,
+                               0.31f, 0.62f, 0.72f, -0.4f, 0.25f, 0.0f };
+    BufferHandle in = g_dev->createBuffer(BufferUsage::Storage, sizeof(inputs), inputs,
+                                          BufferMemory::Static);
+
+    // El dispatch va FUERA de un render pass (en Vulkan dentro es ilegal, ver
+    // `testDispatchInsideRenderPass`), y el `memoryBarrier` ordena la escritura antes de la copia.
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, in);
+        ctx->dispatch(1, 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, N * sizeof(float));
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (v) {
+        // ── LOS ORACULOS, CALCULADOS EN LA CPU ──────────────────────────────────────────────────
+        //
+        // ⚠️ NINGUNO ES UN UMBRAL INVENTADO: los tres son el MISMO calculo hecho en `double` de x86,
+        // donde `sqrt` es correctamente redondeada por el hardware. Lo que se comprueba es que la GPU
+        // llegue al mismo sitio, no que caiga dentro de un margen que yo haya elegido.
+        // ⚠️ LOS ORACULOS PARTEN DE LOS MISMOS FLOAT QUE EL SHADER, no de los decimales bonitos: el
+        // shader recibe `0.31f` y hace `double(0.31f)`, que NO es 0.31. Escribir 0.31 aqui metería un
+        // desajuste de 1e-9 que se confundiría con el bug que se busca.
+        const glm::dvec3 seedRef((double)inputs[4], (double)inputs[5], (double)inputs[6]);
+        const glm::dvec3 pRef  = glm::normalize(seedRef) * (double)inputs[0];
+        const double residRef  = pRef.x - (double)(float)pRef.x;          // caso (3)
+        const double sqrtRef   = (std::sqrt(2.0) * std::sqrt(2.0) - 2.0) * 1.0e12;   // caso (5)
+        const double rsqrtRef  = (1.0 / std::sqrt(2.0) * (1.0 / std::sqrt(2.0)) * 2.0 - 1.0) * 1.0e12;
+        const glm::dvec3 rRef  = Haruka::cubeFaceToDir(Haruka::PlanetFace::FRONT,
+                                                       (double)inputs[7], (double)inputs[8]);
+        const double unitRef   = (glm::dot(rRef, rRef) - 1.0) * 1.0e12;   // caso (7)
+        const double rxResid   = (rRef.x - (double)(float)rRef.x) * 1.0e9; // caso (10)
+
+        std::printf("    (1) (1+1e-10 - 1)*1e10        = %.6f        (double: 1,0 · float: 0)\n", v[0]);
+        std::printf("    (2) (R+1mm - R) en mm         = %.6f        (double: 1,0 · float: 0)\n", v[1]);
+        std::printf("    (3) residuo sub-float de p.x  = %.9f m  (CPU: %.9f · float: 0 exacto)\n",
+                    v[2], residRef);
+        std::printf("    (4) el (2) en FLOAT           = %.6f        (contraprueba: tiene que dar -1)\n", v[3]);
+        std::printf("    (5) (sqrt(2)^2 - 2)*1e12      = %.6f        (CPU: %.6f)\n", v[4], sqrtRef);
+        std::printf("    (6) inversesqrt, idem         = %.6f        (CPU: %.6f)\n", v[5], rsqrtRef);
+        std::printf("    (7) (|cubeFaceToDir|^2-1)*1e12= %.6f        (CPU: %.6f)\n", v[6], unitRef);
+        std::printf("    (8) ...en METROS de superficie= %.9f m  (comparable con el bake)\n", v[7]);
+        std::printf("    (9) el (5) en FLOAT           = %.1f      (contraprueba: ~2,4e5)\n", v[8]);
+        std::printf("   (10) residuo sub-float de r.x  = %.6f      (CPU: %.6f · float: 0 exacto)\n",
+                    v[9], rxResid);
+        const double mulRef = (double)inputs[0] * (double)inputs[4];
+        const double divRef = (double)inputs[0] / 3.0;
+        std::printf("   (11) residuo del PRODUCTO      = %.9f  (CPU: %.9f · float: 0 exacto)\n",
+                    v[10], mulRef - (double)(float)mulRef);
+        std::printf("   (12) residuo de la DIVISION    = %.9f  (CPU: %.9f · float: 0 exacto)\n",
+                    v[11], divRef - (double)(float)divRef);
+        CHECK(std::fabs((double)v[10] - (mulRef - (double)(float)mulRef)) < 1e-4,
+              "(11) el PRODUCTO en doble conserva los bits que un float no puede guardar");
+        CHECK(std::fabs((double)v[11] - (divRef - (double)(float)divRef)) < 1e-4,
+              "(12) la DIVISION en doble conserva los bits que un float no puede guardar");
+
+        // ⚠️ SIN TOLERANCIA BLANDA: en float estos dos casos dan CERO EXACTO, asi que basta con pedir
+        // que se parezcan a lo esperado. Un 0,5 aqui seria tan diagnostico como un 0.
+        CHECK(std::fabs(v[0] - 1.0f) < 0.01f,
+              "(1) la GPU distingue 1+1e-10 de 1 -> hay fp64 de verdad");
+        CHECK(std::fabs(v[1] - 1.0f) < 0.01f,
+              "(2) la GPU suma 1 mm a un radio terrestre sin perderlo");
+        // El residuo es un numero CONCRETO, no "distinto de cero": si la GPU calculo en double llega
+        // al mismo que la CPU salvo el ulp del double (1e-9 m a esta escala). Un cero exacto aqui es
+        // la firma de que `normalize(dvec3)*R` se hizo en float.
+        CHECK(std::fabs((double)v[2] - residRef) < 1.0e-6,
+              "(3) `normalize(dvec3)*R` conserva los bits que un float no puede guardar");
+        // La contraprueba: el MISMO caso en float tiene que perder el milimetro. Si no lo perdiera,
+        // (2) no estaria demostrando nada sobre el double.
+        CHECK(std::fabs(v[3] + 1.0f) < 0.01f,
+              "(4) en FLOAT el milimetro SE PIERDE (si no, el caso (2) no demuestra nada)");
+
+        // ── LA RAIZ EN DOBLE, QUE ES LO QUE NO SE MIRABA ────────────────────────────────────────
+        //
+        // Margen 1,0 en unidades de 1e-12, o sea 1e-12 relativo: dos mil veces el ulp del double y
+        // aun asi SEIS ORDENES por debajo de lo que daria la aproximacion `V_RSQ_F64` sin pulir
+        // (~1e3). No hay zona gris entre "correctamente redondeada" y "aproximada".
+        CHECK(std::fabs((double)v[4] - sqrtRef) < 1.0,
+              "(5) `sqrt(double)` esta correctamente redondeada (no es la aproximacion del hardware)");
+        CHECK(std::fabs((double)v[5] - rsqrtRef) < 1.0,
+              "(6) `inversesqrt(double)` esta correctamente redondeada");
+        // El camino REAL: tres `sqrt(double)` dentro de `harukaCubeFaceToDir`, medidos sin `sqrt`.
+        CHECK(std::fabs((double)v[6] - unitRef) < 1.0,
+              "(7) la direccion del bake sale unitaria con precision de double");
+        // Y la traduccion a lo que se ve: por debajo del milimetro no puede explicar los 2 cm del bake.
+        CHECK(v[7] < 0.001f,
+              "(8) el error de la proyeccion cara->esfera esta por debajo del milimetro");
+        // Contraprueba del (5): sin ella, un (5) que casa no distingue "la raiz es exacta" de "la
+        // sonda no esta midiendo la raiz".
+        // ⚠️ EN VALOR ABSOLUTO. `sqrt(2)` en float redondea HACIA ABAJO, asi que `s*s-2` es NEGATIVO
+        // (-68457) y un `> 1e4` lo daba por fallo. La contraprueba mide MAGNITUD de error, no signo.
+        CHECK(std::fabs(v[8]) > 1.0e4f,
+              "(9) en FLOAT la raiz SI pierde precision (si no, el caso (5) no demuestra nada)");
+        // La misma pregunta que contesta el modo 6 del bake, aqui aislada: si la direccion sale con
+        // bits por debajo del float, el bake no puede estar perdiendolos en esta funcion.
+        CHECK(std::fabs((double)v[9] - rxResid) < 0.01,
+              "(10) `harukaCubeFaceToDir` devuelve una direccion con precision de double");
+    }
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in); g_dev->destroy(cp);
+}
+
+
+// ================================================================================================
+// EL BAKE CONTRA LA CPU, NIVEL A NIVEL. ¿La divergencia entre GPUs escala con el nodo?
+//
+// ⚠️ EL BANCO MIRABA UN SOLO NODO, Y DEL NIVEL 17. Ahi la divergencia AMD/NVIDIA es de 2 cm
+// (0,0204 contra 0,0001 m), y Andoni ve 0,4-1,5 m en partida — donde se dibujan niveles 9..17. Si el
+// ruido diverge mas cuanto mayor es la coordenada, los nodos GRUESOS serian mucho peores y una sola
+// muestra del 17 no lo veria. Esto barre el nivel para contestarlo.
+//
+// No dibuja nada: genera en GPU, lee el heightmap y lo compara con `nodeFillHeights`, que es el
+// gemelo CPU. La referencia NO depende de la GPU, asi que la comparacion es honesta en las dos.
+// ================================================================================================
+// ================================================================================================
+// ¿DA LA GPU EL MISMO NUMERO DE ONDA QUE LA CPU? El eslabon que `rhitest_waveprobe` no aisla.
+//
+// La sonda de la ola compara ALTURAS, o sea el final de la cadena: cuando dio 4,6 m de separacion al
+// meter la dispersion de profundidad finita, no decia si el culpable era `k`, el desvanecido de onda
+// corta, el tope de rompiente o la fase. Esto emite SOLO `harukaWaveNumber`.
+//
+// Y emite ademas el RESIDUO de la propia ecuacion de dispersion, que separa dos casos que a simple
+// vista son el mismo: "las dos resuelven bien y difieren en el ultimo bit" (residuo ~0 en ambas) de
+// "el solver de la GPU no converge" (residuo grande en una).
+// ================================================================================================
+// ================================================================================================
+// EL CAMPO DE AGUA HORNEADO: ¿lee la GPU el mismo lago que la CPU?
+//
+// ⚠️ TODO ESTE CAMINO SE AÑADIÓ SIN UNA SOLA PRUEBA DE GPU. `bakeWaterMap` rellena las cuencas del
+// planeta, sube el resultado como RG32F (R = cota, G = fetch) y el shader lo lee con
+// `harukaBakedLakeAt` / `harukaBakedFetchAt`; la CPU tiene `lakeLevelAt` / `lakeFetchAt`, declaradas
+// gemelas y nunca comparadas. Si divergen, el agua que se DIBUJA no está donde la física dice.
+//
+// El campo NO se toma de un planeta: se construye aquí una altura sintética, se pasa por el MISMO
+// `waterFillEquirect` que usa el motor y se sube. Así el test audita el par textura↔lector, que es
+// lo que no estaba probado, sin depender de que haya un mundo horneado.
+// ================================================================================================
+static void testWaterFieldParity()
+{
+    BEGIN("agua: el campo de lagos de la GPU == el de la CPU");
+
+    // ── EL CAMPO: un continente con una cuenca cerrada, como el test de CPU ─────────────────────
+    const int W = 128, H = 64;
+    std::vector<float> land((size_t)W * H, 100.0f);
+    auto at = [&](int x, int y) -> float& { return land[(size_t)y * W + x]; };
+    for (int y = 0; y < H; ++y) for (int x = 0; x < 12; ++x) at(x, y) = -500.0f;   // océano
+    for (int y = 24; y < 40; ++y) for (int x = 60; x < 76; ++x) at(x, y) = 10.0f;  // cuenca
+    // ⚠️ RADIO PEQUENO A PROPOSITO. Con el radio terrestre, un lago de 16x16 texeles sobre un mapa
+    // de 128x64 mide MILES de kilometros y su factor de fetch satura en 1,0 — o sea que el careo del
+    // fetch compararia 1,0 contra 1,0 y no diria nada. Con un cuerpo pequeno el lago sale de cientos
+    // de metros, el factor cae por debajo de 1 y la comparacion mide algo.
+    const double kProbeRadius = 4000.0;
+    const Haruka::Planet::WaterFillResult fill =
+        Haruka::Planet::waterFillEquirect(land.data(), W, H, 0.0f, kProbeRadius);
+    std::printf("    campo sintetico %dx%d: %zu texeles de mar · %zu de lago · fetch mayor %.0f m\n",
+                W, H, fill.seaCells, fill.lakeCells, fill.biggestFetchM);
+    CHECK(fill.lakeCells > 0, "el campo de prueba TIENE lago (si no, el careo no compara nada)");
+
+    // Intercalado RG, igual que `bakeWaterMap`.
+    std::vector<float> rg((size_t)W * H * 2);
+    for (size_t c = 0; c < (size_t)W * H; ++c) {
+        rg[c * 2 + 0] = fill.levelM[c];
+        rg[c * 2 + 1] = fill.fetchM[c];
+    }
+    TextureDesc td;
+    td.width = (uint32_t)W; td.height = (uint32_t)H;
+    td.format = Format::RG32F; td.filter = Filter::Nearest; td.wrap = Wrap::ClampToEdge;
+    td.mipmaps = false; td.initialData = rg.data();
+    TextureHandle lakeTex = g_dev->createTexture(td);
+    CHECK(valid(lakeTex), "textura RG32F del campo de agua creada");
+    if (!valid(lakeTex)) return;
+
+    // ── LAS DIRECCIONES A PROBAR: dentro del lago, en el mar y en tierra ────────────────────────
+    //
+    // El muestreo es NEAREST y la inversa de `equirectUV`, así que se eligen CENTROS DE TÉXEL: un
+    // punto en el borde caería en un téxel u otro según el último bit y el careo mediría eso.
+    auto dirOfTexel = [&](int x, int y) {
+        const double u = ((double)x + 0.5) / W, v = ((double)y + 0.5) / H;
+        const double lat = (0.5 - v) * 3.14159265358979323846;
+        const double lon = (u - 0.5) * 2.0 * 3.14159265358979323846;
+        const double cl = std::cos(lat);
+        return glm::dvec3(cl * std::cos(lon), std::sin(lat), cl * std::sin(lon));
+    };
+    struct Probe { int x, y; const char* what; };
+    const Probe probes[6] = { { 68, 32, "centro del lago" }, { 61, 25, "borde del lago" },
+                              {  4, 32, "oceano" },          { 40, 10, "tierra seca" },
+                              { 120, 50, "tierra, otra cara" }, { 75, 39, "esquina del lago" } };
+    const int N = 6;
+    std::vector<float> inBuf(1 + (size_t)N * 3);
+    inBuf[0] = (float)N;
+    for (int k = 0; k < N; ++k) {
+        const glm::dvec3 d = dirOfTexel(probes[k].x, probes[k].y);
+        inBuf[1 + k * 3 + 0] = (float)d.x;
+        inBuf[1 + k * 3 + 1] = (float)d.y;
+        inBuf[1 + k * 3 + 2] = (float)d.z;
+    }
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/water_field_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de water_field_probe.comp creado");
+    if (!valid(cp)) { g_dev->destroy(lakeTex); return; }
+
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, (size_t)N * 3 * sizeof(float),
+                                           nullptr, BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, (size_t)N * 3 * sizeof(float),
+                                           nullptr, BufferMemory::Readback);
+    BufferHandle in  = g_dev->createBuffer(BufferUsage::Storage, inBuf.size() * sizeof(float),
+                                           inBuf.data(), BufferMemory::Static);
+    const Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    BufferHandle ocean = makeOceanStateUBO(st);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, in);
+        ctx->bindTexture(18, lakeTex);
+        if (valid(ocean)) ctx->bindUniformBuffer(29, ocean);
+        ctx->dispatch(1, 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, (size_t)N * 3 * sizeof(float));
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback"); g_dev->destroy(rb); g_dev->destroy(out);
+              g_dev->destroy(in); g_dev->destroy(cp); g_dev->destroy(lakeTex); return; }
+
+    std::printf("    punto                  cota GPU     cota CPU      fetch GPU    fetch CPU   factor\n");
+    double worstLvl = 0.0, worstFetch = 0.0, worstFac = 0.0;
+    bool sawLake = false, sawDry = false;
+    for (int k = 0; k < N; ++k) {
+        const size_t c = (size_t)probes[k].y * W + probes[k].x;
+        // El gemelo de CPU: el MISMO muestreo NEAREST que `TerrestrialPlanet::lakeLevelAt`.
+        const float lvlCpu = fill.levelM[c];
+        const float fchCpu = (fill.fetchM[c] > 0.0f) ? fill.fetchM[c]
+                                                     : Haruka::Planet::WATER_FETCH_UNLIMITED;
+        const float facCpu = Haruka::Planet::oceanFetchFactor(st, fchCpu);
+        // El shader devuelve su propio centinela donde no hay lago: se comparan como "no hay".
+        const bool gpuDry = (v[k * 3 + 0] < -1.0e8f);
+        const bool cpuDry = (lvlCpu <= Haruka::Planet::WATER_FILL_DRY);
+        if (!cpuDry) sawLake = true; else sawDry = true;
+        std::printf("    %-20s %11.3f %12.3f %13.0f %12.0f %8.4f\n", probes[k].what,
+                    gpuDry ? 0.0 : (double)v[k * 3 + 0], cpuDry ? 0.0 : (double)lvlCpu,
+                    (double)v[k * 3 + 1], (double)fchCpu, (double)v[k * 3 + 2]);
+        CHECK(gpuDry == cpuDry, "GPU y CPU coinciden en SI hay lago en ese punto");
+        if (!cpuDry) worstLvl = std::max(worstLvl, std::fabs((double)v[k*3+0] - (double)lvlCpu));
+        worstFetch = std::max(worstFetch, std::fabs((double)v[k*3+1] - (double)fchCpu)
+                                        / std::max(1.0, (double)fchCpu));
+        worstFac   = std::max(worstFac,   std::fabs((double)v[k*3+2] - (double)facCpu));
+    }
+    std::printf("    peor diferencia: cota %.6f m · fetch %.3e relativo · factor de ola %.6f\n",
+                worstLvl, worstFetch, worstFac);
+
+    CHECK(sawLake && sawDry,
+          "el careo mira puntos con lago Y sin el (si no, seria tautologico)");
+    CHECK(worstLvl < 1e-3, "la COTA de la lamina es la misma en la GPU que en la CPU");
+    CHECK(worstFetch < 1e-5, "y el FETCH tambien");
+    CHECK(worstFac < 1e-4, "y con el, el factor que decide la ola que se dibuja en ese lago");
+    // ⚠️ Y QUE EL FACTOR NO ESTE SATURADO: con 1,0 en todos los puntos, la linea de arriba compararia
+    // 1,0 contra 1,0. La primera version de este test hacia exactamente eso.
+    double facLake = 1.0;
+    for (int k = 0; k < N; ++k) {
+        const size_t c = (size_t)probes[k].y * W + probes[k].x;
+        if (fill.levelM[c] > Haruka::Planet::WATER_FILL_DRY)
+            facLake = std::min(facLake, (double)v[k * 3 + 2]);
+    }
+    std::printf("    factor de fetch en el lago: %.4f (si fuera 1,0 el careo del fetch no mediria nada)\n",
+                facLake);
+    CHECK(facLake < 0.9, "CONTRAPRUEBA: el fetch del lago LIMITA la ola de verdad (factor < 1)");
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in);
+    g_dev->destroy(cp); g_dev->destroy(lakeTex);
+}
+
+
+static void testWaveNumberParity()
+{
+    BEGIN("mar: el numero de onda de la GPU == el de la CPU");
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/wavenumber_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de wavenumber_probe.comp creado");
+    if (!valid(cp)) return;
+
+    const float depths[12] = { 0.05f, 0.1f, 0.3f, 0.5f, 1.0f, 2.0f,
+                               3.0f, 5.18f, 10.0f, 23.45f, 100.0f, 400.0f };
+    const float k0 = 6.2831853f / Haruka::Planet::OCEAN_WAVE[0][0];
+    // El MISMO punto y tiempo que usa `rhitest_waveprobe` en su peor pixel, para poder carear los dos
+    // caminos: si la altura casa aqui (compute) y no alli (fragmento), el fallo es de aquel camino.
+    const glm::vec3 wpProbe = glm::vec3(1000.0f, 0.0f, -500.0f)
+                            + glm::vec3(0.7f, 0.0f, 0.11f) * 133.0f
+                            + glm::vec3(0.13f, 0.0f, 0.9f) * 52.0f;
+    const glm::vec3 upProbe(0.0f, 1.0f, 0.0f);
+    const float     tProbe = 12.75f;
+    float inputs[20]; inputs[0] = k0;
+    for (int i = 0; i < 12; ++i) inputs[1 + i] = depths[i];
+    inputs[13] = wpProbe.x; inputs[14] = wpProbe.y; inputs[15] = wpProbe.z;
+    inputs[16] = upProbe.x; inputs[17] = upProbe.y; inputs[18] = upProbe.z;
+    inputs[19] = tProbe;
+
+    const size_t N = 28;
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Readback);
+    BufferHandle in  = g_dev->createBuffer(BufferUsage::Storage, sizeof(inputs), inputs,
+                                           BufferMemory::Static);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, in);
+        ctx->dispatch(1, 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, N * sizeof(float));
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback"); g_dev->destroy(rb); g_dev->destroy(out);
+              g_dev->destroy(in); g_dev->destroy(cp); return; }
+
+    std::printf("    tren de %.1f m (k0 = %.6f)\n", Haruka::Planet::OCEAN_WAVE[0][0], k0);
+    std::printf("    prof.      k GPU      k CPU     dif.rel    residuo GPU  residuo CPU\n");
+    double worstRel = 0.0, worstResGpu = 0.0;
+    for (int i = 0; i < 12; ++i) {
+        const float kc = Haruka::Planet::oceanWaveNumber(k0, depths[i]);
+        const double rel = std::fabs((double)v[i] - (double)kc) / std::max((double)kc, 1e-9);
+        const double resC = ((double)(Haruka::Planet::OCEAN_G * kc * std::tanh(kc * depths[i]))
+                           - (double)(Haruka::Planet::OCEAN_G * k0))
+                          / (double)(Haruka::Planet::OCEAN_G * k0);
+        worstRel = std::max(worstRel, rel);
+        worstResGpu = std::max(worstResGpu, std::fabs((double)v[12 + i]));
+        std::printf("    %7.2f m %10.6f %10.6f  %9.2e  %11.2e %11.2e\n",
+                    depths[i], v[i], kc, rel, (double)v[12 + i], resC);
+    }
+    std::printf("    peor diferencia relativa GPU<->CPU: %.3e · peor residuo de la GPU: %.3e\n",
+                worstRel, worstResGpu);
+
+    // ── LA ALTURA, EN COMPUTE, EN EL PEOR PUNTO DE LA OTRA SONDA ────────────────────────────────
+    const Haruka::Planet::OceanState stRef = Haruka::Planet::oceanDefaultState();
+    const float hCpu = Haruka::Planet::oceanWaveHeight(wpProbe, upProbe, tProbe, depths[7], 1.0f, stRef);
+    const float k0f  = 6.2831853f / stRef.wave[0][0];
+    std::printf("    altura a %.2f m de fondo: GPU %+.6f m · CPU %+.6f m · dif %.6f m\n",
+                depths[7], v[24], hCpu, std::fabs(v[24] - hCpu));
+    std::printf("      piezas   green GPU %.6f / CPU %.6f · breakScale GPU %.6f / CPU %.6f\n",
+                v[25], Haruka::Planet::oceanGreenGain(depths[7]),
+                v[26], Haruka::Planet::oceanBreakScale(depths[7], stRef));
+    std::printf("      fade del tren largo: GPU %.6f / CPU %.6f\n",
+                v[27], Haruka::Planet::oceanShortWaveFade(
+                           Haruka::Planet::oceanWaveNumber(k0f, depths[7])));
+    CHECK(std::fabs(v[24] - hCpu) < 1e-3f,
+          "la altura de la ola casa GPU<->CPU calculada en COMPUTE (aisla el camino del fragmento)");
+
+    // ⚠️ EL UMBRAL SALE DE LA FASE, NO DE UN GUSTO. La fase es `k · dot(D,wp)`, y en la sonda de la
+    // ola `dot(D,wp)` llega a ~1100 m: una diferencia relativa de 1e-4 en `k` ya son 0,018 rad de
+    // fase, y 1e-2 descorrelaciona las dos olas por completo. Se pide 1e-5.
+    CHECK(worstRel < 1e-5, "la GPU resuelve el MISMO numero de onda que la CPU");
+    // Y el oraculo independiente: la GPU satisface la ecuacion que dice resolver.
+    CHECK(worstResGpu < 1e-4, "y el `k` de la GPU satisface la relacion de dispersion");
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in); g_dev->destroy(cp);
+}
+
+
+static void testTerrainBakeAcrossLevels()
+{
+    BEGIN("v5 F1: el bake contra la CPU, NIVEL A NIVEL (¿escala la divergencia?)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+
+    TerrainNodeGpu gpu;
+    const std::string base = Haruka::Shader::baseDir();
+    if (!gpu.init(g_dev, (base + "shaders/terrain_node.comp").c_str(), 64)) {
+        CHECK(false, "TerrainNodeGpu::init"); return;
+    }
+    std::printf("    nivel   texel      peor       media     (bake GPU vs referencia CPU)\n");
+    double worstAll = 0.0, worstFine = 0.0;
+    for (uint32_t lvl : { 9u, 11u, 13u, 15u, 17u }) {
+        // El mismo punto del planeta a cada nivel: el nodo de nivel 17 dividido por potencias de dos.
+        const NodeId node{ Haruka::PlanetFace::FRONT, lvl, 33600u >> (17 - lvl), 24800u >> (17 - lvl) };
+        TerrainNodePool pool(64, 8);
+        pool.beginFrame();
+        pool.request(node);
+        for (int pass = 0; pass < 24; ++pass) {
+            Context* ctx = g_dev->beginFrame();
+            const size_t n = ctx ? gpu.generatePending(ctx, pool, R) : 0;
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (n == 0) break;
+        }
+        int slot = -1;
+        for (size_t k = 0; k < gpu.capacity(); ++k) {
+            NodeId at; if (pool.nodeAtSlot((int)k, at) && at == node) { slot = (int)k; break; }
+        }
+        if (slot < 0) { CHECK(false, "el nodo del nivel esta residente"); continue; }
+
+        std::vector<float> ref((size_t)N * N);
+        nodeFillHeights(node, R, ref.data());
+        BufferHandle rb = g_dev->createBuffer(BufferUsage::Storage, ref.size() * sizeof(float),
+                                              nullptr, BufferMemory::Readback);
+        copyThenWait(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode,
+                     ref.size() * sizeof(float));
+        const float* got = (const float*)g_dev->mappedData(rb);
+        double worst = 0.0, sum = 0.0;
+        if (got) {
+            for (size_t k = 0; k < ref.size(); ++k) {
+                const double e = std::fabs((double)got[k] - (double)ref[k]);
+                worst = std::max(worst, e); sum += e;
+            }
+        }
+        std::printf("    %5u  %7.3f m  %8.4f m  %8.4f m\n", lvl, nodeTexelM(node, R),
+                    worst, sum / (double)ref.size());
+        worstAll = std::max(worstAll, worst);
+        if (lvl == 17u) worstFine = worst;
+        g_dev->destroy(rb);
+    }
+    // ⚠️ SIN NUMERO FIJO: lo que se afirma es que el bake CASA con su gemelo de CPU en TODOS los
+    // niveles, no solo en el que se miraba. La tolerancia es la del test que ya existia (0,05 m).
+    std::printf("    peor de todos los niveles: %.4f m · solo del 17: %.4f m\n", worstAll, worstFine);
+    CHECK(worstAll < 0.05, "el bake casa con la CPU en TODOS los niveles, no solo en el 17");
+    gpu.shutdown();
+}
+
+
+// ================================================================================================
+// ¿EN QUE ETAPA DEL BAKE SE PIERDE? La biseccion que faltaba, sobre los 16 641 TEXELES.
+//
+// ⚠️ LO QUE HABIA NO PODIA CONTESTAR ESTO, POR DOS MOTIVOS INDEPENDIENTES:
+//
+//   · `octave_probe.comp` mira UN SOLO PUNTO. Da 1,5e-5 m en las dos GPU y pasa — pero el bake, en
+//     la misma AMD, tiene una MEDIA de 0,003 m sobre el nodo entero. Un punto de 16 641 no es una
+//     muestra, es una anecdota, y esa anecdota decia "todo casa" mientras el nodo no casaba.
+//   · Los modos de biseccion 1-3 del propio `terrain_node.comp` emiten floats de `lx` y `dir.x`,
+//     cuyo ulp vale 0,76 m de superficie. Se escribieron cuando el sintoma eran METROS. Hoy el
+//     sintoma son 0,02 m y esos modos son ciegos: habrian dicho "casa" con toda seguridad.
+//
+// Aqui se usan los modos 6 y 7 (residuo sub-float amplificado, ver el shader) para preguntar por
+// SEPARADO y en TODOS los texeles: ¿es identica la direccion? ¿lo es la posicion `dir·R`? Y luego
+// la altura, con su histograma — porque "peor 0,02 · media 0,003" no dice lo mismo si es un texel
+// suelto (un umbral cruzado) que si son los 16 641 (precision).
+// ================================================================================================
+static void testBakeStageBisect()
+{
+    BEGIN("v5 F1: ¿en QUE etapa del bake diverge la GPU? (biseccion por texel)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const uint32_t N = TERRAIN_NODE_TEXELS;
+    const size_t   T = (size_t)N * N;
+
+    TerrainNodeGpu gpu;
+    if (!gpu.init(g_dev, (Haruka::Shader::baseDir() + "shaders/terrain_node.comp").c_str(), 8)) {
+        CHECK(false, "TerrainNodeGpu::init"); return;
+    }
+
+    // Genera el nodo con el modo pedido y devuelve el heightmap leido. Pool NUEVO cada vez: el
+    // contenido se cachea por hueco, asi que reutilizarlo devolveria el bake del modo anterior.
+    auto bake = [&](const NodeId& node, int mode, std::vector<float>& out) -> bool {
+        gpu.setDebugMode(mode);
+        TerrainNodePool pool(8, 4);
+        pool.beginFrame();
+        pool.request(node);
+        for (int pass = 0; pass < 24; ++pass) {
+            Context* ctx = g_dev->beginFrame();
+            const size_t n = ctx ? gpu.generatePending(ctx, pool, R) : 0;
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (n == 0) break;
+        }
+        int slot = -1;
+        for (size_t k = 0; k < gpu.capacity(); ++k) {
+            NodeId at; if (pool.nodeAtSlot((int)k, at) && at == node) { slot = (int)k; break; }
+        }
+        if (slot < 0) return false;
+        out.assign(T, 0.0f);
+        BufferHandle rb = g_dev->createBuffer(BufferUsage::Storage, T * sizeof(float), nullptr,
+                                              BufferMemory::Readback);
+        copyThenWait(gpu.heights(), rb, (size_t)slot * TerrainNodeGpu::kBytesPerNode,
+                     T * sizeof(float));
+        const float* got = (const float*)g_dev->mappedData(rb);
+        const bool ok = (got != nullptr);
+        if (ok) std::memcpy(out.data(), got, T * sizeof(float));
+        g_dev->destroy(rb);
+        return ok;
+    };
+
+    bool dirOk = true, posOk = true;
+    for (uint32_t lvl : { 9u, 17u }) {
+        const NodeId node{ Haruka::PlanetFace::FRONT, lvl, 33600u >> (17 - lvl), 24800u >> (17 - lvl) };
+        std::printf("    ── nivel %u (texel %.3f m) ─────────────────────────────\n",
+                    lvl, nodeTexelM(node, R));
+
+        // ── ETAPA 1: la DIRECCION, hasta el ultimo bit del double ────────────────────────────────
+        std::vector<float> g6;
+        if (bake(node, 6, g6)) {
+            double worst = 0.0, sum = 0.0;
+            for (uint32_t v = 0; v < N; ++v)
+                for (uint32_t u = 0; u < N; ++u) {
+                    const glm::dvec3 d = nodeTexelDir(node, u, v);
+                    const double ref = (d.x - (double)(float)d.x) * 1.0e9;
+                    const double e = std::fabs((double)g6[(size_t)v * N + u] - ref);
+                    worst = std::max(worst, e); sum += e;
+                }
+            // El residuo esta en unidades de 1e-9 de direccion; a radio terrestre, 1 unidad = 6,4 mm.
+            std::printf("      dir.x  (residuo sub-float) peor %.4f · media %.4f  [1 ud = %.4f m]\n",
+                        worst, sum / (double)T, 1.0e-9 * R);
+            if (worst > 0.01) dirOk = false;
+        } else CHECK(false, "el nodo del modo 6 esta residente");
+
+        // ── ETAPA 2: la POSICION `dir·R`, en metros ──────────────────────────────────────────────
+        std::vector<float> g7;
+        if (bake(node, 7, g7)) {
+            double worst = 0.0, sum = 0.0;
+            for (uint32_t v = 0; v < N; ++v)
+                for (uint32_t u = 0; u < N; ++u) {
+                    const double px  = nodeTexelDir(node, u, v).x * R;
+                    const double ref = px - (double)(float)px;
+                    const double e = std::fabs((double)g7[(size_t)v * N + u] - ref);
+                    worst = std::max(worst, e); sum += e;
+                }
+            std::printf("      dir.x*R (residuo, metros)  peor %.9f m · media %.9f m\n",
+                        worst, sum / (double)T);
+            if (worst > 1.0e-6) posOk = false;
+        } else CHECK(false, "el nodo del modo 7 esta residente");
+
+        // ── ETAPA 3: la ALTURA, con su forma espacial ────────────────────────────────────────────
+        std::vector<float> g0;
+        std::vector<float> ref(T);
+        nodeFillHeights(node, R, ref.data());
+        if (bake(node, 0, g0)) {
+            double worst = 0.0, sum = 0.0; uint32_t wu = 0, wv = 0;
+            size_t over1mm = 0, over1cm = 0;
+            for (uint32_t v = 0; v < N; ++v)
+                for (uint32_t u = 0; u < N; ++u) {
+                    const size_t k = (size_t)v * N + u;
+                    const double e = std::fabs((double)g0[k] - (double)ref[k]);
+                    if (e > worst) { worst = e; wu = u; wv = v; }
+                    sum += e;
+                    if (e > 0.001) ++over1mm;
+                    if (e > 0.01)  ++over1cm;
+                }
+            std::printf("      altura                     peor %.4f m en (%u,%u) · media %.4f m\n",
+                        worst, wu, wv, sum / (double)T);
+            // ⚠️ EL HISTOGRAMA ES EL DIAGNOSTICO, NO EL PEOR. Un peor alto con casi ningun texel por
+            // encima del milimetro seria un UMBRAL cruzado en un punto; miles de texeles por encima
+            // es PRECISION perdida en todas partes. Son dos bugs distintos y el "peor" no los separa.
+            std::printf("      texeles > 1 mm: %zu de %zu (%.1f %%) · > 1 cm: %zu (%.1f %%)\n",
+                        over1mm, T, 100.0 * (double)over1mm / (double)T,
+                        over1cm, 100.0 * (double)over1cm / (double)T);
+        } else CHECK(false, "el nodo del modo 0 esta residente");
+    }
+
+    // ⚠️ ESTAS DOS ASERCIONES SON LAS QUE LOCALIZAN EL BUG, Y POR ESO SON DURAS. Si la direccion y la
+    // posicion casan bit a bit con la CPU y la ALTURA no, entonces lo que diverge esta AGUAS ABAJO
+    // —dentro de `harukaTerrainDetail`, que es hash entero y lerps escritos a mano en float— y eso
+    // acota el problema a una sola funcion. Si alguna de las dos falla, el problema es la geometria.
+    CHECK(dirOk, "la direccion del texel es la MISMA que en la CPU, hasta el ulp del double");
+    CHECK(posOk, "la posicion `dir*R` es la MISMA que en la CPU, hasta el ulp del double");
+    gpu.shutdown();
+}
+
+
+// ================================================================================================
+// ¿QUE OCTAVA DIVERGE? Localiza el bug CRITICO de "el suelo depende de la GPU".
+//
+// `testTerrainBakeAcrossLevels` dice CUANTO (0,02 m en AMD, 0,0001 en NVIDIA, plano en todo nivel).
+// Esto dice DONDE: emite cada octava por separado y su fraccion de celda, y lo compara con el gemelo
+// de CPU. Si solo divergen las octavas finas -> precision de la posicion. Si divergen todas por
+// igual -> el hash o la interpolacion.
+// ================================================================================================
+static void testOctaveDivergence()
+{
+    BEGIN("¿que octava del ruido diverge entre GPUs? (bug critico del suelo)");
+
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/octave_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de octave_probe.comp creado");
+    if (!valid(cp)) return;
+
+    const size_t N = 17;
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, N * sizeof(float), nullptr,
+                                           BufferMemory::Readback);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->dispatch(1, 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, N * sizeof(float));
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback"); g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(cp); return; }
+
+    // El gemelo de CPU, con la MISMA direccion y las MISMAS frecuencias.
+    const glm::dvec3 dir = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 p   = dir * 6371000.0;
+    const double freq[7] = { 0.0000833, 0.0001667, 0.00035, 0.0016, 0.0090, 0.0450, 0.2200 };
+    const double amp[7]  = { 969.3, 513.4, 260.0, 70.0, 14.0, 3.0, 0.7 };
+    std::printf("    oct  frecuencia   ruido GPU   ruido CPU     delta     x amplitud\n");
+    double worstM = 0.0; int worstOct = -1;
+    for (int i = 0; i < 7; ++i) {
+        const glm::dvec3 x = p * freq[i];
+        const double cpu = Haruka::Planet::detailNoise(x);
+        const double d   = std::fabs((double)v[i] - cpu);
+        const double dm  = d * amp[i];
+        if (dm > worstM) { worstM = dm; worstOct = i; }
+        std::printf("    %3d  %10.7f  %10.7f  %10.7f  %9.2e  %8.4f m\n",
+                    i, freq[i], (double)v[i], cpu, d, dm);
+    }
+    std::printf("    |p| - R en la GPU: %.6f m  ·  peor octava: %d (%.4f m)\n",
+                (double)v[14], worstOct, worstM);
+    // El ultimo eslabon: la direccion calculada por `harukaCubeFaceToDir`, que es la que usa el bake.
+    const glm::dvec3 d2  = Haruka::cubeFaceToDir(Haruka::PlanetFace::FRONT, -0.4, 0.25);
+    const double     cpu2 = Haruka::Planet::terrainDetail(d2, 6371000.0, 0.596f);
+    const double     dd   = std::fabs((double)v[15] - cpu2);
+    std::printf("    con la direccion del BAKE (cubeFaceToDir): GPU %.6f m · CPU %.6f m · delta %.6f m\n",
+                (double)v[15], cpu2, dd);
+    std::printf("    (|dir| - 1) en ulps de double: %.2f\n", (double)v[16]);
+    CHECK(dd < 0.001, "el detalle con la direccion del bake casa GPU<->CPU");
+    // ⚠️ SIN TOLERANCIA INVENTADA: el ruido es la MISMA funcion en los dos lados, con la misma
+    // entrada en double. Cualquier diferencia por encima del ulp de un float ya es el bug.
+    CHECK(worstM < 0.001, "el ruido de la GPU casa con el de la CPU en TODAS las octavas");
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(cp);
+}
+
+
 // Diagnóstico directo del pase completo: `init` falló en el juego y hay que saber en qué paso.
 static void testTerrainNodeRendererInit()
 {
@@ -2603,6 +4046,156 @@ static void testTerrainNodeRendererInit()
 // aquí se DIBUJA y se cuentan los píxeles cubiertos, a varias altitudes — porque el fallo reportado
 // era "al alejarte no se ve el terreno", o sea que una sola altura no lo habría cazado.
 // ================================================================================================
+// ================================================================================================
+// EL AGUA DEL PASE DE NODOS **DIBUJA**. El test que separa "compila" de "se ve".
+//
+// ⚠️ EL AGUA SE MIGRO ENTERA DE LA REJILLA DEL CLIPMAP AL QUADTREE Y NADIE LA HABIA VISTO PINTAR. El
+// motor tenia sondas del CAMPO (donde hay agua), de la OLA (que altura) y de la PARIDAD GPU/CPU —
+// todas de DATOS. Ninguna miraba la IMAGEN, que es exactamente lo que dejo pasar los tres bugs del
+// pase de terreno (raices sin fijar, SSBO instanciado, matriz equivocada): los tres pasaban el banco
+// entero y vaciaban la pantalla.
+//
+// ⚠️ Y HACE FALTA UN FONDO DE MAR FALSO. El agua se recorta por PROFUNDIDAD (`nivel - baseH`), y sin
+// planeta horneado `baseH` vale 0: la profundidad sale 0 y el fragmento se descarta ENTERO. Con una
+// textura de altura sintetica a -500 m hay oceano en todas partes; con +500 m, tierra. Ese par es el
+// test y su contraprueba a la vez.
+// ================================================================================================
+static void testNodeWaterDraws()
+{
+    BEGIN("agua: el pase de nodos DIBUJA agua (y la descarta en tierra)");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 256)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    // Un "bake" de altura sintetico de 4x2: constante, asi que la bilineal de `harukaSampleHeightField`
+    // devuelve ese valor caiga donde caiga y la profundidad es la misma en toda la esfera.
+    auto makeFloor = [&](float metres) {
+        std::vector<float> d(8, metres);
+        TextureDesc td; td.width = 4; td.height = 2; td.format = Format::R32F;
+        td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false;
+        td.initialData = d.data();
+        return g_dev->createTexture(td);
+    };
+    // ⚠️ EL MAR, POR ENCIMA DEL RELIEVE. Con la cota 0 el agua queda al nivel MEDIO del terreno
+    // procedural (+-900 m), y mirando desde arriba se ve siempre la superficie MAS ALTA de cada rayo
+    // — que esta sesgada hacia los picos. El test daba 0,6 % y parecia que el pase no dibujaba;
+    // apagando el test de profundidad salia 100 %, o sea que la geometria estaba bien y la escena
+    // mal. Con la lamina a +2000 m el agua tapa el relieve y lo que se mide es lo que se queria medir.
+    Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    st.seaLevelM = 2000.0f;
+    BufferHandle oceanUBO = makeOceanStateUBO(st);
+
+    auto waterPixels = [&](float floorM, size_t& sentinelOut) {
+        TextureHandle floorTex = makeFloor(floorM);
+        TerrainNodeRenderer::Water wcfg;
+        wcfg.heightTex   = floorTex;
+        wcfg.oceanParams = oceanUBO;
+        wcfg.on = true;
+        r.setWater(wcfg);
+
+        // ⚠️ AL NADIR Y DESDE ARRIBA, NO AL HORIZONTE. La primera version miraba a la tangente desde
+        // 30 m: a esa altura el relieve procedural (+-900 m) TAPA el agua al nivel del mar en casi
+        // toda la pantalla, y el test daba 0 px acusando al pase de no dibujar cuando lo que fallaba
+        // era la camara. Mirando abajo desde 5 km se ven las depresiones, que es donde hay agua.
+        const glm::dvec3 cam = pc + up0 * (R + 5000.0);
+        const glm::dvec3 fwd = -up0;
+        const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+        // ⚠️ REVERSED-Z, Y AQUI ESTABA EL FALLO — DEL TEST, NO DEL PASE. `glm::perspective` da una
+        // proyeccion NORMAL (cerca->0, lejos->1) y el motor compara con `Greater`, que es la
+        // convencion de reversed-Z: con la proyeccion normal, `Greater` se queda con lo MAS LEJANO.
+        // El agua salia a 3 294 m y el terreno a 4 100-5 900, asi que ganaba el terreno y el test
+        // daba 0 px acusando al pase de no dibujar. `testTerrainNodeCoverage` no lo nota porque solo
+        // cuenta cobertura, y le da igual cual de las dos superficies gane.
+        //
+        // Reversed-Z con plano lejano infinito: z_ndc = near/dist, o sea 1 en el plano cercano y 0 en
+        // el infinito. Es la que emite `Camera::getProjectionMatrix` en el motor.
+        const float aspect = (float)w / (float)h;
+        const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+        glm::mat4 proj(0.0f);
+        proj[0][0] = fCot / aspect; proj[1][1] = fCot;
+        proj[2][3] = -1.0f;         proj[3][2] = 1.0f;   // near = 1 m
+        const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup));
+        const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(view));
+
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+            cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        // AZUL: el agua sombrea con `harukaOceanShade`, cuyo canal B domina sobre R en toda su
+        // paleta. El terreno del mismo pase no lo hace. Es el discriminante que separa "hay agua"
+        // de "hay algo dibujado".
+        // ⚠️ EL DISCRIMINANTE SE MIDE, NO SE ADIVINA. Este test ya fallo TRES veces por el
+        // instrumento y no por el pase: contando magenta con una regla que exigia B > R, mirando al
+        // horizonte donde el relieve tapa el agua, y con un umbral de azul elegido a ojo. Ahora se
+        // imprime el color medio de lo dibujado, asi que si vuelve a dar 0 se ve POR QUE.
+        size_t blue = 0, sentinel = 0, lit = 0;
+        double sr = 0.0, sg = 0.0, sb = 0.0;
+        for (size_t k = 0; k < px.size(); k += 4) {
+            if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) { ++sentinel; continue; }
+            if (px[k] || px[k+1] || px[k+2]) { ++lit; sr += px[k]; sg += px[k+1]; sb += px[k+2]; }
+            if (px[k+2] > px[k] + 4 && px[k+2] > 8) ++blue;
+        }
+        std::printf("      (fondo %+.0f m) pixeles con color %zu · medio RGB %.0f/%.0f/%.0f\n",
+                    (double)floorM, lit, lit ? sr / lit : 0.0, lit ? sg / lit : 0.0,
+                    lit ? sb / lit : 0.0);
+        sentinelOut = sentinel;
+        g_dev->destroy(floorTex);
+        return blue;
+    };
+
+    // El fondo sintetico decide la PROFUNDIDAD, que es lo unico que separa agua de tierra:
+    //   -500 m -> profundidad 2500 m: hay mar.
+    //   +5000 m -> profundidad -3000 m: tierra seca, el fragmento descarta.
+    // La lamina esta en los dos casos a la MISMA cota, asi que lo que cambia es el descarte y no la
+    // oclusion — que es justo lo que la contraprueba tiene que aislar.
+    size_t sSea = 0, sLand = 0;
+    const size_t blueSea  = waterPixels(-500.0f,  sSea);
+    const size_t blueLand = waterPixels(+5000.0f, sLand);
+    const size_t total = (size_t)w * h;
+    std::printf("    con MAR (fondo -500 m): %zu px de agua (%.1f %%) · centinela %zu\n",
+                blueSea, 100.0 * (double)blueSea / (double)total, sSea);
+    std::printf("    con TIERRA (fondo +5000 m): %zu px de agua (%.1f %%) · centinela %zu\n",
+                blueLand, 100.0 * (double)blueLand / (double)total, sLand);
+
+    // ⚠️ EL CENTINELA PRIMERO: un `readPixels` que no escribe deja 0xAA y el conteo daria 0, o sea
+    // que el test acusaria al pase de no dibujar cuando el que fallo fue el instrumento. Ya paso una
+    // vez en el camino de Vulkan.
+    CHECK(sSea < total / 2, "el readback escribio (si no, el conteo no significa nada)");
+    CHECK(blueSea > total / 20, "el pase de nodos DIBUJA agua sobre un fondo de mar");
+    // CONTRAPRUEBA: sobre tierra el mismo pase no debe pintar ni una gota. Sin esto, "hay pixeles
+    // azules" no distingue el agua de cualquier cosa que el pase pinte.
+    CHECK(blueLand < blueSea / 10,
+          "CONTRAPRUEBA: sobre TIERRA el agua se descarta — es la profundidad quien manda");
+    r.shutdown();
+    if (valid(oceanUBO)) g_dev->destroy(oceanUBO);
+}
+
+
 static void testTerrainNodeCoverage()
 {
     BEGIN("v5 F3: el pase de nodos CUBRE la pantalla (a varias altitudes)");
@@ -4199,8 +5792,17 @@ static int runBackend(Backend backend)
     testTerrainNodeGpuCost();
     testTerrainNodePoolGpu();
     testTerrainNodeRender();
+    testGpuFp64();
+    testOctaveDivergence();
+    testWaterFieldParity();
+    testWaveNumberParity();
+    testTerrainBakeAcrossLevels();
+    testBakeStageBisect();
+    testTerrainNodeDrawnVsField();
+    testTerrainStrideMatchCost();
     testTerrainNodeRendererInit();
     testTerrainNodeBaseField();
+    testNodeWaterDraws();
     testTerrainNodeCoverage();
     testTerrainNodeSeamHoles();
     testTerrainNodeSharedEdgeGpu();
@@ -4209,8 +5811,9 @@ static int runBackend(Backend backend)
     testVertexColor();
     testVertexInterpolation();
     testItemPreviewShader();
+    testOceanWaveParity();
+    testWaterShapes();
     testEnginePipelines();
-    testOceanShading();
     testSkyAmbientGPU();
     testTerrainLighting();
     testPropLighting();

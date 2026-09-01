@@ -1,0 +1,40 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ================================================================================================
+// ¿QUE OCTAVA DIVERGE ENTRE GPUs? El bake da 0,02 m en AMD y 0,0001 en NVIDIA, plano en todos los
+// niveles. El ruido son 8 hashes ENTEROS (exactos en cualquier GPU) y 6 interpolaciones escritas a
+// mano para evitar `fma`, asi que la divergencia tiene que estar en la ENTRADA de cada octava.
+//
+// Se emite cada octava POR SEPARADO, no la suma: si solo divergen las finas, el problema es la
+// precision de la posicion; si divergen todas por igual, es el hash o la interpolacion.
+// ================================================================================================
+#include "lib/terrain_detail.glsl"
+#include "lib/cube_face.glsl"   // harukaCubeFaceToDir: el ULTIMO eslabon sin probar
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+
+void main()
+{
+    const dvec3 dir = normalize(dvec3(0.31LF, 0.62LF, 0.72LF));
+    precise dvec3 p = dir * 6371000.0LF;
+    const double f[7] = double[7](0.0000833LF, 0.0001667LF, 0.00035LF, 0.0016LF,
+                                  0.0090LF, 0.0450LF, 0.2200LF);
+    for (int i = 0; i < 7; ++i) {
+        const dvec3 x = p * f[i];
+        uOut[i]      = harukaDetailNoise(x);       // el ruido crudo de esa octava, sin amplitud
+        uOut[7 + i]  = float(x.x - floor(x.x));    // la fraccion: donde muere la precision si muere
+    }
+    // La magnitud de la posicion, para ver si `p` ya sale distinta.
+    uOut[14] = float(length(p) - 6371000.0LF);
+
+    // ⚠️ EL ULTIMO ESLABON: la direccion del BAKE no se escribe a mano, se calcula con
+    // `harukaCubeFaceToDir` en double (un `normalize` de dvec3, y `normalize` NO esta obligado a ser
+    // exacto: puede ir por `inversesqrt`, que la spec deja con varios ulp de holgura). Todo lo de
+    // arriba usa una direccion literal, asi que no lo veria.
+    {
+        precise dvec3 d2 = harukaCubeFaceToDir(0, -0.4LF, 0.25LF);
+        uOut[15] = harukaTerrainDetail(d2, 6371000.0LF, 0.596);
+        uOut[16] = float((length(d2) - 1.0LF) * 1.0e12LF);   // ¿sale unitaria? en ulps de double
+    }
+}

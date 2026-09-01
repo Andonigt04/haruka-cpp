@@ -20,6 +20,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -100,9 +101,11 @@ public:
      *
      *   · `STRIDE=n`  fija el stride de TODOS los nodos a n (1,2,4…), como antes de que fuera por
      *                 nodo. Si los pinchos se van, son del stride por nodo o de su cosido.
-     *   · `NOMORPH=1` apaga el geomorph entero (ni por distancia ni por arista). Si se van, es el
-     *                 morph. ⚠️ Sin morph REAPARECEN los escalones entre niveles (2,4 m medidos):
-     *                 es un diagnostico, no un modo de juego.
+     *   · `MORPH=1`   DEVUELVE el geomorph, que ahora va apagado por defecto (ver `morphOn`). El
+     *                 aviso que habia aqui —"sin morph reaparecen los escalones entre niveles"— era
+     *                 cierto en metros y enganoso en pantalla: ese salto subtiende 0,03 px al
+     *                 relevo, y a cambio el morph desplazaba el suelo medio metro de forma
+     *                 permanente. Medido con la vista 10 y mirado: sin morph no aparece ni un pop.
      */
     static uint32_t forcedStride() {
         static const uint32_t s_v = []() -> uint32_t {
@@ -113,12 +116,97 @@ public:
         }();
         return s_v;
     }
-    static bool noMorph() {
+    /**
+     * @brief ¿Se aplica el geomorph por distancia? **APAGADO POR DEFECTO desde el 2026-08-30.**
+     *
+     * ⚠️ EL MORPH TAPABA UN POP DE 0,03 PIXELES Y COSTABA 0,5 m DE SUELO. Existe para ocultar el
+     * salto del momento en que un nodo se funde con su padre, mezclando hacia la superficie del padre
+     * antes del relevo. Pero la rampa (`clamp(2(errPx - e)/errPx)`) llega a 1 en cuanto `e` baja de
+     * `errPx/2`, o sea que el nodo dibuja ENTERAMENTE la superficie de su padre durante casi toda su
+     * vida — no solo al fundirse.
+     *
+     * Las dos mitades de la cuenta, con cifras del propio banco:
+     *
+     *   · Lo que TAPA: `terrain_node_morph_no_pop` da 1,231 m como peor salto (nivel 11 -> 10). Ese
+     *     relevo ocurre a ~41 km (el texel del nivel 10 son ~76 m y el criterio es `errPx`), asi que
+     *     1,231 m ahi subtienden **0,03 px**. Invisible por tres ordenes de magnitud.
+     *   · Lo que CUESTA: el suelo dibujado se separa del dato propio 0,3-0,5 m de forma PERMANENTE.
+     *     Medido con la vista 10 (mapa de disparidad): con morph, manchas amarillas (0,5 m) por todo
+     *     el suelo; sin morph, **todo verde (<5 cm)**.
+     *
+     * Y se ve porque el terreno se morfea mientras los props, la colision y el agua NO: el suelo
+     * queda desplazado respecto a todo lo que se apoya en el. Andoni lo reporto como "disparidad de
+     * 0,5-2 m dentro de cada nodo", y confirmo mirando que sin morph no aparece ni un pop.
+     *
+     * El parpadeo al caminar, que es lo que de verdad se reportaba en su dia, lo resuelve la
+     * HISTERESIS del stride (`nodeStrideQuantise`), no esto.
+     *
+     * `HARUKA_TERRAIN_V5_MORPH=1` lo devuelve, para poder carear si alguna vez reaparece un pop.
+     */
+    static bool morphOn() {
         static const bool s_v = []() {
-            const char* v = std::getenv("HARUKA_TERRAIN_V5_NOMORPH");
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_MORPH");
             return v && v[0] == '1';
         }();
         return s_v;
+    }
+
+    /**
+     * @brief Radio (m) del tope de stride de cerca. `HARUKA_TERRAIN_V5_STRIDEMATCH` lo ajusta.
+     *
+     * Ajustable en caliente porque es un cambio de CALIDAD CONTRA MS y el punto justo depende del
+     * monitor y del gusto: la disparidad ver-vs-pisar subtiende 5,6 px a 76 m y 1,6 px a 300 m, y el
+     * coste crece rapido con el radio (la banda 300-600 m sola vale 15,8x en triangulos). 0 lo apaga
+     * y devuelve el comportamiento anterior, que es como se saca la linea base al medir.
+     */
+    /// Fuerza un radio concreto (>= 0) o vuelve al entorno con un valor negativo. Solo para el banco:
+    /// `strideMatchM()` cachea en un `static`, asi que sin esto un barrido mediria cuatro veces la
+    /// primera pasada.
+    void setStrideMatchOverride(double m) { m_strideMatchOverride = m; }
+
+    static double strideMatchM() {
+        static const double s_m = []() {
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_STRIDEMATCH");
+            if (!v || !*v) return Haruka::Terrain::TERRAIN_NODE_STRIDE_MATCH_M;
+            return std::max(0.0, atof(v));
+        }();
+        return s_m;
+    }
+
+    /** @brief Repartir el presupuesto de vertices por RELIEVE y no solo por distancia
+     *  (`HARUKA_TERRAIN_V5_RELIEF=1`). Ver la nota larga de `nodeStrideWant`.
+     *
+     *  ⚠️ VA DETRAS DE UN INTERRUPTOR A PROPOSITO. Cambia la densidad de TODO el terreno, y el unico
+     *  juicio que vale sobre si mejora es mirarlo. Con el interruptor se compara la misma escena con
+     *  y sin el en dos ejecuciones; cableado, habria que revertir el codigo para volver atras. */
+    static bool reliefStride() {
+        static const bool s_on = []() {
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_RELIEF");
+            return v && *v && *v != '0';
+        }();
+        return s_on;
+    }
+
+    /** @brief Elegir el stride por ERROR proyectado en vez de por densidad fija.
+     *  `HARUKA_TERRAIN_V5_ERRLOD=<fraccion de errorPx>`; 0 o sin poner = apagado.
+     *
+     *  ⚠️ ES SU PROPIO PRESUPUESTO, NO `errorPx`. Reutilizar `errorPx` tal cual salio demasiado
+     *  permisivo — medido: 2,8 -> 1,1 M triangulos pero el 21 % de los pixeles cambiaban, y el
+     *  reparto por franjas mostraba que engrosaba TAMBIEN cerca (20,4 % en la franja de los pies,
+     *  25,0 % en el horizonte), donde si se ve. Es la misma confusion que el propio codigo ya
+     *  documenta entre `errorPx` y `vertexPx`: uno decide cuando PARTIR un nodo y el otro cuanto se
+     *  puede diezmar dentro de el, y son dos decisiones distintas aunque compartan unidades.
+     *
+     *  Se aplica escalando `radPerPx`, que entra multiplicando en el presupuesto: `budget =
+     *  errorPx x dist x radPerPx x f`. Sin parametro nuevo y con el mismo significado. */
+    static double errorLod() {
+        static const double s_f = []() {
+            const char* v = std::getenv("HARUKA_TERRAIN_V5_ERRLOD");
+            if (!v || !*v) return 0.0;
+            const double f = std::atof(v);
+            return (f > 0.0) ? std::min(f, 1.0) : 0.0;
+        }();
+        return s_f;
     }
 
     static double vertexPx() {
@@ -234,6 +322,53 @@ public:
             return false;
         }
 
+        // ── EL AGUA, SOBRE LOS MISMOS NODOS ─────────────────────────────────────────────────────
+        //
+        // Mismo vertex layout, mismas instancias, mismo grid. Lo único que cambia es dónde se coloca
+        // el vértice (la cota del agua en vez de la del relieve) y que se mezcla en vez de escribir
+        // profundidad. Ver la nota de `terrain_node_water.vert`.
+        //
+        // ⚠️ `depth.write = false` y `cull = None`: lo segundo por el mismo motivo que el mar del
+        // clipmap —al bajar del nivel del agua se mira la superficie DESDE DENTRO y con `Back` no
+        // queda un solo triángulo— y lo primero porque el agua es translúcida y no debe tapar lo que
+        // hay detrás en el buffer de profundidad.
+        {
+            const std::string wvs = shaderDir + "terrain_node_water.vert";
+            const std::string wfs = shaderDir + "terrain_node_water.frag";
+            RHI::PipelineDesc wd;
+            wd.vertexPath   = wvs.c_str();
+            wd.fragmentPath = wfs.c_str();
+            wd.vertexLayout = pd.vertexLayout;
+            wd.depth.test   = true;  wd.depth.write = false;
+            wd.depth.compare = pd.depth.compare;
+            wd.cull         = RHI::CullMode::None;
+            wd.blend.enable = true;  wd.blend.mode = RHI::BlendMode::Alpha;
+            m_waterPipe = dev->createPipeline(wd);
+            HARUKA_LOGI("TerrenoV5", "pipeline de AGUA sobre nodos: %s",
+                        RHI::valid(m_waterPipe) ? "ok" : "FALLO (el agua no se dibujara)");
+
+            // ── RELLENOS: TODO LO QUE EL SHADER DECLARA SE ATA, SE USE O NO ─────────────────────
+            //
+            // ⚠️ NO ES CELO, ES UN FALLO YA COMETIDO. La primera versión ataba el campo de lagos y el
+            // parche sólo `if (valid(...))`, y en un cuerpo sin ellos el shader leía descriptores SIN
+            // ESCRIBIR — indefinidos en Vulkan, no ceros. `harukaWaterLevelAt` devolvía basura y **el
+            // agua no dibujaba ni un píxel**. Lo cazó `testNodeWaterDraws`, que es justo el test que
+            // no existía. La misma advertencia está tres veces en el pase de terreno.
+            const float dryLake[2] = { -1.0e30f, 1.0e7f };   // (sin lago, fetch ilimitado)
+            RHI::TextureDesc dd;
+            dd.width = 1; dd.height = 1; dd.format = RHI::Format::RG32F;
+            dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
+            dd.mipmaps = false; dd.initialData = dryLake;
+            m_lakeDummy = dev->createTexture(dd);
+            // `uInlandMisc.w = 0` -> `harukaInlandWaterAt` devuelve su centinela sin leer el SSBO.
+            const float inlandOff[16] = { 0.0f };
+            m_inlandDummyUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(inlandOff),
+                                                 inlandOff, RHI::BufferMemory::Static);
+            const float zero4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            m_inlandDummySSBO = dev->createBuffer(RHI::BufferUsage::Storage, sizeof(zero4),
+                                                  zero4, RHI::BufferMemory::Static);
+        }
+
         // LA REJILLA ES ÚNICA para todos los nodos: solo enteros (u,v). Lo que distingue a un nodo de
         // otro es su UBO, así que miles de nodos residentes comparten un vertex y un index buffer.
         const uint32_t N = TERRAIN_NODE_TEXELS;
@@ -303,6 +438,24 @@ public:
 
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
+        /// ⚠️ CUANTO DE PROFUNDA es la caida a ancestro, que es lo que decide el ESCALON contra el
+        /// vecino: `ancestors` solo dice cuantos nodos cayeron, y un nodo caido UN nivel lo cierran
+        /// el cosido y el geomorph sin dejar nada. A partir de dos ya no: el geomorph apunta al
+        /// PADRE, y si el vecino esta a dos o mas niveles el padre no es el vecino.
+        ///   k=1  ->  lo cierra el cosido (0 m)
+        ///   k=2  ->  0,339 m de escalon
+        ///   k=4  ->  1,372 m
+        /// Las cifras salen de `terrain_node_level_balance`. Sin esta k el log no distingue una caida
+        /// inofensiva de la que produce pinchos, y `ancestors` sale igual en los dos casos.
+        size_t   genBudget = 0;     ///< presupuesto de generacion vigente (lazo cerrado)
+        double   dtSeen = 0.0, dtBest = 0.0;   ///< lo que ve el lazo: sin esto no se puede depurar
+        uint32_t ancDepthMax = 0;   ///< la caida MAS profunda del frame (0 = ninguna)
+        size_t   ancDeep = 0;       ///< nodos caidos DOS niveles o mas: los que dejan escalon
+        /// ⚠️ CUANTO COSTARIA LA REGLA "no dibujar lo que no tiene padre residente". Los `ancDeep`
+        /// nodos se sustituirian por sus ancestros, y varios hijos comparten ancestro: lo que se
+        /// dibujaria de menos es `ancDeep - ancDeepCovers`. Es el numero que decide si esa regla es
+        /// viable o es la avalancha que ya se midio por el otro lado (2 902 nodos -> 277).
+        size_t   ancDeepCovers = 0; ///< ancestros DISTINTOS que cubririan a los `ancDeep`
         size_t live = 0;      ///< nodos que hacen falta A LA VEZ este frame: lo que debe caber
         double nodesPerSec = 0.0;  ///< ritmo REAL de streaming: `generated / dt`
         uint32_t stride = 1;      ///< el MAS GRUESO del frame (los nodos ya no comparten stride)
@@ -374,6 +527,25 @@ public:
         bool      on = false;           ///< false = luz plana (el lado A del A/B de coste)
     };
     void setShade(const Shade& sh) { m_shade = sh; }
+
+    /**
+     * @brief Lo que el pase de AGUA necesita de fuera. Mismo patrón que `Shade`.
+     *
+     * ⚠️ EL AGUA PASA A VIVIR AQUÍ Y NO EN LA REJILLA DEL CLIPMAP. El mar cercano no tenía geometría
+     * propia: reusaba `m_ringGridVB` —la rejilla CUADRADA que el clipmap dejó al borrarse— con sus
+     * `ClipParams` por anillo y anclada bajo la cámara. Eso le daba una ley de LOD propia que no se
+     * hablaba con la del terreno, esquinas dibujadas planas y un marco que mantener sólo para el
+     * agua. Aquí el agua usa EL MISMO nodo: mismas instancias, mismo grid, mismo LOD.
+     */
+    struct Water {
+        RHI::TextureHandle heightTex{};    ///< bake equirect de altura: da la PROFUNDIDAD
+        RHI::TextureHandle lakeTex{};      ///< campo de lagos horneado (R = cota · G = fetch)
+        RHI::BufferHandle  oceanParams{};  ///< trenes de olas + cota de la lámina con marea
+        RHI::BufferHandle  inlandUBO{};    ///< parche dinámico (lluvia/caudal), opcional
+        RHI::BufferHandle  inlandSSBO{};
+        bool on = false;                   ///< false = este cuerpo no tiene agua (ver `hasWater`)
+    };
+    void setWater(const Water& w) { m_water = w; }
 
     /// Las cifras del último frame dibujado (nodos, triángulos, niveles…).
     const FrameStats& stats() const { return m_stats; }
@@ -449,6 +621,76 @@ public:
         // generación de lo que falta se paga en paralelo, no bloqueando el dibujo.
         m_resolved.clear(); m_resolved.reserve(m_sel.size());
         for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
+        // ── PRESUPUESTO ELÁSTICO: se gasta cuando hay cola, no siempre ──────────────────────────
+        //
+        // ⚠️ EL NÚMERO FIJO SE PAGA AL GIRAR. 85 nodos/frame son 4,7 ms y 170 son 9,4 (medido, ver
+        // `init`), y se eligió 85 para no pagar los 9,4 SIEMPRE. La elección es correcta —en reposo
+        // no hay nada que generar y ese gasto sería puro desperdicio— pero su factura es que girar
+        // 90°, que pide 935 nodos nuevos, tarda 11 frames en resolverse en vez de 6. Durante esos
+        // frames el terreno se dibuja por ANCESTRO, y medido en partida el 98 % de esas caídas son de
+        // dos niveles o más (1 183 de 1 203), con la más honda en SIETE: más de un metro de escalón.
+        //
+        // Aquí el presupuesto sigue a la COLA. Sin cola vale lo de siempre y no cuesta nada extra
+        // porque no hay nada que generar; con cola sube hasta el techo y la ráfaga dura la mitad.
+        // El coste alto existe solo mientras dura la ráfaga, que es cuando compensa.
+        //
+        // El techo es 2× la base y no más: a 0,0555 ms/nodo, 170 son 9,4 ms de frame — ya el límite
+        // de lo que cabe en 16,6 ms junto con el resto de la escena. Subirlo más cambiaría un
+        // artefacto por un tirón, que es peor: el escalón se ve al girar y el tirón se SIENTE.
+        // ── PRESUPUESTO DE GENERACION EN LAZO CERRADO SOBRE EL TIEMPO DE FRAME ──────────────────
+        //
+        // ⚠️ EL PROBLEMA QUE RESUELVE, Y EL QUE NO DEBE CREAR.
+        //
+        // Un nodo que no llega a tiempo se dibuja con el mapa de un ANCESTRO: la superficie de un
+        // nivel mas basto sobre su propia huella, mientras la colision sigue siendo fina. Medido en
+        // partida: al girar se piden 935 nodos nuevos de golpe, el 98 % de las caidas resultantes son
+        // de dos niveles o mas y la mas honda de SIETE — o sea 0,339 m de escalon a dos niveles y
+        // 1,372 m a cuatro. Eso es la disparidad render/colision que se ve al moverse, y NO aparece
+        // con la camara quieta (por eso siete sondas estaticas no la vieron).
+        //
+        // El primer intento fue subir el presupuesto segun la COLA. Doblaba el ritmo (5081 -> 10163
+        // nodos/s) y arreglaba la disparidad, pero costaba hasta 9,4 ms de frame y con eso el `dt` se
+        // disparaba: el personaje se enganchaba en la geometria, las nubes salian cortadas y la
+        // atmosfera desaparecia. Un arreglo que rompe tres cosas no es un arreglo.
+        //
+        // Aqui el presupuesto lo gobierna el TIEMPO DE FRAME MEDIDO, no la cola: crece mientras
+        // sobre margen y se retira en cuanto no lo hay. Por construccion no puede provocar el tiron,
+        // porque el propio tiron lo baja al frame siguiente. Gasta la capacidad libre y solo esa.
+        //
+        // `HARUKA_TERRAIN_V5_ELASTIC=0` lo fija en el presupuesto de siempre.
+        static const bool s_elastic = [] {
+            const char* e = std::getenv("HARUKA_TERRAIN_V5_ELASTIC");
+            return !(e && e[0] == '0');
+        }();
+        if (s_elastic) {
+            // ⚠️ TOPE ACOTADO EN TIEMPO, NO UN LAZO. Se probo un lazo cerrado sobre el tiempo de
+            // frame y NO FUNCIONA en esta maquina: el frame va de 17 a 32 ms sin tocar nada, asi que
+            // la varianza se come la senal y "hay margen" no se cumple nunca. El presupuesto se
+            // quedaba en la base y la disparidad seguia (medido: dt 28,0 ms con el mejor en 20,0).
+            //
+            // Asi que el extra se declara en MILISEGUNDOS y punto: a 0,0555 ms por nodo (medido con
+            // fence, ver `init`), 2 ms son 36 nodos. Sube el ritmo un 42 % durante la rafaga por un
+            // coste conocido y pequeno — lejos de los 4,7 ms extra del intento anterior, que es lo
+            // que disparaba el `dt` y enganchaba al personaje.
+            // ⚠️ EL TECHO ES 2x LA BASE, y volvio a serlo por una razon medida: con 170 el terreno
+            // se veia CORRECTO (Andoni lo confirmo mirando) y con 121 volvia la caida a ancestro. La
+            // fidelidad SI depende de esta tasa, aunque suene a que no deberia.
+            //
+            // Se bajo a 121 porque 170 rompia el movimiento del personaje. Resulto no ser culpa del
+            // coste sino de la fisica: corria con UN solo paso de colision y el `dt` crudo, o sea ya
+            // fuera del rango que Jolt admite antes de tocar nada (el frame va de 17 a 32 ms).
+            // Cualquier cosa que encareciera el frame la rompia. Arreglado con sub-pasos en
+            // `physics_engine.cpp`; con eso, el presupuesto puede ser el que la fidelidad pide.
+            const size_t ceiling = m_genPerFrameBase * 2;
+            // Solo mientras haya cola: sin nada pendiente el numero da igual y no se gasta nada.
+            m_genAdaptive = m_pool.pendingCount() > 0 ? ceiling : m_genPerFrameBase;
+            m_pool.setGenPerFrame(m_genAdaptive);
+            fs.genBudget = m_genAdaptive;
+            fs.dtSeen = dtSeconds; fs.dtBest = m_dtBest;
+        } else {
+            m_pool.setGenPerFrame(m_genPerFrameBase);
+            fs.genBudget = m_genPerFrameBase;
+        }
         // ⚠️ ORDENAR ANTES DE GENERAR. El presupuesto es el mismo; lo que cambia es CUÁLES entran.
         m_pool.prioritisePending(camPos, planetCenter, planetRadiusM);
         fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM);
@@ -531,27 +773,57 @@ public:
         // usando de verdad — y coser contra una zancada que el otro lado no tiene es una grieta.
         m_skOf.clear(); m_skOf.reserve(m_resolved.size());
         m_skNow.clear(); m_skNow.reserve(m_resolved.size() * 2);
+        // Media del relieve del conjunto DIBUJADO: es la referencia que hace el reparto neutro (ver
+        // `nodeStrideWant`). Una pasada barata sobre datos que el pool ya tiene.
+        double reliefRef = 0.0;
+        if (reliefStride()) {
+            // ⚠️ MEDIA GEOMETRICA, NO ARITMETICA. El stride va en potencias de dos: bajar un escalon
+            // CUADRUPLICA los triangulos de ese nodo. Con la media aritmetica el reparto no salia
+            // neutro (medido: 2,4 -> 3,3 M) porque unos pocos nodos muy escarpados tiraban de la
+            // media y afinaban a casi todos. En el espacio logaritmico —que es donde vive el stride—
+            // la media deja tantos nodos por encima como por debajo, y el total se conserva.
+            double sumLog = 0.0; size_t cnt = 0;
+            for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
+                if (m_resolved[ri].slot < 0 || ri >= m_sel.size()) continue;
+                const NodeRange rg = m_pool.rangeOf(m_sel[ri]);
+                if (!rg.valid()) continue;
+                sumLog += std::log(std::max((double)(rg.maxM - rg.minM), 1e-3)); ++cnt;
+            }
+            reliefRef = cnt ? std::exp(sumLog / (double)cnt) : 0.0;
+        }
+        m_kUpNow.clear(); m_kUpNow.reserve(m_resolved.size() * 2);
         for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
             const auto& r = m_resolved[ri];
             if (r.slot < 0) { m_skOf.push_back(0); continue; }
             const NodeId leaf = m_sel[ri];          // la huella que se dibuja, no el slot que la surte
-            double elevM = 0.0;
-            { const NodeRange rg = m_pool.rangeOf(leaf); if (rg.valid()) elevM = rg.maxM; }
+            double elevM = 0.0, reliefM = -1.0;
+            { const NodeRange rg = m_pool.rangeOf(leaf);
+              if (rg.valid()) { elevM = rg.maxM; if (reliefStride()) reliefM = (double)(rg.maxM - rg.minM); } }
             if (elevM == 0.0) ++fs.rangeMissing;
             const uint64_t key = nodeKey(leaf);
             const auto it = m_skPrev.find(key);
             const uint32_t prev = (it == m_skPrev.end()) ? kNoPrevStride : it->second;
             const double want = nodeStrideWant(leaf, planetRadiusM, camPos, planetCenter,
                                                errorPx(), vertexPx(),
-                                               Planet::TERRAIN_RING_FINE_CELL, elevM);
+                                               Planet::TERRAIN_RING_FINE_CELL, elevM,
+                                               m_strideMatchOverride >= 0.0
+                                                   ? m_strideMatchOverride : strideMatchM(),
+                                               reliefM, reliefRef,
+                                               m_lastRadPerPx * errorLod());
             uint32_t sk = nodeStrideQuantise(want, m_strideCount - 1, prev);
             if (const uint32_t f = forcedStride()) {          // biseccion: stride global, como antes
                 sk = 0; while ((1u << sk) < f && sk + 1 < m_strideCount) ++sk;
             }
             m_skOf.push_back(sk);
             m_skNow[key] = sk;
+            // ⚠️ CUANTOS NIVELES MAS BASTO SE DIBUJA ESTE NODO DE LO QUE DICE SU NIVEL. Un nodo caido
+            // a ancestro tiene la geometria de su huella pero los DATOS del ancestro, asi que la
+            // superficie que entrega es k niveles mas gruesa. El cosido de sus vecinos necesita ese
+            // numero: sin el cose contra un nivel que este nodo no esta dibujando (ver el uso).
+            m_kUpNow[key] = (uint32_t)((int)leaf.level - (int)r.node.level);
         }
         m_skPrev.swap(m_skNow);   // lo de este frame pasa a ser la historia del siguiente
+        m_kUpPrev.swap(m_kUpNow);
         fs.stride    = m_skOf.empty() ? 1u : (1u << *std::max_element(m_skOf.begin(), m_skOf.end()));
         fs.strideMin = m_skOf.empty() ? 1u : (1u << *std::min_element(m_skOf.begin(), m_skOf.end()));
         m_lastRadPerPx = radPerPx;
@@ -584,6 +856,7 @@ public:
         // instanciado solo puede cubrir nodos que compartan stride. Se ordenan por grupo y se emite
         // un draw por grupo — como mucho `m_strideCount` (7), no uno por nodo.
         m_inst.clear(); m_inst.reserve(m_resolved.size());
+        m_deepKeys.clear();
         m_group.assign(m_strideCount + 1, 0);
         for (uint32_t pass = 0; pass < m_strideCount; ++pass) {
         for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
@@ -662,6 +935,18 @@ public:
             // ancestro. El shader lo deduce de `uNode` y de esta k, asi que no hace falta mandar el
             // desplazamiento. Ver `terrain_node.vert`.
             g.slot[1] = (int32_t)((int)leaf.level - (int)r.node.level);
+            // Instrumento, no politica: se cuenta la profundidad para poder decir CUANTO escalon hay.
+            if (g.slot[1] > 0) {
+                fs.ancDepthMax = std::max(fs.ancDepthMax, (uint32_t)g.slot[1]);
+                if (g.slot[1] >= 2) {
+                    ++fs.ancDeep;
+                    // Clave del ANCESTRO que se esta usando (no de la hoja): varias hojas caen en el
+                    // mismo, y eso es justo lo que hay que contar una sola vez.
+                    m_deepKeys.push_back(((uint64_t)r.node.face << 58)
+                                       | ((uint64_t)r.node.level << 52)
+                                       | ((uint64_t)r.node.i << 26) | (uint64_t)r.node.j);
+                }
+            }
             // Ver la nota larga de `terrain_node.vert`: probado, medido y revertido.
             fineMask = 0;
             g.slot[3] = fineMask;      // aristas con vecino MAS FINO: ahi no morfeo (ver arriba)
@@ -701,6 +986,10 @@ public:
         }
         m_group[pass + 1] = m_inst.size();       // fin del grupo `pass`, inicio del siguiente
         }
+        // Ancestros distintos entre los nodos caidos >=2 niveles: `ancDeep - ancDeepCovers` es lo
+        // que se dejaria de dibujar si se aplicara la regla "sin padre residente no se dibuja".
+        std::sort(m_deepKeys.begin(), m_deepKeys.end());
+        fs.ancDeepCovers = (size_t)(std::unique(m_deepKeys.begin(), m_deepKeys.end()) - m_deepKeys.begin());
         if (m_inst.empty()) { m_stats = fs; return fs; }
 
         // ⚠️ UN SSBO POR GRUPO, NO UNO CON DESPLAZAMIENTO. `drawIndexed` no tiene `baseInstance`, así
@@ -741,7 +1030,7 @@ public:
         du.lod[0] = (float)m_lastRadPerPx;
         du.lod[1] = (float)errorPx();
         du.lod[2] = (float)(planetRadiusM * 1.5707963267948966);   // gemelo de `nodeSpanM` en nivel 0
-        du.lod[3] = noMorph() ? 0.0f : 1.0f;
+        du.lod[3] = morphOn() ? 1.0f : 0.0f;
         du.grid[0] = (int32_t)TERRAIN_NODE_TEXELS;
         du.grid[1] = (int32_t)TERRAIN_NODE_CELLS;
         du.misc[0] = (float)planetRadiusM;
@@ -793,6 +1082,38 @@ public:
             fs.tris += n * (size_t)(m_indexCount[k] / 3);
             ++fs.drawCalls;
         }
+
+        // ── EL PASE DE AGUA: LOS MISMOS NODOS, OTRA COTA ────────────────────────────────────────
+        //
+        // Va DESPUES del terreno y sin escribir profundidad: el agua es translucida y tiene que
+        // mezclarse con el lecho que el pase anterior acaba de dejar. Reusa las MISMAS instancias y
+        // los MISMOS index buffers por grupo de stride, asi que no cuesta ni un buffer nuevo.
+        //
+        // ⚠️ TODOS los samplers y UBOs que el shader DECLARA se atan, se usen o no: en Vulkan un
+        // descriptor sin escribir es INDEFINIDO y muestrearlo puede perder el dispositivo. Es la
+        // misma nota que el pase de terreno tiene tres lineas mas arriba, y costo dos tests.
+        if (m_water.on && RHI::valid(m_waterPipe)) {
+            ctx->bindPipeline(m_waterPipe);
+            ctx->bindUniformBuffer(0, m_ubo);
+            ctx->bindTexture(16, RHI::valid(m_water.heightTex) ? m_water.heightTex
+                                                               : m_gpu.heightTexOrDummy());
+            ctx->bindTexture(18, RHI::valid(m_water.lakeTex) ? m_water.lakeTex : m_lakeDummy);
+            if (RHI::valid(m_water.oceanParams)) ctx->bindUniformBuffer(29, m_water.oceanParams);
+            ctx->bindUniformBuffer(24, RHI::valid(m_water.inlandUBO) ? m_water.inlandUBO
+                                                                     : m_inlandDummyUBO);
+            ctx->bindStorageBuffer(25, RHI::valid(m_water.inlandSSBO) ? m_water.inlandSSBO
+                                                                      : m_inlandDummySSBO);
+            ctx->bindVertexBuffer(m_vb);
+            for (uint32_t k = 0; k < m_strideCount; ++k) {
+                const size_t n = m_group[k + 1] - m_group[k];
+                if (n == 0 || !RHI::valid(m_instSSBO[k])) continue;
+                ctx->bindStorageBuffer(2, m_instSSBO[k]);
+                ctx->bindIndexBuffer(m_ibs[k]);
+                ctx->drawIndexed(m_indexCount[k], 0, (uint32_t)n);
+                ++fs.drawCalls;
+            }
+        }
+
         fs.resident = m_pool.residentCount();
         fs.live = m_pool.stats().live;
         m_stats = fs;
@@ -802,6 +1123,8 @@ public:
     /// Gemelo de `NodeInst` de `terrain_node.vert`. std430: 4 ivec4/vec4 = 64 B, alineado a 16.
     /// `node` = cara/nivel/i/j · `edge` = zancada del cosido por arista (0 = no coser) ·
     /// `slot` = hueco / (libre) / índice de stride / (libre) · `misc` = (libre).
+    double m_strideMatchOverride = -1.0;   ///< Ver `setStrideMatchOverride`.
+
     struct NodeInstGPU { int32_t node[4]; int32_t edge[4]; int32_t slot[4]; float misc[4]; };
     static_assert(sizeof(NodeInstGPU) == 64, "NodeInst std430 descuadrado");
 
@@ -836,6 +1159,10 @@ private:
 
 
     Shade                    m_shade;
+    Water                    m_water;
+    RHI::PipelineHandle      m_waterPipe{};
+    RHI::TextureHandle       m_lakeDummy{};
+    RHI::BufferHandle        m_inlandDummyUBO{}, m_inlandDummySSBO{};
     RHI::TextureHandle       m_baseField{};
     std::vector<NodeInstGPU> m_inst;      ///< ORDENADO por grupo de stride; `m_group` los delimita
     std::vector<size_t>      m_group;     ///< `m_group[k]` = primera instancia del stride `k`
@@ -843,6 +1170,8 @@ private:
     /// Stride por nodo del frame ANTERIOR: es lo que da histeresis y quita el parpadeo. Tras el
     /// `swap` de `prepare` contiene el de ESTE frame, que es lo que `draw` consulta para el vecino.
     std::unordered_map<uint64_t, uint32_t> m_skPrev, m_skNow;
+    /// Profundidad de caida a ancestro por hoja: la necesita el COSIDO de los vecinos (ver su uso).
+    std::unordered_map<uint64_t, uint32_t> m_kUpPrev, m_kUpNow;
 
     // Estado que cruza de `prepare` a `draw` (ver la nota de arriba sobre por qué son dos).
     FrameStats                          m_stats;
@@ -868,8 +1197,14 @@ private:
     // **2 035 de 3 053 nodos dibujados por ancestro** — dos de cada tres más gruesos de lo pedido.
     TerrainNodePool     m_pool{ 1024, 43 };
     std::vector<NodeId> m_sel, m_drawn;
-    size_t m_genPerFrameBase = 85;   ///< presupuesto nominal por frame a 60 fps (`capacity/24`)
+    size_t m_genPerFrameBase = 85;
+    /// Presupuesto vigente del lazo cerrado (ver `draw`). Arranca en la base y sube si sobra tiempo.
+    size_t m_genAdaptive = 85;
+    double m_dtBest = 0.0;      ///< mejor tiempo de frame visto: la referencia del lazo   ///< presupuesto nominal por frame a 60 fps (`capacity/24`)
     std::vector<TerrainNodePool::Resolved> m_resolved;
+    /// Claves de los ancestros usados por nodos caidos >=2 niveles. Se limpia cada frame; solo sirve
+    /// para contar cuantos DISTINTOS hay (ver FrameStats::ancDeepCovers).
+    std::vector<uint64_t> m_deepKeys;
 
 };
 

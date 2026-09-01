@@ -1,0 +1,37 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ================================================================================================
+// ¿LEE LA GPU EL MISMO CAMPO DE AGUA QUE LA CPU? Sonda del camino de lagos horneados.
+//
+// ⚠️ ESTE CAMINO SE ANADIO ENTERO SIN UNA SOLA PRUEBA DE GPU. `bakeWaterMap` rellena las cuencas del
+// planeta, sube el resultado como RG32F (R = cota de la lamina, G = fetch) y el shader lo lee con
+// `harukaBakedLakeAt` / `harukaBakedFetchAt`. La CPU tiene `lakeLevelAt` / `lakeFetchAt`, que se
+// declaran gemelas — y hasta ahora nadie las habia comparado.
+//
+// Si divergen, el agua que se DIBUJA no esta donde la fisica dice que esta: la misma discrepancia
+// "lo que se ve contra lo que se pisa" que este motor ya ha pagado tres veces, esta vez en el agua.
+//
+// ⚠️ Las direcciones vienen por SSBO, no escritas a mano: con literales el compilador las pliega y
+// se mediria su plegador de constantes en vez de la textura (ver `fp64_probe.comp`).
+// ================================================================================================
+#include "lib/terrain_detail.glsl"    // harukaEquirectUV
+#include "lib/ocean_params.glsl"      // harukaWaveAt (lo necesita el factor de fetch)
+#include "lib/ocean_wave.glsl"        // harukaFetchFactor
+#include "lib/inland_water.glsl"      // harukaBakedLakeAt / harukaBakedFetchAt (binding 18)
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };   // 3 floats por direccion
+
+void main()
+{
+    const int N = int(uIn[0]);
+    for (int k = 0; k < N; ++k) {
+        const vec3 dir = normalize(vec3(uIn[1 + k * 3 + 0], uIn[1 + k * 3 + 1], uIn[1 + k * 3 + 2]));
+        uOut[k * 3 + 0] = harukaBakedLakeAt(dir);
+        uOut[k * 3 + 1] = harukaBakedFetchAt(dir);
+        // El factor de fetch es lo que de verdad decide la ola que se ve en ese lago: si la CPU y la
+        // GPU no lo calculan igual, la lamina coincide y la OLA no.
+        uOut[k * 3 + 2] = harukaFetchFactor(harukaBakedFetchAt(dir));
+    }
+}

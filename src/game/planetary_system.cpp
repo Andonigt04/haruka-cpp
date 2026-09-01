@@ -31,6 +31,7 @@
 #include "core/terrain/cube_sphere.h"
 #include "core/planet/terrain_grid.h"
 #include "core/planet/terrain_lod.h"   // terrainTriM: el piso del campo cercano, no un literal
+#include "core/planet/water_fill.h"   // WATER_FILL_DRY: el centinela del mapa de lagos
 #include "core/planet/geology.h"       // GeologyConfig (addSimplePlanet/rebuildSimplePlanet)
 #include "core/planet/ocean_wave.h"   // gemelo CPU del oleaje: la física ve la MISMA ola
 #include "renderer/primitive_shapes.h"
@@ -749,6 +750,24 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
     if (s.elevKm < seaKm) {
         s.waterType    = Haruka::WaterType::Ocean;
         s.waterLevelKm = seaKm;
+    } else if (const auto* tpw = activeTerrestrial()) {
+        // ── Y LOS LAGOS, QUE AHORA SÍ SE DECIDEN AQUÍ ───────────────────────────────────────────
+        //
+        // ⚠️ EL COMENTARIO DE ARRIBA DECÍA QUE NO, Y TENÍA RAZÓN HASTA HOY: *"un lago NO se decide
+        // aquí — lo publica la simulación de aguas someras... meter lagos aquí sería una tercera
+        // respuesta a ¿hay agua?"*. Eso valía mientras el lago fuera un PARCHE de 420 m anclado al
+        // jugador: meterlo aquí habría hecho que `sampleSurface` dependiera del observador.
+        //
+        // Ya no lo es. `bakeWaterMap` rellena las cuencas del planeta ENTERO una vez, así que el
+        // lago es función pura de la posición igual que el océano — y por eso puede vivir en el
+        // mismo sitio que él, que es lo que evita la tercera respuesta. La simulación de aguas
+        // someras sigue existiendo, pero para lo DINÁMICO (lluvia, caudal), no para decir dónde hay
+        // una lámina quieta.
+        const float lakeM = tpw->lakeLevelAt(dir);
+        if (lakeM > Haruka::Planet::WATER_FILL_DRY && s.elevKm * 1000.0f < lakeM) {
+            s.waterType    = Haruka::WaterType::Lake;
+            s.waterLevelKm = lakeM / 1000.0f;
+        }
     }
 
     // EL CLIMA, del campo horneado del planeta — el MISMO con el que se pintaron los biomas y se
@@ -805,8 +824,13 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     const double depth2 = level2 - double(s.elevKm) * 1000.0;
     if (depth2 <= 0.0) return level2;
     const glm::vec3 wp2 = glm::vec3(up * (pr + level2));
+    // ⚠️ EL FETCH VA AQUÍ TAMBIÉN, y no sólo en el shader: sin él la física seguiría flotando sobre
+    // la ola oceánica en un lago de montaña mientras el render dibuja el rizo que le toca — la misma
+    // discrepancia "lo que se pisa contra lo que se ve" que este fichero entero existe para impedir.
+    const auto* tpf = activeTerrestrial();
+    const float fetchM = tpf ? tpf->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
     return level2 + (double)Haruka::Planet::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
-                                                            1.0f, m_oceanState);
+                                                            1.0f, m_oceanState, fetchM);
 }
 
 double PlanetarySystem::sampleWaterDepth(const glm::dvec3& worldPos) const {
@@ -831,8 +855,10 @@ glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) cons
 
     const float     t  = Haruka::Planet::oceanClockSeconds();
     const glm::vec3 wp = glm::vec3(up * (pr + levelM));
+    const auto* tpv = activeTerrestrial();
+    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
     return glm::dvec3(Haruka::Planet::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
-                                                    1.0f, m_oceanState));
+                                                    1.0f, m_oceanState, fetchV));
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {

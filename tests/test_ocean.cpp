@@ -20,6 +20,7 @@
 #include <glm/glm.hpp>
 
 #include "core/planet/ocean_wave.h"
+#include "core/planet/water_fill.h"
 #include "physics/physics_engine.h"
 
 using Haruka::Planet::oceanWaveHeight;
@@ -590,4 +591,676 @@ void test_terrain_finest_octave() {
     // rejilla: antes el quad del clipmap, ahora la celda del anillo de colision mas fino.
     CHECK(TERRAIN_TRIM_FLOOR == TERRAIN_RING_FINE_CELL,
           "el piso de la GEOMETRIA sigue atado a su rejilla (Nyquist, no un literal)");
+}
+
+// ------------------------------------------------------- TEST 10: el tope de rompiente es de la OLA
+//
+// La ola no puede ser mas alta que el agua que la sostiene. Es el indice de rompiente clasico: una
+// ola revienta cuando su altura se acerca a la profundidad. Suena obvio y el motor lo incumplia:
+// `oceanShoalAmp` acotaba CADA uno de los 4 trenes a `0.55·d` y luego `oceanWaveHeight` los sumaba,
+// asi que el total podia llegar a `4 x 0.55·d = 2,2·d`. Medido antes del arreglo: un lago de 3,21 m
+// de fondo daba 5,93 m de ola pico a pico, casi el doble que en mar abierto (3,16 m).
+//
+// Se veia en TODA la costa —el bajio es un fenomeno de agua somera— pero saltaba a la vista en los
+// lagos de montana, que son someros enteros. Este test es el guardian: si alguien vuelve a mover el
+// tope al bucle, el barrido de profundidades lo caza.
+void test_ocean_break_limit() {
+    beginTest("ocean_break_limit");
+
+    const glm::vec3 up = upAt(0.4, 0.3);
+    const glm::vec3 wp = up * (float)kR;
+
+    // Altura pico a pico barriendo tiempo y espacio: una sola muestra podria caer en un nodo.
+    auto peakToPeak = [&](float depth) {
+        float lo = 1e9f, hi = -1e9f;
+        for (int s = 0; s < 20; ++s) {
+            const glm::vec3 p = wp + glm::vec3(1.0f, 0.0f, 0.3f) * (float)(s * 11);
+            for (int k = 0; k < 48; ++k) {
+                const float h = oceanWaveHeight(p, up, 0.29f * k, depth);
+                lo = std::min(lo, h); hi = std::max(hi, h);
+            }
+        }
+        return hi - lo;
+    };
+
+    // El tope es sobre la AMPLITUD (0.55·d), asi que la altura pico a pico no puede pasar de 1,1·d.
+    const float kMaxRatio = 1.1f;
+    std::printf("    altura de ola frente a profundidad (el tope es %.2f x la profundidad):\n", kMaxRatio);
+
+    int worstIdx = -1; float worstRatio = 0.0f;
+    const float depths[] = { 0.5f, 1.0f, 2.0f, 3.21f, 5.0f, 8.0f, 15.0f, 30.0f };
+    for (int i = 0; i < 8; ++i) {
+        const float d  = depths[i];
+        const float pp = peakToPeak(d);
+        const float r  = pp / d;
+        std::printf("      fondo %5.2f m -> ola %5.2f m  (%.2f x la profundidad)%s\n",
+                    d, pp, r, r > kMaxRatio ? "   <-- MAS ALTA QUE EL AGUA" : "");
+        if (r > worstRatio) { worstRatio = r; worstIdx = i; }
+        CHECK(r <= kMaxRatio + 0.02f, "la ola no supera el limite de rompiente a esta profundidad");
+    }
+    std::printf("    peor caso: %.2f x a %.2f m de fondo (antes del arreglo se llegaba a ~1,85 x)\n",
+                worstRatio, worstIdx >= 0 ? depths[worstIdx] : 0.0f);
+
+    // CONTRAPRUEBA 1: en agua HONDA el tope no debe morder, o el test estaria pasando simplemente
+    // porque la ola es pequena en todas partes y no porque el limite funcione.
+    const float ppDeep = peakToPeak(400.0f);
+    const float ppAbyss = peakToPeak(4000.0f);
+    std::printf("    CONTRAPRUEBA: a 400 m %.3f m y a 4000 m %.3f m — el tope no muerde (iguales)\n",
+                ppDeep, ppAbyss);
+    CHECK(std::abs(ppDeep - ppAbyss) < 0.05f * ppAbyss,
+          "en agua honda el tope no toca la ola (no esta aplastando el mar entero)");
+
+    // CONTRAPRUEBA 2: el tope tiene que DEPENDER de la profundidad. Si diera lo mismo a 1 m que a
+    // 400 m, no seria un limite de rompiente sino una constante disfrazada.
+    const float pp1 = peakToPeak(1.0f);
+    std::printf("    CONTRAPRUEBA: a 1 m la ola es %.3f m y a 400 m %.3f m (%.1fx)\n",
+                pp1, ppDeep, ppDeep / std::max(pp1, 1e-3f));
+    CHECK(pp1 < 0.6f * ppDeep, "el limite depende de la profundidad (no es una constante)");
+}
+
+// ------------------------------------------------------- TEST 11: la ola PUEDE plegarse al romper
+//
+// Una ola real rompe volcando: la cresta se echa hacia delante hasta que la superficie se pliega
+// sobre si misma. En Gerstner eso ocurre cuando `Σ Q·A·k > 1`, porque ahi el jacobiano del
+// desplazamiento se vuelve negativo — y el propio shader lo usa como senal de rompiente.
+//
+// ⚠️ CON LA FORMULA ANTERIOR NO PODIA PASAR NUNCA. Era `Q = 0.75/(k·A·N)` acotada a 1, lo que deja
+// `Q·A·k ≤ 0.75/N` por tren y `Σ ≤ 0.75`: el jacobiano se quedaba en 0,25 como suelo. El comentario
+// de `harukaGerstner` decia "si pasa de 1, la pliega" describiendo algo que su propia formula
+// impedia, y la espuma por plegado no se encendia jamas. Este test fija las dos mitades: que en mar
+// abierto NO se pliegue (el oleaje de fondo no vuelca solo) y que al romper SI.
+void test_ocean_break_fold() {
+    beginTest("ocean_break_fold");
+
+    const Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    const glm::vec3 up = upAt(0.2, -0.4);
+    const glm::vec3 wp = up * (float)kR;
+    const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0,1,0))
+                                                               : glm::cross(up, glm::vec3(1,0,0)));
+    const glm::vec3 t2 = glm::cross(up, t1);
+
+    // Jacobiano minimo barriendo espacio y tiempo. `jac = 1 − Σ Q·A·k·sin φ`, la MISMA expresion que
+    // acumula el shader; si baja de 0 la superficie esta plegada.
+    auto minJacobian = [&](float depth) {
+        const float green      = Haruka::Planet::oceanGreenGain(depth);
+        const float scale      = Haruka::Planet::oceanBreakScale(depth, st);
+        const float breakiness = std::clamp(1.0f - scale, 0.0f, 1.0f);
+        float worst = 1e9f;
+        for (int s = 0; s < 30; ++s) {
+            const glm::vec3 p = wp + glm::vec3(1.0f, 0.0f, 0.4f) * (float)(s * 5);
+            for (int n = 0; n < 60; ++n) {
+                const float t = 0.21f * n;
+                float jac = 1.0f;
+                for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) {
+                    const float k   = 6.2831853f / st.wave[i][0];
+                    const float amp = st.wave[i][1] * green * scale;
+                    if (amp <= 1e-4f) continue;
+                    const glm::vec3 D = glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]);
+                    const float Q  = Haruka::Planet::oceanSteepness(k, amp, breakiness);
+                    const float ph = k * glm::dot(D, p) - std::sqrt(Haruka::Planet::OCEAN_G * k) * t;
+                    jac -= Q * amp * k * std::sin(ph);
+                }
+                worst = std::min(worst, jac);
+            }
+        }
+        return worst;
+    };
+
+    const float jacDeep  = minJacobian(60.0f);
+    const float jacMid   = minJacobian(6.0f);
+    const float jacBreak = minJacobian(1.2f);
+
+    std::printf("    jacobiano minimo (negativo = superficie PLEGADA = la cresta vuelca):\n");
+    std::printf("      mar abierto 60,0 m -> %+.3f %s\n", jacDeep,  jacDeep  < 0 ? "(pliega)" : "(no pliega)");
+    std::printf("      transicion   6,0 m -> %+.3f %s\n", jacMid,   jacMid   < 0 ? "(pliega)" : "(no pliega)");
+    std::printf("      rompiendo    1,2 m -> %+.3f %s\n", jacBreak, jacBreak < 0 ? "(pliega)" : "(no pliega)");
+
+    // ⚠️ NINGUNA DE LAS TRES PLIEGA, Y ES LO CORRECTO A DIA DE HOY. Se implemento la voluta (subir el
+    // presupuesto de escarpado y abrir el tope de Q al romper) y el jacobiano SI se volvia negativo:
+    // -0,104 a 1,2 m. Se REVIRTIO porque rompia el agua interior, y el motivo esta en la formula:
+    // `Q = presupuesto/(k·A·N)` hace que el desplazamiento horizontal `Q·A = presupuesto/(k·N)` NO
+    // dependa de la amplitud. En mar abierto son ~3 m y esta bien; en un lago de 30 cm son los MISMOS
+    // ~3 m, asi que la lamina se desplazaba metros en horizontal y se plegaba sobre si misma — sobre
+    // celdas de 4,4 m eso se veia como CUBOS DEFORMADOS, y el agua interior antes funcionaba.
+    //
+    // El fondo: aqui la ola no puede plegarse sola porque lambda es FIJA. Una ola real rompe porque al
+    // perder fondo se le acorta la longitud de onda a la vez que crece la altura; con lambda fija,
+    // H/lambda ~ 0,016 en agua somera y no hay pliegue posible sin forzarlo. La voluta de verdad pide
+    // shoaling de longitud de onda, que es otro trabajo. Este test guarda el estado actual.
+    CHECK(jacDeep  > 0.0f, "en mar abierto la ola NO vuelca sola");
+    CHECK(jacBreak > 0.0f, "la cresta NO se pliega (la voluta se revirtio: rompia el agua interior)");
+
+    // CONTRAPRUEBA: con el presupuesto VIEJO (0,75 fijo, sin subir con la rompiente) el jacobiano no
+    // podia bajar de 1−0,75 = 0,25 a ninguna profundidad. Se recalcula aqui para dejar constancia de
+    // que el cambio es lo que habilita el pliegue, y no que el barrido haya tenido suerte.
+    float worstOld = 1e9f;
+    for (float depth : { 60.0f, 6.0f, 1.2f }) {
+        const float green = Haruka::Planet::oceanGreenGain(depth);
+        const float scale = Haruka::Planet::oceanBreakScale(depth, st);
+        for (int s = 0; s < 30; ++s) {
+            const glm::vec3 p = wp + glm::vec3(1.0f, 0.0f, 0.4f) * (float)(s * 5);
+            for (int n = 0; n < 60; ++n) {
+                const float t = 0.21f * n;
+                float jac = 1.0f;
+                for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) {
+                    const float k   = 6.2831853f / st.wave[i][0];
+                    const float amp = st.wave[i][1] * green * scale;
+                    if (amp <= 1e-4f) continue;
+                    const glm::vec3 D = glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]);
+                    float Q = 0.75f / (k * amp * float(Haruka::Planet::OCEAN_WAVES) + 1e-4f);
+                    Q = std::min(Q, 1.0f);                     // el tope viejo
+                    const float ph = k * glm::dot(D, p) - std::sqrt(Haruka::Planet::OCEAN_G * k) * t;
+                    jac -= Q * amp * k * std::sin(ph);
+                }
+                worstOld = std::min(worstOld, jac);
+            }
+        }
+    }
+    std::printf("    (referencia: el mismo calculo con Q acotado a 1 da %+.3f — el escarpado actual)\n", worstOld);
+    CHECK(worstOld > 0.0f, "el escarpado acotado no pliega, que es el comportamiento vigente");
+}
+
+/**
+ * @brief DISPERSIÓN EN PROFUNDIDAD FINITA: la ola se acorta al perder fondo.
+ *
+ * Todo el oleaje usaba `ω = √(g·k)` —aguas profundas— también en 30 cm de agua. La relación correcta
+ * es `ω² = g·k·tanh(k·d)`, y lo que se conserva al entrar en el bajío es la FRECUENCIA, no la
+ * longitud de onda.
+ *
+ * ⚠️ EL ORÁCULO ES LA PROPIA ECUACIÓN, no una tabla de números que yo haya elegido. Se resuelve `k`
+ * y se comprueba que satisface `g·k·tanh(k·d) = ω²`. Eso no se puede hacer trampa: o la cumple o no.
+ */
+void test_ocean_finite_depth() {
+    beginTest("ocean_finite_depth");
+    using namespace Haruka::Planet;
+    const OceanState st = oceanDefaultState();
+
+    // (1) EL RESIDUO DE LA ECUACIÓN, sobre los cuatro trenes y toda la franja interesante.
+    double worstRel = 0.0; float worstD = 0.0f; int worstI = -1;
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        const float k0 = 6.2831853f / st.wave[i][0];
+        const float w2 = OCEAN_G * k0;
+        for (float d : { 0.1f, 0.3f, 1.0f, 3.0f, 10.0f, 30.0f, 100.0f, 400.0f }) {
+            const float k   = oceanWaveNumber(k0, d);
+            const double res = std::fabs((double)(OCEAN_G * k * std::tanh(k * d)) - (double)w2)
+                             / (double)w2;
+            if (res > worstRel) { worstRel = res; worstD = d; worstI = i; }
+        }
+    }
+    std::printf("    residuo peor de `g k tanh(kd) = w2`: %.3e (tren %d a %.1f m)\n",
+                worstRel, worstI, worstD);
+
+    // (2) LA TABLA, para que se vea lo que hace.
+    std::printf("    longitud de onda LOCAL por profundidad (la de la tabla es la PROFUNDA):\n");
+    std::printf("      tren      prof:   0.3 m    1 m     3 m    10 m    40 m   400 m\n");
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        const float k0 = 6.2831853f / st.wave[i][0];
+        std::printf("      %6.1f m         ", st.wave[i][0]);
+        for (float d : { 0.3f, 1.0f, 3.0f, 10.0f, 40.0f, 400.0f })
+            std::printf("%7.2f", 6.2831853f / oceanWaveNumber(k0, d));
+        std::printf("\n");
+    }
+
+    // (3) EL MAR PROFUNDO NO CAMBIA, Y ES BIT A BIT. Con `k0·d >= 10` la salida rápida devuelve `k0`
+    //     sin tocar nada, y eso es lo que garantiza que este cambio no toca el mar abierto.
+    bool deepExact = true;
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        const float k0 = 6.2831853f / st.wave[i][0];
+        const float d  = 10.0f / k0 + 1.0f;           // por encima del umbral de la salida rápida
+        if (oceanWaveNumber(k0, d) != k0) deepExact = false;
+    }
+    // (4) Y EN SOMERO SÍ CAMBIA, MUCHO. Sin esto, (3) se leería como "la función no hace nada".
+    const float k0Long  = 6.2831853f / st.wave[0][0];
+    const float kShallow = oceanWaveNumber(k0Long, 0.3f);
+    const float ratio    = kShallow / k0Long;
+    std::printf("    tren de %.0f m: k x%.2f en 30 cm de agua (lambda %.1f -> %.2f m)\n",
+                st.wave[0][0], ratio, st.wave[0][0], 6.2831853f / kShallow);
+
+    // (5) EL LÍMITE SOMERO ANALÍTICO: `k -> sqrt(k0/d)`. Es otra comprobación independiente de (1),
+    //     y con una fórmula distinta: si las dos casan, el solver está resolviendo lo que dice.
+    const float kAsym = std::sqrt(k0Long / 0.05f);
+    const float kNum  = oceanWaveNumber(k0Long, 0.05f);
+    std::printf("    limite somero a 5 cm: numerico %.4f vs analitico sqrt(k0/d) %.4f (%.2f %%)\n",
+                kNum, kAsym, 100.0 * std::fabs(kNum - kAsym) / kAsym);
+
+    CHECK(worstRel < 1e-5, "el `k` resuelto satisface la relacion de dispersion de profundidad finita");
+    CHECK(deepExact, "en agua profunda devuelve el `k` de la tabla EXACTO: el mar abierto no cambia");
+    CHECK(ratio > 4.0f, "CONTRAPRUEBA: en agua somera el numero de onda cambia MUCHO (si no, (3) no "
+                        "demostraria nada)");
+    CHECK(std::fabs(kNum - kAsym) / kAsym < 0.05f,
+          "y casa con el limite somero analitico, que es una formula distinta");
+}
+
+/**
+ * @brief EL AGUA INTERIOR COMO CAMPO DEL MUNDO: priority-flood global sobre el bake.
+ *
+ * Sustituye la siembra por parche de 420 m, de la que colgaban tres limitaciones: no había agua
+ * fuera del parche, el resultado dependía de su BORDE (un lago podía aparecer al caminar) y no era
+ * función de la posición, así que dos clientes no podían coincidir.
+ *
+ * ⚠️ EL ORÁCULO NO ES UNA TABLA MÍA: son propiedades que el relleno tiene que cumplir por definición
+ * —una cuenca cerrada se llena EXACTAMENTE hasta su punto de derrame, y ni un téxel queda por encima
+ * de él— más el caso del planeta seco, que es el requisito que Andoni pidió.
+ */
+void test_water_fill_global() {
+    beginTest("water_fill_global");
+    using namespace Haruka::Planet;
+
+    const int W = 64, H = 32;
+    auto idx = [&](int x, int y) { return (size_t)y * W + x; };
+
+    // ── MUNDO 1: un continente con una cuenca cerrada de fondo conocido ─────────────────────────
+    //
+    // Terreno a +100 m, un mar en la franja izquierda (por debajo de 0) y una cuenca cuadrada a
+    // +10 m rodeada de pared a +100. El punto de derrame es la pared: la cuenca tiene que llenarse
+    // hasta 100 m EXACTOS, o sea 90 m de fondo.
+    std::vector<float> land((size_t)W * H, 100.0f);
+    for (int y = 0; y < H; ++y) for (int x = 0; x < 6; ++x) land[idx(x, y)] = -500.0f;  // océano
+    for (int y = 12; y < 20; ++y) for (int x = 30; x < 38; ++x) land[idx(x, y)] = 10.0f; // cuenca
+    const WaterFillResult r1 = waterFillEquirect(land.data(), W, H, 0.0f);
+
+    double worstLevel = 0.0; size_t basinWet = 0;
+    for (int y = 12; y < 20; ++y) for (int x = 30; x < 38; ++x) {
+        const float lv = r1.levelM[idx(x, y)];
+        if (lv > WATER_FILL_DRY) { ++basinWet; worstLevel = std::max(worstLevel, std::fabs(lv - 100.0)); }
+    }
+    std::printf("    cuenca cerrada: %zu de 64 texeles con agua · desvio del punto de derrame %.6f m\n",
+                basinWet, worstLevel);
+    std::printf("    mapa: %zu texeles de mar · %zu de lago · el mas hondo %.1f m\n",
+                r1.seaCells, r1.lakeCells, r1.deepestM);
+
+    // Ni una gota fuera de la cuenca: la meseta a +100 no puede retener nada.
+    size_t spill = 0;
+    for (int y = 0; y < H; ++y) for (int x = 6; x < W; ++x) {
+        const bool inBasin = (x >= 30 && x < 38 && y >= 12 && y < 20);
+        if (!inBasin && r1.levelM[idx(x, y)] > WATER_FILL_DRY) ++spill;
+    }
+    std::printf("    texeles con agua FUERA de la cuenca: %zu (debe ser 0: la meseta no retiene)\n", spill);
+
+    // ── MUNDO 2: SIN MAR. El requisito del planeta seco ─────────────────────────────────────────
+    std::vector<float> dry((size_t)W * H, 100.0f);
+    for (int y = 12; y < 20; ++y) for (int x = 30; x < 38; ++x) dry[idx(x, y)] = 10.0f;  // la MISMA cuenca
+    const WaterFillResult r2 = waterFillEquirect(dry.data(), W, H, 0.0f);
+    std::printf("    planeta SECO (misma cuenca, sin mar): %zu de mar · %zu de lago · hasWater=%d\n",
+                r2.seaCells, r2.lakeCells, (int)r2.hasWater);
+
+    // ── MUNDO 3: la costura de longitud NO es un borde ──────────────────────────────────────────
+    //
+    // La misma cuenca, pero a caballo del meridiano ±180 (mitad en x=62,63 y mitad en x=0,1). Si el
+    // mapa se tratara como un rectángulo, ese meridiano sería un BORDE por el que el agua se fuga y
+    // la cuenca no se llenaría. Con la esfera bien cosida se llena igual que la de en medio.
+    std::vector<float> seam((size_t)W * H, 100.0f);
+    for (int y = 0; y < H; ++y) for (int x = 8; x < 14; ++x) seam[idx(x, y)] = -500.0f;   // océano
+    for (int y = 12; y < 20; ++y) { for (int x = 60; x < 64; ++x) seam[idx(x, y)] = 10.0f;
+                                    for (int x = 0;  x < 4;  ++x) seam[idx(x, y)] = 10.0f; }
+    const WaterFillResult r3 = waterFillEquirect(seam.data(), W, H, 0.0f);
+    size_t seamWet = 0;
+    for (int y = 12; y < 20; ++y) { for (int x = 60; x < 64; ++x) if (r3.levelM[idx(x,y)] > WATER_FILL_DRY) ++seamWet;
+                                    for (int x = 0;  x < 4;  ++x) if (r3.levelM[idx(x,y)] > WATER_FILL_DRY) ++seamWet; }
+    std::printf("    cuenca a caballo del meridiano +-180: %zu de 64 texeles con agua\n", seamWet);
+
+    // ── DETERMINISMO: dos pasadas, los mismos bits ──────────────────────────────────────────────
+    const WaterFillResult r1b = waterFillEquirect(land.data(), W, H, 0.0f);
+    bool identical = (r1b.levelM.size() == r1.levelM.size());
+    for (size_t c = 0; identical && c < r1.levelM.size(); ++c)
+        if (r1b.levelM[c] != r1.levelM[c]) identical = false;
+
+    CHECK(basinWet == 64, "la cuenca cerrada se llena ENTERA");
+    CHECK(worstLevel == 0.0, "y EXACTAMENTE hasta su punto de derrame (no 'cerca': el mismo numero)");
+    CHECK(spill == 0, "CONTRAPRUEBA: la meseta no retiene ni un texel — el relleno no inunda de mas");
+    // El requisito de Andoni: un cuerpo sin oceano no tiene agua, y sale del CAMPO, no de un ajuste.
+    CHECK(r2.lakeCells == 0 && !r2.hasWater,
+          "planeta SIN MAR: cero agua y `hasWater` false, DERIVADO del campo y no configurado");
+    CHECK(r1.hasWater, "CONTRAPRUEBA: el que si tiene mar da hasWater true (si no, (2) no diria nada)");
+    CHECK(seamWet == 64, "la costura de longitud NO es un borde: la cuenca del meridiano se llena igual");
+    CHECK(identical, "el relleno es DETERMINISTA bit a bit (dos clientes tienen que ver los mismos lagos)");
+}
+
+/**
+ * @brief EL FETCH: un lago de montaña deja de tener olas de mar abierto.
+ *
+ * Era la limitación 2 del agua, medida: un lago de 3,21 m de fondo recibía **3,46 m de ola**, más
+ * alta que profundo era el lago, porque el oleaje sale de UN estado global (el viento sobre el
+ * océano) y el bajío lo AMPLIFICA en agua somera. Ni la dispersión de profundidad finita lo arregla
+ * —cambia la longitud de onda, no la altura— porque la altura la fijan Green y el tope de rompiente.
+ *
+ * ⚠️ EL ORÁCULO ES JONSWAP, no un número elegido: `Hs = 0,0016·U·sqrt(F/g)` contra el
+ * `Hs = 0,21·U²/g` de Pierson-Moskowitz. Lo que se comprueba es que el factor los relaciona.
+ */
+void test_ocean_fetch() {
+    beginTest("ocean_fetch");
+    using namespace Haruka::Planet;
+    const OceanState st = oceanDefaultState();
+
+    // El viento que el estado de referencia representa, deducido de su propia Hs (ver la función).
+    float sum2 = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) sum2 += st.wave[i][1] * st.wave[i][1];
+    const float Hs = 4.0f * std::sqrt(sum2 * 0.5f);
+    const float U  = std::sqrt(Hs * OCEAN_G / 0.21f);
+    std::printf("    estado de referencia: Hs %.2f m -> viento deducido %.1f m/s (el declarado es %.1f)\n",
+                Hs, U, OCEAN_REF_WIND);
+
+    std::printf("    fetch        factor    Hs resultante   (Hs de mar abierto %.2f m)\n", Hs);
+    for (float F : { 100.0f, 400.0f, 2000.0f, 20000.0f, 200000.0f, WATER_FETCH_UNLIMITED }) {
+        const float f = oceanFetchFactor(st, F);
+        std::printf("    %9.0f m  %8.4f   %8.3f m\n", F, f, f * Hs);
+    }
+
+    // La ola de verdad en el lago que se medía: 3,21 m de fondo, 400 m de diámetro.
+    const glm::vec3 up(0, 1, 0), wp(1234.0f, 0.0f, -567.0f);
+    float pkOpen = 0.0f, pkLake = 0.0f;
+    float loOpen = 1e9f, loLake = 1e9f;
+    for (int k = 0; k < 240; ++k) {
+        const float t = 0.05f * (float)k;
+        const float hO = oceanWaveHeight(wp, up, t, 40.0f, 1.0f, st, WATER_FETCH_UNLIMITED);
+        const float hL = oceanWaveHeight(wp, up, t, 3.21f, 1.0f, st, 400.0f);
+        pkOpen = std::max(pkOpen, hO); loOpen = std::min(loOpen, hO);
+        pkLake = std::max(pkLake, hL); loLake = std::min(loLake, hL);
+    }
+    const float ptpOpen = pkOpen - loOpen, ptpLake = pkLake - loLake;
+    std::printf("    ola pico a pico: mar abierto (40 m) %.3f m · lago de montana (3,21 m fondo, "
+                "400 m de diametro) %.3f m\n", ptpOpen, ptpLake);
+    std::printf("    razon lago/mar: %.3f  (antes del fetch era 1,08 — el lago tenia MAS ola)\n",
+                ptpOpen > 1e-6f ? ptpLake / ptpOpen : 0.0f);
+
+    // ── LO QUE SE AFIRMA ────────────────────────────────────────────────────────────────────────
+    CHECK(std::fabs(oceanFetchFactor(st, WATER_FETCH_UNLIMITED) - 1.0f) < 1e-6f,
+          "el OCEANO no se limita: factor 1 exacto");
+    CHECK(ptpLake < ptpOpen * 0.25f,
+          "el lago de montana ya NO hereda el swell del oceano: menos de un cuarto de su ola");
+    CHECK(ptpLake < 3.21f * 0.5f,
+          "y la ola cabe holgada en el lago (antes era MAS alta que profundo era el lago)");
+    // CONTRAPRUEBA: sin el fetch, la MISMA llamada da la ola grande. Si no, este test no estaria
+    // midiendo el fetch sino la profundidad.
+    float pkNo = 0.0f, loNo = 1e9f;
+    for (int k = 0; k < 240; ++k) {
+        const float h = oceanWaveHeight(wp, up, 0.05f * (float)k, 3.21f, 1.0f, st,
+                                        WATER_FETCH_UNLIMITED);
+        pkNo = std::max(pkNo, h); loNo = std::min(loNo, h);
+    }
+    std::printf("    CONTRAPRUEBA: el MISMO lago sin limitar el fetch da %.3f m (x%.1f)\n",
+                pkNo - loNo, ptpLake > 1e-6f ? (pkNo - loNo) / ptpLake : 0.0f);
+    CHECK((pkNo - loNo) > ptpLake * 4.0f,
+          "CONTRAPRUEBA: sin fetch el MISMO punto da mas de cuatro veces la ola (es el fetch, no el fondo)");
+    // Un mar interior grande SI tiene oleaje: el fetch no es un interruptor de "lago = sin olas".
+    CHECK(oceanFetchFactor(st, 200000.0f) > 0.5f,
+          "un mar interior de 200 km si levanta ola: el fetch gradua, no apaga");
+}
+
+/**
+ * @brief ¿HASTA DÓNDE HAY OLAS, Y HAY HUECOS POR EL CAMINO?
+ *
+ * Reportado por Andoni: *"el agua de la costa funciona con el método anterior de clipmap según si
+ * está cerca o no dentro del cuadrado"*. El mar cercano no tiene geometría propia: reusa la rejilla
+ * de anillos que dejó el clipmap, que es CUADRADA y va anclada bajo la cámara.
+ *
+ * Aquí se replica la ley del shader (`ocean.tese`) sobre el reparto real de anillos y se recorre un
+ * radio. El gemelo es de dos líneas y está a la vista, así que lo que salga es lo que dibuja.
+ *
+ * ⚠️ LA SOSPECHA A COMPROBAR: el desvanecido es `1 - smoothstep(cover*0.85, cover*0.98, rad)` y
+ * `cover` es el semi-lado **DE CADA ANILLO**, no del último. La intención escrita al lado dice otra
+ * cosa —*"que el ÚLTIMO anillo entregue la misma superficie que la esfera lisa"*—, así que si el
+ * dato es por anillo, cada uno apaga su propio 15% exterior y quedan ANILLOS PLANOS concéntricos.
+ */
+void test_ocean_wave_reach() {
+    beginTest("ocean_wave_reach");
+    using namespace Haruka::Planet;
+
+    // El reparto real: `m_ringCoverM = NC·PATCH/2` (NC=31 en calidad Low) y el bucle del dibujo
+    // corta en `kWaveReachM` = 16 km.
+    const double PATCH = TERRAIN_CLIP_PATCH_M;
+    const double cover0 = 31.0 * PATCH * 0.5;
+    // DOS alcances distintos, y confundirlos era el bug: la GEOMETRÍA del agua llega a 60 km (lámina
+    // lisa, para que un lago lejano tenga con qué dibujarse) y la OLA se desvanece mucho antes.
+    const double kWaterReachM = 60000.0;   // gemelo del bucle del dibujo
+    const double kWaveReachM  = 16000.0;   // gemelo del que calcula `waveOuterM`
+    int rings = 0, waveRings = 0;
+    while (cover0 * std::exp2((double)rings) <= kWaterReachM || rings == 0) { ++rings; if (rings > 16) break; }
+    while (cover0 * std::exp2((double)waveRings) <= kWaveReachM || waveRings == 0) { ++waveRings; if (waveRings > 16) break; }
+    std::printf("    semi-lado del anillo 0: %.0f m\n", cover0);
+    std::printf("    GEOMETRIA del agua: %d anillos, hasta %.0f m (lamina lisa: los lagos lejanos)\n",
+                rings, cover0 * std::exp2((double)(rings - 1)));
+    std::printf("    OLA: se desvanece a partir de %.0f m (%d anillos)\n",
+                cover0 * std::exp2((double)(waveRings - 1)) * 0.85, waveRings);
+
+    // La ley del shader, gemela de `ocean.tese`: para un radio, ¿qué anillo lo cubre y cuánta ola deja?
+    // El ALCANCE es uno solo para todos los anillos (`uClipTanV.w`), no el semi-lado de cada uno.
+    // Con el dato por anillo —que era lo que había— cada uno apagaba su 15% exterior y quedaban aros
+    // de mar liso; el `reachPerRing` de abajo lo reproduce para la contraprueba.
+    const double reach = cover0 * std::exp2((double)(waveRings - 1));   // el de la OLA
+    auto factorWith = [&](double rad, bool perRing) -> double {
+        for (int r = 0; r < rings; ++r) {
+            const double half = cover0 * std::exp2((double)r);
+            const double hole = (r == 0) ? 0.0 : cover0 * std::exp2((double)(r - 1));
+            if (rad < hole || rad > half) continue;            // no es su banda
+            const double ref = perRing ? half : reach;
+            const double s = ref * 0.85, e = ref * 0.98;
+            const double t = std::clamp((rad - s) / (e - s), 0.0, 1.0);
+            return 1.0 - (t * t * (3.0 - 2.0 * t));            // smoothstep
+        }
+        return 0.0;                                            // fuera de todo anillo: esfera lisa
+    };
+    auto waveFactorAt = [&](double rad) { return factorWith(rad, false); };
+
+    std::printf("    radio (m)   factor de ola\n");
+    // ⚠️ SE BARRE HASTA DONDE EMPIEZA EL FUNDIDO EXTERIOR, no hasta el borde. Ese fundido es
+    // INTENCIONADO —es lo que hace que el mar cercano entregue la misma superficie que la esfera lisa
+    // que lo releva—, así que contarlo como "aro plano" acusaría al arreglo de hacer lo que el diseño
+    // pide. Lo que se busca son los aros de EN MEDIO, con oleaje a los dos lados.
+    int flatBands = 0; bool inFlat = false; double firstFlat = 0.0;
+    for (double rad = 50.0; rad <= reach * 0.85; rad += 50.0) {
+        const double f = waveFactorAt(rad);
+        const bool flat = (f < 0.02);
+        if (flat && !inFlat) { ++flatBands; if (firstFlat == 0.0) firstFlat = rad; }
+        inFlat = flat;
+    }
+    for (double rad : { 500.0, 1500.0, 1750.0, 1900.0, 2100.0, 3400.0, 3900.0, 4200.0,
+                        7000.0, 7800.0, 8200.0, 15000.0, 16000.0 })
+        std::printf("    %9.0f   %.3f\n", rad, waveFactorAt(rad));
+    std::printf("    ANILLOS PLANOS antes del borde exterior: %d (el primero a %.0f m)\n",
+                flatBands, firstFlat);
+
+    // ── CONTRAPRUEBA: LA LEY VIEJA, la que usaba el semi-lado de CADA anillo ────────────────────
+    //
+    // Sin esto, "0 aros planos" no distingue "lo arreglé" de "esta medida no ve aros planos".
+    int flatOld = 0; bool inOld = false;
+    for (double rad = 50.0; rad <= reach * 0.85; rad += 50.0) {
+        const bool flat = (factorWith(rad, true) < 0.02);
+        if (flat && !inOld) ++flatOld;
+        inOld = flat;
+    }
+    std::printf("    CONTRAPRUEBA con la ley VIEJA (semi-lado por anillo): %d aros planos\n", flatOld);
+
+    // ⚠️ EL CUADRADO. La rejilla es cuadrada y el desvanecido es RADIAL, así que en las esquinas hay
+    // geometría pero el factor ya vale 0: el alcance en diagonal es sqrt(2) veces el del eje, y toda
+    // esa banda va plana.
+    // ⚠️ LO QUE ESTE ARREGLO NO TOCA: la rejilla sigue siendo CUADRADA y anclada bajo la cámara, y el
+    // fundido es RADIAL. El oleaje vive en un DISCO inscrito en el cuadrado: en la diagonal hay
+    // geometría hasta sqrt(2) veces más lejos y va plana. Y todo ello se mueve contigo.
+    std::printf("    PENDIENTE: rejilla CUADRADA, fundido RADIAL — ola en un disco de %.0f m,\n"
+                "      geometria hasta %.0f m en diagonal (plana), y todo anclado bajo la camara\n",
+                reach * 0.85, reach * 1.41421356);
+
+    CHECK(rings >= 3, "se dibujan varios anillos de mar");
+    CHECK(cover0 * std::exp2((double)(rings - 1)) > 30000.0,
+          "la GEOMETRIA del agua llega mas alla de 30 km: un lago lejano tiene con que dibujarse");
+    CHECK(reach < cover0 * std::exp2((double)(rings - 1)),
+          "y la OLA se desvanece ANTES que la geometria (lamina lisa de ahi en adelante)");
+    // Lo que se afirma: si el desvanecido fuera SOLO del ultimo anillo (la intencion escrita en el
+    // shader), no habria ni una banda plana antes del borde. Cada una es un aro de mar liso.
+    CHECK(flatBands == 0, "no hay ANILLOS PLANOS de mar antes del borde exterior");
+    CHECK(flatOld >= 2, "CONTRAPRUEBA: la ley vieja SI los tenia (si no, este test no mide el arreglo)");
+}
+
+/**
+ * @brief ¿PUEDE LA REJILLA LLEVAR LA OLA QUE SE LE PIDE? Nyquist contra la distancia.
+ *
+ * El campo de olas es función pura de la posición del mundo (el marco sale del radial POR VÉRTICE,
+ * no de la cámara), así que la rejilla moviéndose no mueve la ola. Lo que sí decide es si la ola
+ * CABE: la superficie dibujada es lineal a trozos entre vértices, y una ola de 8,7 m sobre un quad
+ * de 512 m no es una ola, es muaré.
+ *
+ * ⚠️ Y AQUÍ HAY DOS LEYES QUE NO SE HABLAN. La teselación se desvanece con `smoothstep(1200, 9000)`
+ * en `ocean.tesc` —a 9 km el quad ya es el parche entero— mientras la AMPLITUD se desvanece mucho
+ * más lejos, a partir de 13,5 km. Entre medias se dibuja ola a plena amplitud sobre una rejilla que
+ * no puede llevarla.
+ *
+ * Se replican las dos leyes y se cuentan las MUESTRAS POR LONGITUD DE ONDA. Nyquist pide 2.
+ */
+void test_ocean_grid_carries_wave() {
+    beginTest("ocean_grid_carries_wave");
+    using namespace Haruka::Planet;
+    const OceanState st = oceanDefaultState();
+    const double PATCH = TERRAIN_CLIP_PATCH_M;
+    const double cover0 = 31.0 * PATCH * 0.5;
+
+    // Gemelo de `edgeF` en `ocean.tesc`: el lado del quad a una distancia dada.
+    auto quadAt = [&](double rad) {
+        int r = 0;
+        while (r < 5 && cover0 * std::exp2((double)r) < rad) ++r;
+        const double arc = PATCH * std::exp2((double)r);      // lado del parche de ese anillo
+        const double t   = std::clamp((rad - 1200.0) / (9000.0 - 1200.0), 0.0, 1.0);
+        const double s   = t * t * (3.0 - 2.0 * t);
+        const double lvl = std::clamp(arc / 4.0 * (1.0 - s), 1.0, 32.0);
+        return arc / lvl;
+    };
+    // Gemelo del desvanecido de amplitud de `ocean.tese` (alcance de la ola).
+    const double reach = cover0 * std::exp2(3.0);             // 4 anillos de ola
+    auto ampFadeAt = [&](double rad) {
+        const double s = reach * 0.85, e = reach * 0.98;
+        const double t = std::clamp((rad - s) / (e - s), 0.0, 1.0);
+        return 1.0 - (t * t * (3.0 - 2.0 * t));
+    };
+
+    const double lamShort = st.wave[OCEAN_WAVES - 1][0];      // el tren mas corto (8,7 m)
+    const double lamLong  = st.wave[0][0];                    // el mas largo (61 m)
+    std::printf("    tren mas corto %.1f m · mas largo %.1f m · Nyquist pide 2 muestras por onda\n",
+                lamShort, lamLong);
+    std::printf("    distancia    quad     muestras/onda corta   muestras/onda larga   amplitud\n");
+    // El desvanecido POR TREN según el quad local, gemelo de `harukaShortWaveFade(k, 2·quadM)`.
+    auto trainAmpAt = [&](double lam, double rad) {
+        const double lo = std::max(quadAt(rad), (double)OCEAN_MIN_QUAD_M), hi = lo * 2.0;
+        return std::clamp((lam - lo) / (hi - lo), 0.0, 1.0) * ampFadeAt(rad);
+    };
+    double worstShort = 1e9, worstLong = 1e9; double firstBad = 0.0;
+    for (double rad : { 100.0, 500.0, 1200.0, 2000.0, 3000.0, 5000.0, 9000.0, 12000.0, 13000.0 }) {
+        const double q = quadAt(rad);
+        const double nS = lamShort / q, nL = lamLong / q;
+        std::printf("    %8.0f m %8.1f m %14.2f %21.2f %11.2f\n",
+                    rad, q, nS, nL, trainAmpAt(lamLong, rad));
+        // Sólo cuenta donde el tren SE DIBUJA de verdad: si su amplitud ya está apagada, que la
+        // rejilla no lo pueda llevar da igual — es justo lo que el desvanecido viene a conseguir.
+        //
+        // ⚠️ EL UMBRAL ES 20 %, NO 5 %. La banda de desvanecido es continua, así que siempre hay un
+        // radio donde un tren está al 8 % y ligeramente por debajo de Nyquist; pedirle a ESO que
+        // cumpla Nyquist es pedir que la rampa sea un escalón, y un escalón se ve como un anillo. A
+        // 20 % de amplitud el tren aporta centímetros sobre metros y su aliasing no es visible.
+        if (trainAmpAt(lamShort, rad) > 0.20) worstShort = std::min(worstShort, nS);
+        if (trainAmpAt(lamLong,  rad) > 0.20) {
+            worstLong = std::min(worstLong, nL);
+            if (nL < 2.0 && firstBad == 0.0) firstBad = rad;
+        }
+    }
+    std::printf("    con amplitud VIVA: peor %.2f muestras/onda corta · %.2f de la larga\n",
+                worstShort, worstLong);
+    if (firstBad > 0.0)
+        std::printf("    ⚠ desde %.0f m se dibuja la ola LARGA por debajo de Nyquist (muaré)\n", firstBad);
+
+    // ── CONTRAPRUEBA: LA LEY VIEJA, con el piso constante de 8 m ────────────────────────────────
+    //
+    // Sin ella, "todo por encima de Nyquist" no distingue el arreglo de una medida que no mira nada.
+    double oldWorstShort = 1e9, oldWorstLong = 1e9;
+    for (double rad : { 2000.0, 5000.0, 9000.0, 12000.0 }) {
+        if (ampFadeAt(rad) <= 0.20) continue;
+        oldWorstShort = std::min(oldWorstShort, lamShort / quadAt(rad));
+        oldWorstLong  = std::min(oldWorstLong,  lamLong  / quadAt(rad));
+    }
+    std::printf("    CONTRAPRUEBA con el piso FIJO de 8 m: %.2f muestras/onda corta · %.2f de la larga\n",
+                oldWorstShort, oldWorstLong);
+
+    // ── ⚠️ Y QUE A LOS PIES DEL JUGADOR NO SE APAGUE NADA ───────────────────────────────────────
+    //
+    // Este es el test que faltaba y que dejo pasar "se ve plano". Con el quad mas fino (4 m) los
+    // CUATRO trenes tienen que estar vivos: el mas corto mide 8,7 m, o sea 2,17 muestras por onda —
+    // Nyquist cumplido. La banda de desvanecido estuvo una octava corrida y lo dejaba al **8,75 %**,
+    // asi que el mar perdia su rizo justo donde mas se mira.
+    double minNear = 1.0;
+    for (int i = 0; i < OCEAN_WAVES; ++i)
+        minNear = std::min(minNear, (double)oceanShortWaveFade(
+                      6.2831853f / st.wave[i][0], OCEAN_MIN_QUAD_M));
+    std::printf("    a los PIES (quad %.1f m): el tren mas apagado de los cuatro esta al %.1f %%\n",
+                (double)OCEAN_MIN_QUAD_M, 100.0 * minNear);
+    CHECK(minNear > 0.99,
+          "a los pies del jugador NINGUN tren se apaga: el quad fino los lleva todos");
+    // CONTRAPRUEBA: con el quad de 2 km (8 m) el mas corto SI se apaga. Si no, el desvanecido no
+    // estaria haciendo nada y el test de arriba no diria nada.
+    const double farShort = (double)oceanShortWaveFade(
+                                6.2831853f / st.wave[OCEAN_WAVES - 1][0], 8.0f);
+    std::printf("    CONTRAPRUEBA a 2 km (quad 8 m): el tren corto baja al %.1f %%\n", 100.0 * farShort);
+    CHECK(farShort < 0.2, "CONTRAPRUEBA: con el quad grueso el tren corto SI se apaga (Nyquist)");
+
+    CHECK(worstLong >= 2.0, "la rejilla puede llevar la ola LARGA en todo el alcance en que se dibuja");
+    CHECK(worstShort >= 2.0, "y la CORTA tambien");
+    CHECK(oldWorstLong < 1.0, "CONTRAPRUEBA: con el piso fijo la ola larga SI iba por debajo de Nyquist");
+    // CONTRAPRUEBA: cerca la rejilla sobra de largo. Si tambien fallara ahi, la medida estaria mal.
+    CHECK(lamShort / quadAt(100.0) > 2.0,
+          "CONTRAPRUEBA: cerca del jugador la rejilla lleva hasta la ola mas corta");
+}
+
+/**
+ * @brief ¿QUÉ LAGO MÁS PEQUEÑO CABE EN EL BAKE? El límite de resolución del campo de agua.
+ *
+ * ⚠️ NO ES UN FALLO QUE ARREGLAR: ES EL LÍMITE DE LO QUE SE CONSTRUYÓ, y hay que tenerlo escrito
+ * porque no es evidente. `bakeWaterMap` rellena las cuencas sobre el bake de altura, que es equirect
+ * a `m_mapRes` (512 por defecto). Un téxel cubre `2πR/W` metros — en la Tierra, **78 km**. Un lago
+ * más pequeño que un téxel no existe para el relleno: ni se llena, ni sale en la textura, ni la
+ * física lo ve.
+ *
+ * O sea que el campo horneado representa MARES INTERIORES, no lagos. Los lagos de verdad (1-50 km)
+ * siguen dependiendo del parche dinámico, que es local. Cerrarlo pide direccionar el agua por el
+ * quadtree del terreno —(cara, nivel, i, j)— en vez de por un equirect: era la propuesta original y
+ * quedó a medias, porque el relleno sí es global pero su rejilla no.
+ */
+void test_water_bake_resolution_limit() {
+    beginTest("water_bake_resolution_limit");
+    using namespace Haruka::Planet;
+    const double R = 6371000.0;
+    const double kPi = 3.14159265358979323846;
+
+    std::printf("    texel del bake de agua y lago minimo que puede representar:\n");
+    std::printf("      resolucion     texel (ecuador)    lago minimo (~2 texeles)\n");
+    double texel512 = 0.0;
+    for (int w : { 512, 1024, 2048, 4096, 8192 }) {
+        const double texel = 2.0 * kPi * R / (double)w;
+        if (w == 512) texel512 = texel;
+        std::printf("      %5d x %-5d %13.0f m %20.0f m\n", w, w / 2, texel, texel * 2.0);
+    }
+
+    // Y comprobado sobre el relleno REAL: una cuenca de un solo texel da un fetch del orden del
+    // texel, no del lago que uno se imagina.
+    const int W = 128, H = 64;
+    std::vector<float> land((size_t)W * H, 100.0f);
+    for (int y = 0; y < H; ++y) for (int x = 0; x < 8; ++x) land[(size_t)y * W + x] = -500.0f;
+    land[(size_t)32 * W + 64] = 10.0f;                       // UNA sola celda hundida
+    const WaterFillResult one = waterFillEquirect(land.data(), W, H, 0.0f, R);
+    const double texel128 = 2.0 * kPi * R / (double)W;
+    std::printf("    cuenca de UN texel a %.0f km/texel: %zu texeles de lago · fetch %.0f m\n",
+                texel128 / 1000.0, one.lakeCells, one.biggestFetchM);
+
+    // ── LO QUE SE AFIRMA ────────────────────────────────────────────────────────────────────────
+    //
+    // No hay nada que "pase" o "falle" en la fisica: se fija el LIMITE por escrito, para que el dia
+    // que alguien pregunte "por que no hay lagos" la respuesta este medida y no haya que buscarla.
+    CHECK(texel512 > 50000.0,
+          "a 512 de resolucion el texel del bake pasa de 50 km: el campo horneado da MARES "
+          "INTERIORES, no lagos — los lagos siguen siendo del parche dinamico");
+    CHECK(one.lakeCells > 0 && one.biggestFetchM > texel128 * 0.5,
+          "y el lago mas pequeno posible es del tamano de un texel, no menor");
+    // CONTRAPRUEBA: subiendo la resolucion el limite baja proporcionalmente. Si no lo hiciera, el
+    // problema no seria de resolucion y la salida propuesta (rejilla del quadtree) seria la equivocada.
+    const double texel8k = 2.0 * kPi * R / 8192.0;
+    std::printf("    a 8192 el texel baja a %.1f km: la salida es la RESOLUCION, no el algoritmo\n",
+                texel8k / 1000.0);
+    CHECK(texel8k < texel512 / 10.0,
+          "CONTRAPRUEBA: el limite escala con la resolucion — es de rejilla, no del relleno");
 }

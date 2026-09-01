@@ -29,7 +29,41 @@ enum class RenderBackend : int { OpenGL = 0, Vulkan = 1 };
 
 struct GraphicsSettings {
     WindowMode      windowMode      = WindowMode::Fullscreen;
-    RenderBackend   renderBackend   = RenderBackend::OpenGL; // API gráfica (requiere reinicio)
+
+    /// Resolucion de la ventana, en pixeles.
+    ///
+    /// ⚠️ **0x0 SIGNIFICA "AUN NO RESUELTA", Y NUNCA SE ENSENA COMO OPCION.** El combo lista solo
+    /// resoluciones reales del monitor; el valor por defecto es la NATIVA, no una entrada "Auto".
+    /// La diferencia importa: con un "Auto" en la lista, el usuario que enchufa otro monitor no sabe
+    /// a que resolucion esta jugando, y el que elige una concreta no puede volver a la nativa sin
+    /// adivinar cual era. Aqui siempre hay un numero, y el primer arranque lo rellena solo.
+    ///
+    /// No se puede resolver al cargar los ajustes: `SDL_Init(SDL_INIT_VIDEO)` ocurre DENTRO de
+    /// `Window::init`, que va despues. Lo rellena `Application` justo tras crear la ventana.
+    int             resolutionW     = 0;
+    int             resolutionH     = 0;
+    /// ── VULKAN POR DEFECTO desde el 2026-08-31. OpenGL SIGUE SOPORTADO ──────────────────────────
+    ///
+    /// No es por milisegundos: medido a altura de ojo son parejos, y en algunos casos Vulkan sale un
+    /// pelin peor. Es por FIDELIDAD, y la razon es concreta y esta en el log del propio motor:
+    ///
+    ///     [RHI] GPU preferida por ajuste: 'NVIDIA' (IGNORADA: OpenGL no permite elegir adaptador)
+    ///
+    /// **OpenGL no deja elegir GPU.** En un portatil hibrido eso significa que el contexto cae en la
+    /// integrada salvo que el usuario sepa exportar las variables de PRIME. Y la diferencia entre
+    /// tarjetas NO es cosmetica — medido con la misma sonda, el mismo shader y el mismo dato:
+    ///
+    ///     colocacion del vertice dibujado   AMD integrada 0,089 m   ·   NVIDIA 0,011 m    27x
+    ///     bake contra la referencia CPU     AMD integrada 0,020 m   ·   NVIDIA 0,0001 m  200x
+    ///
+    /// Con Vulkan la seleccion automatica coge la dedicada, asi que el backend por defecto es lo que
+    /// hace efectiva la GPU por defecto. Por eso NO se fija aqui una `preferredGpus` con un nombre:
+    /// un nombre hardcodeado no existe en otra maquina, y la automatica ya prefiere la discreta.
+    ///
+    /// ⚠️ OpenGL no se retira: `HARUKA_BACKEND=opengl` o el panel de ajustes lo devuelven, y el banco
+    /// sigue pasando los dos. Es cobertura de hardware viejo y un segundo par de ojos sobre el RHI —
+    /// varios bugs de esta sesion salieron justo de comparar los dos backends.
+    RenderBackend   renderBackend   = RenderBackend::Vulkan; // API gráfica (requiere reinicio)
 
     /// GPUs preferidas, por NOMBRE y en orden. Vacío = elección automática (discreta > integrada).
     ///

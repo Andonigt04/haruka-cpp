@@ -265,6 +265,15 @@ public:
      * Reproduce EXACTAMENTE lo que dibuja el tessellation evaluation: bilineal de las alturas de los
      * 4 vértices de la celda base + el detalle procedural compartido. Es el contrato del suelo.
      */
+    /// ¿Hay agua en este cuerpo? Sale del campo horneado, no de la configuración: un planeta sin
+    /// téxeles bajo el nivel del mar da `false` y el motor puede saltarse el agua entera.
+    bool  hasWater() const { return m_hasWater; }
+    /// Cota de la lámina del LAGO en esa dirección (m), o `WATER_FILL_DRY` si aquí no hay lago.
+    /// El océano NO sale por aquí: lo decide la cota del terreno.
+    float lakeLevelAt(const glm::dvec3& dir) const;
+    /// Fetch en esa dirección (m). `WATER_FETCH_UNLIMITED` en el océano.
+    float lakeFetchAt(const glm::dvec3& dir) const;
+
     double sampleHeight(const glm::dvec3& dir) const;
 
     /**
@@ -363,7 +372,7 @@ public:
         // (`haruka/src/panels/viewport.cpp`), que vive en OTRO repo. El build fallaba, el binario
         // viejo seguía ejecutándose y ningún cambio del motor llegaba a la pantalla — sin ningún
         // aviso. Este struct lo leen TRES árboles: haruka-cpp, Survival y haruka (editor).
-        int      drawCalls = 0;                           ///< 1 base + anillos del clipmap
+        int      drawCalls = 0;                           ///< 1 base + anillos de la rejilla
     };
     const RenderStats& lastRenderStats() const { return m_lastRenderStats; }
 
@@ -467,7 +476,7 @@ private:
     // plano: el `uLightDir`/`uLightColor`/`uAmbient` venían fijos y no seguían al sol.
     glm::vec3 m_sunDir  = glm::vec3(0.3f, 0.8f, 0.5f);
     // Suelo mojado/nevado + máscara cenital (ver setGroundWet). El UBO es UNO solo: su contenido no
-    // cambia entre los draws del planeta (base, anillos del clipmap, anillo cercano), así que no
+    // cambia entre los draws del planeta (base, anillos de la rejilla, anillo cercano), así que no
     // puede repetir el fallo del recurso reescrito entre draws.
     float                     m_groundWet  = 0.0f;
     float                     m_groundSnow = 0.0f;
@@ -518,8 +527,45 @@ private:
     std::vector<float> m_heightCPU;
     int m_heightW = 0, m_heightH = 0;
 
+    // ── AGUA QUIETA HORNEADA CON EL PLANETA (2026-09-01) ────────────────────────────────────────
+    //
+    // Cota de la lámina de los LAGOS por téxel equirect, misma retícula que `m_heightCPU`, o
+    // `WATER_FILL_DRY` donde no hay. El océano NO está aquí: lo decide la cota (`elevKm < seaKm`),
+    // que es la regla del shader, y tenerlo en los dos sitios daría dos respuestas a "¿hay agua?".
+    //
+    // ⚠️ SUSTITUYE A LA SIEMBRA POR PARCHE, y con ella a sus tres limitaciones: no había agua fuera
+    // de 420 m, el resultado dependía del BORDE del parche (un lago aparecía al caminar) y no era
+    // función de la posición, así que dos clientes no podían coincidir. Ver `water_fill.h`.
+    std::vector<float> m_waterCPU;
+    /// Fetch por téxel (diámetro equivalente de su masa de agua, m). Ver `water_fill.h`.
+    std::vector<float> m_fetchCPU;
+    // ¿Tiene este cuerpo agua EN ABSOLUTO? **Derivado del campo, no configurado.** Sin téxeles bajo
+    // el nivel del mar no hay semilla para el relleno, así que una luna da `false` y todo el sistema
+    // de agua puede salir por la puerta rápida en vez de pagarse a sí mismo sin nada que hacer.
+    bool  m_hasWater = false;
+    float m_deepestLakeM = 0.0f;
+    /// El mismo campo, subido como R32F equirect para que lo lea `inland_water.glsl` (binding 18).
+    /// El 1x1 de relleno NO es opcional: en Vulkan un sampler sin atar es INDEFINIDO, no ceros.
+    Haruka::RHI::TextureHandle m_lakeTex;
+    Haruka::RHI::TextureHandle m_lakeDummy;
+    Haruka::RHI::TextureHandle lakeTexOrDummy() const {
+        return Haruka::RHI::valid(m_lakeTex) ? m_lakeTex : m_lakeDummy;
+    }
+
     // CLIPMAP — la rejilla que da los 2 m cerca del jugador.
-    Haruka::RHI::BufferHandle m_clipVB, m_clipIB;
+    // ── LA REJILLA DE ANILLOS. Se llamaba `m_clip*` y ya NO es del clipmap. ──────────────────────
+    //
+    // ⚠️ EL NOMBRE COSTO UNA SESION. El clipmap de terreno se borro el 2026-08-24 (lo sustituyo el
+    // pase v5 de nodos), pero sus buffers y sus UBO por anillo siguen vivos porque el MAR los
+    // reutiliza: el mar cercano se dibuja sobre esta misma rejilla, teselada, con Gerstner. Es
+    // reutilizacion deliberada, no residuo — pero llamandolos `m_clip*` cualquiera que audite el
+    // codigo concluye que queda clipmap por limpiar y se va a perseguir un fantasma.
+    //
+    // ⚠️ EN LOS SHADERS EL BLOQUE SIGUE LLAMANDOSE `ClipParams` (binding 13) y sus campos
+    // `uClipOrigin`/`uClipCover`. Renombrarlos toca ocean.{tesc,tese,frag}, terrain.{tesc,tese},
+    // biome.frag y nearground.vert a la vez, asi que se dejo para no mezclar un renombrado masivo con
+    // el resto. Si tocas esos uniformes, este es su lado de CPU.
+    Haruka::RHI::BufferHandle m_ringGridVB, m_ringGridIB;
 
     // EL SUELO CERCANO QUE VIENE DE LA FÍSICA (ver `setNearGroundRing`). El planeta no lo genera:
     // lo recibe ya montado y solo lo dibuja con su propio material, que es el punto entero.
@@ -555,8 +601,8 @@ public:
                            const glm::vec3& anchorRelEye, const glm::vec3& anchorUp,
                            const glm::dvec3& anchorWorld);
 private:
-    uint32_t m_clipIndexCount = 0;
-    uint32_t m_clipVertexCount = 0;
+    uint32_t m_ringIndexCount = 0;
+    uint32_t m_ringVertexCount = 0;
     /// UN UBO POR ANILLO, no uno compartido. El clipmap es ahora una PILA de anillos concéntricos
     /// (ver el bloque largo de `draw`) y cada uno se dibuja con su propio ClipParams: escala, hueco
     /// central y anillo de mezcla distintos.
@@ -570,13 +616,17 @@ private:
     /// donde el clipmap se apaga (sqrt(2·R·h) = 178 km). Es lo que permite que la MALLA BASE —la
     /// rejilla gruesa de cientos de metros por polígono— no llegue a verse nunca desde el suelo.
     static constexpr int kMaxClipRings = 8;
-    std::vector<Haruka::RHI::BufferHandle> m_clipUBOs;
-    int   m_clipRingCount = 1;      ///< anillos dibujados este frame (1 = comportamiento de siempre)
-    float m_clipCoverM = 1984.0f;   // semi-lado del clipmap (m), según calidad; lo leen los shaders
+    std::vector<Haruka::RHI::BufferHandle> m_ringParamUBOs;
+    int   m_ringCount = 1;      ///< anillos dibujados este frame (1 = comportamiento de siempre)
+    /// Semi-lado REAL del anillo exterior. No es `m_ringCoverM · 2^(n-1)`: el exterior lleva
+    /// `clipScale`, y los dos sólo coinciden en el camino normal. Lo necesita el hueco de la esfera
+    /// del mar lejano, que si se queda corto deja una banda de doble mezcla.
+    float m_ringOuterCoverM = 0.0f;
+    float m_ringCoverM = 1984.0f;   ///< semi-lado de la rejilla (m), segun calidad; lo leen los shaders
     /// ¿Dibujó el clipmap el último frame? Ya NO lleva histéresis: no hay umbral de altura que
     /// cruzar (lo único que lo apaga es estar bajo tierra). Se conserva porque lo consultan el
     /// anillo cercano y las sondas.
-    bool  m_clipMapActive = false;
+    bool  m_ringGridActive = false;
 
     // Single terrain mesh (all faces combined)
     Haruka::RHI::BufferHandle m_vertexBuffer;
@@ -601,7 +651,7 @@ private:
 
     // ── EL MAR ──────────────────────────────────────────────────────────────────────────────────
     // Dos geometrías de UNA superficie, igual que el terreno (malla base + clipmap):
-    //  · cerca: los anillos del clipmap (VB/IB/UBOs compartidos con el terreno), teselados y con
+    //  · cerca: los anillos de la rejilla (`m_ringGrid*`, heredada del clipmap borrado), teselados y con
     //    olas de Gerstner. No hay buffers propios: solo otro pipeline sobre la misma rejilla.
     //  · lejos: esta esfera a nivel del mar, lisa (a esa distancia la ola es subpíxel).
     /**
@@ -631,9 +681,6 @@ private:
     Haruka::RHI::BufferHandle  m_oceanParamsUBO;
     bool                       m_oceanParamsValid = false;
 
-    Haruka::RHI::BufferHandle m_oceanFarVB;
-    Haruka::RHI::BufferHandle m_oceanFarIB;
-    uint32_t m_oceanFarFaceStride = 0;   ///< índices por cara cúbica: permite saltar las 5 ocultas
 
     // MAR DINÁMICO POR MASA: snapshot de cuerpos masivos (setTidalBodies, desde el sistema orbital).
     // Su ÚNICO consumidor era la pipeline del agua, que se ha retirado; se conserva el dato porque lo
@@ -680,6 +727,9 @@ private:
     Haruka::RHI::TextureHandle generateProceduralNormal(int width, int height) const;
     /** @brief Hornea la altura base (fase 2a) con cache en disco y la sube como R32F. */
     void bakeHeightMap();
+    /// Rellena las cuencas del planeta hasta su punto de derrame. Va DESPUÉS de `bakeHeightMap`:
+    /// necesita el campo ya horneado. Ver `core/planet/water_fill.h`.
+    void bakeWaterMap();
 
     // Shaders y UBO COMPARTIDOS entre planetas (estáticos).
     static Haruka::RHI::PipelineHandle s_pipeline;
@@ -690,9 +740,7 @@ private:
     /// del mismo tipo en todos los planetas. Inválido = el camino de siempre (draw de todo).
     static Haruka::RHI::PipelineHandle s_cullPipeline;
     /** @brief Mar cercano: la rejilla del clipmap teselada con oleaje de Gerstner. */
-    static Haruka::RHI::PipelineHandle s_oceanPipeline;
     /** @brief Mar lejano: la esfera lisa a nivel del mar, con el MISMO fragment. */
-    static Haruka::RHI::PipelineHandle s_oceanFarPipeline;
     static Haruka::RHI::PipelineHandle s_nearRingPipeline;
     static Haruka::RHI::PipelineHandle s_wirePipeline;
     static Haruka::RHI::BufferHandle s_ubo;

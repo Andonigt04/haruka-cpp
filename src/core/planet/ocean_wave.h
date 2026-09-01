@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include "core/planet/water_fill.h"   // WATER_FETCH_UNLIMITED: el fetch del oceano
 
 namespace Haruka { namespace Planet {
 
@@ -178,11 +179,221 @@ inline double oceanTideAt(const glm::dvec3& dir, double planetRadius,
     return h * scale;
 }
 
-/// Gemelo de `harukaShoalAmp`: ley de Green + límite de rompiente (la ola no crece, revienta).
+/// Ley de Green sola: cuánto crece la amplitud al perder fondo, SIN el límite de rompiente.
+/// Gemelo de `harukaGreenGain`.
+inline float oceanGreenGain(float depthM) {
+    const float d = std::max(depthM, 0.05f);
+    return std::pow(std::clamp(50.0f / d, 1.0f, 40.0f), 0.25f);
+}
+
+/// Longitud de onda por debajo de la cual una ola deja de existir como GEOMETRÍA: el doble del
+/// paso de nodo más fino con el que el agua se dibuja (4 m), que es lo que pide Nyquist.
+///
+/// ⚠️ ES UN PISO, NO EL VALOR: el quad del render CRECE con la distancia (a 2 km ya mide 8 m, a 9 km
+/// 1 024 m), así que el shader pasa el suyo y este número sólo actúa cerca del jugador. La CPU se
+/// queda SIEMPRE en el piso, y es deliberado: la física es la referencia y actúa donde está el
+/// jugador, que es justo donde el quad vale 4 m y los dos coinciden bit a bit.
+/// ⚠️ APUNTABA A `ocean.tesc`, QUE YA NO EXISTE. El agua se dibujaba sobre la rejilla del clipmap y
+/// esa era su teselación más fina; hoy la dibuja el pase de nodos (`terrain_node_water.vert`) y el
+/// quad sale del propio nodo (`téxel × stride`). Este número es sólo el PISO de esa cadena.
+inline constexpr float OCEAN_MIN_QUAD_M = 4.0f;
+
+/**
+ * @brief NÚMERO DE ONDA LOCAL en profundidad finita. Gemelo de `harukaWaveNumber`.
+ *
+ * ⚠️ ESTA ES LA PIEZA QUE FALTABA, Y DE ELLA COLGABAN DOS LIMITACIONES. Todo el oleaje usaba la
+ * dispersión de AGUAS PROFUNDAS —`ω = √(g·k)`, escrito así y etiquetado así en los tres sitios—
+ * también en 30 cm de agua. La relación correcta es `ω² = g·k·tanh(k·d)`, y la diferencia no es
+ * cosmética: es la razón física de que una ola ROMPA.
+ *
+ * Lo que se conserva al entrar en el bajío es la FRECUENCIA (el periodo con el que llegan las
+ * crestas), no la longitud de onda. Al perder fondo, `k` crece y `λ` se ACORTA mientras la altura
+ * sube — y eso es lo que lleva la ola a la cúspide. Con `λ` fija, `H/λ ≈ 0,016` en agua somera y no
+ * hay pliegue posible; forzarlo abriendo el escarpado fue lo que rompió el agua interior, porque
+ * atacaba el síntoma.
+ *
+ * Medido con la tabla de referencia: el tren de 61 m pasa a **32,4 m en 3 m de fondo** y a ~10,7 m
+ * en 30 cm. En mar abierto (40 m) queda en 60,7 m, o sea que **el mar profundo no cambia**.
+ *
+ * ── CÓMO SE RESUELVE, Y POR QUÉ ASÍ ─────────────────────────────────────────────────────────────
+ *
+ * `ω² = g·k·tanh(k·d)` es implícita en `k`. Se arranca con la forma explícita de Fenton-McKee,
+ * `k·d = x·[tanh(x^{3/4})]^{-2/3}` con `x = ω²d/g`, que aquí vale EXACTAMENTE `k₀·d` (porque
+ * `ω² = g·k₀`), y es exacta en los dos límites: `x` grande → `k = k₀` (profundo), `x` pequeño →
+ * `k = √(k₀/d)` (somero). En medio se queda a ~1,7 %, y dos pasos de Newton lo cierran.
+ *
+ * ⚠️ SALIDA RÁPIDA EN AGUA PROFUNDA, Y NO ES UNA OPTIMIZACIÓN: es la GARANTÍA de que este cambio no
+ * toca el mar abierto. Con `k₀·d ≥ 10`, `tanh` vale 1,0 EXACTO en float (1−tanh(10) = 2,1e-9, por
+ * debajo del eps de 1,2e-7), así que devolver `k₀` no es una aproximación — es el mismo bit que
+ * saldría del solver. El mar hondo queda idéntico al de antes, bit a bit.
+ *
+ * ⚠️ LIMITACIÓN ASUMIDA: `k` pasa a depender del punto, y la fase se sigue componiendo como `k·x`
+ * en vez de integrar `k` a lo largo del rayo. Es la aproximación de número de onda LOCAL, estándar
+ * en tiempo real, y se desvía donde la profundidad cambia rápido (un cantil submarino). Lo mismo
+ * vale para la normal analítica del shader, que ignora el término `∂k/∂x`.
+ */
+inline float oceanWaveNumber(float k0, float depthM) {
+    const float d = std::max(depthM, 0.02f);
+    const float x = k0 * d;                       // = ω²d/g
+    if (x >= 10.0f) return k0;                    // aguas profundas: tanh(x) == 1 en float
+    // Fenton-McKee: arranque explícito, exacto en los dos límites.
+    const float t34 = std::tanh(std::pow(x, 0.75f));
+    float k = (x * std::pow(t34, -2.0f / 3.0f)) / d;
+    // Dos pasos de Newton sobre `f(k) = g·k·tanh(k·d) − ω²`.
+    const float w2 = OCEAN_G * k0;
+    for (int it = 0; it < 2; ++it) {
+        const float th = std::tanh(k * d);
+        const float f  = OCEAN_G * k * th - w2;
+        const float df = OCEAN_G * th + OCEAN_G * k * d * (1.0f - th * th);
+        if (std::fabs(df) < 1e-12f) break;
+        k -= f / df;
+        if (!(k > 0.0f)) { k = k0; break; }        // sin NaN ni negativos: la física no los tiene
+    }
+    return k;
+}
+
+/**
+ * @brief Desvanecido de las olas que se han hecho MÁS CORTAS QUE LA REJILLA. Gemelo de
+ *        `harukaShortWaveFade`.
+ *
+ * ⚠️ ESTO ES CONSECUENCIA DIRECTA DE LA DISPERSIÓN FINITA Y HAY QUE PAGARLO. `ocean.tesc` tesela a
+ * 4 m por segmento porque la ola más corta medía 8,7 m; con `λ` variable, ese mismo tren mide **4 m
+ * en 30 cm de agua** — justo en Nyquist, y por debajo más allá. Sin este desvanecido, la ola más
+ * corta se convertiría en muaré exactamente en la orilla, que es donde más se mira.
+ *
+ * Y es lo correcto físicamente además de necesario: una ola muy corta en agua muy somera disipa.
+ *
+ * ⚠️ VA EN LOS DOS LADOS aunque la CPU no tesele nada. La paridad no es negociable: si sólo el
+ * shader desvaneciera, la ola que se nada dejaría de ser la que se ve — y `rhitest_waveprobe` lo
+ * cazaría, que es justo para lo que está.
+ */
+inline float oceanShortWaveFade(float k, float quadM = OCEAN_MIN_QUAD_M) {
+    // ⚠️ LA BANDA VA DE `quad` A `2·quad`, Y ESTUVO UNA OCTAVA CORRIDA. Nyquist dice que con λ = 2·quad
+    // la ola YA CABE (dos muestras por longitud de onda), así que ahí tiene que valer 1 — y estaba
+    // valiendo 0. Con el quad más fino (4 m) eso dejaba el tren de 8,7 m al **8,75 %** a los pies del
+    // jugador: el mar se veía plano, y era este número. Por debajo de un quad no hay ni una muestra
+    // por onda y ahí sí se apaga del todo.
+    const float lo = std::max(quadM, OCEAN_MIN_QUAD_M);
+    const float hi = lo * 2.0f;
+    const float lambda = 6.2831853f / std::max(k, 1e-6f);
+    return glm::clamp((lambda - lo) / (hi - lo), 0.0f, 1.0f);
+}
+
+/**
+ * @brief Cuánta ola cabe con el FETCH que hay. Gemelo de `harukaFetchFactor`.
+ *
+ * ⚠️ ESTO ES LO QUE IMPIDE QUE UN LAGO DE MONTAÑA TENGA OLAS DE MAR ABIERTO. Medido antes de existir:
+ * un lago de 3,21 m de fondo recibía **3,46 m de ola**, más alta que profundo era el lago, porque el
+ * oleaje sale de UN estado global (el viento sobre el océano) y el bajío lo AMPLIFICA al entrar en
+ * agua somera — el modelo no tenía forma de saber que ahí no hay recorrido para levantarla.
+ *
+ * El fetch es esa variable. Pierson-Moskowitz describe el mar PLENAMENTE DESARROLLADO (fetch
+ * infinito) y es lo que `oceanStateFromWind` usa; JONSWAP describe el limitado por fetch:
+ *
+ *     Hs* = 0,0016 · sqrt(F*)      con  Hs* = g·Hs/U²  y  F* = g·F/U²   →   Hs = 0,0016·U·sqrt(F/g)
+ *
+ * A 11,4 m/s de viento y 400 m de lago sale **Hs = 0,12 m** contra los 2,80 m de mar abierto: un
+ * factor de 24. Es la diferencia entre un lago y una bahía.
+ *
+ * ⚠️ EL VIENTO NO SE PASA: SE DEDUCE DEL PROPIO ESTADO. Añadirlo a `OceanState` sería un dato más que
+ * mantener de acuerdo con los trenes, y ya se puede leer de ellos — `Hs = 4·sqrt(Σa²/2)` es la
+ * definición de altura significativa, y `U = sqrt(Hs·g/0,21)` la invierte por PM. Así el factor no
+ * puede desincronizarse de la ola que corrige.
+ *
+ * @param fetchM  diámetro equivalente de la masa de agua (m). `WATER_FETCH_UNLIMITED` = océano.
+ */
+inline float oceanFetchFactor(const OceanState& st, float fetchM) {
+    // Océano, o sin dato: no se limita nada. `<= 0` es "este punto no trae fetch", no "fetch cero".
+    if (fetchM <= 0.0f || fetchM >= WATER_FETCH_UNLIMITED * 0.5f) return 1.0f;
+    float sum2 = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) sum2 += st.wave[i][1] * st.wave[i][1];
+    const float Hs = 4.0f * std::sqrt(sum2 * 0.5f);
+    if (Hs <= 1e-4f) return 1.0f;
+    const float U   = std::sqrt(Hs * OCEAN_G / 0.21f);          // el viento que da ese Hs (PM)
+    const float HsF = 0.0016f * U * std::sqrt(fetchM / OCEAN_G); // JONSWAP limitado por fetch
+    return glm::clamp(HsF / Hs, 0.0f, 1.0f);
+}
+
+/**
+ * @brief Factor COMÚN que impone el límite de rompiente sobre la SUMA de los trenes. Gemelo de
+ *        `harukaBreakScale`.
+ *
+ * ⚠️ ESTE ES EL ARREGLO. Antes el tope `0.55·d` se aplicaba a CADA tren por separado y luego se
+ * sumaban los cuatro, así que la altura total podía llegar a `4 × 0.55·d = 2,2·d`: más del doble de
+ * lo que hay de agua. El índice de rompiente es una afirmación sobre la altura TOTAL de la ola, no
+ * sobre cada componente por separado, y tratarlo por componente lo vacía de sentido.
+ *
+ * Se veía en cualquier agua somera —toda la costa—, pero saltaba a la vista en los lagos de montaña,
+ * que son someros enteros: medido, un lago de 3,21 m de fondo recibía una ola de 5,93 m pico a pico,
+ * casi el doble que en mar abierto (3,16 m) y más alta que profundo era el lago.
+ *
+ * Se devuelve un factor común y no un tope por tren para que el REPARTO entre trenes no cambie: la
+ * ola se encoge entera, conservando su forma, en vez de recortarle la cresta a los trenes grandes y
+ * dejar intactos los pequeños (que daría un mar de otro aspecto al acercarse a la orilla).
+ */
+inline float oceanBreakScale(float depthM, const OceanState& st,
+                             float fetchM = WATER_FETCH_UNLIMITED) {
+    const float green = oceanGreenGain(depthM) * oceanFetchFactor(st, fetchM);
+    float sum = 0.0f;
+    // ⚠️ CON EL DESVANECIDO DE ONDA CORTA DENTRO. El tope habla de la altura que de verdad hay; si
+    // sumara trenes que la dispersion finita ya ha apagado, acotaria una ola que no existe y dejaria
+    // pasar mas de la que si.
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        const float k0 = 6.2831853f / st.wave[i][0];
+        sum += st.wave[i][1] * oceanShortWaveFade(oceanWaveNumber(k0, depthM));
+    }
+    const float total = sum * green;
+    const float limit = 0.55f * std::max(depthM, 0.0f);
+    return (total > limit && total > 1e-6f) ? (limit / total) : 1.0f;
+}
+
+/**
+ * @brief Cuánto está rompiendo la ola aquí: 0 en agua honda, →1 cuando el tope la aplasta.
+ *        Gemelo de `harukaBreakiness`.
+ *
+ * Es exactamente "el límite de rompiente está mordiendo", que es la condición física de rompiente.
+ * Lo consume el escarpado para plegar la cresta (la voluta) y la espuma.
+ */
+inline float oceanBreakiness(float depthM, const OceanState& st,
+                             float fetchM = WATER_FETCH_UNLIMITED) {
+    return glm::clamp(1.0f - oceanBreakScale(depthM, st, fetchM), 0.0f, 1.0f);
+}
+
+/**
+ * @brief ESCARPADO (Q) de un tren. Gemelo de `harukaSteepness`.
+ *
+ * Q reparte el desplazamiento entre horizontal y vertical: `disp = D·(Q·A·cos φ) + up·(A·sin φ)`.
+ * La superficie se PLIEGA —la cresta se echa hacia delante y se enrolla, que es lo que hace una ola
+ * al romper— cuando `Σ Q·A·k > 1`, porque ahí el jacobiano se vuelve negativo.
+ *
+ * ⚠️ Con la fórmula anterior eso NO PODÍA PASAR NUNCA. Era `Q = 0.75/(k·A·N)` acotado a 1, lo que
+ * deja `Q·A·k ≤ 0.75/N` por tren y por tanto `Σ ≤ 0.75`: el jacobiano se quedaba en 0,25 como
+ * mínimo. El comentario de al lado decía "si pasa de 1, la pliega" describiendo un caso que la
+ * propia fórmula impedía, y la espuma por plegado no se encendía jamás.
+ *
+
+ * ⚠️ SE INTENTO LA VOLUTA (la cresta que se enrolla al romper) Y SE REVIRTIO. Se subia el presupuesto
+ * de escarpado y se abria el tope de Q en la franja de rompiente, y el jacobiano SI se volvia negativo
+ * (medido: -0,104 a 1,2 m de fondo). Pero rompia el agua interior, y el motivo esta en la propia
+ * formula: como `Q = presupuesto/(k·A·N)`, el desplazamiento horizontal `Q·A = presupuesto/(k·N)` NO
+ * DEPENDE DE LA AMPLITUD. En mar abierto son ~3 m y esta bien; en un lago de 30 cm de fondo son los
+ * MISMOS ~3 m, asi que la lamina se desplazaba metros en horizontal y se plegaba sobre si misma. Sobre
+ * las celdas de 4,4 m del parche de rios/lagos eso se veia como cubos deformados.
+ *
+ * Y el fondo del asunto es que aqui la ola NO PUEDE plegarse sola: una ola real rompe porque al perder
+ * fondo se le acorta la LONGITUD DE ONDA a la vez que crece la altura, y aqui lambda es fija. Con
+ * H/lambda ~ 0,016 en agua somera no hay pliegue posible sin forzarlo, y forzarlo es lo que rompio el
+ * agua interior. La voluta de verdad pide shoaling de longitud de onda, que es otro trabajo.
+ */
+inline float oceanSteepness(float k, float amp, float /*breakiness*/) {
+    // Reparto del escarpado entre los trenes para que la suma no se pliegue sola en mar abierto.
+    return std::min(0.75f / (k * amp * float(OCEAN_WAVES) + 1e-4f), 1.0f);
+}
+
+/// Ley de Green + límite de rompiente POR TREN. Se mantiene para el `swash`, que la usa como
+/// medida de alcance de UN tren (el dominante) y no como amplitud de la ola sumada.
 inline float oceanShoalAmp(float depthM, float ampDeep) {
-    const float d     = std::max(depthM, 0.05f);
-    const float green = std::pow(std::clamp(50.0f / d, 1.0f, 40.0f), 0.25f);
-    return std::min(ampDeep * green, 0.55f * depthM);
+    return std::min(ampDeep * oceanGreenGain(depthM), 0.55f * depthM);
 }
 
 /**
@@ -201,8 +412,11 @@ inline float oceanShoalAmp(float depthM, float ampDeep) {
 inline float oceanSwash(float depthRest, const glm::vec3& wp, const glm::vec3& up, float t,
                         const OceanState& st) {
     const float lambda0 = st.wave[0][0];
-    const float k0 = 6.2831853f / lambda0;
-    const float w0 = std::sqrt(OCEAN_G * k0);
+    const float kDeep0  = 6.2831853f / lambda0;
+    // ⚠️ La trepada sigue al tren que rompe, así que su fase va con el `k` LOCAL — el mismo que usa
+    // la geometría. La frecuencia, en cambio, es la profunda: es lo que se conserva.
+    const float k0 = oceanWaveNumber(kDeep0, std::max(depthRest, 0.05f));
+    const float w0 = std::sqrt(OCEAN_G * kDeep0);
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
     const glm::vec3 t2 = glm::cross(up, t1);
@@ -237,18 +451,27 @@ inline float oceanSwash(float depthRest, const glm::vec3& wp, const glm::vec3& u
  * @param st      estado del mar (los cuatro trenes). El MISMO que se subió a la GPU este frame.
  */
 inline float oceanWaveHeight(const glm::vec3& wp, const glm::vec3& up, float t,
-                             float depthM, float fade, const OceanState& st) {
+                             float depthM, float fade, const OceanState& st,
+                             float fetchM = WATER_FETCH_UNLIMITED) {
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
     const glm::vec3 t2 = glm::cross(up, t1);
+    // Bajío y tope de rompiente: el bajío es por tren (cada longitud de onda crece a su ritmo) pero
+    // el tope es COMÚN a los cuatro, porque el índice de rompiente habla de la ola entera.
+    // El FETCH entra multiplicando el bajío: es cuánta ola puede haber aquí antes de que el fondo la
+    // amplifique. Sin él, un lago hereda el swell del océano — ver `oceanFetchFactor`.
+    const float green = oceanGreenGain(depthM) * oceanFetchFactor(st, fetchM);
+    const float scale = oceanBreakScale(depthM, st, fetchM);
     float h = 0.0f;
     for (int i = 0; i < OCEAN_WAVES; ++i) {
-        const float lambda = st.wave[i][0];
-        const float k      = 6.2831853f / lambda;
-        const float amp    = oceanShoalAmp(depthM, st.wave[i][1]) * fade;
+        // ⚠️ `λ` DE LA TABLA ES LA DE AGUAS PROFUNDAS. La local sale de la dispersión finita, y `ω`
+        // —que es lo que se conserva— sigue siendo la profunda. Ver `oceanWaveNumber`.
+        const float k0 = 6.2831853f / st.wave[i][0];
+        const float k  = oceanWaveNumber(k0, depthM);
+        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k);
         if (amp <= 1e-4f) continue;
         const glm::vec3 D = glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]);
-        const float w  = std::sqrt(OCEAN_G * k);          // dispersión de aguas profundas
+        const float w  = std::sqrt(OCEAN_G * k0);         // la frecuencia NO cambia con el fondo
         const float ph = k * glm::dot(D, wp) - w * t;
         h += amp * std::sin(ph);                          // solo la componente a lo largo de `up`
     }
@@ -292,25 +515,35 @@ inline float oceanWaveHeight(const glm::vec3& wp, const glm::vec3& up, float t,
  * Parámetros idénticos a `oceanWaveHeight`, y el mismo `t` de `oceanClockSeconds()`.
  */
 inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, float t,
-                                   float depthM, float fade, const OceanState& st) {
+                                   float depthM, float fade, const OceanState& st,
+                                   float fetchM = WATER_FETCH_UNLIMITED) {
     // MISMO marco que `oceanWaveHeight` y que el shader. Si estas dos líneas divergen, la velocidad
     // apunta a otro sitio que la altura y el agua empuja en diagonal respecto a sus propias crestas.
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
     const glm::vec3 t2 = glm::cross(up, t1);
+    // MISMO bajío, MISMO tope común y MISMO escarpado que `oceanWaveHeight`. Si estas tres líneas se
+    // separaran de las suyas, la velocidad dejaría de ser la derivada de la altura y el test de
+    // paridad lo cazaría — que es justo para lo que está.
+    const float green      = oceanGreenGain(depthM) * oceanFetchFactor(st, fetchM);
+    const float scale      = oceanBreakScale(depthM, st, fetchM);
+    const float breakiness = glm::clamp(1.0f - scale, 0.0f, 1.0f);
     glm::vec3 v(0.0f);
     for (int i = 0; i < OCEAN_WAVES; ++i) {
-        const float lambda = st.wave[i][0];
-        const float k      = 6.2831853f / lambda;
-        const float amp    = oceanShoalAmp(depthM, st.wave[i][1]) * fade;
+        // Mismas tres líneas que `oceanWaveHeight`, y por el mismo motivo: si se separaran, la
+        // velocidad dejaría de ser la derivada de la altura y `ocean_wave_velocity` lo cazaría.
+        const float k0 = 6.2831853f / st.wave[i][0];
+        const float k  = oceanWaveNumber(k0, depthM);
+        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k);
         if (amp <= 1e-4f) continue;
         const glm::vec3 D = glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]);
-        const float w  = std::sqrt(OCEAN_G * k);          // dispersión de aguas profundas
+        const float w  = std::sqrt(OCEAN_G * k0);         // la frecuencia NO cambia con el fondo
         const float ph = k * glm::dot(D, wp) - w * t;
-        // Q = escarpado, GEMELO EXACTO de `ocean_wave.glsl` (misma fórmula, mismo tope). Entra en la
-        // velocidad horizontal porque es quien reparte cuánto del círculo es avance y cuánto subida.
-        float Q = 0.75f / (k * amp * float(OCEAN_WAVES) + 1e-4f);
-        Q = std::min(Q, 1.0f);
+        // Q = escarpado, GEMELO EXACTO de `ocean_wave.glsl`. Entra en la velocidad horizontal porque
+        // es quien reparte cuánto del círculo es avance y cuánto subida — y al romper crece, que es
+        // por lo que la cresta de una ola que revienta te empuja hacia la playa mucho más que el
+        // mismo oleaje en agua honda.
+        const float Q = oceanSteepness(k, amp, breakiness);
         v += D * (Q * amp * w * std::sin(ph)) - up * (amp * w * std::cos(ph));
     }
     return v;

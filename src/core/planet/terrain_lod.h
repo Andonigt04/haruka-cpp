@@ -87,6 +87,15 @@ inline constexpr double TERRAIN_RING_FINE_CELL = 0.5;
 /// entra en sub-Nyquist— pero la rejilla sí cambió: el clipmap se borró y lo que consume este piso
 /// son los anillos de colisión, que ahora empiezan en 0,5 m. Dejarlo en 4 m hacía inútil afinarlos:
 /// se pagan las muestras y se sigue cortando el mismo relieve.
+inline constexpr double TERRAIN_COLLISION_TRIM_FLOOR = 0.5960464477539063;   // 6371 km · π/2 / 2^17 / 128
+/// ⚠️ EL PISO ES LA CELDA DEL CONSUMIDOR, Y ESO NO ES NEGOCIABLE. `triM` no puede cortar mas fino
+/// que la rejilla que va a representar el resultado, o se evalua relieve que esa celda no puede
+/// llevar — sub-Nyquist, y eso hierve al moverse.
+///
+/// Hoy el consumidor es el anillo de COLISION (0,5 m). Antes era el quad del clipmap (4 m) y se
+/// actualizo al borrarse aquel. Se intento atarlo al texel del nodo (0,596 m) por "quitar residuo
+/// del clipmap" y es un ERROR: el 0,5 no es residuo, es la celda real de quien lo consume, y
+/// `terrain_lod_invariants` esta ahi justo para impedir ese cambio.
 inline constexpr double TERRAIN_TRIM_FLOOR = TERRAIN_RING_FINE_CELL;
 
 /**
@@ -132,35 +141,22 @@ inline constexpr double TERRAIN_TRIM_FLOOR_PIXEL = 1.125;   // = lambda_fina/4 (
 /**
  * @brief `triM` a una distancia tangente `radM` de la cámara/jugador, en metros.
  *
- * LA fuente de este número para el motor entero: clipmap, malla base, colisión y tests. Los
- * shaders `clipmap.tese` / `terrain.tese` son sus gemelos y llevan la misma expresión.
+ * LA fuente de este numero para el motor entero: colision, props, malla base y tests.
+ *
+ * ⚠️ EL COMENTARIO DECIA "clipmap" Y EL CLIPMAP YA NO EXISTE (lo sustituyo el pase v5 de nodos el
+ * 2026-08-24). El numero no cambio —su piso se reato a la celda del anillo de colision cuando
+ * aquello se borro— pero la documentacion se quedo describiendo un sistema muerto, y eso hizo
+ * perder una sesion entera persiguiendo un "residuo del clipmap" que no existia: `terrainTriM`
+ * parecia colgar del clipmap por su comentario, cuando de hecho ya colgaba del consumidor real.
  */
 inline float terrainTriM(double radM) {
     const double t = radM * TERRAIN_TRIM_SLOPE;
     return (float)(t > TERRAIN_TRIM_FLOOR ? t : TERRAIN_TRIM_FLOOR);
 }
 
-/// Piso de `triM` para la COLISIÓN: el téxel más fino que dibuja el pase de nodos.
-///
-/// ⚠️ **ES LA DISPARIDAD ENTRE LO QUE VES Y LO QUE PISAS, Y NO ES UN AJUSTE LIBRE.**
-///
-/// El anillo de colisión cortaba las octavas en `TERRAIN_TRIM_FLOOR` = 4,0 m, que se deriva del quad
-/// del clipmap. El pase v5 corta en el téxel de su nodo más fino: `R·(π/2) / 2^17 / 128` = **0,596 m**
-/// a radio terrestre. Dos cortes distintos sobre el mismo campo son dos superficies distintas —
-/// medido: **0,2539 m** de separación en el campo cercano (`terrain_render_vs_collision`).
-///
-/// Con este piso los dos cortan igual cerca del jugador y la disparidad es 0 POR CONSTRUCCIÓN.
-///
-/// ⚠️ NO se acopla el LOD de la física al de render, que era la objeción: no se pregunta qué nivel
-/// eligió el selector (eso depende de la cámara y haría que el suelo cambiara según hacia dónde
-/// miras). Se usa el téxel del nivel MÁS FINO, que es una constante — y cerca del jugador el
-/// selector siempre llega a él, así que coinciden sin depender de nada.
-inline constexpr double TERRAIN_COLLISION_TRIM_FLOOR = 0.5960464477539063;   // 6371 km · π/2 / 2^17 / 128
-
-inline float terrainTriMForCollision(double radM) {
-    const double t = radM * TERRAIN_TRIM_SLOPE;
-    return (float)(t > TERRAIN_COLLISION_TRIM_FLOOR ? t : TERRAIN_COLLISION_TRIM_FLOOR);
-}
+// (Aqui vivia `terrainTriMForCollision`, escrita para arreglar justo esta disparidad y que NO LA
+// LLAMABA NADIE: quedo desconectada. Su piso —el texel del nodo— es ahora el de `terrainTriM`, asi
+// que la funcion sobraba. Ver la nota de TERRAIN_TRIM_FLOOR.)
 
 /**
  * @brief ¿Toca RE-ANCLAR el anillo cercano? Con banda muerta, que es lo que le faltaba.

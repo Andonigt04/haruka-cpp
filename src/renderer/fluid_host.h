@@ -37,6 +37,9 @@ public:
     // --- Fuente de verdad del mundo (las fija Application cada frame) ---
     /** @brief Elevación del terreno (m, relativa al nivel del mar 0) en un punto del mundo. */
     std::function<double(const glm::dvec3&)> terrainHeightFn;
+    /// Cota de la lámina HORNEADA con el planeta (m sobre el nivel del mar) o `WATER_FILL_DRY`.
+    /// Con esto la siembra del parche deja de depender de su BORDE — ver `ShallowWaterSim::seedLakes`.
+    std::function<double(const glm::dvec3&)> bakedWaterFn;
     /** @brief Publica la superficie del agua interior donde la dibuje el MAR. Lo pone el llamador
      *  con `TerrestrialPlanet::setInlandWater`; sin él, los ríos y lagos simulan pero no se ven. */
     std::function<void(const std::vector<float>&, int, const glm::vec3&, const glm::vec3&,

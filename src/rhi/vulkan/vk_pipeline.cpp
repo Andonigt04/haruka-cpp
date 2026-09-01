@@ -138,7 +138,12 @@ namespace Haruka::RHI::vulkan
         const char* s = stageSuffix(stage);
         if (!s) { HARUKA_LOGE("RHI/VK", "compileGlslToSpv: etapa no soportada (%d)", (int)stage); return {}; }
 
-        const uint64_t hash = fnv1a(vulkanizeGlsl(source) + "\n@" + s);
+        // ⚠️ EL HASH INCLUYE LAS OPCIONES DEL COMPILADOR, NO SOLO LA FUENTE. El .spv se guarda en
+        // disco (ver abajo), asi que si cambian los shifts de binding y el hash no lo reflejara, se
+        // reutilizaria un SPIR-V con el layout viejo — un fallo silencioso y dificilisimo de ver.
+        const std::string opts = "|ssbo=" + std::to_string(kSsboBindingBase)
+                               + "|tex="  + std::to_string(kTextureBindingBase) + "|v2";
+        const uint64_t hash = fnv1a(vulkanizeGlsl(source) + "\n@" + s + opts);
         static std::map<uint64_t, std::vector<uint32_t>> cache;
         if (auto it = cache.find(hash); it != cache.end()) return it->second;
 
@@ -146,6 +151,21 @@ namespace Haruka::RHI::vulkan
         if (!tmp || !*tmp) tmp = "/tmp";
         const std::string inPath  = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".glsl";
         const std::string outPath = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".spv";
+
+        // ── EL .spv SE REUTILIZA ENTRE EJECUCIONES ──────────────────────────────────────────────
+        //
+        // ⚠️ ESTO ERA UN SEGUNDO DE ARRANQUE. Cada shader que no viene precompilado se traducia
+        // forkeando `glslangValidator` con `std::system` —escribir .glsl, fork+exec, leer .spv— y
+        // **el .spv se borraba al terminar**. La unica cache era un `std::map` en memoria, que muere
+        // con el proceso: se pagaba entero en CADA arranque. Medido en esta maquina: **6 ms por
+        // fork**, y en el log de Andoni salen ~30 shaders por arranque en Vulkan.
+        //
+        // El SPIR-V es independiente del fabricante, asi que la cache sirve igual al cambiar de GPU
+        // — que es justo cuando el se lo encontro (AMD -> NVIDIA -> AMD).
+        if (std::vector<uint32_t> pre = readSpv(outPath); !pre.empty()) {
+            cache.emplace(hash, pre);
+            return pre;
+        }
 
         {
             std::ofstream f(inPath);
@@ -168,7 +188,9 @@ namespace Haruka::RHI::vulkan
         const int rc = std::system(cmd.c_str());
         std::vector<uint32_t> spv = readSpv(outPath);
         std::remove(inPath.c_str());
-        std::remove(outPath.c_str());
+        // ⚠️ EL .spv NO SE BORRA: es la cache entre ejecuciones (ver arriba). Solo se limpia si la
+        // compilacion fallo, para no dejar un fichero vacio que luego se lea como valido.
+        if (spv.empty()) std::remove(outPath.c_str());
 
         if (rc != 0 || spv.empty())
         {

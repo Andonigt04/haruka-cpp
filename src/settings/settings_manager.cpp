@@ -113,6 +113,8 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "LODTargetPx"))    g.lodTargetPx    = atoi(val);
     else if (!strcmp(key, "MotionBlur"))     g.motionBlur     = atoi(val) != 0;
     else if (!strcmp(key, "WindowMode"))     g.windowMode     = (Settings::WindowMode)atoi(val);
+    else if (!strcmp(key, "ResolutionW"))    g.resolutionW    = atoi(val);
+    else if (!strcmp(key, "ResolutionH"))    g.resolutionH    = atoi(val);
     else if (!strcmp(key, "RenderBackend"))  g.renderBackend  = (Settings::RenderBackend)atoi(val);
     // GPUs preferidas: `Gpu0`, `Gpu1`… El índice del CLAVE es la posición en la lista de preferencia,
     // no el índice de la GPU en el sistema (que no se guarda nunca: ver `preferredGpus`).
@@ -154,6 +156,12 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("LODTargetPx=%d\n",    g.lodTargetPx);
     buf->appendf("MotionBlur=%d\n",     g.motionBlur ? 1 : 0);
     buf->appendf("WindowMode=%d\n",     (int)g.windowMode);
+    // 0x0 no se guarda: es el centinela de "sin resolver". Guardarlo haria que un arranque fallido
+    // dejara el ajuste clavado en 0 y la ventana saldria de 0x0 pixeles.
+    if (g.resolutionW > 0 && g.resolutionH > 0) {
+        buf->appendf("ResolutionW=%d\n", g.resolutionW);
+        buf->appendf("ResolutionH=%d\n", g.resolutionH);
+    }
     buf->appendf("RenderBackend=%d\n",  (int)g.renderBackend);
     for (size_t i = 0; i < g.preferredGpus.size(); ++i)
         if (!g.preferredGpus[i].empty())

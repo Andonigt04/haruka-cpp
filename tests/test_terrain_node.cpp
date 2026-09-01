@@ -5377,3 +5377,339 @@ void test_terrain_node_distance_morph_per_vertex() {
                          "dos lados — si no los diera, el arreglo no arreglaria nada");
     CHECK(worstGap > 1.0, "CONTRAPRUEBA: y eso valia METROS de grieta, no un detalle");
 }
+
+/**
+ * @brief ¿CUÁNTO DEPENDE DEL OBSERVADOR EL SUELO QUE SE PISA? El requisito de multijugador, medido.
+ *
+ * Andoni fijó el requisito el 2026-08-31: **lo visible tiene que ser colisionable, 10-100 km.** Eso
+ * convierte esta medida en un criterio de aceptación y no en una curiosidad.
+ *
+ * `terrainTriM(radM) = max(radM·0.002, 0.5)` es el corte de octavas de la colisión, y su entrada es
+ * **la distancia al jugador**. O sea que la altura del MISMO punto del mundo depende de dónde esté
+ * mirando quien pregunta. Dos clientes a distinta distancia pisan suelos distintos, y a un mismo
+ * jugador el suelo le sube o baja mientras se acerca.
+ *
+ * ⚠️ LA MEDIDA ANTERIOR LLEGABA A 2500 m Y SE LEYÓ COMO SI FUERA EL TOPE. Daba 0,313 m y "satura",
+ * pero no satura: es que entre 1200 y 2500 m no se apaga ninguna octava nueva. Con el requisito a
+ * 10-100 km el barrido tiene que llegar ahí, porque cada octava que cruza su guarda de Nyquist añade
+ * su amplitud entera de golpe.
+ *
+ * Referencia = el corte del PIE (`terrainTriM(0)`), que es la superficie que de verdad se pisa.
+ */
+void test_terrain_collision_observer_dependence() {
+    beginTest("terrain_collision_observer_dependence");
+    const double R = 6371000.0;
+
+    // Puntos repartidos por CUATRO caras del cubo, no por un nodo: un solo nodo mide un trozo de
+    // relieve y su peor caso no es el del planeta.
+    std::vector<glm::dvec3> pts;
+    const PlanetFace faces[4] = { PlanetFace::FRONT, PlanetFace::TOP,
+                                  PlanetFace::RIGHT, PlanetFace::BACK };
+    for (PlanetFace f : faces) {
+        const NodeId n{ f, 17, (1u << 17) / 2, (1u << 17) / 3 };
+        for (uint32_t v = 1; v < TERRAIN_NODE_CELLS; v += 9)
+            for (uint32_t u = 1; u < TERRAIN_NODE_CELLS; u += 9)
+                pts.push_back(nodeTexelDir(n, u, v));
+    }
+
+    const float refCut = Haruka::Planet::terrainTriM(0.0);
+    std::vector<double> ref(pts.size());
+    for (size_t k = 0; k < pts.size(); ++k)
+        ref[k] = (double)Haruka::Planet::terrainDetail(pts[k], R, refCut);
+
+    std::printf("    referencia: el corte del PIE, terrainTriM(0) = %.3f m · %zu puntos\n",
+                refCut, pts.size());
+    std::printf("    distancia    corte      octavas    divergencia media    peor\n");
+
+    // Cuántas octavas de la escalera sobreviven a ese corte, para que se vea el mecanismo: la
+    // divergencia no crece suave, salta cuando una octava cruza su guarda.
+    auto octavesAlive = [](double cut) {
+        const double guard[7] = { 6000.0, 3000.0, 1428.5, 312.5, 55.5, 11.0, 2.25 };
+        int n = 0; for (double g : guard) if (cut < g) ++n; return n;
+    };
+
+    struct Row { double d, cut, mean, worst; int oct; };
+    std::vector<Row> rows;
+    for (double d : { 0.0, 100.0, 250.0, 300.0, 600.0, 1200.0, 2500.0,
+                      6000.0, 10000.0, 30000.0, 100000.0 }) {
+        const float cut = Haruka::Planet::terrainTriM(d);
+        double sum = 0.0, worst = 0.0;
+        for (size_t k = 0; k < pts.size(); ++k) {
+            const double e = std::fabs((double)Haruka::Planet::terrainDetail(pts[k], R, cut) - ref[k]);
+            sum += e; worst = std::max(worst, e);
+        }
+        const Row r{ d, (double)cut, sum / (double)pts.size(), worst, octavesAlive((double)cut) };
+        rows.push_back(r);
+        std::printf("    %8.0f m  %8.3f m   %d de 7    %10.4f m    %10.4f m\n",
+                    r.d, r.cut, r.oct, r.mean, r.worst);
+    }
+
+    // ── LO QUE SE AFIRMA ────────────────────────────────────────────────────────────────────────
+    //
+    // (a) DENTRO DE 250 m LA DIVERGENCIA ES CERO EXACTO. No "pequeña": `terrainTriM` es constante en
+    //     su piso hasta 250 m (0,002·250 = 0,5), asi que el corte es EL MISMO y la funcion es pura.
+    //     Esto es a la vez el resultado tranquilizador y la CONTRAPRUEBA de la medida: si el barrido
+    //     devolviera ruido en vez de ceros aqui, las cifras de mas abajo no significarian nada.
+    double within = 0.0, beyond10k = 0.0, beyond100k = 0.0;
+    for (const Row& r : rows) {
+        if (r.d <= 250.0) within = std::max(within, r.worst);
+        if (r.d == 10000.0)  beyond10k  = r.worst;
+        if (r.d == 100000.0) beyond100k = r.worst;
+    }
+    CHECK(within == 0.0, "hasta 250 m el corte es el MISMO y la colision es funcion PURA de la "
+                         "posicion: divergencia CERO EXACTO entre clientes");
+    // (b) Y FUERA NO LO ES, con el orden de magnitud a la vista. Sin esta, la (a) se leeria como
+    //     "no hay problema" cuando lo que dice es "no hay problema DENTRO DE 250 m".
+    CHECK(beyond10k > 1.0, "CONTRAPRUEBA: a 10 km el mismo punto ya vale METROS distintos segun "
+                           "quien pregunte — el requisito de 'lo visible es colisionable' no se cumple");
+    CHECK(beyond100k > beyond10k, "y empeora con la distancia: cada octava que cruza Nyquist entra "
+                                  "entera");
+    std::printf("    veredicto: dentro de 250 m %.4f m · a 10 km %.3f m · a 100 km %.3f m\n",
+                within, beyond10k, beyond100k);
+}
+
+/**
+ * @brief EL CRITERIO DE VERDAD: ¿coincide el suelo de un cliente LEJANO con el de uno CERCANO?
+ *
+ * Requisito de Andoni (2026-08-31): **lo visible tiene que ser colisionable, 10-100 km**, y las
+ * colisiones tienen que ser las mismas entre clientes. Eso es UN numero, no dos, y hay que medirlo
+ * como uno.
+ *
+ * ⚠️ MEDIRLO POR SEPARADO ENGANA, Y CASI ME COME. Hay dos mecanismos:
+ *
+ *   · **el CORTE** — `terrainTriM(radM)` apaga octavas segun la distancia AL JUGADOR;
+ *   · **la REJILLA** — `terrainRingNode` coloca los nodos en `k·cell` DESDE EL ANCLA, asi que al
+ *     caminar la rejilla se desplaza y la bilineal entre nodos cambia bajo un objeto quieto.
+ *
+ * Medidos aparte, "cortar por la celda del anillo" baja el termino de rejilla 7x (4,12 -> 0,58 m a
+ * 10 km) y parece el arreglo. Pero encarece el otro —la celda es MAS GRUESA que el corte de hoy, o
+ * sea menos octavas— y el total puede empeorar. Un arreglo que mejora un sumando y empeora el otro
+ * mas no es un arreglo; es un numero correcto contando media verdad.
+ *
+ * Asi que esto compara contra LA SUPERFICIE QUE SE PISA (el corte del pie, funcion pura de la
+ * posicion) la superficie que un cliente lejano presenta de verdad: bilineal sobre su rejilla, con
+ * su corte y con su ancla. Eso es exactamente lo que un objeto replicado ve.
+ */
+void test_terrain_collision_client_agreement() {
+    beginTest("terrain_collision_client_agreement");
+    const double R = 6371000.0;
+    const glm::dvec3 up = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 t1 = glm::normalize(glm::cross(up, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 t2 = glm::normalize(glm::cross(up, t1));
+
+    auto dirAt = [&](double wx, double wz) {
+        return glm::normalize(up + (t1 * wx) / R + (t2 * wz) / R);
+    };
+    // Un nodo de la rejilla del cliente lejano. `cellCut > 0` = la hipotesis (cortar por la celda).
+    auto nodeH = [&](double wx, double wz, double ax, double az, double cellCut) {
+        const double radM = std::sqrt((wx - ax) * (wx - ax) + (wz - az) * (wz - az));
+        const double cut  = (cellCut > 0.0) ? std::max(cellCut, Haruka::Planet::TERRAIN_TRIM_FLOOR)
+                                            : (double)Haruka::Planet::terrainTriM(radM);
+        return (double)Haruka::Planet::terrainDetail(dirAt(wx, wz), R, (float)cut);
+    };
+    // Lo que Jolt presenta en `(px,pz)`: bilineal entre los cuatro nodos que lo rodean.
+    auto surfaceAt = [&](double px, double pz, double cell, double ax, double az, double cellCut) {
+        const double gx = std::floor((px - ax) / cell), gz = std::floor((pz - az) / cell);
+        const double x0 = ax + gx * cell, z0 = az + gz * cell;
+        const double fx = (px - x0) / cell, fz = (pz - z0) / cell;
+        const double a = nodeH(x0, z0, ax, az, cellCut)
+                       + (nodeH(x0 + cell, z0, ax, az, cellCut) - nodeH(x0, z0, ax, az, cellCut)) * fx;
+        const double b = nodeH(x0, z0 + cell, ax, az, cellCut)
+                       + (nodeH(x0 + cell, z0 + cell, ax, az, cellCut)
+                        - nodeH(x0, z0 + cell, ax, az, cellCut)) * fx;
+        return a + (b - a) * fz;
+    };
+
+    const std::vector<Haruka::Planet::TerrainRingSpec> rings =
+        Haruka::Planet::terrainRingLayout(200000.0);
+    const float footCut = Haruka::Planet::terrainTriM(0.0);
+    std::printf("    referencia: la superficie que SE PISA (corte del pie %.3f m, funcion pura)\n", footCut);
+    std::printf("    lo que ve un cliente a esa distancia, con su rejilla, su corte y su ancla:\n");
+    std::printf("    distancia   celda      HOY (corte por distancia)   CORTE=CELDA (refutado)   CORTE DEL PIE SIEMPRE\n");
+    std::printf("                            media        peor           media      peor        media      peor\n");
+
+    double hoy10k = 0.0, hyp10k = 0.0, hoy100k = 0.0, hyp100k = 0.0, hoyNear = 0.0;
+    for (double d : { 100.0, 600.0, 2500.0, 10000.0, 100000.0 }) {
+        double cell = 0.0;
+        for (const auto& r : rings) if (r.extent >= d) { cell = r.cell; break; }
+        if (cell <= 0.0) cell = rings.empty() ? 1.0 : rings.back().cell;
+
+        double sA = 0.0, wA = 0.0, sB = 0.0, wB = 0.0, sC = 0.0, wC = 0.0; int n = 0;
+        for (int a = 1; a < 8; ++a) for (int b = 1; b < 8; ++b) {
+            const double px = d + cell * ((double)a / 8.0), pz = cell * ((double)b / 8.0);
+            // La verdad: el corte del pie evaluado EN el punto. Ni rejilla ni ancla.
+            const double truth = (double)Haruka::Planet::terrainDetail(dirAt(px, pz), R, footCut);
+            const double eA = std::fabs(surfaceAt(px, pz, cell, 0.0, 0.0, 0.0)  - truth);
+            const double eB = std::fabs(surfaceAt(px, pz, cell, 0.0, 0.0, cell) - truth);
+            // TERCERA POLITICA, la que implica resolver por consulta: los VERTICES del anillo lejano
+            // se evaluan con el corte del PIE, o sea que caen sobre la superficie que se pisa. Queda
+            // el error de cuerda de la celda, pero es funcion PURA de la posicion: sin observador.
+            const double eC = std::fabs(surfaceAt(px, pz, cell, 0.0, 0.0, 1e-6) - truth);
+            sA += eA; wA = std::max(wA, eA); sB += eB; wB = std::max(wB, eB);
+            sC += eC; wC = std::max(wC, eC); ++n;
+        }
+        std::printf("    %8.0f m %8.2f m  %9.4f m %9.4f m  %9.4f m %9.4f m  %9.4f m %9.4f m\n",
+                    d, cell, sA / (double)n, wA, sB / (double)n, wB, sC / (double)n, wC);
+        if (d == 100.0)    hoyNear = wA;
+        if (d == 10000.0)  { hoy10k = wA;  hyp10k = wB; }
+        if (d == 100000.0) { hoy100k = wA; hyp100k = wB; }
+    }
+    std::printf("    HOY: 10 km %.3f m · 100 km %.3f m   |   CORTE=CELDA: 10 km %.3f m · 100 km %.3f m\n",
+                hoy10k, hoy100k, hyp10k, hyp100k);
+
+    // ── LO QUE SE AFIRMA ────────────────────────────────────────────────────────────────────────
+    //
+    // (a) HOY NO SE CUMPLE EL REQUISITO. Un objeto replicado a 10 km se apoya en un suelo que no es
+    //     el que pisa el jugador que esta encima.
+    CHECK(hoy10k > 1.0, "HOY: a 10 km el suelo de colision no es el que se pisa — el requisito de "
+                        "'lo visible es colisionable' no se cumple");
+    // (b) Y CERCA SI. Es la contraprueba de la medida: si tambien fallara aqui, el barrido estaria
+    //     midiendo cualquier otra cosa y no la distancia.
+    CHECK(hoyNear < hoy10k * 0.2, "CONTRAPRUEBA: cerca del jugador SI coincide — la medida ve la "
+                                  "distancia, no un error de fondo");
+    // (c) Y EL VEREDICTO SOBRE LA HIPOTESIS, sea cual sea. Lo unico que se fija es que la comparacion
+    //     quede escrita: si algun dia alguien cambia el corte, este test dice si mejoro o empeoro.
+    std::printf("    veredicto: cortar por la celda %s el acuerdo entre clientes a 10 km (%.3f -> %.3f m)\n",
+                (hyp10k < hoy10k) ? "MEJORA" : "EMPEORA", hoy10k, hyp10k);
+}
+
+/**
+ * @brief ¿CUÁNTO CUESTA resolver el suelo por CONSULTA en vez de contra la malla?
+ *
+ * Andoni, 2026-08-31: *"¿tiene buen rendimiento y es replicable en clientes? entonces es un sí"*.
+ * La replicabilidad es estructural —`terrainTriM(0)` es constante, así que la consulta es función
+ * pura de la posición— pero el coste hay que medirlo, porque de él depende cuántos objetos caben.
+ *
+ * ⚠️ ESTO NO SIGNIFICA NADA COMPILADO EN DEBUG. A -O0 el ruido va 10-20x más lento y el número
+ * saldría prohibitivo por el compilador, no por el algoritmo. `CMakeLists` avisa cuando el tipo de
+ * build es Debug; si ves este test ahí, ignora el resultado.
+ *
+ * Se mide el corte del PIE (0,5 m), que es el caso caro: 7 octavas x 8 esquinas = 56 hashes.
+ */
+void test_terrain_ground_query_cost() {
+    beginTest("terrain_ground_query_cost");
+    const double R = 6371000.0;
+    const float  cut = Haruka::Planet::terrainTriM(0.0);
+
+    // Direcciones repartidas, no una sola: una sola cabría entera en caché y mediría otra cosa.
+    std::vector<glm::dvec3> dirs;
+    for (int k = 0; k < 4096; ++k) {
+        const double a = (double)k * 0.61803398875;
+        const double t = a - std::floor(a), u = (double)k / 4096.0;
+        const double phi = t * 6.283185307179586, cz = 1.0 - 2.0 * u;
+        const double sz = std::sqrt(std::max(0.0, 1.0 - cz * cz));
+        dirs.push_back(glm::dvec3(sz * std::cos(phi), sz * std::sin(phi), cz));
+    }
+
+    // Una pasada en frío para que la caché no cuente como coste del algoritmo.
+    double sink = 0.0;
+    for (const glm::dvec3& d : dirs) sink += (double)Haruka::Planet::terrainDetail(d, R, cut);
+
+    const int reps = 16;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < reps; ++r)
+        for (const glm::dvec3& d : dirs) sink += (double)Haruka::Planet::terrainDetail(d, R, cut);
+    const auto t1 = std::chrono::steady_clock::now();
+
+    const double ns = std::chrono::duration<double, std::nano>(t1 - t0).count()
+                    / (double)(reps * (int)dirs.size());
+    const double perMs = 1.0e6 / ns;
+    std::printf("    consulta del suelo (corte del pie %.3f m, 7 octavas = 56 hashes)\n", cut);
+    std::printf("      %.0f ns por consulta · %.0f consultas por ms\n", ns, perMs);
+    std::printf("      en 1 ms de presupuesto: %.0f objetos a 60 Hz · en 0,1 ms: %.0f\n",
+                perMs, perMs * 0.1);
+    std::printf("      (suma de control %.3f, para que el optimizador no borre el bucle)\n", sink);
+
+    // ⚠️ SIN UMBRAL DE ms: un test que falle por la carga de la maquina es ruido. Lo que se fija es
+    // que la consulta exista y devuelva relieve de verdad; el numero de arriba es para decidir, y se
+    // lee a mano. Si algun dia se quiere un tope, tiene que venir de un presupuesto declarado.
+    CHECK(std::fabs(sink) > 0.0, "la consulta devuelve relieve, no ceros");
+    CHECK(ns > 0.0, "el cronometro mide algo");
+}
+
+/**
+ * @brief EL PRECIO DEL ACUERDO: ¿cuánta celda hace falta y cuánto cuesta?
+ *
+ * `terrain_collision_client_agreement` deja el problema acotado: lo que un cliente lejano presenta
+ * difiere del suelo que se pisa en **8,12 m a 10 km y 39,4 m a 100 km**, y NO lo arregla ninguna
+ * política de corte de octavas (se probaron las tres). Es término de TAMAÑO DE CELDA puro: 256 m no
+ * pueden representar terreno con relieve de 4,5 m.
+ *
+ * Así que la pregunta que queda no es "cómo", es "cuánto": afinar la celda es lo único que lo cierra
+ * y cuesta muestras. Esto barre el factor de afinado y da las dos columnas juntas, para que la
+ * decisión se tome con el precio delante en vez de con una intuición.
+ */
+void test_terrain_collision_refine_cost() {
+    beginTest("terrain_collision_refine_cost");
+    const double R = 6371000.0;
+    const glm::dvec3 up = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 t1 = glm::normalize(glm::cross(up, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 t2 = glm::normalize(glm::cross(up, t1));
+    const float footCut = Haruka::Planet::terrainTriM(0.0);
+
+    auto dirAt = [&](double wx, double wz) {
+        return glm::normalize(up + (t1 * wx) / R + (t2 * wz) / R);
+    };
+    // La superficie que Jolt presenta con una celda dada: bilineal entre nodos, evaluados con el
+    // corte que le toca a cada uno por su distancia (la ley de hoy).
+    auto surfaceAt = [&](double px, double pz, double cell, bool footCutNodes) {
+        const double gx = std::floor(px / cell), gz = std::floor(pz / cell);
+        const double x0 = gx * cell, z0 = gz * cell;
+        const double fx = (px - x0) / cell, fz = (pz - z0) / cell;
+        auto nodeH = [&](double wx, double wz) {
+            const double radM = std::sqrt(wx * wx + wz * wz);
+            const float cut = footCutNodes ? footCut : Haruka::Planet::terrainTriM(radM);
+            return (double)Haruka::Planet::terrainDetail(dirAt(wx, wz), R, cut);
+        };
+        const double a = nodeH(x0, z0) + (nodeH(x0 + cell, z0) - nodeH(x0, z0)) * fx;
+        const double b = nodeH(x0, z0 + cell) + (nodeH(x0 + cell, z0 + cell)
+                                               - nodeH(x0, z0 + cell)) * fx;
+        return a + (b - a) * fz;
+    };
+
+    const std::vector<Haruka::Planet::TerrainRingSpec> rings =
+        Haruka::Planet::terrainRingLayout(200000.0);
+
+    std::printf("    acuerdo con el suelo que SE PISA, y lo que cuesta afinarlo\n");
+    std::printf("    distancia  afinado    celda    acuerdo HOY   + corte del PIE   muestras\n");
+    for (double d : { 10000.0, 100000.0 }) {
+        double cell0 = 0.0;
+        for (const auto& r : rings) if (r.extent >= d) { cell0 = r.cell; break; }
+        if (cell0 <= 0.0) continue;
+        double prev = 1e30; bool monotone = true; double best = 0.0;
+        for (int f : { 1, 2, 4, 8, 16 }) {
+            const double cell = cell0 / (double)f;
+            double worst = 0.0, worstFoot = 0.0;
+            // ⚠️ LOS PUNTOS NO PUEDEN CAER SOBRE LOS NODOS, Y CASI ME COME. Estaban en `cell0·a/8`, y
+            // 256/8 = 32 es múltiplo de la celda de x16 (16 m): la bilineal devolvía el valor del
+            // NODO y el acuerdo salía **0,0000 m exacto** — un titular falso. Con un desplazamiento
+            // de razón áurea, la muestra no cae sobre un nodo de ninguna celda potencia de dos.
+            for (int a = 1; a < 8; ++a) for (int b = 1; b < 8; ++b) {
+                const double px = d + cell0 * std::fmod((double)a * 0.61803398875, 1.0);
+                const double pz =     cell0 * std::fmod((double)b * 0.41421356237, 1.0);
+                const double truth = (double)Haruka::Planet::terrainDetail(dirAt(px, pz), R, footCut);
+                worst     = std::max(worst,     std::fabs(surfaceAt(px, pz, cell, false) - truth));
+                worstFoot = std::max(worstFoot, std::fabs(surfaceAt(px, pz, cell, true)  - truth));
+            }
+            // Las muestras de un anillo van con el CUADRADO del afinado: cubre lo mismo con celdas
+            // f veces más pequeñas, o sea f² nodos. Es el precio, y es el que decide.
+            std::printf("    %8.0f m   x%-3d %9.2f m %11.4f m %14.4f m %8dx\n",
+                        d, f, cell, worst, worstFoot, f * f);
+            if (worst > prev + 1e-6) monotone = false;
+            prev = worst; best = worstFoot;
+        }
+        // ⚠️ NO ES UN BARRIDO INFORMATIVO Y YA: se afirma la PROPIEDAD que hace que la decisión tenga
+        // sentido — que afinar la celda de verdad cierra el hueco, y monótonamente. Si no lo hiciera,
+        // la tabla de precios de arriba sería una lista de números sin nada que comprar.
+        // ⚠️ LO QUE ESTE BARRIDO DEMUESTRA, Y NO ES LO QUE YO ESPERABA: afinar la celda SOLA se
+        // ESTANCA. De x8 a x16 el acuerdo apenas se mueve (1,179 -> 1,169 m a 10 km), porque el
+        // residuo ya no es la celda: es el CORTE, que sigue siendo `terrainTriM(radM)` y a 10 km vale
+        // 20 m. Los dos términos se tapan el uno al otro — cambiar sólo el corte también se estancaba
+        // (medido en `terrain_collision_client_agreement`, las tres políticas daban ~8 m).
+        //
+        // Cerrarlo pide LAS DOS COSAS a la vez, y ésa es la columna de la derecha. Ahí sí baja.
+        CHECK(monotone, "afinar la celda MEJORA el acuerdo en cada paso (monotono)");
+        CHECK(best < prev * 0.5,
+              "con celda fina Y corte del pie el acuerdo baja a menos de la mitad: hacen falta LOS DOS");
+    }
+}

@@ -1,4 +1,6 @@
 #include "ui/settings_panel.h"
+#include <vector>
+#include <algorithm>
 #include "settings/settings_manager.h"
 #include "rhi/rhi_device.h"   // enumerar GPUs para el combo de tarjeta gráfica
 #include "renderer/motor_instance.h"
@@ -120,6 +122,67 @@ void SettingsPanel::tabGraphics() {
             app->applyGraphicsSettings();
     }
 
+    // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ SIN ENTRADA "AUTO", A PROPOSITO. El combo lista SOLO resoluciones reales del monitor y el
+    // defecto es la nativa, ya resuelta por `Application` en el primer arranque. Un "Auto" en la
+    // lista parece cómodo y es peor: el que lo tiene puesto no sabe a que resolucion juega, y el que
+    // elige una concreta no puede volver a la nativa sin adivinar cual era.
+    //
+    // La lista se construye UNA vez: `SDL_GetFullscreenDisplayModes` reserva, y rehacerlo cada frame
+    // seria una llamada al driver por frame para un combo que casi nunca se abre.
+    {
+        struct Res { int w, h; };
+        static std::vector<Res>         s_modes;
+        static std::vector<std::string> s_labels;
+        static bool                     s_built = false;
+        if (!s_built) {
+            s_built = true;
+            // La primaria, no la de la ventana: `Application` no expone el `SDL_Window*` y anadir
+            // un accesor para esto no compensa. En multimonitor la lista puede no ser la del monitor
+            // donde esta la ventana; lo cubre el respaldo de mas abajo, que mete siempre la actual.
+            const SDL_DisplayID disp = SDL_GetPrimaryDisplay();
+            int n = 0;
+            if (SDL_DisplayMode** dm = SDL_GetFullscreenDisplayModes(disp, &n)) {
+                for (int i = 0; i < n; ++i) {
+                    // Se DEDUPLICA por w×h: el monitor expone el mismo tamaño a varias frecuencias
+                    // y a varias escalas, y sin esto la lista sale con 1920x1080 seis veces.
+                    const Res r{ dm[i]->w, dm[i]->h };
+                    bool dup = false;
+                    for (const Res& e : s_modes) if (e.w == r.w && e.h == r.h) { dup = true; break; }
+                    if (!dup) s_modes.push_back(r);
+                }
+                SDL_free(dm);
+            }
+            // Si el monitor no expone modos (Wayland sin fullscreen exclusivo, por ejemplo), al menos
+            // la actual tiene que estar: si no, el combo saldria vacio y no se podria ni ver cual es.
+            const auto& gg = SettingsManager::get().graphics();
+            if (gg.resolutionW > 0) {
+                bool has = false;
+                for (const Res& e : s_modes) if (e.w == gg.resolutionW && e.h == gg.resolutionH) { has = true; break; }
+                if (!has) s_modes.push_back({ gg.resolutionW, gg.resolutionH });
+            }
+            std::sort(s_modes.begin(), s_modes.end(),
+                      [](const Res& a, const Res& b) { return a.w * a.h > b.w * b.h; });
+            for (const Res& r : s_modes)
+                s_labels.push_back(std::to_string(r.w) + " x " + std::to_string(r.h));
+        }
+        if (!s_modes.empty()) {
+            int cur = 0;
+            for (size_t i = 0; i < s_modes.size(); ++i)
+                if (s_modes[i].w == g.resolutionW && s_modes[i].h == g.resolutionH) { cur = (int)i; break; }
+            std::vector<const char*> items;
+            items.reserve(s_labels.size());
+            for (const std::string& l : s_labels) items.push_back(l.c_str());
+            if (ImGui::Combo(TR("gfx.resolution").c_str(), &cur, items.data(), (int)items.size())) {
+                g.resolutionW = s_modes[(size_t)cur].w;
+                g.resolutionH = s_modes[(size_t)cur].h;
+                if (auto* app = MotorInstance::getInstance().getApplication())
+                    app->applyGraphicsSettings();
+            }
+        }
+    }
+
     // API gráfica (RHI). El device se crea en el arranque → NO se aplica en vivo: requiere
     // reiniciar. Se persiste en el imgui.ini (RenderBackend) y Application::run lo lee al iniciar.
     int rb = (int)g.renderBackend;
@@ -149,20 +212,25 @@ void SettingsPanel::tabGraphics() {
                 nullptr);
         }
 
-        const std::string autoLabel = "Automática (dedicada si la hay)";
-        // ⚠️ SE CONSULTA EN CADA USO, no se cachea antes del combo. El cuerpo del combo MUTA la lista
-        // (pulsar "Automática" la vacía), así que un `isAuto` calculado arriba se queda obsoleto en
-        // cuanto el usuario elige, y la iteración siguiente indexaba `[0]` de un vector ya vacío →
-        // abort en `std::vector::operator[]`. El juego se caía al tocar el desplegable.
+        // ⚠️ AQUI HABIA UNA ENTRADA "Automática (dedicada si la hay)" Y SE QUITO A PROPOSITO.
+        //
+        // La automatica ya no es una opcion del desplegable: `Application` la resuelve al arrancar a
+        // una tarjeta CONCRETA (la dedicada si la hay) y la escribe en el ajuste, asi que la lista
+        // solo tiene tarjetas reales y una de ellas sale marcada. El comportamiento por defecto es el
+        // mismo; lo que cambia es que ahora se VE cual es — que es justo lo que faltaba el dia que la
+        // disparidad del terreno dependia de la GPU y el ajuste decia "Automática" en los dos casos.
+        //
+        // ⚠️ SE CONSULTA EN CADA USO, no se cachea antes del combo: el cuerpo del combo MUTA la lista,
+        // y un puntero calculado arriba se queda colgando en cuanto el usuario elige. Esto ya reventó
+        // una vez (`operator[]` sobre un vector vaciado dentro del propio combo).
         auto chosen = [&]() -> const std::string* {
             return (!g.preferredGpus.empty() && !g.preferredGpus[0].empty()) ? &g.preferredGpus[0]
                                                                              : nullptr;
         };
         // El preview se COPIA: `c_str()` de un elemento del vector colgaría si el cuerpo del combo
-        // lo vacía o lo realoja mientras ImGui lo sigue usando.
-        const std::string preview = chosen() ? *chosen() : autoLabel;
+        // lo realoja mientras ImGui lo sigue usando.
+        const std::string preview = chosen() ? *chosen() : std::string("(sin tarjetas)");
         if (ImGui::BeginCombo("Tarjeta gráfica", preview.c_str())) {
-            if (ImGui::Selectable(autoLabel.c_str(), chosen() == nullptr)) g.preferredGpus.clear();
             for (size_t ai = 0; ai < s_adapters.size(); ++ai) {
                 const auto& a = s_adapters[ai];
                 const std::string* cur = chosen();

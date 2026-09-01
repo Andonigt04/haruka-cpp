@@ -52,6 +52,36 @@ void harukaDirToCubeFace(vec3 d, out int face, out vec2 uv) {
 
 #endif // HARUKA_CUBE_FACE_GLSL
 /**
+ * @brief RAÍZ EN DOBLE QUE NO PASA POR `sqrt(double)` DEL DRIVER. Newton desde una semilla en float.
+ *
+ * ⚠️ EXISTE POR UN BUG DE DRIVER MEDIDO, NO POR PRURITO. El compilador de GLSL del driver de OpenGL
+ * de AMD degrada las transcendentes de doble a precisión de float: `inversesqrt(double)` sale con
+ * **3,4e-8 de error relativo** (medido con entradas opacas en `fp64_probe.comp`). Como esta función
+ * hace tres `sqrt(double)` por dirección y la dirección se multiplica luego por 6 371 000 m, eso son
+ * **0,0235 m de superficie** — exactamente el peor error del bake en esa combinación (0,0253 m),
+ * contra 0,0001 m en AMD+Vulkan y en NVIDIA con los dos backends.
+ *
+ * Newton para `sqrt(a)` es `x <- (x + a/x)/2` y DUPLICA los dígitos correctos en cada paso. Desde una
+ * semilla en float (~7 dígitos) dos pasos dan ~28, más de los 16 que un double guarda. Y sólo usa
+ * SUMA, MULTIPLICACIÓN Y DIVISIÓN en doble, que es lo que ese driver sí hace bien — los casos (1) y
+ * (2) de la sonda pasan en las cuatro combinaciones.
+ *
+ * ⚠️ El resultado puede diferir en 1 ulp del `sqrt` correctamente redondeado de la CPU. Eso son 1e-16
+ * relativos, o sea **6e-10 m de superficie**: seis órdenes por debajo del 0,0001 m con el que el bake
+ * ya casa. No mueve la paridad.
+ *
+ * ⚠️ El dominio aquí es `[1/3, 1]` (el radicando del spherify de Cobb), así que la semilla en float
+ * ni desborda ni se aplana. Fuera de ese rango habría que revisar la semilla.
+ */
+precise double harukaSqrtD(double a) {
+    if (!(a > 0.0LF)) return 0.0LF;
+    precise double x = double(sqrt(float(a)));
+    x = 0.5LF * (x + a / x);
+    x = 0.5LF * (x + a / x);
+    return x;
+}
+
+/**
  * @brief (cara, lx, ly) → dirección unitaria. Spherify de Cobb. **Gemelo de `cubeFaceToDir`**
  *        (core/terrain/cube_sphere.cpp) — cualquier cambio va en los dos.
  *
@@ -76,9 +106,11 @@ dvec3 harukaCubeFaceToDir(int face, double lx, double ly) {
     else if (face == 4) p = dvec3(   lx,    ly, 1.0LF);    // RIGHT
     else                p = dvec3(  -lx,    ly,-1.0LF);    // LEFT
     precise double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
-    precise dvec3 r = dvec3(p.x * sqrt(1.0LF - y2 / 2.0LF - z2 / 2.0LF + y2 * z2 / 3.0LF),
-                            p.y * sqrt(1.0LF - z2 / 2.0LF - x2 / 2.0LF + z2 * x2 / 3.0LF),
-                            p.z * sqrt(1.0LF - x2 / 2.0LF - y2 / 2.0LF + x2 * y2 / 3.0LF));
+    // ⚠️ `harukaSqrtD` Y NO `sqrt`: ver su nota. Con el `sqrt(double)` del driver, esta línea daba
+    // 0,0235 m de error de superficie en AMD+OpenGL y 6e-10 m en todo lo demás.
+    precise dvec3 r = dvec3(p.x * harukaSqrtD(1.0LF - y2 / 2.0LF - z2 / 2.0LF + y2 * z2 / 3.0LF),
+                            p.y * harukaSqrtD(1.0LF - z2 / 2.0LF - x2 / 2.0LF + z2 * x2 / 3.0LF),
+                            p.z * harukaSqrtD(1.0LF - x2 / 2.0LF - y2 / 2.0LF + x2 * y2 / 3.0LF));
     return r;
 }
 

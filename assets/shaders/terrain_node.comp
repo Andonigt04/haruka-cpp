@@ -117,6 +117,23 @@ void main() {
     // que los otros tres: cuando GPU y CPU no casan, sin bisección solo se sabe QUE difieren.
     else if (uGrid.z == 4) outv = harukaSampleBaseField(uBaseField, vec3(dir)).x;
     else if (uGrid.z == 5) outv = float(textureSize(uBaseField, 0).x);
+    // ── MODOS 6 Y 7: LA BISECCION QUE LOS MODOS 1-3 NO PODIAN HACER ─────────────────────────────
+    //
+    // ⚠️ LOS MODOS 1-3 SE QUEDARON CORTOS AL CAMBIAR LA ESCALA DEL BUG. Emiten `float(lx)`,
+    // `float(dir.x)` y `float(dir.x·R·0.00035)`: el ulp de un float ahi vale 1,2e-7 en direccion, o
+    // sea **0,76 m de superficie**. Servian cuando el sintoma eran metros (el clipmap leyendo otro
+    // punto del planeta); son CIEGOS ante los 0,02 m que separan hoy a AMD de NVIDIA, que
+    // corresponden a ~1e-9 relativo. Comparar con ellos habria dado "todo casa" y habria sido falso.
+    //
+    // Estos dos emiten el RESIDUO POR DEBAJO DE LA RESOLUCION DE UN FLOAT —los bits que un float no
+    // puede guardar— amplificado. Es la misma tecnica que el caso (3) de `fp64_probe.comp`, y por lo
+    // mismo: no cancela con nada. Resolucion efectiva ~2e-7 en unidades de 1e-9, o sea 1e-15 en
+    // direccion: seis ordenes por debajo de lo que se busca.
+    else if (uGrid.z == 6) outv = float((dir.x - double(float(dir.x))) * 1.0e9LF);
+    // El mismo residuo pero de la POSICION `dir·R`, en metros. Cubre el eslabon siguiente: si el 6
+    // casa y el 7 no, la direccion esta bien y lo que se pierde es la multiplicacion por el radio.
+    else if (uGrid.z == 7) { precise double px = dir.x * double(uMisc.x);
+                             outv = float(px - double(float(px))); }
     else {
         // GEMELO de `clipmap.tese`: base + detalle atenuado, con el detalle recortado para que no
         // hunda el suelo por debajo del nivel del mar. Cualquier cambio va en los dos.

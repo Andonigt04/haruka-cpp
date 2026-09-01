@@ -204,11 +204,32 @@ public:
         }
         // Recorrido por cercanía, pero emitiendo la cadena raíz→nodo de lo que aún no es residente,
         // del más grueso al más fino. Así el presupuesto nunca produce un hijo huérfano.
+        // ── LA DISTANCIA MANDA SOBRE EL PRESUPUESTO ─────────────────────────────────────────────
+        //
+        // ⚠️ LA FIDELIDAD NO PUEDE DEPENDER DE UNA TASA DE STREAMING. El presupuesto es transitorio:
+        // limita cuantos nodos se hornean por frame. Que un nodo A TUS PIES se dibuje con el mapa de
+        // un ancestro —un nivel mas basto, hasta 1,372 m de escalon contra la colision— porque ese
+        // frame se agoto el cupo no es un compromiso razonable, es un fallo. Lejos, basto un par de
+        // frames no se nota; cerca, si.
+        //
+        // Asi que lo CERCANO se genera aunque el cupo se haya acabado, y el cupo pasa a gobernar solo
+        // lo lejano. El coste extra esta acotado por AREA, no por la vista entera: dentro de este
+        // radio caben pocos nodos, y ademas solo se pagan cuando de verdad faltan (al entrar en una
+        // zona nueva), no en cada frame.
+        const double kAlwaysM = 512.0;   // radio dentro del cual la distancia gana al presupuesto
+        auto distOf = [&](const NodeId& n) {
+            const glm::dvec3 p = planetCenter + nodeTexelDir(n, TERRAIN_NODE_CELLS / 2,
+                                                             TERRAIN_NODE_CELLS / 2) * planetRadiusM;
+            return glm::length(p - camPos);
+        };
         std::vector<NodeId> out; out.reserve(std::min(m_pending.size(), m_genPerFrame));
         std::unordered_set<uint64_t> taken;
         std::vector<NodeId> chain;
         for (const NodeId& n : m_pending) {
-            if (out.size() >= m_genPerFrame) break;
+            // `continue`, no `break`: la cola va ordenada por cercania, pero la cadena de ancestros
+            // puede colar nodos mas lejanos por delante. Cortar en seco dejaria fuera a un vecino
+            // cercano que venia detras.
+            if (out.size() >= m_genPerFrame && distOf(n) > kAlwaysM) continue;
             chain.clear();
             for (NodeId a = n;; ) {
                 const uint64_t k = nodeKey(a);
@@ -218,6 +239,12 @@ public:
                 a.level--; a.i /= 2; a.j /= 2;
             }
             for (auto ic = chain.rbegin(); ic != chain.rend(); ++ic) {   // grueso -> fino
+                // ⚠️ EL CORTE INTERIOR SI ES DURO, y el override de distancia NO se aplica aqui.
+                // Se probo dejarlo abierto para los nodos cercanos y es PEOR: cada nodo cercano puede
+                // emitir su cadena entera de ancestros, `out` crece sin tope y el generador —que si
+                // corta en el presupuesto— se queda con los primeros N, que pasan a ser ancestros
+                // gruesos en vez de las hojas finas que hacen falta. El presupuesto se gasta en lo
+                // que no se ve.
                 if (out.size() >= m_genPerFrame) break;
                 if (taken.insert(nodeKey(*ic)).second) out.push_back(*ic);
             }
@@ -228,6 +255,27 @@ public:
     const std::vector<NodeId>& takePending() const { return m_pending; }
     /// Nodos que se pueden generar por frame. Lo aplican `prioritisePending` y el generador.
     size_t genPerFrame() const { return m_genPerFrame; }
+
+    /**
+     * @brief Cambia el presupuesto de generacion de este frame. Ver `TerrainNodeRenderer::draw`.
+     *
+     * ⚠️ EL PRESUPUESTO ES UN INTERCAMBIO, Y EL COSTE SOLO SE PAGA CUANDO HAY COLA. Medido en el
+     * propio motor: 0,0555 ms por nodo, o sea 85 nodos = 4,7 ms de frame y 170 = 9,4 ms. Se eligio
+     * 85 para no pagar los 9,4 SIEMPRE — correcto, porque en reposo no hay nada que generar y ese
+     * gasto seria puro desperdicio.
+     *
+     * Pero la factura de esa eleccion se paga al GIRAR: girar 90 grados pide 935 nodos nuevos, que a
+     * 85 por frame son 11 frames dibujando por ANCESTRO (a 170 serian 6). Y medido en partida, el
+     * 98 % de esas caidas son de dos niveles o mas —1 183 de 1 203— con la mas honda en SIETE, que es
+     * un escalon de mas de un metro contra el vecino.
+     *
+     * La salida es que el numero no sea fijo: en reposo la cola esta vacia y da igual cuanto valga,
+     * y en la rafaga es cuando compensa gastar. Asi el coste alto dura lo que dura la rafaga.
+     */
+    void setGenPerFrame(size_t n) { m_genPerFrame = n; }
+
+    /** @brief Cuantos nodos esperan generacion. Es la senal para dosificar el presupuesto. */
+    size_t pendingCount() const { return m_pending.size(); }
 
     /**
      * @brief Publica un nodo ya generado. Devuelve el hueco asignado, o -1 si no cabe.
@@ -357,7 +405,8 @@ private:
         NodeRange range;
         uint64_t  lastUsed = 0;
     };
-    size_t   m_capacity, m_genPerFrame;
+    size_t   m_capacity;
+    size_t   m_genPerFrame;   // no const: lo dosifica el renderer (ver setGenPerFrame)
     bool     m_chainAncestors = true;
     uint64_t m_frame = 0;
     std::vector<Slot> m_slots;

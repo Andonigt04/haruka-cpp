@@ -13,7 +13,8 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
                            const glm::dvec3& bitangent,
                            const glm::dvec3& up,
                            double spanM, int n,
-                           std::function<double(const glm::dvec3&)> terrainHeight) {
+                           std::function<double(const glm::dvec3&)> terrainHeight,
+                           std::function<double(const glm::dvec3&)> bakedWaterLevel) {
     m_n = std::max(2, n);
     m_span = spanM;
     m_dx = spanM / double(m_n - 1);
@@ -38,7 +39,30 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
             m_terrain[idx(i,j)] = float(terrainHeight(wp) - h0);
         }
 
-    seedLakes();
+    // ── LA SIEMBRA, DEL CAMPO DEL MUNDO SI LO HAY ──────────────────────────────────────────────
+    //
+    // ⚠️ `seedLakes` DEPENDE DEL BORDE DEL PARCHE, y su propia nota lo dice: una cuenca que asome por
+    // él se considera abierta y no se llena, así que un lago APARECE al caminar 160 m. Con el campo
+    // horneado (`TerrestrialPlanet::bakeWaterMap`, un priority-flood sobre el planeta ENTERO) esa
+    // dependencia desaparece: el parche ya no decide dónde hay agua, sólo la mueve.
+    //
+    // El respaldo se queda para quien no tenga planeta horneado (los tests de la sim, un mundo plano).
+    if (bakedWaterLevel) {
+        int filled = 0;
+        for (int j = 0; j < m_n; ++j)
+            for (int i = 0; i < m_n; ++i) {
+                const double lv = bakedWaterLevel(worldPosAt(i, j));
+                if (lv <= -1.0e29) continue;              // centinela de `WATER_FILL_DRY`
+                // El campo viene en cota ABSOLUTA y el parche trabaja en relativa al ancla: la misma
+                // resta `h0` que se acaba de aplicar al terreno, o el lago saldría desplazado.
+                const float d = (float)(lv - h0) - m_terrain[idx(i,j)];
+                if (d > 0.0f) { m_water[idx(i,j)] = d; ++filled; }
+            }
+        HARUKA_LOGD("Fluid", "agua sembrada del campo del MUNDO: %d celdas de %d (%.1f%%)",
+                    filled, N, N ? 100.0 * filled / N : 0.0);
+    } else {
+        seedLakes();
+    }
 }
 
 // ── SIEMBRA DE LAGOS: llena las hondonadas hasta su punto de derrame ────────────────────────────
@@ -183,6 +207,23 @@ float ShallowWaterSim::surfaceAlongUpAtWorld(const glm::dvec3& wp) const {
     // (m_n>0 pero vectores sin datos), no accedas fuera de rango → trata como seco.
     if (c < 0 || c >= (int)m_terrain.size() || c >= (int)m_water.size()) return -1e9f;
     return m_terrain[c] + m_water[c];
+}
+
+float ShallowWaterSim::waterAtWorld(const glm::dvec3& wp) const {
+    // Misma proyección que surfaceAlongUpAtWorld, pero devuelve la LÁMINA y no la superficie.
+    // Existe porque comparar dos parches por su superficie no distingue el agua del terreno: en
+    // pendiente, dos rejillas desplazadas muestrean el terreno en puntos distintos y la diferencia
+    // de superficies es casi toda relieve. La profundidad no tiene ese problema — es 0 en seco,
+    // caiga donde caiga la celda.
+    glm::dvec3 d = wp - m_anchor;
+    double x = glm::dot(d, m_tan), z = glm::dot(d, m_bit);
+    double half = m_span * 0.5;
+    int ci = int((x + half) / m_dx + 0.5);
+    int cj = int((z + half) / m_dx + 0.5);
+    if (ci < 0 || cj < 0 || ci >= m_n || cj >= m_n) return -1.0f;   // fuera del parche
+    int c = idx(ci, cj);
+    if (c < 0 || c >= (int)m_water.size()) return -1.0f;
+    return m_water[c];
 }
 
 void ShallowWaterSim::applySeaLevel(float seaLevelAlongUp) {

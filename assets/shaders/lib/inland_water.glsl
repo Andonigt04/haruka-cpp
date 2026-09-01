@@ -30,6 +30,26 @@ layout(std140, binding = 24) uniform InlandParams {
 };
 layout(std430, binding = 25) readonly buffer InlandWater { float uInlandSurface[]; };
 
+/// ── LOS LAGOS DEL MUNDO, HORNEADOS CON EL PLANETA (2026-09-01) ─────────────────────────────────
+///
+/// Cota de la lámina por téxel equirect, misma retícula que `uHeightTex`. Sale de `bakeWaterMap`,
+/// que rellena las cuencas del planeta ENTERO hasta su punto de derrame una sola vez.
+///
+/// ⚠️ ESTO ES LO QUE ARREGLA LAS TRES LIMITACIONES DEL PARCHE, y la cabecera de arriba las cuenta
+/// como si fueran inevitables: *"el parche de la sim es local (420 m alrededor del jugador): fuera
+/// de él no hay agua interior"*. Ya no. Fuera del parche manda este campo, que existe en todo el
+/// planeta, no depende del observador —así que dos clientes ven los mismos lagos— y no tiene un
+/// BORDE por el que el agua se fugue, que era lo que hacía aparecer un lago al caminar.
+///
+/// El parche NO desaparece: sigue siendo quien manda donde está, porque es el que lleva lo DINÁMICO
+/// (lluvia, caudal, una presa que revienta). Este campo es el suelo sobre el que se apoya.
+/// R = cota de la lámina · G = FETCH (diámetro equivalente de la masa de agua, m). El fetch va en la
+/// MISMA textura y no en otra porque los dos salen del mismo relleno y se leen en el mismo téxel:
+/// separarlos abriría la puerta a que un punto tuviera el nivel de un lago y el fetch de otro.
+layout(binding = 18) uniform sampler2D uLakeTex;
+/// Gemelo de `Haruka::Planet::WATER_FILL_DRY`. Cualquier cosa por debajo es "aquí no hay lago".
+const float HARUKA_LAKE_DRY = -1.0e30;
+
 /// Centinela de "sin agua interior aquí". Gemelo de `TerrestrialPlanet::kNoInlandWater`.
 const float HARUKA_NO_INLAND = -1e9;
 
@@ -68,6 +88,54 @@ float harukaInlandWaterAt(vec3 posRelEye) {
     float a = s00 + (s10 - s00) * tx;
     float b = s01 + (s11 - s01) * tx;
     return a + (b - a) * ty;
+}
+
+/**
+ * @brief Cota de la lámina del LAGO HORNEADO en esa dirección, o el centinela si aquí no hay.
+ *
+ * ⚠️ NEAREST, NO BILINEAL, y es lo contrario de lo que hace el resto de campos de este motor. La
+ * lámina de un lago es PLANA y su borde es un ESCALÓN contra la orilla: interpolar entre "hay lago a
+ * 40 m" y "no hay lago" inventaría una rampa de agua subiendo por la ladera. Gemelo exacto de
+ * `TerrestrialPlanet::lakeLevelAt`, que lo muestrea igual por la misma razón.
+ */
+float harukaBakedLakeAt(vec3 dir) {
+    ivec2 sz = textureSize(uLakeTex, 0);
+    if (sz.x <= 1 || sz.y <= 1) return HARUKA_NO_INLAND;
+    vec2  uv = harukaEquirectUV(dir);
+    ivec2 t  = ivec2(floor(uv * vec2(sz)));
+    t.x = ((t.x % sz.x) + sz.x) % sz.x;          // longitud envuelve
+    t.y = clamp(t.y, 0, sz.y - 1);               // latitud no
+    float lv = texelFetch(uLakeTex, t, 0).r;
+    return (lv > HARUKA_LAKE_DRY) ? lv : HARUKA_NO_INLAND;
+}
+
+/**
+ * @brief FETCH en ese punto: cuánto recorrido de agua abierta hay para que el viento levante ola.
+ *
+ * En el océano devuelve el centinela de "ilimitado" y el oleaje no se toca. En un lago devuelve su
+ * diámetro equivalente, y con él `harukaFetchFactor` baja la ola a lo que ese lago puede sostener —
+ * sin esto, un lago de 400 m tiene el swell del Atlántico. Ver `water_fill.h`.
+ */
+float harukaBakedFetchAt(vec3 dir) {
+    ivec2 sz = textureSize(uLakeTex, 0);
+    if (sz.x <= 1 || sz.y <= 1) return HARUKA_FETCH_UNLIMITED;
+    vec2  uv = harukaEquirectUV(dir);
+    ivec2 t  = ivec2(floor(uv * vec2(sz)));
+    t.x = ((t.x % sz.x) + sz.x) % sz.x;
+    t.y = clamp(t.y, 0, sz.y - 1);
+    float f = texelFetch(uLakeTex, t, 0).g;
+    return (f > 0.0) ? f : HARUKA_FETCH_UNLIMITED;
+}
+
+/**
+ * @brief LA cota del agua en un punto: mar, lago horneado o parche dinámico. Una sola respuesta.
+ *
+ * El orden importa y es el de "quién sabe más": el parche gana donde existe porque lleva lo dinámico
+ * (una crecida, una presa), el lago horneado cubre el resto del planeta, y el mar es el suelo.
+ * `max` de los tres, con centinelas por debajo de todo, hace exactamente eso sin ramas.
+ */
+float harukaWaterLevelAt(vec3 posRelEye, vec3 dir, float seaLevelM) {
+    return max(max(seaLevelM, harukaInlandWaterAt(posRelEye)), harukaBakedLakeAt(dir));
 }
 
 #endif // HARUKA_INLAND_WATER_GLSL

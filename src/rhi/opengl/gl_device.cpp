@@ -8,6 +8,7 @@
 #include <cmath>
 #include <algorithm>
 #include <cstring>
+#include <chrono>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -109,7 +110,25 @@ namespace Haruka::RHI::opengl
         const char* tmp = std::getenv("TMPDIR");
         if (!tmp || !*tmp) tmp = "/tmp";
         const std::string inPath  = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".glsl";
-        const std::string outPath = std::string(tmp) + "/haruka_" + std::to_string(hash) + ".spv";
+        const std::string outPath = std::string(tmp) + "/haruka_gl_" + std::to_string(hash) + ".spv";
+
+        // ⚠️ MISMO ARREGLO QUE EN VULKAN: el .spv se reutiliza entre ejecuciones en vez de borrarse.
+        // Era un fork de `glslangValidator` (6 ms medidos) por shader y por arranque. El nombre lleva
+        // `gl_` porque este usa `-G` (SPIR-V para OpenGL) y el otro `-V`: comparten hash de fuente
+        // pero NO el binario, y mezclarlos daria un modulo con el dialecto equivocado.
+        {
+            std::ifstream f(outPath, std::ios::binary | std::ios::ate);
+            if (f) {
+                const auto n = (std::streamsize)f.tellg();
+                if (n > 0) {
+                    f.seekg(0);
+                    std::vector<uint8_t> pre((size_t)n);
+                    f.read(reinterpret_cast<char*>(pre.data()), n);
+                    cache.emplace(hash, pre);
+                    return pre;
+                }
+            }
+        }
 
         {
             std::ofstream f(inPath);
@@ -150,10 +169,11 @@ namespace Haruka::RHI::opengl
             return {};
         }
         std::remove(inPath.c_str());
-        std::remove(outPath.c_str());
         std::remove(errPath.c_str());
+        // ⚠️ `outPath` NO se borra: es la cache entre ejecuciones. Aqui solo se llega si `rc == 0` y
+        // el .spv no estaba vacio, asi que lo que queda en disco es valido por construccion.
         cache[hash] = std::move(spv);
-        return spv;
+        return cache[hash];
     }
 
     static uint64_t glFnv1a(const std::string& s)
@@ -377,6 +397,47 @@ namespace Haruka::RHI::opengl
             const char* vers = (const char*)glGetString(GL_VERSION);
             HARUKA_LOGI("RHI/GL", "GPU = %s · %s · GL %s", vend ? vend : "(?)",
                         rend ? rend : "(?)", vers ? vers : "(?)");
+
+            // ── COMBINACIÓN CONOCIDA COMO ROTA: AMD + OpenGL DEGRADA EL fp64 ────────────────────
+            //
+            // ⚠️ NO ES UNA SOSPECHA, ESTÁ MEDIDO, y no tiene arreglo por código. Con las entradas
+            // opacas (`fp64_probe.comp`, y opacas es la clave: escritas como literales el driver las
+            // plegaba en el host y los nueve casos pasaban en cualquier hardware), el compilador de
+            // GLSL de este driver degrada la aritmética de doble a precisión de float:
+            //
+            //     residuo sub-float del PRODUCTO   0,000000000  (debería ser 0,015189648)
+            //     residuo sub-float de la DIVISIÓN 0,000000000  (debería ser -0,083333333)
+            //     inversesqrt(double)              3,4e-8 de error relativo
+            //
+            // O sea que sobreviven la suma y la resta, y poco más. Se intentó rodearlo reescribiendo
+            // la raíz de `harukaCubeFaceToDir` con Newton desde una semilla en float —sólo `+`, `*` y
+            // `/`— y el bake mejoró de 0,0253 a 0,0070 m, pero **no se cierra**: no se puede hacer la
+            // proyección cara→esfera sin multiplicar.
+            //
+            // La misma GPU con Vulkan da 0,0001 m, igual que NVIDIA con los dos backends. No es el
+            // hardware: es el front-end de GLSL, que Vulkan no usa (glslang produce el SPIR-V y el
+            // driver nunca ve el GLSL).
+            //
+            // ⚠️ POR QUÉ IMPORTA Y NO ES COSMÉTICO: el terreno de este cliente NO ES EL MISMO que el
+            // de los demás. Andoni lo fijó como requisito — *"como tienen que ser multijugador las
+            // colisiones tienen que ser las mismas"*. Se avisa y no se bloquea: elegir OpenGL es una
+            // decisión explícita del usuario y NVIDIA+OpenGL está limpio.
+            const std::string vs = vend ? vend : "";
+            const std::string rs = rend ? rend : "";
+            auto has = [](const std::string& h, const char* n) {
+                return h.find(n) != std::string::npos;
+            };
+            if (has(vs, "AMD") || has(vs, "ATI") || has(rs, "AMD") || has(rs, "Radeon")
+                || has(rs, "RADV")) {
+                HARUKA_LOGW("RHI/GL", "================================================================");
+                HARUKA_LOGW("RHI/GL", "AMD + OpenGL: ESTE DRIVER DEGRADA LA ARITMETICA DE DOBLE.");
+                HARUKA_LOGW("RHI/GL", "  El terreno saldra con ~0,007-0,025 m de error contra 0,0001 m");
+                HARUKA_LOGW("RHI/GL", "  en Vulkan sobre ESTA MISMA GPU. En multijugador, tu mundo NO");
+                HARUKA_LOGW("RHI/GL", "  coincide con el de los demas jugadores.");
+                HARUKA_LOGW("RHI/GL", "  Solucion: usa Vulkan (Ajustes -> Grafico -> Backend).");
+                HARUKA_LOGW("RHI/GL", "  Medido por `fp64_probe.comp`; ver la nota de este bloque.");
+                HARUKA_LOGW("RHI/GL", "================================================================");
+            }
         }
         // Reversed-Z con near→1, infinito→0 (ver Camera::getProjectionMatrix). La matriz emite
         // z_ndc ∈ [0,1], así que GL DEBE mapear [0,1]→depth (glClipControl(GL_ZERO_TO_ONE)); sin
@@ -528,8 +589,30 @@ namespace Haruka::RHI::opengl
     }
 
     // ------------------------------------------------------------------ pipelines
+    // ⚠️ INSTRUMENTO, NO ADORNO: aqui es donde puede estar el segundo de arranque.
+    //
+    // Crear un pipeline hace dos cosas caras y muy distintas: traducir GLSL a SPIR-V (que ya se
+    // cachea en disco, ver `compileGlslToSpv`) y que el DRIVER convierta ese SPIR-V en codigo
+    // maquina. Lo segundo es por fabricante y no se cachea en la aplicacion: no hay `VkPipelineCache`
+    // ni binarios de programa de GL en este motor. Andoni reporta ~1000 ms al alternar AMD/NVIDIA y
+    // adivinar cual de los dos es sale caro, asi que se MIDE y se avisa de los que pasen del umbral.
     PipelineHandle GLDevice::createPipeline(const PipelineDesc& d)
     {
+        const auto t0_pipe = std::chrono::steady_clock::now();
+        struct PipeTimer {
+            std::chrono::steady_clock::time_point t0; const PipelineDesc* d;
+            ~PipeTimer() {
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - t0).count();
+                static double s_total = 0.0; static int s_count = 0;
+                s_total += ms; ++s_count;
+                if (ms > 20.0)
+                    HARUKA_LOGI("RHI/GL", "pipeline LENTO: %.0f ms  (%s | %s | %s)  · acumulado %.0f ms en %d",
+                                ms, d->vertexPath ? d->vertexPath : "-",
+                                d->fragmentPath ? d->fragmentPath : "-",
+                                d->computePath ? d->computePath : "-", s_total, s_count);
+            }
+        } pipeTimer{ t0_pipe, &d };
         GLPipeline p;
         p.depth = d.depth;
         p.blend = d.blend;

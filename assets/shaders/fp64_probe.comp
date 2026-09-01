@@ -1,0 +1,186 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ================================================================================================
+// ¿LA GPU HACE DE VERDAD LA ARITMETICA EN DOBLE, O LA DEGRADA A FLOAT?
+//
+// ⚠️ ESTA PREGUNTA COSTO UNA SESION ENTERA. `terrain_node.vert` compone la posicion del vertice en
+// double a proposito —`precise dvec3 dirD`, `pRel = dirD*(R+h) + uCenter`— porque en float el ulp a
+// radio terrestre son 0,38-0,76 m, del orden del paso de la malla. En NVIDIA eso funciona. En la
+// AMD integrada, la misma sonda de `terrain_node_drawn_vs_field` da **27 veces mas error** con el
+// MISMO shader y el MISMO dato, y en partida se ve como medio metro de disparidad.
+//
+// Este test no mide terreno: mide si `double` es double. Cada caso esta construido para dar un
+// resultado CONOCIDO que en float colapsa a cero, asi que no hay tolerancia que discutir — o sale el
+// valor o sale 0.
+//
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// ⚠️⚠️ TODAS LAS ENTRADAS VIENEN DE UN SSBO. ESTO NO ES UN DETALLE DE ESTILO: ES EL TEST.
+//
+// La version anterior escribia las entradas como LITERALES —`normalize(dvec3(0.31LF, 0.62LF,
+// 0.72LF))`, `sqrt(2.0LF)`, `harukaCubeFaceToDir(0, -0.4LF, 0.25LF)`— y por eso los nueve casos
+// pasaban en las dos GPU: **todo era constante en tiempo de compilacion**. El driver lo pliega en el
+// host, en double de x86, y lo que se leia no era la ALU de la GPU sino el plegador de constantes
+// del compilador. Una sonda que pasa en cualquier hardware no es una sonda.
+//
+// Lo delato la biseccion del bake (`testBakeStageBisect`): en AMD la direccion del texel —calculada
+// por ESTA MISMA `harukaCubeFaceToDir`, pero con lx/ly de runtime— no conserva ni un bit por debajo
+// de la resolucion de un float, mientras el caso (7) de aqui daba error CERO. Dos medidas de la
+// misma funcion que se contradicen: la que estaba mal era la que tenia las entradas escritas a mano.
+//
+// Con las entradas opacas, el compilador no puede plegar nada y la aritmetica la hace la GPU.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ⚠️ Las constantes que SI quedan literales llevan el sufijo `LF`. Sin el son literales de float y
+// el propio test se convertiria en la tautologia que viene a descartar.
+// ================================================================================================
+#include "lib/cube_face.glsl"    // harukaCubeFaceToDir — el camino real del bake, con sus tres sqrt
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+
+// Las entradas, escritas por el host en tiempo de ejecucion. Son todas exactamente representables en
+// float, asi que `double(uIn[k])` vale EXACTAMENTE el numero que se pretende — pero el compilador no
+// puede saber cual es.
+layout(std430, binding = 1) readonly buffer In { float uIn[]; };
+
+// Lo que un float NO puede representar de `a`. Si la GPU calculo `a` en double de verdad, esto es un
+// numero del orden de medio ulp de float; si lo degrado a float, es CERO EXACTO. No cancela con
+// nada, que es justo lo que le fallaba al caso (3) viejo.
+double subFloatResidual(double a) { return a - double(float(a)); }
+
+void main()
+{
+    const double R    = double(uIn[0]);   // 6371000
+    const double eps  = double(uIn[1]);   // 1e-10
+    const double mm   = double(uIn[2]);   // 0.001
+    const double two  = double(uIn[3]);   // 2.0
+    const dvec3  seed = dvec3(uIn[4], uIn[5], uIn[6]);   // (0.31, 0.62, 0.72)
+    const double lx   = double(uIn[7]);   // -0.4
+    const double ly   = double(uIn[8]);   //  0.25
+    const int    face = int(uIn[9]);      //  0
+
+    // (1) EL DISCRIMINANTE BASICO. 1 + 1e-10 es 1,0 exacto en float (eps = 1,19e-7), asi que en float
+    //     esto da 0. En double el eps es 2,2e-16 y da 1,0.
+    {
+        precise double a = 1.0LF + eps;
+        uOut[0] = float((a - 1.0LF) / eps);               // esperado 1,0 · float da 0
+    }
+
+    // (2) EL CASO DEL MOTOR: sumar un milimetro a un radio terrestre. Es literalmente lo que hace
+    //     `pRel = dirD * (R + h)`, y es donde el float se come la altura del terreno.
+    {
+        precise double r = R + mm;
+        uOut[1] = float((r - R) / mm);                    // esperado 1,0 · float da 0
+    }
+
+    // (3) ¿SOBREVIVE LA ESCALA A RADIO TERRESTRE? El camino exacto del vertice —normalizar en double
+    //     y multiplicar por el radio— pero medido por el RESIDUO, no por el modulo.
+    //
+    //     ⚠️ AQUI ESTABA `length(p) - R`, Y NO MEDIA NADA. El error de `normalize` (modulo 1±eps) y
+    //     el de `length` se CANCELAN: el float pierde la DIRECCION, no el MODULO. `p.x` vale ~2,4e6
+    //     m y el ulp de un float ahi son 0,25 m, asi que si la GPU calculo en double le sobran bits
+    //     que un float no puede guardar. Si degrado a float, el residuo es CERO EXACTO.
+    {
+        precise dvec3 d = normalize(seed);
+        precise dvec3 p = d * R;
+        uOut[2] = float(subFloatResidual(p.x));           // metros · float da 0 exacto
+    }
+
+    // (4) CONTRAPRUEBA: la misma suma hecha a proposito en FLOAT tiene que PERDER el milimetro,
+    //     porque a 6,37e6 el ulp de un float son 0,5 m. Si no lo perdiera, el caso (2) no estaria
+    //     demostrando nada sobre el double.
+    //
+    //     ⚠️ NO SE ESCRIBE COMO `(Rf + mmf - Rf) / mmf`. Asi estaba, y el compilador de AMD lo
+    //     simplifica algebraicamente a **1,0** —`(a+b-a)/b → 1`, que es valido en los reales y falso
+    //     en coma flotante—, con lo que la contraprueba decia "el float conserva el milimetro" en una
+    //     GPU donde no lo conserva. Es la misma clase de trampa que las entradas literales: el
+    //     optimizador contestando en lugar del hardware.
+    //
+    //     Aqui se compara la suma en FLOAT contra la suma en DOUBLE. El compilador no puede colapsar
+    //     eso sin decidir que son iguales, que es justo lo que se le esta preguntando.
+    {
+        float sumF = float(R) + float(mm);
+        uOut[3] = float((double(sumF) - (R + mm)) / mm);  // esperado -1,0 (el float se lo comio)
+    }
+
+    // ── LOS CASOS QUE FALTABAN: `sqrt` EN DOBLE ─────────────────────────────────────────────────
+    //
+    // ⚠️ SUMAR Y RESTAR EN DOUBLE NO ES TENER fp64. GCN/RDNA no tienen una raiz de doble exacta en
+    // hardware: tienen `V_RSQ_F64`, una APROXIMACION de ~2^-29 (1,9e-9 relativo), y la precision IEEE
+    // sale de unos pasos de Newton-Raphson que emite el compilador. Si esos pasos no estan,
+    // `sqrt(double)` se queda en 1e-9 relativo.
+    //
+    // Eso importa AQUI y no en abstracto: `harukaCubeFaceToDir` hace TRES `sqrt(double)` por
+    // direccion, y la direccion se multiplica despues por 6 371 000 m. Un error relativo de 1,9e-9 en
+    // la direccion son **1,2 cm de superficie**, el orden exacto de los 2 cm que separan el bake de
+    // AMD del de NVIDIA. En NVIDIA `sqrt.rn.f64` es correctamente redondeada (1e-16 -> 1e-9 m).
+    //
+    // La medida no usa `sqrt` para medirse a si misma: se eleva al cuadrado y se compara con el
+    // radicando, que es aritmetica exacta.
+
+    // (5) `sqrt(2)` al cuadrado. Correctamente redondeada da |s*s-2| ~ 4,4e-16 -> 4,4e-4 en esta
+    //     escala. Con la aproximacion sin pulir daria ~1e3. Seis ordenes de magnitud: sin discusion.
+    {
+        precise double s = sqrt(two);
+        uOut[4] = float((s * s - two) * 1.0e12LF);
+    }
+
+    // (6) `inversesqrt` en doble, que es por donde suele ir `normalize(dvec3)`.
+    {
+        precise double q = inversesqrt(two);
+        uOut[5] = float((q * q * two - 1.0LF) * 1.0e12LF);
+    }
+
+    // (7) EL CAMINO REAL, MEDIDO SIN `sqrt`. `harukaCubeFaceToDir` (spherify de Cobb) devuelve un
+    //     vector EXACTAMENTE unitario en aritmetica exacta: |r|² = x²+y²+z² - (x²y²+x²z²+y²z²) +
+    //     x²y²z², que vale 1 identicamente para el (1,ly,lz) de una cara. Asi que `dot(r,r) - 1` mide
+    //     el error acumulado de sus TRES `sqrt(double)` usando solo multiplicaciones y sumas —
+    //     ⚠️ y no `length()`, que meteria un cuarto `sqrt` y contaminaria la medida con lo que mide.
+    //
+    //     ⚠️ `face`, `lx` y `ly` SALEN DEL SSBO. Con el `harukaCubeFaceToDir(0, -0.4LF, 0.25LF)` que
+    //     habia, el compilador plegaba la funcion ENTERA y este caso daba cero en cualquier GPU.
+    precise dvec3 r = harukaCubeFaceToDir(face, lx, ly);
+    precise double unitDefect = dot(r, r) - 1.0LF;
+    {
+        uOut[6] = float(unitDefect * 1.0e12LF);
+
+        // (8) LO MISMO, EN METROS DE SUPERFICIE. |r| = sqrt(1+e) ~ 1 + e/2, asi que el error relativo
+        //     de direccion es e/2 y a radio terrestre son (e/2)·R metros. Es la cifra que se puede
+        //     comparar de tu a tu con los 0,0204 m del bake.
+        uOut[7] = float(abs(unitDefect) * 0.5LF * R);
+
+        // (10) Y EL DISCRIMINANTE DIRECTO: ¿le quedan a `r.x` bits por debajo del float? Es la misma
+        //      pregunta que contesta el modo 6 del bake, aqui aislada de todo lo demas.
+        uOut[9] = float(subFloatResidual(r.x) * 1.0e9LF);
+    }
+
+    // ── ¿Y LA ARITMETICA BASICA? Los casos (1) y (2) solo prueban SUMA y RESTA ──────────────────
+    //
+    // ⚠️ HIZO FALTA BAJAR HASTA AQUI. Se reescribio `harukaCubeFaceToDir` para no usar `sqrt(double)`
+    // —Newton desde una semilla en float, solo `+`, `*` y `/`— y el bake mejoro de 0,0253 a 0,0070 m
+    // pero la direccion SIGUE sin bits por debajo del float. Si Newton solo usa esas tres
+    // operaciones, una de las tres tiene que estar degradada tambien. Estos dos casos lo dicen.
+    //
+    // El residuo sub-float otra vez, que es el unico discriminante que no cancela: un producto y una
+    // division cuyo resultado NO cabe en un float. En double el residuo es del orden de medio ulp de
+    // float; si la operacion se hizo en float, es CERO EXACTO.
+
+    // (11) PRODUCTO en doble.
+    {
+        precise double m = R * double(uIn[4]);        // 6371000 * 0.31 = 1975010, con decimales
+        uOut[10] = float(subFloatResidual(m));
+    }
+    // (12) DIVISION en doble.
+    {
+        precise double q = R / 3.0LF;                 // 2123666,666... no cabe en un float
+        uOut[11] = float(subFloatResidual(q));
+    }
+
+    // (9) CONTRAPRUEBA DEL (5): el mismo `sqrt(2)` en FLOAT, elevado al cuadrado en double para no
+    //     perder el error al medirlo. Tiene que dar ~2,4e5 — ocho ordenes por encima del caso (5). Sin
+    //     esto, un (5) que da 4e-4 no distingue "la raiz es exacta" de "la sonda no mide la raiz".
+    {
+        float sf = sqrt(float(two));
+        uOut[8] = float((double(sf) * double(sf) - two) * 1.0e12LF);
+    }
+}

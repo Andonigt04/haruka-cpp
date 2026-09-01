@@ -27,10 +27,12 @@
 #include <cstdint>
 #include <unordered_set>
 #include <algorithm>
+#include <cmath>
 #include <glm/glm.hpp>
 
 #include "core/planet/prop_layer.h"        // PropLayerTable, PlacedProp
 #include "core/terrain/planet_fields.h"    // FieldSample
+#include "core/terrain/cube_sphere.h"      // cubeFaceToDir / dirToCubeFaceClosed: el cuantizador
 #include "tools/procgraph/tree_spawn.h"    // slopeAt pattern, IPropField
 #include "tools/procgraph/tree_prop.h"     // treePoisson
 #include "tools/procgraph/proc_noise.h"    // hash32
@@ -191,53 +193,113 @@ inline std::vector<ScatteredProp> scatterPropsNear(
     // 0, otro de la 1 y otro de la 2: en los primeros 1000 m se apilaban TRES conjuntos de props
     // unos encima de otros. Cada banda cubre ahora solo lo que la anterior no alcanza.
     //
-    // El corte es por distancia de CHEBYSHEV (max(|x|,|y|)) y no euclídea porque cada banda barre un
-    // CUADRADO de semilado `radiusM` (los índices van de -n a n en los dos ejes). Con un corte
-    // circular quedarían las esquinas del cuadrado interior sin cubrir por nadie: un anillo de
-    // huecos justo donde más se nota.
+    // ⚠️ EL CORTE ERA DE CHEBYSHEV (max(|x|,|y|)) Y SE VEIA EL CUADRADO. Andoni: "se ve como hay un
+    // LOD cuadrado para maximizar el render de props en ese cuadrado". Literal: con Chebyshev cada
+    // banda barre un CUADRADO de semilado `radiusM`, asi que el borde exterior de la ultima banda es
+    // un cuadrado y en las esquinas los props llegan `sqrt(2)` mas lejos que de frente.
+    //
+    // El comentario anterior defendia Chebyshev diciendo que con un corte circular "quedarian las
+    // esquinas del cuadrado interior sin cubrir". Eso solo pasa si se mezclan metricas: si el corte
+    // interior es circular y el exterior cuadrado, si queda un anillo de huecos. Con las DOS
+    // euclideas cada banda es una CORONA y encajan sin hueco ni solape, que es lo que hay ahora.
+    //
+    // De rebote sale mas barato: un circulo es el 78,5% del cuadrado que lo contiene, asi que se
+    // enumeran ~21% menos celdas — y la parte cara del scatter es justo muestrear la celda.
     float prevRad = 0.0f;
     for (size_t bi = 0; bi < params.lods.size(); ++bi) {
         const PropScatterLod& lod = params.lods[bi];
         const float cell  = lod.cellM;
         const float rad   = lod.radiusM;
-        const int   n     = (int)std::ceil(rad / cell);
+        // ── ⚠️ SE ENUMERA AL DOBLE DE FINO QUE LA CELDA, Y NO ES DERROCHE: ES LO QUE LO HACE ESTABLE.
+        //
+        // Aqui habia UN punto por celda, y eso es un aliasing de libro: la rejilla de enumeracion va
+        // anclada a la CAMARA y la cuantizacion va a la rejilla del MUNDO, las dos con el mismo paso.
+        // Dos rejillas iguales desplazadas una fraccion arbitraria —donde este el jugador— no se
+        // corresponden una a una: hay celdas del mundo que no reciben ningun punto (y su prop
+        // desaparece) y otras que reciben dos (se deduplican). Al caminar cambia cuales.
+        //
+        // Medido con `prop_scatter_stability`, andando 5 m: **desaparecia el 15,9% de los props de
+        // los primeros 900 m**. No era el borde de banda, era en todas partes.
+        //
+        // Un cuadrado de lado `cell` SIEMPRE contiene al menos un punto de una rejilla de paso
+        // `cell/2`, asi que con esto ninguna celda del mundo se queda sin visitar. Cuesta 4x puntos
+        // de enumeracion, pero el trabajo caro (muestrear el campo) va DESPUES del deduplicado, asi
+        // que se paga en la parte barata. Medido: **15,9% -> 3,2%** de props perdidos al andar 5 m.
+        //
+        // ⚠️ EL 3% QUE QUEDA ES ESTRUCTURAL Y NO SE ARREGLA SOBREMUESTREANDO MAS. La celda del mundo
+        // es un CUBO de una rejilla 3D, y lo que se recorre es la SUPERFICIE de una esfera: la
+        // interseccion de un cubo con la esfera tiene area muy variable —casi cero cuando la esfera
+        // roza una esquina— y esas celdas diminutas se saltan aunque afines el paso. Es el
+        // cuantizador equivocado para una esfera.
+        //
+        // Lo correcto es direccionar los props por la parametrizacion de CARA DE CUBO del planeta
+        // (`face,level,i,j`, la misma que los nodos del terreno): celdas de area pareja, enumeracion
+        // exacta recorriendo enteros, e identidad que no depende de donde este la camara. Es el
+        // "sistema propio con enlace al del planeta" — y ahora hay medida que lo justifica.
+        const float step  = cell * 0.5f;
+        const int   n     = (int)std::ceil(rad / step);
+
+        // ── ⚠️ LA CELDA ES DE LA CARA DEL CUBO DEL PLANETA, NO DE UNA REJILLA CUBICA 3D ──────────
+        //
+        // Antes se cuantizaba con `floor(posicionEnLaEsfera / cell)` sobre una rejilla cubica de 3D.
+        // Ese es el cuantizador equivocado para una superficie esferica: la interseccion de un cubo
+        // con la esfera tiene area MUY variable —casi cero cuando la esfera roza una esquina del
+        // cubo— y esas celdas diminutas se saltaban en la enumeracion aunque se afinara el paso. Es
+        // lo que dejaba un 3% de props parpadeando al caminar despues de arreglar el aliasing.
+        //
+        // Ahora la celda es `(cara, nivel, i, j)` de la misma parametrizacion que usan los nodos del
+        // terreno: celdas de area pareja, identidad que no depende de donde este la camara, y la
+        // enumeracion solo tiene que ACERTAR la celda, no adivinar su tamaño.
+        //
+        // El nivel sale del `cellM` que pide la banda: una cara abarca `pi/2` de arco, asi que al
+        // nivel L la celda mide `R*(pi/2)/2^L`. Se redondea al nivel mas cercano — el `cellM` de la
+        // configuracion es un objetivo, no un contrato.
+        const double faceArc = R * 1.5707963267948966;
+        const int    lvl     = std::max(0, std::min(28,
+                                   (int)std::lround(std::log2(faceArc / (double)cell))));
+        const double cells   = (double)(1u << lvl);      // celdas por lado de cara
         const float inner = prevRad;      // lo que ya cubre la banda anterior
         prevRad = rad;
 
         for (int j = -n; j <= n; ++j) {
             for (int i = -n; i <= n; ++i) {
-                // Fuera del hueco interior: la banda anterior ya sembró ahí, y sembrar otra vez es
-                // lo que ponía un prop encima de otro.
-                if (inner > 0.0f) {
-                    const float cx = std::abs((float)i * cell);
-                    const float cy = std::abs((float)j * cell);
-                    if (std::max(cx, cy) < inner) continue;
+                // Corona euclidea: dentro de ESTA banda y fuera de la anterior. El corte exterior
+                // es lo que quita el cuadrado; el interior evita apilar un prop sobre otro.
+                {
+                    const float cx = (float)i * step, cy = (float)j * step;
+                    const float d  = std::sqrt(cx * cx + cy * cy);
+                    if (d >= rad) continue;                  // fuera del alcance de la banda
+                    if (inner > 0.0f && d < inner) continue; // ya la sembro la banda anterior
                 }
                 // Punto de la rejilla tangente (solo ENUMERA qué zona cubrir).
                 const glm::dvec3 wp = planetC + glm::dvec3(dirCam) * R
-                                    + glm::dvec3(Td) * (double)(i * cell)
-                                    + glm::dvec3(Bd) * (double)(j * cell);
-                // CELDA MUNDIAL FIJA: proyecta a la superficie (nivel mar) y cuantiza en la
-                // rejilla cúbica del MUNDO. La celda NO depende de la cámara ni de la rejilla.
-                const glm::vec3 sp = glm::normalize(glm::vec3(wp - planetC)) * (float)R;
-                const int gx = (int)std::floor(sp.x / cell);
-                const int gy = (int)std::floor(sp.y / cell);
-                const int gz = (int)std::floor(sp.z / cell);
-                const uint64_t cellKey = ((uint64_t)(uint32_t)gx << 42)
-                                       ^ ((uint64_t)(uint32_t)gy << 21)
-                                       ^  (uint64_t)(uint32_t)gz;
-                if (!seenCells.insert(cellKey ^ (uint64_t)bi).second) continue;
+                                    + glm::dvec3(Td) * (double)(i * step)
+                                    + glm::dvec3(Bd) * (double)(j * step);
+                // CELDA DEL PLANETA: (cara, nivel, i, j). La identidad de un prop sale SOLO de eso
+                // y de la semilla — ni de la camara, ni de la banda, ni del paso de enumeracion.
+                Haruka::PlanetFace face; double lx = 0.0, ly = 0.0;
+                Haruka::dirToCubeFaceClosed(glm::normalize(wp - planetC), face, lx, ly);
+                const int gi = (int)std::floor((lx * 0.5 + 0.5) * cells);
+                const int gj = (int)std::floor((ly * 0.5 + 0.5) * cells);
+                if (gi < 0 || gj < 0 || gi >= (int)cells || gj >= (int)cells) continue;
+                // ⚠️ La clave lleva el NIVEL, no el indice de banda. Con `bi` dentro, el mismo sitio
+                // del mundo visto desde dos bandas distintas daba dos props apilados; con el nivel,
+                // dos bandas que compartieran nivel comparten celda, que es lo correcto.
+                const uint64_t cellKey = ((uint64_t)face << 60) ^ ((uint64_t)lvl << 54)
+                                       ^ ((uint64_t)(uint32_t)gi << 27) ^ (uint64_t)(uint32_t)gj;
+                if (!seenCells.insert(cellKey).second) continue;
 
-                const uint32_t hc = PG::hash32(PG::hash32(PG::hash32(
-                    params.seed ^ (uint32_t)gx) ^ (uint32_t)gy) ^ (uint32_t)gz);
+                const uint32_t hc = PG::hash32(PG::hash32(PG::hash32(PG::hash32(
+                    params.seed ^ (uint32_t)face) ^ (uint32_t)lvl) ^ (uint32_t)gi) ^ (uint32_t)gj);
 
-                // Centro de la celda del mundo + jitter determinista DENTRO de ella → dir estable.
-                const glm::vec3 cellC = (glm::vec3((float)gx + 0.5f, (float)gy + 0.5f, (float)gz + 0.5f)) * cell;
-                const glm::vec3 jp = cellC + glm::vec3(
-                    PG::WhiteNode::hashFloat((int)hc, 1, 0, params.seed) - 0.5f,
-                    PG::WhiteNode::hashFloat((int)hc, 2, 0, params.seed) - 0.5f,
-                    PG::WhiteNode::hashFloat((int)hc, 3, 0, params.seed) - 0.5f) * cell * 0.7f;
-                const glm::vec3 dir = glm::normalize(jp);
+                // Centro de la celda + jitter DENTRO de ella, en coordenadas de la cara: asi el
+                // desplazamiento es una fraccion de celda de verdad, no de un cubo que la corta.
+                const double cw = 2.0 / cells;            // ancho de celda en (lx,ly)
+                const double jx = (double)PG::WhiteNode::hashFloat((int)hc, 1, 0, params.seed) - 0.5;
+                const double jy = (double)PG::WhiteNode::hashFloat((int)hc, 2, 0, params.seed) - 0.5;
+                const double clx = -1.0 + ((double)gi + 0.5 + jx * 0.7) * cw;
+                const double cly = -1.0 + ((double)gj + 0.5 + jy * 0.7) * cw;
+                const glm::vec3 dir = glm::vec3(Haruka::cubeFaceToDir(face, clx, cly));
 
                 // Cota de seguridad: no rellenar el buffer si hay demasiado (LOD bajo / planeta raro).
                 if ((int)out.size() >= params.maxProps) return out;

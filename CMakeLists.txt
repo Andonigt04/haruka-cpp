@@ -67,6 +67,19 @@ if(NOT _haruka_multi_config AND NOT CMAKE_BUILD_TYPE)
     message(STATUS "CMAKE_BUILD_TYPE vacío -> RelWithDebInfo (-O2 -g). Antes se compilaba a -O0.")
 endif()
 
+# ⚠️ Y SI ALGUIEN LO PONE EN `Debug`, QUE SE VEA. No se fuerza —depurar con breakpoints es
+# legítimo— pero tiene que CANTAR, porque el modo en que se cuela es en silencio: alguna herramienta
+# reconfigura el directorio de build a Debug y a partir de ahí todo va a -O0 sin que nadie lo note.
+# Pasó cinco veces en la sesión del 2026-08-31: la suite pasó de ~1 min a no acabar en 4, y peor,
+# el banco de coste del terreno dio una línea base inflada con la que se eligió mal un valor por
+# defecto (se creyó que un cambio costaba +0,1 ms cuando cuesta +1,8).
+if(NOT _haruka_multi_config AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    message(WARNING
+        "CMAKE_BUILD_TYPE=Debug: esto compila a -O0. Sirve para depurar, pero CUALQUIER medida de "
+        "tiempo hecha aquí es basura y la suite tarda 4x. Para medir: "
+        "cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo")
+endif()
+
 if(NOT MSVC)
     # ⚠️ SIN `-ffast-math`, Y CON `-ffp-contract=off` GLOBAL. Medido, no supuesto: con
     # `-ffast-math` los tests de paridad FALLAN en Release —
@@ -636,6 +649,7 @@ add_executable(haruka_tests
     tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
     tests/test_cloud_shape.cpp           # forma de la nube: cuerpo y no lamina (ancho/alto + campo 3D)
     tests/test_ocean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
+    tests/test_shallow_water.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
     tests/test_terrain_node.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # test_dgs.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre

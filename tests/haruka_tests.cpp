@@ -31,6 +31,8 @@ int main(int argc, char** argv) {
     if (want("physics"))                  test_physics_character();
     if (want("physics"))                  test_physics_character_resting_velocity();
     if (want("physics"))                  test_physics_body_removal();
+    if (want("physics") || want("multi")) test_physics_far_ground_from_query();
+    if (want("physics") || want("net") || want("multi")) test_physics_two_instances_agree();
     if (want("physics") || want("rail"))   test_rail_mechanism_jolt();
     if (want("construction") || want("build")) test_construction_placement();
     if (want("construction") || want("vehicle")) test_construction_vehicle();
@@ -47,8 +49,20 @@ int main(int argc, char** argv) {
         test_ocean_buoyancy_drift();
         test_ocean_no_water_no_float();
         test_ocean_sea_state();
+        test_ocean_finite_depth();
+        test_water_fill_global();
+        test_ocean_fetch();
+        test_water_bake_resolution_limit();
+        test_ocean_wave_reach();
+        test_ocean_grid_carries_wave();
         test_ocean_tide();
         test_ocean_swash();
+        test_ocean_break_limit();
+        test_ocean_break_fold();
+        test_shallow_water_reanchor_stability();
+        test_shallow_water_mountain_coverage();
+        test_shallow_water_inherits_ocean_swell();
+        test_shallow_water_physics();
         test_terrain_finest_octave();
         test_terrain_orbital_relief();
         test_terrain_orbital_albedo();
@@ -110,6 +124,14 @@ int main(int argc, char** argv) {
         test_terrain_node_neighbours();
     }
 
+    // Con filtro propio: es el criterio de aceptacion del multijugador ("lo visible tiene que ser
+    // colisionable, 10-100 km") y se consulta suelto, sin pagar el bloque entero del v5.
+    if (want("node") || want("v5") || want("parity") || want("observer") || want("multi"))
+    {   test_terrain_collision_observer_dependence();
+        test_terrain_collision_client_agreement();
+        test_terrain_collision_refine_cost();
+        test_terrain_ground_query_cost(); }
+
     if (want("dgs") || want("rules"))     test_dgs_rules_module();
     if (want("dgs") || want("wire"))      test_dgs_wire_format();
     if (want("robust") || want("dgs"))    test_dgs_robust();
@@ -156,6 +178,8 @@ int main(int argc, char** argv) {
         test_image_writer_roundtrip();
         test_prop_lod_mesh();
         test_prop_lod_attributes();
+        test_prop_scatter_radial();
+        test_prop_scatter_stability();
         test_prop_collider();
         test_rock_interior();
     }

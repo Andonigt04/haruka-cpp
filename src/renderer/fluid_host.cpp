@@ -104,7 +104,7 @@ void FluidHost::ensurePatch(const WorldPos& cameraPos) {
     const double hGround = hasPlanet ? terrainHeightFn(cameraPos) : 0.0;
     const glm::dvec3 anchor =
         hasPlanet ? planetCenter + up * (planetRadius + hGround) : cameraPos;
-    m_sim->init(anchor, tan, bit, up, kSpan, kN, terrainHeightFn);
+    m_sim->init(anchor, tan, bit, up, kSpan, kN, terrainHeightFn, bakedWaterFn);
     m_anchor = anchor;
     m_anchored = true;
     m_pendingRain = 0.0f;

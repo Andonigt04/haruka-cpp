@@ -104,6 +104,11 @@ layout(location = 3) flat out int vLevel;   // el nivel ya no está en el UBO: v
 layout(location = 4) out vec3 vClimate;     // x = elevacion BASE en km · y = temp C · z = humedad
 layout(location = 5) out vec3 vUp;          // radial: la normal "del planeta", para clima y costa
 layout(location = 6) flat out int vStride;  // indice de stride del nodo (vista de depuracion 4)
+// ⚠️ Cuantos niveles POR ENCIMA de su huella lee este nodo sus datos (0 = los suyos). Va a la
+// vista 9: sin ella no hay forma de saber si un artefacto cae dentro de un nodo caido a ancestro o
+// dentro de uno normal, y esas dos cosas tienen causas y arreglos distintos.
+layout(location = 8) flat out int vKUp;
+layout(location = 9) out float vDispM;   // vista 10: dibujado - dato, en metros
 layout(location = 7) flat out int vFace;    // cara del cubo (vista 5: atribuir un agujero)
 
 // ── LEER UN SLOT QUE NO ES EL MIO: EL SUB-RECTANGULO ────────────────────────────────────────────
@@ -467,7 +472,25 @@ void main() {
         // Nada que hacer con la posicion: `u0,v0` YA es el vertice del grueso sobre el que colapsa.
     }
     vHeight = h;
+    // ⚠️ VISTA 10: LA DISPARIDAD, EN METROS. `h` es lo que se DIBUJA — despues del stride (que salta
+    // texeles), del cosido (que colapsa vertices sobre la rejilla del vecino) y del morph. El texel
+    // crudo de ESTE vertice, sin nada de eso, es lo que el DATO dice que hay aqui. La diferencia es
+    // exactamente lo que el diezmado se deja, y no habia forma de verla: los tests miran posiciones y
+    // las vistas de depuracion miran niveles, stride o normales. Ninguna resta estas dos cosas.
+    //
+    // Solo tiene sentido con datos propios: con `kUp > 0` el texel fino no existe (se esta leyendo un
+    // ancestro), asi que ahi se marca -1 y la vista lo pinta aparte en vez de inventar un numero.
+    // ⚠️ LA REFERENCIA ES EL TEXEL DEL PROPIO NODO, asi que esto mide lo que pierden el STRIDE, el
+    // COSIDO y el MORPH — no si el dato horneado es correcto. Si el heightmap ya se separa de la
+    // funcion real, los dos lados salen mal a la vez y el mapa se pinta VERDE: es ciego a eso.
+    //
+    // Comparar contra la VERDAD (`base + detalle`) pide dos cosas que aqui no se cumplen solas: el
+    // compute evalua el detalle con la direccion en DOUBLE (en float son 0,38-0,76 m a radio
+    // terrestre, ver la nota de `vFragPos`) y con el corte del TEXEL DEL NODO, no uno fijo (1,32 m de
+    // diferencia ya en el nivel 13). Sin igualar las dos, el careo mide el instrumento.
+    vDispM = (kUp > 0) ? -1.0 : (h - HARUKA_NODE_AT(0, int(u), int(v)));
     vStride = IN.slot.z;
+    vKUp    = kUp;
 
     const vec3 dirF = dir;
     // ⚠️ EL CENTRO VIENE EN DOS TROZOS, Y EL ORDEN DE LA SUMA NO ES NEGOCIABLE.

@@ -978,17 +978,6 @@ depuración. No se aclaró si las tres se ven idénticas **entre sí** —lo que
 terreno lejano faltaba en las tres. Ahora el nivel viaja por un `flat out` en vez del UBO, así que
 esa vista puede comportarse distinto.
 
-### ⚠️ Normal per-píxel dentro del clipmap (2026-08-18) — sin medir el coste
-
-`biome.frag` calculaba la normal per-píxel solo FUERA del clipmap; dentro heredaba `vNorm`, del
-gradiente en vértices teselados cada 4 m. Iluminación per-píxel sobre una normal basta = el suelo
-cercano se veía por triángulos. Añadida la rama que faltaba.
-
-**Sin verificar:** (a) que se vea suave, (b) **cuánto cuesta**. Las dos tomas de `HARUKA_FRAMELOG=1`
-no eran comparables (el juego arranca en estados distintos) y los rangos se solapan: sin cambio
-23,5-23,9 ms de media, con él 21-29. Hay que ponerse **quieto en el mismo sitio** y lanzar las dos.
-Revertir = quitar la rama `else` de `biome.frag`, aislada y comentada.
-
 ### ⚠️ Sombreado toon unificado (2026-08-18) — cambia el aspecto de TODO lo sombreado
 
 `lib/surface_shade.glsl` unifica el terminador (**0,30**, término medio de los cuatro que había) y el
@@ -1005,32 +994,6 @@ por hemisferio; el gradiente arriba/abajo se conserva como factor de brillo (×1
 geometría. Reproducido y arreglado en el banco de tests. **Falta jugarlo en Vulkan** con el streaming
 moviéndose, que es cuando se disparaba.
 
-### ⚠️ Clipmap por ANILLOS ANIDADOS (2026-08-14) — cambia lo que se ve al subir
-
-El clipmap era **una rejilla estirada** por `clipScale = 2^k` según la altura: cubría más, pero
-gruesa POR TODAS PARTES, así que a 640 m el suelo bajo los pies pasaba a quads de 128 m. Ahora se
-dibujan **varios anillos concéntricos** (nivel r: quad `4·2^r` m, alcance `±1,9·2^r` km), cada uno
-con el centro hueco donde vive el de dentro. Un draw por anillo, el mismo buffer de vértices, **un
-ClipParams por anillo** (buffers distintos: con uno solo, en Vulkan todos los anillos leerían el
-último — el fallo del UBO de material y del buffer de instancias, por tercera vez).
-
-Verificado en test (`terrain_lod_invariants`, con contraprueba): el quad coincide **exacto** a los
-dos lados de las 5 fronteras, y sin el redondeo a potencia de dos no coincidiría. Medido: a 640 m de
-altura el quad mejora **32×** a 100 m, **8×** a 3 km, **2×** a 10 km y **queda igual** a 30-63 km.
-
-- [ ] **QUE NO HAYA RENDIJAS.** Es el riesgo #1 y el test solo cubre la frontera *exacta*. Subir
-  despacio de 20 m a 2,5 km mirando al horizonte: si aparece un círculo de puntos de cielo alrededor,
-  son T-junctions. `HARUKA_NEAR_RING=0` descarta que sea el anillo de colisión.
-- [ ] **Que ya no aparezca "una capa nueva muy cerca" al subir**, que es el síntoma que originó esto.
-- [ ] **Qué cuesta.** `planet.clipmap.draw` en el profiler, a ras de suelo y a 640 m. A ras de suelo
-  tiene que ser **idéntico** al de antes (1 solo anillo, k=0); si sube, el cambio toca donde no debía.
-  A 640 m son 6 draws: cota alta 4 641 parches contra 961. **Sin medir todavía.**
-- [ ] **El solape de 64·2^r m** entre anillos (el descarte es por parche entero, así que el de fuera
-  empieza un poco antes). Deberían ser dos superficies idénticas superpuestas → invisible. Si se ve
-  un anillo más oscuro o parpadeando, es z-fighting y hace falta sesgo por nivel.
-- [ ] **Que el agua y la malla base sigan casando** en el borde exterior: el recorte de la base ahora
-  lee la cobertura del anillo EXTERIOR, no la de una rejilla estirada.
-
 ### ⚠️ Peñones enterrados de la roca (2026-08-14) — el ahorro es MUCHO menor de lo que dije
 
 `bakeRockMesh` ya no genera los peñones que caen enteros dentro del blob principal. El test
@@ -1045,41 +1008,6 @@ diferencia — o sea que asomarían por las facetas planas. El cambio es correct
 es una optimización que se vaya a notar**; no merece más tiempo.
 
 - [ ] Nada que mirar en pantalla: la afirmación es justo que no se ve. Si se viera, es un bug.
-
-### ⚠️ Terreno v4 (clipmap) — qué se lleva por delante el cambio del 2026-08-06
-
-El v4 sustituye el streaming por chunks por un **clipmap con teselación hardware**
-(`planet/clipmap.vert/.tesc/.tese`). El motivo es bueno y va al README: un planeta a escala real
-con chunks horneados y cacheados **no cabe en disco** (orden de TB); generando en la `tese` el
-coste de almacenamiento es **cero**. Es un experimento, pero estable.
-
-Lo que hay que confirmar antes de tocar el README, porque el documento sigue describiendo el v3:
-
-- [ ] **¿Cuántos suelos hay ahora?** `reference_surface.cpp:43` devuelve `h = 0.0` (esfera lisa) y
-  `application.h:260` la declara *fallback*. El suelo real parece ser
-  `PlanetarySystem::groundHeightKmAtDir` leyendo `m_heightCPU`. **La afirmación estrella del README
-  ("un solo suelo" + 0,3 mm medidos) es del v3 y hoy no está respaldada.** O se re-mide con el
-  clipmap, o se reformula. Sospecha del autor: sigue habiendo uno solo — *falta comprobarlo*.
-- [ ] **¿La paridad render↔colisión se mantiene con teselación?** Ahora el desplazamiento ocurre en
-  la `tese`, en GPU, y la CPU no tiene la malla. Si el suelo se evalúa en dos sitios distintos con
-  fórmulas distintas, vuelve el bug de los dos terrenos por otra puerta. Es **la** verificación
-  crítica del v4.
-- [ ] **`terrain_gen.comp`**: sin ningún consumidor hoy. ¿Reconectar (el v4 sigue necesitando el
-  campo erosionado) o retirar? Sospecha: sigue haciendo falta, viene del v3.
-- [ ] **Fences + mapeo persistente**: solo aparecen ya en el RHI, sin consumidor. Si el clipmap no
-  hace readback, dejan de ser una feature del terreno y pasan a ser **capacidad del RHI**. Eso está
-  bien, pero el README no puede seguir vendiéndolo como pipeline de terreno.
-- [ ] **Caché LRU + caché en disco (`core/cache/`)**: **cero consumidores**. Si el v4 genera en la
-  `tese`, no hay malla que cachear — y entonces la caché no es deuda: es la **consecuencia lógica**
-  del cambio y hay que contarla como simplificación, no dejarla muerta y callada.
-- [ ] **MESO**: solo sobrevive en un comentario de `reference_surface.h`. Retirar del README y de
-  los switches de entorno si ya no existe.
-- [ ] **`drawIndexedIndirect` / `gl_DrawID`**: ¿lo conserva el camino del clipmap o murió con los
-  chunks? Afecta a lo que se puede afirmar sobre draws agrupados.
-
-> Regla mientras esto esté abierto: **el README no promete cifras del v3 como si fueran del v4.**
-> Un aviso de "en reescritura, cifras pendientes de re-medir" suma credibilidad; una cifra que el
-> código contradice la destruye.
 
 ### ✅ RESUELTO: "con RenderDoc y el backend en Vulkan carga OpenGL" (2026-08-12)
 
@@ -1447,6 +1375,24 @@ Sin versión asignada porque **falta decidir**, no porque falte tiempo.
 - **Forma ESCRITA del idioma**: runas y grimorios como objetos del mundo.
 
 ---
+
+## 🔴 ANOTADO, SIN HACER — la voluta: la elipse de Gerstner (2026-09-01)
+
+La cresta **no puede plegarse**, y ya no es por la longitud de onda: la dispersión de profundidad
+finita está puesta (`oceanWaveNumber` / `harukaWaveNumber`, residuo 1,47e-07) y el tren de 61 m pasa
+a 32,2 m en 3 m de fondo. El jacobiano apenas se movió: 1,2 m de fondo, +0,883 → **+0,864**.
+
+La causa es otra: `Q = min(0.75/(k·A·N), 1)` acota `Σ Q·A·k ≤ 0,75` **por construcción**, así que el
+jacobiano no puede bajar de 0,25 valga lo que valga `k`. El pliegue pide el desplazamiento horizontal
+real de la ola trocoidal en profundidad finita — **`A/tanh(k·d)`** en la superficie — en vez del `Q`
+ad-hoc.
+
+**Ahora es viable, y antes no lo era.** El intento que se revirtió abría `Q` con `k` de aguas
+profundas: como `Q·A = presupuesto/(k·N)` no dependía de la amplitud, en un lago de 30 cm salían los
+mismos ~3 m de desplazamiento que en mar abierto y la lámina se plegaba sobre sí misma. `A/tanh(kd)`
+sí depende de la amplitud y del fondo: con `A ≤ 0,55d` y `k ≈ √(k₀/d)`, en 30 cm da ~0,94 m.
+
+⚠️ Al tocarlo, correr `shallow_water_*`: es lo que rompió la vez anterior.
 
 ## 🤔 Sin decidir (2026-08-24) — el mar, medido y esperando criterio
 

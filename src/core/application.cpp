@@ -153,6 +153,38 @@ void Application::applyGraphicsSettings() {
     if (_window) {
         SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
         _window->setWindowMode(static_cast<int>(g.windowMode)); // windowed / borderless / fullscreen
+
+        // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────
+        //
+        // ⚠️ EL DEFECTO ES LA NATIVA DEL MONITOR, y se resuelve AQUI porque antes no se puede:
+        // `SDL_Init(SDL_INIT_VIDEO)` ocurre dentro de `Window::init`, despues de cargar el ini. Un
+        // 0x0 guardado significa "primer arranque", no "auto": en cuanto se rellena, el ajuste es un
+        // numero concreto y el combo lo enseña como cualquier otro.
+        // `::SDL_Window`, con el `::`: dentro de `Haruka::Core` hay una declaracion adelantada del
+        // mismo nombre y sin el prefijo se resuelve a esa, no al tipo real de SDL.
+        if (::SDL_Window* w = _window->getNativeWindow()) {
+            // `g` es const aqui (esta funcion solo APLICA ajustes). Resolver el defecto es lo unico
+            // que los escribe, y va por el accesor mutable a proposito, para que se vea.
+            auto& gw = Haruka::SettingsManager::get().graphics();
+            if (g.resolutionW <= 0 || g.resolutionH <= 0) {
+                const SDL_DisplayID disp = SDL_GetDisplayForWindow(w);
+                if (const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(disp)) {
+                    gw.resolutionW = dm->w;
+                    gw.resolutionH = dm->h;
+                    HARUKA_LOGI("Settings", "resolucion sin fijar -> la del monitor: %dx%d",
+                                dm->w, dm->h);
+                }
+            }
+            // En pantalla completa manda el modo de video, no el tamaño de ventana: cambiarlo ahi
+            // pelearia con SDL y dejaria la ventana de un tamaño y el swapchain de otro.
+            if (g.windowMode != Haruka::Settings::WindowMode::Fullscreen &&
+                gw.resolutionW > 0 && gw.resolutionH > 0) {
+                int cw = 0, ch = 0;
+                SDL_GetWindowSize(w, &cw, &ch);
+                if (cw != gw.resolutionW || ch != gw.resolutionH)
+                    SDL_SetWindowSize(w, gw.resolutionW, gw.resolutionH);
+            }
+        }
     }
 
     // Texture quality → anisotropic filtering + mip LOD bias. Low trades sharpness
@@ -402,6 +434,38 @@ void Application::run(const std::string& startScenePath, bool headless) {
         // nada y manda la configuración del sistema, que es lo que espera quien no lo ha tocado.
         // Y NO se pisa una variable que ya venga puesta desde fuera — quien arranca con
         // `__NV_PRIME_RENDER_OFFLOAD=1` a mano está diciendo algo más específico que el ajuste.
+        // ── LA GPU "AUTOMATICA" SE RESUELVE A UN NOMBRE, NO ES UNA ENTRADA DEL COMBO ────────────
+        //
+        // ⚠️ MISMO CRITERIO QUE LA RESOLUCION: el ajuste siempre vale una tarjeta concreta, y el
+        // desplegable lista solo tarjetas reales. Un "Automática" en la lista parece comodo y es
+        // peor — el que lo tiene puesto no sabe en que GPU esta jugando, que es exactamente el lio
+        // del que salimos hoy (disparidad en la integrada, correcto en la dedicada, y el ajuste
+        // decia "Automática" en los dos casos).
+        //
+        // Se resuelve ANTES de crear el device para que el valor escrito sea EL QUE SE USA, y con la
+        // misma regla que usaba la automatica: la dedicada si la hay. Asi el comportamiento por
+        // defecto no cambia; lo unico que cambia es que ahora se ve cual es.
+        {
+            auto& gw = Haruka::SettingsManager::get().graphics();
+            const auto ads = Haruka::RHI::Device::enumerateAdapters(
+                useVulkan ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL, nullptr);
+            // Tambien se re-resuelve si el nombre guardado ya no existe: al cambiar de maquina o de
+            // drivers, dejar el combo enseñando una tarjeta que no esta seria peor que no enseñar
+            // nada, porque parece elegida y no lo esta.
+            bool present = false;
+            if (!gw.preferredGpus.empty() && !gw.preferredGpus[0].empty())
+                for (const auto& a : ads)
+                    if (a.name == gw.preferredGpus[0]) { present = true; break; }
+            if (!present && !ads.empty()) {
+                size_t pick = 0;
+                for (size_t i = 0; i < ads.size(); ++i) if (ads[i].discrete) { pick = i; break; }
+                if (gw.preferredGpus.empty()) gw.preferredGpus.emplace_back();
+                gw.preferredGpus[0] = ads[pick].name;
+                HARUKA_LOGI("RHI", "GPU sin fijar -> la que elegiria la automatica: '%s'%s",
+                            ads[pick].name.c_str(), ads[pick].discrete ? " [dedicada]" : "");
+            }
+        }
+
         const auto& gpus = Haruka::SettingsManager::get().graphics().preferredGpus;
         if (!useVulkan && !gpus.empty() && !gpus[0].empty()) {
             std::string want = gpus[0];

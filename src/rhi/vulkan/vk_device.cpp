@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdint>
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <vector>
 #include <string>
@@ -1532,8 +1533,31 @@ namespace Haruka::RHI::vulkan
     // Fase 4: la compilación GLSL→SPIR-V (glslang + shifts de binding), el descriptor set layout
     // COMPARTIDO y la construcción de los pipelines viven en vk_pipeline.{h,cpp}. Aquí SOLO se
     // cargan/compilan las etapas y se delega, siempre contra el pipeline layout compartido.
+    // ⚠️ INSTRUMENTO, NO ADORNO: aqui es donde puede estar el segundo de arranque.
+    //
+    // Crear un pipeline hace dos cosas caras y muy distintas: traducir GLSL a SPIR-V (que ya se
+    // cachea en disco, ver `compileGlslToSpv`) y que el DRIVER convierta ese SPIR-V en codigo
+    // maquina. Lo segundo es por fabricante y no se cachea en la aplicacion: no hay `VkPipelineCache`
+    // ni binarios de programa de GL en este motor. Andoni reporta ~1000 ms al alternar AMD/NVIDIA y
+    // adivinar cual de los dos es sale caro, asi que se MIDE y se avisa de los que pasen del umbral.
     PipelineHandle VKDevice::createPipeline(const PipelineDesc& d)
     {
+        const auto t0_pipe = std::chrono::steady_clock::now();
+        struct PipeTimer {
+            std::chrono::steady_clock::time_point t0; const PipelineDesc* d;
+            ~PipeTimer() {
+                const double ms = std::chrono::duration<double, std::milli>(
+                                      std::chrono::steady_clock::now() - t0).count();
+                static double s_total = 0.0; static int s_count = 0;
+                s_total += ms; ++s_count;
+                if (ms > 20.0)
+                    HARUKA_LOGI("RHI/VK", "pipeline LENTO: %.0f ms  (%s | %s | %s)  · acumulado %.0f ms en %d",
+                                ms, d->vertexPath ? d->vertexPath : "-",
+                                d->fragmentPath ? d->fragmentPath : "-",
+                                d->computePath ? d->computePath : "-", s_total, s_count);
+            }
+        } pipeTimer{ t0_pipe, &d };
+
         // Crea UNA vez el set + layout compartidos (bindings UBO 0..31 / SSBO 32..63 / textura
         // 64..95 de PLAN_VULKAN.md §4.3). Vive hasta el dtor del device.
         if (!m_pipelineLayout)

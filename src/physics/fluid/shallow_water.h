@@ -34,12 +34,16 @@ public:
      * @param terrainHeight  callback: world pos → terrain elevation along `up`
      *                       (metres). Same source the renderer/collision use.
      */
+    /// @param bakedWaterLevel  cota de la lámina HORNEADA con el planeta (m sobre el nivel del mar),
+    ///        o `nullptr`. Ver la nota de `seedLakes`: con este campo, la siembra deja de depender
+    ///        del BORDE del parche, que es lo que hacía aparecer un lago al caminar.
     void init(const glm::dvec3& anchor,
               const glm::dvec3& tangent,
               const glm::dvec3& bitangent,
               const glm::dvec3& up,
               double spanM, int n,
-              std::function<double(const glm::dvec3&)> terrainHeight);
+              std::function<double(const glm::dvec3&)> terrainHeight,
+              std::function<double(const glm::dvec3&)> bakedWaterLevel = nullptr);
 
     /** @brief Advances the simulation by dt seconds (sub-stepped internally for CFL). */
     void step(float dt);
@@ -76,6 +80,16 @@ public:
      * grid cell nearest a world position. Returns -1e9 if off-grid.
      */
     float surfaceAlongUpAtWorld(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief Lámina de agua (m) en la celda más cercana a una posición del mundo; -1 si cae fuera.
+     *
+     * La contraparte de `surfaceAlongUpAtWorld` para cuando lo que interesa es el AGUA y no la
+     * superficie. Comparar dos parches por la superficie mezcla agua y relieve: dos rejillas
+     * desplazadas muestrean el terreno en puntos distintos, y en pendiente esa diferencia es mucho
+     * mayor que cualquier lámina. La profundidad vale 0 en seco caiga donde caiga la celda.
+     */
+    float waterAtWorld(const glm::dvec3& worldPos) const;
 
     /**
      * @brief Clamps coastal water to the sea level so rivers meet the ocean

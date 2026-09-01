@@ -27,6 +27,9 @@ layout(std140, binding = 29) uniform OceanParams {
     vec4 uOceanWave[HARUKA_WAVES];
     /// x = cota de la lamina sobre el nivel del mar base (m), MAREA INCLUIDA.
     /// y = 1 si el bloque trae datos validos; 0 = usar el mar de referencia (ver abajo).
+    /// z = EL RELOJ del oleaje (s). Vive aqui y no en el UBO del planeta porque es estado del MAR:
+    ///     el pase de agua del quadtree no tiene aquel bloque, y sacarlo de otro sitio fue como el
+    ///     agua acabo congelada una vez. Gemelo de `Haruka::Planet::oceanClockSeconds()`.
     vec4 uOceanMisc;
 };
 
@@ -34,6 +37,10 @@ layout(std140, binding = 29) uniform OceanParams {
 /// bloque no se ató (pipeline nuevo, orden de bind mal), un UBO sin atar lee CEROS — y con lambda 0
 /// el número de onda es infinito y el mar sale como ruido blanco. Con esto degrada a "el mar de
 /// siempre", que es un fallo que se ve pero no destruye la escena.
+/// El reloj del oleaje (s). 0 si el bloque no se ato: el mar sale quieto, que es un fallo visible
+/// pero no destruye la escena — el mismo criterio que la tabla de reserva de abajo.
+float harukaOceanTime() { return (uOceanMisc.y > 0.5) ? uOceanMisc.z : 0.0; }
+
 vec4 harukaWaveAt(int i) {
     if (uOceanMisc.y > 0.5) return uOceanWave[i];
     if (i == 0) return vec4(61.0, 0.85,  1.000,  0.000);

@@ -484,6 +484,28 @@ inline uint32_t nodeContentHash(const float* heights, size_t count) {
 inline constexpr double TERRAIN_NODE_ERROR_PX = 2.0;
 
 /**
+ * @brief Radio (m) dentro del cual el render NO puede engrosar por encima del corte de la colision.
+ *
+ * Dentro de este radio el stride se fuerza a 1, y hasta el doble a 2 como maximo. Es lo que cierra la
+ * disparidad ver-vs-pisar donde se ve; ver la nota larga en `nodeStrideWant`. 300 m sale de dividir
+ * la disparidad por la distancia: a 300 m son 1,6 px de media, y mas alla ya no se distingue.
+ *
+ * ⚠️ 150 Y NO 300, Y LA DIFERENCIA LA DECIDIO EL BANCO (`terrain_stride_match_cost`, a altura de
+ * ojo y con HARUKA_NO_VSYNC=1; sin eso Vulkan se clava en 16,6 ms y parece gratis):
+ *
+ *     radio     triangulos   OpenGL           Vulkan
+ *       0 m       1,22 M     4,06 ms          7,66 ms      <- linea base
+ *     150 m       1,65 M     5,35 (+1,3)      7,76 (+0,1)
+ *     300 m       2,38 M     7,60 (+3,5)     10,77 (+3,1)
+ *     600 m       2,93 M     9,23 (+5,2)     13,04 (+5,4)
+ *
+ * 150 m se lleva la banda donde la disparidad vale de 5,6 a 21 px por +0,1 ms en Vulkan. Subir a 300
+ * cuesta 3 ms mas para bajar de 2,8 a 1,6 px de media: mal negocio. Y con el tramo graduado, 150
+ * tambien deja 150-300 m en stride 2 como maximo, que ya era el peor punto (antes saltaba a 4).
+ */
+inline constexpr double TERRAIN_NODE_STRIDE_MATCH_M = 150.0;
+
+/**
  * @brief ¿Hay que subdividir este nodo? Criterio de error en pantalla.
  *
  * El error geométrico de un nodo es del orden de su TÉXEL (lo que la rejilla no puede representar);
@@ -550,11 +572,127 @@ inline double nodeScreenError(const NodeId& n, double planetRadiusM,
  * @param collisionFineCellM celda del anillo más fino de la física (`TERRAIN_RING_FINE_CELL`).
  * @param maxIndex           mayor índice con index buffer construido.
  */
+/**
+ * @brief METROS de relieve que se pierden al dibujar con vano `spanM` un dato horneado a `texelM`.
+ *
+ * ── QUE ES ESTE NUMERO Y POR QUE FALTABA ────────────────────────────────────────────────────────
+ *
+ * El stride dibuja triangulos entre texeles NO CONSECUTIVOS: el dato tiene detalle hasta `texelM`
+ * pero la malla solo puede describir hasta `spanM = stride x texelM`. Lo que hay entre esas dos
+ * longitudes de onda existe en el heightmap y no se dibuja — es el error de cuerda, en metros.
+ *
+ * Y se puede calcular EXACTO sin muestrear nada, porque la tabla de octavas de `terrain_detail` es
+ * explicita: amplitudes 969,3 / 513,4 / 260 / 70 / 14 / 3 / 0,7 con sus longitudes de onda, y un peso
+ * `octaveWeight` que dice cuanto entra cada una a un corte dado. Lo que se pierde es, octava a
+ * octava, lo que el dato SI tiene y la malla NO:
+ *
+ *     perdido = sum_i  0,5 x A_i x [ w(lambda_i, texelM) - w(lambda_i, spanM) ]
+ *
+ * El 0,5 es porque `detailNoise` va de 0 a 1 y entra como `(n - 0,5)`, o sea semi-amplitud.
+ *
+ * ⚠️ GEMELO DE LA TABLA DE `terrain_detail.h`. Si alli cambia una amplitud o una longitud de onda,
+ * aqui tambien: si divergen, el LOD decide con un error que el terreno no tiene.
+ */
+inline double nodeMissingReliefM(double texelM, double spanM) {
+    // (longitud de onda, amplitud) — el MISMO orden y las MISMAS cifras que `terrainDetail`.
+    static constexpr double kOct[7][2] = {
+        { 12000.0, 969.3 }, { 6000.0, 513.4 }, { 2857.0, 260.0 },
+        {   625.0,  70.0 }, {  111.0,  14.0 }, {   22.0,   3.0 }, { 4.5, 0.7 },
+    };
+    auto w = [](double lambdaM, double minFeatureM) {
+        const double t = lambdaM / std::max(minFeatureM * 2.0, 1e-3);
+        return std::min(std::max(t - 1.0, 0.0), 1.0);
+    };
+    double lost = 0.0;
+    for (const auto& o : kOct) lost += 0.5 * o[1] * std::max(w(o[0], texelM) - w(o[0], spanM), 0.0);
+    return lost;
+}
+
 inline double nodeStrideWant(const NodeId& n, double planetRadiusM,
                              const glm::dvec3& camPos, const glm::dvec3& planetCenter,
                              double errorPx, double vertexPx,
-                             double collisionFineCellM, double nodeElevM = 0.0) {
-    const double screenWant = vertexPx / std::max(errorPx, 1e-3);
+                             double collisionFineCellM, double nodeElevM = 0.0,
+                             double strideMatchM = TERRAIN_NODE_STRIDE_MATCH_M,
+                             double nodeReliefM = -1.0, double nodeReliefRefM = 0.0,
+                             double radPerPx = 0.0) {
+    // ── EL PRESUPUESTO DE VERTICES SE REPARTE POR DISTANCIA Y NADA MAS ──────────────────────────
+    //
+    // `screenWant` es `vertexPx / errorPx`: una CONSTANTE, igual para todos los nodos. Asi que un
+    // prado liso recibe exactamente la misma densidad de vertices que una ladera rota, aunque en el
+    // prado no haya nada que describir y en la ladera el diezmado se vea.
+    //
+    // El error que deja el stride es de CUERDA: la superficie dibujada corta entre muestras que si
+    // existen, y lo que se pierde depende de cuanto sube y baja el terreno dentro de ese vano — no
+    // de lo lejos que esta. Por eso gastar por distancia reparte mal: paga igual donde no hace falta.
+    //
+    // ⚠️ SE INTENTO REPARTIR POR RELIEVE Y NO SALE NEUTRO. MEDIDO, NO SUPUESTO.
+    //
+    // La idea: un prado liso no necesita tantos vertices como una ladera rota, asi que mover el
+    // presupuesto del uno al otro daria menos error de cuerda por el MISMO numero de triangulos.
+    // Con `nodeReliefM` y una referencia (`nodeReliefRefM`) el nodo liso pide stride mas grueso y el
+    // escarpado mas fino. Suena bien y no funciona, por el `min(screenWant, collWant)` de abajo:
+    //
+    //   · Afinar SI pasa: `screenWant` baja y el min lo deja pasar.
+    //   · Bastecer NO: `screenWant` sube, pero `collWant` lo tapa y el nodo se queda igual.
+    //
+    // O sea que la mitad que devuelve presupuesto no devuelve nada y solo queda la que gasta.
+    // Medido en la misma escena (2,5 M de triangulos con el reparto de siempre):
+    //
+    //     referencia CONSTANTE (8 x texel)   -> 8,6 M   (3,4x: casi todos los nodos la superan)
+    //     media ARITMETICA de la escena      -> 3,3 M
+    //     media GEOMETRICA de la escena      -> 4,3 M   (la correcta para un stride en potencias de 2)
+    //
+    // Ninguna es neutra. Para que lo fuera habria que repartir DESPUES del min, o sea sobre el stride
+    // ya decidido, y eso es otra estructura. Queda detras de `HARUKA_TERRAIN_V5_RELIEF`, APAGADO por
+    // defecto, para que el numero este a mano si alguien retoma la idea por el lado correcto.
+    double screenWant = vertexPx / std::max(errorPx, 1e-3);
+
+    // ── CRITERIO POR ERROR, NO POR DENSIDAD (`radPerPx > 0`) ────────────────────────────────────
+    //
+    // ⚠️ `vertexPx / errorPx` es una CONSTANTE: fija cuantos vertices por pixel y punto. Eso reparte
+    // el presupuesto sin mirar lo que hay que describir — el mismo gasto en un prado liso que en un
+    // cantil. Un LOD de quadtree no se decide por densidad sino por ERROR: se engrosa mientras lo que
+    // se pierde siga por debajo de un umbral EN PANTALLA.
+    //
+    // Aqui el error se sabe en metros sin muestrear (`nodeMissingReliefM`) y se proyecta dividiendo
+    // por `distancia x radianes por pixel`, que es la misma conversion que usa `nodeScreenError`. Se
+    // busca el vano MAS GRUESO que aun cabe en `errorPx`, o sea el maximo ahorro admisible.
+    //
+    // Lo que cambia frente a la constante: donde las octavas que se pierden son pequenas —terreno
+    // suave, o vanos por debajo de la octava mas fina— el stride puede crecer y se ahorran
+    // triangulos; donde son grandes, se frena aunque la densidad "sobrara". Mismo umbral de calidad,
+    // menos gasto donde no aporta.
+    if (radPerPx > 0.0) {
+        const double texelM = nodeTexelM(n, planetRadiusM);
+        double dist = 1e300;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += TERRAIN_NODE_CELLS / 2)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += TERRAIN_NODE_CELLS / 2)
+                dist = std::min(dist, glm::length(planetCenter
+                       + nodeTexelDir(n, u, v) * (planetRadiusM + nodeElevM) - camPos));
+        dist = std::max(dist, 1.0);
+        const double mPerPx = dist * radPerPx;          // metros que mide un pixel a esa distancia
+        const double budgetM = errorPx * mPerPx;        // lo que se puede perder sin que se note
+        double allowed = 1.0;
+        for (double s = 2.0; s <= 64.0; s *= 2.0) {
+            if (nodeMissingReliefM(texelM, texelM * s) > budgetM) break;
+            allowed = s;
+        }
+        screenWant = std::max(screenWant, allowed);
+    }
+    if (nodeReliefM >= 0.0 && nodeReliefRefM > 0.0) {
+        // Relieve de referencia: el que un nodo "normal" tiene sobre su propio vano de texel. Por
+        // debajo se puede diezmar mas; por encima hay que afinar. La raiz es porque el error de
+        // cuerda va con el CUADRADO del vano: para doblar el error admisible basta 1,41x de vano.
+        // ⚠️ LA REFERENCIA ES LA MEDIA DE LA ESCENA, NO UNA CONSTANTE. El primer intento uso un
+        // numero fijo (`8 x texel`) y NO era neutro: en este terreno casi todos los nodos lo superan,
+        // asi que todos se afinaban y los triangulos pasaban de 2,8 a 8,6 M — o sea "gastar 3x", que
+        // es exactamente lo que esto venia a NO hacer. Con la media del conjunto dibujado, la mitad
+        // de los nodos sube y la otra baja: el total se conserva y solo cambia el REPARTO.
+        // El llamante la pasa en `nodeReliefRefM`; con <= 0 no se aplica nada.
+        const double relief = std::max(nodeReliefM, 1e-3);
+        const double f      = std::sqrt(std::max(nodeReliefRefM, 1e-3) / relief);
+        screenWant *= std::min(std::max(f, 0.5), 2.0);   // ni un cuarto ni cuatro veces: x0,5 a x2
+    }
 
     const double surfR = planetRadiusM + nodeElevM;
     double nearest = 1e300;
@@ -566,7 +704,40 @@ inline double nodeStrideWant(const NodeId& n, double planetRadiusM,
                                      nearest / (double)(TERRAIN_NODE_CELLS / 2));
     const double collWant = cellM / std::max(nodeTexelM(n, planetRadiusM), 1e-9);
 
-    return std::min(screenWant, collWant);
+    // ── EL TOPE DE CERCA: el render no puede engrosar por encima de lo que corta la COLISION ─────
+    //
+    // ⚠️ ESTA ES LA DISPARIDAD VER-vs-PISAR, Y ESTABA AQUI. Con stride >= 2 el vertice lee la altura
+    // del ANCESTRO (`skMap` en `terrain_node.vert`), asi que el render dibuja una superficie con
+    // MENOS OCTAVAS mientras la colision muestrea el campo fino. Medido con la sonda
+    // `terrain_node_drawn_vs_field` (dibujado real contra `harukaTerrainDetail` en el pixel):
+    //
+    //     stride 1 (mapa del nodo)     ver-vs-pisar  0,111 m de media · 0,433 m el peor
+    //     stride 2 (mapa del padre)                  0,409 m          · 1,556 m
+    //     stride 4 (mapa del abuelo)                 0,475 m          · 1,816 m
+    //
+    // Y coincide al 2% con la diferencia de octavas entre los dos cortes, o sea que no es colocacion
+    // ni precision: son dos superficies distintas por construccion.
+    //
+    // ── POR QUE UN RADIO Y NO IGUALAR LAS DOS LEYES ─────────────────────────────────────────────
+    //
+    // Igualarlas en todo el rango son **10,6x mas triangulos** (modelo por bandas con este mismo
+    // selector): sobre los 2,0 M medidos serian ~21 M, y VERTPX=4 ya costaba 29,8 ms con 6,9 M.
+    // Descartado por coste. Pero la disparidad solo SE VE de cerca — hay que dividir por la
+    // distancia, que es lo que faltó la vez del geomorph. A 60 grados y 1080p:
+    //
+    //     disparidad de 0,41 m ->  5,6 px a 76 m ·  2,8 px a 150 m ·  1,6 px a 300 m ·  0,8 px a 600 m
+    //     el peor de 1,56 m    ->   21 px        ·   11 px         ·   6,3 px        ·   3,1 px
+    //
+    // Se corrige la banda donde se ve (que ademas casi no aporta triangulos: 76-300 m es +0,20 M en
+    // el modelo) y se deja la lejana, que es la cara (15,8x) y ya es sub-pixel de media.
+    //
+    // ⚠️ Y VA GRADUADO, NO DE GOLPE. Saltar de stride 1 a 4 en el borde del radio pondria vecinos con
+    // zancada 1 y 4 a la vez: el cosido lo aguanta (`max(mio, vecino << niveles)`) pero el escalon es
+    // el mayor posible. Con el tramo intermedio la secuencia es 1 -> 2 -> 4, monotona.
+    double want = std::min(screenWant, collWant);
+    if      (nearest <=       strideMatchM) want = std::min(want, 1.0);
+    else if (nearest <= 2.0 * strideMatchM) want = std::min(want, 2.0);
+    return want;
 }
 
 /**

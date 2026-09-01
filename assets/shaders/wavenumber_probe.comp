@@ -1,0 +1,54 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ================================================================================================
+// ¿DA LA GPU EL MISMO NUMERO DE ONDA QUE LA CPU? Sonda de un solo eslabon.
+//
+// `rhitest_waveprobe` dijo que la ola de la GPU y la de la CPU se habian separado 4,6 m al meter la
+// dispersion de profundidad finita, pero mide la ALTURA — o sea el final de la cadena. Con eso no se
+// sabe si diverge `k`, el desvanecido de onda corta, el tope de rompiente o la fase.
+//
+// Esto emite SOLO `harukaWaveNumber(k0, d)`, que es el eslabon nuevo. Si casa, el problema esta
+// aguas abajo; si no, esta aqui.
+//
+// ⚠️ ENTRADAS POR SSBO. Escritas como literales, el compilador las pliega y se estaria midiendo su
+// plegador de constantes en vez de la ALU — la trampa que costo la sesion del fp64 esta manana.
+// ================================================================================================
+#include "lib/ocean_wave.glsl"
+
+layout(local_size_x = 1) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };
+// uIn[0] = k0 · uIn[1..12] = profundidades · uIn[13..15] = wp · uIn[16..18] = up · uIn[19] = t
+
+void main()
+{
+    const float k0 = uIn[0];
+    for (int i = 0; i < 12; ++i) {
+        const float d = uIn[1 + i];
+        const float k = harukaWaveNumber(k0, d);
+        uOut[i]      = k;
+        // Y el residuo de la propia ecuacion, que es el oraculo independiente: si la GPU resuelve
+        // BIEN pero distinto que la CPU, este sale ~0 en las dos y la culpa es del redondeo; si sale
+        // grande, es que su solver no converge.
+        uOut[12 + i] = (HARUKA_G * k * tanh(k * d) - HARUKA_G * k0) / (HARUKA_G * k0);
+    }
+
+    // ── LA ALTURA, EN COMPUTE ───────────────────────────────────────────────────────────────────
+    //
+    // `rhitest_waveprobe` la calcula en un FRAGMENTO y la codifica en 24 bits sobre RGB. Si aqui la
+    // altura casa y alli no, el culpable es ese camino (rasterizacion, codificado o lectura), no la
+    // formula. Es el mismo eslabon que la sonda del terreno tuvo que separar en su dia.
+    {
+        const vec3  wp = vec3(uIn[13], uIn[14], uIn[15]);
+        const vec3  up = normalize(vec3(uIn[16], uIn[17], uIn[18]));
+        const float t  = uIn[19];
+        const float d  = uIn[8];              // la profundidad del peor punto (5,18 m)
+        vec3 n; float foam;
+        const vec3 disp = harukaGerstner(wp, up, t, d, HARUKA_FETCH_UNLIMITED, 4.0, 1.0, n, foam);
+        uOut[24] = dot(disp, up);
+        // Y las piezas, para bisecar dentro de la formula si tampoco casa.
+        uOut[25] = harukaGreenGain(d);
+        uOut[26] = harukaBreakScale(d, HARUKA_FETCH_UNLIMITED, HARUKA_MIN_QUAD_M);
+        uOut[27] = harukaShortWaveFade(harukaWaveNumber(6.2831853 / harukaWaveAt(0).x, d), HARUKA_MIN_QUAD_M);
+    }
+}

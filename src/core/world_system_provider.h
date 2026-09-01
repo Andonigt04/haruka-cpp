@@ -182,10 +182,25 @@ public:
         // como lo recorta el UBO, y el MISMO orden de operaciones —`(tan*loc)/R`, no `tan*(loc/R)`—
         // porque en float no son la misma cuenta. Así la colisión no se aproxima a la superficie
         // dibujada: es la superficie dibujada.
-        const glm::vec3 fUp(up), fT1(t1), fT2(t2);
-        const float     fR = (float)R;
+        // ── LA DIRECCION EN DOUBLE. Antes se cuantizaba a float PARA CASAR CON EL CLIPMAP. ──────
+        //
+        // ⚠️ ESTO ERA LA DISPARIDAD ENTRE LO QUE SE VE Y LO QUE SE PISA, Y SOBREVIVIO AL CLIPMAP.
+        //
+        // El calculo se hacia en float replicando bit a bit el `tese` del clipmap —marco recortado
+        // como lo recorta el UBO, y el orden `(tan*loc)/R` en vez de `tan*(loc/R)`, que en float no
+        // son la misma cuenta— para que la colision no se aproximara a la superficie dibujada sino
+        // que FUERA la superficie dibujada. Era correcto mientras el clipmap dibujara.
+        //
+        // El clipmap se borro el 2026-08-24 y lo sustituyo el pase v5, que calcula su direccion desde
+        // las coordenadas ENTERAS del nodo y en DOUBLE (`terrain_node.vert`: "LA DIRECCION EN DOUBLE,
+        // Y AQUI ESTABA EL PINCHO"). O sea que la colision se quedo casada con un shader que ya no
+        // existe, y desde entonces muestrea el terreno en un punto desplazado del que se dibuja.
+        //
+        // Medido sobre un parche de ±256 m: **0,15 m de media y 0,47 m en el peor caso** de
+        // separacion LATERAL. Sobre terreno inclinado eso es la mitad de un metro de diferencia entre
+        // el suelo que ves y el que pisas — y era invisible a cualquier comprobacion que evaluara la
+        // altura en la MISMA direccion en los dos lados, porque ahi los dos son autoconsistentes.
         for (double z : zs) for (double x : xs) {
-            const glm::vec3 dirF = glm::normalize(fUp + (fT1 * (float)x) / fR + (fT2 * (float)z) / fR);
             // ⚠️ RENORMALIZAR EN DOUBLE, y no es redundante aunque `dirF` ya venga de un `normalize`.
             //
             // `normalize` en float deja el módulo en 1 ± 1,2e-7, no en 1. Da igual para la DIRECCIÓN
@@ -203,7 +218,7 @@ public:
             //
             // Renormalizar en double NO rompe la paridad: conserva la dirección (cuya cuantización a
             // float es lo que se comparte con la GPU) y solo corrige el módulo.
-            const glm::dvec3 dir = glm::normalize(glm::dvec3(dirF));
+            const glm::dvec3 dir = glm::normalize(up + (t1 * x) / R + (t2 * z) / R);
             const double radM = std::sqrt(x * x + z * z);                     // distancia tangente al centro
             const float  triM = Haruka::Planet::terrainTriM(radM);            // MISMO triM que el clipmap
             const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);  // física = render
