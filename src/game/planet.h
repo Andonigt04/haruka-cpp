@@ -35,6 +35,9 @@
 #include "core/planet/ocean_wave.h"            // OceanState: el estado del mar que se sube a la GPU
 #include "core/terrain/terrain_node_renderer.h" // v5: pase de terreno por nodos (HARUKA_TERRAIN_V5=1)
 #include "core/weather_system.h"
+#include "core/planet/water_fill.h"          // WaterWindowResult: el relleno FINO de una ventana
+#include <future>
+#include <mutex>
 #include "tools/procgraph/proc_graph.h"
 #include "tools/procgraph/proc_climate.h"
 
@@ -270,6 +273,10 @@ public:
     bool  hasWater() const { return m_hasWater; }
     /// Cota de la lámina del LAGO en esa dirección (m), o `WATER_FILL_DRY` si aquí no hay lago.
     /// El océano NO sale por aquí: lo decide la cota del terreno.
+    /// Unitario en el plano tangente hacia agua MENOS profunda (el fondo que SUBE), o el vector nulo
+    /// si el fondo es llano. Es lo que hace REFRACTAR la ola. GEMELO del bloque `slope` de
+    /// `terrain_node_water.vert`: mismo campo, mismo marco tangente y mismo paso de UN TEXEL.
+    glm::vec3 baseSlopeAt(const glm::dvec3& dir) const;
     float lakeLevelAt(const glm::dvec3& dir) const;
     /// Fetch en esa dirección (m). `WATER_FETCH_UNLIMITED` en el océano.
     float lakeFetchAt(const glm::dvec3& dir) const;
@@ -551,6 +558,60 @@ private:
     Haruka::RHI::TextureHandle lakeTexOrDummy() const {
         return Haruka::RHI::valid(m_lakeTex) ? m_lakeTex : m_lakeDummy;
     }
+
+    // ── LA VENTANA FINA DE LAGOS (2026-09-01) ───────────────────────────────────────────────────
+    //
+    // ⚠️ EL CAMPO DE ARRIBA NO PUEDE TENER LAGOS, y esta medido: es una equirect de `m_mapRes` (512),
+    // o sea **78,2 km por texel** en la Tierra. Una cuenca menor que eso no existe en el, asi que da
+    // MARES INTERIORES. Y subir la resolucion global no llega ni de lejos — a 8192 el texel sigue en
+    // 4,9 km y cuesta 402 MB, dos ordenes por encima de lo que mide un lago.
+    //
+    // La salida es de dos niveles, y se puede porque las mitades no son la misma clase de cosa: la
+    // COTA DE DERRAME es global por naturaleza (depende de la cuenca entera) y la ORILLA es local
+    // (`h(x) < nivel`). `waterFillWindow` vuelve a inundar SOLO un recuadro alrededor del observador,
+    // muestreando el terreno de verdad (`sampleHeight`, base + detalle), con lo que el relleno grueso
+    // dice en el BORDE como condicion de contorno. Ver `core/planet/water_fill.h`.
+    //
+    // ⚠️ Y LA VE TAMBIEN LA GPU (binding 19 + UBO 26). No es opcional: si la fisica viera un lago que
+    // el render no dibuja, seria la CUARTA respuesta a "¿aqui hay agua?" en este motor. Van las dos
+    // por el mismo dato y con el mismo muestreo NEAREST.
+    static constexpr double kLakeWinHalfM = 8000.0;   ///< medio lado de la ventana (m)
+    static constexpr int    kLakeWinRes   = 256;      ///< → 62 m/texel, contra los 78 km del global
+
+    /// ⚠️ INSTANTANEA INMUTABLE, PUBLICADA POR PUNTERO. `m_heightCPU` y `m_waterCPU` son seguros de
+    /// leer sin candado porque no cambian tras el bake; **esta ventana SI cambia en ejecucion**, y la
+    /// leen los proveedores de mundo (`sampleSurface`, `sampleWaterLevel`), que no corren
+    /// necesariamente en el hilo que la recentra. Reasignar el vector bajo un lector es una carrera.
+    /// Publicarla entera por `shared_ptr` la elimina: el lector se lleva el puntero de un tiron y ve
+    /// un estado coherente —datos Y recuadro— aunque justo despues llegue una ventana nueva.
+    struct LakeWindow {
+        Haruka::Planet::WaterWindowResult r;
+        double lonC = 0.0, latC = 0.0, invSpanLon = 0.0, invSpanLat = 0.0;
+    };
+    std::shared_ptr<const LakeWindow> m_lakeWin;      ///< la ventana vigente, o nula si no hay
+    /// Snapshot para los lectores. `atomic_load` sobre `shared_ptr` es lo que existe en C++17 para
+    /// esto y no mete un candado en el camino caliente.
+    std::shared_ptr<const LakeWindow> lakeWindow() const { return std::atomic_load(&m_lakeWin); }
+    /// ⚠️ Recomputar bloqueando el frame no vale: son 65 536 muestras del terreno REAL. Se calcula en
+    /// un hilo y se recoge cuando esta. `m_heightCPU` es inmutable tras el bake, asi que leerlo desde
+    /// ahi es seguro sin candado (lo dice tambien `groundHeightKmAtDir`).
+    std::future<Haruka::Planet::WaterWindowResult> m_lakeWinJob;
+    /// El centro que se le pidio al trabajo en vuelo (el recuadro se arma al recogerlo).
+    bool   m_lakeWinJobLive = false;
+    double m_lakeWinJobLonC = 0.0, m_lakeWinJobLatC = 0.0;
+    Haruka::RHI::TextureHandle m_lakeWinTex;
+    Haruka::RHI::TextureHandle m_lakeWinDummy;
+    Haruka::RHI::BufferHandle  m_lakeWinUBO;
+    Haruka::RHI::TextureHandle lakeWinTexOrDummy() const {
+        return Haruka::RHI::valid(m_lakeWinTex) ? m_lakeWinTex : m_lakeWinDummy;
+    }
+    /// Arranca/recoge la ventana segun donde este el observador. Con histeresis: se recalcula cuando
+    /// se sale de la mitad interior, para que nunca quede menos de medio recuadro de margen delante.
+    void updateLakeWindow(const glm::dvec3& observerDir);
+    /// Muestreo NEAREST de la ventana, GEMELO EXACTO de `harukaWindowLakeAt` del .glsl.
+    /// Devuelve `WATER_FILL_DRY` / `WATER_FETCH_UNLIMITED` si el punto cae fuera.
+    float lakeWindowLevelAt(const glm::dvec3& dir) const;
+    float lakeWindowFetchAt(const glm::dvec3& dir) const;
 
     // CLIPMAP — la rejilla que da los 2 m cerca del jugador.
     // ── LA REJILLA DE ANILLOS. Se llamaba `m_clip*` y ya NO es del clipmap. ──────────────────────

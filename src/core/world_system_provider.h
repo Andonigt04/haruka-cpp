@@ -119,6 +119,12 @@ public:
         return m_planetary->sampleWaterVelocity(worldPos);
     }
 
+    /** @brief Espuma en la superficie (0..1). Ver `oceanFoam`. */
+    float waterFoamAt(const glm::dvec3& worldPos) const override {
+        if (!m_planetary || !hasActivePlanet()) return 0.0f;
+        return m_planetary->sampleWaterFoam(worldPos);
+    }
+
 // (Fase 2b/3) Malla LOCAL del terreno para la colisión de Jolt: se muestrea la altura de la MALLA en
     // una rejilla TANGENTE alrededor de `center` (parche localmente plano sobre la esfera). Sigue el
     // terreno REAL (mismo `sampleTerrainHeight` que la altura) sin tener que iterar el set de chunks.

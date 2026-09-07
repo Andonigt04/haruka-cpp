@@ -915,6 +915,12 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         // 3D render pass (calls onRenderWorld inside renderFrameContent)
         buildRenderQueue();
+        // ⚠️ ANTES DE DIBUJAR, Y AQUI, PORQUE EL JUEGO NO LLAMA A `renderFrame()`. Esa es la ruta
+        // del editor; el bucle del juego es este. El bloque que convierte las entidades que manda
+        // el cluster en objetos de la escena vivia alli dentro, asi que en el juego no corria
+        // nunca: el cliente recibia a los demas y en pantalla no habia nadie, sin un solo error.
+        syncNetworkEntities();
+
         renderFrameContent();
 
         // ImGui composite — Render() siempre (cierra el scope del frame del menú del juego); el DIBUJO

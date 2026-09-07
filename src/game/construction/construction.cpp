@@ -176,7 +176,7 @@ uint64_t ConstructionState::add(uint16_t typeId, const glm::dvec3& pos, const gl
             const PieceType* ot = type(kv.second.typeId);
             if (!ot) continue;
             const OBB other = makeOBB(kv.second.position, kv.second.orientation, ot->halfExtents);
-            if (obbOverlap(box, other, kAnchorGap)) {   // roza otra pieza → clavo/tornillo (arista simétrica)
+            if (obbOverlap(box, other, m_fastenGap)) {  // roza otra pieza → clavo/tornillo (arista simétrica)
                 m_adj[p.id].push_back(kv.first);
                 m_adj[kv.first].push_back(p.id);
             }

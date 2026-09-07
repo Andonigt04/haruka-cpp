@@ -99,6 +99,29 @@ void main() {
     const float depthRest = level - baseH;
     vDepth = depthRest;
 
+    // ── LA PENDIENTE DEL FONDO, para que la ola REFRACTE ────────────────────────────────────────
+    //
+    // Unitario en el plano tangente hacia agua MENOS profunda. Sale del MISMO campo del que sale la
+    // profundidad (`uHeightTex`, bilineal), asi que la ola gira por el fondo que de verdad tiene
+    // debajo y no por otro. Cuatro muestras, diferencias centradas en las dos tangentes.
+    //
+    // ⚠️ EL PASO ES UN TEXEL DEL BAKE, y eso es lo correcto AQUI: la profundidad tampoco lleva
+    // `terrainDetail`, o sea que el fondo que ve la ola es el campo base. Un paso mas fino mediria
+    // la pendiente de un campo que la ola no usa, y las crestas girarian por un relieve invisible.
+    vec3 slope = vec3(0.0);
+    if (hSize.x > 2) {
+        vec3 s1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0,1,0)) : cross(dir, vec3(1,0,0)));
+        vec3 s2 = cross(dir, s1);
+        float e = 6.2831853 / float(hSize.x);          // un texel de longitud, en radianes
+        float h1p = harukaSampleHeightField(uHeightTex, hSize, harukaEquirectUV(normalize(dir + s1*e)));
+        float h1m = harukaSampleHeightField(uHeightTex, hSize, harukaEquirectUV(normalize(dir - s1*e)));
+        float h2p = harukaSampleHeightField(uHeightTex, hSize, harukaEquirectUV(normalize(dir + s2*e)));
+        float h2m = harukaSampleHeightField(uHeightTex, hSize, harukaEquirectUV(normalize(dir - s2*e)));
+        vec3 g = s1 * (h1p - h1m) + s2 * (h2p - h2m);  // hacia el fondo que SUBE = hacia la orilla
+        float gl = length(g);
+        slope = (gl > 1.0e-6) ? (g / gl) : vec3(0.0);  // nulo = fondo llano = sin refraccion
+    }
+
     // ── LA OLA ──────────────────────────────────────────────────────────────────────────────────
     //
     // ⚠️ EL `quad` SALE DEL NODO, y ese es medio motivo de esta migracion. `harukaGerstner` apaga
@@ -110,8 +133,8 @@ void main() {
     float foam = 0.0;
     vec3  disp = vec3(0.0);
     if (depthRest > 0.0) {
-        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, harukaBakedFetchAt(dir), quadM, 1.0,
-                              n, foam);
+        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, harukaWaterFetchAt(dir), quadM, 1.0,
+                              slope, n, foam);
     }
     vNormal = n;
     vFoam   = foam;

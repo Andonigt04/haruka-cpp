@@ -147,6 +147,16 @@ namespace Haruka::RHI
 
             virtual Backend backend() const = 0;
 
+            /** @brief Nombre del dispositivo ACTIVO (`GL_RENDERER` / `VkPhysicalDeviceProperties::
+             *  deviceName`), tal cual lo da el driver.
+             *
+             *  `enumerateAdapters` no sirve para esto: es una consulta que crea una instancia
+             *  temporal y en Vulkan lista TODAS las GPU, no dice cuál se acabó usando. Hace falta
+             *  saberlo para poder declarar un fallo como "defecto conocido de ESTE driver" sin
+             *  silenciarlo en los demás — que es justo la diferencia entre un rasterizador software
+             *  de CI y la GPU de un jugador. */
+            virtual const std::string& deviceName() const = 0;
+
             /** @brief Updates a single face of a cubemap texture with pixel data.
              *  Used by IBL sky generation. The texture must have been created with cube=true. */
             virtual void updateCubemapFace(TextureHandle tex, int face, int width, int height,

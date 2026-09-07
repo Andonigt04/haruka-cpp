@@ -10,13 +10,37 @@
 
 #include <string>
 
+
+// ⚠️ ¿ESTE BINARIO ESTA OPTIMIZADO? SE LE PREGUNTA AL COMPILADOR, NO A UNA VARIABLE.
+//
+// `CMakeLists.txt` ya avisa cuando `CMAKE_BUILD_TYPE=Debug`, y su propia nota cuenta que eso "paso
+// cinco veces en la sesion del 2026-08-31: la suite paso de ~1 min a no acabar en 4". El aviso salta
+// al CONFIGURAR — y despues se compila con `ninja` mil veces sin volver a verlo. Paso una sexta vez:
+// el arbol quedo en Debug, la suite dejo de terminar en 900 s, y estuve buscando la regresion en el
+// codigo. No habia regresion: habia -O0.
+//
+// `__OPTIMIZE__` lo define el compilador cuando de verdad optimiza, asi que esto no puede quedarse
+// desincronizado de la realidad como si se leyera `CMAKE_BUILD_TYPE`. Y sale en la PRIMERA linea de
+// cada corrida: cualquier tiempo raro se explica solo.
+static void harukaPrintBuildMode() {
+#ifdef __OPTIMIZE__
+    std::printf("== build: optimizado ==\n");
+#else
+    std::printf("\033[33m== build: SIN OPTIMIZAR (-O0) ==\n"
+                "   La suite tarda ~4x y CUALQUIER medida de tiempo de aqui es basura.\n"
+                "   Arreglo: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo\033[0m\n");
+#endif
+}
+
 int main(int argc, char** argv) {
     std::string filter = (argc > 1) ? argv[1] : "";
     auto want = [&](const char* name) { return filter.empty() || std::string(name).find(filter) != std::string::npos; };
 
     std::printf("== Haruka tests (CPU) ==\n");
+    harukaPrintBuildMode();
 
     if (want("cube") || want("mesh"))   test_cube_sphere_inverse();
+    if (want("prim") || want("mesh"))   test_primitive_winding();
     if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); }
     if (want("cloud") || want("nube") || want("clima")) test_cloud_shape();
     if (want("capa") || want("ground"))   test_ground_layer();
@@ -50,6 +74,11 @@ int main(int argc, char** argv) {
         test_ocean_no_water_no_float();
         test_ocean_sea_state();
         test_ocean_finite_depth();
+    if (want("ocean") || want("water")) test_ocean_gerstner_ellipse();
+    if (want("ocean") || want("water")) test_water_fill_window();
+    if (want("ocean") || want("water")) test_water_window_policy();
+    if (want("ocean") || want("water")) test_ocean_refraction_and_break();
+    if (want("ocean") || want("water")) test_ocean_spectrum_limits();
         test_water_fill_global();
         test_ocean_fetch();
         test_water_bake_resolution_limit();
@@ -59,6 +88,10 @@ int main(int argc, char** argv) {
         test_ocean_swash();
         test_ocean_break_limit();
         test_ocean_break_fold();
+        test_ocean_foam();
+        test_ocean_skewness();
+        test_ocean_whitewater_drag();
+        test_ocean_whitecaps();
         test_shallow_water_reanchor_stability();
         test_shallow_water_mountain_coverage();
         test_shallow_water_inherits_ocean_swell();
@@ -135,6 +168,8 @@ int main(int argc, char** argv) {
     if (want("dgs") || want("rules"))     test_dgs_rules_module();
     if (want("dgs") || want("wire"))      test_dgs_wire_format();
     if (want("robust") || want("dgs"))    test_dgs_robust();
+    if (want("dgs") || want("net"))       test_dgs_server_simulates();
+    if (want("dgs") || want("net"))    test_dgs_ground_matches_engine();
     if (want("planet") || want("mesh"))   test_simple_planet_mesh();
     if (want("planet") || want("config")) test_simple_planet_config();
     if (want("quality") || want("tier"))  test_terrain_quality_mapping();
@@ -164,6 +199,11 @@ int main(int argc, char** argv) {
         test_procgraph_prop_assembler();
         test_procgraph_prop_layer_json();
     }
+
+    // Que una entidad de red SE DIBUJE, no solo que exista. Va con filtro propio: correrla suelta
+    // no debe costar la suite entera (`./build/haruka_tests net`).
+    if (want("net") || want("dgs") || want("render")) test_net_entity_visible();
+    if (want("net") || want("dgs") || want("weather") || want("clima")) test_weather_replicated();
 
     {   // Órbitas: Kepler con elementos precesantes + auditoría de no-choque
         test_orbit_basis();

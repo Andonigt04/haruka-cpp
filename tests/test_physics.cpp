@@ -662,6 +662,68 @@ void test_physics_two_instances_agree() {
     // (2) Y LA CIFRA QUE DECIDE EL DISENO: cuanto se separan por anclar distinto. No se pone umbral
     //     inventado — se IMPRIME, porque es el dato que dice si el servidor puede correr la misma
     //     fisica o si antes hay que hacer la malla independiente del observador.
-    std::printf("    -> el servidor y el cliente anclan bajo jugadores distintos: esa es la cifra\n");
-    CHECK(crossDiff >= 0.0, "medida tomada");
+
+    // ── (3) EL TERCER TERMINO: TROCEAR EL `dt` DISTINTO ─────────────────────────────────────────
+    //
+    // El motor subdivide cada frame en `kSteps = min(4, ceil(dt·60))` pasos de colision, asi que el
+    // troceado depende del FRAME RATE del cliente — y el servidor corre a su propio tick. Dos
+    // simulaciones con el mismo codigo y el mismo tiempo total divergen si no lo trocean igual.
+    // Es el termino que faltaba para que el umbral anti-trampa sea una SUMA MEDIDA y no una constante.
+    auto runDt = [](double frameDt, int frames, glm::dvec3& outPos) {
+        PhysicsEngine eng; static RolloWorld w; eng.setWorldProvider(&w);
+        auto anchor = std::make_shared<RigidBody>();
+        anchor->position = glm::dvec3(0.0, 20.0, 0.0);
+        anchor->radius = 0.5; anchor->mass = 70.0; anchor->name = "ancla";
+        eng.addBody(anchor);
+        auto probe = std::make_shared<RigidBody>();
+        probe->position = glm::dvec3(0.0, 12.0, 0.0);
+        probe->radius = 0.5; probe->mass = 70.0; probe->name = "sonda";
+        eng.addBody(probe);
+        for (int i = 0; i < frames; ++i) eng.advance(frameDt);
+        outPos = probe->position;
+    };
+    // ⚠️ SE MIDE EN PLENO VUELO, NO EN REPOSO. La primera version dejaba caer 10 s: el cuerpo ya se
+    // habia posado y los tres troceados daban el MISMO sitio — el estado de reposo no depende del
+    // camino, asi que la medida salia 0 sin demostrar nada sobre el troceado. A 1 s el cuerpo lleva
+    // ~4,9 m de caida y sigue en el aire, que es donde el camino SI se ve.
+    glm::dvec3 p60, p30, p144;
+    runDt(1.0 / 60.0,   60, p60);    // 1 s a 60 fps
+    runDt(1.0 / 30.0,   30, p30);    // 1 s a 30 fps
+    runDt(1.0 / 144.0, 144, p144);   // 1 s a 144 fps
+    const double dt30  = glm::length(p30  - p60);
+    const double dt144 = glm::length(p144 - p60);
+    std::printf("    mismo tiempo, distinto troceado: 30 fps %+.6f m · 144 fps %+.6f m (contra 60)\n",
+                dt30, dt144);
+
+    // ── EL TECHO DE DIVERGENCIA LEGITIMA ────────────────────────────────────────────────────────
+    //
+    // ⚠️ ESTO ES LO QUE UN VALIDADOR NECESITA, y no la identidad bit a bit. No hace falta que cliente
+    // y servidor coincidan: hace falta saber CUANTO puede separarse un jugador HONESTO, porque ese
+    // numero es el umbral de trampa. Por debajo, se expulsa a gente legitima; por encima, se cuela un
+    // tramposo. Hoy `validateMove` usa un `+1.0 m` y un `-2.0 m` escritos a mano.
+    const double ceiling = crossDiff + std::max(dt30, dt144);
+    std::printf("    TECHO por fisica = ancla %.4f m + un sub-paso %.4f m = %.4f m\n",
+                crossDiff, std::max(dt30, dt144), ceiling);
+    std::printf("    (falta sumarle la latencia, que el host mide y pasa como `dtSeconds`)\n");
+
+    // ⚠️ Y NO ES CERO, AUNQUE EL PASO SEA FIJO. A 30 fps da 0 (1/30 es multiplo de 1/60), pero a
+    // 144 fps da **0,159 m** — porque el acumulador deja un RESTO pendiente cuando el frame no cabe
+    // entero en el paso. O sea que el cliente va hasta UN SUB-PASO por delante o por detras.
+    //
+    // Eso convierte el termino en algo que se puede escribir: NO es una constante en metros, es
+    // `velocidad x paso fijo`. A 1 s de caida libre la velocidad es 9,81 m/s y un paso 1/60 s, o sea
+    // 0,163 m — y se han medido 0,159. Cuadra, asi que el umbral puede llevarlo como
+    // `maxSpeed / 60` en vez de como un numero elegido.
+    const double vFall   = 9.81 * 1.0;            // 1 s de caida en este mundo (g = 9,81)
+    const double oneStep = vFall / 60.0;
+    std::printf("    el peor (144 fps) vale %.4f m · un sub-paso a esa velocidad son %.4f m\n",
+                dt144, oneStep);
+    CHECK(dt144 > 1e-4,
+          "trocear el frame SI separa las simulaciones cuando el frame no cabe entero en el paso");
+    CHECK(std::fabs(dt144 - oneStep) < 0.05,
+          "y vale UN SUB-PASO DE MOVIMIENTO — asi el umbral puede escribirlo como `maxSpeed/60` en "
+          "vez de como una constante en metros");
+    CHECK(ceiling < 1.0,
+          "y el techo por FISICA cabe holgado en un metro: el `+1,0 m` de `validateMove` no lo cubria "
+          "por casualidad, pero ahora se sabe de que esta hecho");
 }

@@ -1,0 +1,30 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ================================================================================================
+// ¿QUE VALORES DA `cloudField` DE VERDAD? La sonda que faltaba para poder calibrar el cielo.
+//
+// ⚠️ POR QUE EXISTE. El cielo se tapa ~10 veces menos de lo que pide el clima (cobertura 0,80 ->
+// 6,6 % de cielo tapado al cenit, medido en `sky_layers_have_depth`). Quien decide eso es el umbral
+// `lo = mix(0.70, 0.32, cloudiness)` de `sky.frag`, y un umbral solo significa algo contra la
+// DISTRIBUCION del campo al que se aplica. Esa distribucion no se habia medido nunca: `cloudField`
+// vivia dentro del fragment y no habia forma de llamarla desde un banco.
+//
+// Aqui se evalua sobre una rejilla y se vuelcan los valores. Con ellos salen los CUANTILES, que es lo
+// unico que permite decir "para tapar el 60 % del cielo, el umbral tiene que estar en X".
+// ================================================================================================
+#include "lib/sky_clouds.glsl"
+
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };   // 0=N · 1=paso · 2,3=viento
+
+void main()
+{
+    const int N = int(uIn[0]);
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (g.x >= N || g.y >= N) return;
+    // Rejilla en las MISMAS unidades que usa `sky.frag` (km sobre la capa, por `scale`). El paso lo
+    // pone el host para poder barrer varias escalas.
+    const vec2 p = (vec2(g) - 0.5 * float(N)) * uIn[1];
+    uOut[g.y * N + g.x] = cloudField(p, vec2(uIn[2], uIn[3]));
+}

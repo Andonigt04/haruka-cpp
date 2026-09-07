@@ -25,7 +25,17 @@ bool loadPrefab(const std::string& path, Prefab& out) {
             p.rot = glm::dquat(e["rot"][0].get<double>(), e["rot"][1].get<double>(),
                                e["rot"][2].get<double>(), e["rot"][3].get<double>());
         p.mechanism = e.value("joint", std::string("rigid")) == "mechanism";
+        p.arc = e.value("arc", 0.0);
         out.pieces.push_back(p);
+    }
+    // Los anclajes del MONTAJE (dónde acaba una pieza y empieza la siguiente). Opcionales: un
+    // prefabricado que no los declare simplemente no tiene juntas que enseñar.
+    out.anchors.clear();
+    if (j.contains("anclajes") && j["anclajes"].is_array()) {
+        for (const auto& a : j["anclajes"]) {
+            if (!a.is_array() || a.size() != 3) continue;
+            out.anchors.emplace_back(a[0].get<double>(), a[1].get<double>(), a[2].get<double>());
+        }
     }
     return !out.pieces.empty();
 }
@@ -46,7 +56,12 @@ bool savePrefab(const std::string& path, const Prefab& p) {
         e["pos"]  = { pc.pos.x, pc.pos.y, pc.pos.z };
         e["rot"]  = { pc.rot.w, pc.rot.x, pc.rot.y, pc.rot.z };
         if (pc.mechanism) e["joint"] = "mechanism";
+        if (pc.arc != 0.0) e["arc"] = pc.arc;   // recta es lo normal: no se escribe el cero
         j["pieces"].push_back(e);
+    }
+    if (!p.anchors.empty()) {
+        j["anclajes"] = nlohmann::json::array();
+        for (const auto& a : p.anchors) j["anclajes"].push_back({ a.x, a.y, a.z });
     }
     std::ofstream f(path);
     if (!f) return false;

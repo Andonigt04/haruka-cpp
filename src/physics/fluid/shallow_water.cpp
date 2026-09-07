@@ -1,3 +1,4 @@
+#include "core/planet/ocean_wave.h"   // oceanWaterDisabled: el interruptor de biseccion
 #include "shallow_water.h"
 #include <algorithm>
 #include <cmath>
@@ -47,6 +48,13 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
     // dependencia desaparece: el parche ya no decide dónde hay agua, sólo la mueve.
     //
     // El respaldo se queda para quien no tenga planeta horneado (los tests de la sim, un mundo plano).
+    // ⚠️ EL PARCHE TAMBIEN OBEDECE A `HARUKA_NOWATER`. Se apagaba solo el mar y los lagos del CAMPO
+    // (`m_hasWater`), asi que la sim de rios/lagos seguia sembrando agua y "quitar el agua" no la
+    // quitaba entera — que es lo que reporto Andoni.
+    if (Haruka::Planet::oceanWaterDisabled()) {
+        HARUKA_LOGD("Fluid", "agua APAGADA por HARUKA_NOWATER: no se siembra nada");
+        return;
+    }
     if (bakedWaterLevel) {
         int filled = 0;
         for (int j = 0; j < m_n; ++j)

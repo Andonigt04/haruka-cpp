@@ -170,6 +170,8 @@ public:
      *  mecerlo. Ver `Haruka::Planet::oceanWaveVelocity` para la derivación y sus límites (es la
      *  velocidad en la superficie; no decae con la inmersión). */
     glm::dvec3 sampleWaterVelocity(const glm::dvec3& worldPos) const;
+    /// Espuma (0..1) en la superficie del agua. Gemela de `sampleWaterVelocity`; ver `oceanFoam`.
+    float      sampleWaterFoam(const glm::dvec3& worldPos) const;
 
     /** @brief Cobertura de suelo en un punto. */
     struct GroundCover {
@@ -224,6 +226,20 @@ public:
     Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
 
     double simulationTime() const { return m_simulationTime; }
+
+    /// ⚠️ THE WORLD'S CLOCK, WHEN THERE IS ONE — and this is a SET, not an offset, on purpose.
+    ///
+    /// `m_simulationTime` starts at zero and accumulates the local frame delta, and everything the
+    /// world does with time reads it: `orbitPositionAt(orbit, t)` places the planets (so the sun rises
+    /// off this number), the weather fronts move on it, and so does the tide. Two clients therefore
+    /// had two worlds — one at noon and one at midnight, in different storms — and no amount of
+    /// replicating positions would have fixed that, because the sun is not an entity.
+    ///
+    /// Accumulating a delta cannot stay in step: a stall, a paused frame or a loading screen loses
+    /// time that never comes back. So when the cluster hands out a clock, the simulation is not
+    /// nudged towards it, it IS it: assigned every frame from the server's anchor. Passing a negative
+    /// value gives the clock back to the local accumulator, which is what an offline game keeps using.
+    void setWorldClock(double seconds) { m_worldClock = seconds; }
     const Haruka::WeatherSystem& weather() const { return m_weather; }
     Haruka::WeatherSystem&       weatherMutable() { return m_weather; }
 
@@ -341,6 +357,7 @@ private:
     std::vector<Planet> m_planets;
     std::vector<std::unique_ptr<Haruka::Planet::TerrestrialPlanet>> m_simplePlanets;
     double m_simulationTime = 0.0;
+    double m_worldClock     = -1.0;   // < 0 = no cluster clock, accumulate locally (see setWorldClock)
     /// Estado del mar del frame. Lo calcula `updateOceanState`, lo suben los shaders y lo lee la
     /// física — UNA derivación, dos consumidores.
     Haruka::Planet::OceanState m_oceanState = Haruka::Planet::oceanDefaultState();

@@ -278,7 +278,8 @@ namespace Haruka::RHI::vulkan
 
         if (chosen_idx != UINT32_MAX)
         {
-            m_physical = devs[chosen_idx];
+            m_physical   = devs[chosen_idx];
+            m_deviceName = chosen_name;
             // Re-derivar la familia graphics+present de la elegida.
             uint32_t qn = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(m_physical, &qn, nullptr);

@@ -14,6 +14,175 @@ El plan por versiones está en [ROADMAP.md](../ROADMAP.md). Lo que sigue abierto
 
 ---
 
+## Sesión 2026-09-02 — el pase de nubes que nunca dibujó, y lo que costó cuando por fin dibujó
+
+Suites al cerrar: RHI **570 OK · 9 fallos** (los 9 son los conocidos de fp64 en AMD+OpenGL, ajenos).
+
+### 🔴 El pase volumétrico de nubes llevaba desde siempre sin pintar un píxel EN PARTIDA
+
+Síntoma reportado: "se ve la atmósfera pero no las nubes", y luego "no hay nubes" incluso forzando
+`HARUKA_CLOUD_COVER=0.80` — o sea con cobertura uniforme en todo el planeta, lo que descartaba de un
+golpe el campo de humedad y el de cobertura.
+
+**La causa: `RenderTargetDesc::depthAsTexture` vale `false` por defecto.** Sin él la profundidad del
+target es un *renderbuffer* y no se puede muestrear: `getDepthTexture()` devuelve un handle INVÁLIDO,
+`bindTexture(0, ...)` no ata nada y en Vulkan un descriptor sin atar es INDEFINIDO. El shader leía
+basura como profundidad de escena, `min(tExit, sceneT)` dejaba el recorrido en nada y no se dibujaba
+nada. El cielo, que NO lee profundidad, se seguía viendo. En todo el motor solo `shadow.cpp` ponía
+ese flag.
+
+⚠️ **Por qué el banco decía que sí dibujaba (98,4 % del cuadro):** ataba al binding 0 una textura de
+1x1 rellenada a mano. **Nunca ejercitó `blitDepth` + `getDepthTexture`, que es lo que hace la
+partida.** Un test que fabrica la entrada no prueba el camino que produce esa entrada.
+
+⚠️ **Y una segunda trampa dentro de la primera:** incluso con el handle inválido el banco seguía
+dibujando el 98,4 %, porque `bindTexture` con handle inválido deja **pegado lo anterior**. El
+discriminante no era el conteo de píxeles sino `valid(getDepthTexture(...))`. Contar píxeles habría
+dado verde con el bug puesto.
+
+Arreglado en `application_render.cpp`: `dd.depthAsTexture = true`, más una comprobación que desactiva
+el pase con un aviso si el handle sale inválido, en vez de ocluir contra basura. Test nuevo (caso 6d
+de `cloud_volume_draws`) que monta el camino real: target de escena → `blitDepth` → copia → sampler.
+
+### El pase ignoraba los pasos que le manda el motor
+
+`cloud_vol.frag` marchaba la capa principal con **40 pasos fijos** en vez de los 64 de `kCloudSteps`.
+Con `kNearStep = 50 m` y crecimiento 1,09 eso deja el alcance rasante en `50·(1,09^40−1)/0,09 ≈ 17 km`
+en vez de los ≈137 km de 64 pasos: mirando al horizonte la capa se cortaba a media distancia.
+
+### 🔴 Y en cuanto dibujó de verdad: 150 ms quieto
+
+Antes salía gratis porque la profundidad basura lo recortaba a cero. **El coste no se había medido
+nunca.** Caso 6e nuevo, con `HARUKA_NO_VSYNC=1`, a 256x256 y extrapolado a 1920x1080 (el pase es un
+triángulo a pantalla completa: lineal en píxeles):
+
+    OpenGL                     256x256   ->1080p      Vulkan    256x256   ->1080p
+    cielo vacío (early-out)     0,15 ms     4,8         0,55 ms   17,4
+    nube 0,80 · 64 pasos        7,86 ms   248,6         4,00 ms  126,4
+    nube 0,80 · 24 pasos        4,58 ms   144,9         2,40 ms   76,0
+    nube 0,80 · 12 pasos        4,22 ms   133,4         2,23 ms   70,6
+
+⚠️ **De 64 a 24 pasos el coste solo cae al 58 %** (sería 38 % si fuera lineal en pasos), y de 24 a 12
+casi no se mueve. **Bajar los pasos NO arregla esto**, y además rompe el alcance rasante. El término
+que manda es el PÍXEL: `harukaCloudField` son 80 hashes por paso (4 fBm de 5 octavas) más 24 del
+detalle 3D, por ~88 pasos, por 2,07 Mpx.
+
+**Arreglo: la marcha va a un target propio a 1/4 de lado (1/16 de píxeles) y se compone a resolución
+completa.** Divisor en `HARUKA_CLOUD_RESDIV` (1..8, por defecto 4). Ficheros nuevos
+`cloud_upsample.vert` / `.frag`.
+
+### Dos trampas del camino reducido, las dos cazadas por el mismo test
+
+1. **El color no se puede interpolar con la bilineal del sampler.** El pase escribe alfa RECTO y donde
+   no hay nube el color es NEGRO: la bilineal mezcla ese negro con la nube vecina y deja **ribete
+   oscuro** en cada borde. El RHI solo tiene `BlendMode::Alpha`/`Additive`, así que tampoco cabe
+   premultiplicar. `cloud_upsample.frag` interpola **ponderando por alfa** (4 lecturas a mano).
+2. ⚠️ **EL VIEWPORT NO SE RESTABLECE EN OpenGL.** `beginRenderPass` lo fija al tamaño del target en
+   **Vulkan**; en **OpenGL no lo toca**. Dibujar en el target reducido y componer a resolución
+   completa dejaba el viewport pequeño y solo se pintaba la esquina: **OpenGL 5,8 % del cuadro
+   (≈ (64/256)² = 6,25 %) contra Vulkan 96,4 %**, mismo shader y mismos datos. Regla: `setViewport`
+   INCONDICIONAL tras cada `beginRenderPass` que siga a un pase de otro tamaño.
+
+   Esta es la mitad que suele faltar en la lista de trampas de Vulkan: no todo es "GL perdona y Vulkan
+   no". Aquí es Vulkan el que hace trabajo de más, y confiar en eso rompe GL.
+
+**El test que las cazó** (caso 6f) dibuja el MISMO cielo por los dos caminos sobre **gris medio** y
+compara la LUZ MEDIA. Contar "píxeles no negros", como hacían los casos viejos, no habría servido: ese
+umbral lo pasa hasta un alfa de 0,03, o sea que habría dado verde con la nube fantasma. Cierre:
+
+    OpenGL: completa 239,1 · 97,9 % nubosa | reducida 229,4 · 96,4 % · ribete 0,00 %
+    Vulkan: completa 239,7 · 98,2 % nubosa | reducida 230,1 · 96,4 % · ribete 0,00 %
+
+### Antes de las nubes, en la misma sesión
+
+- **El validador DGS camina el suelo del cliente.** `src/net/height_field.h` (nuevo): `HeightField`
+  sin dependencias de GL, gemelo exacto de `TerrestrialPlanet::sampleHeight`, con sidecar `.hfield`
+  escrito en `bakeHeightMap`. `default_rules.cpp` gana `currentField()`, `groundElevM()` y una
+  tolerancia de transporte derivada del **medio ulp del float** de la posición, no de una constante.
+  ⚠️ El test que existía no probaba nada: su mundo "Tierra" tenía relieve cero, así que solo medía la
+  constante vieja de −2,0 m. Reescrito situando al jugador RELATIVO al suelo calculado, con
+  contraprueba al triple del techo.
+- **Olas: espectro de 8 trenes** (Pierson-Moskowitz, `Hs` preservada en 2,8021), refracción por
+  Snell sobre isóbatas, dispersión de profundidad finita, asimetría de rompiente. ⚠️ El salto de 4 a
+  8 trenes destapó **tres `4` a fuego**: el bucle de relleno del UBO del test (λ=0 → k=∞ → NaN → el
+  agua dibujaba 0 píxeles), un `float wave[4][4]` en el struct (volcado de core) y la referencia
+  "EN CALMA" que se quedaba con 4 trenes activos.
+  ⚠️ Predije que 8 trenes doblarían el coste de GPU: **medido, +3 % a +30 %**, no +100 %.
+  ⚠️ Predije que la elipse de Gerstner habilitaría el pliegue de cresta: **medido 0,818 sin tope, no
+  lo habilita.**
+- **Relleno de agua a dos niveles** (nivel global de derrame + ventana local), con `LakeWindow`
+  publicada por `atomic_store` sobre un `shared_ptr` y compuerta por altitud. Paridad CPU/GPU
+  0,000000 m.
+- **El árbol de build estaba en `Debug` (-O0)** y eso invalidaba las medidas de coste: la suite
+  tardaba 4x. Los dos binarios de test imprimen ahora un banner cuando no van optimizados.
+
+### El banco de GPU pasa a correr en CI, SIN GPU
+
+`haruka_tests_rhi` era lo más difícil de tener del repo —paridad CPU↔GPU del terreno, careos entre
+backends, formatos, render targets— y lo único que **no** estaba automatizado: pedía ventana y device
+reales. No los pide: el driver de vídeo `offscreen` de SDL más el rasterizador software de Mesa bastan.
+
+    OpenGL sobre llvmpipe, sin pantalla:   282 OK · 0 fallos · 6 XFAIL
+    Vulkan sobre lavapipe, sin pantalla:   282 OK · 0 fallos · 6 XFAIL
+
+Registrado en CTest (`haruka_tests_rhi_gl`, `haruka_tests_rhi_vk`) y añadidos dos trabajos a
+`ci.yml`, los dos BLOQUEANTES.
+
+⚠️ **TRAMPA DE MÉTODO, y me comí una medida entera con ella: `LIBGL_ALWAYS_SOFTWARE=1` NO ELIGE
+SOFTWARE.** En un equipo con NVIDIA, `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` ordena antes que
+`50_mesa.json`: gana el vendor EGL de NVIDIA y esa variable —que es de Mesa— no hace **nada**. Publiqué
+"288 OK · 0 fallos en 12 s sobre llvmpipe" y era **la NVIDIA dedicada**. Lo destapó una línea que
+acababa de añadir por otro motivo: imprimir el nombre del dispositivo activo.
+
+Lo real, ya forzando `__EGL_VENDOR_LIBRARY_FILENAMES`: **llvmpipe da los mismos 6 fallos de fp64 que
+lavapipe**. O sea que la conclusión que había sacado —"los rojos son solo de AMD, llvmpipe los pasa"—
+era **falsa**. La buena: **NVIDIA pasa el fp64; AMD y los dos rasterizadores software fallan.**
+
+Dos cosas nuevas para que no se repita:
+- `Device::deviceName()` en el RHI (`GL_RENDERER` / `VkPhysicalDeviceProperties::deviceName`), que no
+  existía: `enumerateAdapters` crea una instancia temporal y en Vulkan lista TODAS, no dice cuál se
+  usó. El banco lo imprime siempre.
+- `HARUKA_REQUIRE_DEVICE=<subcadena>`: el banco **falla** si el dispositivo activo no es el pedido.
+  CI declara sobre qué quiere medir en vez de confiar en que el entorno colabore.
+
+## Fallos declarados de driver (XFAIL), y por qué no es lo mismo que silenciarlos
+
+Los 6 de fp64 en Mesa por software no dicen nada del motor. Pero en AMD **el mismo fallo es el bug
+CRÍTICO del suelo** y tiene que seguir en rojo. Así que no se borra el test ni se le baja el umbral:
+`g_driverDefects` (en `rhi_test_main.cpp`) declara backend + subcadena del dispositivo + test + check
++ **motivo obligatorio**, y sólo ahí cuenta como XFAIL.
+
+⚠️ **La regla que hace que esto no se pudra: una entrada que NO llega a usarse en la tanda de su
+backend y su dispositivo es un FALLO.** Si el driver se arregla, o si alguien reescribe el mensaje del
+CHECK, la lista deja de describir la realidad y hay que enterarse. Una lista de excepciones que nadie
+revisa acaba tapando bugs de verdad.
+
+⚠️ **Y el rasterizador software encontró dos cosas que la GPU de escritorio tapaba:**
+
+1. **Un caso del banco emparejaba shaders que el motor NUNCA arma.** `screenquad.vert` con
+   `final.frag`: el primero solo saca `TexCoords`, el segundo lee `Normal`/`FragPos`/`TexCoord`. El
+   motor usa `simple.vert`. Pasaba porque **el driver de AMD enlaza varyings que faltan**; Mesa
+   aplica la especificación: `error: "FragPos" not declared as input from previous stage`. Un test
+   que verificaba algo que no existe, en verde durante quién sabe cuánto.
+2. **Una violación de la especificación de Vulkan, real y de portabilidad:** `vkUpdateDescriptorSets`
+   ata un rango de SSBO de **136 323 072 B contra un `maxStorageBufferRange` de 134 217 728**. Ese
+   límite (128 MB) es el **mínimo que la especificación garantiza**, así que hay hardware real donde
+   esto rompe. En la GPU de escritorio el límite es mayor y no se notaba. **SIN ARREGLAR.**
+
+Nota sobre el fp64 de Mesa: lavapipe **anuncia `shaderFloat64 = true`** y aun así degrada los
+doubles, igual que el driver de AMD. Que los seis fallos sean los MISMOS en los dos backends es
+justamente lo que dice que el defecto es de Mesa y no del motor.
+
+### Lo que queda ABIERTO de esta sesión
+
+- **El coste real EN PARTIDA con el target reducido no está medido.** El 1/16 es geométrico.
+- **El upsample no tiene conciencia de profundidad**: la nube puede derramarse hasta 4 px sobre la
+  silueta del terreno (halo en las crestas). Se arregla con un upsample bilateral.
+- La **niebla atmosférica sobre el disco del planeta** sigue necesitando un pase posterior a la escena
+  con la copia de profundidad.
+- DGS: persistencia, canal de corrección, y `kUnmeasuredM = 0,50 m` sin medir.
+- Vulkan: coste fijo de 32,7 ms/nodo por dispatch contra 0,093 ms en OpenGL (350x). Reportado, sin tocar.
+
 ## Sesión 2026-08-18 — arranque, escritor PNG, normal per-píxel, sombreado unificado y un bug de Vulkan
 
 Suites al cerrar: motor **25927 OK · 1 fallo** (`terrain_quality_mapping: default quality is Low`,

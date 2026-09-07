@@ -212,6 +212,12 @@ void PlanetarySystem::rebuildPlanetMeshes() {
 void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     m_simulationTime += dt;
 
+    // The cluster's clock replaces the local accumulator when there is one (see `setWorldClock`). It
+    // goes BEFORE the `HARUKA_SIM_TIME` override below, not after, so the freeze still wins: that env
+    // var exists to hold the world still for a back-to-back render comparison, and a comparison a
+    // server could move is not a comparison.
+    if (m_worldClock >= 0.0) m_simulationTime = m_worldClock;
+
     // ⚠️ `HARUKA_SIM_TIME=<segundos>` CONGELA EL RELOJ DE SIMULACION. No es para jugar: es la segunda
     // mitad de lo que hace comparables dos capturas. `HARUKA_DAY_ANGLE` fija el Sol, pero el clima,
     // las nubes y la marea van con ESTE reloj, que se acumula con el `dt` — asi que dos backends con
@@ -829,8 +835,11 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // discrepancia "lo que se pisa contra lo que se ve" que este fichero entero existe para impedir.
     const auto* tpf = activeTerrestrial();
     const float fetchM = tpf ? tpf->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    // ⚠️ Y LA PENDIENTE DEL FONDO, por lo mismo que el fetch: la ola REFRACTA al perder fondo, y si
+    // el shader la girara y la fisica no, la cresta que se ve y la que empuja apuntarian a distinto.
+    const glm::vec3 slopeH = tpf ? tpf->baseSlopeAt(up) : glm::vec3(0.0f);
     return level2 + (double)Haruka::Planet::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
-                                                            1.0f, m_oceanState, fetchM);
+                                                            1.0f, m_oceanState, fetchM, slopeH);
 }
 
 double PlanetarySystem::sampleWaterDepth(const glm::dvec3& worldPos) const {
@@ -857,8 +866,35 @@ glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) cons
     const glm::vec3 wp = glm::vec3(up * (pr + levelM));
     const auto* tpv = activeTerrestrial();
     const float fetchV = tpv ? tpv->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
     return glm::dvec3(Haruka::Planet::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
-                                                    1.0f, m_oceanState, fetchV));
+                                                    1.0f, m_oceanState, fetchV, slopeV));
+}
+
+float PlanetarySystem::sampleWaterFoam(const glm::dvec3& worldPos) const {
+    // Gemela EXACTA de `sampleWaterVelocity`: mismo muestreo, mismo reloj, mismo fetch y misma
+    // pendiente. Si estas dos se separaran, el agua blanca de la fisica caeria en otro sitio que la
+    // que se dibuja — que es la clase de discrepancia que `ocean_wave.h` existe para impedir.
+    const Haruka::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Haruka::WaterType::None) return 0.0f;
+    glm::dvec3 pc; double pr = 0.0;
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) return 0.0f;
+    const glm::dvec3 rel = worldPos - pc;
+    const double     r   = glm::length(rel);
+    if (r < 1e-9) return 0.0f;
+    const glm::dvec3 up = rel / r;
+
+    const double levelM = double(s.waterLevelKm) * 1000.0;
+    const double depth  = levelM - double(s.elevKm) * 1000.0;
+    if (depth <= 0.0) return 0.0f;
+
+    const float     t  = Haruka::Planet::oceanClockSeconds();
+    const glm::vec3 wp = glm::vec3(up * (pr + levelM));
+    const auto* tpv = activeTerrestrial();
+    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
+    return Haruka::Planet::oceanFoam(wp, glm::vec3(up), t, (float)depth,
+                                     1.0f, m_oceanState, fetchV, slopeV);
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {

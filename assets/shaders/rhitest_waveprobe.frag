@@ -48,5 +48,11 @@ void main() {
     float r = floor(scaled / 65536.0);
     float g = floor((scaled - r * 65536.0) / 256.0);
     float b = floor(scaled - r * 65536.0 - g * 256.0);
-    FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0);
+    // ⚠️ LA ESPUMA VIAJA EN EL ALFA, que estaba sin usar. Es la unica magnitud de la ola que no tenia
+    // careo CPU<->GPU: se calculaba SOLO aqui, asi que no habia con que compararla. Con `oceanFoam`
+    // en el gemelo de CPU, sale gratis en este mismo barrido — misma posicion, mismo tiempo y misma
+    // profundidad que ya se decodifican para la altura.
+    // 8 bits bastan: la espuma es un 0..1 que se usa para MEZCLAR color, y 1/255 esta muy por debajo
+    // de lo que el ojo separa. La tolerancia del test es esa cuantizacion, no un margen elegido.
+    FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, clamp(foam, 0.0, 1.0));
 }

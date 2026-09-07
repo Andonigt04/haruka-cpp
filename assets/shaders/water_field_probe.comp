@@ -23,15 +23,25 @@ layout(local_size_x = 1) in;
 layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
 layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };   // 3 floats por direccion
 
+// ⚠️ 5 SALIDAS POR DIRECCION DESDE QUE HAY VENTANA FINA (2026-09-01). El campo global es de 78 km por
+// texel y no puede tener lagos; la ventana los pone a 62 m. Son DOS texturas y DOS convenciones de
+// muestreo (equirect global contra recuadro lon/lat), asi que hay dos sitios donde CPU y GPU pueden
+// separarse, y los dos se comparan aqui.
+#define PROBE_OUT 5
+
 void main()
 {
     const int N = int(uIn[0]);
     for (int k = 0; k < N; ++k) {
         const vec3 dir = normalize(vec3(uIn[1 + k * 3 + 0], uIn[1 + k * 3 + 1], uIn[1 + k * 3 + 2]));
-        uOut[k * 3 + 0] = harukaBakedLakeAt(dir);
-        uOut[k * 3 + 1] = harukaBakedFetchAt(dir);
+        uOut[k * PROBE_OUT + 0] = harukaBakedLakeAt(dir);
+        uOut[k * PROBE_OUT + 1] = harukaBakedFetchAt(dir);
         // El factor de fetch es lo que de verdad decide la ola que se ve en ese lago: si la CPU y la
         // GPU no lo calculan igual, la lamina coincide y la OLA no.
-        uOut[k * 3 + 2] = harukaFetchFactor(harukaBakedFetchAt(dir));
+        uOut[k * PROBE_OUT + 2] = harukaFetchFactor(harukaBakedFetchAt(dir));
+        // La VENTANA FINA, y el fetch COMBINADO (ventana si la hay, global si no) — que es el que
+        // acaba entrando en la Gerstner de `terrain_node_water.vert`.
+        uOut[k * PROBE_OUT + 3] = harukaWindowLakeAt(dir);
+        uOut[k * PROBE_OUT + 4] = harukaWaterFetchAt(dir);
     }
 }

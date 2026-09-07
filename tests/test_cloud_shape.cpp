@@ -71,6 +71,14 @@ std::string readCloudLib() {
 
 } // namespace
 
+/// Humedad MEDIA del planeta, tal como la imprime el motor al cargar 'Earth'
+/// (`clima del planeta: humedad [0.059, 0.882] media 0.286`). Se usa para calibrar la cobertura
+/// contra el mundo que existe y no contra uno inventado.
+static constexpr float kHumedadMediaDelMundo = 0.286f;
+static constexpr float kHumedadSeca = 0.059f, kHumedadHumeda = 0.882f;
+/// Cobertura media de nube de la Tierra: referencia real, no una preferencia.
+static constexpr float kCoberturaTierra = 0.67f;
+
 void test_cloud_shape() {
     beginTest("cloud_shape");
 
@@ -130,7 +138,13 @@ void test_cloud_shape() {
         for (int ti = 0; ti < 8; ++ti) {
             W.setTime(ti * 311.0);
             for (const auto& d : dirs) {
-                const WeatherSample w = W.sampleAt(d, 18.0f, 0.65f);
+                // ⚠️ LA HUMEDAD MEDIA DEL MUNDO, NO UN 0,65 ESCRITO A MANO. Esta linea decia `0.65f`
+                // y con ella se calibro la cobertura — pero el motor imprime al cargar el planeta
+                // `humedad [0.059, 0.882] media 0.286`, o sea que se estaba midiendo a **2,3 veces**
+                // la humedad que el mundo tiene. La mediana salia 0,302 y en partida el cielo daba
+                // 0,10: de ahi las "motas" desde orbita. Un test que valida con una entrada que el
+                // juego no produce no valida nada.
+                const WeatherSample w = W.sampleAt(d, 18.0f, kHumedadMediaDelMundo);
                 cover.push_back(w.cloudCover);
                 if (w.cloudCover > 0.05f) thick.push_back(w.cloudThicknessM());
             }
@@ -146,6 +160,15 @@ void test_cloud_shape() {
         const float kExtinction = 0.008f;      // gemelo de kCloudExtinction en application_render.cpp
         const float opticalMed  = medThick * 0.7f * kExtinction;
         const float alphaMed    = 1.0f - std::exp(-opticalMed);
+        std::printf("    cobertura por HUMEDAD (la del mundo va marcada):\n");
+        for (float hh : { kHumedadSeca, 0.15f, kHumedadMediaDelMundo, 0.50f, kHumedadHumeda }) {
+            float acc = 0.0f; int n = 0;
+            for (const auto& d : dirs) { acc += W.sampleAt(d, 18.0f, hh).cloudCover; ++n; }
+            std::printf("      H = %.3f %-14s -> cobertura media %.3f\n", hh,
+                        (hh == kHumedadMediaDelMundo) ? "(LA DEL MUNDO)" : "",
+                        n ? acc / (float)n : 0.0f);
+        }
+        std::printf("      (referencia: la Tierra ronda %.2f de cobertura media)\n", kCoberturaTierra);
         std::printf("    cobertura mediana %.3f · espesor mediano %.0f m -> profundidad optica %.2f"
                     " -> opacidad %.3f\n", medCover, medThick, opticalMed, alphaMed);
         CHECK(medThick > 300.0f, "la nube del cielo TIPICO tiene cuerpo, no es un jiron");
@@ -161,13 +184,21 @@ void test_cloud_shape() {
         // de lo que sale aquí. El criterio se escribe sobre la cota, que es lo reproducible desde un
         // test de CPU, y por eso se exige un FACTOR y no un valor absoluto: aunque se le conceda a la
         // fórmula vieja su mejor caso, la nueva tiene que ser varias veces más opaca.
+        // ⚠️ A COBERTURA FIJA, NO A LA MEDIANA VIVA. Esto usaba `medCover`, y al recalibrar el CLIMA
+        // (la mediana paso de 0,111 a 0,451) la contraprueba se movio sola y fallo: con un cielo mas
+        // cubierto, hasta la formula vieja da una nube gruesa. Pero lo que aqui se compara es la
+        // FORMULA, no el cielo de hoy — atarla al mundo la hace derivar cada vez que se toque el
+        // clima, por algo que no tiene nada que ver con lo que mide.
+        const float kCoberturaDeReferencia = 0.111f;           // la mediana con la que se escribio
         const float oldDens    = 0.054f;                       // medido: (campo − umbral) medio
-        const float oldThick   = 260.0f + 900.0f * medCover;
+        const float oldThick   = 260.0f + 900.0f * kCoberturaDeReferencia;
         const float oldOptical = oldThick * 0.7f * oldDens * 0.014f;
         const float oldAlpha   = 1.0f - std::exp(-oldOptical);
         std::printf("    CONTRAPRUEBA (densidad sin normalizar, COTA SUPERIOR): optica %.4f"
                     " -> opacidad %.4f · la nueva es %.1fx mas opaca\n",
                     oldOptical, oldAlpha, oldAlpha > 0.0f ? alphaMed / oldAlpha : 0.0f);
+        std::printf("    (evaluada a cobertura FIJA %.3f, la de su calibracion; la del mundo hoy es %.3f)\n",
+                    kCoberturaDeReferencia, medCover);
         CHECK(oldAlpha < 0.25f,
               "CONTRAPRUEBA: la formula vieja daba un JIRON con la cobertura tipica");
         CHECK(alphaMed > oldAlpha * 4.0f,

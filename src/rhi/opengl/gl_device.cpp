@@ -395,6 +395,7 @@ namespace Haruka::RHI::opengl
             const char* vend = (const char*)glGetString(GL_VENDOR);
             const char* rend = (const char*)glGetString(GL_RENDERER);
             const char* vers = (const char*)glGetString(GL_VERSION);
+            m_deviceName = rend ? rend : "(sin nombre)";
             HARUKA_LOGI("RHI/GL", "GPU = %s · %s · GL %s", vend ? vend : "(?)",
                         rend ? rend : "(?)", vers ? vers : "(?)");
 

@@ -127,15 +127,73 @@ float harukaBakedFetchAt(vec3 dir) {
     return (f > 0.0) ? f : HARUKA_FETCH_UNLIMITED;
 }
 
+/// ── LA VENTANA FINA DE LAGOS (2026-09-01) ──────────────────────────────────────────────────────
+///
+/// ⚠️ `uLakeTex` NO PUEDE TENER LAGOS y esta medido: es una equirect de 512, o sea **78,2 km por
+/// texel** en la Tierra. Una cuenca menor que eso no existe en el — da mares interiores. Esta es la
+/// segunda mitad: un recuadro de ±8 km alrededor del observador, inundado sobre el terreno de verdad
+/// a 62 m/texel, con el campo global de condicion de contorno (ver `core/planet/water_fill.h`).
+///
+/// ⚠️ ESTA AQUI Y NO SOLO EN LA FISICA POR UNA RAZON QUE ESTE MOTOR YA HA PAGADO TRES VECES: si la
+/// fisica nadara en un lago que el render no dibuja, seria otra respuesta mas a "¿aqui hay agua?".
+/// `TerrestrialPlanet::lakeWindowLevelAt` es el gemelo EXACTO de lo de abajo.
+layout(binding = 19) uniform sampler2D uLakeWinTex;
+layout(std140, binding = 26) uniform LakeWindowParams {
+    /// xy = centro (lon, lat) en radianes · zw = 1/(2·medio lado) para pasar a UV.
+    vec4 uLakeWin;
+};
+
+/// UV del punto dentro del recuadro, o fuera de [0,1) si no cae en el.
+vec2 harukaLakeWinUV(vec3 dir) {
+    vec3  n   = normalize(dir);
+    float lat = asin(clamp(n.y, -1.0, 1.0));
+    float lon = atan(n.z, n.x);
+    float dLon = lon - uLakeWin.x;
+    // La longitud envuelve: sin esto, un recuadro a caballo de ±π rechaza la mitad de si mismo.
+    dLon -= 6.28318530717958647692 * floor(dLon / 6.28318530717958647692 + 0.5);
+    return vec2(dLon * uLakeWin.z + 0.5, (lat - uLakeWin.y) * uLakeWin.w + 0.5);
+}
+
+float harukaWindowLakeAt(vec3 dir) {
+    ivec2 sz = textureSize(uLakeWinTex, 0);
+    if (sz.x <= 1 || sz.y <= 1) return HARUKA_NO_INLAND;   // 1x1 seco = no hay ventana
+    vec2 uv = harukaLakeWinUV(dir);
+    if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) return HARUKA_NO_INLAND;
+    ivec2 t = clamp(ivec2(floor(uv * vec2(sz))), ivec2(0), sz - 1);
+    float lv = texelFetch(uLakeWinTex, t, 0).r;
+    return (lv > HARUKA_LAKE_DRY) ? lv : HARUKA_NO_INLAND;
+}
+
+float harukaWindowFetchAt(vec3 dir) {
+    ivec2 sz = textureSize(uLakeWinTex, 0);
+    if (sz.x <= 1 || sz.y <= 1) return HARUKA_FETCH_UNLIMITED;
+    vec2 uv = harukaLakeWinUV(dir);
+    if (uv.x < 0.0 || uv.x >= 1.0 || uv.y < 0.0 || uv.y >= 1.0) return HARUKA_FETCH_UNLIMITED;
+    ivec2 t = clamp(ivec2(floor(uv * vec2(sz))), ivec2(0), sz - 1);
+    float f = texelFetch(uLakeWinTex, t, 0).g;
+    return (f > 0.0) ? f : HARUKA_FETCH_UNLIMITED;
+}
+
+/// EL FETCH de un punto, con la ventana por delante. Gemelo de `TerrestrialPlanet::lakeFetchAt`:
+/// donde la ventana ve lamina, su fetch es el bueno — mide el lago DE VERDAD y no el texel de 78 km
+/// que el campo grueso confunde con un mar interior.
+float harukaWaterFetchAt(vec3 dir) {
+    if (harukaWindowLakeAt(dir) > HARUKA_NO_INLAND) return harukaWindowFetchAt(dir);
+    return harukaBakedFetchAt(dir);
+}
+
 /**
- * @brief LA cota del agua en un punto: mar, lago horneado o parche dinámico. Una sola respuesta.
+ * @brief LA cota del agua en un punto: mar, lago horneado, ventana fina o parche dinámico. Una sola
+ *        respuesta.
  *
  * El orden importa y es el de "quién sabe más": el parche gana donde existe porque lleva lo dinámico
- * (una crecida, una presa), el lago horneado cubre el resto del planeta, y el mar es el suelo.
- * `max` de los tres, con centinelas por debajo de todo, hace exactamente eso sin ramas.
+ * (una crecida, una presa), la ventana fina sabe más que el campo global del mismo sitio (62 m/téxel
+ * contra 78 km), el campo global cubre el resto del planeta, y el mar es el suelo. `max` de los
+ * cuatro, con centinelas por debajo de todo, hace exactamente eso sin ramas.
  */
 float harukaWaterLevelAt(vec3 posRelEye, vec3 dir, float seaLevelM) {
-    return max(max(seaLevelM, harukaInlandWaterAt(posRelEye)), harukaBakedLakeAt(dir));
+    return max(max(seaLevelM, harukaInlandWaterAt(posRelEye)),
+               max(harukaBakedLakeAt(dir), harukaWindowLakeAt(dir)));
 }
 
 #endif // HARUKA_INLAND_WATER_GLSL

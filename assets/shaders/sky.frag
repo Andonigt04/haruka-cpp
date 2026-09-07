@@ -11,6 +11,7 @@
 #version 450 core
 #extension GL_GOOGLE_include_directive : require
 #include "lib/sky_palette.glsl"
+#include "lib/sky_clouds.glsl"   // hash13/fbm/cloudField: el campo, para poder SONDEARLO
 
 layout(location = 0) in vec3 vRayDir;
 layout(location = 0) out vec4 FragColor;
@@ -45,13 +46,104 @@ layout(std140, binding = 5) uniform SkyParams {
 // Se resuelve la cuadrática y se toma la raíz positiva (la capa está por encima del observador).
 // Al ras del horizonte la distancia se dispara, así que se acota: más allá la nube es una franja
 // borrosa y seguir estirando la coordenada solo produce aliasing.
-vec2 cloudPlane(vec3 dir, vec3 e1, vec3 e2, float h, out bool outOk) {
-    outOk = false;
+// ── LA ATMOSFERA VISTA DESDE FUERA ──────────────────────────────────────────────────────────────
+//
+// ⚠️ ESTO NO EXISTIA. `sky.frag` solo sabe pintar el DOMO en el que estas metido: fuera, `u_atmo`
+// tiende a 0 y `mix(spaceC, sky, u_atmo)` devuelve espacio liso. O sea que un planeta visto desde
+// orbita no tenia atmosfera — ni halo en el limbo, ni la linea azul sobre el horizonte, que es lo
+// que hace que un mundo parezca un mundo desde el espacio. No es que se apagara con la altitud: no
+// estaba escrito. Reportado mirando la pantalla ("el atmosfera segun donde estas se deja de ver").
+//
+// Es el caso geometrico complementario del domo: el rayo entra en la cascara de aire (R .. R+H),
+// recorre un tramo, y sale — o lo corta el planeta. Se integra la densidad por el camino con la
+// escala de altura real, y lo que se dispersa es Rayleigh: el azul ~5 veces mas que el rojo.
+//
+// ⚠️ SOLO SALE FUERA, y no por un interruptor sino por la misma mezcla que ya habia: se suma a
+// `spaceC`, asi que a ras de suelo `mix(..., sky, u_atmo)` la tapa entera. El aire visto desde dentro
+// ya lo modela el domo; tener los dos sumandose seria contar la atmosfera dos veces.
+//
+// ⚠️ LA BRUMA SOBRE EL DISCO SE CALCULA BIEN, PERO EL ORDEN DE PASES LA PIERDE. Medido: sobre el
+// disco esta funcion da luminancia **117** (el rayo cruza aire antes de llegar al suelo, y eso es lo
+// correcto). Lo que pasa es que `sky.frag` se dibuja ANTES de la escena, asi que donde hay terreno el
+// terreno la sobreescribe. El limbo —los rayos que pasan de largo— si sobrevive porque ahi no hay
+// nada delante, y es la mitad que se ve desde orbita.
+//
+// O sea que NO falta fisica: falta un pase DESPUES de la escena con la copia de profundidad, como el
+// de nubes, que componga esta misma integral sobre lo ya dibujado. ABIERTO.
+//
+// ⚠️ Y una correccion a lo que llegue a afirmar: dije que el halo se salia 4 grados de la cascara,
+// leyendo un perfil por angulo que estaba ESPEJADO (ver `detectRowFlip` en el test). Con el orden de
+// filas bien calibrado, el espacio vale 1,1 con atmosfera y 1,1 sin ella — no se sale nada.
+
+/// Interseccion rayo-esfera centrada en el origen. `t0 <= t1`.
+bool raySphereSky(vec3 ro, vec3 rd, float rad, out float t0, out float t1) {
+    float b = dot(ro, rd);
+    float c = dot(ro, ro) - rad * rad;
+    float h = b * b - c;
+    if (h < 0.0) { t0 = t1 = 0.0; return false; }
+    h = sqrt(h);
+    t0 = -b - h; t1 = -b + h;
+    return true;
+}
+
+vec3 harukaAtmoLimb(vec3 dir) {
+    float R = u_planet.x;
+    if (R <= 1.0) return vec3(0.0);
+    // Espesor VISIBLE de la atmosfera y escala de altura. Los dos de la Tierra: la capa azul se
+    // acaba hacia los 80 km y la densidad cae a 1/e cada 8,5 km.
+    const float kAtmoM = 80000.0;
+    const float kScaleH = 8500.0;
+
+    vec3 ro = u_up * (R + max(u_planet.y, 0.0));     // el ojo, respecto al CENTRO del planeta
+    float a0, a1;
+    if (!raySphereSky(ro, dir, R + kAtmoM, a0, a1)) return vec3(0.0);
+    float tEnter = max(a0, 0.0);
+    float tExit  = max(a1, 0.0);
+    if (tExit <= tEnter) return vec3(0.0);
+    // El planeta corta el rayo: mas alla de su superficie no hay aire que sumar.
+    float p0, p1;
+    if (raySphereSky(ro, dir, R, p0, p1) && p0 > 0.0) tExit = min(tExit, p0);
+    if (tExit <= tEnter) return vec3(0.0);
+
+    const int N = 8;                                  // fondo a pantalla completa: pocos, y bastan
+    float dt = (tExit - tEnter) / float(N);
+    float dens = 0.0, litSum = 0.0;
+    for (int i = 0; i < N; ++i) {
+        vec3  p   = ro + dir * (tEnter + (float(i) + 0.5) * dt);
+        float alt = length(p) - R;
+        float d   = exp(-max(alt, 0.0) / kScaleH) * dt;
+        dens += d;
+        // ¿Le da el sol a ESE trozo de aire? Es lo que pone el terminador y deja el lado nocturno
+        // oscuro en vez de un halo azul rodeando el planeta entero.
+        litSum += d * smoothstep(-0.15, 0.10, dot(normalize(p), u_sunDir));
+    }
+    if (dens <= 0.0) return vec3(0.0);
+    float lit = litSum / dens;
+
+    // ⚠️ COEFICIENTES DE RAYLEIGH REALES, no una proporcion inventada. Estaban como
+    // `beta = (0.20, 0.50, 1.00)` por un `kTau = 2.0e-6` que me saque de la manga para que "se viera
+    // bien": eso deja el azul en 2,0e-6 por metro cuando la dispersion de Rayleigh al nivel del mar
+    // es **33,1e-6** — dieciseis veces mas. Por eso la atmosfera salia FINA: solo los ultimos
+    // kilometros de aire llegaban a ser visibles y el resto de la capa se quedaba por debajo del
+    // umbral del ojo. Reportado mirando la pantalla ("se ve desde el espacio pero un poco fina").
+    //
+    // Los valores son los medidos para el aire a nivel del mar, en m^-1 (R, G, B):
+    const vec3 beta = vec3(5.8e-6, 13.5e-6, 33.1e-6);
+    // Con esto, un rayo rasante a la superficie (columna equivalente ~5,8e5 m) satura los tres
+    // canales y da el blanco-azulado de la base del limbo; a 30 km de altura tangente cae a
+    // tau = 0,56 en azul contra 0,098 en rojo, o sea el azul profundo de arriba. Esa graduacion
+    // —blanca abajo, azul arriba, negra al final— es la que hace que la capa se lea GRUESA.
+    vec3 scat = (1.0 - exp(-dens * beta)) * lit;
+    return scat * u_sunColor;
+}
+
+vec2 cloudPlane(vec3 dir, vec3 e1, vec3 e2, float h, out bool outOk, out float outDistKm) {
+    outOk = false; outDistKm = 0.0;
     float R = u_planet.x;
     if (R <= 0.0) {
         // Sin planeta (menús, tests): se conserva el domo de siempre para no dejar el cielo vacío.
         float t = max(dot(dir, u_up), 0.0);
-        outOk = true;
+        outOk = true; outDistKm = 4.0;
         return vec2(dot(dir, e1), dot(dir, e2)) / (t + 0.22) * 4.0;
     }
     float ro    = R + max(u_planet.y, 0.0);     // radio del ojo
@@ -61,42 +153,29 @@ vec2 cloudPlane(vec3 dir, vec3 e1, vec3 e2, float h, out bool outOk) {
     if (disc < 0.0) return vec2(0.0);           // el rayo no llega a la capa
     float dist  = -ro * mu + sqrt(disc);        // raíz positiva: la capa está arriba
     if (dist <= 0.0) return vec2(0.0);
-    dist = min(dist, 6.0 * max(h, 1.0));        // acotar el rasante (ver arriba)
+    // ⚠️⚠️ AQUI ESTABA EL ANILLO. Esto era `dist = min(dist, 6.0*h)`, un tope DURO, y el efecto no es
+    // "la nube se ve borrosa a lo lejos" sino que **por debajo de cierta elevacion la capa desaparece
+    // de golpe**. Con la capa a 4 km y el ojo a 300 m, alcanzar 6·h = 24 km pide asin(3700/24000) =
+    // 8,9 grados; por debajo, TODOS los rayos se clavan en la misma distancia y —siendo casi
+    // paralelos cerca del horizonte— muestrean el ruido practicamente en el MISMO punto. El campo
+    // sale constante en toda esa franja y se va a todo-o-nada.
+    //
+    // Medido con `sky_layers_have_depth` antes de tocarlo: 0 % de nube por debajo de 10 grados,
+    // 6,95 % y 12,73 % en 10-20. Un anillo de nube a altura fija de pantalla es exactamente lo que se
+    // lee como "las nubes son un plano 2D".
+    //
+    // Se sustituye por una saturacion SUAVE: identica hasta `D` (el campo cercano no cambia ni un
+    // bit) y a partir de ahi crece cada vez menos hasta `2·D`. Sigue acotada —que es lo que pedia el
+    // aviso de aliasing— pero es MONOTONA y estrictamente creciente, asi que dos rayos vecinos nunca
+    // caen en el mismo punto del campo y la capa sigue teniendo estructura hasta el horizonte.
+    // La derivada vale 1 justo en `D`, asi que no hay codo visible en la transicion.
+    {
+        float D = 6.0 * max(h, 1.0);
+        dist = (dist <= D) ? dist : D * (2.0 - D / dist);
+    }
     vec3  hit   = dir * dist;                   // punto en la capa, relativo al ojo
-    outOk = true;
+    outOk = true; outDistKm = dist * 0.001;     // para el footprint del pixel (ver `fbmAA`)
     return vec2(dot(hit, e1), dot(hit, e2)) * 0.001;   // a km
-}
-
-// Hash 3D barato para el campo de estrellas.
-float hash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
-}
-
-// Value-noise + fBm para las NUBES pintadas (anime).
-float vnoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = hash13(vec3(i, 0.0));
-    float b = hash13(vec3(i + vec2(1.0, 0.0), 0.0));
-    float c = hash13(vec3(i + vec2(0.0, 1.0), 0.0));
-    float d = hash13(vec3(i + vec2(1.0, 1.0), 0.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-float fbm(vec2 p) {
-    float v = 0.0, a = 0.5;
-    for (int i = 0; i < 5; ++i) { v += a * vnoise(p); p *= 2.0; a *= 0.5; }
-    return v;
-}
-
-// Densidad de nube: DOMAIN WARP (deforma las coords con otro ruido → formas orgánicas billowy, no blobs) +
-// erosión de detalle en los bordes (desgarrados). `wind` = deriva temporal.
-float cloudField(vec2 p, vec2 wind) {
-    vec2  warp = vec2(fbm(p * 0.6 + wind * 0.5), fbm(p * 0.6 + 5.2 - wind * 0.5));
-    float d    = fbm(p * 1.3 + warp * 1.4 + wind);
-    d -= 0.20 * fbm(p * 4.0 - wind * 2.0);
-    return d;
 }
 
 void main()
@@ -134,6 +213,11 @@ void main()
     //     zonas despejadas y puffs pequeños), CICLO del planeta y SILVER-LINING a contraluz. Plano tangente
     //     LOCAL (es un planeta → "arriba" = u_up). ---
     if (u_atmo > 0.5 && t > 0.02) {
+        // ⚠️ EL FOOTPRINT DEL PIXEL, MEDIDO AQUI Y NO DENTRO DEL BUCLE. `fwidth` en control de flujo
+        // NO UNIFORME es comportamiento indefinido, y el bucle de capas tiene un `continue` (cuando el
+        // rayo no alcanza la capa) que lo vuelve no uniforme. Se mide sobre `dir`, que es uniforme, y
+        // dentro del bucle se escala por la distancia y por `scale` de cada capa.
+        float dirPx = length(fwidth(dir));   // radianes por pixel, aproximadamente
         vec3 e1 = normalize(cross(u_up, abs(u_up.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0)));
         vec3 e2 = cross(u_up, e1);
         // DERIVA = el viento del CLIMA (m/s en este/norte), no una constante. Es el mismo vector que
@@ -173,28 +257,68 @@ void main()
         // encarga del cúmulo (aquí solo se pintan las dos capas altas); > 0 = no hay pase
         // volumétrico y ese valor ES el techo del cúmulo, que se pinta plano como antes. Así apagar
         // `m_volumetricClouds` no deja el cielo sin cúmulos.
-        int nLayers = (u_planet.w > 1.0) ? 3 : 2;
+        // ⚠️⚠️ CUANDO EL PASE VOLUMETRICO ESTA ACTIVO, AQUI NO SE PINTA NINGUNA NUBE. Antes eran 2
+        // (cirro y altocumulo) y se quedaban porque "estan tan alto que nunca se cruzan" — premisa
+        // falsa en un juego con vuelo y orbita. Al ser un pase de FONDO no tienen profundidad, no se
+        // componen sobre la escena, y su puerta (`t > 0.02`) solo deja mirar hacia arriba: pasabas de
+        // 4 km y el altocumulo se esfumaba, de 8 y el cirro, y nunca se veian por debajo de ti.
+        // Reportado como "se desvanecen con la subida como si estuvieran pegados al fondo".
+        //
+        // Las tres capas viven ahora en `cloud_vol.frag` como cascaras marchadas de verdad. Aqui solo
+        // se conserva el camino de RESPALDO (`u_planet.w > 1.0`, o sea el pase volumetrico apagado),
+        // donde se pintan las tres planas como siempre: apagar las nubes no debe dejar el cielo pelado.
+        int nLayers = (u_planet.w > 1.0) ? 3 : 0;
         for (int layer = 0; layer < nLayers; ++layer)
         {
-            float h, scale, sharp, thick, windMul, shadeMul, covMul;
+            // ⚠️⚠️ `slabM`/`slabSteps`/`pathMax` SON NUEVOS Y ARREGLAN EL BUG QUE ESTE MISMO
+            // FICHERO CREIA RESUELTO. El bloque de "ESPESOR REAL: LOSA EN VEZ DE LAMINA" de abajo
+            // decia `if (layer == 2)` — o sea que solo el CUMULO tenia espesor. Y desde que el
+            // cumulo lo dibuja el pase volumetrico, `nLayers` vale 2 y **la capa 2 no se recorre
+            // nunca**: el arreglo entero de la planitud estaba aplicado a la unica capa que ya no se
+            // pinta aqui. Las dos que SI se ven —cirro y altocumulo— seguian siendo calcomanias 2D
+            // sobre un cascaron, que es literalmente lo que aquel comentario describia como el
+            // motivo de que se vieran planas: *"Se veía plano porque era plano"*.
+            //
+            // Espesores de la atmosfera real: altocumulo 200-1000 m (se toman 600), cirro mucho mas
+            // extenso pero tenue (900 m con dos muestras basta para que deje de ser una pegatina).
+            // El COSTE no sube respecto a antes: se pasa de "2 capas planas + 1 losa de 4 pasos que
+            // ya no corre" a "una losa de 2 + una de 4", o sea las mismas 6 evaluaciones de campo.
+            float h, scale, sharp, thick, windMul, shadeMul, covMul, slabM, pathMax;
+            int   slabSteps;
+            // ⚠️ `scale` ES EL TAMAÑO DE LA NUBE, Y ESTABA DE 4 A 5 VECES PASADO. `base = pk·scale`
+            // con `pk` en km, y la frecuencia dominante de `cloudField` es 1,3, asi que el elemento
+            // mide ~0,77/scale km. Con `scale = 0,16` el altocumulo tenia elementos de **4,8 km** —
+            // un altocumulo de verdad son borreguillos de ~1 km. Y eso no es solo estetico: la capa
+            // esta a 4 km de altura, asi que MIRANDO HACIA ARRIBA solo se ve un parche de unos pocos
+            // km de ella. Con elementos de 4,8 km, el cielo alto entero cae dentro de UN elemento y
+            // sale todo nube o todo despejado. Medido: 0,00 % de nube en 20-30 grados, en las cuatro
+            // tomas. No era un umbral mal puesto, era que ahi solo cabe una nube.
+            //
+            // Ahora sale del tamaño FISICO de cada tipo: cirro en jirones de ~6 km, altocumulo en
+            // borreguillos de ~1,2 km, cumulo de ~1 km.
             if (layer == 0) {        // CIRRO (se pinta primero: está detrás de todo)
-                h = 8000.0; scale = 0.085; sharp = 0.30; thick = 0.55;
+                h = 8000.0; scale = 0.128; sharp = 0.30; thick = 0.55;   // jirones de ~6 km
                 windMul = 0.35; shadeMul = 0.25; covMul = 0.75;
+                slabM = 900.0; slabSteps = 2; pathMax = 1.6;   // velo: poco espesor efectivo
             } else if (layer == 1) { // ALTOCÚMULO
-                h = 4000.0; scale = 0.16;  sharp = 0.14; thick = 0.80;
+                h = 4000.0; scale = 0.64;  sharp = 0.14; thick = 0.80;   // borreguillos de ~1,2 km
                 windMul = 0.65; shadeMul = 0.70; covMul = 0.85;
+                slabM = 600.0; slabSteps = 4; pathMax = 2.2;
             } else {                 // CÚMULO (delante, el protagonista)
-                h = 1500.0; scale = 0.30;  sharp = 0.07; thick = 1.00;
+                h = 1500.0; scale = 0.77;  sharp = 0.07; thick = 1.00;   // cumulos de ~1 km
                 windMul = 1.00; shadeMul = 1.00; covMul = 1.00;
+                slabM = 1700.0; slabSteps = 4; pathMax = 2.6;  // el techo real lo trae el clima
             }
 
             // La base de los CÚMULOS la pone el clima (la misma que el techo de la lluvia), no una
             // constante: así la panza de la nube y el punto donde nacen las gotas coinciden.
             if (layer == 2 && u_planet.z > 1.0) h = u_planet.z;
 
-            bool ok;
-            vec2 pk = cloudPlane(dir, e1, e2, h, ok);
+            bool ok; float distKm;
+            vec2 pk = cloudPlane(dir, e1, e2, h, ok, distKm);
             if (!ok) continue;
+            // Lado del pixel EN UNIDADES DEL CAMPO: radianes/pixel x distancia (km) x `scale`.
+            float fieldPx = dirPx * distKm * scale;
             vec2 base = pk * scale;
             vec2 wind = windBase * windMul;
 
@@ -220,26 +344,59 @@ void main()
             //
             // Cuatro pasos, no dieciséis: esto corre a pantalla completa. Lo que hace falta para que
             // deje de leerse como calcomanía es que el espesor EXISTA, no que sea exacto.
+            // TODAS las capas son losas ahora, cada una con su espesor y sus pasos (ver arriba).
             float dens;
-            if (layer == 2) {
-                const int  STEPS = 4;
+            {
+                const int  STEPS = slabSteps;
                 // CIMA DEL CÚMULO: la trae el CLIMA (`WeatherSample::cloudTopM`), no una constante.
                 // Estaba cableada a `h + 1700`, y eso daba el mismo desarrollo vertical a una capa
                 // de buen tiempo que a una tormenta — justo lo que distingue a las dos. Medido en el
                 // modelo: ~430 m sin lluvia, ~3850 m descargando (8,9x). El fallback se conserva por
                 // si el UBO llega sin clima (planeta sin `WeatherSystem` configurado).
-                float top = (u_planet.w > h + 1.0) ? u_planet.w : h + 1700.0;
+                // El CUMULO trae su cima del clima; las otras dos usan su espesor tipico.
+                float top = (layer == 2) ? ((u_planet.w > h + 1.0) ? u_planet.w : h + slabM)
+                                         : (h + slabM);
+
+                // ⚠️ Y EL ESPESOR QUE SE MUESTREA SE ACOTA, QUE ES LA RAIZ DEL "SE VEN COMO CAPAS".
+                // La separacion HORIZONTAL entre la muestra de la base y la del techo crece como
+                // `1/sin(elevacion)`: mirando en oblicuo, 600 m de espesor se convierten en KILOMETROS
+                // de recorrido lateral. Pasado ~un elemento de nube, las muestras dejan de ser "la
+                // misma nube a distinta altura" y pasan a ser NUBES DISTINTAS — y lo que aportan no es
+                // espesor, son copias fantasma. Con 4 pasos eso se ve como franjas paralelas.
+                //
+                // El elemento mide ~0,77/scale km (ver la nota de `scale`), asi que se limita el
+                // espesor muestreado a la altura que produce esa separacion lateral. La opacidad del
+                // camino largo NO se pierde: la pone `path` analiticamente, unas lineas mas abajo.
+                {
+                    float latPorM   = 1.0 / max(t, 0.05);            // m laterales por m de altura
+                    float elementoM = (0.77 / max(scale, 1e-3)) * 1000.0;
+                    top = min(top, h + max(elementoM / latPorM, 60.0));
+                }
+                // ⚠️ JITTER, Y NO ES OPCIONAL CON TAN POCOS PASOS. Con las alturas fijas en
+                // `(sI + 0.5)/STEPS`, los 2-4 puntos de muestreo son los MISMOS para todos los
+                // pixeles: mirando en oblicuo, cada altura corta la losa en un sitio horizontal
+                // distinto y lo que se ve no es una nube gruesa sino la MISMA nube repetida 4 veces
+                // en franjas paralelas. Reportado mirando la pantalla: *"se ven como con capas en vez
+                // de como un bloque de gas"*. Es exactamente el artefacto que `cloud_vol.frag` ya
+                // describe para su marcha ("empezar todos los rayos en el mismo sitio pone la
+                // estructura de la marcha EN PANTALLA") y se cura igual: desplazar el arranque una
+                // fraccion distinta por pixel convierte las franjas en ruido, que el ojo perdona.
+                // Cuesta cero: son los mismos pasos, movidos.
+                float jit = fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453);
                 float acc = 0.0, wsum = 0.0;
                 for (int sI = 0; sI < STEPS; ++sI) {
-                    float f  = (float(sI) + 0.5) / float(STEPS);
+                    float f  = (float(sI) + jit) / float(STEPS);
                     float hs = mix(h, top, f);
-                    bool  ok2;
-                    vec2  ps = cloudPlane(dir, e1, e2, hs, ok2);
+                    bool  ok2; float d2;
+                    vec2  ps = cloudPlane(dir, e1, e2, hs, ok2, d2);
                     if (!ok2) continue;
                     // Perfil vertical: densa en el medio, deshilachada en la panza y en la cima. Es
                     // lo que da la forma de coliflor en vez de un ladrillo.
                     float prof = smoothstep(0.0, 0.28, f) * (1.0 - smoothstep(0.62, 1.0, f));
-                    acc  += cloudField(ps * scale, wind) * prof;
+                    // PROFUNDIDAD OPTICA: cada tramo suma lo que le SOBRA al umbral, no su valor.
+                    // Un tramo por debajo del umbral no es "poca nube", es NADA — y promediarlo con
+                    // el nucleo es lo que aplanaba los picos.
+                    acc  += max(cloudField(ps * scale, wind, fieldPx) - lo, 0.0) * prof;
                     wsum += prof;
                 }
                 // ⚠️ NO SE PROMEDIA. La primera versión hacía `acc / wsum`, o sea la MEDIA de las
@@ -253,30 +410,63 @@ void main()
                 //
                 // `wsum` sigue existiendo solo para no depender del número de pasos: la densidad se
                 // normaliza por el perfil, no por el conteo.
+                //
+                // ⚠️⚠️ Y ESTO ES LO QUE FALTABA APLICAR. El comentario de arriba lleva escrito desde el
+                // principio *"NO SE PROMEDIA... salen POCAS nubes y TENUES"* — y la linea era
+                // literalmente `acc / wsum` sobre el valor CRUDO del campo, o sea la media que el
+                // propio comentario declaraba mal. El sintoma estaba medido y coincidia: con
+                // cobertura pedida 0,80 el cielo salia tapado un **5,9 %** (`sky_layers_have_depth`).
+                // Ahora `acc` acumula lo que sobra del umbral, asi que `dens` ES profundidad optica.
                 dens = (wsum > 0.0) ? acc / wsum : 0.0;
-            } else {
-                dens = cloudField(base, wind);
             }
 
             // ⚠️ BORDE DURO = el look de anime. La rampa era `smoothstep(lo, lo + 0.15, dens)` para
             // todas; con `sharp` la nube baja corta en 0,07 y su silueta se lee como una FORMA
             // recortada, no como un degradado de niebla. La alta conserva rampa ancha (0,30) porque
             // un cirro con borde duro no parece un cirro, parece un recorte.
-            float cov = smoothstep(lo, lo + sharp, dens);
-            cov = cov * cov * (3.0 - 2.0 * cov);
+            // BEER-LAMBERT sobre la profundidad optica, que es lo que el comentario de `dens` pide.
+            // `sharp` deja de ser el ancho de una rampa y pasa a ser la ESCALA DE EXTINCION: cuanto
+            // campo por encima del umbral hace falta para tapar. El cirro (0,30) necesita mucho y se
+            // queda en velo; el cumulo (0,07) tapa en cuanto asoma, que es su borde duro de siempre.
+            // El umbral ya esta DENTRO de `dens`, asi que no se resta dos veces.
+            float cov = 1.0 - exp(-dens / max(sharp, 1e-3));
+            cov = cov * cov * (3.0 - 2.0 * cov);   // el mismo afilado de silueta
             // CAMINO ÓPTICO: cuanto más rasante es la vista, más losa se atraviesa → más opaca.
             // `t` es el coseno respecto al cénit, así que 1/t es el camino relativo. Se aplica a la
             // COBERTURA y no a la densidad: aplicado a la densidad desplazaba el umbral y cambiaba la
             // FORMA de la nube con el ángulo de vista, que es justo lo que no debe pasar.
-            if (layer == 2) {
-                float path = clamp(1.0 / max(t, 0.14), 1.0, 2.6);
+            // ⚠️ TAMBIEN ESTABA BAJO `if (layer == 2)`, o sea aplicado solo a la capa que ya no se
+            // dibuja. Sin el, una capa se ve IGUAL de opaca sobre tu cabeza que en el horizonte, que
+            // es la firma de una calcomania: una losa de verdad tapa mas cuanto mas la atraviesas.
+            // El tope es por capa — un cirro no debe cerrarse del todo en el horizonte.
+            {
+                float path = clamp(1.0 / max(t, 0.14), 1.0, pathMax);
                 cov = 1.0 - pow(max(1.0 - cov, 0.0), path);
             }
 
-            // Ni pegadas al horizonte ni en el cénit exacto. La capa ALTA puede acercarse más al
-            // horizonte que la baja: está más lejos, así que su franja visible es más ancha.
-            float hb   = mix(0.02, 0.05, thick);
-            float band = smoothstep(hb, hb + 0.22, t) * (1.0 - smoothstep(0.62, 1.01, t));
+            // ⚠️⚠️ AQUI ESTABA EL ANILLO ENTERO, Y ERA UNA VENTANA DURA DE ELEVACION.
+            //
+            //     band = smoothstep(hb, hb+0.22, t) * (1.0 - smoothstep(0.62, 1.01, t));
+            //
+            // Con `hb ≈ 0,044`, el primer factor no llega a 1 hasta `t = 0,264`, o sea **15,3 grados**:
+            // por debajo la capa esta a medias o apagada. Y el segundo la APAGA desde `t = 0,62`
+            // (38,3 grados) hasta el cenit, donde vale **0,026** — el 97 % borrado. Justo donde mejor
+            // se ve una capa de nubes, que es mirando hacia arriba.
+            //
+            // Medido antes de tocarlo (`sky_layers_have_depth`): la nube vivia entre 5,8 y 21,1 grados
+            // con 0 % por encima de 25, y al cenit la cobertura pedida 0,80 daba **6,6 %** de cielo
+            // tapado. Las dos cifras salen de esta linea. Un anillo a altura fija de pantalla es
+            // exactamente lo que se lee como "las nubes son un plano 2D".
+            //
+            // El desvanecido del cenit NO tiene por que existir: se puso cuando la capa era un plano
+            // sin altitud y la formula reventaba mirando arriba; con la interseccion rayo-esfera de
+            // `cloudPlane` no hay nada que tapar ahi. Se retira entero.
+            //
+            // Del horizonte se conserva un desvanecido MUCHO mas corto (0,6 a 2,9 grados) y solo por
+            // lo que de verdad pasa ahi: la coordenada de la capa se satura (ver `cloudPlane`) y el
+            // ultimo grado es una franja donde ya no hay estructura que dibujar.
+            float hb   = mix(0.010, 0.018, thick);
+            float band = smoothstep(hb, hb + 0.040, t);
             float cloud = cov * band * day * u_atmo;
             if (cloud <= 0.001) continue;
 
@@ -286,7 +476,7 @@ void main()
             vec2  ls = ls2 * (0.20 * scale / 0.30);
             float sh = 0.0;
             for (int i = 1; i <= 3; ++i)
-                sh += smoothstep(lo, lo + 0.26, cloudField(base + ls * float(i), wind));
+                sh += smoothstep(lo, lo + 0.26, cloudField(base + ls * float(i), wind, fieldPx));
             // ⚠️ Beer MÁS AGRESIVO en las capas densas (1,9 → 3,2): es lo que separa el blanco de la
             // cima del azul de la panza. El claroscuro duro es la mitad del look; la otra mitad es
             // el borde. Un cirro no debe tener sombra propia marcada, de ahí `shadeMul`.
@@ -321,6 +511,9 @@ void main()
 
     // --- Mezcla a espacio negro según grosor de atmósfera ---
     vec3 spaceC = vec3(0.004, 0.004, 0.010);
+    // La atmosfera VISTA DESDE FUERA se suma al espacio, no al cielo: dentro, el domo ya la modela y
+    // `mix` la tapa entera. Ver `harukaAtmoLimb`.
+    spaceC += harukaAtmoLimb(dir);
     vec3 outC   = mix(spaceC, sky, u_atmo);
     // (El cuerpo del Sol = corona-objeto emisiva, se dibuja en el pase de objetos sobre este
     //  fondo, igual dentro y fuera de la atmósfera → sin "dos soles".)

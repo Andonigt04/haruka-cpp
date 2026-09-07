@@ -20,7 +20,7 @@
 #define HARUKA_OCEAN_PARAMS_GLSL
 
 /// Número de trenes. Gemelo de `OCEAN_WAVES`.
-const int HARUKA_WAVES = 4;
+const int HARUKA_WAVES = 8;
 
 layout(std140, binding = 29) uniform OceanParams {
     /// (lambda m, amplitud en aguas profundas m, dir.x, dir.y) por tren, en el plano tangente local.
@@ -30,6 +30,9 @@ layout(std140, binding = 29) uniform OceanParams {
     /// z = EL RELOJ del oleaje (s). Vive aqui y no en el UBO del planeta porque es estado del MAR:
     ///     el pase de agua del quadtree no tiene aquel bloque, y sacarlo de otro sitio fue como el
     ///     agua acabo congelada una vez. Gemelo de `Haruka::Planet::oceanClockSeconds()`.
+    /// w = ESCALA DE ESPUMA (`HARUKA_OCEAN_FOAM`, 1 por defecto). Existe para poder BISECAR en el
+    ///     juego: apagar la espuma sin tocar la geometria de la ola es la unica forma de contestar
+    ///     "¿lo blanco es la espuma?" mirando la pantalla.
     vec4 uOceanMisc;
 };
 
@@ -41,12 +44,27 @@ layout(std140, binding = 29) uniform OceanParams {
 /// pero no destruye la escena — el mismo criterio que la tabla de reserva de abajo.
 float harukaOceanTime() { return (uOceanMisc.y > 0.5) ? uOceanMisc.z : 0.0; }
 
+/// Escala de espuma para bisecar (`HARUKA_OCEAN_FOAM`). 1 si el bloque no se ato: sin dato, la espuma
+/// se comporta como siempre — un 0 aqui apagaria la espuma en silencio, que es el fallo contrario.
+float harukaFoamScale() { return (uOceanMisc.y > 0.5) ? uOceanMisc.w : 1.0; }
+
 vec4 harukaWaveAt(int i) {
-    if (uOceanMisc.y > 0.5) return uOceanWave[i];
-    if (i == 0) return vec4(61.0, 0.85,  1.000,  0.000);
-    if (i == 1) return vec4(37.0, 0.45,  0.766,  0.643);
-    if (i == 2) return vec4(19.0, 0.22,  0.174, -0.985);
-    return             vec4( 8.7, 0.09, -0.500,  0.866);
+    // ⚠️ GUARDIA DE `lambda > 0`, y no es teorico: un UBO lleno A MEDIAS (un llamante que copie 4
+    // trenes de 8, que es exactamente lo que paso al subir el espectro) pasa el `uOceanMisc.y > 0.5`
+    // con los ultimos a cero, y `k = 2π/0` es infinito -> NaN -> **el agua no dibuja un solo pixel**.
+    // Con esto, un tren sin rellenar simplemente no existe y el mar degrada en vez de desaparecer.
+    if (uOceanMisc.y > 0.5) return (uOceanWave[i].x > 0.0) ? uOceanWave[i] : vec4(1.0, 0.0, 1.0, 0.0);
+    // Red de seguridad: gemela EXACTA de `OCEAN_WAVE` (ocho trenes de Pierson-Moskowitz a 11,4 m/s,
+    // reescalados para dar el mismo Hs = 2,8021 m que la tabla de cuatro que hubo). Si estas cifras y
+    // las del .h se separaran, un UBO sin atar daria OTRO mar en vez del mismo.
+    if (i == 0) return vec4(137.0, 0.5090,  0.98481, -0.17365);
+    if (i == 1) return vec4( 89.0, 0.5390,  0.97030,  0.24192);
+    if (i == 2) return vec4( 61.0, 0.4394,  1.00000,  0.00000);
+    if (i == 3) return vec4( 43.0, 0.3492,  0.86603,  0.50000);
+    if (i == 4) return vec4( 29.0, 0.2602,  0.89879, -0.43837);
+    if (i == 5) return vec4( 19.0, 0.1748,  0.57358,  0.81915);
+    if (i == 6) return vec4( 12.7, 0.1147,  0.30902, -0.95106);
+    return             vec4(  8.7, 0.0742, -0.30902,  0.95106);
 }
 
 /// Cota de la lámina del mar (m sobre el nivel base). 0 si el bloque no es válido.

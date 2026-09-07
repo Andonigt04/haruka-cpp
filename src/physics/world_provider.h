@@ -91,6 +91,18 @@ public:
      */
     virtual glm::dvec3 waterVelocityAt(const glm::dvec3& /*worldPos*/) const { return glm::dvec3(0.0); }
 
+    /**
+     * @brief ESPUMA en la superficie del agua, 0..1. 0 = agua limpia · 1 = agua blanca.
+     *
+     * El agua blanca de una rompiente esta AIREADA: pesa menos (menos empuje) y arrastra mucho mas
+     * (la ola te lleva). Sin esto, una ola que revienta lo hacia solo para la camara.
+     *
+     * El default es 0 —agua limpia— y no es un dato inventado: es exactamente lo que significa "no
+     * se de espuma" para quien la consume, porque anula los dos efectos y deja la flotacion como
+     * estaba. Un proveedor sin mar (el DGS, los tests) no cambia de comportamiento.
+     */
+    virtual float waterFoamAt(const glm::dvec3& /*worldPos*/) const { return 0.0f; }
+
     /** @brief (Fase 2) Geometría LOCAL del terreno alrededor de `center` (radio `radius`, m), para
      *  colisión REAL con la malla (no una altura vertical). Rellena `outVerts` (posiciones mundo) y
      *  `outTris` (índices de triángulo, 3 por cara) y devuelve true si hay malla. Por defecto false →

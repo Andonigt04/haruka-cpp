@@ -64,6 +64,17 @@ void WeatherSystem::configure(uint32_t seed) {
 
         // Tamaño y fuerza. El radio angular manda en la ESCALA: 0.25 rad sobre la Tierra son ~1600 km
         // de radio = una borrasca de verdad; 0.72 tapa medio hemisferio (un sistema de gran escala).
+        // ⚠️ SE INTENTO ENSANCHARLOS A 0,32-0,89 rad Y SE REVIRTIO, con la medida delante. La idea era
+        // subir la cobertura media por el termino que SI varia en espacio y tiempo, en vez de por el
+        // fondo (que es plano y actua como suelo). Pero un casquete de 0,89 rad tapa el 18,5 % de la
+        // esfera y con 14 frentes no quedan huecos: `weather_fronts` bajo a **111 muestras despejadas
+        // de 9600** y algunas horas se quedaban sin una sola — el cielo permanentemente cubierto que
+        // este fichero lleva dos parrafos avisando de no hacer.
+        //
+        // O sea que los frentes NO tienen holgura para levantar la media: ya cubren casi todo lo que
+        // pueden cubrir sin cerrar el planeta. Lo que de verdad limita la cobertura de este mundo es
+        // su HUMEDAD (media 0,286 contra la terrestre, mucho mas alta), y eso se decide en el bioma,
+        // no aqui.
         f.radius   = 0.25 + 0.47 * (double)hashf(seed, i, 6);
         f.strength = 0.55f + 0.45f * hashf(seed, i, 7);
     }
@@ -111,7 +122,55 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
     // de él no baja nadie. Por eso se deja bajo y se refuerzan los FRENTES en su lugar — ellos sí
     // varían en espacio y tiempo, que es de donde tiene que salir "hoy está despejado y mañana no".
     // Un fondo alto daba cielo permanentemente cubierto, que aburre igual que el cielo vacío.
-    const float background = 0.06f + 0.30f * H;
+    // ⚠️⚠️ Y SEGUIA CORTO, PORQUE SE CALIBRO CON UNA HUMEDAD QUE EL MUNDO NO TIENE. El arreglo de
+    // arriba se valido con `cloud_shape`, que muestrea con `humidity = 0.65` escrita a mano. La
+    // humedad REAL del planeta la imprime el propio motor al cargarlo:
+    //
+    //     clima del planeta: humedad [0.059, 0.882] media 0.286
+    //
+    // O sea que la calibracion se hizo a 2,3 veces la humedad que hay. Con `0.06 + 0.30·H` y la media
+    // real, el fondo vale **0,146** — y la Tierra ronda **0,67** de cobertura media. De ahi que
+    // Andoni viera "motas" desde orbita: fuera de los frentes el planeta esta practicamente
+    // despejado, igual que antes del arreglo anterior pero por otra via.
+    //
+    // ⚠️ NO SE PONE LINEAL. Con `a + b·H` ajustado para dar 0,67 en la media (H = 0,286) hace falta
+    // b ≈ 2,07, y entonces la mitad humeda del mundo (H hasta 0,882) satura a 1,0: cielo cubierto
+    // PERMANENTE, que es justo lo que el parrafo de arriba dice que aburre igual que el vacio. La
+    // humedad esta sesgada a la baja (media 0,286 con maximo 0,882), asi que una recta que acierte en
+    // la media falla en la cola.
+    //
+    // Con raiz cuadrada la curva sube deprisa donde hay poca humedad y se aplana arriba:
+    //     H = 0,059 (desierto)  -> 0,19    sigue habiendo cielos despejados
+    //     H = 0,286 (la MEDIA)  -> 0,42    contra los 0,146 de antes
+    //     H = 0,882 (selva)     -> 0,73    sin saturar, los frentes aun tienen donde crecer
+    // Con los frentes encima, la media del planeta queda cerca de la terrestre sin cerrar el cielo.
+    //
+    // ⚠️ El 0,67 de la Tierra es una referencia REAL y por eso se usa; donde exactamente entre 0,42 y
+    // 0,67 debe quedar este mundo es una decision de diseño, no un dato. Queda escrito el numero para
+    // que se pueda mover a sabiendas.
+    // ⚠️ Y LA RAIZ TAMPOCO VALIA: dejaba el planeta SIN NINGUN SITIO DESPEJADO. `weather_fronts`
+    // barre humedad desde 0,15 y llama "despejado" a `cover < 0.15`; con `0.78·sqrt(0.15) = 0.302` no
+    // habia un solo punto limpio a ninguna hora, y el test lo casco (24 fallos). Es exactamente lo que
+    // el parrafo de arriba avisa: "un fondo alto daba cielo permanentemente cubierto, que aburre igual
+    // que el cielo vacio". La raiz sube demasiado deprisa en la parte baja, que es donde vive casi
+    // todo este mundo (humedad media 0,286).
+    //
+    // Lineal y SIN suelo constante: con poca humedad el cielo puede limpiarse de verdad
+    // (H = 0,15 -> 0,128, por debajo del umbral de despejado), y con mucha se cierra
+    // (H = 0,882 -> 0,75). La pendiente es 2,8 veces la que habia (0,30), que es lo que sube la
+    // cobertura sin romper el invariante.
+    //
+    // ⚠️ Lo que de verdad levanta la MEDIA sin tocar ese suelo son los FRENTES —ellos varian en
+    // espacio y tiempo— y por eso se ensanchan abajo, en `configure`. El fondo solo pone el minimo.
+    // ⚠️ ERA 0,85 Y SE CALIBRO CONTRA UNA MEDIA MAL PONDERADA. La sonda de cobertura promediaba por
+    // TEXEL sobre una rejilla equirectangular, donde un texel polar cubre `cos(lat)` veces menos
+    // superficie: sobrepondera los polos. Al ponderar por AREA, la cobertura real del planeta salio
+    // **0,732**, no los 0,641 que se leian — o sea que la calibracion apuntaba a 0,67 y el mundo
+    // estaba en 0,73, mas cubierto que la Tierra. El coeficiente baja para cerrar esa diferencia.
+    // Ver la nota de `application_render.cpp`, que ahora imprime las dos medias.
+    // El valor sale de DOS medidas, no de una: con 0,85 la media por area era 0,732 y con 0,63 bajaba a
+    // 0,614, o sea 0,536 de cobertura por unidad de coeficiente. Para los 0,67 de la Tierra toca 0,73.
+    const float background = 0.73f * H;
     return glm::clamp(cover * (0.70f + 1.00f * H) + background, 0.0f, 1.0f);
 }
 
@@ -185,7 +244,14 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // ancho. Dando margen aquí, el shader tiene sitio donde levantar las torres.
     const float convect = glm::smoothstep(-10.0f, 24.0f, tempC);   // 0 = gélido, 1 = tropical
     const float body    = 500.0f + 1400.0f * w.cloudCover;
-    const float tower   = 5200.0f * w.precip * (0.35f + 0.65f * convect);
+    // ⚠️ LA TORRE VA CON `precip²`, NO LINEAL. Con el termino lineal una lluvia MODERADA (precip 0,44)
+    // levantaba 2,3 km de torre sobre 1,7 km de cuerpo: la losa iba de 700 a 4490 m, casi 4 km de
+    // espesor. Eso es un cumulonimbo, no una lluvia; y con la camara a 3350 m se queda DENTRO de la
+    // nube, que es el blanco total que se reporto. El desarrollo vertical de una nube crece mucho mas
+    // deprisa que la tasa de lluvia — un nimbostrato de lluvia continua tiene 2-3 km en total, y los
+    // 5 km de torre son del temporal. Con el cuadrado, `precip = 1` da lo mismo que antes (la tormenta
+    // sigue haciendo yunque) y la lluvia moderada baja a ~1,0 km.
+    const float tower   = 5200.0f * w.precip * w.precip * (0.35f + 0.65f * convect);
     const float thick   = glm::clamp(body + tower, 180.0f, 11000.0f);
     w.cloudTopM = w.cloudBaseM + thick;
 

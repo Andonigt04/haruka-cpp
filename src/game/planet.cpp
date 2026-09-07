@@ -12,6 +12,7 @@
 #include "core/planet/terrain_detail.h"
 #include "core/planet/terrain_lod.h"
 #include "core/planet/water_fill.h"   // relleno global de cuencas: los lagos son del MUNDO
+#include "net/height_field.h"          // el campo que se le deja al validador del DGS (GL-free)
 #include "renderer/shader.h"            // Shader::baseDir() — raíz de assets para las rutas de shader
 #include "core/asset_paths.h"
 #include "stb_image.h"
@@ -414,7 +415,11 @@ void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st) {
     // reloj es estado del mar, así que su sitio es éste, junto a los trenes que anima.
     // `oceanClockSeconds()` es la ÚNICA fuente de tiempo del oleaje en todo el motor (ver su nota:
     // hubo dos y el desfase eran 9,7 m de cresta).
-    up.misc = glm::vec4(st.seaLevelM, 1.0f, Haruka::Planet::oceanClockSeconds(), 0.0f);
+    // ⚠️ `w` = ESCALA DE ESPUMA, y existe para poder BISECAR en el juego. `HARUKA_OCEAN_FOAM=0` apaga
+    // la espuma sin recompilar ni tocar la geometria de la ola, que es la unica forma de contestar
+    // "¿lo blanco es la espuma?" mirando la pantalla. Por defecto 1. Se lee una vez.
+    up.misc = glm::vec4(st.seaLevelM, 1.0f, Haruka::Planet::oceanClockSeconds(),
+                        Haruka::Planet::oceanFoamScale());
     if (!RHI::valid(m_oceanParamsUBO))
         m_oceanParamsUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(up), &up,
                                              RHI::BufferMemory::Dynamic);
@@ -759,6 +764,10 @@ void TerrestrialPlanet::clearGPU() {
     if (RHI::valid(m_baseFieldTex)) { dev->destroy(m_baseFieldTex); m_baseFieldTex = {}; }
     if (RHI::valid(m_lakeTex))          { dev->destroy(m_lakeTex);          m_lakeTex          = {}; }
     if (RHI::valid(m_lakeDummy))        { dev->destroy(m_lakeDummy);        m_lakeDummy        = {}; }
+    if (RHI::valid(m_lakeWinTex))       { dev->destroy(m_lakeWinTex);       m_lakeWinTex       = {}; }
+    if (RHI::valid(m_lakeWinDummy))     { dev->destroy(m_lakeWinDummy);     m_lakeWinDummy     = {}; }
+    if (RHI::valid(m_lakeWinUBO))       { dev->destroy(m_lakeWinUBO);       m_lakeWinUBO       = {}; }
+    std::atomic_store(&m_lakeWin, std::shared_ptr<const LakeWindow>());
     if (RHI::valid(m_ringGridVB))       { dev->destroy(m_ringGridVB);       m_ringGridVB       = {}; }
     if (RHI::valid(m_oceanParamsUBO)) { dev->destroy(m_oceanParamsUBO); m_oceanParamsUBO = {}; m_oceanParamsValid = false; }
     if (RHI::valid(m_ringGridIB))       { dev->destroy(m_ringGridIB);       m_ringGridIB       = {}; }
@@ -2711,6 +2720,11 @@ void TerrestrialPlanet::bakeWaterMap() {
     m_waterCPU     = std::move(r.levelM);
     m_fetchCPU     = std::move(r.fetchM);
     m_hasWater     = r.hasWater;
+    // ⚠️ INTERRUPTOR DE BISECCION. `HARUKA_NOWATER=1` apaga TODA el agua (mar, lagos y el parche), que
+    // es como se contesta "¿lo que veo raro es el agua?" en una sola ejecucion.
+    //
+    // Punto UNICO de verdad, y se anuncia en el log: ver `oceanWaterDisabled`.
+    if (Haruka::Planet::oceanWaterDisabled()) m_hasWater = false;
     m_deepestLakeM = r.deepestM;
 
     // ── Y A LA GPU, PARA QUE EL AGUA SE DIBUJE DONDE LA FÍSICA DICE QUE ESTÁ ────────────────────
@@ -2755,9 +2769,221 @@ void TerrestrialPlanet::bakeWaterMap() {
                 r.deepestM, r.bodies, r.biggestFetchM, ms);
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+// LA VENTANA FINA DE LAGOS: QUE RECUADRO, CUANDO Y DONDE SE CACHEA
+//
+// El relleno global es de 78,2 km/texel y no puede tener lagos (ver `bakeWaterMap` y la nota de
+// `m_lakeWin` en planet.h). Esto es el segundo nivel: un recuadro de ±8 km alrededor del observador,
+// inundado sobre el terreno DE VERDAD, con el relleno grueso de condicion de contorno.
+//
+//   · QUE recuadro: el centrado en el observador. Un lago que se ve esta a menos de 8 km o no es un
+//     lago, es un mar interior — y esos ya los tiene el campo global.
+//   · CUANDO: con HISTERESIS. Se recalcula al salir de la MITAD interior, no al salir del borde: asi
+//     nunca queda menos de medio recuadro (4 km) de margen por delante, y no se recalcula en bucle
+//     al caminar justo por el limite.
+//   · DONDE: aqui, en el planeta, junto al campo grueso. En un hilo, porque son 65 536 muestras del
+//     terreno real; `m_heightCPU` es inmutable tras el bake y por eso se puede leer sin candado.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+/// Direccion → (lon, lat) con la MISMA convencion que `equirectUV`. Si estas dos se separaran, la
+/// ventana y el campo grueso hablarian de puntos distintos del planeta.
+static inline void dirToLonLat(const glm::dvec3& d, double& lon, double& lat) {
+    Haruka::Planet::waterDirToLonLat(d, lon, lat);   // la MISMA de `water_fill.h`, no una copia
+}
+
+void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
+    // Sin agua no hay nada que refinar, y sin bake no hay terreno que muestrear.
+    if (!m_hasWater || m_heightCPU.empty() || m_heightW <= 0 || m_heightH <= 0) return;
+    const double R = m_config.radius;
+    if (!(R > 0.0)) return;
+
+    // ⚠️ NI DESDE ARRIBA. La ventana refina lagos a 62 m/texel, y un detalle de 62 m visto desde 500 km
+    // subtiende 0,12 mrad — muy por debajo de un pixel. Ahi no aporta NADA y cuesta 20,7 ms de hilo
+    // cada vez que el observador se mueve mas de 4 km, que en orbita es todo el rato.
+    //
+    // Lo destapo el banco: `terrain_node_orbit_coverage` barre altitudes de 500 a 2000 km y la suite
+    // entera paso de menos de 500 s a no terminar en 900. No era el test, era esta ventana
+    // recalculandose a cada salto para mirar lagos que no se ven.
+    //
+    // El corte sale de cuando el texel deja de ser resoluble: 62 m a 20 km son 3,1 mrad, que a un fov
+    // y una resolucion normales es del orden de UN pixel. Por encima manda el campo global.
+    {
+        const double alt = glm::length(observerDir) > 1e-9
+                         ? (glm::length(observerDir) - R) : 0.0;
+        const double texelM = (2.0 * kLakeWinHalfM) / (double)kLakeWinRes;
+        if (alt > texelM * 320.0) {          // 62 m x 320 = ~20 km
+            std::atomic_store(&m_lakeWin, std::shared_ptr<const LakeWindow>());
+            return;
+        }
+    }
+
+    // ── (1) RECOGER lo que ya este listo ────────────────────────────────────────────────────────
+    if (m_lakeWinJobLive &&
+        m_lakeWinJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        auto snap = std::make_shared<LakeWindow>();
+        snap->r = m_lakeWinJob.get();
+        m_lakeWinJobLive = false;
+        snap->lonC = m_lakeWinJobLonC;
+        snap->latC = m_lakeWinJobLatC;
+        const double halfLat = kLakeWinHalfM / R;
+        const double cosLat  = std::max(std::cos(snap->latC), 1.0e-6);
+        const double halfLon = halfLat / cosLat;   // el recuadro es cuadrado EN METROS, no en radianes
+        snap->invSpanLon = 1.0 / (2.0 * halfLon);
+        snap->invSpanLat = 1.0 / (2.0 * halfLat);
+        const bool ok = (snap->r.w > 0 && snap->r.h > 0);
+        // ⚠️ SE PUBLICA ENTERA O NADA. Escribir datos y recuadro por separado deja una rendija en la
+        // que un lector ve la ventana NUEVA con el centro VIEJO — o sea un lago desplazado.
+        std::atomic_store(&m_lakeWin, ok ? std::shared_ptr<const LakeWindow>(snap)
+                                         : std::shared_ptr<const LakeWindow>());
+
+        // ── A LA GPU. Mismo formato, mismo NEAREST y mismo intercalado que `m_lakeTex`: el nivel y
+        // el fetch salen del mismo relleno y se leen en el mismo texel.
+        if (RHI::Device* dev = RHI::device()) {
+            if (ok) {
+                if (RHI::valid(m_lakeWinTex)) { dev->destroy(m_lakeWinTex); m_lakeWinTex = {}; }
+                std::vector<float> rg((size_t)snap->r.w * snap->r.h * 2);
+                for (size_t i = 0; i < (size_t)snap->r.w * snap->r.h; ++i) {
+                    rg[i * 2 + 0] = snap->r.levelM[i];
+                    rg[i * 2 + 1] = snap->r.fetchM[i];
+                }
+                RHI::TextureDesc td;
+                td.width = (uint32_t)snap->r.w; td.height = (uint32_t)snap->r.h;
+                td.format = RHI::Format::RG32F; td.filter = RHI::Filter::Nearest;
+                td.wrap = RHI::Wrap::ClampToEdge; td.mipmaps = false; td.initialData = rg.data();
+                m_lakeWinTex = dev->createTexture(td);
+            }
+            // El recuadro, para que el shader sepa DONDE esta esta textura en el planeta. Gemelo del
+            // bloque `LakeWindowParams` de `inland_water.glsl`.
+            const glm::vec4 rect((float)snap->lonC, (float)snap->latC,
+                                 (float)snap->invSpanLon, (float)snap->invSpanLat);
+            if (!RHI::valid(m_lakeWinUBO))
+                m_lakeWinUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(rect), &rect,
+                                                 RHI::BufferMemory::Dynamic);
+            else
+                dev->updateBuffer(m_lakeWinUBO, 0, sizeof(rect), &rect);
+            // El 1x1 seco: en Vulkan un sampler sin atar es INDEFINIDO, no ceros.
+            if (!RHI::valid(m_lakeWinDummy)) {
+                const float dry[2] = { Haruka::Planet::WATER_FILL_DRY,
+                                       Haruka::Planet::WATER_FETCH_UNLIMITED };
+                RHI::TextureDesc dd;
+                dd.width = 1; dd.height = 1; dd.format = RHI::Format::RG32F;
+                dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
+                dd.mipmaps = false; dd.initialData = dry;
+                m_lakeWinDummy = dev->createTexture(dd);
+            }
+        }
+    }
+    if (m_lakeWinJobLive) return;   // ya hay uno en marcha: no se encolan dos
+
+    // ── (2) ¿HACE FALTA UNA NUEVA? ──────────────────────────────────────────────────────────────
+    double lon = 0.0, lat = 0.0;
+    dirToLonLat(observerDir, lon, lat);
+    const double halfLat = kLakeWinHalfM / R;
+    // La politica vive en `water_fill.h` y esta probada sola (`water_window_policy`): aqui no se
+    // reimplementa, para que "cuando se recentra" tenga una sola respuesta.
+    const std::shared_ptr<const LakeWindow> cur = lakeWindow();
+    if (!Haruka::Planet::waterWindowNeedsRecenter(observerDir, cur != nullptr,
+                                                  cur ? cur->lonC : 0.0, cur ? cur->latC : 0.0,
+                                                  kLakeWinHalfM, R))
+        return;
+
+    // ── (3) LANZAR ──────────────────────────────────────────────────────────────────────────────
+    const double cosLat  = std::max(std::cos(lat), 1.0e-6);
+    const double halfLon = halfLat / cosLat;
+    m_lakeWinJobLonC = lon; m_lakeWinJobLatC = lat;
+
+    // Copias por VALOR de lo que el hilo necesita. Nada de capturar `this` para leer miembros que el
+    // hilo principal puede reasignar (`rebuild` reconstruye `m_waterCPU` entero).
+    const int   hw = m_heightW, hh = m_heightH;
+    const float baseR = m_baseRadius;
+    auto heightCPU = std::make_shared<std::vector<float>>(m_heightCPU);
+    auto waterCPU  = std::make_shared<std::vector<float>>(m_waterCPU);
+    const float triM = Haruka::Planet::terrainTriM(0.0);
+
+    m_lakeWinJob = std::async(std::launch::async,
+        [hw, hh, baseR, heightCPU, waterCPU, triM, R, lon, lat, halfLon, halfLat]()
+    {
+        auto dirOf = [](double lo, double la) {
+            return glm::dvec3(std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo));
+        };
+        // EL TERRENO DE VERDAD, con la misma cuenta que `sampleHeight`. Si aqui se muestreara el bake
+        // grueso a secas, la ventana no veria nada que el relleno global no viera ya — que es
+        // exactamente el error que hace inutil un refinamiento.
+        auto terreno = [&](double lo, double la) -> float {
+            const glm::dvec3 d = dirOf(lo, la);
+            const glm::vec2  uv = Haruka::Planet::equirectUV(glm::vec3(d));
+            const float baseH = Haruka::Planet::sampleHeightField(uv, hw, hh, heightCPU->data());
+            float det = Haruka::Planet::terrainDetail(glm::vec3(d), baseR + baseH, triM)
+                      * Haruka::Planet::seaLevelAttenuation(baseH);
+            if (baseH > 0.0f) det = glm::max(det, -baseH);
+            return baseH + det;
+        };
+        // Y la condicion de contorno: lo que el relleno GRUESO dice ahi fuera.
+        auto contorno = [&](double lo, double la) -> float {
+            const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dirOf(lo, la)));
+            int x = (int)std::floor((double)uv.x * hw);
+            int y = (int)std::floor((double)uv.y * hh);
+            x = ((x % hw) + hw) % hw;
+            y = glm::clamp(y, 0, hh - 1);
+            return (*waterCPU)[(size_t)y * hw + x];
+        };
+        return Haruka::Planet::waterFillWindow(kLakeWinRes, kLakeWinRes, lon, lat, halfLon, halfLat,
+                                               R, terreno, contorno, 0.0f);
+    });
+    m_lakeWinJobLive = true;
+}
+
+/// Muestreo de la ventana. DELEGA en `waterWindowLevelAt`/`waterWindowFetchAt` (water_fill.h), que
+/// es el gemelo declarado de `harukaLakeWinUV` del .glsl. No se reimplementa aqui: tres copias de la
+/// misma cuenta y la primera que se toque separa el agua que se nada de la que se ve.
+float TerrestrialPlanet::lakeWindowLevelAt(const glm::dvec3& dir) const {
+    const auto w = lakeWindow();
+    if (!w) return Haruka::Planet::WATER_FILL_DRY;
+    return Haruka::Planet::waterWindowLevelAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
+}
+
+float TerrestrialPlanet::lakeWindowFetchAt(const glm::dvec3& dir) const {
+    const auto w = lakeWindow();
+    if (!w) return Haruka::Planet::WATER_FETCH_UNLIMITED;
+    return Haruka::Planet::waterWindowFetchAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
+}
+
 /// Fetch en esa dirección: el diámetro equivalente de la masa de agua que hay ahí, o
 /// `WATER_FETCH_UNLIMITED` si es océano. Mismo muestreo NEAREST y por la misma razón que la cota.
+/// La pendiente del fondo, para la REFRACCION de la ola. Gemelo del bloque `slope` de
+/// `terrain_node_water.vert`.
+///
+/// ⚠️ EL PASO ES UN TEXEL DEL BAKE Y ESO ES LO CORRECTO AQUI. La profundidad que ve la ola es
+/// `nivel - baseH`, o sea el campo BASE sin `terrainDetail`; medir la pendiente mas fina seria
+/// medir un relieve que la ola no usa, y las crestas girarian por un fondo invisible.
+glm::vec3 TerrestrialPlanet::baseSlopeAt(const glm::dvec3& dirIn) const {
+    if (m_heightCPU.empty() || m_heightW <= 2 || m_heightH <= 0) return glm::vec3(0.0f);
+    const glm::vec3 dir = glm::vec3(glm::normalize(dirIn));
+    const glm::vec3 s1 = glm::normalize(std::abs(dir.y) < 0.99f ? glm::cross(dir, glm::vec3(0,1,0))
+                                                                : glm::cross(dir, glm::vec3(1,0,0)));
+    const glm::vec3 s2 = glm::cross(dir, s1);
+    const float e = 6.2831853f / (float)m_heightW;          // un texel de longitud, en radianes
+    auto H = [&](const glm::vec3& d) {
+        return Haruka::Planet::sampleHeightField(Haruka::Planet::equirectUV(glm::normalize(d)),
+                                                 m_heightW, m_heightH, m_heightCPU.data());
+    };
+    const glm::vec3 g = s1 * (H(dir + s1 * e) - H(dir - s1 * e))
+                      + s2 * (H(dir + s2 * e) - H(dir - s2 * e));
+    const float gl = glm::length(g);
+    return (gl > 1.0e-6f) ? (g / gl) : glm::vec3(0.0f);
+}
+
 float TerrestrialPlanet::lakeFetchAt(const glm::dvec3& dir) const {
+    // LA VENTANA FINA MANDA donde existe: es el mismo relleno pero a 62 m/texel en vez de 78 km, asi
+    // que sabe MAS del mismo sitio. Fuera de ella, el campo global. Mismo orden que en el shader.
+    if (const auto w = lakeWindow()) {
+        // UN solo snapshot para las dos consultas: con dos, una ventana nueva entre medias daria el
+        // nivel de un recuadro y el fetch de otro.
+        if (Haruka::Planet::waterWindowLevelAt(w->r, dir, w->lonC, w->latC,
+                                               w->invSpanLon, w->invSpanLat) > Haruka::Planet::WATER_FILL_DRY)
+            return Haruka::Planet::waterWindowFetchAt(w->r, dir, w->lonC, w->latC,
+                                                      w->invSpanLon, w->invSpanLat);
+    }
     if (m_fetchCPU.empty() || m_heightW <= 0 || m_heightH <= 0)
         return Haruka::Planet::WATER_FETCH_UNLIMITED;
     const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dir));
@@ -2773,13 +2999,19 @@ float TerrestrialPlanet::lakeFetchAt(const glm::dvec3& dir) const {
 /// lámina de un lago es PLANA y su borde es un escalón contra la orilla; interpolar entre "hay lago
 /// a 40 m" y "no hay lago" inventaría una rampa de agua que no existe y mojaría la ladera.
 float TerrestrialPlanet::lakeLevelAt(const glm::dvec3& dir) const {
-    if (m_waterCPU.empty() || m_heightW <= 0 || m_heightH <= 0) return Haruka::Planet::WATER_FILL_DRY;
+    // ⚠️ `max` DE LOS DOS, no "la ventana o el global". Los dos son laminas de agua reales y la que
+    // manda es la MAS ALTA: un mar interior del campo grueso que se mete en la ventana sigue estando
+    // ahi aunque el refinamiento local no lo haya resuelto entero. Es el mismo criterio que
+    // `harukaWaterLevelAt` usa para combinar parche, lago y mar — una sola respuesta, sin ramas.
+    const float win = lakeWindowLevelAt(dir);
+    if (m_waterCPU.empty() || m_heightW <= 0 || m_heightH <= 0) return win;
     const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dir));
     int x = (int)std::floor((double)uv.x * m_heightW);
     int y = (int)std::floor((double)uv.y * m_heightH);
     x = ((x % m_heightW) + m_heightW) % m_heightW;          // longitud envuelve
     y = glm::clamp(y, 0, m_heightH - 1);                    // latitud no
-    return m_waterCPU[(size_t)y * m_heightW + x];
+    const float coarse = m_waterCPU[(size_t)y * m_heightW + x];
+    return (win > coarse) ? win : coarse;
 }
 
 void TerrestrialPlanet::bakeHeightMap() {
@@ -2856,6 +3088,24 @@ void TerrestrialPlanet::bakeHeightMap() {
     m_heightCPU  = std::move(up.cpuField);   // copia CPU del R32F: la física usa el mismo campo
     m_heightW    = up.w;
     m_heightH    = up.h;
+
+    // EL SUELO PARA EL SERVIDOR. El validador del DGS juzgaba el noclip contra el analítico, que en
+    // esta rama es un stub (esfera lisa a nivel del mar): un jugador legítimo en un valle se
+    // expulsaba como tramposo y una montaña se podía atravesar hasta la cota 0. El módulo de reglas
+    // sabe muestrear ESTE campo sin GL (`src/net/height_field.h`); lo único que le faltaba era
+    // tenerlo, así que el bake lo deja escrito al lado de su PNG.
+    //
+    // ⚠️ En FLOAT y no en el PNG de 16 bits que ya se guarda: ese cuantiza a ~1 m por paso, y el
+    // suelo del servidor y el del cliente se comparan en centímetros. Es el mismo dato que la física
+    // muestrea aquí, no una reconstrucción.
+    if (!m_heightCPU.empty() && m_heightW > 0 && m_heightH > 0 && m_baseRadius > 0.0f) {
+        Haruka::Net::HeightField hf;
+        hf.w = m_heightW; hf.h = m_heightH; hf.baseRadiusM = m_baseRadius;
+        hf.data = m_heightCPU;
+        const std::string hfPath = bakeCacheDir() + key + "_height.hfield";
+        if (!Haruka::Net::saveHeightField(hfPath, hf))
+            HARUKA_LOGW("BakeCache", "no pude persistir el campo del servidor %s", hfPath.c_str());
+    }
     HARUKA_LOGI("SimplePlanet", "'%s': height map ok (R32F=%d)", m_config.name.c_str(),
                 RHI::valid(m_heightTex));
 }
@@ -2879,6 +3129,12 @@ void TerrestrialPlanet::bakeHeightMap() {
 void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& viewDir,
                                 double fovYRad, double aspect, double viewportH) {
     m_cullReady = false;
+    // LA VENTANA FINA DE LAGOS. Va aqui y no en el bake porque SIGUE AL OBSERVADOR: el bake se hace
+    // una vez y esto se recentra al caminar. No bloquea — lanza un hilo y recoge cuando esta.
+    {
+        const glm::dvec3 rel = cameraPos - m_config.position;
+        if (glm::length(rel) > 1.0) updateLakeWindow(rel);
+    }
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     RHI::Context* ctx = dev->beginFrame();
@@ -3817,6 +4073,10 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 Haruka::Terrain::TerrainNodeRenderer::Water w;
                 w.heightTex   = m_heightTex;
                 w.lakeTex     = lakeTexOrDummy();
+                // La ventana fina: donde existe, es ELLA la que sabe de lagos (62 m/texel contra los
+                // 78 km del campo global). Si no hay, el dummy — nunca un descriptor sin atar.
+                w.lakeWinTex  = lakeWinTexOrDummy();
+                w.lakeWinUBO  = m_lakeWinUBO;
                 w.oceanParams = m_oceanParamsValid ? m_oceanParamsUBO : RHI::BufferHandle{};
                 w.inlandUBO   = m_inlandWaterValid ? m_inlandWaterUBO : RHI::BufferHandle{};
                 w.inlandSSBO  = m_inlandWaterValid ? m_inlandWaterSSBO : RHI::BufferHandle{};
@@ -3986,7 +4246,14 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         ctx->bindUniformBuffer(22, m_nearRingUBO);
         ctx->bindUniformBuffer(23, m_wetUBO);
         if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
-        ctx->bindTexture(15, m_baseFieldTex);
+        // ⚠️ NUNCA `m_baseFieldTex` A PELO. Sin bake ese handle es INVÁLIDO, y este era el único
+        // sitio del terreno que lo ataba sin red: de ahí el aviso `bindTexture(15): handle sin
+        // textura` del backend de GL. Que sea un aviso y no un fallo es engañoso — en Vulkan la
+        // ranura queda sin escribir, y el shader de este anillo DECLARA `uBaseField` (binding 15 en
+        // `terrain_node.vert`/`lib/base_field.glsl`), así que muestrearla es leer un descriptor
+        // indefinido. `baseFieldOrDummy()` devuelve el mismo bake cuando lo hay y el 1x1 de relleno
+        // cuando no, que es el criterio que ya siguen las ranuras 15/16/18/19 del pase de nodos.
+        ctx->bindTexture(15, m_nodeRenderer.baseFieldOrDummy());
         ctx->bindVertexBuffer(m_nearRingVB);
         ctx->bindIndexBuffer(m_nearRingIB);
         ctx->drawIndexed(m_nearRingIndices);

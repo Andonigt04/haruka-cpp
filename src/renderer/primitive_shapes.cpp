@@ -186,13 +186,17 @@ void PrimitiveShapes::createCapsule(float radius, float height, int sectors, int
     int totalRings = (int)vertices.size() / ringSize; // approximate, enough for generated layout
     int currentRing = 0;
 
+    // ⚠️ TODA LA CÁPSULA ESTABA DEL REVÉS: sus 720 triángulos, medido. Con descarte de caras
+    // traseras eso es un objeto que solo se ve desde DENTRO — y la cápsula es justo lo que dibuja a
+    // un jugador sin modelo y a los personajes del editor. Se invierte el bobinado de las tres
+    // partes (casquete de arriba, cuerpo y casquete de abajo). Ver `test_primitive_winding`.
     // Top fan
     int firstRingStart = 1;
     if (totalRings > 1) {
         for (int j = 0; j < sectors; ++j) {
             indices.push_back(0);
-            indices.push_back(firstRingStart + j);
             indices.push_back(firstRingStart + j + 1);
+            indices.push_back(firstRingStart + j);
         }
     }
 
@@ -209,12 +213,12 @@ void PrimitiveShapes::createCapsule(float radius, float height, int sectors, int
             unsigned int d = bStart + j + 1;
             if (a < vertices.size() && b < vertices.size() && c < vertices.size() && d < vertices.size()) {
                 indices.push_back(a);
-                indices.push_back(c);
                 indices.push_back(b);
+                indices.push_back(c);
 
                 indices.push_back(b);
-                indices.push_back(c);
                 indices.push_back(d);
+                indices.push_back(c);
             }
         }
     }
@@ -225,8 +229,8 @@ void PrimitiveShapes::createCapsule(float radius, float height, int sectors, int
         unsigned int prevRingStart = bottomIndex > (unsigned int)(ringSize + 1) ? bottomIndex - (ringSize) : 0;
         for (int j = 0; j < sectors; ++j) {
             indices.push_back(bottomIndex);
-            indices.push_back(prevRingStart + j + 1);
             indices.push_back(prevRingStart + j);
+            indices.push_back(prevRingStart + j + 1);
         }
     }
 }
@@ -474,7 +478,9 @@ void PrimitiveShapes::createCylinder(float radius, float height, int sectors,
     }
     for (int i = 0; i < sectors; ++i) {
         unsigned int t0 = 2 * i, b0 = 2 * i + 1, t1 = 2 * (i + 1), b1 = 2 * (i + 1) + 1;
-        indices.insert(indices.end(), { t0, b0, t1,  t1, b0, b1 });
+        // ⚠️ Bobinado hacia FUERA. Estaba `{t0,b0,t1, t1,b0,b1}`, que da la normal hacia dentro:
+        // la pared del cilindro solo se veia desde el interior. Ver `test_primitive_winding`.
+        indices.insert(indices.end(), { t0, t1, b0,  t1, b1, b0 });
     }
 
     // --- Caps (triangle fans) ---
@@ -493,8 +499,17 @@ void PrimitiveShapes::createCylinder(float radius, float height, int sectors,
             else      indices.insert(indices.end(), { center, a, b });
         }
     };
-    cap( h, glm::vec3(0, 1, 0), false);  // top
-    cap(-h, glm::vec3(0,-1, 0), true);   // bottom
+    // ⚠️ LAS DOS TAPAS ESTABAN DEL REVÉS, y no se notó porque hasta hoy ningún cilindro llegaba a
+    // dibujarse: las columnas del juego (y las ruedas) se pintaban como CAJAS porque nadie
+    // interpretaba la forma declarada del item.
+    //
+    // La cuenta, para la tapa de arriba con el bobinado anterior (`center, a, b`):
+    //     u = a - centro = (r, 0, 0)          v = b - centro = (r·cos t, 0, r·sin t)
+    //     u x v = (0, -r²·sin t, 0)           → la cara mira a -Y
+    // O sea que la tapa SUPERIOR miraba hacia ABAJO, y con descarte de caras traseras se veía desde
+    // dentro y faltaba desde fuera. La de abajo, igual pero al revés. Se intercambian los sentidos.
+    cap( h, glm::vec3(0, 1, 0), true);   // top
+    cap(-h, glm::vec3(0,-1, 0), false);  // bottom
 }
 
 void PrimitiveShapes::createTriangle(float size,

@@ -80,6 +80,7 @@ namespace Haruka::RHI::opengl
             Context* beginFrame() override;
             void     endFrame() override;
             Backend  backend() const override { return Backend::OpenGL; }
+            const std::string& deviceName() const override { return m_deviceName; }
             void     readPixels(int x, int y, int w, int h, Format format, void* data) override;
 
             bool ready() const { return m_glContext != nullptr; }
@@ -93,6 +94,7 @@ namespace Haruka::RHI::opengl
             const GLFence*        fence(FenceHandle h) const              { return get(m_fences, h.id); }
 
         private:
+            std::string m_deviceName = "(sin consultar)";
             template <class T>
             static const T* get(const std::vector<T>& pool, uint32_t id)
             {

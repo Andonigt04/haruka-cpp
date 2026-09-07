@@ -42,7 +42,21 @@ enum class PortClass {
 };
 
 /** @brief Grado de libertad del mecanismo. */
-enum class RailDof { Hinge, Slider };
+/// ROPE: una CUERDA, que no es un grado de libertad más sino una unión que sólo TIRA.
+///
+/// ⚠️ Y no une piezas vecinas: cuelga de un punto del casco y pasa por un ANILLO. Por eso el puerto
+/// que la declara no necesita una pieza atada enfrente —las bisagras sí— y el montaje la trata
+/// aparte: ver `vehicle_spawn.cpp`. Es lo que iza un portalón plegable sin ser un pistón: al acortar
+/// el recorrido tira de lo que menos se resiste, así que primero pliega la hoja y luego la sube.
+/// ⚠️ `Weld` NO ES UN GRADO DE LIBERTAD, y aun así su sitio es este. Une dos piezas SIN juego, pero
+/// las deja en CUERPOS distintos — que es justo lo que no sabe hacer una unión rígida normal, porque
+/// esa las funde en la misma isla. Existe porque `joint: "mechanism"` se marca POR PIEZA y marca
+/// TODAS sus uniones (ver `prefab_runtime.cpp`), así que un conjunto que se mueve sólo podía ser UNA
+/// pieza. Con esto, la pieza marcada puede llevarse consigo a sus vecinas: en la suspensión del
+/// tanque el vástago se une a la camisa por un MUELLE y a la oruga por una SOLDADURA, y así las dos
+/// mitades telescopan de verdad en vez de ser decorado. Se rompe como cualquier otra unión
+/// (`breakForce`), que es lo que la distingue de fundir las piezas.
+enum class RailDof { Hinge, Slider, Rope, Weld };
 
 /** @brief Quién lo mueve. */
 enum class RailDrive {
@@ -64,8 +78,27 @@ struct Rail {
     glm::vec2 limits{0.0f, 90.0f};      ///< [min,max] grados (Hinge) o metros (Slider)
     RailDrive drive      = RailDrive::Manual;
     float     motorForce = 0.0f;        ///< N·m (Hinge) o N (Slider)
-    float     compliance = 0.0f;        ///< α (m²/N)
+    /// BLANDURA del muelle: los metros que cede por newton (m/N), o los radianes por N·m en una
+    /// bisagra. Es 1/k, así que **más grande = más blando**; 0 = rígido y el muelle no actúa.
+    ///
+    /// ⚠️ ESTE CAMPO NO LO LEÍA NADIE HASTA EL 2026-09-07. Se declaraba, se parseaba, viajaba en el
+    /// `RailSpec`... y `addRail` sólo configuraba el motor `if (drive == Motor)`: un `drive: spring`
+    /// salía como un DESLIZANTE LIBRE con topes. O sea que la suspensión no amortiguaba nada, caía a
+    /// plomo hasta el tope de abajo y se quedaba ahí. La documentación decía «α del XPBD (m²/N)»,
+    /// unidades de un solver que este motor no usa: aquí va a `ESpringMode::StiffnessAndDamping` de
+    /// Jolt como `k = 1/compliance`, que es la ecuación `F = -k·x - c·v` y no una analogía.
+    float     compliance = 0.0f;
+    /// AMORTIGUACIÓN, la `c` de `F = -k·x - c·v`: N·s/m en una guía, N·m·s/rad en una bisagra.
+    ///
+    /// ⚠️ Sin esto un muelle es un POGO: almacena y devuelve toda la energía, así que un vehículo que
+    /// cae rebota indefinidamente. No hay valor por defecto sensato en abstracto —depende de la masa
+    /// suspendida— así que se declara por pieza, y quien la declare puede sacarlo de la crítica
+    /// `c_cr = 2·sqrt(k·m)`: un coche anda por 0,2-0,5 de esa.
+    float     damping    = 0.0f;
     float     breakForce = 0.0f;        ///< N; <=0 = no se rompe
+    /// A qué ritmo obedece: m/s en una cuerda, grados/s en una bisagra. 0 = al instante.
+    /// Un cabrestante no teletransporta, y el avance va en el paso FIJO de la física (no en el frame).
+    float     speed      = 0.0f;
 };
 
 /** @brief Un punto autorizado en el asset. Transform LOCAL al prop, nunca al mundo. */
@@ -83,6 +116,21 @@ struct Port {
     float       radius = 0.15f;           ///< radio de enganche/selección (m)
     bool        hasRail = false;
     Rail        rail;
+    /// CON QUÉ SE EMPAREJA este raíl: `kind` que la OTRA pieza tiene que declarar en alguno de sus
+    /// puertos para que la unión se monte. Vacío (lo normal) = como siempre, vale cualquier vecina.
+    ///
+    /// ⚠️ EXISTE PORQUE UN RAÍL SE RESUELVE CONTRA UNA PIEZA, NO CONTRA UN PUERTO. `railPortFor`
+    /// (vehicle_spawn.cpp) coge el puerto de raíl más cercano al CENTRO de la vecina, y eso basta
+    /// mientras una pieza sólo tenga un mecanismo. Deja de bastar en una cadena de oruga: el eslabón
+    /// declara bisagras hacia sus dos vecinos, y la unión eslabón-RODILLO encontraba una de ellas y
+    /// ataba el rodillo a un eslabón cualquiera. La regla obvia —"el puerto tiene que caer dentro de
+    /// la otra pieza"— se midió sobre el barco y NO SE SOSTIENE: la bisagra del portón cae entre
+    /// 0,025 y 0,187 m FUERA de todas las piezas a las que se une, y la del portalón entre 0,015 y
+    /// 0,293 m. O sea que los datos que ya funcionan no la cumplen.
+    ///
+    /// Así que el emparejamiento se DECLARA, y sólo donde hace falta: un puerto sin este campo se
+    /// comporta exactamente como antes, y por construcción nada de lo que ya andaba cambia.
+    std::string pairsWith;
 };
 
 /** @brief Los puertos de un asset. Se carga una vez y se comparte. */

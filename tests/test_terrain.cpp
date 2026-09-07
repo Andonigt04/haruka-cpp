@@ -681,6 +681,47 @@ void test_weather_fronts() {
     CHECK(wet > 0, "en algïn sitio y momento SA precipita (el test no pasa por vacuidad)");
     CHECK(maxCover > 0.8f, "los frentes llegan a cerrar el cielo de verdad");
 
+    // ── EL SUELO DE COBERTURA, QUE ES LO QUE FIJA LA CALIBRACION ────────────────────────────────
+    //
+    // ⚠️ EL COEFICIENTE DEL FONDO SE CALIBRO DOS VECES CONTRA UNA MEDIA MAL PONDERADA. La sonda del
+    // motor promediaba por TEXEL sobre una rejilla equirectangular, y un texel polar cubre `cos(lat)`
+    // veces menos superficie: sobrepondera los polos. Al ponderar por AREA la cobertura real del
+    // planeta salio **0,732** contra los 0,641 que se leian — el mundo estaba mas cubierto que la
+    // Tierra mientras el log decia que estaba justo. Ajustado el fondo, la media por area quedo en
+    // **0,669** (medida EN EL JUEGO, que es donde vive la humedad de verdad).
+    //
+    // ⚠️ Y AQUI NO SE COMPRUEBA ESA MEDIA, A PROPOSITO. Intente reproducirla con una humedad sintetica
+    // y salio 0,417 contra los 0,669 del juego: la distribucion real la da el mapa de biomas y no la
+    // tiene el banco. Un guardian construido sobre esa aproximacion fallaria por el motivo equivocado.
+    // Lo que SI se puede fijar exactamente es el SUELO: fuera de todo frente la cobertura vale
+    // `background = k·H`, asi que el minimo sobre la esfera a humedad fija ES el coeficiente. Eso pilla
+    // cualquier deriva del valor, que es lo que hay que impedir.
+    {
+        auto sueloA = [&](float H) {
+            float mn = 1.0f;
+            for (int i = 0; i < 4000; ++i) {
+                const float z  = 1.0f - 2.0f * (i + 0.5f) / 4000.0f;
+                const float r  = std::sqrt(std::max(0.0f, 1.0f - z * z));
+                const float th = 2.39996323f * i;
+                mn = std::min(mn, W.cloudCoverAt(glm::dvec3(r*std::cos(th), r*std::sin(th), z), H));
+            }
+            return mn;
+        };
+        // Las tres humedades que documenta `weather_system.cpp`, tomadas del propio motor al cargar:
+        // `clima del planeta: humedad [0.059, 0.882] media 0.286`.
+        const float sDesierto = sueloA(0.059f), sMedia = sueloA(0.286f), sSelva = sueloA(0.882f);
+        std::printf("    suelo de cobertura (fuera de frentes): desierto %.3f · media %.3f · selva %.3f\n",
+                    sDesierto, sMedia, sSelva);
+        std::printf("      esperado con k = 0,73: %.3f / %.3f / %.3f\n",
+                    0.73f*0.059f, 0.73f*0.286f, 0.73f*0.882f);
+        CHECK(std::fabs(sMedia - 0.73f * 0.286f) < 0.01f, "el fondo de cobertura es k·H con k = 0,73");
+        // Y el invariante que ya rompio una vez: con poca humedad el cielo TIENE que poder limpiarse.
+        // `weather_fronts` llama despejado a `cover < 0.15`; si el suelo lo supera, no hay un solo
+        // punto limpio en el planeta a ninguna hora.
+        CHECK(sDesierto < 0.15f, "con aire seco el cielo puede limpiarse de verdad");
+        CHECK(sSelva > 0.5f,     "y con aire humedo se cierra sin llegar a saturar");
+    }
+
     Haruka::WeatherSystem W2; W2.configure(4242u); W2.setTime(1000.0);
     W.setTime(1000.0);
     const glm::dvec3 probe = glm::normalize(glm::dvec3(0.3, 0.7, 0.5));

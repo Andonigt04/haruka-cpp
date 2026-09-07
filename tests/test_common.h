@@ -32,6 +32,8 @@ void test_ports_raycast();
 void test_rail_mechanism();
 void test_ports_json_roundtrip();
 void test_cube_sphere_inverse();
+/// Primitivas: ninguna cara bobinada al reves (una tapa invertida no da error, desaparece).
+void test_primitive_winding();
 void test_weather_fronts();
 void test_weather_3d();
 // Forma de la nube: que sea un CUERPO y no una lamina (relacion ancho/alto, campo 3D, visibilidad
@@ -67,10 +69,17 @@ void test_physics_two_instances_agree();
 void test_construction_placement();
 // Módulo de reglas DGS  (test_dgs.cpp)
 void test_dgs_rules_module();
+// Que una entidad del feed de red SE DIBUJE, no solo que exista (test_dgs.cpp).
+void test_net_entity_visible();
+// Que dos clientes con el mismo reloj esten en la MISMA tormenta (test_dgs.cpp).
+void test_weather_replicated();
 // Golden wire-format / layout DGS  (test_dgs.cpp) — guarda el layout que viaja por red (P0)
 void test_dgs_wire_format();
 // Batería de robustez DGS (test_dgs.cpp): framing TCP (bug 6), evicción, escalado dry-run, fuzz (§4.3)
 void test_dgs_robust();
+// El servidor SIMULA (step con Jolt) y simula lo MISMO que el cliente.
+void test_dgs_server_simulates();
+void test_dgs_ground_matches_engine();
 // SimplePlanet mesh   (test_simple_planet.cpp)
 void test_simple_planet_mesh();
 void test_simple_planet_config();
@@ -133,6 +142,11 @@ void test_ocean_no_water_no_float();
 void test_ocean_sea_state();
 // Dispersion en profundidad FINITA: la ola se acorta al perder fondo (era de aguas profundas).
 void test_ocean_finite_depth();
+void test_ocean_gerstner_ellipse();
+void test_water_fill_window();
+void test_water_window_policy();
+void test_ocean_refraction_and_break();
+void test_ocean_spectrum_limits();
 // Agua interior como CAMPO DEL MUNDO: priority-flood global sobre el bake (sustituye al parche).
 void test_water_fill_global();
 // FETCH: un lago de montana deja de heredar el swell del oceano (JONSWAP contra Pierson-Moskowitz).
@@ -147,6 +161,10 @@ void test_ocean_tide();
 void test_ocean_swash();
 void test_ocean_break_limit();
 void test_ocean_break_fold();
+void test_ocean_foam();
+void test_ocean_skewness();
+void test_ocean_whitewater_drag();
+void test_ocean_whitecaps();
 void test_shallow_water_reanchor_stability();
 void test_shallow_water_mountain_coverage();
 void test_shallow_water_inherits_ocean_swell();

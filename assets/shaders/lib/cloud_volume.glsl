@@ -46,33 +46,75 @@ float harukaCloudHash13(vec3 p) {
     p += dot(p, p.yzx + 33.33);
     return fract((p.x + p.y) * p.z);
 }
-float harukaCloudVNoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
+
+/** @brief Ruido de valor 3D (trilineal). Un solo hash para todo el cielo: la capa alta y la baja
+ *  tienen que parecer del mismo. */
+float harukaCloudVNoise3(vec3 p) {
+    vec3 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-    float a = harukaCloudHash13(vec3(i, 0.0));
-    float b = harukaCloudHash13(vec3(i + vec2(1.0, 0.0), 0.0));
-    float c = harukaCloudHash13(vec3(i + vec2(0.0, 1.0), 0.0));
-    float d = harukaCloudHash13(vec3(i + vec2(1.0, 1.0), 0.0));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+    float a = mix(harukaCloudHash13(i + vec3(0, 0, 0)), harukaCloudHash13(i + vec3(1, 0, 0)), f.x);
+    float b = mix(harukaCloudHash13(i + vec3(0, 1, 0)), harukaCloudHash13(i + vec3(1, 1, 0)), f.x);
+    float c = mix(harukaCloudHash13(i + vec3(0, 0, 1)), harukaCloudHash13(i + vec3(1, 0, 1)), f.x);
+    float d = mix(harukaCloudHash13(i + vec3(0, 1, 1)), harukaCloudHash13(i + vec3(1, 1, 1)), f.x);
+    return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
 }
-float harukaCloudFbm(vec2 p) {
+
+// ⚠️ EL CAMPO ERA 2D Y POR ESO LAS NUBES IBAN PEGADAS AL JUGADOR (2026-09-07) ────────────────────
+//
+// Un fBm 2D necesita DOS COORDENADAS, y sobre una esfera eso obliga a elegir un marco tangente.
+// `cloud_vol.frag` lo sacaba del OJO:
+//
+//     up0 = normalize(-u_planetC.xyz);            // la vertical DE LA CAMARA
+//     e1  = normalize(cross(vec3(0,1,0), up0));
+//     e2  = cross(up0, e1);
+//     uv  = vec2(dot(p, e1), dot(p, e2)) * fscale;
+//
+// La prueba de que eso ata el cielo a quien mira cabe en una linea: e1 y e2 son PERPENDICULARES a
+// up0, asi que el punto del cenit —el que esta justo encima de la camara, p = up0*(R+alt)— da
+// `uv = (0,0)` SIEMPRE, estes donde estes en el planeta. O sea que el mismo rasgo del campo se
+// queda clavado sobre tu cabeza mientras caminas: las nubes no se quedan atras nunca. Reportado
+// como "las nubes se mueven con la posicion del personaje", y es literalmente eso.
+//
+// No se arregla con otro marco tangente: por el teorema de la bola peluda NO EXISTE un campo
+// tangente continuo y no nulo sobre una esfera, asi que cualquier eleccion 2D tiene una
+// singularidad (equirect la pone en los polos y ademas parte una costura en el antimeridiano; una
+// ortografica fija estira las nubes en bandas por medio planeta). El dominio correcto de un campo
+// sobre una esfera es el ESPACIO, no un plano: se indexa por la posicion 3D relativa al CENTRO del
+// planeta y deja de haber marco que elegir.
+//
+// ⚠️ COSTE, dicho con numeros y no con adjetivos. El ruido 3D cuesta 8 hashes por octava contra 4
+// del 2D, asi que la traduccion ingenua (mismas 5 octavas, mismas 4 llamadas) seria 160 hashes por
+// muestra contra los 80 de antes: DOBLE en el bucle mas caliente del motor. No hace falta pagarlo:
+//   · el WARP es un desplazamiento suave del dominio — dos octavas ya lo dan, las tres de arriba
+//     solo le ponen grano a un offset;
+//   · la octava 5 de la FORMA pesa 1/32 y esa banda ya la cubre `harukaCloudDetail`, que sigue ahi.
+// Quedan 3*(2*8) + 2*(4*8) = 112 hashes contra 80: +40 %, no +100 %. Sin medir en maquina — el
+// pase se dibuja a 1/4 de lado y se compone, asi que el numero a mirar es el del frame, con `perf`.
+float harukaCloudFbm3(vec3 p, int octaves) {
     float v = 0.0, a = 0.5;
-    for (int i = 0; i < 5; ++i) { v += a * harukaCloudVNoise(p); p *= 2.0; a *= 0.5; }
+    for (int i = 0; i < octaves; ++i) { v += a * harukaCloudVNoise3(p); p *= 2.0; a *= 0.5; }
     return v;
 }
 
-/** @brief Forma horizontal de la nube: domain warp (formas orgánicas, no manchas) + erosión de
- *  detalle en los bordes. `wind` desplaza el campo con el tiempo. */
-float harukaCloudField(vec2 p, vec2 wind) {
-    vec2  warp = vec2(harukaCloudFbm(p * 0.6 + wind * 0.5),
-                      harukaCloudFbm(p * 0.6 + 5.2 - wind * 0.5));
-    float d    = harukaCloudFbm(p * 1.3 + warp * 1.4 + wind);
-    d -= 0.20 * harukaCloudFbm(p * 4.0 - wind * 2.0);
+/** @brief Forma de la nube en un punto, con el dominio FIJO AL PLANETA.
+ *
+ *  @param p     posicion relativa al CENTRO del planeta, ya en unidades de rasgo (`* fscale`).
+ *  @param wind  deriva del campo con el tiempo, ya en el marco del punto (ver `g_wind3`).
+ *
+ *  Misma receta que tenia la version 2D —domain warp para que salgan formas organicas y no
+ *  manchas, mas una erosion de detalle— solo que sobre un dominio de tres dimensiones. */
+float harukaCloudField3(vec3 p, vec3 wind) {
+    vec3 warp = vec3(harukaCloudFbm3(p * 0.6 + wind * 0.5,        2),
+                     harukaCloudFbm3(p * 0.6 + 5.2 - wind * 0.5,  2),
+                     harukaCloudFbm3(p * 0.6 + 11.7 + wind * 0.3, 2));
+    float d = harukaCloudFbm3(p * 1.3 + warp * 1.4 + wind, 4);
+    d -= 0.20 * harukaCloudFbm3(p * 4.0 - wind * 2.0, 4);
     return d;
 }
 
 // ── DE LÁMINA A CUERPO ──────────────────────────────────────────────────────────────────────────
-// Lo de arriba es un campo 2D. Multiplicado por un perfil que solo depende de la altura RELATIVA,
+// Lo de arriba es un campo HORIZONTAL (varía muchísimo más de lado que en vertical, porque la escala
+// del rasgo son kilómetros y el espesor cientos de metros). Multiplicado por un perfil que solo depende de la altura RELATIVA,
 // toda nube sale un PRISMA: la misma sección de la base al techo. Medido sobre el campo real, el
 // rasgo horizontal típico son 2857 m contra 440-980 m de espesor con buen tiempo — o sea entre 6,5:1
 // y 2,9:1. Eso no se ve como un cúmulo por mucho que se recorra: se ve como una lámina, que es justo
@@ -99,18 +141,6 @@ const float HARUKA_CLOUD_MINTOP = 0.22;
  */
 float harukaCloudStrength(float fieldValue, float threshold) {
     return smoothstep(threshold, threshold + HARUKA_CLOUD_SOFT, fieldValue);
-}
-
-/** @brief Ruido de valor 3D (trilineal). Es el mismo hash que el 2D: la capa alta y la baja tienen
- *  que parecer del mismo cielo. */
-float harukaCloudVNoise3(vec3 p) {
-    vec3 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = mix(harukaCloudHash13(i + vec3(0, 0, 0)), harukaCloudHash13(i + vec3(1, 0, 0)), f.x);
-    float b = mix(harukaCloudHash13(i + vec3(0, 1, 0)), harukaCloudHash13(i + vec3(1, 1, 0)), f.x);
-    float c = mix(harukaCloudHash13(i + vec3(0, 0, 1)), harukaCloudHash13(i + vec3(1, 0, 1)), f.x);
-    float d = mix(harukaCloudHash13(i + vec3(0, 1, 1)), harukaCloudHash13(i + vec3(1, 1, 1)), f.x);
-    return mix(mix(a, b, f.y), mix(c, d, f.y), f.z);
 }
 
 /** @brief Erosión de detalle: 3 octavas de ruido 3D. Solo se llama donde YA hay nube (ver

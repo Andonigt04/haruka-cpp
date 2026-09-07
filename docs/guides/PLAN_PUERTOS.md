@@ -51,8 +51,6 @@ Es lo mismo que ya se derivó por otro camino en `VEHICULOS.md` §9 (`mount` + `
 con un eje más. También coinciden su sistema de habitaciones (atmósfera/presión → §10 de VEHICULOS)
 y su framework de UI en el mundo (→ §5 de DIRECCION).
 
-*(Detalles de versión concretos de CIG: no verificados aquí; lo estructural es lo anterior.)*
-
 ---
 
 ## §3 — EL DATO

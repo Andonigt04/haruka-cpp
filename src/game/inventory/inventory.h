@@ -49,6 +49,25 @@ struct ItemDef {
                                     //     GENERA por semilla. En el mundo, la semilla es la de su fuente
                                     //     (variedad); el preview del inventario usa SEMILLA 1 = forma
                                     //     canónica, siempre igual.
+    /// Los GRADOS que la pieza se ARQUEA a lo largo de su lado largo. 0 = recta, y es el defecto.
+    ///
+    /// Un casco no se forra con tablas rectas: se forra con tablas que ceden. Esto lo dice el ITEM,
+    /// no quien lo coloca — dos tablones del mismo material se doblan lo mismo, y un tablón de
+    /// piedra no se dobla nada. Es lo que separa "una caja fina puesta en diagonal" de una tabla.
+    float       arc = 0.0f;
+    /// A QUÉ EJE DE LA CAJA VA CADA EJE DE LA MALLA. `modelAxes[i]` = eje de la caja al que va el eje
+    /// `i` del .glb. Una permutación de {0,1,2}; `{-1,-1,-1}` (el defecto) = emparejar POR RANGO.
+    ///
+    /// ⚠️ EL RANGO NO SIEMPRE PUEDE. `makePieceObject` empareja el eje más largo de la malla con el
+    /// más largo de la caja, el más corto con el más corto. Eso acierta mientras la malla y la caja
+    /// tengan la misma "forma", y no hay manera de que ponga el eje MÁS CORTO de la malla en el lado
+    /// MÁS LARGO de la caja. Medido en un eslabón de oruga: `CaterpillarTrack.glb` es un anillo de
+    /// 2,30 x 2,00 con el agujero atravesando su eje de 1,00, y el pasador de una oruga tiene que ir
+    /// ATRAVESADO al vehículo, que es su lado ancho. Por rango es imposible, y la pieza salía girada
+    /// con el agujero mirando al cielo.
+    ///
+    /// Sólo lo declaran las piezas donde el rango se equivoca; el resto no cambia ni una línea.
+    glm::ivec3  modelAxes{-1, -1, -1};
     glm::vec3   size{0.5f};         // lo que define el item es su TAMAÑO/PROPORCIÓN (m), no la malla
     std::string material;           // id de material (stone, wood, brick…): su TEXTURA. PENDIENTE: hoy
                                     //     solo se aplica el COLOR del material.

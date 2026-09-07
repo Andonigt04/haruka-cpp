@@ -4,6 +4,8 @@
 // movimiento REAL (paso legal → acepta; teleport y noclip → rechaza). El .so usa el MISMO sampler de
 // terreno que el cliente, así que cliente y host deciden igual con el mismo código.
 // ================================================================================================
+#include "core/weather_system.h"
+#include "core/scene/scene_render_policy.h"
 #include "test_common.h"
 
 #include <cstddef>
@@ -14,6 +16,17 @@
 #include <random>
 #include <chrono>
 
+#include "physics/physics_engine.h"
+#include "physics/world_provider.h"
+#include "core/terrain/terrain_sample.h"
+#include "core/planet/soi.h"
+#include "core/planet/terrain_detail.h"
+#include "core/planet/terrain_lod.h"
+#include "net/height_field.h"
+#include <cstdio>
+#include <string>
+#include <memory>
+#include <cmath>
 #include "include/dgs/game_module.h"
 #include "include/dgs/packet.h"
 #include "include/dgs/network.h"
@@ -38,6 +51,10 @@ void test_dgs_rules_module() {
     beginTest("dgs_rules_module");
     // El .so vive junto al ejecutable de tests (build/). Se prueba con varios paths por robustez.
     void* h = dlopen("./libharuka_rules.so", RTLD_NOW);
+    // Bajo CTest el directorio de trabajo es `build/` y acierta la primera; lanzado a mano desde la
+    // raiz del repo acierta esta. Sin ella hay que COPIAR el .so al arbol de FUENTES —lo que hace la
+    // CI— y eso deja un artefacto de compilacion dentro del codigo.
+    if (!h) h = dlopen("./build/libharuka_rules.so", RTLD_NOW);
     if (!h) h = dlopen("libharuka_rules.so", RTLD_NOW);
     CHECK(h != nullptr, "carga libharuka_rules.so (dlopen — lo mismo que haría el host/DGS)");
     if (!h) { std::printf("    dlerror: %s\n", dlerror()); return; }
@@ -90,11 +107,30 @@ void test_dgs_rules_module() {
     { const glm::dvec3 under = glm::dvec3(dir) * (surf - 20.0);
       auto s = mkSample(under, under - step, 5.0f, 1.0f/60.0f);
       CHECK(m->validateMove(zone, &s, &w) == 0, "atravesar el suelo (noclip) → RECHAZADO"); }
-    // (3b) FALSO POSITIVO que sí ocurría, en un planeta TAMAÑO TIERRA — que es donde se midió. El
-    // cliente camina sobre la MALLA, que SUAVIZA el analítico y queda por debajo de él: `haruka_tests
-    // earthdiag` mide hasta 5.12 m. Con el margen fijo de 5.0 m que había, ese jugador LEGÍTIMO se
-    // expulsaba como tramposo. Ahora el suelo es el MÍNIMO local del analítico, que acota la malla por
-    // debajo → se acepta sin aflojar el (3).
+    // (3b) EL SUELO A ESCALA TIERRA. El cliente camina sobre la MALLA, que suaviza el analitico y queda
+    // por debajo de el (`haruka_tests earthdiag` midio hasta 5,12 m); con el margen fijo de 5,0 m que
+    // hubo, ese jugador LEGITIMO se expulsaba como tramposo. La respuesta fue la `FloorCache`: el suelo
+    // es el MINIMO LOCAL del analitico, que acota la malla por debajo.
+    //
+    // ⚠️⚠️ ESTE BLOQUE COMPROBABA UNA CONSTANTE, NO LA REGLA — Y HAY QUE SABER POR QUE.
+    // Estaba escrito como "jugador 1,5 m bajo el analitico -> ACEPTADO", y pasaba con el `-2,0 m`
+    // inventado que habia en el validador. Al sustituir ese 2,0 por la suma de terminos MEDIDOS
+    // (`Tolerance`, ~0,59 m a 5 m/s) el caso reventó, y al medir por que salio esto:
+    //
+    //     [suelo] RELIEVE del analitico en 512 puntos del planeta: +0,00 m .. +0,00 m
+    //     [suelo] lo que acota el minimo local:  min 0,0000 · medio 0,0000 · MAX 0,0000 m
+    //
+    // `Haruka::sampleTerrainV2` **es un stub en esta rama** ("terrain sampler removed", devuelve
+    // elevKm = 0). O sea que este "planeta Tierra" es una ESFERA LISA: no hay malla que suavizar, no
+    // hay nada que el minimo local pueda acotar, y los 1,5 m no median suavizado ninguno — median que
+    // el validador llevaba una holgura de 2 m. Un test que pasa por una constante que el propio test
+    // no nombra no prueba la regla.
+    //
+    // Reescrito para comprobar LA REGLA, que es la misma con stub y con sampler real: se sitúa al
+    // jugador RELATIVO al suelo que el validador va a calcular (el minimo local, medido aqui con el
+    // mismo vecindario), y se comprueba que la frontera cae donde dice `Tolerance`. Asi el dia que
+    // vuelva el sampler estas mismas lineas siguen midiendo, en vez de volverse vacias en silencio.
+    //
     // ⚠️ El planeta pequeño de arriba NO sirve para esto: el suavizado escala con el radio, y a 5 km es
     // submilimétrico — la prueba pasaría sin probar nada.
     {
@@ -122,14 +158,86 @@ void test_dgs_rules_module() {
             return s;
         };
         const glm::dvec3 stepE = glm::normalize(glm::cross(glm::dvec3(dirE), glm::dvec3(0,1,0))) * 0.04;
-        { const glm::dvec3 sm = glm::dvec3(dirE) * (surfE - 1.5);
-          auto s = mkEarth(sm, sm - stepE);
+        double floorM = 0.0, reliefM = -1.0;   // suelo minimo y relieve MEDIDOS abajo, no supuestos
+
+        // ⚠️ QUE PARTE DE ESOS 1,5 m ACOTA EL MINIMO LOCAL Y QUE PARTE NO. Sin esta cifra el umbral de
+        // noclip se elige a ojo — que es exactamente como se llego al `-5,0 m` que expulsaba a
+        // jugadores legitimos. Se reproduce aqui el vecindario 3x3 de `FloorCache` (mismo `kCellFrac`)
+        // y se imprime lo que queda POR DEBAJO del suelo minimo, que es lo unico que el margen del
+        // validador tiene que cubrir.
+        {
+            Haruka::WorldGenParams WE = Haruka::deriveWorldParams(seedE, Re);
+            WE.reliefStrength = 1.0f; WE.profile = 0;
+            const glm::dvec3 d0(dirE);
+            const double elev = (double)Haruka::sampleTerrainV2(glm::vec3(d0), WE, Re).elevKm * 1000.0;
+            glm::dvec3 t1 = glm::normalize(glm::cross(d0, std::abs(d0.y) < 0.99 ? glm::dvec3(0,1,0)
+                                                                                : glm::dvec3(1,0,0)));
+            const glm::dvec3 t2 = glm::cross(d0, t1);
+            double lo = 1e30;
+            for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
+                const glm::dvec3 nd = glm::normalize(d0 + (t1 * (double)i + t2 * (double)j) * 5.0e-6);
+                lo = std::min(lo, (double)Haruka::sampleTerrainV2(glm::vec3(nd), WE, Re).elevKm * 1000.0);
+            }
+            std::printf("    [suelo] analitico %+.4f m · minimo local %+.4f m (acota %.4f m)\n",
+                        elev, lo, elev - lo);
+            floorM = lo;
+
+            // Y CUANTO ACOTA EN GENERAL, no en un punto. Un solo sitio no dice nada (puede caer en
+            // llano); lo que decide el umbral es el PEOR caso sobre el planeta.
+            double wmin = 1e30, wmax = -1e30, acc = 0.0; int n = 0;
+            double emin = 1e30, emax = -1e30;
+            for (int t = 0; t < 512; ++t) {
+                const double u = (double)t * 2.39996322972865332;      // angulo aureo → reparto uniforme
+                const double z = 1.0 - 2.0 * ((double)t + 0.5) / 512.0;
+                const double rr = std::sqrt(std::max(0.0, 1.0 - z * z));
+                const glm::dvec3 d(rr * std::cos(u), z, rr * std::sin(u));
+                const double e0 = (double)Haruka::sampleTerrainV2(glm::vec3(d), WE, Re).elevKm * 1000.0;
+                glm::dvec3 a1 = glm::normalize(glm::cross(d, std::abs(d.y) < 0.99 ? glm::dvec3(0,1,0)
+                                                                                 : glm::dvec3(1,0,0)));
+                const glm::dvec3 a2 = glm::cross(d, a1);
+                double mn = 1e30;
+                for (int j = -1; j <= 1; ++j) for (int i = -1; i <= 1; ++i) {
+                    const glm::dvec3 nd = glm::normalize(d + (a1 * (double)i + a2 * (double)j) * 5.0e-6);
+                    mn = std::min(mn, (double)Haruka::sampleTerrainV2(glm::vec3(nd), WE, Re).elevKm * 1000.0);
+                }
+                const double b = e0 - mn; wmin = std::min(wmin, b); wmax = std::max(wmax, b); acc += b; ++n;
+                emin = std::min(emin, e0); emax = std::max(emax, e0);
+            }
+            std::printf("    [suelo] lo que acota el minimo local en 512 puntos del planeta:"
+                        " min %.4f m · medio %.4f m · MAX %.4f m\n", wmin, acc / (double)n, wmax);
+            std::printf("    [suelo] RELIEVE del analitico en esos 512 puntos: %+.2f m .. %+.2f m\n", emin, emax);
+
+            // ⚠️ LA CONTRAPRUEBA QUE FALTABA: decir en voz alta si este mundo tiene relieve. Sin ella el
+            // bloque entero puede volverse vacio sin que nadie se entere — que es justo lo que paso.
+            reliefM = emax - emin;
+            if (reliefM <= 0.0)
+                std::printf("    \033[33m[suelo] ⚠️ el analitico es PLANO (sampleTerrainV2 es un stub en esta rama):\n"
+                            "            la `FloorCache` no puede acotar nada y el validador juzga el noclip contra\n"
+                            "            una ESFERA LISA a nivel del mar. La regla se comprueba igual; el suavizado NO.\033[0m\n");
+        }
+
+        // LA FRONTERA, relativa al suelo que el validador calcula (R + minimo local) y no a `R` a pelo:
+        // asi la prueba dice lo mismo con el stub y con el sampler real. `Tolerance::physicsM(5 m/s)` =
+        // 0,010 (ancla medida) + 5/60 (un sub-paso) + 0,50 (deuda declarada) = 0,593 m.
+        const double physM  = 0.010 + 5.0 / 60.0 + 0.50;
+        const double groundE = surfE + floorM;      // lo que `validateMove` usara como suelo
+
+        { const glm::dvec3 ok = glm::dvec3(dirE) * (groundE - physM * 0.5);
+          auto s = mkEarth(ok, ok - stepE);
           CHECK(m->validateMove(zoneE, &s, &we) == 1,
-                "Tierra: jugador sobre la MALLA suavizada (1.5 m bajo el analitico) → ACEPTADO (no es noclip)"); }
-        { const glm::dvec3 deep = glm::dvec3(dirE) * (surfE - 300.0);
+                "Tierra: jugador DENTRO del techo de divergencia fisica → ACEPTADO (no es noclip)"); }
+        { const glm::dvec3 deep = glm::dvec3(dirE) * (groundE - 300.0);
           auto s = mkEarth(deep, deep - stepE);
           CHECK(m->validateMove(zoneE, &s, &we) == 0,
                 "Tierra: noclip real (300 m bajo el suelo) → RECHAZADO (el minimo local no lo tapa)"); }
+        // ⚠️ CONTRAPRUEBA DE LA FRONTERA. Sin ella, "acepta a -0,3 m" no distingue un umbral de 0,59 m
+        // de uno de 300 m: los dos aceptarian. Esto fija que el umbral es el de `Tolerance` y no otro.
+        { const glm::dvec3 just = glm::dvec3(dirE) * (groundE - physM * 3.0);
+          auto s = mkEarth(just, just - stepE);
+          CHECK(m->validateMove(zoneE, &s, &we) == 0,
+                "Tierra: al TRIPLE del techo fisico → RECHAZADO (el umbral es `Tolerance`, no una holgura suelta)"); }
+        // Y que el mundo de este bloque es el que se cree que es (o que se sepa que no lo es).
+        CHECK(reliefM >= 0.0, "Tierra: el relieve del analitico queda MEDIDO, no supuesto");
         if (m->destroyZone) m->destroyZone(zoneE);
     }
 
@@ -632,4 +740,436 @@ void test_dgs_robust() {
             CHECK(threwStr, "readString con tamaño mentiroso (>lo que queda) lanza runtime_error");
         }
     }
+}
+
+// ================================================================================================
+// EL SERVIDOR SIMULA, Y SIMULA LO MISMO QUE EL CLIENTE.
+//
+// ⚠️ HASTA HOY `GameModule::step` IBA A NULO: la zona no avanzaba nada y el mundo era lo que el
+// cliente dijera; el servidor solo respondia si o no, y ademas juzgaba contra el sampler ANALITICO
+// mientras el cliente camina sobre la MALLA. Su propia nota mide el precio de esa asimetria: la malla
+// llega a quedar 5,12 m por debajo, el margen fijo era 5,0 m, y **se expulsaba a jugadores legitimos**.
+//
+// Con Jolt en `step` el servidor pisa la misma superficie. Esto lo comprueba en los dos sentidos que
+// importan para un validador:
+//
+//   (1) que SIMULA — un cuerpo soltado en el aire cae y se posa, no se queda flotando;
+//   (2) que simula LO MISMO — el resultado del modulo cargado por `dlopen` coincide con el del motor
+//       corriendo la misma caida. Eso es lo que permite bajar el umbral de trampa de metros a
+//       milimetros: no "que coincidan bit a bit", sino cuanto puede mentir un cliente sin que se note.
+// ================================================================================================
+void test_dgs_server_simulates() {
+    beginTest("dgs_server_simulates");
+    void* h = dlopen("./libharuka_rules.so", RTLD_NOW);
+    // Bajo CTest el directorio de trabajo es `build/` y acierta la primera; lanzado a mano desde la
+    // raiz del repo acierta esta. Sin ella hay que COPIAR el .so al arbol de FUENTES —lo que hace la
+    // CI— y eso deja un artefacto de compilacion dentro del codigo.
+    if (!h) h = dlopen("./build/libharuka_rules.so", RTLD_NOW);
+    if (!h) h = dlopen("libharuka_rules.so", RTLD_NOW);
+    CHECK(h != nullptr, "carga libharuka_rules.so");
+    if (!h) return;
+    auto entry = (const DGS::GameModule* (*)())dlsym(h, "dgs_game_module_v1");
+    if (!entry) { CHECK(false, "dlsym"); dlclose(h); return; }
+    const DGS::GameModule* m = entry();
+    CHECK(m && m->step != nullptr,
+          "el modulo aporta `step`: la zona SIMULA (estaba a NULO — el mundo iba por el cliente)");
+    if (!m || !m->step || !m->createZone) { dlclose(h); return; }
+
+    // Planeta pequeno, como el resto de tests del modulo: a esa escala el `pos[]` float del
+    // `EntityTransfer` tiene precision de sobra y la caida es corta.
+    const double R = 5000.0;
+    DGS::WorldQuery w{};
+    w.chunkSizeX = w.chunkSizeY = w.chunkSizeZ = 1.0f;   // pos[] ya en metros
+    w.planetCenter[0] = w.planetCenter[1] = w.planetCenter[2] = 0.0;
+    w.planetRadius = R; w.seed = 1234u; w.reliefStrength = 1.0f; w.profile = 0;
+
+    DGS::ZoneHandle z = m->createZone(&w);
+    CHECK(z != nullptr, "la zona se crea con su simulacion");
+    if (!z) { dlclose(h); return; }
+
+    const glm::dvec3 dir = glm::normalize(glm::dvec3(0.3, 0.9, 0.2));
+    // ⚠️ LA CAIDA SE ELIGE CON LA GRAVEDAD DE ESTE PLANETA, NO A OJO. Un cuerpo de 5 km de radio con
+    // densidad media terrestre da **g = 0,0077 m/s2** (`G·M/R²` con `M = rho·4/3·pi·R³`), o sea 1 300
+    // veces menos que la Tierra. La primera version soltaba desde 40 m y esperaba que se posara en
+    // 10 s: cayo 0,32 m — que es EXACTAMENTE lo que predice `½gt²`, o sea que la fisica estaba bien y
+    // la cuenta mia mal. Desde 3 m y con 50 s, `½gt²` = 9,6 m: llega de sobra.
+    const glm::dvec3 p0  = dir * (R + 3.0);
+
+    DGS::EntityTransfer e{};
+    e.uuid = 7u;
+    e.chunkX = e.chunkY = e.chunkZ = 0;
+    e.pos[0] = (float)p0.x; e.pos[1] = (float)p0.y; e.pos[2] = (float)p0.z;
+
+    const double r0 = glm::length(glm::dvec3(e.pos[0], e.pos[1], e.pos[2]));
+    const int    kTicks = 3000;   // 50 s
+    for (int i = 0; i < kTicks; ++i) m->step(z, &e, 1.0f / 60.0f, &w);
+    const glm::dvec3 pS(e.pos[0], e.pos[1], e.pos[2]);
+    const double rS = glm::length(pS);
+
+    // ── EL MISMO ESCENARIO, EN EL MOTOR ─────────────────────────────────────────────────────────
+    //
+    // No es un gemelo escrito a mano: es LA MISMA clase (`PhysicsEngine`) sobre el MISMO proveedor de
+    // mundo que usa el modulo. Si esto y lo de arriba se separaran, el servidor no estaria corriendo
+    // la fisica del cliente por mucho que compartan el binario.
+    double rC = 0.0;
+    {
+        struct W : Haruka::Physics::IWorldProvider {
+            glm::dvec3 c{0.0}; double R = 0.0;
+            Haruka::WorldGenParams params{};
+            std::vector<Haruka::Physics::GravBody> grav;
+            bool       hasActivePlanet()    const override { return true; }
+            glm::dvec3 activePlanetCenter() const override { return c; }
+            double     activePlanetRadius() const override { return R; }
+            const std::vector<Haruka::Physics::GravBody>& gravBodies() const override { return grav; }
+            double     terrainHeightAt(const glm::dvec3& p) const override {
+                const glm::dvec3 d = p - c; const double l = glm::length(d);
+                if (l < 1e-6) return 0.0;
+                return (double)Haruka::sampleTerrainV2(glm::vec3(d / l), params, R).elevKm * 1000.0;
+            }
+        } wc;
+        wc.R = R; wc.params = Haruka::deriveWorldParams(1234u, R);
+        const double mass = Haruka::Planet::kEarthMeanDensity * (4.0 / 3.0)
+                          * 3.14159265358979323846 * R * R * R;
+        wc.grav.push_back({ wc.c, mass, R, 0.0, -1 });
+
+        Haruka::Physics::PhysicsEngine eng; eng.setWorldProvider(&wc);
+        auto b = std::make_shared<Haruka::Physics::RigidBody>();
+        b->position = p0; b->radius = 0.5; b->mass = 70.0; b->name = "e7";
+        eng.addBody(b);
+        for (int i = 0; i < kTicks; ++i) eng.advance(1.0 / 60.0);
+        rC = glm::length(b->position);
+    }
+
+    const double terrain = R + (double)Haruka::sampleTerrainV2(
+                                   glm::vec3(dir), Haruka::deriveWorldParams(1234u, R), R).elevKm * 1000.0;
+    std::printf("    soltado a %.2f m del centro (suelo analitico en %.2f m)\n", r0, terrain);
+    std::printf("    tras %d ticks: SERVIDOR %.4f m · CLIENTE %.4f m · diferencia %.6f m\n",
+                kTicks, rS, rC, std::fabs(rS - rC));
+
+    // (1) SIMULA: el cuerpo cae de verdad. Sin esto, `step` podria estar devolviendo lo que entro.
+    CHECK(r0 - rS > 2.0, "el servidor SIMULA: el cuerpo cae, no se queda donde el cliente lo puso");
+    // (2) Y SE POSA, no atraviesa el planeta ni sale despedido.
+    CHECK(rS > terrain - 2.0 && rS < terrain + 2.0,
+          "y se POSA sobre el terreno analitico, ni lo atraviesa ni rebota fuera");
+    // (3) LO MISMO QUE EL CLIENTE. Es la afirmacion que sostiene todo el diseno: si el servidor
+    //     simulara otra cosa, corregir seria pelear con el cliente en vez de juzgarlo.
+    CHECK(std::fabs(rS - rC) < 0.05,
+          "el servidor simula LO MISMO que el cliente (misma clase, mismo proveedor de mundo)");
+    m->destroyZone(z);
+    dlclose(h);
+}
+
+// ---------------------------------------- TEST: el servidor pisa EL MISMO SUELO que el cliente ---
+// ⚠️ EL AGUJERO QUE CIERRA. `dgs_rules_module` decia probar el falso positivo del suavizado de malla
+// en un planeta tamaño Tierra, y su mundo NO TENIA RELIEVE: `Haruka::sampleTerrainV2` es un stub en
+// esta rama (`terrain sampler removed`, devuelve 0). Medido, 512 direcciones: relieve +0,00..+0,00 m,
+// y la `FloorCache` acotando 0,0000 m. O sea que el validador decidia "estas atravesando el suelo"
+// comparando contra una ESFERA LISA a nivel del mar, mientras el cliente camina sobre la rejilla
+// horneada del `TerrestrialPlanet`. El test pasaba por una constante de 2 m que no nombraba.
+//
+// Aqui se le entrega al modulo el MISMO campo horneado (`haruka_rules_set_height_field`) y se
+// comprueba lo unico que importa: que el suelo del servidor ES el del cliente, y que con el deja de
+// equivocarse en los dos sentidos.
+//
+// ⚠️ CON CONTRAPRUEBA EN LOS DOS SENTIDOS, porque sin ella esto no distinguiria un validador que
+// mira el campo de uno que acepta todo:
+//   · un jugador de pie en un VALLE (bajo el radio de referencia) → ACEPTADO con campo, y se
+//     comprueba que SIN campo el mismo jugador se expulsa. Ese es el falso positivo, medido.
+//   · un jugador dentro de una MONTAÑA (sobre el radio, pero bajo el terreno) → RECHAZADO con campo,
+//     y se comprueba que SIN campo pasa por bueno. Ese es el noclip que hoy se cuela.
+void test_dgs_ground_matches_engine() {
+    beginTest("dgs_ground_matches_engine");
+    void* h = dlopen("./libharuka_rules.so", RTLD_NOW);
+    // Bajo CTest el directorio de trabajo es `build/` y acierta la primera; lanzado a mano desde la
+    // raiz del repo acierta esta. Sin ella hay que COPIAR el .so al arbol de FUENTES —lo que hace la
+    // CI— y eso deja un artefacto de compilacion dentro del codigo.
+    if (!h) h = dlopen("./build/libharuka_rules.so", RTLD_NOW);
+    if (!h) h = dlopen("libharuka_rules.so", RTLD_NOW);
+    CHECK(h != nullptr, "carga libharuka_rules.so");
+    if (!h) return;
+    auto entry = (const DGS::GameModule* (*)())dlsym(h, "dgs_game_module_v1");
+    auto setField = (int (*)(int, int, const float*, double))dlsym(h, "haruka_rules_set_height_field");
+    auto loadField = (int (*)(const char*))dlsym(h, "haruka_rules_load_height_field");
+    CHECK(entry && setField && loadField,
+          "el modulo exporta el canal del suelo (simbolos ADICIONALES, sin tocar el ABI del DGS)");
+    if (!entry || !setField || !loadField) { dlclose(h); return; }
+    const DGS::GameModule* m = entry();
+    if (!m || !m->createZone || !m->validateMove) { dlclose(h); return; }
+
+    // Un campo de altura SINTETICO pero con la forma del real: una equirect 2:1 con un valle y una
+    // montaña de cotas conocidas. No hace falta hornear un planeta entero — lo que se prueba es que
+    // el modulo muestrea ESTE dato con la MISMA cuenta que `TerrestrialPlanet::sampleHeight`.
+    const double Re = 6.371e6;
+    const int    W = 256, H = 128;
+    std::vector<float> field((size_t)W * H, 0.0f);
+    // Direcciones de prueba y las cotas que se les impone.
+    const glm::dvec3 dirValle = glm::normalize(glm::dvec3( 0.3,  0.9, 0.2));
+    const glm::dvec3 dirMonte = glm::normalize(glm::dvec3(-0.5,  0.1, 0.8));
+    auto stamp = [&](const glm::dvec3& d, float meters) {
+        // Una MESETA de 5x5 texeles, no un texel suelto: la bilineal de `sampleHeightField` mezcla
+        // los cuatro vecinos, asi que un pico de un texel no da la cota que se cree que da.
+        const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(d));
+        const int cx = (int)std::floor(uv.x * W), cy = (int)std::floor(uv.y * H);
+        for (int j = -2; j <= 2; ++j) for (int i = -2; i <= 2; ++i) {
+            int x = ((cx + i) % W + W) % W, y = glm::clamp(cy + j, 0, H - 1);
+            field[(size_t)y * W + x] = meters;
+        }
+    };
+    stamp(dirValle, -400.0f);    // un valle 400 m BAJO el nivel del mar
+    stamp(dirMonte, 2500.0f);    // una montaña de 2,5 km
+
+    // La referencia: el MISMO muestreo que hace el motor, calculado aqui a mano con las mismas
+    // funciones puras. Si el modulo se separa de esto, el suelo del servidor no es el del cliente.
+    auto engineHeight = [&](const glm::dvec3& d) {
+        const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(d));
+        const float baseH = Haruka::Planet::sampleHeightField(uv, W, H, field.data());
+        const float baseR = (float)Re + baseH;
+        float det = Haruka::Planet::terrainDetail(glm::vec3(d), baseR, Haruka::Planet::terrainTriM(0.0))
+                  * Haruka::Planet::seaLevelAttenuation(baseH);
+        if (baseH > 0.0f) det = glm::max(det, -baseH);
+        return (double)baseH + (double)det;
+    };
+    const double hValle = engineHeight(dirValle), hMonte = engineHeight(dirMonte);
+    std::printf("    [suelo] valle %+.2f m · monte %+.2f m (cotas del campo horneado)\n", hValle, hMonte);
+    CHECK(hValle < -300.0 && hMonte > 2000.0,
+          "el campo de prueba TIENE relieve (si no, lo de abajo no probaria nada)");
+
+    DGS::WorldQuery w{};
+    w.chunkSizeX = w.chunkSizeY = w.chunkSizeZ = 1.0e6f;
+    w.planetCenter[0] = w.planetCenter[1] = w.planetCenter[2] = 0.0;
+    w.planetRadius = Re; w.seed = 4242u; w.reliefStrength = 1.0f; w.profile = 0;
+
+    // ⚠️ EL `EntityTransfer` LO PONE EL LLAMANTE, no un `static` de la lambda. Con un static
+    // compartido, dos `mk` seguidas dejan la PRIMERA muestra apuntando al dato de la SEGUNDA — y eso
+    // ya me costo un falso fallo aqui: `okValle` validaba la posicion de la montaña.
+    auto mk = [&](DGS::EntityTransfer& e, const glm::dvec3& g, const glm::dvec3& last) {
+        e = DGS::EntityTransfer{};
+        const double CS = 1.0e6;
+        const double cx = std::floor(g.x/CS), cy = std::floor(g.y/CS), cz = std::floor(g.z/CS);
+        e.chunkX = (int32_t)cx; e.chunkY = (int32_t)cy; e.chunkZ = (int32_t)cz;
+        e.pos[0] = (float)(g.x - cx*CS); e.pos[1] = (float)(g.y - cy*CS); e.pos[2] = (float)(g.z - cz*CS);
+        DGS::MoveSample s{}; s.now = &e;
+        s.lastGX = (float)last.x; s.lastGY = (float)last.y; s.lastGZ = (float)last.z;
+        s.maxSpeed = 5.0f; s.dtSeconds = 1.0f/60.0f;
+        return s;
+    };
+    const glm::dvec3 paso = glm::normalize(glm::cross(dirValle, glm::dvec3(0,1,0))) * 0.04;
+    // De pie en el fondo del valle (1 m sobre su suelo), y DENTRO de la montaña (500 m bajo su cima
+    // pero MUY por encima del radio de referencia — que es lo que el validador miraba antes).
+    const glm::dvec3 pieValle  = dirValle * (Re + hValle + 1.0);
+    const glm::dvec3 dentroMon = dirMonte * (Re + hMonte - 500.0);
+
+    // ── SIN CAMPO: lo que hace hoy. Es la contraprueba, no un adorno. ───────────────────────────
+    setField(0, 0, nullptr, 0.0);           // desinstala
+    {
+        DGS::ZoneHandle z = m->createZone(&w);
+        DGS::EntityTransfer ev{}, em{};
+        auto sv = mk(ev, pieValle, pieValle - paso);
+        auto sm = mk(em, dentroMon, dentroMon - paso);
+        const int okValle = m->validateMove(z, &sv, &w);
+        const int okMonte = m->validateMove(z, &sm, &w);
+        std::printf("    [sin campo] valle → %s · dentro de la montaña → %s\n",
+                    okValle ? "ACEPTA" : "EXPULSA", okMonte ? "ACEPTA" : "EXPULSA");
+        CHECK(okValle == 0, "SIN campo: al jugador del valle se le EXPULSA (el falso positivo, medido)");
+        CHECK(okMonte == 1, "SIN campo: el noclip dentro de la montaña PASA (el agujero, medido)");
+        if (m->destroyZone) m->destroyZone(z);
+    }
+
+    // ── CON CAMPO: el suelo de verdad. ──────────────────────────────────────────────────────────
+    CHECK(setField(W, H, field.data(), Re) == 1, "el host entrega el campo horneado al modulo");
+    {
+        DGS::ZoneHandle z = m->createZone(&w);
+        DGS::EntityTransfer ev{}, em{};
+        auto sv = mk(ev, pieValle, pieValle - paso);
+        auto sm = mk(em, dentroMon, dentroMon - paso);
+        const int okValle = m->validateMove(z, &sv, &w);
+        const int okMonte = m->validateMove(z, &sm, &w);
+        std::printf("    [con campo] valle → %s · dentro de la montaña → %s\n",
+                    okValle ? "ACEPTA" : "EXPULSA", okMonte ? "ACEPTA" : "EXPULSA");
+        CHECK(okValle == 1, "CON campo: el jugador del valle se ACEPTA (400 m bajo el nivel del mar)");
+        CHECK(okMonte == 0, "CON campo: el noclip dentro de la montaña se RECHAZA (2 km sobre el mar)");
+
+        // ⚠️ Y EL TERMINO DEL TRANSPORTE, medido. `MoveSample::lastG*` son FLOAT en el ABI del DGS, y
+        // a radio terrestre un float tiene 0,5 m de resolucion: un jugador QUIETO parece dar un salto.
+        // Se barren direcciones para dar con el peor caso, porque depende de la magnitud de cada eje.
+        double peor = 0.0;
+        for (int t = 0; t < 256; ++t) {
+            const double u = (double)t * 2.39996322972865332;
+            const double zz = 1.0 - 2.0 * ((double)t + 0.5) / 256.0;
+            const double rr = std::sqrt(std::max(0.0, 1.0 - zz*zz));
+            const glm::dvec3 d(rr*std::cos(u), zz, rr*std::sin(u));
+            const glm::dvec3 g = d * (Re + 1000.0);
+            const double CS = 1.0e6;
+            const double cx = std::floor(g.x/CS), cy = std::floor(g.y/CS), cz = std::floor(g.z/CS);
+            const double rx = (double)(float)(g.x - cx*CS) + cx*CS - (double)(float)g.x;
+            const double ry = (double)(float)(g.y - cy*CS) + cy*CS - (double)(float)g.y;
+            const double rz = (double)(float)(g.z - cz*CS) + cz*CS - (double)(float)g.z;
+            peor = std::max(peor, std::sqrt(rx*rx + ry*ry + rz*rz));
+        }
+        const double presupuesto = 5.0/60.0 + (0.010 + 5.0/60.0 + 0.50);
+        std::printf("    [transporte] un jugador QUIETO parece saltar hasta %.4f m por la cuantizacion\n"
+                    "    [transporte] del float de `lastG*` · presupuesto a 5 m/s y 1/60 s: %.4f m (%.0f %%)\n",
+                    peor, presupuesto, 100.0 * peor / presupuesto);
+        CHECK(peor > 0.01, "la cuantizacion del ABI es MEDIBLE (si diera 0, el termino sobraria)");
+        CHECK(peor < presupuesto, "y cabe en el presupuesto: no expulsa por si sola a un jugador quieto");
+
+        if (m->destroyZone) m->destroyZone(z);
+    }
+
+    // ── El fichero: mismo campo, ida y vuelta por disco. Es lo que consume un servidor headless. ──
+    {
+        Haruka::Net::HeightField hf;
+        hf.w = W; hf.h = H; hf.baseRadiusM = (float)Re; hf.data = field;
+        const std::string path = "./test_ground.hfield";
+        CHECK(Haruka::Net::saveHeightField(path, hf), "el campo se persiste en crudo (float, no PNG)");
+        Haruka::Net::HeightField back;
+        CHECK(Haruka::Net::loadHeightField(path, back) && back.valid(), "y se vuelve a leer");
+        CHECK(back.w == W && back.h == H && back.data == field,
+              "ida y vuelta por disco SIN perdida (el PNG de 16 bits cuantiza a ~1 m; esto no)");
+        // Y que el modulo lo acepta por ese camino.
+        CHECK(loadField(path.c_str()) == 1, "el modulo carga el campo desde el fichero del bake");
+        // Y que ese campo cargado DA LO MISMO que el que se paso en memoria.
+        CHECK(std::fabs(back.heightAt(dirMonte) - hMonte) < 1e-6,
+              "el muestreo del modulo es el GEMELO EXACTO del motor (< 1 µm)");
+        std::remove(path.c_str());
+    }
+
+    // Se deja desinstalado: los demas tests del banco esperan el comportamiento sin campo.
+    setField(0, 0, nullptr, 0.0);
+    dlclose(h);
+}
+
+
+// ================================================================================================
+// test_net_entity_visible — an entity the world feed spawns must be DRAWN, not merely present.
+//
+// ⚠️ THIS FAILURE MODE HAS HAPPENED TWICE AND LOOKS LIKE A WORKING GAME BOTH TIMES. `classifySceneObject`
+// dispatches on the `objectType` ENUM; the string `type` is a label. The first time, networked players
+// were left at `UNKNOWN`: added to the scene, moved every frame, culled, counted — and never drawn.
+// The second door is still open in the same wall: `ObjectType::MODEL` goes to the model renderer,
+// which does `getOrLoadModelCached(obj->modelPath)` and gives up on null, so every entity the feed
+// spawns that is NOT a player or an NPC arrives with an empty path and is invisible in exactly the
+// same silent way.
+//
+// A capsule is not a nice model. It is a VISIBLE one. The counter-proof is the second half: an object
+// that DOES have a model must still go to the model renderer, or this "fix" would just have made
+// every model in the game a capsule.
+// ================================================================================================
+void test_net_entity_visible() {
+    beginTest("net_entity_visible");
+
+    // A player from the world feed: no mesh, no model, no primitive property.
+    Haruka::SceneObject player;
+    player.name       = "entity_8100";
+    player.type       = "Character";
+    player.objectType = Haruka::ObjectType::CHARACTER;
+    Haruka::RenderCommand c = Haruka::classifySceneObject(player);
+    CHECK(c.kind == Haruka::RenderKind::Primitive, "a networked player is drawn");
+    CHECK(c.primitive == Haruka::PrimitiveType::CAPSULE, "and it is drawn as a capsule");
+
+    // Anything else the feed spawns (an item, a vehicle) with nothing to load.
+    Haruka::SceneObject thing;
+    thing.name       = "entity_8101";
+    thing.objectType = Haruka::ObjectType::MODEL;   // modelPath deliberately empty
+    Haruka::RenderCommand t = Haruka::classifySceneObject(thing);
+    CHECK(t.kind == Haruka::RenderKind::Primitive,
+          "a MODEL with nothing to load is drawn anyway (it used to be silently invisible)");
+    CHECK(t.primitive == Haruka::PrimitiveType::CAPSULE, "as a capsule");
+
+    // COUNTER-PROOF: a real model must NOT be replaced by a capsule.
+    Haruka::SceneObject real;
+    real.name       = "crate";
+    real.objectType = Haruka::ObjectType::MODEL;
+    real.modelPath  = "assets/models/crate.obj";
+    Haruka::RenderCommand r = Haruka::classifySceneObject(real);
+    CHECK(r.kind == Haruka::RenderKind::Model,
+          "an object that HAS a model still goes to the model renderer");
+    CHECK(r.primitive != Haruka::PrimitiveType::CAPSULE,
+          "the fallback did not swallow every model in the game");
+}
+
+
+// ================================================================================================
+// test_weather_replicated — two clients must be standing in the SAME storm.
+//
+// Nothing about the weather travels on the wire, and nothing needs to: a front's axis, start point,
+// speed and size all come out of `hashf(seed, i, k)`, and its position at any moment is
+// `rotateAround(start, axis, omega * time)`. There is no RNG and no wall clock anywhere in that path
+// — the header says so in as many words: the time "NO es un steady_clock: tiene que ser el mismo
+// numero en el cliente y en el servidor".
+//
+// So the weather is replicated by REPRODUCTION, not transmission: both machines compute the same
+// storm because they compute the same function of the same inputs. That is cheaper and exact, and it
+// holds only while every input is identical — which is precisely what this pins. It became true the
+// day the simulation clock stopped being a local accumulator and started coming from the cluster
+// (see `Client::hasWorldTime` and `PlanetarySystem::setWorldClock`).
+//
+// THE COUNTER-PROOF IS THE THIRD BLOCK. "Two systems agree" would also pass on a weather system that
+// returned a constant, which would be a broken world that happens to be identical everywhere. So the
+// same pair is asked again at a different time and must DISAGREE: the storm has to move.
+// ================================================================================================
+void test_weather_replicated() {
+    beginTest("weather_replicated");
+
+    // A handful of directions spread over the sphere, not one: a single sample could agree by luck.
+    const glm::dvec3 dirs[] = {
+        glm::normalize(glm::dvec3( 1,  0.2,  0.3)),
+        glm::normalize(glm::dvec3(-0.4, 0.9, 0.1)),
+        glm::normalize(glm::dvec3( 0.1,-0.8, 0.6)),
+        glm::normalize(glm::dvec3(-0.7,-0.2,-0.7)),
+        glm::normalize(glm::dvec3( 0.3, 0.3, 0.9)),
+    };
+    const uint32_t seed = 4242;
+    const double   tA   = 9137.5;   // "player A's world clock"
+    const double   tB   = tA;       // player B, who logged in much later, gets the SAME number
+
+    Haruka::WeatherSystem a, b;
+    a.configure(seed); b.configure(seed);
+    a.setTime(tA);     b.setTime(tB);
+
+    int differing = 0;
+    float worstCover = 0.0f;
+    for (const auto& d : dirs) {
+        const Haruka::WeatherSample sa = a.sampleAt(d, 15.0f, 0.5f);
+        const Haruka::WeatherSample sb = b.sampleAt(d, 15.0f, 0.5f);
+        // BIT for bit: same inputs through the same pure code must give the same floats. Anything
+        // less would mean state hiding somewhere, and "close enough" would hide it.
+        if (sa.cloudCover != sb.cloudCover || sa.precip != sb.precip ||
+            sa.cloudBaseM != sb.cloudBaseM || sa.cloudTopM != sb.cloudTopM ||
+            sa.humidity  != sb.humidity   || sa.tempC     != sb.tempC ||
+            sa.wind      != sb.wind       || sa.type      != sb.type) ++differing;
+        worstCover = std::max(worstCover, sa.cloudCover);
+    }
+    std::printf("    mismo seed y mismo t=%.1f: %d de %d muestras difieren (cobertura max %.3f)\n",
+                tA, differing, (int)(sizeof(dirs)/sizeof(dirs[0])), worstCover);
+    CHECK(differing == 0, "two clients on the same world clock compute the SAME weather");
+
+    // Reconfiguring must not move anything either: `configure` is idempotent, and a client that
+    // reloads its planet must not end up in a different storm from the one next to it.
+    b.configure(seed);
+    b.setTime(tB);
+    int afterReconfigure = 0;
+    for (const auto& d : dirs)
+        if (a.sampleAt(d, 15.0f, 0.5f).cloudCover != b.sampleAt(d, 15.0f, 0.5f).cloudCover)
+            ++afterReconfigure;
+    CHECK(afterReconfigure == 0, "and reconfiguring with the same seed does not move the storm");
+
+    // ── COUNTER-PROOF: it has to MOVE. Agreement alone would also pass on a constant sky.
+    b.setTime(tA + 600.0);   // ten minutes of world later
+    int moved = 0;
+    for (const auto& d : dirs)
+        if (a.sampleAt(d, 15.0f, 0.5f).cloudCover != b.sampleAt(d, 15.0f, 0.5f).cloudCover) ++moved;
+    std::printf("    CONTRAPRUEBA t+600 s: %d de %d muestras cambian\n",
+                moved, (int)(sizeof(dirs)/sizeof(dirs[0])));
+    CHECK(moved > 0, "and at a DIFFERENT time it differs — the weather is not a constant");
+
+    // And a different world (another seed) must be a different world, or the seed does nothing.
+    Haruka::WeatherSystem other;
+    other.configure(seed + 1);
+    other.setTime(tA);
+    int otherWorld = 0;
+    for (const auto& d : dirs)
+        if (a.sampleAt(d, 15.0f, 0.5f).cloudCover != other.sampleAt(d, 15.0f, 0.5f).cloudCover)
+            ++otherWorld;
+    CHECK(otherWorld > 0, "and a different seed is a different world");
 }

@@ -22,6 +22,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>   // std::getenv — Jolt va por defecto; HARUKA_JOLT=0 vuelve al solver a mano
 #include <future>    // refresco ASÍNCRONO de la malla de colisión (no bloquear el frame)
@@ -50,7 +51,10 @@
 // RAÍLES (docs/guides/PLAN_PUERTOS.md §4): puertas, rampas y suspensiones son MECANISMOS, no clips.
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
+#include <Jolt/Physics/Constraints/PulleyConstraint.h>
+#include <Jolt/Physics/Constraints/FixedConstraint.h>
 #include <Jolt/Physics/Body/BodyLockMulti.h>
+#include <Jolt/Physics/Collision/GroupFilterTable.h>
 #include <unordered_map>
 #include <cstdarg>
 #include <cstring>   // memcpy — checksum de las muestras publicadas al render
@@ -1019,6 +1023,54 @@ struct PhysicsEngine::JoltImpl {
     // ⚠️ El ancla y el eje llegan en MUNDO (double) y aquí se rebajan al MARCO LOCAL (`origin`), que es
     // donde vive Jolt. Sin esto, un raíl en un planeta a 1.5e8 m se crearía con coordenadas que el
     // float no representa — el mismo motivo por el que todo lo demás se simula relativo a `origin`.
+    int addLatch(RigidBody* a, RigidBody* b, const glm::dvec3& point) {
+        auto ia = map.find(a), ib = map.find(b);
+        if (ia == map.end() || ib == map.end()) return -1;
+        const glm::dvec3 lp = point - origin;
+        const JPH::BodyID ids[2] = { ia->second, ib->second };
+        JPH::BodyLockMultiWrite lock(system.GetBodyLockInterface(), ids, 2);   // ver la nota de addRail
+        JPH::Body* jba = lock.GetBody(0);
+        JPH::Body* jbb = lock.GetBody(1);
+        if (!jba || !jbb) return -1;
+        JPH::FixedConstraintSettings st;
+        st.mSpace  = JPH::EConstraintSpace::WorldSpace;
+        st.mPoint1 = st.mPoint2 = JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z);
+        RailEntry e;
+        e.spec.dof = PhysicsEngine::RailSpec::Dof::Weld;     // sin juego: ver la nota del enum
+        e.spec.anchor = point;
+        e.c = st.Create(*jba, *jbb);
+        if (!e.c) return -1;
+        system.AddConstraint(e.c);
+        e.alive = true;
+        rails.push_back(e);
+        return (int)rails.size() - 1;
+    }
+
+    void noCollide(const std::vector<RigidBody*>& bodies,
+                   const std::vector<std::pair<int, int>>& pairs) {
+        if (bodies.size() < 2) return;
+        static JPH::CollisionGroup::GroupID s_grupo = 1;
+        const JPH::CollisionGroup::GroupID gid = s_grupo++;
+        JPH::Ref<JPH::GroupFilterTable> filtro = new JPH::GroupFilterTable((JPH::uint)bodies.size());
+        for (const auto& pr : pairs) {
+            if (pr.first < 0 || pr.second < 0) continue;
+            if ((size_t)pr.first >= bodies.size() || (size_t)pr.second >= bodies.size()) continue;
+            if (pr.first == pr.second) continue;
+            filtro->DisableCollision((JPH::CollisionGroup::SubGroupID)pr.first,
+                                     (JPH::CollisionGroup::SubGroupID)pr.second);
+        }
+        // El `Ref` lo mantiene vivo cada `CollisionGroup` que lo referencia: al morir los cuerpos, se
+        // libera solo. Por eso no hace falta guardarlo aqui.
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            auto it = map.find(bodies[i]);
+            if (it == map.end()) continue;
+            JPH::BodyLockWrite lock(system.GetBodyLockInterface(), it->second);
+            if (!lock.Succeeded()) continue;
+            lock.GetBody().SetCollisionGroup(
+                JPH::CollisionGroup(filtro, gid, (JPH::CollisionGroup::SubGroupID)i));
+        }
+    }
+
     int addRail(RigidBody* a, RigidBody* b, const PhysicsEngine::RailSpec& spec) {
         auto ia = map.find(a), ib = map.find(b);
         if (ia == map.end() || ib == map.end()) return -1;
@@ -1026,8 +1078,14 @@ struct PhysicsEngine::JoltImpl {
         const glm::dvec3 la = spec.anchor - origin;
         glm::dvec3 ax = spec.axis;
         const double axLen = glm::length(ax);
-        if (axLen < 1e-9) return -1;
-        ax /= axLen;
+        // Una CUERDA no tiene eje: tiene un anillo y dos amarres. Se le da uno cualquiera para no
+        // repetir todo el montaje de abajo, y no se usa. Una SOLDADURA tampoco: no deja ningún grado
+        // de libertad, así que no hay eje sobre el que dejarlo.
+        const bool sinEje = spec.dof == PhysicsEngine::RailSpec::Dof::Rope
+                         || spec.dof == PhysicsEngine::RailSpec::Dof::Weld;
+        if (axLen < 1e-9 && !sinEje) return -1;
+        if (axLen < 1e-9) ax = glm::dvec3(0, 1, 0);
+        else ax /= axLen;
         // ⚠️ EL CERO DEL ÁNGULO ES LA POSTURA DE MONTAJE. Jolt necesita una normal perpendicular al
         // eje para fijar dónde está el 0, y si se elige una cualquiera, la hoja NACE a un ángulo
         // arbitrario de su propio cero: con la puerta montada a 90° de esa normal, unos límites de
@@ -1054,6 +1112,31 @@ struct PhysicsEngine::JoltImpl {
 
         RailEntry e;
         e.spec = spec;
+        // ── EL MUELLE, que es lo que convierte una guía en una SUSPENSIÓN ───────────────────────
+        //
+        // Se monta como MOTOR DE POSICIÓN apuntando al 0 (la postura de montaje) con ajustes de
+        // muelle: eso da exactamente `F = -k·x - c·v` alrededor del reposo, que es un muelle y no una
+        // analogía. Jolt lo llama `ESpringMode::StiffnessAndDamping`, así que `k` y `c` van tal cual
+        // y no hay que convertirlos a frecuencia — para lo cual haría falta la masa efectiva, que en
+        // este punto no se conoce.
+        //
+        // ⚠️ EL OBJETIVO ES EL 0, NO UN EXTREMO. El signo de la posición del deslizante depende de
+        // cuál de los dos cuerpos le tocó ser el primero, y eso lo decide el orden de las piezas en
+        // el prefabricado — algo que quien declara el puerto no controla. Apuntando al 0, los
+        // límites significan lo que `game/ports/port.h` dice que significan (relativos al reposo) y
+        // el muelle empuja hacia la postura de montaje venga por donde venga.
+        const bool muelle = spec.drive == PhysicsEngine::RailSpec::Drive::Spring
+                         && spec.compliance > 0.0;
+        JPH::MotorSettings ms;
+        if (muelle) {
+            ms.mSpringSettings.mMode      = JPH::ESpringMode::StiffnessAndDamping;
+            ms.mSpringSettings.mStiffness = (float)(1.0 / spec.compliance);
+            ms.mSpringSettings.mDamping   = (float)spec.damping;
+            // Un muelle sin tope de fuerza es lo correcto: lo que lo limita es su propia k. El
+            // `motorForce` del puerto se respeta si se declara, para poder capar un muelle débil.
+            ms.SetForceLimit(spec.motorForce > 0.0 ? (float)spec.motorForce : FLT_MAX);
+            ms.SetTorqueLimit(spec.motorForce > 0.0 ? (float)spec.motorForce : FLT_MAX);
+        }
         if (spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
             JPH::HingeConstraintSettings st;
             st.mPoint1 = st.mPoint2 = JPH::RVec3(jp);
@@ -1061,6 +1144,7 @@ struct PhysicsEngine::JoltImpl {
             st.mNormalAxis1 = st.mNormalAxis2 = jn;
             st.mLimitsMin = (float)glm::radians(std::min(spec.limits.x, spec.limits.y));
             st.mLimitsMax = (float)glm::radians(std::max(spec.limits.x, spec.limits.y));
+            if (muelle) st.mMotorSettings = ms;
             if (spec.drive == PhysicsEngine::RailSpec::Drive::Motor) {
                 st.mMotorSettings.SetTorqueLimit((float)spec.motorForce);
                 // ⚠️ El muelle por defecto de Jolt (2 Hz) es de SUSPENSIÓN, no de mecanismo: una
@@ -1071,12 +1155,43 @@ struct PhysicsEngine::JoltImpl {
                 st.mMotorSettings.mSpringSettings.mDamping   = 1.0f;
             }
             e.c = st.Create(*jba, *jbb);
+        } else if (spec.dof == PhysicsEngine::RailSpec::Dof::Rope) {
+            // LA CUERDA. La polea de Jolt mide `|amarre1 -> fijo1| + ratio * |amarre2 -> fijo2|`, así
+            // que poniendo los DOS puntos fijos en el anillo sale exactamente el recorrido de una
+            // cuerda que pasa por él. `mMinLength = 0` es lo que la hace cuerda y no barra: puede
+            // aflojarse todo lo que quiera, y sólo se entera cuando se tensa.
+            JPH::PulleyConstraintSettings st;
+            st.mSpace = JPH::EConstraintSpace::WorldSpace;
+            const glm::dvec3 ta = spec.tieA - origin, tb = spec.tieB - origin;
+            st.mBodyPoint1  = JPH::RVec3((float)ta.x, (float)ta.y, (float)ta.z);
+            st.mBodyPoint2  = JPH::RVec3((float)tb.x, (float)tb.y, (float)tb.z);
+            st.mFixedPoint1 = st.mFixedPoint2 = JPH::RVec3(jp);   // el ANILLO, los dos por el mismo
+            st.mRatio       = 1.0f;
+            const double lo = std::max(0.0, std::min(spec.limits.x, spec.limits.y));
+            const double hi = std::max(spec.limits.x, spec.limits.y);
+            st.mMinLength = (float)lo;
+            st.mMaxLength = (float)std::max(hi, lo);
+            e.c = st.Create(*jba, *jbb);
+        } else if (spec.dof == PhysicsEngine::RailSpec::Dof::Weld) {
+            // ⚠️ ESTA RAMA NO EXISTÍA Y SU AUSENCIA ERA UN `static_cast` MAL. Sin ella un `weld` caía
+            // al `else` y se construía como SliderConstraint, mientras que `updateRails` lo lee con
+            // `static_cast<FixedConstraint*>` — leer un objeto de una clase por un puntero a otra es
+            // comportamiento indefinido, no un fallo que se vea. Es exactamente la trampa que ya cayó
+            // una vez con el pestillo del portalón, y esta vez está antes de ejecutarse.
+            //
+            // Es el mismo montaje que `addLatch`; se separa porque el que la crea es otro (un puerto
+            // del dato, no una llamada del juego) y porque aquí sí hay `breakForce` que respetar.
+            JPH::FixedConstraintSettings st;
+            st.mSpace  = JPH::EConstraintSpace::WorldSpace;
+            st.mPoint1 = st.mPoint2 = JPH::RVec3(jp);
+            e.c = st.Create(*jba, *jbb);
         } else {
             JPH::SliderConstraintSettings st;
             st.mPoint1 = st.mPoint2 = JPH::RVec3(jp);
             st.SetSliderAxis(ja);
             st.mLimitsMin = (float)std::min(spec.limits.x, spec.limits.y);
             st.mLimitsMax = (float)std::max(spec.limits.x, spec.limits.y);
+            if (muelle) st.mMotorSettings = ms;
             if (spec.drive == PhysicsEngine::RailSpec::Drive::Motor) {
                 st.mMotorSettings.SetForceLimit((float)spec.motorForce);
                 st.mMotorSettings.mSpringSettings.mFrequency = 20.0f;   // ver la nota del Hinge
@@ -1085,6 +1200,19 @@ struct PhysicsEngine::JoltImpl {
             e.c = st.Create(*jba, *jbb);
         }
         if (!e.c) return -1;
+        // El muelle no obedece a nadie: se ARRANCA aqui, apuntando al reposo, y ya trabaja solo. Es
+        // lo que lo distingue de un motor, que espera un `railSetTarget` de quien lo maneja.
+        if (muelle) {
+            if (spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
+                auto* h = static_cast<JPH::HingeConstraint*>(e.c.GetPtr());
+                h->SetMotorState(JPH::EMotorState::Position);
+                h->SetTargetAngle(0.0f);
+            } else if (spec.dof == PhysicsEngine::RailSpec::Dof::Slider) {
+                auto* sl = static_cast<JPH::SliderConstraint*>(e.c.GetPtr());
+                sl->SetMotorState(JPH::EMotorState::Position);
+                sl->SetTargetPosition(0.0f);
+            }
+        }
         system.AddConstraint(e.c);
         e.alive = true;
         rails.push_back(e);
@@ -1101,6 +1229,11 @@ struct PhysicsEngine::JoltImpl {
         e.stall = 0; e.lastValue = e.info.value; e.info.blocked = false;
         // Solo un motor OBEDECE una posición pedida. Manual lo empuja un personaje y Spring tira solo.
         if (e.spec.drive != PhysicsEngine::RailSpec::Drive::Motor) return;
+        // ⚠️ LA CUERDA NO SALTA A SU DESTINO: aquí sólo se APUNTA. Cobrar es una maniobra, no un
+        // teletransporte — poner la longitud de golpe daba un tirón y mandaba el portalón de un
+        // sitio a otro en un frame. Lo cobra `updateRails` a `speed` metros por segundo, y como eso
+        // corre en el paso fijo, la maniobra dura lo mismo a 30 fps que a 200.
+        if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Rope) return;
         if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
             auto* h = static_cast<JPH::HingeConstraint*>(e.c.GetPtr());
             h->SetMotorState(JPH::EMotorState::Position);
@@ -1117,6 +1250,43 @@ struct PhysicsEngine::JoltImpl {
         for (auto& e : rails) {
             if (!e.alive) continue;
             double force = 0.0;
+            if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Weld) {
+                // Un pestillo no tiene posición que leer: o está puesto o no está. Lo único que dice
+                // es cuánto le está costando aguantar, y eso sirve para que pueda CEDER como el
+                // resto de uniones — un portalón estibado tiene que poder arrancarse de un golpe.
+                auto* fc = static_cast<JPH::FixedConstraint*>(e.c.GetPtr());
+                e.info.value = 0.0;
+                e.info.force = (double)fc->GetTotalLambdaPosition().Length() / dt;
+                if (e.spec.breakForce > 0.0 && e.info.force > e.spec.breakForce) {
+                    system.RemoveConstraint(e.c);
+                    e.c = nullptr; e.alive = false; e.info.broken = true;
+                }
+                continue;
+            }
+            if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Rope) {
+                // Lo que MIDE una cuerda es su largo: el recorrido completo por el anillo. Y la
+                // fuerza es la tensión — que en una cuerda sólo existe cuando está tensa, así que un
+                // cero aquí no es un fallo, es que está floja.
+                auto* pu = static_cast<JPH::PulleyConstraint*>(e.c.GetPtr());
+                e.info.value = (double)pu->GetCurrentLength();
+                e.info.force = (double)std::abs(pu->GetTotalLambdaPosition()) / dt;
+
+                // EL CABRESTANTE. Se acorta (o se larga) hacia el objetivo a `speed` m/s, y esto está
+                // DENTRO del paso fijo: la maniobra tarda lo mismo a cualquier fps. Con `speed` a
+                // cero se va de una vez, que es el comportamiento de antes para quien lo quiera.
+                if (e.spec.drive == PhysicsEngine::RailSpec::Drive::Motor) {
+                    const double hi = std::max(e.spec.limits.x, e.spec.limits.y);
+                    double L = (double)pu->GetMaxLength();
+                    const double paso = e.spec.speed > 0.0 ? e.spec.speed * dt : 1e9;
+                    const double d = std::clamp(e.target - L, -paso, paso);
+                    L = std::clamp(L + d, 0.0, hi);
+                    // Mínimo = máximo: la cuerda cobrada queda TENSA. Con el mínimo en cero estaría
+                    // recogida pero floja, y lo que cuelga no subiría.
+                    pu->SetLength((float)L, (float)L);
+                    e.info.blocked = std::abs(e.info.value - L) > 0.05 && std::abs(d) < 1e-9;
+                }
+                continue;
+            }
             if (e.spec.dof == PhysicsEngine::RailSpec::Dof::Hinge) {
                 auto* h = static_cast<JPH::HingeConstraint*>(e.c.GetPtr());
                 e.info.value = glm::degrees((double)h->GetCurrentAngle());
@@ -1124,7 +1294,13 @@ struct PhysicsEngine::JoltImpl {
             } else {
                 auto* sl = static_cast<JPH::SliderConstraint*>(e.c.GetPtr());
                 e.info.value = (double)sl->GetCurrentPosition();
-                force = (double)std::abs(sl->GetTotalLambdaPositionLimits()) / dt;
+                // ⚠️ EL MAYOR DE LOS DOS, y con el muelle esto dejo de ser un detalle. `...Limits()`
+                // es el lambda de los TOPES, o sea cero mientras la union trabaje DENTRO de su
+                // recorrido — que es donde vive una suspension sana. Informando solo ese, un muelle
+                // cargado con toneladas encima leia 0 N (visto en la sonda `muelles`) y su
+                // `breakForce` no podia dispararse jamas por mucho que se le echara encima.
+                force = std::max((double)std::abs(sl->GetTotalLambdaPositionLimits()),
+                                 (double)std::abs(sl->GetTotalLambdaMotor())) / dt;
             }
             e.info.force = force;
 
@@ -1526,6 +1702,35 @@ std::shared_ptr<RigidBody> PhysicsEngine::getBody(const std::string& name) {
 // ── RAÍLES (docs/guides/PLAN_PUERTOS.md §4) ─────────────────────────────────────────────────────
 // Sin Jolt no hay mecanismo: se devuelve -1 en vez de fingir uno. Un raíl simulado a mano sería justo
 // la animación que este sistema existe para no tener.
+void PhysicsEngine::setNoCollidePairs(const std::vector<std::string>& bodyNames,
+                                     const std::vector<std::pair<int, int>>& pairs) {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt) return;
+    std::vector<RigidBody*> bs;
+    bs.reserve(bodyNames.size());
+    for (const auto& n : bodyNames) {
+        auto b = getBody(n);
+        if (!b) return;                  // un hueco desalinearia los subgrupos: mejor no tocar nada
+        bs.push_back(b.get());
+    }
+    m_jolt->noCollide(bs, pairs);
+#else
+    (void)bodyNames; (void)pairs;
+#endif
+}
+
+int PhysicsEngine::addLatch(const std::string& bodyA, const std::string& bodyB,
+                            const glm::dvec3& point) {
+#ifdef HARUKA_HAS_JOLT
+    if (!m_jolt) return -1;
+    auto a = getBody(bodyA), b = getBody(bodyB);
+    if (!a || !b) return -1;
+    return m_jolt->addLatch(a.get(), b.get(), point);
+#else
+    (void)bodyA; (void)bodyB; (void)point; return -1;
+#endif
+}
+
 int PhysicsEngine::addRail(const std::string& bodyA, const std::string& bodyB, const RailSpec& spec) {
 #ifdef HARUKA_HAS_JOLT
     if (!m_jolt) return -1;
@@ -1550,7 +1755,9 @@ bool PhysicsEngine::railSetTarget(int railId, double target) {
 bool PhysicsEngine::railGet(int railId, RailInfo& out) const {
 #ifdef HARUKA_HAS_JOLT
     if (!m_jolt || railId < 0 || railId >= (int)m_jolt->rails.size()) return false;
-    out = m_jolt->rails[(size_t)railId].info;
+    const auto& e = m_jolt->rails[(size_t)railId];
+    out = e.info;
+    out.spec = e.spec;   // el SITIO va con el estado: son el mismo raíl
     return true;
 #else
     (void)railId; (void)out; return false;
@@ -1636,7 +1843,23 @@ glm::dvec3 PhysicsEngine::waterForceOn(RigidBody& body, const glm::dvec3& gravit
     // peso cuando está sumergido del todo, así que el cuerpo sube hasta que `f` baja a `1/ratio` — ahí
     // se equilibra y flota. Ese es el punto de reposo, no un tope artificial.
     const double buoyRatio = 1.1;                    // densidad agua/objeto (>1 = flota)
-    glm::dvec3 F = -gravityAcc * (f * buoyRatio * body.mass);
+
+    // ── EL AGUA BLANCA ──────────────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ HASTA AHORA LA ROMPIENTE SOLO EXISTIA PARA LA CAMARA. La espuma se calculaba en el shader y
+    // en `oceanFoam`, pero nadie la consultaba: un cuerpo flotando en plena rompiente notaba
+    // exactamente lo mismo que en un mar en calma.
+    //
+    // El agua blanca es agua AIREADA, y de ahi salen los dos efectos, los dos con la misma causa:
+    //  · PESA MENOS -> menos empuje. La fraccion de aire de una rompiente va del pequeno porcentaje a
+    //    varias decenas; se toma un 25 % a espuma plena, que es conservador y mantiene el cuerpo a
+    //    flote (`1,1 · 0,75 = 0,825`) en vez de hundirlo — hundir a quien nada en la rompiente seria
+    //    un cambio de jugabilidad, no de fisica.
+    //  · AGARRA MUCHO MAS -> el arrastre se triplica. Es lo que hace que una ola que revienta te
+    //    LLEVE en vez de mecerte, y sin ello el transporte de Stokes solo era el vaiven orbital.
+    const double foam = glm::clamp((double)m_world->waterFoamAt(body.position), 0.0, 1.0);
+    const double buoyFoam = 1.0 - 0.25 * foam;       // aire mezclado: el agua pesa menos
+    glm::dvec3 F = -gravityAcc * (f * buoyRatio * buoyFoam * body.mass);
 
     // ARRASTRE HACIA LA VELOCIDAD DEL AGUA — lo que TRANSPORTA. Con arrastre hacia cero (lo que había)
     // el mar mece pero no lleva: la flotación era puramente vertical y nada alcanzaba la orilla por sí
@@ -1647,7 +1870,10 @@ glm::dvec3 PhysicsEngine::waterForceOn(RigidBody& body, const glm::dvec3& gravit
     // integradores (Jolt y el de aquí) la apliquen igual; con `3·f·dt << 1` coincide con el
     // amortiguado exponencial que usaba este camino.
     constexpr double kDragRate = 3.0;
-    F += (vWater - body.velocity) * (kDragRate * f * body.mass);
+    // ⚠️ EL AGUA BLANCA AGARRA. `1 + 2·foam` lleva la tasa de 3 a 9 en espuma plena: el cuerpo sigue
+    // la velocidad del agua mucho mas deprisa, que es literalmente lo que hace una rompiente. Con
+    // `foam = 0` queda EXACTAMENTE el arrastre de antes, asi que el mar abierto no cambia ni un bit.
+    F += (vWater - body.velocity) * (kDragRate * (1.0 + 2.0 * foam) * f * body.mass);
     return F;
 }
 

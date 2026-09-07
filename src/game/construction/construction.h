@@ -176,7 +176,26 @@ public:
     static constexpr double kAnchorGap = 0.30;  // hueco máximo para considerarse "apoyado/tocando"
     static constexpr double kFlatTol   = 0.30;  // desnivel máx del terreno bajo la huella para ser "llano"
 
+    /// Hueco con el que dos piezas quedan FIJADAS entre sí. Por defecto `kAnchorGap`.
+    ///
+    /// ⚠️ 0,30 m ES UNA AYUDA AL CONSTRUIR A MANO, NO UNA REGLA FÍSICA. Quien coloca con la mira no
+    /// acierta al milímetro, así que el sistema perdona 30 cm y clava lo que ronde. Un PREFABRICADO
+    /// no necesita ese perdón: dice poses exactas. Y con piezas pequeñas, 30 cm no es perdonar, es
+    /// inventar: en un tren de rodaje suelda entre sí cosas que sólo pasan cerca, y eso hace
+    /// imposible un mecanismo compacto — la rueda de retorno acababa fijada a la de rodadura, y la
+    /// oruga entera se volvía rígida al cruzarse eslabones no contiguos.
+    ///
+    /// Medido antes de tocarlo, sobre los datos que ya se envían:
+    ///     barco.json   0,30 -> 6707 aristas · 1 componente | 0,02 -> 3863 aristas · 1 componente
+    ///     tanque.json  0,30 ->  161 aristas · 1 componente | 0,05 ->  133 aristas · 3 componentes
+    /// O sea que al barco los 0,30 le regalan 2844 uniones que no sujetan nada, y el único que
+    /// dependía de la holgura era el tanque — por un fallo suyo, no de la tolerancia: la suspensión
+    /// se agarraba al casco a través de 15 cm de aire.
+    void   setFastenGap(double g) { m_fastenGap = g > 0.0 ? g : kAnchorGap; }
+    double fastenGap() const { return m_fastenGap; }
+
 private:
+    double m_fastenGap = kAnchorGap;
     void relabelStructures();          // recomputa Piece::structureId como componentes conexas (determinista)
 
 

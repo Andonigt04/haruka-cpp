@@ -367,6 +367,30 @@ public:
             const float zero4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
             m_inlandDummySSBO = dev->createBuffer(RHI::BufferUsage::Storage, sizeof(zero4),
                                                   zero4, RHI::BufferMemory::Static);
+            // El recuadro de la ventana fina cuando no hay ninguna. Los `inv` a 0 mandan cualquier
+            // punto al centro del UV, pero da igual: sin ventana el binding 19 lleva el 1x1 seco y
+            // `harukaWindowLakeAt` sale por el `textureSize <= 1` sin llegar a mirar esto.
+            m_lakeWinDummyUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(zero4),
+                                                  zero4, RHI::BufferMemory::Static);
+            // ── EL BLOQUE DEL MAR (29) TAMBIEN, Y ERA EL UNICO QUE NO LO TENIA ──────────────────
+            //
+            // ⚠️ `oceanParams` se ataba SOLO `if (valid(...))`, mientras que sus tres vecinos (24, 25,
+            // 26) tienen relleno desde el dia que costo que el agua no dibujara. O sea que el pase de
+            // agua podia emitirse con el binding 29 SIN ESCRIBIR. `lib/ocean_params.glsl` lleva una
+            // red de seguridad para eso —si `uOceanMisc.y <= 0.5` usa una tabla de olas de
+            // referencia—, pero su nota dice literalmente *"un UBO sin atar lee CEROS"*, y eso es
+            // cierto en OpenGL y FALSO en Vulkan: ahi un descriptor sin escribir es INDEFINIDO. Con
+            // basura, `uOceanMisc.y` pasa el umbral y `uOceanWave[i].x` entra como lambda: el numero
+            // de onda `k = 2*pi/lambda` se dispara y el mar sale, en palabras del propio fichero,
+            // "como ruido blanco". Es el mismo error de fondo que ya cazamos nueve veces: dar por
+            // hecho que Vulkan inicializa a cero porque GL lo hacia.
+            //
+            // Con este relleno a ceros la red de seguridad del shader entra SIEMPRE que no haya
+            // estado del mar, y entra igual en los dos backends: el mar degrada al oleaje de
+            // referencia —un fallo que se ve pero no destruye la escena— en vez de a ruido.
+            const float oceanZeros[9 * 4] = { 0.0f };   // gemelo de `OceanParams`: 8 vec4 + misc
+            m_oceanDummyUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(oceanZeros),
+                                                oceanZeros, RHI::BufferMemory::Static);
         }
 
         // LA REJILLA ES ÚNICA para todos los nodos: solo enteros (u,v). Lo que distingue a un nodo de
@@ -506,6 +530,16 @@ public:
 
     void setBaseField(RHI::TextureHandle t) { m_gpu.setBaseField(t); m_baseField = t; }
 
+    /// El bake, o el 1x1 de relleno si todavía no lo hay. **Siempre válido** (mientras el pase esté
+    /// inicializado), que es lo que necesita cualquier otro pase que declare la ranura 15.
+    ///
+    /// ⚠️ Existe porque el ANILLO CERCANO de `planet.cpp` ataba `m_baseFieldTex` a pelo: sin bake es
+    /// un handle inválido, y eso es justo lo que hace saltar el aviso `bindTexture(15): handle sin
+    /// textura` del backend de GL. El aviso no es cosmético — en Vulkan esa ranura queda sin escribir
+    /// y muestrear un descriptor indefinido puede perder el dispositivo. El relleno ya existía aquí
+    /// dentro; lo único que faltaba era poder alcanzarlo desde fuera.
+    RHI::TextureHandle baseFieldOrDummy() const { return m_gpu.baseFieldOrDummy(); }
+
     /// El bake EQUIRECT de altura: la MISMA fuente de elevación que el clipmap y la física.
     void setHeightTex(RHI::TextureHandle t) { m_gpu.setHeightTex(t); }
 
@@ -542,6 +576,12 @@ public:
         RHI::TextureHandle lakeTex{};      ///< campo de lagos horneado (R = cota · G = fetch)
         RHI::BufferHandle  oceanParams{};  ///< trenes de olas + cota de la lámina con marea
         RHI::BufferHandle  inlandUBO{};    ///< parche dinámico (lluvia/caudal), opcional
+        /// ── LA VENTANA FINA DE LAGOS ────────────────────────────────────────────────────────────
+        /// `lakeTex` es de 78 km/téxel y no puede tener lagos; esto es el recuadro de ±8 km alrededor
+        /// del observador, a 62 m/téxel. Va SIEMPRE atado (dummy cuando no hay) porque en Vulkan un
+        /// descriptor sin atar es INDEFINIDO, no ceros — ya costó que el agua no dibujara un píxel.
+        RHI::TextureHandle lakeWinTex{};
+        RHI::BufferHandle  lakeWinUBO{};
         RHI::BufferHandle  inlandSSBO{};
         bool on = false;                   ///< false = este cuerpo no tiene agua (ver `hasWater`)
     };
@@ -1098,7 +1138,12 @@ public:
             ctx->bindTexture(16, RHI::valid(m_water.heightTex) ? m_water.heightTex
                                                                : m_gpu.heightTexOrDummy());
             ctx->bindTexture(18, RHI::valid(m_water.lakeTex) ? m_water.lakeTex : m_lakeDummy);
-            if (RHI::valid(m_water.oceanParams)) ctx->bindUniformBuffer(29, m_water.oceanParams);
+            // La ventana fina: textura 19 + su recuadro en el UBO 26. Incondicional, con dummies.
+            ctx->bindTexture(19, RHI::valid(m_water.lakeWinTex) ? m_water.lakeWinTex : m_lakeDummy);
+            ctx->bindUniformBuffer(26, RHI::valid(m_water.lakeWinUBO) ? m_water.lakeWinUBO
+                                                                      : m_lakeWinDummyUBO);
+            ctx->bindUniformBuffer(29, RHI::valid(m_water.oceanParams) ? m_water.oceanParams
+                                                                       : m_oceanDummyUBO);
             ctx->bindUniformBuffer(24, RHI::valid(m_water.inlandUBO) ? m_water.inlandUBO
                                                                      : m_inlandDummyUBO);
             ctx->bindStorageBuffer(25, RHI::valid(m_water.inlandSSBO) ? m_water.inlandSSBO
@@ -1162,7 +1207,8 @@ private:
     Water                    m_water;
     RHI::PipelineHandle      m_waterPipe{};
     RHI::TextureHandle       m_lakeDummy{};
-    RHI::BufferHandle        m_inlandDummyUBO{}, m_inlandDummySSBO{};
+    RHI::BufferHandle        m_inlandDummyUBO{}, m_inlandDummySSBO{}, m_lakeWinDummyUBO{};
+    RHI::BufferHandle        m_oceanDummyUBO{};   ///< relleno a ceros del binding 29 (ver su creación)
     RHI::TextureHandle       m_baseField{};
     std::vector<NodeInstGPU> m_inst;      ///< ORDENADO por grupo de stride; `m_group` los delimita
     std::vector<size_t>      m_group;     ///< `m_group[k]` = primera instancia del stride `k`

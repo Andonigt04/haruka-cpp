@@ -1927,6 +1927,19 @@ void Application::renderFrameContent() {
             {
                 HARUKA_PROFILE("planetary.update(LOD+stream)");
                 _planetarySystem->syncFromScene(*_currentScene);
+#ifdef HARUKA_NETWORK
+                // ⚠️ THE SUN IS NOT AN ENTITY, so replicating positions never put two players in the
+                // same day. Everything time-shaped in this world is an analytic function of the
+                // simulation clock — the planets' orbits, and therefore sunrise; the weather fronts;
+                // the tide — and that clock was a LOCAL accumulator starting at zero. Two players who
+                // launched five minutes apart were five minutes apart in the world.
+                //
+                // One number fixes all of it, so it is handed over every frame rather than nudged:
+                // an accumulator cannot stay in step across a stall or a loading screen, and the whole
+                // point is that both machines compute the same `t`.
+                if (m_dgs.hasWorldTime())
+                    _planetarySystem->setWorldClock(m_dgs.worldTimeSeconds());
+#endif
                 _planetarySystem->update(deltaTime > 0.0f ? deltaTime : 0.016, glm::dvec3(_camera->position));
             }
 
@@ -2231,6 +2244,35 @@ void Application::renderFrameContent() {
     // IGUAL con y sin, lo que estás mirando no es el pase volumétrico: son el cirro (8 km) y el
     // altocúmulo (4 km), que son planos A PROPÓSITO —están tan alto que nunca se cruzan— y solo el
     // CÚMULO es volumétrico.
+    // ⚠️ POR QUE NO SE DIBUJAN, EN UNA LINEA. "No se ven las nubes" tiene seis causas posibles y
+    // cinco de ellas son puertas de este bloque, no del shader — que ademas se comprobo en el banco
+    // que dibuja bien (`cloud_volume_draws`, incluso desde 250 km y con el planeta delante). Sin esta
+    // linea, distinguirlas pedia leer el codigo; ya costo dos rondas de adivinar.
+    {
+        static int s_why = -2;
+        int why = 0;                                   // 0 = el pase corre
+        if (!m_volumetricClouds)                                    why = 1;
+        else if (cloudVolumetricOff())                              why = 2;
+        else if (!_camera || !_planetarySystem || !_worldSystem)    why = 3;
+        else {
+            glm::dvec3 c(0.0); double r = 0.0;
+            if (!RHI::device())                                     why = 4;
+            else if (!_planetarySystem->getActivePlanet(c, r) || r <= 0.0) why = 5;
+        }
+        if (why != s_why) {
+            s_why = why;
+            static const char* kPor[] = {
+                "CORRE (si aun no se ven, mira la linea de cobertura)",
+                "APAGADO en ajustes (m_volumetricClouds = false)",
+                "APAGADO por HARUKA_CLOUD_VOL=0",
+                "falta camara / sistema planetario / sistema de mundo",
+                "no hay dispositivo RHI",
+                "NO HAY PLANETA ACTIVO (getActivePlanet): en orbita lejana el cuerpo deja de serlo"
+            };
+            HARUKA_LOGI("Clouds", "pase volumetrico -> %s", kPor[why]);
+        }
+    }
+
     if (m_volumetricClouds && !cloudVolumetricOff() && _camera && _planetarySystem && _worldSystem) {
         HARUKA_PROFILE("scene.clouds.volumetric");
         RHI::Device* dev = RHI::device();
@@ -2250,12 +2292,51 @@ void Application::renderFrameContent() {
                 // escribiera z, lo que se dibujara después quedaría recortado por una "cáscara" que
                 // no existe.
                 pd.depth.test   = false;  pd.depth.write = false;
-                pd.blend.enable = true;   // se compone sobre la escena con su propia opacidad
+                // ⚠️ SIN MEZCLA: ahora la marcha va a un target PROPIO que se limpia a transparente,
+                // no encima de la escena. Mezclar aqui compondria la nube contra el vacio del target.
+                pd.blend.enable = false;
                 m_cloudPSO = dev->createPipeline(pd);
                 m_cloudUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(CloudParams),
                                                nullptr, RHI::BufferMemory::Dynamic);
-                HARUKA_LOGI("Clouds", "pase volumetrico: %s",
-                            RHI::valid(m_cloudPSO) ? "ok" : "FALLO (se sigue viendo el cielo de fondo)");
+
+                const std::string uvs = Shader::baseDir() + "shaders/cloud_upsample.vert";
+                const std::string ufs = Shader::baseDir() + "shaders/cloud_upsample.frag";
+                RHI::PipelineDesc up;
+                up.vertexPath   = uvs.c_str();
+                up.fragmentPath = ufs.c_str();
+                up.topology     = RHI::PrimitiveTopology::Triangles;
+                up.depth.test   = false;  up.depth.write = false;
+                up.blend.enable = true;   // ESTE si: es el que compone la nube sobre la escena
+                m_cloudUpPSO = dev->createPipeline(up);
+
+                HARUKA_LOGI("Clouds", "pase volumetrico: %s · composicion: %s",
+                            RHI::valid(m_cloudPSO)   ? "ok" : "FALLO (se sigue viendo el cielo de fondo)",
+                            RHI::valid(m_cloudUpPSO) ? "ok" : "FALLO (no se vera la nube)");
+            }
+
+            // ── EL TARGET REDUCIDO ──────────────────────────────────────────────────────────────
+            // El divisor es de LADO: 4 son 16 veces menos pixeles. La nube es de frecuencia baja y ya
+            // va con jitter, asi que aguanta el reescalado; lo que no aguanta el motor es pagarla a
+            // resolucion completa (ver la nota del miembro en application.h).
+            int resDiv = 4;
+            if (const char* e = std::getenv("HARUKA_CLOUD_RESDIV")) {
+                const int v = std::atoi(e);
+                if (v >= 1 && v <= 8) resDiv = v;
+            }
+            const int rw = std::max(64, cw / resDiv), rh = std::max(64, ch / resDiv);
+            if (RHI::valid(m_cloudPSO) && (!RHI::valid(m_cloudRT) ||
+                                           m_cloudRTW != rw || m_cloudRTH != rh)) {
+                if (RHI::valid(m_cloudRT)) dev->destroy(m_cloudRT);
+                RHI::RenderTargetDesc rd;
+                rd.width = rw; rd.height = rh;
+                rd.colorFormats = { RHI::Format::RGBA8 };
+                rd.colorFilter  = RHI::Filter::Linear;
+                rd.hasDepth     = false;   // la nube no escribe z; la oclusion sale de la copia de depth
+                m_cloudRT = dev->createRenderTarget(rd);
+                m_cloudRTW = rw; m_cloudRTH = rh;
+                HARUKA_LOGI("Clouds", "target de marcha %dx%d (1/%d de %dx%d · %.1fx menos pixeles)",
+                            rw, rh, resDiv, cw, ch,
+                            (double)(cw * ch) / (double)(rw * rh));
             }
 
             // Copia del DEPTH de la escena. ⚠️ No se puede samplear la profundidad del MISMO target
@@ -2278,6 +2359,13 @@ void Application::renderFrameContent() {
                 dd.colorFilter  = RHI::Filter::Nearest;
                 dd.hasDepth     = true;
                 dd.depthFormat  = srcDepthFmt;
+                // ⚠️ SIN ESTO LA PROFUNDIDAD ES UN RENDERBUFFER Y NO SE PUEDE MUESTREAR:
+                // `getDepthTexture` devuelve un handle INVALIDO, `bindTexture(0, ...)` no ata nada y
+                // en Vulkan un descriptor sin atar es INDEFINIDO, no ceros. El shader leia basura
+                // como profundidad de escena, `min(tExit, sceneT)` vaciaba el recorrido y el pase no
+                // pintaba una sola nube — mientras el cielo, que no lee profundidad, se seguia
+                // viendo. Solo `shadow.cpp` ponia este flag; aqui faltaba desde el principio.
+                dd.depthAsTexture = true;
                 m_cloudDepthRT = dev->createRenderTarget(dd);
                 m_cloudDepthW = cw; m_cloudDepthH = ch; m_cloudDepthFmt = srcDepthFmt;
                 // Una línea, solo al (re)crear: dice si el blit de profundidad puede ser legal. Si
@@ -2287,9 +2375,16 @@ void Application::renderFrameContent() {
                 HARUKA_LOGI("Clouds", "copia de profundidad %dx%d · formato %s (escena: %s)",
                             cw, ch, srcDepthFmt == RHI::Format::D32F ? "D32F" : "D24S8",
                             RHI::valid(sceneTargetPass) ? "target de post" : "BACKBUFFER");
+                if (!RHI::valid(dev->getDepthTexture(m_cloudDepthRT))) {
+                    HARUKA_LOGW("Clouds", "la copia de profundidad NO es muestreable: el pase "
+                                          "ocluiria contra basura. Se desactiva.");
+                    dev->destroy(m_cloudDepthRT);
+                    m_cloudDepthRT = {};
+                }
             }
 
-            if (RHI::valid(m_cloudPSO) && RHI::valid(m_cloudDepthRT)) {
+            if (RHI::valid(m_cloudPSO) && RHI::valid(m_cloudDepthRT) &&
+                RHI::valid(m_cloudRT)  && RHI::valid(m_cloudUpPSO)) {
                 const glm::dvec3 camD = glm::dvec3(_camera->position);
                 const Haruka::WeatherSample wx = _planetarySystem->weatherAt(camD);
                 float coverC = wx.cloudCover;
@@ -2309,7 +2404,175 @@ void Application::renderFrameContent() {
                                     coverC > 0.01f ? "SE DIBUJA" : "NO se dibuja (cielo plano: cirro+altocumulo)");
                     }
                 }
-                if (coverC > 0.01f) {
+                // ── LA COBERTURA DEL PLANETA, HORNEADA ──────────────────────────────────────
+                //
+                // ⚠️ El pase recibia UN escalar (`cover` del punto bajo la camara) y lo aplicaba a
+                // todo lo visible. Desde orbita eso son miles de km con el tiempo de un solo sitio.
+                // Se hornea una equirect pequeña del MISMO `WeatherSystem` —el shader sigue sin
+                // decidir cuanta nube hay— y el escalar pasa a ser el MAXIMO, solo para la salida
+                // rapida. `cloudCoverAt` existe justo para esto: "solo la cobertura, mas barato".
+                //
+                // 128x64 = 8192 muestras, y NO por frame: el tiempo se mueve en minutos, asi que se
+                // rehornea cada 2 s. A 60 fps son 8192 muestras cada 120 frames.
+                // ⚠️ A/B SIN RECOMPILAR: `HARUKA_CLOUD_COVER=<0..1>` fuerza una cobertura UNIFORME y
+                // salta el horneado del campo. Es lo unico que separa en UNA ejecucion las dos causas
+                // posibles de "no hay nubes" con el pase corriendo:
+                //   · con el forzado SE VEN  -> el campo (humedad o cobertura) esta mal;
+                //   · con el forzado TAMPOCO -> es el shader o el compositado.
+                // Sin esto hay que deducirlo, y llevo demasiadas deducciones equivocadas hoy sobre el
+                // origen de un pixel.
+                static const float s_forced = [] {
+                    const char* e = std::getenv("HARUKA_CLOUD_COVER");
+                    const float v = e ? (float)std::atof(e) : -1.0f;
+                    if (v >= 0.0f)
+                        HARUKA_LOGW("Clouds", "HARUKA_CLOUD_COVER=%.2f: cobertura UNIFORME forzada, "
+                                    "el campo del clima se ignora (diagnostico)", v);
+                    return v;
+                }();
+
+                float coverMax = coverC;
+                if (s_forced >= 0.0f) {
+                    coverMax = s_forced;
+                    if (RHI::valid(m_cloudCoverTex)) { dev->destroy(m_cloudCoverTex); m_cloudCoverTex = {}; }
+                } else {
+                    // ⚠️ ESTA CADENCIA SE MEDIA EN UN RELOJ QUE EL MUNDO YA NO SIGUE, y con el reloj
+                    // del cluster acelerado eso se ve. El campo se horneaba cada 2 segundos REALES;
+                    // con `WORLD_TIME_SCALE=120` el mundo avanza 240 s entre horneados, o sea el 13 %
+                    // de una vuelta completa de frente (`kFrontRevolutionS` = 1800 s). El cielo se
+                    // queda congelado dos segundos y luego SALTA — y como un tercio de los frentes
+                    // giran al reves por diseno (`sign = hashf < 0.35`), dos saltos seguidos pueden
+                    // ir en sentidos opuestos. Se ve exactamente como lo que es: rapido, se para, y
+                    // vuelve para atras.
+                    //
+                    // La cadencia se mide ahora en tiempo de MUNDO, que es lo que el campo dibuja, con
+                    // un suelo en tiempo real para que acelerar el reloj no multiplique el coste: este
+                    // horneado es CPU (128x64 muestras del campo de humedad) y a x120 pedirlo 120 veces
+                    // mas costaria 120 veces mas. Ese suelo es el limite real de lo rapido que el cielo
+                    // puede cambiar de forma continua, y decirlo aqui es mejor que fingir que no existe.
+                    static double s_lastBakeWorld = -1e18;
+                    static auto   s_lastBake = std::chrono::steady_clock::now() - std::chrono::hours(1);
+                    const auto   now = std::chrono::steady_clock::now();
+                    const double worldNow = _planetarySystem ? _planetarySystem->simulationTime() : 0.0;
+                    const double sinceRealS  = std::chrono::duration<double>(now - s_lastBake).count();
+                    const double sinceWorldS = worldNow - s_lastBakeWorld;
+                    if (!RHI::valid(m_cloudCoverTex) ||
+                        (sinceWorldS > 2.0 && sinceRealS > 0.10)) {
+                        s_lastBake = now;
+                        s_lastBakeWorld = worldNow;
+                        const int CW = 128, CH = 64;
+                        std::vector<float> cov((size_t)CW * CH, 0.0f);
+                        // ⚠️⚠️ ESTO ERA UN `static` HORNEADO UNA SOLA VEZ Y SIN VALIDAR, Y APAGABA LAS
+                        // NUBES ENTERAS. La humedad sale de `fieldSampleAt`, que necesita el planeta
+                        // con su campo de clima YA horneado; el pase de nubes corre desde el primer
+                        // frame, asi que si se adelanta a eso el campo sale a CERO — y al ser `static`
+                        // se cachea PARA SIEMPRE. Cobertura 0 en todo el planeta, umbral 0,58, cielo
+                        // vacio. Y el pase sigue corriendo (su puerta usa el maximo, que incluye la
+                        // cobertura bajo la camara), asi que el log sale limpio: "SE DIBUJA", atmosfera
+                        // intacta, ni una nube. Reportado como "no hay nubes".
+                        //
+                        // Ahora: miembro (no `static`, que ademas se lo llevaba de un mundo a otro) y
+                        // **no se acepta un horneado degenerado** — si la media sale ~0 el campo no
+                        // estaba listo, no se cachea, y se reintenta en la siguiente pasada.
+                        std::vector<float>& humField = m_cloudHumField;
+                        if (humField.size() != (size_t)CW * CH) {
+                            const auto tHum = std::chrono::steady_clock::now();
+                            humField.assign((size_t)CW * CH, 0.5f);
+                            const double kPiH = 3.14159265358979323846;
+                            for (int y = 0; y < CH; ++y) {
+                                const double lat = (0.5 - ((double)y + 0.5) / CH) * kPiH;
+                                for (int x = 0; x < CW; ++x) {
+                                    const double lon = (((double)x + 0.5) / CW - 0.5) * 2.0 * kPiH;
+                                    const glm::dvec3 dd(std::cos(lat) * std::cos(lon), std::sin(lat),
+                                                        std::cos(lat) * std::sin(lon));
+                                    humField[(size_t)y * CW + x] =
+                                        _planetarySystem->sampleSurface(pcD + dd * (prD + 1.0)).humidity;
+                                }
+                            }
+                            double sh = 0.0; float hmn = 1.0f, hmx = 0.0f;
+                            for (float v : humField) { sh += v; hmn = std::min(hmn, v); hmx = std::max(hmx, v); }
+                            const double hmean = sh / (double)humField.size();
+                            HARUKA_LOGI("Clouds", "campo de HUMEDAD %dx%d en %.0f ms · min %.3f · media "
+                                        "%.3f · max %.3f%s", CW, CH,
+                                        std::chrono::duration<double, std::milli>(
+                                            std::chrono::steady_clock::now() - tHum).count(),
+                                        hmn, hmean, hmx,
+                                        (hmean < 0.02) ? "  <- DEGENERADO: el clima aun no estaba listo,"
+                                                         " se reintenta" : "");
+                            // ⚠️ Un campo plano a cero no se cachea: significa que el clima del planeta
+                            // todavia no existia. Cachearlo dejaba el cielo vacio el resto de la partida.
+                            if (hmean < 0.02) humField.clear();
+                        }
+                        if (humField.size() != (size_t)CW * CH) {
+                            // Sin humedad valida todavia no se hornea la cobertura: mejor esperar un
+                            // par de frames que publicar un campo a cero y apagar el cielo.
+                            m_cloudCoverMax = std::max(m_cloudCoverMax, coverC);
+                        } else {
+                        const auto& wsys = _planetarySystem->weather();
+                        const double kPi = 3.14159265358979323846;
+                        // ⚠️ LA MEDIA VA PONDERADA POR AREA, Y ANTES ERA POR TEXEL. En una rejilla
+                        // equirectangular un texel polar cubre `cos(lat)` veces menos superficie que
+                        // uno ecuatorial, asi que promediar texeles SOBREPONDERA LOS POLOS — y esta
+                        // cifra es la que se lee para decidir si el planeta esta demasiado cubierto.
+                        // Es la misma trampa que ya costo una vez en el fetch de los lagos ("area
+                        // medida en la esfera, no en texeles"). Se imprimen las dos para poder
+                        // comparar con los numeros viejos del historial.
+                        float mx = 0.0f, mn = 1.0f; double sum = 0.0, sumTexel = 0.0, wsum = 0.0;
+                        for (int y = 0; y < CH; ++y) {
+                            const double lat = (0.5 - ((double)y + 0.5) / CH) * kPi;
+                            for (int x = 0; x < CW; ++x) {
+                                const double lon = (((double)x + 0.5) / CW - 0.5) * 2.0 * kPi;
+                                const glm::dvec3 d(std::cos(lat) * std::cos(lon), std::sin(lat),
+                                                   std::cos(lat) * std::sin(lon));
+                                // ⚠️ LA HUMEDAD DE ESE PUNTO, NO LA DE LA CAMARA. Esto pasaba
+                                // `wx.humidity` —la humedad DONDE ESTAS— para el planeta ENTERO: de
+                                // pie en un desierto (H = 0,059 en este mundo) el cielo de todo el
+                                // globo se calculaba como desierto, cobertura ~0,19, y el umbral se
+                                // iba a 0,51: nubes escasas o ninguna, en todas partes, por estar
+                                // parado en el sitio equivocado. Y el pase SEGUIA corriendo, porque
+                                // su puerta usa el maximo — o sea "se ve la atmosfera pero no las
+                                // nubes", sin ningun error en el log.
+                                //
+                                // La humedad es un campo ESTATICO del terreno (sale del bioma), asi
+                                // que se hornea UNA vez y se reutiliza: no hace falta rehacerla con
+                                // la cobertura cada 2 s.
+                                const float c = wsys.cloudCoverAt(d, humField[(size_t)y * CW + x]);
+                                cov[(size_t)y * CW + x] = c;
+                                mx = std::max(mx, c); mn = std::min(mn, c);
+                                const double w = std::cos(lat);   // area del texel en la esfera
+                                sum += c * w; wsum += w; sumTexel += c;
+                            }
+                        }
+                        if (RHI::valid(m_cloudCoverTex)) dev->destroy(m_cloudCoverTex);
+                        RHI::TextureDesc ct;
+                        ct.width = CW; ct.height = CH; ct.format = RHI::Format::R32F;
+                        ct.filter = RHI::Filter::Linear; ct.wrap = RHI::Wrap::Repeat;
+                        ct.mipmaps = false; ct.initialData = cov.data();
+                        m_cloudCoverTex = dev->createTexture(ct);
+                        m_cloudCoverMax = mx;
+                        HARUKA_LOGI("Clouds", "campo de cobertura horneado %dx%d · min %.3f · media "
+                                    "por AREA %.3f (por texel %.3f) · MAX %.3f · bajo la camara %.3f "
+                                    "· humedad de la camara %.3f",
+                                    CW, CH, mn, wsum > 0.0 ? sum / wsum : 0.0,
+                                    sumTexel / (double)(CW * CH), mx, coverC, wx.humidity);
+                        }   // fin del `else` de "hay humedad valida"
+                        if (!RHI::valid(m_cloudCoverDummy)) {
+                            const float one = 1.0f;
+                            RHI::TextureDesc dd;
+                            dd.width = 1; dd.height = 1; dd.format = RHI::Format::R32F;
+                            dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
+                            dd.mipmaps = false; dd.initialData = &one;
+                            m_cloudCoverDummy = dev->createTexture(dd);
+                        }
+                        // (La traza con min/media/max va DENTRO del bloque que las calcula: sacarla
+                        //  fuera la dejaba fuera de ambito y ademas mentia cuando no se horneo nada.)
+                    }
+                    coverMax = std::max(m_cloudCoverMax, coverC);
+                }
+
+                // ⚠️ LA SALIDA RAPIDA VA POR EL MAXIMO DEL PLANETA, no por el punto de la camara.
+                // Con el escalar, estando sobre un claro el pase se saltaba entero y no se dibujaba
+                // la tormenta que tenias a 300 km — que desde orbita es media pantalla.
+                if (coverMax > 0.01f) {
                     glm::dvec3 upD = camD - pcD; const double ul = glm::length(upD);
                     upD = (ul > 1e-9) ? upD / ul : glm::dvec3(0, 1, 0);
                     const float altEye = (float)(ul - prD);
@@ -2329,7 +2592,7 @@ void Application::renderFrameContent() {
                     // float. La resta directa de magnitudes de ~6,37e6 en float se cuantiza a medio
                     // metro, que sobre la base de la nube se ve como que la capa "respira".
                     cp.planetC = glm::vec4(glm::vec3(pcD - camD), (float)prD);
-                    cp.slab    = glm::vec4(wx.cloudBaseM, wx.cloudTopM, coverC, precC);
+                    cp.slab    = glm::vec4(wx.cloudBaseM, wx.cloudTopM, coverMax, precC);
 
                     const glm::vec3 sunDir = _worldSystem->getDominantLightDirection(camD);
                     const glm::vec3 sunCol = _worldSystem->getDominantLightColor(camD);
@@ -2347,8 +2610,25 @@ void Application::renderFrameContent() {
                                         glm::dot(m_windVec, northC) * ct * 0.0008f,
                                         ct, altEye);
 
-                    // Atmósfera: en órbita no hay nube que atravesar (y el fondo ya se encarga).
-                    const float atmoC = 1.0f - glm::smoothstep(0.0f, (float)(prD * 0.02), altEye);
+                    // ⚠️⚠️ ESTO APAGABA LAS NUBES DESDE ORBITA, Y SU PREMISA ERA FALSA POR LOS DOS
+                    // LADOS. Era `1 - smoothstep(0, radio*0.02, altitud)`: en la Tierra eso vale CERO
+                    // a partir de **127 km**, y el shader hace `alpha * u_misc.x`, o sea que a 249 km
+                    // (donde Andoni lo reporto) las nubes se multiplicaban por cero. El comentario
+                    // decia *"en orbita no hay nube que atravesar (y el fondo ya se encarga)"*:
+                    //   · desde fuera no se ATRAVIESAN, pero se VEN — la capa de nubes sobre el
+                    //     planeta es lo mas reconocible de un mundo visto desde el espacio;
+                    //   · y el fondo NO se encarga: `sky.frag` con `u_atmo -> 0` pinta ESPACIO, no
+                    //     nubes, asi que no habia nadie dibujandolas.
+                    //
+                    // La geometria del pase ya soportaba mirar desde ARRIBA de la capa —`cloud_vol.frag`
+                    // tiene el caso `if (hitBase && b0 > 0.0)` que invierte el orden de entrada— y el
+                    // corte contra la profundidad de la escena recorta la cara lejana de la cascara.
+                    // O sea que lo unico que faltaba era dejar de multiplicar por cero.
+                    //
+                    // El campo se conserva (esta en el UBO y el shader lo lee) por si alguna vez hace
+                    // falta atenuar por otra razon; hoy no hay ninguna.
+                    const float atmoC = 1.0f;
+                    (void)altEye;
                     // Pasos: pocos. Esto corre a pantalla completa y lo que hace falta es que el
                     // ESPESOR exista, no que la integral sea exacta.
                     // z = ESCALA del campo horizontal, en 1/metros; su inversa es el ANCHO del
@@ -2363,13 +2643,37 @@ void Application::renderFrameContent() {
                     RHI::Context* cctx = dev->beginFrame();
                     if (cctx) {
                         cctx->blitDepth(sceneTargetPass, m_cloudDepthRT, cw, ch);
-                        RHI::ClearValues keep;
-                        keep.clearColor = false; keep.clearDepth = false;
-                        cctx->beginRenderPass(sceneTargetPass, keep);
-                        if (!RHI::valid(sceneTargetPass)) cctx->setViewport(0, 0, cw, ch);
+
+                        // ── LA MARCHA, EN EL TARGET REDUCIDO ────────────────────────────────────
+                        // Aqui SI se limpia (a transparente): el target es solo de la nube, y si se
+                        // conservara lo del frame anterior la nube se acumularia sobre si misma.
+                        RHI::ClearValues cl;
+                        cl.clearColor = true;  cl.clearDepth = false;
+                        cl.color[0] = cl.color[1] = cl.color[2] = cl.color[3] = 0.0f;
+                        cctx->beginRenderPass(m_cloudRT, cl);
+                        cctx->setViewport(0, 0, m_cloudRTW, m_cloudRTH);
                         cctx->bindPipeline(m_cloudPSO);
                         cctx->bindUniformBuffer(5, m_cloudUBO);
                         cctx->bindTexture(0, dev->getDepthTexture(m_cloudDepthRT));
+                        // ⚠️ INCONDICIONAL: en Vulkan un sampler sin atar es INDEFINIDO, no ceros.
+                        // El shader distingue "sin campo" por `textureSize <= 1` y cae al escalar.
+                        cctx->bindTexture(1, RHI::valid(m_cloudCoverTex) ? m_cloudCoverTex
+                                                                         : m_cloudCoverDummy);
+                        cctx->draw(3);
+                        cctx->endRenderPass();
+
+                        // ── Y LA COMPOSICION SOBRE LA ESCENA, A RESOLUCION COMPLETA ─────────────
+                        RHI::ClearValues keep;
+                        keep.clearColor = false; keep.clearDepth = false;
+                        cctx->beginRenderPass(sceneTargetPass, keep);
+                        // ⚠️ INCONDICIONAL, y no solo cuando no hay target de post: el pase anterior
+                        // dejo el viewport en el tamaño REDUCIDO y en OpenGL `beginRenderPass` no lo
+                        // restablece (Vulkan si). Sin esta linea la nube se componia solo en la
+                        // esquina de 1/4 de lado — medido en el banco: 5,8 % del cuadro en GL contra
+                        // 96,4 % en Vulkan, con el mismo shader y los mismos datos.
+                        cctx->setViewport(0, 0, cw, ch);
+                        cctx->bindPipeline(m_cloudUpPSO);
+                        cctx->bindTexture(0, dev->getColorTexture(m_cloudRT, 0));
                         cctx->draw(3);
                         cctx->endRenderPass();
                     }
@@ -3766,6 +4070,150 @@ void Application::renderMaterialPreview(const Haruka::MaterialComponent& materia
     ctx->endRenderPass();
 }
 
+// ⚠️ ESTO VIVIA DENTRO DE `renderFrame()`, QUE EL JUEGO NO LLAMA NUNCA.
+//
+// El bucle principal (`Application::run`) llama a `renderFrameContent()`; `renderFrame()` es la ruta
+// del EDITOR, que lo invoca desde fuera. Así que todo lo que sigue — vaciar la cola de entidades del
+// cliente, crear el objeto de escena de cada jugador remoto, moverlo, y caducarlo — era codigo muerto
+// en el juego. Sintoma: te conectas, el cliente RECIBE a los demas (medido con una sonda plantada en
+// el punto exacto del spawn: 2 entidades), y en pantalla no hay nadie. Ni un error, ni un log.
+//
+// Peor que invisible: la cola de `pollEntities` es acotada (4096), asi que nadie la vaciaba y el
+// mundo entrante se descartaba en silencio en cuanto se llenaba.
+//
+// Ahora es una funcion, y la llaman LAS DOS rutas: el bucle del juego antes de dibujar (es
+// simulacion, no render) y `renderFrame()` para que el editor siga viendo lo mismo.
+// ⚠️ LA DEFINICIÓN VA DENTRO DEL GUARDIA, como su declaración. Estaba fuera, con un `#ifdef` sólo en
+// el cuerpo, y así el motor dejaba de compilar SIN red: "no declaration matches". No se vio en el
+// juego porque el juego siempre define `HARUKA_NETWORK` — quien lo compila sin red es el EDITOR, y
+// nadie lo había construido desde entonces.
+#ifdef HARUKA_NETWORK
+void Application::adoptWorldObject(uint32_t uuid) {
+    if (!uuid) return;
+    m_locallyOwnedWorld.insert(uuid);
+    // El acuse puede llegar DESPUÉS de la primera difusión que ya trae el objeto: la zona contesta a
+    // quien pidió y a la vez lo mete en su reparto de 10 Hz, y cuál de los dos llega antes no lo
+    // decide nadie. Si la copia ya está creada, se retira; si no, el filtro de arriba la evita.
+    if (_currentScene) _currentScene->removeObject("entity_" + std::to_string(uuid));
+    m_netLastSeen.erase(uuid);
+}
+#endif
+
+void Application::syncNetworkEntities() {
+#ifdef HARUKA_NETWORK
+    if (_currentScene) {
+        // A clock of its own: the TTL below is about wall time since a player was last heard from,
+        // which no frame counter answers.
+        const double nowSeconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        for (const auto& transfer : m_dgs.pollEntities()) {
+            // ⚠️ TWO THINGS THIS LOOP GOT WRONG, and neither could show while the client received
+            // nothing. It does now (`Client::udpLoop`), so both are live:
+            //
+            //   · THE ZONE ECHOES YOU BACK. Its broadcast includes the sender's own entity, so without
+            //     this the local player gets a second, remote-controlled copy of themselves standing
+            //     wherever the server last saw them.
+            //   · AND THIS ADDED A NEW OBJECT PER UPDATE. `addLoadedObject` does `push_back` on the
+            //     scene's vector — the name registry is overwritten, the vector is not — so at 10 Hz
+            //     with N players nearby the scene grew by 10*N objects a second, for ever. An entity
+            //     that is already in the scene is MOVED, not added again.
+            if (transfer.uuid == m_localPlayerUuid) continue;
+            // Y lo que este cliente ya dibuja por su cuenta: lo que TÚ tiraste vuelve por el feed
+            // como cualquier otro objeto del mundo, y crear aquí una segunda copia deja tu objeto
+            // real cayendo debajo de otro idéntico que no se mueve. Ver `adoptWorldObject`.
+            if (m_locallyOwnedWorld.count(transfer.uuid)) continue;
+
+            const std::string name = "entity_" + std::to_string(transfer.uuid);
+            const Haruka::WorldPos where(
+                transfer.chunkX * Haruka::Units::KM + transfer.pos[0],
+                transfer.chunkY * Haruka::Units::KM + transfer.pos[1],
+                transfer.chunkZ * Haruka::Units::KM + transfer.pos[2]
+            );
+            // The wire carries yaw as a uint16 over the full turn, packed by `Client::sendTransform`.
+            // Dropping it, which is what happened, left every remote player facing the same way.
+            const double yawDeg = (double)transfer.angle * (360.0 / 65536.0) - 180.0;
+
+            m_netLastSeen[transfer.uuid] = nowSeconds;
+
+            if (auto existing = _currentScene->getObject(name)) {
+                existing->position = where;
+                existing->rotation.y = yawDeg;
+                continue;
+            }
+
+            auto obj = std::make_shared<Haruka::SceneObject>();
+            obj->name = name;
+            obj->type = (transfer.type == DGS::ENT_PLAYER) ? "Character" :
+                        (transfer.type == DGS::ENT_NPC)    ? "Character" : "Spacecraft";
+            // ⚠️ WITHOUT THIS THEY ARE INVISIBLE. `classifySceneObject` dispatches on the `objectType`
+            // ENUM; the string `type` above is a label. An object left at `UNKNOWN` with no mesh, no
+            // model and no primitive property classifies as `RenderKind::None` — added to the scene,
+            // moved every frame, and never drawn. Ghosts (a neighbouring zone's projection) were being
+            // drawn all along, through a different path that attaches a capsule explicitly, so the
+            // players you could see were the distant ones and the players you could not were the ones
+            // standing next to you.
+            obj->objectType = (transfer.type == DGS::ENT_PLAYER || transfer.type == DGS::ENT_NPC)
+                              ? Haruka::ObjectType::CHARACTER : Haruka::ObjectType::MODEL;
+
+            // ⚠️ UN OBJETO DEL MUNDO NO ES UN JUGADOR SIN MODELO. Lleva el bit STATE_WORLD_OWNED (lo
+            // exime del GC de leases de la zona) y su payload dice QUE es — el otro cliente no puede
+            // adivinar que una mesa es una mesa. Sin leerlo, todo lo que alguien coloque le aparece al
+            // vecino como una capsula, que es el respaldo para lo que no tiene nada que dibujar.
+            if (transfer.state & DGS::STATE_WORLD_OWNED) {
+                obj->type = "Prop";
+                obj->properties["placed"]    = true;
+                obj->properties["fromWorld"] = true;   // no es tuyo: lo puso otro, o estaba ya ahi
+                if (transfer.dataSize > 0) {
+                    const std::string kind((const char*)transfer.data,
+                                           std::min<size_t>(transfer.dataSize, sizeof(transfer.data)));
+                    if (!kind.empty()) obj->modelPath = kind;
+                }
+                // El contador de abajo dice CUANTAS entidades hay, no QUE son. Un jugador y una mesa
+                // que alguien dejo en el suelo suman igual, asi que "veo 2" no distingue haber visto
+                // al vecino de haber visto lo que tiro. Una linea por objeto, solo al crearlo.
+                HARUKA_LOGI("Net", "objeto del mundo %u: '%s'", transfer.uuid,
+                            obj->modelPath.empty() ? "(sin modelo)" : obj->modelPath.c_str());
+            }
+
+            obj->position = where;
+            obj->rotation.y = yawDeg;
+            _currentScene->addLoadedObject(obj);
+        }
+
+        // ⚠️ NOBODY EVER LEAVES OTHERWISE. There is no "this entity is gone" packet and there cannot
+        // usefully be one: a player stops being yours because they walked out of your interest radius,
+        // because their lease expired, or because they closed the game — and from here those are the
+        // same silence. The viewer solves it with a TTL and so does this: an entity not heard from for
+        // `kNetEntityTtlS` is removed. Without it, walking past somebody leaves a statue behind for
+        // the rest of the session.
+        // ⚠️ "NO VEO A NADIE" TIENE TRES CAUSAS Y NINGUNA SE DISTINGUE MIRANDO LA PANTALLA: no
+        // llegan (nadie cerca, o el radio de interes te deja fuera), llegan y no se crean, o se crean
+        // y no se dibujan. Sin este contador hay que adivinar cual de las tres, y ya he adivinado mal
+        // una vez hoy. Una linea cada dos segundos, solo cuando hay red y solo si algo cambia.
+        {
+            static double s_lastReport = 0.0;
+            static size_t s_lastCount  = (size_t)-1;
+            if (nowSeconds - s_lastReport > 2.0 && m_netLastSeen.size() != s_lastCount) {
+                s_lastReport = nowSeconds;
+                s_lastCount  = m_netLastSeen.size();
+                size_t inScene = 0;
+                for (const auto& kv : m_netLastSeen)
+                    if (_currentScene->getObject("entity_" + std::to_string(kv.first))) ++inScene;
+                HARUKA_LOGI("Net", "otras entidades: %zu recibidas · %zu en la escena%s",
+                            m_netLastSeen.size(), inScene,
+                            m_netLastSeen.empty() ? "  (nadie dentro de tu radio de interes)" : "");
+            }
+        }
+
+        for (auto it = m_netLastSeen.begin(); it != m_netLastSeen.end(); ) {
+            if (nowSeconds - it->second < kNetEntityTtlS) { ++it; continue; }
+            _currentScene->removeObject("entity_" + std::to_string(it->first));
+            it = m_netLastSeen.erase(it);
+        }
+    }
+#endif
+}
+
 void Application::renderFrame() {
     auto now = std::chrono::high_resolution_clock::now();
     const std::chrono::duration<float> elapsed = now - _frameStart;
@@ -3775,20 +4223,7 @@ void Application::renderFrame() {
     _lastFrameTimeMs = deltaTime * 1000.0f;
 
 #ifdef HARUKA_NETWORK
-    if (_currentScene) {
-        for (const auto& transfer : m_dgs.pollEntities()) {
-            auto obj = std::make_shared<Haruka::SceneObject>();
-            obj->name = "entity_" + std::to_string(transfer.uuid);
-            obj->type = (transfer.type == DGS::ENT_PLAYER) ? "Character" :
-                        (transfer.type == DGS::ENT_NPC)    ? "Character" : "Spacecraft";
-            obj->position = Haruka::WorldPos(
-                transfer.chunkX * Haruka::Units::KM + transfer.pos[0],
-                transfer.chunkY * Haruka::Units::KM + transfer.pos[1],
-                transfer.chunkZ * Haruka::Units::KM + transfer.pos[2]
-            );
-            _currentScene->addLoadedObject(obj);
-        }
-    }
+    syncNetworkEntities();
 #endif
 
     // In standalone mode (run()), the main loop handles swap + FPS.

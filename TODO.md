@@ -1376,23 +1376,122 @@ Sin versión asignada porque **falta decidir**, no porque falte tiempo.
 
 ---
 
-## 🔴 ANOTADO, SIN HACER — la voluta: la elipse de Gerstner (2026-09-01)
+## ✅ LA VOLUTA SALE (2026-09-07) — y lo que la desbloqueó fue CONCENTRAR, no apretar
 
-La cresta **no puede plegarse**, y ya no es por la longitud de onda: la dispersión de profundidad
-finita está puesta (`oceanWaveNumber` / `harukaWaveNumber`, residuo 1,47e-07) y el tren de 61 m pasa
-a 32,2 m en 3 m de fondo. El jacobiano apenas se movió: 1,2 m de fondo, +0,883 → **+0,864**.
+Historia completa porque las dos hipótesis intermedias eran falsas y las dos llegaron a escribirse aquí:
 
-La causa es otra: `Q = min(0.75/(k·A·N), 1)` acota `Σ Q·A·k ≤ 0,75` **por construcción**, así que el
-jacobiano no puede bajar de 0,25 valga lo que valga `k`. El pliegue pide el desplazamiento horizontal
-real de la ola trocoidal en profundidad finita — **`A/tanh(k·d)`** en la superficie — en vez del `Q`
-ad-hoc.
+1. ❌ *"el adelanto de cresta vive en `sin φ = 0` y no puede mover el jacobiano"*. **FALSO**: el
+   desplazamiento es `H·cos φ·(1+g·cos φ)` y su derivada `−H·sin φ·(1+2g·cos φ)` — entra por el producto.
+2. ✅ Había un **error de derivada** real: se acumulaba `(1+g·cos φ)` en vez de `(1+2g·cos φ)`, o sea
+   la mitad del efecto del adelanto, en la magnitud que decide si la ola rompe. Arreglado en los dos
+   gemelos (alimenta también la NORMAL) y verificado contra la derivada numérica de
+   `oceanDisplacement` — el gemelo del desplazamiento completo, que tampoco existía y es lo que
+   permite que la fórmula deje de ser su propio juez: `peor |analítico − divergencia| = 0,0004`.
+3. ❌ *"la voluta se descarta: haría falta ×8 de escarpado, y `OCEAN_MIN_QUAD_M = 4 m` no la
+   representa"*. **Las dos partes eran falsas.** El techo de 4 m era del **clipmap borrado**; el
+   `quadM` sale ahora del nodo del quadtree. Y el ×8 salía de intentar que UN tren plegase contra los
+   otros siete.
 
-**Ahora es viable, y antes no lo era.** El intento que se revirtió abría `Q` con `k` de aguas
-profundas: como `Q·A = presupuesto/(k·N)` no dependía de la amplitud, en un lago de 30 cm salían los
-mismos ~3 m de desplazamiento que en mar abierto y la lámina se plegaba sobre sí misma. `A/tanh(kd)`
-sí depende de la amplitud y del fondo: con `A ≤ 0,55d` y `k ≈ √(k₀/d)`, en 30 cm da ~0,94 m.
+**La causa real, medida con los autovalores del mapa horizontal** (playa 1:20, peor punto):
 
-⚠️ Al tocarlo, correr `shallow_water_*`: es lo que rompió la vez anterior.
+```
+              lambda1  lambda2    det
+ 12,0 m        0,673    0,746    0,502
+  8,0 m        0,286    0,552    0,158
+  5,0 m        0,192    0,722    0,138
+```
+
+El escarpado por divergencia ya pasaba de 1 (`max(1−jac) = 1,162` a 8 m): compresión sobraba. Pero se
+**repartía entre las dos direcciones**, y un determinante no se anula así — hace falta que UN autovalor
+cruce el cero. La refracción alinea los trenes sólo en parte (un tren oblicuo de 70° entra a 38° con
+5 m de fondo, no a 0°).
+
+**`oceanBreakerGain` / `harukaBreakerGain`**: refuerza el semieje horizontal del **tren 0 refractado** —
+crestas paralelas a la orilla, como se organiza un surf real — en vez de repartir más entre los ocho.
+Gateado por el índice de rompiente arrancando en el **0,78 clásico** (no en el 0,60 del adelanto:
+peraltarse es una cosa y volcar es otra). Resultado:
+
+```
+                max(1-jac)   min(det)   horiz max
+OCEANO 12 m       0,580       0,502      3,028 m   <- sin tocar, el refuerzo no llega
+OCEANO  5 m       1,458      -0,121      9,787 m   <- PLIEGA  (lambda = -0,127 y 0,948)
+OCEANO  3 m       1,355      -0,086      7,564 m   <- PLIEGA
+CHARCA 0,30 m     0,403       0,601      0,879 m   <- IDENTICA a antes de todo esto
+```
+
+⚠️ **Y sin refracción NO pliega** (det +0,064 contra −0,055 con ella). Las dos mitades juntas son lo
+que demuestra que el mecanismo es la CONCENTRACIÓN y no simplemente más compresión; las dos están
+fijadas como CHECK.
+
+⚠️ **La regresión de 2026-08-29 no puede volver, y está medida como guarda en `ocean_break_fold`**: el
+índice de rompiente no llega a 0,78 en una charca, y el refuerzo es una FRACCIÓN de `oceanHorizAmp`,
+que ya escala con la amplitud. Charca de 30 cm con fetch de 100 m: horizontal máx **0,879 m** sobre
+celdas de 4,4 m, determinante **+0,609**.
+
+⚠️ **A 1,2 m de fondo NO pliega, y es correcto**: ahí el límite de rompiente ya ha aplastado la
+amplitud (`Σamp ≤ 0,55·d`). La voluta vive en la BARRA, no en la orilla — donde rompe una ola de verdad.
+
+⚠️ **EL COSTE, sin verificar en pantalla**: el desplazamiento horizontal pasa de 5,66 a **9,79 m** a 5 m
+de fondo (~15 % de la longitud de onda local, geométricamente plausible para una cresta que se lanza).
+Nadie ha mirado si la malla del agua lo lleva sin estirones visibles.
+
+## ✅ HECHO — la espuma llega a la FÍSICA, y refracción en la velocidad (2026-09-07)
+
+- **`oceanFoam` no la consultaba nadie**: la rompiente sólo existía para la cámara. Cadena
+  `sampleWaterFoam` → `IWorldProvider::waterFoamAt` (default 0, inerte para el DGS y los tests) →
+  flotación. El agua blanca está aireada: **−25 % de empuje** (flota 1,24 m más bajo) y **arrastre
+  ×3** (a 0,36 s dentro del agua va a ×1,46). Con espuma 0 el resultado es **bit a bit** el de antes.
+- **`oceanWaveVelocity` aceptaba `upSlope` y no lo usaba nunca**: la altura refractaba al perder fondo
+  y la velocidad no, así que en una playa el agua empujaba en la dirección del mar abierto. El llamante
+  real sí la pasaba. No se veía porque **todo el test usaba las sobrecargas SIN pendiente**, donde
+  `oceanRefract` devuelve `d0` exacto. Con pendiente: error 3,206e-04 m/s · la versión con el bug
+  0,057 m/s = **179× peor**.
+
+## ✅ HECHO — BORREGUILLOS de viento + agua blanca de rompiente (2026-09-07)
+
+El océano salía liso y oscuro hasta la costa. Ahora son dos términos separados **con su propio
+oráculo**, y llegar ahí costó tres intentos fallidos que quedan aquí porque cada uno enseña algo:
+
+1. ❌ **`1−jac` con umbral absoluto.** Calibra en mar abierto (1,47 % contra el 1,562 % de Monahan) y
+   **blanquea la costa**: espuma media 0,283 a 8 m. `1−jac` es la DIVERGENCIA del mapa horizontal y
+   lleva dentro el `1/tanh(k·d)` de la elipse orbital, que en el bajío ensancha la órbita sin que la
+   ola se incline más. **La divergencia no es el escarpado.** ⚠️ Éste es el bug que se vio en pantalla.
+2. ❌ **Normalizado por su σ.** Arregla la costa y **mata la dependencia del viento**.
+3. ❌ **La pendiente `|∇η|` con umbral absoluto.** Bien en profundo, pero la cola de una gaussiana es
+   exponencial: **×18,7 de cobertura con ×1,27 de viento**.
+4. ✅ **La pendiente con el umbral DERIVADO de la cobertura empírica**: se conoce la cobertura que toca
+   (Monahan) y la escala de la distribución (σ), así que sale de invertir la cola. Monahan **por
+   construcción a cualquier viento**.
+
+⚠️ Y hacía falta porque el mar de PM de este motor escala amplitud y λ **las dos con `U²`**, así que su
+escarpado es invariante con el viento y ningún criterio de pendiente podía dar `U^3,41` por sí solo.
+
+La blancura que crece hacia la costa la trae `shoreFoam`, que ahora mira el **índice de rompiente** y no
+metros de profundidad. Sin eso el perfil salía INVERTIDO (33 % a 8 m y 0 % a 1,5 m): el límite de
+rompiente aplasta la amplitud justo donde la ola revienta, así que la pendiente cae — y un criterio de
+pendiente no ve espuma donde la ola YA se rompió.
+
+```
+cobertura:  400 m 1,364 % · 60 m 1,362 % · 20 m 1,465 % · 8 m 1,873 % · 3 m 100 %   (Monahan 1,562 %)
+viento 11,44 -> 15,05 m/s (mar de PM entero): 1,364 % -> 4,750 %   (Monahan 3,982 %)
+```
+
+⚠️ **Mi contraprueba de viento no era un cambio de viento**: multiplicaba amplitudes dejando λ quietas,
+o sea un mar más ESCARPADO. Ahora usa `oceanStateFromWind`, que ya existía.
+
+⚠️ **NaN cazado por el test del `fade = 0`**: sin ola σ = 0 y `smoothstep(0,0,·)` divide por cero. Un
+NaN en la espuma no se ve como espuma rara, se lleva el píxel. Suelo de 1e-6 en los dos gemelos.
+
+⚠️ **La lección**: el banco tenía paridad, límites analíticos y contrapruebas, y aun así el criterio
+medía la magnitud EQUIVOCADA. Ningún test podía cazar eso — hizo falta mirar la pantalla.
+
+## 🟡 `smoothstep` CON BORDES INVERTIDOS EN GLSL ES UB POR ESPECIFICACIÓN (2026-09-07)
+
+La espuma usa `smoothstep(0.55, 0.05, jac)` y `smoothstep(1.6, 0.7, ...)`: `edge0 > edge1`, que el
+spec de GLSL declara **comportamiento indefinido**. Todas las implementaciones reales lo calculan
+como `t = clamp((x−e0)/(e1−e0), 0, 1)` —lo mismo que `glm::smoothstep`— y el careo CPU↔GPU pasa hoy
+en los dos backends, pero es una apuesta sobre el driver y no una garantía del lenguaje. Si algún día
+un backend nuevo da espuma rara, mirar aquí primero.
 
 ## 🤔 Sin decidir (2026-08-24) — el mar, medido y esperando criterio
 

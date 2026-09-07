@@ -420,8 +420,55 @@ public:
     }
 
 #ifdef HARUKA_NETWORK
-    void sendPlayerTransform(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot);
-    void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text);
+    /// Lo que este jugador dice de si mismo, en UNA llamada. `data` es el payload del juego (vida,
+    /// inventario, lo que sea); `size = 0` significa "sin cambios", no "vacio".
+    void sendPlayerState(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot,
+                         const uint8_t* data = nullptr, uint16_t size = 0);
+    /// ⚠️ WITHOUT THIS THE PLAYER IS CAPPED AT ~20 m/s AND NOBODY IS TOLD. The zone's S1 filter allows
+    /// `maxSpeed * dt + 1 m` between updates and believes the most recent packet, and a transform that
+    /// declares nothing declares zero — leaving the 1 m of slack as the only thing letting anyone move.
+    /// At 20 Hz that is 72 km/h; a sprint, a vehicle or a descent is silently discarded by the server,
+    /// which from the client looks exactly like packet loss. Call it whenever the movement mode changes.
+
+
+
+
+    /// The cluster's world clock (see `Haruka::Network::hasWorldTime`). When there is one, the
+    /// planetary simulation is DRIVEN by it instead of accumulating the local frame delta, which is
+    /// what puts every player in the same day and the same storm.
+    /// Pide al cluster colocar una pieza (ver `Haruka::Network::sendPlacePiece`).
+    void sendPlacePiece(uint32_t actor, uint16_t typeId,
+                        const Haruka::WorldPos& pos, const glm::dquat& orient);
+    /// Pide al cluster tirar un objeto al mundo (ver `Haruka::Network::sendDropItem`).
+    /// @return el `requestId` con el que reconocer el veredicto, o 0 si no se pudo pedir.
+    uint32_t sendDropItem(uint32_t actor, const Haruka::WorldPos& pos, const std::string& kind);
+    /// Los veredictos de acciones que han llegado desde la ultima vez. Un juego que coloca al
+    /// instante necesita esto para poder DESHACERLO cuando el servidor dice que no.
+    std::vector<DGS::ActionAck> pollActionResults();
+    uint32_t networkSessionUuid() const;
+    bool   networkHasWorldTime() const;
+    double networkWorldTimeSeconds() const;
+
+    /// Which uuid is US, so the world feed does not spawn a second copy of the local player: the zone
+    /// broadcasts the sender's own entity back along with everyone else's. Set it before connecting.
+    void setLocalPlayerUuid(uint32_t uuid) { m_localPlayerUuid = uuid; }
+
+    /// "Este objeto del mundo YA LO TENGO YO": el juego lo colocó al pedirlo, con su física, y el
+    /// servidor lo devuelve por el feed como cualquier otro. Sin esto aparecen DOS — el tuyo, que
+    /// cae y rueda, y el del servidor, clavado donde lo pediste y sin físicas. Medido soltando una
+    /// mesa: la copia quieta es la que se ve, y parece que el objeto se ha "estancado".
+    /// Se llama con el uuid que trae el acuse de la acción; si la entidad ya había llegado antes
+    /// que el acuse, retira la copia que se creó.
+    void adoptWorldObject(uint32_t uuid);
+
+    /// The engine's opaque per-entity payload (an inventory, typically). The wire carries `dataSize`,
+    /// so an empty one costs nothing; there was simply no way to reach it from a game.
+
+    /// `channel` decides which wire it takes, because it decides who may hear it: `CHAT_LOCAL` goes
+    /// over the UDP link to the ZONE and is filtered by the same interest radius as the world itself;
+    /// guild and global go to the social node. Defaults to global.
+    void sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text,
+                        uint8_t channel = DGS::CHAT_GLOBAL);
     std::vector<DGS::ChatMessage> pollPlayerChats();
     bool connectDGS(const std::string& headHost, int headPort,
                     const std::string& email,    const std::string& password,
@@ -451,6 +498,9 @@ public:
     /** @brief Builds the render queue with frustum culling and LOD management. */
     void buildRenderQueue();
     /** @brief Renders one frame and updates timing state. */
+    /// Drena lo que el cluster ha mandado y lo convierte en objetos de la escena (ver la nota larga
+    /// en la definicion). Es SIMULACION, no render: el bucle del juego la llama antes de dibujar.
+    void syncNetworkEntities();
     void renderFrame();
     /** @brief Frame rendering body (logic-only path). */
     void renderFrameContent();
@@ -462,6 +512,14 @@ private:
     
 #ifdef HARUKA_NETWORK
     DGS::Client m_dgs;
+    uint32_t    m_localPlayerUuid = 0;   // 0 = not set: nothing is filtered
+    // uuid → when it was last heard from, for the TTL that removes players who left. See the loop in
+    // `application_render.cpp`: nothing on the wire says "gone".
+    std::map<uint32_t, double> m_netLastSeen;
+    /// Objetos del mundo que este cliente ya dibuja por su cuenta (los que él mismo pidió). Ver
+    /// `adoptWorldObject`.
+    std::unordered_set<uint32_t> m_locallyOwnedWorld;
+    static constexpr double    kNetEntityTtlS = 5.0;
     std::vector<Haruka::SceneObject> m_ghostObjects;
 
     enum class LoginState { Idle, Show, Connecting, Failed, Done };
@@ -674,6 +732,23 @@ private:
     /// Copia del depth de la escena: no se puede samplear la profundidad del MISMO target al que se
     /// dibuja (realimentación). Mismo patrón que usa el fluido para que sus partículas se ocluyan.
     Haruka::RHI::RenderPassHandle   m_cloudDepthRT;
+    /// Cobertura de nube del PLANETA por direccion (equirect 128x64, R32F), horneada del
+    /// `WeatherSystem` cada 2 s. Antes el pase recibia UN escalar —el del punto bajo la camara— y lo
+    /// aplicaba a todo lo visible: desde orbita, miles de km con el tiempo de un solo sitio.
+    Haruka::RHI::TextureHandle      m_cloudCoverTex;
+    Haruka::RHI::TextureHandle      m_cloudCoverDummy;   // 1x1: nunca un sampler sin atar en Vulkan
+    float                           m_cloudCoverMax = 0.0f;
+    /// Humedad por direccion (equirect 128x64), horneada del terreno. Es ESTATICA (la fija el bioma),
+    /// pero no se puede hornear hasta que el planeta tiene su campo de clima: si se adelanta sale a
+    /// cero y, cacheada, deja el cielo sin una nube el resto de la partida. Vacia = aun no lista.
+    std::vector<float>              m_cloudHumField;
+    /// Target REDUCIDO donde se marcha la nube, y el pipeline que lo sube a la escena. El pase cuesta
+    /// ~80 hashes de ruido por paso y ~88 pasos por pixel: medido en el banco son 8,76 ms a 256x256,
+    /// del orden de 150-280 ms a 1920x1080. Y bajar los pasos NO lo arregla —de 64 a 24 el coste solo
+    /// cae al 58 %—, porque el termino que manda es el pixel. Por eso se dibuja a 1/N y se compone.
+    Haruka::RHI::RenderPassHandle   m_cloudRT;
+    Haruka::RHI::PipelineHandle     m_cloudUpPSO;
+    int  m_cloudRTW = 0, m_cloudRTH = 0;
     int  m_cloudDepthW = 0, m_cloudDepthH = 0;
     /// Formato con el que se creó la copia de profundidad. Tiene que seguir al de la FUENTE del blit
     /// (backbuffer o target de post), que cambia al encender/apagar el post-proceso: si no, el blit

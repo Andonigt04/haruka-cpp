@@ -226,14 +226,53 @@ public:
     // que la especificación se repite aquí a propósito — es la frontera de la librería, no un descuido.
 
     struct RailSpec {
-        enum class Dof   { Hinge, Slider };
+        /// CUERDA: no es un tercer grado de libertad, es una unión que sólo TIRA. Se modela como la
+        /// polea de Jolt con sus dos puntos fijos en el mismo sitio —el ANILLO—, así que su longitud
+        /// es `|amarre A -> anillo| + |anillo -> amarre B|`: una cuerda que pasa por un anillo, tal
+        /// cual. Cobrarla es bajar su longitud máxima, y por eso puede plegar un portalón de dos
+        /// hojas: al acortar el recorrido tira primero de lo que menos se resiste.
+        ///
+        /// Lo que la distingue de una barra es el mínimo: `limits.x = 0` deja que se AFLOJE. Una
+        /// unión que también empujara sería un vástago, y un portalón colgado de un vástago no se
+        /// cae solo — que es justo lo que tiene que hacer.
+        /// WELD: sin juego ninguno. Es el pestillo — ver `addLatch`. Está en el enum y no como un
+        /// caso aparte porque `updateRails` recorre TODOS los raíles y hace un `static_cast` según el
+        /// dof: marcar un pestillo como `Slider` para salir del paso habría casteado un
+        /// `FixedConstraint` a `SliderConstraint` y leído basura.
+        enum class Dof   { Hinge, Slider, Rope, Weld };
         enum class Drive { Manual, Motor, Spring };
         Dof        dof   = Dof::Hinge;
-        glm::dvec3 anchor{0.0};             ///< punto del eje, en MUNDO (double; se rebaja al marco local)
+        glm::dvec3 anchor{0.0};             ///< punto del eje, en MUNDO (double; se rebaja al marco local).
+                                            ///< En una CUERDA es el ANILLO por el que pasa.
+        /// Sólo CUERDA: dónde se amarra en cada cuerpo, en MUNDO. Con el raíl de bisagra o guía los
+        /// dos cuerpos se juntan en `anchor`; una cuerda se ata en dos sitios distintos y pasa por un
+        /// tercero, así que hacen falta los tres puntos.
+        glm::dvec3 tieA{0.0}, tieB{0.0};
         glm::dvec3 axis{0.0, 1.0, 0.0};     ///< eje del giro/deslizamiento, en MUNDO
-        glm::dvec2 limits{0.0, 90.0};       ///< [min,max]: GRADOS si Hinge, METROS si Slider
+        glm::dvec2 limits{0.0, 90.0};       ///< [min,max]: GRADOS si Hinge, METROS si Slider/Rope
         Drive      drive      = Drive::Manual;
         double     motorForce = 0.0;        ///< N·m (Hinge) o N (Slider). Solo con Drive::Motor
+        /// A qué RITMO obedece el motor: m/s en una cuerda o guía, grados/s en una bisagra. 0 = al
+        /// instante.
+        ///
+        /// ⚠️ Hace falta porque un cabrestante no teletransporta. Sin esto, pedirle una longitud a
+        /// una cuerda la ponía de golpe y el portalón daba un tirón; y la alternativa fácil —irla
+        /// acortando un poco cada frame— ataría el mecanismo a los fps, que es justo lo que este
+        /// motor no hace en ningún otro sitio. El avance se aplica en `updateRails`, que corre
+        /// dentro del PASO FIJO, así que la maniobra dura lo mismo a 30 que a 200 fps.
+        double     speed = 0.0;
+        /// EL MUELLE, y sólo se miran con `Drive::Spring`. `compliance` es 1/k (m/N en una guía,
+        /// rad/(N·m) en una bisagra) y `damping` es la `c` de `F = -k·x - c·v`. Van a
+        /// `ESpringMode::StiffnessAndDamping` de Jolt tal cual: `k = 1/compliance`.
+        ///
+        /// ⚠️ `Drive::Spring` NO HACÍA NADA hasta el 2026-09-07. `addRail` sólo configuraba el motor
+        /// `if (drive == Motor)`, así que un muelle salía como un deslizante LIBRE con topes: se
+        /// desplomaba hasta el fondo del recorrido y se quedaba ahí. El reposo del muelle es SIEMPRE
+        /// el 0 —la postura de montaje, que es lo que `game/ports/port.h` dice que significan los
+        /// límites—, y no un extremo: así el signo del recorrido no depende de en qué orden le
+        /// tocaran los dos cuerpos a `addRail`, que es algo que el llamante no controla.
+        double     compliance = 0.0;
+        double     damping    = 0.0;
         double     breakForce = 0.0;        ///< la unión CEDE por encima de esto; <=0 = irrompible
     };
 
@@ -242,7 +281,44 @@ public:
         double force   = 0.0;    ///< magnitud que atraviesa la unión ahora mismo
         bool   blocked = false;  ///< el motor no puede con lo que se le opone → se queda a medias
         bool   broken  = false;  ///< la unión cedió; el mecanismo ya no obedece
+        /// ⚠️ Y DÓNDE ESTÁ, que es la otra mitad y faltaba. Esto decía cómo está el mecanismo y se
+        /// callaba dónde: quien quisiera dibujarlo o inspeccionarlo tenía que guardarse el `RailSpec`
+        /// por su cuenta, en paralelo al id, y mantener las dos listas de acuerdo. El raíl ya sabe su
+        /// eje y sus topes — el motor los guarda para simular—, así que los cuenta.
+        RailSpec spec{};
     };
+
+    /**
+     * @brief CLAVA dos cuerpos: una unión rígida, sin grados de libertad. Devuelve su id, o -1.
+     *
+     * Es el pestillo. Un portalón izado y colgando de la cuerda sigue siendo un péndulo: cabecea con
+     * cada ola y la cuerda es lo único que lo sujeta. Estibado de verdad se ENCAJA en la borda y deja
+     * de tener juego — lo que se mueve con el barco no es que la cuerda lo siga, es que ya es parte
+     * del casco.
+     *
+     * Se quita con `removeRail`, que es lo que suelta la maniobra otra vez.
+     */
+    int  addLatch(const std::string& bodyA, const std::string& bodyB, const glm::dvec3& point);
+
+    /**
+     * @brief Los cuerpos de `bodyNames` dejan de chocar ENTRE LAS PAREJAS indicadas (índices en esa
+     *        lista). Todo lo demás sigue chocando como siempre.
+     *
+     * ⚠️ HACÍA FALTA Y NO EXISTÍA. Este motor sólo tiene dos capas (`NON_MOVING`/`MOVING`) y ningún
+     * filtro por grupo: TODO lo móvil choca con todo lo móvil, incluidas dos piezas que una
+     * restricción mantiene unidas a propósito. Una suspensión telescópica es justo ese caso — la
+     * camisa y el vástago se solapan 0,35 m porque uno DESLIZA DENTRO del otro—, así que el solver
+     * de contactos estaba empujándolos para separarlos mientras el muelle tiraba: dos sistemas
+     * peleándose por la misma pieza. Lo mismo con el brazo que abraza la rueda o el pestillo que
+     * encaja un portalón en la borda.
+     *
+     * Se resuelve con el `GroupFilterTable` de Jolt: un grupo por vehículo, un subgrupo por cuerpo,
+     * y se desactivan sólo las parejas que van unidas. La banda de oruga y la rueda NO son una de
+     * ellas —ahí no hay restricción, hay contacto— y siguen chocando, que es lo que sostiene el
+     * vehículo.
+     */
+    void setNoCollidePairs(const std::vector<std::string>& bodyNames,
+                           const std::vector<std::pair<int, int>>& pairs);
 
     /** @brief Une dos cuerpos por un raíl. Devuelve el id, o -1 si algún cuerpo no existe.
      *         `bodyA` es el marco (el casco) y `bodyB` la hoja (la puerta). */

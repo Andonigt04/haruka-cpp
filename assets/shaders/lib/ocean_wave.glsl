@@ -172,8 +172,178 @@ float harukaBreakiness(float depthM, float fetchM, float quadM) {
  * de verdad pide shoaling de longitud de onda, que es otro trabajo. El parámetro se queda para que
  * la firma no cambie el día que se retome.
  */
+/**
+ * @brief REFRACCION por el fondo. Gemelo EXACTO de `oceanRefract`.
+ *
+ * ⚠️ No existia: `D` era la direccion del tren y NO dependia del fondo, asi que las olas llegaban a
+ * la playa con el angulo del mar abierto. En el mar real la ola se frena al perder fondo, gira, y
+ * entra casi paralela a la orilla — por eso las crestas se ven paralelas a la playa.
+ *
+ * Snell para ondas de agua: el componente del vector de onda A LO LARGO de la isobata se conserva.
+ * En agua profunda `k == k0` y devuelve `d0` exacto, asi que el mar abierto no cambia.
+ *
+ * `upSlope` = unitario en el plano tangente hacia agua MENOS profunda. El vector NULO = sin dato.
+ */
+vec3 harukaRefract(vec3 d0, vec3 upSlope, vec3 up, float k0, float k) {
+    float slopeLen = length(upSlope);
+    if (slopeLen < 1.0e-6 || k <= 0.0 || k0 <= 0.0) return d0;
+    vec3  nS = upSlope / slopeLen;
+    vec3  al = cross(up, nS);
+    float alLen = length(al);
+    if (alLen < 1.0e-6) return d0;
+    vec3  aU = al / alLen;
+
+    float a = dot(d0, nS);
+    float b = dot(d0, aU);
+    float kAlong = k0 * b;
+    float k2 = k * k - kAlong * kAlong;
+    // Reflexion total interna: la ola viaja por la isobata. Solo yendo hacia agua mas honda.
+    if (k2 <= 0.0) return (b >= 0.0) ? aU : -aU;
+    float kAcross = sqrt(k2) * ((a >= 0.0) ? 1.0 : -1.0);
+    vec3  v = nS * kAcross + aU * kAlong;
+    float vl = length(v);
+    return (vl > 1.0e-9) ? (v / vl) : d0;
+}
+
 float harukaSteepness(float k, float amp, float breakiness) {
     return min(0.75 / (k * amp * float(HARUKA_WAVES) + 1e-4), 1.0);
+}
+
+/// Techo del escarpado TOTAL. Gemelo de `OCEAN_MAX_STEEP`. Es el mismo 0,75 que imponia
+/// `harukaSteepness`, conservado a proposito: la formula nueva no puede quedar mas escarpada que la
+/// vieja en ningun punto, asi que el pliegue del agua interior que obligo a revertir la voluta no
+/// puede volver por aqui.
+#define HARUKA_MAX_STEEP 0.75
+
+/**
+ * @brief Semieje HORIZONTAL de la orbita de Gerstner en fondo finito (m). Gemelo de `oceanHorizAmp`.
+ *
+ * ⚠️ El desplazamiento horizontal era `Q·A` con `Q = 0.75/(k·A·N)`, o sea `0.75/(k·N)`: **no dependia
+ * de la amplitud**. Una charca de 30 cm recibia el mismo vaiven que el mar abierto. La orbita real es
+ * una ELIPSE de semiejes `A/tanh(k·d)` (horizontal) y `A` (vertical): circulo en agua profunda,
+ * aplastada y ancha en somero. Y escala con `A`, que es lo que faltaba.
+ */
+float harukaHorizAmp(float k, float amp, float depthM) {
+    // Suelo del tanh: sin el, profundidad exactamente 0 en la orilla da NaN y se lleva el parche.
+    float th = max(tanh(k * max(depthM, 0.0)), 1.0e-3);
+    return amp / th;
+}
+
+/// Adelanto de la cresta al romper, como fraccion del semieje horizontal. Gemelo de `oceanCurlGain`.
+///
+/// ⚠️ Medido: con la orbita eliptica correcta el escarpado total llega como mucho a 0,818 y plegar
+/// pide pasar de 1 — y quitando el tope entero se queda igual. No es el tope quien lo impide, es el
+/// limite de rompiente. Lo que le falta a la ola no es escarpado, es ASIMETRIA: una ola que revienta
+/// tiene la cara delantera casi vertical y la cresta adelantada respecto a su columna. Se anade como
+/// un empujon del horizontal concentrado en `cos φ > 0`, proporcional a la amplitud — que es lo que
+/// impide que vuelva el pliegue del agua interior del intento revertido.
+#define HARUKA_CURL_MAX 1.10
+#define HARUKA_BREAKER_MAX 1.60  // refuerzo direccional del tren que rompe. Gemelo de OCEAN_BREAKER_MAX
+#define HARUKA_SKEW_MAX 0.25   // tope del 2º armonico: por encima al seno le sale un monticulo
+// Banda de escarpado local (`1 - jacobiano`) en la que aparece la espuma de CRESTA. El punto medio
+// (0,21) es el percentil que deja la cobertura de Monahan (1,56 % a 11,44 m/s) en mar abierto.
+// ⚠️ Gemelos de `OCEAN_WHITECAP_LO` / `OCEAN_WHITECAP_HI`.
+// Ajuste que liga la cola de la distribucion de pendientes con la cobertura empirica: si `|grad eta|`
+// fuera gaussiano isotropo el umbral seria `sigma*sqrt(-2 ln W)`; los ocho trenes no cubren todas las
+// direcciones, asi que la cola real es mas estrecha. Medido: percentil 98,44 = 0,186 con sigma 0,0981,
+// o sea 1,897*sigma frente a 2,885 -> 0,657. ⚠️ Gemelos de OCEAN_WHITECAP_*.
+#define HARUKA_WHITECAP_FIT 0.657
+#define HARUKA_WHITECAP_LO  0.769
+#define HARUKA_WHITECAP_HI  1.250
+
+/// Indice de rompiente `H/d`: la altura que la ola QUIERE tener contra el fondo que hay. Gemelo de
+/// `oceanBreakIndex`. Con la altura SIN recortar: el tope es quien la aplasta, asi que preguntarle a
+/// la altura ya recortada si esta rompiendo seria circular.
+float harukaBreakIndex(float depthM, float fetchM, float quadM) {
+    if (!(depthM > 1.0e-4)) return 0.0;
+    float green = harukaGreenGain(depthM) * harukaFetchFactor(fetchM);
+    float sum = 0.0;
+    for (int i = 0; i < HARUKA_WAVES; ++i) {
+        vec4 W = harukaWaveAt(i);
+        sum += W.y * harukaShortWaveFade(harukaWaveNumber(6.2831853 / W.x, depthM), quadM);
+    }
+    return 2.0 * sum * green / depthM;
+}
+
+float harukaCurlGain(float depthM, float fetchM, float quadM) {
+    // ⚠️ Del indice de rompiente, no de `breakiness`: ese solo despega cuando el tope muerde
+    // (`H/d = 1,1`) y romper empieza en 0,78, asi que la franja caia en 0,05-1,65 m cuando una ola de
+    // 2,80 m rompe hacia 3,6 m. 0,78 es el indice clasico y 1,1 el tope del motor; se arranca en 0,60
+    // porque la cara delantera se empina antes de plegarse.
+    return HARUKA_CURL_MAX * smoothstep(0.60, 1.10, harukaBreakIndex(depthM, fetchM, quadM));
+}
+
+/// 2º ARMONICO de UN TREN, del Stokes de segundo orden. Gemelo de `oceanStokesSkew`.
+///
+/// ⚠️ Antes era una CONSTANTE (0,30) igual para los ocho trenes, con una puerta por profundidad. Eso
+/// no es Stokes: la asimetria de una ola sale de SU escarpado (`k·a`) y de SU relacion con el fondo
+/// (`k·d`), asi que un tren largo en 2 m se peralta mucho y uno corto casi nada.
+///
+///     a2 = (k·a²/4) · cosh(kd)·(2 + cosh 2kd) / sinh³(kd)      =>   S = a2/a
+///
+/// Limites: `kd -> inf` da el factor 2, o sea `S = k·a/2` (Stokes profundo); `kd -> 0` va como
+/// `3/(kd)³`, el numero de Ursell — que es por lo que Stokes deja de valer en somero y hace falta el
+/// tope. El tope 0,25 tampoco es un ajuste: con `S > 0,25` a `η = a(sin φ − S cos 2φ)` le salen dos
+/// extremos de mas (en `sin φ = −1/(4S)`) y al seno le crece un monticulo secundario.
+float harukaStokesSkew(float k, float amp, float depthM) {
+    if (!(k > 0.0) || !(amp > 0.0)) return 0.0;
+    float kd = k * max(depthM, 0.02);
+    // Salida rapida obligatoria: por encima de kd ~ 10, cosh/sinh DESBORDAN y el cociente es inf/inf.
+    float f = (kd >= 10.0) ? 2.0
+                           : cosh(kd) * (2.0 + cosh(2.0 * kd)) / pow(sinh(kd), 3.0);
+    return min(0.25 * k * amp * f, HARUKA_SKEW_MAX);
+}
+
+/// Refuerzo DIRECCIONAL de la rompiente. Gemelo de `oceanBreakerGain`.
+///
+/// ⚠️ ES LO QUE HACE QUE UNA OLA VUELQUE, y no por meter mas compresion: por CONCENTRARLA. El
+/// escarpado por divergencia ya pasaba de 1, pero se repartia entre las dos direcciones del mapa
+/// horizontal y un determinante no se anula asi — hace falta que UN autovalor llegue a 0. Medido en
+/// una playa 1:20: a 5 m los autovalores eran 0,192 y 0,722. Reforzando solo el TREN 0 REFRACTADO
+/// (crestas paralelas a la orilla, como un surf real) pasan a -0,127 y 0,948: pliega.
+///
+/// Arranca en el 0,78 clasico —el indice al que una ola revienta— y no en el 0,60 del adelanto de
+/// cresta: peraltarse es una cosa y volcar es otra.
+///
+/// ⚠️ El agua interior esta a salvo por DOS puertas, y las dos se miden: el indice de rompiente no
+/// llega a 0,78 en una charca, y el refuerzo es una FRACCION de `harukaHorizAmp`, que ya escala con la
+/// amplitud. Una charca de 30 cm sale identica (horizontal max 0,879 m, determinante +0,609).
+/// Fraccion de superficie con BORREGUILLOS en mar abierto (Monahan & O'Muircheartaigh 1980):
+/// `W = 3,84e-6 * U^3,41`, con el viento DEDUCIDO del propio estado (`Hs = 4*sqrt(sum a^2/2)`,
+/// `U = sqrt(Hs*g/0,21)`). Gemelo de `oceanWhitecapCoverage`. Es el oraculo del que sale el umbral de
+/// espuma de cresta, en vez de elegirlo a mano.
+float harukaWhitecapCoverage() {
+    float sum2 = 0.0;
+    for (int i = 0; i < HARUKA_WAVES; ++i) { float a = harukaWaveAt(i).y; sum2 += a * a; }
+    float Hs = 4.0 * sqrt(sum2 * 0.5);
+    if (Hs <= 1e-4) return 0.0;
+    float U = sqrt(Hs * HARUKA_G / 0.21);
+    return 3.84e-6 * pow(U, 3.41);
+}
+
+float harukaBreakerGain(float depthM, float fetchM, float quadM) {
+    return HARUKA_BREAKER_MAX * smoothstep(0.78, 1.20, harukaBreakIndex(depthM, fetchM, quadM));
+}
+
+/// Factor COMUN que impide que la lamina se pliegue sobre si misma. Gemelo de `oceanSteepScale`.
+/// Se encoge la ola ENTERA conservando su forma, igual que hace `harukaBreakScale` con la altura.
+float harukaSteepScale(float depthM, float fetchM, float quadM) {
+    float green = harukaGreenGain(depthM) * harukaFetchFactor(fetchM);
+    float brk   = harukaBreakScale(depthM, fetchM, quadM);
+    float sum   = 0.0;
+    for (int i = 0; i < HARUKA_WAVES; ++i) {
+        vec4  W   = harukaWaveAt(i);
+        float k0  = 6.2831853 / W.x;
+        float k   = harukaWaveNumber(k0, depthM);
+        float amp = W.y * green * brk * harukaShortWaveFade(k, quadM);
+        sum += k * harukaHorizAmp(k, amp, depthM);
+    }
+    // El techo SUBE donde la ola rompe: con 0,75 fijo la cresta no podia plegarse nunca. Fuera de esa
+    // franja el techo es el de antes, asi que el mar abierto no cambia.
+    float ceiling = HARUKA_MAX_STEEP
+                  + (1.0 + HARUKA_CURL_MAX - HARUKA_MAX_STEEP)
+                    * harukaCurlGain(depthM, fetchM, quadM) / max(HARUKA_CURL_MAX, 1e-6);
+    return (sum > ceiling && sum > 1e-6) ? (ceiling / sum) : 1.0;
 }
 
 /**
@@ -186,7 +356,7 @@ float harukaSteepness(float k, float amp, float breakiness) {
  * llegar a la orilla: una ola rompe cuando su altura supera ~0,78 veces la profundidad (índice de
  * rompiente clásico). Aquí la amplitud se acota a `0.55·d` — la mitad de esa altura, porque la
  * altura pico-valle es 2·amplitud. Pasado el límite la ola no crece: ROMPE, y lo que crece es la
- * espuma (ver `harukaBreakFoam`).
+ * espuma (el `outFoam` de `harukaGerstner`, gemelo de `oceanFoam`).
  *
  * ⚠️ Y ES LO QUE HACE QUE LA COSTA FUNCIONE: con `d → 0` la amplitud va a 0, así que la superficie
  * del agua se junta con el fondo EXACTAMENTE en la línea de costa. La orilla deja de ser una
@@ -276,7 +446,7 @@ float harukaSwash(float depthRest, vec3 wp, vec3 up, float t) {
  * elegido a mano y pasa a salir de lo que la geometria puede representar.
  */
 vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float quadM, float fade,
-                    out vec3 outNormal, out float outFoam) {
+                    vec3 upSlope, out vec3 outNormal, out float outFoam) {
     // Marco tangente local estable: se construye del propio `up`, no de un uniform, para que dos
     // puntos vecinos den marcos vecinos (y la normal no salte).
     vec3 t1 = normalize(abs(up.y) < 0.99 ? cross(up, vec3(0, 1, 0)) : cross(up, vec3(1, 0, 0)));
@@ -289,12 +459,22 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float
     float green      = harukaGreenGain(depthM) * harukaFetchFactor(fetchM);
     float scale      = harukaBreakScale(depthM, fetchM, qm);
     float breakiness = clamp(1.0 - scale, 0.0, 1.0);
+    float steepScale = harukaSteepScale(depthM, fetchM, qm);
+    float curl       = harukaCurlGain(depthM, fetchM, qm);
+    float breaker    = harukaBreakerGain(depthM, fetchM, qm);
 
     vec3  disp = vec3(0.0);
     // Derivadas del desplazamiento respecto a las dos tangentes: de ahí sale la normal SIN muestrear
     // puntos vecinos (analítica, igual que el terreno). `jac` acumula el pliegue de la superficie.
     vec3  dT1 = t1, dT2 = t2;
     float jac = 1.0;
+    // LA PENDIENTE de la superficie, acumulada en este mismo bucle (no cuesta otra pasada):
+    // `grad eta = sum D*(amp*k*cos phi)`. ⚠️ NO es `1-jac`: ese es la divergencia del mapa horizontal
+    // y lleva dentro el `1/tanh(k*d)` de la elipse orbital, que en el bajio se dispara sin que la ola
+    // sea mas escarpada. Con el criterio equivocado la costa salia BLANCA. Gemelo del `outSlope` de
+    // `oceanJacobian`.
+    vec2 grad = vec2(0.0);
+    float sumSq = 0.0;
 
     for (int i = 0; i < HARUKA_WAVES; ++i) {
         vec4  W      = harukaWaveAt(i);          // el tren vigente (subido por la CPU)
@@ -305,21 +485,45 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float
         float amp    = W.y * green * scale * fade * harukaShortWaveFade(k, qm);
         if (amp <= 1e-4) continue;
         // Dirección en 3D: la 2D del tren, llevada al plano tangente del punto.
-        vec3  D  = normalize(t1 * W.z + t2 * W.w);
+        // ⚠️ REFRACTADA: la direccion de la tabla es la de aguas PROFUNDAS. Ver `harukaRefract`.
+        vec3  D  = harukaRefract(normalize(t1 * W.z + t2 * W.w), upSlope, up, k0, k);
         float w  = sqrt(HARUKA_G * k0);           // la frecuencia NO cambia con el fondo
         float ph = k * dot(D, wp) - w * t;
         float c  = cos(ph), s = sin(ph);
-        // Q = escarpado. 1 sería la cúspide exacta (la ola justo a punto de plegarse); se reparte
-        // entre los trenes para que la suma no se pliegue sola en mar abierto.
-        float Q  = harukaSteepness(k, amp, breakiness);
+        // EL SEMIEJE HORIZONTAL DE LA ELIPSE (ver `harukaHorizAmp`), no `Q·A`: el reparto viejo no
+        // dependia de la amplitud, asi que una charca oscilaba de lado como el oceano.
+        // El ADELANTO DE LA CRESTA (ver `harukaCurlGain`), solo en la mitad delantera.
+        // ⚠️ EL REFUERZO VA SOLO AL TREN 0, Y ESE ES EL PUNTO: repartido entre los ocho comprime en
+        // ocho direcciones y el determinante nunca llega a 0. Ver `harukaBreakerGain`.
+        float horiz = harukaHorizAmp(k, amp, depthM) * steepScale * (1.0 + curl * max(0.0, c))
+                    * ((i == 0) ? (1.0 + breaker) : 1.0);
 
-        disp += D * (Q * amp * c) + up * (amp * s);
+        // El 2º armonico va en la VERTICAL: cresta picuda, seno plano. Ver `harukaStokesSkew`. No cambia
+        // la altura pico-valle, asi que el limite de rompiente sigue significando lo mismo.
+        float s2 = sin(2.0 * ph), c2 = cos(2.0 * ph);
+        float skew = harukaStokesSkew(k, amp, depthM);      // POR TREN, no una constante comun
+        disp += D * (horiz * c) + up * (amp * (s - skew * c2));
         // d(disp)/d(dirección de propagación) — lo que afila la cresta y, si pasa de 1, la pliega.
-        float dq = Q * amp * k * s;
-        float da = amp * k * c;
+        // ⚠️ EL FACTOR DEL ADELANTO VA CON UN DOS, Y AQUI FALTABA. El desplazamiento es
+        // `H·cos φ·(1 + g·max(0,cos φ))` = `H·(cos φ + g·cos²φ)` en la mitad delantera; su derivada
+        // es `−H·sin φ·(1 + 2g·cos φ)`, no `−H·sin φ·(1 + g·cos φ)`. El termino del adelanto es
+        // CUADRATICO en `cos φ`, asi que derivarlo dobla su coeficiente. Se dejaba la mitad del
+        // efecto, y con ella la espuma de plegado apagada y la normal ligeramente mal.
+        // Oraculo: la derivada numerica de `oceanDisplacement` (gemelo de CPU). Ver `ocean_break_fold`.
+        float dHoriz = harukaHorizAmp(k, amp, depthM) * steepScale * (1.0 + 2.0 * curl * max(0.0, c))
+                     * ((i == 0) ? (1.0 + breaker) : 1.0);
+        float dq = dHoriz * k * s;
+        // ⚠️ LA VERTICAL LLEVA EL 2º ARMONICO DERIVADO, y de aqui sale la NORMAL: la elevacion es
+        // `amp·(sin φ − S·cos 2φ)`, cuya derivada es `amp·(cos φ + 2S·sin 2φ)`. Sin el segundo
+        // termino la normal describiria una ola simetrica sobre una superficie que ya no lo es, y la
+        // luz delataria la cresta picuda como un pliegue plano.
+        float da = amp * k * (c + 2.0 * skew * s2);
         dT1 += D * (-dq * dot(D, t1)) + up * (da * dot(D, t1));
         dT2 += D * (-dq * dot(D, t2)) + up * (da * dot(D, t2));
-        jac -= Q * amp * k * s;                   // jacobiano: <0 = superficie plegada = rompiendo
+        jac -= dq;                                // jacobiano: <0 = superficie plegada = rompiendo
+        float ka = amp * k;
+        grad += vec2(dot(D, t1), dot(D, t2)) * (ka * c);
+        sumSq += ka * ka;                      // sigma de la pendiente: escala de la distribucion
     }
 
     outNormal = normalize(cross(dT1, dT2) * sign(dot(cross(dT1, dT2), up)));
@@ -327,10 +531,38 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float
     //  · `jac` bajo: la cresta se ha sobre-escarpado y se pliega — es la definición geométrica de
     //    romper, y ocurra donde ocurra (mar abierto con viento o en la barra de la playa).
     //  · altura contra fondo: cerca de la orilla la ola alcanza su límite y revienta entera.
-    float foldFoam  = smoothstep(0.55, 0.05, jac);
-    float shoreFoam = smoothstep(1.6, 0.7, depthM / max(harukaWaveAt(0).y * 2.0, 0.1));
-    outFoam = clamp(max(foldFoam, shoreFoam) * fade, 0.0, 1.0);
+    // ⚠️ ESTA RAMA ERA `smoothstep(0.55, 0.05, jac)` Y ESTABA MUERTA: pedia un escarpado local de 0,45
+    // y en mar abierto eso ocurre el 0,000 % de las veces (200 000 muestras). El oceano salia liso y
+    // oscuro hasta la costa, cuando un mar de 11,4 m/s tiene crestas blancas.
+    // El umbral nuevo esta CALIBRADO contra Monahan & O'Muircheartaigh (W = 3,84e-6·U^3,41): con el
+    // viento que el estado deduce (11,44 m/s) toca 1,562 % y el percentil del escarpado ahi es 0,208.
+    // Medido despues: 1,466 % en mar abierto, subiendo sola a 25 % en la rompiente.
+    // ⚠️ EL UMBRAL NO SE ELIGE, SE DERIVA: se conoce la cobertura que toca (Monahan) y la escala de la
+    // distribucion (sigma), asi que sale de invertir la cola. Con un umbral ABSOLUTO la cobertura se
+    // disparaba x18,7 con x1,27 de viento; asi es Monahan por construccion. Y la blancura que crece
+    // hacia la costa no sale de aqui sino de `shoreFoam`, que mira el indice de rompiente.
+    float sg        = sqrt(sumSq * 0.5);
+    float W         = clamp(harukaWhitecapCoverage(), 1.0e-5, 0.5);
+    // ⚠️ SUELO OBLIGATORIO: con `fade = 0` todos los trenes salen por el `amp <= 1e-4`, `sg` queda en
+    // CERO y `smoothstep(0,0,..)` da NaN — que no se ve como espuma rara, se lleva el pixel entero.
+    float Tm        = max(sg * HARUKA_WHITECAP_FIT * sqrt(-2.0 * log(W)), 1.0e-6);
+    float capFoam   = smoothstep(HARUKA_WHITECAP_LO * Tm, HARUKA_WHITECAP_HI * Tm, length(grad));
+    // ⚠️ EL TERMINO QUE ORDENA EL PERFIL: la ola que ROMPE, no la profundidad. Con la banda por metros
+    // que habia aqui, la espuma salia INVERTIDA (33 % a 8 m de fondo y 0 % a 1,5 m): el limite de
+    // rompiente aplasta la amplitud justo donde la ola revienta, asi que la pendiente cae y un
+    // criterio de pendiente no puede ver espuma donde la ola YA se rompio. El indice de rompiente si
+    // lo ve, y crece monotono hacia la orilla. Arranca en el 0,78 clasico.
+    float shoreFoam = smoothstep(0.78, 1.60, harukaBreakIndex(depthM, fetchM, qm));
+    outFoam = clamp(max(capFoam, shoreFoam) * fade * harukaFoamScale(), 0.0, 1.0);
     return disp;
+}
+
+/// Sobrecarga SIN pendiente: la ola no refracta. La usan las sondas del banco y cualquier camino que
+/// no tenga el gradiente del fondo a mano. `vec3(0)` es el centinela de "sin dato", el mismo que en
+/// `oceanRefract`.
+vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float quadM, float fade,
+                    out vec3 outNormal, out float outFoam) {
+    return harukaGerstner(wp, up, t, depthM, fetchM, quadM, fade, vec3(0.0), outNormal, outFoam);
 }
 
 #endif // HARUKA_OCEAN_WAVE_GLSL

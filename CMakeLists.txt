@@ -73,11 +73,23 @@ endif()
 # Pasó cinco veces en la sesión del 2026-08-31: la suite pasó de ~1 min a no acabar en 4, y peor,
 # el banco de coste del terreno dio una línea base inflada con la que se eligió mal un valor por
 # defecto (se creyó que un cambio costaba +0,1 ms cuando cuesta +1,8).
-if(NOT _haruka_multi_config AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-    message(WARNING
-        "CMAKE_BUILD_TYPE=Debug: esto compila a -O0. Sirve para depurar, pero CUALQUIER medida de "
-        "tiempo hecha aquí es basura y la suite tarda 4x. Para medir: "
-        "cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo")
+# ⚠️ EL AVISO NO BASTABA, y ésta es la sexta vez. Era un `message(WARNING)`: sale una vez, al
+# configurar, y a partir de ahí el directorio se queda en Debug para siempre sin decir nada más.
+# Medido hoy con la misma suite y el mismo binario:
+#
+#     Debug (-O0)         la suite NO TERMINA en 10 min, y una pasada murió con SIGTRAP
+#     RelWithDebInfo      26247 comprobaciones · 0 fallos · 52 s
+#
+# Casi cuatro minutos de espera por vuelta, que es lo que hace que uno deje de correr los tests.
+# Así que ahora Debug hay que PEDIRLO: sigue siendo legítimo para poner breakpoints, pero tiene que
+# ser una decisión escrita, no algo en lo que un directorio de build se queda de paso.
+if(NOT _haruka_multi_config AND CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT HARUKA_ALLOW_DEBUG)
+    message(FATAL_ERROR
+        "CMAKE_BUILD_TYPE=Debug compila a -O0: la suite pasa de 52 s a no terminar en 10 min, y "
+        "cualquier medida de tiempo hecha aquí es basura.\n"
+        "  Para trabajar:  cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo\n"
+        "  Si de verdad quieres -O0 para depurar, dilo explícitamente:\n"
+        "                  cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DHARUKA_ALLOW_DEBUG=ON")
 endif()
 
 if(NOT MSVC)
@@ -366,7 +378,20 @@ target_link_libraries(haruka_simbase PUBLIC HarukaPhysics HarukaConstruction)
 set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # haruka_rules.so: el módulo por defecto (dgs_game_module_v1). GL-free.
-add_library(haruka_rules SHARED "${CMAKE_CURRENT_SOURCE_DIR}/src/net/default_rules.cpp")
+#
+# ⚠️ `logger.cpp` VA AQUÍ, y no es un detalle de compilación: sin él el `.so` queda con
+# `Haruka::diagLogs()` y `Haruka::log(...)` SIN RESOLVER —los usa por `HARUKA_LOGI`/`HARUKA_LOGW`— y
+# `dlopen` FALLA en cualquier proceso que no tenga ya el motor cargado. O sea: en un `validador_node`
+# headless, que es el único sitio donde este módulo tiene sentido. El nodo no se cae; dice
+# "sin modulo de reglas -> fallback generico" y sigue con su regla propia, así que **el anti-cheat del
+# juego no se estaba aplicando en despliegue** y nada lo delataba.
+#
+# No lo veía ningún test: `tests/test_dgs.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
+# motor, así que el símbolo aparecía por la puerta de atrás. Lo destapó `dgs_live_terrain`, que carga
+# el módulo desde el nodo de verdad.
+add_library(haruka_rules SHARED
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/net/default_rules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/logger.cpp")
 target_include_directories(haruka_rules PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
     "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
@@ -636,6 +661,7 @@ add_executable(haruka_tests
     tests/test_physics.cpp      # caída radial + determinismo (sin GL)
     tests/test_construction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
     tests/test_ports.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
+    tests/test_primitives.cpp   # primitivas: ninguna cara bobinada al revés (una tapa invertida no da error, desaparece)
     tests/test_dgs.cpp
     tests/test_simple_planet.cpp         # SimplePlanet mesh & config
     tests/test_terrain_quality.cpp       # terrain quality → resolution mappings
@@ -689,6 +715,69 @@ target_link_libraries(haruka_tests_rhi PRIVATE HarukaEngine)
 set_target_properties(haruka_tests_rhi PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
+
+# Registrado en CTest, pero SIN display: el driver de vídeo `offscreen` de SDL más el rasterizador
+# software de Mesa bastan para la suite entera, en los dos backends. Eso es lo que hace que el banco
+# de GPU pueda correr en CI y no solo en la máquina de uno. Los fallos de fp64 del rasterizador
+# software van declarados en `g_driverDefects` (rhi_test_main.cpp) y salen como XFAIL.
+#
+# ⚠️ `LIBGL_ALWAYS_SOFTWARE=1` NO BASTA PARA ELEGIR SOFTWARE, y costó una medida entera darse cuenta:
+# en un equipo con NVIDIA, `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` ordena antes que
+# `50_mesa.json`, gana el vendor EGL de NVIDIA y esa variable —que es de Mesa— no hace nada. La tanda
+# corre en la GPU dedicada mientras uno cree estar midiendo el rasterizador software. Por eso van las
+# DOS cosas: `__EGL_VENDOR_LIBRARY_FILENAMES` para forzarlo, y `HARUKA_REQUIRE_DEVICE` para que el
+# banco FALLE si aun así acabó en otro sitio.
+add_test(NAME haruka_tests_rhi_gl COMMAND haruka_tests_rhi gl)
+set_tests_properties(haruka_tests_rhi_gl PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=offscreen;__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=llvmpipe;HARUKA_REQUIRE_DEVICE=llvmpipe;HARUKA_NO_VSYNC=1"
+    TIMEOUT 1800)
+
+add_test(NAME haruka_tests_rhi_vk COMMAND haruka_tests_rhi vk)
+set_tests_properties(haruka_tests_rhi_vk PROPERTIES
+    ENVIRONMENT "SDL_VIDEODRIVER=offscreen;VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json;HARUKA_REQUIRE_DEVICE=llvmpipe;HARUKA_NO_VSYNC=1"
+    TIMEOUT 1800)
+
+# ── Test CRUZADO: modulo REAL + terreno REAL + `validador_node` VIVO ─────────────────────────────
+# Cierra el hueco entre dos tests que ya existian y que, por separado, no prueban lo que protege al
+# juego: `test_dgs.cpp` prueba la REGLA en proceso, y `dgs/tests/validator_e2e.cpp` prueba el NODO con
+# un modulo de juguete. Entre medias se puede romper que el nodo cargue el `.so`, que le llegue el
+# campo de altura, y que el `.hfield` del bake sea el que el modulo sabe leer.
+#
+# ⚠️ SOLO SE REGISTRA SI EL NODO ESTA CONSTRUIDO. El proyecto de red es OTRO repositorio a proposito,
+# asi que aqui no se inventa un verde cuando falta: o corre de verdad, o el test no existe.
+find_program(HARUKA_DGS_VALIDADOR validador_node
+             PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/build" NO_DEFAULT_PATH)
+# ⚠️ Se enlaza la biblioteca RECIEN construida del repo hermano, NO `external/dgs/sdk/libdgs_client.a`,
+# y ahora es a proposito y no por avería. El vendorizado estaba desactualizado (le faltaban
+# `Packet::pack(ValidateRequest)` y `unpackValidateAck`, justo los del camino de validacion); se ha
+# refrescado con `cmake --install` desde el repo hermano y ya los trae. Pero este test existe para
+# cazar la DIVERGENCIA entre los dos proyectos: si enlazara la copia, compararia el vendorizado
+# consigo mismo y no notaria nada. Enlazando el original, el dia que las dos versiones se separen
+# este test es el que lo dice.
+find_library(HARUKA_DGS_CLIENT_LIB dgs_client
+             PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/build" NO_DEFAULT_PATH)
+if (HARUKA_DGS_VALIDADOR AND HARUKA_DGS_CLIENT_LIB)
+    add_executable(haruka_dgs_live tests/dgs_live_test.cpp)
+    target_include_directories(haruka_dgs_live PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../dgs"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/include")
+    target_link_libraries(haruka_dgs_live PRIVATE
+        HarukaEngine
+        "${HARUKA_DGS_CLIENT_LIB}"
+        OpenSSL::SSL OpenSSL::Crypto)
+    set_target_properties(haruka_dgs_live PROPERTIES BUILD_RPATH "$ORIGIN" INSTALL_RPATH "$ORIGIN")
+    add_dependencies(haruka_dgs_live haruka_rules)
+
+    add_test(NAME dgs_live_terrain COMMAND haruka_dgs_live)
+    set_tests_properties(dgs_live_terrain PROPERTIES
+        ENVIRONMENT "HARUKA_DGS_VALIDADOR=${HARUKA_DGS_VALIDADOR}"
+        WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+        RUN_SERIAL TRUE TIMEOUT 120)
+    message(STATUS "DGS vivo: test cruzado ACTIVADO (${HARUKA_DGS_VALIDADOR})")
+else()
+    message(STATUS "DGS vivo: sin validador_node -> el test cruzado NO se registra")
+endif()
 
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)

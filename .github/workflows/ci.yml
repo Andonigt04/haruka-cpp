@@ -7,6 +7,125 @@ on:
   workflow_dispatch:
 
 jobs:
+  # El banco de GPU, SIN GPU. El driver de vídeo `offscreen` de SDL más el rasterizador software de
+  # Mesa bastan para crear un device real, dibujar y leer píxeles — así que la suite del RHI (paridad
+  # CPU↔GPU del terreno, careos entre backends, formatos, render targets, el pase de nubes) deja de
+  # ser algo que solo corre en la máquina de uno.
+  #
+  # Medido: OpenGL sobre llvmpipe da **282 OK · 0 fallos · 6 XFAIL**. Los 6 son el fp64 de Mesa por
+  # software, declarados en `g_driverDefects` con su motivo — NO silenciados: en AMD ese mismo fallo
+  # sigue en rojo, que es donde importa.
+  #
+  # De paso salió un fallo real que la GPU integrada tapaba: el driver de AMD enlaza varyings que
+  # faltan, así que un caso que emparejaba `screenquad.vert` con `final.frag` (par que el motor nunca
+  # arma) pasaba allí y en un driver que cumple la especificación da
+  # `error: "FragPos" not declared as input from previous stage`.
+  #
+  # ⚠️ `LIBGL_ALWAYS_SOFTWARE=1` no elige software por sí solo: si hay un vendor EGL de NVIDIA con
+  # prioridad, gana él y esa variable (de Mesa) no hace nada. Por eso van también
+  # `__EGL_VENDOR_LIBRARY_FILENAMES` y `HARUKA_REQUIRE_DEVICE`, que hace FALLAR al banco si acabó
+  # midiendo en otro dispositivo. En el contenedor no hay NVIDIA, pero una CI que solo funciona
+  # porque el entorno es el esperado no es una CI.
+  gpu:
+    name: GPU · RHI headless (llvmpipe)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: RHI suite sobre rasterizador software
+        uses: addnab/docker-run-action@v3
+        with:
+          image: fedora:latest
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            set -e
+            dnf install -y --setopt=install_weak_deps=False \
+              cmake ninja-build g++ pkg-config git \
+              assimp-devel openssl-devel openal-soft-devel postgresql-devel \
+              gtk3-devel glm-devel glslang mesa-libGL-devel mesa-libEGL-devel \
+              mesa-dri-drivers libzstd-devel \
+              wayland-devel wayland-protocols-devel libxkbcommon-devel
+
+            git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
+            cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="/tmp/sdl3-install" \
+              -DSDL_X11=OFF \
+              -DSDL_WAYLAND=ON
+            cmake --build /tmp/SDL/build -j"$(nproc)"
+            cmake --install /tmp/SDL/build
+
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
+            # `haruka_tests_rhi` arrastra HarukaEngine, que a su vez arrastra HarukaShaders: los
+            # .spv se compilan solos. Un .spv que falte es MUDO en tiempo de ejecución, así que si
+            # esto se rompe alguna vez, mirar ahí primero.
+            cmake --build build -j"$(nproc)" --target haruka_tests_rhi
+
+            # Sin ventana ni GPU: `offscreen` da un contexto GL por EGL y llvmpipe lo rasteriza.
+            # HARUKA_NO_VSYNC=1 no es cosmético — con FIFO cualquier medida de coste se clava en
+            # 16,7 ms y las cifras que imprime el banco dejarían de significar nada.
+            export SDL_VIDEODRIVER=offscreen
+            export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+            export LIBGL_ALWAYS_SOFTWARE=1
+            export GALLIUM_DRIVER=llvmpipe
+            export HARUKA_REQUIRE_DEVICE=llvmpipe
+            export HARUKA_NO_VSYNC=1
+            ./build/haruka_tests_rhi gl
+
+  # Vulkan sobre lavapipe: 282 OK · 0 fallos · 6 XFAIL, los mismos seis de fp64 que en OpenGL. Que
+  # coincidan backend a backend es justamente lo que dice que el defecto es de Mesa y no del motor.
+  #
+  # ⚠️ Bloquea, y puede hacerlo porque los fallos van DECLARADOS con su motivo, no silenciados: si uno
+  # de ellos deja de ocurrir (driver arreglado) o cambia de mensaje, el banco lo marca como entrada
+  # caducada y tumba la tanda. Una lista de excepciones que nadie revisa acaba tapando bugs de verdad.
+  gpu-vulkan:
+    name: GPU · RHI Vulkan headless (lavapipe)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: RHI suite de Vulkan sobre lavapipe
+        uses: addnab/docker-run-action@v3
+        with:
+          image: fedora:latest
+          options: -v ${{ github.workspace }}:/workspace -w /workspace
+          run: |
+            set -e
+            dnf install -y --setopt=install_weak_deps=False \
+              cmake ninja-build g++ pkg-config git \
+              assimp-devel openssl-devel openal-soft-devel postgresql-devel \
+              gtk3-devel glm-devel glslang mesa-libGL-devel mesa-libEGL-devel \
+              mesa-vulkan-drivers vulkan-loader libzstd-devel \
+              wayland-devel wayland-protocols-devel libxkbcommon-devel
+
+            git clone --depth 1 https://github.com/libsdl-org/SDL /tmp/SDL
+            cmake -S /tmp/SDL -B /tmp/SDL/build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX="/tmp/sdl3-install" \
+              -DSDL_X11=OFF \
+              -DSDL_WAYLAND=ON
+            cmake --build /tmp/SDL/build -j"$(nproc)"
+            cmake --install /tmp/SDL/build
+
+            cmake -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
+            cmake --build build -j"$(nproc)" --target haruka_tests_rhi
+
+            export SDL_VIDEODRIVER=offscreen
+            export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+            export HARUKA_REQUIRE_DEVICE=llvmpipe
+            export HARUKA_NO_VSYNC=1
+            ./build/haruka_tests_rhi vk
+
   engine:
     name: Engine · ${{ matrix.name }}
     runs-on: ubuntu-latest

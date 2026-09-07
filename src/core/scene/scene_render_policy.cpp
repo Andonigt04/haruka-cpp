@@ -105,6 +105,21 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
             return command;
 
         case ObjectType::MODEL:
+            // ⚠️ A MODEL WITH NO MODEL DRAWS NOTHING, AND SAYS NOTHING. The draw case does
+            // `getOrLoadModelCached(obj->modelPath)` and `break`s on null, so an object with an empty
+            // path is added to the scene, moved every frame, culled, counted — and never appears.
+            // That is exactly how the networked players were invisible before (they classified as
+            // UNKNOWN, same silence, different door), and every entity the world feed spawns that is
+            // not a player or an NPC still arrives here with no path at all.
+            //
+            // A capsule is not a nice model. It is a VISIBLE one: something standing where the server
+            // says something is standing beats an empty patch of ground that looks exactly like a
+            // working game. Anything that has a path keeps going to the model renderer untouched.
+            if (obj.modelPath.empty() && !(obj.meshRenderer && obj.meshRenderer->isResident())) {
+                command.kind = Haruka::RenderKind::Primitive;
+                command.primitive = Haruka::PrimitiveType::CAPSULE;
+                return command;
+            }
             command.kind = Haruka::RenderKind::Model;
             return command;
 

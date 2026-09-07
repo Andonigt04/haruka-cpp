@@ -127,6 +127,7 @@ namespace Haruka::RHI::vulkan
             // la UI sobre el backbuffer. Solo Vulkan; los demás backends no-op.
             bool     initUi() override;
             Backend  backend() const override { return Backend::Vulkan; }
+            const std::string& deviceName() const override { return m_deviceName; }
             void     readPixels(int x, int y, int w, int h, Format format, void* data) override;
             // Retorna el tamaño en píxeles del swapchain (extent físico de presentación). El host lo usa
             // para ajustar DisplayFramebufferScale de ImGui (el tamaño lógico de SDL puede diferir).
@@ -149,6 +150,7 @@ namespace Haruka::RHI::vulkan
             { return (h.id == 0 || h.id > m_textures.size()) ? nullptr : &m_textures[h.id - 1]; }
 
         private:
+            std::string m_deviceName = "(sin consultar)";
             template <class T>
             static const T* get(const std::vector<T>& pool, uint32_t id)
             {

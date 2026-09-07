@@ -20,7 +20,15 @@ const char* toString(PortClass c) {
     }
     return "mount";
 }
-const char* toString(RailDof d)   { return d == RailDof::Hinge ? "hinge" : "slider"; }
+const char* toString(RailDof d) {
+    switch (d) {
+        case RailDof::Hinge:  return "hinge";
+        case RailDof::Slider: return "slider";
+        case RailDof::Rope:   return "rope";
+        case RailDof::Weld:   return "weld";
+    }
+    return "slider";
+}
 const char* toString(RailDrive d) {
     switch (d) {
         case RailDrive::Manual: return "manual";
@@ -39,6 +47,8 @@ bool parsePortClass(const std::string& s, PortClass& out) {
 bool parseRailDof(const std::string& s, RailDof& out) {
     if (s == "hinge")  { out = RailDof::Hinge;  return true; }
     if (s == "slider") { out = RailDof::Slider; return true; }
+    if (s == "rope")   { out = RailDof::Rope;   return true; }
+    if (s == "weld")   { out = RailDof::Weld;   return true; }
     return false;
 }
 bool parseRailDrive(const std::string& s, RailDrive& out) {
@@ -167,6 +177,7 @@ bool loadPortSetJson(const std::string& path, PortSet& out) {
                                    e["rotation"][2].get<float>(), e["rotation"][3].get<float>());
         parsePortClass(e.value("cls", std::string("mount")), p.cls);
         p.kind      = e.value("kind", std::string{});
+        p.pairsWith = e.value("pairsWith", std::string{});
         p.size      = e.value("size", 1);
         p.partIndex = e.value("partIndex", -1);
         p.radius    = e.value("radius", 0.15f);
@@ -174,12 +185,14 @@ bool loadPortSetJson(const std::string& path, PortSet& out) {
             const auto& r = e["rail"];
             p.hasRail = true;
             parseRailDof(r.value("dof", std::string("hinge")), p.rail.dof);
+            p.rail.speed = r.value("speed", 0.0f);
             parseRailDrive(r.value("drive", std::string("manual")), p.rail.drive);
             p.rail.axis = vec3OrDefault(r, "axis", glm::vec3(0.0f, 1.0f, 0.0f));
             if (r.contains("limits") && r["limits"].is_array() && r["limits"].size() == 2)
                 p.rail.limits = glm::vec2(r["limits"][0].get<float>(), r["limits"][1].get<float>());
             p.rail.motorForce = r.value("motorForce", 0.0f);
             p.rail.compliance = r.value("compliance", 0.0f);
+            p.rail.damping    = r.value("damping", 0.0f);
             p.rail.breakForce = r.value("breakForce", 0.0f);
             // Un puerto con raíl ES de clase Rail aunque el fichero diga otra cosa: el mecanismo
             // manda sobre la etiqueta, para que no haya dos verdades.
@@ -222,17 +235,20 @@ bool savePortSetJson(const std::string& path, const PortSet& set) {
         e["rotation"] = { p.rotation.w, p.rotation.x, p.rotation.y, p.rotation.z };
         e["cls"]      = toString(p.cls);
         if (!p.kind.empty()) e["kind"] = p.kind;
+        if (!p.pairsWith.empty()) e["pairsWith"] = p.pairsWith;
         e["size"]      = p.size;
         e["partIndex"] = p.partIndex;
         e["radius"]    = p.radius;
         if (p.hasRail) {
             nlohmann::json r;
             r["dof"]        = toString(p.rail.dof);
+            if (p.rail.speed != 0.0f) r["speed"] = p.rail.speed;
             r["drive"]      = toString(p.rail.drive);
             r["axis"]       = { p.rail.axis.x, p.rail.axis.y, p.rail.axis.z };
             r["limits"]     = { p.rail.limits.x, p.rail.limits.y };
             r["motorForce"] = p.rail.motorForce;
             r["compliance"] = p.rail.compliance;
+            r["damping"]    = p.rail.damping;
             r["breakForce"] = p.rail.breakForce;
             e["rail"] = r;
         }
