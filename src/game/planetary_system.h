@@ -247,6 +247,39 @@ public:
     Haruka::WeatherSample weatherAt(const glm::dvec3& worldPos) const;
 
     /**
+     * @brief Los VÓRTICES vivos ahora (tornados y trombas), con las condiciones REALES del terreno.
+     *
+     * Aquí es donde el clima deja de mirar una temperatura y una humedad globales: cada hueco de
+     * embudo se juzga con el campo que hay DEBAJO DE ÉL —`sampleSurface` en su propia dirección—, y
+     * el `landMask` de ese punto decide si sale un tornado o una tromba marina. Es la diferencia
+     * entre «el jugador está en un sitio húmedo, luego hay tornados en todo el planeta» y «hay
+     * tornados sobre la selva y trombas sobre el mar», que es lo que se quería.
+     *
+     * Se cachea por instante de simulación: el sistema es puro, así que dos llamadas en el mismo
+     * frame dan lo mismo y no hace falta repetir 28 muestreos de terreno.
+     */
+    const std::vector<Haruka::WeatherSystem::Vortex>& activeVortices() const;
+
+    /**
+     * @brief VIENTO TOTAL en un punto (m/s, marco local del planeta como `WeatherSample::wind`):
+     *        el de fondo MÁS el de cada vórtice que alcance.
+     *
+     * ⚠️ Es el único sitio del que debe salir el viento para quien lo SUFRE (el jugador, un prop
+     * suelto, la lluvia inclinada, el agua). `weatherAt(...).wind` es sólo el fondo: usarlo
+     * directamente significa que un tornado no mueve nada, que es como estaba el sistema antes de
+     * existir los vórtices. El motivo de que haya dos funciones y no una es que el mar SÍ quiere el
+     * fondo a secas —un tornado no levanta un oleaje de 20 km de fetch— y mezclarlos ahí daría un
+     * mar entero desatado por un embudo de 100 m.
+     *
+     * @param altAboveGroundM altura sobre el suelo: el vórtice muere en su nube madre y succiona
+     *        sólo en la capa de abajo, así que sin este dato el campo no se puede evaluar.
+     */
+    glm::dvec3 windAt(const glm::dvec3& worldPos, float altAboveGroundM) const;
+
+    /** @brief Severidad [0,1] del tiempo en un punto y su escalón. Para avisos, IA y refugio. */
+    float severityAt(const glm::dvec3& worldPos) const;
+
+    /**
      * @brief FUENTE DE SUELO ya resuelta: el planeta que manda aquí + su centro, sin más búsquedas.
      *
      * ⚠️ EXISTE POR EL CAMINO CALIENTE. `sampleTerrainHeight` se llama **235 564 veces** por cada
@@ -388,6 +421,11 @@ private:
     mutable glm::dvec3            m_weatherFieldPos{1e300};
     mutable float                 m_weatherFieldTempC = 15.0f;
     mutable float                 m_weatherFieldHumid = 0.5f;
+    // Caché de vórtices POR INSTANTE. No es estado del clima (que sigue siendo puro): es memoria de
+    // la última evaluación, porque juzgar los 28 huecos cuesta 28 muestreos de terreno y en un frame
+    // lo preguntan el jugador, los props, la lluvia y el render.
+    mutable std::vector<Haruka::WeatherSystem::Vortex> m_vortexCache;
+    mutable double                m_vortexCacheTime = -1e300;
     const double G = 6.67430e-11;
 
     void updateOrbits(double dt);

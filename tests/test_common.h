@@ -26,6 +26,8 @@ void beginTest(const char* name);
 // en cada uno.  (test_ports.cpp)
 void test_rail_mechanism_jolt();   // raíles contra Jolt (test_physics.cpp)
 void test_construction_vehicle();   // mecanismos, masa y distancia sobre el grafo de construcción
+void test_prefab_edits();           // los cambios de UN conjunto no tocan el montaje (test_prefab.cpp)
+void test_prefab_scene_roundtrip(); // la escena guarda la entrada y sus cambios, no las piezas
 void test_ports_transform();
 void test_ports_fit();
 void test_ports_raycast();
@@ -36,6 +38,13 @@ void test_cube_sphere_inverse();
 void test_primitive_winding();
 void test_weather_fronts();
 void test_weather_3d();
+// Tiempo adverso: la severidad sale de las condiciones y el embudo (tornado/tromba) de la severidad.
+// Campo de Rankine con succion y ascendente, determinista. Con contraprueba en cada punto.
+void test_weather_severe();
+// Que el campo del vortice LLEGUE al jugador: arrastre, rozamiento del suelo y que andar no lo anule.
+void test_wind_pushes_character();
+// El cielo horneado lleva base/techo/lluvia POR DIRECCION, no una losa del punto de la camara.
+void test_sky_bake();
 // Forma de la nube: que sea un CUERPO y no una lamina (relacion ancho/alto, campo 3D, visibilidad
 // con la cobertura mediana del planeta). Con contraprueba de las cifras viejas en los tres.
 void test_cloud_shape();
@@ -161,6 +170,7 @@ void test_ocean_tide();
 void test_ocean_swash();
 void test_ocean_break_limit();
 void test_ocean_break_fold();
+void test_ocean_mesh_stretch();   // el ESTIRON entre vertices vecinos (lo que el jacobiano no ve)
 void test_ocean_foam();
 void test_ocean_skewness();
 void test_ocean_whitewater_drag();

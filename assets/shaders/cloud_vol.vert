@@ -17,7 +17,14 @@ layout(std140, binding = 5) uniform CloudParams {
     vec4  u_sun;             // xyz = hacia el Sol · w = elevación (dot con el cénit)
     vec4  u_sunColor;        // rgb = color del sol · a = día[0,1]
     vec4  u_wind;            // xy = deriva del campo · z = tiempo(s) · w = altitud del ojo (m)
-    vec4  u_misc;            // x = atmósfera[0,1] · y = pasos · z = escala del campo · w = sin usar
+    vec4  u_misc;            // x = atmósfera[0,1] · y = pasos · z = escala del campo · w = extinción
+    // ⚠️ MISMO BLOQUE QUE EN `cloud_vol.frag`, ENTERO. OpenGL enlaza vert+frag y un bloque con el
+    // mismo `binding` y distinta definición es un error de link: al crecer el UBO con los embudos
+    // solo se tocó el frag y en GL el pase de nubes dejó de existir (el banco: "pipeline creado"
+    // en FAIL). Vulkan no enlaza etapas entre sí y no avisó.
+    vec4  u_vortexPos[4];
+    vec4  u_vortexInfo[4];
+    vec4  u_vortexN;
 };
 
 layout(location = 0) out vec3 vRayDir;

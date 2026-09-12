@@ -112,6 +112,58 @@ float harukaCloudField3(vec3 p, vec3 wind) {
     return d;
 }
 
+/** @brief fBm con LOD: cada octava se funde a su MEDIA (0,5·a) cuando su longitud de onda no cubre
+ *  varias veces la huella de la muestra (`fp`, en las unidades de `p`). Fundir a la media en vez de
+ *  quitar la octava mantiene el nivel del campo —y con él la cobertura— igual a cualquier distancia.
+ *
+ *  ⚠️ POR QUÉ. El campo del cúmulo tiene una octava a `p·4` con cuatro suboctavas: rasgos de 45 m.
+ *  La marcha muestrea a 50-360 m con jitter por píxel, así que dos píxeles vecinos ven valores
+ *  distintos de un rasgo que no pueden resolver: GRANO. En una nube densa no se nota (satura en dos
+ *  muestras); en un cúmulo de buen tiempo, translúcido, se ve entero (27 % de píxeles a más de
+ *  10/255 de su media 3x3, banco con horneado real). La regla es la de siempre: nada por debajo
+ *  del paso ni del píxel. */
+///  ⚠️ `fp0` es la huella para la octava FUNDAMENTAL y `fp` para el resto, y no son la misma: la
+///  fundamental es la FORMA de la nube (1,1 km) y sólo puede fundirse cuando el PÍXEL no la resuelve
+///  (desde órbita). Fundirla también por el paso de la marcha —que crece hasta 430 m a 2,3 km
+///  mirando al horizonte— dejaba el cielo entero como una lámina uniforme de la cobertura media,
+///  moteada por la erosión: "todo el cielo lleno de textura". Las octavas finas sí van por el paso.
+float harukaCloudFbm3LOD(vec3 p, int octaves, float fp0, float fp) {
+    float v = 0.0, a = 0.5, wl = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        const float w = 1.0 - smoothstep(wl / 6.0, wl / 3.0, (i == 0) ? fp0 : fp);
+        v += a * mix(0.5, harukaCloudVNoise3(p), w);
+        p *= 2.0; a *= 0.5; wl *= 0.5;
+    }
+    return v;
+}
+
+/** @brief `harukaCloudField3` con LOD (ver `harukaCloudFbm3LOD`). `fp` = huella de la muestra en
+ *  unidades de `p` (metros × fscale): el mayor entre el paso de la marcha y el píxel. */
+float harukaCloudField3LOD(vec3 p, vec3 wind, float fp0, float fp) {
+    vec3 warp = vec3(harukaCloudFbm3LOD(p * 0.6 + wind * 0.5,        2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LOD(p * 0.6 + 5.2 - wind * 0.5,  2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LOD(p * 0.6 + 11.7 + wind * 0.3, 2, fp0 * 0.6, fp * 0.6));
+    float d = harukaCloudFbm3LOD(p * 1.3 + warp * 1.4 + wind, 4, fp0 * 1.3, fp * 1.3);
+    d -= 0.20 * harukaCloudFbm3LOD(p * 4.0 - wind * 2.0, 4, fp * 4.0, fp * 4.0);   // esta es detalle entera
+    return d;
+}
+
+/** @brief El campo de las CAPAS (altocúmulo, cirro): el mismo warp, pero LIMITADO EN BANDA.
+ *
+ *  ⚠️ `harukaCloudField3` lleva una octava a `p·4` con cuatro suboctavas: rasgos de 190 m a la
+ *  escala del cirro y de 50 m a la del altocúmulo. La marcha da pasos de 50-360 m con jitter por
+ *  píxel, así que cada píxel muestrea ese ruido en sitios distintos y sale un valor distinto: MOTAS
+ *  de 1 px por todo el cielo (medido a resolución completa; con el recorte de escena apagado
+ *  seguían, con el perfil de capa seguían — era el campo). El cúmulo lo tolera porque satura en dos
+ *  pasos y la varianza se esconde bajo el alfa; una capa translúcida la enseña entera. Aquí, dos
+ *  octavas: el rasgo más fino queda en 2,3 km (cirro) y 600 m (altocúmulo), varias veces el paso. */
+float harukaCloudFieldLayer(vec3 p, vec3 wind, float fp0, float fp) {
+    vec3 warp = vec3(harukaCloudFbm3LOD(p * 0.6 + wind * 0.5,        2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LOD(p * 0.6 + 5.2 - wind * 0.5,  2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LOD(p * 0.6 + 11.7 + wind * 0.3, 2, fp0 * 0.6, fp * 0.6));
+    return harukaCloudFbm3LOD(p * 1.3 + warp * 1.4 + wind, 2, fp0 * 1.3, fp * 1.3);
+}
+
 // ── DE LÁMINA A CUERPO ──────────────────────────────────────────────────────────────────────────
 // Lo de arriba es un campo HORIZONTAL (varía muchísimo más de lado que en vertical, porque la escala
 // del rasgo son kilómetros y el espesor cientos de metros). Multiplicado por un perfil que solo depende de la altura RELATIVA,
@@ -129,6 +181,11 @@ const float HARUKA_CLOUD_ERODE = 0.55;
 /** Altura MÍNIMA de la nube más débil, en fracción de la losa. Sin este suelo, un punto apenas por
  *  encima del umbral daría una nube de espesor ~0 y el borde del cúmulo se afilaría a un plano. */
 const float HARUKA_CLOUD_MINTOP = 0.22;
+/** Espesor MÍNIMO de una nube (m): lo que la marcha puede resolver con sus pasos de 50-360 m. Una
+ *  nube más fina que esto no se dibuja como nube, se dibuja como grano. */
+const float HARUKA_CLOUD_MIN_THICK_M = 260.0;
+float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM);
+float harukaCloudDensity(float strength, float f, vec3 q) { return harukaCloudDensity(strength, f, q, HARUKA_CLOUD_MINTOP, 1.0e9, 0.0); }
 
 /**
  * @brief Fuerza de la nube en [0,1] a partir del campo y el umbral.
@@ -143,6 +200,37 @@ float harukaCloudStrength(float fieldValue, float threshold) {
     return smoothstep(threshold, threshold + HARUKA_CLOUD_SOFT, fieldValue);
 }
 
+/**
+ * @brief El UMBRAL que deja por encima una fraccion `cover` del campo.
+ *
+ * ⚠️ ERA `lo = mix(0.58, 0.20, cover)`, una recta a ojo. Medida la distribucion de los campos en
+ * CPU (400 000 puntos, mismo hash y mismo fBm): los dos son ~gaussianos con media 0,375 y sigma
+ * 0,109 (cumulo) / 0,103 (capa). Con esa recta, cobertura 0,08 daba umbral 0,55 y por encima
+ * quedaba el 5 % del cumulo y el 0,7-2 % de la capa: el altocumulo de buen tiempo (cobertura
+ * 0,08-0,14) NO EXISTIA —0,0 % de pixeles en el banco desde el suelo, desde dentro de su banda y
+ * desde encima— y el cirro salia a la mitad. El umbral de un cuantil es media + sigma·probit(1-c);
+ * el probit va por Abramowitz-Stegun 26.2.23 (error < 4,5e-4), que son diez operaciones.
+ * A partir de aqui `cover` SIGNIFICA fraccion del cielo, y la mezcla a cobertura de lejos
+ * (`wFund`) deja de cambiar de nivel al entrar.
+ */
+float harukaCloudThreshold(float cover, float sigma) {
+    const float c  = clamp(cover, 0.005, 0.995);
+    const float pp = min(c, 1.0 - c);
+    const float t  = sqrt(-2.0 * log(pp));
+    float z = t - (2.515517 + 0.802853 * t + 0.010328 * t * t)
+                / (1.0 + 1.432788 * t + 0.189269 * t * t + 0.001308 * t * t * t);
+    z = (c < 0.5) ? z : -z;
+    return 0.375 + sigma * z;
+}
+const float HARUKA_CLOUD_SIGMA_CUMULO = 0.109;
+const float HARUKA_CLOUD_SIGMA_CAPA   = 0.103;
+
+/* ⚠️ AQUÍ HUBO DOS `harukaCloudStrengthAA` (asimétrico y simétrico) que ensanchaban el borde del
+ * umbral con la huella. Los dos INFLAN la cobertura a distancia cuando el umbral cae en la cola
+ * del campo (cobertura baja): medido en el juego como neblina gris y como cielo blanco al
+ * horizonte. Retirados. El antialiasing correcto de un umbral es la esperanza del escalón bajo la
+ * huella, y eso no sale de ensanchar un smoothstep. */
+
 /** @brief Erosión de detalle: 3 octavas de ruido 3D. Solo se llama donde YA hay nube (ver
  *  `harukaCloudDensity`), que es lo que la hace asequible: el 3D no se paga en el cielo vacío, y
  *  cuesta 8 hashes por octava contra los 80 del campo 2D — subir octavas AQUÍ es barato. */
@@ -150,6 +238,32 @@ float harukaCloudDetail(vec3 q) {
     return 0.55 * harukaCloudVNoise3(q)
          + 0.30 * harukaCloudVNoise3(q * 2.7 + 11.3)
          + 0.15 * harukaCloudVNoise3(q * 6.9 + 41.7);
+}
+
+/** @brief El detalle CON LOD: cada octava se apaga cuando su longitud de onda no llega a unos
+ *  píxeles en pantalla.
+ *
+ *  ⚠️ SIN ESTO LA NUBE DÉBIL ES UNA CELOSÍA. Las tres octavas miden 125, 46 y 18 m a la escala del
+ *  cúmulo; a 1,5 km de la cámara y a 1/4 de resolución eso son 1-3 píxeles. Sobre un cuerpo flojo
+ *  (~0,3) la erosión ×0,55 manda, y lo que queda es la RETÍCULA del ruido de valor pintada a
+ *  Nyquist: en el banco (`cloud_volume_draws`, horneado real) el 27 % de los píxeles del cúmulo se
+ *  separaban más de 10/255 de su media 3x3, y en el juego eran "motas" y "píxeles". No era muestreo
+ *  —se probó con paso adaptativo y espesor mínimo, sin cambio—: era señal real por encima de la
+ *  frecuencia del píxel. Cada octava entra sólo cuando su longitud de onda cubre 4-8 píxeles, y los
+ *  pesos se renormalizan para que la densidad media no cambie con la distancia.
+ *
+ *  @param wavelengthM longitud de onda de la PRIMERA octava, en metros (1/(fscale·11,4))
+ *  @param footprintM  lo que mide un píxel a la distancia de la muestra, en metros */
+float harukaCloudDetailLOD(vec3 q, float wavelengthM, float footprintM) {
+    const float w0 = 1.0 - smoothstep(wavelengthM / 8.0,       wavelengthM / 4.0,       footprintM);
+    const float w1 = 1.0 - smoothstep(wavelengthM / 8.0 / 2.7, wavelengthM / 4.0 / 2.7, footprintM);
+    const float w2 = 1.0 - smoothstep(wavelengthM / 8.0 / 6.9, wavelengthM / 4.0 / 6.9, footprintM);
+    const float a0 = 0.55 * w0, a1 = 0.30 * w1, a2 = 0.15 * w2;
+    const float sum = a0 + a1 + a2;
+    if (sum <= 0.001) return 0.5;                     // sin detalle resoluble: el valor medio
+    return (a0 * harukaCloudVNoise3(q)
+          + a1 * harukaCloudVNoise3(q * 2.7 + 11.3)
+          + a2 * harukaCloudVNoise3(q * 6.9 + 41.7)) / sum;
 }
 
 /**
@@ -170,11 +284,16 @@ float harukaCloudDetail(vec3 q) {
  * en C++: el remapeo solo puede ACORTAR (`localTop <= 1`). La CPU responde "¿puede haber nube a esta
  * altura?" y el shader "¿la hay aquí exactamente?". Por eso el perfil compartido no se toca.
  */
-float harukaCloudDensity(float strength, float f, vec3 q) {
+float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM) {
     if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
 
     // Techo LOCAL de esta nube dentro de la losa. El suelo evita el filo de espesor cero.
-    const float localTop = mix(HARUKA_CLOUD_MINTOP, 1.0, strength);
+    // ⚠️ `minTop` lo pone el LLAMADOR a partir del espesor de la losa en metros: una nube floja no
+    // puede quedar por debajo de lo que la marcha resuelve (ver `HARUKA_CLOUD_MIN_THICK_M`). Con el
+    // 22 % fijo y una losa de 280 m salían jirones de 62 m, muestreados a 50-360 m por paso con
+    // jitter por píxel: GRANO (22,8 % de píxeles a más de 10/255 de su media 3x3, medido en el
+    // banco con el horneado real; 0 % en las capas altas, que llenan su losa).
+    const float localTop = mix(max(HARUKA_CLOUD_MINTOP, minTop), 1.0, strength);
     if (f >= localTop) return 0.0;
 
     const float body = harukaCloudProfile(f / localTop) * strength;
@@ -188,7 +307,62 @@ float harukaCloudDensity(float strength, float f, vec3 q) {
     // de nube" que se reportó. Ahora el núcleo conserva un 35 % del detalle: suficiente para que se
     // lea el grano y la nube tenga superficie, sin convertirla en un encaje que deje pasar el sol.
     const float edge = mix(0.35, 1.0, 1.0 - smoothstep(0.30, 0.85, body));
-    return max(body - HARUKA_CLOUD_ERODE * edge * harukaCloudDetail(q), 0.0);
+    return max(body - HARUKA_CLOUD_ERODE * edge * harukaCloudDetailLOD(q, wavelengthM, footprintM), 0.0);
+}
+
+/**
+ * @brief Densidad de una nube EN CAPA (altocúmulo, cirro): ocupa su losa entera, sin remapeo.
+ *
+ * ⚠️ Usar `harukaCloudDensity` para las capas altas las convertía en MOTAS: el remapeo por fuerza
+ * deja a una nube floja en el 22 % inferior de su losa — es lo que hace crecer un cúmulo — y un
+ * cirro a 0,26 de cobertura quedaba en ~250 m de espesor contra pasos de 130 m: uno o cero pasos
+ * dentro, decididos por el jitter de cada píxel. Medido con A/B en el juego (parches a 0 → sin
+ * motas). Un cirro o un altocúmulo no crecen en vertical: son capas, y llenan su losa.
+ */
+float harukaLayerDensity(float strength, float f, vec3 q) {
+    if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
+    const float body = harukaCloudProfile(f) * strength;
+    if (body <= 0.0) return 0.0;
+    // ⚠️ NADA DE RESTAR EL DETALLE FINO. `harukaCloudDetail` tiene octavas hasta 76 m a la escala
+    // del cirro y restarlo (x0,55) a un cuerpo de 0,3 deja solo los PICOS del ruido: a 100-200 m por
+    // paso y con jitter por pixel eso es una mota por pixel — medido a resolucion completa, motas
+    // de 1 px por todo el cielo. Aqui el detalle MODULA (nunca resta hasta cero) y a baja
+    // frecuencia (jirones de km, que es lo que tiene un cirro).
+    const float tex = harukaCloudVNoise3(q * 0.12) * 0.7 + harukaCloudVNoise3(q * 0.20 + 3.1) * 0.3;
+    return body * (0.45 + 0.75 * tex);
+}
+
+/**
+ * @brief Densidad del CIRRO: una lamina fina, translucida y FIBROSA a lo largo del viento.
+ *
+ * ⚠️ El cirro era `harukaLayerDensity` sobre 1,1-2,2 km de losa con extincion 0,00176/m: espesor
+ * optico 2-4, o sea OPACO, y desde dentro de su banda el banco daba el 100 % del cuadro blanco (una
+ * niebla). Un cirro real tiene espesor optico 0,1-1 y es un peine de fibras tendidas con el viento
+ * de altura. `along` y `across` son las coordenadas en el marco tangente del punto (metros): el
+ * ruido va estirado 6:1 a lo largo, y la fibra que cae por debajo del cuerpo se apaga.
+ */
+float harukaCirrusDensity(float strength, float f, float along, float across, float footprintM) {
+    if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
+    const float body = harukaCloudProfile(f) * strength;
+    if (body <= 0.0) return 0.0;
+    // Las fibras llevan LOD como todo lo demas, o a 30 km son una mota por pixel (medido en el banco: la mitad alta del cuadro en sal y pimienta).
+    // ⚠️ El patron es HORIZONTAL (no depende de la altura dentro de la lamina) y por eso su LOD va
+    // por la huella del PIXEL, no del paso: con el paso (80-200 m dentro de la lamina) las fibras
+    // se fundian enteras y el cirro salia como algodon liso desde encima.
+    // 1,7 km de traves (720 m la segunda octava) por 4 km a lo largo: a 1/4 de resolucion desde
+    // el suelo, una fibra de 290 m eran 3-4 px y el banco la contaba como grano (51 % al cenit).
+    // ⚠️ Eran 10 km a lo largo (6:1) y en el juego se veian "nubes mucho mas largas que anchas":
+    // barras. 2,4:1, y un tercer ruido ISOTROPO que las corta en jirones para que no sean barras.
+    const vec3 qa = vec3(along * 0.00025, across * 0.0006, 3.7);
+    const vec3 qi = vec3(along * 0.0004, across * 0.0004, 9.1);
+    const float w0 = 1.0 - smoothstep(1667.0 / 8.0, 1667.0 / 4.0, footprintM);
+    const float w1 = 1.0 - smoothstep(725.0 / 8.0, 725.0 / 4.0, footprintM);
+    const float fibra = mix(0.5, harukaCloudVNoise3(qa), w0) * 0.45
+                      + mix(0.5, harukaCloudVNoise3(qa * 2.3 + 7.7), w1) * 0.25
+                      + mix(0.5, harukaCloudVNoise3(qi), w1) * 0.30;
+    // Borde blando: la fibra MODULA (0,15-1) y no recorta; con smoothstep(0,30, 0,70) salian
+    // placas de canto duro.
+    return body * mix(0.15, 1.0, smoothstep(0.25, 0.75, fibra));
 }
 
 /**

@@ -289,6 +289,63 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
     const float speed = glm::length(ws.wind);
     m_oceanState = Haruka::Planet::oceanStateFromWind(speed, ws.wind.x, ws.wind.z, (float)tideM);
 
+    // ⚠️ EL VIENTO ES LA MITAD DE "NO VEO OLAS". La amplitud va con U² y `oceanStateFromWind` topa U
+    // por abajo en 4 m/s: con el clima en calma TODOS los trenes salen al 12 % de la tabla y el mar
+    // es un rizo de 15 cm. Eso no se distingue a ojo de "el mar no se dibuja" ni de "la celda se come
+    // la ola" (el otro log de `[Mar]`, en planet.cpp) — por eso hay que ver el numero.
+    {   static int s_lastU = -999;
+        const int u = (int)std::lround(speed);
+        if (u != s_lastU) {
+            s_lastU = u;
+            double sumAmp = 0.0;
+            for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) sumAmp += m_oceanState.wave[i][1];
+            HARUKA_LOGI("Mar", "viento %.1f m/s%s -> Sigma amp %.2f m (cresta-valle ~%.2f m) · lambda %.0f..%.0f m · marea %.2f m",
+                        speed,
+                        (speed < 4.0f) ? " (TOPADO a 4: mar en calma)" : "",
+                        sumAmp, sumAmp * 2.0,
+                        (double)m_oceanState.wave[0][0],
+                        (double)m_oceanState.wave[Haruka::Planet::OCEAN_WAVES - 1][0], tideM);
+        }
+    }
+
+    // ── TIEMPO ADVERSO: lo que hay y lo que viene ───────────────────────────────────────────────
+    //
+    // ⚠️ SIN ESTE LOG, «no hay tornados» y «los tornados no se dibujan» se ven exactamente igual
+    // desde fuera — que es el par de síntomas que ya costó una sesión entera con el mar. Aquí sale
+    // el escalón de severidad cuando CAMBIA y el embudo más cercano cuando hay alguno, con su
+    // distancia: si el número dice que el más cercano está a 4000 km, el problema no es el render.
+    {
+        const float sev = Haruka::WeatherSystem::severityAt(ws);
+        const auto  cls = Haruka::WeatherSystem::severityClass(sev);
+        static int s_lastClass = -1;
+        if ((int)cls != s_lastClass) {
+            s_lastClass = (int)cls;
+            HARUKA_LOGI("Clima", "%s (severidad %.2f) · viento %.1f m/s · nube %.0f-%.0f m · precip %.2f",
+                        Haruka::WeatherSystem::severityName(cls), sev, speed,
+                        ws.cloudBaseM, ws.cloudTopM, ws.precip);
+        }
+
+        const auto& vs = activeVortices();
+        static size_t s_lastN = (size_t)-1;
+        if (vs.size() != s_lastN) {
+            s_lastN = vs.size();
+            double bestKm = -1.0; const Haruka::WeatherSystem::Vortex* best = nullptr;
+            for (const auto& v : vs) {
+                const double km = std::acos(glm::clamp(glm::dot(dir, v.dir), -1.0, 1.0)) * pr / 1000.0;
+                if (!best || km < bestKm) { bestKm = km; best = &v; }
+            }
+            if (best)
+                HARUKA_LOGI("Clima", "%zu embudo(s) a menos de %.0f km · el mas cercano: %s a %.1f km, "
+                            "%.0f m/s, nucleo %.0f m, edad %.0f%%",
+                            vs.size(), Haruka::WeatherSystem::kVortexSearchM / 1000.0,
+                            best->overWater ? "TROMBA MARINA" : "TORNADO", bestKm,
+                            (double)best->windMS, best->coreRadiusM, best->age01 * 100.0f);
+            else
+                HARUKA_LOGI("Clima", "sin embudos en %.0f km a la redonda",
+                            Haruka::WeatherSystem::kVortexSearchM / 1000.0);
+        }
+    }
+
     // Publicarlo a quien lo DIBUJA. La física lo lee de `oceanState()`, no de otra derivación.
     if (auto* tpm = activeTerrestrialMut()) tpm->setOceanState(m_oceanState);
 }
@@ -689,6 +746,91 @@ Haruka::WeatherSample PlanetarySystem::weatherAt(const glm::dvec3& worldPos) con
         m_weatherFieldPos   = worldPos;
     }
     return m_weather.sampleAt(dir, m_weatherFieldTempC, m_weatherFieldHumid);
+}
+
+const std::vector<Haruka::WeatherSystem::Vortex>& PlanetarySystem::activeVortices() const {
+    // Puro ⇒ el mismo instante y el mismo sitio dan el mismo resultado. La caché no es estado, es no
+    // repetir trabajo: en un frame lo preguntan el jugador, los props, la lluvia y el render.
+    if (m_vortexCacheTime == m_weather.time()) return m_vortexCache;
+    m_vortexCacheTime = m_weather.time();
+    m_vortexCache.clear();
+
+    glm::dvec3 pc; double pr;
+    if (!getActivePlanet(pc, pr)) return m_vortexCache;
+    // Alrededor de DÓNDE. El campo del clima cubre el planeta entero, pero los embudos se consultan
+    // por vecindad (ver `kVortexCellRad`): se busca alrededor del último punto donde alguien
+    // preguntó por el clima, que es el jugador.
+    glm::dvec3 obs = m_weatherFieldPos - pc;
+    const double ol = glm::length(obs);
+    if (ol < 1e-9) return m_vortexCache;
+    obs /= ol;
+
+    // La sonda: las condiciones DEBAJO de cada hueco, no las del jugador. Es lo que hace que el
+    // tornado salga donde hay energía y la tromba donde hay mar.
+    struct Ctx { const PlanetarySystem* self; glm::dvec3 center; double radius; } ctx{ this, pc, pr };
+    Haruka::WeatherSystem::Vortex buf[Haruka::WeatherSystem::kMaxVortices];
+    const int n = m_weather.activeVortices(obs, Haruka::WeatherSystem::kVortexSearchM, pr,
+        buf, Haruka::WeatherSystem::kMaxVortices,
+        [](const glm::dvec3& dir, void* user, float& tempC, float& humidity, bool& overWater) {
+            const Ctx* c = (const Ctx*)user;
+            const Haruka::TerrainSample ts = c->self->sampleSurface(c->center + dir * c->radius);
+            tempC     = ts.tempC;
+            humidity  = ts.humidity;
+            // ⚠️ NO `landMask` (la puerta del continente, que aqui vale 1 en todo el planeta): el
+            // mar es la cota bajo el nivel del mar, que es lo que `sampleSurface` ya decide.
+            overWater = (ts.waterType == Haruka::WaterType::Ocean);
+        }, &ctx);
+
+    m_vortexCache.assign(buf, buf + n);
+
+    // ── ESCOTILLA DE DEPURACIÓN: un tornado a la carta ──────────────────────────────────────────
+    // `HARUKA_VORTEX_DEBUG=<metros>` planta un embudo a esa distancia del observador, hacia el
+    // este, pase lo que pase con el clima. Existe porque la frecuencia real medida es del 2 % del
+    // tiempo a 30 km en el cinturón húmedo y 0 % en la media del mundo: sin esto, comprobar el
+    // render o el arrastre del jugador es esperar horas. NO afecta a nada si la variable no está.
+    static const double s_debugM = [] {
+        const char* e = std::getenv("HARUKA_VORTEX_DEBUG");
+        return e ? std::atof(e) : 0.0;
+    }();
+    if (s_debugM != 0.0) {                      // negativo = TROMBA (sin polvo) a esa distancia
+        glm::dvec3 east = glm::cross(glm::dvec3(0, 1, 0), obs);
+        if (glm::length(east) < 1e-6) east = glm::cross(glm::dvec3(1, 0, 0), obs);
+        east = glm::normalize(east);
+        const double ang = std::fabs(s_debugM) / pr;
+        Haruka::WeatherSystem::Vortex v;
+        v.dir         = glm::normalize(obs * std::cos(ang) + east * std::sin(ang));
+        v.travel      = east;
+        v.travelMS    = 0.0f;                   // quieto, para poder mirarlo
+        v.coreRadiusM = 120.0;
+        v.windMS      = 85.0f;
+        v.spin        = 1.0f;
+        v.age01       = 0.5f;
+        // Hasta la base de la nube que HAY, o la manga acabaría en el aire con un hueco encima.
+        v.topM        = weatherAt(m_weatherFieldPos).cloudBaseM;
+        v.overWater   = (s_debugM < 0.0);
+        v.cell        = 0xDEB06u;
+        v.id          = 0xDEB06u;
+        m_vortexCache.push_back(v);
+    }
+    return m_vortexCache;
+}
+
+glm::dvec3 PlanetarySystem::windAt(const glm::dvec3& worldPos, float altAboveGroundM) const {
+    glm::dvec3 pc; double pr;
+    if (!getActivePlanet(pc, pr)) return glm::dvec3(0.0);
+    glm::dvec3 dir = worldPos - pc;
+    const double len = glm::length(dir);
+    if (len < 1e-9) return glm::dvec3(0.0);
+    dir /= len;
+
+    glm::dvec3 w = glm::dvec3(weatherAt(worldPos).wind);
+    for (const auto& v : activeVortices())
+        w += Haruka::WeatherSystem::vortexWindAt(v, dir, pr, altAboveGroundM);
+    return w;
+}
+
+float PlanetarySystem::severityAt(const glm::dvec3& worldPos) const {
+    return Haruka::WeatherSystem::severityAt(weatherAt(worldPos));
 }
 
 PlanetarySystem::GroundCover PlanetarySystem::groundCoverAt(const glm::dvec3& worldPos,

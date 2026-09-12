@@ -82,11 +82,37 @@ void main() {
     const vec3   dir  = vec3(dirD);
 
     const float R = uMisc.x;
-    // ── LA COTA DEL AGUA: mar, lago horneado o parche dinamico, en UNA respuesta ────────────────
-    const vec3  posRelEye = dir * R + uCenter.xyz;
-    const float level = harukaWaterLevelAt(posRelEye, dir, harukaSeaLevelM());
 
-    // ── LA PROFUNDIDAD, del MISMO bake que dibuja el terreno y que pisa la fisica ───────────────
+    // ── EL SUELO PRIMERO, QUE LA COTA DEL AGUA DEPENDE DE EL ───────────────────────────────────
+    //
+    // El orden importa: el parche dinamico publica METROS DE LAMINA, no cota, y se apoya en ESTE
+    // suelo (ver `harukaInlandWaterDepthAt`). Calcular el nivel antes obligaria a restar dos suelos
+    // distintos, que es de donde salio la pelicula blanca.
+    //
+    // ── LA PROFUNDIDAD, contra EL SUELO QUE SE DIBUJA (bake + relieve) ─────────────────────────
+    //
+    // ⚠️ AQUI ESTABA EL AGUA QUE ATRAVESABA EL CERRO. Esto restaba `baseH`, el bake equirect A PELO,
+    // y decia en su titulo que era "el MISMO bake que dibuja el terreno y que pisa la fisica". NO LO
+    // ERA: el nodo le suma `harukaTerrainDetail` encima (`terrain_node.comp`, el bloque de `uMisc.z`)
+    // y `sampleTerrainHeight` —la fisica, y el suelo con el que el fluido MIDE su lamina— tambien.
+    //
+    // Las dos puntas de la cadena median con campos distintos, asi que la resta acumulaba el relieve
+    // entero. La cota que publica el parche de aguas someras es `suelo_COMPLETO + charco`
+    // (`fluid_host.cpp`, "publicar la superficie del agua interior"), de modo que aqui salia:
+    //
+    //     profundidad = (bake + relieve + charco) − bake = relieve + charco
+    //
+    // Un charco de 5 cm sobre una ladera con 60 m de relieve se dibujaba como 60 m de agua, y esa
+    // lamina plana se extendia hasta donde el BAKE subia por encima de ella — cortando el cerro de
+    // verdad, con el borde recto donde acaba el soporte del parche. Reportado como "agua dinamica en
+    // terreno sin agua inicial, con forma de cuadrado, que se mueve": el cuadrado es el parche de
+    // 420 m anclado bajo el jugador, y lo que lo hacia visible era esta resta.
+    //
+    // El relieve llega a ±915 m (ver la nota de las dos octavas continentales en
+    // `lib/terrain_detail.glsl`), y `harukaSeaLevelAttenuation` solo lo apaga por debajo de 5 m de
+    // cota — por eso el MAR (nivel 0) se veia bien y el agua interior no. El sintoma vivia entero en
+    // los lagos, los rios y el parche.
+    //
     // ⚠️ LA BANDERA SALE DE LA PROPIA TEXTURA, NO DE `uMisc.y`. Ese flag lo escribe el pase de
     // TERRENO para SU textura de altura, y el agua ata la suya: con un cuerpo donde el terreno no
     // tenia bake pero el agua si, `uMisc.y` valia 0, `baseH` salia 0, la profundidad 0 y **el agua se
@@ -96,8 +122,52 @@ void main() {
     const float baseH = (hSize.x > 2)
                       ? harukaSampleHeightField(uHeightTex, hSize, harukaEquirectUV(dir))
                       : 0.0;
-    const float depthRest = level - baseH;
+
+    // El relieve, con EL MISMO orden de operaciones que `terrain_node.comp` —incluido el tope de "el
+    // detalle no hunde tierra bajo el mar"—, para que la orilla que se ve sea la del suelo que se ve.
+    //
+    // ⚠️ EL CORTE ES EL DEL VANO DIBUJADO (texel x ZANCADA), NO EL TEXEL DEL NODO. Es la diferencia
+    // entre que la lamina se apoye en el suelo o flote sobre el. Con `stride > 1` el terreno NO
+    // dibuja su propio mapa: lee el del ANCESTRO `log2(stride)` niveles arriba, que se horneo con el
+    // corte `texel x stride`. Cortando mas fino, el agua seca se apoyaba en un relieve que el terreno
+    // no dibuja —el fino— y quedaba por ENCIMA de la superficie real: lamina en el aire. Es el mismo
+    // error que mide `v5 F3` por zancada (0,0752 m con stride 1 · 0,1260 con 2 · 0,3857 con 4), y con
+    // el corte del vano desaparece por construccion en el interior del nodo.
+    const float quadM = float(uLod.z) / float(1 << I.node.y) / float(cells) * float(stride);
+    float groundH = baseH;
+    if (hSize.x > 2) {
+        float det = harukaTerrainDetail(dirD, double(R) + double(baseH), quadM)
+                  * harukaSeaLevelAttenuation(baseH);
+        if (baseH > 0.0 && det < -baseH) det = -baseH;
+        groundH = baseH + det;
+    }
+
+    // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────
+    const vec3  posRelEye = dir * R + uCenter.xyz;
+    const float level = harukaWaterLevelAt(posRelEye, dir, harukaSeaLevelM(), groundH);
+
+    const float depthRest = level - groundH;
     vDepth = depthRest;
+
+    // ── Y LA COTA A LA QUE SE DIBUJA EL VERTICE, QUE NO ES LA MISMA ─────────────────────────────
+    //
+    // ⚠️ AQUI ESTABAN LOS CUBOS. `harukaWaterLevelAt` devuelve `max(nivelDelMar, agua interior)`, asi
+    // que un vertice SIN agua interior no devuelve "no hay agua": devuelve **la cota 0**. El
+    // fragmento lo descarta (`vDepth <= 0`) y por eso parecia inofensivo — pero el VERTICE ya se
+    // habia colocado ahi. Un charco a 1 025 m rodeado de vertices secos generaba triangulos que
+    // caian de 1 025 m a 0 m: una CORTINA vertical de agua colgando del charco hasta el nivel del
+    // mar. Lo que se ve de esa cortina es la parte con `vDepth > 0` mas lo que el terreno no tapa:
+    // una caja con la cara de arriba rizada por Gerstner y paredes verticales. Reportado como
+    // "aparecen cubos con relieve en la cara superior" y como "estela hacia abajo" — la estela es la
+    // cortina cayendo por la ladera.
+    //
+    // El arreglo no toca el criterio: `vDepth` sigue siendo `nivel - suelo` y sigue descartando. Lo
+    // que se corrige es la GEOMETRIA — en seco el vertice se apoya en el suelo en vez de desplomarse
+    // al nivel del mar, asi que el borde del agua es una cuña que muere en la orilla y no una pared.
+    //
+    // ⚠️ EL MAR NO CAMBIA: alli `level` es 0 y `groundH` es negativo, o sea `max` = 0, el mismo
+    // vertice de siempre. Por eso el oceano nunca enseño cubos y el agua interior si.
+    const float drawLevel = max(level, groundH);
 
     // ── LA PENDIENTE DEL FONDO, para que la ola REFRACTE ────────────────────────────────────────
     //
@@ -105,9 +175,10 @@ void main() {
     // profundidad (`uHeightTex`, bilineal), asi que la ola gira por el fondo que de verdad tiene
     // debajo y no por otro. Cuatro muestras, diferencias centradas en las dos tangentes.
     //
-    // ⚠️ EL PASO ES UN TEXEL DEL BAKE, y eso es lo correcto AQUI: la profundidad tampoco lleva
-    // `terrainDetail`, o sea que el fondo que ve la ola es el campo base. Un paso mas fino mediria
-    // la pendiente de un campo que la ola no usa, y las crestas girarian por un relieve invisible.
+    // ⚠️ EL PASO ES UN TEXEL DEL BAKE, y sigue siendo lo correcto AQUI aunque la PROFUNDIDAD ya lleve
+    // relieve (ver arriba). Lo que refracta una ola es la forma del fondo a la escala de su longitud
+    // de onda —decenas de metros—, no el rizado del relieve fino: el campo base es justo esa escala.
+    // Un paso mas fino giraria las crestas con detalle que la ola no puede sentir.
     vec3 slope = vec3(0.0);
     if (hSize.x > 2) {
         vec3 s1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0,1,0)) : cross(dir, vec3(1,0,0)));
@@ -127,8 +198,7 @@ void main() {
     // ⚠️ EL `quad` SALE DEL NODO, y ese es medio motivo de esta migracion. `harukaGerstner` apaga
     // cada tren cuando su longitud baja de dos quads (Nyquist); con la rejilla del clipmap ese dato
     // habia que reconstruirlo replicando su ley, y aqui es sencillamente el paso del nodo.
-    const float quadM = float(uLod.z) / float(1 << I.node.y) / float(cells) * float(stride);
-    vec3  wp = dir * (R + level);
+    vec3  wp = dir * (R + drawLevel);   // == `level` donde hay agua: la ola no se entera
     vec3  n  = dir;
     float foam = 0.0;
     vec3  disp = vec3(0.0);
@@ -142,7 +212,7 @@ void main() {
     // ⚠️ LA POSICION EN DOUBLE Y CON `uCenter` PARTIDO, igual que el terreno y por lo mismo: en float
     // el ulp a radio terrestre son 0,5 m, o sea que el agua temblaria al mover la camara. Ver la nota
     // larga de `terrain_node.vert`.
-    precise dvec3 pRel = dirD * (double(R) + double(level)) + dvec3(uCenter.xyz);
+    precise dvec3 pRel = dirD * (double(R) + double(drawLevel)) + dvec3(uCenter.xyz);
     vFragPos = vec3(pRel) + uCenterLo.xyz + disp;
     gl_Position = uMVP * vec4(vFragPos, 1.0);
 }

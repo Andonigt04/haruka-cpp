@@ -34,6 +34,7 @@
 #include <vector>
 #include <functional>
 #include <chrono>
+#include <future>     // el horneado del cielo corre en un hilo (134 ms medidos: 8 frames)
 #include <algorithm>
 #include <cstdlib>   // getenv/atof: HARUKA_RAIN (ver m_rainOverride)
 #include <unordered_set>
@@ -742,6 +743,17 @@ private:
     /// pero no se puede hornear hasta que el planeta tiene su campo de clima: si se adelanta sale a
     /// cero y, cacheada, deja el cielo sin una nube el resto de la partida. Vacia = aun no lista.
     std::vector<float>              m_cloudHumField;
+    std::vector<float>              m_cloudTempField;   // temperatura, mismo horneado (decide la torre)
+    std::vector<float>              m_cloudWaterField;  // 1 = mar (complemento del landMask): humedad marina
+    Haruka::RHI::TextureHandle      m_cloudHiTex;       // capas ALTAS (cirro, nivel medio), desfasadas del frente
+    float                           m_cloudBaseMin = 700.0f;   // banda GLOBAL que marcha el pase
+    float                           m_cloudTopMax  = 1800.0f;
+    /// El horneado del cielo, EN VUELO. `bakeSky` a 256x128 son 134 ms medidos: en el hilo de render
+    /// eran 8 frames congelados cada 2 s de mundo. Corre en un hilo sobre una COPIA del clima (14
+    /// frentes; se copia para no leer `m_time` mientras el hilo principal lo escribe) y de los
+    /// campos estaticos; al terminar se sube la textura. Mientras, se sigue viendo el anterior.
+    struct SkyBake { std::vector<float> rgba, hi; float coverMax = 0, baseMin = 700, topMax = 1800; double ms = 0; int w = 0, h = 0; };
+    std::future<SkyBake>            m_skyBakeJob;
     /// Target REDUCIDO donde se marcha la nube, y el pipeline que lo sube a la escena. El pase cuesta
     /// ~80 hashes de ruido por paso y ~88 pasos por pixel: medido en el banco son 8,76 ms a 256x256,
     /// del orden de 150-280 ms a 1920x1080. Y bajar los pasos NO lo arregla —de 64 a 24 el coste solo

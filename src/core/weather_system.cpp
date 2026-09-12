@@ -174,6 +174,49 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
     return glm::clamp(cover * (0.70f + 1.00f * H) + background, 0.0f, 1.0f);
 }
 
+float WeatherSystem::bakeSky(const float* tempC, const float* humidity, int W, int H,
+                             float* outRGBA, float* outBaseMin, float* outTopMax,
+                             const float* water, float* outHiRGBA) const {
+    float coverMax = 0.0f, baseMin = 1e9f, topMax = 0.0f;
+    const double kPi = glm::pi<double>();
+    // Las capas altas, con el reloj desfasado (ver `kCirrusLeadS`). Copias: el sistema son 14
+    // frentes y un reloj, y así el horneado sigue siendo `const` y puro.
+    WeatherSystem lead = *this; lead.setTime(m_time + kCirrusLeadS / m_timeScale);
+    WeatherSystem lag  = *this; lag.setTime(m_time - kMidLagS / m_timeScale);
+    for (int y = 0; y < H; ++y) {
+        const double lat = (0.5 - ((double)y + 0.5) / H) * kPi;
+        for (int x = 0; x < W; ++x) {
+            const double lon = (((double)x + 0.5) / W - 0.5) * 2.0 * kPi;
+            const glm::dvec3 d(std::cos(lat) * std::cos(lon), std::sin(lat),
+                               std::cos(lat) * std::sin(lon));
+            const size_t i = (size_t)y * W + x;
+            const float hSky = skyHumidity(humidity[i], water ? water[i] : 0.0f);
+            const WeatherSample s = sampleAt(d, tempC[i], hSky);
+            outRGBA[i * 4 + 0] = s.cloudCover;
+            outRGBA[i * 4 + 1] = s.cloudBaseM;
+            outRGBA[i * 4 + 2] = s.cloudTopM;
+            outRGBA[i * 4 + 3] = s.precip;
+            coverMax = std::max(coverMax, s.cloudCover);
+            baseMin  = std::min(baseMin, s.cloudBaseM);
+            topMax   = std::max(topMax, s.cloudTopM);
+            if (outHiRGBA) {
+                // El cirro NO lleva el fondo de humedad (sería otra capa cerrada): sólo los frentes
+                // adelantados. Se resta el fondo que `cloudCoverAt` suma y se reescala.
+                const float bg = 0.73f * hSky;
+                const float cirrus = glm::clamp((lead.cloudCoverAt(d, hSky) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
+                const float mid    = glm::clamp((lag.cloudCoverAt(d, hSky)  - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
+                outHiRGBA[i * 4 + 0] = cirrus;
+                outHiRGBA[i * 4 + 1] = mid;
+                outHiRGBA[i * 4 + 2] = hSky;
+                outHiRGBA[i * 4 + 3] = 0.0f;
+            }
+        }
+    }
+    if (outBaseMin) *outBaseMin = baseMin;
+    if (outTopMax)  *outTopMax  = topMax;
+    return coverMax;
+}
+
 float WeatherSystem::cloudDensityAt(const WeatherSample& w, float altM) {
     if (w.cloudCover <= 0.0f) return 0.0f;
     const float thick = w.cloudTopM - w.cloudBaseM;
@@ -281,18 +324,304 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
         glm::dvec3 adv = glm::cross(f.axis, d);                  // dirección de avance en ESTE punto
         const double al = glm::length(adv);
         if (al < 1e-9) continue;
-        wind += (adv / al) * (f.omega * 6371000.0 * 0.35) * wgt; // ω·R escalado a m/s plausibles
+        // ⚠️ ERA `f.omega * 6371000.0 * 0.35` = la velocidad de AVANCE del frente, que son km/s
+        // porque el frente cruza el planeta en media hora. Ver `kFrontWindMS` en la cabecera: se
+        // conserva el SIGNO de ω (los frentes retrógrados soplan al revés) y el peso, no su módulo.
+        const double sign = (f.omega < 0.0) ? -1.0 : 1.0;
+        wind += (adv / al) * (sign * (double)kFrontWindMS) * wgt;
     }
 
     // (3) Racha: variación lenta y determinista (nada de rand()). ±25 % sobre el vector.
     const float gust = 0.75f + 0.5f * h01((uint32_t)(m_time * 0.35) * 2654435761u + m_seed);
     wind *= (double)gust;
 
+    // (4) TECHO. Aunque cada sumando esté acotado, 14 frentes solapados podrían apilarse; y este
+    //     vector sale del sistema hacia consumidores que no lo van a volver a mirar. Se acota el
+    //     MÓDULO (no cada eje) para no torcer la dirección, que es la mitad de la información.
+    {
+        const double sp = glm::length(wind);
+        if (sp > (double)kMaxWindMS) wind *= (double)kMaxWindMS / sp;
+    }
+
     // La lluvia arrecia con el viento (la borrasca sopla y descarga a la vez): +30 % como techo.
     const double speed = glm::length(wind);
     w.precip = glm::clamp(w.precip * (float)(1.0 + 0.02 * glm::min(speed, 15.0)), 0.0f, 1.0f);
     w.wind   = glm::vec3(wind);
     return w;
+}
+
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+//  TIEMPO ADVERSO. Ver la cabecera: la severidad sale de las condiciones y el embudo de la
+//  severidad, igual que la lluvia sale de la cobertura. Nada de esto guarda estado.
+// ════════════════════════════════════════════════════════════════════════════════════════════════
+
+const char* WeatherSystem::severityName(Severity s) {
+    switch (s) {
+        case Severity::Calm:   return "calma";
+        case Severity::Breezy: return "brisa";
+        case Severity::Windy:  return "viento";
+        case Severity::Gale:   return "temporal";
+        case Severity::Storm:  return "tormenta";
+        case Severity::Severe: return "tormenta severa";
+    }
+    return "?";
+}
+
+float WeatherSystem::severityAt(const WeatherSample& w) {
+    // La TORRE pesa más que nada porque es lo que separa un día feo de una tormenta: el mismo cielo
+    // cubierto con 800 m de estrato y con 9 km de cumulonimbo no es el mismo tiempo.
+    // ⚠️ La ventana acaba en `kVortexFullTowerM` y no en un número redondo mayor por lo mismo que
+    // allí: la torre de este mundo tope medida es 6397 m, así que una escala que llegue a 9000
+    // dedica su tercio superior a nubes que no existen — y entonces «tormenta severa» no se alcanza
+    // nunca y el escalón más alto es decorativo.
+    const float tower = glm::smoothstep(1500.0f, kVortexFullTowerM, w.cloudThicknessM());
+    const float rain  = glm::clamp(w.precip, 0.0f, 1.0f);
+    // El viento entra desde 8 m/s (donde ya se nota) hasta el techo del campo de fondo.
+    const float windS = glm::smoothstep(8.0f, kMaxWindMS, glm::length(w.wind));
+    return glm::clamp(0.45f * tower + 0.32f * rain + 0.23f * windS, 0.0f, 1.0f);
+}
+
+WeatherSystem::Severity WeatherSystem::severityClass(float s) {
+    if (s < 0.12f) return Severity::Calm;
+    if (s < 0.30f) return Severity::Breezy;
+    if (s < 0.48f) return Severity::Windy;
+    if (s < 0.64f) return Severity::Gale;
+    if (s < 0.80f) return Severity::Storm;
+    return Severity::Severe;
+}
+
+float WeatherSystem::vortexPotential(const WeatherSample& w, bool overWater) {
+    // (1) CONVECCIÓN PROFUNDA, con umbral y no en rampa desde cero. Sin cumulonimbo no hay embudo,
+    //     por mucho que sople: es la diferencia entre un temporal y una tormenta tornádica.
+    const float tower = glm::smoothstep(kVortexMinTowerM, kVortexFullTowerM, w.cloudThicknessM());
+    if (tower <= 0.0f) return 0.0f;
+
+    // (2) ENERGÍA disponible: aire cálido y húmedo. Sobre el mar el listón de temperatura es más
+    //     bajo — el agua entrega calor y humedad sin límite, y por eso las trombas marinas se forman
+    //     en condiciones que en tierra no darían nada.
+    const float warm  = glm::smoothstep(overWater ? 8.0f : 16.0f, 30.0f, w.tempC);
+    const float humid = glm::smoothstep(0.25f, 0.85f, w.humidity);
+    const float energy = warm * humid;
+
+    // (3) La tormenta tiene que estar DESCARGANDO, y el viento ayuda poco a propósito: un vendaval
+    //     limpio no hace embudos.
+    const float rain = glm::smoothstep(0.25f, 0.80f, w.precip);
+    const float gust = 0.85f + 0.15f * glm::smoothstep(5.0f, 30.0f, glm::length(w.wind));
+
+    float p = tower * (0.45f + 0.55f * energy) * (0.50f + 0.50f * rain) * gust;
+    if (overWater) p *= 1.20f;      // más frecuentes, y más abajo se verá que también más débiles
+    return glm::clamp(p, 0.0f, 1.0f);
+}
+
+namespace {
+
+// ── LA RETÍCULA DE EMBUDOS ──────────────────────────────────────────────────────────────────────
+// Rejilla del CUBO, como el terreno: cada dirección cae en (cara, i, j) y esa terna es la semilla
+// del hueco. Una rejilla lat/lon amontonaría los huecos en los polos, que es donde menos tormentas
+// hay. El lado real de la celda varía ~1,4× entre el centro de una cara y su esquina — da igual
+// para sembrar, y evita tener que proyectar de verdad.
+
+/// Nº de celdas por lado de cara. La cara abarca 90° de arco en su centro.
+inline int cellsPerFace() {
+    return (int)std::lround((glm::pi<double>() * 0.5) / WeatherSystem::kVortexCellRad);
+}
+
+inline void dirToFaceUV(const glm::dvec3& d, int& face, double& u, double& v) {
+    const double ax = std::fabs(d.x), ay = std::fabs(d.y), az = std::fabs(d.z);
+    if (ax >= ay && ax >= az)      { face = (d.x > 0) ? 0 : 1; u = d.y / ax; v = d.z / ax; }
+    else if (ay >= az)             { face = (d.y > 0) ? 2 : 3; u = d.x / ay; v = d.z / ay; }
+    else                           { face = (d.z > 0) ? 4 : 5; u = d.x / az; v = d.y / az; }
+}
+
+inline glm::dvec3 faceUVToDir(int face, double u, double v) {
+    switch (face) {
+        case 0:  return glm::normalize(glm::dvec3( 1.0, u,   v));
+        case 1:  return glm::normalize(glm::dvec3(-1.0, u,   v));
+        case 2:  return glm::normalize(glm::dvec3( u,   1.0, v));
+        case 3:  return glm::normalize(glm::dvec3( u,  -1.0, v));
+        case 4:  return glm::normalize(glm::dvec3( u,   v,   1.0));
+        default: return glm::normalize(glm::dvec3( u,   v,  -1.0));
+    }
+}
+
+/// Clave entera de la celda. Estable: es lo que hace que dos observadores distintos que miren la
+/// misma celda vean EL MISMO tornado, sin hablar entre ellos.
+inline uint32_t cellKey(int face, int i, int j, int n) {
+    return (uint32_t)face * (uint32_t)(n * n) + (uint32_t)j * (uint32_t)n + (uint32_t)i;
+}
+
+} // namespace
+
+int WeatherSystem::activeVortices(const glm::dvec3& nearDir, double searchRadiusM,
+                                  double planetRadiusM, Vortex* out, int maxOut,
+                                  float tempC, float humidity, bool overWater) const {
+    struct Fixed { float t, h; bool w; } fx{ tempC, humidity, overWater };
+    return activeVortices(nearDir, searchRadiusM, planetRadiusM, out, maxOut,
+        [](const glm::dvec3&, void* u, float& t, float& h, bool& w) {
+            const Fixed* f = (const Fixed*)u; t = f->t; h = f->h; w = f->w;
+        }, &fx);
+}
+
+int WeatherSystem::activeVortices(const glm::dvec3& nearDir, double searchRadiusM,
+                                  double planetRadiusM, Vortex* out, int maxOut,
+                                  FieldProbe probe, void* user) const {
+    if (!m_configured || !out || maxOut <= 0 || planetRadiusM <= 0.0) return 0;
+
+    const glm::dvec3 obs = glm::normalize(nearDir);
+    const double tS       = m_time * m_timeScale;
+    const double lifeFrac = kVortexLifeS / kVortexCycleS;   // techo de cuánto PUEDE haber embudo
+    const int    N        = cellsPerFace();
+    const double searchRad = searchRadiusM / planetRadiusM;  // el arco, en radianes
+
+    // Celdas a mirar: se barre una rejilla TANGENTE alrededor del observador y cada punto se mapea
+    // a su celda. Es aproximado para radios grandes, pero no hace falta que sea exacto —sólo que
+    // cubra— porque luego cada candidato se descarta por distancia de verdad. La alternativa
+    // (recorrer la rejilla del cubo cruzando caras) es diez veces más código para el mismo conjunto.
+    glm::dvec3 e1 = glm::cross(obs, kNorth);
+    if (glm::length(e1) < 1e-6) e1 = glm::cross(obs, glm::dvec3(1, 0, 0));
+    e1 = glm::normalize(e1);
+    const glm::dvec3 e2 = glm::cross(obs, e1);
+
+    const int k = glm::clamp((int)std::ceil(searchRad / kVortexCellRad) + 1, 1, 14);
+    uint32_t seen[(2 * 14 + 1) * (2 * 14 + 1)];
+    int nSeen = 0;
+    int n = 0;
+
+    for (int dj = -k; dj <= k && n < maxOut; ++dj) {
+        for (int di = -k; di <= k && n < maxOut; ++di) {
+            const glm::dvec3 probeDir = glm::normalize(
+                obs + e1 * ((double)di * kVortexCellRad) + e2 * ((double)dj * kVortexCellRad));
+            int face; double u, v;
+            dirToFaceUV(probeDir, face, u, v);
+            const int ci = glm::clamp((int)std::floor((u + 1.0) * 0.5 * N), 0, N - 1);
+            const int cj = glm::clamp((int)std::floor((v + 1.0) * 0.5 * N), 0, N - 1);
+            const uint32_t key = cellKey(face, ci, cj, N);
+
+            bool dup = false;                                   // la rejilla tangente repite celdas
+            for (int s = 0; s < nSeen; ++s) if (seen[s] == key) { dup = true; break; }
+            if (dup) continue;
+            if (nSeen < (int)(sizeof(seen) / sizeof(seen[0]))) seen[nSeen++] = key;
+
+            // VENTANA DE VIDA del hueco de esta celda. Casi siempre se sale por aquí, y por eso
+            // mirar 100 celdas no cuesta 100 muestreos de terreno.
+            const double u0    = (double)h01(key * 2654435761u + m_seed * 747796405u);
+            const double cyc   = tS / kVortexCycleS + u0;
+            const double phase = cyc - std::floor(cyc);
+            if (phase >= lifeFrac) continue;
+            const float age = (float)(phase / lifeFrac);
+
+            // Punto de nacimiento: centro de la celda con una sacudida dentro de ella, para que los
+            // embudos no salgan alineados en una cuadrícula visible desde el aire.
+            const double cu = ((ci + 0.5) / (double)N) * 2.0 - 1.0
+                            + (h01(key * 374761393u + m_seed) - 0.5) * (2.0 / N);
+            const double cv = ((cj + 0.5) / (double)N) * 2.0 - 1.0
+                            + (h01(key * 668265263u + m_seed) - 0.5) * (2.0 / N);
+            glm::dvec3 dir = faceUVToDir(face, cu, cv);
+
+            // LA CONDICIÓN. Aquí es donde el embudo puede no existir, y es lo que hace que el
+            // sistema sea «clima adverso generado por las condiciones» y no un temporizador.
+            float tC = 15.0f, hu = 0.5f; bool water = false;
+            probe(dir, user, tC, hu, water);
+            const WeatherSample w = sampleAt(dir, tC, hu);
+            const float pot = vortexPotential(w, water);
+            if (pot <= kVortexTrigger) continue;
+
+            // SE DESPLAZA CON SU TORMENTA: la dirección la da el viento en ese punto, que ya lleva
+            // dentro el arrastre del frente. Un embudo quieto se lee como un decorado.
+            glm::dvec3 tr = glm::dvec3(w.wind);
+            tr -= dir * glm::dot(tr, dir);                       // sólo la parte tangente
+            const double trl = glm::length(tr);
+            const float travelMS = 8.0f + 12.0f * hashf(m_seed, (int)(key & 0xFFFF), 7);
+            if (trl > 1e-6) {
+                tr /= trl;
+                // Recorre su surco durante la vida: nace en la celda y muere corriente abajo.
+                const double travelled = (double)travelMS * (double)age * kVortexLifeS;
+                const glm::dvec3 axis = glm::normalize(glm::cross(dir, tr));
+                dir = rotateAround(dir, axis, travelled / planetRadiusM);
+            }
+
+            // ¿Ha caído dentro de lo que se preguntaba? El corte va DESPUÉS de moverlo: si no, un
+            // embudo que entra en tu radio a mitad de vida aparecería de la nada.
+            const double ang = std::acos(glm::clamp(glm::dot(obs, dir), -1.0, 1.0));
+            if (ang > searchRad) continue;
+
+            // Envolvente de vida: nace de nada y se muere a nada. El exponente < 1 ensancha la
+            // meseta — un tornado pasa la mayor parte de su vida a plena fuerza, no en un pico.
+            const float env   = std::pow(std::sin(glm::pi<float>() * age), 0.45f);
+            const float drive = glm::smoothstep(kVortexTrigger, 1.0f, pot);
+
+            Vortex& vx = out[n++];
+            vx.dir       = dir;
+            vx.overWater = water;
+            vx.cell      = key;
+            vx.age01     = age;
+            vx.topM      = w.cloudBaseM;     // la columna llega hasta su nube madre, ni más ni menos
+            vx.travel    = (trl > 1e-6) ? tr : glm::dvec3(0);
+            vx.travelMS  = travelMS;
+            // La tromba marina es MÁS PEQUEÑA y MÁS DÉBIL que el tornado: se forma con menos
+            // energía (arriba) y por eso mismo no llega tan lejos. Si tuvieran la misma fuerza, el
+            // mar —que es donde más fácil salen— sería el sitio más peligroso del planeta.
+            vx.windMS      = (water ? 26.0f + 42.0f * drive : 34.0f + 76.0f * drive) * env;
+            vx.coreRadiusM = (water ? 12.0 + 38.0 * (double)drive
+                                    : 25.0 + 175.0 * (double)drive) * (0.55 + 0.45 * (double)env);
+            // Giro: ciclónico según el hemisferio (Coriolis), con una minoría anticiclónica — que
+            // también existe, y así no todos los embudos del hemisferio giran igual.
+            const float flip = h01(key * 2246822519u + m_seed);
+            vx.spin = ((glm::dot(dir, kNorth) >= 0.0) ? 1.0f : -1.0f) * ((flip < 0.12f) ? -1.0f : 1.0f);
+            // `id` cambia en cada aparición del hueco, no sólo por celda: dos tornados distintos de
+            // la misma celda no deben compartir efectos.
+            vx.id = key * 2654435761u + (uint32_t)((int64_t)std::floor(cyc)) * 2891336453u + m_seed;
+        }
+    }
+    return n;
+}
+
+glm::dvec3 WeatherSystem::vortexWindAt(const Vortex& v, const glm::dvec3& dir,
+                                       double planetRadiusM, float altM) {
+    if (v.windMS <= 0.0f || v.coreRadiusM <= 0.0) return glm::dvec3(0.0);
+
+    const glm::dvec3 d = glm::normalize(dir);
+    const double cosang = glm::clamp(glm::dot(d, v.dir), -1.0, 1.0);
+    const double r = std::acos(cosang) * planetRadiusM;      // distancia al EJE, en metros
+
+    const double reach = v.coreRadiusM * kVortexReachCores;
+    if (r > reach) return glm::dvec3(0.0);                   // corte duro: ver `kVortexReachCores`
+
+    // Altura: la columna muere en su nube madre. Por encima del techo no hay vórtice — y eso es lo
+    // que permite volar por encima de un tornado, igual que `cloudDensityAt` permite dejar la capa.
+    if (altM >= v.topM) return glm::dvec3(0.0);
+    const float hf = 1.0f - glm::smoothstep(v.topM * 0.75f, v.topM, altM);
+
+    // (1) TANGENCIAL — perfil de Rankine: sólido rígido dentro del núcleo, 1/r fuera. El máximo está
+    //     EN el núcleo, no en el centro: en el eje el viento horizontal es cero. Por eso el daño de
+    //     un tornado tiene forma de anillo y no de disco.
+    double vt = (r <= v.coreRadiusM) ? (double)v.windMS * (r / v.coreRadiusM)
+                                     : (double)v.windMS * (v.coreRadiusM / std::max(r, 1e-6));
+    // El 1/r no llega a cero nunca; se apaga suave antes del corte para no dejar un escalón de
+    // viento en el borde (un salto ahí se siente como una pared y delata el radio de corte).
+    vt *= (1.0 - (double)glm::smoothstep(0.6 * reach, reach, r));
+    vt *= (double)hf;
+
+    // (2) ENTRADA RADIAL cerca del suelo. Es la que ARRASTRA hacia dentro; sin ella todo orbitaría
+    //     eternamente a distancia fija y nada sería succionado. Se concentra en la capa de fricción.
+    const float inflowH = std::max(60.0f, v.topM * 0.12f);
+    const float nearGnd = 1.0f - glm::smoothstep(0.0f, inflowH, altM);
+    const double vr = 0.50 * vt * (0.30 + 0.70 * (double)nearGnd);
+
+    // (3) ASCENDENTE en el núcleo: la que LEVANTA. En una tromba marina es literalmente lo que se
+    //     ve — la columna de agua. Arranca justo sobre el suelo para que sí levante lo que hay ahí.
+    const double rn = r / v.coreRadiusM;
+    const double vz = 0.85 * (double)v.windMS * std::exp(-rn * rn)
+                    * (double)glm::smoothstep(0.0f, 30.0f, altM) * (double)hf;
+
+    // Marco local en el punto consultado. En el eje el radial degenera: sólo queda el ascendente.
+    glm::dvec3 toAxis = v.dir - d * cosang;
+    const double tl = glm::length(toAxis);
+    if (tl < 1e-9) return d * vz;
+    toAxis /= tl;                                            // tangente, apunta HACIA el eje
+    const glm::dvec3 tang = glm::cross(d, -toAxis) * (double)v.spin;
+
+    return tang * vt + toAxis * vr + d * vz;
 }
 
 } // namespace Haruka

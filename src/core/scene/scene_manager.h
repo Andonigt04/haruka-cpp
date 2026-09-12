@@ -11,6 +11,7 @@
 #include <string>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include <functional>
 #include <unordered_map>
 #include <optional>
 #include <nlohmann/json.hpp>
@@ -23,6 +24,7 @@
 
 #include "tools/math_types.h"
 #include "tools/object_types.h"
+#include "game/prefab/prefab.h"   // PrefabEdit: lo que se desvía del montaje en ESTE conjunto
 
 namespace Haruka {
 
@@ -124,6 +126,47 @@ namespace Haruka {
         nlohmann::json components;       // Luces, scripts, colisionadores
         nlohmann::json properties;       // Metadatos extra (velocidad, facción, etc.)
 
+        // ── PREFABRICADO: UNA ENTRADA EN VEZ DE MIL OBJETOS ─────────────────────────────────────
+        //
+        // ⚠️ ESTO ES LO QUE HACE QUE UN PREFABRICADO SIRVA PARA ALGO. Un montaje son CIENTOS de
+        // piezas (el casco del barco tiene 870 tablas); guardarlas una a una en la escena significa
+        // 870 entradas con su malla, su material y su pose — un fichero enorme para describir algo
+        // que ya está descrito en `assets/data/prefabs/<x>.json`. Con esto la escena dice "aquí va
+        // el barco, en esta pose" y punto: **una entrada**.
+        //
+        // `prefabName` es el montaje del que sale este objeto. No es `templateName`: una plantilla
+        // se FUNDE en un objeto (le pone valores por defecto) y esto EXPANDE a muchos.
+        std::string prefabName;
+
+        /// Esta pieza SALIÓ de expandir una entrada de prefabricado: es derivada, no dato.
+        ///
+        /// ⚠️ NO SE SERIALIZA, y es justo el motivo de existir: `SceneManager::save` se la salta,
+        /// porque lo que describe a estas piezas es la ENTRADA del prefabricado, que sí se guarda.
+        /// Guardarlas además sería guardar dos veces lo mismo — y la copia de la escena quedaría
+        /// congelada, sin enterarse de que el montaje ha cambiado.
+        bool fromPrefab = false;
+
+        /// De QUÉ entrada salió esta pieza y CUÁL es dentro del montaje. Runtime, no se serializan.
+        ///
+        /// ⚠️ Hace falta el `uid` de la entrada y no su nombre: puede haber tres barcos colocados del
+        /// mismo `barco.json`, y una tabla rota es de UNO de ellos. Con el nombre, romper una tabla
+        /// en el primero se la rompería a los tres — que es justo lo que `prefabEdits` viene a evitar.
+        uint64_t prefabOwnerUid = 0;
+        int      prefabPieceIndex = -1;
+
+        /// LO QUE LE HA PASADO A **ESTE** CONJUNTO: qué pieza cambió y cómo.
+        ///
+        /// Si a un barco se le parte una tabla no ha cambiado "el barco", ha cambiado ESE barco. Así
+        /// que aquí van las desviaciones —pieza rota, movida, sustituida— y el `.json` del montaje se
+        /// queda como está. Tres tablas rotas son tres entradas, no las 870 del casco. La regla de
+        /// qué significa cada cambio vive en `applyPrefabEdits`, una sola vez para juego y editor.
+        std::vector<PrefabEdit> prefabEdits;
+
+        /// Esta ENTRADA ya se expandió en sus piezas. Runtime, no se serializa: al cargar de nuevo
+        /// vuelve a false y la escena se expande otra vez. Existe para que `expandPrefabs()` se
+        /// pueda llamar las veces que haga falta sin duplicar un montaje entero.
+        bool prefabExpanded = false;
+
         // Jerarquía (Opcional para naves dentro de planetas o lunas)
         int parentIndex = -1;
         std::vector<int> childrenIndices;
@@ -206,6 +249,35 @@ namespace Haruka {
         bool load(const std::string& filepath);
         bool save(const std::string& filepath) const;
 
+        /**
+         * @brief Quién convierte una entrada de PREFABRICADO en sus piezas.
+         *
+         * La escena guarda "aquí va el barco, en esta pose" — una entrada. Alguien tiene que leer
+         * `assets/data/prefabs/barco.json` y poner las 870 tablas. **Ese alguien no puede ser el
+         * motor**, porque expandir significa cosas distintas según quién mire:
+         *
+         *   · el JUEGO quiere piezas con su colisionador, su isla rígida y su sitio en la física
+         *     (`Survival::spawnPrefab`), porque allí el barco se navega;
+         *   · el EDITOR quiere mallas que se vean y se puedan mover con el gizmo, y nada más.
+         *
+         * Si el motor eligiera una, la otra tendría que deshacerla. Así que el motor pone el DATO
+         * (la entrada, el fichero, la pose) y el anfitrión pone el QUÉ ES.
+         *
+         * Lo que el expansor cree tiene que llevar `fromPrefab = true`: así `save` no lo escribe y
+         * la escena sigue siendo una entrada por montaje, que es todo el propósito.
+         */
+        using PrefabExpander = std::function<void(SceneManager&, const SceneObject&)>;
+        void setPrefabExpander(PrefabExpander fn) { m_prefabExpander = std::move(fn); }
+
+        /**
+         * @brief Expande TODAS las entradas de prefabricado que haya en la escena.
+         *
+         * Se llama sola al terminar `load`. Es pública porque el anfitrión puede instalar su
+         * expansor DESPUÉS de cargar (el editor no tiene proyecto abierto hasta más tarde) y
+         * entonces hay que poder pedirla a mano; llamarla dos veces no duplica nada.
+         */
+        void expandPrefabs();
+
         void removeObject(const std::string& name) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_objects.erase(std::remove_if(m_objects.begin(), m_objects.end(),
@@ -264,6 +336,7 @@ namespace Haruka {
         std::unordered_map<uint64_t, std::shared_ptr<SceneObject>> m_idRegistry;
         std::string m_name = "Untitled";
         EventManager* m_eventManager = nullptr;
+        PrefabExpander m_prefabExpander;   ///< ver setPrefabExpander
         
         mutable std::mutex m_mutex; // Para que el StreamingSystem pueda leer mientras el Loader carga
     };

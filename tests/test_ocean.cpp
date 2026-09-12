@@ -852,6 +852,24 @@ void test_ocean_break_fold() {
     // ⚠️ El fondo de 1,2 m NO pliega, y es correcto: ahi el limite de rompiente ya ha aplastado la
     // amplitud (`Σamp ≤ 0,55·d`), asi que queda poca ola que volcar. La voluta vive en la BARRA, no en
     // la orilla — que es donde rompe una ola de verdad.
+    // ⚠️ SE PROBO A CERRAR EL PLIEGUE Y SE REVIRTIO, CON LOS NUMEROS DELANTE. `ocean_mesh_stretch`
+    // midio lo que este test no puede ver —el avance entre vertices VECINOS— y el vuelco sale como
+    // **87 celdas del reves de 48 000 (0,18 %)**. Se implemento un tope del vaiven horizontal
+    // (`sum k·horiz` acotada) y funcionaba:
+    //
+    //   sin tope          jac -0,006 ·  87 celdas invertidas · estiramiento 2,33x
+    //   tope 1,80         jac +0,095 ·  58 celdas invertidas · 2,27x
+    //   tope 0,97         jac +0,512 ·   0 celdas invertidas · 1,74x   <- sin vuelco
+    //
+    // **Andoni eligio el vuelco**, y es defendible: en un mapa de altura con desplazamiento
+    // horizontal, "la cresta vuelca" y "la malla se cruza" son LA MISMA COSA, asi que exigir cero
+    // celdas cruzadas es exigir que no haya rompiente. Lo que se dibuja con `cull = None` y la
+    // normal analitica es una cresta que sobresale, que es lo que se queria.
+    //
+    // ⚠️ Lo que NO puede pasar es que el pliegue se EXTIENDA sin que nadie se entere: en mar abierto
+    // no debe cruzarse una sola celda, y la fraccion que cruza en la rompiente esta acotada por
+    // `ocean_mesh_stretch`. El desastre de 2026-08-29 (la charca con metros de vaiven) esta cerrado
+    // por otra via — la elipse escala con la amplitud — y su caso sigue medido aqui abajo.
     CHECK(jacDeep  > 0.0f, "en mar abierto la ola NO vuelca sola");
     CHECK(jacMid   < 0.0f, "en la franja de rompiente la cresta SI se pliega");
 
@@ -938,8 +956,8 @@ void test_ocean_break_fold() {
         // acumula el motor tiene que ser la divergencia del desplazamiento que el motor APLICA.
         CHECK(peorTraza < 0.01, "`oceanJacobian` ES la divergencia de `oceanDisplacement` (derivada numerica)");
 
-        // EL CRITERIO REAL DE PLIEGUE, y ahora se cruza: con refraccion el determinante es NEGATIVO,
-        // o sea que la superficie deja de ser inyectiva. Eso es una ola volcando.
+        // EL CRITERIO REAL DE PLIEGUE, y se cruza: con refraccion el determinante es NEGATIVO, o sea
+        // que la superficie deja de ser inyectiva. Eso es una ola volcando — y es lo que se quiere.
         CHECK(minDetRefr < 0.0, "CON REFRACCION la superficie SE PLIEGA (determinante < 0)");
         // Y SIN refraccion no pliega: hace falta que los trenes se alineen. Las dos mitades juntas son
         // lo que demuestra que el mecanismo es la CONCENTRACION y no simplemente "mas compresion".
@@ -2509,4 +2527,195 @@ void test_ocean_spectrum_limits() {
                     OCEAN_WAVES, ns, ns * 2.0, ns * 4.0);
         CHECK(ns > 0.0, "el coste por evaluacion queda MEDIDO (subir trenes tiene precio conocido)");
     }
+}
+
+/**
+ * @brief ¿LA MALLA DEL AGUA AGUANTA EL VAIVÉN, O SE ESTIRA Y SE DOBLA?
+ *
+ * ⚠️ ESTE ES EL PUNTO CIEGO QUE QUEDABA, Y NO LO VE `ocean_break_fold`. Aquel mide el jacobiano
+ * ANALÍTICO: una propiedad del continuo, en el límite de separación cero. Lo que se dibuja no es el
+ * continuo — son vértices cada `quadM` metros, y entre dos vecinos sólo hay una recta. Las dos cosas
+ * se separan justo donde importa:
+ *
+ *   · el continuo puede plegarse a una escala MÁS FINA que la celda, y entonces la malla ni se
+ *     entera: se estira, pero no se cruza;
+ *   · y al revés, un pliegue que abarque varias celdas SÍ invierte el orden de los vértices, que es
+ *     lo que en pantalla se ve como caras del revés y "cubos deformes".
+ *
+ * Se mide lo que de verdad le pasa a un quad: la separación de dos vértices vecinos DESPUÉS de
+ * desplazarlos. `estiramiento = |p'(x+q) − p'(x)| / q`.
+ *
+ *   ≈ 1  la celda conserva su tamaño
+ *   ≫ 1  la celda se estira (textura y normales embarradas)
+ *   ≤ 0  el vecino se ha adelantado: la celda está DEL REVÉS, y eso es el fallo visible
+ *
+ * El barrido usa las separaciones REALES del pase de agua (`terrain_node_water.vert`: téxel × zancada
+ * del nodo, de 0,6 m bajo los pies a 9,5 m a distancia) contra el perfil de una playa.
+ *
+ * CONTRAPRUEBA: con el mar en calma (amplitudes a 0) no puede haber ni estirón ni inversión. Sin
+ * ella, "0 inversiones" no distingue una malla sana de una medida que no mide.
+ */
+void test_ocean_mesh_stretch() {
+    beginTest("ocean_mesh_stretch");
+
+    const Haruka::Planet::OceanState st = Haruka::Planet::oceanDefaultState();
+    const glm::vec3 up = upAt(0.2, -0.4);
+    // ⚠️ CERCA DEL ORIGEN, **NO** A RADIO PLANETARIO, Y LA CONTRAPRUEBA LO CAZO EN EL PRIMER INTENTO.
+    // Esto es una DIFERENCIA FINITA: se resta la posicion de dos vertices separados `q`. A 6,37e6 m
+    // un float32 tiene 1 ulp ~ 0,5 m, asi que `b − a` con `q = 4,4 m` sale cuantizado y el cociente
+    // da 0,89..1,11 con el mar EN CALMA. Se vio exactamente asi: la contraprueba dio 0,974..0,992 en
+    // vez de 1,0000, y el instrumento no medira el mar hasta que de 1 exacto en calma.
+    //
+    // La posicion absoluta solo entra en la FASE de la ola, asi que muestrear a 1 km del origen es
+    // el mismo mar con 5 ordenes de magnitud mas de resolucion. Ver [[float-ulp-precision-wall]] —
+    // la misma piedra tumbo dos sondas del jacobiano el 2026-09-07.
+    const glm::vec3 wp = up * 1000.0f;
+    const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0,1,0))
+                                                               : glm::cross(up, glm::vec3(1,0,0)));
+    const glm::vec3 t2 = glm::cross(up, t1);
+
+    // La pendiente del fondo hacia la orilla: sin ella no hay refracción, y la refracción es
+    // justamente lo que concentra los trenes y hace que la cresta se pliegue (lo fija
+    // `ocean_break_fold` con su contraprueba). Medir el estirón sin ella mediría otro mar.
+    const glm::vec3 slope = t1;
+
+    struct Res { double peor; double menor; int invertidas; int total; };
+    auto barrido = [&](float depth, float q, const Haruka::Planet::OceanState& estado) {
+        Res r{ 0.0, 1e9, 0, 0 };
+        for (int s = 0; s < 24; ++s) {
+            // Puntos repartidos a lo largo de la costa y del tiempo: con ocho trenes
+            // inconmensurables, un punto y un instante no dicen nada del peor caso.
+            const glm::vec3 p = wp + t1 * (float)(s * 7) + t2 * (float)(s * 3);
+            for (int n = 0; n < 40; ++n) {
+                const float t = 0.37f * n;
+                for (int eje = 0; eje < 2; ++eje) {
+                    const glm::vec3 dir = (eje == 0) ? t1 : t2;
+                    const glm::vec3 a = p;
+                    const glm::vec3 b = p + dir * q;
+                    const glm::vec3 da = Haruka::Planet::oceanDisplacement(a, up, t, depth, 1.0f,
+                                                                          estado,
+                                                                          Haruka::Planet::WATER_FETCH_UNLIMITED,
+                                                                          slope);
+                    const glm::vec3 db = Haruka::Planet::oceanDisplacement(b, up, t, depth, 1.0f,
+                                                                          estado,
+                                                                          Haruka::Planet::WATER_FETCH_UNLIMITED,
+                                                                          slope);
+                    // Proyectada SOBRE EL EJE de la celda y con signo: el modulo no distingue
+                    // "el vecino sigue delante" de "el vecino se ha puesto detras", que es el caso
+                    // que rompe la malla.
+                    const double avance = (double)glm::dot((b + db) - (a + da), dir) / (double)q;
+                    r.peor  = std::max(r.peor, avance);
+                    r.menor = std::min(r.menor, avance);
+                    if (avance <= 0.0) ++r.invertidas;
+                    ++r.total;
+                }
+            }
+        }
+        return r;
+    };
+
+    // Las separaciones del pase de agua y el perfil de la playa donde la ola hace cosas.
+    const float qs[]     = { 0.6f, 1.2f, 2.4f, 4.4f, 9.5f };
+    const float fondos[] = { 12.0f, 8.0f, 5.0f, 2.0f, 1.2f };
+
+    std::printf("    estiramiento de la celda (avance del vecino / separacion). "
+                "1,00 = intacta · <=0 = celda DEL REVES\n");
+    std::printf("    fondo \\ celda ");
+    for (float q : qs) std::printf("   %5.1f m", (double)q);
+    std::printf("\n");
+
+    double peorGlobal = 0.0, menorGlobal = 1e9;
+    int invGlobal = 0, totGlobal = 0;
+    float fondoPeor = 0.0f, celdaPeor = 0.0f;
+    for (float d : fondos) {
+        std::printf("    %6.1f m      ", (double)d);
+        for (float q : qs) {
+            const Res r = barrido(d, q, st);
+            std::printf("  %5.2f/%.2f", r.peor, r.menor);
+            if (r.menor < menorGlobal) { menorGlobal = r.menor; fondoPeor = d; celdaPeor = q; }
+            peorGlobal = std::max(peorGlobal, r.peor);
+            invGlobal += r.invertidas; totGlobal += r.total;
+        }
+        std::printf("\n");
+    }
+    std::printf("    peor estiramiento %.2fx · peor compresion %.2f (fondo %.1f m, celda %.1f m) · "
+                "celdas del reves %d de %d\n",
+                peorGlobal, menorGlobal, (double)fondoPeor, (double)celdaPeor, invGlobal, totGlobal);
+
+    // ── LA GUARDA QUE DE VERDAD IMPORTA: EL AGUA INTERIOR ───────────────────────────────────────
+    //
+    // ⚠️ EL VUELCO ES DELIBERADO EN EL MAR, Y AQUI NO PUEDE ENTRAR. El intento de 2026-08-29 se
+    // revirtio porque metia metros de vaiven horizontal en una charca sobre celdas de 4,4 m: Andoni
+    // lo vio como "el agua dinamica son cubos deformados", y eran exactamente estas celdas del reves.
+    // Hoy no pasa por dos razones independientes —la elipse escala con la amplitud y el FETCH de un
+    // lago recorta el oleaje— pero las dos viven lejos de aqui. Esto lo ata donde se ve.
+    {
+        const float dCharca = 0.30f, qCharca = 4.4f;
+        Res rl{ 0.0, 1e9, 0, 0 };
+        for (int s2 = 0; s2 < 24; ++s2) {
+            const glm::vec3 p = wp + t1 * (float)(s2 * 7) + t2 * (float)(s2 * 3);
+            for (int n = 0; n < 40; ++n) {
+                const float tt = 0.37f * n;
+                for (int eje = 0; eje < 2; ++eje) {
+                    const glm::vec3 dir = (eje == 0) ? t1 : t2;
+                    const glm::vec3 da = Haruka::Planet::oceanDisplacement(p, up, tt, dCharca, 1.0f,
+                                                                          st, 100.0f, slope);
+                    const glm::vec3 db = Haruka::Planet::oceanDisplacement(p + dir * qCharca, up, tt,
+                                                                          dCharca, 1.0f, st, 100.0f,
+                                                                          slope);
+                    const double av = (double)glm::dot((dir * qCharca + db) - da, dir) / (double)qCharca;
+                    rl.peor = std::max(rl.peor, av); rl.menor = std::min(rl.menor, av);
+                    if (av <= 0.0) ++rl.invertidas;
+                    ++rl.total;
+                }
+            }
+        }
+        std::printf("    CHARCA de 0,30 m (fetch 100 m, celda 4,4 m): estiramiento %.3f..%.3f · "
+                    "celdas del reves %d\n", rl.menor, rl.peor, rl.invertidas);
+        CHECK(rl.invertidas == 0,
+              "el agua interior NO se pliega: ni una celda del reves en una charca");
+        // ⚠️ EL 1,40 ES UN TECHO MEDIDO (hoy 1,290), NO UN NUMERO ELEGIDO — mi primera version puso
+        // 1,20 a ojo y fallo. Un 29 % de estiramiento en una charca es una ola de Gerstner normal en
+        // agua somera; lo que NO puede es parecerse al 2,34x de la rompiente, que es donde vuelca.
+        CHECK(rl.peor < 1.40, "y se estira MUCHO menos que la rompiente (2,34x): el vuelco no llega");
+    }
+
+    // CONTRAPRUEBA: en calma la malla es la malla. Si esto no diera 1,00 exacto, lo que falla es la
+    // medida y no el mar — y los numeros de arriba no significarian nada.
+    Haruka::Planet::OceanState calma = st;
+    for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) calma.wave[i][1] = 0.0f;
+    const Res rc = barrido(5.0f, 4.4f, calma);
+    std::printf("    CONTRAPRUEBA en calma (fondo 5 m, celda 4,4 m): estiramiento %.4f..%.4f · "
+                "celdas del reves %d\n", rc.menor, rc.peor, rc.invertidas);
+    CHECK(rc.invertidas == 0 && std::abs(rc.peor - 1.0) < 1e-4 && std::abs(rc.menor - 1.0) < 1e-4,
+          "CONTRAPRUEBA: con el mar en calma la celda no se estira ni se invierte");
+
+    // ── LO QUE SE AFIRMA, Y LO QUE SOLO SE ACOTA ────────────────────────────────────────────────
+    //
+    // ⚠️ LA PRIMERA VERSION DE ESTE TEST EXIGIA CERO INVERSIONES EN TODA LA PLAYA Y FALLO: hay **87
+    // celdas del reves de 48 000 (0,18 %)**, todas en 5 / 2 / 1,2 m de fondo, y el peor estiramiento
+    // es **2,34x**. O sea que la voluta que `ocean_break_fold` mide como correcta EN EL CONTINUO
+    // invierte celdas a la resolucion a la que el agua se dibuja de verdad. Era el punto que estaba
+    // anotado como "nadie ha mirado si la malla lo lleva sin estirones": no lo lleva.
+    //
+    // Asi que se separa lo que es INVARIANTE de lo que es un TECHO MEDIDO:
+    //
+    //   · Fuera de la rompiente la malla NO puede doblarse. Una ola que no rompe no tiene por que
+    //     cruzar la lamina sobre si misma, y si algun dia lo hace es un fallo, no un ajuste.
+    //   · Dentro de la rompiente hay pliegue, y es lo que se pidio: una ola que vuelca SE cruza. Lo
+    //     que no puede es CRECER sin que nadie se entere, asi que se acota donde esta hoy.
+    //
+    // ⚠️ El techo NO es un objetivo. Mientras el numero de abajo siga por encima de cero, la
+    // respuesta a "¿el mar esta estable?" es NO, y esta es la linea que lo dice.
+    {
+        const Res hondo = barrido(12.0f, 4.4f, st);
+        const Res mas   = barrido(40.0f, 4.4f, st);
+        CHECK(hondo.invertidas == 0 && mas.invertidas == 0,
+              "fuera de la rompiente (12 y 40 m) la malla no invierte NI UNA celda");
+    }
+    const double fracInv = totGlobal ? (double)invGlobal / (double)totGlobal : 0.0;
+    CHECK(fracInv < 0.005,
+          "TECHO MEDIDO: las celdas invertidas de la rompiente no pasan del 0,5 % (hoy 0,18 %)");
+    CHECK(peorGlobal < 2.5,
+          "TECHO MEDIDO: ninguna celda se estira mas de 2,5x (hoy 2,34x)");
 }

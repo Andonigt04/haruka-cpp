@@ -1072,7 +1072,12 @@ inline float oceanFoam(const glm::vec3& wp, const glm::vec3& up, float t,
     // (`smoothstep(1.6, 0.7, d/2A₀)`): era la misma idea escrita en metros en vez de en fisica — no
     // sabia nada de la ola, solo de cuanta agua hay debajo.
     const float shoreFoam = glm::smoothstep(0.78f, 1.60f, oceanBreakIndex(depthM, st, fetchM));
-    return glm::clamp(std::max(capFoam, shoreFoam) * fade, 0.0f, 1.0f);
+    // ⚠️ LA ESCALA VA AQUI TAMBIEN, y faltaba: `harukaGerstner` multiplica su espuma por
+    // `harukaFoamScale()` (el `misc.w` del UBO, que sale de este mismo `oceanFoamScale`) y este
+    // gemelo no lo hacia. Con la escala por defecto (1,0) daba igual, pero `HARUKA_OCEAN_FOAM=0.5`
+    // dejaba la espuma que se DIBUJA a la mitad de la que se CONSULTA — dos respuestas para la misma
+    // pregunta, que es justo lo que el careo GPU<->CPU existe para impedir.
+    return glm::clamp(std::max(capFoam, shoreFoam) * fade * oceanFoamScale(), 0.0f, 1.0f);
 }
 
 /// Sobrecarga con el mar de referencia. Ver la nota de `oceanWaveHeight`.

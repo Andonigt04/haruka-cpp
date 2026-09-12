@@ -69,6 +69,47 @@ struct Prefab {
     bool empty() const { return pieces.empty(); }
 };
 
+/**
+ * @brief LO QUE LE HA PASADO A UNA PIEZA DE **ESTE** MONTAJE. El prefabricado no se entera.
+ *
+ * ⚠️ ES LA DIFERENCIA ENTRE UN PREFABRICADO Y UNA PLANTILLA MUERTA. Si a un barco se le parte una
+ * tabla, no ha cambiado "el barco": ha cambiado ESE barco. Las dos salidas obvias son malas:
+ *
+ *   · tocar el `.json` del montaje → se parte la tabla en TODOS los barcos, incluidos los que aún
+ *     no existen;
+ *   · guardar las 870 piezas en la escena → se acabó el prefabricado, y la copia queda congelada
+ *     sin enterarse de que el montaje cambió.
+ *
+ * Así que la escena guarda la referencia **y lo que se desvía de ella**: qué pieza y cómo. Tres
+ * tablas rotas son tres líneas, no ochocientas setenta.
+ *
+ * `index` es la POSICIÓN en `Prefab::pieces`. Es frágil a propósito y hay que saberlo: reordenar las
+ * piezas de un montaje ya colocado descoloca sus cambios. Un id por pieza lo arreglaría y no está
+ * hecho — el formato del fichero no lo tiene, e inventarlo aquí sería que el editor escribiera algo
+ * que el resto del motor no sabe leer.
+ */
+struct PrefabEdit {
+    int  index = -1;          ///< pieza del montaje
+    bool removed = false;     ///< ya no está: rota, arrancada, quemada
+    bool hasPos = false;      ///< ¿la pose está tocada? (un `optional` no cabe en el JSON plano)
+    bool hasRot = false;
+    glm::dvec3  pos{0.0};
+    glm::dquat  rot{1.0, 0.0, 0.0, 0.0};
+    std::string item;         ///< "" = el que diga el montaje; si no, la pieza se ha SUSTITUIDO
+};
+
+/**
+ * @brief Aplica los cambios de un conjunto concreto sobre la copia de su montaje.
+ *
+ * Vive aquí y no en cada anfitrión porque "qué significa un cambio" tiene que ser UNA respuesta: si
+ * el juego y el editor la interpretaran por su cuenta, el mismo barco roto se vería de dos formas
+ * distintas — que es el error que este motor ya ha pagado con las aguas y con las miniaturas.
+ *
+ * Las piezas marcadas `removed` se BORRAN de la copia, así que los índices posteriores se mueven:
+ * por eso se aplica todo sobre `pieces` ANTES de quitar nada.
+ */
+void applyPrefabEdits(Prefab& pf, const std::vector<PrefabEdit>& edits);
+
 /** @brief Carga un prefabricado. false si no existe o no parsea. */
 bool loadPrefab(const std::string& path, Prefab& out);
 /** @brief Lo guarda: es lo que escribirá el editor y lo que exporta el comando de consola. */

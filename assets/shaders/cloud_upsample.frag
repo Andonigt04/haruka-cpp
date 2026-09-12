@@ -23,36 +23,50 @@ layout(binding = 0) uniform sampler2D u_cloudLo;
 layout(location = 0) in  vec2 vUV;
 layout(location = 0) out vec4 FragColor;
 
+// ── POR QUÉ CÚBICA Y NO BILINEAL ────────────────────────────────────────────────────────────────
+// Reportado: "las nubes se ven como píxeles". A 1/4 de lado el borde de la nube pasa de 0 a 1 en UN
+// téxel (la extinción satura Beer-Lambert en dos o tres pasos), y el jitter de arranque es ruido
+// blanco por téxel: al subirlo x4 salen bloques de 4 px en el borde y grano de 4 px dentro. La
+// bilineal une cuatro téxeles con pesos lineales y deja la escalera intacta. Una B-spline cúbica de
+// 4x4 es un filtro PASO BAJO de verdad: cada píxel promedia 16 téxeles con pesos suaves, la
+// escalera se convierte en un degradado y el grano del jitter baja ~4x. Lo que se pierde (el
+// detalle por debajo de ~4 px) no existe a esa resolución de todos modos.
+float bspline(float x) {
+    x = abs(x);
+    if (x < 1.0) return (4.0 - 6.0 * x * x + 3.0 * x * x * x) / 6.0;
+    if (x < 2.0) { const float t = 2.0 - x; return t * t * t / 6.0; }
+    return 0.0;
+}
+
 void main()
 {
     const vec2  sz = vec2(textureSize(u_cloudLo, 0));
     if (sz.x < 2.0 || sz.y < 2.0) { FragColor = vec4(0.0); return; }
 
-    // Bilineal a mano sobre los cuatro téxeles que rodean al píxel.
     const vec2 t  = vUV * sz - 0.5;
     const vec2 i  = floor(t);
     const vec2 f  = t - i;
-    const vec2 uv0 = (i + 0.5) / sz;
     const vec2 duv = 1.0 / sz;
 
-    const vec4 c00 = texture(u_cloudLo, uv0);
-    const vec4 c10 = texture(u_cloudLo, uv0 + vec2(duv.x, 0.0));
-    const vec4 c01 = texture(u_cloudLo, uv0 + vec2(0.0, duv.y));
-    const vec4 c11 = texture(u_cloudLo, uv0 + duv);
+    float wx[4], wy[4];
+    for (int k = 0; k < 4; ++k) {
+        wx[k] = bspline(f.x - float(k - 1));
+        wy[k] = bspline(f.y - float(k - 1));
+    }
 
-    const float w00 = (1.0 - f.x) * (1.0 - f.y);
-    const float w10 =        f.x  * (1.0 - f.y);
-    const float w01 = (1.0 - f.x) *        f.y;
-    const float w11 =        f.x  *        f.y;
-
-    // Alfa: bilineal normal. Es una cobertura, y promediarla es lo correcto.
-    const float a = w00 * c00.a + w10 * c10.a + w01 * c01.a + w11 * c11.a;
+    // Color PONDERADO POR ALFA: los téxeles vacíos (negros, alfa 0) solo bajan la opacidad, no
+    // oscurecen el color — el ribete oscuro del borde que tenía la bilineal a secas.
+    float a = 0.0, wa = 0.0;
+    vec3  c = vec3(0.0);
+    for (int y = 0; y < 4; ++y)
+        for (int x = 0; x < 4; ++x) {
+            const float w  = wx[x] * wy[y];
+            const vec2  uv = (i + vec2(float(x - 1), float(y - 1)) + 0.5) * duv;
+            const vec4  s  = texture(u_cloudLo, uv);
+            a  += w * s.a;
+            wa += w * s.a;
+            c  += w * s.a * s.rgb;
+        }
     if (a <= 0.002) { FragColor = vec4(0.0); return; }
-
-    // Color: bilineal PONDERADA POR ALFA. Un téxel sin nube no tiene color que aportar.
-    const float wa = w00 * c00.a + w10 * c10.a + w01 * c01.a + w11 * c11.a;
-    const vec3  c  = (w00 * c00.a * c00.rgb + w10 * c10.a * c10.rgb +
-                      w01 * c01.a * c01.rgb + w11 * c11.a * c11.rgb) / max(wa, 1e-4);
-
-    FragColor = vec4(c, a);
+    FragColor = vec4(c / max(wa, 1e-4), a);
 }

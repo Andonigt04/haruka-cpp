@@ -82,4 +82,17 @@ bool previewWorks();
 /** @brief Libera texturas y buffers de la caché. Antes de destruir el contexto. */
 void clearPreviews();
 
+/**
+ * @brief Tira UNA entrada de la caché: la próxima llamada con esa clave la vuelve a renderizar.
+ *
+ * ⚠️ EXISTE PORQUE UNA MINIATURA DEJA DE SER CONSTANTE EN CUANTO SE PUEDE EDITAR. La caché se pensó
+ * para el inventario, donde un item se dibuja una vez y no cambia nunca, así que lo único que había
+ * era `clearPreviews()` — y usar eso para refrescar UN prefabricado tira también el pipeline y los
+ * iconos de todos los items, que se regeneran de golpe al frame siguiente.
+ *
+ * Lo que NO hace: no es un "refresca por si acaso". Llamarla cada frame (mientras se arrastra un
+ * gizmo, por ejemplo) recrea un render target por frame. Quien edite debe invalidar al SOLTAR.
+ */
+void invalidatePreview(const std::string& key);
+
 } // namespace Haruka

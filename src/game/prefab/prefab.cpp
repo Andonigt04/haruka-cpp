@@ -69,4 +69,23 @@ bool savePrefab(const std::string& path, const Prefab& p) {
     return f.good();
 }
 
+void applyPrefabEdits(Prefab& pf, const std::vector<PrefabEdit>& edits) {
+    if (edits.empty()) return;
+    // ⚠️ PRIMERO LOS CAMBIOS, DESPUÉS LOS BORRADOS. Los índices son posiciones en `pieces`: si se
+    // borrara sobre la marcha, el siguiente cambio caería en la pieza equivocada — y en silencio.
+    std::vector<char> gone(pf.pieces.size(), 0);
+    for (const PrefabEdit& e : edits) {
+        if (e.index < 0 || e.index >= (int)pf.pieces.size()) continue;   // montaje reordenado
+        if (e.removed) { gone[e.index] = 1; continue; }
+        PrefabPiece& pc = pf.pieces[e.index];
+        if (e.hasPos)       pc.pos = e.pos;
+        if (e.hasRot)       pc.rot = e.rot;
+        if (!e.item.empty()) pc.id = e.item;
+    }
+    size_t w = 0;
+    for (size_t i = 0; i < pf.pieces.size(); ++i)
+        if (!gone[i]) pf.pieces[w++] = pf.pieces[i];
+    pf.pieces.resize(w);
+}
+
 } // namespace Haruka

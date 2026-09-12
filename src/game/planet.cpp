@@ -402,6 +402,7 @@ void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n
 }
 
 void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st) {
+    m_oceanStateCPU = st;   // ver el log de `[Mar]`: cuantos trenes caben en la celda del agua
     RHI::Device* dev = RHI::device();
     if (!dev) { m_oceanParamsValid = false; return; }
     // Gemelo EXACTO del bloque `OceanParams` de `lib/ocean_params.glsl`: 4 vec4 de trenes + misc.
@@ -4183,6 +4184,50 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                             st.levelMax, (double)cutColl, (double)cutNode,
                             hColl, hNode, hNode - hColl, hColl, hDouble, hDouble - hColl);
             }
+            // ── SONDA DEL AGUA ALREDEDOR (`HARUKA_WATER_PROBE=1`) ───────────────────────────
+            //
+            // ⚠️ EXISTE PORQUE LA CAPTURA NO ES UNA MEDIDA. "El cubo de agua" se bisecaba apagando
+            // fuentes en el shader y mirando la pantalla, y dos ejecuciones del juego NO repiten el
+            // encuadre (el yaw deriva): un cuadro sin agua no distingue "la fuente no la pone" de
+            // "la camara mira a otro lado". Esto pregunta a las fuentes DIRECTAMENTE, en un abanico
+            // alrededor del jugador, y dice cual afirma agua POR ENCIMA del suelo que se dibuja.
+            //
+            // Las dos cotas del suelo van a proposito: `sampleHeight` es el suelo COMPLETO (bake +
+            // relieve, lo que se ve y se pisa) y `bake` es el campo a pelo. La diferencia entre las
+            // dos columnas es exactamente el error que la lamina cometia al restar el bake.
+            static const bool s_wprobe = [] {
+                const char* e = std::getenv("HARUKA_WATER_PROBE");
+                return e && *e && *e != '0';
+            }();
+            if (s_wprobe && (s_log % 120) == 0) {
+                const glm::dvec3 dirC = glm::normalize(cameraPos - m_config.position);
+                const glm::dvec3 t1 = glm::normalize(glm::cross(dirC,
+                                      std::abs(dirC.y) < 0.9 ? glm::dvec3(0,1,0) : glm::dvec3(1,0,0)));
+                const glm::dvec3 t2 = glm::cross(dirC, t1);
+                int nLake = 0, nWin = 0; double worstLake = 0.0, worstWin = 0.0;
+                double worstBakeGap = 0.0;
+                for (int a = 0; a < 16; ++a)
+                    for (int r = 1; r <= 12; ++r) {
+                        const double ang = 6.2831853 * a / 16.0, dist = r * 10.0;
+                        const glm::dvec3 d = glm::normalize(dirC + (t1 * std::cos(ang) +
+                                                                   t2 * std::sin(ang)) * (dist / m_config.radius));
+                        const double gFull = sampleHeight(d);                       // lo que se ve
+                        const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(d));
+                        const double gBake = (double)Haruka::Planet::sampleHeightField(
+                                                 uv, m_heightW, m_heightH, m_heightCPU.data());
+                        worstBakeGap = std::max(worstBakeGap, std::abs(gFull - gBake));
+                        const double lv  = (double)lakeLevelAt(d);
+                        const double wlv = (double)lakeWindowLevelAt(d);
+                        if (lv  > Haruka::Planet::WATER_FILL_DRY && lv  > gFull)
+                            { ++nLake; worstLake = std::max(worstLake, lv  - gFull); }
+                        if (wlv > Haruka::Planet::WATER_FILL_DRY && wlv > gFull)
+                            { ++nWin;  worstWin  = std::max(worstWin,  wlv - gFull); }
+                    }
+                HARUKA_LOGI("SondaAgua", "abanico de 192 puntos (10..120 m): lago GRUESO afirma agua "
+                            "en %d (peor %.2f m sobre el suelo VISIBLE) · VENTANA en %d (peor %.2f m)"
+                            " · |suelo completo - bake| peor %.2f m",
+                            nLake, worstLake, nWin, worstWin, worstBakeGap);
+            }
             if ((s_log++ % 120) == 0)
                 // ⚠️ LOS DOS RECORTES POR SEPARADO. Con "frustum descarto" a secas no se distingue el
                 // cono del horizonte, y son dos causas distintas para el mismo sintoma ("chunks
@@ -4206,6 +4251,47 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                             st.genBudget, s_peakBudget, st.dtSeen * 1000.0, s_peakLive, s_peakAnc, s_peakDeep, s_peakCovers, s_peakDepth, s_peakRate),
                 (void)(s_peakAnc = 0), (void)(s_peakLive = 0), (void)(s_peakRate = 0.0),
                 (void)(s_peakDeep = 0), (void)(s_peakDepth = 0), (void)(s_peakCovers = 0), (void)(s_peakBudget = 0);
+            // ── LO QUE EL MAR PUEDE DIBUJAR A ESTA RESOLUCION ───────────────────────────────
+            //
+            // ⚠️ "NO VEO OLAS" NO SE PUEDE CONTESTAR SIN ESTE NUMERO. El agua reusa la rejilla del
+            // nodo, asi que su celda es `texel x zancada`; y `harukaShortWaveFade` apaga por NYQUIST
+            // todo tren cuya longitud no llegue a DOS celdas. A 3,5 km de altitud el selector da
+            // nivel 13 con zancada 4, o sea celdas de 38 m: de los ocho trenes (137 a 8,7 m)
+            // sobreviven dos. A nivel 11, celdas de 153 m: **ninguno, y el mar sale plano** — no por
+            // un fallo, sino porque una ola de 12 m sobre un quad de 153 m es alias, no ola.
+            //
+            // Sin esta linea, "el mar esta plano" y "el mar no se dibuja" se ven igual desde fuera.
+            {
+                const double texelFino = Haruka::Terrain::nodeTexelM(
+                    Haruka::Terrain::NodeId{ Haruka::PlanetFace::FRONT, st.levelMax, 0, 0 },
+                    m_config.radius);
+                // `strideMin` YA es la zancada (1,2,4…), no su logaritmo: el log imprime "stride 4..4"
+                // con este mismo campo. Elevarlo a potencia daria celdas 4x mayores y un diagnostico
+                // que asusta sin motivo.
+                const double quadFino = texelFino * (double)st.strideMin;
+                // El apagado lo decide `oceanShortWaveFade` — se LLAMA, no se reescribe aqui: una
+                // copia de la formula en el diagnostico se desincroniza y miente justo cuando importa.
+                int vivos = 0;
+                double ampViva = 0.0;
+                for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) {
+                    const float lam = m_oceanStateCPU.wave[i][0];
+                    if (lam <= 0.0f) continue;
+                    const float f = Haruka::Planet::oceanShortWaveFade(6.2831853f / lam,
+                                                                      (float)quadFino);
+                    if (f > 0.01f) ++vivos;
+                    ampViva += (double)m_oceanStateCPU.wave[i][1] * (double)f;
+                }
+                static int s_vivos = -1;
+                if (vivos != s_vivos) {
+                    s_vivos = vivos;
+                    HARUKA_LOGI("Mar", "celda del agua %.1f m (texel %.2f x zancada %u) -> %d de %d "
+                                "trenes sobreviven a Nyquist · Sigma amp %.2f m%s",
+                                quadFino, texelFino, st.strideMin, vivos,
+                                Haruka::Planet::OCEAN_WAVES, ampViva,
+                                vivos == 0 ? "  <- MAR PLANO: la celda es mas grande que la ola"
+                                           : "");
+                }
+            }
             v5Drew = st.drawn > 0;
         }
     }

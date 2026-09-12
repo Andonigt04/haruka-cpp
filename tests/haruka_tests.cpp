@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
 
     if (want("cube") || want("mesh"))   test_cube_sphere_inverse();
     if (want("prim") || want("mesh"))   test_primitive_winding();
-    if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); }
+    if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); test_weather_severe(); test_wind_pushes_character(); test_sky_bake(); }
     if (want("cloud") || want("nube") || want("clima")) test_cloud_shape();
     if (want("capa") || want("ground"))   test_ground_layer();
     if (want("lod")  || want("parity"))   test_terrain_lod_invariants();
@@ -60,6 +60,7 @@ int main(int argc, char** argv) {
     if (want("physics") || want("rail"))   test_rail_mechanism_jolt();
     if (want("construction") || want("build")) test_construction_placement();
     if (want("construction") || want("vehicle")) test_construction_vehicle();
+    if (want("prefab") || want("construction")) { test_prefab_edits(); test_prefab_scene_roundtrip(); }
     if (want("port") || want("puerto") || want("rail")) {
         test_ports_transform(); test_ports_fit(); test_ports_raycast();
         test_rail_mechanism(); test_ports_json_roundtrip();
@@ -88,6 +89,7 @@ int main(int argc, char** argv) {
         test_ocean_swash();
         test_ocean_break_limit();
         test_ocean_break_fold();
+        test_ocean_mesh_stretch();
         test_ocean_foam();
         test_ocean_skewness();
         test_ocean_whitewater_drag();

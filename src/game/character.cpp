@@ -99,6 +99,7 @@ void Character::update(float deltaTime) {
     }
     
     checkGrounded();
+    applyWind(deltaTime);
     updateState();
     
     if (localPlayer)
@@ -117,6 +118,71 @@ void Character::update(float deltaTime) {
     
     float targetHeight = crouched ? crouchingHeight : standingHeight;
     currentHeight += (targetHeight - currentHeight) * deltaTime * 10.0f;
+}
+
+// ── EL VIENTO EMPUJA ────────────────────────────────────────────────────────────────────────────
+//
+// Arrastre aerodinámico de verdad, no un empujón con una constante inventada:
+//
+//     a = ½·ρ·Cd·A/m · |v_aire − v_cuerpo|·(v_aire − v_cuerpo)
+//
+// Con ρ = 1,2 kg/m³, Cd ≈ 1,0 (una persona no es aerodinámica), A ≈ 0,7 m² y m = 80 kg sale el
+// coeficiente de abajo. Que vaya con el CUADRADO de la velocidad es lo que hace que esto se sienta
+// bien sin tocar nada: a 10 m/s son 0,5 m/s² (te despeina), a 30 m/s son 4,7 (cuesta andar) y a
+// 90 m/s —el núcleo de un tornado— son 42 m/s², cuatro veces la gravedad. No hace falta un caso
+// especial para "te levanta": sale de la fórmula.
+void Character::applyWind(float deltaTime) {
+    if (!m_windProvider || !physicsBody || flightMode || deltaTime <= 0.0f) return;
+
+    const glm::dvec3 vAir = m_windProvider(position);
+    glm::dvec3 up = glm::dvec3(getEffectiveUp());
+    const double ul = glm::length(up);
+    up = (ul > 1e-6) ? up / ul : glm::dvec3(0.0, 1.0, 0.0);
+
+    constexpr double kDrag     = 0.00525;  // ½·ρ·Cd·A/m, ver arriba
+    constexpr double kMaxAccel = 60.0;     // techo de cordura: ni el peor vórtice rompe la integración
+    // ⚠️ ERA 8,0 (μ = 0,8, el rozamiento de una suela agarrando) Y ESO DEJA AL TEMPORAL SIN EFECTO:
+    // el arrastre a 35 m/s son 0,00525·35² = **6,4 m/s²**, por debajo de 8, así que un viento de
+    // 126 km/h no movía al jugador ni un centímetro. Medido en `wind_pushes_character`, que imprime
+    // la deriva a cuatro vientos justo para que esto no se pueda decidir a ojo.
+    //
+    // El fallo era de modelo, no de número: a una persona el viento no la hace DESLIZAR, la hace
+    // PERDER PIE — vuelca antes de que la suela patine. 4,5 m/s² es el umbral efectivo de eso: a
+    // 25 m/s (90 km/h) aguantas de pie con esfuerzo y a 35 empiezas a ser arrastrado, que es lo que
+    // pasa de verdad.
+    constexpr double kFriction = 4.5;      // m/s²: no es la suela, es perder pie
+
+    const glm::dvec3 rel = vAir - glm::dvec3(physicsBody->velocity);
+    const double s = glm::length(rel);
+    if (s < 1e-6) { /* sin viento relativo no hay fuerza, pero el rozamiento sigue actuando */ }
+    glm::dvec3 accel = rel * (kDrag * s);
+    const double al = glm::length(accel);
+    if (al > kMaxAccel) accel *= kMaxAccel / al;
+
+    // La componente RADIAL va directa a la velocidad del cuerpo: es la que compite con la gravedad y
+    // la que te levanta. No pasa por la deriva porque `move()` ya conserva lo radial.
+    const double aRad = glm::dot(accel, up);
+    physicsBody->velocity += up * (aRad * (double)deltaTime);
+
+    // La TANGENTE se acumula aparte (ver `m_windDrift`). Al cuerpo se le aplica el INCREMENTO, no el
+    // total: así la velocidad de locomoción que escribió `move()` sigue ahí y no hay que reconstruir
+    // "qué parte de la tangencial era andar y qué parte era viento" — que no se puede saber.
+    const glm::dvec3 driftAntes = m_windDrift;
+    m_windDrift += (accel - up * aRad) * (double)deltaTime;
+
+    // ROZAMIENTO: de pie en el suelo, el viento tiene que GANARLE al rozamiento para moverte. Sin
+    // esto una brisa de 10 m/s te iría desplazando sin parar, porque nada frena la deriva; y con un
+    // frenado proporcional (·0,9 por frame) el resultado depende de los FPS. Un rozamiento de
+    // Coulomb —deceleración constante hasta parar— es lo que hace que por debajo de cierto viento
+    // no pase nada y por encima te arrastre, que es justo el comportamiento que se quiere.
+    if (grounded) {
+        const double d = glm::length(m_windDrift);
+        const double dec = kFriction * (double)deltaTime;
+        m_windDrift = (d > dec) ? m_windDrift * ((d - dec) / d) : glm::dvec3(0.0);
+    }
+
+    physicsBody->velocity += (m_windDrift - driftAntes);
+    velocity = physicsBody->velocity;
 }
 
 void Character::processInput(SDL_Window* window, float deltaTime) {
@@ -192,8 +258,12 @@ void Character::move(glm::vec2 input, float deltaTime) {
         // el body y CONSERVAMOS su componente radial (gravedad/salto, que integra el motor). El motor
         // avanza el body (advance) → la posición sale de ahí, y una fuerza externa (viento, empujón,
         // magia) se suma a esa velocidad en vez de ser ignorada.
+        // ⚠️ `+ m_windDrift`: sin él, andar ANULA el viento. Esta línea reescribe la tangencial
+        // entera cada frame con tecla pulsada, así que el empujón del tornado que `applyWind` acaba
+        // de sumar desaparecería en cuanto el jugador intentara moverse — es decir, justo cuando
+        // importa. Se suma la deriva porque andar y que te arrastren pasan A LA VEZ.
         const glm::dvec3 vBody = physicsBody->velocity;
-        physicsBody->velocity  = delta + u * glm::dot(vBody, u);
+        physicsBody->velocity  = delta + m_windDrift + u * glm::dot(vBody, u);
         velocity = physicsBody->velocity;
         return;
     }
@@ -214,7 +284,9 @@ void Character::stopWalking() {
     glm::dvec3 u = glm::dvec3(getEffectiveUp());
     const double ul = glm::length(u);
     u = (ul > 1e-6) ? u / ul : glm::dvec3(0.0, 1.0, 0.0);
-    physicsBody->velocity = u * glm::dot(glm::dvec3(physicsBody->velocity), u);   // deja solo lo radial
+    // Lo radial (gravedad/salto) y la DERIVA DEL VIENTO sobreviven; lo que se anula es la locomoción.
+    // Soltar la tecla no te libra de un tornado.
+    physicsBody->velocity = u * glm::dot(glm::dvec3(physicsBody->velocity), u) + m_windDrift;
     velocity = physicsBody->velocity;
 }
 

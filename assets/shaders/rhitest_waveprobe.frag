@@ -28,7 +28,13 @@ layout(std140, binding = 0) uniform ProbeParams {
     vec4 uProbeDepth;    // x = profundidad minima · y = incremento por fila · z = alto en pixeles
 };
 
-const float kRange = 4.0;    // la altura se codifica en [-kRange, +kRange]
+// La altura se codifica en [-kRange, +kRange]. ⚠️ EL RANGO DEPENDE DEL MODO Y NO ES UN DETALLE: la
+// altura no pasa de ~3 m, pero el vaiven HORIZONTAL llega a 9,79 m a 5 m de fondo (medido por
+// `ocean_mesh_stretch`). Con los ±4 m de la altura, el modo horizontal saturaria justo en la franja
+// que se quiere mirar —la rompiente— y el careo compararia dos valores recortados, que siempre
+// coinciden. Un test que satura es un test que pasa por el motivo equivocado.
+const float kRangeH = 4.0;    // altura
+const float kRangeX = 16.0;   // horizontal
 
 void main() {
     vec2  px = floor(gl_FragCoord.xy);
@@ -37,12 +43,22 @@ void main() {
     float depth = uProbeDepth.x + uProbeDepth.y * px.y;
 
     vec3  n; float foam;
-    vec3  disp = harukaGerstner(wp, up, uProbeOrigin.w, depth, HARUKA_FETCH_UNLIMITED, 4.0, 1.0, n, foam);
-    // La componente a lo largo de `up` ES la altura: la horizontal es el vaiven de Gerstner, que la
-    // CPU no modela en su `oceanWaveHeight` (devuelve solo la subida).
-    float h = dot(disp, up);
+    // `vec3(0)` es el centinela de "sin dato" de `harukaRefract`, asi que pasar la pendiente a cero
+    // es exactamente la sobrecarga de antes: los tests que no la usan no cambian ni un bit.
+    vec3  pend = vec3(uProbeStep.w, uProbeStepY.w, uProbeUp.w);
+    vec3  disp = harukaGerstner(wp, up, uProbeOrigin.w, depth, HARUKA_FETCH_UNLIMITED, 4.0, 1.0,
+                                pend, n, foam);
+    // La componente a lo largo de `up` ES la altura; las otras dos son el vaiven horizontal, que es
+    // donde vive el vuelco. El marco tangente es EL MISMO que construyen `harukaGerstner` y
+    // `oceanDisplacement` — si no lo fuera, se compararian proyecciones sobre ejes distintos.
+    vec3  t1 = normalize(abs(up.y) < 0.99 ? cross(up, vec3(0.0, 1.0, 0.0))
+                                          : cross(up, vec3(1.0, 0.0, 0.0)));
+    vec3  t2 = cross(up, t1);
+    int   modo = int(uProbeDepth.w + 0.5);
+    float h = (modo == 1) ? dot(disp, t1) : (modo == 2) ? dot(disp, t2) : dot(disp, up);
 
     // 24 bits fijos: se parte el valor normalizado en tres bytes.
+    float kRange = (modo == 0) ? kRangeH : kRangeX;
     float t = clamp((h + kRange) / (2.0 * kRange), 0.0, 1.0);
     float scaled = t * 16777215.0;
     float r = floor(scaled / 65536.0);

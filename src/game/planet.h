@@ -647,9 +647,13 @@ public:
      *  Sin ella el parche quedaría pegado a la cámara y se deslizaría sobre el terreno al caminar.
      *
      *  `verts`/`tris` solo hacen falta cuando cambia la revisión; pasar `nullptr` reusa los buffers. */
-    /** @brief Publica la superficie del agua interior (ríos/lagos) para que la dibuje el MAR.
-     *  @param surfaceM  n×n cotas de la superficie del agua (m sobre el nivel del mar);
-     *                   `kNoInlandWater` en las celdas sin agua.
+    /** @brief Publica el agua interior (ríos/lagos) para que la dibuje el MAR.
+     *  @param surfaceM  n×n **metros de LÁMINA** (profundidad), 0 en las celdas sin agua.
+     *                   ⚠️ Fueron COTAS absolutas y ya no lo son: una cota lleva dentro la idea que
+     *                   la sim tiene del suelo, y el shader le restaba la SUYA (otro corte de
+     *                   octavas) — esa diferencia salía como profundidad dibujada y pintaba una
+     *                   película de agua sobre todo el parche. Con la lámina, los dos suelos se
+     *                   cancelan. Ver `harukaInlandWaterDepthAt`.
      *  @param n         lado del parche · @param anchorRelEye ancla del parche relativa al ojo
      *  @param tan,bit,up  marco tangente del parche · @param spanM  lado del parche en metros */
     void setInlandWater(const std::vector<float>* surfaceM, int n,
@@ -739,6 +743,10 @@ private:
     double m_frameDt = 1.0 / 60.0;   ///< dt canónico del motor; lo pone `PlanetarySystem::update`
 
     // ESTADO DEL MAR del frame (trenes + cota de la lámina). Ver `setOceanState`.
+    /// ⚠️ Se guarda TAMBIÉN en CPU, no solo en el UBO: hace falta para poder decir cuántos trenes
+    /// sobreviven a Nyquist con la celda que el agua está dibujando (el log de `[Mar]`). Sin él, "el
+    /// mar está plano" y "el mar no se dibuja" se ven igual desde fuera.
+    Haruka::Planet::OceanState m_oceanStateCPU = Haruka::Planet::oceanDefaultState();
     Haruka::RHI::BufferHandle  m_oceanParamsUBO;
     bool                       m_oceanParamsValid = false;
 

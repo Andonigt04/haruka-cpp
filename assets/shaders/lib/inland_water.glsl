@@ -54,17 +54,26 @@ const float HARUKA_LAKE_DRY = -1.0e30;
 const float HARUKA_NO_INLAND = -1e9;
 
 /**
- * @brief Cota de la superficie del agua interior en un punto, o el centinela si no hay.
+ * @brief LÁMINA de agua interior en un punto (m), 0 si aquí no hay o si cae fuera del parche.
  * @param posRelEye  posición del punto RELATIVA AL OJO (el mismo marco que el ancla).
+ *
+ * ⚠️ DEVUELVE PROFUNDIDAD, NO COTA, y ese cambio es el que quita la película blanca. Devolvía la
+ * cota absoluta que publicaba la sim, y esa cota lleva DENTRO la idea que la sim tiene del suelo
+ * (`sampleTerrainHeight`, corte fino). El shader le restaba LA SUYA (el relieve al corte del vano),
+ * así que la diferencia entre los dos cortes se convertía en profundidad dibujada: agua de un
+ * centímetro sobre todo el parche, que es espuma de orilla saturada — pantalla blanca.
+ *
+ * Con la lámina, quien la compone es `harukaWaterLevelAt` como `suelo_DEL_SHADER + lámina`: los dos
+ * suelos se cancelan y en seco la profundidad es 0 exacta.
  *
  * Bilineal a mano, como el resto de campos del terreno: el filtrado del hardware usa pesos de 8 bits
  * en varias GPU y aquí eso se vería como escalones en la lámina de un lago quieto.
  */
-float harukaInlandWaterAt(vec3 posRelEye) {
-    if (uInlandMisc.w < 0.5) return HARUKA_NO_INLAND;
+float harukaInlandWaterDepthAt(vec3 posRelEye) {
+    if (uInlandMisc.w < 0.5) return 0.0;
     int   n    = int(uInlandMisc.y);
     float span = uInlandMisc.x;
-    if (n <= 1 || span <= 0.0) return HARUKA_NO_INLAND;
+    if (n <= 1 || span <= 0.0) return 0.0;
 
     // Del mundo al parche: proyección sobre sus dos ejes tangentes, en metros desde el ancla.
     vec3  rel = posRelEye - uInlandAnchor.xyz;
@@ -73,21 +82,23 @@ float harukaInlandWaterAt(vec3 posRelEye) {
     // Celdas: el parche va de -span/2 a +span/2 y su celda mide span/(n-1).
     float fx = (u + span * 0.5) / span * float(n - 1);
     float fy = (v + span * 0.5) / span * float(n - 1);
-    if (fx < 0.0 || fy < 0.0 || fx > float(n - 1) || fy > float(n - 1)) return HARUKA_NO_INLAND;
+    if (fx < 0.0 || fy < 0.0 || fx > float(n - 1) || fy > float(n - 1)) return 0.0;
 
     int   x0 = int(floor(fx)), y0 = int(floor(fy));
     int   x1 = min(x0 + 1, n - 1), y1 = min(y0 + 1, n - 1);
     float tx = fx - float(x0), ty = fy - float(y0);
     float s00 = uInlandSurface[y0 * n + x0], s10 = uInlandSurface[y0 * n + x1];
     float s01 = uInlandSurface[y1 * n + x0], s11 = uInlandSurface[y1 * n + x1];
-    // ⚠️ Si CUALQUIER esquina está seca, no se interpola: mezclar una cota real con el centinela
-    // daría una lámina hundiéndose hacia -1e9 en el borde del lago. El borde lo decide luego la
-    // profundidad (agua donde el nivel supera al suelo), que es un criterio continuo de verdad.
-    if (s00 <= HARUKA_NO_INLAND * 0.5 || s10 <= HARUKA_NO_INLAND * 0.5 ||
-        s01 <= HARUKA_NO_INLAND * 0.5 || s11 <= HARUKA_NO_INLAND * 0.5) return HARUKA_NO_INLAND;
+    // ⚠️ AQUÍ HABÍA UN RECHAZO POR ESQUINA SECA, Y ERA EL BORDE EN ESCALERA. Decía: si CUALQUIERA de
+    // las cuatro esquinas traía el centinela, no se interpolaba —mezclar una cota real con -1e9
+    // hundiría la lámina— y se devolvía "sin agua". El agua se cortaba en la REJILLA: escalones de
+    // 4,4 m, y un agujero por cada celda con menos de 2 cm ("partes faltantes").
+    //
+    // Ya no existe el centinela: el campo son METROS DE LÁMINA y las celdas secas traen 0, que
+    // interpola solo. Fuera del parche manda el recorte de `fx/fy` de arriba.
     float a = s00 + (s10 - s00) * tx;
     float b = s01 + (s11 - s01) * tx;
-    return a + (b - a) * ty;
+    return max(a + (b - a) * ty, 0.0);   // la lámina no es negativa
 }
 
 /**
@@ -191,8 +202,13 @@ float harukaWaterFetchAt(vec3 dir) {
  * contra 78 km), el campo global cubre el resto del planeta, y el mar es el suelo. `max` de los
  * cuatro, con centinelas por debajo de todo, hace exactamente eso sin ramas.
  */
-float harukaWaterLevelAt(vec3 posRelEye, vec3 dir, float seaLevelM) {
-    return max(max(seaLevelM, harukaInlandWaterAt(posRelEye)),
+float harukaWaterLevelAt(vec3 posRelEye, vec3 dir, float seaLevelM, float groundH) {
+    // El parche llega en METROS DE LÁMINA y se apoya en EL SUELO DE QUIEN PREGUNTA (ver
+    // `harukaInlandWaterDepthAt`): así los dos suelos se cancelan y en seco la lámina es 0, o sea
+    // que el parche no puede inventar agua ni aunque su idea del terreno no sea la de aquí.
+    const float patchD = harukaInlandWaterDepthAt(posRelEye);
+    const float patchLv = (patchD > 0.0) ? (groundH + patchD) : HARUKA_NO_INLAND;
+    return max(max(seaLevelM, patchLv),
                max(harukaBakedLakeAt(dir), harukaWindowLakeAt(dir)));
 }
 

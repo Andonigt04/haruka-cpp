@@ -131,6 +131,22 @@ public:
 
     void setInputProvider(const CharacterInputProvider& p) { m_inputProvider = p; }
 
+    // -- Viento ---------------------------------------------------------------
+    //
+    // El personaje NO conoce el clima y no debe conocerlo (aquí no hay planeta, ni terreno, ni
+    // `PlanetarySystem`). El juego le enchufa una función que, dado el punto donde está, devuelve la
+    // velocidad del aire en m/s — de la que el motor saca el arrastre. En el juego esa función es
+    // `PlanetarySystem::windAt`, que ya suma el viento de fondo y el de cualquier tornado cerca.
+    //
+    // ⚠️ Sin esto, un tornado con un campo de 100 m/s perfectamente medido no movía al jugador ni un
+    // centímetro: el campo existía y nadie lo consultaba.
+    using WindProvider = std::function<glm::dvec3(const glm::dvec3& worldPos)>;
+    void setWindProvider(WindProvider p) { m_windProvider = std::move(p); }
+
+    /** @brief Velocidad que el VIENTO le ha impuesto (m/s, tangente). Para el HUD y para depurar:
+     *  si esto es 0 con un tornado encima, el problema está en el enganche, no en el clima. */
+    glm::dvec3 getWindDrift() const { return m_windDrift; }
+
     // Register a callback for any action/trigger combination.
     // T must match the ActionValue type the action produces (bool, float, vec2, vec3).
     // Use the value-less overload for simple button presses.
@@ -219,6 +235,12 @@ private:
     
     bool grounded = false;
     bool m_externalGround = false; // grounded managed by the game's surface constraint
+
+    WindProvider m_windProvider;
+    /// Velocidad TANGENTE acumulada por el viento. Vive aparte de la de locomoción porque `move()`
+    /// REESCRIBE la tangencial cada frame que hay tecla pulsada: sumando el viento al mismo vector,
+    /// andar contra un tornado lo cancelaría por completo (y andar a favor, también).
+    glm::dvec3 m_windDrift{0.0};
     bool sprinting = false;
     bool crouched = false;
     bool flightMode = false;
@@ -242,6 +264,8 @@ private:
     void updateState();
     /** @brief Recomputes grounded state from physics/orientation. */
     void checkGrounded();
+    /** @brief Arrastre del aire sobre el personaje (ver `setWindProvider`). */
+    void applyWind(float deltaTime);
 
     /** @brief Returns the current up vector used for movement basis. */
     glm::dvec3 getEffectiveUp() const;

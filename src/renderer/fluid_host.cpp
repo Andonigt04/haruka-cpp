@@ -188,26 +188,38 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
         { HARUKA_PROFILE("fluid.pbf.step(colision vs terreno)"); m_pbf->step(dt); }
     }
 
-    // ── PUBLICAR LA SUPERFICIE DEL AGUA INTERIOR ────────────────────────────────────────────────
+    // ── PUBLICAR EL AGUA INTERIOR: LA LÁMINA, NO LA COTA ────────────────────────────────────────
     //
-    // Ríos y lagos ya no tienen malla ni shader propios: los dibuja el MAR, con su misma superficie
-    // y su mismo `ocean.frag`. Lo único que sale de aquí es el CAMPO — la cota del agua por celda —
-    // y el marco del parche para localizarla. Una sola pregunta ("¿nivel del agua menos cota del
-    // suelo?") con tres orígenes, en vez de tres aguas con tres respuestas distintas.
+    // Ríos y lagos no tienen malla ni shader propios: los dibuja el MAR, con su misma superficie y su
+    // mismo `ocean.frag`. Lo único que sale de aquí es el CAMPO y el marco del parche para localizarlo.
     //
-    // Las cotas van ABSOLUTAS (m sobre el nivel del mar): dentro de la sim todo es relativo al suelo
-    // del ancla (`h0`), pero el shader razona en la cota del planeta, así que la conversión se hace
-    // aquí una vez y no en cada píxel.
+    // ⚠️ SE PUBLICA **PROFUNDIDAD** (m de lámina), NO LA COTA ABSOLUTA. Antes iba la cota
+    // (`h0abs + terreno + lámina`) y eso obligaba al shader a restar SU idea del suelo a la cota que
+    // traía la idea del suelo de la SIM — y no son la misma: la sim muestrea `sampleTerrainHeight`
+    // con el corte fino y el shader evalúa el relieve con el corte del VANO (`téxel × zancada`).
+    // Esa diferencia se colaba entera en la profundidad dibujada. Con la lámina, los dos suelos se
+    // CANCELAN: el shader hace `suelo_suyo + lámina`, así que sobre terreno seco la lámina es 0, la
+    // profundidad es 0 exacta y el fragmento descarta — pase lo que pase con los cortes.
+    //
+    // Y de paso muere el CENTINELA, que era el borde en escalera. Antes las celdas secas escribían
+    // `-1e9` y `harukaInlandWaterAt` tiraba la bilineal entera si cualquiera de sus cuatro esquinas
+    // lo traía: el agua se cortaba en la REJILLA (escalones de 4,4 m) y cada celda por debajo del
+    // umbral de "mojada" abría un AGUJERO dentro del charco ("partes faltantes y no tienen formas de
+    // agua"). Una lámina de 0 no envenena nada: interpola sola y la orilla cae SUB-CELDA.
+    //
+    // ⚠️ Y LO QUE ESTO ARREGLA DE VERDAD: con la cota y un margen fijo, cualquier desajuste de suelo
+    // mayor que el margen dejaba una PELÍCULA de agua sobre todo el parche — y una película de un
+    // centímetro es espuma de orilla saturada, o sea **la pantalla en blanco**. Con la lámina no hay
+    // margen que ajustar porque no hay resta que descuadrar.
     if (publishInlandWater && m_sim && m_sim->valid()) {
         const int n = m_sim->size();
-        m_inlandSurface.assign((size_t)n * n, -1e9f);          // centinela: sin agua
-        const double h0abs = terrainHeightFn(m_sim->anchor()); // cota del suelo bajo el ancla
+        m_inlandSurface.assign((size_t)n * n, 0.0f);           // 0 = sin lámina, no centinela
         int wet = 0;
         for (int j = 0; j < n; ++j)
             for (int i = 0; i < n; ++i) {
-                if (!m_sim->hasWaterAt(i, j)) continue;        // seca: se queda el centinela
-                m_inlandSurface[(size_t)j * n + i] = (float)(h0abs + m_sim->surfaceAt(i, j));
-                ++wet;
+                const float d = m_sim->waterAt(i, j);
+                m_inlandSurface[(size_t)j * n + i] = d;
+                if (m_sim->hasWaterAt(i, j)) ++wet;
             }
         const float span = (float)(m_sim->cellSize() * (n - 1));
         publishInlandWater(m_inlandSurface, n,

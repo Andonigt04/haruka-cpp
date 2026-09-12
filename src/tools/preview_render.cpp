@@ -243,6 +243,22 @@ uint64_t previewTexture(const std::string& key, const std::function<PreviewGeo()
     return dev->imguiTextureId(cc.tex);
 }
 
+void invalidatePreview(const std::string& key) {
+    auto it = g_cache.find(key);
+    if (it == g_cache.end()) return;
+    if (R::Device* dev = R::device()) {
+        Cached& x = it->second;
+        if (R::valid(x.vb))  dev->destroy(x.vb);
+        if (R::valid(x.ib))  dev->destroy(x.ib);
+        if (R::valid(x.ubo)) dev->destroy(x.ubo);
+        // El render target es dueño de su textura de color (y del descriptor set de ImGui): destruirlo
+        // la destruye. Ojo con el orden — soltar la textura por su cuenta dejaría el RT apuntando a
+        // nada. El pipeline NO se toca: es compartido y se reusa en el siguiente render.
+        if (R::valid(x.rt))  dev->destroy(x.rt);
+    }
+    g_cache.erase(it);
+}
+
 void clearPreviews() {
     R::Device* dev = R::device();
     if (dev) {

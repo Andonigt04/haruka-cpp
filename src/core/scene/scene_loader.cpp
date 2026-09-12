@@ -256,6 +256,31 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     obj->type = mergedJson.at("type").get<std::string>();
     obj->objectType = Haruka::classifyObjectType(obj->type);
     obj->templateName = mergedJson.value("template", "");
+    // La entrada de un PREFABRICADO: un nombre y una pose. Quien la expande en piezas es el
+    // anfitrión (ver `SceneManager::setPrefabExpander`), porque expandir significa cosas distintas
+    // — el juego quiere física y colisionadores, el editor sólo mallas que mover.
+    obj->prefabName = mergedJson.value("prefab", "");
+    // Los cambios de ESTE conjunto (ver `SceneObject::prefabEdits`). Sólo lo que se desvía.
+    if (mergedJson.contains("prefabEdits") && mergedJson["prefabEdits"].is_array()) {
+        for (const auto& e : mergedJson["prefabEdits"]) {
+            if (!e.is_object()) continue;
+            PrefabEdit ed;
+            ed.index   = e.value("piece", -1);
+            ed.removed = e.value("removed", false);
+            ed.item    = e.value("item", std::string{});
+            if (e.contains("pos") && e["pos"].is_array() && e["pos"].size() == 3) {
+                ed.hasPos = true;
+                ed.pos = glm::dvec3(e["pos"][0].get<double>(), e["pos"][1].get<double>(),
+                                    e["pos"][2].get<double>());
+            }
+            if (e.contains("rot") && e["rot"].is_array() && e["rot"].size() == 4) {
+                ed.hasRot = true;
+                ed.rot = glm::dquat(e["rot"][0].get<double>(), e["rot"][1].get<double>(),
+                                    e["rot"][2].get<double>(), e["rot"][3].get<double>());
+            }
+            if (ed.index >= 0) obj->prefabEdits.push_back(ed);
+        }
+    }
     
     // Transformaciones
     obj->position = parseDVec3(mergedJson, "position", {0,0,0});
@@ -345,7 +370,25 @@ bool SceneManager::load(const std::string& filepath) {
     clear();
     m_name = std::filesystem::path(filepath).stem().string();
     SceneLoader loader(*this);
-    return loader.loadFromFile(filepath);
+    if (!loader.loadFromFile(filepath)) return false;
+    expandPrefabs();
+    return true;
+}
+
+void SceneManager::expandPrefabs() {
+    if (!m_prefabExpander) return;
+    // ⚠️ SE COPIAN LAS ENTRADAS ANTES DE EXPANDIR. El expansor AÑADE objetos a esta misma escena, y
+    // recorrer `m_objects` mientras crece es un puntero colgando en cuanto el vector se realoja.
+    std::vector<SceneObject> entries;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        for (auto& o : m_objects)
+            if (o && !o->prefabName.empty() && !o->fromPrefab && !o->prefabExpanded) {
+                o->prefabExpanded = true;      // marcar ANTES: el expansor añade objetos a la lista
+                entries.push_back(*o);
+            }
+    }
+    for (const SceneObject& e : entries) m_prefabExpander(*this, e);
 }
 
 bool SceneManager::save(const std::string& filepath) const {
@@ -354,9 +397,36 @@ bool SceneManager::save(const std::string& filepath) const {
     root["version"] = "2.0";
     root["objects"] = nlohmann::json::array();
 
+    // ── REMAPEO DE LA JERARQUÍA ─────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ `parentIndex` y `childrenIndices` son POSICIONES en el array que se escribe, y aquí se
+    // SALTAN objetos (las piezas de un prefabricado). Sin remapear, todo lo que viniera detrás de
+    // una pieza saltada quedaría apuntando a otro objeto: un hijo colgando de quien no es, y en
+    // silencio. Primero se decide quién se escribe y con qué índice; luego se traduce.
+    std::vector<int> remap(m_objects.size(), -1);
+    {
+        int w = 0;
+        for (size_t i = 0; i < m_objects.size(); ++i) {
+            const auto& o = m_objects[i];
+            if (!o || o->fromPrefab) continue;
+            remap[i] = w++;
+        }
+    }
+    size_t srcIndex = 0;
     for (const auto& objPtr : m_objects) {
+        const size_t myIndex = srcIndex++;
         if (!objPtr) continue;
         const auto& obj = *objPtr;
+        // ── LAS PIEZAS DE UN PREFABRICADO NO SE GUARDAN: SE GUARDA EL PREFABRICADO ───────────────
+        //
+        // Es LA razón de ser de un prefabricado. El casco del barco son 870 tablas; escribirlas una
+        // a una convierte "aquí va el barco" en 870 entradas con su malla, su material y su pose —
+        // y además congela una copia que no se entera de que el montaje ha cambiado. Lo que describe
+        // a estas piezas es la ENTRADA (`prefabName` + pose), que sí se escribe unas líneas abajo.
+        //
+        // ⚠️ Esto NO es "objetos temporales del editor". Una pieza colocada es un objeto de verdad
+        // mientras vive —se dibuja, se toca, la física la usa—; lo que no es, es DATO: es derivada.
+        if (obj.fromPrefab) continue;
         nlohmann::json item;
         item["name"] = obj.name;
         item["type"] = obj.type;
@@ -381,11 +451,36 @@ bool SceneManager::save(const std::string& filepath) const {
         // desde el IDE bastaba para perder los planetas para siempre.
         if (!obj.surfaceConfig.is_null() && !obj.surfaceConfig.empty()) item["surface"] = obj.surfaceConfig;
         if (!obj.modelPath.empty()) item["modelPath"] = obj.modelPath;
+        if (!obj.prefabName.empty()) item["prefab"] = obj.prefabName;
+        if (!obj.prefabEdits.empty()) {
+            nlohmann::json eds = nlohmann::json::array();
+            for (const PrefabEdit& ed : obj.prefabEdits) {
+                nlohmann::json e;
+                e["piece"] = ed.index;
+                if (ed.removed)      e["removed"] = true;
+                if (ed.hasPos)       e["pos"] = { ed.pos.x, ed.pos.y, ed.pos.z };
+                if (ed.hasRot)       e["rot"] = { ed.rot.w, ed.rot.x, ed.rot.y, ed.rot.z };
+                if (!ed.item.empty()) e["item"] = ed.item;
+                eds.push_back(std::move(e));
+            }
+            item["prefabEdits"] = std::move(eds);
+        }
         if (obj.material) item["material"] = obj.material->toJSON();
         if (!obj.components.is_null() && !obj.components.empty()) item["components"] = obj.components;
         if (!obj.properties.is_null() && !obj.properties.empty()) item["properties"] = obj.properties;
-        if (obj.parentIndex >= 0) item["parentIndex"] = obj.parentIndex;
-        if (!obj.childrenIndices.empty()) item["childrenIndices"] = obj.childrenIndices;
+        // Los enlaces, traducidos al array que se escribe. Un padre que no se escribe (una pieza de
+        // prefabricado) deja al hijo suelto, y los hijos derivados se caen de la lista: lo que los
+        // describe es la entrada del montaje, no un índice.
+        if (obj.parentIndex >= 0 && obj.parentIndex < (int)remap.size() && remap[obj.parentIndex] >= 0)
+            item["parentIndex"] = remap[obj.parentIndex];
+        if (!obj.childrenIndices.empty()) {
+            std::vector<int> hijos;
+            hijos.reserve(obj.childrenIndices.size());
+            for (int c : obj.childrenIndices)
+                if (c >= 0 && c < (int)remap.size() && remap[c] >= 0) hijos.push_back(remap[c]);
+            if (!hijos.empty()) item["childrenIndices"] = hijos;
+        }
+        (void)myIndex;
         root["objects"].push_back(std::move(item));
     }
 

@@ -344,8 +344,17 @@ struct CloudParams {
     glm::vec4 sunColor;       // 112..128  rgb=color del sol · a=día[0,1]
     glm::vec4 wind;           // 128..144  xy=deriva del campo · z=tiempo(s) · w=altitud del ojo(m)
     glm::vec4 misc;           // 144..160  x=atmósfera · y=pasos · z=escala · w=EXTINCIÓN por metro
+    // ── EMBUDOS (tornados y trombas) ──────────────────────────────────────────────────────────
+    // Se dibujan en ESTE pase porque un embudo es nube condensada: mismo color, misma luz, mismo
+    // corte contra la escena. Un pase aparte habría que componerlo contra la nube madre, y el punto
+    // donde el embudo entra en la base es justo donde se notaría la costura.
+    glm::vec4 vortexPos[4];   // 160..224  xyz = punto de SUELO del eje, RELATIVO a la cámara · w = radio del núcleo (m)
+    glm::vec4 vortexInfo[4];  // 224..288  x = techo (m) · y = viento (m/s) · z = giro · w = 1 tromba / 0 tornado
+    glm::vec4 vortexN;        // 288..304  x = cuántos · y = tiempo (s)
 };
-static_assert(sizeof(CloudParams) == 160, "CloudParams std140 size mismatch");
+static_assert(sizeof(CloudParams) == 304, "CloudParams std140 size mismatch");
+/** @brief Techo de embudos que el shader dibuja a la vez. Cuatro en pantalla ya es el fin del mundo. */
+static constexpr int kCloudMaxVortices = 4;
 
 /** @brief EXTINCIÓN por metro del volumen de nube: el mando de la DENSIDAD.
  *
@@ -897,15 +906,16 @@ void Application::renderFrameContent() {
                 // z = BASE DE LA NUBE del clima (`WeatherSample::cloudBaseM`), no una constante del
                 // shader: es la misma altura que ya define el techo de la lluvia, así que la panza
                 // de los cúmulos y el punto donde nacen las gotas coinciden por construcción.
-                // w = CONMUTADOR del cúmulo, con la convención que documenta `sky.frag`:
-                //   0  → lo dibuja el pase VOLUMÉTRICO; aquí solo van cirro y altocúmulo.
-                //  >0  → no hay pase volumétrico, y el valor ES el techo del cúmulo plano. Antes
-                //        estaba cableado a `base + 1700 m`, o sea el mismo desarrollo vertical con
-                //        buen tiempo que con tormenta; ahora lo trae el clima (~430 m de estrato
-                //        frente a >3800 m de cumulonimbo).
-                sp.planet = glm::vec4(rad, alt, wx.cloudBaseM,
-                                      (m_volumetricClouds && !cloudVolumetricOff()) ? 0.0f
-                                                                                  : wx.cloudTopM);
+                // ⚠️ `w` ERA EL CONMUTADOR DEL CÚMULO PLANO Y YA NO EXISTE TAL COSA. Decía "0 = lo
+                // dibuja el pase volumétrico; > 0 = píntalo tú plano, y este valor es su techo".
+                // `sky.frag` ya no pinta NINGUNA nube: las tres capas viven en `cloud_vol.frag` como
+                // cáscaras marchadas. Se deja el campo a 0 y no se recicla para otra cosa — un
+                // hueco de UBO reutilizado es cómo un shader acaba leyendo el dato de otro.
+                //
+                // CONSECUENCIA DELIBERADA: apagar el pase (ajustes o `HARUKA_CLOUD_VOL=0`) deja el
+                // cielo SIN nubes. Antes el respaldo las repintaba planas y apagar no se notaba, que
+                // es justo lo que impedía saber cuál de los dos caminos estabas mirando.
+                sp.planet = glm::vec4(rad, alt, wx.cloudBaseM, 0.0f);
             }
             skyDev->updateBuffer(m_skyUBO, 0, sizeof(sp), &sp);
 
@@ -2214,7 +2224,24 @@ void Application::renderFrameContent() {
                     if (auto* tp = _planetarySystem->activeTerrestrialMut())
                         tp->setInlandWater(&surf, n, anchorRelEye, tan, bit, up, span);
                 };
-            _fluidHost->rainPerSec = (m_rainAmount > 0.01f) ? m_rainAmount : 0.0f;
+            // ⚠️ LA INTENSIDAD DEL CLIMA NO ES UN CAUDAL, Y ASI ESTABA ENCHUFADA. `rainPerSec` son
+            // METROS DE LAMINA POR SEGUNDO (lo dice `fluid_host.h`) y aqui se le pasaba `m_rainAmount`
+            // tal cual, que es un 0..1 de "cuanto llueve". O sea que una lluvia de intensidad 0,5
+            // vertia **medio metro de agua por segundo** sobre las 9 216 celdas del parche.
+            //
+            // Medido antes de esto, con `HARUKA_RAIN=0.06` y 60 s de partida: **8 602 celdas de 9 216
+            // encharcadas** y el jugador AHOGANDOSE dentro de un bloque de agua de 420 m que le
+            // seguia — el "cubo de agua dinamica que aparece en terreno seco y se mueve". Con
+            // `HARUKA_RAIN=1`, sumergido entero antes de los 70 s.
+            //
+            // La referencia fisica: una lluvia torrencial son ~100 mm/h = 2,8e-5 m/s. Aquello eran
+            // 0,5 m/s, o sea **~18 000 veces** un aguacero. Aqui se usa 1 mm/s a intensidad plena
+            // (3,6 m/h, todavia 36x lo torrencial) porque a escala real un charco tarda horas en
+            // verse y el gate de `addRain` es de 2 cm; es un numero de JUEGO, y es el que hay que
+            // tocar si se quiere mas o menos encharcamiento.
+            constexpr float kRainFullIntensityMPerSec = 1.0e-3f;
+            _fluidHost->rainPerSec = (m_rainAmount > 0.01f)
+                                   ? m_rainAmount * kRainFullIntensityMPerSec : 0.0f;
             _fluidHost->update(deltaTime > 0.0f ? deltaTime : 0.016f,
                                glm::dvec3(_camera->position));
 
@@ -2259,8 +2286,15 @@ void Application::renderFrameContent() {
             if (!RHI::device())                                     why = 4;
             else if (!_planetarySystem->getActivePlanet(c, r) || r <= 0.0) why = 5;
         }
-        if (why != s_why) {
-            s_why = why;
+        // ⚠️ Y EL CONMUTADOR DEL CÚMULO PLANO EN LA MISMA LÍNEA. "Siguen saliendo las nubes planas
+        // antiguas" no se distingue de "son el cirro y el altocúmulo, que son planos a propósito"
+        // sin saber qué vale `planet.w`: >0 significa que `sky.frag` está pintando el CÚMULO PLANO
+        // porque nadie va a pintar el volumétrico. Las dos cosas se deciden aquí, así que se dicen
+        // aquí — mirarlo pedía leer dos ficheros.
+        const bool cumuloPlano = !(m_volumetricClouds && !cloudVolumetricOff());
+        static int s_flat = -1;
+        if (why != s_why || (int)cumuloPlano != s_flat) {
+            s_flat = (int)cumuloPlano;
             static const char* kPor[] = {
                 "CORRE (si aun no se ven, mira la linea de cobertura)",
                 "APAGADO en ajustes (m_volumetricClouds = false)",
@@ -2269,7 +2303,10 @@ void Application::renderFrameContent() {
                 "no hay dispositivo RHI",
                 "NO HAY PLANETA ACTIVO (getActivePlanet): en orbita lejana el cuerpo deja de serlo"
             };
-            HARUKA_LOGI("Clouds", "pase volumetrico -> %s", kPor[why]);
+            s_why = why;
+            HARUKA_LOGI("Clouds", "pase volumetrico -> %s · cumulo PLANO de `sky.frag`: %s "
+                        "(el cirro a 8 km y el altocumulo a 4 km son planos A PROPOSITO)",
+                        kPor[why], cumuloPlano ? "SI (planet.w > 0)" : "no (planet.w = 0)");
         }
     }
 
@@ -2459,8 +2496,11 @@ void Application::renderFrameContent() {
                         (sinceWorldS > 2.0 && sinceRealS > 0.10)) {
                         s_lastBake = now;
                         s_lastBakeWorld = worldNow;
-                        const int CW = 128, CH = 64;
-                        std::vector<float> cov((size_t)CW * CH, 0.0f);
+                        // ⚠️ 256x128, no 128x64: un texel de 128x64 son ~310 km. Con la base y el techo
+                        // por direccion (abajo) esa rejilla no distingue la tormenta del claro de al
+                        // lado, que es justo lo que se quiere ver. 32768 muestras cada 2 s de mundo.
+                        const int CW = 256, CH = 128;
+                        std::vector<float> sky((size_t)CW * CH * 4, 0.0f);
                         // ⚠️⚠️ ESTO ERA UN `static` HORNEADO UNA SOLA VEZ Y SIN VALIDAR, Y APAGABA LAS
                         // NUBES ENTERAS. La humedad sale de `fieldSampleAt`, que necesita el planeta
                         // con su campo de clima YA horneado; el pase de nubes corre desde el primer
@@ -2473,10 +2513,14 @@ void Application::renderFrameContent() {
                         // Ahora: miembro (no `static`, que ademas se lo llevaba de un mundo a otro) y
                         // **no se acepta un horneado degenerado** — si la media sale ~0 el campo no
                         // estaba listo, no se cachea, y se reintenta en la siguiente pasada.
-                        std::vector<float>& humField = m_cloudHumField;
+                        std::vector<float>& humField  = m_cloudHumField;
+                        std::vector<float>& tempField = m_cloudTempField;
+                        std::vector<float>& waterField = m_cloudWaterField;
                         if (humField.size() != (size_t)CW * CH) {
                             const auto tHum = std::chrono::steady_clock::now();
                             humField.assign((size_t)CW * CH, 0.5f);
+                            tempField.assign((size_t)CW * CH, 15.0f);
+                            waterField.assign((size_t)CW * CH, 0.0f);
                             const double kPiH = 3.14159265358979323846;
                             for (int y = 0; y < CH; ++y) {
                                 const double lat = (0.5 - ((double)y + 0.5) / CH) * kPiH;
@@ -2484,14 +2528,19 @@ void Application::renderFrameContent() {
                                     const double lon = (((double)x + 0.5) / CW - 0.5) * 2.0 * kPiH;
                                     const glm::dvec3 dd(std::cos(lat) * std::cos(lon), std::sin(lat),
                                                         std::cos(lat) * std::sin(lon));
-                                    humField[(size_t)y * CW + x] =
-                                        _planetarySystem->sampleSurface(pcD + dd * (prD + 1.0)).humidity;
+                                    const Haruka::TerrainSample ts =
+                                        _planetarySystem->sampleSurface(pcD + dd * (prD + 1.0));
+                                    humField[(size_t)y * CW + x]   = ts.humidity;
+                                    tempField[(size_t)y * CW + x]  = ts.tempC;
+                                    // ⚠️ NO `landMask`: es la puerta del continente y aqui salia 1 en todo el
+                                    // planeta (MAR 0.000 en el log). El mar es la cota bajo el nivel del mar.
+                                    waterField[(size_t)y * CW + x] = (ts.waterType == Haruka::WaterType::Ocean) ? 1.0f : 0.0f;
                                 }
                             }
                             double sh = 0.0; float hmn = 1.0f, hmx = 0.0f;
                             for (float v : humField) { sh += v; hmn = std::min(hmn, v); hmx = std::max(hmx, v); }
                             const double hmean = sh / (double)humField.size();
-                            HARUKA_LOGI("Clouds", "campo de HUMEDAD %dx%d en %.0f ms · min %.3f · media "
+                            HARUKA_LOGI("Clouds", "campo de HUMEDAD+TEMP %dx%d en %.0f ms · humedad min %.3f · media "
                                         "%.3f · max %.3f%s", CW, CH,
                                         std::chrono::duration<double, std::milli>(
                                             std::chrono::steady_clock::now() - tHum).count(),
@@ -2500,67 +2549,96 @@ void Application::renderFrameContent() {
                                                          " se reintenta" : "");
                             // ⚠️ Un campo plano a cero no se cachea: significa que el clima del planeta
                             // todavia no existia. Cachearlo dejaba el cielo vacio el resto de la partida.
-                            if (hmean < 0.02) humField.clear();
+                            if (hmean < 0.02) { humField.clear(); tempField.clear(); waterField.clear(); }
                         }
                         if (humField.size() != (size_t)CW * CH) {
-                            // Sin humedad valida todavia no se hornea la cobertura: mejor esperar un
+                            // Sin humedad valida todavia no se hornea el cielo: mejor esperar un
                             // par de frames que publicar un campo a cero y apagar el cielo.
                             m_cloudCoverMax = std::max(m_cloudCoverMax, coverC);
                         } else {
-                        const auto& wsys = _planetarySystem->weather();
+                        // ── EL CIELO ENTERO, POR DIRECCION, EN UN HILO ──────────────────────
+                        // ⚠️ Antes aqui solo se horneaba la COBERTURA, y base/techo/lluvia salian
+                        // del punto bajo la camara para todo el planeta: una sola losa, y el pase
+                        // rellenaba con capas fijas. Ver `WeatherSystem::bakeSky`.
+                        // ⚠️ Y EN UN HILO: 134 ms medidos a 256x128, que en el hilo de render son
+                        // ocho frames parados cada dos segundos de mundo. Se lanza con copias y se
+                        // recoge cuando este; entre medias se ve el cielo anterior, que a 2 s de
+                        // mundo de distancia es indistinguible.
+                        if (!m_skyBakeJob.valid()) {
+                            Haruka::WeatherSystem wcopy = _planetarySystem->weather();
+                            std::vector<float> tcopy = tempField, hcopy = humField, wcp = waterField;
+                            m_skyBakeJob = std::async(std::launch::async,
+                                [wcopy, tcopy = std::move(tcopy), hcopy = std::move(hcopy), wcp = std::move(wcp), CW, CH]() {
+                                    SkyBake r; r.w = CW; r.h = CH;
+                                    r.rgba.assign((size_t)CW * CH * 4, 0.0f);
+                                    r.hi.assign((size_t)CW * CH * 4, 0.0f);
+                                    const auto t0 = std::chrono::steady_clock::now();
+                                    r.coverMax = wcopy.bakeSky(tcopy.data(), hcopy.data(), CW, CH,
+                                                               r.rgba.data(), &r.baseMin, &r.topMax,
+                                                               wcp.data(), r.hi.data());
+                                    r.ms = std::chrono::duration<double, std::milli>(
+                                        std::chrono::steady_clock::now() - t0).count();
+                                    return r;
+                                });
+                        }
+                        }   // fin del `else` de "hay humedad valida"
+                    }
+                    // Recoger el horneado que haya terminado (en cualquier frame, no solo en los de
+                    // lanzamiento: si no, un horneado de 134 ms se recogeria 2 s tarde).
+                    if (m_skyBakeJob.valid() &&
+                        m_skyBakeJob.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                        SkyBake r = m_skyBakeJob.get();
+                        const int CW = r.w, CH = r.h;
+                        const std::vector<float>& sky = r.rgba;
+                        // Media por AREA (un texel polar cubre cos(lat) veces menos superficie).
                         const double kPi = 3.14159265358979323846;
-                        // ⚠️ LA MEDIA VA PONDERADA POR AREA, Y ANTES ERA POR TEXEL. En una rejilla
-                        // equirectangular un texel polar cubre `cos(lat)` veces menos superficie que
-                        // uno ecuatorial, asi que promediar texeles SOBREPONDERA LOS POLOS — y esta
-                        // cifra es la que se lee para decidir si el planeta esta demasiado cubierto.
-                        // Es la misma trampa que ya costo una vez en el fetch de los lagos ("area
-                        // medida en la esfera, no en texeles"). Se imprimen las dos para poder
-                        // comparar con los numeros viejos del historial.
-                        float mx = 0.0f, mn = 1.0f; double sum = 0.0, sumTexel = 0.0, wsum = 0.0;
+                        double sum = 0.0, wsum = 0.0, sumTower = 0.0; int nStorm = 0;
+                        double sumSea = 0.0, wSea = 0.0, sumLand = 0.0, wLand = 0.0, sumHi = 0.0;
                         for (int y = 0; y < CH; ++y) {
-                            const double lat = (0.5 - ((double)y + 0.5) / CH) * kPi;
+                            const double w = std::cos((0.5 - ((double)y + 0.5) / CH) * kPi);
                             for (int x = 0; x < CW; ++x) {
-                                const double lon = (((double)x + 0.5) / CW - 0.5) * 2.0 * kPi;
-                                const glm::dvec3 d(std::cos(lat) * std::cos(lon), std::sin(lat),
-                                                   std::cos(lat) * std::sin(lon));
-                                // ⚠️ LA HUMEDAD DE ESE PUNTO, NO LA DE LA CAMARA. Esto pasaba
-                                // `wx.humidity` —la humedad DONDE ESTAS— para el planeta ENTERO: de
-                                // pie en un desierto (H = 0,059 en este mundo) el cielo de todo el
-                                // globo se calculaba como desierto, cobertura ~0,19, y el umbral se
-                                // iba a 0,51: nubes escasas o ninguna, en todas partes, por estar
-                                // parado en el sitio equivocado. Y el pase SEGUIA corriendo, porque
-                                // su puerta usa el maximo — o sea "se ve la atmosfera pero no las
-                                // nubes", sin ningun error en el log.
-                                //
-                                // La humedad es un campo ESTATICO del terreno (sale del bioma), asi
-                                // que se hornea UNA vez y se reutiliza: no hace falta rehacerla con
-                                // la cobertura cada 2 s.
-                                const float c = wsys.cloudCoverAt(d, humField[(size_t)y * CW + x]);
-                                cov[(size_t)y * CW + x] = c;
-                                mx = std::max(mx, c); mn = std::min(mn, c);
-                                const double w = std::cos(lat);   // area del texel en la esfera
-                                sum += c * w; wsum += w; sumTexel += c;
+                                const size_t i = (size_t)y * CW + x;
+                                sum += sky[i * 4] * w; wsum += w;
+                                sumHi += r.hi[i * 4] * w;
+                                // ⚠️ MAR Y TIERRA POR SEPARADO: "el mar totalmente cubierto" no se ve
+                                // en la media global, que puede dar 0,67 con el mar a 0,95 y la tierra
+                                // a 0,4. Es la cifra que hay que mirar para ese sintoma.
+                                const double isSea = (m_cloudWaterField.size() == sky.size() / 4) ? m_cloudWaterField[i] : 0.0;
+                                sumSea += sky[i * 4] * w * isSea;  wSea  += w * isSea;
+                                sumLand += sky[i * 4] * w * (1.0 - isSea); wLand += w * (1.0 - isSea);
+                                if (sky[i * 4 + 3] > 0.3f) { ++nStorm; sumTower += sky[i * 4 + 2] - sky[i * 4 + 1]; }
                             }
                         }
                         if (RHI::valid(m_cloudCoverTex)) dev->destroy(m_cloudCoverTex);
                         RHI::TextureDesc ct;
-                        ct.width = CW; ct.height = CH; ct.format = RHI::Format::R32F;
+                        ct.width = CW; ct.height = CH; ct.format = RHI::Format::RGBA32F;
                         ct.filter = RHI::Filter::Linear; ct.wrap = RHI::Wrap::Repeat;
-                        ct.mipmaps = false; ct.initialData = cov.data();
+                        ct.mipmaps = false; ct.initialData = sky.data();
                         m_cloudCoverTex = dev->createTexture(ct);
-                        m_cloudCoverMax = mx;
-                        HARUKA_LOGI("Clouds", "campo de cobertura horneado %dx%d · min %.3f · media "
-                                    "por AREA %.3f (por texel %.3f) · MAX %.3f · bajo la camara %.3f "
-                                    "· humedad de la camara %.3f",
-                                    CW, CH, mn, wsum > 0.0 ? sum / wsum : 0.0,
-                                    sumTexel / (double)(CW * CH), mx, coverC, wx.humidity);
-                        }   // fin del `else` de "hay humedad valida"
+                        if (RHI::valid(m_cloudHiTex)) dev->destroy(m_cloudHiTex);
+                        ct.initialData = r.hi.data();
+                        m_cloudHiTex = dev->createTexture(ct);
+                        m_cloudCoverMax = r.coverMax;
+                        m_cloudBaseMin  = r.baseMin;
+                        m_cloudTopMax   = r.topMax;
+                        static int s_bakeLog = 0;
+                        if ((s_bakeLog++ % 30) == 0)   // cada minuto de mundo, no cada horneado
+                            HARUKA_LOGI("Clouds", "cielo horneado %dx%d en %.1f ms (en hilo) · cobertura media por AREA %.3f "
+                                        "(MAR %.3f · TIERRA %.3f) · cirro medio %.3f · MAX %.3f "
+                                        "· base min %.0f m · techo max %.0f m · %d texeles con lluvia (torre media %.0f m) "
+                                        "· bajo la camara %.3f",
+                                        CW, CH, r.ms, wsum > 0.0 ? sum / wsum : 0.0,
+                                        wSea > 0.0 ? sumSea / wSea : 0.0, wLand > 0.0 ? sumLand / wLand : 0.0,
+                                        wsum > 0.0 ? sumHi / wsum : 0.0, r.coverMax, r.baseMin, r.topMax,
+                                        nStorm, nStorm ? sumTower / nStorm : 0.0, coverC);
+                    }
+                    {
                         if (!RHI::valid(m_cloudCoverDummy)) {
-                            const float one = 1.0f;
+                            const float one[4] = { 1.0f, 700.0f, 1800.0f, 0.0f };
                             RHI::TextureDesc dd;
-                            dd.width = 1; dd.height = 1; dd.format = RHI::Format::R32F;
+                            dd.width = 1; dd.height = 1; dd.format = RHI::Format::RGBA32F;
                             dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
-                            dd.mipmaps = false; dd.initialData = &one;
+                            dd.mipmaps = false; dd.initialData = one;
                             m_cloudCoverDummy = dev->createTexture(dd);
                         }
                         // (La traza con min/media/max va DENTRO del bloque que las calcula: sacarla
@@ -2572,7 +2650,7 @@ void Application::renderFrameContent() {
                 // ⚠️ LA SALIDA RAPIDA VA POR EL MAXIMO DEL PLANETA, no por el punto de la camara.
                 // Con el escalar, estando sobre un claro el pase se saltaba entero y no se dibujaba
                 // la tormenta que tenias a 300 km — que desde orbita es media pantalla.
-                if (coverMax > 0.01f) {
+                if (coverMax > 0.01f || (_planetarySystem && !_planetarySystem->activeVortices().empty())) {
                     glm::dvec3 upD = camD - pcD; const double ul = glm::length(upD);
                     upD = (ul > 1e-9) ? upD / ul : glm::dvec3(0, 1, 0);
                     const float altEye = (float)(ul - prD);
@@ -2592,7 +2670,12 @@ void Application::renderFrameContent() {
                     // float. La resta directa de magnitudes de ~6,37e6 en float se cuantiza a medio
                     // metro, que sobre la base de la nube se ve como que la capa "respira".
                     cp.planetC = glm::vec4(glm::vec3(pcD - camD), (float)prD);
-                    cp.slab    = glm::vec4(wx.cloudBaseM, wx.cloudTopM, coverMax, precC);
+                    // x/y = la BANDA GLOBAL que hay que marchar (base mínima y techo máximo del
+                    // planeta): dentro, cada punto lee SU base y SU techo de la textura. Con el
+                    // forzado uniforme (`HARUKA_CLOUD_COVER`) no hay textura y valen los locales.
+                    cp.slab    = (s_forced >= 0.0f)
+                               ? glm::vec4(wx.cloudBaseM, wx.cloudTopM, coverMax, precC)
+                               : glm::vec4(m_cloudBaseMin, m_cloudTopMax, coverMax, precC);
 
                     const glm::vec3 sunDir = _worldSystem->getDominantLightDirection(camD);
                     const glm::vec3 sunCol = _worldSystem->getDominantLightColor(camD);
@@ -2606,8 +2689,19 @@ void Application::renderFrameContent() {
                     glm::vec3 eastC = glm::normalize(glm::cross(glm::vec3(0, 1, 0), glm::vec3(upD)));
                     if (!std::isfinite(eastC.x)) eastC = glm::vec3(1, 0, 0);
                     const glm::vec3 northC = glm::cross(glm::vec3(upD), eastC);
-                    cp.wind = glm::vec4(glm::dot(m_windVec, eastC) * ct * 0.0008f,
-                                        glm::dot(m_windVec, northC) * ct * 0.0008f,
+                    // ⚠️ LA DERIVA IBA CON EL VIENTO DE SUPERFICIE Y CON EL RELOJ REAL. Dos fallos:
+                    // (1) a 1-2 km el viento es 2-3 veces el de los 10 m del suelo, y con los 3,5 m/s
+                    // del spawn un cumulo de 1,4 km tardaba 7 minutos en recorrer su ancho —"las nubes
+                    // no se mueven"—; (2) el reloj real no es el del mundo: con el tiempo acelerado los
+                    // frentes corrian y la forma fina se quedaba atras. Va en tiempo de MUNDO y en
+                    // unidades del campo (metros x escala), calculado en doble para no perder el
+                    // desplazamiento en la suma con un `ct` grande.
+                    const double simT = _planetarySystem ? _planetarySystem->simulationTime() : (double)ct;
+                    const double driftM = simT * (double)Haruka::WeatherSystem::kCloudLevelWindMul;
+                    cp.wind = glm::vec4((float)(glm::dot(glm::dvec3(m_windVec), glm::dvec3(eastC))  * driftM
+                                                * Haruka::WeatherSystem::kFieldScale),
+                                        (float)(glm::dot(glm::dvec3(m_windVec), glm::dvec3(northC)) * driftM
+                                                * Haruka::WeatherSystem::kFieldScale),
                                         ct, altEye);
 
                     // ⚠️⚠️ ESTO APAGABA LAS NUBES DESDE ORBITA, Y SU PREMISA ERA FALSA POR LOS DOS
@@ -2638,6 +2732,42 @@ void Application::renderFrameContent() {
                     cp.misc = glm::vec4(atmoC, (float)kCloudSteps,
                                         Haruka::WeatherSystem::kFieldScale, kCloudExtinction);
 
+                    // ── LOS EMBUDOS QUE HAY CERCA ───────────────────────────────────────────
+                    // Los más cercanos primero: si hay más de `kCloudMaxVortices` (no debería
+                    // pasar nunca; ver la frecuencia medida en `weather_severe`), se quedan fuera
+                    // los lejanos, que son los que menos píxeles ocupan.
+                    int nv = 0;
+                    if (_planetarySystem) {
+                        auto vs = _planetarySystem->activeVortices();   // copia: se ordena
+                        std::sort(vs.begin(), vs.end(),
+                            [&](const Haruka::WeatherSystem::Vortex& a,
+                                const Haruka::WeatherSystem::Vortex& b) {
+                                return glm::dot(a.dir, upD) > glm::dot(b.dir, upD);
+                            });
+                        for (const auto& v : vs) {
+                            if (nv >= kCloudMaxVortices) break;
+                            // Punto de SUELO del eje: el terreno bajo el vórtice, no el nivel del
+                            // mar. Un tornado sobre una meseta de 800 m que naciera a cota 0
+                            // sería una columna enterrada.
+                            const glm::dvec3 gW = pcD + v.dir * prD;
+                            const double hM = _planetarySystem->sampleTerrainHeight(gW);
+                            const glm::dvec3 groundW = pcD + v.dir * (prD + std::max(hM, 0.0));
+                            cp.vortexPos[nv]  = glm::vec4(glm::vec3(groundW - camD), (float)v.coreRadiusM);
+                            cp.vortexInfo[nv] = glm::vec4(v.topM, v.windMS, v.spin,
+                                                          v.overWater ? 1.0f : 0.0f);
+                            ++nv;
+                        }
+                    }
+                    // z = ángulo de un píxel del target REDUCIDO (el que marcha): el LOD del shader
+                    // se calibra con lo que de verdad resuelve, no con una constante.
+                    const float fovYc = glm::radians(_camera ? _camera->zoom : 60.0f);
+                    // w = máscara de capas (diagnóstico): HARUKA_CLOUD_MODES=1 cúmulo · 2 nivel medio · 4 cirro.
+                    static const float s_modes = [] {
+                        const char* e = std::getenv("HARUKA_CLOUD_MODES");
+                        return e ? (float)std::atoi(e) : 7.0f;
+                    }();
+                    cp.vortexN = glm::vec4((float)nv, ct, fovYc / (float)std::max(m_cloudRTH, 1), s_modes);
+
                     dev->updateBuffer(m_cloudUBO, 0, sizeof(cp), &cp);
 
                     RHI::Context* cctx = dev->beginFrame();
@@ -2659,6 +2789,8 @@ void Application::renderFrameContent() {
                         // El shader distingue "sin campo" por `textureSize <= 1` y cae al escalar.
                         cctx->bindTexture(1, RHI::valid(m_cloudCoverTex) ? m_cloudCoverTex
                                                                          : m_cloudCoverDummy);
+                        cctx->bindTexture(2, RHI::valid(m_cloudHiTex) ? m_cloudHiTex
+                                                                      : m_cloudCoverDummy);
                         cctx->draw(3);
                         cctx->endRenderPass();
 

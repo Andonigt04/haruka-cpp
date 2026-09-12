@@ -661,6 +661,7 @@ add_executable(haruka_tests
     tests/test_physics.cpp      # caída radial + determinismo (sin GL)
     tests/test_construction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
     tests/test_ports.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
+    tests/test_prefab.cpp       # prefabricados: los cambios de UN conjunto no tocan el montaje
     tests/test_primitives.cpp   # primitivas: ninguna cara bobinada al revés (una tapa invertida no da error, desaparece)
     tests/test_dgs.cpp
     tests/test_simple_planet.cpp         # SimplePlanet mesh & config
@@ -673,6 +674,7 @@ add_executable(haruka_tests
     tests/test_prop_collider.cpp         # colliders de props por PARTE (esqueleto del arbol)
     tests/test_rock_interior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
     tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
+    tests/test_weather_severe.cpp        # tiempo adverso: severidad por condiciones + vortices (Rankine)
     tests/test_cloud_shape.cpp           # forma de la nube: cuerpo y no lamina (ancho/alto + campo 3D)
     tests/test_ocean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
     tests/test_shallow_water.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
