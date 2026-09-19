@@ -104,7 +104,7 @@ void FluidHost::ensurePatch(const WorldPos& cameraPos) {
     const double hGround = hasPlanet ? terrainHeightFn(cameraPos) : 0.0;
     const glm::dvec3 anchor =
         hasPlanet ? planetCenter + up * (planetRadius + hGround) : cameraPos;
-    m_sim->init(anchor, tan, bit, up, kSpan, kN, terrainHeightFn, bakedWaterFn);
+    m_sim->init(anchor, tan, bit, up, kSpan, kN, terrainHeightFn, bakedWaterFn, bedRoughnessFn);
     m_anchor = anchor;
     m_anchored = true;
     m_pendingRain = 0.0f;
@@ -139,6 +139,15 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
     // Lluvia acumulada: se vierte en saltos de ≥2 cm para no spamear addRain cada frame.
     m_pendingRain += rainPerSec * dt;
     if (m_pendingRain >= 0.02f) { m_sim->addRain(m_pendingRain); m_pendingRain = 0.0f; }
+    // Y lo que se va: evaporación e infiltración, acumuladas en saltos de 1 mm por lo mismo.
+    m_pendingEvap  += evapPerSec * dt;
+    m_pendingInfil += infilPerSec * dt;
+    evaporatedM3 = 0.0;
+    if (m_pendingEvap >= 0.001f || m_pendingInfil >= 0.001f) {
+        evaporatedM3 = m_sim->drain(m_pendingEvap, m_pendingInfil);
+        m_pendingEvap = 0.0f; m_pendingInfil = 0.0f;
+    }
+    dynamicWaterM3 = m_sim->dynamicVolumeM3();
 
     // Ríos/lagos: avanza la altura (modelo de tubos, sub-step CFL) y pinza la costa al mar.
     { HARUKA_PROFILE("fluid.sim.step(shallow water)");
@@ -211,14 +220,20 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
     // mayor que el margen dejaba una PELÍCULA de agua sobre todo el parche — y una película de un
     // centímetro es espuma de orilla saturada, o sea **la pantalla en blanco**. Con la lámina no hay
     // margen que ajustar porque no hay resta que descuadrar.
+    //
+    // Y DETRÁS DE LA LÁMINA, EL FETCH (segundo bloque de n² floats): el diámetro de la masa de agua
+    // conexa de cada celda. Sin él, el oleaje del parche salía con fetch "ilimitado" y un charco
+    // recibía el swell del océano (ver `ShallowWaterSim::fetchAt`). Va en el MISMO buffer que la
+    // lámina y se publica a la vez: separarlos dejaría un frame con la lámina nueva y el fetch viejo.
     if (publishInlandWater && m_sim && m_sim->valid()) {
         const int n = m_sim->size();
-        m_inlandSurface.assign((size_t)n * n, 0.0f);           // 0 = sin lámina, no centinela
+        m_inlandSurface.assign((size_t)n * n * 2, 0.0f);       // 0 = sin lámina, no centinela
         int wet = 0;
         for (int j = 0; j < n; ++j)
             for (int i = 0; i < n; ++i) {
                 const float d = m_sim->waterAt(i, j);
                 m_inlandSurface[(size_t)j * n + i] = d;
+                m_inlandSurface[(size_t)n * n + (size_t)j * n + i] = m_sim->fetchAt(i, j);
                 if (m_sim->hasWaterAt(i, j)) ++wet;
             }
         const float span = (float)(m_sim->cellSize() * (n - 1));

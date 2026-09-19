@@ -504,29 +504,43 @@ void test_ocean_sea_state() {
                 OCEAN_REF_WIND, worstDelta);
     CHECK(worstDelta < 1e-4, "a viento de referencia sale EXACTAMENTE el mar de siempre");
 
-    // (b) PIERSON-MOSKOWITZ: Hs y lambda van con U². Doblar el viento cuadruplica los dos.
+    // (b) PIERSON-MOSKOWITZ A FRECUENCIAS FIJAS. ⚠️ Antes Hs y λ iban con U² (se escalaba la tabla
+    // entera) y cada cambio de λ revolvía la fase del mar entero (`dk·x` a 10 km del ancla son
+    // radianes). Ahora λ NO cambia con el viento y cada tren toma la amplitud de PM en SU frecuencia:
+    // el viento mueve la energía de los trenes cortos (brisa) a los largos (temporal). Lo que se
+    // exige: λ idénticas a cualquier viento, Hs monótona en U, el tren largo muerto con brisa y vivo
+    // con temporal, y la cifra a 12 m/s cerca del manual (band-limited: por debajo).
     const auto s6  = oceanStateFromWind(6.0f,  1.0f, 0.0f, 0.0f);
     const auto s12 = oceanStateFromWind(12.0f, 1.0f, 0.0f, 0.0f);
-    const double hs6 = hsOf(s6), hs12 = hsOf(s12);
-    const double lam6 = s6.wave[0][0], lam12 = s12.wave[0][0];
-    std::printf("    U=6 m/s  -> Hs %.2f m · swell %.1f m\n", hs6, lam6);
-    std::printf("    U=12 m/s -> Hs %.2f m · swell %.1f m   (razones Hs %.2f · lambda %.2f, se espera 4.00)\n",
-                hs12, lam12, hs12 / hs6, lam12 / lam6);
-    CHECK(std::abs(hs12 / hs6 - 4.0) < 0.05, "Hs va con U^2 (Pierson-Moskowitz)");
-    CHECK(std::abs(lam12 / lam6 - 4.0) < 0.05, "la longitud de onda va con U^2");
-    // Y la cifra absoluta cae donde manda el manual: Hs = 0,21·U²/g.
+    const auto s22 = oceanStateFromWind(22.0f, 1.0f, 0.0f, 0.0f);
+    const double hs6 = hsOf(s6), hs12 = hsOf(s12), hs22 = hsOf(s22);
+    double lamDiff = 0.0;
+    for (int i = 0; i < OCEAN_WAVES; ++i)
+        lamDiff = std::max(lamDiff, std::abs((double)s6.wave[i][0] - s22.wave[i][0]));
+    std::printf("    U=6 m/s  -> Hs %.2f m · tren de 137 m amp %.3f · tren de 8,7 m amp %.3f\n", hs6, s6.wave[0][1], s6.wave[OCEAN_WAVES - 1][1]);
+    std::printf("    U=12 m/s -> Hs %.2f m · tren de 137 m amp %.3f (razon Hs %.2f; PM entero daria 4,00, la banda 8,7-137 m da menos)\n",
+                hs12, s12.wave[0][1], hs12 / hs6);
+    std::printf("    U=22 m/s -> Hs %.2f m · tren de 137 m amp %.3f · λ identicas a 6 m/s: dif. peor %.1e m\n", hs22, s22.wave[0][1], lamDiff);
+    CHECK(lamDiff < 1e-6, "las longitudes de onda NO cambian con el viento (la fase no se revuelve)");
+    CHECK(hs6 < hs12 && hs12 < hs22, "Hs crece con el viento");
+    CHECK(hs12 / hs6 > 2.5, "y crece deprisa: doblar el viento mas que duplica Hs");
+    CHECK(s6.wave[0][1] < 0.02 * s22.wave[0][1], "con brisa el tren de 137 m esta muerto; con temporal vivo");
+    // Y la cifra absoluta a 12 m/s, contra el manual (Hs = 0,21·U²/g): band-limited, sale por debajo
+    // pero en el mismo orden.
     const double hsBook = 0.21 * 12.0 * 12.0 / 9.81;
     std::printf("    contraste con el manual a 12 m/s: Hs modelo %.2f m vs 0.21U^2/g = %.2f m\n",
                 hs12, hsBook);
-    CHECK(std::abs(hs12 - hsBook) / hsBook < 0.25, "Hs cae donde manda Pierson-Moskowitz");
+    CHECK(hs12 > 0.6 * hsBook && hs12 < 1.25 * hsBook, "Hs cae en el orden de Pierson-Moskowitz");
 
     // (c) EL TOPE DE NYQUIST: por flojo que sople, ningún tren baja del corto de referencia (8,7 m),
-    // que es lo que `ocean.tesc` puede teselar a 4 m por segmento. Si bajara, esa ola sería muare.
+    // que es lo que la rejilla puede llevar a 4 m por celda. Con λ fijas sale por construccion, y se
+    // deja medido para que no vuelva.
     const auto calm = oceanStateFromWind(0.0f, 1.0f, 0.0f, 0.0f);
     float shortest = 1e9f;
     for (int i = 0; i < OCEAN_WAVES; ++i) shortest = std::min(shortest, calm.wave[i][0]);
-    std::printf("    en calma: tren mas corto %.2f m (piso de teselacion 8.70 m)\n", shortest);
+    std::printf("    en calma: tren mas corto %.2f m (piso de teselacion 8.70 m) · Hs %.3f m\n", shortest, hsOf(calm));
     CHECK(shortest >= 8.7f - 1e-3f, "ningun tren baja del piso de Nyquist de la teselacion");
+    CHECK(hsOf(calm) < 0.15, "en calma (viento topado a OCEAN_WIND_MIN) el mar es un rizo");
 
     // (d) EL RUMBO: girar el viento 90 grados gira el tren principal 90 grados, sin cambiar su
     // longitud ni su amplitud (es un giro, no otro mar).
@@ -2718,4 +2732,188 @@ void test_ocean_mesh_stretch() {
           "TECHO MEDIDO: las celdas invertidas de la rompiente no pasan del 0,5 % (hoy 0,18 %)");
     CHECK(peorGlobal < 2.5,
           "TECHO MEDIDO: ninguna celda se estira mas de 2,5x (hoy 2,34x)");
+}
+
+// ================================================================================================
+// VIENTO FLOJO: el espectro no puede COLAPSAR en un solo tren.
+//
+// Andoni (16-09): "el agua palpita y se mueve incluso cuando no deberia, se estira demasiado, hay
+// mucha espuma en esas palpitaciones, y como tal no hay olas". `oceanStateFromWind` escala lambda
+// con U^2 y topa por abajo en 8,7 m: a 4 m/s (el viento del spawn) SEIS de los ocho trenes caen al
+// mismo 8,7 m. Seis senos de la MISMA frecuencia en direcciones distintas no son seis olas: son UNA
+// oscilacion estacionaria, `A(x)·cos(wt - F(x))`, con la envolvente A(x) clavada en el sitio. Eso es
+// lo que "palpita": cada punto sube y baja en su sitio, y donde A(x) es grande la pendiente sumada
+// dispara la espuma. Se mide con la correlacion de la superficie consigo misma medio periodo
+// despues: una onda estacionaria da -1 en TODOS los puntos; un oleaje que viaja, con frecuencias
+// distintas, decorrelaciona.
+// ================================================================================================
+void test_ocean_low_wind_spectrum() {
+    beginTest("ocean_low_wind_spectrum");
+    using namespace Haruka::Planet;
+    const glm::vec3 up(0, 1, 0);
+
+    auto standing = [&](const OceanState& st, int& distinct, float& hs) {
+        // Trenes vivos con lambda distinta.
+        std::vector<float> lams;
+        float e = 0.0f;
+        for (int i = 0; i < OCEAN_WAVES; ++i) {
+            if (st.wave[i][1] <= 1e-5f) continue;
+            e += st.wave[i][1] * st.wave[i][1];
+            bool dup = false;
+            for (float l : lams) if (std::abs(l - st.wave[i][0]) < 1e-3f) dup = true;
+            if (!dup) lams.push_back(st.wave[i][0]);
+        }
+        distinct = (int)lams.size();
+        hs = 4.0f * std::sqrt(e * 0.5f);
+        // La FIRMA de una onda estacionaria: la envolvente A(x) esta clavada en el sitio, con nodos
+        // (A~0) y vientres. En un oleaje que viaja cada punto acaba viendo la cresta entera. Se mide
+        // el recorrido (max-min) de la cota en cada punto durante 30 s y su variacion relativa
+        // (desviacion/media) entre puntos: ~0 si todos ven lo mismo, alto si hay nodos y vientres.
+        double sum = 0, sum2 = 0; int n = 0;
+        for (int gy = 0; gy < 24; ++gy) for (int gx = 0; gx < 24; ++gx) {
+            const glm::vec3 wp((float)gx * 3.7f, 0.0f, (float)gy * 3.7f);
+            float lo = 1e9f, hi = -1e9f;
+            for (int ti = 0; ti < 120; ++ti) {
+                const float h = oceanDisplacement(wp, up, 10.0f + 0.25f * (float)ti, 1000.0f, 1.0f, st).y;
+                lo = std::min(lo, h); hi = std::max(hi, h);
+            }
+            const double r = hi - lo;
+            sum += r; sum2 += r * r; ++n;
+        }
+        const double mean = sum / n, var = sum2 / n - mean * mean;
+        return (mean > 0) ? (float)(std::sqrt(std::max(var, 0.0)) / mean) : 0.0f;
+    };
+
+    int d4 = 0, d11 = 0; float hs4 = 0, hs11 = 0;
+    const OceanState s4  = oceanStateFromWind(4.0f, 1.0f, 0.0f, 0.0f);
+    const OceanState s11 = oceanStateFromWind(OCEAN_REF_WIND, 1.0f, 0.0f, 0.0f);
+    const float c4 = standing(s4, d4, hs4), c11 = standing(s11, d11, hs11);
+    std::printf("    4 m/s: %d longitudes distintas · Hs %.2f m · variacion del recorrido entre puntos %.2f\n", d4, hs4, c4);
+    std::printf("    %.1f m/s (referencia): %d longitudes distintas · Hs %.2f m · variacion %.2f\n",
+                OCEAN_REF_WIND, d11, hs11, c11);
+    // Pierson-Moskowitz a 4 m/s: Hs = 0,21·U²/g = 0,34 m. Con λ fijas y PM en cada frecuencia sale
+    // cerca (la banda 8,7-137 m contiene casi todo el espectro de una brisa).
+    const float hsPM = 0.21f * 16.0f / 9.81f;
+    CHECK(std::abs(hs4 - hsPM) / hsPM < 0.30f, "Hs a 4 m/s sigue a Pierson-Moskowitz");
+    CHECK(d4 >= 2, "a 4 m/s quedan al menos dos longitudes distintas");
+    for (int i = 0; i < OCEAN_WAVES; ++i)
+        for (int j = i + 1; j < OCEAN_WAVES; ++j)
+            if (s4.wave[i][1] > 1e-5f && s4.wave[j][1] > 1e-5f)
+                CHECK(std::abs(s4.wave[i][0] - s4.wave[j][0]) > 1e-3f, "dos trenes vivos nunca comparten longitud (eso es una onda estacionaria, no dos olas)");
+    CHECK(c4 < 0.25f, "a 4 m/s la superficie NO es estacionaria (todos los puntos ven casi el mismo recorrido)");
+    CHECK(c11 < 0.25f, "a la referencia tampoco");
+    // Lo que hubo (hasta el 16-09): el piso APILABA (lambda = max(lambda·escala, 8,7)) en vez de
+    // quitar, y seis trenes caian a la misma λ. Se reconstruye ese estado para dejar medido lo que se
+    // veia — y como contraprueba de que la metrica distingue un mar estacionario de uno que viaja.
+    {
+        OceanState old = s4;
+        const float sc = 16.0f / (OCEAN_REF_WIND * OCEAN_REF_WIND);
+        for (int i = 0; i < OCEAN_WAVES; ++i) {
+            old.wave[i][0] = std::max(OCEAN_WAVE[i][0] * sc, OCEAN_WAVE[OCEAN_WAVES - 1][0]);
+            old.wave[i][1] = OCEAN_WAVE[i][1] * sc;
+        }
+        int dOld = 0; float hsOld = 0;
+        const float cOld = standing(old, dOld, hsOld);
+        std::printf("    ANTES (piso que apilaba): %d longitudes distintas de 8 · Hs %.2f m · variacion %.2f\n", dOld, hsOld, cOld);
+        CHECK(cOld > 0.12f && cOld > c4 * 1.5f, "contraprueba: el estado antiguo a 4 m/s era parcialmente estacionario (es lo que palpitaba)");
+    }
+    // Contraprueba del metodo: un estado con todos los trenes a la MISMA lambda da -1 (estacionario).
+    OceanState same = s11;
+    for (int i = 0; i < OCEAN_WAVES; ++i) same.wave[i][0] = 20.0f;
+    int ds = 0; float hss = 0;
+    const float cs = standing(same, ds, hss);
+    std::printf("    contraprueba (8 trenes a 20 m): variacion %.2f\n", cs);
+    CHECK(cs > 0.35f, "contraprueba: ocho trenes de la misma longitud son una onda estacionaria (nodos y vientres)");
+}
+
+// ── EL MAR EN EL MARCO DEL JUEGO: viaja, sigue al viento despacio, y el ancla no salta ──────────
+//
+// 2026-09-18. Andoni: "el look no es bueno, palpita, se estira, el viento afecta demasiado". Medido:
+//   · la fase `k·(D·x) − ω·t` con `x = dir·R` (planetocentrica) era la MISMA en todo el mar — `D`
+//     tangente y `x` radial — asi que el oceano subia en bloque y las "olas" eran ruido de float;
+//   · el estado del mar se rehacia cada frame con el viento instantaneo, que en un punto fijo salta
+//     hasta 7,8 m/s en un segundo: la Hs de todo el mar saltaba 5,7 m entre frames;
+//   · y λ escalaba con U², asi que cada cambio de viento revolvia la fase de todo el mar.
+// Este test mide las tres cosas EN EL MARCO DEL JUEGO (up radial, posicion relativa al ancla), que
+// es donde los tests anteriores no miraban (todos usaban un marco plano).
+void test_ocean_sea_follows_wind() {
+    beginTest("ocean_sea_follows_wind: la ola VIAJA en el marco del juego, el mar sigue al viento despacio, el ancla no salta");
+    using namespace Haruka::Planet;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 c = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    const glm::dvec3 e = glm::normalize(glm::cross(c, glm::dvec3(0, 1, 0)));
+
+    // (1) LA OLA VARIA EN EL ESPACIO. Puntos cada 20 m a lo largo de un circulo maximo, como los
+    // consulta la fisica (up = dir radial), con la posicion RELATIVA AL ANCLA (la camara).
+    SeaFollower sea;
+    OceanState st = oceanStateFromWind(OCEAN_REF_WIND, 1.0f, 0.0f, 0.0f);
+    sea.anchorFor(st, pc + c * R, pc, R);
+    auto sigmaAlong = [&](const glm::dvec3& anchor, float t) {
+        double m1 = 0, m2 = 0; const int n = 200;
+        for (int i = 0; i < n; ++i) {
+            const glm::dvec3 dir = glm::normalize(c + e * (i * 20.0 / R));
+            const glm::vec3 wp = glm::vec3(pc + dir * R - anchor);
+            const double h = oceanWaveHeight(wp, glm::vec3(dir), t, 400.0f, 1.0f, st);
+            m1 += h; m2 += h * h;
+        }
+        return std::sqrt(std::max(m2 / n - (m1 / n) * (m1 / n), 0.0));
+    };
+    const double sigAnchored = sigmaAlong(sea.anchor, 1.0f);
+    const double sigCentred  = sigmaAlong(pc, 1.0f);            // el bug: posicion planetocentrica
+    std::printf("    sigma espacial de la cota (4 km, t fijo): relativa al ancla %.3f m · planetocentrica %.3f m\n",
+                sigAnchored, sigCentred);
+    CHECK(sigAnchored > 0.3, "en el marco del juego la ola VARIA en el espacio (sigma > 30 cm a Hs 2,8 m)");
+    CHECK(sigCentred < 0.05, "CONTRAPRUEBA: con la posicion planetocentrica no variaba (el mar en bloque, ruido de 1 cm)");
+
+    // (2) EL MAR SIGUE AL VIENTO DESPACIO. Escalon de 4 a 12 m/s: Hs no salta; sube con tau ~20 min;
+    // y al amainar baja con tau ~1 h. Reloj en segundos.
+    SeaFollower f;
+    auto hsAt = [&](const glm::vec2& w) { return oceanSignificantHeight(oceanStateFromWind(glm::length(w), w.x, w.y)); };
+    f.filterWind(glm::vec2(4.0f, 0.0f), 0.0f);
+    float prevHs = hsAt(f.windSea), maxStep = 0.0f, hs20 = 0.0f, hs60 = 0.0f;
+    for (int s = 1; s <= 3600; ++s) {
+        const glm::vec2 w = f.filterWind(glm::vec2(12.0f, 0.0f), (float)s);
+        const float hs = hsAt(w);
+        maxStep = std::max(maxStep, std::abs(hs - prevHs)); prevHs = hs;
+        if (s == 1200) hs20 = hs;
+        if (s == 3600) hs60 = hs;
+    }
+    const float hs4 = hsAt(glm::vec2(4, 0)), hs12 = hsAt(glm::vec2(12, 0));
+    std::printf("    escalon 4 -> 12 m/s: Hs %.2f -> %.2f m · a los 20 min %.2f · a la hora %.2f · salto maximo por segundo %.4f m\n",
+                hs4, hs12, hs20, hs60, maxStep);
+    CHECK(maxStep < 0.01f, "la Hs nunca salta mas de 1 cm por segundo (antes: 5,7 m)");
+    CHECK(hs20 > hs4 + 0.5f * (hs12 - hs4) && hs20 < hs12, "a los 20 min el mar ha crecido mas de la mitad (tau de subida ~20 min)");
+    CHECK(hs60 > 0.9f * hs12, "a la hora esta casi desarrollado");
+    float hsDecay = 0.0f;
+    for (int s = 3601; s <= 7200; ++s) hsDecay = hsAt(f.filterWind(glm::vec2(4.0f, 0.0f), (float)s));
+    std::printf("    amaina a 4 m/s: una hora despues Hs %.2f m (de %.2f; en calma seria %.2f)\n", hsDecay, hs60, hs4);
+    CHECK(hsDecay > hs4 + 0.2f * (hs60 - hs4), "la mar de fondo sobrevive al viento: una hora despues aun queda mas del 20 %");
+    CHECK(hsDecay < hs60, "pero baja");
+    // Contraprueba del instrumento: el viento INSTANTANEO si salta.
+    CHECK(std::abs(hs12 - hs4) > 1.0f, "CONTRAPRUEBA: sin filtro el escalon es de mas de 1 m de Hs");
+
+    // (3) EL ANCLA NO SALTA. La camara se va 21 km; el ancla se mueve; en el ancla nueva la cota es
+    // la misma antes y despues (compensacion exacta en aguas profundas) y a 1 km cambia poco.
+    SeaFollower a;
+    OceanState s1 = oceanStateFromWind(OCEAN_REF_WIND, 0.3f, 0.8f, 0.0f);
+    a.anchorFor(s1, pc + c * R, pc, R);
+    const glm::dvec3 far = glm::normalize(c + e * (21000.0 / R));
+    auto hAt = [&](const OceanState& s, const glm::dvec3& dir, const glm::dvec3& anchor) {
+        return oceanWaveHeight(glm::vec3(pc + dir * R - anchor), glm::vec3(dir), 7.0f, 400.0f, 1.0f, s);
+    };
+    const glm::dvec3 near1 = glm::normalize(far + e * (1000.0 / R));
+    const double before0 = hAt(s1, far, a.anchor), before1 = hAt(s1, near1, a.anchor);
+    OceanState s2 = s1;
+    const bool moved = a.anchorFor(s2, pc + far * R, pc, R);
+    const double after0 = hAt(s2, far, a.anchor), after1 = hAt(s2, near1, a.anchor);
+    // Sin compensar (fases a cero) seria un salto.
+    OceanState s3 = s2; for (int i = 0; i < OCEAN_WAVES; ++i) s3.phase[i] = 0.0f;
+    const double naive0 = hAt(s3, far, a.anchor);
+    std::printf("    re-anclaje a 21 km: movida=%d · cota en el ancla nueva %.4f -> %.4f m (sin compensar %.4f) · a 1 km %.4f -> %.4f m\n",
+                (int)moved, before0, after0, naive0, before1, after1);
+    CHECK(moved && a.reanchors == 1, "el ancla se movio una vez");
+    CHECK(std::abs(after0 - before0) < 0.002, "en el ancla nueva la cota no cambia (< 2 mm)");
+    CHECK(std::abs(after1 - before1) < 0.08, "a 1 km del ancla nueva cambia menos de 8 cm (la curvatura entre los dos marcos)");
+    CHECK(std::abs(naive0 - before0) > 0.05, "CONTRAPRUEBA: sin la compensacion de fase el re-anclaje salta");
 }

@@ -230,11 +230,6 @@ para el gradiente. Con el meso apagado los cinco caen al macro (`elevKmIfResiden
 y los cuatro del gradiente solo alimentan la normal. En el camino de colisión, que solo quiere la
 altura, son cuatro bilineales de más por consulta.
 
-### 1.12 🔴 / ⏸️ Aparcado pero vivo
-
-`floating_islands.{h,cpp}` + `floating_island_renderer` siguen compilándose y llamándose desde
-`planetary_system.cpp:401`, con la feature aparcada por decisión de diseño.
-
 ---
 
 ## 2. RENDER — lo que se dibuja de verdad

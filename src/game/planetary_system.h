@@ -19,11 +19,23 @@
 #include "core/terrain/terrain_sample.h"     // WorldGenParams
 #include "core/weather_system.h"              // WeatherSystem
 #include "core/ground_layer.h"                // GroundMaterial
+#include "core/terrain/cave_system.h"
+#include "core/terrain/island_system.h"
 #include "core/planet/orbit.h"                // OrbitElements (Kepler con elementos precesantes)
 #include "tools/planetary_types.h"           // PlanetFace (GL-free)
 #include "rhi/rhi_types.h"
 
-namespace Haruka { namespace Planet {
+namespace Haruka {
+    struct SceneObject;
+    /** @brief Una entrada `"type": "Cave"` de la escena → su definición (centro relativo al planeta
+     *  en `planetPos`). Es LA interpretación, la misma para el juego al cargar y para el editor al
+     *  sincronizar; si divergieran, lo que se pinta no sería lo que se juega. */
+    CaveDef   caveDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
+    IslandDef islandDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
+    /** @brief ¿Definen lo mismo? (nombre, centro a 1e-9, tamaños, mapas). */
+    bool sameCaveDef(const CaveDef& a, const CaveDef& b);
+    bool sameIslandDef(const IslandDef& a, const IslandDef& b);
+ namespace Planet {
     struct GeologyConfig;
     struct TerrainGridConfig;
 }}
@@ -163,6 +175,8 @@ public:
      *  Quien necesite la ola en CPU debe leerla de aquí y no volver a derivarla del viento: dos
      *  derivaciones son dos mares, y el motor ya pagó esa lección con el terreno. */
     const Haruka::Planet::OceanState& oceanState() const { return m_oceanState; }
+    /// El ANCLA del mar (mundo): las funciones de ola reciben posiciones RELATIVAS a ella.
+    const glm::dvec3& oceanAnchor() const { return m_sea.anchor; }
 
     /** @brief VELOCIDAD del agua en la superficie (m/s, marco del mundo). Cero si no hay agua.
      *
@@ -241,6 +255,7 @@ public:
     /// value gives the clock back to the local accumulator, which is what an offline game keeps using.
     void setWorldClock(double seconds) { m_worldClock = seconds; }
     const Haruka::WeatherSystem& weather() const { return m_weather; }
+    Haruka::WeatherSystem& weatherMut() { return m_weather; }
     Haruka::WeatherSystem&       weatherMutable() { return m_weather; }
 
     /** @brief Muestra de clima (temp, humedad, precipitación) en un punto. */
@@ -304,6 +319,13 @@ public:
             const glm::dvec3 rel = worldPos - center;
             const double len = glm::length(rel);
             return (len > 1e-9) ? planet->sampleHeight(rel / len, minFeatureM) : 0.0;
+        }
+        /** @brief ¿Está el suelo RECORTADO aquí (boca de cueva, lo picado)? Es la misma función que
+         *  usa el shader del terreno para no dibujarlo: lo que no se ve tampoco se pisa. */
+        bool surfaceCutAt(const glm::dvec3& worldPos) const {
+            const glm::dvec3 rel = worldPos - center;
+            const double len = glm::length(rel);
+            return len > 1e-9 && planet->vox().surfaceCut(rel / len) > 0.5f;
         }
     };
     TerrainSampler terrainSampler(const glm::dvec3& nearWorldPos) const;
@@ -370,6 +392,8 @@ public:
      * planetas iluminaban con una dirección fija y el terreno no respondía al sol del cielo.
      */
     void setSunLight(const glm::vec3& dir, const glm::vec3& color, const glm::vec3& ambientColor);
+    /// Perspectiva aérea del frame (ver TerrestrialPlanet::setAerial): a todos los planetas.
+    void setAerial(const glm::vec4& a);
     /** @brief Reparte los 9 coeficientes SH del cielo a todos los planetas. */
     void setSkyAmbientSH(const glm::vec3 (&coef)[9]);
 
@@ -394,6 +418,8 @@ private:
     /// Estado del mar del frame. Lo calcula `updateOceanState`, lo suben los shaders y lo lee la
     /// física — UNA derivación, dos consumidores.
     Haruka::Planet::OceanState m_oceanState = Haruka::Planet::oceanDefaultState();
+    /// El mar sigue al viento (filtrado) y lleva el ancla de la fase. Ver `SeaFollower`.
+    Haruka::Planet::SeaFollower m_sea;
 
     // EL SUELO DEL JUEGO (ver sampleTerrainHeight)
     // ⚠️ AQUÍ VIVÍA `ReferenceSurface`: 12 KB de máquina —snapshot atómico, caché de 1 M entradas con
@@ -421,6 +447,7 @@ private:
     mutable glm::dvec3            m_weatherFieldPos{1e300};
     mutable float                 m_weatherFieldTempC = 15.0f;
     mutable float                 m_weatherFieldHumid = 0.5f;
+    mutable float m_weatherFieldGroundM = 0.0f;   // cota del suelo bajo la muestra (m)
     // Caché de vórtices POR INSTANTE. No es estado del clima (que sigue siendo puro): es memoria de
     // la última evaluación, porque juzgar los 28 huecos cuesta 28 muestreos de terreno y en un frame
     // lo preguntan el jugador, los props, la lluvia y el render.

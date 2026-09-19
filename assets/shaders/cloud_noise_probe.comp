@@ -1,0 +1,23 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ── SONDA DEL RUIDO DE LAS NUBES: ¿GL y Vulkan calculan lo mismo? ──────────────────────────────
+// El mismo shader daba 53,7 % de cirro al cenit en OpenGL y 67,3 % en Vulkan EN LA MISMA GPU (con
+// facetas rectas en Vulkan). Aqui se evaluan las piezas del campo una a una, sobre los mismos
+// puntos, y el banco compara los dos backends numero a numero: donde diverjan, ahi esta.
+#include "lib/cloud_volume.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };   // 6 por punto
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };   // 0 = n · luego 4 por punto (x,y,z, libre)
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    const uint n = uint(uIn[0]);
+    if (i >= n) return;
+    const vec3 p = vec3(uIn[4u + i * 4u], uIn[5u + i * 4u], uIn[6u + i * 4u]);
+    uOut[i * 6u + 0u] = harukaCloudHash13(p);
+    uOut[i * 6u + 1u] = harukaCloudVNoise3(p);
+    uOut[i * 6u + 2u] = harukaCloudField3LOD(p, vec3(0.0), 0.0, 0.0);   // el campo ENTERO del cumulo (para su media y sigma)
+    uOut[i * 6u + 3u] = harukaCloudFbm3LODRot(p, 3, 0.0, 0.0);
+    uOut[i * 6u + 4u] = harukaCloudFieldLayer(p, vec3(0.0), 0.0, 0.0);
+    uOut[i * 6u + 5u] = harukaCirrusDensity(0.8, 0.0, 1.0, p.x * 4000.0, p.y * 1700.0, 30.0);
+}

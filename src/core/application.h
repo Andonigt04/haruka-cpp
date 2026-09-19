@@ -50,6 +50,7 @@
 #include "core/world_system_provider.h"  // adaptador IWorldProvider (cliente) para la física
 #include "core/window.h"
 #include "core/camera.h"
+#include "core/cloud_motion.h"   // deriva integrada y fundido de horneados (medidos en test_cloud_motion)
 #include "rhi/rhi_device.h"
 #include "core/scene/scene_manager.h"
 #include "core/scene/scene_render_policy.h"
@@ -338,6 +339,16 @@ public:
     double getTerrainHeightAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
     }
+    /** @brief ¿Está el SUELO recortado aquí (boca de cueva, lo picado)? Si sí, la altura del
+     *  heightfield NO es suelo: debajo hay aire y el jugador puede estar más abajo que ella.
+     *  ⚠️ Es lo que el jugador tiene que consultar antes de "subirse al suelo" como red de
+     *  seguridad: sin esto, dentro de un foso el script lo empujaba cada frame a la cota del
+     *  heightfield — "flota" sobre la boca (Andoni lo vio). */
+    bool isTerrainCutAt(const glm::dvec3& worldPos) const {
+        if (!_planetarySystem) return false;
+        const auto s = _planetarySystem->terrainSampler(worldPos);
+        return s && s.surfaceCutAt(worldPos);
+    }
 
     /** @brief Altura DEL SUELO DEL JUEGO en una dirección planet-local (km): la MISMA superficie que
      *  pisa el jugador (el SimplePlanet/TerrestrialPlanet, como `sampleTerrainHeight`). La
@@ -360,6 +371,41 @@ public:
         if (_planetarySystem) _planetarySystem->editTerrain(worldPos, radius, step, dig);
     }
     /// Flatten terrain to target height.
+    /** @brief EL CAMPO del mundo en un punto: > 0 roca, < 0 aire (m). Es `min(terreno, cueva)`:
+     *  el heightfield más todo lo picado/construido. Lo que apunta el pico se busca contra ESTO,
+     *  no contra la altura del heightfield — si no, desde dentro de una cueva no se puede picar. */
+    double worldFieldAt(const glm::dvec3& worldPos) const {
+        if (!_planetarySystem) return 1e9;
+        const auto* tp = _planetarySystem->activeTerrestrial();
+        if (!tp) return 1e9;
+        return (double)tp->vox().density(worldPos - tp->position());
+    }
+    /** @brief Rayo contra el campo del mundo (la misma marcha que usa el editor: `VoxWorld::raycast`).
+     *  Coordenadas de mundo. @return false sin planeta, desde dentro de la roca, o sin impacto. */
+    bool worldRaycast(const glm::dvec3& o, const glm::dvec3& dir, double maxM, glm::dvec3& outHit) const {
+        if (!_planetarySystem) return false;
+        const auto* tp = _planetarySystem->activeTerrestrial();
+        if (!tp) return false;
+        glm::dvec3 h;
+        if (!tp->vox().raycast(o - tp->position(), dir, maxM, h)) return false;
+        outHit = h + tp->position();
+        return true;
+    }
+    /** @brief Carpeta de la PARTIDA para lo que el jugador cambia del mundo (trazos, cuevas
+     *  colocadas). Sin ella, lo picado se pierde al salir. La fija el juego al cargar/crear la
+     *  partida. Idempotente. */
+    void setWorldEditsDir(const std::string& dir) {
+        if (_planetarySystem)
+            if (auto* tp = _planetarySystem->activeTerrestrialMut()) tp->setVoxEditsDir(dir);
+        m_worldEditsDir = dir;
+    }
+    const std::string& worldEditsDir() const { return m_worldEditsDir; }
+    /** @brief Guarda los trazos del campo (llamar al guardar la partida). */
+    bool saveWorldEdits() {
+        if (!_planetarySystem) return false;
+        auto* tp = _planetarySystem->activeTerrestrialMut();
+        return tp && tp->vox().saveEdits();
+    }
     void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeight) {
         if (_planetarySystem) _planetarySystem->levelTerrain(worldPos, radius, targetHeight);
     }
@@ -565,7 +611,8 @@ private:
         return (e && e[0]) ? std::max(-1.0f, std::min(1.0f, (float)std::atof(e))) : -1.0f;
     }();
     float                       m_windSlant = 0.0f;   // inclinación de la lluvia = viento del clima (mismo vector que las nubes)
-    glm::vec3                   m_windVec{0.0f};      // viento del clima (m/s, mundo): nubes, lluvia y follaje van con ESTE
+    glm::vec3                   m_windVec{0.0f};
+    Haruka::CloudDrift          m_cloudDrift;          // deriva del campo de nubes, INTEGRADA (core/cloud_motion.h)
     /** @brief Lluvia/nieve como GEOMETRÍA en el pase de escena (con depth), no como filtro de pantalla. */
     Haruka::PrecipitationRenderer m_precip;
 
@@ -589,6 +636,11 @@ private:
      *  en su ventana cenital para que el terreno las muestree. */
     Haruka::GroundLayer         m_groundLayer;
     Haruka::GroundStampRenderer m_stampRenderer;
+    /// Las paredes del campo volumétrico → cuerpos de Jolt. Por frame, sólo lo que cambió de revisión.
+    void syncVoxColliders();
+    std::unordered_map<uint64_t, uint64_t> m_voxColliderRev;
+    uint64_t m_propScatterVoxVersion = 0;   ///< el scatter se rehace cuando el campo cambia
+    std::string m_worldEditsDir;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */
@@ -719,6 +771,13 @@ private:
     // El REGISTRO es de la Application (decisión de arquitectura): el scatter lo rellena, este
     // pase lo lee por frame. Ver application_render.cpp (pase "scene.prop.instanced").
     Haruka::InstancedObjectRegistry m_propRegistry;
+    /// Instancias YA TRANSFORMADAS, una por entrada del registro (mismo índice), con la posición
+    /// relativa a `m_propOrigin`. Se construyen en el scatter (cada ~30 m), NO por frame: construir
+    /// 180 000 matrices (quaternion + tres productos) cada frame costaba 31 ms. Por frame solo queda
+    /// cull + LOD + copiar 96 B. Ver `rebuildPropGpu`.
+    std::vector<Haruka::InstanceDataFloat> m_propGpu;
+    glm::dvec3                      m_propOrigin{0.0};
+    void rebuildPropGpu(const glm::dvec3& planetC, double planetR);
     Haruka::RHI::PipelineHandle     m_propInstPSO;
     /// Solo profundidad, instanciado: mete los props del motor en el mapa de sombras. Sin esto el
     /// pase de sombras solo contenía lo que dibuja el hook del juego y ningún árbol proyectaba.
@@ -744,8 +803,12 @@ private:
     /// cero y, cacheada, deja el cielo sin una nube el resto de la partida. Vacia = aun no lista.
     std::vector<float>              m_cloudHumField;
     std::vector<float>              m_cloudTempField;   // temperatura, mismo horneado (decide la torre)
-    std::vector<float>              m_cloudWaterField;  // 1 = mar (complemento del landMask): humedad marina
+    std::vector<float>              m_cloudWaterField;
+    std::vector<float>              m_cloudGroundField; // cota del suelo (m, >= 0): la base de la nube va SOBRE el suelo  // 1 = mar (complemento del landMask): humedad marina
     Haruka::RHI::TextureHandle      m_cloudHiTex;       // capas ALTAS (cirro, nivel medio), desfasadas del frente
+    Haruka::RHI::TextureHandle      m_cloudCoverTexPrev; // el horneado ANTERIOR (se funde con el nuevo, ver el bake)
+    Haruka::RHI::TextureHandle      m_cloudHiTexPrev;
+    Haruka::BakeBlend               m_cloudBlend;        // fundido entre horneados (core/cloud_motion.h)
     float                           m_cloudBaseMin = 700.0f;   // banda GLOBAL que marcha el pase
     float                           m_cloudTopMax  = 1800.0f;
     /// El horneado del cielo, EN VUELO. `bakeSky` a 256x128 son 134 ms medidos: en el hilo de render
@@ -754,6 +817,11 @@ private:
     /// campos estaticos; al terminar se sube la textura. Mientras, se sigue viendo el anterior.
     struct SkyBake { std::vector<float> rgba, hi; float coverMax = 0, baseMin = 700, topMax = 1800; double ms = 0; int w = 0, h = 0; };
     std::future<SkyBake>            m_skyBakeJob;
+    std::vector<float>              m_lastSkyRGBA;   ///< último cielo horneado (r cobertura · a precipitación), para el ciclo del agua
+    double                          m_lastWeatherT = -1.0;
+    /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L (por metro) · y = día. Sale del clima
+    /// en la cámara al montar el cielo y va al terreno, a los props y a las nubes: un solo aire.
+    glm::vec4                       m_aerial{1.0f / 60000.0f, 1.0f, 0.0f, 0.0f};
     /// Target REDUCIDO donde se marcha la nube, y el pipeline que lo sube a la escena. El pase cuesta
     /// ~80 hashes de ruido por paso y ~88 pasos por pixel: medido en el banco son 8,76 ms a 256x256,
     /// del orden de 150-280 ms a 1920x1080. Y bajar los pasos NO lo arregla —de 64 a 24 el coste solo

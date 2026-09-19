@@ -45,7 +45,7 @@ namespace Haruka::RHI::vulkan
             void clear(float r, float g, float b, float a) override;
 
             void bindPipeline(PipelineHandle) override;
-            void bindVertexBuffer(BufferHandle, uint32_t binding = 0) override;
+            void bindVertexBuffer(BufferHandle, uint32_t binding = 0, size_t offsetBytes = 0) override;
             void bindIndexBuffer(BufferHandle) override;
             void bindUniformBuffer(uint32_t slot, BufferHandle) override;
             void bindStorageBuffer(uint32_t slot, BufferHandle) override;
@@ -94,6 +94,7 @@ namespace Haruka::RHI::vulkan
             // Vertex/index buffers pendientes de bindear (definir al draw). 8 bindings máx.
             VkBuffer m_vbs[8] = {};
             bool     m_vbUsed[8] = {};
+            VkDeviceSize m_vbOff[8] = {};
             VkBuffer m_ib = VK_NULL_HANDLE;
 
             // Cada draw consume UN descriptor set del ring del device; todos los bind* desde el draw anterior

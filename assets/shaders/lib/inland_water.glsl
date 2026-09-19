@@ -26,7 +26,8 @@ layout(std140, binding = 24) uniform InlandParams {
     vec4 uInlandAnchor;   // xyz = ancla del parche relativa al OJO
     vec4 uInlandTanU;     // xyz = eje +X del parche (unitario, en el plano tangente)
     vec4 uInlandTanV;     // xyz = eje +Z del parche
-    vec4 uInlandMisc;     // x = lado del parche (m) · y = celdas por lado · w = 1 si hay campo
+    vec4 uInlandMisc;     // x = lado del parche (m) · y = celdas por lado · z = 1 si tras la lámina
+                          // viene el bloque de FETCH (n² floats más) · w = 1 si hay campo
 };
 layout(std430, binding = 25) readonly buffer InlandWater { float uInlandSurface[]; };
 
@@ -185,10 +186,42 @@ float harukaWindowFetchAt(vec3 dir) {
     return (f > 0.0) ? f : HARUKA_FETCH_UNLIMITED;
 }
 
-/// EL FETCH de un punto, con la ventana por delante. Gemelo de `TerrestrialPlanet::lakeFetchAt`:
-/// donde la ventana ve lamina, su fetch es el bueno — mide el lago DE VERDAD y no el texel de 78 km
-/// que el campo grueso confunde con un mar interior.
-float harukaWaterFetchAt(vec3 dir) {
+/**
+ * @brief FETCH del PARCHE dinámico en un punto: diámetro de la masa de agua conexa (m), o el
+ *        centinela "ilimitado" si aquí el parche no tiene lámina o no publica fetch.
+ *
+ * ⚠️ ESTO ES LO QUE HACÍA "PALPITAR" AL AGUA DINÁMICA. Un charco de lluvia no está en el lago
+ * horneado ni en la ventana, así que `harukaWaterFetchAt` caía al campo global, que fuera de un lago
+ * devuelve "ilimitado": el charco recibía el swell del OCÉANO (medido: 30 cm de agua a 4 m/s de
+ * viento → 0,33 m de vaivén horizontal sobre celdas de 4,4 m, 40x lo que sostiene una masa de 20 m).
+ * NEAREST, como el nivel del lago: el fetch es una propiedad de la masa, no se interpola.
+ */
+float harukaInlandFetchAt(vec3 posRelEye) {
+    if (uInlandMisc.w < 0.5 || uInlandMisc.z < 0.5) return HARUKA_FETCH_UNLIMITED;
+    int   n    = int(uInlandMisc.y);
+    float span = uInlandMisc.x;
+    if (n <= 1 || span <= 0.0) return HARUKA_FETCH_UNLIMITED;
+    vec3  rel = posRelEye - uInlandAnchor.xyz;
+    float u   = dot(rel, uInlandTanU.xyz);
+    float v   = dot(rel, uInlandTanV.xyz);
+    float fx = (u + span * 0.5) / span * float(n - 1);
+    float fy = (v + span * 0.5) / span * float(n - 1);
+    if (fx < 0.0 || fy < 0.0 || fx > float(n - 1) || fy > float(n - 1)) return HARUKA_FETCH_UNLIMITED;
+    int x = int(fx + 0.5), y = int(fy + 0.5);
+    float f = uInlandSurface[n * n + y * n + x];
+    return (f > 0.0) ? f : HARUKA_FETCH_UNLIMITED;
+}
+
+/// EL FETCH de un punto, con el parche y la ventana por delante. Gemelo de
+/// `TerrestrialPlanet::lakeFetchAt` (+ el parche, que la física no consulta porque para ella el
+/// parche no es agua): donde el parche tiene lámina, su fetch es el bueno; donde la ventana ve
+/// lamina, el suyo — mide el lago DE VERDAD y no el texel de 78 km que el campo grueso confunde con
+/// un mar interior. Mismo orden que `harukaWaterLevelAt`: quien sabe más, manda.
+float harukaWaterFetchAt(vec3 posRelEye, vec3 dir) {
+    if (harukaInlandWaterDepthAt(posRelEye) > 0.0) {
+        const float f = harukaInlandFetchAt(posRelEye);
+        if (f < HARUKA_FETCH_UNLIMITED) return f;
+    }
     if (harukaWindowLakeAt(dir) > HARUKA_NO_INLAND) return harukaWindowFetchAt(dir);
     return harukaBakedFetchAt(dir);
 }

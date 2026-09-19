@@ -1,0 +1,5 @@
+agua.pase_ms 1.89965
+instancias.subida_60_lotes_ms 1.72574
+nubes.pase_64pasos_ms_1080p 1191.31
+terreno.pase_ms 1.42646
+terreno.sombreado_800m_ms 4.4742

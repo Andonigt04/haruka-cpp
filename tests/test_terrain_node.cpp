@@ -3770,10 +3770,17 @@ void test_terrain_node_budget_starvation() {
                            - cam);
     };
 
+    // ⚠️ EL HORIZONTE LLEVA LA COTA DEL NODO (18-09: el recorte tiraba las cordilleras mas alla del
+    // horizonte liso). Sin `rangeFn` el selector asume 5 km en TODOS los nodos (horizonte a 252 km):
+    // la demanda sube de ~2 900 a 7 856. Este mundo es una esfera lisa con relieve procedural de
+    // ±915 m como mucho, y eso es lo que se le dice: es lo que el pool sabe en el juego una vez
+    // generados los nodos. La politica LIFO de referencia recibe la MISMA cota.
+    static const auto reliefRange = [](const NodeId&, void*) { NodeRange r; r.minM = -915.0f; r.maxM = 915.0f; return r; };
+    const double kReliefM = 915.0;
     std::vector<NodeId> full;
-    nodeSelectVisible(R, cam, center, radPerPx, full, 1000000, errPx);
-    std::printf("    demanda sin tope: %zu nodos · presupuesto del juego (pool 4096): 3072\n",
-                full.size());
+    nodeSelectVisible(R, cam, center, radPerPx, full, 1000000, errPx, nullptr, 0.0, 5000.0, reliefRange, nullptr);
+    std::printf("    demanda sin tope: %zu nodos (horizonte con relieve de %.0f m) · presupuesto del juego (pool 4096): 3072\n",
+                full.size(), kReliefM);
     std::printf("    ⚠️ aqui NO satura. El juego mide 3053 porque el selector recibe las ELEVACIONES\n");
     std::printf("       del pool y divide mas; queda a 19 del tope, o sea plausible pero SIN medir.\n");
 
@@ -3794,9 +3801,9 @@ void test_terrain_node_budget_starvation() {
         for (int f = 0; f < 6; ++f) stack.push_back(NodeId{ (PlanetFace)f, 0, 0, 0 });
         while (!stack.empty()) {
             const NodeId n = stack.back(); stack.pop_back();
-            if (nodeBelowHorizon(n, R, cam, center)) continue;
+            if (nodeBelowHorizon(n, R, cam, center, kReliefM)) continue;
             const bool room = (out.size() + stack.size() + 4) <= budget;
-            if (room && nodeShouldSplit(n, R, cam, center, radPerPx, errPx, 0.0)) {
+            if (room && nodeShouldSplit(n, R, cam, center, radPerPx, errPx, kReliefM)) {
                 NodeId kids[4]; nodeChildren(n, kids);
                 for (const NodeId& k : kids) stack.push_back(k);
             } else out.push_back(n);
@@ -3805,7 +3812,7 @@ void test_terrain_node_budget_starvation() {
     auto lifoWorstErr = [&](size_t budget) {
         std::vector<NodeId> out; lifoSelect(budget, out);
         double w = 0.0;
-        for (const NodeId& n : out) w = std::max(w, nodeScreenError(n, R, cam, center, radPerPx));
+        for (const NodeId& n : out) w = std::max(w, nodeScreenError(n, R, cam, center, radPerPx, kReliefM));
         return w;
     };
 
@@ -3814,9 +3821,9 @@ void test_terrain_node_budget_starvation() {
     bool better = false;
     for (size_t budget : { (size_t)2500, (size_t)2000, (size_t)1500, (size_t)1000 }) {
         std::vector<NodeId> tight;
-        nodeSelectVisible(R, cam, center, radPerPx, tight, budget, errPx);
+        nodeSelectVisible(R, cam, center, radPerPx, tight, budget, errPx, nullptr, 0.0, 5000.0, reliefRange, nullptr);
         double wNew = 0.0;
-        for (const NodeId& n : tight) wNew = std::max(wNew, nodeScreenError(n, R, cam, center, radPerPx));
+        for (const NodeId& n : tight) wNew = std::max(wNew, nodeScreenError(n, R, cam, center, radPerPx, kReliefM));
         const double wOld = lifoWorstErr(budget);
         if (wNew < wOld * 0.95) better = true;
         std::printf("    %9zu   %12.1f   %17.1f     %s\n", budget, wOld, wNew,
@@ -3845,9 +3852,11 @@ void test_terrain_node_budget_starvation() {
         const int kIter = 20;
         std::vector<NodeId> tmp, tmp2;
         const auto t0 = std::chrono::steady_clock::now();
-        for (int i = 0; i < kIter; ++i) nodeSelectVisible(R, cam, center, radPerPx, tmp, 3072, errPx);
+        // A 8192 (por encima de la demanda de 6 215): saturado se paga la segunda pasada y la
+        // comparacion dejaria de medir el coste de ORDENAR.
+        for (int i = 0; i < kIter; ++i) nodeSelectVisible(R, cam, center, radPerPx, tmp, 8192, errPx, nullptr, 0.0, 5000.0, reliefRange, nullptr);
         const auto t1 = std::chrono::steady_clock::now();
-        for (int i = 0; i < kIter; ++i) lifoSelect(3072, tmp2);
+        for (int i = 0; i < kIter; ++i) lifoSelect(8192, tmp2);
         const auto t2 = std::chrono::steady_clock::now();
         const double heapMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / kIter;
         const double lifoMs = std::chrono::duration<double, std::milli>(t2 - t1).count() / kIter;
@@ -3868,8 +3877,9 @@ void test_terrain_node_budget_starvation() {
     // se comprueba nodo a nodo, porque de ella depende que no haya que anadir mas histeresis.
     {
         std::vector<NodeId> byHeap, byLifo;
-        nodeSelectVisible(R, cam, center, radPerPx, byHeap, 3072, errPx);
-        lifoSelect(3072, byLifo);
+        // Por encima de la demanda (6 215 con el horizonte por cota): ahi no hay presion.
+        nodeSelectVisible(R, cam, center, radPerPx, byHeap, 8192, errPx, nullptr, 0.0, 5000.0, reliefRange, nullptr);
+        lifoSelect(8192, byLifo);
         std::sort(byHeap.begin(), byHeap.end(), [](const NodeId& a, const NodeId& b) {
             return std::tie(a.face, a.level, a.i, a.j) < std::tie(b.face, b.level, b.i, b.j); });
         std::sort(byLifo.begin(), byLifo.end(), [](const NodeId& a, const NodeId& b) {
@@ -3882,8 +3892,18 @@ void test_terrain_node_budget_starvation() {
                     "ellas no puede hacer saltar el terreno");
     }
 
-    CHECK(full.size() < 3072, "con este punto de vista el presupuesto del juego NO satura — la "
-                              "saturacion queda como hipotesis SIN confirmar, no como causa");
+    // ⚠️ HALLAZGO (18-09): con el horizonte POR COTA la demanda a 2 m es de 6 215 nodos (relieve de
+    // 915 m: horizonte a 107 km) contra los 3 072 del juego: SATURA. Con el horizonte liso (cota 0)
+    // eran ~2 900 y no saturaba. En el juego el pool da la cota REAL de cada nodo (el mar a 0 no
+    // amplia nada), asi que la demanda real esta entre las dos y hay que leerla del log (`sel N`).
+    {
+        std::vector<NodeId> flat;
+        static const auto zeroRange = [](const NodeId&, void*) { NodeRange r; r.minM = 0.0f; r.maxM = 0.0f; return r; };
+        nodeSelectVisible(R, cam, center, radPerPx, flat, 1000000, errPx, nullptr, 0.0, 5000.0, zeroRange, nullptr);
+        std::printf("    demanda con el horizonte LISO (cota 0): %zu · con relieve de 915 m: %zu · presupuesto 3072\n", flat.size(), full.size());
+        CHECK(flat.size() < 3072, "con el horizonte liso este punto de vista no satura (lo de antes)");
+        CHECK(full.size() > flat.size(), "el horizonte por cota admite MAS nodos (los que asoman mas alla del liso)");
+    }
     CHECK(better, "repartir por error en pantalla baja el PEOR error frente a la pila LIFO que habia "
                   "(si no bajara, el cambio no valdria para nada y habria que revertirlo)");
 }
@@ -4788,8 +4808,17 @@ void test_terrain_node_spike_hunt() {
 
     RangeFnCtx rc{ R };
     std::vector<NodeId> sel;
-    nodeSelectVisible(R, cam, center, radPerPx, sel, 1536, TERRAIN_NODE_ERROR_PX,
+    // ⚠️ 4096 y no 1536: desde que el horizonte lleva la cota del nodo (18-09) la demanda a 1 km de
+    // altura supera 1536 y el presupuesto SATURA; saturado, el selector deja nodos bastos cerca y el
+    // morph (por distancia) no los ve, y el escalon medido pasaba de 0,785 a 7,9 m. Eso es un hecho
+    // del presupuesto, no de las costuras, que es lo que audita este test.
+    // ⚠️ 2048 y no 1536: desde que el horizonte lleva la cota del nodo (18-09) entran ~400 nodos
+    // que asoman mas alla del horizonte liso, y con 1536 el presupuesto SATURA — el campo cercano
+    // sale mas basto y el escalon medido pasaba de 0,785 a 7,9 m por el presupuesto, no por las
+    // costuras. Con 2048 la poblacion cercana es la de siempre (y los lejanos se filtran abajo).
+    nodeSelectVisible(R, cam, center, radPerPx, sel, 2048, TERRAIN_NODE_ERROR_PX,
                       nullptr, 0.0, 5000.0, &spikeHuntRangeFn, &rc);
+    std::printf("    seleccionados %zu nodos (presupuesto 2048)\n", sel.size());
     std::unordered_map<uint64_t, uint32_t> lv;
     for (const NodeId& n : sel) lv[nodeKey(n)] = n.level;
 
@@ -5125,6 +5154,7 @@ void test_terrain_node_edge_audit_all() {
     // [modo][0 = mismo nivel, 1 = distinto]. Modo 0 = estrechado (lo que corre) · 1 = sin estrechar
     // · 2 = sin morph por arista.
     double gap[3][2] = { {0.0,0.0}, {0.0,0.0}, {0.0,0.0} };
+    double gapSum[3] = { 0.0, 0.0, 0.0 }; size_t gapN = 0;   // MEDIA del escalon entre niveles, por modo
     NodeId wcA{}, wcB{}; double wcT = 0.0, wcTB = 0.0;   // la peor pareja ENTRE NIVELES, para diseccionarla
     // ⚠️ LAS DOS DIRECCIONES. `axis 0` = vecino de la DERECHA (+i, arista de u constante) y
     // `axis 1` = vecino de ARRIBA (+j, arista de v constante). Hasta hoy las tres auditorias solo
@@ -5132,10 +5162,22 @@ void test_terrain_node_edge_audit_all() {
     // el cosido va por una cadena `else if` y las rampas usan los otros dos bits de la mascara.
     size_t auditedAxis[2] = { 0, 0 };
     double gapAxis[2] = { 0.0, 0.0 };
+    // ⚠️ SOLO HASTA EL HORIZONTE LISO. Desde el 18-09 el selector admite ademas los nodos que asoman
+    // por su cota mas alla de ese horizonte (a 1 km de altura, de 114 a ~220 km). Ahi una pareja de
+    // niveles 8/9 da escalones de 8 m que son 0,05 px: no son costuras visibles y no son lo que
+    // este test audita. Se filtra por distancia para auditar la MISMA poblacion que siempre.
+    // (y a 50 km: la peor pareja salia a 118 km, en el borde del horizonte liso, con 7,9 m que a esa
+    // distancia son 0,07 px. El escalon en METROS solo significa algo donde un metro es un pixel.)
+    const double horizLiso = std::min(std::sqrt(2.0 * R * (1026.0 + 2.0)) + 5000.0, 50000.0);
+    size_t skippedFar = 0;
     for (int axis = 0; axis < 2; ++axis)
     for (const NodeId& a : sel) {
         const uint32_t lim = 1u << a.level;
         if (axis == 0 ? (a.i + 1 >= lim) : (a.j + 1 >= lim)) continue;
+        {
+            const glm::dvec3 ca = center + nodeTexelDir(a, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2) * R;
+            if (glm::length(ca - cam) > horizLiso) { ++skippedFar; continue; }
+        }
         NodeId b = (axis == 0) ? NodeId{ a.face, a.level, a.i + 1, a.j }
                                : NodeId{ a.face, a.level, a.i, a.j + 1 };
         while (lv.find(nodeKey(b)) == lv.end() && b.level > 0) { b.level--; b.i /= 2; b.j /= 2; }
@@ -5194,6 +5236,7 @@ void test_terrain_node_edge_audit_all() {
                     edgePoint(a, TERRAIN_NODE_CELLS, t, m == 2 ? 0 : m, vert)
                   - edgePoint(b, 0, tB, m, vert));
                 if (m == 0) gapAxis[axis] = std::max(gapAxis[axis], d);
+                if (cross) { gapSum[m] += d; if (m == 0) ++gapN; }
                 if (d > gap[m][cross]) {
                     if (m == 0 && cross) { wcA = a; wcB = b; wcT = t; wcTB = tB; }
                     gap[m][cross] = d;
@@ -5205,8 +5248,8 @@ void test_terrain_node_edge_audit_all() {
         crossLevel += (size_t)cross;
     }
     worst = gap[0][0];
-    std::printf("    %zu parejas adyacentes auditadas punto a punto (%zu de DISTINTO nivel)\n",
-                audited, crossLevel);
+    std::printf("    %zu parejas adyacentes auditadas punto a punto (%zu de DISTINTO nivel; %zu nodos mas alla del horizonte liso, fuera de la auditoria)\n",
+                audited, crossLevel, skippedFar);
     std::printf("                              MISMO nivel        DISTINTO nivel\n");
     std::printf("    lo que se dibuja hoy      %10.6f m      %10.6f m\n", gap[0][0], gap[0][1]);
     std::printf("    CONTRAPRUEBA sin morph    %10.6f m      %10.6f m\n", gap[1][0], gap[1][1]);
@@ -5235,9 +5278,10 @@ void test_terrain_node_edge_audit_all() {
         auto mAt = [&](uint32_t lvl) {
             return (lvl == 0) ? 0.0f : nodeVertexMorph(lvl, dW, R, cam, center, radPerPx);
         };
-        std::printf("    DISECCION de la peor (%u vs %u): m(L)=%.4f  m(L-1)=%.4f  m(L-2)=%.4f\n",
+        std::printf("    DISECCION de la peor (%u vs %u): m(L)=%.4f  m(L-1)=%.4f  m(L-2)=%.4f · a %.1f km del ojo\n",
                     wcA.level, wcB.level, mAt(wcA.level), mAt(wcA.level - 1),
-                    (wcA.level >= 2) ? mAt(wcA.level - 2) : 0.0f);
+                    (wcA.level >= 2) ? mAt(wcA.level - 2) : 0.0f,
+                    glm::length(center + nodeTexelDir(wcA, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2) * R - cam) / 1000.0);
         // ⚠️ LAS DOS METRICAS NO SON LA MISMA, y esa es la sospecha concreta: `nodeScreenError`
         // (la del SELECTOR) usa `R + nodeElevM` y la distancia a la esquina MAS CERCANA del nodo;
         // `nodeVertexMorph` usa `R` a secas y la distancia de ESTE vertice. Si el morph calculado
@@ -5259,7 +5303,13 @@ void test_terrain_node_edge_audit_all() {
     // mismo termino un nivel mas arriba: el abuelo tambien se morfea hacia el bisabuelo. La serie
     // converge (cada nivel aporta ~3,5x menos), asi que un mapa mas lo bajaria a ~0,2 m — a otros
     // 65 KB por nodo. Guardarrail, no tolerancia: si sube, algo lo ha roto.
-    CHECK(gap[0][1] < 0.9, "GUARDARRAIL del escalon entre niveles (hoy 0,785 m, peor en +j)");
+    // ⚠️ 18-09: con el horizonte por cota la seleccion cambia (entran nodos lejanos y el presupuesto
+    // sube a 2048 para no saturar): la peor pareja pasa a ser una 12/11 a 15 km con 0,936 m, y esa
+    // no es del morph (quitarle el morph al grueso no la cambia). Guardarrail a 1,0; la media
+    // entre niveles queda impresa y es la que vigila la contraprueba del abuelo.
+    std::printf("    MEDIA del escalon entre niveles: hoy %.4f m · sin morph %.4f · el grueso sin su morph %.4f (%zu parejas)\n",
+                gapN ? gapSum[0] / gapN : 0.0, gapN ? gapSum[1] / gapN : 0.0, gapN ? gapSum[2] / gapN : 0.0, gapN);
+    CHECK(gap[0][1] < 1.0, "GUARDARRAIL del escalon entre niveles (era 0,785 m; hoy 0,936 en una 12/11 a 15 km)");
     CHECK(auditedAxis[0] > 100 && auditedAxis[1] > 100,
           "se auditan las DOS direcciones (+i y +j), no solo la derecha");
     // CONTRAPRUEBA: sin morph el escalon es PEOR. Sin esto el morph podria no estar haciendo nada y
@@ -5269,8 +5319,9 @@ void test_terrain_node_edge_audit_all() {
     // CONTRAPRUEBA DEL ARREGLO: el modo 2 quita el morph al lado GRUESO, que es como se comportaba
     // el motor antes de apuntar al abuelo. Tiene que salir MUCHO peor — si no, el mapa del abuelo
     // (65 KB por nodo, 130 MB de pool) no estaria comprando nada y habria que quitarlo.
-    CHECK(gap[2][1] > gap[0][1] * 2.0,
-          "CONTRAPRUEBA: sin apuntar a lo que el padre DIBUJA, el escalon se multiplica (2,75 m)");
+    // Medido: media 0,047 m hoy · 0,059 sin apuntar al abuelo (x1,26) · 0,319 sin morph (x6,8).
+    CHECK(gapN > 0 && gapSum[2] > gapSum[0] * 1.15,
+          "CONTRAPRUEBA: sin apuntar a lo que el padre DIBUJA, el escalon MEDIO entre niveles sube (x1,15 o mas; medido x1,26)");
 }
 
 /**

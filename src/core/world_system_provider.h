@@ -345,6 +345,12 @@ public:
     // Devuelve la componente RADIAL respecto al plano tangente, no la altitud: un heightfield es plano
     // y el terreno está sobre una esfera. Proyectar sobre `up` mete la caída por curvatura (x²/2R)
     // exactamente — a 262 km son 5,4 km, así que no es un detalle.
+    uint64_t groundEditsVersion() const override {
+        if (!m_planetary) return 0;
+        const auto* tp = m_planetary->activeTerrestrial();
+        return tp ? tp->vox().version() : 0;
+    }
+
     float ringSample(const PlanetarySystem::TerrainSampler& src,
                      const glm::dvec3& pc, double R, const glm::dvec3& up,
                      const glm::dvec3& t1d, const glm::dvec3& hzd,
@@ -472,6 +478,7 @@ public:
         // worker). Se reparte por FILAS y no por anillos porque los anillos son muy desiguales — el
         // de ±2048 m tiene 258² muestras contra las 130² de los demás, o sea que un hilo por anillo
         // dejaría a uno con el 35 % del trabajo y a los otros esperándolo.
+        std::atomic<size_t> cutSamples{0};               // muestras del anillo 0 que son BOCA (sin suelo)
         std::vector<std::pair<size_t, uint32_t>> rows;   // (índice de anillo, fila)
         for (size_t k = firstRing; k < layout.size(); ++k) {
             auto& ring = outRings[k - firstRing];
@@ -495,6 +502,17 @@ public:
                     continue;
                 }
                 out = ringSample(src, pc, R, up, t1, hz, outOrigin, x, z);
+                // ⚠️ EL AGUJERO DE LA CUEVA TAMBIÉN EN LA FÍSICA. Sin esto el suelo se recorta en
+                // pantalla y se sigue pisando: el jugador "flota" sobre la boca (Andoni lo vio).
+                // Sólo en el anillo cercano, que es donde la ventana del campo está cargada
+                // (±260 m); más allá `surfaceCut` dice 0 y no cuesta nada.
+                // En TODOS los anillos de esta construcción cercana (firstRing == 0: ±256 m), no solo
+                // el 0 (±32 m): con el recorte solo en el anillo 0, a más de 32 m del jugador el foso
+                // tenía suelo invisible ("no puedo entrar en la cueva").
+                if (firstRing == 0 && src.surfaceCutAt(outOrigin + t1 * x + hz * z)) {
+                    out = std::numeric_limits<float>::quiet_NaN();
+                    cutSamples.fetch_add(1, std::memory_order_relaxed);
+                }
             }
         };
         const unsigned hw = std::thread::hardware_concurrency();
@@ -516,6 +534,10 @@ public:
             worker();
             for (auto& th : pool) th.join();
         }
+
+        if (cutSamples.load() > 0)
+            HARUKA_LOGI("Physics", "anillo cercano: %zu muestras SIN suelo por boca de cueva (el jugador cae por ahi)",
+                        cutSamples.load());
 
         // ── COSER LAS COSTURAS ENTRE ANILLOS ────────────────────────────────────────────────────
         //

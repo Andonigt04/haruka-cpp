@@ -136,6 +136,18 @@ namespace Haruka::RHI
             virtual Context* beginFrame() = 0;
             virtual void     endFrame() = 0;
 
+            // --- Tiempos de GPU por tramo (timestamps). ---
+            //
+            // El profiler de CPU no ve la GPU: con `present.swap` en 47 ms y la GPU al 90 %, ningún
+            // interruptor (props, nubes, teselado, fluidos, bloom, terreno sin sombrear) movía la
+            // cifra. Sin esto "optimizar" es apagar cosas a ciegas. `gpuScopeBegin/End` anidan como
+            // `HARUKA_PROFILE`; los resultados son los del ÚLTIMO frame terminado (en ms de GPU) y se
+            // leen tras `endFrame`. Un backend sin soporte devuelve la lista vacía.
+            struct GpuScope { std::string name; int depth = 0; double ms = 0.0; };
+            virtual void gpuScopeBegin(const char* /*name*/) {}
+            virtual void gpuScopeEnd() {}
+            virtual const std::vector<GpuScope>& gpuScopes() const { static const std::vector<GpuScope> none; return none; }
+
             // ImGui (fase 7): el host inicia el renderer de UI del backend cuando corresponde
             // (Vulkan → ImGui_ImplVulkan; GL → no-op, se usa el impl GL existente). false = no-op.
             virtual bool initUi() { return false; }

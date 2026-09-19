@@ -25,6 +25,8 @@ void beginTest(const char* name);
 // AABB), encaje por clase/kind/talla, raycast, y el mecanismo que BLOQUEA y ROMPE — con contraprueba
 // en cada uno.  (test_ports.cpp)
 void test_rail_mechanism_jolt();   // raíles contra Jolt (test_physics.cpp)
+// La boca de una cueva en la fisica: el NaN del anillo deja caer y la malla del chunk sostiene.
+void test_physics_cave_mouth();
 void test_construction_vehicle();   // mecanismos, masa y distancia sobre el grafo de construcción
 void test_prefab_edits();           // los cambios de UN conjunto no tocan el montaje (test_prefab.cpp)
 void test_prefab_scene_roundtrip(); // la escena guarda la entrada y sus cambios, no las piezas
@@ -37,17 +39,18 @@ void test_cube_sphere_inverse();
 /// Primitivas: ninguna cara bobinada al reves (una tapa invertida no da error, desaparece).
 void test_primitive_winding();
 void test_weather_fronts();
-void test_weather_3d();
 // Tiempo adverso: la severidad sale de las condiciones y el embudo (tornado/tromba) de la severidad.
 // Campo de Rankine con succion y ascendente, determinista. Con contraprueba en cada punto.
 void test_weather_severe();
+void test_weather_water_cycle();
 // Que el campo del vortice LLEGUE al jugador: arrastre, rozamiento del suelo y que andar no lo anule.
 void test_wind_pushes_character();
 // El cielo horneado lleva base/techo/lluvia POR DIRECCION, no una losa del punto de la camara.
 void test_sky_bake();
 // Forma de la nube: que sea un CUERPO y no una lamina (relacion ancho/alto, campo 3D, visibilidad
 // con la cobertura mediana del planeta). Con contraprueba de las cifras viejas en los tres.
-void test_cloud_shape();
+void test_cloud_formation();
+void test_cloud_motion();      // frame a frame: deriva integrada y fundido de horneados (sin tirones)   // el UNICO test de como se forma una nube (cloud_column.h)
 void test_ground_layer();
 // Las cifras de LOD (terrain_lod.h) casan entre sí y con el hardware: ningún tope de teselación por
 // encima de GL_MAX_TESS_GEN_LEVEL, y el piso de triM == el lado real del quad (Nyquist).
@@ -138,6 +141,32 @@ void test_prop_lod_attributes();
 void test_prop_scatter_radial();
 void test_prop_scatter_stability();
 void test_prop_collider();
+void test_prop_biome();
+void test_prop_variants();
+void test_prop_density();
+void test_prop_map_biome();
+void test_prop_scatter_cost();
+// Cuevas: la definicion vive en MAPAS EN DISCO (como el terreno). Siembra determinista, contraste
+// de los mapas, el invariante de conectividad (una sola pieza de aire) y el cache.
+void test_caves_bake();
+void test_caves_cache();
+void test_caves_mesh_and_strokes();
+void test_caves_coupling();
+// El mundo por chunks: bajo demanda, cuevas rasterizadas, trazos persistentes y SIN costura.
+void test_vox_world();
+void test_vox_placed_cave();
+void test_vox_draped_cave();
+void test_vox_columns();
+void test_vox_scene_cave();
+void test_vox_designer_strokes();
+void test_vox_brush();
+void test_world_edit_panel();
+void test_vox_raycast_grazing();
+void test_vox_brush_ops();
+void test_vox_sculpt();
+void test_physics_island();
+void test_islands_bake();
+void test_vox_island();
 void test_rock_interior();   // peñones enterrados de la roca (con contraprueba por rayos)
 // EL MAR (test_ocean.cpp): que la ola de la física sea la derivada exacta de la superficie, que el
 // agua TRANSPORTE (firma de Stokes), el bajío/rompiente que define la costa, y el acople real en el
@@ -149,6 +178,8 @@ void test_ocean_shoaling();
 void test_ocean_buoyancy_drift();
 void test_ocean_no_water_no_float();
 void test_ocean_sea_state();
+void test_ocean_low_wind_spectrum();
+void test_ocean_sea_follows_wind();
 // Dispersion en profundidad FINITA: la ola se acorta al perder fondo (era de aguas profundas).
 void test_ocean_finite_depth();
 void test_ocean_gerstner_ellipse();
@@ -180,6 +211,9 @@ void test_shallow_water_mountain_coverage();
 void test_shallow_water_inherits_ocean_swell();
 // FISICA del agua interior: conservacion, nivelado, desbordamiento y rotura de presa (con Ritter).
 void test_shallow_water_physics();
+void test_shallow_water_cycle();
+void test_shallow_water_friction();
+void test_shallow_water_fetch();
 // La octava mas fina del terreno sigue viva (murio en silencio al bajar el tope de tesela).
 void test_terrain_finest_octave();
 // F5: ¿hay relieve procedural desde orbita? Antes del 2026-08-24 era EXACTAMENTE cero a partir de

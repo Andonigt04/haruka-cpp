@@ -1645,6 +1645,22 @@ namespace Haruka::RHI::vulkan
         pci.queueFamilyIndex = m_graphicsFamily;
         if (!vkSuccess(vkCreateCommandPool(m_device, &pci, nullptr, &m_framePool), "create frame pool")) return false;
 
+        // Query pool de timestamps (ver gpuScopeBegin). Si el dispositivo no da timestamps en la
+        // cola gráfica, el pool queda nulo y los scopes son no-op.
+        {
+            VkPhysicalDeviceProperties pp{};
+            vkGetPhysicalDeviceProperties(m_physical, &pp);
+            m_gpuTimestampNs = pp.limits.timestampPeriod;
+            if (m_gpuTimestampNs > 0.0f && pp.limits.timestampComputeAndGraphics)
+            {
+                VkQueryPoolCreateInfo qi{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+                qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                qi.queryCount = kGpuQueries;
+                if (vkCreateQueryPool(m_device, &qi, nullptr, &m_gpuQueryPool) != VK_SUCCESS)
+                    m_gpuQueryPool = VK_NULL_HANDLE;
+            }
+        }
+
         VkCommandBufferAllocateInfo ai{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
         ai.commandPool = m_framePool;
         ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -1669,6 +1685,7 @@ namespace Haruka::RHI::vulkan
         if (m_imgAvailable) { vkDestroySemaphore(m_device, m_imgAvailable, nullptr); m_imgAvailable = VK_NULL_HANDLE; }
         if (m_frameCmd) { vkFreeCommandBuffers(m_device, m_framePool, 1, &m_frameCmd); m_frameCmd = VK_NULL_HANDLE; }
         if (m_framePool) { vkDestroyCommandPool(m_device, m_framePool, nullptr); m_framePool = VK_NULL_HANDLE; }
+        if (m_gpuQueryPool) { vkDestroyQueryPool(m_device, m_gpuQueryPool, nullptr); m_gpuQueryPool = VK_NULL_HANDLE; }
         if (m_descPool) { vkDestroyDescriptorPool(m_device, m_descPool, nullptr); m_descPool = VK_NULL_HANDLE; }
         m_descRing.clear();
     }
@@ -1764,6 +1781,12 @@ namespace Haruka::RHI::vulkan
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(m_frameCmd, &bi) != VK_SUCCESS) return nullptr;
 
+        // Timestamps: el pool se resetea en el command buffer (fuera de render pass, aquí al inicio).
+        m_gpuScopesFrame.clear();
+        m_gpuScopeStack.clear();
+        m_gpuQueryUsed = 0;
+        if (m_gpuQueryPool) vkCmdResetQueryPool(m_frameCmd, m_gpuQueryPool, 0, kGpuQueries);
+
         m_frameActive = true;
         m_backbufferUsed = false;
         return m_context.get();
@@ -1837,9 +1860,59 @@ if (m_swapchain && m_swapchain->valid())
             // SU wait haya consumido la señal antes de re-signalizarla en el próximo submit. Sin esto
             // la sem repite la señal sin espera → VVL 00067 → cuelga la GPU → NVIDIA TDR ~5s/frame.
             vkDeviceWaitIdle(m_device);
+            resolveGpuScopes();
         }
         m_frameActive = false;
         m_backbufferUsed = false;
+    }
+
+    // ------------------------------------------------------------------ timestamps de GPU
+    void VKDevice::gpuScopeBegin(const char* name)
+    {
+        if (!m_gpuQueryPool || !m_frameActive || !m_frameCmd) return;
+        if (m_gpuQueryUsed + 2 > kGpuQueries) return;   // sin sitio: el scope no se mide (no rompe)
+        GpuScopeOpen sc;
+        sc.name  = name ? name : "?";
+        sc.depth = (int)m_gpuScopeStack.size();
+        sc.q0    = m_gpuQueryUsed++;
+        sc.q1    = UINT32_MAX;
+        // BOTTOM_OF_PIPE en las dos marcas: mide cuándo TERMINA lo grabado antes y cuándo termina lo
+        // grabado dentro. Con TOP en la primera se contaría el trabajo anterior aún en vuelo.
+        vkCmdWriteTimestamp(m_frameCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_gpuQueryPool, sc.q0);
+        m_gpuScopeStack.push_back((int)m_gpuScopesFrame.size());
+        m_gpuScopesFrame.push_back(std::move(sc));
+    }
+
+    void VKDevice::gpuScopeEnd()
+    {
+        if (!m_gpuQueryPool || !m_frameActive || !m_frameCmd || m_gpuScopeStack.empty()) return;
+        GpuScopeOpen& sc = m_gpuScopesFrame[(size_t)m_gpuScopeStack.back()];
+        m_gpuScopeStack.pop_back();
+        if (m_gpuQueryUsed >= kGpuQueries) return;
+        sc.q1 = m_gpuQueryUsed++;
+        vkCmdWriteTimestamp(m_frameCmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_gpuQueryPool, sc.q1);
+    }
+
+    void VKDevice::resolveGpuScopes()
+    {
+        m_gpuScopesDone.clear();
+        if (!m_gpuQueryPool || m_gpuQueryUsed == 0) return;
+        std::vector<uint64_t> ticks((size_t)m_gpuQueryUsed, 0);
+        // Tras vkDeviceWaitIdle todas las marcas están escritas: WAIT no bloquea nada nuevo.
+        if (vkGetQueryPoolResults(m_device, m_gpuQueryPool, 0, m_gpuQueryUsed,
+                                  ticks.size() * sizeof(uint64_t), ticks.data(), sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) != VK_SUCCESS)
+            return;
+        m_gpuScopesDone.reserve(m_gpuScopesFrame.size());
+        for (const GpuScopeOpen& sc : m_gpuScopesFrame)
+        {
+            if (sc.q1 == UINT32_MAX) continue;    // scope sin cerrar
+            GpuScope r;
+            r.name  = sc.name;
+            r.depth = sc.depth;
+            r.ms    = (double)(ticks[sc.q1] - ticks[sc.q0]) * (double)m_gpuTimestampNs * 1e-6;
+            m_gpuScopesDone.push_back(std::move(r));
+        }
     }
 
     // Variante del pipeline para UN render pass concreto. Los pipelines de la fase 4 se crean

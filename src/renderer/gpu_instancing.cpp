@@ -4,12 +4,15 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <cstddef>
+#include "tools/profiler.h"
 
 namespace Haruka { namespace Renderer {
 
 GPUInstancing::~GPUInstancing() {
-    if (RHI::Device* dev = RHI::device())
-        for (auto& b : m_bufs) if (RHI::valid(b)) dev->destroy(b);
+    if (RHI::Device* dev = RHI::device()) {
+        if (RHI::valid(m_arena)) dev->destroy(m_arena);
+        for (auto& b : m_retired) if (RHI::valid(b)) dev->destroy(b);
+    }
 }
 
 void GPUInstancing::init(int maxInstances) {
@@ -17,17 +20,23 @@ void GPUInstancing::init(int maxInstances) {
     m_instances.reserve((size_t)m_maxInstances);
     RHI::Device* dev = RHI::device();
     if (!dev) return;
-    for (auto& b : m_bufs) if (RHI::valid(b)) dev->destroy(b);
-    m_bufs.clear();
-    m_cursor = 0;
-    // Vertex buffer (no SSBO): lo consume el ensamblador de vértices como binding por-instancia.
-    // UNO POR ENTRADA DEL ANILLO: cada draw necesita su copia (ver la nota en la cabecera).
-    m_bufs.reserve((size_t)kRing);
-    for (int i = 0; i < kRing; ++i)
-        m_bufs.push_back(dev->createBuffer(RHI::BufferUsage::Vertex,
-                                           (size_t)m_maxInstances * sizeof(InstanceDataFloat),
-                                           nullptr, RHI::BufferMemory::Dynamic));
-    m_buf = m_bufs.empty() ? RHI::BufferHandle{} : m_bufs[0];
+    if (RHI::valid(m_arena)) dev->destroy(m_arena);
+    for (auto& b : m_retired) if (RHI::valid(b)) dev->destroy(b);
+    m_retired.clear();
+    m_arena = {}; m_arenaCap = 0; m_arenaUsed = 0; m_lastOff = 0; m_draws = 0;
+    // El arena nace al primer uso y del tamaño que haga falta (ver la nota de la cabecera).
+}
+
+void GPUInstancing::beginFrame() {
+    if (RHI::Device* dev = RHI::device())
+        for (auto& b : m_retired) if (RHI::valid(b)) dev->destroy(b);
+    m_retired.clear();
+    m_arenaUsed = 0;
+    m_draws = 0;
+}
+
+size_t GPUInstancing::hostBytes() const {
+    return m_arenaCap * sizeof(InstanceDataFloat);
 }
 
 void GPUInstancing::addInstance(const glm::vec3& position, const glm::vec3& scale,
@@ -53,26 +62,44 @@ void GPUInstancing::setInstances(const std::vector<InstanceDataFloat>& data) {
     m_dirty = true;
 }
 
+void GPUInstancing::setInstancesGather(const InstanceDataFloat* src, const std::vector<uint32_t>& idx) {
+    const size_t n = idx.size() < (size_t)m_maxInstances ? idx.size() : (size_t)m_maxInstances;
+    m_instances.resize(n);
+    for (size_t i = 0; i < n; ++i) m_instances[i] = src[idx[i]];
+    m_dirty = true;
+}
+
 void GPUInstancing::upload() {
     if (m_instances.empty()) return;
     RHI::Device* dev = RHI::device();
     if (!dev) return;
-    // Toma la SIGUIENTE entrada del anillo: cada draw necesita su propia copia (ver la nota en la
-    // cabecera). Se crean perezosamente y con el mismo tamaño que el buffer original.
-    if (m_bufs.empty()) return;
-    m_buf = m_bufs[(size_t)m_cursor];
-    m_cursor = (m_cursor + 1) % (int)m_bufs.size();
-    if (!RHI::valid(m_buf)) return;
-    dev->updateBuffer(m_buf, 0, m_instances.size() * sizeof(InstanceDataFloat), m_instances.data());
+    const size_t need = m_instances.size();
+    if (!RHI::valid(m_arena) || m_arenaUsed + need > m_arenaCap) {
+        // No cabe: arena nuevo (potencia de dos por encima de lo usado + lo que viene) y el viejo se
+        // retira hasta el frame siguiente — los draws ya grabados este frame lo siguen leyendo.
+        size_t c = 4096; while (c < m_arenaUsed + need) c <<= 1;
+        if (RHI::valid(m_arena)) m_retired.push_back(m_arena);
+        m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, c * sizeof(InstanceDataFloat),
+                                    nullptr, RHI::BufferMemory::Dynamic);
+        m_arenaCap = c;
+        // Lo ya sub-asignado vive en el arena retirado; el nuevo empieza limpio.
+        m_arenaUsed = 0;
+    }
+    if (!RHI::valid(m_arena)) return;
+    m_lastOff = m_arenaUsed * sizeof(InstanceDataFloat);
+    dev->updateBuffer(m_arena, m_lastOff, need * sizeof(InstanceDataFloat), m_instances.data());
+    m_arenaUsed += need;
+    ++m_draws;
     m_dirty = false;
 }
 
 void GPUInstancing::render(RHI::Context* ctx, uint32_t indexCount, uint32_t instanceBinding) {
     if (!ctx || m_instances.empty() || indexCount == 0) return;
-    upload();
+    { HARUKA_PROFILE("inst.upload(memcpy)"); upload(); }
     // El divisor NO se toca aquí: vive en el PSO (InputRate::Instance). El llamador ya ató su
     // pipeline y la malla base; nosotros solo añadimos el stream de instancias y disparamos el draw.
-    ctx->bindVertexBuffer(m_buf, instanceBinding);
+    HARUKA_PROFILE("inst.bind+draw");
+    ctx->bindVertexBuffer(m_arena, instanceBinding, m_lastOff);
     ctx->drawIndexed(indexCount, /*first*/0, (uint32_t)m_instances.size());
 }
 

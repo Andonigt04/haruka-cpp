@@ -42,6 +42,9 @@ void main()
         // La VENTANA FINA, y el fetch COMBINADO (ventana si la hay, global si no) — que es el que
         // acaba entrando en la Gerstner de `terrain_node_water.vert`.
         uOut[k * PROBE_OUT + 3] = harukaWindowLakeAt(dir);
-        uOut[k * PROBE_OUT + 4] = harukaWaterFetchAt(dir);
+        // Sin parche dinamico en la sonda (posicion fuera de cualquier parche): esto carea el fetch
+        // de ventana+global con `lakeFetchAt`, que es lo que la fisica consulta. El del parche lo
+        // mide `test_shallow_water_fetch` en CPU (la fisica no lo usa: para ella el parche no es agua).
+        uOut[k * PROBE_OUT + 4] = harukaWaterFetchAt(vec3(1.0e30), dir);
     }
 }

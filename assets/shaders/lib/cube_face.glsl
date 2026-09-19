@@ -75,10 +75,18 @@ void harukaDirToCubeFace(vec3 d, out int face, out vec2 uv) {
  */
 precise double harukaSqrtD(double a) {
     if (!(a > 0.0LF)) return 0.0LF;
-    precise double x = double(sqrt(float(a)));
-    x = 0.5LF * (x + a / x);
-    x = 0.5LF * (x + a / x);
-    return x;
+    // ⚠️ SIN DIVISIONES EN DOUBLE. La versión anterior era Newton sobre sqrt (`x <- (x + a/x)/2`): dos
+    // divisiones fp64 por raíz, tres raíces por vértice. En una GeForce el fp64 va a 1/64 y la división
+    // es a su vez una iteración: medido con timestamps de GPU, el pase de nodos costaba 39 ms con
+    // 22 M de vértices y no se movía ni con la mitad de píxeles ni sin sombrear — era esto. Newton
+    // sobre 1/sqrt (`y <- y·(1,5 − a·y²/2)`) sólo multiplica y suma, converge igual (duplica dígitos
+    // por paso: 7 → 14 → 28) y la raíz sale de `a·y`. Misma clase de error que antes (≤1 ulp frente al
+    // sqrt correctamente redondeado de la CPU: 6e-10 m de superficie), y sigue sin usar el
+    // `sqrt(double)` del driver, que es lo que fallaba en AMD+OpenGL.
+    precise double y = double(inversesqrt(float(a)));
+    y = y * (1.5LF - 0.5LF * a * y * y);
+    y = y * (1.5LF - 0.5LF * a * y * y);
+    return a * y;
 }
 
 /**
@@ -108,9 +116,13 @@ dvec3 harukaCubeFaceToDir(int face, double lx, double ly) {
     precise double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
     // ⚠️ `harukaSqrtD` Y NO `sqrt`: ver su nota. Con el `sqrt(double)` del driver, esta línea daba
     // 0,0235 m de error de superficie en AMD+OpenGL y 6e-10 m en todo lo demás.
-    precise dvec3 r = dvec3(p.x * harukaSqrtD(1.0LF - y2 / 2.0LF - z2 / 2.0LF + y2 * z2 / 3.0LF),
-                            p.y * harukaSqrtD(1.0LF - z2 / 2.0LF - x2 / 2.0LF + z2 * x2 / 3.0LF),
-                            p.z * harukaSqrtD(1.0LF - x2 / 2.0LF - y2 / 2.0LF + x2 * y2 / 3.0LF));
+    // ⚠️ `* kHalf` y `* kThird` EN VEZ DE `/ 2` y `/ 3`: la división fp64 es una iteración cara (ver
+    // harukaSqrtD). Por 2 es exacto; por 3 difiere del gemelo C++ (`/ 3.0`) en ≤1 ulp de un término
+    // ≤ 1/3, o sea ~3e-17 en el radicando: 1e-10 m de superficie, muy por debajo de la paridad.
+    const double kHalf = 0.5LF, kThird = 1.0LF / 3.0LF;
+    precise dvec3 r = dvec3(p.x * harukaSqrtD(1.0LF - y2 * kHalf - z2 * kHalf + y2 * z2 * kThird),
+                            p.y * harukaSqrtD(1.0LF - z2 * kHalf - x2 * kHalf + z2 * x2 * kThird),
+                            p.z * harukaSqrtD(1.0LF - x2 * kHalf - y2 * kHalf + x2 * y2 * kThird));
     return r;
 }
 

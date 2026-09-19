@@ -27,6 +27,7 @@ layout(location = 11) in float aPart;       // parte del esqueleto de este vért
 
 layout(std140, binding = 0) uniform PropShadowUBO {
     mat4 uLightSpace;
+    vec4 uOriginRel;   // origen del scatter relativo a la cámara (las instancias van relativas a él)
 };
 
 void main() {
@@ -35,8 +36,8 @@ void main() {
     // arrancada seguiría dibujando su sombra en el suelo — la forma más barata de delatar que lo que
     // se ve y lo que hay no son lo mismo. Colapsa a un punto (área cero), NO se expulsa del NDC.
     if ((uint(iBreakMask) & (1u << uint(aPart + 0.5))) != 0u) {
-        gl_Position = uLightSpace * vec4(iModel3.xyz, 1.0);
+        gl_Position = uLightSpace * vec4(iModel3.xyz + uOriginRel.xyz, 1.0);
         return;
     }
-    gl_Position = uLightSpace * model * vec4(aPos, 1.0);
+    gl_Position = uLightSpace * (model * vec4(aPos, 1.0) + vec4(uOriginRel.xyz, 0.0));
 }

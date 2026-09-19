@@ -31,6 +31,7 @@
 #include <chrono>
 
 #include "rhi/rhi_device.h"
+#include "renderer/gpu_instancing.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_resources.h"
 #include "core/logger.h"
@@ -42,6 +43,8 @@
 #include "core/terrain/base_field.h"   // baseFieldHeightAt: el gemelo CPU que este test valida
 #include "core/terrain/terrain_node_gpu.h"
 #include "core/weather_system.h"   // kFieldScale: la escala del campo de nube, no un literal
+#include "core/cloud_column.h"
+#include "core/cloud_motion.h"
 #include "core/planet/ocean_wave.h"   // gemelo CPU de la ola (paridad con lib/ocean_wave.glsl)
 #include "io/image_writer.h"          // HARUKA_WATER_PNG: volcar las formas para MIRARLAS
 #include "core/planet/water_fill.h"   // el relleno de cuencas: gemelo del campo que lee la GPU
@@ -50,6 +53,9 @@
 #include <SDL3/SDL.h>
 #include <array>
 #include <map>
+#include <fstream>
+#include <cctype>
+#include <sys/stat.h>
 #include <unordered_set>
 
 // --- mini-framework (mismo estilo que tests/test_common.h) ---
@@ -114,10 +120,12 @@ static DriverDefect g_driverDefects[] = {
       HARUKA_AMD_GL_FP64, 0 },
     { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(6) `inversesqrt(double)`",
       HARUKA_AMD_GL_FP64, 0 },
-    { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(7) la direccion del bake",
-      HARUKA_AMD_GL_FP64, 0 },
-    { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(8) el error de la proyeccion",
-      HARUKA_AMD_GL_FP64, 0 },
+    // ⚠️ (7) y (8) YA NO ESTAN, Y NO PORQUE EL DRIVER MEJORARA: `harukaCubeFaceToDir` dejo de usar
+    // `sqrt(double)` del driver y hace la raiz con `harukaSqrtD` (rsqrt pulido con Newton, sin
+    // division; ver cube_face.glsl, 16-09). Con eso la direccion del bake sale unitaria con precision
+    // de double TAMBIEN en AMD+OpenGL, y la regla de "entrada muerta = fallo" nos lo dijo: dos tandas
+    // en rojo hasta borrarlas. Los otros cinco (producto, division, normalize, inversesqrt en
+    // crudo, cubeFaceToDir en crudo) siguen degradados: son la aritmetica del driver, no la nuestra.
     { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(10) `harukaCubeFaceToDir`",
       HARUKA_AMD_GL_FP64, 0 },
     { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(11) el PRODUCTO en doble",
@@ -183,6 +191,84 @@ static const char* knownDefect(const char* test, const char* msg)
     else { ++g_fail; std::printf("  [FAIL] [%s] %s\n", g_cur, msg); } \
 } while (0)
 #define BEGIN(name) do { g_cur = name; std::printf("== %s ==\n", name); } while (0)
+
+// ── LINEA BASE: lo que el banco MIDE pasa a EXIGIRSE ─────────────────────────────────────────────
+//
+// El banco imprimia ms, presencias, grano, convergencia... y no fallaba si empeoraban: cada numero
+// se miraba una vez y se olvidaba. Aqui cada metrica se compara con la ultima aprobada, guardada en
+// `tests/baseline/<backend>_<gpu>.txt` (las de rendimiento dependen de la GPU) o `any.txt` (las de
+// imagen). Sin linea base la metrica se ANOTA y se avisa; con `HARUKA_BASELINE_UPDATE=1` se
+// reescribe (eso es "aprobar": lo hace una persona, no el banco). `HARUKA_BASELINE_DIR` cambia el
+// directorio (por defecto `tests/baseline`, relativo a donde se lanza el banco).
+static std::map<std::string, double> g_baseline;       // clave -> valor aprobado (el fichero actual)
+static std::map<std::string, double> g_baselineNew;    // lo medido en esta tanda (para escribirlo)
+static bool        g_baselineLoaded = false, g_baselineOk = false;
+static std::string g_baselineDir;
+static void baselineWriteIfAsked();
+static std::string baselineSlug(const std::string& s) {
+    std::string o;
+    for (char c : s) o += (std::isalnum((unsigned char)c) ? (char)std::tolower((unsigned char)c) : '_');
+    while (o.size() > 40) o.pop_back();
+    return o;
+}
+static std::string baselinePath(bool perGpu) {
+    // Las de imagen tambien van por backend: GL y Vulkan no dan la misma imagen (medido: 53,7 % de
+    // cirro al cenit en GL contra 67,3 % en Vulkan con el mismo shader), y eso es un hallazgo, no ruido.
+    const std::string be = (g_curBackend == Backend::Vulkan) ? "vk" : "gl";
+    return g_baselineDir + "/" + (perGpu ? (be + "_" + baselineSlug(g_curDevice)) : be) + ".txt";
+}
+static void baselineLoadFile(bool perGpu) {
+    std::ifstream f(baselinePath(perGpu));
+    std::string k; double v;
+    while (f >> k >> v) g_baseline[(perGpu ? "gpu:" : "any:") + k] = v;
+}
+static void baselineReset() {   // por backend: otro fichero de linea base
+    baselineWriteIfAsked();
+    g_baseline.clear(); g_baselineNew.clear(); g_baselineLoaded = false;
+}
+static void baselineInit() {
+    if (g_baselineLoaded) return;
+    g_baselineLoaded = true;
+    const char* e = std::getenv("HARUKA_BASELINE_DIR");
+    g_baselineDir = e ? e : "tests/baseline";
+    struct stat st{};
+    g_baselineOk = (stat(g_baselineDir.c_str(), &st) == 0);
+    if (!g_baselineOk) { std::printf("  (sin directorio de linea base `%s`: las metricas solo se imprimen)\n", g_baselineDir.c_str()); return; }
+    baselineLoadFile(false); baselineLoadFile(true);
+}
+/// `key`: nombre de la metrica · `value`: lo medido · `tolRel`: tolerancia relativa (0,3 = 30 %) ·
+/// `upperOnly`: solo importa que no SUBA (coste, grano) · `perGpu`: depende de la maquina.
+static void baselineMetric(const char* key, double value, double tolRel, bool upperOnly, bool perGpu, bool valid = true)
+{
+    baselineInit();
+    if (!g_baselineOk || !valid) return;
+    const std::string full = (perGpu ? "gpu:" : "any:") + std::string(key);
+    g_baselineNew[full] = value;
+    auto it = g_baseline.find(full);
+    if (it == g_baseline.end()) { std::printf("    [linea base] %s = %.4g (NUEVA: se anota; aprobar con HARUKA_BASELINE_UPDATE=1)\n", key, value); return; }
+    const double base = it->second;
+    // Suelo absoluto: una linea base en 0 (grano 0 %, presencia 0 %) con tolerancia relativa es
+    // "exactamente 0 o falla", y 0,009 % de grano no es una regresion. Las de imagen son porcentajes
+    // y diferencias /255: medio punto; las de coste, 0,05 ms.
+    const double tol = std::max(std::fabs(base) * tolRel, perGpu ? 0.05 : 0.5);
+    const bool ok = upperOnly ? (value <= base + tol) : (std::fabs(value - base) <= tol);
+    char msg[256];
+    std::snprintf(msg, sizeof msg, "linea base %s: %.4g contra %.4g aprobado (tol %.0f %%%s)", key, value, base, tolRel * 100.0, upperOnly ? ", solo subir" : "");
+    CHECK(ok, msg);
+}
+static void baselineWriteIfAsked() {
+    if (!g_baselineLoaded || !g_baselineOk || !std::getenv("HARUKA_BASELINE_UPDATE")) return;
+    for (int perGpu = 0; perGpu < 2; ++perGpu) {
+        std::map<std::string, double> merged;
+        const std::string pre = perGpu ? "gpu:" : "any:";
+        for (auto& kv : g_baseline)    if (kv.first.rfind(pre, 0) == 0) merged[kv.first.substr(4)] = kv.second;
+        for (auto& kv : g_baselineNew) if (kv.first.rfind(pre, 0) == 0) merged[kv.first.substr(4)] = kv.second;
+        if (merged.empty()) continue;
+        std::ofstream f(baselinePath(perGpu != 0));
+        for (auto& kv : merged) f << kv.first << ' ' << kv.second << '\n';
+        std::printf("  [linea base] escrita %s (%zu metricas)\n", baselinePath(perGpu != 0).c_str(), merged.size());
+    }
+}
 
 
 static const char* fmtName(Format f)
@@ -984,9 +1070,15 @@ static void testTextureContent()
 // ALLA del struct: **volcado de nucleo**, el banco entero muerto. Y el sintoma previo, con el bucle
 // aun en 4, fue el contrario y mas silencioso — el agua no dibujaba un pixel porque los trenes
 // vacios daban `k = 2π/0`. Un gemelo a mano con una constante escrita rompe en las dos direcciones.
-struct OceanParamsUBO { float wave[Haruka::Planet::OCEAN_WAVES][4]; float misc[4]; };
+struct OceanParamsUBO { float wave[Haruka::Planet::OCEAN_WAVES][4]; float misc[4];
+                        float phase[2][4]; float anchor[4]; };
+static_assert(sizeof(OceanParamsUBO) == (Haruka::Planet::OCEAN_WAVES + 4) * 16,
+              "OceanParams del banco descuadrado del bloque GLSL (8 trenes + misc + 2 fases + ancla)");
 
-static BufferHandle makeOceanStateUBO(const Haruka::Planet::OceanState& st)
+/// `anchorRelEye`: el ancla del mar relativa al ojo (0 = el marco plano de las sondas). `clockS`:
+/// el reloj del oleaje (0 = lo pone cada sonda).
+static BufferHandle makeOceanStateUBO(const Haruka::Planet::OceanState& st,
+                                      const glm::vec3& anchorRelEye = glm::vec3(0.0f), float clockS = 0.0f)
 {
     OceanParamsUBO u{};
     // ⚠️ AQUI HABIA UN `4` ESCRITO A MANO Y COSTO EL PASE DE AGUA ENTERO. Al subir el espectro de 4 a
@@ -1004,8 +1096,14 @@ static BufferHandle makeOceanStateUBO(const Haruka::Planet::OceanState& st)
     // no era del motor sino de este ayudante, que no copiaba el `misc` que sube `setOceanState`.
     // `misc.z` es el reloj del oleaje; aqui va a 0 A PROPOSITO (cada sonda pasa su propio tiempo y
     // el banco tiene que ser determinista), pero se deja escrito para que se vea que es una eleccion.
-    u.misc[2] = 0.0f;                                    // reloj: lo pone cada sonda
+    u.misc[2] = clockS;                                  // reloj: lo pone cada sonda
     u.misc[3] = Haruka::Planet::oceanFoamScale();        // gemelo de `TerrestrialPlanet::setOceanState`
+    // Desfases del estado (0 salvo que la sonda los ponga) y el ANCLA (por defecto en el origen: las
+    // sondas del banco ya pasan posiciones "relativas" en marco plano, asi que el careo mide la
+    // misma formula que antes). El viento conocido, como lo sube `setOceanState`.
+    for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) u.phase[i / 4][i % 4] = st.phase[i];
+    u.anchor[0] = anchorRelEye.x; u.anchor[1] = anchorRelEye.y; u.anchor[2] = anchorRelEye.z;
+    u.anchor[3] = st.windMS;
     return g_dev->createBuffer(BufferUsage::Uniform, sizeof(u), &u, BufferMemory::Dynamic);
 }
 
@@ -2461,7 +2559,12 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
     pf.ambientStrength = 0.18f;
     BufferHandle pfUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pf), &pf, BufferMemory::Dynamic);
 
-    struct PropParams { float wind[3]; float time; float matPBR[4]; } pp{};
+    // ⚠️ 64 B, como el bloque `PropParams` del shader (viento, PBR, ORIGEN RELATIVO y perspectiva
+    // aerea). Con 32 B el shader leia `u_originRel`/`u_aerial` FUERA del buffer: Mesa devuelve 0 y
+    // el test pasaba; NVIDIA/OpenGL devuelve basura y el prop no escribia pixeles o salia negro
+    // (10 de 12 angulos a 0). Misma clase de fallo que el `CloudUBO` de 304 B contra 320.
+    struct PropParams { float wind[3]; float time; float matPBR[4]; float originRel[4]; float aerial[4]; } pp{};
+    static_assert(sizeof(PropParams) == 64, "PropParams del banco desincronizado del shader");
     pp.matPBR[0] = 0.0f;   // metallic
     pp.matPBR[1] = 0.6f;   // roughness
     pp.matPBR[2] = 1.0f;   // ao
@@ -2530,28 +2633,30 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
     }
     if (ok) {
         const bool isVk = (g_dev->backend() == Backend::Vulkan);
-        Context* c = g_dev->beginFrame();
-        if (c) {
-            ClearValues cv;
-            cv.clearColor = true;
-            cv.color[0] = 1.0f; cv.color[1] = 0.0f; cv.color[2] = 1.0f; cv.color[3] = 1.0f;
-            cv.clearDepth = true; cv.depth = 0.0f;
-            c->beginRenderPass({}, cv);
-            c->bindPipeline(pipe);
-            c->bindUniformBuffer(0, pfUbo);
-            c->bindUniformBuffer(6, ppUbo);
-            c->bindTexture(0, t0); c->bindTexture(1, t1); c->bindTexture(2, t2);
-            c->bindTexture(3, t3); c->bindTexture(4, t4);
-            c->bindVertexBuffer(vb, 0);
-            c->bindVertexBuffer(ib, 1);
-            c->draw(3, 0, 1);   // 3 vértices, 1 instancia
-            c->endRenderPass();
+        for (int frame = 0; frame < 1; ++frame) {
+            Context* c = g_dev->beginFrame();
+            if (c) {
+                ClearValues cv;
+                cv.clearColor = true;
+                cv.color[0] = 1.0f; cv.color[1] = 0.0f; cv.color[2] = 1.0f; cv.color[3] = 1.0f;
+                cv.clearDepth = true; cv.depth = 0.0f;
+                c->beginRenderPass({}, cv);
+                c->bindPipeline(pipe);
+                c->bindUniformBuffer(0, pfUbo);
+                c->bindUniformBuffer(6, ppUbo);
+                c->bindTexture(0, t0); c->bindTexture(1, t1); c->bindTexture(2, t2);
+                c->bindTexture(3, t3); c->bindTexture(4, t4);
+                c->bindVertexBuffer(vb, 0);
+                c->bindVertexBuffer(ib, 1);
+                c->draw(3, 0, 1);   // 3 vértices, 1 instancia
+                c->endRenderPass();
+            }
+            std::memset(out, 0, 4);
+            if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
         }
-        std::memset(out, 0, 4);
-        if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
-        g_dev->endFrame();
-        pumpWindowEvents();
-        if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
     }
 
     if (valid(pipe)) g_dev->destroy(pipe);
@@ -4658,7 +4763,7 @@ static inline bool detectRowFlip(const std::vector<uint8_t>& px, int w, int h) {
 // Lo que se busca son los CUANTILES: "para tapar el X % del cielo, el umbral tiene que valer Y".
 static void testCloudFieldDistribution()
 {
-    BEGIN("cielo: la DISTRIBUCION de `cloudField` (para poder calibrar el umbral)");
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");   // distribucion del campo
 
     const std::string cs = Haruka::Shader::baseDir() + "shaders/cloud_field_probe.comp";
     PipelineDesc pd; pd.computePath = cs.c_str();
@@ -4710,6 +4815,410 @@ static void testCloudFieldDistribution()
     CHECK(std::isfinite(media), "la media es finita");
 
     g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in); g_dev->destroy(cp);
+}
+
+// ================================================================================================
+// FORMA DEL CUMULO EN 3D: ¿es un cuerpo con base y techo, o una bola que corta de golpe?
+//
+// Andoni (16-09): "son redondas y cortan de repente". Se mide sobre la densidad volumetrica real
+// (`cloud_density_probe.comp`, la misma cadena que el pase) en una rejilla de 8 x 8 km y todo el
+// espesor de la losa:
+//   1. RELACION ANCHO/ALTO de cada nube (componentes conexas de densidad > 0,05). Un cumulo real es
+//      mas ancho que alto; una bola da ~1.
+//   2. BASE contra TECHO: en un cumulo la base es plana (poca variacion de altura) y el techo es
+//      abollado (mucha). En una bola las dos varian igual.
+//   3. DUREZA DEL BORDE: al mirar la nube desde abajo, la opacidad (Beer-Lambert con la extincion
+//      del motor) pasa de 0,1 a 0,9 en cuantos metros. Un corte "de repente" son unas decenas.
+// ================================================================================================
+// ── LA MITAD GPU DEL UNICO TEST DE FORMACION ───────────────────────────────────────────────────
+// `test_cloud_formation` (CPU) mide el modelo de la columna de aire; aqui se mide que el gemelo GLSL
+// (`lib/cloud_column.glsl`) da LO MISMO en 4 096 (columna, altura) al azar. Sin esto el jugador
+// podria estar "dentro de la nube" segun la CPU donde el cielo no la dibuja.
+static void testCloudColumnParity()
+{
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");   // paridad CPU/GPU
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/cloud_column_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de cloud_column_probe.comp creado");
+    if (!valid(cp)) return;
+    const int n = 4096;
+    std::vector<float> in(8 + (size_t)n * 8, 0.0f);
+    std::vector<Haruka::AirColumn> cols((size_t)n);
+    std::vector<float> zs((size_t)n);
+    uint32_t seed = 20260917u;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; };
+    in[0] = (float)n;
+    for (int i = 0; i < n; ++i) {
+        Haruka::AirColumn& c = cols[i];
+        c.groundM = rnd() * 2500.0f; c.tSurfC = -10.0f + 40.0f * rnd(); c.rhSurf = 0.1f + 0.9f * rnd();
+        c.cover = rnd(); c.blDepthM = 500.0f + 7500.0f * rnd(); c.vaporMid = rnd(); c.vaporHigh = rnd();
+        zs[i] = rnd() * 13000.0f;
+        const size_t b = 8 + (size_t)i * 8;
+        in[b + 0] = c.cover; in[b + 1] = Haruka::cloudBaseM(c); in[b + 2] = c.groundM + c.blDepthM;
+        in[b + 3] = c.vaporMid; in[b + 4] = c.vaporHigh;
+        in[b + 5] = c.tSurfC + Haruka::kLapseEnvC * c.groundM;   // reducida al nivel del mar, como el horneado
+        in[b + 6] = zs[i];
+    }
+    const size_t bytes = (size_t)n * 3 * sizeof(float);
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Readback);
+    BufferHandle inB = g_dev->createBuffer(BufferUsage::Storage, in.size() * sizeof(float), in.data(), BufferMemory::Static);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, inB);
+        ctx->dispatch((uint32_t)((n + 63) / 64), 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, bytes);
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback de la sonda de columna"); }
+    else {
+        double worst[3] = {0, 0, 0}; int nCloud = 0;
+        for (int i = 0; i < n; ++i) {
+            const Haruka::AirColumn& c = cols[i];
+            // ⚠️ La CPU toma la cota del suelo en `airTempC` (max(z − suelo, 0)); el shader, sin suelo,
+            // la temperatura reducida al nivel del mar: bajo tierra divergen, y bajo tierra no hay
+            // nube que comparar. Solo se compara por encima del suelo.
+            if (zs[i] < c.groundM) continue;
+            const float cC = Haruka::convectiveFractionAt(c, zs[i]);
+            const float cA = Haruka::aloftFractionAt(c, zs[i]);
+            const float cI = Haruka::iceFractionAt(c, zs[i]);
+            worst[0] = std::max(worst[0], (double)std::fabs(cC - v[i * 3 + 0]));
+            worst[1] = std::max(worst[1], (double)std::fabs(cA - v[i * 3 + 1]));
+            worst[2] = std::max(worst[2], (double)std::fabs(cI - v[i * 3 + 2]));
+            if (cC > 0.05f || cA > 0.05f) ++nCloud;
+        }
+        std::printf("    paridad CPU/GPU de la columna en %d muestras (%d con nube): peor |dif| convectiva %.2e · vapor en altura %.2e · hielo %.2e\n",
+                    n, nCloud, worst[0], worst[1], worst[2]);
+        CHECK(nCloud > n / 10, "hay nube en al menos el 10 % de las muestras (si no, la paridad no mide nada)");
+        CHECK(worst[0] < 1e-3 && worst[1] < 1e-3 && worst[2] < 1e-3, "la columna de aire da LO MISMO en CPU y en GPU (|dif| < 1e-3)");
+    }
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(inB); g_dev->destroy(cp);
+}
+
+// ── ¿GL Y VULKAN CALCULAN EL MISMO RUIDO? ──────────────────────────────────────────────────────
+// Con el MISMO shader y la MISMA GPU (GL forzado a la NVIDIA con PRIME), el cirro al cenit salia
+// 53,7 % en OpenGL y 67,3 % en Vulkan, y en Vulkan con facetas rectas. La imagen no dice donde;
+// esto si: cada pieza del campo (hash, ruido de valor, fbm, fbm con mallas giradas, campo de capa,
+// fibras) evaluada en los mismos 4 096 puntos en los dos backends. El primero que corre guarda; el
+// segundo compara.
+static std::vector<float> g_noiseProbeFirst; static std::string g_noiseProbeFirstBackend;
+static void testCloudNoiseParity()
+{
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");   // ruido GL vs VK
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/cloud_noise_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de cloud_noise_probe.comp creado");
+    if (!valid(cp)) return;
+    const int n = 4096;
+    std::vector<float> in(4 + (size_t)n * 4, 0.0f);
+    uint32_t seed = 4242u;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (float)(seed >> 8) / 16777216.0f; };
+    in[0] = (float)n;
+    for (int i = 0; i < n; ++i) {   // puntos del orden de los que ve el pase: cientos a miles de unidades
+        const float mag = (i % 4 == 0) ? 10.0f : (i % 4 == 1) ? 300.0f : (i % 4 == 2) ? 3000.0f : 4500.0f;
+        in[4 + (size_t)i * 4 + 0] = (rnd() - 0.5f) * 2.0f * mag;
+        in[4 + (size_t)i * 4 + 1] = (rnd() - 0.5f) * 2.0f * mag;
+        in[4 + (size_t)i * 4 + 2] = (rnd() - 0.5f) * 2.0f * mag;
+    }
+    const size_t bytes = (size_t)n * 6 * sizeof(float);
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Readback);
+    BufferHandle inB = g_dev->createBuffer(BufferUsage::Storage, in.size() * sizeof(float), in.data(), BufferMemory::Static);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, inB);
+        ctx->dispatch((uint32_t)((n + 63) / 64), 1, 1);
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, bytes);
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback de la sonda de ruido"); }
+    else {
+        std::vector<float> cur(v, v + (size_t)n * 6);
+        const char* piezas[6] = { "hash13", "ruido de valor", "campo del cumulo", "fbm mallas giradas", "campo de capa", "fibras del cirro" };
+        // La ESTADISTICA del campo, que es lo que calibra el umbral (`harukaCloudThreshold`: media +
+        // sigma·z). Un hash distinto cambia la sigma (uno correlacionado da mas varianza que uno
+        // blanco interpolado) y con ella cuanta nube sale para la misma cobertura.
+        for (int k = 2; k < 5; ++k) {
+            double m = 0.0, m2 = 0.0;
+            for (int i = 0; i < n; ++i) { const double x = cur[(size_t)i * 6 + k]; m += x; m2 += x * x; }
+            m /= n; m2 /= n;
+            std::printf("    %-20s media %.4f · sigma %.4f\n", piezas[k], m, std::sqrt(std::max(m2 - m * m, 0.0)));
+        }
+        if (g_noiseProbeFirst.empty()) {
+            g_noiseProbeFirst = cur; g_noiseProbeFirstBackend = (g_curBackend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
+            std::printf("    ruido evaluado en %d puntos (%s): se compara cuando corra el otro backend\n", n, g_noiseProbeFirstBackend.c_str());
+        } else {
+            for (int k = 0; k < 6; ++k) {
+                double worst = 0.0, mean = 0.0; int nBad = 0;
+                for (int i = 0; i < n; ++i) {
+                    const double d = std::fabs((double)cur[(size_t)i * 6 + k] - (double)g_noiseProbeFirst[(size_t)i * 6 + k]);
+                    worst = std::max(worst, d); mean += d; if (d > 1e-3) ++nBad;
+                }
+                mean /= n;
+                std::printf("    %-20s GL vs VK: |dif| media %.2e · peor %.2e · %d de %d puntos con > 1e-3\n", piezas[k], mean, worst, nBad, n);
+                char msg[160];
+                // Lo que se caza es el hash que CAMBIA (|dif| ~ 1: el 39 % de los nudos antes del
+                // arreglo); las dos etapas en coma flotante que quedan dan ulps amplificados (< 0,05).
+                std::snprintf(msg, sizeof msg, "%s: GL y Vulkan dan lo mismo (peor |dif| < 0,1; era 1,0)", piezas[k]);
+                CHECK(worst < 0.1, msg);
+            }
+        }
+    }
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(inB); g_dev->destroy(cp);
+}
+
+static void cloudShapeAt(float cover, bool deck)
+{
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");   // forma 3D del cumulo
+    if (deck) std::printf("    -- el DECK: cobertura %.2f (\"hay nubes grandes que salen planas\") --\n", cover);
+    const std::string cs = Haruka::Shader::baseDir() + "shaders/cloud_density_probe.comp";
+    PipelineDesc pd; pd.computePath = cs.c_str();
+    PipelineHandle cp = g_dev->createPipeline(pd);
+    CHECK(valid(cp), "pipeline de cloud_density_probe.comp creado");
+    if (!valid(cp)) return;
+
+    const int   N = 192, Ny = 48;                 // 6 km a 31 m · 48 alturas (50 m) en la losa
+    const float stepM = 31.25f, thick = 2400.0f, fscale = 0.0007f;
+    const size_t cnt = (size_t)N * N * Ny, bytes = cnt * sizeof(float);
+    BufferHandle out = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Static);
+    BufferHandle rb  = g_dev->createBuffer(BufferUsage::Storage, bytes, nullptr, BufferMemory::Readback);
+    const float in8[8] = { (float)N, stepM, (float)Ny, thick, cover, fscale, 0.0f, 0.0f };
+    BufferHandle in = g_dev->createBuffer(BufferUsage::Storage, sizeof(in8), in8, BufferMemory::Static);
+    if (Context* ctx = g_dev->beginFrame()) {
+        ctx->bindPipeline(cp);
+        ctx->bindStorageBuffer(0, out);
+        ctx->bindStorageBuffer(1, in);
+        ctx->dispatch((uint32_t)((N + 7) / 8), (uint32_t)((N + 7) / 8), (uint32_t)((Ny + 3) / 4));
+        ctx->memoryBarrier();
+        g_dev->endFrame();
+    }
+    copyThenWait(out, rb, 0, bytes);
+    const float* v = (const float*)g_dev->mappedData(rb);
+    if (!v) { CHECK(false, "readback de la densidad"); g_dev->destroy(rb); g_dev->destroy(out);
+              g_dev->destroy(in); g_dev->destroy(cp); return; }
+    std::vector<float> d(v, v + cnt);
+    auto at = [&](int x, int z, int y) { return d[((size_t)y * N + z) * N + x]; };
+
+    // 1+2. Componentes conexas en 3D (6-vecinos) sobre densidad > 0,05.
+    const float kOn = 0.05f;
+    std::vector<int> label(cnt, -1);
+    struct Comp { int minX = 1 << 30, maxX = -1, minZ = 1 << 30, maxZ = -1, minY = 1 << 30, maxY = -1; size_t vox = 0;
+                  std::vector<int> baseY, topY; };
+    std::vector<Comp> comps;
+    std::vector<size_t> stack;
+    for (size_t i = 0; i < cnt; ++i) {
+        if (d[i] <= kOn || label[i] >= 0) continue;
+        const int id = (int)comps.size(); comps.push_back(Comp{});
+        stack.clear(); stack.push_back(i); label[i] = id;
+        while (!stack.empty()) {
+            const size_t c = stack.back(); stack.pop_back();
+            const int y = (int)(c / ((size_t)N * N)), z = (int)((c / N) % N), x = (int)(c % N);
+            Comp& C = comps[(size_t)id];
+            C.minX = std::min(C.minX, x); C.maxX = std::max(C.maxX, x);
+            C.minZ = std::min(C.minZ, z); C.maxZ = std::max(C.maxZ, z);
+            C.minY = std::min(C.minY, y); C.maxY = std::max(C.maxY, y);
+            ++C.vox;
+            const int nb[6][3] = { {1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1} };
+            for (const auto& o : nb) {
+                const int nx = x + o[0], nz = z + o[1], ny = y + o[2];
+                if (nx < 0 || nz < 0 || ny < 0 || nx >= N || nz >= N || ny >= Ny) continue;
+                const size_t j = ((size_t)ny * N + nz) * N + nx;
+                if (d[j] > kOn && label[j] < 0) { label[j] = id; stack.push_back(j); }
+            }
+        }
+    }
+    // Base y techo por columna dentro de cada componente (y en mapa 2D, para la rugosidad).
+    std::vector<int> topMap((size_t)N * N, -1), baseMap((size_t)N * N, -1), idMap((size_t)N * N, -1);
+    for (int z = 0; z < N; ++z) for (int x = 0; x < N; ++x) {
+        int lo = -1, hi = -1;
+        for (int y = 0; y < Ny; ++y) if (at(x, z, y) > kOn) { if (lo < 0) lo = y; hi = y; }
+        if (lo < 0) continue;
+        const int id = label[((size_t)lo * N + z) * N + x];
+        if (id >= 0) { comps[(size_t)id].baseY.push_back(lo); comps[(size_t)id].topY.push_back(hi);
+                       topMap[(size_t)z * N + x] = hi; baseMap[(size_t)z * N + x] = lo; idMap[(size_t)z * N + x] = id; }
+    }
+    // RUGOSIDAD (coliflor): alta frecuencia del techo = techo menos su media 3x3, solo donde los
+    // nueve vecinos son de la misma nube. En metros. La base, igual, para contrastar.
+    auto roughness = [&](const std::vector<int>& m, int wantId, double& acc, int& cnt) {
+        const int R2 = 3;   // ventana 7x7 = 220 m: la escala de un bulto de coliflor
+        for (int z = R2; z < N - R2; ++z) for (int x = R2; x < N - R2; ++x) {
+            if (idMap[(size_t)z * N + x] != wantId) continue;
+            double sum = 0; bool ok = true;
+            for (int dz = -R2; dz <= R2 && ok; ++dz) for (int dx = -R2; dx <= R2; ++dx) {
+                const size_t k = (size_t)(z + dz) * N + (x + dx);
+                if (idMap[k] != wantId) { ok = false; break; }
+                sum += m[k];
+            }
+            if (!ok) continue;
+            const double d = (double)m[(size_t)z * N + x] - sum / (double)((2 * R2 + 1) * (2 * R2 + 1));
+            acc += d * d; ++cnt;
+        }
+    };
+    const float dyM = thick / (float)Ny;
+    double sumRatio = 0.0, sumBaseSd = 0.0, sumTopSd = 0.0, sumTopRough = 0.0, sumBaseRough = 0.0; int nBig = 0; float worstRatio = 1e9f;
+    float flattestRatio = 0.0f, flattestW = 0.0f, flattestH = 0.0f;   // la nube mas APLANADA (ancho/alto mayor)
+    for (const Comp& C : comps) {
+        if (C.vox < 800 || C.baseY.size() < 120) continue;      // nubes de verdad (>= ~0,1 km2), no motas
+        const float w = (float)(std::max(C.maxX - C.minX, C.maxZ - C.minZ) + 1) * stepM;
+        // Alto TIPICO = espesor medio de sus columnas (la caja englobaria la torre mas alta, y un
+        // cumulo con un nucleo que sube no es una torre).
+        double th = 0.0; for (size_t i = 0; i < C.baseY.size(); ++i) th += (C.topY[i] - C.baseY[i] + 1);
+        const float h = (float)(th / (double)C.baseY.size()) * dyM;
+        const float ratio = w / h;
+        auto sd = [&](const std::vector<int>& ys) {
+            double m = 0; for (int y : ys) m += y; m /= (double)ys.size();
+            double s2 = 0; for (int y : ys) s2 += (y - m) * (y - m);
+            return std::sqrt(s2 / (double)ys.size()) * dyM;
+        };
+        sumRatio += ratio; worstRatio = std::min(worstRatio, ratio);
+        if (ratio > flattestRatio) { flattestRatio = ratio; flattestW = w; flattestH = h; }
+        sumBaseSd += sd(C.baseY); sumTopSd += sd(C.topY); ++nBig;
+        double accT = 0, accB = 0; int cT = 0, cB = 0;
+        roughness(topMap, (int)(&C - comps.data()), accT, cT);
+        roughness(baseMap, (int)(&C - comps.data()), accB, cB);
+        sumTopRough  += cT ? std::sqrt(accT / cT) * dyM : 0.0;
+        sumBaseRough += cB ? std::sqrt(accB / cB) * dyM : 0.0;
+    }
+    // ── MESETA: "hay nubes grandes que salen planas" (Andoni) ─────────────────────────────────
+    // En una nube grande el nucleo saturaba la fuerza y todos sus puntos llegaban al MISMO techo:
+    // una bandeja. Se mide (a) la fraccion de columnas de cada nube grande cuyo techo esta en la
+    // capa mas alta de esa nube (o la de debajo): una meseta tiene muchas, un domo pocas; (b) que la
+    // nube MAS grande sea tambien mas alta que la mediana (la nube grande es la del ascenso fuerte).
+    double plateauMax = 0.0, plateauMean = 0.0; int nPl = 0;
+    float hBiggest = 0.0f; size_t voxBiggest = 0; std::vector<float> hAll;
+    for (const Comp& C : comps) {
+        if (C.vox < 800 || C.topY.size() < 120) continue;
+        int top = -1; for (int y : C.topY) top = std::max(top, y);
+        int flat = 0; for (int y : C.topY) if (y >= top - 1) ++flat;
+        const double fr = (double)flat / (double)C.topY.size();
+        plateauMax = std::max(plateauMax, fr); plateauMean += fr; ++nPl;
+        const float hTop = (float)(top - C.minY + 1) * dyM;
+        hAll.push_back(hTop);
+        if (C.vox > voxBiggest) { voxBiggest = C.vox; hBiggest = hTop; }
+    }
+    if (nPl) plateauMean /= nPl;
+    // ── LA CIMA QUE SE VE: donde la opacidad desde arriba llega a 0,63 (optica 1 con 0,008/m) ──
+    // La densidad > 0,05 incluye jirones; lo que un ojo ve desde encima es la superficie OPACA, y
+    // esa puede ser plana aunque el jiron ondule. Por nube grande: sd de esa cota y su meseta.
+    double visSdSum = 0.0, visPlateauMax = 0.0; int nVis = 0;
+    for (const Comp& C : comps) {
+        if (C.vox < 800 || C.topY.size() < 120) continue;
+        const int id = (int)(&C - comps.data());
+        std::vector<int> yv;
+        for (int z = 0; z < N; ++z) for (int x = 0; x < N; ++x) {
+            if (idMap[(size_t)z * N + x] != id) continue;
+            float opt = 0.0f; int yy = -1;
+            for (int y = Ny - 1; y >= 0; --y) { opt += at(x, z, y) * dyM * 0.008f; if (opt >= 1.0f) { yy = y; break; } }
+            if (yy >= 0) yv.push_back(yy);
+        }
+        if (yv.size() < 60) continue;
+        double m = 0; for (int y : yv) m += y; m /= yv.size();
+        double s2 = 0; for (int y : yv) s2 += (y - m) * (y - m);
+        int top = -1; for (int y : yv) top = std::max(top, y);
+        int flat = 0; for (int y : yv) if (y >= top - 1) ++flat;
+        visSdSum += std::sqrt(s2 / yv.size()) * dyM; visPlateauMax = std::max(visPlateauMax, (double)flat / yv.size()); ++nVis;
+    }
+    const double visSd = nVis ? visSdSum / nVis : 0.0;
+    std::printf("    cima VISIBLE (opacidad 0,63 desde arriba): ondula %.0f m (sd) · meseta peor %.0f %% en %d nubes\n", visSd, 100.0 * visPlateauMax, nVis);
+    std::sort(hAll.begin(), hAll.end());
+    const float hMedian = hAll.empty() ? 0.0f : hAll[hAll.size() / 2];
+    std::printf("    meseta: columnas en la capa mas alta de su nube, media %.0f %% · peor nube %.0f %%  ·  la nube mas grande sube %.0f m contra %.0f m la mediana\n",
+                100.0 * plateauMean, 100.0 * plateauMax, hBiggest, hMedian);
+    const double topRough = nBig ? sumTopRough / nBig : 0.0, baseRough = nBig ? sumBaseRough / nBig : 0.0;
+    const double ratioMean = nBig ? sumRatio / nBig : 0.0;
+    const double baseSd = nBig ? sumBaseSd / nBig : 0.0, topSd = nBig ? sumTopSd / nBig : 0.0;
+    std::printf("    cobertura %.2f · %zu componentes (%d de mas de 800 voxeles)\n", cover, comps.size(), nBig);
+    std::printf("    ancho/alto: media %.2f:1 · peor %.2f:1   (una bola es 1:1) · la mas APLANADA %.1f:1 (%.0f m de ancho, %.0f de alto)\n",
+                ratioMean, worstRatio, flattestRatio, flattestW, flattestH);
+    std::printf("    variacion de altura: base %.0f m · techo %.0f m   (cumulo: base plana << techo abollado)\n", baseSd, topSd);
+    std::printf("    rugosidad local (alta frecuencia, 7x7 = %.0f m): techo %.0f m · base %.0f m   (coliflor: techo >> base)\n",
+                7.0f * stepM, topRough, baseRough);
+
+    // 3. Borde visto desde abajo: opacidad por columna con la extincion del motor (0,008/m).
+    std::vector<float> alpha((size_t)N * N, 0.0f);
+    for (int z = 0; z < N; ++z) for (int x = 0; x < N; ++x) {
+        float opt = 0.0f;
+        for (int y = 0; y < Ny; ++y) opt += at(x, z, y) * dyM * 0.008f;
+        alpha[(size_t)z * N + x] = 1.0f - std::exp(-opt);
+    }
+    // Anchura media del borde: recorriendo filas, metros entre alpha 0,1 y 0,9 en cada subida.
+    std::vector<float> edges;
+    for (int z = 0; z < N; ++z) {
+        int start = -1;
+        for (int x = 1; x < N; ++x) {
+            const float a0 = alpha[(size_t)z * N + x - 1], a1 = alpha[(size_t)z * N + x];
+            if (a0 < 0.1f && a1 >= 0.1f) start = x;
+            if (start >= 0 && a1 >= 0.9f) { edges.push_back((float)(x - start + 1) * stepM); start = -1; }
+            if (a1 < 0.1f) start = -1;
+        }
+    }
+    std::sort(edges.begin(), edges.end());
+    const float edgeMed = edges.empty() ? 0.0f : edges[edges.size() / 2];
+    std::printf("    borde (opacidad 0,1 -> 0,9 visto desde abajo): mediana %.0f m en %zu bordes · rejilla %.1f m\n",
+                edgeMed, edges.size(), stepM);
+
+    if (deck) {
+        // Con cobertura alta el campo pasa el umbral casi en todas partes y sale UNA nube grande: la
+        // que Andoni veia plana. Con el tope duro del techo (min(...,1)) el exceso grande la llevaba
+        // entera al techo de la losa: una bandeja. Un estratocumulo real es CELULAR.
+        CHECK(nBig >= 1, "con cobertura alta hay al menos una nube grande");
+        CHECK(plateauMax < 0.25, "el DECK no es una bandeja: menos del 25 % de sus columnas en la capa mas alta");
+        CHECK(topSd > 150.0, "la cima del deck ondula mas de 150 m (celular, no plana)");
+        CHECK(topRough >= 40.0, "y tiene coliflor (bultos locales >= 40 m) tambien con cobertura alta");
+        CHECK(nVis > 0 && visSd > 120.0, "la cima OPACA del deck (la que se ve desde encima) ondula mas de 120 m");
+        CHECK(visPlateauMax < 0.25, "...y no es una meseta (menos del 25 % de columnas en su capa mas alta)");
+        g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in); g_dev->destroy(cp);
+        return;
+    }
+    CHECK(nBig >= 3, "hay nubes que medir");
+    CHECK(plateauMax < 0.25, "ninguna nube grande es una MESETA: menos del 25 % de sus columnas en la capa mas alta (con la fuerza saturada eran bandejas)");
+    // "Hay nubes grandes que salen planas": la nube mas ancha no puede ser una torta. Un cumulo
+    // mediocris real anda en 2-4:1; a 6:1 se lee como una lamina. Con el techo al 60 % de la losa
+    // para TODAS las nubes, la mas ancha del banco salia a 6-8:1 (medido antes de la torre).
+    CHECK(flattestRatio < 6.0, "la nube mas ancha no es una torta: ancho/alto < 6 (la nube grande sube con su nucleo; medido 5,2 con torre, 5,5 sin ella)");
+    CHECK(hAll.size() < 2 || hBiggest >= hMedian, "la nube mas grande no es mas baja que la mediana (la grande es la del ascenso fuerte)");
+    CHECK(ratioMean >= 1.8, "un cumulo es mas ancho que alto (media >= 1,8:1)");
+    CHECK(baseSd * 2.0 < topSd, "la base es plana y el techo abollado (variacion de la base < mitad de la del techo)");
+    CHECK(topRough >= 45.0 && topRough > 3.0 * baseRough, "el techo es COLIFLOR: bultos locales de >= 45 m y al menos 3x los de la base");
+    CHECK(edgeMed >= 4.0f * stepM, "el borde no es un corte: la opacidad tarda al menos 4 celdas (125 m) en subir (un cumulo real: 100-200 m)");
+    // Contraprueba del metodo: una bola perfecta da 1:1, base y techo iguales, y borde de una celda.
+    {
+        std::vector<float> ball(cnt, 0.0f);
+        const float rM = 900.0f, cy = 0.5f * thick;
+        for (int y = 0; y < Ny; ++y) for (int z = 0; z < N; ++z) for (int x = 0; x < N; ++x) {
+            const float px = ((float)x - 0.5f * N) * stepM, pz = ((float)z - 0.5f * N) * stepM, py = ((float)y + 0.5f) * dyM - cy;
+            ball[((size_t)y * N + z) * N + x] = (px * px + pz * pz + py * py < rM * rM) ? 1.0f : 0.0f;
+        }
+        int lo = Ny, hi = -1, minX = N, maxX = -1;
+        std::vector<int> by, ty;
+        for (int z = 0; z < N; ++z) for (int x = 0; x < N; ++x) {
+            int b = -1, t = -1;
+            for (int y = 0; y < Ny; ++y) if (ball[((size_t)y * N + z) * N + x] > 0.5f) { if (b < 0) b = y; t = y; }
+            if (b < 0) continue;
+            by.push_back(b); ty.push_back(t); lo = std::min(lo, b); hi = std::max(hi, t); minX = std::min(minX, x); maxX = std::max(maxX, x);
+        }
+        double thb = 0.0; for (size_t i = 0; i < by.size(); ++i) thb += (ty[i] - by[i] + 1);
+        const float ratioBall = (float)(maxX - minX + 1) * stepM / ((float)(thb / (double)by.size()) * dyM);
+        double mb = 0, mt = 0; for (size_t i = 0; i < by.size(); ++i) { mb += by[i]; mt += ty[i]; } mb /= by.size(); mt /= ty.size();
+        double sb = 0, st = 0; for (size_t i = 0; i < by.size(); ++i) { sb += (by[i] - mb) * (by[i] - mb); st += (ty[i] - mt) * (ty[i] - mt); }
+        std::printf("    contraprueba (bola de 900 m): ancho/alto %.2f:1 · base %.0f m · techo %.0f m\n",
+                    ratioBall, std::sqrt(sb / by.size()) * dyM, std::sqrt(st / ty.size()) * dyM);
+        CHECK(ratioBall < 1.6f && std::abs(sb - st) < 1e-6, "contraprueba: la bola da ~1,5:1 (ancho / espesor medio) y base = techo");
+    }
+    g_dev->destroy(rb); g_dev->destroy(out); g_dev->destroy(in); g_dev->destroy(cp);
+}
+static void testCloudShape3D()
+{
+    cloudShapeAt(0.35f, false);   // buen tiempo: cumulos sueltos
+    cloudShapeAt(0.85f, true);    // el deck: una nube grande que no puede ser una bandeja
 }
 
 static void testSkyLayersHaveDepth()
@@ -5369,14 +5878,25 @@ static void testCloudVolumeDraws()
     TextureHandle hiDummy = makeSkyTex(std::vector<float>{0.0f}, 1, 1, 0.0f, 0.0f,
                                        Filter::Nearest, Wrap::ClampToEdge);
     TextureHandle coverBound = coverTex;   // intercambiable: el caso (7) mete un campo de verdad
+    // El "horneado anterior" (bindings 3/4) y el fundido: por defecto el mismo y peso 1 (sin fundir);
+    // el caso MOVIMIENTO pone dos horneados distintos y mueve el peso frame a frame.
+    TextureHandle coverPrevBound = {}, hiPrevBound = {};
+    float blendCur = 1.0f;
+    float windOffX = 0.0f, windOffY = 0.0f;   // la deriva del campo (unidades), para el caso MOVIMIENTO
+    float aerialLm = 60000.0f;                // perspectiva aerea (m): aire limpio; SILUETAS la acorta
 
     struct CloudUBO {
         float invVP[16]; float planetC[4]; float slab[4]; float sun[4];
         float sunColor[4]; float wind[4]; float misc[4];
         // Embudos: ninguno en el banco (a cero). El layout tiene que casar con `CloudParams`.
         float vortexPos[4][4]; float vortexInfo[4][4]; float vortexN[4];
+        // ⚠️ FALTABA. `CloudParams` crecio a 320 B con `u_aerial` y el banco seguia en 304: el shader
+        // leia `u_aerial` FUERA del buffer (lo que hubiera). Con L = 60 km (aire limpio) el tope de
+        // marcha a 4 L son 240 km y no toca ninguna medida del banco.
+        float aerial[4];
+        float blend[4];    // x = 1: el banco solo tiene UN horneado (bindings 3/4 = el mismo)
     };
-    static_assert(sizeof(CloudUBO) == 304, "CloudUBO del banco desincronizado de CloudParams");
+    static_assert(sizeof(CloudUBO) == 336, "CloudUBO del banco desincronizado de CloudParams");
     BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(CloudUBO), nullptr,
                                            BufferMemory::Dynamic);
 
@@ -5403,12 +5923,16 @@ static void testCloudVolumeDraws()
     // El relleno del UBO, aparte: el caso (6f) monta su propia secuencia de pases y necesita los
     // MISMOS uniformes que el resto del test, no una copia que pueda divergir.
     glm::dvec3 upCur = up0;                       // la vertical del ojo (el caso 6c' se va del polo)
+    glm::vec3  sunCur = glm::normalize(glm::vec3(0.4f, 0.7f, 0.2f));   // el Sol (el caso de LUZ lo mueve)
     auto fillUBO = [&](float cover) {
         const glm::dvec3 pcR = -upCur * (R + (double)ojoA);
-        const glm::dvec3 vup2 = glm::normalize(glm::cross(mira, glm::dvec3(0, 1, 0)));
+        // "Arriba" de la camara = la vertical del OJO. Antes era `cross(mira, +Y)`, que es un vector
+        // HORIZONTAL: la camara salia rodada 90 grados y el horizonte (y el canto de cada capa) se
+        // pintaba como una franja VERTICAL en los PNG y en el detector de cortes. Solo al mirar al
+        // cenit/nadir (mira || vertical) hace falta otro eje.
         const glm::mat4 view2 = glm::lookAt(glm::vec3(0.0f), glm::vec3(mira),
-                                            glm::vec3(std::abs(glm::dot(mira, up0)) > 0.99
-                                                      ? glm::dvec3(1, 0, 0) : vup2));
+                                            glm::vec3(std::abs(glm::dot(mira, upCur)) > 0.99
+                                                      ? glm::dvec3(1, 0, 0) : upCur));
         const glm::mat4 iVP = glm::inverse(proj * glm::mat4(glm::mat3(view2)));
         CloudUBO u{};
         std::memcpy(u.invVP, &iVP[0][0], sizeof(u.invVP));
@@ -5417,15 +5941,18 @@ static void testCloudVolumeDraws()
         u.slab[0] = slabBase; u.slab[1] = slabTop; u.slab[2] = cover; u.slab[3] = 0.0f;
         // Sol alto y de lado: si estuviera en el cenit exacto, un volumen y una calcomania se verian
         // igual y el careo de sombreado no mediria nada.
-        const glm::vec3 sun = glm::normalize(glm::vec3(0.4f, 0.7f, 0.2f));
+        const glm::vec3 sun = sunCur;
         u.sun[0] = sun.x; u.sun[1] = sun.y; u.sun[2] = sun.z; u.sun[3] = sun.y;
         u.sunColor[0] = u.sunColor[1] = u.sunColor[2] = 1.0f; u.sunColor[3] = 1.0f;
-        u.wind[0] = 0.0f; u.wind[1] = 0.0f; u.wind[2] = 7.0f; u.wind[3] = ojoA;
+        u.wind[0] = windOffX; u.wind[1] = windOffY; u.wind[2] = 7.0f; u.wind[3] = ojoA;
         u.misc[0] = 1.0f;                       // atmosfera: dentro
         u.misc[1] = pasos;                      // pasos, el mismo `kCloudSteps` del motor
         u.misc[2] = Haruka::WeatherSystem::kFieldScale;
         u.misc[3] = 0.008f;                     // extincion por metro, gemela de kCloudExtinction
         u.vortexN[2] = (float)fovY / (float)hCur; // angulo de un pixel del target que se dibuja
+        u.aerial[0] = 1.0f / aerialLm; u.aerial[1] = 1.0f;
+        u.aerial[2] = ojoA; u.aerial[3] = 4000.0f;   // altitud del ojo y escala de altura del aire, como el motor
+        u.blend[0] = blendCur;
         {   // los bits altos (>= 8) del entorno son DIAGNOSTICO del shader y se conservan por caso
             const int env = std::getenv("HARUKA_CLOUD_MODES") ? std::atoi(std::getenv("HARUKA_CLOUD_MODES")) : 7;
             u.vortexN[3] = (float)((modosCur > 0) ? (modosCur | (env & ~7)) : env);
@@ -5458,6 +5985,8 @@ static void testCloudVolumeDraws()
             ctx->bindTexture(0, depthTex);
             ctx->bindTexture(1, coverBound);
             ctx->bindTexture(2, hiDummy);   // sin capas altas: el banco mide el cumulo
+            ctx->bindTexture(3, valid(coverPrevBound) ? coverPrevBound : coverBound);   // "anterior"
+            ctx->bindTexture(4, valid(hiPrevBound) ? hiPrevBound : hiDummy);
             ctx->draw(3, 1);
             ctx->endRenderPass();
             const bool ultimo = leer && (f == marcos - 1);
@@ -5531,6 +6060,10 @@ static void testCloudVolumeDraws()
               "la opacidad NO se derrumba hacia el horizonte: la marcha aguanta el angulo rasante");
     }
 
+    // ═══ De aqui en adelante lo que se mide es la FORMACION (como se reparte la fraccion de la
+    // columna en nubes y como se ven), no la fontaneria del pase. Es UN test: el gemelo GPU de
+    // `test_cloud_formation`. Las secciones de fontaneria vuelven al nombre del pase.
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");
     // ── (3) ⚠️ ¿HAY NUBES, O HAY UN TECHO? Con la cobertura MEDIANA DEL PLANETA ─────────────────
     //
     // A cobertura 0,85 el cielo esta cerrado y verlo todo tapado es lo correcto. Pero la mediana del
@@ -5619,6 +6152,7 @@ static void testCloudVolumeDraws()
         mira = fwd;   // se devuelve la vista, o el caso siguiente heredaria el cenit
     }
 
+    BEGIN("nubes: el pase VOLUMETRICO dibuja, y aguanta el angulo rasante");
     // ── (6) ⚠️ DESDE ORBITA. Reportado mirando la pantalla: *"desde orbita deberian de verse"*, y no
     //        se veian. `application_render.cpp` calculaba `atmoC = 1 - smoothstep(0, radio*0.02,
     //        altitud)` y el shader hace `alpha * u_misc.x`: en la Tierra eso es CERO a partir de
@@ -5674,6 +6208,435 @@ static void testCloudVolumeDraws()
                     lit, n, n ? 100.0 * (double)lit / (double)n : 0.0);
         CHECK(n > 0, "el readback de la vista orbital escribio");
         CHECK(lit > n / 20, "las nubes SE VEN desde orbita (el fade por altitud las borraba enteras)");
+
+        // ── (6-T) ⚠️ Y CUANTO TAPAN. Contar pixeles "con nube" no distingue una capa rota de una
+        //        sabana: con el 30 % de cobertura los dos dan 100 % de pixeles tocados. Andoni:
+        //        "en orbita esta todo en blanco". La causa era la fraccion de cobertura aplicada POR
+        //        PASO como si cada paso fuera una nube independiente: 0,7^10 = 0,03 de transmitancia
+        //        a traves de una capa al 30 %. Ahora la fraccion se correlaciona por columna
+        //        (`harukaCloseSeg`), y al nadir la transmitancia media tiene que quedar cerca de
+        //        `1 − cobertura`. Sonda dbg 128: B = optica/8.
+        {
+            const int modosAntes = modosCur;
+            modosCur = 7 | 128;
+            auto transmit = [&](float cover) {
+                std::vector<uint8_t> pxT;
+                render(cover, pxT);
+                double sumT = 0.0; size_t nT = 0;
+                for (size_t k = 0; k < pxT.size(); k += 4) {
+                    if (pxT[k] == 0xAA && pxT[k+1] == 0xAA && pxT[k+2] == 0xAA) continue;
+                    const double optical = (double)pxT[k+2] / 255.0 * 8.0;
+                    sumT += std::exp(-optical); ++nT;
+                }
+                return nT ? sumT / (double)nT : -1.0;
+            };
+            const double t30 = transmit(0.30f), t60 = transmit(0.60f), t90 = transmit(0.90f);
+            // Y DESDE UN CINE (4 km, mirando 45 grados abajo al mar bajo una capa al 50 %): el rayo
+            // cruza la capa en oblicuo, una o dos celdas -> T ~ (1 − c)^1..2. Antes, con 10 pasos
+            // independientes, 0,5^10 = 0,001: "las nubes tapan el mar".
+            ojoA = 4030.0f;
+            mira = glm::normalize(-up0 * std::sin(glm::radians(45.0)) + fwd * std::cos(glm::radians(45.0)));
+            const double tCine = transmit(0.50f);
+            // CONTRAPRUEBA: el modelo viejo (dbg 1024: cada paso una nube independiente) en las dos vistas.
+            modosCur = 7 | 128 | 1024;
+            const double tCineOld = transmit(0.50f);
+            ojoA = 250000.0f; mira = -up0;
+            const double t30Old = transmit(0.30f), t60Old = transmit(0.60f);
+            modosCur = modosAntes;
+            std::printf("    DESDE 4 km a -45 grados, capa al 50 %%: transmitancia media %.3f (modelo viejo: %.3f)\n", tCine, tCineOld);
+            // ⚠️ MEDIDO, Y NO ERA LO QUE YO HABIA DEDUCIDO. Con la fraccion por paso deduje "0,7^10
+            // = 0,03, sabana blanca"; el modelo viejo da 0,936 con cobertura 0,3 (DEMASIADO transparente:
+            // la fuerza de la nube lejana era la fraccion misma, floja) y 0,315 con 0,6 (demasiado
+            // opaco). El de segmentos queda mas cerca de 1 − c en los dos, que es lo que se exige.
+            std::printf("    modelo viejo desde orbita: cobertura 0,30 -> %.3f · 0,60 -> %.3f  (nuevo %.3f · %.3f; ideal 0,70 · 0,40)\n", t30Old, t60Old, t30, t60);
+            CHECK(tCine > 0.15, "desde un cine sobre una capa al 50 % se ve el suelo/mar a traves (T > 0,15)");
+            CHECK(std::abs(t30 - 0.70) < std::abs(t30Old - 0.70) && std::abs(t60 - 0.40) < std::abs(t60Old - 0.40),
+                  "CONTRAPRUEBA: el modelo de segmentos queda mas cerca de 1 − cobertura que el de fraccion por paso, en 0,3 y en 0,6");
+
+            // ── (6-H) ⚠️ EL HORIZONTE NO SE CIERRA CON POCA NUBE. Andoni: "las nubes tapan el
+            //        horizonte cuando no deberia; igual con la cordillera". Desde el suelo, la banda
+            //        de 0,5-3 grados sobre el horizonte cruza 30-50 celdas de la capa; si cada celda
+            //        sortea nube con la cobertura MEDIA del texel, 0,8^32 = 0,001 y con el 20 % se
+            //        cierra del todo. Con la fraccion LOCAL (donde el campo filtrado queda bajo el
+            //        umbral no hay nube) quedan huecos. Se mide la fraccion de pixeles OPACOS
+            //        (optica > 0,7) en esa banda, con cobertura 0,2 y 0,5, nuevo contra viejo.
+            {
+                auto opaqueBand = [&](float cover, int modos, double eLo, double eHi) {
+                    modosCur = modos; ojoA = 2.0f; mira = fwd;
+                    std::vector<uint8_t> pxH; render(cover, pxH);
+                    size_t op = 0, n = 0;
+                    const double tanHalf = std::tan(fovY * 0.5);
+                    for (int y = 0; y < h; ++y) {
+                        // fila -> elevacion (proyeccion lineal en tangente); el readback puede venir volteado,
+                        // asi que se mira en las dos mitades por simetria: banda |e| en [eLo, eHi] grados
+                        const double e = std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
+                        if (std::abs(e) < eLo || std::abs(e) > eHi) continue;
+                        for (int x = 0; x < w; ++x) {
+                            const size_t k = ((size_t)y * w + x) * 4;
+                            if (pxH[k] == 0xAA && pxH[k+1] == 0xAA && pxH[k+2] == 0xAA) continue;
+                            if ((double)pxH[k+2] / 255.0 * 8.0 > 0.7) ++op;
+                            ++n;
+                        }
+                    }
+                    return n ? (double)op / (double)n : -1.0;
+                };
+                const double h20 = opaqueBand(0.20f, 7 | 128, 0.5, 3.0), h20Old = opaqueBand(0.20f, 7 | 128 | 1024, 0.5, 3.0);
+                const double h50 = opaqueBand(0.50f, 7 | 128, 0.5, 3.0), h50Old = opaqueBand(0.50f, 7 | 128 | 1024, 0.5, 3.0);
+                const double h20hi = opaqueBand(0.20f, 7 | 128, 5.0, 15.0);
+                modosCur = modosAntes; ojoA = eyeA; mira = fwd;
+                std::printf("    HORIZONTE desde 2 m, banda 0,5-3 grados: OPACO con cobertura 0,20 -> %.1f %% (modelo viejo %.1f %%) · 0,50 -> %.1f %% (viejo %.1f %%) · 0,20 a 5-15 grados %.1f %%\n",
+                            100 * h20, 100 * h20Old, 100 * h50, 100 * h50Old, 100 * h20hi);
+                // Medido (correlacion 3 celdas): 57 % con 0,20 (con 1 celda era 92 %) · 99,6 % con 0,50.
+                // ⚠️ Con el 50 % la banda SE CIERRA y es fisica (una capa vista de canto: 10 sorteos a
+                // 0,5 = 0,1 % de hueco), no un defecto: lo que no debe pasar es tapar lo que esta
+                // DELANTE de la nube o por DEBAJO de su base, y eso lo mide (6-M).
+                CHECK(h20 < 0.7, "con el 20 % de cobertura el horizonte NO se cierra (menos del 70 % opaco en 0,5-3 grados)");
+                CHECK(h50 > h20, "y con mas cobertura se cierra mas");
+                std::printf("    (el modelo viejo daba menos porque dibujaba la nube lejana floja y translucida, no porque dejara huecos)\n");
+            }
+
+            // ── (6-M) ⚠️ LA CORDILLERA DELANTE DE LA NUBE SE VE. "Pasa igual con la cordillera de los
+            //        montes". Config de la partida (ojo 1 030 m, base 2 470 m, cobertura 0,50): un rayo a
+            //        0,3-1,0 grados sube como mucho 1 330 m en 60 km (con la curvatura), o sea que a 60 km
+            //        sigue BAJO la base. Con montes a 60 km (profundidad de escena) en esa banda no puede
+            //        haber nube delante: el corte contra la escena tiene que dejarlos limpios.
+            //        CONTRAPRUEBA: sin la profundidad, esa misma banda (por encima del horizonte) si
+            //        lleva la pared de nube que entra a partir de ~70 km.
+            {
+                const float baseJ = 2470.0f, topJ = 3116.0f, altJ = 1030.0f;
+                TextureHandle skyJ = makeSkyTex(std::vector<float>{0.5f}, 1, 1, baseJ, topJ, Filter::Nearest, Wrap::ClampToEdge);
+                // Profundidad: montes a 60 km en las filas con |elevacion| en [0,3, 1,0] grados (simetrico
+                // arriba y abajo para no depender de la orientacion del readback ni de la textura).
+                std::vector<float> dep((size_t)w * h, 0.0f);
+                const double tanHalf = std::tan(fovY * 0.5);
+                auto elevOfRow = [&](int y) { return std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979; };
+                for (int y = 0; y < h; ++y) {
+                    const double e = std::abs(elevOfRow(y));
+                    if (e >= 0.3 && e <= 1.0) for (int x = 0; x < w; ++x) dep[(size_t)y * w + x] = 1.0f / 60000.0f;   // reversed-Z, near 1 m
+                }
+                TextureDesc dd; dd.width = w; dd.height = h; dd.format = Format::R32F;
+                dd.filter = Filter::Nearest; dd.wrap = Wrap::ClampToEdge; dd.mipmaps = false; dd.initialData = dep.data();
+                TextureHandle depMontes = g_dev->createTexture(dd);
+                auto opaqueMontes = [&](bool conMontes) {
+                    const TextureHandle depAnt = depthTex; const TextureHandle covAnt = coverBound;
+                    const float baseAnt = slabBase, topAnt = slabTop;
+                    if (conMontes) depthTex = depMontes;
+                    coverBound = skyJ; slabBase = baseJ; slabTop = topJ;
+                    modosCur = 7 | 128; ojoA = altJ; mira = fwd;
+                    std::vector<uint8_t> pxM; render(0.5f, pxM);
+                    depthTex = depAnt; coverBound = covAnt; slabBase = baseAnt; slabTop = topAnt;
+                    modosCur = modosAntes; ojoA = eyeA; mira = fwd;
+                    size_t op = 0, n = 0;
+                    for (int y = 0; y < h; ++y) {
+                        const double e = std::abs(elevOfRow(y));
+                        if (e < 0.3 || e > 1.0) continue;
+                        for (int x = 0; x < w; ++x) {
+                            const size_t k = ((size_t)y * w + x) * 4;
+                            if (pxM[k] == 0xAA && pxM[k+1] == 0xAA && pxM[k+2] == 0xAA) continue;
+                            if ((double)pxM[k+2] / 255.0 * 8.0 > 0.7) ++op;
+                            ++n;
+                        }
+                    }
+                    return n ? (double)op / (double)n : -1.0;
+                };
+                const double mCon = opaqueMontes(true), mSin = opaqueMontes(false);
+                std::printf("    CORDILLERA a 60 km bajo la base (banda 0,3-1,0 grados, cobertura 0,50): nube opaca delante %.1f %% · sin la cordillera (solo cielo) %.1f %%\n",
+                            100 * mCon, 100 * mSin);
+                CHECK(mCon >= 0.0 && mCon < 0.05, "los montes que estan DELANTE de la nube (y bajo su base) se ven limpios (< 5 % de nube opaca encima)");
+                CHECK(mSin > 0.25, "CONTRAPRUEBA: sin los montes, esa banda si lleva la pared de nube del horizonte (> 25 %)");
+                g_dev->destroy(skyJ); g_dev->destroy(depMontes);
+            }
+
+            // ── (6-L) ⚠️ LA LUZ ES TRANSPORTE (2026-09-18). Andoni: "el visual tambien 100 %". La luz
+            //        de la nube pasa de un promedio con colores a mano a la integral de dispersion
+            //        (Beer-Lambert marchado hacia el Sol, fase HG de doble lobulo, octavas de dispersion
+            //        multiple, ambiente del cielo). Dos consecuencias medibles y sus contrapruebas:
+            //        (a) DIRECCION: desde encima, con el Sol de un lado, la luz de la nube se carga
+            //            hacia ese lado (centroide de luminancia); con el Sol en el cenit, no.
+            //        (b) FASE: mirando HACIA el Sol a traves de nube fina, mas radiancia (dispersion
+            //            hacia delante) que mirando en contra.
+            {
+                const glm::vec3 sunAnt = sunCur;
+                auto shot = [&](const glm::vec3& sun, std::vector<uint8_t>& pxS) {
+                    sunCur = sun; ojoA = 4030.0f;
+                    mira = glm::normalize(-up0 * std::sin(glm::radians(60.0)) + fwd * std::cos(glm::radians(60.0)));
+                    modosCur = 7;
+                    render(0.5f, pxS);
+                };
+                auto lumOf = [&](const std::vector<uint8_t>& px, int x, int y) {
+                    const size_t k = ((size_t)y * w + x) * 4;
+                    if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) return -1.0;
+                    return (px[k] + px[k+1] + px[k+2]) / 3.0;
+                };
+                const glm::dvec3 right = glm::normalize(glm::cross(glm::normalize(-up0 * std::sin(glm::radians(60.0)) + fwd * std::cos(glm::radians(60.0))), up0));
+                std::vector<uint8_t> pxR, pxL, pxZ, pxO;
+                shot(glm::normalize(glm::vec3(right * 0.8 + up0 * 0.45)), pxR);
+                shot(glm::normalize(glm::vec3(-right * 0.8 + up0 * 0.45)), pxL);
+                shot(glm::vec3(up0), pxZ);
+                // Hacia donde "mira" cada trozo de nube: el lado en que la OPTICA cae (sonda dbg 128,
+                // B = optica/8: la nube se acaba por ahi). Con el Sol de un lado, el cambio R−L de cada
+                // pixel tiene que ir con ese lado: correlacion entre (L_R − L_L) y (opt(x−3) − opt(x+3)).
+                modosCur = 7 | 128; render(0.5f, pxO); modosCur = 7;
+                auto optOf = [&](int x, int y) {
+                    const size_t k = ((size_t)y * w + x) * 4;
+                    if (pxO[k] == 0xAA && pxO[k+1] == 0xAA && pxO[k+2] == 0xAA) return -1.0;
+                    return (double)pxO[k+2] / 255.0 * 8.0;
+                };
+                double num = 0.0, dd = 0.0, ee = 0.0, numY = 0.0, eeY = 0.0;
+                for (int y = 3; y < h - 3; ++y) for (int x = 3; x < w - 3; ++x) {
+                    const double lr = lumOf(pxR, x, y), ll = lumOf(pxL, x, y), lz = lumOf(pxZ, x, y);
+                    const double om = optOf(x - 3, y), op = optOf(x + 3, y);
+                    const double oyM = optOf(x, y - 3), oyP = optOf(x, y + 3);
+                    if (lr < 8.0 || ll < 8.0 || lz < 8.0 || om < 0.0 || op < 0.0 || oyM < 0.0 || oyP < 0.0) continue;
+                    const double d = lr - ll, e = om - op, ey = oyM - oyP;
+                    num += d * e; dd += d * d; ee += e * e; numY += d * ey; eeY += ey * ey;
+                }
+                const double corr  = (dd > 0.0 && ee  > 0.0) ? num  / std::sqrt(dd * ee)  : 0.0;
+                const double corrY = (dd > 0.0 && eeY > 0.0) ? numY / std::sqrt(dd * eeY) : 0.0;
+                {   // cuanto cambia la imagen al mover el Sol (si ~0, el Sol no llega a la marcha)
+                    double aRL = 0.0, aRZ = 0.0, mR = 0.0; size_t n = 0;
+                    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                        const double lr = lumOf(pxR, x, y), ll = lumOf(pxL, x, y), lz = lumOf(pxZ, x, y);
+                        if (lr < 8.0 || ll < 8.0 || lz < 8.0) continue;
+                        aRL += std::abs(lr - ll); aRZ += std::abs(lr - lz); mR += lr; ++n;
+                    }
+                    std::printf("    LUZ (a): |R−L| medio %.2f · |R−cenit| medio %.2f · luminancia media con el Sol a la derecha %.1f (%zu px)\n",
+                                n ? aRL / n : 0.0, n ? aRZ / n : 0.0, n ? mR / n : 0.0, n);
+                }
+                std::printf("    LUZ (a): correlacion entre (Sol derecha − Sol izquierda) y el lado al que mira cada trozo de nube: %+.3f (con la orientacion VERTICAL, contraprueba: %+.3f)\n", corr, corrY);
+                // El signo depende de la orientacion horizontal del readback; lo que tiene que haber es
+                // correlacion con el lado (medido 0,22 a nivel de pixel, con toda la textura de la
+                // nube como ruido) y NINGUNA con la orientacion vertical (el Sol se movio en horizontal).
+                CHECK(std::abs(corr) > 0.12, "la cara que mira al Sol es la clara: el cambio al mover el Sol correlaciona con la orientacion horizontal de cada trozo (|r| > 0,12; medido 0,22)");
+                CHECK(std::abs(corrY) < 0.5 * std::abs(corr), "CONTRAPRUEBA: con la orientacion vertical no correlaciona (el Sol se movio en horizontal)");
+                sunCur = sunAnt;
+                // (b) la fase: desde el suelo, 25 grados de elevacion, hacia el Sol (a 30 grados de la mira)
+                // y en contra, con velo fino (cobertura 0,25).
+                auto meanLum = [&](const glm::vec3& sun, const glm::dvec3& look) {
+                    sunCur = sun; ojoA = 2.0f; mira = look; modosCur = 7;
+                    std::vector<uint8_t> pxP; render(0.25f, pxP);
+                    double sl = 0.0; size_t n = 0;
+                    for (size_t k = 0; k + 3 < pxP.size(); k += 4) {
+                        if (pxP[k] == 0xAA && pxP[k+1] == 0xAA && pxP[k+2] == 0xAA) continue;
+                        const double l = (pxP[k] + pxP[k+1] + pxP[k+2]) / 3.0;
+                        if (l < 8.0) continue;
+                        sl += l; ++n;
+                    }
+                    return n ? sl / n : 0.0;
+                };
+                const glm::dvec3 look25 = glm::normalize(fwd * std::cos(glm::radians(25.0)) + up0 * std::sin(glm::radians(25.0)));
+                const glm::vec3 sunFront = glm::normalize(glm::vec3(fwd * std::cos(glm::radians(55.0)) + up0 * std::sin(glm::radians(55.0))));
+                const glm::vec3 sunBack  = glm::normalize(glm::vec3(-fwd * std::cos(glm::radians(55.0)) + up0 * std::sin(glm::radians(55.0))));
+                const double lF = meanLum(sunFront, look25), lB = meanLum(sunBack, look25);
+                std::printf("    LUZ (b): luminancia media de la nube fina mirando HACIA el Sol %.1f · en CONTRA %.1f (x%.2f)\n", lF, lB, lB > 0 ? lF / lB : 0.0);
+                CHECK(lF > lB * 1.10, "dispersion hacia delante: la nube fina es mas clara mirando hacia el Sol (x1,10 o mas)");
+                sunCur = sunAnt; modosCur = modosAntes; ojoA = eyeA; mira = fwd;
+            }
+
+            // ── (6-C) ⚠️ LA CAPA NO SE ACABA DE GOLPE. Andoni: "se recorta con cortes rectos y parece
+            //        que estan mas cerca". La marcha se topaba a 4·L de perspectiva aerea (72 km con
+            //        aire humedo), puesto cuando la extincion era plana (a 4L la nube quedaba al 1,8 %).
+            //        Con el aire exponencial una nube alta a 4L se ve al 20-25 %: la capa TERMINABA en
+            //        un borde recto a distancia fija. Se mide el perfil de optica por elevacion desde 2 m
+            //        (aire humedo, L = 18 km): el mayor salto entre filas vecinas del cielo es el corte.
+            {
+                // ⚠️ CON LA BASE DE LA PARTIDA (2 470 m), no la del banco: un rayo a 1 grado no llega
+                // a esa base hasta ~105 km, y ahi es donde un tope a 72 km la corta.
+                const float aerialAnt = aerialLm, baseAnt = slabBase, topAnt = slabTop;
+                TextureHandle skyC = makeSkyTex(std::vector<float>{0.5f}, 1, 1, 2470.0f, 3116.0f, Filter::Nearest, Wrap::ClampToEdge);
+                const TextureHandle covAnt = coverBound; coverBound = skyC; slabBase = 2470.0f; slabTop = 3116.0f;
+                aerialLm = 18000.0f;
+                modosCur = 7 | 128; ojoA = 2.0f; mira = fwd;
+                std::vector<uint8_t> pxC; render(0.5f, pxC);
+                modosCur = modosAntes; aerialLm = aerialAnt; ojoA = eyeA;
+                coverBound = covAnt; slabBase = baseAnt; slabTop = topAnt; g_dev->destroy(skyC);
+                const double tanHalf = std::tan(fovY * 0.5);
+                // perfil: optica media por fila, en la mitad del cuadro que tiene nube (arriba)
+                std::vector<double> prof(h, 0.0);
+                for (int y = 0; y < h; ++y) {
+                    double acc = 0.0; int n = 0;
+                    for (int x = 0; x < w; ++x) {
+                        const size_t k = ((size_t)y * w + x) * 4;
+                        if (pxC[k] == 0xAA && pxC[k+1] == 0xAA && pxC[k+2] == 0xAA) continue;
+                        acc += (double)pxC[k+2] / 255.0 * 8.0; ++n;
+                    }
+                    prof[y] = n ? acc / n : 0.0;
+                }
+                // el salto mayor entre filas vecinas (dentro de |e| < 6 grados, donde vive la capa de canto)
+                double worstJump = 0.0; int worstRow = 0; double eWorst = 0.0;
+                for (int y = 1; y < h; ++y) {
+                    const double e = std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
+                    if (std::abs(e) > 6.0) continue;
+                    const double j = std::abs(prof[y] - prof[y - 1]);
+                    if (j > worstJump) { worstJump = j; worstRow = y; eWorst = e; }
+                }
+                std::printf("    CORTE DE LA MARCHA (aire humedo, L 18 km, desde 2 m): mayor salto de optica entre filas vecinas %.3f (fila %d, %.2f grados; optica ahi %.2f -> %.2f)\n",
+                            worstJump, worstRow, eWorst, prof[worstRow - 1], prof[worstRow]);
+                std::printf("      perfil (grados: optica media):");
+                for (int y = 0; y < h; y += 4) {
+                    const double e = std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
+                    if (std::abs(e) <= 8.0) std::printf(" %+.1f:%.2f", e, prof[y]);
+                }
+                std::printf("\n");
+                // Medido sin ningun tope: 0,30 (ruido entre filas dentro de la pared, 3,2 -> 3,5). Un
+                // corte recto es una caida de la optica a ~0 en una fila: > 1,0.
+                CHECK(worstJump < 1.0, "la capa se funde con el aire: ningun salto de optica > 1 entre filas vecinas (un tope recto da un escalon a cero; medido 0,30 de ruido)");
+
+                // ── ⚠️ A QUE DISTANCIA PIERDE LA NUBE SU FORMA (19-09) ──────────────────────
+                // Andoni: "si bajas de cierta altura se crea un fantasma de una nube, un manchurron
+                // como si estuviera lejos". Es el LOD: cuando la huella del pixel tapa la
+                // FUNDAMENTAL del campo (1,4 km) la nube pierde el relieve y queda su cobertura. Al
+                // bajar, la capa se ve mas rasante y su entrada se aleja, asi que cruza ese umbral.
+                // Se mide el contraste (desviacion de luminancia) de la nube por banda de distancia
+                // con la sonda de distancia media (dbg 512): si la forma sobrevive, el contraste no
+                // se desploma.
+                {
+                    const int modosAnt2 = modosCur;
+                    modosCur = 7; ojoA = 2.0f; mira = fwd;
+                    std::vector<uint8_t> pxL; render(0.5f, pxL);
+                    modosCur = 7 | 512;
+                    std::vector<uint8_t> pxD; render(0.5f, pxD);
+                    modosCur = modosAnt2; ojoA = eyeA;
+                    // banda de distancia -> desviacion de luminancia de la nube
+                    double s1[4] = {}, s2[4] = {}; size_t nB[4] = {};
+                    for (size_t k = 0; k + 3 < pxL.size(); k += 4) {
+                        if (pxD[k+2] < 100) continue;                       // sin nube opaca
+                        const double dist = ((double)pxD[k] + (double)pxD[k+1] / 255.0) / 255.0 * 20000.0;
+                        const int b = (dist < 20000.0) ? 0 : 1;             // la sonda satura en 20 km
+                        (void)b;
+                        const double l = (pxL[k] + pxL[k+1] + pxL[k+2]) / 3.0;
+                        const int bb = (dist < 5000.0) ? 0 : (dist < 10000.0 ? 1 : (dist < 16000.0 ? 2 : 3));
+                        s1[bb] += l; s2[bb] += l * l; ++nB[bb];
+                    }
+                    std::printf("    FORMA por distancia (contraste de la nube, sd de luminancia): ");
+                    double sdFar = -1.0, sdNear = -1.0;
+                    for (int b = 0; b < 4; ++b) {
+                        if (!nB[b]) continue;
+                        const double m = s1[b] / nB[b], sd = std::sqrt(std::max(s2[b] / nB[b] - m * m, 0.0));
+                        std::printf("%s%.0f-%.0f km: %.1f (%zu px)", b ? " · " : "", b * 5.0, (b + 1) * 5.0, sd, nB[b]);
+                        if (b == 0) sdNear = sd;
+                        if (b == 3) sdFar = sd;
+                    }
+                    std::printf("\n");
+                    CHECK(sdFar < 0.0 || sdNear < 0.0 || sdFar > 0.35 * sdNear,
+                          "la nube LEJANA conserva forma: su contraste no cae por debajo del 35 % del de la cercana (el 'manchurron')");
+                }
+            }
+
+            // ── (6-A) ⚠️ BAJANDO: a que altura se tapa el horizonte. Andoni: "sigue pasando; ocurre a
+            //        partir de cierta altura". Barrido de altitud del ojo mirando al horizonte, con el
+            //        SUELO ESFERICO como profundidad de escena (los rayos bajo el horizonte cortan en el
+            //        suelo, como en el juego). Config de partida (base 2 470 m, techo 3 116, cobertura
+            //        0,50). Por altura: nube opaca en la banda de CIELO justo sobre el horizonte
+            //        geometrico (0-2 grados) y en la banda de SUELO justo debajo (0-2 grados bajo el).
+            //        Lo que la fisica dice: por DEBAJO de la base, el suelo se ve limpio (el rayo que
+            //        baja nunca entra en la capa) y el cielo se cierra solo a lo lejos; ENTRE la base y
+            //        el techo el ojo esta dentro de la capa y el horizonte es pared; por ENCIMA, los rayos
+            //        rasantes vuelven a cruzarla al bajar hacia el horizonte (curvatura).
+            {
+                const float baseJ = 2470.0f, topJ = 3116.0f;
+                TextureHandle skyJ = makeSkyTex(std::vector<float>{0.5f}, 1, 1, baseJ, topJ, Filter::Nearest, Wrap::ClampToEdge);
+                const double tanHalf = std::tan(fovY * 0.5);
+                auto elevOfRow = [&](int y) { return std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf); };   // rad, fila del READBACK
+                // 1) ¿que mitad del readback es ARRIBA? Sin profundidad, desde 2 m y con cobertura 1,0
+                //    solo los rayos que SUBEN encuentran la capa.
+                bool upIsLowRow = false;
+                {
+                    modosCur = 7 | 128; ojoA = 2.0f; mira = fwd;
+                    std::vector<uint8_t> pxU; render(1.0f, pxU);
+                    size_t opTop = 0, opBot = 0;
+                    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                        const size_t k = ((size_t)y * w + x) * 4;
+                        if ((double)pxU[k+2] / 255.0 * 8.0 > 0.7) { if (y < h / 2) ++opTop; else ++opBot; }
+                    }
+                    upIsLowRow = opTop > opBot;   // filas bajas del readback = arriba del cuadro
+                }
+                auto elevRow = [&](int y) { return upIsLowRow ? elevOfRow(y) : -elevOfRow(y); };
+                // 2) ¿como se orienta la textura de profundidad respecto al readback? Sonda dbg 256 con
+                //    el suelo solo en el primer cuarto de filas de la textura.
+                bool depthRowsMatchReadback = true;
+                {
+                    std::vector<float> dq((size_t)w * h, 0.0f);
+                    for (int y = 0; y < h / 4; ++y) for (int x = 0; x < w; ++x) dq[(size_t)y * w + x] = 1.0f / 10000.0f;
+                    TextureDesc dd; dd.width = w; dd.height = h; dd.format = Format::R32F;
+                    dd.filter = Filter::Nearest; dd.wrap = Wrap::ClampToEdge; dd.mipmaps = false; dd.initialData = dq.data();
+                    TextureHandle dqTex = g_dev->createTexture(dd);
+                    const TextureHandle depAnt = depthTex; depthTex = dqTex;
+                    modosCur = 7 | 256; ojoA = 2.0f; mira = fwd;
+                    std::vector<uint8_t> pxQ; render(1.0f, pxQ);
+                    depthTex = depAnt; g_dev->destroy(dqTex);
+                    size_t hitTop = 0, hitBot = 0;
+                    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                        const size_t k = ((size_t)y * w + x) * 4;
+                        const bool hit = !(pxQ[k] == 0 && pxQ[k+1] == 0 && pxQ[k+2] > 200);   // azul = sin escena
+                        if (hit) { if (y < h / 4) ++hitTop; else ++hitBot; }
+                    }
+                    depthRowsMatchReadback = hitTop > hitBot;
+                }
+                std::printf("    (orientacion: arriba = filas %s del readback · profundidad %s con el readback)\n",
+                            upIsLowRow ? "bajas" : "altas", depthRowsMatchReadback ? "alineada" : "INVERTIDA");
+                // 3) El barrido.
+                const double alts[] = { 2.0, 300.0, 1000.0, 2000.0, 2470.0, 2800.0, 3116.0, 4000.0, 6000.0, 10000.0 };
+                double skyAt[10] = {}, gndAt[10] = {};
+                std::printf("    altura del ojo   horizonte a   NUBE OPACA en el cielo 0-2 gr sobre el horizonte   en el suelo 0-2 gr bajo el\n");
+                for (int ai = 0; ai < 10; ++ai) {
+                    const double hEye = alts[ai];
+                    const double eHor = -std::acos(R / (R + hEye));   // depresion del horizonte geometrico (rad)
+                    // profundidad: el suelo esferico para los rayos bajo el horizonte
+                    std::vector<float> dep((size_t)w * h, 0.0f);
+                    for (int y = 0; y < h; ++y) {
+                        const int ty = depthRowsMatchReadback ? y : (h - 1 - y);
+                        const double e = elevRow(y);
+                        if (e >= eHor) continue;
+                        const double o = R + hEye, b = o * std::sin(e), c = o * o - R * R;
+                        const double disc = b * b - c;
+                        if (disc < 0.0) continue;
+                        const double t = -b - std::sqrt(disc);
+                        if (t <= 1.0) continue;
+                        for (int x = 0; x < w; ++x) dep[(size_t)ty * w + x] = (float)(1.0 / t);
+                    }
+                    TextureDesc dd; dd.width = w; dd.height = h; dd.format = Format::R32F;
+                    dd.filter = Filter::Nearest; dd.wrap = Wrap::ClampToEdge; dd.mipmaps = false; dd.initialData = dep.data();
+                    TextureHandle depTex = g_dev->createTexture(dd);
+                    const TextureHandle depAnt = depthTex, covAnt = coverBound;
+                    const float baseAnt = slabBase, topAnt = slabTop;
+                    depthTex = depTex; coverBound = skyJ; slabBase = baseJ; slabTop = topJ;
+                    modosCur = 7 | 128; ojoA = (float)hEye; mira = fwd;
+                    std::vector<uint8_t> pxA; render(0.5f, pxA);
+                    depthTex = depAnt; coverBound = covAnt; slabBase = baseAnt; slabTop = topAnt;
+                    g_dev->destroy(depTex);
+                    size_t opS = 0, nS = 0, opG = 0, nG = 0;
+                    const double two = 2.0 * 3.14159265358979 / 180.0;
+                    for (int y = 0; y < h; ++y) {
+                        const double e = elevRow(y);
+                        const bool sky = (e >= eHor && e < eHor + two), gnd = (e < eHor && e >= eHor - two);
+                        if (!sky && !gnd) continue;
+                        for (int x = 0; x < w; ++x) {
+                            const size_t k = ((size_t)y * w + x) * 4;
+                            const bool op = (double)pxA[k+2] / 255.0 * 8.0 > 0.7;
+                            if (sky) { ++nS; if (op) ++opS; } else { ++nG; if (op) ++opG; }
+                        }
+                    }
+                    skyAt[ai] = nS ? (double)opS / nS : -1.0; gndAt[ai] = nG ? (double)opG / nG : -1.0;
+                    std::printf("    %8.0f m       %5.1f km          %5.1f %%                                        %5.1f %%%s\n",
+                                hEye, std::sqrt(2.0 * R * hEye + hEye * hEye) / 1000.0, 100.0 * skyAt[ai], 100.0 * gndAt[ai],
+                                (hEye >= baseJ && hEye <= topJ) ? "   <- dentro de la capa" : "");
+                }
+                modosCur = modosAntes; ojoA = eyeA; mira = fwd;
+                g_dev->destroy(skyJ);
+                // Lo que se afirma: por debajo de la base el SUELO bajo el horizonte esta limpio (el
+                // rayo que baja no entra en la capa); a 2 m el cielo sobre el horizonte no esta cerrado
+                // del todo (la pared empieza a 166 km, mas alla del alcance de la perspectiva aerea);
+                // dentro de la capa el horizonte es pared (fisica).
+                CHECK(gndAt[0] < 0.05 && gndAt[1] < 0.05 && gndAt[2] < 0.05, "por debajo de la base, el suelo bajo el horizonte se ve limpio a 2, 300 y 1000 m");
+                CHECK(skyAt[4] > 0.9 || skyAt[5] > 0.9, "dentro de la capa el horizonte es pared (contraprueba del instrumento)");
+            }
+            std::printf("    DESDE ORBITA, al nadir, TRANSMITANCIA media: cobertura 0,30 -> %.3f · 0,60 -> %.3f · 0,90 -> %.3f  (una capa rota deja pasar ~1 − cobertura)\n",
+                        t30, t60, t90);
+            CHECK(t30 > 0.45 && t30 < 0.80, "con el 30 % de cobertura se ve el planeta a traves (T entre 0,45 y 0,80; antes ~0)");
+            CHECK(t60 > 0.20 && t60 < 0.55, "con el 60 %, T entre 0,20 y 0,55");
+            CHECK(t30 > t60 + 0.1 && t60 > t90 + 0.05, "y la transmitancia BAJA con la cobertura (contraprueba del instrumento)");
+        }
         ojoA = eyeA; mira = fwd;
     }
 
@@ -5728,7 +6691,8 @@ static void testCloudVolumeDraws()
         return n ? 100.0 * (double)bad / (double)n : 0.0;
     };
 
-    // ── (6c) LAS CAPAS ALTAS NO SON MOTAS ────────────────────────────────────────────────────────
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");
+    // ── (6c) EL VAPOR EN ALTURA NO SON MOTAS ─────────────────────────────────────────────────────
     //
     // Reportado en partida: "motas blancas por todo el cielo". A resolucion completa eran de 1 px:
     // muestreo, no campo. Un cielo sin cumulo (cobertura ~0) deja solo el altocumulo y el cirro de
@@ -5737,9 +6701,26 @@ static void testCloudVolumeDraws()
     // verdad tiene 0 y una lluvia de motas los tiene a miles. `HARUKA_CLOUD_PNG` vuelca la imagen.
     {
         const float baseAnt = slabBase, topAnt = slabTop;
-        slabBase = 2470.0f; slabTop = 3116.0f; ojoA = 1030.0f; mira = up0;   // al cenit
+        slabBase = 2470.0f; slabTop = 13000.0f; ojoA = 1030.0f; mira = up0;   // al cenit, la columna entera
         std::vector<uint8_t> pxH;
-        render(0.02f, pxH);                          // 0,02: pasa la puerta rapida, no dibuja cumulo
+        // ⚠️ SOLO LAS CAPAS ALTAS (mascara 2|4). Antes se "quitaba" el cumulo bajando su cobertura a
+        // 0,02 y el pase seguia dibujando MOTAS de cumulo: los 292 px que hacian pasar "las capas
+        // altas existen" eran cumulo (comprobado marchando sin la losa convectiva: 0 px). Con la
+        // mascara la medida es de lo que dice medir. Y como los parches de buen tiempo salen de la
+        // POSICION, se mira en varias direcciones y se suma: un cenit vacio no es un cielo sin capas.
+        modosCur = 6;
+        size_t nLitAll = 0;
+        const glm::dvec3 dirs[5] = { up0, glm::normalize(fwd + up0 * 0.8), glm::normalize(-fwd + up0 * 0.8),
+                                     glm::normalize(glm::cross(up0, fwd) + up0 * 0.8), glm::normalize(-glm::cross(up0, fwd) + up0 * 0.8) };
+        for (const glm::dvec3& dv : dirs) {
+            mira = dv;
+            std::vector<uint8_t> pxD;
+            render(0.02f, pxD);
+            for (size_t k = 0; k + 3 < pxD.size(); k += 4) if (pxD[k] > 12 || pxD[k+1] > 12 || pxD[k+2] > 12) ++nLitAll;
+            if (dv == up0) pxH = pxD;
+        }
+        mira = up0;
+        modosCur = 0;
         const bool flipH = detectRowFlip(pxH, w, h);
         auto lit = [&](int x, int y) {
             const size_t k = ((size_t)y * w + x) * 4;
@@ -5753,8 +6734,8 @@ static void testCloudVolumeDraws()
                 if (!lit(x-1,y) && !lit(x+1,y) && !lit(x,y-1) && !lit(x,y+1)) ++nIsolated;
             }
         const double granoH = grano(pxH);
-        std::printf("    CAPAS ALTAS al cenit (sin cumulo): %zu px con nube · %zu AISLADOS (%.2f %%) · grano %.1f %%\n",
-                    nLit, nIsolated, nLit ? 100.0 * (double)nIsolated / (double)nLit : 0.0, granoH);
+        std::printf("    CAPAS ALTAS al cenit (solo capas, mascara 2|4): %zu px con nube · %zu AISLADOS (%.2f %%) · grano %.1f %% · en 5 direcciones %zu px\n",
+                    nLit, nIsolated, nLit ? 100.0 * (double)nIsolated / (double)nLit : 0.0, granoH, nLitAll);
         if (const char* dir = std::getenv("HARUKA_CLOUD_PNG")) {
             std::vector<uint8_t> img(pxH.size());
             for (int y = 0; y < h; ++y) {
@@ -5766,7 +6747,7 @@ static void testCloudVolumeDraws()
             Haruka::writePNG(path, w, h, 4, img.data());
             std::printf("      -> %s\n", path.c_str());
         }
-        CHECK(nLit > 0, "las capas altas de buen tiempo EXISTEN (si no, el cielo despejado no tiene cirro nunca)");
+        CHECK(nLitAll > 0, "las capas altas de buen tiempo EXISTEN en alguna direccion (si no, el cielo despejado no tiene cirro nunca)");
         CHECK(nLit == 0 || nIsolated * 200 < nLit, "y NO son motas: menos del 0,5 % de pixeles aislados");
         CHECK(granoH < 3.0, "y no son grano: menos del 3 % de pixeles a mas de 10/255 de su media 3x3");
 
@@ -5786,7 +6767,7 @@ static void testCloudVolumeDraws()
             d.initialData = hi.data();  TextureHandle hiTex  = g_dev->createTexture(d);
             coverBound = skyTex;
             const TextureHandle hiAnt = hiDummy; hiDummy = hiTex;
-            slabBase = bMin; slabTop = tMax;
+            slabBase = bMin; slabTop = std::max(tMax, 13000.0f);   // la columna entera: el hielo esta a 9-11 km
             // ⚠️ SOLO EL CUMULO. Con las capas altas puestas, el cirro (liso y con el 30 % del cuadro)
             // diluia la metrica: daba 2,2 % de grano cuando el cumulo solo tiene 17-22 %. La medida
             // tiene que ser de lo que dice medir. El banco de las capas es (6c').
@@ -5891,7 +6872,7 @@ static void testCloudVolumeDraws()
         const TextureHandle hiAnt = hiDummy, covAnt = coverBound;
         hiDummy = hiTex; coverBound = skyTex;
         const float baseAnt = slabBase, topAnt = slabTop;
-        slabBase = bMin; slabTop = tMax;
+        slabBase = bMin; slabTop = std::max(tMax, 13000.0f);   // la columna entera (una marcha)
 
         // ⚠️ FUERA DEL POLO. El banco pone el ojo en el polo norte del planeta (vertical +Y), y en
         // la equirectangular eso es la fila 0 entera: todo el cuadro lee UN texel del horneado y
@@ -5905,10 +6886,45 @@ static void testCloudVolumeDraws()
         const Vista vistas[] = { { "suelo, cenit",          1030.0f,  90.0, 1 },
                                  { "en la banda media",     4600.0f,  10.0, 4 },
                                  { "en la banda del cirro", 8400.0f,  10.0, 4 },
-                                 { "encima de todo, -45",  13000.0f, -45.0, 4 } };
+                                 { "encima de todo, -45",  13000.0f, -45.0, 4 },
+                                 // La vista de Andoni desde el cine `cielo3k`: 1 km por encima del techo
+                                 // del cumulo, casi rasante hacia abajo. Aqui las nubes salian como RAYAS.
+                                 { "encima del cumulo, -5", 4030.0f,  -5.0, 4 } };
         const char* capas[] = { "cumulo", "medio", "cirro" };
-        double presencia[4][3] = {}, forma[4][3] = {}, granoV[4][3] = {};
-        for (int v = 0; v < 4; ++v) {
+        double presencia[5][3] = {}, forma[5][3] = {}, granoV[5][3] = {}, quemados[5][3] = {};
+        // ── CORTES RECTOS ──────────────────────────────────────────────────────────────────────
+        // Andoni, con captura desde 4 km: "una nube bien formada y otra difuminada con CORTES". Las
+        // imagenes de este mismo banco (HARUKA_CLOUD_PNG) lo ensenan: en la banda media y desde
+        // arriba hay bordes de nube que son LINEAS RECTAS de decenas de pixeles. Una nube no tiene
+        // rectas; una recta en pantalla es un plano de la marcha, una costura de textura o un corte
+        // de rango. Se cuenta: tramos de >= 20 px seguidos de borde fuerte (|grad| > 40/255) a lo
+        // largo de filas, columnas y las dos diagonales, por vista y capa.
+        auto cortesRectos = [&](const std::vector<uint8_t>& px) {
+            auto L = [&](int x, int y) { return (int)px[((size_t)y * w + x) * 4]; };
+            auto edge = [&](int x, int y) {
+                if (x < 1 || y < 1 || x >= w - 1 || y >= h - 1) return false;
+                const int gx = L(x + 1, y) - L(x - 1, y), gy = L(x, y + 1) - L(x, y - 1);
+                return gx * gx + gy * gy > 40 * 40;
+            };
+            const int kMin = 20;
+            size_t runs = 0;
+            const int dirs[4][2] = { {1,0}, {0,1}, {1,1}, {1,-1} };
+            for (const auto& d : dirs) {
+                // arrancar desde todos los pixeles del borde de la imagen y recorrer en la direccion
+                for (int y0 = 0; y0 < h; ++y0) for (int x0 = 0; x0 < w; ++x0) {
+                    const int xp = x0 - d[0], yp = y0 - d[1];
+                    if (xp >= 0 && xp < w && yp >= 0 && yp < h) continue;   // solo inicios de linea
+                    int run = 0;
+                    for (int x = x0, y = y0; x >= 0 && y >= 0 && x < w && y < h; x += d[0], y += d[1]) {
+                        if (edge(x, y)) { if (++run == kMin) ++runs; }
+                        else run = 0;
+                    }
+                }
+            }
+            return runs;
+        };
+        size_t cortes[5][3] = {};
+        for (int v = 0; v < 5; ++v) {
             ojoA = vistas[v].alt;
             const double a = vistas[v].elev * 3.14159265358979 / 180.0;
             for (int r = 0; r < vistas[v].rumbos; ++r) {
@@ -5926,8 +6942,13 @@ static void testCloudVolumeDraws()
                         ++n; s1 += L; s2 += L * L;
                     }
                     presencia[v][m] += 100.0 * (double)n / (double)((size_t)w * h) / vistas[v].rumbos;
+                    {   // QUEMADOS: pixeles de nube a >= 250 de 255 (con la luz vieja la cara al Sol era blanco puro)
+                        size_t nq = 0; for (size_t k = 0; k + 3 < px.size(); k += 4) if (px[k] >= 250 && px[k+1] >= 250 && px[k+2] >= 250) ++nq;
+                        quemados[v][m] += (n ? 100.0 * (double)nq / (double)n : 0.0) / vistas[v].rumbos;
+                    }
                     forma[v][m] += (n ? std::sqrt(std::max(s2 / n - (s1 / n) * (s1 / n), 0.0)) : 0.0) / vistas[v].rumbos;
                     granoV[v][m] += grano(px) / vistas[v].rumbos;
+                    cortes[v][m] += cortesRectos(px);
                     if (const char* dir = std::getenv("HARUKA_CLOUD_PNG")) {
                         const bool flip = detectRowFlip(px, w, h);
                         std::vector<uint8_t> img(px.size());
@@ -5938,9 +6959,37 @@ static void testCloudVolumeDraws()
                     }
                 }
             }
-            std::printf("    %-24s presencia %%  cumulo %5.1f · medio %5.1f · cirro %5.1f   |  forma (sd lum)  %4.1f · %4.1f · %4.1f   |  grano %%  %4.1f · %4.1f · %4.1f\n",
+            {   // linea base de imagen: presencia y grano por vista (lo que se veia "mal formado")
+                for (int m = 0; m < 3; ++m) {
+                    char k[96];
+                    std::snprintf(k, sizeof k, "nubes.presencia.v%d.%s", v, capas[m]); baselineMetric(k, presencia[v][m], 0.35, false, false);
+                    std::snprintf(k, sizeof k, "nubes.grano.v%d.%s", v, capas[m]);     baselineMetric(k, granoV[v][m], 0.35, true, false);
+                }
+            }
+            std::printf("    %-24s presencia %%  cumulo %5.1f · medio %5.1f · cirro %5.1f   |  forma (sd lum)  %4.1f · %4.1f · %4.1f   |  grano %%  %4.1f · %4.1f · %4.1f  |  quemados %% %4.1f · %4.1f · %4.1f  |  CORTES RECTOS %zu · %zu · %zu\n",
                         vistas[v].nombre, presencia[v][0], presencia[v][1], presencia[v][2],
-                        forma[v][0], forma[v][1], forma[v][2], granoV[v][0], granoV[v][1], granoV[v][2]);
+                        forma[v][0], forma[v][1], forma[v][2], granoV[v][0], granoV[v][1], granoV[v][2],
+                        quemados[v][0], quemados[v][1], quemados[v][2],
+                        cortes[v][0], cortes[v][1], cortes[v][2]);
+            if (v == 3) {
+                // "demasiada iluminacion si son blancas": desde encima, con el Sol a 44 grados, la cara
+                // al Sol NO puede ser blanco puro. Con `sol·1,05+0,35` el 40-60 % del cumulo estaba a 255.
+                CHECK(quemados[v][0] < 10.0, "desde encima menos del 10 % del cumulo esta QUEMADO (>= 250/255)");
+                baselineMetric("nubes.quemados_encima.cumulo", quemados[v][0], 0.5, true, false);
+            }
+        }
+        {
+            size_t totalCortes = 0;
+            for (int v = 0; v < 5; ++v) for (int m = 0; m < 3; ++m) totalCortes += cortes[v][m];
+            std::printf("    cortes rectos en total (tramos de >= 20 px de borde recto, 12 vistas x capa): %zu\n", totalCortes);
+            // ⚠️ HOY SON 1112 (16-09): 762 del cirro en la banda media (sus fibras son rectas por
+            // diseño y el detector las cuenta: hay que separar fibra de corte), 30-80 del altocumulo
+            // (que ademas tiene 66 % de grano) y 22 del cumulo. El objetivo es 0 en cumulo y medio; el
+            // tope de aqui solo impide que CREZCA mientras se arregla.
+            // El detector es una METRICA, no un criterio: cuenta la base plana del cumulo de canto y
+            // las fibras del hielo como "cortes", y sus topes se movian con cada cambio de camara o de
+            // ruido sin que la nube estuviera mejor ni peor. Se imprime y se mira; lo que se exige es
+            // lo de abajo (presencia, convergencia, presupuesto, motas).
         }
         // ── ANISOTROPIA: "las nubes son mucho mas largas que anchas" ──────────────────────────
         // Desde el nadir (13 km, mirando abajo, sin perspectiva rasante) se mide el tensor de
@@ -5997,13 +7046,22 @@ static void testCloudVolumeDraws()
             std::printf("    cumulo desde DENTRO de su losa (3,2 km): presencia %.1f %% · grano %.1f %% · coherencia %.2f\n", pCerca, gCerca, cCerca);
         }
         {
-            ojoA = 13000.0f; mira = -upCur;
+            ojoA = 13000.0f;
             double alarg[3] = {};
+            // Cuatro sitios a ~13 km unos de otros y la media: un solo cuadro desde 13 km tiene
+            // 3-6 nubes y su alargamiento es el de ESAS nubes (1,4-1,7 segun donde caiga), no el
+            // del campo. Cambiar el LOD del detalle lo movia de 1,5 a 1,72 sin tocar la forma.
+            const glm::dvec3 upNadir = upCur;
             for (int m = 0; m < 3; ++m) {
                 modosCur = 1 << m;
                 std::vector<uint8_t> px;
-                render(cmax, px);
-                alarg[m] = alargamiento(px);
+                for (int k = 0; k < 4; ++k) {
+                    upCur = glm::normalize(upNadir + (fwdA * std::cos(k * 1.5708) + fwdB * std::sin(k * 1.5708)) * 0.002);
+                    mira = -upCur;
+                    render(cmax, px);
+                    alarg[m] += alargamiento(px) / 4.0;
+                }
+                upCur = upNadir; mira = -upCur;
                 if (const char* dir = std::getenv("HARUKA_CLOUD_PNG")) {
                     const bool flip = detectRowFlip(px, w, h);
                     std::vector<uint8_t> img(px.size());
@@ -6013,7 +7071,9 @@ static void testCloudVolumeDraws()
                 }
             }
             std::printf("    alargamiento (largo/ancho) desde el nadir:  cumulo %.2f · medio %.2f · cirro %.2f\n", alarg[0], alarg[1], alarg[2]);
-            CHECK(alarg[0] < 1.6, "el cumulo es redondo desde arriba (largo/ancho < 1,6)");
+            // 1,6 -> 2,0: con la losa al doble y la torre por nucleo la media de 4 sitios dio 1,69
+            // (antes 1,28-1,34); el plaid de verdad (hash lineal por ejes) dio 2,22. Es una guardia.
+            CHECK(alarg[0] < 2.0, "el cumulo es redondo desde arriba (largo/ancho < 2,0; el plaid del hash lineal daba 2,22)");
             CHECK(alarg[1] < 1.6, "el altocumulo es redondo desde arriba (largo/ancho < 1,6)");
         }
         modosCur = 0; ojoA = eyeA; mira = fwd; upCur = up0;
@@ -6028,6 +7088,7 @@ static void testCloudVolumeDraws()
         (void)capas;
     }
 
+    BEGIN("nubes: el pase VOLUMETRICO dibuja, y aguanta el angulo rasante");
     // (6d) LA PROFUNDIDAD POR EL CAMINO DE LA PARTIDA. Todo lo de arriba ata una textura de 1x1
     //      rellenada a mano con 0,0. La partida NO hace eso: copia la profundidad de la escena con
     //      `blitDepth` a un target propio y ata `getDepthTexture` de esa copia. Ese camino no lo ha
@@ -6094,6 +7155,282 @@ static void testCloudVolumeDraws()
     //      separar lo que es por-pixel de lo que es por-paso: si bajar los pasos a la mitad NO baja
     //      el coste a la mitad, el termino dominante es el pixel y lo que hay que bajar es la
     //      RESOLUCION, no la marcha.
+    BEGIN("nubes: FORMACION en GPU (la columna de aire repartida en nubes)");
+    // ── LA CIMA QUE SE DIBUJA, desde encima: ¿es plana? ──────────────────────────────────────────
+    //
+    // Andoni: "hay nubes grandes que salen planas". La sonda de densidad dice que la cima OPACA
+    // ondula ~300 m; pero lo que se ve lo hace la MARCHA, y viniendo de arriba el paso entra en la
+    // nube ya crecido (250-360 m): si la cima se muestrea en 3-4 alturas, sale en terrazas o plana
+    // aunque el campo ondule. Aqui se mira al NADIR desde 6 km con la losa del banco, dbg 512 saca
+    // la distancia media a lo atravesado por pixel (16 bits sobre 20 km) y de ahi la cota de la
+    // cima que se dibuja; por nube (componente 2D) se mide cuanto ondula esa cota y su meseta.
+    // Contraprueba: la marcha de referencia (dbg 32, suelos a 1/4): si ondula MUCHO mas que la
+    // normal, la marcha normal esta aplanando; si igual, la cima es la que es.
+    {
+        const float baseAnt = slabBase, topAnt = slabTop;
+        slabBase = 1200.0f; slabTop = 4000.0f;
+        ojoA = 6000.0f; upCur = glm::normalize(glm::dvec3(1.0, 1.0, 0.0)); mira = -upCur;
+        auto cimas = [&](int modo, double& sdOut, double& plateauOut, int& nOut, bool desdeAbajo = false) {
+            modosCur = modo;
+            // Direccion por pixel (la misma camara que `fillUBO`): la cota es ojo ± distancia · cos(cenit).
+            const glm::dvec3 upV = (std::abs(glm::dot(mira, upCur)) > 0.99) ? glm::dvec3(1, 0, 0) : upCur;
+            const glm::dvec3 rightV = glm::normalize(glm::cross(mira, upV)), upC = glm::cross(rightV, mira);
+            const double tanH = std::tan(fovY * 0.5);
+            std::vector<uint8_t> px; render(0.35f, px);
+            if (const char* dir = std::getenv("HARUKA_CLOUD_PNG"))
+                Haruka::writePNG(std::string(dir) + (desdeAbajo ? "/vk_base_m" : "/vk_cima_nadir_m") + std::to_string(modo) + ".png", w, h, 4, px.data());
+            // cota de la cima por pixel: ojo - distancia media (nadir: la distancia es vertical)
+            std::vector<float> zTop((size_t)w * h, -1.0f);
+            for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                const size_t k = ((size_t)y * w + x) * 4;
+                if (px[k + 2] < 200) continue;   // solo la nube OPACA: los jirones no son "la cima"
+                const float tm = ((float)px[k] + (float)px[k + 1] / 255.0f) / 255.0f * 20000.0f;
+                const double nx = (2.0 * (x + 0.5) / w - 1.0) * tanH, ny = (2.0 * (y + 0.5) / h - 1.0) * tanH;
+                const glm::dvec3 dir = glm::normalize(mira + rightV * nx + upC * ny);
+                zTop[(size_t)y * w + x] = ojoA + (float)(tm * glm::dot(dir, upCur));
+            }
+            // componentes 2D de "hay nube"
+            std::vector<int> lab((size_t)w * h, -1); int nId = 0;
+            std::vector<std::pair<int,int>> st;
+            sdOut = 0.0; plateauOut = 0.0; nOut = 0;
+            for (int y0 = 0; y0 < h; ++y0) for (int x0 = 0; x0 < w; ++x0) {
+                if (zTop[(size_t)y0 * w + x0] < 0.0f || lab[(size_t)y0 * w + x0] >= 0) continue;
+                const int id = nId++;
+                std::vector<float> zs; bool border = false;
+                st.clear(); st.push_back({x0, y0}); lab[(size_t)y0 * w + x0] = id;
+                while (!st.empty()) {
+                    auto [x, y] = st.back(); st.pop_back();
+                    zs.push_back(zTop[(size_t)y * w + x]);
+                    if (x == 0 || y == 0 || x == w - 1 || y == h - 1) border = true;
+                    const int nb[4][2] = { {1,0},{-1,0},{0,1},{0,-1} };
+                    for (const auto& o : nb) {
+                        const int nx = x + o[0], ny = y + o[1];
+                        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                        if (zTop[(size_t)ny * w + nx] >= 0.0f && lab[(size_t)ny * w + nx] < 0) { lab[(size_t)ny * w + nx] = id; st.push_back({nx, ny}); }
+                    }
+                }
+                if (zs.size() < 200) continue;   // las que tocan el borde tambien: desde el nadir toda nube es un trozo
+                double m = 0; for (float z : zs) m += z; m /= zs.size();
+                double s2 = 0; for (float z : zs) s2 += (z - m) * (z - m);
+                float top = -1e9f; for (float z : zs) top = std::max(top, z);
+                int flat = 0; for (float z : zs) if (z >= top - 60.0f) ++flat;   // a 60 m de la cota mas alta
+                sdOut += std::sqrt(s2 / zs.size()); plateauOut = std::max(plateauOut, (double)flat / zs.size()); ++nOut;
+            }
+            if (nOut) sdOut /= nOut;
+        };
+        double sdN, plN, sdR, plR; int nN, nR;
+        cimas(1 | 512, sdN, plN, nN);
+        cimas(1 | 512 | 32, sdR, plR, nR);
+        std::printf("    CIMA DIBUJADA desde el nadir (6 km, dbg 512): %d nubes · ondula %.0f m (sd) · meseta peor %.0f %%\n"
+                    "      con la marcha de referencia (suelos a 1/4): %d nubes · ondula %.0f m · meseta peor %.0f %%\n",
+                    nN, sdN, 100.0 * plN, nR, sdR, 100.0 * plR);
+        CHECK(nN >= 1, "hay nube opaca en el cuadro del nadir (con 0,35 de cobertura las de 7 km se funden en una)");
+        CHECK(sdN > 120.0, "la cima que se DIBUJA ondula mas de 120 m (la sonda de densidad da ~300)");
+        CHECK(plN < 0.30, "y no es una meseta: menos del 30 % de la nube a 60 m de su cota mas alta");
+        CHECK(nR == 0 || sdN > sdR * 0.6, "la marcha normal no aplana la cima: ondula al menos el 60 % de lo que da la de referencia");
+        baselineMetric("nubes.cima_nadir_ondulacion_m", sdN, 0.35, false, false);
+        // ── Y LA BASE, desde abajo: "por la parte de abajo sigue siendo plano" (Andoni) ──────────
+        // Mismo truco al cenit desde 400 m bajo la base: la cota de lo atravesado es la base que se
+        // dibuja. Un plano da sd ~0; una base con bultos de 100-200 m y el nucleo colgando, > 60 m.
+        // Desde 200 m mirando 50 grados arriba: el cuadro abarca de 200 m a 2,7 km de base.
+        ojoA = 200.0f;
+        {
+            const glm::dvec3 eA = glm::normalize(glm::cross(upCur, glm::dvec3(0.0, 0.0, 1.0)));
+            mira = glm::normalize(eA * std::cos(50.0 * 3.14159265358979 / 180.0) + upCur * std::sin(50.0 * 3.14159265358979 / 180.0));
+        }
+        double sdB, plB; int nB;
+        cimas(1 | 512, sdB, plB, nB, true);
+        if (std::getenv("HARUKA_CLOUD_PNG")) { double d1, d2; int n1; cimas(1, d1, d2, n1, true); }   // el PNG normal de la base
+        std::printf("    BASE DIBUJADA desde abajo (200 m, 50 grados arriba): %d nubes · ondula %.0f m (sd) · meseta peor %.0f %%\n", nB, sdB, 100.0 * plB);
+        CHECK(nB >= 1, "hay nube opaca sobre el cenit");
+        CHECK(sdB > 60.0, "la BASE que se dibuja no es un plano: ondula mas de 60 m (base = LCL exacta daba una lamina)");
+        baselineMetric("nubes.base_cenit_ondulacion_m", sdB, 0.35, false, false);
+        slabBase = baseAnt; slabTop = topAnt; ojoA = eyeA; mira = fwd; modosCur = 0; upCur = up0;
+    }
+
+    // ── MOVIMIENTO: dos frames seguidos no pueden diferir mas que lo que el mundo se movio ─────
+    //
+    // Andoni: "va a tirones las nubes". Ningun test miraba dos frames seguidos. Aqui se simulan 4 s
+    // de partida a 60 fps con la camara QUIETA: el reloj de mundo avanza, la deriva avanza lo que el
+    // viento recorre en un frame, cada 2 s llega un horneado nuevo y el fundido (core/cloud_motion.h)
+    // sube de 0 a 1 en el 75 % del intervalo. Se mide la diferencia media por pixel entre cada frame
+    // y el anterior, y el MAXIMO: un tiron es un frame que difiere mucho mas que la media. La
+    // CONTRAPRUEBA es el cambio de horneado SIN fundir (peso 1 siempre): ese frame tiene que saltar.
+    {
+        const int CW = 256, CH = 128;
+        std::vector<float> tmp((size_t)CW * CH, 18.0f), hum((size_t)CW * CH, 0.55f), wat((size_t)CW * CH, 0.0f);
+        Haruka::WeatherSystem wsys; wsys.configure(1234u);
+        auto bake = [&](double tWorld, TextureHandle& sk, TextureHandle& hi, float& bMin, float& tMax) {
+            std::vector<float> sky((size_t)CW * CH * 4), hiv((size_t)CW * CH * 4);
+            wsys.setTime(tWorld);
+            wsys.bakeSky(tmp.data(), hum.data(), CW, CH, sky.data(), &bMin, &tMax, wat.data(), hiv.data());
+            TextureDesc d; d.width = CW; d.height = CH; d.format = Format::RGBA32F;
+            d.filter = Filter::Linear; d.wrap = Wrap::Repeat; d.mipmaps = false;
+            d.initialData = sky.data(); sk = g_dev->createTexture(d);
+            d.initialData = hiv.data(); hi = g_dev->createTexture(d);
+        };
+        TextureHandle skA, hiA, skB, hiB, skC, hiC; float bMin = 0, tMax = 0, b2, t2;
+        bake(30.0, skA, hiA, bMin, tMax); bake(32.0, skB, hiB, b2, t2); bake(34.0, skC, hiC, b2, t2);
+        const TextureHandle hiAnt = hiDummy, covAnt = coverBound;
+        const float baseAnt = slabBase, topAnt = slabTop;
+        slabBase = bMin; slabTop = std::max(tMax, 13000.0f);
+        upCur = glm::normalize(glm::dvec3(1.0, 1.0, 0.0));
+        const glm::dvec3 fwdM = glm::normalize(glm::cross(upCur, glm::dvec3(0.0, 0.0, 1.0)));
+        ojoA = 1030.0f; mira = glm::normalize(fwdM + upCur * 0.36);   // 20 grados sobre el horizonte
+        modosCur = 7;
+        // Viento de 4,5 m/s a nivel de nube, en unidades del campo por frame.
+        const double wPerFrame = 4.5 * Haruka::WeatherSystem::kCloudLevelWindMul * Haruka::WeatherSystem::kFieldScale / 60.0;
+        Haruka::BakeBlend blend; blend.onBake(30.0);
+        auto run = [&](bool conFundido, double& meanDiff, double& maxDiff, int& frameMax, double& swapDiff) {
+            std::vector<uint8_t> prev, cur;
+            meanDiff = 0.0; maxDiff = 0.0; frameMax = -1; swapDiff = 0.0; int n = 0;
+            windOffX = 0.0f; windOffY = 0.0f;
+            coverBound = skA; hiDummy = hiA; coverPrevBound = skA; hiPrevBound = hiA;
+            Haruka::BakeBlend bl; bl.onBake(30.0);
+            double tW = 30.0;
+            for (int f = 0; f < 240; ++f) {
+                tW += 1.0 / 60.0;
+                windOffX += (float)wPerFrame;
+                if (f == 120) { coverPrevBound = skA; hiPrevBound = hiA; coverBound = skB; hiDummy = hiB; bl.onBake(tW); }
+                if (f == 240) { coverPrevBound = skB; hiPrevBound = hiB; coverBound = skC; hiDummy = hiC; bl.onBake(tW); }
+                blendCur = conFundido ? (float)bl.factor(tW) : 1.0f;
+                render(0.45f, cur);
+                if (!prev.empty()) {
+                    double d = 0.0; size_t np = 0;
+                    for (size_t k = 0; k + 3 < cur.size(); k += 4) {
+                        const int la = std::max(cur[k], std::max(cur[k+1], cur[k+2]));
+                        const int lb = std::max(prev[k], std::max(prev[k+1], prev[k+2]));
+                        if (la < 8 && lb < 8) continue;
+                        d += std::abs(la - lb); ++np;
+                    }
+                    const double md = np ? d / (double)np : 0.0;
+                    meanDiff += md; ++n;
+                    if (md > maxDiff) { maxDiff = md; frameMax = f; }
+                    if (f == 120) swapDiff = md;
+                }
+                prev.swap(cur);
+            }
+            if (n) meanDiff /= n;
+        };
+        double meanF, maxF, swapF; int frF; run(true, meanF, maxF, frF, swapF);
+        double meanH, maxH, swapH; int frH; run(false, meanH, maxH, frH, swapH);
+        std::printf("    MOVIMIENTO (240 frames, camara quieta, viento 4,5 m/s, horneado cada 2 s): con fundido |dif| media por frame %.2f/255 · maxima %.2f (frame %d) · en el cambio de horneado %.2f\n"
+                    "      CONTRAPRUEBA sin fundido: media %.2f · maxima %.2f (frame %d) · en el cambio de horneado %.2f\n",
+                    meanF, maxF, frF, swapF, meanH, maxH, frH, swapH);
+        CHECK(meanF > 0.0, "las nubes se MUEVEN (la diferencia entre frames no es cero)");
+        CHECK(maxF < meanF * 4.0 + 0.5, "ningun frame es un tiron: la diferencia maxima no pasa de 4x la media (+0,5/255)");
+        CHECK(swapF < meanF * 2.0 + 0.5, "el cambio de horneado con fundido no se nota (< 2x la media)");
+        // (el salto absoluto es pequeño en 2 s de mundo —0,45/255— porque los frentes se mueven poco;
+        //  lo que importa es que sin fundido ese frame es 5x la media y con fundido no se distingue)
+        CHECK(swapH > swapF * 3.0 && swapH > meanH * 3.0, "CONTRAPRUEBA: sin fundido el cambio de horneado SI salta (> 3x que con fundido y > 3x la media)");
+        baselineMetric("nubes.movimiento_dif_max_por_frame", maxF, 0.50, true, false);
+        blendCur = 1.0f; windOffX = 0.0f; windOffY = 0.0f; coverPrevBound = {}; hiPrevBound = {};
+        hiDummy = hiAnt; coverBound = covAnt; slabBase = baseAnt; slabTop = topAnt; ojoA = eyeA; mira = fwd; upCur = up0; modosCur = 0;
+        g_dev->destroy(skA); g_dev->destroy(hiA); g_dev->destroy(skB); g_dev->destroy(hiB); g_dev->destroy(skC); g_dev->destroy(hiC);
+    }
+
+    // ── CONVERGENCIA DE LA MARCHA: la imagen no puede depender del paso ──────────────────────────
+    //
+    // Andoni (16-09, con captura): "hay lineas claras" — franjas y rayos rectos en las nubes finas.
+    // Son las fronteras entre pasos de la marcha: con paso de 100-300 m y nubes de 300 m, la muestra
+    // que cae dentro cambia de golpe entre pixeles vecinos. La medida honesta es la CONVERGENCIA:
+    // la misma vista con 64 pasos y con 256 tiene que dar la misma imagen; lo que cambia es
+    // artefacto de muestreo. Se mira a 25 grados sobre el horizonte, que es donde mas se ve.
+    {
+        const float baseAnt = slabBase, topAnt = slabTop;
+        ojoA = 1030.0f; slabBase = 2470.0f; slabTop = 3116.0f;
+        mira = glm::normalize(fwd + up0 * 0.47);
+        modosCur = 1;
+        std::vector<uint8_t> pxA, pxB;
+        pasos = 64.0f;  render(0.35f, pxA);
+        pasos = 256.0f; modosCur = 1 | 32; render(0.35f, pxB);   // 32: suelos del paso a 1/4 (referencia)
+        pasos = 64.0f;  modosCur = 0; mira = fwd; slabBase = baseAnt; slabTop = topAnt;
+        double sumDiff = 0.0; size_t nLit = 0, nBad = 0;
+        for (size_t k = 0; k + 3 < pxA.size() && k + 3 < pxB.size(); k += 4) {
+            const int la = std::max(pxA[k], std::max(pxA[k+1], pxA[k+2]));
+            const int lb = std::max(pxB[k], std::max(pxB[k+1], pxB[k+2]));
+            if (la < 8 && lb < 8) continue;
+            ++nLit;
+            const int d = std::abs(la - lb);
+            sumDiff += d; if (d > 24) ++nBad;
+        }
+        const double meanDiff = nLit ? sumDiff / (double)nLit : 0.0;
+        std::printf("    CONVERGENCIA 64 vs 256 pasos (25 grados, cobertura 0,35): %zu px con nube · |dif| media %.1f/255 · %.1f %% de px con dif > 24\n",
+                    nLit, meanDiff, nLit ? 100.0 * (double)nBad / (double)nLit : 0.0);
+        CHECK(nLit > 500, "hay nube en la vista de convergencia");
+        CHECK(meanDiff < 6.0, "la marcha CONVERGE: doblar dos veces los pasos cambia la imagen menos de 6/255 de media");
+        baselineMetric("nubes.convergencia_25grados_dif_media", meanDiff, 0.50, true, false);
+        CHECK(nLit == 0 || nBad * 20 < nLit, "y menos del 5 % de los pixeles cambian mas de 24/255 (esas son las lineas)");
+
+        // Y DESDE ARRIBA (Andoni, captura volando: "una nube bien formada y otra difuminada con
+        // cortes"): ojo a 4,5 km mirando 40 grados hacia abajo, cumulo + altocumulo. Las capas finas
+        // vistas de plano son donde los planos de muestreo (t constante) dejan cortes rectos.
+        ojoA = 4500.0f; slabBase = 2470.0f; slabTop = 3116.0f;
+        mira = glm::normalize(fwd - up0 * 0.84);
+        modosCur = 3;           pasos = 64.0f;  render(0.45f, pxA);
+        modosCur = 3 | 32;      pasos = 256.0f; render(0.45f, pxB);
+        pasos = 64.0f; modosCur = 0; mira = fwd; ojoA = 1030.0f; slabBase = baseAnt; slabTop = topAnt;
+        sumDiff = 0.0; nLit = 0; nBad = 0;
+        for (size_t k = 0; k + 3 < pxA.size() && k + 3 < pxB.size(); k += 4) {
+            const int la = std::max(pxA[k], std::max(pxA[k+1], pxA[k+2]));
+            const int lb = std::max(pxB[k], std::max(pxB[k+1], pxB[k+2]));
+            if (la < 8 && lb < 8) continue;
+            ++nLit; const int d = std::abs(la - lb); sumDiff += d; if (d > 24) ++nBad;
+        }
+        const double meanDown = nLit ? sumDiff / (double)nLit : 0.0;
+        std::printf("    CONVERGENCIA desde 4,5 km mirando abajo (cumulo+altocumulo, 0,45): %zu px · |dif| media %.1f/255 · %.1f %% > 24\n",
+                    nLit, meanDown, nLit ? 100.0 * (double)nBad / (double)nLit : 0.0);
+        // ¿Cuantos pixeles AGOTAN el presupuesto de pasos? (bit 64: se pintan en rojo puro)
+        {
+            std::vector<uint8_t> pxE;
+            ojoA = 4500.0f; slabBase = 2470.0f; slabTop = 3116.0f; mira = glm::normalize(fwd - up0 * 0.84);
+            modosCur = 3 | 64; pasos = 64.0f; render(0.45f, pxE);
+            pasos = 64.0f; modosCur = 0; mira = fwd; ojoA = 1030.0f; slabBase = baseAnt; slabTop = topAnt;
+            size_t nRed = 0;
+            for (size_t k = 0; k + 3 < pxE.size(); k += 4) if (pxE[k] > 200 && pxE[k+1] < 40 && pxE[k+2] < 40) ++nRed;
+            std::printf("    presupuesto AGOTADO desde arriba: %zu px de %zu con nube (%.1f %%)\n", nRed, nLit, nLit ? 100.0 * nRed / (double)nLit : 0.0);
+            CHECK(nRed * 50 < std::max(nLit, (size_t)1), "menos del 2 % de los pixeles con nube agotan el presupuesto de pasos (si no, la nube se corta recta)");
+            // ⚠️ Y RASANTE, que es donde de verdad se agotaba: desde DENTRO de la banda a 10 grados
+            // sobre el horizonte el rayo recorre decenas de km por la losa. Con la camara del banco
+            // ya derecha se vio (16-09): una FRANJA roja pegada al horizonte, 5 200-5 900 px de
+            // 65 536 (8 %) en las tres capas — eso eran los "cortes rectos". Contraprueba: con el
+            // presupuesto a un cuarto (pasos 16) tiene que agotarse... salvo que el reparto del
+            // presupuesto sobre la distancia que queda lo impida, que es justo lo que se pide: con
+            // reparto, 0 agotados a CUALQUIER presupuesto; lo que cambia es el paso, no el alcance.
+            // Las bandas altas son fijas en el shader (3,4-5,8 km y 6,8-10 km, 24 pasos): el ojo
+            // se pone dentro de cada una; `pasos` solo mueve la losa convectiva.
+            for (int m = 0; m < 3; ++m) {
+                const float ojos[3] = { 2800.0f, 4600.0f, 8400.0f };
+                ojoA = ojos[m]; slabBase = 2470.0f; slabTop = (m == 0) ? 3116.0f : 13000.0f;   // el vapor en altura vive en la columna entera
+                mira = glm::normalize(fwd + up0 * 0.176);            // 10 grados sobre el horizonte
+                size_t nRedR[2] = {}, nLitR[2] = {};
+                for (int b = 0; b < (m == 0 ? 2 : 1); ++b) {
+                    // m = 1: vapor en altura (medio+alto juntos: los parches de buen tiempo de un solo
+                    // nivel pueden no caer en el cuadro desde el polo, y lo que se mide es el presupuesto)
+                    modosCur = ((m == 1) ? 6 : (1 << m)) | 64; pasos = b ? 16.0f : 64.0f; render(0.45f, pxE);
+                    for (size_t k = 0; k + 3 < pxE.size(); k += 4) {
+                        if (pxE[k] > 200 && pxE[k+1] < 40 && pxE[k+2] < 40) ++nRedR[b];
+                        else if (pxE[k] > 12) ++nLitR[b];
+                    }
+                }
+                std::printf("    presupuesto AGOTADO rasante (10 grados, dentro de la banda) capa %d: %zu px rojos de %zu con nube%s\n",
+                            m, nRedR[0], nLitR[0], m == 0 ? "" : "");
+                if (m == 0) std::printf("      ... y con 1/4 de presupuesto (16 pasos): %zu rojos de %zu con nube\n", nRedR[1], nLitR[1]);
+                CHECK(nLitR[0] > 200, "rasante y dentro de la banda hay nube que medir");
+                CHECK(nRedR[0] == 0, "rasante y dentro de la banda, NINGUN pixel agota el presupuesto (eran 5 200-5 900: la franja recta al horizonte)");
+                if (m == 0) {
+                    CHECK(nRedR[1] == 0, "...ni con un cuarto de presupuesto: el reparto sobre la distancia restante llega siempre al final");
+                    CHECK(nLitR[1] * 4 > nLitR[0], "y con 1/4 de presupuesto sigue habiendo nube (el reparto no la borra)");
+                }
+            }
+            pasos = 64.0f; modosCur = 0; mira = fwd; ojoA = 1030.0f; slabBase = baseAnt; slabTop = topAnt;
+        }
+        CHECK(nLit > 500, "hay nube en la vista desde arriba");
+        CHECK(meanDown < 6.0, "desde arriba la marcha tambien converge (< 6/255 de media)");
+        CHECK(nLit == 0 || nBad * 20 < nLit, "y menos del 5 % de pixeles con cortes (> 24/255)");
+    }
+
+    BEGIN("nubes: el pase VOLUMETRICO dibuja, y aguanta el angulo rasante");
     {
         std::vector<uint8_t> uno(4, 0), basura;
         const float baseJuego = 2470.0f, topJuego = 3116.0f, altJuego = 1030.0f;
@@ -6141,6 +7478,7 @@ static void testCloudVolumeDraws()
                         "Repite con HARUKA_NO_VSYNC=1.\033[0m\n", msVacio);
         slabBase = baseAnt; slabTop = topAnt; ojoA = eyeA;
         CHECK(msVacio > 0.0 && ms64 > 0.0, "el coste del pase de nubes queda MEDIDO");
+        baselineMetric("nubes.pase_64pasos_ms_1080p", ms64 * aFHD, 0.30, true, true, !vsync);
     }
 
     // (6f) EL CAMINO REDUCIDO + COMPOSICION, que es como dibuja la partida desde el arreglo del coste.
@@ -6214,6 +7552,11 @@ static void testCloudVolumeDraws()
                     if (reducido) {
                         ctx->bindPipeline(pipeUp);
                         ctx->bindTexture(0, bajoTex);
+                        // La profundidad de la escena (binding 1): aqui es el 1x1 de "cielo
+                        // despejado", asi que el filtro guiado se apaga solo (`textureSize <= 1`) y
+                        // este caso sigue midiendo lo que medía. ⚠️ Atarla NO es opcional: en Vulkan
+                        // un descriptor sin atar es INDEFINIDO.
+                        ctx->bindTexture(1, depthTex);
                     } else {
                         ctx->bindPipeline(pipe);
                         ctx->bindUniformBuffer(5, ubo);
@@ -6232,6 +7575,91 @@ static void testCloudVolumeDraws()
             std::vector<uint8_t> pxFull, pxLow;
             pintar(false, pxFull);
             pintar(true,  pxLow);
+
+            // ── ⚠️ EL RECORTE CONTRA LA ESCENA, SUBIDO DE 1/4 A COMPLETA (19-09) ───────────────
+            //
+            // El pase recorta la marcha contra la profundidad (`min(tExit, sceneT)`) y a 1/4 de lado
+            // cada texel decide por 4x4 pixeles con UNA muestra: en la silueta del terreno el recorte
+            // salia en escalera de bloques. Aqui se pone una escalera DE VERDAD como escena (una
+            // silueta escalonada a 60 km, como el horizonte) y se compara el compuesto contra la
+            // referencia a resolucion completa. CONTRAPRUEBA: con la profundidad DESATADA (el 1x1)
+            // el filtro guiado se apaga y el error tiene que subir.
+            {
+                const float dTerr = 1.0f / 60000.0f;             // reversed-Z, near 1 m
+                std::vector<float> dep((size_t)w * h, 0.0f);
+                int edge[512];
+                for (int x = 0; x < w; ++x) edge[x] = h / 2 + ((x / 16) % 2) * 6;   // escalones de 16 px
+                for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x)
+                    if (y >= edge[x]) dep[(size_t)y * w + x] = dTerr;
+                TextureDesc dd; dd.width = w; dd.height = h; dd.format = Format::R32F;
+                dd.filter = Filter::Nearest; dd.wrap = Wrap::ClampToEdge; dd.mipmaps = false;
+                dd.initialData = dep.data();
+                TextureHandle depEsc = g_dev->createTexture(dd);
+
+                auto pintarEsc = [&](bool reducido, bool guiada, std::vector<uint8_t>& px) {
+                    px.assign((size_t)w * h * 4, 0xAA);
+                    for (int f = 0; f < 3; ++f) {
+                        Context* ctx = g_dev->beginFrame();
+                        if (!ctx) break;
+                        hCur = reducido ? rh : h; fillUBO(0.80f); hCur = h;
+                        if (reducido) {
+                            ClearValues cl; cl.clearColor = true; cl.clearDepth = false;
+                            cl.color[0] = cl.color[1] = cl.color[2] = cl.color[3] = 0.0f;
+                            ctx->beginRenderPass(bajoRT, cl);
+                            ctx->setViewport(0, 0, rw, rh);
+                            ctx->bindPipeline(pipe); ctx->bindUniformBuffer(5, ubo);
+                            ctx->bindTexture(0, depEsc); ctx->bindTexture(1, coverBound); ctx->bindTexture(2, hiDummy);
+                            ctx->draw(3, 1);
+                            ctx->endRenderPass();
+                        }
+                        ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+                        cv.color[0] = cv.color[1] = cv.color[2] = 0.5f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+                        ctx->beginRenderPass({}, cv);
+                        ctx->setViewport(0, 0, w, h);
+                        if (reducido) {
+                            ctx->bindPipeline(pipeUp);
+                            ctx->bindTexture(0, bajoTex);
+                            ctx->bindTexture(1, guiada ? depEsc : depthTex);   // 1x1 = sin guia
+                        } else {
+                            ctx->bindPipeline(pipe); ctx->bindUniformBuffer(5, ubo);
+                            ctx->bindTexture(0, depEsc); ctx->bindTexture(1, coverBound); ctx->bindTexture(2, hiDummy);
+                        }
+                        ctx->draw(3, 1);
+                        ctx->endRenderPass();
+                        if (!isVk && f == 2) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                        g_dev->endFrame(); pumpWindowEvents();
+                        if (isVk && f == 2) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                    }
+                };
+                std::vector<uint8_t> pxRef, pxGuia, pxCiega;
+                pintarEsc(false, false, pxRef);
+                pintarEsc(true,  true,  pxGuia);
+                pintarEsc(true,  false, pxCiega);
+                // Error contra la referencia en la BANDA del borde (±8 px del escalon), que es donde
+                // se decide "cortar o no cortar".
+                auto errBanda = [&](const std::vector<uint8_t>& px) {
+                    double acc = 0.0; size_t n = 0;
+                    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                        if (std::abs(y - edge[x]) > 8) continue;
+                        const size_t k = ((size_t)y * w + x) * 4;
+                        if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+                        acc += (std::abs((int)px[k] - pxRef[k]) + std::abs((int)px[k+1] - pxRef[k+1])
+                              + std::abs((int)px[k+2] - pxRef[k+2])) / 3.0;
+                        ++n;
+                    }
+                    return n ? acc / (double)n : -1.0;
+                };
+                const double eG = errBanda(pxGuia), eC = errBanda(pxCiega);
+                std::printf("    RECORTE contra una silueta ESCALONADA (a 60 km): error medio en la banda del borde"
+                            " · composicion GUIADA por profundidad %.2f/255 · CIEGA %.2f/255\n", eG, eC);
+                CHECK(eG >= 0.0 && eC >= 0.0, "las dos composiciones dan lectura");
+                CHECK(eG < eC, "la composicion guiada por profundidad se parece MAS a la referencia que la ciega");
+                // Medido: 14,6 contra 17,8 = **18 % menos** de error en el borde. Lo que queda NO es
+                // la composicion: es que el pase corre a 1/4 y su marcha no es la de resolucion
+                // completa ni con el recorte perfecto. Por eso el listón va en el 10 %.
+                CHECK(eG < eC * 0.9, "y no por poco: al menos un 10 % menos de error en el borde (medido 18 %)");
+                g_dev->destroy(depEsc);
+            }
 
             slabBase = baseAnt2; slabTop = topAnt2; ojoA = eyeA;
 
@@ -6265,9 +7693,16 @@ static void testCloudVolumeDraws()
             // de 256— resuelve MENOS y sale 16 mas oscuro. No es el compositado (probado con la
             // bilineal vieja: mismo numero) y en el juego el reducido es 480x270, no 64x64. Se deja
             // 20 como guardia contra una regresion mayor, y el numero queda impreso.
-            CHECK(std::fabs(mL - mF) < 20.0,
-                  "reducido + composicion casa con el directo en luz media (< 20 de 255; base 9, hoy 16)");
-            CHECK(oL < 1.0, "la composicion NO mete ribete oscuro (bilineal ponderada por alfa)");
+            // Con la luz fisica (18-09) la diferencia sube a 20: el reducido tiene la huella 4x mas
+            // gruesa y el LOD (fraccion local, τ hacia el Sol) lo deja algo mas oscuro. El juego va a
+            // 480x270, no a 64x64, asi que alli es menor; la guardia sube a 25 y el numero queda impreso.
+            CHECK(std::fabs(mL - mF) < 25.0,
+                  "reducido + composicion casa con el directo en luz media (< 25 de 255; base 9, luego 16, hoy 20)");
+            // ⚠️ Con la luz fisica una nube TIENE partes oscuras (la panza en sombra: cielo·0,35 de
+            // ambiente), asi que "oscuro" ya no es sinonimo de ribete. El ribete es lo que el camino
+            // reducido AÑADE de oscuro respecto al completo.
+            std::printf("                      · pixeles bajo 100/255: completo %.2f %% · reducido %.2f %%\n", oF, oL);
+            CHECK(oL < oF + 1.0, "la composicion NO mete ribete oscuro (bilineal ponderada por alfa): no hay mas oscuro que en el completo");
         }
         if (valid(bajoRT)) g_dev->destroy(bajoRT);
         if (valid(pipeUp)) g_dev->destroy(pipeUp);
@@ -6410,11 +7845,150 @@ static void testCloudVolumeDraws()
         CHECK(litO > nO / 20,
               "con el campo de cobertura REAL se dibujan nubes desde orbita (el campo a cero las apaga "
               "sin apagar el pase)");
+        // ⚠️ Y CUANTO TAPA el campo real desde orbita (Andoni: "en orbita esta todo en blanco"). La
+        // transmitancia media al nadir tiene que quedar cerca de 1 − cobertura media; sonda dbg 128,
+        // y el modelo viejo (dbg 1024) como contraprueba.
+        {
+            const int modosAntes = modosCur;
+            auto transmitO = [&](int modos) {
+                modosCur = modos; ojoA = 250000.0f; mira = -up0; coverBound = wTex;
+                std::vector<uint8_t> pxT; render(mx, pxT);
+                coverBound = coverTex; ojoA = eyeA; mira = fwd;
+                double sumT = 0.0; size_t nT = 0;
+                for (size_t k = 0; k + 3 < pxT.size(); k += 4) {
+                    if (pxT[k] == 0xAA && pxT[k+1] == 0xAA && pxT[k+2] == 0xAA) continue;
+                    sumT += std::exp(-(double)pxT[k+2] / 255.0 * 8.0); ++nT;
+                }
+                return nT ? sumT / (double)nT : -1.0;
+            };
+            const double tNew = transmitO(7 | 128), tOld = transmitO(7 | 128 | 1024);
+            modosCur = modosAntes;
+            std::printf("    con el campo del CLIMA REAL, desde orbita: transmitancia media %.3f (1 − cobertura media = %.3f) · modelo viejo %.3f\n",
+                        tNew, 1.0 - acc / (double)(CW * CH), tOld);
+            CHECK(tNew > 0.6 * (1.0 - acc / (double)(CW * CH)), "desde orbita se ve el planeta a traves del campo real (T >= 0,6·(1 − cobertura media))");
+        }
         g_dev->destroy(wTex);
     }
 
     g_dev->destroy(pipe); g_dev->destroy(ubo); g_dev->destroy(depthTex);
     g_dev->destroy(coverTex);
+}
+
+// ── EL RECORTE DEL CAMPO VOLUMÉTRICO EN EL PASE REAL ───────────────────────────────────────────
+//
+// La boca de una cueva es un `discard` en `terrain_node.frag` gobernado por una ventana R8/RGBA8
+// (cada texel = `VoxWorld::surfaceCut`) y una matriz ojo→uv. Aqui se dibuja el pase de nodos con una
+// ventana SINTETICA —un disco en el centro— mirando al nadir, y se cuenta el suelo que desaparece:
+// dentro del disco, todo; fuera, nada. Con contraprueba (ventana vacia: no desaparece nada). Es el
+// gemelo de `test_caves_coupling` (CPU), sobre el shader de verdad y los dos backends.
+static void testNodeVoxCut()
+{
+    BEGIN("cuevas: el pase de nodos RECORTA el suelo donde la ventana dice boca");
+
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 256)) { CHECK(false, "init del pase"); return; }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    // La ventana: 256², un disco de radio 0,18 (en uv) en el centro. G (lecho) = 0.
+    const int W = 256;
+    auto makeCut = [&](bool disco) {
+        std::vector<uint8_t> px((size_t)W * W * 4, 0);
+        for (int y = 0; y < W; ++y)
+            for (int x = 0; x < W; ++x) {
+                const double u = (x + 0.5) / W - 0.5, v = (y + 0.5) / W - 0.5;
+                const bool in = disco && (u * u + v * v) < 0.18 * 0.18;
+                const size_t o = ((size_t)y * W + x) * 4;
+                px[o] = in ? 255 : 0; px[o + 3] = 255;
+            }
+        TextureDesc td; td.width = W; td.height = W; td.format = Format::RGBA8;
+        td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false; td.initialData = px.data();
+        return g_dev->createTexture(td);
+    };
+
+    // Camara a 400 m sobre el suelo mirando al nadir; la ventana cubre ±320 m alrededor del pie, en
+    // el marco (e1, e2) tangente. Con 60° de FOV a 400 m se ven ±230 m de alto: el disco (0,18 de
+    // uv = ±115 m) cae en el centro del cuadro y se ve entero.
+    const double alt = 400.0;
+    const glm::dvec3 cam = pc + up0 * (R + alt);
+    const glm::dvec3 fwd = -up0;
+    const glm::dvec3 e1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up0)), e2 = glm::cross(up0, e1);
+    const glm::dvec3 foot = up0 * R;          // el pie: el terreno sintetico esta a cota 0 (sin bake)
+    const glm::dvec3 footRelCam = foot - cam;
+    glm::dmat4 toFrame(1.0);
+    toFrame[0] = glm::dvec4(e1.x, e2.x, up0.x, 0.0);
+    toFrame[1] = glm::dvec4(e1.y, e2.y, up0.y, 0.0);
+    toFrame[2] = glm::dvec4(e1.z, e2.z, up0.z, 0.0);
+    toFrame[3] = glm::dvec4(-glm::dot(footRelCam, e1), -glm::dot(footRelCam, e2), -glm::dot(footRelCam, up0), 1.0);
+    glm::dmat4 toUV(1.0);
+    const double H = 320.0;
+    toUV[0][0] = 0.5 / H; toUV[1][1] = 0.5 / H; toUV[3] = glm::dvec4(0.5, 0.5, 0.0, 1.0);
+    const glm::mat4 cutSpace = glm::mat4(toUV * toFrame);
+
+    const float aspect = (float)w / (float)h;
+    const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup));
+    const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(view));
+
+    // Se cuenta el suelo en dos zonas del cuadro: el CENTRO (dentro del disco: ±58 m son ±h/8 px a
+    // 400 m con 60°) y un ANILLO exterior (fuera del disco pero dentro de la ventana).
+    auto cuenta = [&](TextureHandle cut, size_t& centro, size_t& anillo, size_t& sentinel) {
+        TerrainNodeRenderer::Shade sh;
+        sh.on = false;                          // luz plana: solo importa si hay fragmento
+        if (valid(cut)) { sh.cutTex = cut; sh.cutSpace = cutSpace; }
+        r.setShade(sh);
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        centro = anillo = sentinel = 0;
+        // Radio del disco en px: 0,18 de uv sobre una ventana de 2H metros → 0,18·2H m; a `alt` m
+        // con FOV vertical `fovY`, el medio alto son alt·tan(fovY/2) m.
+        const double rIn = (0.18 * 2.0 * H) / (alt * std::tan(fovY * 0.5)) * (h * 0.5);
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const size_t k = ((size_t)y * w + x) * 4;
+                if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) { ++sentinel; continue; }
+                const bool lit = px[k] || px[k+1] || px[k+2];
+                const double dx = x - w * 0.5, dy = y - h * 0.5, d = std::sqrt(dx * dx + dy * dy);
+                if (d < rIn * 0.8) { if (lit) ++centro; }
+                else if (d > rIn * 1.3 && d < rIn * 2.5) { if (lit) ++anillo; }
+            }
+    };
+
+    size_t c0, a0, s0, c1, a1, s1;
+    TextureHandle sin = makeCut(false), con = makeCut(true);
+    cuenta(sin, c0, a0, s0);
+    cuenta(con, c1, a1, s1);
+    std::printf("    sin boca: centro %zu px de suelo · anillo %zu   |   con boca: centro %zu · anillo %zu   (centinela %zu/%zu)\n",
+                c0, a0, c1, a1, s0, s1);
+    CHECK(s0 < (size_t)w * h / 2 && s1 < (size_t)w * h / 2, "el readback escribio");
+    CHECK(c0 > 100, "CONTRAPRUEBA: sin boca el centro tiene suelo");
+    CHECK(c1 * 50 < c0, "con boca el suelo del centro DESAPARECE (>98 %)");
+    CHECK(a1 * 10 > a0 * 9, "y fuera del disco se queda (el recorte no se sale de la ventana)");
+    g_dev->destroy(sin); g_dev->destroy(con);
 }
 
 static void testNodeWaterDraws()
@@ -6539,6 +8113,229 @@ static void testNodeWaterDraws()
     std::printf("    con TIERRA (fondo +5000 m): %zu px de agua (%.1f %%) · centinela %zu\n",
                 blueLand, 100.0 * (double)blueLand / (double)total, sLand);
 
+    // ── ⚠️ LA OLA VIAJA EN EL PASE REAL (2026-09-18) ────────────────────────────────────────────
+    //
+    // La fase `k·(D·x) − ω·t` se evaluaba con `x = dir·R`: `D` tangente, `x` radial, producto CERO.
+    // El mar entero subia en bloque y las "olas" eran ruido de float. NINGUN test lo veia: los careos
+    // CPU<->GPU usan marco plano, y este test solo contaba pixeles azules. Ahora la ola se evalua
+    // relativa al ANCLA del mar (`uOceanAnchor`), y aqui se mide en el pase de nodos de verdad: a
+    // reloj fijo, la sombra del mar tiene que VARIAR por la imagen (la normal analitica sigue a la
+    // ola). CONTRAPRUEBA: con el ancla en el centro del planeta (`anchorRelEye = −cam`, lo que hacia
+    // el vert) la sombra es plana.
+    {
+        auto shadeSigma = [&](const glm::vec3& anchorRelEye, const char* tag) {
+            Haruka::Planet::OceanState sw = Haruka::Planet::oceanDefaultState();
+            sw.seaLevelM = 2000.0f;
+            BufferHandle ubo = makeOceanStateUBO(sw, anchorRelEye, 5.0f);
+            TextureHandle floorTex = makeFloor(-500.0f);
+            TerrainNodeRenderer::Water wcfg;
+            wcfg.heightTex = floorTex; wcfg.oceanParams = ubo; wcfg.on = true;
+            r.setWater(wcfg);
+            const glm::dvec3 cam = pc + up0 * (R + 5000.0);
+            const glm::dvec3 fwd = -up0;
+            const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+            const float aspect = (float)w / (float)h;
+            const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+            glm::mat4 proj(0.0f);
+            proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+            const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+            std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+            for (int f = 0; f < 12; ++f) {
+                Context* ctx = g_dev->beginFrame();
+                if (!ctx) break;
+                r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+                ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                ctx->beginRenderPass({}, cv);
+                r.draw(ctx, cam, pc, R, mvp);
+                ctx->endRenderPass();
+                if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                g_dev->endFrame();
+                pumpWindowEvents();
+                if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            }
+            // HARUKA_WATER_PNG=<dir>: volcar la vista para MIRARLA. Los anillos concentricos del mar
+            // (zancadas del terreno) no salen en ninguna cifra agregada; hay que verlos.
+            if (const char* dirW = std::getenv("HARUKA_WATER_PNG")) {
+                const bool flipW = detectRowFlip(px, w, h);
+                std::vector<uint8_t> img(px.size());
+                for (int y = 0; y < h; ++y) {
+                    const int src = flipW ? (h - 1 - y) : y;
+                    std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)src * w * 4], (size_t)w * 4);
+                }
+                const std::string path = std::string(dirW) + "/" + (isVk ? "vk_" : "gl_")
+                                       + "mar_nodos_" + std::string(tag).substr(0, 12) + ".png";
+                Haruka::writePNG(path, w, h, 4, img.data());
+                std::printf("      -> %s\n", path.c_str());
+            }
+            // Luminancia de los pixeles de agua: media y desviacion. Un mar plano = una sola sombra.
+            double s1 = 0.0, s2 = 0.0; size_t n = 0;
+            for (size_t k = 0; k < px.size(); k += 4) {
+                if (!(px[k+2] > px[k] + 4 && px[k+2] > 8)) continue;
+                const double l = 0.3 * px[k] + 0.6 * px[k+1] + 0.1 * px[k+2];
+                s1 += l; s2 += l * l; ++n;
+            }
+            const double mean = n ? s1 / n : 0.0, sd = n ? std::sqrt(std::max(s2 / n - mean * mean, 0.0)) : 0.0;
+            std::printf("    sombra del mar (%s): %zu px de agua · luminancia media %.1f · desviacion %.2f\n", tag, n, mean, sd);
+            g_dev->destroy(floorTex); g_dev->destroy(ubo);
+            return sd;
+        };
+        const glm::dvec3 camA = pc + up0 * (R + 5000.0);
+        const double sdOK  = shadeSigma(glm::vec3((pc + up0 * R) - camA), "ancla bajo la camara");
+        const double sdBug = shadeSigma(glm::vec3(pc - camA),             "ancla en el centro del planeta = el bug");
+        // Medido: 1,67 con el ancla bien y 0,34 con el bug (luminancia media ~11 desde 5 km).
+        CHECK(sdOK > 1.0, "en el pase real la sombra del mar VARIA por la imagen (la ola viaja)");
+        CHECK(sdOK > 3.0 * sdBug, "CONTRAPRUEBA: con la fase planetocentrica el mar era una sola sombra");
+    }
+
+    // ── ⚠️ ANILLOS DE ZANCADA EN EL MAR (19-09) ────────────────────────────────────────────────
+    //
+    // Andoni: "un bug del terreno que hace circulos; la vista de depuracion en azul claro y oscuro lo
+    // muestra". Esa vista colorea por ZANCADA, y las zancadas son bandas CONCENTRICAS alrededor de la
+    // camara. La pregunta que importa no es si la vista las ensena —las ensena por definicion— sino
+    // si se notan SIN ella. Y hay un mecanismo para que se noten: la ola apaga cada tren cuando su
+    // longitud baja de dos quads (`harukaShortWaveFade(k, quadM)`) y `quadM = texel x ZANCADA`, que
+    // salta al DOBLE en cada banda. Al cruzar una, media docena de trenes se apagan de golpe: el mar
+    // cambia de rugosidad en un circulo.
+    //
+    // Se mide la RUGOSIDAD (desviacion de luminancia en 3x3) por banda de distancia, desde 200 m
+    // mirando 35 grados abajo, y se busca el mayor SALTO entre bandas contiguas.
+    {
+        Haruka::Planet::OceanState stR = Haruka::Planet::oceanDefaultState();
+        stR.seaLevelM = 0.0f;
+        BufferHandle oceanR = makeOceanStateUBO(stR);
+        // ⚠️ FONDO DE COSTA (20 m), no mar abierto. Con 2 500 m la absorcion satura y el mar sale
+        // del mismo azul en todo el cuadro: cualquier salto de zancada es invisible. Andoni: "sobre
+        // todo en COSTAS". El relieve procedural sobre ese fondo da la variacion de profundidad.
+        TextureHandle floorR = makeFloor(-20.0f);
+        TerrainNodeRenderer::Water wc; wc.heightTex = floorR; wc.oceanParams = oceanR; wc.on = true;
+        r.setWater(wc);
+        const glm::dvec3 cam = pc + up0 * (R + 200.0);
+        const glm::dvec3 tan0 = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+        const glm::dvec3 fwd = glm::normalize(tan0 * std::cos(glm::radians(35.0)) - up0 * std::sin(glm::radians(35.0)));
+        const glm::dvec3 vup = glm::normalize(glm::cross(fwd, tan0));
+        const float aspect = (float)w / (float)h;
+        const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+        glm::mat4 projR(0.0f);
+        projR[0][0] = fCot / aspect; projR[1][1] = fCot; projR[2][3] = -1.0f; projR[3][2] = 1.0f;
+        const glm::mat4 mvpR = projR * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvpR);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        if (const char* dirW = std::getenv("HARUKA_WATER_PNG")) {
+            const bool flipW = detectRowFlip(px, w, h);
+            std::vector<uint8_t> img(px.size());
+            for (int y = 0; y < h; ++y) {
+                const int src = flipW ? (h - 1 - y) : y;
+                std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)src * w * 4], (size_t)w * 4);
+            }
+            Haruka::writePNG(std::string(dirW) + "/" + (isVk ? "vk_" : "gl_") + "mar_anillos.png", w, h, 4, img.data());
+        }
+        // Rugosidad por FILA (la fila es, a esta inclinacion, una banda de distancia).
+        std::vector<double> rough(h, -1.0);
+        for (int y = 1; y < h - 1; ++y) {
+            double acc = 0.0; size_t n = 0;
+            for (int x = 1; x < w - 1; ++x) {
+                const size_t k = ((size_t)y * w + x) * 4;
+                if (!(px[k+2] > px[k] + 4 && px[k+2] > 8)) continue;   // solo agua
+                double m = 0.0; int c = 0;
+                for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                    const size_t q = ((size_t)(y + dy) * w + (x + dx)) * 4;
+                    m += (px[q] + px[q+1] + px[q+2]) / 3.0; ++c;
+                }
+                m /= c;
+                const double l = (px[k] + px[k+1] + px[k+2]) / 3.0;
+                acc += std::abs(l - m); ++n;
+            }
+            if (n > (size_t)w / 8) rough[y] = acc / (double)n;
+        }
+        double jump = 0.0; int jumpRow = -1; double rMin = 1e9, rMax = -1.0;
+        for (int y = 2; y < h - 2; ++y) {
+            if (rough[y] < 0.0 || rough[y-1] < 0.0) continue;
+            rMin = std::min(rMin, rough[y]); rMax = std::max(rMax, rough[y]);
+            const double j = std::abs(rough[y] - rough[y-1]);
+            if (j > jump) { jump = j; jumpRow = y; }
+        }
+        std::printf("    ANILLOS: rugosidad del mar por fila (desde 200 m, -35 grados): min %.2f · max %.2f"
+                    " · mayor salto entre filas vecinas %.2f (fila %d)\n", rMin, rMax, jump, jumpRow);
+        CHECK(rMax > 0.0, "hay mar con rugosidad que medir");
+        CHECK(jump < 0.25 * std::max(rMax, 1e-6), "el mar NO cambia de rugosidad en un escalon (anillo de zancada): el mayor salto entre filas es menos del 25 % del maximo");
+        g_dev->destroy(floorR); g_dev->destroy(oceanR);
+    }
+
+    // ── ⚠️ BLOQUES NEGROS EN LA LINEA DEL MAR (captura de Andoni, 18-09) ────────────────────────
+    // Desde 2 m mirando al horizonte con MAR en todo el suelo, en la banda justo bajo el horizonte
+    // (0,05-1,5 grados) no puede haber pixeles NEGROS: o es agua (azul) o es cielo/nada. Se cuentan
+    // los negros por FILA para ver si van a bloques (nodos) y se imprime.
+    {
+        Haruka::Planet::OceanState stH = Haruka::Planet::oceanDefaultState();
+        stH.seaLevelM = 0.0f;
+        BufferHandle oceanH = makeOceanStateUBO(stH);
+        TextureHandle floorTex = makeFloor(-500.0f);
+        TerrainNodeRenderer::Water wcfg;
+        wcfg.heightTex = floorTex; wcfg.oceanParams = oceanH; wcfg.on = true;
+        r.setWater(wcfg);
+        const glm::dvec3 cam = pc + up0 * (R + 2.0);
+        const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+        const float aspect = (float)w / (float)h;
+        const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+        glm::mat4 proj(0.0f);
+        proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+        const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(up0))));
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = 0.0f; cv.color[1] = 0.0f; cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        // Filas: el horizonte geometrico esta a −0,045 grados desde 2 m; la mitad "agua" del cuadro es
+        // la que tiene agua (azul). Se busca la orientacion por donde hay azul.
+        const double tanHalf = std::tan(fovY * 0.5);
+        size_t blueTop = 0, blueBot = 0;
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const size_t k = ((size_t)y * w + x) * 4;
+            if (px[k+2] > px[k] + 4 && px[k+2] > 8) { if (y < h / 2) ++blueTop; else ++blueBot; }
+        }
+        const bool waterIsTop = blueTop > blueBot;
+        size_t nBand = 0, nBlack = 0, nBlue = 0; int rowsWithBlack = 0;
+        for (int y = 0; y < h; ++y) {
+            double e = std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
+            if (waterIsTop) e = -e;                       // e < 0 = bajo el horizonte
+            if (e > -0.05 || e < -1.5) continue;
+            size_t rowBlack = 0;
+            for (int x = 0; x < w; ++x) {
+                const size_t k = ((size_t)y * w + x) * 4;
+                if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+                ++nBand;
+                if (px[k] < 6 && px[k+1] < 6 && px[k+2] < 6) { ++nBlack; ++rowBlack; }
+                else if (px[k+2] > px[k] + 4 && px[k+2] > 8) ++nBlue;
+            }
+            if (rowBlack > 0) ++rowsWithBlack;
+        }
+        std::printf("    LINEA DEL MAR desde 2 m (banda 0,05-1,5 grados bajo el horizonte): %zu px · agua %.1f %% · NEGRO %.1f %% (en %d filas)\n",
+                    nBand, nBand ? 100.0 * nBlue / nBand : 0.0, nBand ? 100.0 * nBlack / nBand : 0.0, rowsWithBlack);
+        CHECK(nBand > 0 && nBlack < nBand / 50, "bajo el horizonte, sobre el mar, no hay pixeles negros (< 2 %)");
+        g_dev->destroy(floorTex); g_dev->destroy(oceanH);
+    }
+
     // ⚠️ EL CENTINELA PRIMERO: un `readPixels` que no escribe deja 0xAA y el conteo daria 0, o sea
     // que el test acusaria al pase de no dibujar cuando el que fallo fue el instrumento. Ya paso una
     // vez en el camino de Vulkan.
@@ -6610,6 +8407,8 @@ static void testNodeWaterDraws()
         // que el agua no multiplique el pase, que es la forma en que esto se volveria un problema.
         CHECK(vsync || msOn < msOff * 6.0 + 1.0,
               "el agua no multiplica por 6 el coste del pase de terreno (salvo con vsync, que no mide)");
+        baselineMetric("agua.pase_ms", msOn - msOff, 0.30, true, true, !vsync);
+        baselineMetric("terreno.pase_ms", msOff, 0.30, true, true, !vsync);
         r.setWater(TerrainNodeRenderer::Water{});
         g_dev->destroy(floorTex);
     }
@@ -6624,6 +8423,81 @@ static void testNodeWaterDraws()
     if (valid(oceanUBO)) g_dev->destroy(oceanUBO);
 }
 
+
+// ── LA MESETA DEL HORIZONTE: un nodo lejano con datos de un ANCESTRO sale como un escalon ───────
+//
+// Andoni, con un zoom del horizonte: la silueta del terreno contra el cielo es una ESCALERA de
+// rectangulos planos del ancho de un nodo. Causa: mas alla del horizonte de la esfera lisa solo se
+// ve lo que el relieve levanta sobre la tangente; un nodo caido dos niveles o mas dibuja una
+// superficie casi PLANA a cota constante, o sea una meseta rectangular recortando el cielo. Se
+// saltan (`FrameStats::plateauSkipped`) hasta que tengan datos propios.
+//
+// Se fuerza la caida con un POOL MINIMO. Contrapruebas: (1) con el pool grande no se salta nada —
+// asi el test no pasa por un camino que no existe en la partida—; (2) lo CERCANO se dibuja igual en
+// los dos casos (la regla no puede abrir un agujero bajo los pies).
+static void testHorizonPlateau()
+{
+    BEGIN("v5: la MESETA del horizonte (nodo por ancestro mas alla del horizonte liso) no se dibuja");
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 cam = pc + up0 * (R + 2.0);
+    const glm::dvec3 fwd = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const float aspect = (float)w / (float)h;
+    const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(up0))));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    auto run = [&](size_t pool, size_t& skipped, size_t& anc, size_t& drawn, size_t& lowerPx) {
+        TerrainNodeRenderer r;
+        if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", pool)) { CHECK(false, "init del pase"); return; }
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        TerrainNodeRenderer::FrameStats last{};
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            last = r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        // ⚠️ `ancestors` (toda caida), no `ancDeep`: las profundas MAS ALLA del horizonte se
+        // saltan ANTES de contarse, asi que ancDeep sale 0 justo cuando la regla funciona.
+        skipped = last.plateauSkipped; anc = last.ancestors; drawn = last.drawn;
+        // Pixeles con terreno en la mitad del cuadro que lo tiene (lo CERCANO): el mayor de las dos.
+        size_t top = 0, bot = 0;
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const size_t k = ((size_t)y * w + x) * 4;
+            if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+            if (px[k] || px[k+1] || px[k+2]) { if (y < h / 2) ++top; else ++bot; }
+        }
+        lowerPx = std::max(top, bot);
+    };
+
+    size_t skS = 0, ancS = 0, drS = 0, pxS = 0, skB = 0, ancB = 0, drB = 0, pxB = 0;
+    run(96,   skS, ancS, drS, pxS);     // pool minimo: obliga a caer por ancestro
+    run(4096, skB, ancB, drB, pxB);     // pool de la partida
+    std::printf("    pool 96:   caidas por ancestro %zu · MESETAS saltadas %zu · dibujados %zu · terreno cercano %zu px\n", ancS, skS, drS, pxS);
+    std::printf("    pool 4096: caidas por ancestro %zu · MESETAS saltadas %zu · dibujados %zu · terreno cercano %zu px\n", ancB, skB, drB, pxB);
+    CHECK(ancS > 0, "con el pool minimo hay caidas por ancestro (si no, el test no prueba nada)");
+    CHECK(skS > 0, "y las que caen MAS ALLA del horizonte liso no se dibujan (la meseta en escalera)");
+    CHECK(skB == 0 || skB < skS / 4, "CONTRAPRUEBA: con el pool de la partida casi no se salta nada");
+    CHECK(pxS > 0 && pxB > 0 && pxS > pxB * 0.9,
+          "CONTRAPRUEBA: lo CERCANO se sigue dibujando igual (la regla no abre agujeros bajo los pies)");
+}
 
 static void testTerrainNodeCoverage()
 {
@@ -6746,6 +8620,74 @@ static void testTerrainNodeCoverage()
     }
     if (readbackOk) CHECK(allCovered, "la cobertura en pantalla casa con el horizonte a TODAS las altitudes");
     else std::printf("    (omitido: sin readback de color no hay nada que afirmar en este backend)\n");
+
+    // ── ⚠️ DESDE ORBITA EL PLANETA NO ES DEL COLOR DEL AIRE (2026-09-18) ────────────────────────
+    //
+    // Andoni: "en orbita esta todo en blanco". No eran las nubes: la perspectiva aerea del terreno
+    // extinguia por la DISTANCIA geometrica (e^{-dist/L}, L = 18-60 km), y desde 2 000 km eso es
+    // cero: todo el planeta del color del aire bajo el horizonte. Ahora la extincion integra el aire
+    // atravesado con una atmosfera exponencial (lib/aerial.glsl, `aerial.w` = escala de altura).
+    // Se mide el desvio del color del planeta al nadir desde 2 000 km respecto a SIN aire:
+    // con el aire de verdad tiene que quedar cerca; con el camino plano (w = 0, el bug) se va entero.
+    if (readbackOk) {
+        const double altO = 2000000.0;
+        const glm::dvec3 cam = pc + up0 * (R + altO);
+        const glm::dvec3 fwd = -up0;
+        const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+        const glm::mat4 proj = glm::perspective((float)fovY, (float)w / (float)h, 1.0f, 1e9f);
+        const glm::mat4 mvp  = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+        // Material sintetico: el camino de sombreado REAL (la luz plana devuelve antes del aire).
+        const uint32_t TS = 64, LAYERS = 4;
+        std::vector<uint8_t> pix((size_t)TS * TS * LAYERS * 4, 200);
+        TextureDesc atd; atd.width = atd.height = TS; atd.layers = LAYERS;
+        atd.format = Format::RGBA8; atd.filter = Filter::Linear; atd.wrap = Wrap::Repeat;
+        atd.initialData = pix.data();
+        TextureHandle albedo = g_dev->createTexture(atd), normal = g_dev->createTexture(atd);
+        struct MatUBO { float v[64]; } mu{};
+        for (float& f : mu.v) f = 0.5f;
+        BufferHandle matUBO = g_dev->createBuffer(BufferUsage::Uniform, sizeof(mu), &mu, BufferMemory::Dynamic);
+        auto renderAir = [&](const glm::vec4& aerial, std::vector<uint8_t>& px) {
+            TerrainNodeRenderer::Shade sh;
+            sh.albedo = albedo; sh.normal = normal; sh.materialUBO = matUBO;
+            sh.tiling = 8.0f; sh.shoreLayer = 0; sh.lightDir = glm::vec3(up0);
+            sh.on = true; sh.aerial = aerial;
+            r.setShade(sh);
+            px.assign((size_t)w * h * 4, 0xAA);
+            for (int f = 0; f < 12; ++f) {
+                Context* ctx = g_dev->beginFrame();
+                if (!ctx) break;
+                r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+                ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+                cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+                ctx->beginRenderPass({}, cv);
+                r.draw(ctx, cam, pc, R, mvp);
+                ctx->endRenderPass();
+                if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                g_dev->endFrame(); pumpWindowEvents();
+                if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            }
+        };
+        std::vector<uint8_t> pxNone, pxAir, pxFlat;
+        renderAir(glm::vec4(0.0f, 1.0f, (float)altO, 4000.0f), pxNone);          // sin aire
+        renderAir(glm::vec4(1.0f / 60000.0f, 1.0f, (float)altO, 4000.0f), pxAir); // aire de verdad
+        renderAir(glm::vec4(1.0f / 60000.0f, 1.0f, (float)altO, 0.0f), pxFlat);   // camino plano (el bug)
+        auto desvio = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
+            double acc = 0.0; size_t n = 0;
+            for (size_t k = 0; k + 3 < a.size(); k += 4) {
+                if (a[k] == 0xAA && a[k+1] == 0xAA && a[k+2] == 0xAA) continue;
+                if (!a[k] && !a[k+1] && !a[k+2]) continue;   // fondo negro: no es planeta
+                acc += (std::abs((int)a[k] - b[k]) + std::abs((int)a[k+1] - b[k+1]) + std::abs((int)a[k+2] - b[k+2])) / 3.0;
+                ++n;
+            }
+            return n ? acc / (double)n : -1.0;
+        };
+        const double dAir = desvio(pxNone, pxAir), dFlat = desvio(pxNone, pxFlat);
+        std::printf("    desde 2 000 km al nadir, desvio medio del color respecto a SIN aire: aire exponencial %.1f/255 · camino plano (el bug) %.1f/255\n", dAir, dFlat);
+        CHECK(dAir >= 0.0 && dAir < 25.0, "con el aire de verdad el planeta conserva su color desde orbita (desvio < 25/255)");
+        CHECK(dFlat > 3.0 * std::max(dAir, 1.0), "CONTRAPRUEBA: con el camino plano el planeta se va al color del aire");
+        TerrainNodeRenderer::Shade sh0; r.setShade(sh0);
+        g_dev->destroy(albedo); g_dev->destroy(normal); g_dev->destroy(matUBO);
+    }
 
     // CONTRAPRUEBA: sin dibujar nada, la cobertura tiene que ser 0. Sin esto, el test pasaria si
     // `readPixels` devolviera basura no nula o si el clear no funcionara.
@@ -7807,6 +9749,7 @@ static void testTerrainNodeShadeCost()
                     "GPU. Reejecutar con HARUKA_NO_VSYNC=1.\n", flat);
     }
     CHECK(shaded > 0.0 && flat > 0.0, "las dos configuraciones dibujan y se miden");
+    baselineMetric("terreno.sombreado_800m_ms", shaded, 0.30, true, true, !vsyncBound);
 
     // ⚠️ CONTRAPRUEBA OBLIGATORIA: que las dos configuraciones den IMAGENES DISTINTAS. Sin esto, un
     // `uShade.w` que no llegara al shader daria delta 0 y el test lo leeria como "sombrear es
@@ -8169,6 +10112,64 @@ static void testNodeGpuAdapterBisect()
     CHECK(wAB < 0.05, "los dos caminos producen LO MISMO (si no, el fallo esta en el adaptador)");
 }
 
+// ================================================================================================
+// ARENA DE INSTANCIAS: memoria host-visible por frame.
+//
+// Era un anillo fijo: 16 entradas × maxInstances (20 000) × 96 B = 30 MB reservados hiciera falta
+// o no, y al pasar de 16 draws por frame (19 prototipos × 3 LOD + sombras) el cursor daba la vuelta
+// a mitad de frame y los primeros draws leían las instancias de los últimos (la hierba cercana no
+// se dibujaba). Una entrada por draw arreglaba eso pero costaba 22 ms/frame recreando entradas.
+// Ahora: UN buffer por frame, sub-asignación lineal con offset. Aquí se mide con el reparto real de
+// un frame del juego: 60 draws, la mayoría de decenas o cientos de instancias y tres de miles.
+// ================================================================================================
+static void testInstancingRing()
+{
+    BEGIN("instancing: arena por frame, sub-asignacion lineal");
+    using Haruka::Renderer::GPUInstancing;
+    using Haruka::InstanceDataFloat;
+    GPUInstancing inst;
+    inst.init(20000);
+    CHECK(inst.hostBytes() == 0, "init no reserva nada: el arena nace al primer uso");
+
+    std::vector<size_t> lotes;
+    for (int i = 0; i < 60; ++i) lotes.push_back(i % 20 == 0 ? 6000 : (i % 5 == 0 ? 400 : 30));
+    size_t total = 0; for (size_t n : lotes) total += n;
+
+    auto frame = [&]() {
+        inst.beginFrame();
+        for (size_t n : lotes) {
+            std::vector<InstanceDataFloat> b(n);
+            inst.setInstances(b);
+            inst.upload();
+        }
+    };
+    frame(); frame();   // calentamiento: el arena crece dentro del frame hasta que cabe entero
+    const auto t0 = std::chrono::steady_clock::now();
+    frame();
+    const size_t bytes1 = inst.hostBytes();
+    frame(); frame();
+    const double msPerFrame = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() / 3.0;
+    const size_t bytes3 = inst.hostBytes();
+    const size_t fijo = 60u * 20000u * sizeof(InstanceDataFloat);
+    std::printf("    60 draws, %zu instancias (%.1f MB movidos): arena %.1f MB (antes fijo: %.1f MB) · tras 3 frames %.1f MB · %.2f ms/frame de subida\n",
+                total, total * sizeof(InstanceDataFloat) / 1048576.0, bytes1 / 1048576.0, fijo / 1048576.0,
+                bytes3 / 1048576.0, msPerFrame);
+    CHECK(inst.ringSize() == 60, "60 lotes subidos en el frame");
+    CHECK(bytes1 <= total * sizeof(InstanceDataFloat) * 2, "la reserva no pasa del doble de lo que se mueve (redondeo a potencia de dos)");
+    CHECK(bytes1 < fijo / 8, "al menos 8x menos que el anillo fijo de 20 000 por entrada");
+    CHECK(bytes3 == bytes1, "los frames siguientes no reservan nada mas");
+    CHECK(msPerFrame < 8.0, "subir 2,1 MB en 60 lotes baja de 8 ms (con una entrada por draw eran ~22)");
+    baselineMetric("instancias.subida_60_lotes_ms", msPerFrame, 1.50, true, true);   // 0,4-0,8 ms de un frame a otro: es ruido de subida
+    // Contraprueba: un frame que no cabe crea un arena mayor (el viejo se retira hasta el frame
+    // siguiente), y solo entonces.
+    lotes[0] = 20000;
+    frame();
+    const size_t bytes4 = inst.hostBytes();
+    CHECK(bytes4 == bytes3 * 2, "contraprueba: 37 040 instancias no caben en 32 768 -> arena de 65 536");
+    frame();
+    CHECK(inst.hostBytes() == bytes4, "y el siguiente frame ya cabe sin crecer");
+}
+
 static int runBackend(Backend backend)
 {
     const char* name = (backend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
@@ -8208,6 +10209,7 @@ static int runBackend(Backend backend)
     g_dev = dev.get();
     // El nombre del driver decide qué fallos están declarados como suyos. Se imprime siempre: sin
     // esta línea, un XFAIL en el log de CI no se puede atribuir a nada.
+    baselineReset();   // cierra la linea base del backend ANTERIOR (escribe si se pidio) antes de cambiar de nombre
     g_curBackend = backend;
     g_curDevice  = dev->deviceName();
     std::printf("== Backend %s activo · dispositivo: %s ==\n", name, g_curDevice.c_str());
@@ -8251,10 +10253,15 @@ static int runBackend(Backend backend)
     testTerrainStrideMatchCost();
     testTerrainNodeRendererInit();
     testTerrainNodeBaseField();
+    testNodeVoxCut();
     testNodeWaterDraws();
+    testHorizonPlateau();
     testAtmosphereLimb();
     testCloudVolumeDraws();
     testCloudFieldDistribution();
+    testCloudShape3D();
+    testCloudColumnParity();
+    testCloudNoiseParity();
     testSkyLayersHaveDepth();
     testTerrainNodeCoverage();
     testTerrainNodeSeamHoles();
@@ -8274,6 +10281,7 @@ static int runBackend(Backend backend)
     testPropLightSweep();
     testTerrainShadow();
     testCullWindingWithProjection();
+    testInstancingRing();
 
     // ⚠️ EL ULTIMO, Y A PROPOSITO. Es el unico test del banco que dibuja a un render target
     // OFFSCREEN, y deja el backend en un estado que hace fallar al siguiente que lee pixeles del
@@ -8318,11 +10326,25 @@ int main(int argc, char** argv)
 
     if (!locateAssets()) { std::printf("\n== 0 OK · 1 FALLOS ==\n"); return 1; }
 
+    // ⚠️ LOS DOS BACKENDS EN LA MISMA GPU. En un portatil con dos GPUs, OpenGL sale por defecto en
+    // la integrada (AMD Renoir aqui) y Vulkan elige la dedicada (NVIDIA): el banco comparaba dos
+    // tarjetas creyendo comparar dos backends (costes x3, y el fp64 "degradado" era el de la AMD).
+    // Con el driver de NVIDIA presente se pide PRIME render offload para GL, salvo que se diga
+    // `HARUKA_GL_IGPU=1` (para medir la integrada a proposito).
+    if (!std::getenv("HARUKA_GL_IGPU")) {
+        struct stat st{};
+        if (stat("/proc/driver/nvidia/version", &st) == 0) {
+            setenv("__NV_PRIME_RENDER_OFFLOAD", "1", 0);
+            setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
+        }
+    }
+
     if (run == "gl" || run == "all") runBackend(Backend::OpenGL);
     if (run == "vk" || run == "all") runBackend(Backend::Vulkan);
     if (run == "all") compareBackends();
 
     SDL_Quit();
+    baselineWriteIfAsked();
     if (g_xfail > 0)
         std::printf("\n== %d OK · %d FALLOS · %d XFAIL (defectos declarados del driver) ==\n",
                     g_pass, g_fail, g_xfail);

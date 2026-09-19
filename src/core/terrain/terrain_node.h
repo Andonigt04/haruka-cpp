@@ -881,13 +881,24 @@ inline float nodeVertexMorph(uint32_t level, const glm::dvec3& texelDir, double 
  * no se ve (se dibuja de más, que es barato) pero no puede descartarse uno que sí — que sería un
  * agujero en el suelo. Nunca al revés.
  */
+/// @param maxElevM  cota MÁXIMA del terreno del nodo sobre la esfera (m). ⚠️ SIN ELLA EL RECORTE
+///        TIRABA LAS CORDILLERAS: el horizonte de la esfera LISA desde 2 m está a 5 km, pero un monte
+///        de 2 km asoma por encima hasta 160 km. Todo relieve entre los dos horizontes se descartaba
+///        y en su sitio quedaba cielo con la banda de nube ("las nubes tapan la cordillera", Andoni,
+///        y su pista: "creo que es el frustum culling"). El horizonte del nodo es el de la esfera de
+///        radio `R + maxElevM`: se ve si algún punto suyo queda a menos de `acos(R/D) + acos(R/(R+h))`.
 inline bool nodeBelowHorizon(const NodeId& n, double planetRadiusM,
-                             const glm::dvec3& camPos, const glm::dvec3& planetCenter) {
+                             const glm::dvec3& camPos, const glm::dvec3& planetCenter,
+                             double maxElevM = 0.0) {
     const glm::dvec3 rel = camPos - planetCenter;
     const double D = glm::length(rel);
     if (D <= planetRadiusM) return false;          // cámara dentro del planeta: no se recorta nada
     const glm::dvec3 camHat = rel / D;
-    const double cosHorizon = planetRadiusM / D;
+    const double h = std::max(maxElevM, 0.0);
+    // cos(acos(R/D) + acos(R/(R+h))): la suma de los dos horizontes, sin llamar a acos.
+    const double cA = planetRadiusM / D, cB = planetRadiusM / (planetRadiusM + h);
+    const double sA = std::sqrt(std::max(1.0 - cA * cA, 0.0)), sB = std::sqrt(std::max(1.0 - cB * cB, 0.0));
+    const double cosHorizon = cA * cB - sA * sB;
 
     // ── REGLA 1: ¿está el punto BAJO LA CÁMARA dentro de este nodo? Entonces se ve, y punto. ─────
     //
@@ -1078,16 +1089,17 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
     const auto admit = [&](const NodeId& n) {
         // HORIZONTE PRIMERO: descartar lo que no se ve antes de gastarle presupuesto. Ver
         // `nodeBelowHorizon` — sin esto la cara oculta se come las plazas del campo cercano.
-        if (nodeBelowHorizon(n, planetRadiusM, camPos, planetCenter)) {
+        // Cota del nodo: la que sepa el pool, y si no la sabe el bound conservador. La usan los DOS
+        // recortes: el horizonte (un monte asoma mas alla del horizonte liso) y el frustum.
+        double bound = terrainBoundM, maxElev = terrainBoundM;
+        if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) { bound = r.boundM(); maxElev = r.maxM; } }
+        if (nodeBelowHorizon(n, planetRadiusM, camPos, planetCenter, maxElev)) {
             if (outCulledHorizon) ++*outCulledHorizon;
             return;
         }
         // FRUSTUM después del horizonte: los dos descartan, pero el de horizonte es más barato
         // (sin acos ni asin) y se lleva por delante media esfera antes de que el otro mire nada.
         if (viewDir) {
-            // Cota del nodo: la que sepa el pool, y si no la sabe el bound conservador.
-            double bound = terrainBoundM;
-            if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) bound = r.boundM(); }
             if (nodeOutsideFrustum(n, planetRadiusM, camPos, planetCenter,
                                    *viewDir, coneHalfAngle, bound)) {
                 if (outCulledFrustum) ++*outCulledFrustum;

@@ -73,6 +73,23 @@ enum class TreePartKind : uint8_t {
     Branch = 1,   ///< una rama: se rompe sola, y si es larga deja un palo
 };
 
+/**
+ * @brief ESTILO del árbol: qué silueta emite el mismo generador. Existe porque el scatter tenía UN
+ *  prototipo por capa y todos los árboles del planeta eran la misma frondosa: la taiga y la selva
+ *  recibían la misma malla. Cada estilo cambia el esqueleto (de donde salen malla y collider) y la
+ *  copa; `Broadleaf` es la frondosa de siempre, bit a bit (lo fija un test).
+ */
+enum class TreeStyle : uint8_t {
+    Broadleaf = 0,  ///< frondosa: tronco + 2-3 ramas + copa de blobs (la de siempre)
+    Conifer   = 1,  ///< conífera: fuste alto y copa de conos apilados
+    Palm      = 2,  ///< palmera: fuste curvado sin ramas y corona de hojas planas
+    Shrub     = 3,  ///< arbusto: sin fuste visible, blobs a ras de suelo
+    Dead      = 4,  ///< árbol muerto: tronco y ramas, sin copa
+    Cactus    = 5,  ///< cactus: fuste grueso verde con dos brazos, sin copa
+    Grass     = 6,  ///< mata de hierba: hojas cruzadas, sin esqueleto (no colisiona)
+    COUNT
+};
+
 /** @brief Un segmento estructural: cono truncado de `a` a `b` con radio en cada extremo.
  *  Coordenadas LOCALES del árbol (base del tronco en el origen, +Y hacia arriba), sin escalar:
  *  quien lo use aplica la escala/orientación de la instancia. */
@@ -107,17 +124,55 @@ struct TreeSkeleton {
  * de canal (0,1 para la inclinación; 3..6 por rama), mismas constantes. Cambiar cualquiera de
  * ellas mueve árboles ya generados, así que se tocan a sabiendas.
  */
-inline TreeSkeleton treeSkeleton(int seed, float height, float trunkR) {
+inline TreeSkeleton treeSkeleton(int seed, float height, float trunkR,
+                                 TreeStyle style = TreeStyle::Broadleaf) {
     TreeSkeleton sk;
     sk.height = height;
     sk.trunkR = trunkR;
 
     const float kPi = 3.14159265358979323846f;
 
+    // La hierba no tiene esqueleto: nada que talar, nada con lo que chocar.
+    if (style == TreeStyle::Grass) { sk.trunkH = height; return sk; }
+
+    // Proporciones por estilo. La frondosa conserva las constantes de siempre (0,62 · 0,12 · 0,25):
+    // cambiarlas movería árboles ya generados, y lo fija el test de compatibilidad del LOD.
+    float trunkFrac = 0.62f, bendAmp = 0.12f, topFrac = 0.25f;
+    int   nBranches = 2 + (int)(WhiteNode::hashFloat(0, 2, 0, (uint32_t)seed) * 2.0f);   // 2..3
+    float branchAt = 0.55f, leanLo = 0.35f, leanHi = 0.35f, upLo = 0.30f, upHi = 0.30f;
+    float lenLo = 0.22f, lenHi = 0.12f, brR = 0.30f;
+    switch (style) {
+        case TreeStyle::Conifer:   // fuste casi entero, ramas cortas y horizontales bajo la copa
+            trunkFrac = 0.92f; bendAmp = 0.04f; topFrac = 0.12f;
+            nBranches = 3; branchAt = 0.35f; leanLo = 0.8f; leanHi = 0.2f; upLo = 0.05f; upHi = 0.10f;
+            lenLo = 0.12f; lenHi = 0.06f; brR = 0.22f;
+            break;
+        case TreeStyle::Palm:      // fuste entero, curvado, sin ramas: la corona cuelga del tronco
+            trunkFrac = 1.0f; bendAmp = 0.30f; topFrac = 0.6f; nBranches = 0;
+            break;
+        case TreeStyle::Shrub:     // fuste corto y ramas que suben: la copa está a ras de suelo
+            trunkFrac = 0.30f; bendAmp = 0.10f; topFrac = 0.5f;
+            nBranches = 3; branchAt = 0.6f; leanLo = 0.4f; leanHi = 0.3f; upLo = 0.6f; upHi = 0.3f;
+            lenLo = 0.30f; lenHi = 0.15f; brR = 0.5f;
+            break;
+        case TreeStyle::Dead:      // tronco y ramas retorcidas hacia arriba, nada más
+            trunkFrac = 0.90f; bendAmp = 0.18f; topFrac = 0.20f;
+            nBranches = 3 + (int)(WhiteNode::hashFloat(0, 2, 0, (uint32_t)seed) * 2.0f);
+            branchAt = 0.5f; leanLo = 0.3f; leanHi = 0.4f; upLo = 0.5f; upHi = 0.5f;
+            lenLo = 0.25f; lenHi = 0.15f; brR = 0.30f;
+            break;
+        case TreeStyle::Cactus:    // fuste grueso casi cilíndrico y dos brazos que suben
+            trunkFrac = 1.0f; bendAmp = 0.02f; topFrac = 0.85f;
+            nBranches = 2; branchAt = 0.45f; leanLo = 0.5f; leanHi = 0.1f; upLo = 0.9f; upHi = 0.2f;
+            lenLo = 0.30f; lenHi = 0.10f; brR = 0.7f;
+            break;
+        default: break;
+    }
+
     // Inclinación determinista del fuste (la misma que da el "bend" al dibujarlo).
-    const float bendX = (WhiteNode::hashFloat(0, 0, 0, (uint32_t)seed) - 0.5f) * 0.12f;
-    const float bendZ = (WhiteNode::hashFloat(0, 1, 0, (uint32_t)seed) - 0.5f) * 0.12f;
-    const float trunkH = height * 0.62f;
+    const float bendX = (WhiteNode::hashFloat(0, 0, 0, (uint32_t)seed) - 0.5f) * bendAmp;
+    const float bendZ = (WhiteNode::hashFloat(0, 1, 0, (uint32_t)seed) - 0.5f) * bendAmp;
+    const float trunkH = height * trunkFrac;
     sk.trunkH = trunkH;
 
     TreePart trunk;
@@ -125,26 +180,27 @@ inline TreeSkeleton treeSkeleton(int seed, float height, float trunkR) {
     trunk.a       = glm::vec3(0.0f);
     trunk.b       = glm::vec3(bendX * trunkH, trunkH, bendZ * trunkH);
     trunk.radiusA = trunkR;
-    trunk.radiusB = trunkR * 0.25f;
+    trunk.radiusB = trunkR * topFrac;
     sk.parts.push_back(trunk);
-
-    // Ramas: 2-3, siempre TODAS en el esqueleto (el detalle decide si se dibujan, no si existen).
-    const int nBranches = 2 + (int)(WhiteNode::hashFloat(0, 2, 0, (uint32_t)seed) * 2.0f);
-    const float branchBaseY = trunkH * 0.55f;
+    // Ramas: siempre TODAS en el esqueleto (el detalle decide si se dibujan, no si existen).
+    const float branchBaseY = trunkH * branchAt;
     const glm::vec3 bBase(bendX * branchBaseY, branchBaseY, bendZ * branchBaseY);
     for (int b = 0; b < nBranches; ++b) {
-        const float ang  = 2.0f * kPi * WhiteNode::hashFloat(b, 3, 0, (uint32_t)seed);
-        const float lean = 0.35f + WhiteNode::hashFloat(b, 4, 0, (uint32_t)seed) * 0.35f;
-        const float up   = 0.30f + WhiteNode::hashFloat(b, 5, 0, (uint32_t)seed) * 0.30f;
-        const float lenB = height * (0.22f + WhiteNode::hashFloat(b, 6, 0, (uint32_t)seed) * 0.12f);
+        // El cactus reparte los brazos en oposición: dos brazos al mismo lado no se leen como cactus.
+        const float ang  = (style == TreeStyle::Cactus)
+                         ? 2.0f * kPi * (WhiteNode::hashFloat(0, 3, 0, (uint32_t)seed) + 0.5f * (float)b)
+                         : 2.0f * kPi * WhiteNode::hashFloat(b, 3, 0, (uint32_t)seed);
+        const float lean = leanLo + WhiteNode::hashFloat(b, 4, 0, (uint32_t)seed) * leanHi;
+        const float up   = upLo   + WhiteNode::hashFloat(b, 5, 0, (uint32_t)seed) * upHi;
+        const float lenB = height * (lenLo + WhiteNode::hashFloat(b, 6, 0, (uint32_t)seed) * lenHi);
         const glm::vec3 dir = glm::normalize(glm::vec3(std::cos(ang) * lean, up, std::sin(ang) * lean));
 
         TreePart br;
         br.kind    = TreePartKind::Branch;
         br.a       = bBase;
         br.b       = bBase + dir * lenB;
-        br.radiusA = trunkR * 0.30f;
-        br.radiusB = trunkR * 0.05f;
+        br.radiusA = trunkR * brR;
+        br.radiusB = trunkR * (style == TreeStyle::Cactus ? brR * 0.8f : 0.05f);
         sk.parts.push_back(br);
     }
     return sk;
@@ -176,9 +232,10 @@ public:
      * Lo fija un test.
      */
     TreeMeshNode(int seed = 0, float height = 6.5f, float trunkRadius = 0.35f,
-                 float canopySize = 1.0f, int segments = 8, float detail = 1.0f)
+                 float canopySize = 1.0f, int segments = 8, float detail = 1.0f,
+                 TreeStyle style = TreeStyle::Broadleaf)
         : m_seed(seed), m_height(height), m_trunkRadius(trunkRadius),
-          m_canopySize(canopySize), m_segments(segments), m_detail(detail) {}
+          m_canopySize(canopySize), m_segments(segments), m_detail(detail), m_style(style) {}
 
     std::string name() const override { return "Tree Mesh"; }
 
@@ -205,10 +262,10 @@ public:
 
         if (!m_built || seed   != m_lastSeed   || height != m_lastHeight ||
             trunkR   != m_lastTrunkR || canopy != m_lastCanopy || segs != m_lastSegs ||
-            m_detail != m_lastDetail) {
+            m_detail != m_lastDetail || m_style != m_lastStyle) {
             build(seed, height, trunkR, canopy, segs);
             m_lastSeed = seed; m_lastHeight = height; m_lastTrunkR = trunkR;
-            m_lastCanopy = canopy; m_lastSegs = segs; m_lastDetail = m_detail;
+            m_lastCanopy = canopy; m_lastSegs = segs; m_lastDetail = m_detail; m_lastStyle = m_style;
             m_built = true;
         }
 
@@ -228,11 +285,13 @@ private:
     float m_height, m_trunkRadius, m_canopySize;
     int   m_segments;
     float m_detail = 1.0f;
+    TreeStyle m_style = TreeStyle::Broadleaf;
 
     int   m_lastSeed   = 0x7fffffff;
     float m_lastHeight = -1, m_lastTrunkR = -1, m_lastCanopy = -1;
     int   m_lastSegs   = -1;
     float m_lastDetail = -1.0f;
+    TreeStyle m_lastStyle = TreeStyle::COUNT;
 };
 
 // ===========================================================================
@@ -296,8 +355,18 @@ inline void TreeMeshNode::build(int seed, float height, float trunkR,
     const float kPi = 3.14159265358979323846f;
 
     // ---- colores anime por material ---------------------------------------
-    const glm::vec3 barkCol   (0.42f, 0.30f, 0.20f);
-    const glm::vec3 foliageCol(0.24f, 0.42f, 0.17f);
+    const TreeStyle style = m_style;
+    glm::vec3 barkCol   (0.42f, 0.30f, 0.20f);
+    glm::vec3 foliageCol(0.24f, 0.42f, 0.17f);
+    switch (style) {
+        case TreeStyle::Conifer: foliageCol = glm::vec3(0.14f, 0.32f, 0.16f); barkCol = glm::vec3(0.36f, 0.24f, 0.16f); break;
+        case TreeStyle::Palm:    foliageCol = glm::vec3(0.30f, 0.50f, 0.18f); barkCol = glm::vec3(0.50f, 0.40f, 0.26f); break;
+        case TreeStyle::Shrub:   foliageCol = glm::vec3(0.30f, 0.46f, 0.18f); break;
+        case TreeStyle::Dead:    barkCol    = glm::vec3(0.34f, 0.30f, 0.26f); break;
+        case TreeStyle::Cactus:  barkCol    = glm::vec3(0.28f, 0.50f, 0.26f); break;
+        case TreeStyle::Grass:   foliageCol = glm::vec3(0.36f, 0.56f, 0.20f); break;
+        default: break;
+    }
 
     auto appendCone = [&](const glm::vec3& base, const glm::vec3& top,
                           float baseR, float topR, int rings,
@@ -335,7 +404,7 @@ inline void TreeMeshNode::build(int seed, float height, float trunkR,
     // ---- tronco y ramas: LOS EMITE EL ESQUELETO -----------------------------
     // La forma ya no se calcula aquí. `treeSkeleton` es la única fuente, y este bucle solo decide
     // CUÁNTOS anillos gasta en cada segmento (eso sí es LOD) y qué partes se dibujan.
-    const TreeSkeleton sk = treeSkeleton(seed, height, trunkR);
+    const TreeSkeleton sk = treeSkeleton(seed, height, trunkR, style);
     const float trunkH = sk.trunkH;
     for (size_t pi = 0; pi < sk.parts.size(); ++pi) {
         const TreePart& p = sk.parts[pi];
@@ -349,6 +418,23 @@ inline void TreeMeshNode::build(int seed, float height, float trunkR,
         appendCone(p.a, p.b, p.radiusA, p.radiusB, rings, 0, barkCol);
     }
     ctx.part = 0;   // la copa cuelga del TRONCO: tumbarlo se lleva el follaje
+
+    // ---- HOJA PLANA a dos caras (palmera, hierba): el PSO de props culla la cara trasera, así
+    // que una hoja de un solo lado desaparece al mirarla desde atrás. Se emite dos veces con el hint
+    // opuesto; `addTri` orienta cada copia hacia su hint.
+    auto appendBlade = [&](const glm::vec3& root, const glm::vec3& tip, const glm::vec3& side,
+                           float widthRoot, float widthTip, unsigned char mat, const glm::vec3& color) {
+        const glm::vec3 n = glm::normalize(glm::cross(tip - root, side));
+        for (int face = 0; face < 2; ++face) {
+            const glm::vec3 hint = face == 0 ? n : -n;
+            const size_t a = ctx.addV(root - side * (widthRoot * 0.5f), hint, glm::vec2(0, 0), mat, color);
+            const size_t b = ctx.addV(root + side * (widthRoot * 0.5f), hint, glm::vec2(1, 0), mat, color);
+            const size_t c = ctx.addV(tip  + side * (widthTip  * 0.5f), hint, glm::vec2(1, 1), mat, color);
+            const size_t d = ctx.addV(tip  - side * (widthTip  * 0.5f), hint, glm::vec2(0, 1), mat, color);
+            ctx.addQuad(a, b, c, d);
+        }
+    };
+
 
     // ---- copa: cluster de blobs achatados (estilo anime) -------------------
     auto appendSphere = [&](const glm::vec3& center, float radius,
@@ -388,6 +474,81 @@ inline void TreeMeshNode::build(int seed, float height, float trunkR,
             ctx.addTri(botV, rings[lat - 2][j], rings[lat - 2][j2]);
         }
     };
+
+    // ---- copas que NO son la de blobs ----------------------------------------
+    if (style == TreeStyle::Dead || style == TreeStyle::Cactus) {
+        // Sin copa: normalizar y salir.
+        for (size_t i = 0; i < m.normals.size(); ++i) {
+            const float l = glm::length(m.normals[i]);
+            m.normals[i] = (l > 1e-6f) ? m.normals[i] / l : glm::normalize(ctx.hints[i]);
+        }
+        return;
+    }
+    if (style == TreeStyle::Conifer) {
+        // Conos apilados desde el 25 % del fuste hasta la punta; cada uno más estrecho. El LOD quita
+        // conos (mínimo 1) pero conserva la base del más bajo y la punta: la envolvente no cambia.
+        const int tiersFull = 3 + (int)(WhiteNode::hashFloat(0, 7, 0, seed) * 2.0f);   // 3..4
+        const int tiers = std::max(1, (int)std::lround((float)tiersFull * detail));
+        const float y0 = trunkH * 0.25f, y1 = trunkH * 1.08f;
+        const float baseR = trunkR * (4.5f + 2.0f * canopy) * (0.9f + 0.2f * WhiteNode::hashFloat(0, 9, 0, seed));
+        const glm::vec3 axisTop = sk.parts[0].b;   // sigue la (poca) inclinación del fuste
+        for (int t = 0; t < tiers; ++t) {
+            const float f0 = (float)t / (float)tiers, f1 = (float)(t + 1) / (float)tiers;
+            const float yb = y0 + (y1 - y0) * f0, yt = y0 + (y1 - y0) * f1;
+            const float r  = baseR * (1.0f - 0.75f * f0);
+            const glm::vec3 cb = axisTop * (yb / trunkH), ct = axisTop * (yt / trunkH);
+            // Cada cono llega hasta el arranque del siguiente + un solape para que no se vea el hueco.
+            const glm::vec3 top = (t + 1 == tiers) ? ct : ct + (ct - cb) * 0.35f;
+            appendCone(cb, top, r, 0.02f, 1, 1, foliageCol);
+            // Tapa inferior: sin ella se ve el interior del cono desde abajo.
+            appendCone(cb - glm::vec3(0, 0.02f, 0), cb, 0.02f, r, 1, 1, foliageCol);
+        }
+    } else if (style == TreeStyle::Palm) {
+        // Corona: hojas planas que salen de la punta del fuste, suben un poco y caen.
+        const int frondsFull = 6 + (int)(WhiteNode::hashFloat(0, 7, 0, seed) * 3.0f);   // 6..8
+        const int fronds = std::max(3, (int)std::lround((float)frondsFull * detail));
+        const glm::vec3 top = sk.parts[0].b;
+        const float lenF = height * (0.30f + 0.06f * canopy);
+        for (int f = 0; f < fronds; ++f) {
+            const float ang = 2.0f * kPi * ((float)f / (float)fronds + 0.05f * WhiteNode::hashFloat(f, 8, 0, seed));
+            const glm::vec3 out(std::cos(ang), 0.0f, std::sin(ang));
+            const glm::vec3 side = glm::vec3(-out.z, 0.0f, out.x);
+            const float droop = 0.25f + 0.25f * WhiteNode::hashFloat(f, 9, 0, seed);
+            const glm::vec3 mid = top + out * (lenF * 0.5f) + glm::vec3(0, lenF * 0.18f, 0);
+            const glm::vec3 tip = top + out * lenF - glm::vec3(0, lenF * droop, 0);
+            appendBlade(top, mid, side, 0.25f, lenF * 0.30f, 1, foliageCol);
+            appendBlade(mid, tip, side, lenF * 0.30f, 0.05f, 1, foliageCol);
+        }
+    } else if (style == TreeStyle::Grass) {
+        // Mata: 3 hojas cruzadas (6 caras) de altura `height`, sin esqueleto.
+        const int blades = std::max(2, (int)std::lround(3.0f * detail));
+        for (int b = 0; b < blades; ++b) {
+            const float ang = kPi * (float)b / (float)blades + 0.3f * WhiteNode::hashFloat(b, 8, 0, seed);
+            const glm::vec3 side(std::cos(ang), 0.0f, std::sin(ang));
+            const glm::vec3 lean = glm::vec3(-side.z, 0.0f, side.x) * (0.15f * (WhiteNode::hashFloat(b, 9, 0, seed) - 0.5f));
+            appendBlade(glm::vec3(0.0f), glm::vec3(0, height, 0) + lean * height, side,
+                        height * 0.35f, height * 0.06f, 1, foliageCol);
+        }
+    } else if (style == TreeStyle::Shrub) {
+        // Blobs a ras de suelo alrededor de la punta del fuste corto.
+        const int nFull = 3 + (int)(WhiteNode::hashFloat(0, 7, 0, seed) * 2.0f);   // 3..4
+        const int n = std::max(1, (int)std::lround((float)nFull * detail));
+        const float r = trunkR * (4.0f + 2.0f * canopy);
+        for (int b = 0; b < n; ++b) {
+            const float ang = 2.0f * kPi * WhiteNode::hashFloat(b, 8, 0, seed);
+            const float rad = (n == 1) ? 0.0f : r * (0.3f + 0.4f * WhiteNode::hashFloat(b, 9, 0, seed));
+            const float br  = r * (0.6f + 0.4f * WhiteNode::hashFloat(b, 11, 0, seed));
+            appendSphere(glm::vec3(std::cos(ang) * rad, trunkH + br * 0.5f, std::sin(ang) * rad),
+                         br, 0.75f, 1, foliageCol);
+        }
+    }
+    if (style != TreeStyle::Broadleaf) {
+        for (size_t i = 0; i < m.normals.size(); ++i) {
+            const float l = glm::length(m.normals[i]);
+            m.normals[i] = (l > 1e-6f) ? m.normals[i] / l : glm::normalize(ctx.hints[i]);
+        }
+        return;
+    }
 
     // ---- copa: cluster de blobs, con LOD que CONSERVA LA ENVOLVENTE ---------
     //

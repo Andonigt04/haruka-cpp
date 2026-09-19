@@ -14,13 +14,15 @@
 
 layout(std140, binding = 0) uniform NodeDraw {
     mat4  uMVP; vec4 uCenter; vec4 uCenterLo; vec4 uLod; ivec4 uGrid; ivec4 uEdgeUnused;
-    vec4  uMisc; vec4 uShade; vec4 uTexAnchor; vec4 uLightDir;
+    vec4  uMisc; vec4 uShade; vec4 uTexAnchor; vec4 uLightDir; vec4 uAerial;
 };
 
 layout(location = 0) in vec3  vNormal;
 layout(location = 1) in vec3  vFragPos;
 layout(location = 2) in float vDepth;
 layout(location = 3) in float vFoam;
+layout(location = 4) flat in int vWStride;
+layout(location = 5) flat in int vWLevel;
 
 layout(location = 0) out vec4 fragColor;
 
@@ -28,6 +30,12 @@ void main() {
     // Aqui no hay agua: el fondo asoma. Mismo criterio que `ocean.frag` — la orilla la decide la
     // PROFUNDIDAD, no un recorte de geometria, asi que sube y baja con la marea sola.
     if (vDepth <= 0.0) discard;
+    // Vistas de depuracion (`HARUKA_TERRAIN_V5_DEBUG`, uMisc.z), las mismas que el terreno: 4 = color
+    // por ZANCADA, 1 = por nivel. Existen por los "bloques negros en la linea del mar" (captura,
+    // 18-09): si se colorean, son nodos de agua; si no, no es el agua.
+    const int dbg = int(uMisc.z);
+    if (dbg == 4) { fragColor = vec4(fract(vec3(0.31, 0.57, 0.83) * float(vWStride * 3 + 1)), 1.0); return; }
+    if (dbg == 1) { fragColor = vec4(fract(vec3(0.31, 0.57, 0.83) * float(vWLevel + 1)), 1.0); return; }
     const vec3 wp = vFragPos - uCenter.xyz - uCenterLo.xyz;
     fragColor = harukaOceanShade(wp, vFragPos, normalize(vNormal), normalize(uLightDir.xyz),
                                  vec3(1.0), vec3(0.10, 0.13, 0.18), vDepth, vFoam);

@@ -1,0 +1,25 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ── SONDA DE LA COLUMNA DE AIRE ─────────────────────────────────────────────────────────────────
+// Evalua `lib/cloud_column.glsl` (fraccion convectiva, fraccion del vapor en altura, hielo) en una
+// lista de columnas x alturas, para que el banco compare contra `src/core/cloud_column.h`: es la
+// mitad GPU del unico test de formacion. Si divergen, el jugador estaria "dentro de la nube" (CPU)
+// donde el cielo no la dibuja (GPU), o al reves.
+#include "lib/cloud_column.glsl"
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };   // por muestra: conv, aloft, hielo
+// por muestra 8 floats: cover, baseM, topM, vaporMid, vaporHigh, tSeaC, zM, (libre)
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    const uint n = uint(uIn[0]);
+    if (i >= n) return;
+    const uint b = 8u + i * 8u;
+    const float cover = uIn[b + 0u], baseM = uIn[b + 1u], topM = uIn[b + 2u];
+    const float vMid = uIn[b + 3u], vHigh = uIn[b + 4u], tSea = uIn[b + 5u], z = uIn[b + 6u];
+    const float tC = harukaColAirTempC(tSea, z);
+    uOut[i * 3u + 0u] = harukaColConvective(cover, baseM, topM, z);
+    uOut[i * 3u + 1u] = harukaColAloft(vMid, vHigh, tC);
+    uOut[i * 3u + 2u] = harukaColIce(tC);
+}

@@ -31,6 +31,7 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uShade;
     vec4  uTexAnchor;
     vec4  uLightDir;
+    vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
 };
 
 layout(std140, binding = 3) uniform Probe {

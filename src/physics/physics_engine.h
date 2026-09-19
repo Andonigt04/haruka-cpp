@@ -7,6 +7,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
+#include <unordered_map>
 #include <memory>
 #include <string>
 #include <functional>
@@ -344,6 +345,24 @@ public:
      *  cuando cambia — son estáticos y tocarlos es raro (colocar/romper), no cosa de cada frame. */
     uint64_t staticsVersion() const { return m_staticsVersion; }
 
+    // ── LAS PAREDES DEL CAMPO VOLUMÉTRICO (cuevas, lo picado) ───────────────────────────────────
+    //
+    // Una malla por chunk, con su propia forma de Jolt: NO se registra como prop porque los props
+    // se vacían y recolocan enteros en cada `syncPropColliders`, y una cueva no es una instancia de
+    // un prototipo. La forma (árbol AABB) se construye sólo cuando ESA malla cambia; el cuerpo se
+    // recrea en cada `syncStatics` como todos los estáticos (es barato: la forma se comparte).
+    /** @brief Sustituye (o crea) la malla de colisión de un chunk. Vértices `xyz` RELATIVOS a `origin`. */
+    void setVoxMesh(uint64_t key, const float* verts, size_t vertCount, const uint32_t* idx, size_t idxCount,
+                    const glm::dvec3& origin);
+    void removeVoxMesh(uint64_t key);
+    struct VoxMeshData {
+        std::vector<float>    verts;
+        std::vector<uint32_t> idx;
+        glm::dvec3            origin{0.0};
+        uint64_t              revision = 0;   ///< sube con cada `setVoxMesh`: la forma se rehace sólo entonces
+    };
+    const std::unordered_map<uint64_t, VoxMeshData>& voxMeshes() const { return m_voxMeshes; }
+
     /** @brief Cajas de los RECURSOS del mundo (árboles/rocas) — lista aparte porque se
      *  regeneran al moverse, independiente de los objetos colocados. */
     void addPropOBB(const glm::dvec3& center, const glm::dvec3& halfExtents, const glm::dmat3& rot);
@@ -493,6 +512,7 @@ private:
     std::vector<StaticBox>                  staticBoxes;
     std::vector<StaticOBB>                  placedOBBs;   // objetos colocados por el jugador
     uint64_t                                m_staticsVersion = 0;  // ver staticsVersion()
+    std::unordered_map<uint64_t, VoxMeshData> m_voxMeshes;
     std::vector<StaticOBB>                  propOBBs;     // recursos del mundo (rocas/casas)
     std::vector<StaticCone>                 propCones;    // troncos y ramas (forma real)
     std::vector<StaticMeshInstance>         propMeshes;   // props con su MALLA exacta

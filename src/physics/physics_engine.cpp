@@ -714,7 +714,10 @@ struct PhysicsEngine::JoltImpl {
     // Sin esto, Jolt solo conoce el terreno: un cuerpo dinámico (el jugador) ATRAVIESA todo lo demás,
     // porque esas cajas solo existían para el resolutor a mano. Se reconstruyen cuando cambia la lista
     // (`version`), no cada frame: son estáticas y cambiarlas es raro (colocar/romper algo).
+    uint64_t lastEditsVersion = 0;   // ver IWorldProvider::groundEditsVersion
     std::vector<JPH::BodyID> staticIds;
+    struct VoxShape { JPH::Ref<JPH::Shape> shape; uint64_t revision = 0; };
+    std::unordered_map<uint64_t, VoxShape> voxShapes;   // paredes de cueva: forma por chunk, cacheada
     uint64_t staticVersion = ~0ull;
 
     /// Mallas de colisión de props, UNA por prototipo/parte y compartidas por todas sus instancias.
@@ -844,6 +847,42 @@ struct PhysicsEngine::JoltImpl {
                 JPH::EMotionType::Static, JLayers::NON_MOVING);
             staticIds.push_back(bi.CreateAndAddBody(s, JPH::EActivation::DontActivate));
             ++meshMade;
+        }
+        // ── PAREDES DEL CAMPO VOLUMÉTRICO ───────────────────────────────────────────────────────
+        // La forma se cachea por chunk y revisión (construir el árbol AABB de 10 k triángulos cuesta
+        // ms; hacerlo en cada sync de estáticos —que ocurre al colocar cualquier prop— no).
+        size_t voxMade = 0;
+        {
+            for (auto it = voxShapes.begin(); it != voxShapes.end();) {
+                if (eng->voxMeshes().count(it->first)) ++it; else it = voxShapes.erase(it);
+            }
+            for (const auto& [key, vm] : eng->voxMeshes()) {
+                if (vm.idx.size() < 3 || vm.verts.size() < 9) continue;
+                auto& cached = voxShapes[key];
+                if (!cached.shape || cached.revision != vm.revision) {
+                    JPH::VertexList vl; vl.reserve(vm.verts.size() / 3);
+                    for (size_t i = 0; i + 2 < vm.verts.size(); i += 3)
+                        vl.push_back(JPH::Float3(vm.verts[i], vm.verts[i + 1], vm.verts[i + 2]));
+                    JPH::IndexedTriangleList tl; tl.reserve(vm.idx.size() / 3);
+                    for (size_t i = 0; i + 2 < vm.idx.size(); i += 3)
+                        tl.push_back(JPH::IndexedTriangle(vm.idx[i], vm.idx[i + 1], vm.idx[i + 2], 0));
+                    JPH::MeshShapeSettings ms(vl, tl);
+                    JPH::ShapeSettings::ShapeResult r = ms.Create();
+                    if (!r.IsValid()) { HARUKA_LOGW("Physics", "malla de cueva %llu invalida: %s", (unsigned long long)key, r.GetError().c_str()); continue; }
+                    cached.shape = r.Get(); cached.revision = vm.revision;
+                }
+                const glm::dvec3 lp = vm.origin - origin;
+                if (!finite3(lp)) continue;
+                JPH::BodyCreationSettings s(cached.shape, JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
+                                            JPH::Quat::sIdentity(), JPH::EMotionType::Static, JLayers::NON_MOVING);
+                staticIds.push_back(bi.CreateAndAddBody(s, JPH::EActivation::DontActivate));
+                ++voxMade;
+            }
+            static size_t s_lastVox = ~(size_t)0;
+            if (voxMade != s_lastVox) {
+                s_lastVox = voxMade;
+                HARUKA_LOGI("Physics", "paredes de cueva -> Jolt: %zu cuerpos de %zu mallas", voxMade, eng->voxMeshes().size());
+            }
         }
         {
             static size_t s_last = ~(size_t)0;
@@ -1408,7 +1447,13 @@ struct PhysicsEngine::JoltImpl {
                                Haruka::Planet::terrainAnchorShouldJump(
                                    nearAnchor, near - w->activePlanetCenter(),
                                    w->activePlanetRadius());
-            if (!nearAnchorSet || moved) {
+            // ⚠️ Y TAMBIÉN CUANDO EL SUELO CAMBIA SIN MOVERSE: una boca de cueva que acaba de
+            // cargar, un trazo del pico. Si no, el anillo se hizo antes de que existiera el campo y
+            // el jugador flota sobre el agujero hasta que anda 4 m.
+            const uint64_t edits = w->groundEditsVersion();
+            const bool editado = edits != lastEditsVersion;
+            if (!nearAnchorSet || moved || editado) {
+                lastEditsVersion = edits;
                 nearJobAnchor = a;
                 nearJob = std::async(std::launch::async, [this, w, near] {
                     return buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
@@ -2277,6 +2322,20 @@ void PhysicsEngine::addPropMeshInstance(int shapeId, const glm::dvec3& center,
     if (shapeId < 0) return;
     propMeshes.push_back({ shapeId, center, rot, scale });
     ++m_staticsVersion;
+}
+
+void PhysicsEngine::setVoxMesh(uint64_t key, const float* verts, size_t vertCount, const uint32_t* idx,
+                               size_t idxCount, const glm::dvec3& origin) {
+    VoxMeshData& m = m_voxMeshes[key];
+    m.verts.assign(verts, verts + vertCount * 3);
+    m.idx.assign(idx, idx + idxCount);
+    m.origin = origin;
+    ++m.revision;
+    ++m_staticsVersion;
+}
+
+void PhysicsEngine::removeVoxMesh(uint64_t key) {
+    if (m_voxMeshes.erase(key)) ++m_staticsVersion;
 }
 
 void PhysicsEngine::clearPropMeshInstances() {

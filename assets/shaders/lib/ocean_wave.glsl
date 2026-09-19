@@ -123,7 +123,9 @@ float harukaFetchFactor(float fetchM) {
     for (int i = 0; i < HARUKA_WAVES; ++i) { float a = harukaWaveAt(i).y; sum2 += a * a; }
     float Hs = 4.0 * sqrt(sum2 * 0.5);
     if (Hs <= 1e-4) return 1.0;
-    float U   = sqrt(Hs * HARUKA_G / 0.21);
+    // Gemelo de `oceanWindSpeed`: el viento que trae el estado si lo trae; si no, se deduce de Hs.
+    float Uk  = harukaWindKnown();
+    float U   = (Uk > 0.0) ? Uk : sqrt(Hs * HARUKA_G / 0.21);
     float HsF = 0.0016 * U * sqrt(fetchM / HARUKA_G);
     return clamp(HsF / Hs, 0.0, 1.0);
 }
@@ -317,7 +319,8 @@ float harukaWhitecapCoverage() {
     for (int i = 0; i < HARUKA_WAVES; ++i) { float a = harukaWaveAt(i).y; sum2 += a * a; }
     float Hs = 4.0 * sqrt(sum2 * 0.5);
     if (Hs <= 1e-4) return 0.0;
-    float U = sqrt(Hs * HARUKA_G / 0.21);
+    float Uk = harukaWindKnown();
+    float U  = (Uk > 0.0) ? Uk : sqrt(Hs * HARUKA_G / 0.21);
     return 3.84e-6 * pow(U, 3.41);
 }
 
@@ -413,7 +416,7 @@ float harukaSwash(float depthRest, vec3 wp, vec3 up, float t) {
     // La trepada retrasa a la ola un cuarto de ciclo: el agua sube por la arena DESPUÉS de que la
     // cresta llegue, no a la vez. Sin el desfase la lámina y la cresta laten juntas y se lee como un
     // pulso, no como una ola que rompe y se derrama.
-    float ph = k0 * dot(D0, wp) - w0 * t - 1.5707963;
+    float ph = k0 * dot(D0, wp) - w0 * t - 1.5707963 + harukaPhaseAt(0);
     return aBreak * sin(ph) * wgt;
 }
 
@@ -488,7 +491,7 @@ vec3 harukaGerstner(vec3 wp, vec3 up, float t, float depthM, float fetchM, float
         // ⚠️ REFRACTADA: la direccion de la tabla es la de aguas PROFUNDAS. Ver `harukaRefract`.
         vec3  D  = harukaRefract(normalize(t1 * W.z + t2 * W.w), upSlope, up, k0, k);
         float w  = sqrt(HARUKA_G * k0);           // la frecuencia NO cambia con el fondo
-        float ph = k * dot(D, wp) - w * t;
+        float ph = k * dot(D, wp) - w * t + harukaPhaseAt(i);
         float c  = cos(ph), s = sin(ph);
         // EL SEMIEJE HORIZONTAL DE LA ELIPSE (ver `harukaHorizAmp`), no `Q·A`: el reparto viejo no
         // dependia de la amplitud, asi que una charca oscilaba de lado como el oceano.

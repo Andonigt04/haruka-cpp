@@ -31,7 +31,9 @@ namespace Haruka::RHI
             virtual void bindPipeline(PipelineHandle) = 0;                 // absorbe glUseProgram + estado
             /** @brief Ata un vertex buffer a un BINDING del layout (default 0). Una malla con
              *  streams separados llama una vez por stream. Vulkan: vkCmdBindVertexBuffers. */
-            virtual void bindVertexBuffer(BufferHandle, uint32_t binding = 0) = 0;
+            /// `offsetBytes`: primer byte del stream dentro del buffer. Permite meter varios lotes
+            /// (instancias de varios draws) en UN buffer por frame en vez de un buffer por draw.
+            virtual void bindVertexBuffer(BufferHandle, uint32_t binding = 0, size_t offsetBytes = 0) = 0;
             virtual void bindIndexBuffer(BufferHandle) = 0;
             virtual void bindUniformBuffer(uint32_t slot, BufferHandle) = 0;
             /** @brief Storage buffer (SSBO) para el shader. Datos por-draw indexados por gl_DrawID

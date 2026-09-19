@@ -40,7 +40,9 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <vector>
 #include <cstdint>
+#include "core/cloud_column.h"
 
 namespace Haruka {
 
@@ -66,6 +68,9 @@ struct WeatherSample {
     float  tempC      = 15.0f;   ///< temperatura del campo en el punto (la que decide lluvia/nieve).
     float  humidity   = 0.5f;    ///< humedad del campo en el punto.
     glm::vec3 wind{0.0f};        ///< viento TANGENTE (m/s) en el marco local del planeta.
+    /// LA COLUMNA DE AIRE de este punto (ver `cloud_column.h`): es de donde salen base, techo y el
+    /// vapor en altura. `cloudBaseM`/`cloudTopM` son derivados de ella y se mantienen por comodidad.
+    AirColumn column;
 
     /// Grosor de la nube (m). >0 siempre que haya algo de cobertura.
     float cloudThicknessM() const { return cloudTopM - cloudBaseM; }
@@ -134,18 +139,9 @@ public:
      *  el término `0.30 + 0.70·H` de `sampleAt`, que gradúa la INTENSIDAD. */
     static constexpr float kPrecipCover = 0.78f;
 
-    /** @brief Bordes de la losa de nube, en fracción del grosor: dónde acaba de entrar y dónde
-     *  empieza a deshilacharse.
-     *
-     *  ⚠️ ESTÁN DUPLICADOS EN `assets/shaders/lib/cloud_volume.glsl` (`HARUKA_CLOUD_RISE`/`_FALL`),
-     *  porque el mismo volumen se evalúa en dos sitios: aquí para saber si el ojo está dentro, y en
-     *  el shader para pintarlo. No hay forma de compartir un `constexpr` con GLSL, así que los ata
-     *  un TEST que lee el fichero de shader (`weather_3d`). Sin esa atadura, divergir es cuestión de
-     *  tiempo — y el síntoma sería entrar en la niebla a una altura distinta de la que se ve la
-     *  nube, que es el mismo fallo que tenía el clima cuando CPU y shader calculaban la nubosidad
-     *  cada uno por su cuenta. */
-    static constexpr float kProfileRise = 0.28f;
-    static constexpr float kProfileFall = 0.62f;
+    // (el perfil vertical a mano `kProfileRise/Fall` ya no existe: la nube es la columna de aire,
+    //  ver `cloud_column.h`; CPU y shader usan la misma funcion)
+
 
     /** @brief Escala del campo horizontal de nube, en 1/metros. Su inversa es el ANCHO típico de un
      *  cúmulo (0.0007 ⇒ ~1430 m).
@@ -184,10 +180,13 @@ public:
      * las deriva de latitud/altitud y de la advección desde el mar con sombra orográfica. El sistema
      * solo aporta el EVENTO (el frente que pasa) sobre ese fondo.
      */
-    WeatherSample sampleAt(const glm::dvec3& dir, float tempC, float humidity) const;
+    /// `groundM`: cota del suelo (m sobre el nivel del mar). La base de la nube es un nivel de
+    /// condensacion SOBRE EL SUELO; sin esto, sobre una meseta la nube nacia bajo tierra.
+    WeatherSample sampleAt(const glm::dvec3& dir, float tempC, float humidity, float groundM = 0.0f) const;
 
     /** @brief Solo la cobertura de nube (más barato: sin viento ni base de nube). */
     float cloudCoverAt(const glm::dvec3& dir, float humidity) const;
+    float cloudCoverAtTime(const glm::dvec3& dir, float humidity, double time) const;   // reloj desplazado (vapor en altura)
 
     /**
      * @brief EL CIELO ENTERO, HORNEADO: por dirección, (cobertura, base m, techo m, precipitación).
@@ -208,9 +207,57 @@ public:
      * @param outRGBA   W·H·4 floats: r = cobertura · g = base (m) · b = techo (m) · a = precipitación
      * @return          la cobertura MÁXIMA del planeta (para la salida rápida del pase)
      */
+    /// `groundM` (opcional): cota del SUELO sobre el nivel del mar por texel (m, ≥ 0). La base de la
+    /// nube (`cloudBaseM`) es un nivel de condensacion SOBRE EL SUELO; sin esto, sobre una meseta de
+    /// 1 000 m una base de 950 m dejaba la nube DENTRO del terreno: desde arriba se veia como una
+    /// sabana plana troceada por los triangulos de la malla (captura de Andoni, 17-09).
     float bakeSky(const float* tempC, const float* humidity, int W, int H,
                   float* outRGBA, float* outBaseMin = nullptr, float* outTopMax = nullptr,
-                  const float* water = nullptr, float* outHiRGBA = nullptr) const;
+                  const float* water = nullptr, float* outHiRGBA = nullptr,
+                  const float* groundM = nullptr) const;
+
+    // ── EL CICLO DEL AGUA: la HUMEDAD DINÁMICA ───────────────────────────────────────────────
+    //
+    // ⚠️ LA HUMEDAD DEL CAMPO ES ESTÁTICA (sale del bioma): llovía igual hubiera llovido o no, y
+    // nada de lo que evaporaba volvía al cielo. Andoni: "al principio no esté [el agua] y después
+    // conforme llueva se rellene y se evapore para crear más nubes". Esto es esa vuelta:
+    //
+    //   · Una rejilla equirect del planeta (la misma que el horneado del cielo, 256x128) con
+    //     `m` = vapor EXTRA [0,1] sobre la humedad estática.
+    //   · FUENTE: evaporación. Sobre agua (máscara del terreno) y sobre suelo MOJADO (`wet`, que la
+    //     lluvia sube y el sol baja), proporcional a la temperatura y al sol (1 − cobertura).
+    //     Y lo que evapora el parche de agua dinámica del jugador entra aquí (`addMoisture`).
+    //   · SUMIDERO: la precipitación consume vapor (llueve = baja). Así después de un temporal viene
+    //     un claro, y no llueve indefinidamente sobre lo mismo.
+    //   · TRANSPORTE: difusión a 4 vecinos (el viento de verdad lo mueven los frentes; esto sólo
+    //     evita que el vapor se quede clavado donde nació) y una fuga lenta.
+    //   · EFECTO: el clima muestrea `humedad + gain·m` en vez de la estática: más nubes y más
+    //     lluvia donde y después de que ha evaporado.
+    //
+    // Escala de JUEGO, como la lluvia (que ya va 36x más rápida que un aguacero): un temporal medio
+    // se seca en 1-2 h de juego a pleno sol. Las constantes están en `stepMoisture` con su porqué.
+    struct MoistureStats { double meanM = 0.0, maxM = 0.0, evapTotal = 0.0, rainTotal = 0.0; };
+    /** @brief Fija los campos estáticos que el ciclo necesita (los mismos del horneado del cielo):
+     *  temperatura (°C) y máscara de agua (0 tierra, 1 mar/lago), W×H equirect. */
+    void setMoistureFields(const float* tempC, const float* water, int W, int H);
+    /** @brief Un paso del ciclo. `precipRGBA` = el último horneado del cielo (canal a = precipitación),
+     *  puede ser nulo (entonces no llueve para el ciclo). `dtWeatherS` en segundos de CLIMA. */
+    void stepMoisture(double dtWeatherS, const float* precipRGBA = nullptr);
+    /** @brief Vapor extra en una dirección (bilineal). 0 sin campo. */
+    float moistureAt(const glm::dvec3& dir) const;
+    /** @brief Humedad efectiva = estática + `kMoistureGain`·vapor, acotada. */
+    float effectiveHumidity(const glm::dvec3& dir, float staticHumidity) const { return glm::clamp(staticHumidity + kMoistureGain * moistureAt(dir), 0.0f, 1.0f); }
+    /** @brief Ídem sobre un campo entero W×H (para el horneado del cielo). */
+    void effectiveHumidityField(const float* staticHum, float* out, int W, int H) const;
+    /** @brief Mete vapor en la celda de `dir`: `m3` metros cúbicos evaporados por el parche local. */
+    void addMoisture(const glm::dvec3& dir, double m3);
+    const MoistureStats& moistureStats() const { return m_moistStats; }
+    bool hasMoisture() const { return !m_moist.empty(); }
+    static constexpr float kMoistureGain = 0.6f;   ///< cuánto vapor (m=1) equivale en humedad
+    /** @brief Velocidad del ciclo (x1 = las constantes de `stepMoisture` en segundos de clima; el
+     *  clima va 1:1 con el reloj del mundo, así que un charco tarda 1-2 h REALES en secarse).
+     *  `HARUKA_WATER_CYCLE_SPEED=<x>` la cambia sin recompilar; vale también para el parche del jugador. */
+    static double cycleSpeed();
 
     /** @brief Humedad EFECTIVA para el cielo sobre el agua.
      *
@@ -492,12 +539,21 @@ private:
 
     /** @brief Centro del frente i en el instante actual (girado sobre su eje). */
     glm::dvec3 frontCenter(int i) const;
+    glm::dvec3 frontCenterAt(int i, double time) const;
 
     Front    m_fronts[kFronts]{};
     uint32_t m_seed = 0;
     double   m_time = 0.0;
     double   m_timeScale = 1.0;
     bool     m_configured = false;
+
+    // El ciclo del agua (ver arriba). Equirect W×H: fila 0 = polo norte, columna 0 = lon −180°.
+    int                m_mW = 0, m_mH = 0;
+    std::vector<float> m_mTemp, m_mWater;   ///< estáticos (copiados de `setMoistureFields`)
+    std::vector<float> m_moist;             ///< vapor extra [0,1]
+    std::vector<float> m_wet;               ///< suelo mojado [0,1] (memoria de la lluvia)
+    std::vector<float> m_moistTmp;
+    MoistureStats      m_moistStats;
 };
 
 } // namespace Haruka

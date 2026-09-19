@@ -54,6 +54,11 @@ public:
                      const glm::vec4& color    = glm::vec4(1.0f),
                      const glm::vec3& rotation = glm::vec3(0.0f));
 
+    /** @brief Lote por ÍNDICES: copia `idx.size()` instancias de `src` (ya transformadas) al lote.
+     *  Es el camino del pase de props: las instancias viven transformadas en la Application y el
+     *  bucket de cada (prototipo, LOD) es una lista de índices, no una copia de 96 B por instancia. */
+    void setInstancesGather(const InstanceDataFloat* src, const std::vector<uint32_t>& idx);
+
     /** @brief Encola una instancia con matriz ya construida (p.ej. orientada a la normal del suelo). */
     void addInstance(const glm::mat4& model,
                      const glm::vec4& color = glm::vec4(1.0f),
@@ -77,7 +82,7 @@ public:
     int  getInstanceCount() const { return (int)m_instances.size(); }
     int  getMaxInstances()  const { return m_maxInstances; }
     /** @brief Handle del buffer de instancias (para atarlo a mano si el llamador prefiere). */
-    Haruka::RHI::BufferHandle buffer() const { return m_buf; }
+    Haruka::RHI::BufferHandle buffer() const { return m_arena; }
 
     /** @brief El layout de los atributos de instancia, para que el llamador lo meta en su PSO.
      *  Devolverlo desde aquí evita que cada usuario lo reescriba (y se equivoque en un offset). */
@@ -85,24 +90,38 @@ public:
 
 private:
     std::vector<InstanceDataFloat> m_instances;
-    /// ⚠️ ANILLO DE BUFFERS, no uno solo. `render()` sube las instancias y dibuja; con un único
-    /// buffer eso vale en OpenGL —cada draw se ejecuta al vuelo— pero en Vulkan los comandos se
-    /// GRABAN y se ejecutan al final, así que TODOS los draws leerían el ÚLTIMO lote subido. El
-    /// pase de props llama a `render()` una vez por (prototipo, LOD): hasta 9 draws dibujando el
-    /// mismo conjunto de instancias con mallas distintas, o sea props apilados unos sobre otros.
-    /// Es el mismo fallo que tenía el UBO de material, y el propio motor ya lo avisaba.
+    /// ⚠️ UN ARENA POR FRAME, no un buffer por draw. `render()` sube las instancias y dibuja; con
+    /// un único buffer eso vale en OpenGL —cada draw se ejecuta al vuelo— pero en Vulkan los comandos
+    /// se GRABAN y se ejecutan al final, así que TODOS los draws leerían el ÚLTIMO lote subido.
+    /// Primero fue un anillo de 16 buffers de 20 000 instancias (30 MB fijos) que se daba la vuelta a
+    /// mitad de frame en cuanto hubo más de 16 draws (la hierba cercana no salía); después una entrada
+    /// por draw del tamaño del lote, que costaba **22 ms por frame** en `updateBuffer`: cada entrada
+    /// se recreaba cuando su lote crecía (el orden de los draws cambia con el cull) y crear+mapear
+    /// memoria de Vulkan por draw no es gratis.
     ///
-    /// El anillo se recorre por llamada; con ~9 draws por frame y 16 entradas no se reutiliza
-    /// ninguna dentro del mismo frame. Entre frames es seguro: el device espera a la GPU en
-    /// `endFrame`.
-    static constexpr int kRing = 16;
-    std::vector<Haruka::RHI::BufferHandle> m_bufs;
-    int  m_cursor = 0;
-    Haruka::RHI::BufferHandle      m_buf;   ///< entrada actual del anillo (la que ve `buffer()`)
+    /// Ahora hay UN buffer host-visible por frame y cada draw se sub-asigna LINEALMENTE dentro
+    /// (`bindVertexBuffer` con offset): un memcpy contiguo por lote, cero creaciones en régimen. Si
+    /// el arena se queda corto a mitad de frame se crea otro mayor y el viejo se RETIRA hasta el
+    /// frame siguiente (los draws ya grabados lo referencian). Entre frames es seguro: el device
+    /// espera a la GPU en `endFrame`.
+    Haruka::RHI::BufferHandle m_arena;
+    size_t m_arenaCap  = 0;    ///< capacidad del arena (instancias)
+    size_t m_arenaUsed = 0;    ///< instancias ya sub-asignadas este frame
+    size_t m_lastOff   = 0;    ///< offset (bytes) del lote actual dentro del arena
+    int    m_draws     = 0;    ///< lotes subidos este frame (diagnóstico)
+    std::vector<Haruka::RHI::BufferHandle> m_retired;   ///< arenas viejos: se destruyen al frame siguiente
     int  m_maxInstances = 0;
     bool m_dirty = false;
 
+public:
+    /// Sube el lote actual a SU entrada del anillo (lo llama `render`; público para el banco RHI).
     void upload();
+    /// Al empezar cada frame: el arena vuelve a cero y se sueltan los arenas retirados.
+    void beginFrame();
+    /// Lotes subidos en el último frame (diagnóstico: cuántos draws instanciados hubo).
+    int ringSize() const { return m_draws; }
+    /// Bytes reservados en buffers de instancias (host-visible: cuentan como RAM).
+    size_t hostBytes() const;
 };
 
 }} // namespace Haruka::Renderer

@@ -55,15 +55,48 @@ inline PropShapeKind propShapeKind(const std::string& name) {
     return PropShapeKind::Tree;
 }
 
+/** @brief ESTILO de árbol de un prototipo, también por NOMBRE (el `mesh` de la capa o de su
+ *  variante): `conifer`/`pino`/`abeto`, `palm`/`palmera`, `shrub`/`arbusto`, `dead`/`muerto`,
+ *  `cactus`, `grass`/`hierba`. Cualquier otro nombre es la frondosa de siempre. El sufijo `#k` de
+ *  las semillas por variante no molesta: se busca por subcadena. */
+inline Haruka::Tools::ProcGraph::TreeStyle propTreeStyle(const std::string& name) {
+    using S = Haruka::Tools::ProcGraph::TreeStyle;
+    auto has = [&](const char* w) { return name.find(w) != std::string::npos; };
+    if (has("conifer") || has("pino") || has("abeto"))  return S::Conifer;
+    if (has("palm"))                                    return S::Palm;
+    if (has("shrub") || has("arbusto"))                 return S::Shrub;
+    if (has("dead") || has("muerto"))                   return S::Dead;
+    if (has("cactus"))                                  return S::Cactus;
+    if (has("grass") || has("hierba"))                  return S::Grass;
+    return S::Broadleaf;
+}
+
 /** @brief Parámetros con los que se hornea el árbol prototipo. Estaban sueltos en la llamada a
- *  `TreeMeshNode`; ahora se piden aquí para que el esqueleto del collider sea EL MISMO árbol. */
+ *  `TreeMeshNode`; ahora se piden aquí para que el esqueleto del collider sea EL MISMO árbol.
+ *  Varían por ESTILO (una palmera es alta y fina; un arbusto, bajo y ancho): la única fuente es
+ *  `propTreeParams(nombre)`, para malla, LOD y collider. */
 struct PropTreeParams {
     float height   = 6.5f;    ///< altura nominal (m)
     float trunkR   = 0.35f;   ///< radio del tronco en la base (m)
     float canopy   = 1.0f;    ///< escala de la copa
     int   segments = 8;       ///< lados del cono a detalle 1
+    Haruka::Tools::ProcGraph::TreeStyle style = Haruka::Tools::ProcGraph::TreeStyle::Broadleaf;
 };
-inline PropTreeParams propTreeParams() { return PropTreeParams{}; }
+inline PropTreeParams propTreeParams(const std::string& protoName = {}) {
+    using S = Haruka::Tools::ProcGraph::TreeStyle;
+    PropTreeParams p;
+    p.style = protoName.empty() ? S::Broadleaf : propTreeStyle(protoName);
+    switch (p.style) {
+        case S::Conifer: p.height = 9.0f;  p.trunkR = 0.30f; p.canopy = 0.9f; break;
+        case S::Palm:    p.height = 8.0f;  p.trunkR = 0.28f; p.canopy = 1.0f; break;
+        case S::Shrub:   p.height = 1.6f;  p.trunkR = 0.12f; p.canopy = 1.2f; break;
+        case S::Dead:    p.height = 5.5f;  p.trunkR = 0.30f; p.canopy = 0.0f; break;
+        case S::Cactus:  p.height = 3.2f;  p.trunkR = 0.30f; p.canopy = 0.0f; p.segments = 10; break;
+        case S::Grass:   p.height = 1.2f;  p.trunkR = 0.02f; p.canopy = 0.0f; p.segments = 3; break;
+        default: break;
+    }
+    return p;
+}
 
 /**
  * @brief Un collider en el marco LOCAL del prop (base en el origen, +Y arriba, SIN escalar).
@@ -98,9 +131,10 @@ inline std::vector<PropColliderPart> propColliderParts(const std::string& protoN
     const PropShapeKind kind = propShapeKind(protoName);
 
     if (kind == PropShapeKind::Tree) {
-        const PropTreeParams tp = propTreeParams();
+        const PropTreeParams tp = propTreeParams(protoName);
+        // La hierba no tiene esqueleto (`treeSkeleton` devuelve 0 partes): se atraviesa.
         const Haruka::Tools::ProcGraph::TreeSkeleton sk =
-            Haruka::Tools::ProcGraph::treeSkeleton((int)meshSeed, tp.height, tp.trunkR);
+            Haruka::Tools::ProcGraph::treeSkeleton((int)meshSeed, tp.height, tp.trunkR, tp.style);
         out.reserve(sk.parts.size());
         for (size_t i = 0; i < sk.parts.size(); ++i) {
             const auto& p = sk.parts[i];

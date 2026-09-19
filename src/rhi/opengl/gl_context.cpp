@@ -170,12 +170,12 @@ namespace Haruka::RHI::opengl
 
     // Ata el buffer a UN binding del layout. Una malla con streams separados (el terreno) llama
     // una vez por stream; el caso común (todo interleaved) usa solo el binding 0.
-    void GLContext::bindVertexBuffer(BufferHandle h, uint32_t binding)
+    void GLContext::bindVertexBuffer(BufferHandle h, uint32_t binding, size_t offsetBytes)
     {
         if (!m_hasPipeline || !m_vao || binding >= 8) return;
         const GLBuffer* b = m_device->buffer(h);
         if (!b) return;
-        glVertexArrayVertexBuffer(m_vao, binding, b->id, 0, (GLsizei)m_strides[binding]);
+        glVertexArrayVertexBuffer(m_vao, binding, b->id, (GLintptr)offsetBytes, (GLsizei)m_strides[binding]);
     }
 
     void GLContext::bindIndexBuffer(BufferHandle h)

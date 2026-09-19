@@ -623,3 +623,55 @@ void test_sky_bake() {
         CHECK(corr < 0.85, "el cirro NO es una copia del cumulo: va por delante del frente");
     }
 }
+
+// ---------------------------------------------- TEST: el ciclo del agua en el CLIMA
+// El vapor sube donde hay agua y sol, la lluvia lo consume, el suelo mojado evapora después de
+// llover, y la humedad efectiva que ve el clima cambia. Contraprueba: con frío no evapora nada.
+void test_weather_water_cycle() {
+    beginTest("clima: ciclo del agua (vapor sube con agua+sol, la lluvia lo consume, el frio no evapora)");
+    Haruka::WeatherSystem w;
+    w.configure(7u);
+    const int W = 32, H = 16;
+    std::vector<float> temp((size_t)W * H, 25.0f), water((size_t)W * H, 0.0f);
+    // Un "mar" en las columnas 0-7 de las filas 6-9; tierra en el resto. Filas 0-2 heladas.
+    for (int y = 6; y <= 9; ++y) for (int x = 0; x < 8; ++x) water[(size_t)y * W + x] = 1.0f;
+    for (int y = 0; y <= 2; ++y) for (int x = 0; x < W; ++x) temp[(size_t)y * W + x] = -10.0f;
+    w.setMoistureFields(temp.data(), water.data(), W, H);
+    auto dirOf = [&](int x, int y) {
+        const double lat = (0.5 - ((double)y + 0.5) / H) * 3.14159265358979, lon = (((double)x + 0.5) / W - 0.5) * 6.283185307179586;
+        return glm::dvec3(std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon));
+    };
+    const glm::dvec3 mar = dirOf(3, 7), tierraLejos = dirOf(24, 7), hielo = dirOf(3, 1);
+    // (1) Una hora de sol sin lluvia.
+    for (int i = 0; i < 60; ++i) w.stepMoisture(60.0, nullptr);
+    const float vMar = w.moistureAt(mar), vTierra = w.moistureAt(tierraLejos), vHielo = w.moistureAt(hielo);
+    std::printf("    1 h de sol: vapor sobre el mar %.3f · tierra seca lejos %.3f · humedad efectiva mar %.3f (estatica 0,30)\n",
+                vMar, vTierra, w.effectiveHumidity(mar, 0.30f));
+    CHECK(vMar > 0.5f, "sobre el agua con sol el vapor sube");
+    CHECK(vTierra < 0.05f, "sobre tierra seca lejos, casi nada (la difusion es lenta)");
+    CHECK(w.effectiveHumidity(mar, 0.30f) > 0.55f, "y el clima ve mas humedad ahi");
+    CHECK(vHielo < 0.05f, "CONTRAPRUEBA: a -10 C sobre agua no evapora");
+    // (2) Llueve a tope 30 min sobre el mar: el vapor se agota.
+    std::vector<float> sky((size_t)W * H * 4, 0.0f);
+    for (int y = 6; y <= 9; ++y) for (int x = 0; x < 8; ++x) { sky[((size_t)y * W + x) * 4 + 0] = 1.0f; sky[((size_t)y * W + x) * 4 + 3] = 1.0f; }
+    for (int i = 0; i < 30; ++i) w.stepMoisture(60.0, sky.data());
+    const float trasLluvia = w.moistureAt(mar);
+    std::printf("    30 min de lluvia plena: vapor sobre el mar %.3f -> %.3f\n", vMar, trasLluvia);
+    CHECK(trasLluvia < vMar * 0.3f, "la lluvia consume el vapor (despues del temporal viene el claro)");
+    // (3) Tierra: llueve 20 min sobre tierra y luego sol 2 h: el suelo mojado evapora y el vapor sube.
+    Haruka::WeatherSystem w2; w2.configure(7u);
+    std::vector<float> noWater((size_t)W * H, 0.0f);
+    w2.setMoistureFields(temp.data(), noWater.data(), W, H);
+    std::vector<float> rainLand((size_t)W * H * 4, 0.0f);
+    rainLand[((size_t)7 * W + 24) * 4 + 0] = 1.0f; rainLand[((size_t)7 * W + 24) * 4 + 3] = 1.0f;
+    for (int i = 0; i < 20; ++i) w2.stepMoisture(60.0, rainLand.data());
+    const double justoDespues = w2.moistureStats().meanM;
+    for (int i = 0; i < 120; ++i) w2.stepMoisture(60.0, nullptr);
+    const double tras2h = w2.moistureStats().meanM;
+    // Media del planeta: la difusion reparte el vapor de una celda sola a sus vecinas, asi que el
+    // punto no lo mide; la media si (nada mas lo genera).
+    std::printf("    tierra: tras 20 min de lluvia en UNA celda, vapor medio %.5f · tras 2 h de sol %.5f (el suelo mojado evapora) · en la celda %.3f\n",
+                justoDespues, tras2h, w2.moistureAt(tierraLejos));
+    CHECK(tras2h > justoDespues * 1.5 + 1e-5, "el suelo mojado devuelve vapor al aire despues de llover");
+    CHECK(w2.moistureAt(hielo) < 0.01f, "CONTRAPRUEBA: donde nunca llovio ni hay agua, nada");
+}

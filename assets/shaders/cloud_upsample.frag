@@ -19,9 +19,39 @@
 #version 450 core
 
 layout(binding = 0) uniform sampler2D u_cloudLo;
+/// ⚠️ LA PROFUNDIDAD DE LA ESCENA, A RESOLUCION COMPLETA — la MISMA copia que leyo el pase de nubes.
+/// Con ella la composicion sabe, para cada texel de nube, CONTRA QUE recorto su marcha: basta
+/// muestrearla en el centro del texel, que es exactamente donde la leyo el pase. No hace falta que
+/// el pase escriba nada mas.
+layout(binding = 1) uniform sampler2D u_sceneDepth;
 
 layout(location = 0) in  vec2 vUV;
 layout(location = 0) out vec4 FragColor;
+
+// ── POR QUE HAY QUE MIRAR LA PROFUNDIDAD AL SUBIR LA RESOLUCION ────────────────────────────────
+//
+// El pase corre a 1/4 de lado y recorta la marcha contra la escena (`tExit = min(tExit, sceneT)`),
+// asi que cada texel de nube tapa 4x4 pixeles de pantalla y decide "cortar o no cortar" con UNA
+// muestra de profundidad. En el borde del terreno esa decision es cara o cruz, y como la silueta del
+// horizonte es casi horizontal, el recorte de la capa salia en ESCALERA de bloques de 4 px, rectos y
+// paralelos al horizonte (Andoni: "se recorta con recortes rectos y parece que estan mas cerca"; su
+// hipotesis, correcta: lo recorta el relieve del terreno).
+//
+// El arreglo es de la COMPOSICION, no del pase: cada pixel de pantalla se queda con las muestras de
+// nube que se marcharon contra SU MISMA escena y descarta las del otro lado del borde. Se probo
+// arreglarlo en el pase (tomar la profundidad mas lejana o la mas cercana de la huella) y las dos
+// fallan por construccion: la lejana deja de cortar (la cordillera pasa de 0 % a 99,3 % de nube
+// delante) y la cercana agranda el escalon.
+//
+// `d` es reversed-Z (`near/dist`), asi que `dTap/dPix` es la razon de DISTANCIAS: comparar asi es
+// relativo y no depende de la escala de la escena.
+float depthAffinity(float dTap, float dPix) {
+    const bool skyTap = (dTap < 1.0e-7), skyPix = (dPix < 1.0e-7);
+    if (skyTap != skyPix) return 0.0;   // uno es cielo y el otro escena: lados distintos del borde
+    if (skyTap) return 1.0;             // los dos cielo: nada que distinguir
+    const float rel = abs(dTap / dPix - 1.0);
+    return 1.0 - smoothstep(0.05, 0.35, rel);
+}
 
 // ── POR QUÉ CÚBICA Y NO BILINEAL ────────────────────────────────────────────────────────────────
 // Reportado: "las nubes se ven como píxeles". A 1/4 de lado el borde de la nube pasa de 0 a 1 en UN
@@ -56,17 +86,30 @@ void main()
 
     // Color PONDERADO POR ALFA: los téxeles vacíos (negros, alfa 0) solo bajan la opacidad, no
     // oscurecen el color — el ribete oscuro del borde que tenía la bilineal a secas.
-    float a = 0.0, wa = 0.0;
-    vec3  c = vec3(0.0);
+    // La profundidad de ESTE pixel de pantalla: contra ella se juzga cada muestra de nube.
+    const bool haveDepth = (textureSize(u_sceneDepth, 0).x > 1);
+    const float dPix = haveDepth ? texture(u_sceneDepth, vUV).r : 0.0;
+
+    float a = 0.0, wa = 0.0, wSum = 0.0;          // con el peso de profundidad
+    float aP = 0.0, waP = 0.0;                    // sin el: respaldo si ninguna muestra casa
+    vec3  c = vec3(0.0), cP = vec3(0.0);
     for (int y = 0; y < 4; ++y)
         for (int x = 0; x < 4; ++x) {
-            const float w  = wx[x] * wy[y];
+            const float wb = wx[x] * wy[y];
             const vec2  uv = (i + vec2(float(x - 1), float(y - 1)) + 0.5) * duv;
             const vec4  s  = texture(u_cloudLo, uv);
+            aP  += wb * s.a; waP += wb * s.a; cP += wb * s.a * s.rgb;
+            // El texel de nube leyo la profundidad en SU centro, que es este mismo `uv`.
+            const float w = haveDepth ? wb * depthAffinity(texture(u_sceneDepth, uv).r, dPix) : wb;
             a  += w * s.a;
             wa += w * s.a;
+            wSum += w;
             c  += w * s.a * s.rgb;
         }
+    // Si ninguna muestra se marcho contra la misma escena (un pixel aislado del otro lado del borde),
+    // se cae al filtro de siempre: mejor la nube de al lado que un agujero.
+    if (wSum < 0.02) { a = aP; wa = waP; c = cP; wSum = 1.0; }
+    a /= max(wSum, 1.0e-4);
     if (a <= 0.002) { FragColor = vec4(0.0); return; }
     FragColor = vec4(c / max(wa, 1e-4), a);
 }

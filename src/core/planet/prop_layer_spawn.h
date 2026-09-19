@@ -27,6 +27,7 @@
 #include <glm/glm.hpp>
 
 #include "core/planet/prop_layer.h"                 // PropLayerTable, PlacedProp
+#include "core/planet/biomes.h"                     // classifyBiome / biomeKey
 #include "tools/procgraph/tree_spawn.h"             // IPropField, PropGrid, slopeAt
 #include "tools/procgraph/tree_prop.h"              // treePoisson, PoissonPoint
 #include "tools/procgraph/proc_noise.h"             // hash32, WhiteNode
@@ -86,7 +87,12 @@ inline PropsPlaced placeProps(const PG::IPropField& field, const PG::PropGrid& g
                 const float mapD = L.densityMap.empty() ? 1.0f : field.mapDensityAt(px, pz, L.densityMap);
                 const std::string zone  = field.zoneAt(px, pz);
                 const std::string layer = field.layerAt(px, pz);
-                const float cov   = L.coverage(fs, slope, mapD, zone, layer);
+                const float hM = field.heightAt(px, pz);
+                const std::string biomeK = L.usesBiomeAnywhere()
+                    ? std::string(biomeKey(classifyBiome(BiomeSample{fs.tempC, fs.humidity, hM, slope})))
+                    : std::string{};
+                const std::string bk = L.biomeFor(biomeK, mapD, fs.tempC);
+                const float cov   = L.coverage(fs, slope, mapD, zone, layer, bk);
                 if (cov <= 0.0f) continue;
 
                 // Densidad local: huecos sin patrón (hash de la celda × peso de volumen).
@@ -105,11 +111,16 @@ inline PropsPlaced placeProps(const PG::IPropField& field, const PG::PropGrid& g
                 }();
                 if (claimed) continue;
 
+                const std::string proto = L.pickPrototype(layer, zone, bk,
+                    PG::WhiteNode::hashFloat((int)pp.seed, 600 + li, 0, pp.seed),
+                    PG::WhiteNode::hashFloat((int)pp.seed, 700 + li, 0, pp.seed));
+                if (proto.empty()) continue;
+
                 PlacedProp pr;
-                pr.mesh       = L.mesh;
+                pr.mesh       = proto;
                 pr.layerIndex = li;
                 pr.localPos   = glm::vec3(px, 0.0f, pz);
-                pr.heightM    = field.heightAt(px, pz);
+                pr.heightM    = hM;
                 // Sumergido: solo las capas que lo declaran (`submerged`, la roca del lecho); el
                 // resto no se dibuja bajo el nivel del mar (misma regla que el scatter esférico).
                 if (pr.heightM < 0.0f && !L.submerged) continue;

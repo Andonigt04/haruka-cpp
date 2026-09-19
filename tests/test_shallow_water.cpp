@@ -528,3 +528,156 @@ void test_shallow_water_physics() {
               "CONTRAPRUEBA: en llano el centroide NO se mueve — es la gravedad, no deriva del esquema");
     }
 }
+
+// ---------------------------------------------- TEST: el ciclo del agua en el parche
+// La lluvia SUMA y ahora algo RESTA: evaporación (cuenta, vuelve al clima) e infiltración (no
+// cuenta), y ninguna de las dos baja del nivel horneado del mundo. Antes el parche era un
+// acumulador ("se acumulará infinitamente").
+void test_shallow_water_cycle() {
+    beginTest("shallow_water_cycle: lluvia, evaporacion e infiltracion sin bajar del lago del mundo");
+    const glm::dvec3 dir = glm::normalize(glm::dvec3(0.31, 0.62, 0.72));
+    // Cuenca plana a 100 m; el MUNDO dice que hay un lago de 1 m en ella (nivel 101 en las celdas
+    // del centro, seco fuera).
+    ShallowWaterSim sim;
+    const glm::dvec3 up = dir;
+    const glm::dvec3 ref = (std::abs(up.y) < 0.99) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+    const glm::dvec3 tan = glm::normalize(glm::cross(ref, up)), bit = glm::cross(up, tan);
+    auto hf = [&](const glm::dvec3&) { return 100.0; };
+    auto lake = [&](const glm::dvec3& p) {
+        const glm::dvec3 d = glm::normalize(p);
+        const double u = glm::dot(d - up, tan) * kR, v = glm::dot(d - up, bit) * kR;
+        return (std::abs(u) < 60.0 && std::abs(v) < 60.0) ? 101.0 : -1.0e30;
+    };
+    sim.init(up * (kR + 100.0), tan, bit, up, kSpan, kN, hf, lake);
+    const double lago = sim.totalWater();
+    CHECK(lago > 0.0 && sim.dynamicVolumeM3() == 0.0, "arranca con el lago del mundo y CERO agua de lluvia");
+    // Llueve 10 cm.
+    sim.addRain(0.10f);
+    const double conLluvia = sim.dynamicVolumeM3();
+    std::printf("    lago del mundo %.0f m3 · tras 10 cm de lluvia, agua dinamica %.0f m3\n", lago, conLluvia);
+    CHECK(conLluvia > 0.0, "la lluvia es agua dinamica");
+    // Evapora 4 cm: vuelve al aire exactamente eso.
+    const double evap = sim.drain(0.04f, 0.0f);
+    const double area = (double)kN * kN * sim.cellSize() * sim.cellSize();
+    std::printf("    evaporar 4 cm: %.0f m3 (esperado %.0f)\n", evap, 0.04 * area);
+    CHECK(std::abs(evap - 0.04 * area) < 1.0, "lo evaporado es lamina x area, y se devuelve para el clima");
+    // Se infiltra 3 cm: no cuenta.
+    CHECK(sim.drain(0.0f, 0.03f) == 0.0, "la infiltracion no cuenta como evaporada");
+    CHECK(std::abs(sim.dynamicVolumeM3() - 0.03 * area) < 1.0, "quedan 3 cm de lluvia");
+    // Se seca del todo: pide 1 m, solo hay 3 cm; y el lago NO baja.
+    const double ultimo = sim.drain(1.0f, 0.0f);
+    std::printf("    secar pidiendo 1 m: evapora %.0f m3 (habia %.0f) · queda %.0f m3 = el lago %.0f\n", ultimo, 0.03 * area, sim.totalWater(), lago);
+    CHECK(std::abs(ultimo - 0.03 * area) < 1.0, "solo evapora lo que hay de lluvia");
+    CHECK(std::abs(sim.totalWater() - lago) < 1e-3, "y el lago del MUNDO sigue a su nivel (nunca baja de lo horneado)");
+    CHECK(sim.drain(1.0f, 1.0f) == 0.0, "CONTRAPRUEBA: sin lluvia, secar no quita nada");
+}
+
+// ── FRICCION DEL LECHO y FETCH DEL PARCHE (2026-09-18) ──────────────────────────────────────────
+//
+// Andoni: "el agua dinamica palpita, no se queda quieta". Dos causas medidas, dos tests:
+//   1. El modelo de tuberias no tenia friccion: un estanque con un bulto seguia oscilando a los
+//      300 s (1,1 cm/s RMS). Ahora hay Manning por celda, y la `n` es DEL LECHO (bioma).
+//   2. El parche recibia el swell del oceano entero (fetch "ilimitado" fuera de lagos horneados).
+//      Ahora publica el diametro de su masa conexa y la ola es la de ese charco.
+namespace {
+// Cuenca parabolica de 4 m con un lago hasta -1 m y un bulto de 30 cm; devuelve el cambio de cota
+// RMS entre dos instantes separados 1 s, tras `secs` segundos de simulacion.
+struct Settle { double rms1s = 0, rmsEnd = 0, maxEnd = 0; };
+Settle settlePond(double manning, double deepM, double bumpM, int secs) {
+    ShallowWaterSim sim;
+    auto terrain = [&](const glm::dvec3& p) { return -deepM + deepM * (p.x * p.x + p.z * p.z) / (120.0 * 120.0); };
+    auto rough   = [&](const glm::dvec3&)   { return manning; };
+    sim.init(glm::dvec3(0), glm::dvec3(1, 0, 0), glm::dvec3(0, 0, 1), glm::dvec3(0, 1, 0), kSpan, kN,
+             terrain, nullptr, rough);
+    const float lv = (float)(-deepM * 0.25);   // lamina hasta el cuarto de la cuenca
+    for (int j = 0; j < kN; ++j) for (int i = 0; i < kN; ++i) {
+        const float t = sim.terrainAt(i, j);
+        if (t < lv) sim.addWater(i, j, lv - t);
+    }
+    for (int j = 40; j < 56; ++j) for (int i = 30; i < 46; ++i) sim.addWater(i, j, (float)bumpM);
+    std::vector<float> a(kN * kN), b(kN * kN);
+    auto surf = [&](std::vector<float>& s) {
+        for (int j = 0; j < kN; ++j) for (int i = 0; i < kN; ++i)
+            s[j * kN + i] = sim.waterAt(i, j) > 1e-4f ? sim.surfaceAt(i, j) : -999.f;
+    };
+    auto rms = [&](double& outRms, double& outMax) {
+        double acc = 0; int cnt = 0; double mx = 0;
+        for (int c = 0; c < kN * kN; ++c) if (a[c] > -900 && b[c] > -900) {
+            const double d = b[c] - a[c]; acc += d * d; ++cnt; mx = std::max(mx, std::abs(d));
+        }
+        outRms = std::sqrt(acc / std::max(cnt, 1)); outMax = mx;
+    };
+    Settle r; double dummy;
+    for (int sec = 0; sec < secs; ++sec) {
+        surf(a);
+        for (int f = 0; f < 60; ++f) sim.step(1.0f / 60.0f);
+        surf(b);
+        if (sec == 0) rms(r.rms1s, dummy);
+    }
+    rms(r.rmsEnd, r.maxEnd);
+    return r;
+}
+} // namespace
+
+void test_shallow_water_friction() {
+    beginTest("shallow_water_friction: la charca se para, y se para segun el lecho");
+    // Charca somera (30 cm de cuenca, bulto de 5 cm: el regimen del parche, que es agua de lluvia),
+    // 90 s. Sin friccion (n = 0,005, el minimo que admite init) sigue oscilando; con hierba (0,03)
+    // se para; el bosque (0,12) se para antes que la arena (0,022). ⚠️ Un lago de 3 m NO se para
+    // con esto y es correcto: alli las velocidades son de mm/s y un seiche real dura horas.
+    const Settle none  = settlePond(0.0,   0.30, 0.05, 90);
+    const Settle sand  = settlePond(0.022, 0.30, 0.05, 90);
+    const Settle grass = settlePond(0.030, 0.30, 0.05, 90);
+    const Settle wood  = settlePond(0.120, 0.30, 0.05, 90);
+    std::printf("    cambio de cota RMS en 1 s tras 90 s: sin friccion %.4f m · arena %.4f · hierba %.4f · bosque %.4f\n",
+                none.rmsEnd, sand.rmsEnd, grass.rmsEnd, wood.rmsEnd);
+    std::printf("    peor celda: %.4f / %.4f / %.4f / %.4f · el primer segundo, todos parecidos: %.4f / %.4f / %.4f / %.4f\n",
+                none.maxEnd, sand.maxEnd, grass.maxEnd, wood.maxEnd, none.rms1s, sand.rms1s, grass.rms1s, wood.rms1s);
+    CHECK(none.rmsEnd > 0.008, "CONTRAPRUEBA: sin friccion la charca sigue moviendose a los 90 s (>8 mm/s RMS)");
+    CHECK(grass.rmsEnd < 0.0015 && grass.maxEnd < 0.010,
+          "con hierba (n=0,03) la charca esta quieta a los 90 s (<1,5 mm/s RMS, <1 cm en la peor celda)");
+    CHECK(wood.rmsEnd < sand.rmsEnd * 0.5, "el bosque frena antes que la arena (2x o mas): la friccion es DEL LECHO");
+    CHECK(sand.rmsEnd < none.rmsEnd * 0.5, "y la arena, con ser lisa, ya frena 2x respecto a nada");
+}
+
+void test_shallow_water_fetch() {
+    beginTest("shallow_water_fetch: un charco recibe la ola de SU tamano, no la del oceano");
+    using namespace Haruka::Planet;
+    // Terreno plano; un charco de 20 m de diametro (celdas 4,4 m -> ~5x5) y un lago de 200 m.
+    ShallowWaterSim sim;
+    auto terrain = [&](const glm::dvec3&) { return 0.0; };
+    sim.init(glm::dvec3(0), glm::dvec3(1, 0, 0), glm::dvec3(0, 0, 1), glm::dvec3(0, 1, 0), kSpan, kN, terrain);
+    const double dx = sim.cellSize();
+    auto disc = [&](int ci, int cj, double diamM, float depth) {
+        for (int j = 0; j < kN; ++j) for (int i = 0; i < kN; ++i)
+            if (std::hypot((i - ci) * dx, (j - cj) * dx) <= diamM * 0.5) sim.addWater(i, j, depth);
+    };
+    disc(15, 15, 20.0, 0.30f);
+    disc(60, 60, 200.0, 3.0f);
+    sim.computeFetch();
+    const float fSmall = sim.fetchAt(15, 15), fBig = sim.fetchAt(60, 60), fDry = sim.fetchAt(40, 15);
+    std::printf("    fetch: charco de 20 m -> %.1f m · lago de 200 m -> %.1f m · seco -> %.1f\n", fSmall, fBig, fDry);
+    CHECK(fSmall > 12.0f && fSmall < 30.0f, "el charco de 20 m tiene un fetch de ~20 m (diametro equivalente, celdas de 4,4 m)");
+    CHECK(fBig > 170.0f && fBig < 230.0f, "el lago de 200 m, ~200 m");
+    CHECK(fDry == 0.0f, "en seco no hay fetch");
+    CHECK(fSmall < fBig, "y son masas distintas: el charco no hereda el fetch del lago");
+
+    // LO QUE CAMBIA EN LA OLA. Con el viento del clima (4 m/s), vaiven horizontal maximo en 30 cm de
+    // agua: con fetch ilimitado (lo que recibia el parche) contra el fetch del charco.
+    const OceanState st = oceanStateFromWind(4.0f, 1.0f, 0.0f);
+    const glm::vec3 up(0, 1, 0);
+    auto maxSway = [&](float fetch) {
+        float m = 0.0f;
+        for (int ti = 0; ti < 40; ++ti) for (int xi = 0; xi < 60; ++xi) {
+            const glm::vec3 p(1000.0f + xi * 1.7f, 0.0f, 500.0f);
+            const glm::vec3 d = oceanDisplacement(p, up, ti * 0.37f, 0.30f, 1.0f, st, fetch);
+            m = std::max(m, std::sqrt(d.x * d.x + d.z * d.z));
+        }
+        return m;
+    };
+    const float swayOcean = maxSway(WATER_FETCH_UNLIMITED), swayPond = maxSway(fSmall);
+    std::printf("    vaiven horizontal en 30 cm de agua a 4 m/s: fetch ilimitado %.3f m · fetch del charco %.4f m (x%.0f)\n",
+                swayOcean, swayPond, swayPond > 1e-6f ? swayOcean / swayPond : 0.0f);
+    CHECK(swayOcean > 0.2f, "CONTRAPRUEBA: con fetch ilimitado el charco de 30 cm oscila decimetros (lo que 'palpitaba')");
+    CHECK(swayPond < 0.02f, "con su fetch, milimetros: no se ve sobre celdas de 4,4 m");
+}

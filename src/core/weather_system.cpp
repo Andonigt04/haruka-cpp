@@ -1,9 +1,14 @@
 #include "core/weather_system.h"
+#include <cstdlib>
 
 #include <glm/gtc/constants.hpp>
 #include <cmath>
 
 namespace Haruka {
+
+/// Metros de lámina evaporada → vapor [0,1]: 20 mm saturan una celda.
+static constexpr float kLaminaToVapor = 1.0f / 0.020f;
+
 
 namespace {
 
@@ -82,11 +87,21 @@ void WeatherSystem::configure(uint32_t seed) {
 }
 
 glm::dvec3 WeatherSystem::frontCenter(int i) const {
+    return frontCenterAt(i, m_time);
+}
+glm::dvec3 WeatherSystem::frontCenterAt(int i, double time) const {
     const Front& f = m_fronts[i];
-    return rotateAround(f.start, f.axis, f.omega * m_time * m_timeScale);
+    return rotateAround(f.start, f.axis, f.omega * time * m_timeScale);
 }
 
 float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
+    return cloudCoverAtTime(dir, humidity, m_time);
+}
+
+/// La misma cobertura con el reloj DESPLAZADO: el vapor en altura son los frentes adelantados
+/// (`kCirrusLeadS`) y atrasados (`kMidLagS`). Antes se copiaba el sistema entero para mover el
+/// reloj; por muestra eso son dos copias de 14 frentes y no hace falta.
+float WeatherSystem::cloudCoverAtTime(const glm::dvec3& dir, float humidity, double time) const {
     if (!m_configured) return 0.0f;
     const glm::dvec3 d = glm::normalize(dir);
 
@@ -95,7 +110,7 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
     float cover = 0.0f;
     for (int i = 0; i < kFronts; ++i) {
         const Front& f = m_fronts[i];
-        const double cosang = glm::clamp(glm::dot(d, frontCenter(i)), -1.0, 1.0);
+        const double cosang = glm::clamp(glm::dot(d, frontCenterAt(i, time)), -1.0, 1.0);
         const double ang    = std::acos(cosang);
         if (ang >= f.radius) continue;
         // Perfil suave del casquete: 1 en el núcleo → 0 en el borde. `t·t·(3−2t)` = smoothstep.
@@ -176,13 +191,12 @@ float WeatherSystem::cloudCoverAt(const glm::dvec3& dir, float humidity) const {
 
 float WeatherSystem::bakeSky(const float* tempC, const float* humidity, int W, int H,
                              float* outRGBA, float* outBaseMin, float* outTopMax,
-                             const float* water, float* outHiRGBA) const {
+                             const float* water, float* outHiRGBA,
+                             const float* groundM) const {
     float coverMax = 0.0f, baseMin = 1e9f, topMax = 0.0f;
     const double kPi = glm::pi<double>();
     // Las capas altas, con el reloj desfasado (ver `kCirrusLeadS`). Copias: el sistema son 14
     // frentes y un reloj, y así el horneado sigue siendo `const` y puro.
-    WeatherSystem lead = *this; lead.setTime(m_time + kCirrusLeadS / m_timeScale);
-    WeatherSystem lag  = *this; lag.setTime(m_time - kMidLagS / m_timeScale);
     for (int y = 0; y < H; ++y) {
         const double lat = (0.5 - ((double)y + 0.5) / H) * kPi;
         for (int x = 0; x < W; ++x) {
@@ -191,7 +205,9 @@ float WeatherSystem::bakeSky(const float* tempC, const float* humidity, int W, i
                                std::cos(lat) * std::sin(lon));
             const size_t i = (size_t)y * W + x;
             const float hSky = skyHumidity(humidity[i], water ? water[i] : 0.0f);
-            const WeatherSample s = sampleAt(d, tempC[i], hSky);
+            // La columna entera sale de `sampleAt` (base = nivel de condensacion SOBRE EL SUELO,
+            // techo = capa convectiva, vapor en altura = frentes adelantados/atrasados).
+            const WeatherSample s = sampleAt(d, tempC[i], hSky, groundM ? groundM[i] : 0.0f);
             outRGBA[i * 4 + 0] = s.cloudCover;
             outRGBA[i * 4 + 1] = s.cloudBaseM;
             outRGBA[i * 4 + 2] = s.cloudTopM;
@@ -200,15 +216,13 @@ float WeatherSystem::bakeSky(const float* tempC, const float* humidity, int W, i
             baseMin  = std::min(baseMin, s.cloudBaseM);
             topMax   = std::max(topMax, s.cloudTopM);
             if (outHiRGBA) {
-                // El cirro NO lleva el fondo de humedad (sería otra capa cerrada): sólo los frentes
-                // adelantados. Se resta el fondo que `cloudCoverAt` suma y se reescala.
-                const float bg = 0.73f * hSky;
-                const float cirrus = glm::clamp((lead.cloudCoverAt(d, hSky) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
-                const float mid    = glm::clamp((lag.cloudCoverAt(d, hSky)  - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
-                outHiRGBA[i * 4 + 0] = cirrus;
-                outHiRGBA[i * 4 + 1] = mid;
+                // x = vapor alto (hielo, cirro) · y = vapor medio · z = humedad que ve el cielo ·
+                // w = temperatura en superficie (°C): con ella el shader sabe a que cota esta cada
+                // temperatura, que es donde condensa cada vapor (ver `aloftFractionAt`).
+                outHiRGBA[i * 4 + 0] = s.column.vaporHigh;
+                outHiRGBA[i * 4 + 1] = s.column.vaporMid;
                 outHiRGBA[i * 4 + 2] = hSky;
-                outHiRGBA[i * 4 + 3] = 0.0f;
+                outHiRGBA[i * 4 + 3] = s.column.tSurfC;
             }
         }
     }
@@ -218,30 +232,19 @@ float WeatherSystem::bakeSky(const float* tempC, const float* humidity, int W, i
 }
 
 float WeatherSystem::cloudDensityAt(const WeatherSample& w, float altM) {
-    if (w.cloudCover <= 0.0f) return 0.0f;
-    const float thick = w.cloudTopM - w.cloudBaseM;
-    if (thick <= 1.0f) return 0.0f;
-
-    // Altura RELATIVA dentro de la losa: 0 en la base, 1 en el techo. Fuera de [0,1] no hay nube, y
-    // ese cero es literal — es lo que permite volar por debajo de la capa y salir por encima.
-    const float t = (altM - w.cloudBaseM) / thick;
-    if (t <= 0.0f || t >= 1.0f) return 0.0f;
-
-    // Perfil: entra rápido por abajo y se deshilacha por arriba. Asimétrico a propósito — la base de
-    // una nube es un plano bastante definido (el nivel de condensación es una cota, y por eso todas
-    // las nubes de un cielo tienen la base a la misma altura) mientras que el techo se desfleca.
-    // Bordes SUAVES: con un corte duro, atravesar la base se leería como cruzar una pared de niebla.
-    // Los bordes viven en la cabecera (`kProfileRise`/`kProfileFall`) porque un TEST los compara
-    // con los del shader: es la misma losa evaluada en dos sitios y no pueden separarse.
-    const float rise = glm::smoothstep(0.0f, kProfileRise, t);
-    const float fall = 1.0f - glm::smoothstep(kProfileFall, 1.0f, t);
-    return glm::clamp(w.cloudCover * rise * fall, 0.0f, 1.0f);
+    // La MISMA función que el shader: fracción de nube de la columna a esa cota (cloud_column.h).
+    // Fuera de donde el aire satura es exactamente 0: es lo que permite volar por debajo y salir
+    // por encima. Ya no hay un perfil a mano con constantes gemelas que mantener.
+    return cloudFractionAt(w.column, altM);
 }
 
-WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float humidity) const {
+WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float humidity, float groundM) const {
     WeatherSample w;
     w.tempC    = tempC;
     w.humidity = glm::clamp(humidity, 0.0f, 1.0f);
+    w.column.groundM = std::max(groundM, 0.0f);
+    w.column.tSurfC  = tempC;
+    w.column.rhSurf  = w.humidity;
     if (!m_configured) return w;
 
     const glm::dvec3 d = glm::normalize(dir);
@@ -264,9 +267,18 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // encima de la cabeza — el "la gris está muy cercana" que se reportó. El estratocúmulo real de
     // un día cubierto vive entre 600 y 2000 m. Sigue siendo el techo de la lluvia, así que subirlo
     // sube también de dónde nacen las gotas, que es lo coherente.
-    w.cloudBaseM = glm::clamp(700.0f + (1.0f - w.humidity) * 2100.0f
-                              - glm::smoothstep(25.0f, -5.0f, tempC) * 260.0f,
-                              700.0f, 2900.0f);
+    // ⚠️ LA BASE YA NO ES UNA FÓRMULA A OJO: es el nivel de condensación de la columna
+    // (`condensationLevelM`: Espenshade, 125 m por grado de depresión del punto de rocío), SOBRE EL
+    // SUELO. Sigue siendo el techo de la lluvia. La cota mínima de 600 m sobre el suelo conserva lo
+    // que se aprendió con la fórmula vieja: una base a 200-400 m se lee como un techo encima de la
+    // cabeza ("la gris está muy cercana").
+    // ⚠️ NO TODA LA COBERTURA ES CÚMULO. El fondo de buen tiempo (`0,73·H`, sin frente) se reparte:
+    // la mitad cúmulo, la otra mitad velo de nivel medio (ver `kFairWeatherCumulusShare`); lo que
+    // añaden los frentes es convectivo entero. `cloudCover` (lluvia, oscuridad del cielo) no cambia.
+    const float bgCover  = glm::clamp(0.73f * w.humidity, 0.0f, 1.0f);
+    const float fairPart = std::min(w.cloudCover, bgCover);
+    w.column.cover = glm::clamp(fairPart * Haruka::kFairWeatherCumulusShare + (w.cloudCover - fairPart), 0.0f, 1.0f);
+    w.cloudBaseM = Haruka::cloudBaseM(w.column);
 
     // ── TECHO: el DESARROLLO VERTICAL ───────────────────────────────────────────────────────────
     // Aquí es donde la nube deja de ser una superficie y pasa a ser un cuerpo. El grosor NO es una
@@ -296,7 +308,20 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // sigue haciendo yunque) y la lluvia moderada baja a ~1,0 km.
     const float tower   = 5200.0f * w.precip * w.precip * (0.35f + 0.65f * convect);
     const float thick   = glm::clamp(body + tower, 180.0f, 11000.0f);
-    w.cloudTopM = w.cloudBaseM + thick;
+    // La capa convectiva llega hasta el techo: base (sobre el suelo) + desarrollo. El techo se
+    // desfleca `kBlTopFadeM` por encima (ver `convectiveFractionAt`).
+    w.column.blDepthM = (w.cloudBaseM - w.column.groundM) + thick;
+    w.cloudTopM = convectiveTopM(w.column);
+    // VAPOR EN ALTURA: los frentes ADELANTADOS (cirro, hielo) y ATRASADOS (nivel medio), como ya
+    // hacía el horneado; sin el fondo de humedad, que sería otra capa cerrada. Condensan a SU
+    // temperatura (−40 / −10 °C), a la cota que toque en esta columna (ver `aloftFractionAt`).
+    {
+        const float bg = 0.73f * w.humidity;
+        w.column.vaporHigh = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time + kCirrusLeadS / m_timeScale) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
+        w.column.vaporMid  = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time - kMidLagS / m_timeScale)   - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
+        // Y la parte del fondo de buen tiempo que NO es cúmulo, como velo de nivel medio.
+        w.column.vaporMid  = glm::clamp(w.column.vaporMid + fairPart * (1.0f - Haruka::kFairWeatherCumulusShare), 0.0f, 1.0f);
+    }
 
     // ── VIENTO ──────────────────────────────────────────────────────────────────────────────────
     // Marco tangente local (este/norte) para poder hablar de vientos zonales como en la Tierra.
@@ -622,6 +647,119 @@ glm::dvec3 WeatherSystem::vortexWindAt(const Vortex& v, const glm::dvec3& dir,
     const glm::dvec3 tang = glm::cross(d, -toAxis) * (double)v.spin;
 
     return tang * vt + toAxis * vr + d * vz;
+}
+
+
+
+// ── El ciclo del agua: la humedad dinámica ──────────────────────────────────────────────────────
+
+void WeatherSystem::setMoistureFields(const float* tempC, const float* water, int W, int H) {
+    if (W <= 0 || H <= 0 || !tempC || !water) return;
+    const size_t n = (size_t)W * H;
+    m_mW = W; m_mH = H;
+    m_mTemp.assign(tempC, tempC + n);
+    m_mWater.assign(water, water + n);
+    if (m_moist.size() != n) { m_moist.assign(n, 0.0f); m_wet.assign(n, 0.0f); }
+    m_moistTmp.assign(n, 0.0f);
+}
+
+namespace {
+inline void dirToEquirect(const glm::dvec3& d, int W, int H, float& fx, float& fy) {
+    const double lat = std::asin(glm::clamp(d.y, -1.0, 1.0));
+    const double lon = std::atan2(d.z, d.x);
+    fx = (float)((lon / 6.283185307179586 + 0.5) * W);          // columna 0 = lon −180°
+    fy = (float)((0.5 - lat / 3.14159265358979) * H);           // fila 0 = polo norte
+}
+} // namespace
+
+float WeatherSystem::moistureAt(const glm::dvec3& dir) const {
+    if (m_moist.empty()) return 0.0f;
+    float fx, fy;
+    dirToEquirect(glm::normalize(dir), m_mW, m_mH, fx, fy);
+    fx -= 0.5f; fy -= 0.5f;
+    const int x0 = (int)std::floor(fx), y0 = glm::clamp((int)std::floor(fy), 0, m_mH - 1);
+    const int y1 = glm::clamp(y0 + 1, 0, m_mH - 1);
+    const float ax = fx - (float)x0, ay = glm::clamp(fy - (float)y0, 0.0f, 1.0f);
+    auto at = [&](int x, int y) { x = ((x % m_mW) + m_mW) % m_mW; return m_moist[(size_t)y * m_mW + x]; };   // la longitud envuelve
+    const float a = at(x0, y0) + (at(x0 + 1, y0) - at(x0, y0)) * ax;
+    const float b = at(x0, y1) + (at(x0 + 1, y1) - at(x0, y1)) * ax;
+    return a + (b - a) * ay;
+}
+
+void WeatherSystem::effectiveHumidityField(const float* staticHum, float* out, int W, int H) const {
+    const size_t n = (size_t)W * H;
+    if (m_moist.size() != n) { for (size_t i = 0; i < n; ++i) out[i] = staticHum[i]; return; }
+    for (size_t i = 0; i < n; ++i) out[i] = glm::clamp(staticHum[i] + kMoistureGain * m_moist[i], 0.0f, 1.0f);
+}
+
+void WeatherSystem::addMoisture(const glm::dvec3& dir, double m3) {
+    if (m_moist.empty() || m3 <= 0.0) return;
+    float fx, fy;
+    dirToEquirect(glm::normalize(dir), m_mW, m_mH, fx, fy);
+    const int x = ((int)std::floor(fx) % m_mW + m_mW) % m_mW, y = glm::clamp((int)std::floor(fy), 0, m_mH - 1);
+    // Una celda equirect de 256x128 en la Tierra son ~150x150 km; el parche del jugador son
+    // 420x420 m. Su evaporación es un grano de arena en la celda, y ASÍ TIENE QUE SER: la
+    // conversión es honesta (m³ / área de la celda → metros de lámina → vapor con la misma
+    // constante que la evaporación global). Lo que cierra el ciclo a lo grande es la evaporación
+    // global del agua del mundo; esto es lo que hace que un charco que se seca cuente.
+    const double cellAreaM2 = (4.0 * 3.14159265358979 * 6371000.0 * 6371000.0) / ((double)m_mW * m_mH);
+    m_moist[(size_t)y * m_mW + x] = glm::clamp(m_moist[(size_t)y * m_mW + x] + (float)(m3 / cellAreaM2 * kLaminaToVapor), 0.0f, 1.0f);
+}
+
+double WeatherSystem::cycleSpeed() {
+    static const double s = [] { const char* e = std::getenv("HARUKA_WATER_CYCLE_SPEED"); const double v = e ? std::atof(e) : 1.0; return v > 0.0 ? v : 1.0; }();
+    return s;
+}
+
+void WeatherSystem::stepMoisture(double dt, const float* precipRGBA) {
+    if (m_moist.empty() || dt <= 0.0) return;
+    dt *= cycleSpeed();
+    const int W = m_mW, H = m_mH;
+    const size_t n = (size_t)W * H;
+    // ── Constantes de JUEGO (segundos de clima) ──
+    // Evaporación sobre agua a 25 °C y pleno sol: 1 mm/h de lámina = 2,8e-7 m/s; a escala de juego
+    // (la lluvia plena vierte 1e-3 m/s = 3,6 m/h) se multiplica por el mismo 36x de la lluvia:
+    // 1e-5 m/s. `kLaminaToVapor` convierte metros de lámina evaporada en vapor [0,1]: 20 mm de
+    // lámina → m = 1 (una celda no puede "sobrecargarse": el clamp es la saturación).
+    constexpr float kEvapWaterMPerS = 1.0e-5f;
+    constexpr float kEvapWetMPerS   = 0.5e-5f;     // suelo mojado: la mitad (menos superficie libre)
+    constexpr float kRainSinkPerS   = 1.0f / 1800.0f;   // lloviendo a tope, el vapor se agota en 30 min
+    constexpr float kWetRisePerS    = 1.0f / 600.0f;    // 10 min de lluvia plena mojan el suelo del todo
+    constexpr float kWetDryPerS     = 1.0f / 5400.0f;   // 1,5 h de sol lo secan
+    constexpr float kDiffusion      = 0.01f;            // fracción que se reparte a los 4 vecinos por paso de 60 s (0,05 disolvia una celda sola en una hora)
+    constexpr float kLeakPerS       = 1.0f / 21600.0f;  // fuga lenta (6 h): el vapor no se queda para siempre
+    const float dtf = (float)std::min(dt, 120.0);        // un paso grande no puede saltar el clamp
+    double evap = 0.0, rain = 0.0, sum = 0.0, mx = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const float T = m_mTemp[i];
+        const float fT = glm::clamp((T + 5.0f) / 35.0f, 0.0f, 1.5f);   // −5 °C: nada · 25 °C: 0,86 · 47 °C: 1,5
+        const float precip = precipRGBA ? glm::clamp(precipRGBA[i * 4 + 3], 0.0f, 1.0f) : 0.0f;
+        const float cover  = precipRGBA ? glm::clamp(precipRGBA[i * 4 + 0], 0.0f, 1.0f) : 0.3f;
+        const float sun = 1.0f - 0.8f * cover;
+        float& m = m_moist[i];
+        float& wet = m_wet[i];
+        // Suelo mojado: sube con la lluvia, baja con el sol (y al bajar, evapora).
+        wet = glm::clamp(wet + precip * kWetRisePerS * dtf - sun * fT * kWetDryPerS * dtf, 0.0f, 1.0f);
+        const float lamina = (kEvapWaterMPerS * m_mWater[i] + kEvapWetMPerS * wet * (1.0f - m_mWater[i])) * fT * sun * dtf;
+        const float dm = lamina * kLaminaToVapor - precip * kRainSinkPerS * dtf - m * kLeakPerS * dtf;
+        evap += lamina; rain += precip * kRainSinkPerS * dtf;
+        m = glm::clamp(m + dm, 0.0f, 1.0f);
+    }
+    // Difusión a 4 vecinos (la longitud envuelve; los polos se sujetan).
+    const float k = kDiffusion * dtf / 60.0f;
+    if (k > 0.0f) {
+        for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x) {
+                const size_t i = (size_t)y * W + x;
+                const float l = m_moist[(size_t)y * W + (x + W - 1) % W], r = m_moist[(size_t)y * W + (x + 1) % W];
+                const float u = m_moist[(size_t)std::max(y - 1, 0) * W + x], d = m_moist[(size_t)std::min(y + 1, H - 1) * W + x];
+                m_moistTmp[i] = m_moist[i] + std::min(k, 0.25f) * (l + r + u + d - 4.0f * m_moist[i]);
+            }
+        m_moist.swap(m_moistTmp);
+    }
+    for (size_t i = 0; i < n; ++i) { sum += m_moist[i]; mx = std::max(mx, (double)m_moist[i]); }
+    m_moistStats.meanM = sum / (double)n; m_moistStats.maxM = mx;
+    m_moistStats.evapTotal += evap; m_moistStats.rainTotal += rain;
 }
 
 } // namespace Haruka

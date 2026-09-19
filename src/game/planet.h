@@ -34,6 +34,8 @@
 #include "core/terrain/planet_fields.h"        // FieldSample (fieldSampleAt)
 #include "core/planet/ocean_wave.h"            // OceanState: el estado del mar que se sube a la GPU
 #include "core/terrain/terrain_node_renderer.h" // v5: pase de terreno por nodos (HARUKA_TERRAIN_V5=1)
+#include "core/terrain/vox_world.h"             // el campo volumétrico: cuevas y lo que se pica
+#include "renderer/vox_renderer.h"
 #include "core/weather_system.h"
 #include "core/planet/water_fill.h"          // WaterWindowResult: el relleno FINO de una ventana
 #include <future>
@@ -234,6 +236,11 @@ public:
         m_skySHValid = true;
     }
 
+    /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L extinción por metro · y = día. La
+    /// calcula la Application del clima en la cámara y la reparte a terreno, props y nubes.
+    void setAerial(const glm::vec4& a) { m_aerial = a; }
+    const glm::vec4& aerial() const { return m_aerial; }
+
     void setSunLight(const glm::vec3& dir, const glm::vec3& color, const glm::vec3& ambientColor) {
         if (glm::dot(dir, dir) > 1e-12f) m_sunDir = glm::normalize(dir);
         m_sunColor     = glm::clamp(color, 0.0f, 1.0f);
@@ -280,6 +287,13 @@ public:
     float lakeLevelAt(const glm::dvec3& dir) const;
     /// Fetch en esa dirección (m). `WATER_FETCH_UNLIMITED` en el océano.
     float lakeFetchAt(const glm::dvec3& dir) const;
+    /** @brief Lado del quad con el que se DIBUJA el agua bajo `dir` este frame (m), o el piso de
+     *  4 m si ningún nodo de agua la cubre. Ver `TerrainNodeRenderer::waterQuadAt`: es lo que hace
+     *  que la física apague los mismos trenes de ola que el render. */
+    float waterQuadAt(const glm::dvec3& dir) const {
+        const double q = m_nodeRenderer.waterQuadAt(dir, m_config.radius);
+        return (q > 0.0) ? (float)q : Haruka::Planet::OCEAN_MIN_QUAD_M;
+    }
 
     double sampleHeight(const glm::dvec3& dir) const;
 
@@ -368,7 +382,9 @@ public:
      * Sin llamarla, el UBO queda inválido y los shaders caen a la tabla de referencia: el mar de
      * siempre, que es una degradación visible pero no una escena rota.
      */
-    void setOceanState(const Haruka::Planet::OceanState& st);
+    /// @param anchorRelEye  el ANCLA del mar (punto fijo del mundo desde el que se mide la fase de
+    ///        la ola) relativa a la cámara, en metros. Ver `OceanState::phase`.
+    void setOceanState(const Haruka::Planet::OceanState& st, const glm::vec3& anchorRelEye);
 
     // --- Stats de geometría del último frame (para el panel del editor) ---------------------
     /** @brief Lo que dibujó el planeta el último render: base + clipmap + agua, separados. */
@@ -482,6 +498,7 @@ private:
     // `setSunLight` (el orquestador la lee de la escena). Sin esto el terreno era un color
     // plano: el `uLightDir`/`uLightColor`/`uAmbient` venían fijos y no seguían al sol.
     glm::vec3 m_sunDir  = glm::vec3(0.3f, 0.8f, 0.5f);
+    glm::vec4 m_aerial{0.0f};
     // Suelo mojado/nevado + máscara cenital (ver setGroundWet). El UBO es UNO solo: su contenido no
     // cambia entre los draws del planeta (base, anillos de la rejilla, anillo cercano), así que no
     // puede repetir el fallo del recurso reescrito entre draws.
@@ -736,10 +753,47 @@ private:
     Haruka::RHI::BufferHandle  m_inlandWaterSSBO;   ///< n·n cotas del agua (m sobre el mar)
     Haruka::RHI::BufferHandle  m_inlandWaterUBO;
     bool                       m_inlandWaterValid = false;
+    glm::vec3                  m_inlandCenterRelEye{0.0f};   ///< centro del parche, relativo al ojo
+    float                      m_inlandSpanM = 0.0f;
     /// PASE DE TERRENO v5 (quadtree + pool de nodos). Opt-in con `HARUKA_TERRAIN_V5=1`; cuando está
     /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
     /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
     Haruka::Terrain::TerrainNodeRenderer m_nodeRenderer;
+
+    // ── EL CAMPO VOLUMÉTRICO: cuevas sembradas y todo lo que el jugador pique o rellene ──────────
+    // Una sola forma de tocar el mundo (ver `vox_world.h`). El planeta lo streamea alrededor de la
+    // cámara en `prepare`, lo dibuja en `render` tras el terreno y le pasa al pase de nodos la
+    // ventana de recorte para que el suelo no se dibuje sobre una boca.
+    Haruka::VoxWorld     m_vox;
+    Haruka::VoxRenderer  m_voxRenderer;
+    std::string          m_voxEditsDir;      ///< carpeta de la PARTIDA para los trazos (vacía = no persiste)
+    std::string          m_voxDesignerDir;   ///< carpeta del MUNDO para los trazos del editor
+    std::vector<Haruka::CaveDef>   m_sceneCaves;
+    std::vector<Haruka::IslandDef> m_sceneIslands;
+    bool                 m_voxWarnedNoSave = false;
+    void streamVox(const glm::dvec3& camRelPlanet);
+public:
+    /// El campo, para quien pique (el jugador, el editor) o consulte (la colisión).
+    Haruka::VoxWorld&       vox()       { return m_vox; }
+    const Haruka::VoxWorld& vox() const { return m_vox; }
+    const Haruka::VoxRenderer& voxRenderer() const { return m_voxRenderer; }
+    /// Dónde guarda la partida los trazos. Sin esto, lo picado se pierde al salir (se avisa una vez).
+    void setVoxEditsDir(const std::string& dir) { m_voxEditsDir = dir; if (m_vox.configured()) m_vox.setSaveDir(dir); }
+    /// Cuevas e islas de la ESCENA (se aplican al configurar el campo, o al momento si ya lo está).
+    void addSceneCave(const Haruka::CaveDef& d)     { m_sceneCaves.push_back(d);   if (m_vox.configured()) m_vox.placeCave(d); }
+    void addSceneIsland(const Haruka::IslandDef& d) { m_sceneIslands.push_back(d); if (m_vox.configured()) m_vox.placeIsland(d); }
+    /// Carpeta de trazos del diseñador (`surface.voxEdits` del planeta en la escena).
+    void setVoxDesignerDir(const std::string& dir) { m_voxDesignerDir = dir; if (m_vox.configured()) m_vox.setDesignerDir(dir); }
+    const std::vector<Haruka::CaveDef>&   sceneCaves()   const { return m_sceneCaves; }
+    const std::vector<Haruka::IslandDef>& sceneIslands() const { return m_sceneIslands; }
+    /// Radio de streaming de chunks alrededor del pie de la cámara (m).
+    static constexpr double kVoxStreamM = 260.0;
+    /// Una cueva colocada a menos de esto se carga ENTERA (todas sus columnas y profundidad).
+    static constexpr double kVoxCaveLoadM = 600.0;
+    /// Una isla colocada a menos de esto se carga ENTERA. Más lejos que una cueva: flota a 150-320 m
+    /// y se ve desde lejos; una cueva sólo importa cuando estás encima.
+    static constexpr double kVoxIslandLoadM = 2500.0;
+private:
     double m_frameDt = 1.0 / 60.0;   ///< dt canónico del motor; lo pone `PlanetarySystem::update`
 
     // ESTADO DEL MAR del frame (trenes + cota de la lámina). Ver `setOceanState`.

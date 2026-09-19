@@ -66,6 +66,11 @@ public:
      *  ground-snap la usa. Cliente: malla (F10). Servidor: sampler analítico. Mismas unidades. */
     virtual double terrainHeightAt(const glm::dvec3& worldPos) const = 0;
 
+    /** @brief Cambia cada vez que el SUELO cambia por algo que no es la posición del jugador: una
+     *  boca de cueva que se carga, un trazo del pico. El anillo cercano se rehace cuando lo ve
+     *  cambiar; si no, el suelo se recorta en pantalla y se sigue pisando. 0 = nunca cambia. */
+    virtual uint64_t groundEditsVersion() const { return 0; }
+
     /** @brief Centinela de "aquí no hay agua". Gemelo de `PlanetarySystem::kNoWater`. */
     static constexpr double kNoWater = -1e30;
 

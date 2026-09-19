@@ -4,12 +4,16 @@
  *
  * El filtro de zona por lista (`PropLayer::zones`) es un veto DURO por nombres: "solo en oasis".
  * Para expresar reglas compuestas —"no en arena PERO sí en la zona oasis" (`layer != sand || zone
- * == oasis`)— cada capa acepta un campo `when` con una expresión booleana sobre las DOS identidades
+ * == oasis`)— cada capa acepta un campo `when` con una expresión booleana sobre las TRES identidades
  * del punto:
  *
  *     · `layer` — el MATERIAL del terreno en el punto ("sand", "forest", "water"…).
  *     · `zone`  — la ZONA nombrada (geométrica/pintada) en el punto; vacío si el punto no está en
  *                 ninguna zona declarada.
+ *     · `biome` — el BIOMA clasificado por clima/cota/pendiente (`classifyBiome`, biomes.h): claves
+ *                 `taiga`, `bosque`, `selva`, `desierto`, `playa`, `alpino`, `acantilado`… Se
+ *                 calcula de lo que el scatter ya muestrea: no cuesta un muestreo más, y no
+ *                 necesita zoneMap (a diferencia de `layer`).
  *
  * Sintaxis (GL-free, header-only, sin dependencias):
  *
@@ -27,6 +31,7 @@
  *     when: "layer != sand"                     → no en arena
  *     when: "layer != sand || zone == oasis"    → no en arena, pero sí en el oasis
  *     when: "!(layer == water) && zone != ''"   → fuera del agua y dentro de alguna zona
+ *     when: "biome == taiga || biome == boreal"   → coníferas: solo en los biomas fríos húmedos
  *
  * `PropCond::parse` devuelve la AST (o nullptr + mensaje si la sintaxis no vale). La evalúa
  * `PropCond::eval(layer, zone)`. La tabla de capas guarda SOLO el string (round-trip con el IDE);
@@ -38,6 +43,7 @@
 #include <string>
 #include <vector>
 #include <cctype>
+#include <functional>
 
 namespace Haruka { namespace Planet {
 
@@ -46,29 +52,36 @@ namespace Haruka { namespace Planet {
 struct PropCondCtx {
     std::string layer;
     std::string zone;
+    std::string biome;   ///< clave de `biomeKey()`; vacío = quien evalúa no clasificó el bioma
 };
 
 /** @brief Nodo de la AST de la condición. */
+struct PropCondCompare;
 struct PropCond {
     virtual ~PropCond() = default;
     virtual bool eval(const PropCondCtx& ctx) const = 0;
+    /// Recorre las comparaciones hoja (el validador lo usa para avisar de un `biome == bosqe`).
+    virtual void eachCompare(const std::function<void(const PropCondCompare&)>& fn) const = 0;
 };
 
-/** @brief Comparación `layer == X` / `zone != X`. `var` es "layer" o "zone". */
+/** @brief Comparación `layer == X` / `zone != X` / `biome == X`. `var` es "layer", "zone" o "biome". */
 struct PropCondCompare : PropCond {
-    std::string var;        ///< "layer" | "zone"
+    std::string var;        ///< "layer" | "zone" | "biome"
     bool        equal = true;
     std::string value;
     bool eval(const PropCondCtx& ctx) const override {
-        const std::string& actual = (var == "zone") ? ctx.zone : ctx.layer;
+        const std::string& actual = (var == "zone")  ? ctx.zone
+                                  : (var == "biome") ? ctx.biome : ctx.layer;
         return equal ? (actual == value) : (actual != value);
     }
+    void eachCompare(const std::function<void(const PropCondCompare&)>& fn) const override { fn(*this); }
 };
 
 /** @brief Negación `!expr`. */
 struct PropCondNot : PropCond {
     std::shared_ptr<PropCond> child;
     bool eval(const PropCondCtx& ctx) const override { return !child->eval(ctx); }
+    void eachCompare(const std::function<void(const PropCondCompare&)>& fn) const override { child->eachCompare(fn); }
 };
 
 /** @brief Conjunción `a && b && …`. */
@@ -78,6 +91,9 @@ struct PropCondAnd : PropCond {
         for (const auto& c : children) if (!c->eval(ctx)) return false;
         return true;
     }
+    void eachCompare(const std::function<void(const PropCondCompare&)>& fn) const override {
+        for (const auto& c : children) c->eachCompare(fn);
+    }
 };
 
 /** @brief Disyunción `a || b || …`. */
@@ -86,6 +102,9 @@ struct PropCondOr : PropCond {
     bool eval(const PropCondCtx& ctx) const override {
         for (const auto& c : children) if (c->eval(ctx)) return true;
         return false;
+    }
+    void eachCompare(const std::function<void(const PropCondCompare&)>& fn) const override {
+        for (const auto& c : children) c->eachCompare(fn);
     }
 };
 
@@ -158,8 +177,9 @@ private:
 
     std::shared_ptr<PropCond> parseComparison() {
         const std::string var = readIdent();
-        if (var != "layer" && var != "zone") {
-            m_error = var.empty() ? "se esperaba 'layer' o 'zone'" : "'" + var + "' no es una identidad (usa layer o zone)";
+        if (var != "layer" && var != "zone" && var != "biome") {
+            m_error = var.empty() ? "se esperaba 'layer', 'zone' o 'biome'"
+                                  : "'" + var + "' no es una identidad (usa layer, zone o biome)";
             return nullptr;
         }
         bool equal = false;

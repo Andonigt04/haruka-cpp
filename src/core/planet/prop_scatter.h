@@ -31,6 +31,7 @@
 #include <glm/glm.hpp>
 
 #include "core/planet/prop_layer.h"        // PropLayerTable, PlacedProp
+#include "core/planet/biomes.h"            // classifyBiome / biomeKey: la identidad `biome` del when
 #include "core/terrain/planet_fields.h"    // FieldSample
 #include "core/terrain/cube_sphere.h"      // cubeFaceToDir / dirToCubeFaceClosed: el cuantizador
 #include "tools/procgraph/tree_spawn.h"    // slopeAt pattern, IPropField
@@ -139,6 +140,7 @@ struct PropScatterStats {
     std::vector<int> noSubmerged; ///< descartes por estar bajo el agua sin declarar `submerged`
     std::vector<int> noCoverage;  ///< descartes por `coverage()` == 0 (total)
     std::vector<int> noDensity;   ///< descartes por el dado de `density`
+    std::vector<int> noVariant;   ///< descartes porque ninguna variante de la capa vive en ese punto
     std::vector<int> placed;      ///< colocadas
     // Desglose de `noCoverage` por factor: es lo que dice QUÉ campo del JSON tocar.
     std::vector<int> failZone, failWhen, failHum, failTemp, failSlope, failMap;
@@ -148,10 +150,16 @@ struct PropScatterStats {
     float humLo = 1e9f, humHi = -1e9f, tempLo = 1e9f, tempHi = -1e9f, slopeLo = 1e9f, slopeHi = -1e9f;
     int   cells = 0;
 
+    /// Celdas visitadas por bioma y colocadas por (capa, bioma): `placedByBiome[li*COUNT + b]`. Es
+    /// lo que dice si "en la taiga solo hay coníferas" es verdad en el planeta real, no en el test.
+    int              cellsByBiome[(int)Biome::COUNT] = {};
+    std::vector<int> placedByBiome;
+
     void resize(size_t n) { offered.assign(n,0); noSubmerged.assign(n,0); noCoverage.assign(n,0);
-                            noDensity.assign(n,0); placed.assign(n,0);
+                            noDensity.assign(n,0); noVariant.assign(n,0); placed.assign(n,0);
                             failZone.assign(n,0); failWhen.assign(n,0); failHum.assign(n,0);
-                            failTemp.assign(n,0); failSlope.assign(n,0); failMap.assign(n,0); }
+                            failTemp.assign(n,0); failSlope.assign(n,0); failMap.assign(n,0);
+                            placedByBiome.assign(n * (size_t)Biome::COUNT, 0); }
 };
 
 inline std::vector<ScatteredProp> scatterPropsNear(
@@ -181,9 +189,11 @@ inline std::vector<ScatteredProp> scatterPropsNear(
     // la tabla por defecto (~61k celdas).
     bool needZone  = false;
     bool needLayer = false;
+    bool needBiome = stats != nullptr;   // el diagnóstico cuenta por bioma aunque nadie lo pida
     for (const auto& L : table.layers) {
-        if (!L.zones.empty() || L.when.find("zone") != std::string::npos) needZone = true;
-        if (L.when.find("layer") != std::string::npos) needLayer = true;
+        if (L.usesZoneAnywhere())  needZone  = true;
+        if (L.usesLayerAnywhere()) needLayer = true;
+        if (L.usesBiomeAnywhere()) needBiome = true;
     }
 
     std::unordered_set<uint64_t> seenCells;
@@ -320,6 +330,10 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                 const std::string zone  = needZone ? field.zoneAt(dir) : std::string{};
                 // Material del terreno en la celda: alimenta la condición booleana `when` de cada capa.
                 const std::string layer = needLayer ? field.layerAt(dir) : std::string{};
+                // Bioma de la celda: de lo YA muestreado (clima, cota, pendiente), sin ir al campo.
+                const Biome biome = needBiome
+                    ? classifyBiome(BiomeSample{fs.tempC, fs.humidity, hM, slope}) : Biome::COUNT;
+                const std::string biomeK = needBiome ? std::string(biomeKey(biome)) : std::string{};
 
                 // Lo que el terreno DA aquí, para poder contrastarlo con lo que las bandas PIDEN.
                 if (stats) {
@@ -330,14 +344,31 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     stats->tempHi  = std::max(stats->tempHi,  fs.tempC);
                     stats->slopeLo = std::min(stats->slopeLo, slope);
                     stats->slopeHi = std::max(stats->slopeHi, slope);
+                    if (biome != Biome::COUNT) ++stats->cellsByBiome[(int)biome];
                 }
 
-                // El orden de la tabla es la PRIORIDAD de construcción: cada capa reclama.
-                for (int li = 0; li < (int)table.layers.size(); ++li) {
+                // ── SORTEO ENTRE CAPAS, NO "LA PRIMERA QUE ACEPTA" ───────────────────────────────
+                // Antes la celda era de la primera capa de la tabla que pasara sus bandas (`break`):
+                // roca y árbol no podían convivir en el mismo territorio, sólo vetarse por orden.
+                //
+                // Dos clases de capa, por `claimRadius`:
+                //   · EXCLUSIVAS (claimRadius > 0: árbol, roca, casa): ocupan sitio. Cada una da un
+                //     PESO = densidad × coverage × mancha; la celda se ocupa con probabilidad
+                //     max(peso) y, si se ocupa, la capa sale sorteada proporcional a su peso.
+                //   · LIBRES (claimRadius == 0: hierba, arbusto, líquen): sotobosque. Tiran su propio
+                //     dado, independientes de las exclusivas y entre sí. Sin esto, meter hierba
+                //     quitaba árboles: la hierba entraba en el sorteo y se llevaba el 60 % de las celdas.
+                // Todo por hash de celda: mismo sitio, mismo resultado.
+                constexpr int kMaxL = PropLayerTable::kMaxLayers;
+                float       w[kMaxL];
+                std::string protoOf[kMaxL];
+                float total = 0.0f, wmax = 0.0f;
+                const int nL = std::min((int)table.layers.size(), kMaxL);
+                for (int li = 0; li < nL; ++li) {
+                    w[li] = 0.0f;
                     const PropLayer& L = table.layers[li];
                     if (L.mesh.empty()) continue;                 // capa informativa: no instala
-                    // `offered` se cuenta AQUÍ: es el turno real. Una capa con offered=0 no es que
-                    // rechace nada — es que nunca llegó, porque otra de más prioridad hizo `break`.
+                    if (L.maxDistM > 0.0f && rad > L.maxDistM) continue;   // fuera de su alcance
                     if (stats) ++stats->offered[(size_t)li];
                     if (hM < 0.0f && !L.submerged) {              // sumergido: solo capas `submerged`
                         if (stats) ++stats->noSubmerged[(size_t)li];
@@ -345,11 +376,13 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     }
                     const float mapD = L.densityMap.empty() ? 1.0f
                                                             : field.mapDensityAt(dir, L.densityMap);
-                    const float cov  = L.coverage(fs, slope, mapD, zone, layer);
+                    // El bioma que VE esta capa: el clasificado, o el bosque pintado si el mapa manda.
+                    const std::string bk = L.biomeFor(biomeK, mapD, fs.tempC);
+                    const float cov  = L.coverage(fs, slope, mapD, zone, layer, bk);
                     if (cov <= 0.0f) {
                         if (stats) {
                             ++stats->noCoverage[(size_t)li];
-                            const uint32_t m = L.coverageFailMask(fs, slope, mapD, zone, layer);
+                            const uint32_t m = L.coverageFailMask(fs, slope, mapD, zone, layer, bk);
                             if (m & PropLayer::FAIL_ZONE)  ++stats->failZone[(size_t)li];
                             if (m & PropLayer::FAIL_WHEN)  ++stats->failWhen[(size_t)li];
                             if (m & PropLayer::FAIL_HUM)   ++stats->failHum[(size_t)li];
@@ -359,27 +392,90 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                         }
                         continue;
                     }
-
-                    // Densidad local: huecos sin patrón (hash de la celda × peso de volumen).
-                    const float r = PG::WhiteNode::hashFloat((int)hc, 200 + li, 0, params.seed);
-                    if (r > L.density * cov) { if (stats) ++stats->noDensity[(size_t)li]; continue; }
-                    if (stats) ++stats->placed[(size_t)li];
-
-                    ScatteredProp pr;
-                    pr.mesh       = L.mesh;
-                    pr.layerIndex = li;
-                    pr.dir        = dir;
-                    pr.heightM    = hM;
-                    pr.cellSeed   = hc;
-                    pr.scale      = L.scaleMin + (L.scaleMax - L.scaleMin) *
-                                    PG::WhiteNode::hashFloat((int)hc, 300 + li, 0, params.seed);
-                    // Tinte determinista por celda (variedad de color sin geometría nueva).
-                    const float tv = PG::WhiteNode::hashFloat((int)hc, 400 + li, 0, params.seed);
-                    pr.tint = glm::vec3(0.85f + 0.30f * tv);
-                    pr.state = 0;
-                    out.push_back(pr);
-                    break;   // una celda instala UNA capa (la de mayor prioridad que la acepte)
+                    // QUÉ iría aquí: la variante (por bioma/material/zona) y su semilla, por hash de
+                    // celda. Sin variante elegible la capa no entra en el sorteo de esta celda.
+                    protoOf[li] = L.pickPrototype(layer, zone, bk,
+                        PG::WhiteNode::hashFloat((int)hc, 600 + li, 0, params.seed),
+                        PG::WhiteNode::hashFloat((int)hc, 700 + li, 0, params.seed));
+                    if (protoOf[li].empty()) { if (stats) ++stats->noVariant[(size_t)li]; continue; }
+                    w[li] = L.density * cov * L.clumpFactor(dir, R, params.seed, li);
+                    if (w[li] <= 0.0f) { w[li] = 0.0f; if (stats) ++stats->noDensity[(size_t)li]; continue; }
+                    if (L.claimRadius <= 0.0f) continue;          // libre: su dado va aparte
+                    total += w[li];
+                    wmax = std::max(wmax, w[li]);
                 }
+
+                // Emisor común: `perCell` instancias de la capa `li` en esta celda. La primera en el
+                // punto muestreado (con su cota exacta); las demás con otro jitter dentro de la MISMA
+                // celda y la cota de la primera (a 12 m la diferencia es la del quad; la hierba no la
+                // nota y así no se paga otro muestreo).
+                auto emit = [&](int li) {
+                    const PropLayer& L = table.layers[li];
+                    if (stats) {
+                        ++stats->placed[(size_t)li];
+                        if (biome != Biome::COUNT)
+                            ++stats->placedByBiome[(size_t)li * (size_t)Biome::COUNT + (size_t)biome];
+                    }
+                    const int nInst = std::max(1, L.perCell);
+                    for (int k = 0; k < nInst; ++k) {
+                        const uint32_t hk = (k == 0) ? hc : PG::hash32(hc ^ (uint32_t)(k * 0x9E3779B9u) ^ (uint32_t)(li * 0x85EBCA6Bu));
+                        glm::vec3 dk = dir;
+                        if (k > 0) {
+                            const double kx = (double)PG::WhiteNode::hashFloat((int)hk, 1, 0, params.seed) - 0.5;
+                            const double ky = (double)PG::WhiteNode::hashFloat((int)hk, 2, 0, params.seed) - 0.5;
+                            dk = glm::vec3(Haruka::cubeFaceToDir(face, -1.0 + ((double)gi + 0.5 + kx * 0.9) * cw,
+                                                                       -1.0 + ((double)gj + 0.5 + ky * 0.9) * cw));
+                        }
+                        ScatteredProp pr;
+                        pr.mesh       = protoOf[li];
+                        pr.layerIndex = li;
+                        pr.dir        = dk;
+                        pr.heightM    = hM;
+                        pr.cellSeed   = hk;
+                        pr.scale      = L.scaleMin + (L.scaleMax - L.scaleMin) *
+                                        PG::WhiteNode::hashFloat((int)hk, 300 + li, 0, params.seed);
+                        // Tinte determinista por celda (variedad de color sin geometría nueva).
+                        const float tv = PG::WhiteNode::hashFloat((int)hk, 400 + li, 0, params.seed);
+                        pr.tint = glm::vec3(0.85f + 0.30f * tv);
+                        pr.state = 0;
+                        out.push_back(pr);
+                    }
+                };
+
+                // Capas LIBRES: dado propio, independiente.
+                for (int li = 0; li < nL; ++li) {
+                    if (w[li] <= 0.0f || table.layers[li].claimRadius > 0.0f) continue;
+                    const float rf = PG::WhiteNode::hashFloat((int)hc, 250 + li, 0, params.seed);
+                    if (rf > w[li]) { if (stats) ++stats->noDensity[(size_t)li]; continue; }
+                    emit(li);
+                    if ((int)out.size() >= params.maxProps) return out;
+                }
+                if (total <= 0.0f) continue;
+
+                // Capas EXCLUSIVAS: ¿se ocupa la celda? Dado contra el peso MAYOR (una capa sola
+                // conserva su densidad). ¿Qué capa? Proporcional al peso.
+                const float r = PG::WhiteNode::hashFloat((int)hc, 200, 0, params.seed);
+                if (r > wmax) {
+                    if (stats) for (int li = 0; li < nL; ++li)
+                        if (w[li] > 0.0f && table.layers[li].claimRadius > 0.0f) ++stats->noDensity[(size_t)li];
+                    continue;
+                }
+                int li = -1;
+                {
+                    const float pick = PG::WhiteNode::hashFloat((int)hc, 201, 0, params.seed) * total;
+                    float acc = 0.0f;
+                    for (int k = 0; k < nL; ++k) {
+                        if (w[k] <= 0.0f || table.layers[k].claimRadius <= 0.0f) continue;
+                        acc += w[k];
+                        if (pick < acc || li < 0) li = k;
+                        if (pick < acc) break;
+                    }
+                }
+                if (li < 0) continue;
+                if (stats) for (int k = 0; k < nL; ++k)
+                    if (k != li && w[k] > 0.0f && table.layers[k].claimRadius > 0.0f) ++stats->noDensity[(size_t)k];
+                emit(li);
+                if ((int)out.size() >= params.maxProps) return out;
             }
         }
     }

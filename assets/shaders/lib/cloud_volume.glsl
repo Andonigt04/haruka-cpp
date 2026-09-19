@@ -26,8 +26,35 @@
 // Bordes de la losa, en fracción del grosor. GEMELOS de los de weather_system.cpp.
 // La base es un plano bastante definido (el nivel de condensación es una cota, y por eso todas las
 // nubes de un cielo tienen la panza a la misma altura); el techo se desfleca.
-const float HARUKA_CLOUD_RISE = 0.28;
-const float HARUKA_CLOUD_FALL = 0.62;
+// ⚠️ BASE PLANA, TECHO REDONDO. Eran 0,28 / 0,62: la nube entraba en 670 m y se deshilachaba desde
+// 1 500 m, simetrica arriba y abajo, y con el campo 3D isotropo cada nube salia como una BOLA
+// (medido en `cloud_shape_3d`: variacion de altura de la base 374 m = la del techo 374 m). Un cumulo
+// real nace en el nivel de condensacion, que es PLANO: la base se forma en ~150 m (0,06 de 2,4 km)
+// y todo lo redondo va arriba. Gemelos en `WeatherSystem::kProfileRise/Fall` (los ata `weather_3d`).
+const float HARUKA_CLOUD_RISE = 0.06;
+const float HARUKA_CLOUD_FALL = 0.50;
+/// Compresion VERTICAL de la coordenada del campo 3D del cumulo: la estructura horizontal del campo
+/// se mantiene y a lo alto de la losa casi no cambia, asi que la nube es una COLUMNA con la base del
+/// perfil y el techo de la erosion, no una bola. 1,0 = isotropo (lo de antes).
+const float HARUKA_CLOUD_VERT_SQUASH = 0.15;
+/// Escala HORIZONTAL del campo del cumulo: 1,0 daba nubes de ~1 km de ancho (el fundamental del fbm
+/// a 1,43 km/unidad); a 0,6 salen de ~1,7 km, el tamano de un cumulo de buen tiempo.
+const float HARUKA_CLOUD_HORIZ_SCALE = 0.6;
+
+/// La posicion del campo del cumulo con la vertical COMPRIMIDA, sobre la esfera. `p` relativo al
+/// centro del planeta (m), `fscale` 1/m. Horizontal: la posicion sobre la esfera a radio R (o sea,
+/// d·fscale por metro andado); vertical: la altura sobre R comprimida por SQUASH.
+/// ⚠️ ERA `pf − up·(dot(pf,up)·(1−SQUASH))`, Y ESO NO COMPRIME NADA: `p` es RADIAL desde el centro,
+/// asi que `pf − 0,85·|pf|·up = 0,15·pf` — un escalado UNIFORME de todo el campo (x0,15 tambien en
+/// horizontal). El cumulo se muestreaba con celdas de ~12 km e isotropo: bolas enormes recortadas
+/// por la losa = tortas planas por arriba y por abajo ("nubes grandes planas", "la base es plana").
+/// La sonda de densidad (`cloud_density_probe.comp`) usaba la version plana correcta, por eso sus
+/// medidas (3,3:1, coliflor) no eran las del pase. Medido al arreglarlo: la base dibujada pasa de
+/// 66 m de ondulacion a ver los bultos, y las nubes al tamano de la sonda.
+vec3 harukaCloudSquashedPos(vec3 p, float R, float alt, float fscale) {
+    const vec3 upS = p / (R + alt);
+    return upS * ((R + alt * HARUKA_CLOUD_VERT_SQUASH) * fscale) * HARUKA_CLOUD_HORIZ_SCALE;
+}
 
 /** @brief Perfil vertical dentro de la losa. `t` = 0 en la base, 1 en el techo. */
 float harukaCloudProfile(float t) {
@@ -41,10 +68,62 @@ float harukaCloudProfile(float t) {
 // Es el mismo value-noise + fBm que ya usaba el cielo. Vive aquí para que el fondo (cirro,
 // altocúmulo) y el volumen (cúmulo) compartan la forma: si usaran ruidos distintos, la capa alta y
 // la baja parecerían de dos cielos diferentes.
+/// ⚠️ ERA `p = fract(p*0.1031); p += dot(p, p.yzx+33.33); fract((p.x+p.y)*p.z)` (el "hash 13" de
+/// Hoskins), y en coma flotante es CAOTICO: con p ~ 3 000 (las coordenadas que ve el pase) un ulp
+/// de diferencia en `p*0.1031` se multiplica por ~100 dos veces y el hash cambia del todo. Los
+/// compiladores no redondean igual: con el MISMO shader y la MISMA GPU, OpenGL y Vulkan daban
+/// hashes distintos en el 39 % de los nudos (sonda `cloud_noise_probe`), y de ahi un cirro al
+/// cenit del 53,7 % en GL contra 67,3 % en Vulkan, con facetas rectas en Vulkan (dos esquinas de
+/// una celda con hashes "de otro compilador" = una arista recta). O sea: no existia UN campo de
+/// nubes, existia uno por compilador.
+/// Ademas `fract(p·0,1031)` es casi lineal entre nudos vecinos: el ruido viejo estaba
+/// correlacionado por los ejes de la malla (hecho exacto en enteros salia un cumulo alargado 2,2:1
+/// desde el nadir), y lo unico que lo disimulaba era el caos de redondeo. Los nudos son ENTEROS y
+/// se mezclan como enteros (pcg3d, Jarzynski & Olano 2020): exacto en cualquier compilador y GPU,
+/// blanco e isotropo. El tamano de las celdas del cumulo se recalibro para este ruido
+/// (HARUKA_CLOUD_HORIZ_SCALE).
+float harukaCloudPcg3d(ivec3 ip) {
+    uvec3 v = uvec3(ip + ivec3(0x40000000));
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return float(v.x & 0xffffffu) / 16777216.0;
+}
+/// El hash de las nubes, EXACTO y con la misma estadistica que tenia:
+///   · la primera etapa del "hash 13" (`fract(p·0,1031)`) se hace en enteros: `(p·1031 mod 10000)/10000`,
+///     igual en cualquier compilador; las dos etapas restantes van con entradas en [0,1) y un ulp
+///     ahi son 1e-4 de salida, no otro hash;
+///   · ese hash es casi LINEAL entre nudos vecinos (por eso el ruido tenia energia de baja frecuencia
+///     y los cumulos salian coherentes) y por lo mismo tiende a rampas por los ejes de la malla.
+///     En coma flotante el caos de redondeo revolvia ~18 % de los nudos y rompia las rampas (hecho
+///     exacto sin mas, el cumulo salia alargado 2,2:1 desde el nadir). Aqui ese 18 % se revuelve A
+///     PROPOSITO con pcg3d, decidido por el propio nudo: determinista, y el mismo aspecto.
+/// ⚠️ Se probo el hash blanco puro (pcg3d) y recalibrar: sin la correlacion el cumulo sale en
+/// jirones (presencia 7,4 -> 1,8 %), y un hash suavizado (media de 8) cuesta x9 el pase (1 790 ms).
+/// El "hash 13" de Hoskins de siempre, hecho DETERMINISTA:
+///   · el nudo se envuelve a 8 192 (`& 8191`: el ruido se repite cada 8 192 nudos = 11 000 km en el
+///     cumulo, invisible) para que `nudo · 0,1031` sea pequeño y UN solo producto IEEE;
+///   · ese producto va `precise`: sin eso el compilador lo fundia con el `floor` de `fract` en un
+///     FMA (o no), y el error de redondeo (1e-5) se amplificaba x100 dos veces: hashes distintos en
+///     el 39 % de los nudos entre OpenGL y Vulkan EN LA MISMA GPU. Las dos etapas siguientes tienen
+///     entradas en [0,1): un ulp ahi son 1e-4 en la salida, no otro hash.
+/// ⚠️ NO se cambia por un hash "bueno" (pcg3d): con la misma media y sigma del campo (medido:
+/// 0,375 / 0,109 los dos) el cumulo salia en jirones grises (presencia 7,4 -> 1,8 %). La razon esta
+/// en las OCTAVAS: `fract(2i·0,1031) = fract(2·fract(i·0,1031))`, asi que en este hash la octava
+/// k+1 sigue a la k y los picos se alinean — es lo que da cuerpos coherentes. Con nudos
+/// independientes por octava no hay cuerpos. Todo el cumulo esta calibrado sobre ESTO.
 float harukaCloudHash13(vec3 p) {
-    p = fract(p * 0.1031);
-    p += dot(p, p.yzx + 33.33);
-    return fract((p.x + p.y) * p.z);
+    const ivec3 ip = ivec3(floor(p + 0.5)) & ivec3(8191);
+    // TODO `precise` y con el orden de las operaciones escrito: `precise` obliga a evaluar el arbol
+    // tal cual (sin FMA ni reasociacion), y asi los dos compiladores hacen las mismas operaciones
+    // IEEE en el mismo orden. Con un `dot()` suelto quedaban flips en el 2 % de los nudos.
+    precise vec3 t = vec3(ip) * 0.1031;
+    precise vec3 q = fract(t);
+    precise float d = ((q.x * (q.y + 33.33)) + (q.y * (q.z + 33.33))) + (q.z * (q.x + 33.33));
+    precise vec3 r = q + d;
+    precise float m = (r.x + r.y) * r.z;
+    return fract(m);
 }
 
 /** @brief Ruido de valor 3D (trilineal). Un solo hash para todo el cielo: la capa alta y la baja
@@ -127,11 +206,31 @@ float harukaCloudField3(vec3 p, vec3 wind) {
 ///  (desde órbita). Fundirla también por el paso de la marcha —que crece hasta 430 m a 2,3 km
 ///  mirando al horizonte— dejaba el cielo entero como una lámina uniforme de la cobertura media,
 ///  moteada por la erosión: "todo el cielo lleno de textura". Las octavas finas sí van por el paso.
+/// ⚠️ LA BANDA DE DESVANECIDO DEL LOD ESTABA 3x POR ENCIMA DE NYQUIST. Era `(wl/6, wl/3)`: una
+/// octava se apagaba DEL TODO con tres muestras por longitud de onda, cuando Nyquist pide dos. Como
+/// el pase corre a 1/4 de lado, la fundamental del cumulo (1,4 km) empezaba a fundirse a 77 km y
+/// desaparecia a 154 km: a esas distancias la nube perdia la FORMA y quedaba su cobertura, o sea un
+/// manchurron — "si bajas de cierta altura se crea un fantasma de una nube" (Andoni), porque al
+/// bajar la capa se ve mas rasante y su entrada se aleja. Con `(wl/3, wl/1,5)` la octava vive hasta
+/// 1,5 muestras por periodo y se apaga en el limite: la forma llega al doble de distancia. El precio
+/// es alias, y eso el banco lo mide (`grano %`): si sube, este es el sitio.
+/// Las octavas FINAS se quedan donde estaban (medido: aflojarlas a Nyquist sube el grano del
+/// nivel medio de 6,4 a 16 % y el del cumulo de 55 a 63 % — el muestreo de la marcha lleva jitter
+/// por pixel y pasos irregulares, asi que su Nyquist efectivo es peor que el teorico).
+const float HARUKA_CLOUD_LOD_LO = 1.0 / 6.0;
+const float HARUKA_CLOUD_LOD_HI = 1.0 / 3.0;
+/// La FUNDAMENTAL no: es la FORMA de la nube (1,4 km), su alias es de baja frecuencia (bultos
+/// grandes, no moteado) y es lo que se pierde a 77 km con la banda conservadora. Se lleva a Nyquist.
+const float HARUKA_CLOUD_LOD0_LO = 1.0 / 4.0;
+const float HARUKA_CLOUD_LOD0_HI = 1.0 / 2.0;
 float harukaCloudFbm3LOD(vec3 p, int octaves, float fp0, float fp) {
     float v = 0.0, a = 0.5, wl = 1.0;
     for (int i = 0; i < octaves; ++i) {
-        const float w = 1.0 - smoothstep(wl / 6.0, wl / 3.0, (i == 0) ? fp0 : fp);
-        v += a * mix(0.5, harukaCloudVNoise3(p), w);
+        const float w = (i == 0) ? (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD0_LO, wl * HARUKA_CLOUD_LOD0_HI, fp0))
+                                 : (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD_LO,  wl * HARUKA_CLOUD_LOD_HI,  fp));
+        // Una octava que el LOD descarta del todo no se evalua: es lo que hace asequible la marcha
+        // hacia el Sol (huella gruesa, 1-2 octavas) y las muestras lejanas.
+        v += (w > 0.0) ? a * mix(0.5, harukaCloudVNoise3(p), w) : a * 0.5;
         p *= 2.0; a *= 0.5; wl *= 0.5;
     }
     return v;
@@ -140,6 +239,10 @@ float harukaCloudFbm3LOD(vec3 p, int octaves, float fp0, float fp) {
 /** @brief `harukaCloudField3` con LOD (ver `harukaCloudFbm3LOD`). `fp` = huella de la muestra en
  *  unidades de `p` (metros × fscale): el mayor entre el paso de la marcha y el píxel. */
 float harukaCloudField3LOD(vec3 p, vec3 wind, float fp0, float fp) {
+    // ⚠️ Se probo con las mallas giradas por octava (`harukaCloudFbm3LODRot`, como las capas) y el
+    // banco dio MAS cortes rectos en el cumulo (107 contra 53) y lo saco alargado desde arriba: una
+    // malla girada sigue siendo una malla, y el cumulo ya lleva warp, cuatro octavas y erosion.
+    // Se queda como estaba; la rotacion es solo para las capas, que no tienen nada de eso.
     vec3 warp = vec3(harukaCloudFbm3LOD(p * 0.6 + wind * 0.5,        2, fp0 * 0.6, fp * 0.6),
                      harukaCloudFbm3LOD(p * 0.6 + 5.2 - wind * 0.5,  2, fp0 * 0.6, fp * 0.6),
                      harukaCloudFbm3LOD(p * 0.6 + 11.7 + wind * 0.3, 2, fp0 * 0.6, fp * 0.6));
@@ -157,11 +260,43 @@ float harukaCloudField3LOD(vec3 p, vec3 wind, float fp0, float fp) {
  *  seguían, con el perfil de capa seguían — era el campo). El cúmulo lo tolera porque satura en dos
  *  pasos y la varianza se esconde bajo el alfa; una capa translúcida la enseña entera. Aquí, dos
  *  octavas: el rasgo más fino queda en 2,3 km (cirro) y 600 m (altocúmulo), varias veces el paso. */
+/// ⚠️ LAS CAPAS SALIAN COMO POLIGONOS. El ruido de valor es una malla cubica interpolada: umbralizado
+/// con un borde de 0,085 (`harukaCloudStrength`), sus contornos son TRAMOS RECTOS entre nudos de la
+/// malla, y en las capas —dos octavas, sin detalle que lo rompa— cada hueco del cirro era un rombo
+/// de 4,6 km de lados rectos (captura desde 3 km, 16-09: "una difuminada con cortes"). El cumulo no
+/// lo ensena porque lleva 4 octavas, warp y erosion. Aqui cada octava va sobre una malla GIRADA
+/// respecto a la anterior: los tramos rectos de una no coinciden con los de la otra y el contorno
+/// deja de ser un poligono. Cuesta lo mismo (una multiplicacion por matriz por octava).
+const mat3 HARUKA_CLOUD_ROT_A = mat3( 0.80, -0.36,  0.48,
+                                      0.48,  0.80, -0.36,
+                                     -0.36,  0.48,  0.80);   // ~37 grados sobre (1,1,1)
+const mat3 HARUKA_CLOUD_ROT_B = mat3( 0.36,  0.48,  0.80,
+                                      0.80,  0.36, -0.48,
+                                     -0.48,  0.80, -0.36);   // otra, sin eje en comun con la anterior
+float harukaCloudFbm3LODRot(vec3 p, int octaves, float fp0, float fp) {
+    float v = 0.0, a = 0.5, wl = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        const float w = (i == 0) ? (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD0_LO, wl * HARUKA_CLOUD_LOD0_HI, fp0))
+                                 : (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD_LO,  wl * HARUKA_CLOUD_LOD_HI,  fp));
+        v += (w > 0.0) ? a * mix(0.5, harukaCloudVNoise3(p), w) : a * 0.5;
+        p = ((i & 1) == 0 ? HARUKA_CLOUD_ROT_A : HARUKA_CLOUD_ROT_B) * p * 2.0 + 17.3;
+        a *= 0.5; wl *= 0.5;
+    }
+    return v;
+}
+
 float harukaCloudFieldLayer(vec3 p, vec3 wind, float fp0, float fp) {
-    vec3 warp = vec3(harukaCloudFbm3LOD(p * 0.6 + wind * 0.5,        2, fp0 * 0.6, fp * 0.6),
-                     harukaCloudFbm3LOD(p * 0.6 + 5.2 - wind * 0.5,  2, fp0 * 0.6, fp * 0.6),
-                     harukaCloudFbm3LOD(p * 0.6 + 11.7 + wind * 0.3, 2, fp0 * 0.6, fp * 0.6));
-    return harukaCloudFbm3LOD(p * 1.3 + warp * 1.4 + wind, 2, fp0 * 1.3, fp * 1.3);
+    vec3 warp = vec3(harukaCloudFbm3LODRot(p * 0.6 + wind * 0.5,        2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LODRot(p * 0.6 + 5.2 - wind * 0.5,  2, fp0 * 0.6, fp * 0.6),
+                     harukaCloudFbm3LODRot(p * 0.6 + 11.7 + wind * 0.3, 2, fp0 * 0.6, fp * 0.6));
+    // Tres octavas, no dos: la tercera (1,1 km en el cirro, 300 m en el altocumulo) es la que
+    // redondea el contorno; queda por encima del paso dentro de la losa (ver `finoM`).
+    const float v = harukaCloudFbm3LODRot(HARUKA_CLOUD_ROT_B * (p * 1.3) + warp * 1.8 + wind, 3, fp0 * 1.3, fp * 1.3);
+    // El umbral (`harukaCloudThreshold`) esta calibrado para DOS octavas: media 0,375 y sigma
+    // HARUKA_CLOUD_SIGMA_CAPA. Con tres la media es 0,4375 y la sigma x1,10 — sin recolocar, el
+    // cirro a 0,45 de cobertura salia como un velo casi cerrado (captura). Se devuelve el campo con
+    // las estadisticas de dos octavas, y la tercera solo aporta FORMA.
+    return 0.375 + (v - 0.4375) * 0.91;
 }
 
 // ── DE LÁMINA A CUERPO ──────────────────────────────────────────────────────────────────────────
@@ -184,8 +319,33 @@ const float HARUKA_CLOUD_MINTOP = 0.22;
 /** Espesor MÍNIMO de una nube (m): lo que la marcha puede resolver con sus pasos de 50-360 m. Una
  *  nube más fina que esto no se dibuja como nube, se dibuja como grano. */
 const float HARUKA_CLOUD_MIN_THICK_M = 260.0;
-float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM);
-float harukaCloudDensity(float strength, float f, vec3 q) { return harukaCloudDensity(strength, f, q, HARUKA_CLOUD_MINTOP, 1.0e9, 0.0); }
+float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM, float topMul);
+float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM) {
+    return harukaCloudDensity(strength, f, q, minTop, wavelengthM, footprintM, 1.0);
+}
+float harukaCloudDensity(float strength, float f, vec3 q) { return harukaCloudDensity(strength, f, q, HARUKA_CLOUD_MINTOP, 1.0e9, 0.0, 1.0); }
+
+/** @brief COLIFLOR: multiplicador del techo por columna, de un ruido de ~250 m evaluado en la
+ *  posicion HORIZONTAL (la comprimida, `pfC`, que apenas cambia con la altura). 0,7..1,3: cada bulto
+ *  sube o baja el techo hasta un 30 %. Es lo que hace que el techo tenga bultos del tamano de los de
+ *  un cumulo real, y no solo el grano de 125 m de la erosion. */
+/// LA TORRE: cuanto sube una nube, ademas de los bultos, segun lo FUERTE que sea su nucleo.
+/// ⚠️ "Hay nubes grandes que salen planas" (Andoni). `harukaCloudStrengthCumulo` satura en 0,22
+/// unidades por encima del umbral: en un cumulo grande todo el nucleo esta saturado, todos sus
+/// puntos alcanzan el MISMO techo (el 60 % de la losa) y la cima es una MESETA con bultos de 130-265
+/// m. En la atmosfera real es al reves: la nube grande es la del ascenso fuerte, y sube mas. Aqui el
+/// EXCESO del campo sobre el umbral —que no satura, sigue creciendo hacia el centro de la nube—
+/// levanta el techo: 0 de exceso, x0,75 (una nube floja es baja y ancha); 0,40 de exceso, x1,9 (el
+/// nucleo llega al techo de su losa). Con eso la cima de una nube grande es un domo que crece hacia
+/// dentro, no una bandeja.
+float harukaCloudTowerMul(float excess) {
+    return mix(0.75, 1.9, smoothstep(0.0, 0.40, excess));
+}
+float harukaCloudTopBumps(vec3 pfC) {
+    const float b = harukaCloudVNoise3(pfC * 9.0 + vec3(3.3, 8.1, 5.7)) * 0.6
+                  + harukaCloudVNoise3(pfC * 18.0 + vec3(9.2, 1.4, 6.6)) * 0.4;
+    return 0.6 + 0.8 * b;
+}
 
 /**
  * @brief Fuerza de la nube en [0,1] a partir del campo y el umbral.
@@ -198,6 +358,17 @@ float harukaCloudDensity(float strength, float f, vec3 q) { return harukaCloudDe
  */
 float harukaCloudStrength(float fieldValue, float threshold) {
     return smoothstep(threshold, threshold + HARUKA_CLOUD_SOFT, fieldValue);
+}
+/// Banda de transicion del CUMULO, mas ancha que la de las capas: con 0,085 la opacidad vista desde
+/// abajo pasaba de 0,1 a 0,9 en 125 m (dos celdas de la sonda) — el "corta de repente". Las capas
+/// altas se quedan con la estrecha: con la ancha sus fuerzas bajan y desaparecen (medido).
+const float HARUKA_CLOUD_SOFT_CUMULO = 0.22;
+float harukaCloudStrengthCumulo(float fieldValue, float threshold) {
+    // Centrada en el umbral (no empezando en el): el umbral sale de la cobertura pedida y con la
+    // banda ancha empezando ahi el cielo tapado caia al 43 % de lo pedido (medido). Centrada, lo
+    // que el adelgazado de la periferia quita lo devuelve el medio umbral de mas.
+    const float t0 = threshold - 0.25 * HARUKA_CLOUD_SOFT_CUMULO;
+    return smoothstep(t0, t0 + HARUKA_CLOUD_SOFT_CUMULO, fieldValue);
 }
 
 /**
@@ -224,6 +395,69 @@ float harukaCloudThreshold(float cover, float sigma) {
 }
 const float HARUKA_CLOUD_SIGMA_CUMULO = 0.109;
 const float HARUKA_CLOUD_SIGMA_CAPA   = 0.103;
+
+/**
+ * @brief Cuanto queda el campo POR ENCIMA del umbral, de media, DENTRO de la parte nublada:
+ *        `E[campo | campo > umbral] − umbral = σ·(φ(z)/c − z)` con `z = (umbral − μ)/σ` (el cociente
+ *        de Mills inverso de la gaussiana). Es lo que hay que meter en la funcion de fuerza cuando
+ *        el pixel ya no resuelve la fundamental (desde orbita): ahi `sN` pasa a ser la FRACCION de
+ *        cielo con nube (`cover`), y si esa misma cifra se usa como fuerza de la nube, con cobertura
+ *        0,3 cada nube sale como una nube al 30 % — floja, baja, translucida — y desde orbita el
+ *        planeta se ve a traves de una capa que deberia tapar el 30 % en firme (medido: T 0,94 con
+ *        cobertura 0,3, cuando toca ~0,7). Con esto la nube lejana tiene la fuerza MEDIA de las
+ *        nubes de cerca (cobertura 0,3 -> fuerza 0,63; 0,9 -> 1,0).
+ */
+/**
+ * @brief Fraccion de la sigma del campo que el LOD se ha LLEVADO (la varianza sub-huella), en [0,1]:
+ *        `sqrt(Σ(1−wᵢ²)·aᵢ² / Σaᵢ²)` con los mismos pesos `wᵢ` que `harukaCloudFbm3LOD` aplica a cada
+ *        octava (aᵢ = 0,5^(i+1), λᵢ = 0,5^i). 0 de cerca (todo resuelto), 1 desde orbita.
+ *        `fp0`/`fp`: las huellas que recibio el fbm (ya multiplicadas por su 1,3).
+ */
+float harukaCloudLodSigmaFrac(float fp0, float fp, int octaves) {
+    float lost = 0.0, total = 0.0, a = 0.5, wl = 1.0;
+    for (int i = 0; i < octaves; ++i) {
+        const float w = (i == 0) ? (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD0_LO, wl * HARUKA_CLOUD_LOD0_HI, fp0))
+                                 : (1.0 - smoothstep(wl * HARUKA_CLOUD_LOD_LO,  wl * HARUKA_CLOUD_LOD_HI,  fp));
+        lost += (1.0 - w * w) * a * a; total += a * a;
+        a *= 0.5; wl *= 0.5;
+    }
+    return sqrt(max(lost, 0.0) / max(total, 1.0e-6));
+}
+/// Φ(z) de la normal estandar (Abramowitz-Stegun 7.1.26, error < 1,5e-7).
+float harukaCloudPhi(float z) {
+    const float x = abs(z) * 0.7071068;
+    const float t = 1.0 / (1.0 + 0.3275911 * x);
+    const float y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-x * x);
+    return 0.5 * (1.0 + ((z < 0.0) ? -y : y));
+}
+/**
+ * @brief La FRACCION de nube de una muestra cuya huella no resuelve el campo, y el campo MEDIO dentro
+ *        de esa fraccion. El LOD devuelve el campo FILTRADO `f`; lo que se quedo por debajo de la
+ *        huella es ~gaussiano con sigma `sSub`, asi que P(campo > umbral) = 1 − Φ((lo − f)/sSub) y
+ *        E[campo | campo > lo] = f + sSub·φ(z)/P.
+ *
+ * ⚠️ ESTO ES LO QUE ABRE HUECOS EN EL HORIZONTE. Antes, sin la fundamental resuelta, la fraccion era
+ * la COBERTURA MEDIA DEL TEXEL (78 km): la misma en toda la region, asi que un rayo rasante que cruza
+ * 30-50 celdas de la banda de la capa "sorteaba" nube en todas y el horizonte se cerraba con un 20 %
+ * de cobertura (0,8^32 = 0,001): las cordilleras lejanas y el mar desaparecian tras una pared. Con la
+ * fraccion LOCAL, donde el campo filtrado queda bajo el umbral no hay nube, y los huecos regionales
+ * del campo (que existen: es un fbm con warp) dejan ver.
+ */
+vec2 harukaCloudLocalFraction(float f, float lo, float sSub) {
+    const float z = (lo - f) / max(sSub, 1.0e-4);
+    const float P = clamp(1.0 - harukaCloudPhi(z), 0.0, 1.0);
+    const float phi = exp(-0.5 * z * z) * 0.3989423;
+    const float fIn = f + sSub * phi / max(P, 1.0e-3);
+    return vec2(P, fIn);
+}
+
+float harukaCloudInFieldAbove(float cover, float sigma) {
+    const float c  = clamp(cover, 0.005, 0.995);
+    const float lo = harukaCloudThreshold(c, sigma);
+    const float z  = (lo - 0.375) / sigma;
+    const float phi = exp(-0.5 * z * z) * 0.3989423;
+    return sigma * (phi / c - z);
+}
 
 /* ⚠️ AQUÍ HUBO DOS `harukaCloudStrengthAA` (asimétrico y simétrico) que ensanchaban el borde del
  * umbral con la huella. Los dos INFLAN la cobertura a distancia cuando el umbral cae en la cola
@@ -284,7 +518,7 @@ float harukaCloudDetailLOD(vec3 q, float wavelengthM, float footprintM) {
  * en C++: el remapeo solo puede ACORTAR (`localTop <= 1`). La CPU responde "¿puede haber nube a esta
  * altura?" y el shader "¿la hay aquí exactamente?". Por eso el perfil compartido no se toca.
  */
-float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM) {
+float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wavelengthM, float footprintM, float topMul) {
     if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
 
     // Techo LOCAL de esta nube dentro de la losa. El suelo evita el filo de espesor cero.
@@ -293,11 +527,37 @@ float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wa
     // 22 % fijo y una losa de 280 m salían jirones de 62 m, muestreados a 50-360 m por paso con
     // jitter por píxel: GRANO (22,8 % de píxeles a más de 10/255 de su media 3x3, medido en el
     // banco con el horneado real; 0 % en las capas altas, que llenan su losa).
-    const float localTop = mix(max(HARUKA_CLOUD_MINTOP, minTop), 1.0, strength);
-    if (f >= localTop) return 0.0;
-
-    const float body = harukaCloudProfile(f / localTop) * strength;
+    // ⚠️ EL TECHO SUBE CON LA FUERZA AL CUADRADO, no linealmente. Con la vertical del campo comprimida
+    // (columnas) y el techo lineal, cualquier nube que pasaba el umbral llegaba al techo de la losa:
+    // torres de 2,4 km y 1 km de ancho (medido 1,01:1). Solo los nucleos fuertes suben; el resto son
+    // cumulos bajos y anchos, que es lo que hay en un cielo de buen tiempo.
+    // ── DOMO: la seccion se ESTRECHA con la altura ─────────────────────────────────────────────
+    // Antes: `techo = f(fuerza)` y dentro `perfil(f/techo)·fuerza`. Con fuerza baja eso es una LAMINA
+    // fina (medido en el juego: parches planos con banding). Un cumulo es lo contrario: en la base
+    // TODA la huella es nube (base plana) y segun se sube solo sobreviven los picos del campo — asi
+    // salen los domos, la coliflor y los bordes que se afinan hacia arriba. Es el "gradiente de
+    // altura" clasico: el umbral de fuerza sube con la altura.
+    // El techo que puede alcanzar la columna: hasta ~el 60 % de la losa por los bultos (topMul 0,6..1,4),
+    // no la losa entera — con toda la losa salian torres de 2,4 km (1,7:1 medido).
+    // ⚠️ Se probo 0,75 (17-09) contra las "rayas" de cumulos lejanos vistos desde 1 km por encima: el
+    // banco ("encima del cumulo, -5") no cambio nada visible —esas lentes son la cima de cada nube en
+    // escorzo, a 10-20 km, y no dependen de la altura del domo— y subian los cortes del cumulo (72).
+    // ⚠️ SIN TOPE DURO. Era `min(MINTOP + 0,38·topMul, 1,0)`: con cobertura alta el exceso del campo
+    // es grande en todas partes, la torre (x1,9) llevaba `topMul` por encima de 2 y el `min` dejaba
+    // TODA la nube en el techo de la losa — un deck PLANO ("hay nubes grandes que salen planas").
+    // Ahora el techo satura suave: 1 − e^(−0,55·topMul), que con topMul 0,45..2,7 da 0,39..0,82 de la
+    // losa, y los bultos (±40 %) siguen moviendo la cima ±0,08 (200-280 m) tambien en el deck: es lo
+    // que hace celular un estratocumulo en vez de una bandeja.
+    const float tmin = max(HARUKA_CLOUD_MINTOP, minTop);
+    const float topMax = tmin + (1.0 - tmin) * (1.0 - exp(-0.55 * topMul));
+    if (f >= topMax) return 0.0;
+    const float g     = pow(clamp(f / topMax, 0.0, 1.0), 1.4);            // 0 en la base, 1 en el techo maximo
+    const float need  = 0.92 * g;                                           // fuerza que hace falta a esta altura
+    const float sEff  = clamp((strength - need) / max(1.0 - need, 0.05), 0.0, 1.0);
+    if (sEff <= 0.0) return 0.0;
+    const float body = smoothstep(0.0, HARUKA_CLOUD_RISE, f) * sEff * (1.0 - smoothstep(0.85, 1.0, f / topMax));
     if (body <= 0.0) return 0.0;
+    const float localTop = topMax;   // para la erosion de abajo
 
     // El detalle muerde SOBRE TODO el borde, pero ya no deja el núcleo liso.
     //
@@ -307,7 +567,15 @@ float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wa
     // de nube" que se reportó. Ahora el núcleo conserva un 35 % del detalle: suficiente para que se
     // lea el grano y la nube tenga superficie, sin convertirla en un encaje que deje pasar el sol.
     const float edge = mix(0.35, 1.0, 1.0 - smoothstep(0.30, 0.85, body));
-    return max(body - HARUKA_CLOUD_ERODE * edge * harukaCloudDetailLOD(q, wavelengthM, footprintM), 0.0);
+    // La erosion muerde ARRIBA (coliflor) y apenas abajo (base plana): sube con la altura en la nube.
+    const float topBias = 0.20 + 0.80 * clamp(f / localTop, 0.0, 1.0);
+    const float dens = max(body - HARUKA_CLOUD_ERODE * edge * topBias * harukaCloudDetailLOD(q, wavelengthM, footprintM), 0.0);
+    // El BORDE se adelgaza: donde la fuerza es baja (periferia de la nube) la densidad baja con ella,
+    // asi la opacidad sube en cientos de metros y no en dos celdas ("corta de repente": medido 125 m
+    // de 0,1 a 0,9 de opacidad, ahora >= 190).
+    // Y las MOTAS no existen: por debajo de 0,2 de fuerza (picos sueltos del campo que solo dan una
+    // lamina de un paso) no hay nube; de 0,2 a 0,5 entra en rampa.
+    return dens * smoothstep(0.1, 0.55, strength);
 }
 
 /**
@@ -319,9 +587,28 @@ float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wa
  * dentro, decididos por el jitter de cada píxel. Medido con A/B en el juego (parches a 0 → sin
  * motas). Un cirro o un altocúmulo no crecen en vertical: son capas, y llenan su losa.
  */
-float harukaLayerDensity(float strength, float f, vec3 q) {
-    if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
-    const float body = harukaCloudProfile(f) * strength;
+/** @brief Perfil vertical de una CAPA (altocumulo, cirro): parabola 4f(1-f), maximo a media losa,
+ *  y su MEDIA EXACTA sobre el tramo [fLo, fHi] que el paso recorre dentro de la losa.
+ *
+ *  ⚠️ ESTRIAS HORIZONTALES POR TODO EL VELO (captura desde 3 km, 16-09; el banco las ensena al cenit).
+ *  El perfil del cumulo (subida en el 6 % de la losa: 20-50 m de rampa) se evaluaba en UN punto por
+ *  paso —la altura media del solape— con pasos de 80-200 m dentro de una capa de 320-800 m: dos o
+ *  cuatro muestras por travesia, y si la rampa caia dentro del paso o no lo decidia el angulo del
+ *  rayo, no el jitter (que solo mueve el arranque, 0-50 m). Bandas a elevacion constante. Sin
+ *  fibras (dbg 16, sin perfil) no habia bandas; con la marcha de referencia (x4 fina) eran MAS
+ *  fuertes, no menos — la firma de un perfil aliasado. Integrar el perfil sobre el tramo es exacto
+ *  con cualquier paso: F(f) = 2f^2 - 4f^3/3. */
+float harukaLayerProfileMean(float fLo, float fHi) {
+    fLo = clamp(fLo, 0.0, 1.0); fHi = clamp(fHi, 0.0, 1.0);
+    if (fHi - fLo < 1.0e-5) { const float f = clamp(0.5 * (fLo + fHi), 0.0, 1.0); return 4.0 * f * (1.0 - f); }
+    const float FLo = 2.0 * fLo * fLo - 4.0 * fLo * fLo * fLo / 3.0;
+    const float FHi = 2.0 * fHi * fHi - 4.0 * fHi * fHi * fHi / 3.0;
+    return (FHi - FLo) / (fHi - fLo);
+}
+
+float harukaLayerDensity(float strength, float fLo, float fHi, vec3 q) {
+    if (strength <= 0.0 || fHi <= 0.0 || fLo >= 1.0) return 0.0;
+    const float body = harukaLayerProfileMean(fLo, fHi) * strength;
     if (body <= 0.0) return 0.0;
     // ⚠️ NADA DE RESTAR EL DETALLE FINO. `harukaCloudDetail` tiene octavas hasta 76 m a la escala
     // del cirro y restarlo (x0,55) a un cuerpo de 0,3 deja solo los PICOS del ruido: a 100-200 m por
@@ -341,9 +628,9 @@ float harukaLayerDensity(float strength, float f, vec3 q) {
  * de altura. `along` y `across` son las coordenadas en el marco tangente del punto (metros): el
  * ruido va estirado 6:1 a lo largo, y la fibra que cae por debajo del cuerpo se apaga.
  */
-float harukaCirrusDensity(float strength, float f, float along, float across, float footprintM) {
-    if (strength <= 0.0 || f <= 0.0 || f >= 1.0) return 0.0;
-    const float body = harukaCloudProfile(f) * strength;
+float harukaCirrusDensity(float strength, float fLo, float fHi, float along, float across, float footprintM) {
+    if (strength <= 0.0 || fHi <= 0.0 || fLo >= 1.0) return 0.0;
+    const float body = harukaLayerProfileMean(fLo, fHi) * strength;   // ver harukaLayerProfileMean
     if (body <= 0.0) return 0.0;
     // Las fibras llevan LOD como todo lo demas, o a 30 km son una mota por pixel (medido en el banco: la mitad alta del cuadro en sal y pimienta).
     // ⚠️ El patron es HORIZONTAL (no depende de la altura dentro de la lamina) y por eso su LOD va
@@ -353,16 +640,26 @@ float harukaCirrusDensity(float strength, float f, float along, float across, fl
     // el suelo, una fibra de 290 m eran 3-4 px y el banco la contaba como grano (51 % al cenit).
     // ⚠️ Eran 10 km a lo largo (6:1) y en el juego se veian "nubes mucho mas largas que anchas":
     // barras. 2,4:1, y un tercer ruido ISOTROPO que las corta en jirones para que no sean barras.
-    const vec3 qa = vec3(along * 0.00025, across * 0.0006, 3.7);
-    const vec3 qi = vec3(along * 0.0004, across * 0.0004, 9.1);
+    // ⚠️ Con la malla del ruido alineada con (along, across) y umbralizada, cada jiron salia como un
+    // ROMBO de lados rectos (captura desde 3 km, 17-09, en cuanto se quito la palanca que lo
+    // escondia). La malla de las fibras va girada 33 grados en el plano y la del ruido isotropo
+    // otros 33 al reves: los tramos rectos de una no coinciden con los de la otra.
+    const vec2  ax = vec2(along * 0.00025, across * 0.0006);
+    const vec2  ar = vec2(ax.x * 0.8387 - ax.y * 0.5446, ax.x * 0.5446 + ax.y * 0.8387);
+    const vec2  ix = vec2(along * 0.0004, across * 0.0004);
+    const vec2  ir = vec2(ix.x * 0.8387 + ix.y * 0.5446, -ix.x * 0.5446 + ix.y * 0.8387);
+    const vec3 qa = vec3(ar, 3.7);
+    const vec3 qi = vec3(ir, 9.1);
     const float w0 = 1.0 - smoothstep(1667.0 / 8.0, 1667.0 / 4.0, footprintM);
     const float w1 = 1.0 - smoothstep(725.0 / 8.0, 725.0 / 4.0, footprintM);
+    // Las mallas de las tres, giradas entre si (ver HARUKA_CLOUD_ROT_*): con la misma malla la fibra
+    // umbralizada era una BARRA de lados rectos, no un jiron.
     const float fibra = mix(0.5, harukaCloudVNoise3(qa), w0) * 0.45
-                      + mix(0.5, harukaCloudVNoise3(qa * 2.3 + 7.7), w1) * 0.25
-                      + mix(0.5, harukaCloudVNoise3(qi), w1) * 0.30;
+                      + mix(0.5, harukaCloudVNoise3(HARUKA_CLOUD_ROT_A * (qa * 2.3) + 7.7), w1) * 0.25
+                      + mix(0.5, harukaCloudVNoise3(HARUKA_CLOUD_ROT_B * qi), w1) * 0.30;
     // Borde blando: la fibra MODULA (0,15-1) y no recorta; con smoothstep(0,30, 0,70) salian
     // placas de canto duro.
-    return body * mix(0.15, 1.0, smoothstep(0.25, 0.75, fibra));
+    return body * mix(0.15, 1.0, smoothstep(0.20, 0.80, fibra));   // borde mas ancho: menos poligono
 }
 
 /**

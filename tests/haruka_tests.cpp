@@ -41,8 +41,8 @@ int main(int argc, char** argv) {
 
     if (want("cube") || want("mesh"))   test_cube_sphere_inverse();
     if (want("prim") || want("mesh"))   test_primitive_winding();
-    if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_3d(); test_weather_severe(); test_wind_pushes_character(); test_sky_bake(); }
-    if (want("cloud") || want("nube") || want("clima")) test_cloud_shape();
+    if (want("weather") || want("clima")) { test_weather_fronts(); test_weather_severe(); test_weather_water_cycle(); test_wind_pushes_character(); test_sky_bake(); }
+    if (want("cloud") || want("nube") || want("clima")) { test_cloud_formation(); test_cloud_motion(); }
     if (want("capa") || want("ground"))   test_ground_layer();
     if (want("lod")  || want("parity"))   test_terrain_lod_invariants();
     if (want("ring") || want("parity"))   test_terrain_ring_grid();
@@ -51,6 +51,9 @@ int main(int argc, char** argv) {
     if (want("grad")  || want("parity"))  test_terrain_detail_gradient();
     if (want("physics"))                  test_physics_radial_fall();
     if (want("physics"))                  test_physics_mesh_ground();
+    if (want("physics") || want("caves") || want("vox")) test_physics_cave_mouth();
+    if (want("isla") || want("vox"))      { test_islands_bake(); test_vox_island(); }
+    if (want("physics") || want("isla") || want("vox")) test_physics_island();
     if (want("physics"))                  test_physics_static_wall();
     if (want("physics"))                  test_physics_character();
     if (want("physics"))                  test_physics_character_resting_velocity();
@@ -74,6 +77,8 @@ int main(int argc, char** argv) {
         test_ocean_buoyancy_drift();
         test_ocean_no_water_no_float();
         test_ocean_sea_state();
+        test_ocean_low_wind_spectrum();
+        test_ocean_sea_follows_wind();
         test_ocean_finite_depth();
     if (want("ocean") || want("water")) test_ocean_gerstner_ellipse();
     if (want("ocean") || want("water")) test_water_fill_window();
@@ -98,6 +103,9 @@ int main(int argc, char** argv) {
         test_shallow_water_mountain_coverage();
         test_shallow_water_inherits_ocean_swell();
         test_shallow_water_physics();
+        test_shallow_water_cycle();
+        test_shallow_water_friction();
+        test_shallow_water_fetch();
         test_terrain_finest_octave();
         test_terrain_orbital_relief();
         test_terrain_orbital_albedo();
@@ -223,6 +231,26 @@ int main(int argc, char** argv) {
         test_prop_scatter_radial();
         test_prop_scatter_stability();
         test_prop_collider();
+        test_prop_biome();
+        test_prop_variants();
+        test_prop_density();
+        test_prop_map_biome();
+        test_prop_scatter_cost();
+        test_caves_bake();
+        test_caves_cache();
+        test_caves_mesh_and_strokes();
+        test_caves_coupling();
+        test_vox_world();
+        test_vox_placed_cave();
+        test_vox_draped_cave();
+        test_vox_columns();
+        test_vox_scene_cave();
+        test_vox_designer_strokes();
+        test_vox_brush();
+        test_world_edit_panel();
+        test_vox_raycast_grazing();
+        test_vox_brush_ops();
+        test_vox_sculpt();
         test_rock_interior();
     }
 

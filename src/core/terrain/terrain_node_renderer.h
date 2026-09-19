@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <functional>
 
 #include "core/planet/terrain_lod.h"   // TERRAIN_RING_FINE_CELL: la celda de la malla que se PISA
 #include "terrain_node.h"
@@ -32,6 +33,7 @@
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_resources.h"
+#include "rhi/rhi_gpu_scope.h"
 #include "core/logger.h"
 
 namespace Haruka { namespace Terrain {
@@ -360,6 +362,12 @@ public:
             dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
             dd.mipmaps = false; dd.initialData = dryLake;
             m_lakeDummy = dev->createTexture(dd);
+            // El UBO del recorte volumétrico (bocas de cueva). Se rellena en cada draw.
+            {
+                VoxCutUBO vc{};
+                m_voxCutUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(vc), &vc,
+                                                RHI::BufferMemory::Dynamic);
+            }
             // `uInlandMisc.w = 0` -> `harukaInlandWaterAt` devuelve su centinela sin leer el SSBO.
             const float inlandOff[16] = { 0.0f };
             m_inlandDummyUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(inlandOff),
@@ -449,9 +457,11 @@ public:
     void shutdown() {
         if (!m_dev) return;
         if (RHI::valid(m_ubo)) { m_dev->destroy(m_ubo); m_ubo = {}; }
+        if (RHI::valid(m_voxCutUBO)) { m_dev->destroy(m_voxCutUBO); m_voxCutUBO = {}; }
         for (uint32_t k = 0; k < kStrides; ++k) {
             if (RHI::valid(m_ibs[k]))      { m_dev->destroy(m_ibs[k]);      m_ibs[k] = {}; }
             if (RHI::valid(m_instSSBO[k])) { m_dev->destroy(m_instSSBO[k]); m_instSSBO[k] = {}; m_instCap[k] = 0; }
+            if (RHI::valid(m_instWaterSSBO[k])) { m_dev->destroy(m_instWaterSSBO[k]); m_instWaterSSBO[k] = {}; m_instWaterCap[k] = 0; }
         }
         m_strideCount = 0;
         if (RHI::valid(m_vb))  { m_dev->destroy(m_vb);  m_vb  = {}; }
@@ -462,6 +472,7 @@ public:
 
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
+        size_t waterNodes = 0;   ///< nodos que pasaron por el pase de agua (ver Water::lakeLevelFn)
         /// ⚠️ CUANTO DE PROFUNDA es la caida a ancestro, que es lo que decide el ESCALON contra el
         /// vecino: `ancestors` solo dice cuantos nodos cayeron, y un nodo caido UN nivel lo cierran
         /// el cosido y el geomorph sin dejar nada. A partir de dos ya no: el geomorph apunta al
@@ -475,6 +486,14 @@ public:
         double   dtSeen = 0.0, dtBest = 0.0;   ///< lo que ve el lazo: sin esto no se puede depurar
         uint32_t ancDepthMax = 0;   ///< la caida MAS profunda del frame (0 = ninguna)
         size_t   ancDeep = 0;       ///< nodos caidos DOS niveles o mas: los que dejan escalon
+        /// ⚠️ NODOS SALTADOS POR SER MESETA EN EL HORIZONTE. Un nodo MAS ALLA del horizonte de la
+        /// esfera lisa solo se ve por lo que su relieve levanta sobre la tangente; si se dibuja con
+        /// los datos de un ancestro lejano su superficie es casi PLANA, y esa meseta a cota constante
+        /// recorta el cielo en un rectangulo del ancho del nodo: la silueta del horizonte sale en
+        /// ESCALERA (capturas de Andoni, 19-09). Ahi es mejor no dibujar nada —el cielo, que es lo
+        /// que habia antes— y que aparezca cuando el nodo tenga SUS datos, un par de frames despues.
+        /// Cerca del observador NO se aplica: un hueco bajo los pies seria mucho peor.
+        size_t   plateauSkipped = 0;
         /// ⚠️ CUANTO COSTARIA LA REGLA "no dibujar lo que no tiene padre residente". Los `ancDeep`
         /// nodos se sustituirian por sus ancestros, y varios hijos comparten ancestro: lo que se
         /// dibujaria de menos es `ancDeep - ancDeepCovers`. Es el numero que decide si esa regla es
@@ -558,7 +577,12 @@ public:
         int       shoreLayer = -1;      ///< capa de arena de orilla (−1 = no hay)
         glm::vec3 texAnchor{0.0f};      ///< ancla planetaria, reducida módulo el tile en doubles
         glm::vec3 lightDir{0.0f, 1.0f, 0.0f};
+        glm::vec4 aerial{0.0f};         ///< perspectiva aérea (lib/aerial.glsl): x = 1/L · y = día
         bool      on = false;           ///< false = luz plana (el lado A del A/B de coste)
+        /// El recorte del campo volumétrico (bocas de cueva, lo picado): ventana R8 + su matriz.
+        /// Inválido = no se recorta nada. Ver `VoxRenderer::cutTexture`.
+        RHI::TextureHandle cutTex{};
+        glm::mat4 cutSpace{1.0f};
     };
     void setShade(const Shade& sh) { m_shade = sh; }
 
@@ -584,6 +608,19 @@ public:
         RHI::BufferHandle  lakeWinUBO{};
         RHI::BufferHandle  inlandSSBO{};
         bool on = false;                   ///< false = este cuerpo no tiene agua (ver `hasWater`)
+        /// ── QUÉ NODOS LLEVAN AGUA ─────────────────────────────────────────────────────────────
+        /// El pase de agua redibujaba TODOS los nodos con el shader de olas: medido con timestamps
+        /// de GPU, 16 de los 27 ms del terreno, a 1 000 m de altitud y 50 km tierra adentro. Un nodo
+        /// cuyo suelo queda por encima del agua que pueda tocarle (mar + margen de marea y ola, o
+        /// el lago más alto que el mapa de lagos conozca en su huella) no se dibuja en este pase.
+        /// `lakeLevelFn(dir)` = cota del lago en esa dirección (0 = no hay); lo pone el planeta.
+        std::function<float(const glm::dvec3&)> lakeLevelFn;
+        float seaMarginM = 15.0f;          ///< marea + amplitud de ola + margen
+        /// El PARCHE de agua interior (lluvia, charcas, lagos sembrados) se dibuja sobre estos mismos
+        /// nodos (`inlandSSBO`), y no esta en el mapa de lagos: sin esto el filtro lo dejaba fuera y
+        /// el lago del spawn salia como arena. Centro relativo al ojo + radio; 0 = no hay parche.
+        glm::vec3 inlandRelEye{0.0f};
+        float     inlandRadiusM = 0.0f;
     };
     void setWater(const Water& w) { m_water = w; }
 
@@ -906,6 +943,19 @@ public:
             if (r.slot < 0) { if (pass == 0) ++fs.noSlot; continue; }
             if (!r.exact) ++fs.ancestors;
             const NodeId leaf = (ri < m_sel.size()) ? m_sel[ri] : r.node;
+            // ── LA MESETA DEL HORIZONTE (ver `plateauSkipped`) ─────────────────────────────────
+            // Mas alla del horizonte liso + un margen, un nodo caido DOS niveles o mas dibuja una
+            // superficie casi plana a cota constante: un escalon rectangular contra el cielo. Se
+            // salta hasta que tenga datos propios (o de su padre).
+            if ((int)leaf.level - (int)r.node.level >= 2) {
+                const double camAlt = glm::length(camPos - planetCenter) - planetRadiusM;
+                if (camAlt > 0.0) {
+                    const double horiz = std::sqrt(std::max(2.0 * planetRadiusM * camAlt, 0.0));
+                    const glm::dvec3 c = planetCenter + nodeTexelDir(leaf, TERRAIN_NODE_CELLS / 2,
+                                                                     TERRAIN_NODE_CELLS / 2) * planetRadiusM;
+                    if (glm::length(c - camPos) > horiz * 1.2 + 2000.0) { ++fs.plateauSkipped; continue; }
+                }
+            }
             NodeInstGPU g{};
             g.node[0] = (int32_t)leaf.face; g.node[1] = (int32_t)leaf.level;
             g.node[2] = (int32_t)leaf.i;    g.node[3] = (int32_t)leaf.j;
@@ -1050,6 +1100,71 @@ public:
             m_dev->updateBuffer(m_instSSBO[k], 0, needB, m_inst.data() + m_group[k]);
         }
 
+        // ── EL SUBCONJUNTO CON AGUA ───────────────────────────────────────────────────────────
+        // Un nodo entra si su suelo más bajo queda por debajo del agua que pueda tocarle: el mar
+        // (0 + margen) o el lago más alto que el mapa conozca en su centro y sus cuatro esquinas.
+        // Sin rango publicado (no debería pasar) se dibuja, por si acaso.
+        m_instWater.clear();
+        m_groupWater.assign(m_strideCount + 1, 0);
+        fs.waterNodes = 0;
+        // `HARUKA_WATER_ALLNODES=1`: sin filtro (A/B: si algo de agua falta, esto dice si es el filtro).
+        static const bool s_allNodes = [] { const char* e = std::getenv("HARUKA_WATER_ALLNODES"); return e && e[0] == '1'; }();
+        if (m_water.on) {
+            for (uint32_t k = 0; k < m_strideCount; ++k) {
+                for (size_t ii = m_group[k]; ii < m_group[k + 1]; ++ii) {
+                    const NodeInstGPU& g = m_inst[ii];
+                    if (s_allNodes) { m_instWater.push_back(g); continue; }
+                    NodeId n; n.face = (PlanetFace)g.node[0]; n.level = (uint32_t)g.node[1];
+                    n.i = (uint32_t)g.node[2]; n.j = (uint32_t)g.node[3];
+                    const NodeRange r = m_pool.rangeOf(n);
+                    bool keep = !r.valid();
+                    // Dentro del parche de agua interior (o tocandolo): se dibuja siempre.
+                    if (!keep && m_water.inlandRadiusM > 0.0f) {
+                        const double cells = (double)(1u << n.level);
+                        const double lxC = -1.0 + 2.0 * (((double)n.i + 0.5) / cells);
+                        const double lyC = -1.0 + 2.0 * (((double)n.j + 0.5) / cells);
+                        const glm::dvec3 cW = planetCenter + cubeFaceToDir(n.face, lxC, lyC)
+                                            * (planetRadiusM + 0.5 * (double)(r.minM + r.maxM));
+                        const double halfDiag = planetRadiusM * 1.5707963 / cells * 0.71;
+                        const double dist = glm::length(cW - (camPos + glm::dvec3(m_water.inlandRelEye)));
+                        keep = dist < (double)m_water.inlandRadiusM + halfDiag;
+                    }
+                    if (!keep) {
+                        float waterMax = m_water.seaMarginM;
+                        if (m_water.lakeLevelFn) {
+                            // ⚠️ 9x9 Y NO 5 PUNTOS. Con centro + esquinas un lago de 100 m dentro de un
+                            // nodo de 300 m se quedaba sin muestrear: el agua del lago del spawn salia
+                            // como ARENA en una de cada dos corridas (segun que nodo cayera encima).
+                            // 81 lecturas por nodo son ~100 000 por frame: lecturas de tabla, no coste.
+                            const double cells = (double)(1u << n.level);
+                            for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
+                                const double lx = -1.0 + 2.0 * (((double)n.i + (a + 0.5) / 9.0) / cells);
+                                const double ly = -1.0 + 2.0 * (((double)n.j + (b + 0.5) / 9.0) / cells);
+                                const float lk = m_water.lakeLevelFn(cubeFaceToDir(n.face, lx, ly));
+                                if (lk > 0.0f) waterMax = std::max(waterMax, lk + m_water.seaMarginM);
+                            }
+                        }
+                        keep = r.minM <= waterMax;
+                    }
+                    if (keep) m_instWater.push_back(g);
+                }
+                m_groupWater[k + 1] = m_instWater.size();
+            }
+            fs.waterNodes = m_instWater.size();
+            for (uint32_t k = 0; k < m_strideCount; ++k) {
+                const size_t n = m_groupWater[k + 1] - m_groupWater[k];
+                if (n == 0) continue;
+                const size_t needB = n * sizeof(NodeInstGPU);
+                if (needB > m_instWaterCap[k]) {
+                    if (RHI::valid(m_instWaterSSBO[k])) m_dev->destroy(m_instWaterSSBO[k]);
+                    m_instWaterCap[k]  = needB * 2;
+                    m_instWaterSSBO[k] = m_dev->createBuffer(RHI::BufferUsage::Storage, m_instWaterCap[k],
+                                                             nullptr, RHI::BufferMemory::Dynamic);
+                }
+                m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWater[k]);
+            }
+        }
+
         DrawUBO du{};
         du.mvp     = mvp;
         // ⚠️ PARTIDO EN DOS, y la resta en double antes de partir. Un float de 6,37e6 tiene un ulp de
@@ -1088,6 +1203,7 @@ public:
         du.shade[3] = shadeOn ? 1.0f : 0.0f;
         du.texAnchor = glm::vec4(m_shade.texAnchor, 0.0f);
         du.lightDir  = glm::vec4(m_shade.lightDir, 0.0f);
+        du.aerial    = m_shade.aerial;
         m_dev->updateBuffer(m_ubo, 0, sizeof(du), &du);   // UNA vez, antes de cualquier draw
 
         ctx->bindPipeline(m_pipe);
@@ -1103,6 +1219,20 @@ public:
         // a ser invalido. Costó dos tests del banco que no tenian nada que ver con esto.
         ctx->bindTexture(15, m_gpu.baseFieldOrDummy());
         ctx->bindTexture(16, m_gpu.heightTexOrDummy());
+        // El recorte volumétrico: SIEMPRE atado (descriptor indefinido en Vulkan = pérdida del
+        // dispositivo), y el UBO dice si vale. Sin campo, el dummy y `info.x = 0`.
+        {
+            VoxCutUBO vc{};
+            const bool haveCut = RHI::valid(m_shade.cutTex);
+            static bool s_saidCut = false;
+            if (haveCut && !s_saidCut) { s_saidCut = true; HARUKA_LOGI("TerrenoV5", "recorte volumetrico ATADO (binding 17 + UBO 3)"); }
+            vc.space = m_shade.cutSpace;
+            static const float s_voxDbg = [] { const char* e = std::getenv("HARUKA_VOX_DEBUG"); return e ? (float)std::atoi(e) : 0.0f; }();
+            vc.info  = glm::vec4(haveCut ? 1.0f : 0.0f, s_voxDbg, 0.0f, 0.0f);
+            m_dev->updateBuffer(m_voxCutUBO, 0, sizeof(vc), &vc);
+            ctx->bindUniformBuffer(3, m_voxCutUBO);
+            ctx->bindTexture(17, haveCut ? m_shade.cutTex : m_lakeDummy);
+        }
         if (shadeOn) {
             ctx->bindUniformBuffer(12, m_shade.materialUBO);
             ctx->bindTexture(12, m_shade.albedo);
@@ -1113,6 +1243,7 @@ public:
         }
         ctx->bindVertexBuffer(m_vb);
         fs.tris = 0;
+        HARUKA_GPU_SCOPE("v5.terreno");
         for (uint32_t k = 0; k < m_strideCount; ++k) {
             const size_t n = m_group[k + 1] - m_group[k];
             if (n == 0 || !RHI::valid(m_instSSBO[k])) continue;
@@ -1133,6 +1264,7 @@ public:
         // descriptor sin escribir es INDEFINIDO y muestrearlo puede perder el dispositivo. Es la
         // misma nota que el pase de terreno tiene tres lineas mas arriba, y costo dos tests.
         if (m_water.on && RHI::valid(m_waterPipe)) {
+            HARUKA_GPU_SCOPE("v5.agua");
             ctx->bindPipeline(m_waterPipe);
             ctx->bindUniformBuffer(0, m_ubo);
             ctx->bindTexture(16, RHI::valid(m_water.heightTex) ? m_water.heightTex
@@ -1140,6 +1272,9 @@ public:
             ctx->bindTexture(18, RHI::valid(m_water.lakeTex) ? m_water.lakeTex : m_lakeDummy);
             // La ventana fina: textura 19 + su recuadro en el UBO 26. Incondicional, con dummies.
             ctx->bindTexture(19, RHI::valid(m_water.lakeWinTex) ? m_water.lakeWinTex : m_lakeDummy);
+            // El recorte volumétrico, igual que en el pase de suelo (UBO 3 ya está relleno arriba).
+            ctx->bindUniformBuffer(3, m_voxCutUBO);
+            ctx->bindTexture(17, RHI::valid(m_shade.cutTex) ? m_shade.cutTex : m_lakeDummy);
             ctx->bindUniformBuffer(26, RHI::valid(m_water.lakeWinUBO) ? m_water.lakeWinUBO
                                                                       : m_lakeWinDummyUBO);
             ctx->bindUniformBuffer(29, RHI::valid(m_water.oceanParams) ? m_water.oceanParams
@@ -1150,9 +1285,9 @@ public:
                                                                       : m_inlandDummySSBO);
             ctx->bindVertexBuffer(m_vb);
             for (uint32_t k = 0; k < m_strideCount; ++k) {
-                const size_t n = m_group[k + 1] - m_group[k];
-                if (n == 0 || !RHI::valid(m_instSSBO[k])) continue;
-                ctx->bindStorageBuffer(2, m_instSSBO[k]);
+                const size_t n = m_groupWater[k + 1] - m_groupWater[k];
+                if (n == 0 || !RHI::valid(m_instWaterSSBO[k])) continue;
+                ctx->bindStorageBuffer(2, m_instWaterSSBO[k]);
                 ctx->bindIndexBuffer(m_ibs[k]);
                 ctx->drawIndexed(m_indexCount[k], 0, (uint32_t)n);
                 ++fs.drawCalls;
@@ -1185,9 +1320,40 @@ public:
      */
     const std::vector<NodeInstGPU>& instancesSent() const { return m_inst; }
 
+    /**
+     * @brief LADO DEL QUAD con el que se DIBUJA el agua bajo una dirección (m): téxel del nodo ×
+     *        zancada, lo mismo que calcula `terrain_node_water.vert` (`quadM`). 0 si ningún nodo
+     *        del pase de agua de este frame cubre esa dirección.
+     *
+     * ⚠️ EXISTE PARA QUE LA FÍSICA EVALÚE LA MISMA OLA QUE SE VE. `oceanShortWaveFade` apaga cada
+     * tren cuando su longitud baja de dos quads; el shader lo hace con el quad del nodo y la CPU lo
+     * hacía con el PISO de 4 m fijo — con zancada 4 (9,5 m de celda, lo habitual al lado del
+     * jugador) el render tiene 3 de los 8 trenes y la física los 8: se nada una ola que no se ve.
+     * Lo que se dibuja depende de la cámara, así que esto también: es inherente, no un defecto.
+     * Válido después de `draw()` y hasta el siguiente.
+     */
+    double waterQuadAt(const glm::dvec3& dir, double planetRadiusM) const {
+        PlanetFace face; double lx, ly;
+        dirToCubeFaceClosed(dir, face, lx, ly);
+        const double span0 = planetRadiusM * 1.5707963267948966;   // gemelo de `uLod.z`
+        for (const NodeInstGPU& g : m_instWater) {
+            if (g.node[0] != (int32_t)face) continue;
+            const uint32_t level = (uint32_t)g.node[1];
+            const double cells = (double)(1u << level);
+            const double fi = (lx + 1.0) * 0.5 * cells, fj = (ly + 1.0) * 0.5 * cells;
+            if ((int64_t)std::floor(fi) != (int64_t)g.node[2] || (int64_t)std::floor(fj) != (int64_t)g.node[3]) continue;
+            const double stride = (double)(1 << g.slot[2]);
+            return span0 / cells / (double)TERRAIN_NODE_CELLS * stride;
+        }
+        return 0.0;
+    }
+
 private:
 
     /// Gemelo del bloque `NodeDraw` de `terrain_node.vert`. std140: mat4 + 4 vec4 de 16 B.
+    struct VoxCutUBO { glm::mat4 space{1.0f}; glm::vec4 info{0.0f}; };
+    RHI::BufferHandle m_voxCutUBO{};
+
     struct DrawUBO {
         glm::mat4 mvp{1.0f};
         glm::vec4 center{0.0f};      ///< parte GRUESA, multiplo de 64 m: exacta en float
@@ -1200,6 +1366,7 @@ private:
         float   shade[4]{};
         glm::vec4 texAnchor{0.0f};
         glm::vec4 lightDir{0.0f, 1.0f, 0.0f, 0.0f};
+        glm::vec4 aerial{0.0f};      ///< x = 1/L (extinción por metro) · y = día — gemelo de `uAerial`
     };
 
 
@@ -1233,6 +1400,11 @@ private:
     uint32_t            m_indexCount[kStrides]{};
     RHI::BufferHandle   m_instSSBO[kStrides]{};   ///< uno por grupo: `drawIndexed` no tiene baseInstance
     size_t              m_instCap[kStrides]{};
+    /// El subconjunto con agua, agrupado igual (ver Water::lakeLevelFn).
+    std::vector<NodeInstGPU> m_instWater;
+    std::vector<size_t>      m_groupWater;
+    RHI::BufferHandle   m_instWaterSSBO[kStrides]{};
+    size_t              m_instWaterCap[kStrides]{};
     uint32_t            m_strideCount = 0;
     bool                m_ready = false;
     bool                m_rootsPinned = false;

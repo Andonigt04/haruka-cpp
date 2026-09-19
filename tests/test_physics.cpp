@@ -13,6 +13,9 @@
 #include <glm/glm.hpp>
 
 #include "physics/physics_engine.h"
+#include "core/terrain/vox_world.h"
+#include "core/terrain/island_system.h"
+#include <filesystem>
 
 // ---------------------------------------------- TEST: física — caída radial + determinismo (F1)
 // Verifica lo que la Fase 1 promete y NADIE más cubre: (1) un cuerpo dinámico cae hacia el planeta
@@ -726,4 +729,193 @@ void test_physics_two_instances_agree() {
     CHECK(ceiling < 1.0,
           "y el techo por FISICA cabe holgado en un metro: el `+1,0 m` de `validateMove` no lo cubria "
           "por casualidad, pero ahora se sabe de que esta hecho");
+}
+
+// ---------------------------------------------- TEST: física — la BOCA de una cueva y su suelo
+// Lo que el acople cueva↔física promete: donde el campo dice aire, el heightfield de Jolt no tiene
+// suelo (`cNoCollisionValue`) y el cuerpo CAE por la boca; y las paredes de la cueva (malla por
+// chunk, `setVoxMesh`) lo sostienen abajo. Se mide a nivel de MOTOR con un mundo de juguete que
+// entrega los anillos con un agujero: la parte del proveedor real (NaN donde `surfaceCut`) la cubre
+// `test_caves_coupling`; aquí se prueba que la física HAGA algo con ese NaN, y con contraprueba.
+namespace {
+    struct HoleWorld : Haruka::Physics::IWorldProvider {
+        glm::dvec3 center{0, 0, 0};
+        double     R = 6371000.0, surf = 100.0;   // terreno constante a +100 m
+        double     holeR = 15.0;                  // radio de la boca (m)
+        glm::dvec3 mouthUp{1, 0, 0};              // la boca esta en un punto FIJO del mundo (no sigue al cuerpo)
+        bool       hole = true;
+        std::vector<Haruka::Physics::GravBody> grav;
+        HoleWorld() { const double G = 6.67430e-11, g = 9.81; grav.push_back({ center, g * R * R / G }); }
+        bool       hasActivePlanet()    const override { return true; }
+        glm::dvec3 activePlanetCenter() const override { return center; }
+        double     activePlanetRadius() const override { return R; }
+        const std::vector<Haruka::Physics::GravBody>& gravBodies() const override { return grav; }
+        double     terrainHeightAt(const glm::dvec3&) const override { return surf; }
+        bool terrainHeightFieldRings(const glm::dvec3& near, double halfExtent,
+                                     std::vector<TerrainRing>& out, glm::dvec3& org, glm::dvec3& t1,
+                                     glm::dvec3& up, glm::dvec3& t2, size_t firstRing) const override {
+            const glm::dvec3 rel = near - center; const double len = glm::length(rel);
+            if (len < 1e-9) return false;
+            up = rel / len;
+            // ⚠️ TERNA DEXTRÓGIRA (rx, rup, rz): `det(t1, up, t2) = +1`, o Jolt recibe el relieve
+            // espejado. Con `t2 = cross(up, t1)` el determinante sale -1 y el anillo acababa 20 m
+            // por debajo de donde debía (medido: el cuerpo "sin boca" reposaba a -19,5 m).
+            t1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up)); t2 = glm::cross(t1, up);
+            org = center + up * (R + surf);
+            const auto layout = Haruka::Planet::terrainRingLayout(halfExtent);
+            // La boca, en el marco de ESTOS anillos (que se centran en el cuerpo, no en la boca).
+            const glm::dvec3 mouthPt = center + mouthUp * (R + surf);
+            const double mx = glm::dot(mouthPt - org, t1), mz = glm::dot(mouthPt - org, t2);
+            out.clear();
+            for (size_t k = firstRing; k < layout.size(); ++k) {
+                TerrainRing r; r.spec = layout[k];
+                const uint32_t n = r.spec.samples;
+                r.samples.assign((size_t)n * n, 0.0f);
+                for (uint32_t j = 0; j < n; ++j)
+                    for (uint32_t i = 0; i < n; ++i) {
+                        const double x = Haruka::Planet::terrainRingNode(i, r.spec);
+                        const double z = Haruka::Planet::terrainRingNode(j, r.spec);
+                        float& s = r.samples[(size_t)j * n + i];
+                        // Sin superficie: borde sobrante, hueco central del nivel de dentro, y LA BOCA.
+                        const bool boca = hole && ((x - mx) * (x - mx) + (z - mz) * (z - mz) < holeR * holeR);
+                        if (i == 0 || j == 0 || Haruka::Planet::terrainRingHole(r.spec, x, z) || boca)
+                            s = std::numeric_limits<float>::quiet_NaN();
+                        else
+                            s = 0.0f;   // el anillo va sobre el plano tangente en `org`: altura 0
+                    }
+                out.push_back(std::move(r));
+            }
+            return true;
+        }
+    };
+
+    /// El "suelo de la cueva": un cuadrado de 60 m a `depthM` bajo la superficie, como malla
+    /// de chunk (`setVoxMesh`), con sus vértices relativos a su origen.
+    static void caveFloor(Haruka::Physics::PhysicsEngine& eng, const HoleWorld& w, const glm::dvec3& up,
+                          const glm::dvec3& t1, const glm::dvec3& t2, double depthM) {
+        const glm::dvec3 origin = w.center + up * (w.R + w.surf - depthM);
+        const float verts[] = { (float)(-30 * t1.x - 30 * t2.x), (float)(-30 * t1.y - 30 * t2.y), (float)(-30 * t1.z - 30 * t2.z),
+                                (float)( 30 * t1.x - 30 * t2.x), (float)( 30 * t1.y - 30 * t2.y), (float)( 30 * t1.z - 30 * t2.z),
+                                (float)( 30 * t1.x + 30 * t2.x), (float)( 30 * t1.y + 30 * t2.y), (float)( 30 * t1.z + 30 * t2.z),
+                                (float)(-30 * t1.x + 30 * t2.x), (float)(-30 * t1.y + 30 * t2.y), (float)(-30 * t1.z + 30 * t2.z) };
+        const uint32_t idx[] = { 0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2 };   // las dos caras: da igual el bobinado
+        eng.setVoxMesh(1ull, verts, 4, idx, 12, origin);
+    }
+
+    static double dropAt(const HoleWorld& w0, double offsetM, bool withFloor, double depthM, double seconds) {
+        Haruka::Physics::PhysicsEngine eng; HoleWorld w = w0; eng.setWorldProvider(&w);
+        const glm::dvec3 up(1, 0, 0);
+        const glm::dvec3 t1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up)), t2 = glm::cross(t1, up);
+        if (withFloor) caveFloor(eng, w, up, t1, t2, depthM);
+        auto b = std::make_shared<Haruka::Physics::RigidBody>();
+        b->position = w.center + up * (w.R + w.surf + 3.0) + t1 * offsetM;
+        b->radius = 0.5; b->mass = 70.0; b->name = "probe";
+        eng.addBody(b);
+        for (int i = 0; i < (int)(seconds * 60.0); ++i) {
+            eng.advance(1.0 / 60.0);
+            if (std::getenv("HARUKA_CAVE_TRACE") && (i % 30) == 0)
+                std::printf("      t=%.2f h=%+.2f v=%.2f\n", i / 60.0, glm::length(b->position - w.center) - (w.R + w.surf), glm::length(b->velocity));
+        }
+        return glm::length(b->position - w.center) - (w.R + w.surf);   // altura sobre la superficie
+    }
+}
+
+void test_physics_cave_mouth() {
+    beginTest("physics_cave_mouth");
+    HoleWorld w;
+    const double depth = 20.0;
+
+    // (1) Al lado de la boca: se posa en el suelo (a +0,5 = el radio del cuerpo).
+    const double lado = dropAt(w, 40.0, true, depth, 6.0);
+    std::printf("    a 40 m de la boca: reposo a %+.2f m de la superficie\n", lado);
+    CHECK(std::abs(lado - 0.5) < 0.1, "fuera de la boca el suelo del heightfield sostiene");
+
+    // (2) Sobre la boca, con suelo de cueva: CAE por el agujero y se posa en la malla de la cueva.
+    const double dentro = dropAt(w, 0.0, true, depth, 8.0);
+    std::printf("    sobre la boca, con suelo de cueva a -%.0f m: reposo a %+.2f m\n", depth, dentro);
+    CHECK(dentro < -1.0, "sobre la boca el cuerpo CAE (el heightfield no lo sostiene)");
+    CHECK(std::abs(dentro - (-depth + 0.5)) < 0.15, "y se posa en el SUELO DE LA CUEVA (la malla del chunk)");
+
+    // (3) CONTRAPRUEBA: sin la malla de la cueva sigue cayendo (no hay nada que lo pare).
+    // 5 s y no 8: el motor devuelve a la superficie lo que cae a más de 256 m de su anillo (es su
+    // "se salió del mundo"), y eso pasa hacia los 7,5 s; a 5 s va por -110 m y sigue cayendo.
+    const double sinSuelo = dropAt(w, 0.0, false, depth, 5.0);
+    std::printf("    CONTRAPRUEBA sin malla de cueva: %+.2f m a los 5 s (y bajando)\n", sinSuelo);
+    CHECK(sinSuelo < -depth - 5.0, "sin la malla del chunk no hay suelo: cae mas alla");
+
+    // (4) CONTRAPRUEBA: sin boca en el anillo, encima del mismo punto se posa arriba.
+    HoleWorld w2 = w; w2.hole = false;
+    const double tapado = dropAt(w2, 0.0, true, depth, 6.0);
+    std::printf("    CONTRAPRUEBA sin boca en el anillo: reposo a %+.2f m\n", tapado);
+    CHECK(std::abs(tapado - 0.5) < 0.1, "sin NaN en el anillo el heightfield sostiene (es el NaN el que abre)");
+}
+
+// ---------------------------------------------- TEST: física — pisar una ISLA FLOTANTE
+// La isla no tiene colisión propia: es la malla del campo por chunk (`setVoxMesh`), la misma que
+// las paredes de una cueva. Aquí se rasteriza una isla REAL (VoxWorld + islandLoadOrBake), se
+// entregan sus mallas a Jolt con sus orígenes, y se suelta un PERSONAJE encima: tiene que posarse
+// en la cima, no atravesarla ni salir despedido. Contraprueba: sin las mallas cae hasta el suelo.
+void test_physics_island() {
+    beginTest("physics_island");
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_phys_island").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    Haruka::caveSetAutoProbability(0.0f);
+    HoleWorld w; w.hole = false;                        // terreno plano a +100 m, sin boca
+    Haruka::VoxWorld vox;
+    vox.configure(5u, w.R, tmp + "/bakes", tmp + "/save", [](const glm::dvec3&) { return 100.0f; });
+    vox.setSynchronousBake(true);
+    const glm::dvec3 d(1, 0, 0);
+    CHECK(vox.placeIsland(d), "isla colocada");
+    const Haruka::IslandBox B = vox.placedIslandBoxes()[0];
+    Haruka::IslandSystem sys; Haruka::islandLoadOrBake(B, sys, tmp + "/bakes");
+    // La columna más interior de la silueta y su cota de cima.
+    size_t best = 0;
+    for (size_t i = 0; i < sys.planta.v.size(); ++i) if (sys.planta.v[i] > sys.planta.v[best]) best = i;
+    const float bu = (float)(best % sys.planta.w) / (float)(sys.planta.w - 1), bv = (float)(best / sys.planta.w) / (float)(sys.planta.h - 1);
+    const glm::vec3 lc((bu - 0.5f) * 2.0f * B.radiusM, (bv - 0.5f) * 2.0f * B.radiusM, 0.0f);
+    float topH = 0, botH = 0;
+    Haruka::islandColumnAt(sys, glm::normalize(B.toWorld(lc)), topH, botH);
+    const glm::dvec3 topPt = B.toWorld(glm::vec3(lc.x, lc.y, topH));
+    const glm::dvec3 up = glm::normalize(topPt);
+    const double topR = glm::length(topPt);
+    // Todos los chunks de la caja, y sus mallas a Jolt.
+    std::vector<Haruka::VoxKey> keys;
+    for (double x = -B.radiusM; x <= B.radiusM; x += 40.0)
+        for (double y = -B.radiusM; y <= B.radiusM; y += 40.0)
+            for (double h = -B.rootM - 30.0; h <= B.topM + 30.0; h += 40.0) {
+                const Haruka::VoxKey k = vox.keyAt(B.toWorld(glm::vec3((float)x, (float)y, (float)h)));
+                if (std::find(keys.begin(), keys.end(), k) == keys.end()) { keys.push_back(k); vox.ensure(k); }
+            }
+    auto run = [&](bool withMeshes, bool character, double seconds) {
+        Haruka::Physics::PhysicsEngine eng; eng.setWorldProvider(&w);
+        size_t mallas = 0, tris = 0;
+        if (withMeshes)
+            for (size_t i = 0; i < keys.size(); ++i) {
+                Haruka::CaveMesh m; vox.buildMesh(keys[i], m);
+                if (m.empty()) continue;
+                eng.setVoxMesh((uint64_t)i + 1, &m.positions[0].x, m.positions.size(), m.indices.data(), m.indices.size(), w.center + m.origin);
+                ++mallas; tris += m.triangleCount();
+            }
+        auto b = std::make_shared<Haruka::Physics::RigidBody>();
+        b->position = w.center + up * (topR + 3.0);
+        b->radius = 0.5; b->mass = 70.0; b->name = character ? "player" : "probe";
+        b->isCharacter = character;
+        eng.addBody(b);
+        double peor = 0.0;
+        for (int i = 0; i < (int)(seconds * 60.0); ++i) {
+            eng.advance(1.0 / 60.0);
+            peor = std::max(peor, glm::length(b->velocity));
+        }
+        const double h = glm::length(b->position - w.center) - topR;
+        std::printf("    %s%s: %zu mallas (%zu tris) · reposo a %+.2f m de la cima · v max %.1f m/s · pisaSuelo=%s\n",
+                    character ? "personaje" : "rigido", withMeshes ? "" : " SIN mallas", mallas, tris, h, peor, b->onGround ? "si" : "no");
+        return h;
+    };
+    const double hc = run(true, true, 6.0);
+    CHECK(std::fabs(hc - 0.5) < 0.6, "el personaje se POSA en la cima de la isla (a un radio de la superficie)");
+    const double hr = run(true, false, 6.0);
+    CHECK(std::fabs(hr - 0.5) < 0.6, "y un rigido tambien");
+    const double sin = run(false, true, 4.0);
+    CHECK(sin < -30.0, "CONTRAPRUEBA: sin las mallas del campo, cae a traves de donde estaria la isla");
+    std::filesystem::remove_all(tmp, ec);
 }

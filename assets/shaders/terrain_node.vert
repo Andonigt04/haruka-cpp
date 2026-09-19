@@ -51,6 +51,7 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uShade;
     vec4  uTexAnchor;
     vec4  uLightDir;
+    vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
 };
 
 // ⚠️ SE PROBÓ CON UN SSBO INSTANCIADO Y SE REVIRTIÓ. La idea era colapsar 1 008 draws en uno, y
@@ -192,8 +193,12 @@ void main() {
     // No reordenar: de esto depende que el vértice caiga sobre el téxel que le corresponde.
     precise double cells = double(uGrid.y);
     precise double den   = double(1u << uint(uNode.y)) * cells;
-    precise double lx0 = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(u0)) / den);
-    precise double ly0 = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(v0)) / den);
+    // ⚠️ UNA división fp64 por vértice, no seis: `den` es 2^nivel × 128 (una potencia de dos), así
+    // que multiplicar por su inverso es EXACTO, bit a bit igual que dividir. Cada división fp64 en
+    // una GeForce es una iteración a 1/64 del ritmo; con 22 M de vértices por frame se notaba (39 ms).
+    precise double invDen = 1.0LF / den;
+    precise double lx0 = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(u0)) * invDen);
+    precise double ly0 = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(v0)) * invDen);
     // ⚠️ LA DIRECCION EN DOUBLE, Y AQUI ESTABA EL PINCHO. Esto llamaba a `harukaCubeFaceToDirF` —la
     // version FLOAT— mientras `terrain_node.comp` usa la de DOUBLE para el mismo punto.
     //
@@ -553,7 +558,7 @@ void main() {
     const float hU = HARUKA_NODE_H(int(u),   int(vp));
     #undef HARUKA_NODE_H
     // Paso entre téxeles en metros: el lado del nodo entre sus celdas.
-    const float stepM = float(uMisc.x * 1.5707963267948966LF / double(1u << uint(uNode.y))) / float(uGrid.y);
+    const float stepM = float(uMisc.x * 1.5707963267948966LF) / float(1u << uint(uNode.y)) / float(uGrid.y);
     // ⚠️ LOS EJES DEL GRADIENTE SON LOS DEL TEXEL, NO UNOS CUALESQUIERA. AQUI ESTABA EL CORRUGADO.
     //
     // `hR-hL` y `hU-hD` son diferencias a lo largo de la rejilla (u,v) de la cara del cubo. Se
@@ -568,10 +573,10 @@ void main() {
     //
     // Las tangentes correctas son las direcciones en que crecen u y v SOBRE ESTA CARA, sacadas de la
     // misma proyeccion que coloca los vertices. Dos evaluaciones mas de `harukaCubeFaceToDirF`.
-    precise double lxA = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(up_)) / den);
-    precise double lxB = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(um )) / den);
-    precise double lyA = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(vp )) / den);
-    precise double lyB = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(vm )) / den);
+    precise double lxA = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(up_)) * invDen);
+    precise double lxB = -1.0LF + 2.0LF * ((double(uNode.z) * cells + double(um )) * invDen);
+    precise double lyA = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(vp )) * invDen);
+    precise double lyB = -1.0LF + 2.0LF * ((double(uNode.w) * cells + double(vm )) * invDen);
     const vec3 dirU = harukaCubeFaceToDirF(uNode.x, float(lxA), float(ly0))
                     - harukaCubeFaceToDirF(uNode.x, float(lxB), float(ly0));
     const vec3 dirV = harukaCubeFaceToDirF(uNode.x, float(lx0), float(lyA))

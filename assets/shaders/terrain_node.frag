@@ -27,7 +27,8 @@ layout(location = 7) flat in int vFace;
 // ⚠️ EL COLOR SALE DE LA MISMA LIBRERIA QUE EL CLIPMAP, NO DE UNA COPIA. Si el nodo y el clipmap
 // divergen en color, la transicion entre los dos se ve como una costura — justo lo que el v5 venia
 // a quitar. Ver `lib/terrain_shade.glsl`.
-#include "lib/terrain_material.glsl"   // harukaSelectMaterial + su UBO (binding 12)
+#include "lib/terrain_material.glsl"
+#include "lib/aerial.glsl"            // harukaAerial: perspectiva aérea (la misma que props y nubes)   // harukaSelectMaterial + su UBO (binding 12)
 #include "lib/terrain_shade.glsl"      // harukaTerrainAlbedo
 #include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
 
@@ -48,9 +49,25 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uShade;
     vec4  uTexAnchor;   // ancla planetaria del patrón, reducida módulo el tile en doubles por CPU
     vec4  uLightDir;
+    vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
 };
 
 layout(location = 0) out vec4 fragColor;
+
+// ── EL RECORTE DEL CAMPO VOLUMÉTRICO (bocas de cueva, lo picado) ────────────────────────────────
+//
+// El heightfield no sabe de aire debajo: la boca de una cueva es un AGUJERO en el suelo, y aquí se
+// hace no dibujándolo. `uVoxCut` es una ventana R8 de ±320 m alrededor del pie de la cámara, cada
+// téxel = `VoxWorld::surfaceCut(dir)` calculado por la CPU con la MISMA función que usa la física
+// y la malla de paredes: lo que aquí desaparece es exactamente donde el campo dice aire. Borde
+// suave (3 m) en el mapa y umbral a 0,5: un escalón por téxel dejaría un filo dentado.
+// `uVoxCutSpace` lleva una posición RELATIVA AL OJO (como `vFragPos`) a [0,1]² de la ventana;
+// `uVoxCutInfo.x` = 1 si la ventana vale (0 = no hay campo cargado: no se recorta nada).
+layout(binding = 17) uniform sampler2D uVoxCut;
+layout(std140, binding = 3) uniform VoxCut {
+    mat4 uVoxCutSpace;
+    vec4 uVoxCutInfo;
+};
 
 /**
  * Vistas de depuración (`HARUKA_TERRAIN_V5_DEBUG`, en uMisc.z). Existen porque "falta terreno" tiene
@@ -79,6 +96,21 @@ vec3 debugLevelColor(int lv) {
 }
 
 void main() {
+    if (uVoxCutInfo.x > 0.5) {
+        const vec2 cuv = (uVoxCutSpace * vec4(vFragPos, 1.0)).xy;
+        const bool dentro = cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0;
+        const float cut = dentro ? texture(uVoxCut, cuv).r : 0.0;
+        // `HARUKA_VOX_DEBUG=1` (uVoxCutInfo.y): en vez de recortar, PINTA: rojo = recorte, verde =
+        // dentro de la ventana. Distingue "la ventana no llega aquí" de "llega y no recorta".
+        if (uVoxCutInfo.y > 1.5) {          // =2: la uv como color (R = u, G = v, B = recorte)
+            fragColor = vec4(clamp(cuv, 0.0, 1.0), cut, 1.0); return;
+        } else if (uVoxCutInfo.y > 0.5) {
+            if (cut > 0.05) { fragColor = vec4(1.0, 0.0, 0.0, 1.0); return; }
+            if (dentro)     { fragColor = vec4(0.1, 0.6, 0.1, 1.0); return; }
+        } else if (cut > 0.5) {
+            discard;
+        }
+    }
     const int dbg = int(uMisc.z);
     if (dbg == 1) { fragColor = vec4(debugLevelColor(vLevel), 1.0); return; }
     if (dbg == 5) {   // atribucion: se LEE, no se mira. Ver la nota de arriba.
@@ -197,5 +229,10 @@ void main() {
 
     // `harukaTerrainAlbedo` MODIFICA `n` con el normal map, asi que la iluminacion va despues.
     const float d = max(dot(n, normalize(uLightDir.xyz)), 0.0);
-    fragColor = vec4(col * (0.25 + 0.75 * d), 1.0);
+    vec3 lit = col * (0.25 + 0.75 * d);
+    // El aire de en medio: lo lejano se funde con el cielo de esa dirección (lib/aerial.glsl).
+    // ⚠️ Con la ALTITUD del fragmento (`vClimate.x`, km): desde orbita el rayo cruza unos km de
+    // aire, no cientos (ver lib/aerial.glsl: "en orbita esta todo en blanco").
+    lit = harukaAerialAlt(lit, dist, dot(vFragPos / max(dist, 1.0), normalize(vUp)), vClimate.x * 1000.0, uAerial);
+    fragColor = vec4(lit, 1.0);
 }

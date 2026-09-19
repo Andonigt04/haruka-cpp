@@ -15,7 +15,8 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
                            const glm::dvec3& up,
                            double spanM, int n,
                            std::function<double(const glm::dvec3&)> terrainHeight,
-                           std::function<double(const glm::dvec3&)> bakedWaterLevel) {
+                           std::function<double(const glm::dvec3&)> bakedWaterLevel,
+                           std::function<double(const glm::dvec3&)> bedRoughness) {
     m_n = std::max(2, n);
     m_span = spanM;
     m_dx = spanM / double(m_n - 1);
@@ -34,10 +35,14 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
     // anchor's terrain height) so flow only depends on local slope and the
     // numbers stay small/precise.
     double h0 = terrainHeight(anchor);
+    m_manning.assign(N, 0.03f);
+    m_fetch.assign(N, 0.0f);
     for (int j = 0; j < m_n; ++j)
         for (int i = 0; i < m_n; ++i) {
             glm::dvec3 wp = worldPosAt(i, j);
             m_terrain[idx(i,j)] = float(terrainHeight(wp) - h0);
+            // La rugosidad del lecho, del sitio: sobre roca resbala, en el bosque se para.
+            if (bedRoughness) m_manning[idx(i,j)] = std::clamp((float)bedRoughness(wp), 0.005f, 0.5f);
         }
 
     // ── LA SIEMBRA, DEL CAMPO DEL MUNDO SI LO HAY ──────────────────────────────────────────────
@@ -66,10 +71,12 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
                 const float d = (float)(lv - h0) - m_terrain[idx(i,j)];
                 if (d > 0.0f) { m_water[idx(i,j)] = d; ++filled; }
             }
+        m_baseWater = m_water;   // lo que es del MUNDO: el ciclo no baja de aquí
         HARUKA_LOGD("Fluid", "agua sembrada del campo del MUNDO: %d celdas de %d (%.1f%%)",
                     filled, N, N ? 100.0 * filled / N : 0.0);
     } else {
         seedLakes();
+        m_baseWater = m_water;   // los lagos del respaldo también son "del mundo"
     }
 }
 
@@ -163,6 +170,31 @@ void ShallowWaterSim::addWater(int i, int j, float depth) {
 
 void ShallowWaterSim::addRain(float depth) {
     for (auto& w : m_water) w += depth;
+}
+
+double ShallowWaterSim::drain(float evapM, float infilM) {
+    if (evapM <= 0.0f && infilM <= 0.0f) return 0.0;
+    double evaporated = 0.0;
+    const double cellArea = m_dx * m_dx;
+    const bool hasBase = m_baseWater.size() == m_water.size();
+    for (size_t i = 0; i < m_water.size(); ++i) {
+        const float base = hasBase ? m_baseWater[i] : 0.0f;
+        float dyn = m_water[i] - base;
+        if (dyn <= 0.0f) continue;
+        // Primero evapora (cuenta), luego se infiltra (no cuenta): las dos acotadas por lo que hay.
+        const float e = std::min(dyn, evapM);
+        dyn -= e; evaporated += (double)e * cellArea;
+        dyn -= std::min(dyn, infilM);
+        m_water[i] = base + dyn;
+    }
+    return evaporated;
+}
+
+double ShallowWaterSim::dynamicVolumeM3() const {
+    double v = 0.0;
+    const bool hasBase = m_baseWater.size() == m_water.size();
+    for (size_t i = 0; i < m_water.size(); ++i) v += std::max(0.0f, m_water[i] - (hasBase ? m_baseWater[i] : 0.0f));
+    return v * m_dx * m_dx;
 }
 
 void ShallowWaterSim::addSpringWorld(const glm::dvec3& worldPos, float radiusM,
@@ -261,6 +293,41 @@ void ShallowWaterSim::step(float dt) {
     int nsub = std::max(1, std::min(8, int(std::ceil(dt / maxStep))));
     float h = dt / float(nsub);
     for (int s = 0; s < nsub; ++s) substep(h);
+    computeFetch();
+}
+
+void ShallowWaterSim::computeFetch() {
+    const int n = m_n, N = n * n;
+    if (N <= 0) return;
+    m_fetch.assign(N, 0.0f);
+    m_fetchLabel.assign(N, -1);
+    // Mojada = con lámina apreciable, el mismo umbral que `hasWaterAt` (2 cm): por debajo el render
+    // no la dibuja y un rizo sobre ella no se vería.
+    const float wet = 0.02f;
+    std::vector<int> queue; queue.reserve(N);
+    const double cellArea = m_dx * m_dx;
+    int label = 0;
+    for (int seed = 0; seed < N; ++seed) {
+        if (m_fetchLabel[seed] >= 0 || m_water[seed] <= wet) continue;
+        queue.clear(); queue.push_back(seed); m_fetchLabel[seed] = label;
+        size_t head = 0;
+        while (head < queue.size()) {
+            const int c = queue[head++];
+            const int i = c % n, j = c / n;
+            const int nb[4] = { (i > 0) ? c - 1 : -1, (i < n - 1) ? c + 1 : -1,
+                                (j > 0) ? c - n : -1, (j < n - 1) ? c + n : -1 };
+            for (int k = 0; k < 4; ++k) {
+                const int d = nb[k];
+                if (d < 0 || m_fetchLabel[d] >= 0 || m_water[d] <= wet) continue;
+                m_fetchLabel[d] = label; queue.push_back(d);
+            }
+        }
+        // Diámetro equivalente del círculo de la misma área: la misma definición que el relleno
+        // global (`water_fill.h`), así un charco y un lago horneado hablan la misma unidad.
+        const float diam = (float)(2.0 * std::sqrt((double)queue.size() * cellArea / 3.14159265358979));
+        for (int c : queue) m_fetch[c] = diam;
+        ++label;
+    }
 }
 
 void ShallowWaterSim::substep(float dt) {
@@ -284,6 +351,33 @@ void ShallowWaterSim::substep(float dt) {
             float fr = (i < n-1)   ? std::max(0.0f, m_fR[c] + dt * A * g * (hC - totalH(i+1,j)) / l) : 0.0f;
             float fb = (j > 0)     ? std::max(0.0f, m_fB[c] + dt * A * g * (hC - totalH(i,j-1)) / l) : 0.0f;
             float ft = (j < n-1)   ? std::max(0.0f, m_fT[c] + dt * A * g * (hC - totalH(i,j+1)) / l) : 0.0f;
+
+            // 1b. FRICCIÓN DEL LECHO (Manning), implícita por tubería. Sin ella el modelo era
+            //     conservativo puro: un estanque de 240 m con un bulto de 30 cm seguía moviéndose a
+            //     1,1 cm/s RMS a los 300 s (medido) — "el agua dinámica no se queda quieta". La
+            //     decel es `g·n²·|u|/h^(4/3)`: crece con la velocidad y con la finura de la lámina,
+            //     y `n` es del suelo de la celda (`manningForBiome`). Implícita para que a lámina
+            //     fina (h^(4/3) → 0) el factor tienda a 0 en vez de invertir el flujo.
+            //
+            //     ⚠️ CON LA VELOCIDAD MEDIA DE LA CELDA A PELO NO FRENA NADA: es cuadrática, y en una
+            //     charca de 30 cm que oscila las velocidades son de cm/s (medido: n = 0,03 bajaba el
+            //     movimiento de 16,7 a 6,3 mm/s en 60 s; el bosque a 0,9). La media sobre 4,4 m
+            //     esconde los remolinos que disipan de verdad, así que la ley se evalúa a
+            //     `max(|u|, kTurbU0)`: por debajo de esa escala de velocidad sub-celda la fricción es
+            //     lineal. Con 2 m/s la misma charca cae a 1,7 mm/s a los 60 s y 0,9 a los 90, con
+            //     decaimiento exponencial limpio (e-fold ~45 s). Sigue siendo del lecho: el bosque
+            //     para 10x antes que la arena (`test_shallow_water_friction`).
+            {
+                const float hW  = std::max(m_water[c], 1.0e-3f);           // calado, ≥ 1 mm
+                const float nn  = m_manning[c] * m_manning[c];
+                const float h43 = std::pow(hW, 4.0f / 3.0f);
+                const float inv = 1.0f / (hW * A);                          // f (m³/s) → u (m/s)
+                auto damp = [&](float f) {
+                    const float u = std::max(f * inv, kTurbU0);
+                    return f / (1.0f + dt * g * nn * u / h43);
+                };
+                fl = damp(fl); fr = damp(fr); fb = damp(fb); ft = damp(ft);
+            }
 
             // 2. Scale so total outflow volume can't exceed the water present
             //    (this is what guarantees mass conservation / no negative depth).

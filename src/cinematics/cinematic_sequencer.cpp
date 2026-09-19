@@ -85,15 +85,41 @@ glm::dvec3 CinematicSequencer::anchorBase(const std::string& name) const {
 void CinematicSequencer::buildResolved() {
     m_resolved.clear();
     m_resolved.reserve(m_keys.size());
+    // "Arriba" = la vertical de la camara de juego al arrancar, NO el +Y global: sobre un planeta
+    // el +Y global esta inclinado la latitud entera (unos 60 grados a 31 N) y la toma salia RODADA
+    // — el horizonte cruzaba el cuadro en diagonal en toda captura hecha con un `.cine` relativo.
+    // ...y si el juego puso el ancla "planet", la vertical es la del PLANETA en el punto de partida,
+    // no la de la camara de juego: a los pocos segundos de partida esa camara aun puede no estar
+    // enderezada (medido: de tres capturas con el mismo `.cine`, dos derechas y una rodada 50 grados).
+    glm::dvec3 up = glm::normalize(m_startOrient * glm::dvec3(0.0, 1.0, 0.0));
+    if (auto it = m_anchors.find("planet"); it != m_anchors.end()) {
+        const glm::dvec3 r = m_startPos - it->second;
+        if (glm::length(r) > 1.0) up = glm::normalize(r);
+    }
+    // Y los OFFSETS relativos van en ese mismo marco local (x = derecha, y = arriba, z = atras de la
+    // camara de juego), no en los ejes del mundo: `pos: [0, 3000, 0]` quiere decir 3 km POR ENCIMA
+    // del jugador, y en ejes del mundo a 31 N eran 1,5 km arriba y 2,6 km de lado. Con anchor no:
+    // un anchor es un punto del mundo y su offset tambien.
+    glm::dvec3 fwdL = m_startOrient * glm::dvec3(0.0, 0.0, -1.0);
+    fwdL -= up * glm::dot(fwdL, up);
+    if (glm::length(fwdL) < 1e-6) fwdL = glm::cross(up, glm::dvec3(1.0, 0.0, 0.0));
+    fwdL = glm::normalize(fwdL);
+    const glm::dvec3 rightL = glm::normalize(glm::cross(fwdL, up));
+    auto local = [&](const glm::dvec3& o) { return rightL * o.x + up * o.y - fwdL * o.z; };
     for (const auto& k : m_keys) {
         Key r; r.t = k.t; r.fov = k.fov;
         const std::string& la = k.lookAnchor.empty() ? k.anchor : k.lookAnchor;
-        r.pos  = anchorBase(k.anchor) + k.pos;
-        r.look = anchorBase(la)       + k.look;
+        const bool relP = m_relative && (k.anchor.empty() || !m_anchors.count(k.anchor));
+        const bool relL = m_relative && (la.empty()       || !m_anchors.count(la));
+        r.pos  = anchorBase(k.anchor) + (relP ? local(k.pos)  : k.pos);
+        r.look = anchorBase(la)       + (relL ? local(k.look) : k.look);
         glm::dvec3 d = r.look - r.pos;                          // orientation baked from pos→look
+        glm::dvec3 upK = up;
+        if (glm::length(d) > 1e-9 && std::abs(glm::dot(glm::normalize(d), up)) > 0.999)
+            upK = glm::normalize(m_startOrient * glm::dvec3(0.0, 0.0, -1.0));   // al cenit/nadir
         r.orient = (glm::length(d) > 1e-9)
-                 ? glm::quatLookAt(glm::normalize(d), glm::dvec3(0.0, 1.0, 0.0))
-                 : glm::dquat(1.0, 0.0, 0.0, 0.0);
+                 ? glm::quatLookAt(glm::normalize(d), upK)
+                 : m_startOrient;
         m_resolved.push_back(r);
     }
 }

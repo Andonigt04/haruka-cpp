@@ -35,10 +35,40 @@
 
 #include "core/terrain/planet_fields.h"             // FieldSample
 #include "core/planet/prop_cond.h"                  // PropCond, parsePropCond
+#include "core/planet/biomes.h"                     // biomeFromKey / forestBiomeForTemp (mapForcesBiome)
 #include "tools/procgraph/tree_spawn.h"             // IPropField, PropGrid, slopeAt (GL-free)
 #include "tools/procgraph/proc_noise.h"             // hash32
 
 namespace Haruka { namespace Planet {
+
+/**
+ * @brief Ruido de VALOR 3D trilineal, [0,1], anclado al mundo (la entrada es un punto en metros
+ *  sobre la esfera): determinista por (posición, semilla), sin cámara. Base del "clump" de las capas.
+ */
+inline float valueNoise3(const glm::vec3& p, int seed) {
+    const glm::vec3 f0 = glm::floor(p);
+    const glm::vec3 t  = p - f0;
+    const glm::vec3 u  = t * t * (3.0f - 2.0f * t);
+    const int ix = (int)f0.x, iy = (int)f0.y, iz = (int)f0.z;
+    auto h = [&](int dx, int dy, int dz) {
+        return Haruka::Tools::ProcGraph::WhiteNode::hashFloat(ix + dx, iy + dy, iz + dz, seed);
+    };
+    const float x00 = glm::mix(h(0,0,0), h(1,0,0), u.x), x10 = glm::mix(h(0,1,0), h(1,1,0), u.x);
+    const float x01 = glm::mix(h(0,0,1), h(1,0,1), u.x), x11 = glm::mix(h(0,1,1), h(1,1,1), u.x);
+    return glm::mix(glm::mix(x00, x10, u.y), glm::mix(x01, x11, u.y), u.z);
+}
+
+/** @brief fbm de 3 octavas sobre `valueNoise3`, [0,1] aprox. (media 0,5). */
+inline float fbmNoise3(const glm::vec3& p, int seed) {
+    float a = 0.5f, sum = 0.0f, norm = 0.0f;
+    glm::vec3 q = p;
+    for (int o = 0; o < 3; ++o) {
+        sum  += a * valueNoise3(q, seed + o * 131);
+        norm += a;
+        a *= 0.5f; q = q * 2.03f + glm::vec3(17.1f, 9.7f, 3.3f);
+    }
+    return sum / norm;
+}
 
 /** @brief Banda suave de un rango [min,max] con `feather` en los dos extremos. Devuelve [0,1]:
  *  0 fuera (con degradado en los bordes), 1 dentro. Replica las bandas de TerrainMaterial. */
@@ -47,6 +77,35 @@ inline float softBand(float v, float minV, float maxV, float feather) {
     if (v < minV)       return glm::smoothstep(minV - feather, minV, v);
     if (v > maxV)       return glm::smoothstep(maxV + feather, maxV, v);
     return 1.0f;
+}
+
+/**
+ * @brief Una VARIANTE de lo que instala una capa: otro mesh, con su peso y su condición.
+ *
+ * Existe porque una capa tenía UN mesh y el registro UN prototipo por mesh: todos los árboles del
+ * planeta eran la misma frondosa. Con variantes, la capa "tree" decide el SITIO (bandas, mapa,
+ * claims) y la variante decide QUÉ árbol va ahí: `conifer` donde `biome == taiga`, `palm` en la
+ * playa… Se sortea por hash de celda entre las variantes cuya `when` pasa, con `weight`.
+ */
+struct PropVariant {
+    std::string mesh;          ///< prototipo ("conifer", "palm", "shrub"…): el estilo sale del nombre
+    float       weight = 1.0f; ///< peso relativo en el sorteo entre las variantes elegibles
+    std::string when;          ///< condición (misma sintaxis que la de la capa); vacío = siempre elegible
+    int         seeds  = 1;    ///< nº de mallas distintas de esta variante ("conifer#0".."#k-1")
+    mutable std::shared_ptr<PropCond> m_when;
+
+    bool allowed(const std::string& layer, const std::string& zone, const std::string& biome) const {
+        if (when.empty()) return true;
+        if (!m_when) { std::string err; m_when = parsePropCond(when, err); if (!m_when) return true; }
+        PropCondCtx ctx{layer, zone, biome};
+        return m_when->eval(ctx);
+    }
+};
+
+/** @brief Nombre de prototipo de una malla con varias semillas: `mesh#k`. Con una sola, el mesh
+ *  a secas (así una escena sin `seeds` sigue registrando los mismos prototipos que antes). */
+inline std::string propProtoName(const std::string& mesh, int seedIdx, int seeds) {
+    return seeds > 1 ? mesh + "#" + std::to_string(seedIdx) : mesh;
 }
 
 /**
@@ -63,11 +122,31 @@ struct PropLayer {
     float tempMin  = -1e3f,  tempMax = 1e3f;    ///< temperatura en °C
     float slopeMin =  0.0f,  slopeMax = 1.0f;   ///< pendiente: 0 llano … 1 vertical (≈1.57 rad)
     float feather  =  0.08f;                     ///< degradado en los límites
+    /** @brief Banda de COTA (m sobre el nivel del mar), con su propio degradado en metros: la línea
+     *  de árboles no es sólo temperatura (a 2 500 m en el trópico hace 10 °C y no hay bosque por el
+     *  viento y el suelo). Por defecto abierta. */
+    float elevMinM = -1e9f, elevMaxM = 1e9f, elevFeatherM = 60.0f;
+    /** @brief MANCHAS: longitud de onda (m) de un fbm anclado al mundo que multiplica la densidad
+     *  (bosque con claros, pedregales en vez de piedras repartidas). 0 = apagado (ruido blanco, como
+     *  siempre). `clumpAmount` [0,1] dice cuánto manda la mancha frente a la densidad plana. */
+    float clumpM = 0.0f, clumpAmount = 1.0f;
+    /** @brief Instancias POR CELDA cuando la capa gana la celda (hierba: 5 matas en 12 m, no una).
+     *  Cada una con su jitter, escala y giro por hash. Las bandas de LOD son globales al scatter,
+     *  así que es la forma de que una capa sea más fina que la celda sin re-enumerar. */
+    int perCell = 1;
+    /** @brief Alcance (m): la capa no se instala en bandas de LOD cuyo radio exterior pase de aquí.
+     *  0 = todas. Es para la hierba: a 3 km no se ve y sí se paga (12 triángulos × 100 000). */
+    float maxDistM = 0.0f;
 
     /** @brief Qué objeto instala. NO es un enum del motor: es un identificador que este .cpp
      *  apenas conoce ("tree", "rock", "house", "path"…). Vacío = esta capa nunca instala; el
      *  planner la empareja con su mesh/bake procedure (bakeTreeMesh) fuera de aquí. */
     std::string mesh;
+    /** @brief Variantes del mesh (ver `PropVariant`). Vacío = la capa instala `mesh` a secas. */
+    std::vector<PropVariant> variants;
+    /** @brief Nº de mallas distintas (semillas) de `mesh` cuando no hay variantes: 1 = un solo
+     *  prototipo, como siempre; 4 = cuatro árboles distintos repartidos por hash de celda. */
+    int seeds = 1;
     /** @brief Multiplicador de DENSIDAD local [0,1]: 1 = todos los sitios válidos. El placer
      *  pincha con un hash de la celda contra este peso para dejar huecos sin patrón. */
     float density = 1.0f;
@@ -80,6 +159,22 @@ struct PropLayer {
      *  bandas: `coverage` se multiplica por su valor [0,1] en el punto — el mismo rol que el
      *  `zoneMap` del terreno, pero por capa (pintas dónde crecen los árboles). Vacío = sin mapa. */
     std::string densityMap;
+    /** @brief El `densityMap` MANDA SOBRE EL BIOMA para esta capa: donde el mapa vale ≥ 0,5 el punto
+     *  se trata como el bosque que toca por temperatura (`forestBiomeForTemp`) aunque el clima diga
+     *  matorral. Es la regla "donde está pintado bosque, hay bosque" (decisión de Andoni, 15-09):
+     *  el perfil de humedad del clima deja el spawn de Survival en matorral con 0,12 y sin esto
+     *  ninguna variante `biome == bosque` saldría ahí. Mar, acantilado y hielo no se fuerzan. */
+    bool mapForcesBiome = false;
+
+    /** @brief Bioma que VE esta capa en un punto: el clasificado, o el bosque por temperatura si
+     *  `mapForcesBiome` y el mapa lo pinta. `biome` = clave de `biomeKey` (vacío = sin clasificar). */
+    std::string biomeFor(const std::string& biome, float mapDensity, float tempC) const {
+        if (!mapForcesBiome || densityMap.empty() || mapDensity < 0.5f || biome.empty()) return biome;
+        const Biome b = biomeFromKey(biome);
+        if (b == Biome::COUNT || !biomeAcceptsForestMap(b)) return biome;
+        return biomeKey(forestBiomeForTemp(tempC));
+    }
+
     /** @brief ZONAS donde esta capa puede instalar: lista de NOMBRES de zona de la escena (las
      *  declaradas en `surfaceConfig.zones`, con perímetro GEOMÉTRICO —círculo/polígono, "una
      *  ciudad es esta área"— o color pintado en el zoneMap). Vacío = sin restricción de zona (solo
@@ -100,6 +195,70 @@ struct PropLayer {
      *  posteriores que caigan dentro se DESCARTAN. 0 = no reclama (p. ej. líquen, hierba). */
     float claimRadius = 0.0f;
 
+    /** @brief ¿Alguna condición de esta capa (la suya o la de sus variantes) mira al bioma? */
+    bool usesBiomeAnywhere() const {
+        if (usesBiome() || mapForcesBiome) return true;
+        for (const auto& v : variants) if (v.when.find("biome") != std::string::npos) return true;
+        return false;
+    }
+    /** @brief ¿Alguna condición mira al material del terreno (`layer`)? */
+    bool usesLayerAnywhere() const {
+        if (when.find("layer") != std::string::npos) return true;
+        for (const auto& v : variants) if (v.when.find("layer") != std::string::npos) return true;
+        return false;
+    }
+    /** @brief ¿Alguna condición o la lista `zones` mira a la zona? */
+    bool usesZoneAnywhere() const {
+        if (!zones.empty() || when.find("zone") != std::string::npos) return true;
+        for (const auto& v : variants) if (v.when.find("zone") != std::string::npos) return true;
+        return false;
+    }
+
+    /** @brief Todos los nombres de prototipo que esta capa puede instalar (para registrarlos). */
+    std::vector<std::string> prototypeNames() const {
+        std::vector<std::string> out;
+        if (mesh.empty()) return out;
+        if (variants.empty()) {
+            for (int k = 0; k < std::max(1, seeds); ++k) out.push_back(propProtoName(mesh, k, seeds));
+            return out;
+        }
+        for (const auto& v : variants) {
+            if (v.mesh.empty()) continue;
+            for (int k = 0; k < std::max(1, v.seeds); ++k) out.push_back(propProtoName(v.mesh, k, v.seeds));
+        }
+        return out;
+    }
+
+    /**
+     * @brief Prototipo que va en UNA celda: la variante elegida (sorteo con `weight` entre las que
+     *  pasan su `when` con las identidades del punto) y su semilla. `r0`, `r1` en [0,1) salen del
+     *  hash de la celda: misma celda, mismo árbol, siempre. Vacío = ninguna variante es elegible
+     *  aquí (la celda no instala nada: la capa dijo "sí" pero ninguna de sus especies vive en este
+     *  bioma).
+     */
+    std::string pickPrototype(const std::string& layerName, const std::string& zoneName,
+                              const std::string& biomeKey, float r0, float r1) const {
+        if (variants.empty()) {
+            const int n = std::max(1, seeds);
+            return propProtoName(mesh, std::min(n - 1, (int)(r1 * (float)n)), n);
+        }
+        float total = 0.0f;
+        for (const auto& v : variants)
+            if (!v.mesh.empty() && v.weight > 0.0f && v.allowed(layerName, zoneName, biomeKey)) total += v.weight;
+        if (total <= 0.0f) return {};
+        float acc = 0.0f;
+        const float pick = r0 * total;
+        for (const auto& v : variants) {
+            if (v.mesh.empty() || v.weight <= 0.0f || !v.allowed(layerName, zoneName, biomeKey)) continue;
+            acc += v.weight;
+            if (pick < acc || &v == &variants.back()) {
+                const int n = std::max(1, v.seeds);
+                return propProtoName(v.mesh, std::min(n - 1, (int)(r1 * (float)n)), n);
+            }
+        }
+        return {};
+    }
+
     /** @brief ¿Está permitida esta capa en la zona dada? `zoneName` es el NOMBRE del material que
      *  el zoneMap asigna al punto (vacío = el planeta no declara zona ahí). Vacío sin restricción
      *  de `zones` → siempre permitido. Con `zones` declaradas, el nombre tiene que estar en la
@@ -113,31 +272,53 @@ struct PropLayer {
     }
 
     /** @brief ¿Cumple la condición booleana `when`? `layer` = material del terreno en el punto,
-     *  `zone` = zona nombrada (vacío = sin zona). Sin `when` → siempre true. Un `when` mal
+     *  `zone` = zona nombrada (vacío = sin zona), `biome` = clave de `biomeKey()` (vacío = quien
+     *  llama no clasificó; entonces `biome == X` es falso y `biome != X` cierto). Sin `when` →
+     *  siempre true. Un `when` mal
      *  escrito (que el SceneValidator debería haber cazado) se ignora a propósito: una capa no
      *  debe dejar de instalar por una expresión rota. El parseo se cachea en `m_when`. */
-    bool whenAllowed(const std::string& layer, const std::string& zone) const {
+    bool whenAllowed(const std::string& layer, const std::string& zone,
+                     const std::string& biome = {}) const {
         if (when.empty()) return true;
         if (!m_when) {
             std::string err;
             m_when = parsePropCond(when, err);
             if (!m_when) return true;
         }
-        PropCondCtx ctx{layer, zone};
+        PropCondCtx ctx{layer, zone, biome};
         return m_when->eval(ctx);
     }
 
+    /// ¿Menciona `when` al bioma? Quien evalúa solo clasifica si alguna capa lo pide (es barato,
+    /// pero es una rama por celda × capa que no hace falta pagar en una tabla sin `biome`).
+    bool usesBiome() const { return when.find("biome") != std::string::npos; }
+
     /** @brief Cuánto CUMPLE esta capa en un punto del campo, [0,1] = producto de las bandas de
      *  clima/forma. 0 = no es su territorio; >0 = cuánto es. `zoneName` (opcional) aplica el
-     *  filtro de zona declarado en `zones`; `layerName` (opcional) alimenta la condición `when`. */
+     *  filtro de zona declarado en `zones`; `layerName` y `biomeKey` (opcionales) alimentan la
+     *  condición `when`. */
     float coverage(const FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
-                   const std::string& zoneName = {}, const std::string& layerName = {}) const {
+                   const std::string& zoneName = {}, const std::string& layerName = {},
+                   const std::string& biomeKey = {}) const {
         if (!zoneAllowed(zoneName)) return 0.0f;
-        if (!whenAllowed(layerName, zoneName)) return 0.0f;
+        if (!whenAllowed(layerName, zoneName, biomeKey)) return 0.0f;
         float h = softBand(fs.humidity, humMin, humMax, feather);
         float t = softBand(fs.tempC,   tempMin, tempMax, feather);
         float s = softBand(glm::clamp(slopeRad, 0.0f, 1.0f), slopeMin, slopeMax, feather);
-        return h * t * s * glm::clamp(mapDensity, 0.0f, 1.0f);
+        float e = softBand(fs.elevKm * 1000.0f, elevMinM, elevMaxM, elevFeatherM);
+        return h * t * s * e * glm::clamp(mapDensity, 0.0f, 1.0f);
+    }
+
+    /** @brief Factor de MANCHA [0,1] en un punto del mundo (`dir` unitario, `radiusM` del planeta).
+     *  1 sin `clumpM`. Con él, un fbm de esa longitud de onda con contraste: el tercio bajo del ruido
+     *  da 0 (claro), el tercio alto 1 (espesura). `layerIndex` separa las manchas de cada capa: el
+     *  claro del bosque no es el pedregal. */
+    float clumpFactor(const glm::vec3& dir, double radiusM, uint32_t seed, int layerIndex) const {
+        if (clumpM <= 0.0f) return 1.0f;
+        const glm::vec3 p = dir * (float)(radiusM / (double)clumpM);
+        const float n = fbmNoise3(p, (int)(seed ^ (uint32_t)(layerIndex * 7919)));
+        const float f = glm::clamp((n - 0.5f) * 3.0f + 0.5f, 0.0f, 1.0f);
+        return glm::mix(1.0f, f, glm::clamp(clumpAmount, 0.0f, 1.0f));
     }
 
     /// Bits de POR QUÉ `coverage()` dio 0. Sin esto, "coverage=53753" no dice nada útil: hay SEIS
@@ -149,6 +330,7 @@ struct PropLayer {
         FAIL_TEMP  = 1u << 3,   ///< temperatura fuera de [tempMin, tempMax]
         FAIL_SLOPE = 1u << 4,   ///< pendiente fuera de [slopeMin, slopeMax]
         FAIL_MAP   = 1u << 5,   ///< el `densityMap` vale 0 aquí
+        FAIL_ELEV  = 1u << 6,   ///< cota fuera de [elevMinM, elevMaxM]
     };
 
     /** @brief Qué factores de `coverage()` valen 0 en este punto, como máscara de `FailBit`.
@@ -159,15 +341,17 @@ struct PropLayer {
      *  la humedad Y la pendiente mal, quieres saberlo de una vez, no en dos arranques. */
     uint32_t coverageFailMask(const FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
                               const std::string& zoneName = {},
-                              const std::string& layerName = {}) const {
+                              const std::string& layerName = {},
+                              const std::string& biomeKey = {}) const {
         uint32_t m = 0;
-        if (!zoneAllowed(zoneName))                  m |= FAIL_ZONE;
-        if (!whenAllowed(layerName, zoneName))       m |= FAIL_WHEN;
+        if (!zoneAllowed(zoneName))                       m |= FAIL_ZONE;
+        if (!whenAllowed(layerName, zoneName, biomeKey))  m |= FAIL_WHEN;
         if (softBand(fs.humidity, humMin, humMax, feather) <= 0.0f) m |= FAIL_HUM;
         if (softBand(fs.tempC,    tempMin, tempMax, feather) <= 0.0f) m |= FAIL_TEMP;
         if (softBand(glm::clamp(slopeRad, 0.0f, 1.0f), slopeMin, slopeMax, feather) <= 0.0f)
             m |= FAIL_SLOPE;
         if (glm::clamp(mapDensity, 0.0f, 1.0f) <= 0.0f) m |= FAIL_MAP;
+        if (softBand(fs.elevKm * 1000.0f, elevMinM, elevMaxM, elevFeatherM) <= 0.0f) m |= FAIL_ELEV;
         return m;
     }
 
@@ -267,8 +451,14 @@ struct PropLayerTable {
     nlohmann::json toJSON() const {
         nlohmann::json out = nlohmann::json::array();
         for (const auto& L : layers) {
+            nlohmann::json vars = nlohmann::json::array();
+            for (const auto& v : L.variants)
+                vars.push_back(nlohmann::json::object({
+                    {"mesh", v.mesh}, {"weight", v.weight}, {"when", v.when}, {"seeds", v.seeds}}));
             out.push_back(nlohmann::json::object({
                 {"name", L.name}, {"mesh", L.mesh},
+                {"seeds", L.seeds},
+                {"variants", vars},
                 {"density", L.density},
                 {"submerged", L.submerged},
                 {"densityMap", L.densityMap},
@@ -279,7 +469,12 @@ struct PropLayerTable {
                 {"humMin", L.humMin}, {"humMax", L.humMax},
                 {"tempMin", L.tempMin}, {"tempMax", L.tempMax},
                 {"slopeMin", L.slopeMin}, {"slopeMax", L.slopeMax},
-                {"feather", L.feather}
+                {"feather", L.feather},
+                {"elevMinM", L.elevMinM}, {"elevMaxM", L.elevMaxM}, {"elevFeatherM", L.elevFeatherM},
+                {"clumpM", L.clumpM}, {"clumpAmount", L.clumpAmount},
+                {"mapForcesBiome", L.mapForcesBiome},
+                {"perCell", L.perCell},
+                {"maxDistM", L.maxDistM}
             }));
         }
         return out;
@@ -302,6 +497,18 @@ struct PropLayerTable {
             L.zones        = jl.value("zones", std::vector<std::string>{});
             L.when         = jl.value("when", std::string());
             L.m_when.reset();
+            L.seeds        = std::max(1, jl.value("seeds", 1));
+            if (jl.contains("variants") && jl["variants"].is_array()) {
+                for (const auto& jv : jl["variants"]) {
+                    if (!jv.is_object()) continue;
+                    PropVariant v;
+                    v.mesh   = jv.value("mesh", std::string());
+                    v.weight = jv.value("weight", 1.0f);
+                    v.when   = jv.value("when", std::string());
+                    v.seeds  = std::max(1, jv.value("seeds", 1));
+                    if (!v.mesh.empty()) L.variants.push_back(v);
+                }
+            }
             L.scaleMin     = jl.value("scaleMin", 0.8f);
             L.scaleMax     = jl.value("scaleMax", 1.3f);
             L.claimRadius  = jl.value("claimRadius", 0.0f);
@@ -312,6 +519,14 @@ struct PropLayerTable {
             L.slopeMin     = jl.value("slopeMin", 0.0f);
             L.slopeMax     = jl.value("slopeMax", 1.0f);
             L.feather      = jl.value("feather", 0.08f);
+            L.elevMinM     = jl.value("elevMinM", -1e9f);
+            L.elevMaxM     = jl.value("elevMaxM", 1e9f);
+            L.elevFeatherM = jl.value("elevFeatherM", 60.0f);
+            L.clumpM       = jl.value("clumpM", 0.0f);
+            L.clumpAmount  = jl.value("clumpAmount", 1.0f);
+            L.mapForcesBiome = jl.value("mapForcesBiome", false);
+            L.perCell      = std::max(1, jl.value("perCell", 1));
+            L.maxDistM     = jl.value("maxDistM", 0.0f);
             if (L.name.empty() && L.mesh.empty()) continue;   // entrada basura
             t.layers.push_back(L);
         }

@@ -1,0 +1,36 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+// ── SONDA DE LA FORMA DE LA NUBE ────────────────────────────────────────────────────────────────
+// Evalúa la densidad VOLUMÉTRICA (la misma cadena que `cloud_vol.frag`, modo cúmulo: campo 3D →
+// fuerza → perfil → erosión) sobre una rejilla x·z·altura, para que un test de CPU pueda medir la
+// forma de lo que se dibuja: relación ancho/alto, dureza del borde, base plana o no. Sin esto la
+// forma sólo se juzgaba mirando la pantalla ("son redondas y cortan de repente").
+#include "lib/cloud_volume.glsl"
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 4) in;
+layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
+// 0=N (x,z) · 1=paso horizontal (m) · 2=Ny (alturas) · 3=espesor de la losa (m) · 4=cobertura
+// 5=escala del campo (1/m) · 6,7=viento
+layout(std430, binding = 1) readonly  buffer In  { float uIn[];  };
+void main()
+{
+    const int N  = int(uIn[0]);
+    const int Ny = int(uIn[2]);
+    const ivec3 g = ivec3(gl_GlobalInvocationID.xyz);
+    if (g.x >= N || g.y >= N || g.z >= Ny) return;
+    const float stepM = uIn[1], thick = uIn[3], cover = uIn[4], fscale = uIn[5];
+    const vec3  wind  = vec3(uIn[6], 0.0, uIn[7]);
+    // Punto: x,z horizontales centrados; altura desde la base de la losa (f = fracción del espesor).
+    const float f = (float(g.z) + 0.5) / float(Ny);
+    const vec3  p = vec3((float(g.x) - 0.5 * float(N)) * stepM, f * thick,
+                         (float(g.y) - 0.5 * float(N)) * stepM);
+    const vec3  pf = p * fscale;
+    const float lo = harukaCloudThreshold(cover, HARUKA_CLOUD_SIGMA_CUMULO);
+    const vec3  pfC = vec3(pf.x, pf.y * HARUKA_CLOUD_VERT_SQUASH, pf.z) * HARUKA_CLOUD_HORIZ_SCALE;   // como el pase
+    const float fieldC = harukaCloudField3LOD(pfC, wind, 0.0, 0.0);
+    const float sN = harukaCloudStrengthCumulo(fieldC, lo);
+    float dens = 0.0;
+    if (sN > 0.0)
+        dens = harukaCloudDensity(sN, f, pf * 11.4, HARUKA_CLOUD_MIN_THICK_M / thick,
+                                  1.0 / (fscale * 11.4), stepM, harukaCloudTopBumps(pfC) * harukaCloudTowerMul(fieldC - lo));
+    uOut[(g.z * N + g.y) * N + g.x] = dens;
+}

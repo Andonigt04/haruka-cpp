@@ -920,6 +920,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
         // el cluster en objetos de la escena vivia alli dentro, asi que en el juego no corria
         // nunca: el cliente recibia a los demas y en pantalla no habia nadie, sin un solo error.
         syncNetworkEntities();
+        syncVoxColliders();
 
         renderFrameContent();
 
@@ -949,6 +950,47 @@ void Application::run(const std::string& startScenePath, bool headless) {
         if (RHI::device()) {
             HARUKA_PROFILE("present.swap(espera GPU/vsync)");
             RHI::device()->endFrame();
+        }
+        // Tiempos de GPU del frame recién presentado, con la misma cadencia que HARUKA_PROF_LOG.
+        // Es la otra mitad del perfil: lo que la CPU encola en 0,3 ms puede costar 30 en la GPU.
+        if (RHI::device()) {
+            static const int gpuPeriod = [] { const char* pl = getenv("HARUKA_PROF_LOG"); return pl ? std::max(1, atoi(pl)) : 0; }();
+            static int gpuFrame = 0;
+            if (gpuPeriod > 0 && ++gpuFrame % gpuPeriod == 0) {
+                const auto& scopes = RHI::device()->gpuScopes();
+                double total = 0.0;
+                for (const auto& sc : scopes) if (sc.depth == 0) total += sc.ms;
+                HARUKA_LOGD("GpuProf", "--- frame %d · GPU %.2f ms en tramos de nivel 0 (%zu tramos) ---",
+                            gpuFrame, total, scopes.size());
+                for (const auto& sc : scopes)
+                    HARUKA_LOGD("GpuProf", "%*s%-36s %7.2f ms", sc.depth * 2, "", sc.name.c_str(), sc.ms);
+            }
+        }
+
+        // ── MEMORIA (HARUKA_MEM_LOG=N: cada N frames) ──────────────────────────────────────
+        // Andoni: "gasta demasiada RAM y no se por que". Sin numeros por fase no hay causa: aqui va
+        // el RSS del proceso (y su pico) con lo que el motor sabe que tiene vivo — instancias de
+        // props, malla de colision, texturas del horneado. Lo que no cuadre con esa suma es lo
+        // que hay que buscar (driver de la GPU, terreno, audio...).
+        {
+            static const int memPeriod = [] { const char* e = getenv("HARUKA_MEM_LOG"); return e ? std::max(1, atoi(e)) : 0; }();
+            static int memFrame = 0;
+            if (memPeriod > 0 && ++memFrame % memPeriod == 0) {
+                long rssKb = 0, hwmKb = 0, dataKb = 0;
+                if (FILE* f = fopen("/proc/self/status", "r")) {
+                    char line[256];
+                    while (fgets(line, sizeof line, f)) {
+                        if      (!strncmp(line, "VmRSS:", 6))  rssKb  = atol(line + 6);
+                        else if (!strncmp(line, "VmHWM:", 6))  hwmKb  = atol(line + 6);
+                        else if (!strncmp(line, "VmData:", 7)) dataKb = atol(line + 7);
+                    }
+                    fclose(f);
+                }
+                HARUKA_LOGI("Mem", "frame %d · RSS %.0f MB (pico %.0f MB) · VmData %.0f MB · props: %zu instancias, %.1f MB en CPU · GPU inst. arena %.1f MB",
+                            memFrame, rssKb / 1024.0, hwmKb / 1024.0, dataKb / 1024.0,
+                            m_propGpu.size(), m_propGpu.size() * sizeof(m_propGpu[0]) / 1048576.0,
+                            _instancing ? _instancing->hostBytes() / 1048576.0 : 0.0);
+            }
         }
 
         // ── LA CAPTURA VA DESPUES DEL PRESENT ────────────────────────────────────────────────

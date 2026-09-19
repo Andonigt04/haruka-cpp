@@ -24,7 +24,7 @@ namespace Haruka::RHI::opengl
             void clear(float r, float g, float b, float a) override;
 
             void bindPipeline(PipelineHandle) override;
-            void bindVertexBuffer(BufferHandle, uint32_t binding) override;
+            void bindVertexBuffer(BufferHandle, uint32_t binding, size_t offsetBytes = 0) override;
             void bindIndexBuffer(BufferHandle) override;
             void bindUniformBuffer(uint32_t slot, BufferHandle) override;
             void bindStorageBuffer(uint32_t slot, BufferHandle) override;

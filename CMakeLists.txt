@@ -673,9 +673,12 @@ add_executable(haruka_tests
     tests/test_prop_lod.cpp              # LOD de malla de props: envolvente estable
     tests/test_prop_collider.cpp         # colliders de props por PARTE (esqueleto del arbol)
     tests/test_rock_interior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
-    tests/test_weather_3d.cpp            # clima 3D: la nube como volumen (base + techo)
+    tests/test_caves.cpp                 # cuevas: mapas en disco, conectividad garantizada, campo
+    tests/test_vox_world.cpp             # el mundo por chunks: sin costura, trazos de la partida
+    tests/test_islands.cpp               # islas flotantes: roca AÑADIDA al mismo campo
     tests/test_weather_severe.cpp        # tiempo adverso: severidad por condiciones + vortices (Rankine)
-    tests/test_cloud_shape.cpp           # forma de la nube: cuerpo y no lamina (ancho/alto + campo 3D)
+    tests/test_cloud_motion.cpp          # frame a frame: la deriva integrada y el fundido de horneados (sin tirones)
+    tests/test_cloud_formation.cpp       # el UNICO test de formacion: la columna de aire (cloud_column.h)
     tests/test_ocean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
     tests/test_shallow_water.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
     tests/test_terrain_node.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)

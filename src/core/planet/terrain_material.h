@@ -265,6 +265,20 @@ struct TerrainMaterialTable {
         return -1;
     }
 
+    /** @brief La capa de ROCA (paredes de cueva, lo picado). Misma heurística por nombre que
+     *  `shoreLayer`; si no hay, la capa con mayor `slopeMin` (lo que se pinta en lo vertical); si
+     *  nada tiene textura, -1 y la pared va con su color plano. */
+    int rockLayer() const {
+        int best = -1; float bestSlope = -1.0f;
+        for (const auto& m : materials) {
+            if (m.layer == kNoTerrainTile) continue;
+            if (m.name == "rock" || m.name == "roca" || m.name == "stone" || m.name == "piedra" || m.name == "cliff")
+                return m.layer;
+            if (m.slopeMin > bestSlope) { bestSlope = m.slopeMin; best = m.layer; }
+        }
+        return best;
+    }
+
     /** @brief Rutas de albedo de los materiales CON textura, en orden de capa. */
     std::vector<std::string> albedoPaths() const { return layerPaths(true); }
     /** @brief Ídem para las normales. Vacía en un material con albedo = capa plana sin relieve. */

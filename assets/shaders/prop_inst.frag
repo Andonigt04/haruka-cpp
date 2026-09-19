@@ -13,6 +13,7 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "lib/surface_shade.glsl"
+#include "lib/aerial.glsl"
 
 layout(location = 0) out vec4 FragColor;
 
@@ -48,6 +49,8 @@ layout(std140, binding = 0) uniform PerFrameData {
 layout(std140, binding = 6) uniform PropParams {
     vec3  u_wind;   float u_time;
     vec4  u_matPBR;     // x=metallic y=roughness z=ao w=máscara de texturas (bits)
+    vec4  u_originRel;  // (solo lo usa el vértice; el bloque tiene que coincidir)
+    vec4  u_aerial;     // perspectiva aérea: x = 1/L · y = día (lib/aerial.glsl)
 };
 
 const int TEX_ALBEDO = 1, TEX_NORMAL = 2, TEX_METALLIC = 4, TEX_ROUGHNESS = 8, TEX_AO = 16;
@@ -127,5 +130,8 @@ void main() {
         color = clamp(color, 0.0, 1.0);
     }
 
+    // El mismo aire que el terreno y las nubes. Un prop nunca está a más de 6 km, así que la
+    // elevación de la vista se toma 0 (color de horizonte): la diferencia es inapreciable.
+    color = harukaAerial(color, length(FragPos), 0.0, u_aerial);
     FragColor = vec4(color, 1.0);
 }

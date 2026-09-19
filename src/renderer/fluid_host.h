@@ -40,8 +40,12 @@ public:
     /// Cota de la lámina HORNEADA con el planeta (m sobre el nivel del mar) o `WATER_FILL_DRY`.
     /// Con esto la siembra del parche deja de depender de su BORDE — ver `ShallowWaterSim::seedLakes`.
     std::function<double(const glm::dvec3&)> bakedWaterFn;
+    /// `n` de Manning del LECHO en un punto (ver `manningForBiome`), o nulo = 0,03 en todo el parche.
+    /// Es lo que hace la fricción del agua interior DEL SITIO: roca, arena, hierba, bosque.
+    std::function<double(const glm::dvec3&)> bedRoughnessFn;
     /** @brief Publica la superficie del agua interior donde la dibuje el MAR. Lo pone el llamador
-     *  con `TerrestrialPlanet::setInlandWater`; sin él, los ríos y lagos simulan pero no se ven. */
+     *  con `TerrestrialPlanet::setInlandWater`; sin él, los ríos y lagos simulan pero no se ven.
+     *  El vector lleva 2·n² floats: [0, n²) lámina en metros, [n², 2n²) fetch en metros. */
     std::function<void(const std::vector<float>&, int, const glm::vec3&, const glm::vec3&,
                        const glm::vec3&, const glm::vec3&, float)> publishInlandWater;
     /** @brief Elevación del mar de marea (m sobre el nivel del mar base) en una dirección radial. */
@@ -52,6 +56,12 @@ public:
 
     /** @brief Lluvia (m de profundidad por segundo) a verter en el parche. */
     float rainPerSec = 0.0f;
+    /// EL CICLO: evaporación (vuelve al clima) e infiltración (se la traga el suelo), metros de
+    /// lámina por segundo, sobre el agua de LLUVIA del parche (nunca bajo el nivel horneado).
+    float  evapPerSec  = 0.0f;
+    float  infilPerSec = 0.0f;
+    double evaporatedM3 = 0.0;   ///< lo evaporado en el último `update` (para la humedad del clima)
+    double dynamicWaterM3 = 0.0; ///< agua de lluvia que hay en el parche (medida)
 
     /** @brief Avanza sims + acoplador. Re-ancla el parche cuando el jugador se aleja. */
     void update(float dt, const WorldPos& cameraPos);
@@ -82,6 +92,7 @@ private:
     WorldPos m_anchor{0.0};
     bool     m_anchored = false;
     float    m_pendingRain = 0.0f;
+    float m_pendingEvap = 0.0f, m_pendingInfil = 0.0f;
     float    m_splashAccum = 0.0f;
 };
 

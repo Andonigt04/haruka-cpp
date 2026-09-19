@@ -46,6 +46,10 @@ layout(std140, binding = 0) uniform PerFrameData {
 layout(std140, binding = 6) uniform PropParams {
     vec3  u_wind;   float u_time;      // viento del clima (mundo, m/s) · segundos
     vec4  u_matPBR;                    // x=metallic y=roughness z=ao w=máscara de texturas (bits)
+    // ORIGEN del scatter relativo a la cámara. Las matrices de instancia van RELATIVAS AL ORIGEN
+    // (fijo hasta el siguiente scatter), no a la cámara: así se construyen una vez y no por frame.
+    vec4  u_originRel;
+    vec4  u_aerial;     // (solo lo usa el fragmento; el bloque tiene que coincidir)
 };
 
 layout(location = 0) out vec3 Normal;
@@ -64,8 +68,8 @@ void main() {
     // el triángulo tiene área cero y no produce ni un fragmento — y vale porque ningún triángulo
     // cruza dos partes (cada cono emite los suyos; lo fija el test `prop_collider`).
     if ((uint(iBreakMask) & (1u << uint(aPart + 0.5))) != 0u) {
-        gl_Position = projection * view * vec4(iModel[3].xyz, 1.0);
-        Normal = vec3(0.0, 1.0, 0.0); FragPos = iModel[3].xyz; Color = vec3(0.0); TexCoord = vec2(0.0);
+        gl_Position = projection * view * vec4(iModel[3].xyz + u_originRel.xyz, 1.0);
+        Normal = vec3(0.0, 1.0, 0.0); FragPos = iModel[3].xyz + u_originRel.xyz; Color = vec3(0.0); TexCoord = vec2(0.0);
         return;
     }
 
@@ -85,7 +89,7 @@ void main() {
     vec3  wside = normalize(cross(vec3(0.0, 1.0, 0.0), wdir) + vec3(1e-5));
     pos += leaf * h * wspd * (wdir * (0.035 + 0.05 * sway) + wside * 0.03 * flap);
 
-    vec3 camRel = (iModel * vec4(pos, 1.0)).xyz;   // prototipo → sitio del prop (camera-relativo)
+    vec3 camRel = (iModel * vec4(pos, 1.0)).xyz + u_originRel.xyz;   // prototipo → origen → cámara
     FragPos  = camRel;
     Normal   = normalize(transpose(inverse(mat3(iModel))) * aNormal);   // escala NO uniforme → traspuesta inversa
     Color    = aColor * iColor.rgb;

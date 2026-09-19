@@ -50,15 +50,24 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uShade;
     vec4  uTexAnchor;
     vec4  uLightDir;
+    vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
 };
 struct NodeInst { ivec4 node; ivec4 edge; ivec4 slot; vec4 misc; };
 layout(std430, binding = 2) readonly buffer Insts { NodeInst uInst[]; };
 layout(binding = 16) uniform sampler2D uHeightTex;
+// La ventana de recorte del campo volumétrico (ver `terrain_node.frag`): aquí se lee el LECHO.
+layout(binding = 17) uniform sampler2D uVoxCut;
+layout(std140, binding = 3) uniform VoxCut {
+    mat4 uVoxCutSpace;
+    vec4 uVoxCutInfo;
+};
 
 layout(location = 0) out vec3  vNormal;
 layout(location = 1) out vec3  vFragPos;
 layout(location = 2) out float vDepth;    // profundidad del agua: < 0 = tierra, el fragmento descarta
 layout(location = 3) out float vFoam;
+layout(location = 4) flat out int vWStride;   // vista 4 (HARUKA_TERRAIN_V5_DEBUG): color por zancada, tambien el agua
+layout(location = 5) flat out int vWLevel;
 
 void main() {
     const NodeInst I = uInst[INSTANCE_INDEX];
@@ -142,8 +151,20 @@ void main() {
         groundH = baseH + det;
     }
 
-    // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────
+    // ── EL LECHO BAJO UNA BOCA DE CUEVA ─────────────────────────────────────────────────────────
+    // El suelo del agua no es el heightfield donde hay boca: es el fondo del foso (canal G de la
+    // ventana de recorte, en metros). Así una lámina que cubra la boca se dibuja DENTRO, apoyada en
+    // el lecho, y una que quede por debajo del lecho no se dibuja. Misma ventana que recorta el suelo.
     const vec3  posRelEye = dir * R + uCenter.xyz;
+    if (uVoxCutInfo.x > 0.5) {
+        const vec2 cuv = (uVoxCutSpace * vec4(posRelEye + uCenterLo.xyz, 1.0)).xy;
+        if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
+            const vec4 vc = textureLod(uVoxCut, cuv, 0.0);
+            if (vc.r > 0.5) groundH -= vc.g * 255.0;
+        }
+    }
+
+    // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────
     const float level = harukaWaterLevelAt(posRelEye, dir, harukaSeaLevelM(), groundH);
 
     const float depthRest = level - groundH;
@@ -198,21 +219,30 @@ void main() {
     // ⚠️ EL `quad` SALE DEL NODO, y ese es medio motivo de esta migracion. `harukaGerstner` apaga
     // cada tren cuando su longitud baja de dos quads (Nyquist); con la rejilla del clipmap ese dato
     // habia que reconstruirlo replicando su ley, y aqui es sencillamente el paso del nodo.
-    vec3  wp = dir * (R + drawLevel);   // == `level` donde hay agua: la ola no se entera
-    vec3  n  = dir;
-    float foam = 0.0;
-    vec3  disp = vec3(0.0);
-    if (depthRest > 0.0) {
-        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, harukaWaterFetchAt(dir), quadM, 1.0,
-                              slope, n, foam);
-    }
-    vNormal = n;
-    vFoam   = foam;
-
     // ⚠️ LA POSICION EN DOUBLE Y CON `uCenter` PARTIDO, igual que el terreno y por lo mismo: en float
     // el ulp a radio terrestre son 0,5 m, o sea que el agua temblaria al mover la camara. Ver la nota
     // larga de `terrain_node.vert`.
     precise dvec3 pRel = dirD * (double(R) + double(drawLevel)) + dvec3(uCenter.xyz);
-    vFragPos = vec3(pRel) + uCenterLo.xyz + disp;
+    const vec3 posRel = vec3(pRel) + uCenterLo.xyz;   // relativa al OJO, exacta al milimetro
+
+    // ⚠️ LA OLA SE EVALUA EN LA POSICION RELATIVA AL ANCLA DEL MAR, NO EN `dir * R`. La fase es
+    // `k * dot(D, x) - w * t` con `D` en el plano tangente de `dir`; con `x = dir * R` ese producto
+    // es CERO en todo el mar y la fase valia `-w*t` en todas partes: el oceano entero subia y bajaba
+    // en bloque y "las olas" eran el ruido de float de un producto escalar a 6,4e6 m (medido: sigma
+    // espacial de la cota 1 cm contra 62 cm en marco plano). Ver `OceanState::phase`.
+    const vec3 wp = posRel - uOceanAnchor.xyz;
+    vec3  n  = dir;
+    float foam = 0.0;
+    vec3  disp = vec3(0.0);
+    if (depthRest > 0.0) {
+        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, harukaWaterFetchAt(posRelEye, dir), quadM, 1.0,
+                              slope, n, foam);
+    }
+    vNormal = n;
+    vFoam   = foam;
+    vWStride = I.slot.z;
+    vWLevel  = I.node.y;
+
+    vFragPos = posRel + disp;
     gl_Position = uMVP * vec4(vFragPos, 1.0);
 }

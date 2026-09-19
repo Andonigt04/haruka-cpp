@@ -123,6 +123,9 @@ namespace Haruka::RHI::vulkan
 
             Context* beginFrame() override;
             void     endFrame() override;
+            void gpuScopeBegin(const char* name) override;
+            void gpuScopeEnd() override;
+            const std::vector<GpuScope>& gpuScopes() const override { return m_gpuScopesDone; }
             // ImGui (fase 7): inicia ImGui_ImplVulkan + render pass/framebuffers propios para dibujar
             // la UI sobre el backbuffer. Solo Vulkan; los demás backends no-op.
             bool     initUi() override;
@@ -275,6 +278,17 @@ namespace Haruka::RHI::vulkan
             // frame; si no se usó, endFrame salta el present para no mostrar basura de un acquire
             // que nunca se rasterizó.
             VkCommandPool              m_framePool = VK_NULL_HANDLE;
+            // Timestamps de GPU: un query pool de `kGpuQueries` marcas por frame. Cada scope gasta dos
+            // (inicio/fin); se resuelven tras el `vkDeviceWaitIdle` de endFrame (ya están listas).
+            static constexpr uint32_t  kGpuQueries = 256;
+            VkQueryPool                m_gpuQueryPool = VK_NULL_HANDLE;
+            uint32_t                   m_gpuQueryUsed = 0;
+            float                      m_gpuTimestampNs = 0.0f;   ///< ns por tick (limits.timestampPeriod)
+            struct GpuScopeOpen { std::string name; int depth; uint32_t q0; uint32_t q1; };
+            std::vector<GpuScopeOpen>  m_gpuScopesFrame;    ///< scopes grabados este frame (en orden)
+            std::vector<int>           m_gpuScopeStack;     ///< índices abiertos (anidamiento)
+            std::vector<GpuScope>      m_gpuScopesDone;     ///< resultado del último frame
+            void resolveGpuScopes();
             VkCommandBuffer            m_frameCmd = VK_NULL_HANDLE;
             VkSemaphore                m_imgAvailable = VK_NULL_HANDLE;
             VkSemaphore                m_renderFinished = VK_NULL_HANDLE;

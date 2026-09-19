@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "core/planet/prop_cond.h"                 // parsePropCond: valida el `when` de las capas
+#include "core/planet/biomes.h"                    // biomeFromKey: un `biome == bosqe` es un error, no silencio
 
 namespace Haruka {
 
@@ -224,10 +225,21 @@ namespace Haruka {
                         if (p.contains("when")) {
                             if (!p["when"].is_string()) {
                                 result.addError(powner + ".when debe ser string.");
-                            } else {
+                            } else if (!p["when"].get<std::string>().empty()) {   // vacío = sin condición
                                 std::string perr;
-                                if (!Haruka::Planet::parsePropCond(p["when"].get<std::string>(), perr))
+                                auto cond = Haruka::Planet::parsePropCond(p["when"].get<std::string>(), perr);
+                                if (!cond) {
                                     result.addError(powner + ".when: " + perr);
+                                } else {
+                                    // `biome` compara contra un conjunto CERRADO de claves; una errata
+                                    // dejaría la capa muda para siempre sin que nadie lo dijera.
+                                    cond->eachCompare([&](const Haruka::Planet::PropCondCompare& c) {
+                                        if (c.var == "biome" &&
+                                            Haruka::Planet::biomeFromKey(c.value) == Haruka::Planet::Biome::COUNT)
+                                            result.addError(powner + ".when: '" + c.value +
+                                                "' no es un bioma (taiga, bosque, selva, desierto, playa...).");
+                                    });
+                                }
                             }
                         }
                     }

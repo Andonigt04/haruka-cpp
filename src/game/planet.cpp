@@ -25,7 +25,8 @@
 #include "settings/settings_manager.h"
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
-#include "tools/profiler.h"          // HARUKA_PROFILE: sub-scopes de simple_planet.draw (base/clipmap/agua)
+#include "tools/profiler.h"
+#include "rhi/rhi_gpu_scope.h"          // HARUKA_PROFILE: sub-scopes de simple_planet.draw (base/clipmap/agua)
 #include "core/logger.h"
 #include "core/progress_hook.h"
 #include "core/planet/ocean_wave.h"  // oceanClockSeconds: EL reloj del oleaje, compartido con la física
@@ -389,9 +390,15 @@ void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n
 
     struct InlandParams { glm::vec4 anchor; glm::vec4 tanU; glm::vec4 tanV; glm::vec4 misc; } ip{};
     ip.anchor = glm::vec4(anchorRelEye, 0.0f);   // ancla del parche, relativa al OJO
+    // Para el filtro del pase de agua por nodo (ver Water::inlandRelEye): el parche entero.
+    m_inlandCenterRelEye = anchorRelEye + (tan + bit) * (0.5f * spanM);
+    m_inlandSpanM = spanM;
     ip.tanU   = glm::vec4(tan, 0.0f);
     ip.tanV   = glm::vec4(bit, 0.0f);
-    ip.misc   = glm::vec4(spanM, (float)n, 0.0f, 1.0f);   // w = 1 → hay campo
+    // z = 1 si detrás de la lámina viene el bloque de FETCH (2·n² floats, ver `FluidHost`): con
+    // él, `harukaWaterFetchAt` deja de dar "ilimitado" sobre el parche y un charco recibe su rizo.
+    const bool hasFetch = (int)surfaceM->size() >= 2 * n * n;
+    ip.misc   = glm::vec4(spanM, (float)n, hasFetch ? 1.0f : 0.0f, 1.0f);   // w = 1 → hay campo
     if (!RHI::valid(m_inlandWaterUBO))
         m_inlandWaterUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(ip), &ip,
                                              RHI::BufferMemory::Dynamic);
@@ -401,15 +408,23 @@ void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n
     (void)up;   // el marco lo fijan tan/bit; `up` queda por si el parche deja de ser tangente
 }
 
-void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st) {
+void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st, const glm::vec3& anchorRelEye) {
     m_oceanStateCPU = st;   // ver el log de `[Mar]`: cuantos trenes caben en la celda del agua
     RHI::Device* dev = RHI::device();
     if (!dev) { m_oceanParamsValid = false; return; }
-    // Gemelo EXACTO del bloque `OceanParams` de `lib/ocean_params.glsl`: 4 vec4 de trenes + misc.
-    // std140 alinea cada elemento de un array a 16 bytes, y un vec4 ya los ocupa — sin relleno.
-    struct OceanParamsUBO { glm::vec4 wave[Haruka::Planet::OCEAN_WAVES]; glm::vec4 misc; } up{};
+    // Gemelo EXACTO del bloque `OceanParams` de `lib/ocean_params.glsl`: 8 vec4 de trenes + misc +
+    // 2 vec4 de desfase + ancla. std140 alinea cada elemento de un array a 16 bytes, y un vec4 ya
+    // los ocupa — sin relleno.
+    struct OceanParamsUBO { glm::vec4 wave[Haruka::Planet::OCEAN_WAVES]; glm::vec4 misc;
+                            glm::vec4 phase[2]; glm::vec4 anchor; } up{};
+    static_assert(sizeof(OceanParamsUBO) == (Haruka::Planet::OCEAN_WAVES + 4) * 16, "OceanParams descuadrado");
     for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i)
         up.wave[i] = glm::vec4(st.wave[i][0], st.wave[i][1], st.wave[i][2], st.wave[i][3]);
+    for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) up.phase[i / 4][i % 4] = st.phase[i];
+    // El ANCLA del mar relativa al ojo: la fase de cada vertice se mide desde ella (ver
+    // `OceanState::phase`). Y el viento filtrado, para que el fetch y los borreguillos de la GPU
+    // usen el mismo que la CPU en vez de deducirlo de una Hs que ya no invierte PM.
+    up.anchor = glm::vec4(anchorRelEye, st.windMS);
     // ⚠️ `z` = EL RELOJ DEL OLEAJE, y viaja aquí a propósito. El mar del clipmap lo sacaba de
     // `uDebug.y` (el UBO del planeta), y el pase de agua del quadtree no tiene ese bloque: metí por
     // error `uShade.y` —que es el índice de capa de orilla— y el agua habría salido CONGELADA. El
@@ -3127,6 +3142,112 @@ void TerrestrialPlanet::bakeHeightMap() {
 //
 // En OpenGL el cambio es inocuo: agrupar el compute antes del pase no altera el resultado.
 // ────────────────────────────────────────────────────────────────────────────────────────────────
+// ── EL CAMPO VOLUMÉTRICO ALREDEDOR DE LA CÁMARA ─────────────────────────────────────────────────
+//
+// Se cargan las columnas de chunks a menos de `kVoxStreamM` del pie de la cámara, y en cada columna
+// los chunks radiales desde 3 por debajo de la superficie (las cuevas bajan hasta 300 m) hasta el
+// que contiene la superficie. Se descarga lo que queda a más del doble. El remallado lo acota el
+// renderer (3 por frame); el horneado de un chunk sin cueva es un `assign` y no se nota.
+void TerrestrialPlanet::streamVox(const glm::dvec3& camRelPlanet) {
+    if (!m_vox.configured()) {
+        if (m_voxEditsDir.empty() && !m_voxWarnedNoSave) {
+            m_voxWarnedNoSave = true;
+            HARUKA_LOGW("Vox", "sin carpeta de partida para los trazos (setVoxEditsDir): lo que se "
+                               "pique NO se guardara al salir");
+        }
+        // `HARUKA_VOX_SAVE_DIR`: carpeta de partida para trazos y cuevas colocadas mientras el juego
+        // no la fije con `setVoxEditsDir` (para probar sin manos).
+        if (m_voxEditsDir.empty()) if (const char* e = std::getenv("HARUKA_VOX_SAVE_DIR")) m_voxEditsDir = e;
+        m_vox.configure(m_seed, m_config.radius, bakeCacheDir(), m_voxEditsDir,
+                        [this](const glm::dvec3& d) { return (float)sampleHeight(d); });
+        // Lo que trajo la escena: cuevas, islas y la carpeta de trazos del diseñador.
+        if (!m_voxDesignerDir.empty()) m_vox.setDesignerDir(m_voxDesignerDir);
+        m_vox.setCaves(m_sceneCaves);
+        m_vox.setIslands(m_sceneIslands);
+        // `HARUKA_CAVE_AT=lat,lon`: coloca una cueva a mano ahí al arrancar (la celda que contiene el
+        // punto). Es la forma de probar cuevas mientras no hay editor: la siembra automática está a 0.
+        if (const char* e = std::getenv("HARUKA_CAVE_AT")) {
+            double lat = 0.0, lon = 0.0;
+            if (std::sscanf(e, "%lf,%lf", &lat, &lon) == 2) {
+                const double la = glm::radians(lat), lo = glm::radians(lon);
+                m_vox.placeCave(glm::dvec3(std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)));
+            }
+        }
+        for (const glm::dvec3& c : m_vox.placedCaveMouths())
+            HARUKA_LOGI("Vox", "cueva colocada: su BOCA en SURVIVAL_SPAWN=%.5f,%.5f",
+                        glm::degrees(std::asin(std::clamp(c.y, -1.0, 1.0))), glm::degrees(std::atan2(c.z, c.x)));
+        // La definición tal cual iría a la escena (para copiarla de un borrador a un `.scene`).
+        for (const Haruka::CaveDef& d : m_vox.caveDefs()) {
+            const glm::dvec3 p = m_config.position + d.centerDir * m_config.radius;
+            HARUKA_LOGI("Vox", "  Cave '%s': position [%.3f, %.3f, %.3f] · radiusM %.0f · depthM %.0f · mouth [%.3f, %.3f, %.4f] · draftSeed %u · planta '%s'",
+                        d.name.c_str(), p.x, p.y, p.z, d.radiusM, d.depthM, d.mouth.x, d.mouth.y, d.mouth.z, d.draftSeed, d.planta.c_str());
+        }
+        for (const Haruka::IslandDef& d : m_vox.islandDefs()) {
+            const glm::dvec3 p = m_config.position + d.centerDir * m_config.radius;
+            HARUKA_LOGI("Vox", "  Island '%s': position [%.3f, %.3f, %.3f] · radiusM %.0f · topM %.0f · rootM %.0f · altitudeM %.0f · draftSeed %u",
+                        d.name.c_str(), p.x, p.y, p.z, d.radiusM, d.topM, d.rootM, d.altitudeM, d.draftSeed);
+        }
+        // `HARUKA_ISLAND_AT=lat,lon`: ídem para una isla flotante (la celda de 20 km que contiene el punto).
+        if (const char* e = std::getenv("HARUKA_ISLAND_AT")) {
+            double lat = 0.0, lon = 0.0;
+            if (std::sscanf(e, "%lf,%lf", &lat, &lon) == 2) {
+                const double la = glm::radians(lat), lo = glm::radians(lon);
+                m_vox.placeIsland(glm::dvec3(std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)));
+            }
+        }
+        for (const Haruka::IslandBox& b : m_vox.placedIslandBoxes())
+            HARUKA_LOGI("Vox", "isla colocada: centro en %.5f,%.5f · base a %.0f m sobre la cota · medio lado %.0f m",
+                        glm::degrees(std::asin(std::clamp(b.centerDir.y, -1.0, 1.0))),
+                        glm::degrees(std::atan2(b.centerDir.z, b.centerDir.x)), b.altitudeM, b.radiusM);
+        HARUKA_LOGI("Vox", "campo volumetrico configurado: seed %u · chunks de %.0f m · %d^3 voxeles",
+                    m_seed, Haruka::kVoxChunkM, Haruka::kVoxN);
+    }
+    m_vox.pollCaveJobs();   // las cuevas que se hornean en hilo: recoger y rehacer sus chunks
+    const double camR = glm::length(camRelPlanet);
+    if (camR < 1.0) return;
+    const glm::dvec3 up = camRelPlanet / camR;
+    const double elev = sampleHeight(up);
+    // ⚠️ Sólo cerca del suelo: desde 2 km de altura no se entra en ninguna cueva y cargar columnas
+    // por el planeta entero al volar sería tirar memoria (y el streaming de nodos ya tiene su coste).
+    if (camR - (m_config.radius + elev) > 2000.0) { m_vox.unloadFar(up, 0.0); return; }
+
+    // ⚠️ POR COLUMNAS DE CHUNK, NO A PASOS DE METROS: cerca de una esquina del cubo un chunk mide
+    // ~50 m y un barrido a 100 m se saltaba columnas (ver `VoxWorld::columnsNear`).
+    for (const Haruka::VoxKey& col : m_vox.columnsNear(up, kVoxStreamM)) {
+        // La columna se ancla al chunk de la SUPERFICIE en su centro y baja tres (las cajas de cueva
+        // llegan a 300 m).
+        const glm::dvec3 dir = m_vox.chunkCenterDir(col);
+        const Haruka::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
+        for (int dk = -3; dk <= 0; ++dk) { Haruka::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
+    }
+    // ⚠️ UNA CUEVA CERCANA SE CARGA ENTERA. Con el radio de 260 m, una caja de 700 m se quedaba a
+    // medias: al quitar la pared del borde (delantal con el campo) lo que se veía era el HUECO
+    // donde la galería sigue y no hay malla ("el cacho que falta"). Si la caja está a menos de
+    // `kVoxCaveLoadM`, se cargan todas sus columnas, en toda su profundidad.
+    for (const Haruka::CaveBox& b : m_vox.placedCaveBoxes()) {
+        const double dist = std::acos(std::clamp(glm::dot(b.centerDir, up), -1.0, 1.0)) * m_config.radius;
+        if (dist > kVoxCaveLoadM + (double)b.radiusM) continue;
+        const int kDown = (int)std::ceil((double)b.depthM / Haruka::kVoxChunkM) + 1;
+        for (const Haruka::VoxKey& col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42)) {
+            const glm::dvec3 dir = m_vox.chunkCenterDir(col);
+            const Haruka::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
+            for (int dk = -kDown; dk <= 0; ++dk) { Haruka::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
+        }
+    }
+    // Y UNA ISLA CERCANA, ENTERA: sus columnas por los chunks radiales que la caja cruza, de la
+    // raíz a la cima. Nada de esto depende del suelo bajo la cámara: se puede estar encima.
+    for (const Haruka::IslandBox& b : m_vox.placedIslandBoxes()) {
+        const double dist = std::acos(std::clamp(glm::dot(b.centerDir, up), -1.0, 1.0)) * m_config.radius;
+        if (dist > kVoxIslandLoadM + (double)b.radiusM) continue;
+        const int kLo = (int)std::floor((b.baseRM - (double)b.rootM - (double)Haruka::kIslandRangeM - m_config.radius) / Haruka::kVoxChunkM);
+        const int kHi = (int)std::floor((b.baseRM + (double)b.topM + (double)Haruka::kIslandRangeM - m_config.radius) / Haruka::kVoxChunkM);
+        for (Haruka::VoxKey col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42))
+            for (int k = kLo; k <= kHi; ++k) { col.k = k; m_vox.ensure(col); }
+    }
+    m_vox.unloadFar(up, std::max(kVoxStreamM * 2.0, std::max(kVoxCaveLoadM, kVoxIslandLoadM) + 900.0));
+    m_voxRenderer.update(m_vox, camRelPlanet, elev);
+}
+
 void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& viewDir,
                                 double fovYRad, double aspect, double viewportH) {
     m_cullReady = false;
@@ -3140,6 +3261,13 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
     if (!dev) return;
     RHI::Context* ctx = dev->beginFrame();
     if (!ctx) return;
+
+    // ── EL CAMPO VOLUMÉTRICO: streaming, remallado y ventana de recorte ────────────────────────
+    // Antes del pase de nodos: la ventana de recorte que éste ata tiene que estar hecha ya.
+    {
+        HARUKA_PROFILE("planet.vox"); HARUKA_GPU_SCOPE("planet.vox");
+        streamVox(cameraPos - m_config.position);
+    }
 
     // ── EL PASE DE NODOS (v5) GENERA AQUÍ, Y NO ES OPCIONAL QUE SEA AQUÍ ─────────────────────────
     //
@@ -3934,7 +4062,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
     }
 
-    { HARUKA_PROFILE("planet.base.draw");
+    { HARUKA_PROFILE("planet.base.draw"); HARUKA_GPU_SCOPE("planet.base.draw");
     // ⚠️ CON EL PASE v5 LA MALLA BASE NO SE DIBUJA, y saltársela es la mitad del ahorro. Al principio
     // solo se anulaba el clipmap, así que el v5 se SUMABA a la base en vez de sustituirla: `biome.frag`
     // seguía corriendo por píxel con su sphere-trace de 2-16 pasos, que es justo el coste que el v5
@@ -3991,7 +4119,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // en el panel con `planet.v5.draw` ANIDADO DENTRO, que es exactamente la lectura que induce el
     // nombre: parece que el v5 cuelga del clipmap. Un nombre obsoleto en un instrumento cuesta mas
     // que codigo obsoleto — esta sesion ya se fue por ese camino con el comentario de `terrainTriM`.
-    { HARUKA_PROFILE("planet.terrain.draw");
+    { HARUKA_PROFILE("planet.terrain.draw"); HARUKA_GPU_SCOPE("planet.terrain.draw");
     // ── PASE v5: TERRENO POR NODOS (HARUKA_TERRAIN_V5=1) ────────────────────────────────────────
     //
     // ⚠️ SUSTITUYE al clipmap, no se suma. Añadir una cuarta superficie coplanar sería exactamente el
@@ -4059,9 +4187,17 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 sh.shoreLayer  = m_materialTable.shoreLayer();
                 sh.texAnchor   = glm::vec3(ubo.uTexAnchor);
                 sh.lightDir    = m_sunDir;
+                sh.aerial      = m_aerial;
                 const char* flat = std::getenv("HARUKA_TERRAIN_V5_FLAT");
                 sh.on = !(flat && flat[0] == '1');
+                if (m_voxRenderer.cutValid()) { sh.cutTex = m_voxRenderer.cutTexture(); sh.cutSpace = m_voxRenderer.cutSpace(); }
                 m_nodeRenderer.setShade(sh);
+                // Las paredes del campo se pintan con la MISMA roca que el terreno.
+                m_voxRenderer.setRock(m_terrainAlbedoArray, m_materialTable.rockLayer(), m_tiling);
+                static bool s_saidRock = false;
+                if (!s_saidRock) { s_saidRock = true;
+                    HARUKA_LOGI("Vox", "paredes con la roca del terreno: capa %d (albedo %s, tile %.0f m)",
+                                m_materialTable.rockLayer(), RHI::valid(m_terrainAlbedoArray) ? "si" : "NO", m_tiling); }
             }
             // ── EL AGUA, SOBRE LOS MISMOS NODOS ─────────────────────────────────────────────────
             //
@@ -4082,12 +4218,23 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 w.inlandUBO   = m_inlandWaterValid ? m_inlandWaterUBO : RHI::BufferHandle{};
                 w.inlandSSBO  = m_inlandWaterValid ? m_inlandWaterSSBO : RHI::BufferHandle{};
                 w.on          = m_hasWater;
+                w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeLevelAt(dir); };
+                w.inlandRelEye  = m_inlandWaterValid ? m_inlandCenterRelEye : glm::vec3(0.0f);
+                w.inlandRadiusM = m_inlandWaterValid ? m_inlandSpanM * 0.75f : 0.0f;
                 m_nodeRenderer.setWater(w);
             }
             // ⚠️ `prepare` (compute) YA se despachó fuera del pase — ver prepareNodePass(). Aquí solo
             // se dibuja: una barrera dentro del render pass invalida el command buffer en Vulkan.
             const auto st = m_nodeRenderer.draw(ctx, cameraPos, m_config.position,
                                                 m_config.radius, rotVP);
+            // Las paredes del campo volumétrico, TRAS el terreno: las bocas ya están recortadas y
+            // la cueva se ve por el agujero. Mismo `rotVP`, misma convención relativa al ojo.
+            {
+                // La dirección de vista sale de la matriz de vista (fila -Z), como en el resto del pase.
+                const glm::mat3 r = glm::mat3(view);
+                const glm::vec3 viewDir = -glm::normalize(glm::vec3(r[0][2], r[1][2], r[2][2]));
+                m_voxRenderer.draw(m_vox, rotVP, cameraPos - m_config.position, m_sunDir, viewDir);
+            }
             // ⚠️ EL PICO, NO EL INSTANTE. La sabana gruesa al girar dura UN frame, y este log muestrea
             // 1 de cada 120: el valor instantaneo casi siempre sale 0 aunque el bug este vivo. Se
             // guarda el maximo de la ventana, que es lo que hay que mirar para decir que no pasa.
@@ -4234,14 +4381,14 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 // cortados"). Los dos estan probados por tests contra rayos de pantalla —cero
                 // descartes indebidos en ambos— asi que si aqui salen cifras altas, el que miente es
                 // el test, no el motor. Ese es el dato que falta.
-                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (SIN HUECO %zu, por ancestro %zu) · "
-                            "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu"
+                HARUKA_LOGI("TerrenoV5", "sel %zu -> dibujados %zu (con agua %zu) (SIN HUECO %zu, por ancestro %zu) · "
+                            "niveles %u..%u · mas lejano %.0f km · descartes: cono %zu / horizonte %zu / MESETA del horizonte %zu"
                             " · tope del selector %zu%s · stride %u..%u en %u draws · %.1f M tris"
                             " · residentes %zu/%zu · SIN RANGO %zu · alt %.0f m"
                             " · presupuesto %zu/frame (PICO %zu · dt %.1f ms) · PICO en 120 frames: VIVOS %zu, por ancestro %zu (>=2 niveles %zu en %zu ancestros,"
                             " el mas hondo %u), %.0f nodos/s",
-                            st.selected, st.drawn, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
-                            st.farthestKm, st.culledFrustum, st.culledHorizon,
+                            st.selected, st.drawn, st.waterNodes, st.noSlot, st.ancestors, st.levelMin, st.levelMax,
+                            st.farthestKm, st.culledFrustum, st.culledHorizon, st.plateauSkipped,
                             st.selBudget,
                             (st.selBudget > 0 && st.selected + 8 >= st.selBudget) ? " SATURADO" : "",
                             st.strideMin, st.stride, st.drawCalls,
@@ -4311,7 +4458,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // Se dibuja DESPUÉS del clipmap y con más sesgo de profundidad: dentro de ±256 m los dos
     // describen el mismo suelo y tiene que ganar éste, que es el que de verdad se pisa. Cuando el
     // paso 5 abra el hueco en el clipmap dejarán de solaparse y el sesgo sobrará.
-    { HARUKA_PROFILE("planet.nearring.draw");
+    { HARUKA_PROFILE("planet.nearring.draw"); HARUKA_GPU_SCOPE("planet.nearring.draw");
     // ⚠️ CON EL v5 NO HAY HUECO QUE TAPAR, Y ESTE ANILLO ERA "EL TERRENO FALSO A PIE".
     //
     // El anillo cercano existe para rellenar el HUECO DEL NIVEL 0 del clipmap, dibujando la malla de

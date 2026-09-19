@@ -34,7 +34,22 @@ layout(std140, binding = 29) uniform OceanParams {
     ///     juego: apagar la espuma sin tocar la geometria de la ola es la unica forma de contestar
     ///     "¿lo blanco es la espuma?" mirando la pantalla.
     vec4 uOceanMisc;
+    /// DESFASE por tren (rad), 8 floats en dos vec4. Gemelo de `OceanState::phase`: continuidad de
+    /// la fase al mover el ancla del mar.
+    vec4 uOceanPhase[2];
+    /// xyz = ANCLA DEL MAR relativa al OJO (m) · w = viento filtrado que levanto este mar (m/s).
+    /// La fase de la ola se mide desde el ancla: `k·(D·(x − ancla)) − ω·t`. Con la posicion
+    /// planetocentrica `D·x` era 0 (D es tangente y x radial) y el mar entero subia en bloque.
+    vec4 uOceanAnchor;
 };
+
+float harukaPhaseAt(int i) {
+    if (uOceanMisc.y < 0.5) return 0.0;
+    return (i < 4) ? uOceanPhase[0][i] : uOceanPhase[1][i - 4];
+}
+
+/// Viento que levanto el mar (m/s); 0 si no se sabe (bloque sin atar): entonces se deduce de Hs.
+float harukaWindKnown() { return (uOceanMisc.y > 0.5) ? uOceanAnchor.w : 0.0; }
 
 /// La tabla de REFERENCIA, la que estaba escrita a mano. Sigue aquí como red de seguridad: si el
 /// bloque no se ató (pipeline nuevo, orden de bind mal), un UBO sin atar lee CEROS — y con lambda 0

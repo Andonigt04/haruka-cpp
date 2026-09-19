@@ -46,6 +46,7 @@
 #include "renderer/simple_mesh.h"
 #include "tools/object_types.h"
 #include "tools/profiler.h"
+#include "rhi/rhi_gpu_scope.h"   // HARUKA_GPU_SCOPE: el gemelo de HARUKA_PROFILE para la GPU
 #include "settings/settings_manager.h"
 #include "io/image_writer.h"
 #include "core/asset_paths.h"
@@ -65,7 +66,10 @@
 #include <cstring>
 #include <iostream>
 
-namespace Haruka { namespace Core {
+namespace Haruka {
+/// Escala de altura del aire para la perspectiva aerea (m). Ver lib/aerial.glsl.
+static constexpr float kAerialScaleHeightM = 4000.0f;
+ namespace Core {
 
 using AppInternal::g_sceneRenderQueue;
 
@@ -143,8 +147,16 @@ static_assert(sizeof(PresentParams) == 32, "PresentParams std140 size mismatch")
 struct PropParams {
     glm::vec3 wind;   float time;       // viento del clima (mundo, m/s) · segundos
     glm::vec4 matPBR;                   // x=metallic y=roughness z=ao w=máscara de texturas (bits)
+    glm::vec4 originRel;                // origen del scatter relativo a la cámara (ver m_propGpu)
+    glm::vec4 aerial;                   // perspectiva aérea (lib/aerial.glsl): x = 1/L · y = día
 };
-static_assert(sizeof(PropParams) == 32, "PropParams std140 size mismatch");
+static_assert(sizeof(PropParams) == 64, "PropParams std140 size mismatch");
+/// UBO del pase de sombras de props: matriz de luz + el mismo origen relativo.
+struct PropShadowUBO {
+    glm::mat4 lightSpace;
+    glm::vec4 originRel;
+};
+static_assert(sizeof(PropShadowUBO) == 80, "PropShadowUBO std140 size mismatch");
 
 // Material PER-PIXEL del prototipo de props: el MISMO grafo de texturas del editor de node graph
 // (perlin → altura → albedo por rampa + normal por derivadas + AO/roughness desde la altura),
@@ -351,8 +363,10 @@ struct CloudParams {
     glm::vec4 vortexPos[4];   // 160..224  xyz = punto de SUELO del eje, RELATIVO a la cámara · w = radio del núcleo (m)
     glm::vec4 vortexInfo[4];  // 224..288  x = techo (m) · y = viento (m/s) · z = giro · w = 1 tromba / 0 tornado
     glm::vec4 vortexN;        // 288..304  x = cuántos · y = tiempo (s)
+    glm::vec4 aerial;         // 304..320  perspectiva aérea (lib/aerial.glsl): x = 1/L · y = día
+    glm::vec4 blend;          // 320..336  x = peso del horneado NUEVO frente al anterior (bindings 3/4)
 };
-static_assert(sizeof(CloudParams) == 304, "CloudParams std140 size mismatch");
+static_assert(sizeof(CloudParams) == 336, "CloudParams std140 size mismatch");
 /** @brief Techo de embudos que el shader dibuja a la vez. Cuatro en pantalla ya es el fin del mundo. */
 static constexpr int kCloudMaxVortices = 4;
 
@@ -632,8 +646,14 @@ void Application::renderFrameContent() {
     }
 
     HARUKA_PROFILE("renderFrameContent");
-    const uint32_t width  = _window ? _window->getWidth()  : static_cast<uint32_t>(m_editorViewportW);
-    const uint32_t height = _window ? _window->getHeight() : static_cast<uint32_t>(m_editorViewportH);
+    // ⚠️ CON TARGET DEL EDITOR, EL TAMAÑO ES EL DEL VIEWPORT, no el de la ventana. En el editor la
+    // ventana existe (headless, 1280x720 de fábrica) y el viewport de ImGui mide lo que mida el
+    // panel: con el aspecto de la ventana la imagen salía ESTIRADA en el panel y el rayo del ratón
+    // (calculado con el aspecto del panel) no caía donde se veía el cursor ("no apunta bien por la
+    // resolución/escala").
+    const bool editorSized = _editorTarget && m_editorViewportW > 0 && m_editorViewportH > 0;
+    const uint32_t width  = editorSized ? static_cast<uint32_t>(m_editorViewportW) : (_window ? _window->getWidth()  : static_cast<uint32_t>(m_editorViewportW));
+    const uint32_t height = editorSized ? static_cast<uint32_t>(m_editorViewportH) : (_window ? _window->getHeight() : static_cast<uint32_t>(m_editorViewportH));
 
     // GPU timer disabled during RHI migration
 
@@ -642,7 +662,12 @@ void Application::renderFrameContent() {
     // effect or non-1.0 render scale is active. With everything off this stays
     // false → the scene renders straight to the screen exactly as before.
     const auto& gpost  = Haruka::SettingsManager::get().graphics();
-    const float rscale = std::min(std::max(gpost.renderScale, 0.5f), 2.0f);
+    // `HARUKA_RENDER_SCALE=<0.5..2>`: A/B de coste por PÍXEL sin tocar los ajustes guardados. Si el
+    // tiempo de GPU cae con el cuadrado de la escala, el pase es de relleno (fragmentos/overdraw);
+    // si no se mueve, es de vértices o de draws.
+    static const float s_envScale = [] { const char* e = std::getenv("HARUKA_RENDER_SCALE");
+                                         return e ? (float)std::atof(e) : 0.0f; }();
+    const float rscale = std::min(std::max(s_envScale > 0.0f ? s_envScale : gpost.renderScale, 0.5f), 2.0f);
     const bool  wantFXAA = (gpost.antialiasing == Haruka::Settings::AntialiasingMode::FXAA);
     // ⚠️ `HARUKA_NOBLOOM=1` apaga SOLO el bloom, no el pase. Existe para atribuir GPU por diferencia
     // (el profiler mide CPU y todo el coste de GPU cae en `present.swap`). El primer intento saltaba
@@ -747,7 +772,7 @@ void Application::renderFrameContent() {
     // del segundo frame ningún fragmento a la misma profundidad volvía a pasar → viewport negro.
     // El cielo, cuando corre, reabre este mismo pase SIN clear y pinta encima.
     if (frameCtx) {
-        HARUKA_PROFILE("frame.clear(pass)");
+        HARUKA_PROFILE("frame.clear(pass)"); HARUKA_GPU_SCOPE("frame.clear(pass)");
         RHI::ClearValues frameClear;
         frameClear.clearColor = true;
         frameClear.color[0] = sky.r; frameClear.color[1] = sky.g; frameClear.color[2] = sky.b;
@@ -768,9 +793,10 @@ void Application::renderFrameContent() {
     // aislados— mientras en ejecución el dispositivo se perdía a mitad de frame y quedaba la
     // pantalla negra. Si alguien mueve esta llamada dentro de un pase, vuelve el mismo fallo.
     if (_camera && _planetarySystem) {
-        HARUKA_PROFILE("frame.compute.prepare");
+        HARUKA_PROFILE("frame.compute.prepare"); HARUKA_GPU_SCOPE("frame.compute.prepare");
         uint32_t vpW = 0, vpH = 0;
         if (RHI::Device* d = RHI::device()) d->framebufferSize(vpW, vpH);
+        if (_editorTarget && m_editorViewportW > 0 && m_editorViewportH > 0) { vpW = (uint32_t)m_editorViewportW; vpH = (uint32_t)m_editorViewportH; }   // el viewport del IDE, no la ventana headless
 
         // ⚠️ EL ASPECTO SALE DEL FRAMEBUFFER REAL, NO DE `_camera->aspectRatio`.
         //
@@ -882,6 +908,24 @@ void Application::renderFrameContent() {
             const glm::vec2 windEN(glm::dot(wx.wind, eastW), glm::dot(wx.wind, northW));
             m_windSlant = glm::clamp(windEN.x * 0.02f, -0.45f, 0.45f);   // para el pase de lluvia
 
+            // ── EL AIRE DEL FRAME (perspectiva aérea) ─────────────────────────────────────────
+            // Visibilidad L: ~60 km con aire seco, ~18 km húmedo, y la lluvia la recorta más. `día`
+            // es el mismo `harukaSkyDay` del cielo (smoothstep(-0,12, 0,22) de la elevación solar),
+            // para que el color del aire sea el del domo y no otro.
+            {
+                const float hum = glm::clamp(wx.humidity, 0.0f, 1.0f);
+                float L = glm::mix(60000.0f, 18000.0f, hum);
+                L *= glm::mix(1.0f, 0.35f, glm::clamp(precip, 0.0f, 1.0f));
+                const float day = glm::smoothstep(-0.12f, 0.22f, sunElev);
+                // z = altitud del ojo · w = escala de altura del aire (m). Con ellas la extincion
+                // integra el AIRE atravesado y no los metros: desde orbita el planeta se veia al 1,5 %
+                // de su color (e^{-250/60}) — "todo en blanco". Ver lib/aerial.glsl. 4 km: entre los
+                // 8 km del Rayleigh y los ~1,5-2 km del aerosol de la capa limite, que es lo que la
+                // visibilidad L describe.
+                m_aerial = glm::vec4(1.0f / L, day, std::max(alt, 0.0f), kAerialScaleHeightM);
+                if (_planetarySystem) _planetarySystem->setAerial(m_aerial);
+            }
+
             SkyParams sp{};
             sp.invViewProjRot = invVPRot;
             sp.sunDir         = sunDir;
@@ -930,7 +974,7 @@ void Application::renderFrameContent() {
             ctx->beginRenderPass(sceneTargetPass, sceneClear);
             if (!RHI::valid(sceneTargetPass))                        // el pass a pantalla NO fija viewport
                 ctx->setViewport(0, 0, (int)width, (int)height);
-            { HARUKA_PROFILE("sky.draw");
+            { HARUKA_PROFILE("sky.draw"); HARUKA_GPU_SCOPE("sky.draw");
             ctx->bindPipeline(m_skyPSO);                             // programa + depth off (no escribe z)
             ctx->bindUniformBuffer(5, m_skyUBO);
             ctx->draw(3);
@@ -1214,7 +1258,7 @@ void Application::renderFrameContent() {
         // el pase de escena); dos piezas con la misma malla y el mismo material comparten el draw.
         std::unordered_map<std::string, ConstInstGroup> constGroups;
 
-        { HARUKA_PROFILE("scene.objects.draw");
+        { HARUKA_PROFILE("scene.objects.draw"); HARUKA_GPU_SCOPE("scene.objects.draw");
         for (const auto& command : g_sceneRenderQueue) {
             const auto* obj = command.object;
             if (!obj) continue;
@@ -1380,7 +1424,7 @@ void Application::renderFrameContent() {
 
         // --- Pase INSTANCIADO de piezas de construcción (mismo render pass/depth que la escena) ---
         if (!constGroups.empty() && RHI::valid(m_scenePSO)) {
-            HARUKA_PROFILE("scene.construction.instanced");
+            HARUKA_PROFILE("scene.construction.instanced"); HARUKA_GPU_SCOPE("scene.construction.instanced");
             if (!RHI::valid(m_constInstPSO)) {                    // PSO instanciado (una vez)
                 using V = Haruka::Renderer::Vertex;
                 const std::string vs = Shader::baseDir() + "shaders/construction_inst.vert";
@@ -1495,7 +1539,7 @@ void Application::renderFrameContent() {
         static const bool s_noProps = [] { const char* e = std::getenv("HARUKA_NOPROPS");
                                            return e && e[0] == '1'; }();
         if (!s_noProps && m_propScatterEnabled && m_propRegistry.prototypeCount() > 0 && RHI::valid(m_scenePSO)) {
-            HARUKA_PROFILE("scene.prop.instanced");
+            HARUKA_PROFILE("scene.prop.instanced"); HARUKA_GPU_SCOPE("scene.prop.instanced");
             if (!RHI::valid(m_propInstPSO)) {                 // PSO instanciado de props (una vez)
                 const std::string vs = Shader::baseDir() + "shaders/prop_inst.vert";
                 const std::string fs = Shader::baseDir() + "shaders/prop_inst.frag";
@@ -1627,7 +1671,7 @@ void Application::renderFrameContent() {
                 // ENTERO filtrando `io.prototype != pi`. Con ~61k celdas del scatter y ~4 prototipos
                 // eso son ~160k iteraciones/frame con cull+mat4 cada una — el grueso de los ~39 ms
                 // que medía `scene.prop.instanced`. Ahora se barre UNA vez (O(N)) y se agrupa.
-                static std::vector<std::vector<Haruka::InstanceDataFloat>> s_propBuckets;
+                static std::vector<std::vector<uint32_t>> s_propBuckets;   // índices en m_propGpu
                 static std::vector<int> s_aliveCounts;
                 static std::vector<int> s_drawnCounts;
                 // Un bucket por (prototipo, nivel): el draw instanciado necesita que todas las
@@ -1666,6 +1710,10 @@ void Application::renderFrameContent() {
                 const int bufCap = _instancing->getMaxInstances();
                 const glm::dvec3 camToCenter = planetC - camD;   // una resta dvec por frame, no por instancia
                 std::vector<int> aliveSeenPerProto((size_t)protoCount, 0);
+                // Las instancias ya están transformadas relativas a `m_propOrigin` (ver rebuildPropGpu);
+                // por frame solo hace falta el origen relativo a la cámara, UNA resta en double.
+                if (m_propGpu.size() != m_propRegistry.instances().size()) rebuildPropGpu(planetC, planetR);
+                const glm::vec3 originRel = glm::vec3(m_propOrigin - camD);
 
                 // SONDA: el pase cuesta 21,4 ms de los 33 del frame y barre 36 621 instancias para
                 // dibujar 6 792. "Optimizar el culling" sin saber si el tiempo se va en CULLAR, en
@@ -1675,7 +1723,9 @@ void Application::renderFrameContent() {
                 const auto tSweep0 = PClock::now();
                 size_t nSwept = 0, nKept = 0;
 
-                for (const auto& io : m_propRegistry.instances()) {
+                const auto& insts = m_propRegistry.instances();
+                for (uint32_t ii = 0; ii < (uint32_t)insts.size(); ++ii) {
+                    const auto& io = insts[ii];
                     ++nSwept;
                     const int pi = io.prototype;
                     if (pi < 0 || pi >= protoCount) continue;
@@ -1684,30 +1734,12 @@ void Application::renderFrameContent() {
                     uint8_t cull = 0;
                     if (alive) {
                         ++s_aliveCounts[(size_t)pi];
-                        const glm::vec3 posF = glm::vec3(
-                            camToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
+                        // Posición relativa a la cámara = la relativa al origen + el origen relativo.
+                        const glm::vec3 posF = glm::vec3(m_propGpu[ii].model[3]) + originRel;
                         int lod = 0;
                         cull = propCull(posF, io.scale * 8.0f, lod);
                         if (cull == 0) {
-                            glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
-                            m *= glm::mat4_cast(glm::rotation(up, io.dir));
-                            // ⚠️ El giro de yaw va sobre el eje LOCAL, no sobre `io.dir`.
-                            // `glm::rotate(m, a, eje)` POST-multiplica: el eje se interpreta en el
-                            // espacio de `m`, que ya lleva la rotación up→dir. Pasarle `io.dir`
-                            // giraba en torno a `R·dir`, un eje que NO es la vertical del prop —
-                            // así que el yaw (aleatorio por celda, 0..2π) TUMBABA el objeto tanto
-                            // como lo giraba. Era el "los árboles están tumbados": los de yaw≈0
-                            // salían de pie y el resto caídos en ángulos arbitrarios.
-                            // El eje local que la rotación manda a `dir` es +Y (el `up` de arriba),
-                            // así que girar sobre +Y en local ES girar sobre la vertical en mundo.
-                            m = glm::rotate(m, io.yaw, up);
-                            m = glm::scale(m, glm::vec3(io.scale));
-                            Haruka::InstanceDataFloat inst;
-                            inst.model = m;
-                            inst.color = glm::vec4(io.tint, 1.0f);
-                            inst.scale = glm::vec3(io.scale);
-                            inst.breakMask = (float)io.breakMask;   // ramas que ya no están
-                            s_propBuckets[(size_t)(pi * kLods + lod)].push_back(inst);
+                            s_propBuckets[(size_t)(pi * kLods + lod)].push_back(ii);
                             ++nKept;
                         }
                     }
@@ -1772,11 +1804,11 @@ void Application::renderFrameContent() {
                         } else if (shape == Haruka::Planet::PropShapeKind::House) {
                             tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
                         } else {
-                            const Haruka::Planet::PropTreeParams tp = Haruka::Planet::propTreeParams();
+                            const Haruka::Planet::PropTreeParams tp = Haruka::Planet::propTreeParams(proto.name);
                             Haruka::Tools::ProcGraph::Graph g;
                             int tree = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
                                 (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments,
-                                kLodDetail[lod]);
+                                kLodDetail[lod], tp.style);
                             g.compile();
                             if (!Haruka::Tools::ProcGraph::bakeTreeMesh(g, tree, tm)) {
                                 // bakeTreeMesh devuelve la malla en `out` solo si el nodo es válido;
@@ -1855,6 +1887,8 @@ void Application::renderFrameContent() {
                     pp.wind = windWorld;
                     pp.time = propTime;
                     pp.matPBR = glm::vec4(pg.metallicS, pg.roughnessS, pg.aoS, (float)pg.mask);
+                    pp.originRel = glm::vec4(originRel, 0.0f);
+                    pp.aerial    = m_aerial;
 
                     // UN DRAW POR NIVEL. El instancing sigue intacto —cada comando lleva todas las
                     // instancias de su nivel— y lo que baja es la geometría por instancia. Son 3 draws
@@ -1865,7 +1899,8 @@ void Application::renderFrameContent() {
                         auto& bucket = s_propBuckets[(size_t)(pi * kLods + lod)];
                         if (bucket.empty()) continue;
                         if (!RHI::valid(pg.vbo[lod]) || pg.indexCount[lod] == 0) continue;
-                        _instancing->setInstances(bucket);
+                        { HARUKA_PROFILE("prop.gather");
+                          _instancing->setInstancesGather(m_propGpu.data(), bucket); }
                         const int drawnN = _instancing->getInstanceCount();
                         drawnTotal += drawnN;
                         renderedVertices  += pg.vertexCount[lod] * drawnN;
@@ -1895,10 +1930,12 @@ void Application::renderFrameContent() {
                             (pi < (int)m_propParamsUBOs.size()) ? m_propParamsUBOs[(size_t)pi]
                                                                 : RHI::BufferHandle{};
                         if (RHI::valid(ppUbo)) {
+                            HARUKA_PROFILE("prop.ubo.update");
                             uboDev->updateBuffer(ppUbo, 0, sizeof(pp), &pp);
                             sceneCtx->bindUniformBuffer(6, ppUbo);
                         }
-                        _instancing->render(sceneCtx, pg.indexCount[lod], 1);
+                        { HARUKA_PROFILE("prop.upload+draw");
+                          _instancing->render(sceneCtx, pg.indexCount[lod], 1); }
                         ++renderedDrawCalls;
                     }
                     s_drawnCounts[(size_t)pi] = drawnTotal;
@@ -1924,6 +1961,24 @@ void Application::renderFrameContent() {
                         }
                         HARUKA_LOGDIAG("PropDiag", "protoCount=%d instances=%zu%s", protoCount,
                                     m_propRegistry.instances().size(), line.c_str());
+                        // La instancia MÁS CERCANA de cada prototipo con bucket de nivel 0: dónde está
+                        // respecto a la cámara y cuánto mide su malla. Si un prototipo "se dibuja" y no
+                        // se ve, aquí se distingue "está a 300 m" de "mide 2 cm" de "está bajo tierra".
+                        for (int di = 0; di < protoCount; ++di) {
+                            const auto& b0 = s_propBuckets[(size_t)(di * kLods + 0)];
+                            if (b0.empty()) continue;
+                            float best = 1e30f; glm::vec3 bp(0.0f); float bs = 0.0f;
+                            for (const uint32_t bi : b0) {
+                                const glm::vec3 pp3 = glm::vec3(m_propGpu[bi].model[3]) + originRel;
+                                const float d = glm::length(pp3);
+                                if (d < best) { best = d; bp = pp3; bs = m_propGpu[bi].scale.x; }
+                            }
+                            auto itM = m_propProtoMesh.find(m_propRegistry.prototype(di).name);
+                            HARUKA_LOGDIAG("PropDiag", "  %s: nivel0 mas cercano a %.1f m (cam-rel %.1f %.1f %.1f · escala %.2f) · vbo0 verts %u idx %u",
+                                m_propRegistry.prototype(di).name.c_str(), best, bp.x, bp.y, bp.z, bs,
+                                itM != m_propProtoMesh.end() ? itM->second.vertexCount[0] : 0u,
+                                itM != m_propProtoMesh.end() ? itM->second.indexCount[0] : 0u);
+                        }
                     }
                 }
                 sceneCtx->bindPipeline(m_scenePSO);   // restaura el PSO de escena (el cierre lo asume)
@@ -1973,7 +2028,7 @@ void Application::renderFrameContent() {
 
                 RHI::ClearValues shadowClear;
                 shadowClear.clearColor = false; shadowClear.clearDepth = true; shadowClear.depth = 1.0f;
-                { HARUKA_PROFILE("shadow.pass");
+                { HARUKA_PROFILE("shadow.pass"); HARUKA_GPU_SCOPE("shadow.pass");
                 sceneCtx->beginRenderPass(_shadow->pass(), shadowClear);
                 _gameInterface->onRenderShadow(lightSpace, glm::vec3(_camera->position));
                 renderPropShadows(sceneCtx, lightSpace);   // ← los props del motor, ver abajo
@@ -2016,7 +2071,7 @@ void Application::renderFrameContent() {
                 {
                 RHI::ClearValues maskClear;
                 maskClear.clearColor = false; maskClear.clearDepth = true; maskClear.depth = 1.0f;
-                { HARUKA_PROFILE("skymask.pass");
+                { HARUKA_PROFILE("skymask.pass"); HARUKA_GPU_SCOPE("skymask.pass");
                 sceneCtx->beginRenderPass(m_skyMask->pass(), maskClear);
                 _gameInterface->onRenderShadow(m_skySpace, glm::vec3(_camera->position));
                 m_skyMaskOn = true;
@@ -2048,7 +2103,7 @@ void Application::renderFrameContent() {
 
             // --- SimplePlanet terrain rendering ---
             {
-                HARUKA_PROFILE("simple_planet.draw");
+                HARUKA_PROFILE("simple_planet.draw"); HARUKA_GPU_SCOPE("simple_planet.draw");
                 const float aspectC = (height > 0u) ? (float)width / (float)height : 1.0f;
                 const glm::mat4 projC    = _camera->getProjectionMatrix(aspectC);
                 const glm::mat4 viewC    = _camera->getViewMatrix();
@@ -2101,7 +2156,7 @@ void Application::renderFrameContent() {
     // escena y su DEPTH siguen bindeados. Dibujada después del composite, la gota no tendría contra
     // qué probarse y volveríamos al filtro de pantalla que se acaba de quitar.
     if (m_rainAmount > 0.01f || m_snowAmount > 0.01f) {
-        HARUKA_PROFILE("precip.draw");
+        HARUKA_PROFILE("precip.draw"); HARUKA_GPU_SCOPE("precip.draw");
         const glm::dvec3 camD = glm::dvec3(_camera->position);
         glm::dvec3 upD(0, 1, 0);
         // Altura de la BASE DE LA NUBE respecto a la cámara. Sin planeta activo no hay cota de la que
@@ -2167,7 +2222,7 @@ void Application::renderFrameContent() {
                             : true;   // sin planeta terrestre resuelto, no se decide aquí
     if (!_fluidHost && bodyHasWater) _fluidHost = std::make_unique<Haruka::FluidHost>();
     if (_fluidHost && bodyHasWater && _planetarySystem && _camera) {
-        HARUKA_PROFILE("fluid.setup+render(rios/lagos)");
+        HARUKA_PROFILE("fluid.setup+render(rios/lagos)"); HARUKA_GPU_SCOPE("fluid.setup+render(rios/lagos)");
         glm::dvec3 pc; double pr;
             if (_planetarySystem->getActivePlanet(pc, pr)) {
                 _fluidHost->planetCenter = pc;
@@ -2175,7 +2230,17 @@ void Application::renderFrameContent() {
                 _fluidHost->hasPlanet    = true;
             }
             _fluidHost->terrainHeightFn = [this](const glm::dvec3& wp) -> double {
-                return _planetarySystem->sampleTerrainHeight(wp);
+                // El LECHO, no el heightfield: donde hay boca de cueva el agua cae hasta el fondo
+                // del foso y se ACUMULA allí (Andoni: "el agua es que se acumule en esa parte").
+                const double h = _planetarySystem->sampleTerrainHeight(wp);
+                if (const auto* t = _planetarySystem->activeTerrestrial()) {
+                    glm::dvec3 pc; double pr = 0.0;
+                    if (_planetarySystem->getActivePlanet(pc, pr) && pr > 0.0) {
+                        const glm::dvec3 rel = wp - pc;
+                        if (glm::length(rel) > 1e-9) return h - (double)t->vox().floorDepthM(rel / glm::length(rel));
+                    }
+                }
+                return h;
             };
             // El campo de lagos HORNEADO: con él, la siembra del parche deja de depender de su borde.
             _fluidHost->bakedWaterFn = [this](const glm::dvec3& wp) -> double {
@@ -2188,6 +2253,33 @@ void Application::renderFrameContent() {
                 const double len = glm::length(rel);
                 if (len < 1e-9) return (double)Haruka::Planet::WATER_FILL_DRY;
                 return (double)t->lakeLevelAt(rel / len);
+            };
+            // LA RUGOSIDAD DEL LECHO, del bioma del punto (el mismo clasificador que pinta el suelo
+            // y reparte los props): con ella la fricción del agua interior es del sitio — sobre roca
+            // o hielo la lámina corre, en un bosque se frena — y no un número único para el parche.
+            _fluidHost->bedRoughnessFn = [this](const glm::dvec3& wp) -> double {
+                const auto* t = _planetarySystem ? _planetarySystem->activeTerrestrial() : nullptr;
+                if (!t) return 0.03;
+                glm::dvec3 pc; double pr = 0.0;
+                if (!_planetarySystem->getActivePlanet(pc, pr) || pr <= 0.0) return 0.03;
+                const glm::dvec3 rel = wp - pc;
+                const double len = glm::length(rel);
+                if (len < 1e-9) return 0.03;
+                const glm::dvec3 dir = rel / len;
+                const Haruka::FieldSample f = t->fieldSampleAt(glm::vec3(dir));
+                const double hM = _planetarySystem->sampleTerrainHeight(wp);
+                // Pendiente por diferencias sobre 8 m, en el plano tangente: basta para separar
+                // "acantilado" (0,55 rad) de lo demás, que es lo único que el bioma le pide.
+                const glm::dvec3 t1 = glm::normalize(std::abs(dir.y) < 0.99 ? glm::cross(dir, glm::dvec3(0, 1, 0))
+                                                                             : glm::cross(dir, glm::dvec3(1, 0, 0)));
+                const glm::dvec3 t2 = glm::cross(dir, t1);
+                const double e = 4.0;
+                const double dh1 = _planetarySystem->sampleTerrainHeight(wp + t1 * e) - _planetarySystem->sampleTerrainHeight(wp - t1 * e);
+                const double dh2 = _planetarySystem->sampleTerrainHeight(wp + t2 * e) - _planetarySystem->sampleTerrainHeight(wp - t2 * e);
+                const float slope = (float)std::atan(std::sqrt(dh1 * dh1 + dh2 * dh2) / (2.0 * e));
+                const Haruka::Planet::Biome b = Haruka::Planet::classifyBiome(
+                    Haruka::Planet::BiomeSample{f.tempC, f.humidity, (float)hM, slope});
+                return (double)Haruka::Planet::manningForBiome(b);
             };
             const auto* tp = _planetarySystem->activeTerrestrial();
             if (tp) {
@@ -2242,8 +2334,24 @@ void Application::renderFrameContent() {
             constexpr float kRainFullIntensityMPerSec = 1.0e-3f;
             _fluidHost->rainPerSec = (m_rainAmount > 0.01f)
                                    ? m_rainAmount * kRainFullIntensityMPerSec : 0.0f;
+            // EL CICLO, en el parche: evapora con la temperatura y el sol (misma escala de juego
+            // que la lluvia: 1e-5 m/s a 25 °C y cielo abierto = 36x lo real) y se infiltra despacio
+            // en el suelo. Lo evaporado vuelve al clima como vapor en la celda del jugador.
+            {
+                const Haruka::WeatherSample wxl = _planetarySystem ? _planetarySystem->weatherAt(glm::dvec3(_camera->position)) : Haruka::WeatherSample{};
+                const float fT  = glm::clamp((wxl.tempC + 5.0f) / 35.0f, 0.0f, 1.5f);
+                const float sun = 1.0f - 0.8f * glm::clamp(wxl.cloudCover, 0.0f, 1.0f);
+                const float speed = (float)Haruka::WeatherSystem::cycleSpeed();
+                _fluidHost->evapPerSec  = 1.0e-5f * fT * sun * speed;
+                _fluidHost->infilPerSec = 0.5e-5f * speed;
+            }
             _fluidHost->update(deltaTime > 0.0f ? deltaTime : 0.016f,
                                glm::dvec3(_camera->position));
+            if (_fluidHost->evaporatedM3 > 0.0 && _planetarySystem) {
+                glm::dvec3 pcw; double prw;
+                if (_planetarySystem->getActivePlanet(pcw, prw))
+                    _planetarySystem->weatherMut().addMoisture(glm::dvec3(_camera->position) - pcw, _fluidHost->evaporatedM3);
+            }
 
             int fw = (int)width, fh = (int)height;
             if (m_postActive && _postScene) { fw = m_postW; fh = m_postH; }
@@ -2311,7 +2419,7 @@ void Application::renderFrameContent() {
     }
 
     if (m_volumetricClouds && !cloudVolumetricOff() && _camera && _planetarySystem && _worldSystem) {
-        HARUKA_PROFILE("scene.clouds.volumetric");
+        HARUKA_PROFILE("scene.clouds.volumetric"); HARUKA_GPU_SCOPE("scene.clouds.volumetric");
         RHI::Device* dev = RHI::device();
         glm::dvec3 pcD; double prD = 0.0;
         if (dev && _planetarySystem->getActivePlanet(pcD, prD) && prD > 0.0) {
@@ -2470,7 +2578,8 @@ void Application::renderFrameContent() {
                 float coverMax = coverC;
                 if (s_forced >= 0.0f) {
                     coverMax = s_forced;
-                    if (RHI::valid(m_cloudCoverTex)) { dev->destroy(m_cloudCoverTex); m_cloudCoverTex = {}; }
+                    if (RHI::valid(m_cloudCoverTex))     { dev->destroy(m_cloudCoverTex);     m_cloudCoverTex = {}; }
+                    if (RHI::valid(m_cloudCoverTexPrev)) { dev->destroy(m_cloudCoverTexPrev); m_cloudCoverTexPrev = {}; }
                 } else {
                     // ⚠️ ESTA CADENCIA SE MEDIA EN UN RELOJ QUE EL MUNDO YA NO SIGUE, y con el reloj
                     // del cluster acelerado eso se ve. El campo se horneaba cada 2 segundos REALES;
@@ -2516,11 +2625,13 @@ void Application::renderFrameContent() {
                         std::vector<float>& humField  = m_cloudHumField;
                         std::vector<float>& tempField = m_cloudTempField;
                         std::vector<float>& waterField = m_cloudWaterField;
+                        std::vector<float>& groundField = m_cloudGroundField;
                         if (humField.size() != (size_t)CW * CH) {
                             const auto tHum = std::chrono::steady_clock::now();
                             humField.assign((size_t)CW * CH, 0.5f);
                             tempField.assign((size_t)CW * CH, 15.0f);
                             waterField.assign((size_t)CW * CH, 0.0f);
+                            groundField.assign((size_t)CW * CH, 0.0f);
                             const double kPiH = 3.14159265358979323846;
                             for (int y = 0; y < CH; ++y) {
                                 const double lat = (0.5 - ((double)y + 0.5) / CH) * kPiH;
@@ -2535,6 +2646,7 @@ void Application::renderFrameContent() {
                                     // ⚠️ NO `landMask`: es la puerta del continente y aqui salia 1 en todo el
                                     // planeta (MAR 0.000 en el log). El mar es la cota bajo el nivel del mar.
                                     waterField[(size_t)y * CW + x] = (ts.waterType == Haruka::WaterType::Ocean) ? 1.0f : 0.0f;
+                                    groundField[(size_t)y * CW + x] = std::max(ts.elevKm, 0.0f) * 1000.0f;   // la nube nace SOBRE el suelo
                                 }
                             }
                             double sh = 0.0; float hmn = 1.0f, hmx = 0.0f;
@@ -2549,7 +2661,10 @@ void Application::renderFrameContent() {
                                                          " se reintenta" : "");
                             // ⚠️ Un campo plano a cero no se cachea: significa que el clima del planeta
                             // todavia no existia. Cachearlo dejaba el cielo vacio el resto de la partida.
-                            if (hmean < 0.02) { humField.clear(); tempField.clear(); waterField.clear(); }
+                            if (hmean < 0.02) { humField.clear(); tempField.clear(); waterField.clear(); groundField.clear(); }
+                            // EL CICLO DEL AGUA arranca con los mismos campos: el clima guarda su copia
+                            // de temperatura y máscara de agua y desde ahí evapora, llueve y difunde.
+                            else _planetarySystem->weatherMut().setMoistureFields(tempField.data(), waterField.data(), CW, CH);
                         }
                         if (humField.size() != (size_t)CW * CH) {
                             // Sin humedad valida todavia no se hornea el cielo: mejor esperar un
@@ -2564,18 +2679,36 @@ void Application::renderFrameContent() {
                         // ocho frames parados cada dos segundos de mundo. Se lanza con copias y se
                         // recoge cuando este; entre medias se ve el cielo anterior, que a 2 s de
                         // mundo de distancia es indistinguible.
+                        // El ciclo del agua avanza con el reloj del CLIMA (el mismo que mueve los
+                        // frentes), no con el del render.
+                        {
+                            const double tw = _planetarySystem->weather().time();
+                            if (m_lastWeatherT >= 0.0 && tw > m_lastWeatherT)
+                                _planetarySystem->weatherMut().stepMoisture(tw - m_lastWeatherT, m_lastSkyRGBA.size() == (size_t)CW * CH * 4 ? m_lastSkyRGBA.data() : nullptr);
+                            m_lastWeatherT = tw;
+                            static double s_lastLog = -1e9;
+                            if (tw - s_lastLog > 120.0) {   // cada 2 min de clima: la medida del ciclo
+                                s_lastLog = tw;
+                                const auto& st = _planetarySystem->weather().moistureStats();
+                                HARUKA_LOGI("Clima", "ciclo del agua: vapor medio %.3f · max %.3f · evaporado acumulado %.4f m · consumido por lluvia %.3f · agua de lluvia en el parche %.0f m3",
+                                            st.meanM, st.maxM, st.evapTotal, st.rainTotal, _fluidHost ? _fluidHost->dynamicWaterM3 : 0.0);
+                            }
+                        }
                         if (!m_skyBakeJob.valid()) {
                             Haruka::WeatherSystem wcopy = _planetarySystem->weather();
-                            std::vector<float> tcopy = tempField, hcopy = humField, wcp = waterField;
+                            std::vector<float> tcopy = tempField, hcopy = humField, wcp = waterField, gcp = groundField;
+                            // Humedad EFECTIVA: la estática del bioma + el vapor del ciclo del agua.
+                            wcopy.effectiveHumidityField(humField.data(), hcopy.data(), CW, CH);
                             m_skyBakeJob = std::async(std::launch::async,
-                                [wcopy, tcopy = std::move(tcopy), hcopy = std::move(hcopy), wcp = std::move(wcp), CW, CH]() {
+                                [wcopy, tcopy = std::move(tcopy), hcopy = std::move(hcopy), wcp = std::move(wcp), gcp = std::move(gcp), CW, CH]() {
                                     SkyBake r; r.w = CW; r.h = CH;
                                     r.rgba.assign((size_t)CW * CH * 4, 0.0f);
                                     r.hi.assign((size_t)CW * CH * 4, 0.0f);
                                     const auto t0 = std::chrono::steady_clock::now();
                                     r.coverMax = wcopy.bakeSky(tcopy.data(), hcopy.data(), CW, CH,
                                                                r.rgba.data(), &r.baseMin, &r.topMax,
-                                                               wcp.data(), r.hi.data());
+                                                               wcp.data(), r.hi.data(),
+                                                               gcp.size() == (size_t)CW * CH ? gcp.data() : nullptr);
                                     r.ms = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - t0).count();
                                     return r;
@@ -2590,6 +2723,7 @@ void Application::renderFrameContent() {
                         SkyBake r = m_skyBakeJob.get();
                         const int CW = r.w, CH = r.h;
                         const std::vector<float>& sky = r.rgba;
+                        m_lastSkyRGBA = r.rgba;   // lo que el ciclo del agua lee como "dónde llueve"
                         // Media por AREA (un texel polar cubre cos(lat) veces menos superficie).
                         const double kPi = 3.14159265358979323846;
                         double sum = 0.0, wsum = 0.0, sumTower = 0.0; int nStorm = 0;
@@ -2609,18 +2743,47 @@ void Application::renderFrameContent() {
                                 if (sky[i * 4 + 3] > 0.3f) { ++nStorm; sumTower += sky[i * 4 + 2] - sky[i * 4 + 1]; }
                             }
                         }
-                        if (RHI::valid(m_cloudCoverTex)) dev->destroy(m_cloudCoverTex);
+                        // HARUKA_DIAG: cuanto CAMBIA el horneado entre dos seguidos (cada 2 s de
+                        // mundo): un salto grande aqui es un tiron del cielo, porque la textura se
+                        // cambia de golpe, sin fundido.
+                        {
+                            static std::vector<float> s_prev; static double s_prevT = 0.0;
+                            static const bool s_diag = std::getenv("HARUKA_DIAG") != nullptr;
+                            if (s_diag && s_prev.size() == sky.size()) {
+                                double mCov = 0, mBase = 0, mTop = 0, sCov = 0; int n = 0;
+                                for (size_t i = 0; i < sky.size(); i += 4) {
+                                    mCov  = std::max(mCov,  (double)std::fabs(sky[i] - s_prev[i]));
+                                    mBase = std::max(mBase, (double)std::fabs(sky[i + 1] - s_prev[i + 1]));
+                                    mTop  = std::max(mTop,  (double)std::fabs(sky[i + 2] - s_prev[i + 2]));
+                                    sCov += std::fabs(sky[i] - s_prev[i]); ++n;
+                                }
+                                HARUKA_LOGI("Clouds", "horneado vs anterior (%.1f s de mundo): cobertura max |d| %.3f (media %.4f) · base max |d| %.0f m · techo max |d| %.0f m",
+                                            worldNow - s_prevT, mCov, n ? sCov / n : 0.0, mBase, mTop);
+                            }
+                            if (s_diag) { s_prev = sky; s_prevT = worldNow; }
+                        }
+                        // ⚠️ EL HORNEADO ANTERIOR NO SE TIRA: SE FUNDE. Cada 2 s de mundo la textura
+                        // cambiaba de golpe, y medido (HARUKA_DIAG) entre dos horneados seguidos el
+                        // techo de algun texel salta hasta 1,4 km y la cobertura 0,05: la torre que
+                        // tienes encima crece 1,4 km en un frame — "las nubes van a tirones". El shader
+                        // lee las dos (bindings 1/2 = nuevo, 3/4 = anterior) y mezcla con `blend.x`,
+                        // que va de 0 a 1 durante los 2 s hasta el siguiente horneado.
+                        if (RHI::valid(m_cloudCoverTexPrev)) dev->destroy(m_cloudCoverTexPrev);
+                        if (RHI::valid(m_cloudHiTexPrev))    dev->destroy(m_cloudHiTexPrev);
+                        m_cloudCoverTexPrev = m_cloudCoverTex; m_cloudHiTexPrev = m_cloudHiTex;
+                        m_cloudBlend.onBake(worldNow);   // (core/cloud_motion.h; medido en test_cloud_motion)
                         RHI::TextureDesc ct;
                         ct.width = CW; ct.height = CH; ct.format = RHI::Format::RGBA32F;
                         ct.filter = RHI::Filter::Linear; ct.wrap = RHI::Wrap::Repeat;
                         ct.mipmaps = false; ct.initialData = sky.data();
                         m_cloudCoverTex = dev->createTexture(ct);
-                        if (RHI::valid(m_cloudHiTex)) dev->destroy(m_cloudHiTex);
                         ct.initialData = r.hi.data();
                         m_cloudHiTex = dev->createTexture(ct);
                         m_cloudCoverMax = r.coverMax;
                         m_cloudBaseMin  = r.baseMin;
-                        m_cloudTopMax   = r.topMax;
+                        // La marcha es UNA por la columna de aire: hasta el techo de la atmosfera util
+                        // (13 km: el hielo del vapor alto en el tropico esta a 10-11 km).
+                        m_cloudTopMax   = std::max(r.topMax, 13000.0f);
                         static int s_bakeLog = 0;
                         if ((s_bakeLog++ % 30) == 0)   // cada minuto de mundo, no cada horneado
                             HARUKA_LOGI("Clouds", "cielo horneado %dx%d en %.1f ms (en hilo) · cobertura media por AREA %.3f "
@@ -2697,12 +2860,32 @@ void Application::renderFrameContent() {
                     // unidades del campo (metros x escala), calculado en doble para no perder el
                     // desplazamiento en la suma con un `ct` grande.
                     const double simT = _planetarySystem ? _planetarySystem->simulationTime() : (double)ct;
-                    const double driftM = simT * (double)Haruka::WeatherSystem::kCloudLevelWindMul;
-                    cp.wind = glm::vec4((float)(glm::dot(glm::dvec3(m_windVec), glm::dvec3(eastC))  * driftM
-                                                * Haruka::WeatherSystem::kFieldScale),
-                                        (float)(glm::dot(glm::dvec3(m_windVec), glm::dvec3(northC)) * driftM
-                                                * Haruka::WeatherSystem::kFieldScale),
-                                        ct, altEye);
+                    // ⚠️ ERA `viento(ahora) x simT`, Y ESO DA TIRONES. El viento que devuelve el clima
+                    // cambia cada frame (rachas, y con la camara, porque se lee en `camD`); multiplicado
+                    // por un simT de horas, una variacion de 0,1 m/s movia el campo cientos de km de
+                    // golpe: "las nubes van a tirones" (Andoni). La deriva es la INTEGRAL del viento,
+                    // asi que se acumula en doble frame a frame con el dt del mundo; el viento de hoy
+                    // solo decide cuanto avanza HOY. El primer frame arranca en viento x simT para que
+                    // el cielo no empiece en el origen del campo en cada partida.
+                    {
+                        const glm::dvec3 wcl = glm::dvec3(m_windVec) * (double)Haruka::WeatherSystem::kCloudLevelWindMul
+                                             * (double)Haruka::WeatherSystem::kFieldScale;
+                        const glm::dvec2 wEN(glm::dot(wcl, glm::dvec3(eastC)), glm::dot(wcl, glm::dvec3(northC)));
+                        const glm::dvec2 dAdv = m_cloudDrift.advance(wEN, simT);   // core/cloud_motion.h
+                        // HARUKA_DIAG: cuanto habria SALTADO el campo con la formula vieja (viento x simT)
+                        // frente a lo que avanza integrando. En unidades del campo (1 = ~1,4 km).
+                        static const bool s_diag = std::getenv("HARUKA_DIAG") != nullptr;
+                        if (s_diag) {
+                            static glm::dvec2 s_oldPrev(0.0); static double s_maxOld = 0.0, s_maxNew = 0.0; static int s_n = 0;
+                            const glm::dvec2 oldNow = wEN * simT;
+                            if (s_n > 0) { s_maxOld = std::max(s_maxOld, glm::length(oldNow - s_oldPrev)); s_maxNew = std::max(s_maxNew, glm::length(dAdv)); }
+                            s_oldPrev = oldNow;
+                            if (++s_n % 300 == 0)
+                                HARUKA_LOGI("Clouds", "deriva: salto maximo por frame en 300 frames — formula vieja (viento x simT) %.4f · integrada %.4f unidades del campo (viento %.2f m/s)",
+                                            s_maxOld, s_maxNew, (double)glm::length(m_windVec)), s_maxOld = s_maxNew = 0.0;
+                        }
+                    }
+                    cp.wind = glm::vec4((float)m_cloudDrift.offset.x, (float)m_cloudDrift.offset.y, ct, altEye);
 
                     // ⚠️⚠️ ESTO APAGABA LAS NUBES DESDE ORBITA, Y SU PREMISA ERA FALSA POR LOS DOS
                     // LADOS. Era `1 - smoothstep(0, radio*0.02, altitud)`: en la Tierra eso vale CERO
@@ -2767,6 +2950,12 @@ void Application::renderFrameContent() {
                         return e ? (float)std::atoi(e) : 7.0f;
                     }();
                     cp.vortexN = glm::vec4((float)nv, ct, fovYc / (float)std::max(m_cloudRTH, 1), s_modes);
+                    cp.aerial  = m_aerial;
+                    {   // fundido del horneado (core/cloud_motion.h): 0 al llegar el nuevo, 1 antes del siguiente
+                        const double wnow = _planetarySystem ? _planetarySystem->simulationTime() : 0.0;
+                        const double f = RHI::valid(m_cloudCoverTexPrev) ? m_cloudBlend.factor(wnow) : 1.0;
+                        cp.blend = glm::vec4((float)f, 0.0f, 0.0f, 0.0f);
+                    }
 
                     dev->updateBuffer(m_cloudUBO, 0, sizeof(cp), &cp);
 
@@ -2791,6 +2980,10 @@ void Application::renderFrameContent() {
                                                                          : m_cloudCoverDummy);
                         cctx->bindTexture(2, RHI::valid(m_cloudHiTex) ? m_cloudHiTex
                                                                       : m_cloudCoverDummy);
+                        cctx->bindTexture(3, RHI::valid(m_cloudCoverTexPrev) ? m_cloudCoverTexPrev
+                                          : (RHI::valid(m_cloudCoverTex) ? m_cloudCoverTex : m_cloudCoverDummy));
+                        cctx->bindTexture(4, RHI::valid(m_cloudHiTexPrev) ? m_cloudHiTexPrev
+                                          : (RHI::valid(m_cloudHiTex) ? m_cloudHiTex : m_cloudCoverDummy));
                         cctx->draw(3);
                         cctx->endRenderPass();
 
@@ -2806,6 +2999,11 @@ void Application::renderFrameContent() {
                         cctx->setViewport(0, 0, cw, ch);
                         cctx->bindPipeline(m_cloudUpPSO);
                         cctx->bindTexture(0, dev->getColorTexture(m_cloudRT, 0));
+                        // ⚠️ Y LA PROFUNDIDAD DE LA ESCENA, la misma copia que leyo el pase: con ella
+                        // la composicion descarta las muestras de nube que se marcharon contra OTRA
+                        // escena (el otro lado de la silueta del terreno). Sin esto el recorte sale en
+                        // escalera de bloques de 4 px — ver la nota larga de `cloud_upsample.frag`.
+                        cctx->bindTexture(1, dev->getDepthTexture(m_cloudDepthRT));
                         cctx->draw(3);
                         cctx->endRenderPass();
                     }
@@ -2820,7 +3018,7 @@ void Application::renderFrameContent() {
     // FXAA off and scale 1.0 the scene never took this path (m_postActive false).
     // === PASE 2 MIGRADO A PSO/Context: el present/composite (FXAA + bloom + upscale). ===
     if (m_postActive && _postScene) {
-        HARUKA_PROFILE("post.composite(FXAA+bloom+upscale)");
+        HARUKA_PROFILE("post.composite(FXAA+bloom+upscale)"); HARUKA_GPU_SCOPE("post.composite(FXAA+bloom+upscale)");
         RHI::Device* dev = RHI::device();
         if (m_quadBuf.id == 0) setupQuad();   // VBO del quad (el VAO lo aporta el PSO)
 
@@ -3504,17 +3702,18 @@ void Application::renderPropShadows(RHI::Context* ctx, const glm::mat4& lightSpa
     }
     if (!RHI::valid(m_propShadowPSO)) return;
 
-    if (!RHI::valid(m_propShadowUBO))
-        m_propShadowUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(glm::mat4),
-                                           nullptr, RHI::BufferMemory::Dynamic);
-    dev->updateBuffer(m_propShadowUBO, 0, sizeof(lightSpace), &lightSpace);
-
     // Centro y planeta, para reconstruir la transformación igual que el pase de color.
     glm::dvec3 planetC(0.0); double planetR = 0.0;
     if (!_planetarySystem || !_planetarySystem->getActivePlanet(planetC, planetR)) return;
     const glm::dvec3 camD = glm::dvec3(_camera->position);
-    const glm::dvec3 camToCenter = planetC - camD;
-    const glm::vec3  up(0.0f, 1.0f, 0.0f);
+    if (m_propGpu.size() != m_propRegistry.instances().size()) rebuildPropGpu(planetC, planetR);
+    const glm::vec3 originRel = glm::vec3(m_propOrigin - camD);
+
+    if (!RHI::valid(m_propShadowUBO))
+        m_propShadowUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PropShadowUBO),
+                                           nullptr, RHI::BufferMemory::Dynamic);
+    PropShadowUBO su; su.lightSpace = lightSpace; su.originRel = glm::vec4(originRel, 0.0f);
+    dev->updateBuffer(m_propShadowUBO, 0, sizeof(su), &su);
 
     // Radio de la caja de sombra con margen: el volumen es ±42 m, y un prop justo fuera puede
     // proyectar dentro. 1,6× cubre eso sin barrer el planeta.
@@ -3524,7 +3723,22 @@ void Application::renderPropShadows(RHI::Context* ctx, const glm::mat4& lightSpa
     ctx->bindPipeline(m_propShadowPSO);
     ctx->bindUniformBuffer(0, m_propShadowUBO);
 
-    static std::vector<Haruka::InstanceDataFloat> s_shadowBucket;
+    // UN barrido de las instancias (no uno por prototipo: con 19 prototipos eran 3,4 M de vueltas por
+    // frame): la caja de la luz es de ±67 m, así que entran unas decenas de las 180 000.
+    static std::vector<std::vector<uint32_t>> s_shadowBuckets;
+    s_shadowBuckets.resize((size_t)protoCount);
+    for (auto& b : s_shadowBuckets) b.clear();
+    {
+        const auto& insts = m_propRegistry.instances();
+        for (uint32_t ii = 0; ii < (uint32_t)insts.size(); ++ii) {
+            const auto& io = insts[ii];
+            if (io.prototype < 0 || io.prototype >= protoCount) continue;
+            if (io.state != (uint32_t)Haruka::InstancedObjectState::Alive) continue;
+            const glm::vec3 posF = glm::vec3(m_propGpu[ii].model[3]) + originRel;
+            if (glm::dot(posF, posF) > kBox2) continue;      // fuera de la caja de la luz
+            s_shadowBuckets[(size_t)io.prototype].push_back(ii);
+        }
+    }
     for (int pi = 0; pi < protoCount; ++pi) {
         const Haruka::InstancedPrototype& proto = m_propRegistry.prototype(pi);
         if (proto.name.empty()) continue;
@@ -3539,25 +3753,10 @@ void Application::renderPropShadows(RHI::Context* ctx, const glm::mat4& lightSpa
         const int sl = (pg.indexCount[kShadowLod] > 0 && RHI::valid(pg.vbo[kShadowLod])) ? kShadowLod : 0;
         if (pg.indexCount[sl] == 0 || !RHI::valid(pg.vbo[sl]) || !RHI::valid(pg.ebo[sl])) continue;
 
-        s_shadowBucket.clear();
-        for (const auto& io : m_propRegistry.instances()) {
-            if (io.prototype != pi) continue;
-            if (io.state != (uint32_t)Haruka::InstancedObjectState::Alive) continue;
-            const glm::vec3 posF = glm::vec3(camToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
-            if (glm::dot(posF, posF) > kBox2) continue;      // fuera de la caja de la luz
-            glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
-            m *= glm::mat4_cast(glm::rotation(up, io.dir));
-            m = glm::rotate(m, io.yaw, up);   // eje LOCAL (ver la nota del pase de color)
-            m = glm::scale(m, glm::vec3(io.scale));
-            Haruka::InstanceDataFloat inst;
-            inst.model = m;
-            inst.color = glm::vec4(1.0f);
-            inst.scale = glm::vec3(io.scale);
-            s_shadowBucket.push_back(inst);
-        }
-        if (s_shadowBucket.empty()) continue;
+        const auto& bucket = s_shadowBuckets[(size_t)pi];
+        if (bucket.empty()) continue;
 
-        _instancing->setInstances(s_shadowBucket);
+        _instancing->setInstancesGather(m_propGpu.data(), bucket);
         ctx->bindVertexBuffer(pg.vbo[sl], 0);
         ctx->bindIndexBuffer(pg.ebo[sl]);
         _instancing->render(ctx, pg.indexCount[sl], 1);
@@ -3668,10 +3867,15 @@ void Application::refreshPropScatter() {
     const double speed   = elapsed > 1e-3 ? distCam / elapsed : 0.0;
     const double refreshM = std::max(30.0, speed * 1.5);
     const bool tooSoon = elapsed < 0.5;
-    if ((distCam < refreshM || tooSoon) &&
+    // Y cuando el CAMPO cambia (una boca que carga, un trazo): los props que estaban sobre el
+    // agujero tienen que irse, aunque no te hayas movido.
+    const uint64_t voxVer = planet->vox().version();
+    const bool campoCambio = voxVer != m_propScatterVoxVersion;
+    if ((distCam < refreshM || tooSoon) && !campoCambio &&
         !m_propScatterPlanet.empty() && m_propRegistry.prototypeCount() > 0)
         return;
     m_propScatterLastCam = camPos;
+    m_propScatterVoxVersion = voxVer;
     s_lastT = nowT;
 
     // El campo real del planeta + la tabla de capas que DECLARA (orden = prioridad de instalación).
@@ -3682,22 +3886,25 @@ void Application::refreshPropScatter() {
 
     // Registra UN prototipo por mesh de capa (malla compartida por todas sus instancias).
     // `meshSeed` fija el bake determinista de la malla del prototipo (p.ej. bakeTreeMesh).
+    // Uno por NOMBRE de prototipo: el mesh de la capa, o cada variante × cada semilla ("conifer#2").
     for (const auto& L : table.layers) {
-        if (L.mesh.empty()) continue;
-        bool found = false;
-        for (int i = 0; i < m_propRegistry.prototypeCount(); ++i)
-            if (m_propRegistry.prototype(i).name == L.mesh) { found = true; break; }
-        if (found) continue;
-        Haruka::InstancedPrototype p;
-        p.name     = L.mesh;
-        // meshSeed determinista (hash32 de planeta+mesh): el bake de la malla prototipo (bakeTreeMesh)
-        // es reproducible en cualquier plataforma/ejecución — un árbol es SIEMPRE el mismo árbol.
-        uint32_t h = 2166136261u;
-        for (const char c : m_propScatterPlanet) h = (h ^ (uint8_t)c) * 16777619u;
-        for (const char c : L.mesh)             h = (h ^ (uint8_t)c) * 16777619u;
-        p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
-        p.lodLevel = 0;
-        m_propRegistry.addPrototype(p);
+        for (const std::string& pname : L.prototypeNames()) {
+            bool found = false;
+            for (int i = 0; i < m_propRegistry.prototypeCount(); ++i)
+                if (m_propRegistry.prototype(i).name == pname) { found = true; break; }
+            if (found) continue;
+            Haruka::InstancedPrototype p;
+            p.name     = pname;
+            // meshSeed determinista (hash32 de planeta+nombre): el bake de la malla prototipo
+            // (bakeTreeMesh) es reproducible en cualquier plataforma/ejecución — un árbol es SIEMPRE el
+            // mismo árbol. El "#k" entra en el hash: cada semilla de una variante es otra malla.
+            uint32_t h = 2166136261u;
+            for (const char c : m_propScatterPlanet) h = (h ^ (uint8_t)c) * 16777619u;
+            for (const char c : pname)              h = (h ^ (uint8_t)c) * 16777619u;
+            p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
+            p.lodLevel = 0;
+            m_propRegistry.addPrototype(p);
+        }
     }
     if (m_propRegistry.prototypeCount() == 0) return;
 
@@ -3707,14 +3914,9 @@ void Application::refreshPropScatter() {
     params.seed   = planet->config().seed ? planet->config().seed : 1u;
 
     // Coloca las instancias (deterministas por celda) y las traduce al registro.
-    // ⚠️ CAPAS MUERTAS. `scatterPropsNear` recorre las capas EN ORDEN DE PRIORIDAD y hace `break` en
-    // la primera que acepta la celda: una capa permisiva colocada arriba se queda con TODAS las
-    // celdas y las de abajo no llegan a colocar ni un prop. El autor declara 4 capas, ve props de
-    // una sola, y el motor registra los prototipos igual y los deja a cero sin decir nada.
-    //
-    // Y hay que distinguir DOS causas con arreglos opuestos: una capa que TUVO turno y lo rechazó
-    // (sus condiciones están mal) frente a una que NUNCA llegó a tenerlo (otra le come las celdas y
-    // hay que reordenar la tabla). Por eso el stats cuenta `offered` aparte de los descartes.
+    // ⚠️ CAPAS MUERTAS. Cada celda SORTEA entre las capas que la aceptan (peso = densidad × coverage
+    // × mancha), así que una capa a cero ya no puede ser "otra se la comió": sus condiciones no pasan
+    // en ninguna celda, o ninguna de sus variantes vive ahí. El desglose dice cuál de los factores.
     static bool s_propStatsReported = false;
     Haruka::Planet::PropScatterStats stats;
     const std::vector<Haruka::Planet::ScatteredProp> placed =
@@ -3725,19 +3927,13 @@ void Application::refreshPropScatter() {
         for (size_t li = 0; li < table.layers.size(); ++li) {
             const auto& L = table.layers[li];
             if (L.mesh.empty() || stats.placed[li] > 0) continue;
-            if (stats.offered[li] == 0) {
-                HARUKA_LOGW("PropScatter",
-                    "capa %zu ('%s', mesh '%s'): 0 props y NUNCA tuvo turno — una capa de MAYOR "
-                    "prioridad reclama todas las celdas antes. Subela en la tabla o baja la densidad "
-                    "de la que va delante.", li, L.name.c_str(), L.mesh.c_str());
-            } else {
+            {
                 // Desglose por FACTOR: cada uno se arregla tocando un campo distinto del JSON.
                 HARUKA_LOGW("PropScatter",
-                    "capa %zu ('%s', mesh '%s'): 0 props con %d turnos. El problema es SUYO, no del "
-                    "orden. Descartes: sumergido=%d densidad=%d · coverage=%d de los cuales "
+                    "capa %zu ('%s', mesh '%s'): 0 props en %d celdas. Descartes: sumergido=%d densidad=%d sin_variante=%d · coverage=%d de los cuales "
                     "zona=%d when=%d humedad=%d temp=%d pendiente=%d mapa=%d",
                     li, L.name.c_str(), L.mesh.c_str(), stats.offered[li],
-                    stats.noSubmerged[li], stats.noDensity[li], stats.noCoverage[li],
+                    stats.noSubmerged[li], stats.noDensity[li], stats.noVariant[li], stats.noCoverage[li],
                     stats.failZone[li], stats.failWhen[li], stats.failHum[li],
                     stats.failTemp[li], stats.failSlope[li], stats.failMap[li]);
                 // Y lo que PIDE frente a lo que el terreno DA: sin esto sabes que la humedad no
@@ -3756,6 +3952,22 @@ void Application::refreshPropScatter() {
                                 "fuera de ellas no instala NADA. La escena declara las zonas en surfaceConfig.",
                                 L.zones.size());
             }
+        }
+        // Tabla bioma × capa del primer scatter: es la medida de "los props siguen al bioma". Sin
+        // esto solo se sabe cuántos árboles hay, no que la taiga tenga los suyos y la playa los suyos.
+        {
+            std::string line = "biomas en el primer scatter (celdas · colocadas por capa):";
+            for (int b = 0; b < (int)Haruka::Planet::Biome::COUNT; ++b) {
+                if (stats.cellsByBiome[b] == 0) continue;
+                line += "\n   " + std::string(Haruka::Planet::biomeKey((Haruka::Planet::Biome)b))
+                      + " " + std::to_string(stats.cellsByBiome[b]);
+                for (size_t li = 0; li < table.layers.size(); ++li) {
+                    if (table.layers[li].mesh.empty()) continue;
+                    line += " · " + table.layers[li].mesh + "=" + std::to_string(
+                        stats.placedByBiome[li * (size_t)Haruka::Planet::Biome::COUNT + (size_t)b]);
+                }
+            }
+            HARUKA_LOGI("PropScatter", "%s", line.c_str());
         }
     }
 
@@ -3776,7 +3988,11 @@ void Application::refreshPropScatter() {
 
     std::vector<Haruka::InstancedObject> objs;
     objs.reserve(placed.size());
+    size_t sobreBoca = 0;
     for (const auto& sp : placed) {
+        // ⚠️ NADA SOBRE UNA BOCA. El suelo ahí no se dibuja ni se pisa (campo volumétrico); un
+        // árbol encima flota en el aire (Andoni lo vio). Misma función que el shader y la física.
+        if (planet->vox().surfaceCut(glm::dvec3(sp.dir)) > 0.5f) { ++sobreBoca; continue; }
         int protoIdx = -1;
         for (int i = 0; i < m_propRegistry.prototypeCount(); ++i)
             if (m_propRegistry.prototype(i).name == sp.mesh) { protoIdx = i; break; }
@@ -3802,11 +4018,41 @@ void Application::refreshPropScatter() {
         objs.push_back(io);
     }
     m_propRegistry.setInstances(std::move(objs));
+    rebuildPropGpu(planetC, planetR);
+    if (sobreBoca > 0) HARUKA_LOGI("Vox", "props retirados por estar sobre una boca: %zu", sobreBoca);
 
     // Los props del scatter ahora COLISIONAN. Se alimenta aquí y no por frame porque el scatter es
     // quien cambia el conjunto de instancias: registrar en otro sitio sería mirar una lista que no
     // se ha movido.
     refreshPropColliders(planetC, planetR, camPos);
+}
+
+// Las matrices de las instancias, UNA vez por scatter. El origen es la cámara en ese momento:
+// las posiciones relativas caben en float con precisión de mm (el scatter llega a 6 km) y el
+// shader suma `originRel` (origen − cámara actual), una resta en double por frame.
+void Application::rebuildPropGpu(const glm::dvec3& planetC, double planetR) {
+    const auto& insts = m_propRegistry.instances();
+    m_propOrigin = _camera ? glm::dvec3(_camera->position) : planetC;
+    m_propGpu.resize(insts.size());
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::dvec3 originToCenter = planetC - m_propOrigin;
+    for (size_t i = 0; i < insts.size(); ++i) {
+        const auto& io = insts[i];
+        const glm::vec3 posF = glm::vec3(originToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
+        glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
+        m *= glm::mat4_cast(glm::rotation(up, io.dir));
+        // ⚠️ El giro de yaw va sobre el eje LOCAL, no sobre `io.dir`. `glm::rotate(m, a, eje)`
+        // POST-multiplica: el eje se interpreta en el espacio de `m`, que ya lleva la rotación
+        // up→dir. Pasarle `io.dir` giraba en torno a `R·dir` y TUMBABA el objeto tanto como lo
+        // giraba ("los árboles están tumbados"). El eje local que la rotación manda a `dir` es +Y.
+        m = glm::rotate(m, io.yaw, up);
+        m = glm::scale(m, glm::vec3(io.scale));
+        Haruka::InstanceDataFloat& inst = m_propGpu[i];
+        inst.model     = m;
+        inst.color     = glm::vec4(io.tint, 1.0f);
+        inst.scale     = glm::vec3(io.scale);
+        inst.breakMask = (float)io.breakMask;   // ramas que ya no están
+    }
 }
 
 std::vector<Application::PropStateDelta> Application::serializePropState() const {
@@ -3893,6 +4139,9 @@ Application::PropHit Application::breakPropAt(const glm::dvec3& center, double r
         m_propRegistry.setStateBySeed(best.seed, Haruka::InstancedObjectState::Destroyed);
     } else if (best.partId >= 0 && best.partId < 32) {
         m_propRegistry.setBreakBitBySeed(best.seed, (uint32_t)best.partId);
+        // La copia transformada lleva la máscara al shader: hay que ponérsela también.
+        if (bestIdx < m_propGpu.size())
+            m_propGpu[bestIdx].breakMask = (float)m_propRegistry.instances()[bestIdx].breakMask;
     }
     // …y al mapa persistente, que es lo que hace que siga roto cuando vuelvas.
     PropStateDelta& st = m_propState[best.seed];
@@ -3935,10 +4184,10 @@ const std::vector<int>& Application::propMeshShapesFor(int protoIdx) {
     } else if (shape == Haruka::Planet::PropShapeKind::House) {
         tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
     } else {
-        const auto tp = Haruka::Planet::propTreeParams();
+        const auto tp = Haruka::Planet::propTreeParams(proto.name);
         Haruka::Tools::ProcGraph::Graph g;
         const int node = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
-            (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments, 1.0f);
+            (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments, 1.0f, tp.style);
         g.compile();
         Haruka::Tools::ProcGraph::bakeTreeMesh(g, node, tm);
     }
@@ -3985,6 +4234,40 @@ const std::vector<int>& Application::propMeshShapesFor(int protoIdx) {
     HARUKA_LOGD("PropCollider", "malla de colision '%s': %d parte(s) registradas",
                 proto.name.c_str(), (int)ids.size());
     return ids;
+}
+
+// ── LAS PAREDES DE LAS CUEVAS COLISIONAN ────────────────────────────────────────────────────────
+// Lo que el render remalló este frame va a Jolt con la MISMA malla (surface nets del mismo campo),
+// así que lo que se ve es lo que se choca. Por revisión: un chunk quieto no cuesta nada.
+void Application::syncVoxColliders() {
+    // ⚠️ SIN `#ifdef HARUKA_MOD_PLANETS`: ese símbolo no lo define nadie (lo usa `application.cpp`
+    // en el bloque de HARUKA_CAM_PITCH, que por eso tampoco encuentra el planeta). Con él, esto se
+    // compilaba a nada y las paredes de la cueva no llegaban a Jolt: "traspaso la cueva".
+    if (!_physicsEngine || !_planetarySystem) return;
+    const auto* tp = _planetarySystem->activeTerrestrial();
+    if (!tp) return;
+    const auto& meshes = tp->voxRenderer().cpuMeshes();
+    { static size_t s_last = ~(size_t)0; if (meshes.size() != s_last) { s_last = meshes.size();
+      HARUKA_LOGI("Vox", "syncVoxColliders: %zu mallas CPU del render", meshes.size()); } }
+    for (const auto& [key, cm] : meshes) {
+        const uint64_t pk = Haruka::VoxRenderer::physicsKey(key);
+        auto it = m_voxColliderRev.find(pk);
+        if (it != m_voxColliderRev.end() && it->second == cm.revision) continue;
+        m_voxColliderRev[pk] = cm.revision;
+        if (cm.mesh.empty()) { _physicsEngine->removeVoxMesh(pk); continue; }
+        // El cuerpo va en coordenadas de MUNDO: origen del chunk + centro del planeta.
+        _physicsEngine->setVoxMesh(pk, &cm.mesh.positions[0].x, cm.mesh.positions.size(),
+                                   cm.mesh.indices.data(), cm.mesh.indices.size(),
+                                   tp->position() + cm.mesh.origin);
+    }
+    // Lo que el render soltó, la física también.
+    for (auto it = m_voxColliderRev.begin(); it != m_voxColliderRev.end();) {
+        bool vivo = false;
+        for (const auto& [key, cm] : meshes) if (Haruka::VoxRenderer::physicsKey(key) == it->first) { vivo = true; break; }
+        if (vivo) { ++it; continue; }
+        _physicsEngine->removeVoxMesh(it->first);
+        it = m_voxColliderRev.erase(it);
+    }
 }
 
 void Application::refreshPropColliders(const glm::dvec3& planetC, double planetR,
@@ -4361,6 +4644,7 @@ void Application::renderFrame() {
     // In standalone mode (run()), the main loop handles swap + FPS.
     // In editor mode (no _window), renderFrame() is called externally
     // and the editor manages the swap.
+    if (_instancing) _instancing->beginFrame();   // el anillo de instancias empieza de cero (ver kRing)
     buildRenderQueue();
     renderFrameContent();
 

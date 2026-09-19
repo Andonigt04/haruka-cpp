@@ -25,6 +25,8 @@ layout(std140, binding = 5) uniform CloudParams {
     vec4  u_vortexPos[4];
     vec4  u_vortexInfo[4];
     vec4  u_vortexN;
+    vec4  u_aerial;    // (solo lo usa el fragmento; el bloque tiene que coincidir con el .frag)
+    vec4  u_blend;
 };
 
 layout(location = 0) out vec3 vRayDir;

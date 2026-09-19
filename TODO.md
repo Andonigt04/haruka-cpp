@@ -1528,3 +1528,88 @@ sería barato y taparía un agujero real.
 `planet/clipmap.vert` = `planet/ocean.vert` · `equirect_to_cubemap.vert` =
 `irradiance_convolution.vert` = `prefilter_env.vert` · `screenquad.vert` = `brdf_lut.vert`.
 
+
+## ⚠️ ABIERTO: LA ESCALERA DEL HORIZONTE (19-09, reportado con capturas)
+
+**Síntoma**, en palabras de Andoni y con dos capturas (una en zoom): la silueta del terreno contra el
+cielo sale como una **escalera de rectángulos planos** del ancho de un nodo; la capa de nube se
+**recorta con líneas rectas** paralelas al horizonte y por eso parece acabarse más cerca de lo que
+está; y por debajo de cierta altura aparece «un fantasma de una nube, un manchurrón como si estuviera
+lejos». Sigue ahí después de todo lo de abajo.
+
+**Lo DESCARTADO, con medida** (no repetir):
+- El recorte contra la profundidad de escena. Sonda `HARUKA_CLOUD_MODES=263` en la partida: **azul
+  puro en todo el cielo**, o sea que ahí no hay escena contra la que recortar.
+- El tope de la marcha a 4·L de perspectiva aérea: perfil de óptica por elevación **con la base de la
+  partida** (2 470 m), sin escalón — el mayor salto entre filas vecinas es 0,67 y es ruido dentro de
+  la pared (test `6-C` del banco).
+- Los segmentos de cobertura correlada (ya sustituidos por la forma continua `harukaCorrT`).
+- La malla base del planeta: con el pase v5 no se dibuja.
+- Saturación del presupuesto de nodos: con el cono de visión la demanda es **447 → 966** nodos contra
+  **3 072** de presupuesto (el «6 215» de una nota anterior era sin cono, y era mío: corregido).
+- El grosor de la malla lejana: el quad dibujado mide **~5,2 px de ancho de 5 km a 400 km**, uniforme.
+- La huella del PÍXEL en el LOD de la nube: con `HARUKA_CLOUD_RESDIV=1` (pase a resolución completa)
+  el manchurrón **no desaparece**.
+- `sSub`/`wFund` con el píxel solo (sin el paso): grano del nivel medio 6 → 12 %, presencia 32 → 15 %.
+- Huella isótropa por media geométrica de paso y píxel: grano del cúmulo 56 → 63 %, sin ganar forma.
+- En el PASE, tomar la profundidad más lejana de la huella: deja de recortar (la cordillera pasa de
+  0 % a 99,3 % de nube por delante). La más cercana: agranda el escalón.
+
+**Lo HECHO que lo mejora pero no lo cierra**:
+- Horizonte de nodos por COTA (`R + maxM`), que es lo que devolvió las cordilleras al cuadro.
+- No dibujar la MESETA del horizonte: un nodo caído ≥ 2 niveles a ancestro y más allá de 1,2× el
+  horizonte liso se salta (`FrameStats::plateauSkipped`, sale en el log del terreno). Con el pool de
+  la partida casi no dispara (test: pool 96 → 5 saltos; pool 4096 → 0).
+- LOD de la FUNDAMENTAL del campo a Nyquist (`HARUKA_CLOUD_LOD0_*` = 1/4, 1/2): la forma de la nube
+  llega al doble de distancia; las octavas finas se quedan en (1/6, 1/3) porque aflojarlas dispara el
+  grano (medio 6 → 16 %).
+- Composición de la nube **guiada por profundidad** (`cloud_upsample.frag` lee la copia de
+  profundidad y pesa los 16 taps por afinidad): error en el borde de una silueta escalonada **14,6
+  contra 17,8 de 255 (18 % menos)**.
+
+**Lo que queda por mirar**, en este orden:
+1. La SILUETA del terreno en sí: de dónde salen los escalones planos del ancho de un nodo si el quad
+   mide 5 px. Candidato con más peso: la resolución del bake global de altura (**512 × 256 = 78 km
+   por téxel**) que da la forma de baja frecuencia a lo lejos; el detalle procedural se corta por
+   `quadM`. Instrumento listo: `HARUKA_TERRAIN_V5_DEBUG=4` (color por zancada, también el agua) y
+   `=1` (por nivel), y el log `descartes: ... / MESETA del horizonte N`.
+2. El manchurrón: queda la huella del PASO de la marcha (se satura en ~359 m a media distancia y mata
+   las octavas de detalle). Filtrar anisótropo de verdad (a lo largo del rayo) es la vía correcta; la
+   media geométrica ya se probó y sube el grano.
+3. Coste: el pase de nubes va a **27,9 ms** en GL a 256²/64 pasos tras la luz física. Sin medir en el
+   juego (falta una corrida con `HARUKA_NO_VSYNC=1`).
+
+## ⚠️ ABIERTO: ANILLOS DE ZANCADA EN EL AGUA DE COSTA (19-09)
+
+**Síntoma** (Andoni): círculos concéntricos de tono azul distinto, **sobre todo en costas**; la vista
+`HARUKA_TERRAIN_V5_DEBUG=4` los enseña por construcción (colorea por zancada) y ningún test falla.
+
+**Mecanismo, medido** (`terrainDetail` con el corte a `quadM` y a `2·quadM`, 2 000 direcciones):
+
+```
+quad    salto MEDIO de la cota dibujada al cruzar la banda    peor
+ 4,8 m            0,382 m                                    1,252 m
+19,1 m            1,150 m                                    3,754 m
+38,2 m            0,952 m                                    3,107 m
+```
+
+Al cruzar una banda de zancada, `quadM = téxel × zancada` se DOBLA y `harukaTerrainDetail` suelta una
+octava: el fondo dibujado salta hasta **3,75 m**. En mar abierto eso no se ve (la absorción satura).
+En 1-5 m de agua cambia la profundidad un 20-100 %, y con ella **todo lo que depende de la
+profundidad**: la ley de Green (`d^-1/4`), el límite de rompiente (`0,55·d`), la espuma de orilla (por
+índice de rompiente) y el color. De ahí los anillos, y de ahí que se vean *en la costa*.
+
+**Por qué ningún test lo caza**: `terrain_node_edge_audit_all` mide el escalón entre NIVELES (y
+publica `strides 0/0` porque en su escena no hay cambio de zancada en aristas auditadas); los tests de
+agua usan fondo CONSTANTE (2 500 m o 20 m) o mar abierto, donde el salto es invisible. El test nuevo
+`ANILLOS` (rugosidad por fila) tampoco lo ve por lo mismo: mide el mar sintético, no una costa real.
+
+**Opciones** (sin decidir):
+1. **Tope de zancada bajo el agua**: acotar la zancada para que la relieve que se pierde sea ≤ 10 %
+   de la profundidad local. Cuesta triángulos sólo en la costa, que es donde se mira de cerca.
+2. **Profundidad continua para el SOMBREADO y la OLA**: `vDepth` con un corte continuo en distancia
+   en vez del cuantizado por zancada; la posición del vértice se queda como está. ⚠️ Riesgo conocido:
+   la orilla (el `discard` por `vDepth <= 0`) dejaría de coincidir con el suelo dibujado en 1-3 m —
+   es la enfermedad de «dos suelos» que ya costó el cuadrado de agua y la película blanca.
+3. **Corte continuo también en el terreno**: quita los anillos en todas partes, pero mete detalle que
+   la malla no puede representar en el lado grueso — que es lo que el corte existe para evitar.

@@ -299,12 +299,13 @@ namespace Haruka::RHI::vulkan
         m_compute = p->compute;
     }
 
-    void VKContext::bindVertexBuffer(BufferHandle h, uint32_t binding)
+    void VKContext::bindVertexBuffer(BufferHandle h, uint32_t binding, size_t offsetBytes)
     {
         if (binding >= 8) return;
         const VKBuffer* b = m_dev.buffer(h);
         if (!b) return;
         m_vbs[binding] = b->buffer;
+        m_vbOff[binding] = (VkDeviceSize)offsetBytes;
         m_vbUsed[binding] = true;
     }
 
@@ -527,13 +528,14 @@ namespace Haruka::RHI::vulkan
         return true;
     }
 
-    static void bindUsedVertexBuffers(VkCommandBuffer cmd, const VkBuffer* vbs, const bool* used)
+    static void bindUsedVertexBuffers(VkCommandBuffer cmd, const VkBuffer* vbs, const bool* used,
+                                      const VkDeviceSize* offs)
     {
         VkBuffer buffers[8] = {};
         VkDeviceSize offsets[8] = {};
         uint32_t n = 0;
         for (uint32_t i = 0; i < 8; ++i)
-            if (used[i]) { buffers[n] = vbs[i]; offsets[n] = 0; ++n; }
+            if (used[i]) { buffers[n] = vbs[i]; offsets[n] = offs[i]; ++n; }
         if (n) vkCmdBindVertexBuffers(cmd, 0, n, buffers, offsets);
     }
 
@@ -541,7 +543,7 @@ namespace Haruka::RHI::vulkan
     {
         if (!m_inPass || !instanceCount) return;
         if (!ensurePipeline()) return;
-        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed);
+        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed, m_vbOff);
         vkCmdDraw(m_dev.m_frameCmd, vertexCount, instanceCount, first, 0);
     }
 
@@ -549,7 +551,7 @@ namespace Haruka::RHI::vulkan
     {
         if (!m_inPass || !instanceCount) return;
         if (!ensurePipeline()) return;
-        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed);
+        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed, m_vbOff);
         if (m_ib) vkCmdBindIndexBuffer(m_dev.m_frameCmd, m_ib, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(m_dev.m_frameCmd, indexCount, instanceCount, first, 0, 0);
     }
@@ -558,7 +560,7 @@ namespace Haruka::RHI::vulkan
     {
         if (!m_inPass || !drawCount) return;
         if (!ensurePipeline()) return;
-        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed);
+        bindUsedVertexBuffers(m_dev.m_frameCmd, m_vbs, m_vbUsed, m_vbOff);
         const VKBuffer* b = m_dev.buffer(cmds);
         if (!b || !b->buffer) return;
         if (m_ib) vkCmdBindIndexBuffer(m_dev.m_frameCmd, m_ib, 0, VK_INDEX_TYPE_UINT32);
