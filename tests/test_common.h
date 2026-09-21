@@ -27,6 +27,7 @@ void beginTest(const char* name);
 void test_rail_mechanism_jolt();   // raíles contra Jolt (test_physics.cpp)
 // La boca de una cueva en la fisica: el NaN del anillo deja caer y la malla del chunk sostiene.
 void test_physics_cave_mouth();
+void test_physics_character_capsule();   // la capsula del personaje tiene cabeza (contraprueba: esfera)
 void test_construction_vehicle();   // mecanismos, masa y distancia sobre el grafo de construcción
 void test_prefab_edits();           // los cambios de UN conjunto no tocan el montaje (test_prefab.cpp)
 void test_prefab_scene_roundtrip(); // la escena guarda la entrada y sus cambios, no las piezas
@@ -38,6 +39,7 @@ void test_ports_json_roundtrip();
 void test_cube_sphere_inverse();
 /// Primitivas: ninguna cara bobinada al reves (una tapa invertida no da error, desaparece).
 void test_primitive_winding();
+void test_character_capsule_standing();   // la capsula de otro jugador, de pie sobre el planeta (contraprueba: Euler del mundo)
 void test_weather_fronts();
 // Tiempo adverso: la severidad sale de las condiciones y el embudo (tornado/tromba) de la severidad.
 // Campo de Rankine con succion y ascendente, determinista. Con contraprueba en cada punto.
@@ -97,6 +99,11 @@ void test_simple_planet_mesh();
 void test_simple_planet_config();
 // Terrain quality → resolution  (test_terrain_quality.cpp)
 void test_terrain_quality_mapping();
+void test_input_gamepad_bindings();
+// Sonido del mundo sin dispositivo: sintesis de bucles/disparos y puntos logicos agrupados por sector.
+void test_sound_synth();
+void test_sound_points_grouping();
+void test_debug_overlay_stats();   // panel de depuracion: percentiles y tx/rx (sin ImGui)
 // Ambiente por SH (test_sky_ambient.cpp): paridad con sky_palette.glsl + simetría azimutal
 void test_sky_ambient_palette();
 void test_sky_ambient_sh();
@@ -275,6 +282,8 @@ void test_terrain_node_inherited_range_flicker();
 void test_terrain_node_spike_hunt();
 void test_terrain_node_finer_neighbour_step();
 void test_terrain_node_edge_audit_all();
+void test_terrain_node_shallow_split();
+void test_terrain_node_stride_ramp_continuity();
 void test_terrain_node_distance_morph_per_vertex();
 // ¿El suelo depende de hacia donde miras? Separa las dos causas: la SELECCION (no debe) y el pool
 // desalojando lo que sale de cuadro (si, y es transitorio).

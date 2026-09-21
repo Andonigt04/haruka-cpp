@@ -19,8 +19,8 @@
 #include <vector>
 #include <cstdint>
 #include <cmath>
-#include "core/planet/soi.h"        // GravityBody + gravedad N-cuerpos (matemática pura, sin motor)
-#include "core/planet/terrain_lod.h" // geometría de los anillos de colisión (constantes compartidas)
+#include "world/planet/soi.h"        // GravityBody + gravedad N-cuerpos (matemática pura, sin motor)
+#include "world/terrain/terrain_lod.h" // geometría de los anillos de colisión (constantes compartidas)
 
 namespace Haruka { namespace Physics {
 

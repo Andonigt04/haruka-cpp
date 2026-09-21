@@ -17,7 +17,7 @@
 // ===========================================================================
 
 #include "proc_noise.h"          // hash32
-#include "core/terrain/planet_fields.h"  // FieldSample
+#include "world/planet/planet_fields.h"  // FieldSample
 
 #include <algorithm>
 #include <cmath>

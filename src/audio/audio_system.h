@@ -31,6 +31,15 @@ public:
                    float gain, bool loop, float refDist = 6.0f);
     void voiceSetPos(uint32_t voice, const glm::vec3& relPos);
     void voiceSetGain(uint32_t voice, float gain);
+    void voiceSetPitch(uint32_t voice, float pitch);
+    /// rolloff 0 = la distancia NO atenua (quien atenua es el llamador: ver SoundPoints).
+    void voiceSetRolloff(uint32_t voice, float rolloff);
+
+    /// Disparo con la ganancia YA atenuada (rolloff 0) y tono propio: los grupos de SoundPoints.
+    void playOneShotFlat(uint32_t buffer, const glm::vec3& relPos, float gain, float pitch);
+
+    /// Volumen general (AL_GAIN del listener). Antes `masterVolume` no se aplicaba en ningun sitio.
+    void setMasterGain(float g);
 
 private:
     bool  m_ok = false;

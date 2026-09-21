@@ -15,6 +15,7 @@
 
 #include "audio/audio_system.h"
 #include "audio/audio_loader.h"
+#include "audio/sound_points.h"
 
 namespace Haruka {
 
@@ -51,6 +52,21 @@ public:
 
     void update();   // recoloca/atenúa las fuentes persistentes cada frame
 
+    // ── PUNTOS LOGICOS DE SONIDO (sound_points.h) ────────────────────────────────────────────
+    // El juego crea puntos (una pisada aqui, un arbol al viento alli, la espuma de la orilla) y
+    // los que hacen el mismo sonido se agrupan por sector en una voz. `update()` los mezcla y
+    // los enchufa a OpenAL. Los bucles (viento/hojas/agua) van por `ambientVolume`; los disparos
+    // por `sfxVolume`. Ver `setVolumes`.
+    Audio::SoundPoints&       points()       { return m_points; }
+    const Audio::SoundPoints& points() const { return m_points; }
+    /// Volumenes: general (listener), ambiente (bucles de puntos), efectos (disparos de puntos).
+    void setVolumes(float master, float ambient, float sfx);
+    /// Oido bajo el agua: los demas puntos se amortiguan (×0,15) mientras dure.
+    void setSubmerged(bool s) { m_submerged = s; }
+    bool submerged() const { return m_submerged; }
+    /// La vertical local del oyente (los sectores giran alrededor de ella). `setListener` la fija.
+    const glm::dvec3& listenerUp() const { return m_listenerUp; }
+
 private:
     AudioSystem m_sys;
     AudioLoader m_loader;
@@ -64,6 +80,16 @@ private:
     };
     std::unordered_map<SourceId, World> m_world;
     SourceId m_nextId = 1;
+
+    // Puntos logicos: una voz AL por ranura de SoundPoints (misma indexacion).
+    Audio::SoundPoints m_points;
+    struct SlotVoice { uint32_t voice = 0; uint32_t key = 0; bool playing = false; };
+    std::vector<SlotVoice> m_slotVoices;
+    glm::dvec3 m_listenerUp{0.0, 1.0, 0.0};
+    float m_volAmbient = 0.8f, m_volSfx = 1.0f;
+    bool  m_submerged = false;
+    double m_lastUpdateS = -1.0;
+    void updatePoints();
 };
 
 } // namespace Haruka

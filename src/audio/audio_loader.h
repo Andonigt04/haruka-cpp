@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 
+#include "audio/sound_synth.h"
+
 namespace Haruka {
 
 class AudioLoader {
@@ -21,11 +23,15 @@ public:
     // mono/estéreo). Devuelve 0 si falla. (OGG: pendiente, vía libvorbis.) MONO = espacializable.
     uint32_t file(const std::string& path);
 
+    /// Sonido SINTETIZADO del mundo (sound_synth.h) → buffer AL (cacheado por sonido).
+    uint32_t synth(Audio::Sound s);
+
     void clear();   // libera todos los buffers (al cerrar)
 
 private:
     std::unordered_map<uint64_t, uint32_t>    m_cache;   // tonos: clave(params) → buffer
     std::unordered_map<std::string, uint32_t> m_files;   // ficheros: ruta → buffer
+    std::unordered_map<int, uint32_t>         m_synth;   // sintetizados: Sound → buffer
 };
 
 } // namespace Haruka

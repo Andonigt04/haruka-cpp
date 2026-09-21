@@ -232,6 +232,7 @@ namespace Haruka::RHI::vulkan
             static constexpr uint32_t kDescRing = 2048;
             std::vector<VkDescriptorSet> m_descRing;      // sets del ring (por draw)
             uint32_t                     m_setCursor = 0; // próximo set a usar en este frame
+            uint64_t                     m_framesSubmitted = 0; // frames enviados: numera el log de endFrame
 
             SDL_Window*                m_window = nullptr;
             // GPUs preferidas por NOMBRE y en orden (ver `Device::create`). Vacío = automático.
@@ -291,7 +292,13 @@ namespace Haruka::RHI::vulkan
             void resolveGpuScopes();
             VkCommandBuffer            m_frameCmd = VK_NULL_HANDLE;
             VkSemaphore                m_imgAvailable = VK_NULL_HANDLE;
-            VkSemaphore                m_renderFinished = VK_NULL_HANDLE;
+            /// UNO POR IMAGEN DEL SWAPCHAIN, no uno para todos. El present espera este semaforo y
+            /// nadie sabe CUANDO lo consume (vkDeviceWaitIdle no cubre la presentacion); volver a
+            /// senalarlo en el submit siguiente mientras el present anterior aun no lo ha esperado es
+            /// VUID 00067. Con uno por imagen, el siguiente submit que lo senala es el de la MISMA
+            /// imagen, y para que acquire la haya devuelto el present anterior ya la ha consumido.
+            std::vector<VkSemaphore>   m_renderFinished;
+            VkSemaphore renderFinishedFor(uint32_t image);
             VkFence                    m_frameFence = VK_NULL_HANDLE;
             bool                       m_frameActive = false;
             bool                       m_backbufferUsed = false;

@@ -46,8 +46,8 @@
 // `haruka_rules_set_height_field` / `haruka_rules_load_height_field` en `default_rules.cpp`.
 // ================================================================================================
 
-#include "core/planet/terrain_detail.h"   // equirectUV · sampleHeightField · terrainDetail (gemelos)
-#include "core/planet/terrain_lod.h"      // terrainTriM: el corte de octavas, NO un literal
+#include "world/terrain/terrain_detail.h"   // equirectUV · sampleHeightField · terrainDetail (gemelos)
+#include "world/terrain/terrain_lod.h"      // terrainTriM: el corte de octavas, NO un literal
 
 #include <glm/glm.hpp>
 #include <cstdint>

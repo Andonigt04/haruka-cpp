@@ -14,7 +14,7 @@
 
 layout(std140, binding = 0) uniform NodeDraw {
     mat4  uMVP; vec4 uCenter; vec4 uCenterLo; vec4 uLod; ivec4 uGrid; ivec4 uEdgeUnused;
-    vec4  uMisc; vec4 uShade; vec4 uTexAnchor; vec4 uLightDir; vec4 uAerial;
+    vec4  uMisc; vec4 uShade; vec4 uTexAnchor; vec4 uLightDir; vec4 uAerial; vec4 uStrideRamp;
 };
 
 layout(location = 0) in vec3  vNormal;

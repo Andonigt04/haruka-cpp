@@ -11,12 +11,14 @@
 #include <memory>
 
 #include <glm/gtx/euler_angles.hpp>
+#include <glm/gtc/quaternion.hpp>   // mat4_cast
+#include <glm/gtx/quaternion.hpp>   // glm::rotation (eje→cuaternion) para el personaje de pie
 
 #include "renderer/model.h"
 #include "renderer/simple_mesh.h"
 #include "renderer/primitive_shapes.h"
 #include "core/scene/scene_manager.h"   // Haruka::SceneObject
-#include "game/planetary_system.h"      // radio real de un planeta (getObjectBoundingRadius)
+#include "world/planet/planetary_system.h"      // radio real de un planeta (getObjectBoundingRadius)
 #include "core/asset_paths.h"
 #include "core/logger.h"
 #include "rhi/rhi_device.h"
@@ -37,6 +39,7 @@ std::unordered_map<std::string, std::shared_ptr<Model>> g_modelCache;
 std::unique_ptr<SimpleMesh> g_sphereMesh;
 std::unique_ptr<SimpleMesh> g_cubeMesh;
 std::unique_ptr<SimpleMesh> g_capsuleMesh;
+std::unique_ptr<SimpleMesh> g_characterMesh;
 std::unique_ptr<SimpleMesh> g_planeMesh;
 std::unique_ptr<SimpleMesh> g_cylinderMesh;
 std::unique_ptr<SimpleMesh> g_triangleMesh;
@@ -57,6 +60,7 @@ void cleanupGLStatics() {
     g_sphereMesh.reset();
     g_cubeMesh.reset();
     g_capsuleMesh.reset();
+    g_characterMesh.reset();
     g_planeMesh.reset();
     g_cylinderMesh.reset();
     g_triangleMesh.reset();
@@ -79,6 +83,16 @@ glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::World
         );
 
     transform *= rotation;
+    return glm::scale(transform, glm::vec3(obj.scale));
+}
+
+glm::mat4 getCharacterTransform(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos, const glm::dvec3& up) {
+    glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position - camPos));
+    // Marco local: Y = arriba del planeta. `glm::rotation` lleva +Y a `up`; el yaw gira alrededor de
+    // ese Y LOCAL (post-multiplicado), como en el pase de props.
+    const glm::vec3 upF = glm::normalize(glm::vec3(up));
+    transform *= glm::mat4_cast(glm::rotation(glm::vec3(0.0f, 1.0f, 0.0f), upF));
+    transform  = glm::rotate(transform, glm::radians(static_cast<float>(obj.rotation.y)), glm::vec3(0.0f, 1.0f, 0.0f));
     return glm::scale(transform, glm::vec3(obj.scale));
 }
 
@@ -169,6 +183,18 @@ SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
                 g_capsuleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
             }
             return g_capsuleMesh.get();
+        case Haruka::PrimitiveType::CHARACTER:
+            if (!g_characterMesh) {
+                std::vector<glm::vec3> vertices;
+                std::vector<glm::vec3> normals;
+                std::vector<unsigned int> indices;
+                // Las MISMAS cifras que la capsula de Jolt del jugador (player.cpp: 1,9 m de pie,
+                // radio 0,35): lo que se ve es lo que choca. Se sube 0,95 m para que la base sea el pie.
+                PrimitiveShapes::createCapsule(0.35f, 1.9f, 24, 12, vertices, normals, indices);
+                for (auto& v : vertices) v.y += 0.95f;
+                g_characterMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+            }
+            return g_characterMesh.get();
         case Haruka::PrimitiveType::PLANE:
             if (!g_planeMesh) {
                 std::vector<glm::vec3> vertices;

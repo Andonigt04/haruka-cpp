@@ -15,7 +15,7 @@
 
 #include <glm/glm.hpp>
 #include "rhi/rhi_types.h"
-#include "core/ground_layer.h"
+#include "world/ground_layer.h"
 
 namespace Haruka {
 

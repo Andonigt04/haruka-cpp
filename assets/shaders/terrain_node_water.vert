@@ -51,6 +51,8 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uTexAnchor;
     vec4  uLightDir;
     vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
+    vec4  uStrideRamp;  // rampa del mapa por zancada: x = radio zancada 1 · y = fracción de rampa ·
+                        // z = vertexPx/errorPx · w = celda fina de colisión (ver nodeStrideMapF)
 };
 struct NodeInst { ivec4 node; ivec4 edge; ivec4 slot; vec4 misc; };
 layout(std430, binding = 2) readonly buffer Insts { NodeInst uInst[]; };
@@ -143,10 +145,64 @@ void main() {
     // error que mide `v5 F3` por zancada (0,0752 m con stride 1 · 0,1260 con 2 · 0,3857 con 4), y con
     // el corte del vano desaparece por construccion en el interior del nodo.
     const float quadM = float(uLod.z) / float(1 << I.node.y) / float(cells) * float(stride);
+    // ── Y CON LA RAMPA DEL MAPA POR ZANCADA, COMO EL TERRENO ───────────────────────────────────
+    // `terrain_node.vert` ya no lee el mapa de la zancada a secas: mezcla el mapa `floor(fMap)` con
+    // el siguiente por la distancia del vertice (gemelo de `nodeStrideMapF`; ver
+    // `TERRAIN_NODE_STRIDE_RAMP`). El fondo del agua tiene que ser ESE, o la lamina se apoya en un
+    // suelo distinto del que se dibuja justo en la rampa: aqui se evaluan los dos cortes y se
+    // mezclan igual. La segunda evaluacion solo se paga dentro de la rampa (`fracMap > 0`).
+    int   iMap = I.slot.z;
+    float fracMap = 0.0;
+    // Los ruidos del detalle, UNA vez para los tres cortes que siguen (ver `harukaTerrainDetailNoises`):
+    // la guarda es el corte mas fino que se puede pedir, el texel del nodo a la zancada del vertice
+    // (`iMap >= I.slot.z`), asi que ningun ruido se evalua para pesarlo a cero.
+    float detN[7];
+    if (hSize.x > 2)
+        harukaTerrainDetailNoises(dirD, double(R) + double(baseH),
+                                  float(uLod.z) / float(1 << I.node.y) / float(cells) * float(stride), detN);
+    {
+        // La distancia AL TERRENO, como el vertice del terreno (que la mide a su mapa del abuelo:
+        // corte a 4 texeles). Aqui, el campo analitico al mismo corte; la diferencia entre los dos
+        // es la interpolacion bilineal del mapa, centimetros, que en la ley son ~1e-4 de mapa.
+        float hElev = baseH;
+        if (hSize.x > 2) {
+            const float quad4 = float(uLod.z) / float(1 << I.node.y) / float(cells) * 4.0;
+            float d4 = harukaTerrainDetailFrom(detN, quad4) * harukaSeaLevelAttenuation(baseH);
+            if (baseH > 0.0 && d4 < -baseH) d4 = -baseH;
+            hElev = baseH + d4;
+        }
+        const float dist     = max(length(dir * (R + hElev) + uCenter.xyz + uCenterLo.xyz), 1.0);
+        const float texOwn   = float(uLod.z) / float(1 << I.node.y) / float(cells);
+        const float collWant = max(uStrideRamp.w, dist / float(cells / 2)) / max(texOwn, 1e-9);
+        float clampC;
+        if (uStrideRamp.y <= 0.0) {
+            clampC = (dist <= uStrideRamp.x) ? 1.0 : (dist <= 2.0 * uStrideRamp.x) ? 2.0 : 4.0;
+        } else {
+            float f = 0.0;
+            for (int k = 0; k < 2; ++k) {
+                const float D = uStrideRamp.x * exp2(float(k));
+                f += clamp((dist - D * (1.0 - uStrideRamp.y)) / (D * uStrideRamp.y), 0.0, 1.0);
+            }
+            clampC = exp2(f);
+        }
+        const float want = min(min(uStrideRamp.z, collWant), clampC);
+        float f = clamp(log2(max(want, 1.0)), 0.0, 2.0);
+        if (dist > 2.0 * uStrideRamp.x) {            // el corte continuo, como el terreno
+            const float texelPx = texOwn / max(dist * uLod.x, 1e-12);
+            f = max(f, min(log2(max(uStrideRamp.z * uLod.y / max(texelPx, 1e-9), 1.0)), 6.0));
+        }
+        const float fEff = max(f, float(I.slot.z));
+        iMap    = int(floor(fEff));
+        fracMap = fEff - float(iMap);
+        if (iMap >= 6) { iMap = 6; fracMap = 0.0; }
+    }
+    const float quadOwn = float(uLod.z) / float(1 << I.node.y) / float(cells) * exp2(float(iMap));
     float groundH = baseH;
     if (hSize.x > 2) {
-        float det = harukaTerrainDetail(dirD, double(R) + double(baseH), quadM)
-                  * harukaSeaLevelAttenuation(baseH);
+        float det = harukaTerrainDetailFrom(detN, quadOwn);
+        if (fracMap > 0.0)
+            det = mix(det, harukaTerrainDetailFrom(detN, quadOwn * 2.0), fracMap);
+        det *= harukaSeaLevelAttenuation(baseH);
         if (baseH > 0.0 && det < -baseH) det = -baseH;
         groundH = baseH + det;
     }

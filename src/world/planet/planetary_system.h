@@ -1,0 +1,477 @@
+/**
+ * @file planetary_system.h
+ * @brief Planetas, órbitas, terreno, clima y render SimplePlanet.
+ *
+ * @par API Status — FROZEN
+ * Breaking changes will not be made without a major version bump.
+ */
+#pragma once
+
+#include <memory>
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <functional>
+#include <nlohmann/json.hpp>
+#include "tools/math_types.h"
+#include "world/planet/planet.h"                            // TerrestrialPlanet (el planeta se crea a sí mismo)
+#include "core/scene/scene_manager.h"
+#include "world/terrain/terrain_sample.h"     // WorldGenParams
+#include "world/weather_system.h"              // WeatherSystem
+#include "world/ground_layer.h"                // GroundMaterial
+#include "world/vox/cave_system.h"
+#include "world/vox/island_system.h"
+#include "world/planet/orbit.h"                // OrbitElements (Kepler con elementos precesantes)
+#include "tools/planetary_types.h"           // PlanetFace (GL-free)
+#include "rhi/rhi_types.h"
+
+namespace Haruka {
+    struct SceneObject;
+    /** @brief Una entrada `"type": "Cave"` de la escena → su definición (centro relativo al planeta
+     *  en `planetPos`). Es LA interpretación, la misma para el juego al cargar y para el editor al
+     *  sincronizar; si divergieran, lo que se pinta no sería lo que se juega. */
+    CaveDef   caveDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
+    IslandDef islandDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
+    /** @brief ¿Definen lo mismo? (nombre, centro a 1e-9, tamaños, mapas). */
+    bool sameCaveDef(const CaveDef& a, const CaveDef& b);
+    bool sameIslandDef(const IslandDef& a, const IslandDef& b);
+ namespace Planet {
+    struct GeologyConfig;
+    struct TerrainGridConfig;
+}}
+
+namespace Haruka {
+
+/**
+ * @brief Sistema planetario: órbitas, terreno, clima y renderizado simple.
+ *
+ * Gestiona la lista de planetas (con órbitas Kepler analíticas), el terreno
+ * muestreable (ReferenceSurface + altura editada), el clima global (WeatherSystem),
+ * y los planetas "SimplePlanet" para testing/rendering con texturas procedurales.
+ */
+class PlanetarySystem {
+public:
+    PlanetarySystem();
+    ~PlanetarySystem();
+
+    /** @brief Configuración de superficie: tiling de textura y resolución procedural. */
+    struct SurfaceConfig {
+        float       tiling = 100.0f;
+        int         texRes = 512;   // biome map procedural texture resolution (width); height = width/2
+        int         macroRes = 2048; // macro-variation texture resolution (width); height = width/2
+        /**
+         * @brief Fracción de la superficie por ENCIMA del nivel del mar [0,1].
+         *
+         * El nivel del mar se DERIVA de esto (cuantil de la distribución de alturas), no al revés.
+         * Así "cuánta tierra tiene el planeta" es un número que se declara y se cumple, en vez de
+         * lo que salga del reparto de placas de esa semilla. 0.29 = la Tierra.
+         */
+        float       landFraction = 0.29f;
+        /**
+         * @brief Mapa EQUIRECTANGULAR de zonas (PNG con colores planos), o vacío.
+         *
+         * Cada color corresponde al `zone` de un material de `materials`. Cuando existe, decide
+         * qué material hay en cada punto y qué está bajo el agua — y entonces `landFraction` deja
+         * de usarse: el mar lo dibuja el mapa, no una estadística.
+         */
+        std::string zoneMap;
+
+        /**
+         * @brief Mapa EQUIRECTANGULAR de ELEVACIÓN (PNG en gris), o vacío.
+         *
+         * El canal rojo, 0..255, se mapea linealmente a `elevationRange` en metros. Sustituye al
+         * relieve de las placas, que es casi BINARIO —fondo oceánico o meseta continental— y por eso
+         * no puede tener cordilleras: casi toda la tierra acaba a la misma cota.
+         *
+         * A 4096² son ~9,8 km por téxel. Suena basto y no lo es para este uso: la malla base tiene
+         * un vértice cada 39 km, así que el mapa es 4× más fino que lo que puede representar. El
+         * relieve por debajo de eso lo pone el detalle procedural.
+         */
+        std::string elevationMap;
+        /** @brief Metros a los que corresponden el 0 y el 255 del mapa. */
+        glm::vec2   elevationRange = glm::vec2(-4000.0f, 4000.0f);
+    };
+
+    /** @brief Planeta con órbita Kepler analítica. */
+    struct Planet {
+        std::string name;
+        Haruka::WorldPos position;
+        double radius;
+        SurfaceConfig surface;              // texture-driven surface config
+        bool isHome = false;                // planeta del jugador (flags.originShiftingTarget)
+        uint32_t seed = 0;                  // semilla auto-generada para generación determinista
+
+        // --- ÓRBITA (Kepler ANALÍTICO): posición = función del tiempo → ESTABLE (sin deriva de
+        // integración) y depurable. orbitParent = índice del cuerpo central (Sol) en m_planets, o -1
+        // (estático). Plano orbital = base ortonormal (u,v); foco en el cuerpo padre. ---
+        int    orbitParent = -1;          // índice del cuerpo central en m_planets (-1 = estático)
+        // ⚠️ La FUENTE DE VERDAD del plano orbital son los ELEMENTOS, no una base (u,v) guardada.
+        // Con la base congelada al cargar la escena la órbita no puede precesar, y sin precesión es
+        // exactamente periódica: la misma elipse para siempre, que es lo que se lee como "rail".
+        // Ver core/planet/orbit.h. `orbitA/Ecc/Period/Phase` siguen aquí porque son parte de los
+        // elementos y hay API pública que los expone.
+        double orbitA      = 0.0;         // semi-eje mayor (m)
+        double orbitEcc    = 0.0;         // excentricidad MEDIA [0,1) (0 = círculo)
+        double orbitPeriod = 0.0;         // periodo (s); <=0 = no orbita
+        double orbitPhase  = 0.0;         // anomalía media en t=0 (rad)
+        Haruka::Planet::OrbitElements orbit;   // elementos completos + tasas de precesión
+    };
+
+    void init();
+    /** @brief Actualiza órbitas, clima, y SimplePlanets. @param dt Delta time en segundos. */
+    void update(double dt, const glm::dvec3& cameraPos);
+
+    /** @brief Configura órbita Kepler para un planeta. @return false si no encuentra planetName. */
+    bool setPlanetOrbit(const std::string& planetName, const std::string& parentName,
+                        double periodSeconds, double ecc = 0.0);
+
+    /** @brief Obtiene centro y radio del planeta activo (el más cercano a la cámara). */
+    bool getActivePlanet(glm::dvec3& center, double& radius) const;
+    /** @brief Overload de compatibilidad (ignora reliefStrength). */
+    bool getActivePlanet(glm::dvec3& center, double& radius, float& /*reliefStrength*/) const {
+        return getActivePlanet(center, radius);
+    }
+    /** @brief Nombre del planeta activo. */
+    /** @brief Nombre del planeta activo, por REFERENCIA.
+     *
+     *  ⚠️ Devolvía `std::string` por VALOR, y está en el camino caliente: `sampleTerrainHeight` lo
+     *  llama para elegir el planeta, y el solver de partículas del fluido llama a `sampleTerrainHeight`
+     *  ~1600 veces por frame (400 partículas × 3 iteraciones de densidad). Una asignación de heap por
+     *  muestreo de terreno, para comparar un nombre que no cambia. */
+    const std::string& getActivePlanetName() const;
+
+    /** @brief TerrestrialPlanet del planeta activo (el que da el campo ecológico + cota de props).
+     *  Busca por NOMBRE (m_planets y m_simplePlanets no comparten índice cuando el planeta se
+     *  añadió por `addSimplePlanet`). nullptr si no hay planeta con superficie. */
+    const Haruka::Planet::TerrestrialPlanet* activeTerrestrial() const;
+    /** @brief Igual, MUTABLE: hace falta para entregarle al planeta activo el suelo cercano que
+     *  monta la física (`setNearGroundRing`). Delega en la versión const — una sola búsqueda. */
+    Haruka::Planet::TerrestrialPlanet* activeTerrestrialMut() {
+        return const_cast<Haruka::Planet::TerrestrialPlanet*>(activeTerrestrial());
+    }
+
+    /** @brief Parámetros de generación del planeta activo. */
+    bool getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const;
+
+    /** @brief Constante para "sin agua". */
+    static constexpr double kNoWater = -1e30;
+    /** @brief Nivel del agua en un punto del mundo (kNoWater si no hay).
+     *
+     *  Incluye LA OLA: el gemelo CPU (`core/planet/ocean_wave.h`) evaluado con el mismo reloj que el
+     *  shader, así que la cota que devuelve es la de la superficie que se está viendo, no la del mar
+     *  en reposo. */
+    double sampleWaterLevel(const glm::dvec3& worldPos) const;
+
+    /** @brief Profundidad de la columna de agua en un punto (m; 0 si no hay agua).
+     *
+     *  Es la del mar EN REPOSO (nivel − suelo), que es la que gobierna el bajío y la rompiente — la
+     *  misma que el shader le pasa a `harukaShoalAmp`. No es "cuánto me cubre": para eso está la
+     *  diferencia entre `sampleWaterLevel` y tu propia cota. */
+    double sampleWaterDepth(const glm::dvec3& worldPos) const;
+
+    /** @brief EL ESTADO DEL MAR vigente: los cuatro trenes de olas + la cota de la lámina (marea).
+     *
+     *  ⚠️ Es la MISMA tabla que se subió a la GPU este frame (`TerrestrialPlanet::setOceanState`).
+     *  Quien necesite la ola en CPU debe leerla de aquí y no volver a derivarla del viento: dos
+     *  derivaciones son dos mares, y el motor ya pagó esa lección con el terreno. */
+    const Haruka::Planet::OceanState& oceanState() const { return m_oceanState; }
+    /// El ANCLA del mar (mundo): las funciones de ola reciben posiciones RELATIVAS a ella.
+    const glm::dvec3& oceanAnchor() const { return m_sea.anchor; }
+
+    /** @brief VELOCIDAD del agua en la superficie (m/s, marco del mundo). Cero si no hay agua.
+     *
+     *  El movimiento orbital de la ola de Gerstner — lo que EMPUJA a un cuerpo flotante en vez de solo
+     *  mecerlo. Ver `Haruka::Planet::oceanWaveVelocity` para la derivación y sus límites (es la
+     *  velocidad en la superficie; no decae con la inmersión). */
+    glm::dvec3 sampleWaterVelocity(const glm::dvec3& worldPos) const;
+    /// Espuma (0..1) en la superficie del agua. Gemela de `sampleWaterVelocity`; ver `oceanFoam`.
+    float      sampleWaterFoam(const glm::dvec3& worldPos) const;
+
+    /** @brief Cobertura de suelo en un punto. */
+    struct GroundCover {
+        Haruka::GroundMaterial material = Haruka::GroundMaterial::None;
+        float                  amount   = 0.0f;
+    };
+    GroundCover groundCoverAt(const glm::dvec3& worldPos, float snowAccum) const;
+
+    const std::vector<Planet>& getPlanets() const { return m_planets; }
+          std::vector<Planet>& getPlanets()       { return m_planets; }
+
+    /** @brief Sincroniza desde SceneManager (carga/reloading). */
+    void syncFromScene(const SceneManager& scene);
+    /** @brief Construye planetas desde los objetos de escena con surfaceConfig. */
+    void buildFromScene(SceneManager& scene);
+    /**
+     * @brief Regenera UN planeta leyendo SU surfaceConfig actual del SceneManager.
+     *
+     * Camino del editor: cambias seed/landFraction/mapas en el objeto y este método lo relee
+     * (misma interpretación que `buildFromScene`) y reconstruye ese TerrestrialPlanet. Si la
+     * escena aún no tiene objeto con ese nombre, no hace nada.
+     */
+    void updatePlanetFromScene(SceneManager& scene, const std::string& name);
+
+    /** @brief Vista de depuración para TODOS los planetas renderizables (ver TerrestrialPlanet::setDebugView). */
+    void setDebugView(int view);
+    /** @brief Vista de depuración del planeta activo. */
+    int  debugView() const;
+
+    /**
+     * @brief Nombres de las CAPAS de textura del planeta activo, en orden de capa.
+     *
+     * Solo los materiales con albedo (textura) son una capa del array de terreno; los que no
+     * (hielo, sal, agua…) no aparecen. El editor los lista en el selector de capas para revelar
+     * cómo se aplica cada textura. Vacío si no hay planeta.
+     */
+    std::vector<std::string> activeTerrainLayerNames() const;
+
+    /**
+     * @brief Nombres de las CAPAS DE PROPS del planeta activo, en orden de prioridad.
+     *
+     * Las lista el editor en el selector de vista para pintar el ÁREA DE SPAWN de cada capa
+     * (dónde instalaría esa capa sus objetos: bandas de clima/forma × densityMap). Vacío si el
+     * planeta no declara `propLayers`.
+     */
+    std::vector<std::string> activePropLayerNames() const;
+
+    /**
+     * @brief Stats de geometría del último frame, sumadas sobre TODOS los SimplePlanets.
+     * Lo consume el panel de performance del editor (sustituye al "Chunk Streaming" legacy).
+     */
+    Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
+
+    double simulationTime() const { return m_simulationTime; }
+
+    /// ⚠️ THE WORLD'S CLOCK, WHEN THERE IS ONE — and this is a SET, not an offset, on purpose.
+    ///
+    /// `m_simulationTime` starts at zero and accumulates the local frame delta, and everything the
+    /// world does with time reads it: `orbitPositionAt(orbit, t)` places the planets (so the sun rises
+    /// off this number), the weather fronts move on it, and so does the tide. Two clients therefore
+    /// had two worlds — one at noon and one at midnight, in different storms — and no amount of
+    /// replicating positions would have fixed that, because the sun is not an entity.
+    ///
+    /// Accumulating a delta cannot stay in step: a stall, a paused frame or a loading screen loses
+    /// time that never comes back. So when the cluster hands out a clock, the simulation is not
+    /// nudged towards it, it IS it: assigned every frame from the server's anchor. Passing a negative
+    /// value gives the clock back to the local accumulator, which is what an offline game keeps using.
+    void setWorldClock(double seconds) { m_worldClock = seconds; }
+    const Haruka::WeatherSystem& weather() const { return m_weather; }
+    Haruka::WeatherSystem& weatherMut() { return m_weather; }
+    Haruka::WeatherSystem&       weatherMutable() { return m_weather; }
+
+    /** @brief Muestra de clima (temp, humedad, precipitación) en un punto. */
+    Haruka::WeatherSample weatherAt(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief Los VÓRTICES vivos ahora (tornados y trombas), con las condiciones REALES del terreno.
+     *
+     * Aquí es donde el clima deja de mirar una temperatura y una humedad globales: cada hueco de
+     * embudo se juzga con el campo que hay DEBAJO DE ÉL —`sampleSurface` en su propia dirección—, y
+     * el `landMask` de ese punto decide si sale un tornado o una tromba marina. Es la diferencia
+     * entre «el jugador está en un sitio húmedo, luego hay tornados en todo el planeta» y «hay
+     * tornados sobre la selva y trombas sobre el mar», que es lo que se quería.
+     *
+     * Se cachea por instante de simulación: el sistema es puro, así que dos llamadas en el mismo
+     * frame dan lo mismo y no hace falta repetir 28 muestreos de terreno.
+     */
+    const std::vector<Haruka::WeatherSystem::Vortex>& activeVortices() const;
+
+    /**
+     * @brief VIENTO TOTAL en un punto (m/s, marco local del planeta como `WeatherSample::wind`):
+     *        el de fondo MÁS el de cada vórtice que alcance.
+     *
+     * ⚠️ Es el único sitio del que debe salir el viento para quien lo SUFRE (el jugador, un prop
+     * suelto, la lluvia inclinada, el agua). `weatherAt(...).wind` es sólo el fondo: usarlo
+     * directamente significa que un tornado no mueve nada, que es como estaba el sistema antes de
+     * existir los vórtices. El motivo de que haya dos funciones y no una es que el mar SÍ quiere el
+     * fondo a secas —un tornado no levanta un oleaje de 20 km de fetch— y mezclarlos ahí daría un
+     * mar entero desatado por un embudo de 100 m.
+     *
+     * @param altAboveGroundM altura sobre el suelo: el vórtice muere en su nube madre y succiona
+     *        sólo en la capa de abajo, así que sin este dato el campo no se puede evaluar.
+     */
+    glm::dvec3 windAt(const glm::dvec3& worldPos, float altAboveGroundM) const;
+
+    /** @brief Severidad [0,1] del tiempo en un punto y su escalón. Para avisos, IA y refugio. */
+    float severityAt(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief FUENTE DE SUELO ya resuelta: el planeta que manda aquí + su centro, sin más búsquedas.
+     *
+     * ⚠️ EXISTE POR EL CAMINO CALIENTE. `sampleTerrainHeight` se llama **235 564 veces** por cada
+     * reconstrucción de la malla de colisión, y resolver "qué planeta es el suelo" dentro de cada
+     * llamada significaba repetir, por muestra, dos bucles sobre los vectores de planetas y una
+     * comparación de `std::string` — para un puntero idéntico en las 235 564.
+     *
+     * Un llamador masivo lo resuelve UNA vez y luego llama a `heightAt`. Y no hay dos verdades sobre
+     * qué planeta es el suelo: `sampleTerrainHeight` delega en esta misma resolución, así que el
+     * camino masivo y el puntual no pueden separarse.
+     *
+     * @param nearWorldPos punto de referencia SOLO para el desempate por cercanía cuando el nombre del
+     *        planeta activo no casa con ningún SimplePlanet (el camino (2), con aviso). En el camino
+     *        normal —el nombre casa— no se usa, que es lo que permite resolverlo fuera del bucle.
+     */
+    struct TerrainSampler {
+        const Haruka::Planet::TerrestrialPlanet* planet = nullptr;
+        glm::dvec3 center{0.0};
+        explicit operator bool() const { return planet != nullptr; }
+        /** @brief Cota del terreno (m sobre el radio). MISMAS cuentas que hacía `sampleTerrainHeight`. */
+        double heightAt(const glm::dvec3& worldPos, float minFeatureM) const {
+            const glm::dvec3 rel = worldPos - center;
+            const double len = glm::length(rel);
+            return (len > 1e-9) ? planet->sampleHeight(rel / len, minFeatureM) : 0.0;
+        }
+        /** @brief ¿Está el suelo RECORTADO aquí (boca de cueva, lo picado)? Es la misma función que
+         *  usa el shader del terreno para no dibujarlo: lo que no se ve tampoco se pisa. */
+        bool surfaceCutAt(const glm::dvec3& worldPos) const {
+            const glm::dvec3 rel = worldPos - center;
+            const double len = glm::length(rel);
+            return len > 1e-9 && planet->vox().surfaceCut(rel / len) > 0.5f;
+        }
+    };
+    TerrainSampler terrainSampler(const glm::dvec3& nearWorldPos) const;
+
+    double sampleTerrainHeight(const glm::dvec3& worldPos) const;
+    double sampleTerrainHeight(const glm::dvec3& worldPos, float minFeatureM) const;
+    bool groundHeightKmAtDir(const glm::dvec3& dir, float& outElevKm) const;
+
+    /// Dynamic terrain editing: add/subtract height within a radius (meters)
+    void editTerrain(const glm::dvec3& worldPos, double radius, double step, bool dig);
+    /// Flatten terrain to a target height (meters) within a radius
+    void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeight);
+
+    /** @brief Muestrea la superficie (altura, normal, material) en un punto del mundo. */
+    Haruka::TerrainSample sampleSurface(const glm::dvec3& worldPos) const;
+    bool getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const;
+
+    // ── SimplePlanet ──────────────────────────────────────────────────────
+    /**
+     * @brief Planeta de terreno simple (una malla, texturas procedurales).
+     *
+     * Alias de `Haruka::Planet::TerrestrialPlanetConfig` — la identidad + config cruda con la que
+     * un planeta SE CREA A SÍ MISMO. La API pública (getSimplePlanet/renderSimplePlanet) no cambia:
+     * el nombre y el radio que leían los consumidores siguen ahí, y `seed`/`raw`/`faceRes` son
+     * campos extra que la escena puede (o no) rellenar.
+     */
+    using SimplePlanet = Haruka::Planet::TerrestrialPlanetConfig;
+
+    /**
+     * @brief Añade un SimplePlanet para rendering.
+     * @param orbit Configuración orbital y de superficie.
+     * @param geo   Configuración geológica (placas, erosión).
+     * @param grid  Configuración de la malla (faceRes, etc.).
+     */
+    void addSimplePlanet(const SimplePlanet& orbit,
+                         const Haruka::Planet::GeologyConfig& geo,
+                         const Haruka::Planet::TerrainGridConfig& grid);
+
+    /**
+     * @brief Reconstruye el terreno de un SimplePlanet (nueva semilla).
+     */
+    void rebuildSimplePlanet(const std::string& name,
+                             const Haruka::Planet::GeologyConfig& geo,
+                             const Haruka::Planet::TerrainGridConfig& grid);
+
+    /**
+     * @brief Renderiza un SimplePlanet (pipelines RHI con shaders inline).
+     */
+    /** @brief Lanza el trabajo de COMPUTE de los planetas (culling de parches). DEBE llamarse
+     *  ANTES de abrir el render pass de la escena: `vkCmdDispatch` dentro de un render pass es
+     *  ilegal en Vulkan y cerraba el programa. Ver `TerrestrialPlanet::prepare`. */
+    void prepareSimplePlanets(const glm::dvec3& cameraPos,
+                              const glm::dvec3& viewDir = glm::dvec3(0,0,-1),
+                              double fovYRad = 0.7854, double aspect = 1.777,
+                              double viewportH = 1080.0,
+                              const glm::dvec3& viewUp = glm::dvec3(0.0));
+
+    void renderSimplePlanet(const std::string& name, const glm::dvec3& cameraPos,
+                            const glm::mat4& proj, const glm::mat4& view);
+
+    /**
+     * @brief Propaga la luz del sol a todos los SimplePlanet.
+     *
+     * La llama el orquestador cada frame con la luz real de la escena (WorldSystem); sin ella los
+     * planetas iluminaban con una dirección fija y el terreno no respondía al sol del cielo.
+     */
+    void setSunLight(const glm::vec3& dir, const glm::vec3& color, const glm::vec3& ambientColor);
+    /// Perspectiva aérea del frame (ver TerrestrialPlanet::setAerial): a todos los planetas.
+    void setAerial(const glm::vec4& a);
+    /** @brief Reparte los 9 coeficientes SH del cielo a todos los planetas. */
+    void setSkyAmbientSH(const glm::vec3 (&coef)[9]);
+
+    /** @brief Reparte a los planetas el estado de SUELO MOJADO/NEVADO y la máscara cenital con la que
+     *  se recorta (la misma que usa la lluvia para saber si una gota está bajo cubierto).
+     *  Ver `TerrestrialPlanet::setGroundWet`. */
+    void setGroundWet(float wet, float snow, Haruka::RHI::TextureHandle skyMask,
+                      const glm::mat4& skySpace);
+
+    size_t getSimplePlanetCount() const { return m_simplePlanets.size(); }
+    /** @brief Config del SimplePlanet por índice. */
+    const SimplePlanet& getSimplePlanet(size_t i) const;
+
+    /** @brief Genera chunks LOD @param name Nombre del planeta. @param lod Nivel LOD. */
+    void generateSimpleLOD(const std::string& name, int lod);
+
+private:
+    std::vector<Planet> m_planets;
+    std::vector<std::unique_ptr<Haruka::Planet::TerrestrialPlanet>> m_simplePlanets;
+    double m_simulationTime = 0.0;
+    double m_worldClock     = -1.0;   // < 0 = no cluster clock, accumulate locally (see setWorldClock)
+    /// Estado del mar del frame. Lo calcula `updateOceanState`, lo suben los shaders y lo lee la
+    /// física — UNA derivación, dos consumidores.
+    Haruka::Planet::OceanState m_oceanState = Haruka::Planet::oceanDefaultState();
+    /// El mar sigue al viento (filtrado) y lleva el ancla de la fase. Ver `SeaFollower`.
+    Haruka::Planet::SeaFollower m_sea;
+
+    // EL SUELO DEL JUEGO (ver sampleTerrainHeight)
+    // ⚠️ AQUÍ VIVÍA `ReferenceSurface`: 12 KB de máquina —snapshot atómico, caché de 1 M entradas con
+    // mutex, bilineal sobre retícula cube-sphere— cuyo `cornerM` acababa en `return 0.0`. Calculaba
+    // CERO, y los dos llamantes reales la esquivaban con un comentario que lo decía. Colgaba de
+    // `sampleTerrainV2`, que en esta rama es un stub.
+    //
+    // Lo único que se conserva es el paso de retícula (`terrainLatticeStep`, en el .cpp), porque la
+    // clave de las deformaciones lo usa. Y esa vía es inerte de todas formas: ver `warnDeformationInert`.
+
+    // Alturas editadas (deformación dinámica del terreno)
+    // Key = hash de la dirección del punto, Value = offset en metros sobre la altura base
+    mutable std::unordered_map<uint64_t, float> m_heightEdits;
+    /// Computes a spatial key for a direction (face + grid coords at reference resolution)
+    static uint64_t dirToHeightKey(const glm::dvec3& dir, int refLod, int chunkSize);
+    void rebuildPlanetMeshes();
+    static void editHeightsInRadius(std::unordered_map<uint64_t, float>& edits,
+                                    const glm::dvec3& center, double radius,
+                                    const std::vector<Planet>& planets,
+                                    int refLod, int chunkSize,
+                                    std::function<float(float)> modifyFn);
+
+    // CLIMA del mundo + caché del clima del CAMPO
+    mutable Haruka::WeatherSystem m_weather;
+    mutable glm::dvec3            m_weatherFieldPos{1e300};
+    mutable float                 m_weatherFieldTempC = 15.0f;
+    mutable float                 m_weatherFieldHumid = 0.5f;
+    mutable float m_weatherFieldGroundM = 0.0f;   // cota del suelo bajo la muestra (m)
+    // Caché de vórtices POR INSTANTE. No es estado del clima (que sigue siendo puro): es memoria de
+    // la última evaluación, porque juzgar los 28 huecos cuesta 28 muestreos de terreno y en un frame
+    // lo preguntan el jugador, los props, la lluvia y el render.
+    mutable std::vector<Haruka::WeatherSystem::Vortex> m_vortexCache;
+    mutable double                m_vortexCacheTime = -1e300;
+    const double G = 6.67430e-11;
+
+    void updateOrbits(double dt);
+    /** @brief Recalcula el estado del mar (viento + marea) y lo publica al planeta que lo dibuja. */
+    void updateOceanState(const glm::dvec3& cameraPos);
+    void updateSimpleOrbits(double dt);
+public:
+    /**
+     * @brief Audita el sistema: ¿puede alguna pareja de órbitas cruzarse en algún instante?
+     *
+     * Con elementos precesantes `a` es constante y `e` está acotada, así que el radio de cada cuerpo
+     * vive siempre en un intervalo fijo y la respuesta se puede DEMOSTRAR una vez para todo t (ver
+     * core/planet/orbit.h). Se llama sola al resolver las órbitas de la escena.
+     *
+     * @return nº de problemas encontrados (0 = sistema limpio). Cada uno se registra con su causa.
+     */
+    int validateOrbits() const;
+private:
+};
+
+}

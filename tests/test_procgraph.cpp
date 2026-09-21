@@ -15,12 +15,12 @@
 #include "tools/procgraph/tree_mesh.h"
 #include "tools/procgraph/tree_prop.h"
 #include "tools/procgraph/tree_spawn.h"
-#include "core/planet/prop_layer.h"
-#include "core/planet/prop_layer_spawn.h"
-#include "core/planet/zone_shape.h"
-#include "core/planet/climate.h"
-#include "game/terrain_prop_field.h"
-#include "game/prop_assembler.h"
+#include "world/props/prop_layer.h"
+#include "world/props/prop_layer_spawn.h"
+#include "world/props/zone_shape.h"
+#include "world/planet/climate.h"
+#include "world/props/terrain_prop_field.h"
+#include "world/props/prop_assembler.h"
 
 using namespace Haruka::Tools::ProcGraph;
 

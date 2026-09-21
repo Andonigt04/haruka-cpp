@@ -1,4 +1,5 @@
 #include "settings/settings_manager.h"
+#include "input/gamepad.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -31,8 +32,11 @@ static std::vector<std::string> splitCSV(const char* s) {
     return out;
 }
 
-// Serialises an action's key list with a type prefix so composites round-trip.
-// Format:  "Direct:W,Space"  |  "Axis1D:Equals,Minus"  |  "Axis2D:W,S,A,D"
+// Serialises an action's key list with a type prefix so composites round-trip, and the GAMEPAD
+// half after `;pad=`: buttons in source order, then `/` and the axes.
+//   "Direct:W,Space;pad=south/"  |  "Axis1D:Equals,Minus;pad=,/righttrigger"
+//   "Axis2D:W,S,A,D;pad=dpup,dpdown,dpleft,dpright/leftx,lefty"
+// A slot with no binding is written empty (the comma stays) so positions keep their meaning.
 static std::string serializeBinding(const Input::InputAction& a) {
     auto keys = a.keys();
     std::string prefix = std::visit([](const auto& src) -> std::string {
@@ -47,14 +51,41 @@ static std::string serializeBinding(const Input::InputAction& a) {
         if (i) out += ',';
         out += SDL_GetScancodeName(keys[i]);
     }
+    out += ";pad=";
+    const auto btns = a.padButtons();
+    for (size_t i = 0; i < btns.size(); ++i) {
+        if (i) out += ',';
+        out += Input::Gamepad::buttonName(btns[i]);
+    }
+    out += '/';
+    const auto axes = a.padAxes();
+    for (size_t i = 0; i < axes.size(); ++i) {
+        if (i) out += ',';
+        out += Input::Gamepad::axisName(axes[i]);
+    }
+    // Y la inversion de ejes, solo si hay alguna: ";inv=x", ";inv=y" o ";inv=xy".
+    bool ix = false, iy = false; a.invert(ix, iy);
+    if (ix || iy) { out += ";inv="; if (ix) out += 'x'; if (iy) out += 'y'; }
     return out;
 }
 
-// Parses "TypePrefix:K1,K2,..." and updates the action's key list.
-// Ignores the prefix when the action already has the correct binding type.
+// Parses "TypePrefix:K1,K2,...[;pad=b1,b2/ax1,ax2]" and updates the action's bindings.
+// Ignores the prefix when the action already has the correct binding type. An ini written before
+// the gamepad existed has no `;pad=` part: the defaults registered by the game are kept.
 static void deserializeBinding(Input::InputAction& action, const char* val) {
-    const char* colon = strchr(val, ':');
-    const char* keyPart = colon ? colon + 1 : val; // fallback: no prefix = Direct
+    std::string whole = val;
+    std::string padPart;
+    if (const size_t inv = whole.find(";inv="); inv != std::string::npos) {
+        const std::string flags = whole.substr(inv + 5);
+        action.setInvert(flags.find('x') != std::string::npos, flags.find('y') != std::string::npos);
+        whole = whole.substr(0, inv);
+    }
+    if (const size_t semi = whole.find(";pad="); semi != std::string::npos) {
+        padPart = whole.substr(semi + 5);
+        whole   = whole.substr(0, semi);
+    }
+    const char* colon = strchr(whole.c_str(), ':');
+    const char* keyPart = colon ? colon + 1 : whole.c_str(); // fallback: no prefix = Direct
 
     auto names = splitCSV(keyPart);
     std::vector<SDL_Scancode> codes;
@@ -64,6 +95,25 @@ static void deserializeBinding(Input::InputAction& action, const char* val) {
         if (sc != SDL_SCANCODE_UNKNOWN) codes.push_back(sc);
     }
     action.setKeys(codes);
+
+    if (padPart.empty()) return;
+    std::string bPart = padPart, aPart;
+    if (const size_t slash = padPart.find('/'); slash != std::string::npos) {
+        bPart = padPart.substr(0, slash); aPart = padPart.substr(slash + 1);
+    }
+    // Se conservan las POSICIONES: un hueco vacio es "sin boton" (INVALID), no "saltar" — `splitCSV`
+    // tira los vacios y descolocaria `dpdown` al sitio de `dpup`.
+    auto splitKeep = [](const std::string& str) {
+        std::vector<std::string> out; std::string tok;
+        for (char c : str) { if (c == ',') { out.push_back(tok); tok.clear(); } else if (c != ' ') tok += c; }
+        out.push_back(tok);
+        return out;
+    };
+    std::vector<SDL_GamepadButton> btns;
+    for (const auto& n : splitKeep(bPart)) btns.push_back(Input::Gamepad::buttonFromName(n.c_str()));
+    std::vector<SDL_GamepadAxis> axes;
+    for (const auto& n : splitKeep(aPart)) axes.push_back(Input::Gamepad::axisFromName(n.c_str()));
+    action.setPad(btns, axes);
 }
 
 // ── ImGuiSettingsHandler callbacks ───────────────────────────────────────────
@@ -128,6 +178,7 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "MasterVolume"))   a.masterVolume   = (float)atof(val);
     else if (!strcmp(key, "MusicVolume"))    a.musicVolume    = (float)atof(val);
     else if (!strcmp(key, "SFXVolume"))      a.sfxVolume      = (float)atof(val);
+    else if (!strcmp(key, "AmbientVolume"))  a.ambientVolume  = (float)atof(val);
 }
 
 static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* buf) {
@@ -169,6 +220,7 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("MasterVolume=%.2f\n", a.masterVolume);
     buf->appendf("MusicVolume=%.2f\n",  a.musicVolume);
     buf->appendf("SFXVolume=%.2f\n",    a.sfxVolume);
+    buf->appendf("AmbientVolume=%.2f\n", a.ambientVolume);
     if (!a.inputDevice.empty())  buf->appendf("InputDevice=%s\n",  a.inputDevice.c_str());
     if (!a.outputDevice.empty()) buf->appendf("OutputDevice=%s\n", a.outputDevice.c_str());
     buf->appendf("Language=%s\n", SettingsManager::get().language().c_str());
@@ -270,6 +322,10 @@ void SettingsManager::registerAction(const std::string& name,
 // ── update ────────────────────────────────────────────────────────────────────
 
 void SettingsManager::update(const bool* kbd) {
+    // Teclado (lo que pase el juego) + el mando, si lo hay: una sola lectura por frame.
+    Input::InputState in;
+    in.kbd = kbd;
+    Input::Gamepad::get().poll(in);
     for (auto& a : m_actions) {
         // While the rebind UI is capturing a key, no action may fire — otherwise the
         // key being bound would also run its current action (and ESC would close the
@@ -285,7 +341,7 @@ void SettingsManager::update(const bool* kbd) {
                 return false;
             }, a.source);
         } else {
-            a.evaluate(kbd);
+            a.evaluate(in);
         }
     }
 }

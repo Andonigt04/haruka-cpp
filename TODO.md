@@ -1579,7 +1579,7 @@ lejos». Sigue ahí después de todo lo de abajo.
 3. Coste: el pase de nubes va a **27,9 ms** en GL a 256²/64 pasos tras la luz física. Sin medir en el
    juego (falta una corrida con `HARUKA_NO_VSYNC=1`).
 
-## ⚠️ ABIERTO: ANILLOS DE ZANCADA EN EL AGUA DE COSTA (19-09)
+## HECHO (parcial): ANILLOS DE ZANCADA Y DE NIVEL EN EL AGUA DE COSTA (19-09)
 
 **Síntoma** (Andoni): círculos concéntricos de tono azul distinto, **sobre todo en costas**; la vista
 `HARUKA_TERRAIN_V5_DEBUG=4` los enseña por construcción (colorea por zancada) y ningún test falla.
@@ -1604,12 +1604,435 @@ publica `strides 0/0` porque en su escena no hay cambio de zancada en aristas au
 agua usan fondo CONSTANTE (2 500 m o 20 m) o mar abierto, donde el salto es invisible. El test nuevo
 `ANILLOS` (rugosidad por fila) tampoco lo ve por lo mismo: mide el mar sintético, no una costa real.
 
-**Opciones** (sin decidir):
-1. **Tope de zancada bajo el agua**: acotar la zancada para que la relieve que se pierde sea ≤ 10 %
-   de la profundidad local. Cuesta triángulos sólo en la costa, que es donde se mira de cerca.
-2. **Profundidad continua para el SOMBREADO y la OLA**: `vDepth` con un corte continuo en distancia
-   en vez del cuantizado por zancada; la posición del vértice se queda como está. ⚠️ Riesgo conocido:
-   la orilla (el `discard` por `vDepth <= 0`) dejaría de coincidir con el suelo dibujado en 1-3 m —
-   es la enfermedad de «dos suelos» que ya costó el cuadrado de agua y la película blanca.
-3. **Corte continuo también en el terreno**: quita los anillos en todas partes, pero mete detalle que
-   la malla no puede representar en el lado grueso — que es lo que el corte existe para evitar.
+**Decisión** (Andoni: «no quiero añadir disparidad en ningún concepto»): se descartan las dos
+opciones que tocan el corte del detalle (profundidad continua sólo para el sombreado = «dos suelos»;
+corte continuo en el terreno = detalle que la malla gruesa no representa). Lo único que queda es
+**afinar la malla donde el agua es somera**, que ACERCA lo dibujado al campo que se pisa.
+
+**HECHO** (las dos son la misma regla: lo que el corte esconde ≤ `kWaterReliefFrac` = 0,25 × la
+profundidad del punto más hondo del nodo; `nodeMissingReliefM` lo sabe en metros sin muestrear):
+- **Zancada** (`TerrainNodeRenderer::draw`, `FrameStats::waterStrideCapped`): la zancada de un nodo
+  bajo agua somera no puede perder más que eso respecto a su téxel. Banco: costa (3 m) 45 de 92
+  nodos acotados, 0,67 M tris; mar abierto 0 acotados, 0,48 M. Igual en GL y VK.
+- **Nivel** (`nodeShallowWantsSplit` en `nodeSelectVisible`, `FrameStats::waterSplit`): el nodo se
+  parte aunque la pantalla no lo pida mientras su téxel esconda más que eso respecto al campo
+  entero. ⚠️ Con **alcance** `TERRAIN_NODE_WATER_SPLIT_REACH` = 2 (sólo nodos con error en pantalla
+  > errorPx/2, o sea a menos de 2× su distancia de partición): sin tope, una plataforma de < 15 m
+  vista desde órbita pediría decenas de miles de nodos. Medido en `terrain_node_shallow_split`
+  (plataforma plana de 3 m y 30 km, el peor caso): alcance 2 = +80 % de nodos (494 → 890),
+  3 = +172 %, 4 = +251 %. La frontera 14→13 que saltaba 0,42 × profundidad a 6 km se va a 10,4 km
+  y dentro del alcance el peor salto queda en 0,10. Banco: 14 particiones del agua en la costa, 0
+  en mar abierto.
+- De paso: `TERRAIN_NODE_MAX_LEVEL` era la constante 17 calculada para la Tierra; ahora
+  `nodeMaxLevelFor(R)` (primer nivel cuyo téxel baja de λmin/4 = 1,125 m: Tierra 17, 4 R⊕ 19,
+  R⊕/4 15) y la constante es el tope duro de la clave (26).
+- Y el banco medía mal: `setHeightSampler` no re-acotaba los residentes del pool (cache), así que
+  la tirada «costa» sólo veía el fondo en el nodo recién generado (1 acotado). Ahora
+  `TerrainNodePool::rerange`.
+
+**NO elimina**: los anillos de nivel más allá de 2× la distancia de partición (allí el nodo mide la
+mitad en pantalla), ni el anillo en una playa de pendiente normal —que no existe: con 2 m por
+100 m las fronteras de nivel caen ya en agua honda (17→16 a 692 m con 29 m de fondo, salto 0,04 m).
+Los anillos que se ven son de PLATAFORMAS de pocos metros durante kilómetros, que es lo que deja
+el bake al interpolar la costa sobre 80 km. **Sin verificar en el juego** (nada visto en pantalla).
+
+## HECHO (a falta de mirarlo): CÍRCULOS EN EL TERRENO (19-09, «no es de agua sino de terreno»)
+
+**La raíz, medida** (`terrain_node_stride_ramp_continuity`, CPU sobre los mismos mapas que dibuja
+la GPU; `testStrideRingsOnLand` en el banco): el corte de octavas era un **diente de sierra en la
+distancia**. Dos dientes:
+
+1. **Zancada** (150 y 300 m): el vértice pasaba de su mapa al del padre y al del abuelo de golpe.
+   En el nivel 17 vale 1,8 cm y 8 cm de relieve, 0,010 / 0,027 de pendiente: tenue.
+2. **Nivel** (614 m, 1,2 km, 2,5 km, 4,9 km…): con zancada 4 el corte es 4×téxel, y el téxel se
+   dobla por nivel; dentro de cada banda el corte iba de 16 px a 8 px y en la frontera volvía a 16.
+   A 1 228 m se llevaba el 85 % de la octava de 22 m (**0,38 m**; bultos de 19 px a 1080p). Con el
+   morph apagado (30-08) nada lo suavizaba. Fronteras de nodos (cuadrados de 152 m a 1,2 km) que a
+   esa distancia se leen como circunferencias. Escalón medido hijo-contra-padre en el mismo vértice:
+   **0,131 m de media, 0,958 el peor** (400–3 000 m).
+
+**Hecho — el corte continuo** (`nodeStrideMapF`, gemelos en `terrain_node.vert` y
+`terrain_node_water.vert`; `TERRAIN_NODE_STRIDE_RAMP`): el mapa que lee cada vértice es un índice
+FRACCIONARIO por su distancia. Cerca (< 300 m) es la ley de zancada con el tope de cerca hecho rampa
+(25 % del radio). Lejos, el espaciado del mapa mide `vertexPx` píxeles a cualquier distancia:
+`f = log2(vertexPx / téxel_px)`; en la frontera el hijo lee 8×téxel = el 4×téxel del padre. Para eso
+el vértice lee hasta el **tatarabuelo** (k = 4; `IN.misc.zw`): el nivel se decide por el punto más
+cercano del nodo y `f` va por vértice, así que la esquina lejana de una hoja pide hasta 3,43 (con
+k = 3 quedaba un escalón de 0,075 m). La normal va al paso del MAPA, no de la malla (el mismo mapa
+daba rugosidad 0,31 a zancada 1 y 0,55 a zancada 4). Resultado: **escalón en las fronteras de nivel
+0,0000 m** (hijo y padre leen el mismo mapa en el mismo punto). GPU = CPU comprobado con las
+vistas 12 (mapa leído) y 13 (distancia): residuo 0,30 contra la ley, 1,01 sin la rampa.
+
+**Lo que cuesta**: es la opción (A), «el lado grueso del diente en todas partes»: más allá de 300 m
+la mitad lejana de cada banda pierde una octava antes que antes (a 1,2 km hasta 0,38 m = 0,3 px; a
+4,9 km 3,8 m = 0,8 px). Bajo los pies y hasta 300 m no cambia nada (medido: idéntico bit a bit fuera
+de las rampas de 112–150 y 225–300 m, donde añade ≤ 12 cm). **`vertexPx` es el mando**: con
+`HARUKA_TERRAIN_V5_VERTPX=4` es la opción (B), el lado fino (×3,5 triángulos, 22 ms medidos en su
+día), sin tocar código. `HARUKA_TERRAIN_V5_STRIDE_RAMP=0` devuelve el escalón de zancada (no el de
+nivel). Vistas: `HARUKA_TERRAIN_V5_DEBUG=12` mapa leído, `=13` distancia.
+
+**Dos bugs que salieron al mirarlo (20-09)**:
+- Los nodos **caídos a ancestro** leían el ancestro crudo sin la ley: contra un vecino bien dibujado,
+  0,317 m de media / 1,46 el peor de desnivel en la frontera (Andoni: «el desnivel de geometría…
+  como que no ha sido adrede»). Ahora un caído mide la ley desde su mapa base (`f − kUp`) y lee los
+  ancestros `kUp + S`: idéntico a lo que dibujaría con sus datos (0,0000 m).
+- La ley medía la distancia a la **esfera lisa** (`dir·R`), no al terreno: con el terreno a +286 m el
+  vértice creía estar a 339 m estando a 59 y leía el mapa del abuelo bajo los pies (lo cazó `v5 F3`
+  cuando su gemelo del UBO pasó a 240 B y `uStrideRamp` dejó de leerse a cero). A 1 000 m de cota
+  todo el campo cercano se dibujaba con el corte de 1 km más lejos. Ahora la distancia va a la cota
+  del mapa del abuelo (función de la posición: las dos caras de una arista leen lo mismo); el agua,
+  al campo analítico al mismo corte.
+
+- Y un tercero, con la vista 11 desde alto: una **costura recta naranja** en la costa. Los nodos que
+  la partición bajo agua somera baja dos niveles piden el mapa 5–6 niveles arriba para leer el mismo
+  corte absoluto; con 4 ancestros se recortaban y dibujaban un mapa más fino que el vecino (0,093 m
+  de media / 0,96 el peor en el mismo vértice, medido en CPU). Ahora `slot.w` lleva los ancestros 5
+  y 6 (16 bits cada uno): 0,0000. De paso, la cota de la ley se lee en el vértice colapsado (u0,v0),
+  no en (u,v): regla 1 del 25-08.
+
+**El test que pedía Andoni** («que el valor dado en la imagen y el horneado se verifique»):
+`testFrameDrawnVsBaked` en el banco: un frame entero del renderer real con bake (equirect + cubo),
+vista 14 = |dibujado − pisado| en 16 bits por píxel (misma referencia que la vista 11, con el bake),
+por bandas de distancia. Medido: < 150 m 1,9 mm de media / 5,6 cm peor · 150–300 m 3 cm / 29 cm ·
+300–1 000 m 10 cm / 65 cm · 1–2 km 37 cm / 1,29 m (VK = GL). Contraprueba: un bake 3 m distinto para
+el vértice sale como 2,9–3,0 m. ⚠️ Salió de paso: la vista 11 en el juego compara contra un planeta
+SIN bake (referencia `detail(dir, R)`), o sea que con continentes pinta magenta por el bake, no por
+un fallo; la 14 es la buena. Y el compute sólo compone el bake si hay campo del cubo atado
+(`uMisc.z`): con equirect solo, el nodo es detalle puro sobre R.
+
+**Sin verificar**: nada visto en el juego con estos dos arreglos. El coste en vértice (+4 muestras
+del mapa en las rampas, +1 del abuelo para la cota). En el banco a 256 px la esquina lejana está 3×
+más lejos y `f` pediría 4,6: ahí queda un residuo; a 1080p no. Con el pool escaso el selector emite
+hojas más bastas de lo que la ley pide (nivel 13 a 300 m): ese escalón es del hambre, no de esto.
+
+## 20-09 — «el viento me mueve solo»: no era el viento, era el frame (CERRADO con números)
+
+Sonda `HARUKA_WIND_DIAG=1`: deriva 0,000 m/s parado, pies en el suelo 90-100 %. Lo que pasaba era
+el frame: 67-98 ms. Volcado de GPU (`HARUKA_PROF_LOG=120 HARUKA_NO_VSYNC=1`, costa): `v5.agua`
+10-16 ms, nubes 11-30, terreno seco 5-9, `compute.prepare` 14 a ráfagas.
+
+- **Nubes: 64 → 24 pasos** (`HARUKA_CLOUD_STEPS`). Medido contra 256 pasos: 1,2 → 2,4/255; alcance
+  igual; **el Sol igual** (r 0,202/0,206, fase ×1,10, exigido ahora por el banco 6-L). En juego 16 → 9-11 ms.
+- **Nubes: rayas horizontales** (ya estaban): planos de muestreo coherentes anclados en la cámara.
+  Muestreo estratificado por tramo en `cloud_vol.frag`. Andoni: «ya no está». `HARUKA_CLOUD_PNG=<dir>`
+  vuelca la vista rasante desde el suelo (el banco no la tenía y no las veía).
+- **Agua: 98 % vértice** (A/B de viewport en el banco, `agua.costa_*`). Desglose a 256²: suelo de
+  vértices 34 %, Gerstner 28 %, ruidos 9 %, pendiente del fondo 8 %, dir fp64 8 %. Hecho: ruidos
+  ×3 → ×1 (`harukaTerrainDetailNoises`, bit a bit igual): 5,39 → 4,62 ms. `WATERFIX=0` demostró
+  que los parches de costa NO son el coste. Lo que queda es número de vértices: sólo se baja
+  dibujando el agua con menos vértices que el terreno donde las olas no los necesitan.
+  **HECHO (20-09, tarde) — el agua tiene su propia zancada por nodo** (`Water::waveQuadMinM` = 2 m y
+  `Water::waveVertexPx` = 2 px; `HARUKA_WATER_QUAD_MIN` / `HARUKA_WATER_VERTEX_PX` para medir, 0 =
+  como antes). Nunca más fina que la del terreno; la física no cambia porque lee el quad DIBUJADO
+  (`waterQuadAt`, que ahora devuelve el del agua). Medido intercalado (3+3, banco de costa 256²):
+  VK 6,16 → 5,37 ms (−13 %); GL 4,73 con lo nuevo; 11 de 92 nodos con más zancada que el terreno.
+  El histograma nuevo del banco (`nodos de agua … por zancada`) dice DÓNDE están los vértices: 58
+  de los 92 nodos a zancada 2 (nivel 14, quads de 5-10 m, sub-píxel a 256²), y el tope ahí lo pone
+  la ley del terreno (constante 8/errorPx + colisión), no las olas. **Lo que NO se hizo, medido**:
+  un tope fijo de zancada 4 da −60 % (1,97 ms) pero mata el tren de 137 m visto desde 5 km (7 px
+  allí; el test «la ola viaja» cae) y baja la rugosidad de 0,68 a 0,24 desde 200 m; con 8, −78 % y
+  negros en la línea del mar. En el juego (1080p) el grueso son niveles 14-16 a zancada 4 entre
+  150 m y 3 km: 2,4-4,8 m de quad = 3,6 vértices por ola de 8,7 m, el mínimo visual para el tren
+  más corto, que allí mide 10-60 px. Bajar más = perder trenes visibles: decisión de Andoni con los
+  dos mandos y `HARUKA_PROF_LOG` (`v5.agua`). La salida estructural de verdad sería llevar los
+  trenes cortos a la NORMAL (por píxel) y dejar la geometría a los largos con malla ×4 más gruesa —
+  pero la altura de la física ya no sería la dibujada en ±0,3 m (los trenes cortos), y eso es
+  disparidad: no se toca sin que él lo decida.
+- ⚠️ `tests/baseline/` ha desaparecido del árbol de trabajo (20-09, 21:02; `git status` lo da
+  como borrado, y `.gitignore` tiene `test/baseline/` —sin la «s»—). Sin él `baselineMetric` no
+  comprueba nada: el banco pasó de 460 a 420 comprobaciones (−37 en nubes, −1 en RHI, agua y
+  escena). Los valores aprobados hoy (`agua.costa_ms`, `nubes.pase_24pasos_ms_1080p`) estaban
+  sólo en esos ficheros sin commit. `git checkout -- tests/baseline` recupera los de HEAD; los de
+  hoy están en las notas de esta sesión (VK agua.costa 4,618 · costa_vertice 4,617 ·
+  nubes 24 pasos 293,1 · 64 pasos 580,3; GL 5,686 · 5,553 · 423,1).
+- `compute.prepare` 14 ms a ráfagas = 170 nodos × 0,08 ms del presupuesto elástico (por diseño, ver
+  `init` del renderer: «la fidelidad depende de esta tasa»). No tocado.
+- ✅ El banco de Vulkan se colgaba 2 de 7 tandas (`vkQueueSubmit = -4`, device lost). CERRADO
+  (20-09, tarde): era la **cache de shaders en disco de NVIDIA** (`__GL_SHADER_DISK_CACHE`, driver
+  615.71.09). Reproductor `vk NodeWaterDraws` 35 % / `vk TerrainNodeCoverage` 40 %, siempre en el 2.º
+  o 3.º frame de un renderer nuevo, 4,3 s de `vkDeviceWaitIdle` y -4 (o bloqueo mudo). Con la cache
+  apagada 0/20 intercalado con 5/10 con ella; con una cache nueva y vacía la corrida que la escribe
+  pasa y las que la leen cuelgan 2/12 (el driver cargando el pipeline, no una entrada corrupta).
+  Descartado con ≥10 corridas cada uno: contenido (instancias bit a bit iguales al frame anterior),
+  pase de agua, cosido, partición somera, present mode, Wayland/X11, barreras, reuso del command
+  buffer, anillo de descriptores, timestamps. RADV 0/10. El banco la apaga en `main`
+  (`HARUKA_NV_SHADER_CACHE=1` para volver a medirlo). **El juego NO se ha tocado**: si cuelga al
+  arrancar en Vulkan, es esto (`__GL_SHADER_DISK_CACHE=0 ./build/bin/survival`). De paso, dos
+  hazards reales que la validación de sincronización sacó y que NO eran la causa: la dependencia de
+  subpase sin la profundidad (WAW del clear) y `renderFinished` único para todo el swapchain (VUID
+  00067) → uno por imagen. `endFrame` ahora loguea el resultado de `vkDeviceWaitIdle`, el frame y
+  los ms.
+
+## 20-09 — build y bancos
+
+- `HARUKA_BUILD_TESTS`: OFF con `CMAKE_BUILD_TYPE=Release` o `RELEASE=ON` (motor y juego): sin
+  targets, sin CTest, sin binarios. La CI lo pide con -D. Release completo COMPILADO una vez.
+- CMake dividido: motor 822 → 294 + `cmake/Haruka{Version,BuildFlags,Dependencies,Modules,Shaders,Tests}.cmake`;
+  juego 325 → 181 + `cmake/Survival{Tests,Shaders,Assets}.cmake`. Verificado: mismos targets, mismos
+  flags por fichero, mismos comandos de shaders.
+- Tests por grupos con contador `[grupo i/N · test j/M]`, tabla por grupo y filtro por grupo o por
+  nombre: CPU 14 grupos (198 tests), RHI 7 (57), juego 5 (12, UN binario `survival_tests` en vez de
+  doce). Dos bugs que salieron al hacerlo: `BuildingGenerator::generate` ignoraba la semilla
+  (`random_device`; ciudades distintas en cada arranque, cliente ≠ servidor) y `survival_ground_api`
+  apuntaba a un script que nunca existió (escrito: el suelo se lee por `getTerrainHeightAt`).
+- `HARUKA_NETWORK` del juego se declaraba DESPUÉS de traerse el motor: `cmake` a secas compilaba sin
+  red y `network.h` no compilaba. Movida antes de FetchContent.
+
+## 21-09 — HIERBA DENSA EN GPU, que se aplasta (Andoni: «hierba bastante, realista, muy optimizado»)
+
+- **Hecho**: `renderer/grass_renderer.{h,cpp}` + `grass_gen.comp` / `grass.vert` / `grass.frag` /
+  `grass_press.{vert,frag}`. Compute por (celda del cubo 2,4 m, brizna) con hash del mundo; altura
+  del **mapa del nodo dibujado** (tabla `TerrainNodeRenderer::nearNodes` + `heightsBuffer`, la
+  misma bilineal que `terrain_node.vert`, caída a ancestro incluida); densidad = material del suelo
+  (`grass` por material, `g.w`; `harukaGrassAmount`) × pendiente (≤ 0,30 = 46°) × LOD por
+  distancia (menos briznas, más anchas); cono de frustum; `drawIndexedIndirect` con la cuenta
+  atómica. Aplastado: mapa de presión 512² a 25 cm (128 m) anclado al mundo a saltos de téxel,
+  decae en 4 s, hasta 64 sellos/frame (`addStamp`: jugador en `player.cpp`, cuerpos con física en
+  `dynamic_props.cpp`; criaturas y vehículos aún NO estampan). Viento y reloj: los de los props.
+- **Medido** (banco `vk|gl hierba`, 256², 8 nodos, 414 k hilos): 49 652 briznas en el cono, todas
+  en radio/cono, raíz a < 2 cm del mapa del nodo (bilineal en CPU del mismo mapa), 0 briznas con
+  `grass = 0`, 0 sin tabla de nodos, girar 180° da otro conjunto del mismo tamaño; presión bajo el
+  pie 0,64 tras el sello, 0 a los 6 s, y un sello a 20 m no toca el pie. Coste a 256²: 0,1 ms
+  (`hierba.pase_ms`). Imágenes: `HARUKA_GRASS_PNG=<dir>` (con/sin/pisada).
+- **Densidad (21-09, Andoni: «la hierba es basta, cada milímetro»)**: cada instancia es ahora una
+  MATA de 3 briznas (45 índices; ×3 cobertura por el mismo compute), 100 matas/m² a los pies
+  (~300 briznas/m²), briznas de 0,26 m × 1,2 cm, LOD desde 8 m hasta el 10 % en el radio con las
+  supervivientes ensanchadas hasta ×3,5; el descarte de LOD va ANTES de buscar el nodo (con la
+  distancia aproximada y 10 m de margen, misma cuenta que sin atajo). Banco a 256²: 164 511 matas
+  en el cono de 1,72 M hilos, **0,86 ms GL · 0,91 ms VK** (era 0,1 ms con 50 k briznas sueltas).
+- **Culling (21-09, «¿frustum, oclusión?»)**: el cono se cambió por los **cuatro planos del
+  frustum** (la cámara pasa su `up` por `prepare`): misma imagen (SE VE 19 141 vs 19 135 px) con
+  un 33 % menos de matas en la ventana 1:1 del banco, y más en 16:9 (el cono de 49,7° envuelve un
+  rectángulo de 30°×46°). Con eso la densidad subió a **160 matas/m²** (~480 briznas): 175 508
+  matas en el cono, 0,97 ms a 256²; radio 80 m → 295 721 y 1,7 ms. **Oclusión: no hay** (ni Hi-Z
+  del frame anterior ni auto-oclusión del terreno); es lo siguiente si hace falta, con números.
+- **Sin verificar**: el juego (no lo lanzo): coste a 1080p (el fill de 500 k briznas), el aspecto
+  (`HARUKA_GRASS_DENSITY`, `HARUKA_GRASS_RADIUS`, `HARUKA_GRASS=0`), y que el material real de la
+  escena reparta la hierba donde toca (por defecto `grass = 1` en los materiales cuyo albedo se
+  llama `grass*`).
+- **Lo que no hace (v1)**: sombra (ni la proyecta ni la recibe), colisión, la esquina de la otra
+  cara del cubo, zonas pintadas (`harukaGrassAmount` no mira el mapa de zonas), criaturas/vehículos
+  sin sello. Tres bugs del banco por el camino: el readback sin fence leía el frame anterior en GL;
+  la cámara sobre el bake y no sobre el suelo dibujado (−88 m); la distancia aproximada con el
+  suelo al nivel del mar se comía el 97 % de las briznas cuando el suelo está a −87 m.
+- De paso, **el pase a pantalla de OpenGL no fijaba el viewport** (`GLContext::beginRenderPass` con
+  target 0): heredaba el del último pase a textura, y la app lo salvaba con un `setViewport`
+  explícito que el banco no hacía — el mapa de presión de 512² dejó el cielo del test siguiente
+  dibujado a 512² sobre 256² (9 fallos en «cielo y nubes» solo tras «hierba»). Ahora GL fija el de
+  la ventana (`GLDevice::framebufferSize`, que antes devolvía 0), como Vulkan. El filtro del banco
+  admite `a|b` para correr dos grupos en el mismo proceso, que es como se cazó.
+- ⚠️ El IDE (CMake Tools) reconfigura `build/` **en Debug** cuando cambia un CMakeLists: pasó dos
+  veces hoy en los dos árboles (`CMAKE_BUILD_TYPE:STRING=Debug` en la caché). Devueltos a
+  RelWithDebInfo; es «esta en debug parece».
+
+## 21-09 — MANDO: el sistema de entrada solo sabía de teclado (Andoni: «¿no está planteado otro device?»)
+
+- No lo estaba: las tres fuentes eran listas de `SDL_Scancode`, `evaluate` recibía
+  `SDL_GetKeyboardState`, y `SDL_INIT_GAMEPAD` no se iniciaba nunca (SDL enumeraba el joystick y
+  nadie lo abría). **Hecho**: cada fuente lleva teclas Y mando (`DirectBinding`: botones + gatillo
+  por umbral; `Axis1DBinding`: eje o dos botones; `Axis2DBinding`: stick —Y invertida, zona
+  muerta radial reescalada— o cruceta). `Input::Gamepad` (`input/gamepad.*`) abre el primer mando,
+  sigue conexión/desconexión y rellena `InputState`; `SettingsManager::update` lo lee cada frame.
+  El ini guarda la mitad del mando tras `;pad=` (botones/ejes por posición, huecos vacíos =
+  sin asignar); un ini viejo sin esa parte conserva los defaults. `Character` gira con la acción
+  "Look" (stick derecho, 160°/s a tope, independiente de la sensibilidad del ratón). Reparto en
+  `init_console.cpp`: stick izq/cruceta mover · stick der mirar · A saltar · B bajar · X usar ·
+  Y inventario · LB conjurar · RB colocar · LT construir · RT romper · Start ajustes · Back consola
+  · L3 esprintar. `HARUKA_GAMEPAD=0` lo apaga.
+- **Medido**: `haruka_tests input` (19 comprobaciones: stick/zona muerta/cruceta/teclado+stick,
+  gatillo por umbral, fases, ida y vuelta de nombres, huecos por posición; contraprueba: sin mando
+  abierto los ejes no cuentan y el teclado sigue igual). CPU 332 740 OK, juego 549 OK.
+- **Panel de ajustes (21-09, «los inputs no se leen y pone que hay 4 inputs; ¿dividir?»)**: los
+  «4 inputs» eran los 4 huecos VACÍOS de teclado de «Mirar» (solo mando) pintados como botones
+  sin nombre; y el panel capturaba solo teclas, así que un botón del mando «no se leía». Ahora la
+  pestaña tiene dos columnas, **Teclado** y **Mando** (botones por hueco y ejes con `~`), los huecos
+  vacíos salen como «—», al clicar un chip del mando se captura el botón o el eje que muevas
+  (> 0,6), y arriba dice si SDL ve el mando y cuál (`ctrl.padNone` si no). Sin verificar en
+  pantalla (no lanzo el juego). Botones del RATÓN como binding: no existen en el sistema.
+- **Sin verificar**: con un mando REAL (no hay ninguno aquí): que SDL lo reconozca como gamepad
+  (si solo es "joystick" sin mapeo, `SDL_GetGamepads` no lo lista → `SDL_GAMECONTROLLERCONFIG`),
+  la sensación del stick de mirar, y el panel de ajustes: enseña y reasigna solo las TECLAS; la
+  mitad del mando se cambia a mano en el ini o en `registerActions`.
+
+## 21-09 — SONIDO POR PUNTOS LÓGICOS, agrupados (Andoni: «un pie sobre una rama crea un punto donde se rompe; el viento… ¿global?; los que hacen el mismo sonido se agrupan»)
+
+**Qué había**: OpenAL con tonos procedurales y WAV, `playSound(pos)`/`addSource(pos)` con oclusión
+por pathfind, y NI UN asset de audio (assets/ no tiene carpeta de sonido). Nada sonaba en el mundo.
+
+**Qué hay** (`src/audio/`):
+- `sound_synth.*`: 12 sonidos SINTETIZADOS al arrancar (bucles: viento en el oído, hojas, rompiente,
+  chapoteo, sumergido; disparos: pisada hierba/arena/roca/nieve/agua, chapuzón, crujido). Ruido
+  filtrado + envolvente con periodos enteros en el bucle + fundido cola→cabeza. ~3 MB PCM a 22 050 Hz.
+- `sound_points.*`: PUNTOS. `add/set/remove` persistentes (objetos que suenan mientras algo les pasa)
+  y `emit` (hechos). Los del MISMO sonido se agrupan por sector (12 azimut × 3 anillos 15/45/160 m,
+  más el "centro" a < 1 m del oído): una voz en el centroide con la energía SUMADA (√N: cien
+  árboles = 10× uno). Presupuesto 24 voces; un grupo conserva su ranura (no reinicia el bucle);
+  el que se va se apaga en 100 ms. Atenúa esto (ref 6 m, 1/d), no OpenAL (rolloff 0).
+- `AudioManager::points()` + `setVolumes(master, ambiente, efectos)` (MasterVolume NO se aplicaba
+  en ningún sitio: ahora es AL_GAIN del listener) + `setSubmerged` (amortigua ×0,15). Ajuste nuevo
+  `AmbientVolume` (panel, ini, `audio.ambient`).
+
+**Juego**: `scripts/world_sound.cpp` — viento en el oído (punto en la cámara, potencia por
+`windAt`, tono 0,85–1,15), cada árbol a < 120 m con hojas (no hierba/muerto/cactus) un punto
+en la copa (barrido cada 0,5 s), retícula polar 12×3 (18/40/90 m) de agua: rompiente por espuma
+y chapoteo por presencia, sumergido si la lámina tapa la cámara. `Player::updateSounds`: pisada
+por zancada (0,85 m) con material (charco/nieve/arena/hierba), chapuzón al cruzar la lámina.
+`init.cpp`: crujido DONDE se rompe la rama/tronco. Consola: `sonido`.
+
+**Medido** (`haruka_tests sonido`, 53 comprobaciones): costura de cada bucle ≤ p99 de saltos
+vecinos (y la contraprueba con un salto a mano la detecta); hojas 60 %+ de energía > 800 Hz,
+viento < 20 %; rompiente 3 olas/vuelta; 100 árboles al este = 1 voz g=0,75 (√100 × 0,075), uno
+solo 0,075; 50 este + 50 oeste = 2; hojas+rompiente mismo sector = 2; 72 grupos → 24 voces, las
+más fuertes; cruzar de sector apaga la vieja y nace otra; 5 crujidos = 1 disparo √5 más fuerte.
+
+**Sin verificar**: TODO lo del juego (no se ha lanzado): cómo suena cada síntesis, las potencias
+relativas (0,9 viento, 0,35 hojas, 0,8 rompiente, 0,25 chapoteo, 0,4 pisada), que el barrido de
+árboles encuentre árboles (depende de que el scatter global esté vivo), el coste del barrido de
+agua (36 celdas × 3 muestreos de terreno cada 0,5 s). No hay oclusión de los grupos por terreno
+(los `addSource` viejos sí la tienen). Pisada "roca" existe pero nada la dispara (no hay material
+roca en `groundCoverAt`). Criaturas y vehículos no emiten puntos. Al cruzar una frontera de
+sector la voz vieja y la nueva se solapan 100 ms con fases distintas del mismo bucle.
+
+## 21-09 — LOG LIMPIO (Andoni: «limpia los logs de terreno y del selector de GPU, la detección, etc.»)
+
+- El nivel por defecto del logger pasa de DEBUG a **INFO** (`logger.cpp`): las trazas `[DEBUG]`
+  (colliders de props, escalas, listas de GPU) salían en cada sesión. `HARUKA_LOG_LEVEL=debug` o
+  `HARUKA_DIAG=1` las devuelven.
+- GPU: cuatro bloques (pre-resolución, lista del VK, lista de la aplicación, elegida) → **una línea**
+  `[RHI/VK] GPU = <elegida> (ajuste del juego|automatica|via HARUKA_VK_GPU) · vistas: a, b, c` más
+  `Backend activo`. Swapchain extent/recreación e ImGui a DEBUG.
+- Terreno/física/vox por frame o por reconstrucción → `HARUKA_LOGDIAG` (sólo con `HARUKA_DIAG=1`):
+  `sel N -> dibujados`, anillo cercano (SIN suelo / publicado / suelo CERCANO / twist / escalón),
+  paredes de cueva, chunks vox (generados, mallados, dibujados, syncVoxColliders, props retirados,
+  ventana de recorte, trazos), `[Mar] celda del agua`.
+- Detalle del arranque del planeta → DEBUG: capas «gana», capas decodificadas, pipelines, pasos de
+  build (shaders/mesh/orilla/macro/bioma/altura ok), BakeCache cached/upload, bisección, NearGround,
+  recorte volumétrico, paredes con la roca. Quedan a INFO: `build 'Earth': radius=…`, clima del
+  planeta, `agua SI …`, array de terreno, pool de nodos, hierba, `init OK`, `[Mar] viento del mar`.
+- Sin verificar: el log del juego con estos cambios (no se ha lanzado); nada del banco depende de
+  DEBUG (`haruka_tests` 332 797 OK, `gl hierba` 15 OK después del cambio).
+
+## 21-09 — MÓDULOS FUERA DE `application_*` (Andoni: «ya tengo el renderer; los módulos están todos en application_*»)
+
+Plan acordado: `core/` = lo indispensable; `renderer/` = piezas + pases; `world/` (nueva) = planeta
+y lo que hay encima (hoy `core/terrain` + `core/planet` + `game/`); `physics/ audio/ net/ ui/ scene/`
+igual. Primero sacar los ★ de `application_render.cpp` sin mover ficheros; después UN commit de
+`git mv` a `world/`.
+
+**★ 1/5 hecho — props** (`src/world/props/prop_system.{h,cpp}`, 1 220 líneas): scatter global,
+registro, mallas/materiales de prototipo, pase instanciado (cull, LOD, buckets), sombras, colliders
+por parte, `breakAt`, estado persistente. `Application` reenvía en una línea (`breakPropAt`,
+`propRegistry`, `serializePropState`…): Survival no cambia. `renderer/fallback_texture.*` para las
+texturas de relleno (las usan props y construcción). Cifras: `application_render.cpp` 4 751 → 3 500;
+`application.h` 1 025 → 885 (18 miembros `m_prop*` → 1 `m_props`). Los props tienen ahora SU
+`GPUInstancing` (antes compartían el de construcción): +1,9 MB host, y `beginFrame` propio.
+
+**Sin verificar**: el juego no se ha lanzado con el corte (el banco RHI no tiene `Application`, así
+que el pase de props sólo está probado por compilación; `gl hierba|nube` 147 OK, juego compila).
+Riesgo concreto: el orden `beginFrame` → `refreshScatter` → `draw` es el mismo, pero el anillo de
+instancias es otro objeto.
+
+**★ 2/5 nubes** → `renderer/cloud_pass.{h,cpp}` (855 líneas): horneado del cielo en hilo, fundido,
+deriva integrada, marcha a 1/N, composición. `CloudPass::enabled()` es lo que consulta el pase Y
+el conmutador de `sky.frag`. `m_volumetricClouds` (24 miembros `m_cloud*`) → `m_clouds`.
+**★ 3/5 post** → `renderer/post_pass.{h,cpp}` (301): `begin(w,h,editor)` decide escala/FXAA/bloom
+y crea el target; `composite()` al final. `renderBloom`, `setupQuad`, `_postScene`, `m_bloom*`,
+`m_present*`, `m_quadBuf` y los cuatro `RenderTarget` legacy sin uso se van.
+**★ 4/5 alambre** → `renderer/collision_wire.{h,cpp}` (~380): la malla de Jolt + OBB/conos/mallas
+de props + el autotest contra la función de altura. Queda en Application `renderMaterialPreview`
+(102 líneas, editor: comparte los UBO de escena) y el diagnóstico de emisores.
+**★ 5/5 red** → `net/entity_sync.{h,cpp}`: crear/mover/caducar entidades remotas en la escena,
+`adoptWorldObject`, uuid local. `application_network.cpp` (126) se queda: son los reenvíos a
+`DGS::Client`. Compila a nada sin `HARUKA_NETWORK`.
+
+Cifras finales de la fase ★: `application_render.cpp` **4 751 → 2 024**, `application.h`
+**1 025 → 810**; `renderFrameContent` sigue en 1 380 líneas (cielo, escena, construcción, sombras,
+terreno, fluido, lluvia — la LISTA de pases todavía es esta función). Sin verificar en el juego
+(compila; `haruka_tests` 332 797 OK, `haruka_tests_rhi gl nube|hierba|agua` 219 OK).
+
+**`git mv` a `world/` HECHO** (56 renombrados, en el índice; 95 ficheros con includes reescritos en
+motor, tests, Survival y el editor `haruka/`; CMake de `haruka_simbase` actualizado):
+```
+src/world/            weather_system, world_system(_provider), cloud_column, cloud_motion, ground_layer, noise_generator
+src/world/planet/     planet, planetary_system, planet_fields, planet_geology, biomes, climate, geology, orbit, soi
+src/world/terrain/    terrain_node*, terrain_lod/grid/detail/material/strata/deform/sample, base_field, cube_sphere, bake_util
+src/world/water/      ocean_wave, water_fill
+src/world/vox/        vox_world, cave_system, island_system
+src/world/props/      prop_system, prop_*, zone_shape, instanced_object, prop_assembler, terrain_prop_field
+```
+`core/` queda con lo indispensable (+ scene/, components/, cache/, sky_ambient, propagation);
+`game/` con character, spawn_system, construction/, inventory/, ports/, prefab/. Los renderers de
+mundo (terrain_renderer, vox_renderer, grass_renderer, fluid_*) se quedan en `renderer/`.
+Verificado: motor y juego compilan, `haruka_tests` 332 797 OK, `gl nube|hierba` 147 OK. El editor
+`haruka/` tiene los includes cambiados pero NO se ha compilado (ya no compilaba antes).
+
+**`renderFrameContent` ES LA LISTA** (25 líneas): `frameBegin → passCompute → passSky →
+passSceneSetup → passSceneObjects → passProps → passPlanetUpdate → passShadows → passPlanet →
+passGameWorld → passPrecipitation → passFluid → passClouds → post.composite → frameEnd`. Cada pase
+es una función miembro con su trozo (el mayor, `passSceneObjects`, 288 líneas) y `RenderFrame`
+lleva lo compartido (tamaño, target, contexto de escena, UBO por frame, contadores). Los `static`
+de bloque pasan a `static` de función: mismo significado. Un cambio de semántica a propósito:
+sin escena, `_iTotalDrawCalls` sigue siendo el tamaño de la cola (antes también). Sin verificar
+en el juego (compila; `gl nube|hierba` 147 OK). Convertir cada `pass*` en clase es ya mecánico.
+**Y tres pases más como módulo**: `renderer/sky_pass` (el fondo + `SkyPass::weather()`: lluvia,
+nieve, viento, mojado y nieve acumulada integrados, aire — lo escribe sólo el cielo, lo leen
+lluvia/fluido/nubes/props/sombras; `getSnowAccum`/`getGroundWetness` reenvían),
+`renderer/shadow_pass` (sombra del sol + máscara cenital + `setGroundWet`; `skyMaskTexture()` para
+la lluvia, `shadowReady()` para el UBO) y `world/water/fluid_bridge` (las lambdas del `FluidHost`
+que capturaban `this`, ahora `[ps]`). `application_render.cpp` 2 024 → **1 650**; `application.h`
+53 miembros. Compila motor y juego; `gl nube|hierba|agua` 219 OK; juego sin lanzar.
+**Y cuatro más** (Andoni: «sigue con el mover líneas»): `renderer/scene_pass` (objetos +
+construcción instanciada, 460 líneas; abre el pass sin clear y lo deja abierto para los props;
+`pso()`/`perObjectUBO()` para props y preview), `renderer/scene_ubo.h` (PerFrame/PerObject UBO +
+bits de material, compartidos), `world/vox/vox_system` (cuevas → Jolt + anillo del suelo cercano),
+`renderer/frame_lights` (sol, luna, ambiente SH → UBO y planeta; diagnóstico de estrellas). Se fue
+`_mainShader` (se creaba y nadie lo usaba). `application_render.cpp` **4 751 → 963**, `application.h`
+171 → 48 miembros. Test `net_entity_visible` actualizado a la primitiva `CHARACTER`. Compila motor y
+juego; `haruka_tests` 332 805 OK; `gl nube|hierba|agua` 219 OK; juego sin lanzar.
+Queda en `Application` lo de la aplicación: `frameBegin` (tamaño, post, near, clear), el resto de
+`passSceneSetup` (flags de features, el `advance` de la física), `passPlanet` (orden terreno +
+alambre + stats), precipitación (45 líneas), `renderMaterialPreview` (editor), `buildRenderQueue`.
+
+## 21-09 — PANEL DE DEPURACIÓN (Andoni: «anclado arriba derecha, transparente, fondo estático»)
+
+`tools/debug_overlay.*` reescrito (el viejo no lo llamaba nadie). F5 o `debug` en la consola. Sin
+fondo ni bordes ni ratón; texto con sombra. Líneas: fps · p50/p98/p99.5 (ms, ventana de 240 frames;
+rango al índice más cercano: p99.5 = 2ª peor muestra, p98 = 6ª) · mem RSS/total MiB y % (cada 0,5 s)
+· `integrado (sin DGS)` o `head <rtt> min/avg/max` + `tx/rx KiB/s` (media del último segundo) ·
+reloj del mundo · servidor / zona · objs (escena) + props (scatter) + ghosts · xyz del mundo · cpu ·
+gpu · pantalla (nombre, modo, Hz) · API. Decisiones pedidas: latencia sólo al HEAD sin tocar el
+protocolo (cronómetro de cada consulta de zona + `TCP_INFO` del kernel, que sólo se actualiza cuando
+fluye algo por ese enlace); tx/rx de todos los enlaces sumados; coords XYZ; reloj del mundo.
+DGS: `Client::stats()` nuevo (contadores atómicos tx/rx en los tres enlaces + RTT min/avg(EMA 16)/max)
+— repo `dgs`, `libdgs_client.a` y `client.h` copiados a `external/dgs`; sus 4 tests de cliente pasan.
+Motor: `Application::networkLinkStats()`; juego: `Network::linkStats()`, acción `DebugPanel` (F5).
+Banco: `haruka_tests sonido` → `debug_overlay_stats` (percentiles con 1/2/6 tirones, fps, KiB/s).
+**Latencia a la zona (UDP)** — Andoni: «latencia udp». `PKT_PING`(25)/`PKT_PONG`(26) en el protocolo
+DGS: el cliente manda secuencia + su reloj por el enlace del juego, la zona devuelve el MISMO
+payload sellado al remitente (sólo contesta a quien abre el sello: no es un amplificador), el
+cliente resta su reloj. `Client::pingZone()` + `stats()` lo hace sola cada segundo; sin pong en
+2 s = perdido. `LinkStats` gana `zoneRtt{Ms,Min,Avg,Max}`, `pingsSent`, `pingsLost`. Test en
+`client_world_e2e` (bloque F): 3 pings/3 pongs, RTT 0,15–0,29 ms en loopback, 0 perdidos, tx/rx > 0;
+contraprueba F': con las claves UDP olvidadas el pong llega y no se abre → perdido y sin muestra
+nueva. La suite del DGS entera: 35/35. Panel: línea `zona <rtt> min/avg/max [perdidos N]`.
+⚠️ Hace falta REDESPLEGAR el `zone_node` (el viejo ignora el ping: el panel dirá «sin pong»).
+Sin verificar: el panel en pantalla (posición, legibilidad sobre cielo claro, ancho de las líneas de
+cpu/gpu), el RTT con un head/zona reales, y `SDL_GetDisplayName` en Wayland.
+
+## 21-09 — LA CÁPSULA DEL JUGADOR (Andoni: «quiero hacer un mini vídeo pero la cápsula no está bien dimensionada»)
+
+Dos cosas estaban mal y ninguna era una cápsula:
+- **Física**: el personaje era una ESFERA de 0,4 m en los pies (`SphereShape(radius)`): 0,8 m de bola
+  y la cabeza (cámara a 1,71 m) sin volumen — pasaba bajo ramas y dinteles con la cámara dentro.
+  Ahora `RigidBody::characterHeight/characterRadius` (jugador: 1,9 m / 0,35) → `CapsuleShape` dentro
+  de un `RotatedTranslatedShape` con la base en el pie; `position` sigue siendo pie + 0,4 (el juego no
+  cambia su matemática). `SetRotation(sFromTo(Y, up))` cada paso: sin él la cápsula quedaba tumbada a
+  cualquier latitud. `mSupportingVolume` = casquete inferior (Jolt lo pide para cápsulas).
+  Test `physics_character_capsule`: viga a 1,2 m para la cápsula en x=3,13 (borde 3,15); la misma
+  viga a 2,3 m se pasa (x=12), y la esfera de antes pasaba la de 1,2 (x=12). `physics` 62+3 OK.
+- **Dibujo** (otros jugadores, ghosts, entidades sin modelo): la primitiva `CAPSULE` genérica (0,5 ×
+  1,5, centrada) puesta en el PIE con Euler del mundo: medio enterrada, gorda y tumbada fuera del
+  ecuador. Nueva primitiva `CHARACTER` (0,35 × 1,9, base en el origen — las MISMAS cifras que Jolt) y
+  `getCharacterTransform`: de pie sobre la vertical del planeta, yaw alrededor de ella.
+Sin verificar: en el juego (agacharse NO cambia la cápsula: `crouchingHeight` 1,2 sigue siendo sólo
+cámara; escalones de 0,40 m con la cápsula; el jugador local no se dibuja — no hay tercera persona).

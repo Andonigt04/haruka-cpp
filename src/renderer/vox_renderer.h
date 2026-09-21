@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/terrain/vox_world.h"
+#include "world/vox/vox_world.h"
 #include "rhi/rhi_resources.h"
 
 namespace Haruka {

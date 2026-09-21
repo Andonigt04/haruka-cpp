@@ -11,8 +11,8 @@
 // en la dirección física (más seco = base más alta; más frío = cirro más bajo).
 // ================================================================================================
 #include "test_common.h"
-#include "core/cloud_column.h"
-#include "core/weather_system.h"
+#include "world/cloud_column.h"
+#include "world/weather_system.h"
 
 #include <cmath>
 #include <cstdio>

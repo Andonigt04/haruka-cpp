@@ -32,23 +32,25 @@
 
 #include "rhi/rhi_device.h"
 #include "renderer/gpu_instancing.h"
+#include "renderer/grass_renderer.h"
+#include "world/terrain/cube_sphere.h"      // dirToCubeFaceClosed (la sonda de la hierba)
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_resources.h"
 #include "core/logger.h"
 #include "renderer/shader.h"
 #include "core/camera.h"
 #include "core/sky_ambient.h"   // gemelo CPU del ambiente (paridad)
-#include "core/terrain/terrain_node.h"   // v5 F1: referencia CPU del nodo + hash golden
-#include "core/terrain/terrain_node_pool.h"
-#include "core/terrain/base_field.h"   // baseFieldHeightAt: el gemelo CPU que este test valida
-#include "core/terrain/terrain_node_gpu.h"
-#include "core/weather_system.h"   // kFieldScale: la escala del campo de nube, no un literal
-#include "core/cloud_column.h"
-#include "core/cloud_motion.h"
-#include "core/planet/ocean_wave.h"   // gemelo CPU de la ola (paridad con lib/ocean_wave.glsl)
+#include "world/terrain/terrain_node.h"   // v5 F1: referencia CPU del nodo + hash golden
+#include "world/terrain/terrain_node_pool.h"
+#include "world/terrain/base_field.h"   // baseFieldHeightAt: el gemelo CPU que este test valida
+#include "world/terrain/terrain_node_gpu.h"
+#include "world/weather_system.h"   // kFieldScale: la escala del campo de nube, no un literal
+#include "world/cloud_column.h"
+#include "world/cloud_motion.h"
+#include "world/water/ocean_wave.h"   // gemelo CPU de la ola (paridad con lib/ocean_wave.glsl)
 #include "io/image_writer.h"          // HARUKA_WATER_PNG: volcar las formas para MIRARLAS
-#include "core/planet/water_fill.h"   // el relleno de cuencas: gemelo del campo que lee la GPU
-#include "core/terrain/terrain_node_renderer.h"   // Shader::baseDir() para los shaders del banco
+#include "world/water/water_fill.h"   // el relleno de cuencas: gemelo del campo que lee la GPU
+#include "world/terrain/terrain_node_renderer.h"   // Shader::baseDir() para los shaders del banco
 
 #include <SDL3/SDL.h>
 #include <array>
@@ -1478,6 +1480,372 @@ static void testOceanWaveParity()
  * Se mide cobertura y color medio en los dos backends. La imagen queda ademas guardada en `g_shots`
  * para que el careo GL<->Vulkan de `compareBackends()` la incluya como una escena mas.
  */
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// HIERBA DENSA: generada en GPU sobre los nodos dibujados, aplastada por el mapa de presion.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+static void testGrassGen()
+{
+    BEGIN("hierba: la GPU genera briznas sobre el suelo dibujado, las recorta al frustum y las aplasta");
+
+    using namespace Haruka::Terrain;
+    using Haruka::Renderer::GrassRenderer;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 256)) { CHECK(false, "init del pase de nodos"); return; }
+    GrassRenderer grass;
+    if (!grass.init(g_dev, Haruka::Shader::baseDir() + "shaders/")) { CHECK(false, "init de la hierba"); return; }
+
+    // Suelo: SIN bake (ni equirect ni campo del cubo), o sea solo el relieve procedural sobre R —
+    // el mismo camino que `nodeFillHeights` sin `baseFn`. Asi el muestreador de CPU que publica los
+    // rangos y el mapa que genera la GPU describen el MISMO suelo (±100 m de relieve, no plano), que
+    // es lo que hace falta para que "apoyada en el mapa del nodo" signifique algo. El nivel del mar
+    // se manda a −2 000 m para que la orilla no descarte nada.
+    static const double s_R = R;
+    static const float  s_floor = 0.0f;
+    r.setHeightSampler([](const glm::dvec3& d, void*) {
+        return Haruka::Planet::terrainDetail(d, s_R, 0.6f);
+    }, nullptr);
+
+    // Tabla de materiales: UNO, bandas abiertas, y `g.w` = cuanta hierba (1 en la prueba, 0 en la contraprueba).
+    struct GpuMat { float a[4], b[4], c[4], d[4], e[4], f[4], g[4]; };
+    struct GpuTable { float count[4]; GpuMat mats[16]; };
+    auto makeMat = [&](float grassAmt) {
+        GpuTable t{};
+        t.count[0] = 1.0f;
+        t.mats[0].a[0] = 0.0f; t.mats[0].a[1] = 1.0f; t.mats[0].a[2] = -1000.0f; t.mats[0].a[3] = 1000.0f;
+        t.mats[0].b[0] = 0.0f; t.mats[0].b[1] = 1.0f; t.mats[0].b[2] = -1.0f; t.mats[0].b[3] = 0.0f;
+        t.mats[0].c[0] = t.mats[0].c[1] = t.mats[0].c[2] = 1.0f; t.mats[0].c[3] = 1.0f;
+        t.mats[0].d[0] = 1.0f; t.mats[0].d[1] = 0.08f;
+        t.mats[0].f[0] = -1000.0f; t.mats[0].f[1] = 1000.0f; t.mats[0].f[2] = 0.25f;
+        t.mats[0].g[0] = -1000.0f; t.mats[0].g[1] = 1000.0f; t.mats[0].g[2] = 0.01f; t.mats[0].g[3] = grassAmt;
+        return g_dev->createBuffer(BufferUsage::Uniform, sizeof(t), &t, BufferMemory::Dynamic);
+    };
+    BufferHandle matGrass = makeMat(1.0f), matBare = makeMat(0.0f);
+
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 east = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    // Camara a 1,7 m sobre el suelo DIBUJADO (el bake + el relieve procedural, que aqui vale −130 m:
+    // puesta sobre el bake a secas quedaba a 130 m del suelo y toda la hierba fuera del radio),
+    // mirando al horizonte. La cota sale del mapa del nodo, leido de vuelta, tras calentar el pool.
+    glm::dvec3 cam = pc + up0 * (R + (double)s_floor + 1.7);
+    const glm::dvec3 fwd = east;
+    const glm::dvec3 vup = up0;
+    const float aspect = (float)w / (float)h, fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f); proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup));
+    const glm::mat4 rotVP = proj * glm::mat4(glm::mat3(view));
+
+    std::vector<TerrainNodeRenderer::NearNode> nodes;
+    // Un frame: nodos (compute) + hierba (presion + compute) fuera del pase; terreno + hierba dentro.
+    auto frame = [&](BufferHandle mat, const glm::dvec3& viewDir, bool drawGrass, float dt,
+                     const std::vector<glm::dvec3>* stamps, const glm::vec3& stampVel, bool noNodes = false) {
+        Context* ctx = g_dev->beginFrame();
+        if (!ctx) return false;
+        r.prepare(ctx, cam, pc, R, viewDir, radPerPx, cone);
+        GrassRenderer::Frame gf;
+        gf.finestTexelM = (float)r.nearNodes(cam, pc, R, (double)grass.config().radiusM, nodes);
+        if (noNodes) nodes.clear();
+        gf.nodes = &nodes; gf.camPos = cam; gf.planetCenter = pc; gf.planetRadiusM = R;
+        gf.viewDir = glm::vec3(viewDir); gf.coneHalfAngle = (float)cone; gf.seaLevelM = -2000.0f;
+        gf.viewUp = glm::vec3(up0); gf.tanHalfV = (float)std::tan(fovY * 0.5); gf.aspect = (float)w / (float)h;
+        gf.sunDir = glm::vec3(up0); gf.wind = glm::vec3(0.0f); gf.time = 0.0f; gf.dt = dt;
+        gf.heights = r.heightsBuffer(); gf.baseField = r.baseFieldOrDummy(); gf.materialUBO = mat;
+        if (stamps) for (const glm::dvec3& sp : *stamps) grass.addStamp(sp, 0.5f, stampVel, 1.0f);
+        grass.prepare(ctx, gf);
+        ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+        cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        ctx->beginRenderPass({}, cv);
+        r.draw(ctx, cam, pc, R, rotVP);
+        if (drawGrass) grass.draw(ctx, rotVP);
+        ctx->endRenderPass();
+        g_dev->endFrame(); pumpWindowEvents();
+        return true;
+    };
+    // La bilineal en CPU del mapa del nodo, sobre una copia leida de vuelta: es la MISMA lectura que
+    // hace el compute (`drawnHeightAt`), y sirve para poner la camara en el suelo y para auditar raices.
+    const size_t N1 = TERRAIN_NODE_TEXELS, texels = N1 * N1;
+    BufferHandle heightsRb = g_dev->createBuffer(BufferUsage::Storage, 256 * texels * sizeof(float), nullptr, BufferMemory::Readback);
+    auto readHeights = [&]() -> const float* {
+        FenceHandle fh{};
+        if (Context* c = g_dev->beginFrame()) {
+            g_dev->copyBuffer(r.heightsBuffer(), heightsRb, 0, 0, 256 * texels * sizeof(float));
+            c->memoryBarrier(); fh = c->signalFence(); g_dev->endFrame();
+            if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(fh, 10000000000ull); c2->deleteFence(fh); g_dev->endFrame(); }
+        }
+        return (const float*)g_dev->mappedData(heightsRb);
+    };
+    auto mapHeightAt = [&](const float* H, const glm::dvec3& dir, double& hOut) {
+        Haruka::PlanetFace face; double lx, ly;
+        Haruka::dirToCubeFaceClosed(dir, face, lx, ly);
+        const double fx = (lx + 1.0) * 0.5, fy = (ly + 1.0) * 0.5;
+        for (const auto& nd : nodes) {
+            if (nd.node[0] != (int)face) continue;
+            const double cells = (double)(1u << nd.node[1]);
+            if ((int)std::floor(fx * cells) != nd.node[2] || (int)std::floor(fy * cells) != nd.node[3]) continue;
+            const double tu = (fx * cells - nd.node[2]) * TERRAIN_NODE_CELLS, tv = (fy * cells - nd.node[3]) * TERRAIN_NODE_CELLS;
+            const double inv = 1.0 / (double)(1 << nd.slot[1]);
+            const double au = std::clamp((nd.slot[2] * (double)TERRAIN_NODE_CELLS + tu) * inv, 0.0, (double)TERRAIN_NODE_CELLS);
+            const double av = std::clamp((nd.slot[3] * (double)TERRAIN_NODE_CELLS + tv) * inv, 0.0, (double)TERRAIN_NODE_CELLS);
+            const size_t base = (size_t)nd.slot[0] * texels;
+            const int iu = (int)std::floor(au), iv = (int)std::floor(av);
+            const int ju = std::min(iu + 1, (int)N1 - 1), jv = std::min(iv + 1, (int)N1 - 1);
+            const double fu = au - iu, fv = av - iv;
+            const double h00 = H[base + iv * N1 + iu], h10 = H[base + iv * N1 + ju], h01 = H[base + jv * N1 + iu], h11 = H[base + jv * N1 + ju];
+            hOut = (h00 * (1 - fu) + h10 * fu) * (1 - fv) + (h01 * (1 - fu) + h11 * fu) * fv;
+            return true;
+        }
+        return false;
+    };
+    // Calentar el pool: los nodos bajo la camara tienen que existir antes de pedirles altura. Dos
+    // vueltas: la primera para saber donde esta el suelo, la segunda ya con la camara sobre el.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (int f = 0; f < 10; ++f) frame(matGrass, fwd, false, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+        if (pass == 0) {
+            double hGround = (double)s_floor;
+            // Con radio ancho: la camara aun esta a decenas de metros del suelo real y la tabla de
+            // 60 m (que mide contra el rango del nodo) no la tendria dentro.
+            r.nearNodes(cam, pc, R, 600.0, nodes);
+            const float* H = readHeights();
+            const bool ok = H && mapHeightAt(H, up0, hGround);
+            std::printf("    suelo dibujado bajo la camara: %s%.2f m (bake %.0f m)\n", ok ? "" : "SIN NODO, ", hGround, (double)s_floor);
+            CHECK(ok, "el mapa del nodo da la cota del suelo bajo la camara");
+            cam = pc + up0 * (R + hGround + 1.7);
+        }
+    }
+    const auto st0 = r.stats();
+    std::printf("    nodos dibujados %zu · en la tabla de la hierba %zu (texel mas fino %.2f m)\n",
+                st0.drawn, nodes.size(), r.nearNodes(cam, pc, R, (double)grass.config().radiusM, nodes));
+    CHECK(!nodes.empty(), "hay nodos hoja dibujados alrededor de la camara (la tabla de la hierba no esta vacia)");
+
+    // ── 0. SE VE: la imagen con hierba difiere de la imagen sin ella ────────────────────────────
+    // Es la comprobacion que no depende de ninguna lectura de vuelta: si el compute escribe y el
+    // draw indirecto dibuja, hay pixeles distintos; si cualquiera de los dos falla en silencio, no.
+    {
+        auto capture = [&](bool withGrass, std::vector<uint8_t>& px, const std::vector<glm::dvec3>* stamps = nullptr) {
+            px.assign((size_t)w * h * 4, 0);
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) return;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            if (stamps) for (const glm::dvec3& sp : *stamps) grass.addStamp(sp, 0.6f, glm::vec3(glm::cross(fwd, up0)) * 2.0f, 1.0f);
+            GrassRenderer::Frame gf;
+            gf.finestTexelM = (float)r.nearNodes(cam, pc, R, (double)grass.config().radiusM, nodes);
+            gf.nodes = &nodes; gf.camPos = cam; gf.planetCenter = pc; gf.planetRadiusM = R;
+            gf.viewDir = glm::vec3(fwd); gf.coneHalfAngle = (float)cone; gf.sunDir = glm::vec3(up0); gf.seaLevelM = -2000.0f;
+            gf.viewUp = glm::vec3(up0); gf.tanHalfV = (float)std::tan(fovY * 0.5); gf.aspect = (float)w / (float)h;
+            gf.heights = r.heightsBuffer(); gf.baseField = r.baseFieldOrDummy(); gf.materialUBO = matGrass;
+            grass.prepare(ctx, gf);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, rotVP);
+            if (withGrass) grass.draw(ctx, rotVP);
+            ctx->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        };
+        std::vector<uint8_t> a, b;
+        capture(false, a); capture(true, b);
+        // `HARUKA_GRASS_PNG=<dir>`: las dos imagenes, para MIRARLAS (fila 0 = abajo en GL, arriba en VK).
+        if (const char* dir = std::getenv("HARUKA_GRASS_PNG")) {
+            for (int k = 0; k < 2; ++k) {
+                const std::vector<uint8_t>& px = k ? b : a;
+                std::vector<uint8_t> img(px.size());
+                for (int y = 0; y < h; ++y) {
+                    const int src = isVk ? y : (h - 1 - y);
+                    std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)src * w * 4], (size_t)w * 4);
+                }
+                const std::string path = std::string(dir) + "/" + (isVk ? "vk_" : "gl_") + (k ? "hierba_con.png" : "hierba_sin.png");
+                Haruka::writePNG(path, w, h, 4, img.data());
+                std::printf("      -> %s\n", path.c_str());
+            }
+            // Y una PISADA: un rastro de sellos que CRUZA por delante de la camara (de izquierda a
+            // derecha, a 5 m), por el suelo dibujado. Cruzando y no alejandose: una brizna tumbada
+            // en la direccion de la vista se ve como una raya; tumbada de lado se ve tumbada.
+            std::vector<glm::dvec3> trail;
+            const float* H = readHeights();
+            const glm::dvec3 right = glm::normalize(glm::cross(fwd, up0));
+            for (double d = -7.0; d < 7.0; d += 0.6) {
+                const glm::dvec3 p = cam + fwd * 5.0 + right * d;
+                double hg = 0.0; const glm::dvec3 dirP = glm::normalize(p - pc);
+                if (H && mapHeightAt(H, dirP, hg)) trail.push_back(pc + dirP * (R + hg));
+            }
+            std::vector<uint8_t> c;
+            for (int f = 0; f < 3; ++f) capture(true, c, &trail);
+            std::vector<uint8_t> img(c.size());
+            for (int y = 0; y < h; ++y) {
+                const int src = isVk ? y : (h - 1 - y);
+                std::memcpy(&img[(size_t)y * w * 4], &c[(size_t)src * w * 4], (size_t)w * 4);
+            }
+            const std::string path = std::string(dir) + "/" + (isVk ? "vk_" : "gl_") + "hierba_pisada.png";
+            Haruka::writePNG(path, w, h, 4, img.data());
+            std::printf("      -> %s (%zu sellos)\n", path.c_str(), trail.size());
+        }
+        size_t diff = 0, lowerDiff = 0;
+        for (size_t i = 0; i + 4 <= a.size(); i += 4) {
+            const int d = std::abs((int)a[i] - b[i]) + std::abs((int)a[i + 1] - b[i + 1]) + std::abs((int)a[i + 2] - b[i + 2]);
+            if (d > 24) {
+                ++diff;
+                const size_t row = (i / 4) / (size_t)w;
+                const bool bottom = isVk ? (row >= (size_t)h / 2) : (row < (size_t)h / 2);   // fila 0 = abajo en GL, arriba en VK
+                if (bottom) ++lowerDiff;
+            }
+        }
+        std::printf("    SE VE: %zu de %d pixeles cambian con la hierba (%.1f %%), %zu en la mitad inferior\n",
+                    diff, w * h, 100.0 * diff / (w * h), lowerDiff);
+        CHECK(diff > (size_t)(w * h) / 50, "la hierba cambia mas del 2 %% de los pixeles de la imagen");
+    }
+
+    // ── 1. GENERACION: cuantas y donde ──────────────────────────────────────────────────────────
+    std::vector<float> bl;
+    frame(matGrass, fwd, true, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+    const size_t nGrass = grass.readBack(4096, bl);
+    const double areaM2 = 3.14159 * grass.config().radiusM * grass.config().radiusM;
+    std::printf("    briznas: %zu de %zu hilos (%.1f por m² de disco, cono de %.0f°)\n",
+                nGrass, grass.lastDispatched(), (double)nGrass / areaM2, cone * 180.0 / 3.14159);
+    CHECK(nGrass > 2000, "con material de hierba se generan briznas (mas de 2 000)");
+    CHECK(nGrass < grass.config().maxBlades, "y no se desborda el tope del buffer");
+    // Cada brizna leida: dentro del radio, por delante de la camara (cono), normal sana, altura sana.
+    size_t bad = 0, farN = 0, behind = 0, badUp = 0;
+    double maxAbove = -1e9, minBelow = 1e9;   // cota de la raiz respecto al bake, en metros
+    const float cosCone = std::cos((float)cone + 0.15f);
+    for (size_t i = 0; i + 8 <= bl.size(); i += 8) {
+        const glm::vec3 p(bl[i], bl[i + 1], bl[i + 2]);
+        const glm::vec3 n(bl[i + 4], bl[i + 5], bl[i + 6]);
+        const float dist = glm::length(p);
+        const bool inRadius = dist <= grass.config().radiusM + 0.01f;
+        const bool inCone   = dist <= 3.0f || glm::dot(p / std::max(dist, 1e-3f), glm::vec3(fwd)) >= cosCone - 0.02f;
+        const bool upOk     = std::abs(glm::length(n) - 1.0f) < 0.05f && glm::dot(n, glm::vec3(up0)) > 0.7f;
+        if (!inRadius) ++farN; if (!inCone) ++behind; if (!upOk) ++badUp;
+        if (!inRadius || !inCone || !upOk || !(bl[i + 3] > 0.05f && bl[i + 3] < 2.0f)) ++bad;
+        // Cota de la raiz sobre el bake (50 m): el relieve procedural es de metros, la raiz va 4 cm bajo el mapa.
+        const double hRoot = glm::length(glm::dvec3(p) + cam - pc) - R;
+        maxAbove = std::max(maxAbove, hRoot - (double)s_floor); minBelow = std::min(minBelow, hRoot - (double)s_floor);
+    }
+    std::printf("    muestra de %zu: fuera del radio %zu · fuera del cono %zu · normal rara %zu · cota de raiz sobre el bake [%.2f, %.2f] m\n",
+                bl.size() / 8, farN, behind, badUp, minBelow, maxAbove);
+    CHECK(bl.size() >= 8 * 100, "se leen briznas de vuelta");
+    CHECK(bad == 0, "todas las briznas leidas estan en el radio, en el cono, con normal unitaria hacia arriba y altura sana");
+
+    // ── 2. LAS RAICES ESTAN EN EL SUELO DIBUJADO ────────────────────────────────────────────────
+    // El mapa del nodo se lee de vuelta y se compara, brizna a brizna, con la bilineal en CPU del
+    // MISMO mapa (la raiz va 4 cm por debajo). Si la busqueda del nodo o el sub-rectangulo del
+    // ancestro estuvieran mal, la raiz caeria a metros del suelo, no a centimetros.
+    {
+        double worst = 0.0; size_t tested = 0, missing = 0;
+        const float* H = readHeights();
+        for (size_t i = 0; H && i + 8 <= bl.size() && tested < 512; i += 8) {
+            const glm::dvec3 pW = glm::dvec3(bl[i], bl[i + 1], bl[i + 2]) + cam - pc;
+            double hMap = 0.0;
+            if (!mapHeightAt(H, glm::normalize(pW), hMap)) { ++missing; continue; }
+            worst = std::max(worst, std::abs((glm::length(pW) - R) - (hMap - 0.04)));
+            ++tested;
+        }
+        std::printf("    raiz vs mapa del nodo (bilineal en CPU del MISMO mapa): %zu briznas · peor %.4f m · sin nodo %zu\n", tested, worst, missing);
+        CHECK(tested >= 100, "se comprobaron al menos 100 raices contra el mapa");
+        CHECK(worst < 0.02, "la raiz esta a menos de 2 cm de donde el mapa del nodo pone el suelo (menos 4 cm de hundimiento)");
+    }
+
+    // ── 3. CONTRAPRUEBAS ────────────────────────────────────────────────────────────────────────
+    frame(matBare, fwd, true, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+    const size_t nBare = grass.readBack(0, bl);
+    std::printf("    CONTRAPRUEBA material sin hierba (g.w = 0): %zu briznas\n", nBare);
+    CHECK(nBare == 0, "con `grass = 0` en el material no se genera ninguna brizna");
+    frame(matGrass, fwd, true, 1.0f / 60.0f, nullptr, glm::vec3(0.0f), true);
+    const size_t nNoNodes = grass.readBack(0, bl);
+    std::printf("    CONTRAPRUEBA sin tabla de nodos: %zu briznas\n", nNoNodes);
+    CHECK(nNoNodes == 0, "sin nodos dibujados no hay suelo donde apoyarse: cero briznas");
+    // Mirando hacia atras, el cono recorta las de delante: la cuenta cae a las de los 3 m de gracia.
+    frame(matGrass, -fwd, true, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+    const size_t nBack = grass.readBack(0, bl);
+    frame(matGrass, fwd, true, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+    const size_t nFwd = grass.readBack(4096, bl);
+    std::printf("    CONTRAPRUEBA del cono: mirando al este %zu · al oeste %zu (conjuntos distintos, tamano parecido)\n", nFwd, nBack);
+    CHECK(nBack > 1000 && (double)nBack < 1.5 * (double)nFwd && (double)nFwd < 1.5 * (double)nBack,
+          "girar la camara 180 grados da otro conjunto del mismo tamano (el cono recorta, no la densidad)");
+
+    // ── 4. LA PRESION: un sello tumba la hierba y se levanta sola ──────────────────────────────
+    // Se estampa en el pie de la camara con velocidad E+N (asi las dos componentes del mapa son
+    // positivas y se leen en un backbuffer RGBA8) y se muestrea el mapa en su centro con el
+    // pipeline de muestreo del banco.
+    {
+        glm::dvec3 anchor, E, N; grass.pressureFrame(anchor, E, N);
+        const std::vector<glm::dvec3> foot = { cam - up0 * 1.7 };
+        const glm::vec3 vel = glm::vec3(E + N) * 2.0f;
+        frame(matGrass, fwd, true, 1.0f / 60.0f, &foot, vel);
+        const std::string vs = Haruka::Shader::baseDir() + "shaders/rhitest_fullscreen.vert";
+        const std::string fs = Haruka::Shader::baseDir() + "shaders/rhitest_tex.frag";
+        PipelineDesc pd; pd.vertexPath = vs.c_str(); pd.fragmentPath = fs.c_str();
+        pd.topology = PrimitiveTopology::Triangles; pd.depth.test = false; pd.depth.write = false;
+        PipelineHandle pipe = g_dev->createPipeline(pd);
+        auto sampleCentre = [&](float& rOut, float& gOut) {
+            // El sello cae en (cam − ancla)·E/N, que tras el primer anclado es ~0 → el centro del mapa.
+            grass.pressureFrame(anchor, E, N);
+            const glm::dvec3 d = foot[0] - anchor;
+            const float side = (float)(grass.config().pressRes * grass.config().pressTexelM);
+            const float uv[4] = { (float)glm::dot(d, E) / side + 0.5f, (float)glm::dot(d, N) / side + 0.5f, 0.0f, 0.0f };
+            BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, 16, uv, BufferMemory::Dynamic);
+            unsigned char px[4] = { 0, 0, 0, 0 };
+            if (Context* c = g_dev->beginFrame()) {
+                ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                c->beginRenderPass({}, cv);
+                c->bindPipeline(pipe); c->bindUniformBuffer(0, ubo); c->bindTexture(0, grass.pressureTexture());
+                c->draw(3, 0, 1);
+                c->endRenderPass();
+                if (!isVk) g_dev->readPixels(w / 2, h / 2, 1, 1, Format::RGBA8, px);
+                g_dev->endFrame(); pumpWindowEvents();
+                if (isVk) g_dev->readPixels(w / 2, h / 2, 1, 1, Format::RGBA8, px);
+            }
+            g_dev->destroy(ubo);
+            rOut = px[0] / 255.0f; gOut = px[1] / 255.0f;
+        };
+        float pr = 0, pg = 0; sampleCentre(pr, pg);
+        std::printf("    presion bajo el pie tras el sello: E %.2f · N %.2f\n", pr, pg);
+        CHECK(valid(pipe) && pr > 0.25f && pg > 0.25f, "el sello deja la hierba tumbada hacia donde va (las dos componentes > 0,25)");
+        // Se levanta: 6 s de mundo sin sellos con `recoverS` = 4 → cero.
+        for (int f = 0; f < 6; ++f) frame(matGrass, fwd, true, 1.0f, nullptr, glm::vec3(0.0f));
+        float qr = 0, qg = 0; sampleCentre(qr, qg);
+        std::printf("    ... y 6 s despues: E %.2f · N %.2f\n", qr, qg);
+        CHECK(qr < 0.02f && qg < 0.02f, "sin sellos la hierba se levanta sola (presion a 0 en 6 s)");
+        // Y un sello LEJOS del pie no toca el centro (el mapa no es un escalar global).
+        const std::vector<glm::dvec3> farStamp = { cam - up0 * 1.7 + E * 20.0 };
+        frame(matGrass, fwd, true, 1.0f / 60.0f, &farStamp, vel);
+        float fr = 0, fg = 0; sampleCentre(fr, fg);
+        std::printf("    CONTRAPRUEBA sello a 20 m: bajo el pie E %.2f · N %.2f\n", fr, fg);
+        CHECK(fr < 0.02f && fg < 0.02f, "un sello a 20 m no aplasta la hierba bajo el pie");
+        if (valid(pipe)) g_dev->destroy(pipe);
+    }
+
+    // ── 5. COSTE ───────────────────────────────────────────────────────────────────────────────
+    {
+        std::vector<uint8_t> one(4, 0);
+        auto timeFrames = [&](bool withGrass, int n) {
+            for (int f = 0; f < 4; ++f) frame(matGrass, fwd, withGrass, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+            g_dev->readPixels(0, 0, 1, 1, Format::RGBA8, one.data());
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            for (int f = 0; f < n; ++f) frame(matGrass, fwd, withGrass, 1.0f / 60.0f, nullptr, glm::vec3(0.0f));
+            g_dev->readPixels(0, 0, 1, 1, Format::RGBA8, one.data());
+            return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() / n;
+        };
+        const double tOff = timeFrames(false, 30), tOn = timeFrames(true, 30);
+        const bool vs = (tOff > 15.5 && tOff < 18.0);
+        std::printf("    COSTE (256², %zu briznas): sin hierba %.3f ms · con %.3f ms · hierba %.3f ms%s\n",
+                    nFwd, tOff, tOn, tOn - tOff, vs ? "  (VSYNC: no vale)" : "");
+        baselineMetric("hierba.pase_ms", tOn - tOff, 0.30, true, true, !vs);
+    }
+
+    grass.shutdown();
+    g_dev->destroy(heightsRb);
+    g_dev->destroy(matGrass); g_dev->destroy(matBare);
+}
+
 static void testWaterShapes()
 {
     BEGIN("mar: la ola sobre un anillo y sobre un cubo (no hace falta planeta)");
@@ -3476,8 +3844,12 @@ static void testTerrainNodeRender()
         glm::mat4 mvp; glm::vec4 center; glm::vec4 centerLo;
         float lod[4]; int32_t grid[4]; int32_t edge[4];
         float misc[4]; float shade[4]; glm::vec4 texAnchor; glm::vec4 lightDir;
+        // ⚠️ `uAerial` y `uStrideRamp` TAMBIEN, aunque la sonda no los use: el bloque tiene que medir
+        // lo que el shader declara. Con 208 B (sin los dos ultimos) NVIDIA+GL leia `uStrideRamp`
+        // fuera del buffer y la contraprueba de F3 dibujaba 0 px; AMD lo toleraba en silencio.
+        glm::vec4 aerial; glm::vec4 strideRamp;
     } du{};
-    static_assert(sizeof(DrawUBO) == 208, "el gemelo de NodeDraw se ha descuadrado");
+    static_assert(sizeof(DrawUBO) == 240, "el gemelo de NodeDraw se ha descuadrado");
     du.mvp      = proj * view;
     du.center   = glm::vec4(glm::vec3(glm::dvec3(0.0) - cam), 0.0f);  // centro del planeta rel. al ojo
     du.centerLo = glm::vec4(0.0f);
@@ -3485,6 +3857,9 @@ static void testTerrainNodeRender()
     du.lod[2] = (float)(R * 1.5707963267948966); du.lod[3] = 0.0f;    // w = 0: morph apagado
     du.grid[0] = (int32_t)N; du.grid[1] = (int32_t)TERRAIN_NODE_CELLS; du.grid[2] = slot;
     du.misc[0] = (float)R;
+    // La ley de zancada del vertice, como la manda el renderer: sin rampa (0), para que el mapa
+    // leido sea el de la zancada y la sonda mida el corte que dice medir.
+    du.strideRamp = glm::vec4(150.0f, 0.0f, 4.0f, 0.5f);
     BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(du), &du, BufferMemory::Dynamic);
 
     // ⚠️ EL SSBO DE INSTANCIAS ES OBLIGATORIO, Y NO ATARLO PIERDE EL DISPOSITIVO.
@@ -3698,8 +4073,12 @@ static void testTerrainNodeDrawnVsField()
         glm::mat4 mvp; glm::vec4 center; glm::vec4 centerLo;
         float lod[4]; int32_t grid[4]; int32_t edge[4];
         float misc[4]; float shade[4]; glm::vec4 texAnchor; glm::vec4 lightDir;
+        // ⚠️ `uAerial` y `uStrideRamp` TAMBIEN, aunque la sonda no los use: el bloque tiene que medir
+        // lo que el shader declara. Con 208 B (sin los dos ultimos) NVIDIA+GL leia `uStrideRamp`
+        // fuera del buffer y la contraprueba de F3 dibujaba 0 px; AMD lo toleraba en silencio.
+        glm::vec4 aerial; glm::vec4 strideRamp;
     } du{};
-    static_assert(sizeof(DrawUBO) == 208, "el gemelo de NodeDraw se ha descuadrado");
+    static_assert(sizeof(DrawUBO) == 240, "el gemelo de NodeDraw se ha descuadrado");
     du.mvp      = proj * view;
     du.center   = glm::vec4(glm::vec3(glm::dvec3(0.0) - cam), 0.0f);
     du.centerLo = glm::vec4(0.0f);
@@ -3707,6 +4086,9 @@ static void testTerrainNodeDrawnVsField()
     du.lod[2] = (float)(R * 1.5707963267948966); du.lod[3] = 0.0f;   // w = 0: morph APAGADO
     du.grid[0] = (int32_t)N; du.grid[1] = (int32_t)TERRAIN_NODE_CELLS; du.grid[2] = slot;
     du.misc[0] = (float)R;
+    // La ley de zancada del vertice, como la manda el renderer: sin rampa (0), para que el mapa
+    // leido sea el de la zancada y la sonda mida el corte que dice medir.
+    du.strideRamp = glm::vec4((float)TERRAIN_NODE_STRIDE_MATCH_M, 0.0f, 4.0f, 0.5f);
     BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(du), &du, BufferMemory::Dynamic);
 
     // El corte de octavas del nodo: si la sonda evaluara el campo con otro, mediria el CORTE en vez
@@ -3737,6 +4119,7 @@ static void testTerrainNodeDrawnVsField()
     const NodeId gran{ par.face,  par.level  - 1, par.i  / 2, par.j  / 2 };
     inst.misc[0] = (float)pool.slotOf(par);
     inst.misc[1] = (float)pool.slotOf(gran);
+    inst.misc[2] = -1.0f; inst.misc[3] = -1.0f;   // bisabuelo/tatarabuelo: no estan (0 seria el hueco 0)
     BufferHandle instSSBO = g_dev->createBuffer(BufferUsage::Storage, sizeof(inst), &inst,
                                                 BufferMemory::Dynamic);
 
@@ -5533,6 +5916,418 @@ static void testSkyLayersHaveDepth()
 // silueta del planeta, que se apaga al alejarse del limbo. Con contraprueba en el lado nocturno, que
 // es donde el terminador tiene que dejarlo a oscuras — sin ella, "hay azul" no distingue una
 // atmosfera de un halo pintado alrededor de la esfera.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// LOS CIRCULOS EN EL TERRENO (Andoni, 19-09: "sigue ocurriendo y no es de agua sino de terreno")
+//
+// Con zancada `s` el vertice lee el mapa cortado a `texel x s`, y la zancada cambia en el radio de
+// 150 m (1->2) y 300 m (2->4): el relieve dibujado suelta una octava EN UNA CIRCUNFERENCIA alrededor
+// del observador, y el sombreado cambia de rugosidad ahi. Se mide asi: se dibuja el terreno con la
+// luz plana y con la vista 4 (color por zancada); en la imagen lit se toma la rugosidad de cada
+// pixel (|L - media 3x3|) y, para cada frontera entre dos zancadas de la vista 4, la rugosidad
+// media a un lado y al otro (a 3-10 px de la frontera). La RAZON entre los dos lados es el circulo.
+// Con la rampa del mapa (`TERRAIN_NODE_STRIDE_RAMP`) tiene que quedar cerca de 1; la CONTRAPRUEBA
+// es la misma escena con la rampa a 0 (el escalon de antes), donde tiene que ser claramente > 1.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// LA IMAGEN CONTRA EL RELIEVE HORNEADO FINAL (Andoni, 20-09: "que el valor dado en la imagen y el
+// horneado se verifique"). Un FRAME ENTERO del renderer real —selector, pool, niveles, zancadas,
+// rampa, con bake— y por cada pixel |dibujado − pisado| (vista 14: 16 bits, la misma referencia que
+// la 11 pero con el bake), por bandas de distancia. La contraprueba: cambiar el bake que lee el
+// vertice SIN regenerar los nodos (que guardan el bake viejo) tiene que aparecer como error del
+// tamano del cambio; si no, el instrumento no ve el relieve horneado.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+static void testFrameDrawnVsBaked()
+{
+    BEGIN("v5: un frame entero contra el relieve horneado final (|dibujado − pisado| por pixel)");
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 tan0 = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    // Un bake equirect SUAVE con continentes de verdad (cientos de metros): el vertice y el compute
+    // lo muestrean bilineal con el mismo gemelo (`harukaSampleHeightField` / `sampleHeightField`),
+    // asi que el bake que se dibuja y el que se pisa son el MISMO numero.
+    const int BW = 128, BH = 64;
+    static std::vector<float> s_bake, s_bake2;
+    auto bakeFn = [](double u, double v, float extra) {
+        const double lon = (u - 0.5) * 6.2831853, lat = (0.5 - v) * 3.1415926;
+        return (float)(320.0 + 260.0 * std::sin(3.0 * lon) * std::cos(2.0 * lat) + 90.0 * std::cos(7.0 * lon + 1.0)) + extra;
+    };
+    s_bake.assign((size_t)BW * BH, 0.0f); s_bake2.assign((size_t)BW * BH, 0.0f);
+    for (int y = 0; y < BH; ++y) for (int x = 0; x < BW; ++x) {
+        s_bake [(size_t)y * BW + x] = bakeFn((x + 0.5) / BW, (y + 0.5) / BH, 0.0f);
+        s_bake2[(size_t)y * BW + x] = bakeFn((x + 0.5) / BW, (y + 0.5) / BH, 3.0f);   // +3 m: la contraprueba
+    }
+    auto makeBake = [&](const std::vector<float>& d) {
+        TextureDesc td; td.width = BW; td.height = BH; td.format = Format::R32F;
+        td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false;
+        td.initialData = d.data();
+        return g_dev->createTexture(td);
+    };
+    TextureHandle bakeTex = makeBake(s_bake), bakeTex2 = makeBake(s_bake2);
+    // ⚠️ El compute solo compone bake + detalle si hay CAMPO DEL CUBO atado (`uMisc.z`): el equirect
+    // manda para la altura, pero sin el cubo el nodo es detalle puro sobre R (y el vertice, que si
+    // lee el equirect para el clima, compararia contra otro planeta: medido, 64 m saturados en todo
+    // el cuadro). Un cubo de ceros basta: el clima no se mide aqui.
+    TextureHandle cubeTex{};
+    {
+        const int N1 = 9;
+        std::vector<float> rgba((size_t)6 * N1 * N1 * 4, 0.0f);
+        TextureDesc td; td.width = td.height = (uint32_t)N1; td.layers = 6;
+        td.format = Format::RGBA32F; td.filter = Filter::Nearest; td.wrap = Wrap::ClampToEdge;
+        td.initialData = rgba.data();
+        cubeTex = g_dev->createTexture(td);
+    }
+    auto baseAt = [&](const glm::dvec3& d) -> float {
+        return Haruka::Planet::sampleHeightField(Haruka::Planet::equirectUV(glm::vec3(d)), BW, BH, s_bake.data());
+    };
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 4096)) { CHECK(false, "init del pase"); return; }
+    r.setBaseField(cubeTex);
+    r.setHeightTex(bakeTex);
+    r.setHeightSampler([](const glm::dvec3& d, void*) {
+        return Haruka::Planet::sampleHeightField(Haruka::Planet::equirectUV(glm::vec3(d)), 128, 64, s_bake.data());
+    }, nullptr);
+
+    // A la altura del ojo, sobre el suelo horneado FINAL (bake + detalle con el corte de la colision).
+    const float  b0 = baseAt(up0);
+    const double h0 = (double)b0 + (double)Haruka::Planet::terrainDetail(up0, R + (double)b0, 0.5f) * Haruka::Planet::seaLevelAttenuation(b0);
+    // A 30 m y 15 grados abajo: desde la altura del ojo todo lo que pasa de 150 m cabe en 3 filas
+    // de 256 (medido: 0 pixeles en las bandas lejanas). Asi las cuatro bandas tienen pixeles.
+    const glm::dvec3 cam = pc + up0 * (R + h0 + 30.0);
+    const glm::dvec3 fwd = glm::normalize(tan0 * std::cos(glm::radians(15.0)) - up0 * std::sin(glm::radians(15.0)));
+    const glm::dvec3 vup = glm::normalize(up0 - fwd * glm::dot(up0, fwd));
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double radPerPx = fovY / 1080.0;                 // la ley del juego (ver `testStrideRingsOnLand`)
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const float aspect = (float)w / (float)h, fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+    std::printf("    bake bajo la camara %.1f m · suelo final %.2f m · camara a 30 m, mirando 15 grados abajo\n", b0, h0);
+
+    auto render = [&](int dbg, std::vector<uint8_t>& px, int frames) {
+        r.setDebugViewOverride(dbg);
+        px.assign((size_t)w * h * 4, 0);
+        TerrainNodeRenderer::FrameStats last{};
+        for (int f = 0; f < frames; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            last = r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == frames - 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == frames - 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        return last;
+    };
+    struct Band { double lo, hi, sum = 0, worst = 0; size_t n = 0; };
+    auto measure = [&](const std::vector<uint8_t>& pxErr, const std::vector<uint8_t>& pxDist, std::vector<Band>& bands) {
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            if (pxErr[i * 4 + 2] < 128) continue;                       // B = 0: sin terreno
+            const uint32_t q = ((uint32_t)pxErr[i * 4] << 8) | (uint32_t)pxErr[i * 4 + 1];
+            const double err = ((double)q / 65535.0) * 128.0 - 64.0;
+            const double d = pxDist[i * 4] / 255.0 * 2000.0;
+            for (Band& b : bands) if (d >= b.lo && d < b.hi) { b.sum += std::abs(err); b.worst = std::max(b.worst, std::abs(err)); ++b.n; }
+        }
+    };
+    auto report = [&](const char* tag, const std::vector<Band>& bands) {
+        std::printf("    %s\n      banda           pixeles    media     peor\n", tag);
+        for (const Band& b : bands)
+            std::printf("      %5.0f-%5.0f m   %7zu   %.4f   %.4f\n", b.lo, b.hi, b.n, b.n ? b.sum / b.n : 0.0, b.worst);
+    };
+    std::vector<Band> bands = { {2, 150}, {150, 300}, {300, 1000}, {1000, 1990} };
+
+    std::vector<uint8_t> pxErr, pxDist;
+    const auto st = render(14, pxErr, 24);
+    render(13, pxDist, 2);
+    std::printf("    sel %zu · dibujados %zu · por ancestro %zu · zancadas %u..%u\n", st.selected, st.drawn, st.ancestors, st.strideMin, st.stride);
+    measure(pxErr, pxDist, bands);
+    report("|dibujado − pisado| (bake + detalle con el corte de la colision):", bands);
+    if (const char* dir = std::getenv("HARUKA_TERRAIN_PNG")) {
+        const bool flip = detectRowFlip(pxErr, w, h);
+        std::vector<uint8_t> img(pxErr.size());
+        for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &pxErr[(size_t)(flip ? h - 1 - y : y) * w * 4], (size_t)w * 4);
+        Haruka::writePNG(std::string(dir) + "/" + (isVk ? "vk_" : "gl_") + "frame_vs_horneado.png", w, h, 4, img.data());
+    }
+
+    // ── Y DESDE ALTO (la captura de Andoni del 20-09: desde 1 500 m, mirando 35 grados abajo) ──
+    // Todo el cuadro esta mas alla de 300 m: es el regimen del corte continuo entero (mapas 2 a 4).
+    std::vector<Band> bandsHi = { {300, 1000}, {1000, 2000}, {2000, 4000}, {4000, 7990} };
+    {
+        const glm::dvec3 camHi = pc + up0 * (R + h0 + 1500.0);
+        const glm::dvec3 fwdHi = glm::normalize(tan0 * std::cos(glm::radians(35.0)) - up0 * std::sin(glm::radians(35.0)));
+        const glm::dvec3 vupHi = glm::normalize(up0 - fwdHi * glm::dot(up0, fwdHi));
+        const glm::mat4 mvpHi = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwdHi), glm::vec3(vupHi))));
+        auto renderHi = [&](int dbg, std::vector<uint8_t>& px, int frames) {
+            r.setDebugViewOverride(dbg);
+            px.assign((size_t)w * h * 4, 0);
+            TerrainNodeRenderer::FrameStats last{};
+            for (int f = 0; f < frames; ++f) {
+                Context* ctx = g_dev->beginFrame();
+                if (!ctx) break;
+                r.prepare(ctx, camHi, pc, R, fwdHi, radPerPx, cone);
+                ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+                cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+                ctx->beginRenderPass({}, cv);
+                last = r.draw(ctx, camHi, pc, R, mvpHi);
+                ctx->endRenderPass();
+                if (!isVk && f == frames - 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                g_dev->endFrame(); pumpWindowEvents();
+                if (isVk && f == frames - 1) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            }
+            return last;
+        };
+        std::vector<uint8_t> pxErrHi, pxDistHi, pxMapHi;
+        const auto stHi = renderHi(14, pxErrHi, 30);
+        renderHi(13, pxDistHi, 2);
+        renderHi(12, pxMapHi, 2);
+        // La vista 13 va a 8 m en 0..2 km: aqui se lee con la escala x4 (0..8 km) que da `uMisc`... no:
+        // la vista 13 es fija a 2 000 m. Las bandas de mas de 2 km se saturan a 1990: se agrupan ahi.
+        auto measureHi = [&](const std::vector<uint8_t>& pxErr2, std::vector<Band>& bands2) {
+            for (size_t i = 0; i < (size_t)w * h; ++i) {
+                if (pxErr2[i * 4 + 2] < 128) continue;
+                const uint32_t q = ((uint32_t)pxErr2[i * 4] << 8) | (uint32_t)pxErr2[i * 4 + 1];
+                const double err = ((double)q / 65535.0) * 128.0 - 64.0;
+                const double d = pxDistHi[i * 4] / 255.0 * 2000.0;
+                for (Band& b : bands2) if (d >= b.lo && d < b.hi) { b.sum += std::abs(err); b.worst = std::max(b.worst, std::abs(err)); ++b.n; }
+            }
+        };
+        measureHi(pxErrHi, bandsHi);
+        std::printf("    DESDE ALTO: sel %zu · dibujados %zu · por ancestro %zu · niveles %u..%u · zancadas %u..%u\n",
+                    stHi.selected, stHi.drawn, stHi.ancestors, stHi.levelMin, stHi.levelMax, stHi.strideMin, stHi.stride);
+        report("|dibujado − pisado| desde 1 500 m (la vista 13 satura a 2 km: la ultima banda es 'mas de 2 km'):", bandsHi);
+        // El mapa absoluto leido, por bandas: de 17 (propio del 17) bajando; y cuantos pixeles leen
+        // el tatarabuelo (fraccion del mapa > 3 respecto a su hoja no se ve aqui; se ve el absoluto).
+        double mapMin = 99, mapMax = -99; size_t nm = 0;
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            if (pxMapHi[i * 4] < 8) continue;
+            const double A = (pxMapHi[i * 4] / 255.0 - 0.1) / 0.08 + 6.0;
+            mapMin = std::min(mapMin, A); mapMax = std::max(mapMax, A); ++nm;
+        }
+        std::printf("    mapa absoluto leido: de %.2f a %.2f (%zu px)\n", mapMin, mapMax, nm);
+        if (const char* dir = std::getenv("HARUKA_TERRAIN_PNG")) {
+            const bool flip = detectRowFlip(pxErrHi, w, h);
+            std::vector<uint8_t> img(pxErrHi.size());
+            for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &pxErrHi[(size_t)(flip ? h - 1 - y : y) * w * 4], (size_t)w * 4);
+            Haruka::writePNG(std::string(dir) + "/" + (isVk ? "vk_" : "gl_") + "frame_vs_horneado_alto.png", w, h, 4, img.data());
+        }
+    }
+
+    // ── CONTRAPRUEBA: el bake +3 m para el vertice, los nodos con el viejo ──────────────────────
+    std::vector<Band> bands2 = { {2, 150}, {150, 300}, {300, 1000}, {1000, 1990} };
+    r.setHeightTex(bakeTex2);
+    std::vector<uint8_t> pxErr2;
+    render(14, pxErr2, 2);              // 2 frames: nada nuevo que generar, los nodos siguen con el bake viejo
+    measure(pxErr2, pxDist, bands2);
+    report("CONTRAPRUEBA (el vertice lee un bake +3 m; los nodos guardan el viejo):", bands2);
+    r.setHeightTex(bakeTex);
+
+    CHECK(st.ancestors == 0, "el frame se dibuja con datos propios (24 frames bastan para el pool)");
+    CHECK(bands[0].n > 2000 && bands[1].n > 500, "hay terreno en las bandas cercanas");
+    // Cerca: el nodo dibuja su propio mapa (corte 0,6 m) contra el corte de la colision (0,5-0,6):
+    // lo que queda es la cuerda del triangulo y la octava de 4,5 m entre los dos cortes. Medido.
+    // Medido (NVIDIA, VK y GL): 1,9 mm / 5,6 cm · 3,0 cm / 29 cm · 10 cm / 65 cm · 37 cm / 1,29 m.
+    // Los topes van al doble: lo que se quiere cazar es un cambio de regimen, no el ruido.
+    CHECK(bands[0].sum / std::max(bands[0].n, (size_t)1) < 0.01, "a menos de 150 m, |dibujado − pisado| medio < 1 cm");
+    CHECK(bands[0].worst < 0.15, "y el peor pixel cercano < 15 cm");
+    CHECK(bands[1].sum / std::max(bands[1].n, (size_t)1) < 0.06, "de 150 a 300 m (mapa del padre), medio < 6 cm");
+    CHECK(bands[2].sum / std::max(bands[2].n, (size_t)1) < 0.2, "de 300 a 1000 m (corte continuo), medio < 20 cm");
+    CHECK(bands[3].n == 0 || bands[3].sum / bands[3].n < 0.75, "de 1 a 2 km, medio < 75 cm");
+    const double c0 = bands2[0].sum / std::max(bands2[0].n, (size_t)1);
+    CHECK(c0 > 2.5 && c0 < 3.5, "CONTRAPRUEBA: un bake 3 m distinto del horneado aparece como ~3 m de error (el instrumento ve el relieve horneado)");
+    g_dev->destroy(bakeTex); g_dev->destroy(bakeTex2); g_dev->destroy(cubeTex);
+}
+
+static void testStrideRingsOnLand()
+{
+    BEGIN("v5: los circulos de zancada en el TERRENO (el mapa leido es continuo en la distancia)");
+    using namespace Haruka::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 tan0 = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    // Sin bake, el nodo dibuja el detalle sobre R sin atenuar: el suelo bajo la camara es esto.
+    const double h0 = Haruka::Planet::terrainDetail(up0, R, 0.5f);
+    const glm::dvec3 cam = pc + up0 * (R + h0 + 40.0);
+    const glm::dvec3 fwd = glm::normalize(tan0 * std::cos(glm::radians(25.0)) - up0 * std::sin(glm::radians(25.0)));
+    // El "arriba" de la camara es el del planeta proyectado, para que las bandas de distancia sean
+    // FILAS de la imagen (con `cross(fwd, tan0)` la imagen sale girada 90 grados).
+    const glm::dvec3 vup = glm::normalize(up0 - fwd * glm::dot(up0, fwd));
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    // ⚠️ LA LEY DE ZANCADA DEL JUEGO, NO LA DEL BANCO. A 256 px `collWant = d/64/texel` no llega a 2
+    // en ningun nivel (el nivel se parte a 122 x texel en vez de a 515 x), asi que la zancada es 1 en
+    // todo el cuadro y no hay frontera que medir. Se selecciona y se dibuja con los radianes por
+    // pixel de 1080p: la imagen es la misma geometria vista a menos resolucion.
+    const double radPerPx = fovY / 1080.0;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const float aspect = (float)w / (float)h;
+    const float fCot   = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    TerrainNodeRenderer rBig, rSmall;
+    if (!rBig.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 4096)) { CHECK(false, "init del pase"); return; }
+    // ⚠️ Y CON EL POOL PEQUEÑO, que es el juego lejos: con 512 huecos el selector (tope 384) deja
+    // la mitad de la escena dibujada POR ANCESTRO. Un nodo caido tiene que seguir la misma ley
+    // continua desde el mapa de su ancestro; si no, en la frontera con un vecino bien dibujado
+    // queda un desnivel (Andoni, 20-09). Se mide lo mismo con los dos pools.
+    if (!rSmall.init(g_dev, Haruka::Shader::baseDir() + "shaders/", 512)) { CHECK(false, "init del pase (pool pequeño)"); return; }
+    TerrainNodeRenderer* rp = &rBig;
+    size_t lastAncestors = 0;
+
+    auto render = [&](int dbg, std::vector<uint8_t>& px) {
+        TerrainNodeRenderer& r = *rp;
+        r.setDebugViewOverride(dbg);
+        px.assign((size_t)w * h * 4, 0);
+        TerrainNodeRenderer::FrameStats last{};
+        for (int f = 0; f < 24; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            last = r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 23) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == 23) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        // Si algo se dibuja por ANCESTRO, la medida es de otra cosa (datos mas bastos, no la zancada).
+        std::printf("    [pool %zu · vista %d] sel %zu / tope %zu · dibujados %zu · por ancestro %zu · zancadas %u..%u · %.2f M tris\n",
+                    rp == &rBig ? (size_t)4096 : (size_t)512, dbg, last.selected, last.selBudget, last.drawn, last.ancestors, last.strideMin, last.stride, last.tris / 1e6);
+        lastAncestors = last.ancestors;
+    };
+    // Clase de zancada por pixel, de la vista 4 (colores planos distintos por zancada; negro = cielo).
+    auto classes = [&](const std::vector<uint8_t>& px, std::vector<int>& cls, std::vector<uint32_t>& palette) {
+        cls.assign((size_t)w * h, -1); palette.clear();
+        for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+            const size_t k = ((size_t)y * w + x) * 4;
+            if (px[k] < 8 && px[k+1] < 8 && px[k+2] < 8) continue;
+            // Cuantizado a 4 bits por canal: la interpolacion plana no mezcla, pero el swapchain puede
+            // redondear distinto en GL y VK.
+            const uint32_t key = ((uint32_t)(px[k] >> 4) << 8) | ((uint32_t)(px[k+1] >> 4) << 4) | (uint32_t)(px[k+2] >> 4);
+            int id = -1;
+            for (size_t i = 0; i < palette.size(); ++i) if (palette[i] == key) { id = (int)i; break; }
+            if (id < 0) { palette.push_back(key); id = (int)palette.size() - 1; }
+            cls[(size_t)y * w + x] = id;
+        }
+    };
+    // ── LO QUE SE MIDE AQUI, Y LO QUE NO ────────────────────────────────────────────────────────
+    // La rugosidad de la IMAGEN a 256 px y con la camara rasante no mide el relieve: la domina la
+    // estructura de la malla (facetas y triangulos de 2,4 m a 2 px), y la MISMA superficie sale con
+    // 0,31 de rugosidad en una malla a zancada 1 y 0,55 a zancada 4 (medido en esta escena). Lo que
+    // si se puede medir sin ambiguedad en la GPU es EL MAPA QUE LEE CADA VERTICE (vista 12): con la
+    // rampa tiene que ser un degradado continuo en la distancia, y sin ella una escalera de saltos
+    // de 1. La continuidad del relieve y de la normal dibujados se mide en CPU sobre los mismos
+    // mapas (`terrain_node_stride_ramp_continuity`), que es donde se ve en metros.
+    std::vector<uint8_t> pxLit, pxStride, pxMap;
+    std::vector<int> cls; std::vector<uint32_t> pal;
+    double worstRamp = 0.0, worstStep = 0.0, worstSmall = 0.0; size_t nClasses = 0, ancSmall = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+        // 0 = la rampa que corre · 1 = el escalon (contraprueba) · 2 = la rampa con el pool pequeño
+        rp = (pass == 2) ? &rSmall : &rBig;
+        TerrainNodeRenderer& r = *rp;
+        r.setStrideRampOverride(pass == 1 ? 0.0 : -1.0);
+        render(0, pxLit);
+        render(4, pxStride);
+        render(12, pxMap);
+        if (const char* dir = std::getenv("HARUKA_TERRAIN_PNG")) {
+            const bool flip = detectRowFlip(pxLit, w, h);
+            for (int which = 0; which < 3; ++which) {
+                const std::vector<uint8_t>& src = which == 0 ? pxLit : which == 1 ? pxStride : pxMap;
+                std::vector<uint8_t> img(src.size());
+                for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &src[(size_t)(flip ? h - 1 - y : y) * w * 4], (size_t)w * 4);
+                Haruka::writePNG(std::string(dir) + "/" + (isVk ? "vk_" : "gl_") + "anillos_terreno_"
+                                 + (pass == 0 ? "rampa" : pass == 1 ? "escalon" : "pool512") + (which == 0 ? "_lit" : which == 1 ? "_zancada" : "_mapa") + ".png", w, h, 4, img.data());
+            }
+        }
+        classes(pxStride, cls, pal);
+        std::vector<uint8_t> pxDist; render(13, pxDist);
+        // El nivel ABSOLUTO del mapa leido por pixel (vista 12: gris 0,1 + 0,08·(A − 6); 8 bits =
+        // 1/20 de nivel) y su salto entre filas a 2 px en la misma columna, DESCONTANDO lo que la ley
+        // continua cambia entre esas dos distancias (mas alla de 300 m, A baja log2(d2/d1) entre dos
+        // pixeles: cerca del horizonte dos filas son cientos de metros). Lo que queda es el salto
+        // que NO explica la distancia: el escalon. Solo entre 100 y 1 500 m (la vista 13 da la
+        // distancia a 8 m de resolucion).
+        double worst = 0.0; int wy = -1, wx = -1;
+        for (int x = 0; x < w; ++x) for (int y = 0; y + 2 < h; ++y) {
+            const size_t k0 = ((size_t)y * w + x) * 4, k1 = ((size_t)(y + 2) * w + x) * 4;
+            if (pxMap[k0] < 8 || pxMap[k1] < 8) continue;               // cielo
+            const double d0 = pxDist[k0] / 255.0 * 2000.0, d1 = pxDist[k1] / 255.0 * 2000.0;
+            if (d0 < 100.0 || d1 < 100.0 || d0 > 1500.0 || d1 > 1500.0) continue;   // 8 m de resolucion: a 100 m son 0,1 de log2
+            const double A0 = (pxMap[k0] / 255.0 - 0.1) / 0.08 + 6.0, A1 = (pxMap[k1] / 255.0 - 0.1) / 0.08 + 6.0;
+            const double dA = A1 - A0;   // nivel absoluto del mapa: decrece con la distancia segun la ley
+            // La ley, en nivel absoluto: la misma `nodeStrideMapF` (con el texel del nivel 17, que es
+            // el que a 1080p es hoja hasta 614 m; para otro nivel solo cambia una constante, y aqui
+            // se comparan diferencias). En la contraprueba (rampa 0) la ley es la del escalon.
+            const double tex17 = nodeTexelM(NodeId{ Haruka::PlanetFace::FRONT, 17, 0, 0 }, R);
+            const double ramp = (pass == 1) ? 0.0 : TERRAIN_NODE_STRIDE_RAMP;
+            const double fA = nodeStrideMapF(d0, tex17, TERRAIN_NODE_STRIDE_MATCH_M, ramp, 4.0, 0.5, radPerPx, TERRAIN_NODE_ERROR_PX);
+            const double fB = nodeStrideMapF(d1, tex17, TERRAIN_NODE_STRIDE_MATCH_M, ramp, 4.0, 0.5, radPerPx, TERRAIN_NODE_ERROR_PX);
+            const double expected = -(fB - fA);
+            // Con la rampa a 0 el escalon cae en un pixel concreto y la vista 13 lo situa con 8 m de
+            // error: en la contraprueba se mide contra la ley CONTINUA para que el escalon aparezca.
+            const double expectedC = -(nodeStrideMapF(d1, tex17, TERRAIN_NODE_STRIDE_MATCH_M, TERRAIN_NODE_STRIDE_RAMP, 4.0, 0.5, radPerPx, TERRAIN_NODE_ERROR_PX)
+                                     - nodeStrideMapF(d0, tex17, TERRAIN_NODE_STRIDE_MATCH_M, TERRAIN_NODE_STRIDE_RAMP, 4.0, 0.5, radPerPx, TERRAIN_NODE_ERROR_PX));
+            const double resid = std::abs(dA - (pass == 1 ? expectedC : expected));
+            if (resid > worst) { worst = resid; wy = y; wx = x; }
+        }
+        {   // El nivel ABSOLUTO del mapa en la columna central, del pixel mas cercano al mas lejano:
+            // bajo los pies tiene que ser 17 (el mapa propio del nivel 17). Un desfase constante aqui
+            // no lo veria el salto entre filas de abajo.
+            std::printf("    mapa absoluto en la columna central (cerca -> lejos):");
+            int shown = 0;
+            for (int y = 0; y < h && shown < 8; y += 12) {
+                const size_t k = ((size_t)y * w + w / 2) * 4;
+                if (pxMap[k] < 8) continue;
+                std::printf(" %.2f@%.0fm", (pxMap[k] / 255.0 - 0.1) / 0.08 + 6.0, pxDist[k] / 255.0 * 2000.0); ++shown;
+            }
+            std::printf("\n");
+        }
+        std::printf("    %s: %zu zancadas en cuadro · mayor salto del MAPA leido entre filas a 2 px (descontada la ley): %.2f (columna %d, fila %d)\n",
+                    pass == 0 ? "CON rampa (lo que corre)" : pass == 1 ? "SIN rampa (contraprueba)" : "CON rampa, pool 512 (mitad por ancestro)", pal.size(), worst, wx, wy);
+        if (std::getenv("HARUKA_TERRAIN_PNG") && wx >= 0) {   // la columna del peor salto, para mirar
+            std::printf("      columna %d (fila: mapa absoluto · distancia · zancada):\n", wx);
+            for (int y = std::max(wy - 8, 0); y < std::min(wy + 10, h); ++y) {
+                const size_t k = ((size_t)y * w + wx) * 4;
+                std::printf("        %3d: mapa absoluto %.2f · %5.0f m · zancada %d\n", y, (pxMap[k] / 255.0 - 0.1) / 0.08 + 6.0, pxDist[k] / 255.0 * 2000.0, cls[(size_t)y * w + wx]);
+            }
+        }
+        if (pass == 0) { worstRamp = worst; nClasses = pal.size(); }
+        else if (pass == 1) worstStep = worst;
+        else { worstSmall = worst; ancSmall = lastAncestors; }
+    }
+    rBig.setStrideRampOverride(-1.0);
+    CHECK(nClasses >= 2, "hay al menos dos zancadas en cuadro (si no, no hay frontera que medir)");
+    CHECK(worstStep > 0.6, "CONTRAPRUEBA: sin la rampa el mapa leido SALTA un nivel entero en el radio de zancada (contra la ley continua)");
+    // Lo que queda es ruido de las vistas de 8 bits (mapa 1/51, distancia 8 m) y el muestreo de
+    // la malla. La continuidad en METROS la mide `terrain_node_stride_ramp_continuity`; aqui se
+    // comprueba que la GPU aplica LA MISMA ley que la CPU, incluidas las fronteras de nivel.
+    CHECK(worstRamp < 0.35, "con la rampa y el corte continuo, lo que cambia el mapa leido entre dos filas lo explica la ley (GPU = CPU)");
+    // ⚠️ Con el pool pequeño el selector se queda SIN SITIO y emite hojas mas bastas de lo que la ley
+    // pide (nivel 13 a 300 m: f = −1, recortado a 0): eso es un escalon inherente al hambre —un nodo
+    // no puede leer mas fino de lo que tiene— y no lo que se quiere medir aqui. Se imprime, y lo
+    // que si se comprueba es que haya caidas por ancestro. La aritmetica de los nodos CAIDOS (leer
+    // la ley desde el mapa del ancestro `kUp`) la mide en CPU `terrain_node_stride_ramp_continuity`.
+    (void)worstSmall;
+    CHECK(ancSmall > 0, "con el pool pequeño hay nodos dibujados por ancestro (la ruta kUp > 0 se ejecuta en la GPU)");
+}
+
 static void testAtmosphereLimb()
 {
     BEGIN("atmosfera: el planeta tiene LIMBO visto desde fuera");
@@ -6355,7 +7150,17 @@ static void testCloudVolumeDraws()
             //            hacia ese lado (centroide de luminancia); con el Sol en el cenit, no.
             //        (b) FASE: mirando HACIA el Sol a traves de nube fina, mas radiancia (dispersion
             //            hacia delante) que mirando en contra.
-            {
+            // ⚠️ A 64 Y A 24 PASOS (20-09). El juego baja a 24 por coste y Andoni: "no quiero que el
+            //    sol se muestre diferente". Los pasos son el muestreo de la DENSIDAD a lo largo del
+            //    rayo; la luz (marcha hacia el Sol, fase, octavas) se evalua por muestra y no depende
+            //    de cuantas hay. Se mide igualmente: las dos cifras de la luz a cada presupuesto, y se
+            //    exige que coincidan (Δr ≤ 0,05, Δfase ≤ 0,05). Si un dia el paso entra en la luz
+            //    (p. ej. una sombra por pasos), esto lo dice.
+            double corrAt[2] = {}, faseAt[2] = {};
+            const float pasosLuz[2] = { 64.0f, 24.0f };
+            for (int ip = 0; ip < 2; ++ip) {
+                pasos = pasosLuz[ip];
+                std::printf("    LUZ a %.0f pasos:\n", pasos);
                 const glm::vec3 sunAnt = sunCur;
                 auto shot = [&](const glm::vec3& sun, std::vector<uint8_t>& pxS) {
                     sunCur = sun; ojoA = 4030.0f;
@@ -6431,7 +7236,14 @@ static void testCloudVolumeDraws()
                 std::printf("    LUZ (b): luminancia media de la nube fina mirando HACIA el Sol %.1f · en CONTRA %.1f (x%.2f)\n", lF, lB, lB > 0 ? lF / lB : 0.0);
                 CHECK(lF > lB * 1.10, "dispersion hacia delante: la nube fina es mas clara mirando hacia el Sol (x1,10 o mas)");
                 sunCur = sunAnt; modosCur = modosAntes; ojoA = eyeA; mira = fwd;
+                corrAt[ip] = std::abs(corr); faseAt[ip] = lB > 0 ? lF / lB : 0.0;
             }
+            pasos = 64.0f;
+            std::printf("    LUZ 64 vs 24 pasos: |r| %.3f vs %.3f (Δ %.3f) · fase x%.2f vs x%.2f (Δ %.2f)\n",
+                        corrAt[0], corrAt[1], std::abs(corrAt[0] - corrAt[1]),
+                        faseAt[0], faseAt[1], std::abs(faseAt[0] - faseAt[1]));
+            CHECK(std::abs(corrAt[0] - corrAt[1]) <= 0.05, "el Sol se ve IGUAL a 24 pasos que a 64: la correlacion con la cara al Sol no cambia (Δ|r| ≤ 0,05)");
+            CHECK(std::abs(faseAt[0] - faseAt[1]) <= 0.05, "...ni la fase (Δ ≤ 0,05): los pasos muestrean la densidad, no la luz");
 
             // ── (6-C) ⚠️ LA CAPA NO SE ACABA DE GOLPE. Andoni: "se recorta con cortes rectos y parece
             //        que estan mas cerca". La marcha se topaba a 4·L de perspectiva aerea (72 km con
@@ -7380,6 +8192,94 @@ static void testCloudVolumeDraws()
         const double meanDown = nLit ? sumDiff / (double)nLit : 0.0;
         std::printf("    CONVERGENCIA desde 4,5 km mirando abajo (cumulo+altocumulo, 0,45): %zu px · |dif| media %.1f/255 · %.1f %% > 24\n",
                     nLit, meanDown, nLit ? 100.0 * (double)nBad / (double)nLit : 0.0);
+
+        // ¿Y CON MENOS PASOS? (Andoni, 20-09: "con 24 estaria igual?"). La misma medida, con la misma
+        // referencia de 256, para 32 y 24 pasos en las dos vistas: es el numero que dice cuanto se
+        // pierde por bajar el mando `HARUKA_CLOUD_STEPS`, en vez de suponerlo. Solo se imprime: el
+        // contrato (< 6/255) es de los 64 del juego; aqui se mide el precio de cada alternativa.
+        {
+            struct Vista { const char* nombre; float ojo; glm::vec3 dir; int modos; float cov; };
+            const Vista vistas[2] = {
+                { "25 grados sobre el horizonte", 1030.0f, glm::normalize(fwd + up0 * 0.47), 1, 0.35f },
+                { "desde 4,5 km mirando abajo",   4500.0f, glm::normalize(fwd - up0 * 0.84), 3, 0.45f } };
+            for (const Vista& v : vistas) {
+                std::vector<uint8_t> pxRef;
+                ojoA = v.ojo; slabBase = 2470.0f; slabTop = 3116.0f; mira = v.dir;
+                modosCur = v.modos | 32; pasos = 256.0f; render(v.cov, pxRef);
+                for (float np : { 64.0f, 32.0f, 24.0f }) {
+                    std::vector<uint8_t> pxN, pxE;
+                    modosCur = v.modos;      pasos = np; render(v.cov, pxN);
+                    modosCur = v.modos | 64; pasos = np; render(v.cov, pxE);   // rojo = presupuesto agotado
+                    double sd = 0.0; size_t nl = 0, nb = 0, nr = 0;
+                    for (size_t k = 0; k + 3 < pxN.size() && k + 3 < pxRef.size(); k += 4) {
+                        const int la = std::max(pxN[k], std::max(pxN[k+1], pxN[k+2]));
+                        const int lb = std::max(pxRef[k], std::max(pxRef[k+1], pxRef[k+2]));
+                        if (pxE[k] > 200 && pxE[k+1] < 40 && pxE[k+2] < 40) ++nr;
+                        if (la < 8 && lb < 8) continue;
+                        ++nl; const int d = std::abs(la - lb); sd += d; if (d > 24) ++nb;
+                    }
+                    std::printf("    PASOS %3.0f vs 256, %s: |dif| media %.1f/255 · %.1f %% > 24 · presupuesto agotado %.1f %% de los px con nube\n",
+                                np, v.nombre, nl ? sd / (double)nl : 0.0, nl ? 100.0 * (double)nb / (double)nl : 0.0,
+                                nl ? 100.0 * (double)nr / (double)nl : 0.0);
+                }
+            }
+            pasos = 64.0f; modosCur = 0; mira = fwd; ojoA = 1030.0f; slabBase = baseAnt; slabTop = topAnt;
+        }
+
+        // ── RASANTE DESDE EL SUELO, A LA VISTA (Andoni, 20-09: "las nubes se ven con rayas
+        //    horizontales", y con RESDIV=1 y MODES=1 tambien). El banco no tiene una vista desde el
+        //    suelo mirando al horizonte, que es la del juego. `HARUKA_CLOUD_PNG=<dir>` vuelca esa vista
+        //    a 3, 8 y 15 grados con la losa de la partida (2 470-13 000 m), y con la marcha en modo
+        //    "solo la fraccion" (dbg 8) como contraprueba: si las rayas estan tambien ahi, son del
+        //    reparto de pasos/cobertura y no del campo.
+        if (const char* dir = std::getenv("HARUKA_CLOUD_PNG")) {
+            const bool isVk2 = (g_dev->backend() == Backend::Vulkan);
+            const double elevs[3] = { 3.0, 8.0, 15.0 };
+            // La capa de la PARTIDA (log del juego: base 2 470, techo 3 095, cobertura 0,09-0,38) y las
+            // dos formas de marcharla: la BANDA de la columna entera (el juego normal: de la base minima
+            // del planeta a 13 km) y la banda ajustada a la capa (lo que hace HARUKA_CLOUD_COVER, que
+            // es con lo que a Andoni "se le van" las rayas).
+            TextureHandle skyG = makeSkyTex(std::vector<float>{0.30f}, 1, 1, 2470.0f, 3095.0f, Filter::Nearest, Wrap::ClampToEdge);
+            const TextureHandle covAnt2 = coverBound; coverBound = skyG;
+            for (int e = 0; e < 3; ++e) for (int pass = 0; pass < 2; ++pass) {
+                ojoA = 2.0f;
+                if (pass == 0) { slabBase = 600.0f;  slabTop = 13000.0f; }
+                else           { slabBase = 2470.0f; slabTop = 3095.0f; }
+                mira = glm::normalize(fwd * std::cos(glm::radians(elevs[e])) + up0 * std::sin(glm::radians(elevs[e])));
+                modosCur = 1; pasos = 64.0f;
+                std::vector<uint8_t> px; render(0.30f, px);
+                std::vector<uint8_t> img(px.size());
+                for (int y = 0; y < h; ++y) {
+                    const int src = isVk2 ? y : (h - 1 - y);
+                    std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)src * w * 4], (size_t)w * 4);
+                }
+                char name[160]; std::snprintf(name, sizeof name, "%s/%s_suelo_%02.0fgrados_%s.png", dir, isVk2 ? "vk" : "gl", elevs[e], pass ? "banda_capa" : "banda_columna");
+                Haruka::writePNG(name, w, h, 4, img.data());
+                // RAYAS = estructura por FILAS: el perfil de luminancia media por fila (solo pixeles con
+                // nube) tiene que ser suave; su segunda diferencia media es la medida. Y la misma
+                // medida por COLUMNAS como contraprueba (las nubes tienen bordes en las dos direcciones).
+                std::vector<double> rowP(h, 0.0), colP(w, 0.0); std::vector<int> rowN(h, 0), colN(w, 0);
+                for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) {
+                    const size_t k = ((size_t)y * w + x) * 4;
+                    const int l = std::max(px[k], std::max(px[k+1], px[k+2]));
+                    if (l < 8) continue;
+                    rowP[y] += l; ++rowN[y]; colP[x] += l; ++colN[x];
+                }
+                auto rough = [](std::vector<double>& P, std::vector<int>& N) {
+                    double sum = 0.0; int n = 0;
+                    for (size_t i = 1; i + 1 < P.size(); ++i) {
+                        if (N[i-1] < 8 || N[i] < 8 || N[i+1] < 8) continue;
+                        const double a = P[i-1] / N[i-1], b = P[i] / N[i], c = P[i+1] / N[i+1];
+                        sum += std::abs(a - 2.0 * b + c); ++n;
+                    }
+                    return n ? sum / n : 0.0;
+                };
+                std::printf("      -> %s · rugosidad del perfil por FILAS %.2f/255 · por COLUMNAS %.2f (contraprueba)\n",
+                            name, rough(rowP, rowN), rough(colP, colN));
+            }
+            coverBound = covAnt2; g_dev->destroy(skyG);
+            pasos = 64.0f; modosCur = 0; mira = fwd; ojoA = 1030.0f; slabBase = baseAnt; slabTop = topAnt;
+        }
         // ¿Cuantos pixeles AGOTAN el presupuesto de pasos? (bit 64: se pintan en rojo puro)
         {
             std::vector<uint8_t> pxE;
@@ -7479,6 +8379,8 @@ static void testCloudVolumeDraws()
         slabBase = baseAnt; slabTop = topAnt; ojoA = eyeA;
         CHECK(msVacio > 0.0 && ms64 > 0.0, "el coste del pase de nubes queda MEDIDO");
         baselineMetric("nubes.pase_64pasos_ms_1080p", ms64 * aFHD, 0.30, true, true, !vsync);
+        // Los 24 son lo que dibuja la partida desde el 20-09: es la cifra que vigila el coste real.
+        baselineMetric("nubes.pase_24pasos_ms_1080p", ms24 * aFHD, 0.30, true, true, !vsync);
     }
 
     // (6f) EL CAMINO REDUCIDO + COMPOSICION, que es como dibuja la partida desde el arreglo del coste.
@@ -8268,6 +9170,135 @@ static void testNodeWaterDraws()
         }
         std::printf("    ANILLOS: rugosidad del mar por fila (desde 200 m, -35 grados): min %.2f · max %.2f"
                     " · mayor salto entre filas vecinas %.2f (fila %d)\n", rMin, rMax, jump, jumpRow);
+        // ── ⚠️ LA ZANCADA BAJO EL AGUA SOMERA, Y LO QUE CUESTA ─────────────────────────────────
+        // El salto de la banda de zancada (hasta 3,75 m de fondo) es invisible en mar abierto y se
+        // ve como un CIRCULO en la costa, porque el regimen somero es no lineal en la profundidad.
+        // El tope (`kWaterReliefFrac`) afina la malla donde el agua es poco profunda: eso ACERCA lo
+        // dibujado al campo (menos disparidad, no mas) y cuesta triangulos. Se miden los dos.
+        {
+            // ⚠️ MIRANDO CASI AL HORIZONTE (−3 grados), no a −35: a 35 grados abajo todo cae a pocos
+            // km y la zancada ya es la fina, asi que el tope no puede morder y el test mediria 0 por
+            // construccion (paso una vez). Las bandas gruesas viven a decenas de km.
+            const glm::dvec3 fwdH = glm::normalize(tan0 * std::cos(glm::radians(3.0)) - up0 * std::sin(glm::radians(3.0)));
+            const glm::dvec3 vupH = glm::normalize(glm::cross(fwdH, tan0));
+            const glm::mat4 mvpH = projR * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwdH), glm::vec3(vupH))));
+            // ⚠️ Y CON MUESTREADOR DE ALTURA: sin el, el pool no sabe el rango de cada nodo
+            // (`rangeOf` invalido) y el tope —que se apoya en la cota MINIMA del nodo— no puede
+            // morder. Medido: 0 nodos acotados hasta que se puso esto.
+            // ⚠️ Y SE VUELVE A PONER EN CADA TIRADA: el pool es una cache y los residentes guardan
+            // el rango del muestreador con el que se generaron; `setHeightSampler` los re-acota
+            // (`TerrainNodePool::rerange`). Sin eso las dos tiradas daban LO MISMO (45 acotados,
+            // 14 particiones) porque el fondo de -2 000 m nunca llegaba al rango.
+            static float s_fondo = -3.0f;
+            auto tirada = [&](float fondo, size_t& capped, size_t& tris, uint32_t& strideMax,
+                              size_t& splits, size_t& selected) {
+                s_fondo = fondo;
+                r.setHeightSampler([](const glm::dvec3&, void*) { return s_fondo; }, nullptr);
+                TextureHandle fl = makeFloor(fondo);
+                TerrainNodeRenderer::Water wcap; wcap.heightTex = fl; wcap.oceanParams = oceanR; wcap.on = true;
+                r.setWater(wcap);
+                TerrainNodeRenderer::FrameStats last{};
+                for (int f = 0; f < 8; ++f) {
+                    Context* ctx = g_dev->beginFrame();
+                    if (!ctx) break;
+                    r.prepare(ctx, cam, pc, R, fwdH, radPerPx, cone);
+                    ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                    ctx->beginRenderPass({}, cv);
+                    last = r.draw(ctx, cam, pc, R, mvpH);
+                    ctx->endRenderPass();
+                    g_dev->endFrame(); pumpWindowEvents();
+                }
+                capped = last.waterStrideCapped; tris = last.tris; strideMax = last.stride;
+                splits = last.waterSplit; selected = last.selected;
+                g_dev->destroy(fl);
+            };
+            size_t cS = 0, cD = 0, tS = 0, tD = 0, pS = 0, pD = 0, nS = 0, nD = 0; uint32_t sS = 0, sD = 0;
+            tirada(-3.0f,    cS, tS, sS, pS, nS);     // costa: 3 m de fondo
+            tirada(-2000.0f, cD, tD, sD, pD, nD);     // mar abierto
+            std::printf("    ZANCADA bajo el agua: costa (3 m) %zu nodos acotados · %.2f M tris · zancada max %u"
+                        "  |  mar abierto (2 000 m) %zu acotados · %.2f M tris · zancada max %u\n",
+                        cS, tS / 1e6, sS, cD, tD / 1e6, sD);
+            // Y la PARTICION extra por nivel (`nodeShallowWantsSplit`), sobre el rango REAL que
+            // publica el pool: es la version por nivel del tope de zancada, y quita los anillos de
+            // la frontera entre niveles hasta 2x la distancia de particion. Coste en nodos.
+            std::printf("    NIVEL bajo el agua: costa (3 m) %zu particiones del agua, %zu nodos seleccionados"
+                        "  |  mar abierto %zu particiones, %zu nodos\n", pS, nS, pD, nD);
+            CHECK(cS > 0, "en la costa la zancada se acota (si no, el tope no hace nada)");
+            CHECK(cD == 0, "CONTRAPRUEBA: en mar abierto NO se acota ni un nodo (el tope es de 200 m alli)");
+            CHECK(tS >= tD, "y el coste va donde el agua es somera: mas triangulos en la costa que en mar abierto");
+            CHECK(pS > 0 && nS > nD, "en la costa el agua pide particiones que la pantalla no pedia, y cuesta nodos");
+            CHECK(pD == 0, "CONTRAPRUEBA: en mar abierto (presupuesto 500 m) el agua no pide ni una particion");
+
+            // ── ¿EL AGUA CUESTA POR VERTICE O POR PIXEL? (Andoni, 20-09: "sigue con el .5") ──────
+            // En el juego `v5.agua` son 10-16 ms en la costa, el mayor pase del frame, y apagar los
+            // parches de costa no lo baja. Dos sospechosos: el vertex (4 evaluaciones de
+            // `harukaTerrainDetail` por vertice desde el corte continuo) o el fragment (Green,
+            // espuma, absorcion). Se separan con el MISMO dibujo a dos tamaños de viewport: los
+            // vertices son los mismos y los pixeles 1/4. Con c = V + F y c/4 = V + F/4:
+            //     V = (4·c_cuarto − c_entero) / 3,   F = c_entero − V.
+            // Escena: la costa de arriba (fondo 3 m, 200 m de altura, −3 grados), agua encendida.
+            {
+                s_fondo = -3.0f;
+                r.setHeightSampler([](const glm::dvec3&, void*) { return s_fondo; }, nullptr);
+                TextureHandle fl = makeFloor(-3.0f);
+                std::vector<uint8_t> one(4, 0);
+                auto timeCoast = [&](bool waterOn, int div, int frames) {
+                    TerrainNodeRenderer::Water wc; wc.heightTex = fl; wc.oceanParams = oceanR; wc.on = waterOn;
+                    r.setWater(wc);
+                    auto frame = [&]() {
+                        if (Context* c = g_dev->beginFrame()) {
+                            r.prepare(c, cam, pc, R, fwdH, radPerPx, cone);
+                            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                            c->beginRenderPass({}, cv);
+                            c->setViewport(0, 0, w / div, h / div);
+                            r.draw(c, cam, pc, R, mvpH);
+                            // ⚠️ Y SE DEJA COMO ESTABA: en GL el viewport persiste entre pases y el
+                            // test siguiente ("LINEA DEL MAR") leia un cuadro a 128x128 con el resto
+                            // negro (100 % negro, 0 % agua). En Vulkan no se notaba.
+                            c->setViewport(0, 0, w, h);
+                            c->endRenderPass();
+                            g_dev->endFrame(); pumpWindowEvents();
+                        }
+                    };
+                    for (int f = 0; f < 8; ++f) frame();
+                    g_dev->readPixels(0, 0, 1, 1, Format::RGBA8, one.data());   // sync
+                    const auto t0 = std::chrono::high_resolution_clock::now();
+                    for (int f = 0; f < frames; ++f) frame();
+                    g_dev->readPixels(0, 0, 1, 1, Format::RGBA8, one.data());
+                    return std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() / frames;
+                };
+                const double tOff1 = timeCoast(false, 1, 30), tOff2 = timeCoast(false, 2, 30);
+                const double tOn1  = timeCoast(true,  1, 30), tOn2  = timeCoast(true,  2, 30);
+                const double agua1 = tOn1 - tOff1, agua2 = tOn2 - tOff2;
+                const double aguaV = std::max((4.0 * agua2 - agua1) / 3.0, 0.0), aguaF = agua1 - aguaV;
+                const double terrV = std::max((4.0 * tOff2 - tOff1) / 3.0, 0.0), terrF = tOff1 - terrV;
+                const bool vs = (tOff1 > 15.5 && tOff1 < 18.0);
+                std::printf("    AGUA, VERTICE O PIXEL (costa 3 m, %dx%d contra %dx%d): terreno %.3f / %.3f ms · agua %.3f / %.3f ms\n"
+                            "      -> agua: vertice %.3f ms (%.0f %%) · pixel %.3f ms  |  terreno: vertice %.3f ms (%.0f %%) · pixel %.3f ms%s\n",
+                            w, h, w / 2, h / 2, tOff1, tOff2, agua1, agua2,
+                            aguaV, agua1 > 0 ? 100.0 * aguaV / agua1 : 0.0, aguaF,
+                            terrV, tOff1 > 0 ? 100.0 * terrV / tOff1 : 0.0, terrF,
+                            vs ? "  (VSYNC: no vale)" : "");
+                {
+                    // DONDE ESTAN LOS VERTICES: nodos de agua por zancada y triangulos. Un nodo cuesta
+                    // (129/zancada)^2 vertices este donde este, asi que la cuenta por zancada dice
+                    // que parte del pase es la malla fina de cerca y que parte el numero de nodos.
+                    const auto& st = r.stats();
+                    std::printf("      nodos de agua %zu (%zu con mas zancada que el terreno) · %.2f M tris de agua, %.2f M de terreno\n"
+                                "      por zancada (1,2,4,8,16,32,64): agua", st.waterNodes, st.waterCoarsened,
+                                st.waterTris / 1e6, st.tris / 1e6);
+                    for (int k = 0; k < 7; ++k) std::printf(" %zu", st.waterByStride[k]);
+                    std::printf("  ·  tris terreno (M)");
+                    for (int k = 0; k < 7; ++k) std::printf(" %.2f", st.trisByStride[k] / 1e6);
+                    std::printf("\n");
+                }
+                CHECK(vs || agua1 > 0.0, "el coste del agua en la costa queda medido");
+                baselineMetric("agua.costa_ms", agua1, 0.30, true, true, !vs);
+                baselineMetric("agua.costa_vertice_ms", aguaV, 0.30, true, true, !vs);
+                r.setWater(TerrainNodeRenderer::Water{});
+                g_dev->destroy(fl);
+            }
+        }
         CHECK(rMax > 0.0, "hay mar con rugosidad que medir");
         CHECK(jump < 0.25 * std::max(rMax, 1e-6), "el mar NO cambia de rugosidad en un escalon (anillo de zancada): el mayor salto entre filas es menos del 25 % del maximo");
         g_dev->destroy(floorR); g_dev->destroy(oceanR);
@@ -10170,6 +11201,7 @@ static void testInstancingRing()
     CHECK(inst.hostBytes() == bytes4, "y el siguiente frame ya cabe sin crecer");
 }
 
+static std::string g_filter;   // segundo argumento del banco: grupo o test (subcadena)
 static int runBackend(Backend backend)
 {
     const char* name = (backend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
@@ -10230,70 +11262,96 @@ static int runBackend(Backend backend)
         }
     }
 
-    testTextureFormats();
-    testBuffers();
-    testRenderTargets();
-    testArrayAndCube();
-    testFrameCycle();
-    testBindingPersistence();
-    testComputeArraySampler();
-    testNodeGpuAdapterBisect();
-    testDispatchInsideRenderPass();
-    testTerrainNodeGpuParity();
-    testTerrainNodeGpuCost();
-    testTerrainNodePoolGpu();
-    testTerrainNodeRender();
-    testGpuFp64();
-    testOctaveDivergence();
-    testWaterFieldParity();
-    testWaveNumberParity();
-    testTerrainBakeAcrossLevels();
-    testBakeStageBisect();
-    testTerrainNodeDrawnVsField();
-    testTerrainStrideMatchCost();
-    testTerrainNodeRendererInit();
-    testTerrainNodeBaseField();
-    testNodeVoxCut();
-    testNodeWaterDraws();
-    testHorizonPlateau();
-    testAtmosphereLimb();
-    testCloudVolumeDraws();
-    testCloudFieldDistribution();
-    testCloudShape3D();
-    testCloudColumnParity();
-    testCloudNoiseParity();
-    testSkyLayersHaveDepth();
-    testTerrainNodeCoverage();
-    testTerrainNodeSeamHoles();
-    testTerrainNodeSharedEdgeGpu();
-    testTerrainNodeStitchSymmetryGpu();
-    testTextureContent();
-    testVertexColor();
-    testVertexInterpolation();
-    testItemPreviewShader();
-    testOceanWaveParity();
-    testOceanFoldParity();
-    testWaterShapes();
-    testEnginePipelines();
-    testSkyAmbientGPU();
-    testTerrainLighting();
-    testPropLighting();
-    testPropLightSweep();
-    testTerrainShadow();
-    testCullWindingWithProjection();
-    testInstancingRing();
-
-    // ⚠️ EL ULTIMO, Y A PROPOSITO. Es el unico test del banco que dibuja a un render target
-    // OFFSCREEN, y deja el backend en un estado que hace fallar al siguiente que lee pixeles del
-    // framebuffer por defecto (`testCullWindingWithProjection`). No he encontrado QUE queda mal:
-    // el viewport lo restaura `beginRenderPass`, el target se destruye y aun asi pasa, y un frame
-    // de restauracion explicito NO lo arregla. Es un gap del RHI, no del terreno.
-    //
-    // Ponerlo al final es una MITIGACION, no un arreglo: mientras siga aqui, nadie puede añadir un
-    // test detras sin comprobar que no hereda basura. Queda anotado para cuando se toque el RHI.
-    testTerrainNodeSceneSeams();
-    testSceneTerrainAndProp();
-    testTerrainNodeShadeCost();
+    // ── LOS TESTS, POR GRUPOS (Andoni, 20-09: "agrupados, contador secundario, de mas simples a mas
+    //    complejos"). Cada test imprime `[grupo i/N · test j/M]` antes de su propia cabecera. El
+    //    segundo argumento del banco filtra: `haruka_tests_rhi vk nubes` corre el grupo cuya clave
+    //    o nombre contenga la palabra, y ademas cualquier test cuyo nombre la contenga.
+    // ⚠️ EL ORDEN DENTRO DE "escena" NO ES LIBRE: `testTerrainNodeSceneSeams` dibuja a un render
+    //    target offscreen y deja el backend en un estado que hace fallar a quien lea el framebuffer
+    //    por defecto despues (no he encontrado que queda mal: el viewport lo restaura
+    //    `beginRenderPass`, el target se destruye, un frame de restauracion no lo arregla). Es un
+    //    gap del RHI, no del terreno; por eso ese grupo va el ultimo y esos tres al final de el.
+    struct RhiTest  { const char* name; void (*fn)(); };
+    struct RhiGroup { const char* name; const char* what; std::vector<const char*> keys; std::vector<RhiTest> tests; };
+    const std::vector<RhiGroup> groups = {
+        { "RHI basico", "texturas, buffers, render targets, ciclo de frame, bindings, compute, instancing, pipelines del motor",
+          { "rhi", "basic", "basico", "textura", "buffer", "target", "frame", "pipeline", "instanc" },
+          { { "TextureFormats", testTextureFormats }, { "Buffers", testBuffers }, { "RenderTargets", testRenderTargets }, { "ArrayAndCube", testArrayAndCube }, { "FrameCycle", testFrameCycle }, { "BindingPersistence", testBindingPersistence }, { "ComputeArraySampler", testComputeArraySampler }, { "DispatchInsideRenderPass", testDispatchInsideRenderPass }, { "TextureContent", testTextureContent }, { "VertexColor", testVertexColor }, { "VertexInterpolation", testVertexInterpolation }, { "EnginePipelines", testEnginePipelines }, { "ItemPreviewShader", testItemPreviewShader }, { "InstancingRing", testInstancingRing } } },
+        { "fp64 y paridad GPU", "la aritmetica de la GPU contra la CPU: fp64, octavas, el adaptador y el horneado por etapas",
+          { "fp64", "parity", "paridad", "bisect", "bake", "horneado" },
+          { { "GpuFp64", testGpuFp64 }, { "OctaveDivergence", testOctaveDivergence }, { "NodeGpuAdapterBisect", testNodeGpuAdapterBisect }, { "TerrainNodeGpuParity", testTerrainNodeGpuParity }, { "BakeStageBisect", testBakeStageBisect }, { "TerrainBakeAcrossLevels", testTerrainBakeAcrossLevels } } },
+        { "terreno", "el quadtree v5 en la GPU: coste, pool, dibujado contra el campo, zancadas, cosido, horizonte",
+          { "terreno", "terrain", "node", "v5", "stride", "zancada", "seam", "costura" },
+          { { "TerrainNodeGpuCost", testTerrainNodeGpuCost }, { "TerrainNodePoolGpu", testTerrainNodePoolGpu }, { "TerrainNodeRender", testTerrainNodeRender }, { "TerrainNodeDrawnVsField", testTerrainNodeDrawnVsField }, { "TerrainStrideMatchCost", testTerrainStrideMatchCost }, { "TerrainNodeRendererInit", testTerrainNodeRendererInit }, { "TerrainNodeBaseField", testTerrainNodeBaseField }, { "NodeVoxCut", testNodeVoxCut }, { "HorizonPlateau", testHorizonPlateau }, { "StrideRingsOnLand", testStrideRingsOnLand }, { "FrameDrawnVsBaked", testFrameDrawnVsBaked }, { "TerrainNodeCoverage", testTerrainNodeCoverage }, { "TerrainNodeSeamHoles", testTerrainNodeSeamHoles }, { "TerrainNodeSharedEdgeGpu", testTerrainNodeSharedEdgeGpu }, { "TerrainNodeStitchSymmetryGpu", testTerrainNodeStitchSymmetryGpu } } },
+        { "agua", "campo del agua, numero de onda, nodos con agua, olas y pliegue, formas de la profundidad",
+          { "agua", "water", "ocean", "mar", "wave", "ola" },
+          { { "WaterFieldParity", testWaterFieldParity }, { "WaveNumberParity", testWaveNumberParity }, { "NodeWaterDraws", testNodeWaterDraws }, { "OceanWaveParity", testOceanWaveParity }, { "OceanFoldParity", testOceanFoldParity }, { "WaterShapes", testWaterShapes } } },
+        { "hierba", "briznas en GPU sobre el suelo dibujado, cono, contrapruebas y el mapa de presion",
+          { "hierba", "grass", "brizna" },
+          { { "GrassGen", testGrassGen } } },
+        { "cielo y nubes", "limbo de la atmosfera, el pase volumetrico, el campo, la forma, la columna y el ruido; ambiente SH",
+          { "cielo", "sky", "nube", "cloud", "atmos", "ambient" },
+          { { "AtmosphereLimb", testAtmosphereLimb }, { "CloudVolumeDraws", testCloudVolumeDraws }, { "CloudFieldDistribution", testCloudFieldDistribution }, { "CloudShape3D", testCloudShape3D }, { "CloudColumnParity", testCloudColumnParity }, { "CloudNoiseParity", testCloudNoiseParity }, { "SkyLayersHaveDepth", testSkyLayersHaveDepth }, { "SkyAmbientGPU", testSkyAmbientGPU } } },
+        { "luz y sombra", "iluminacion del terreno y de los props, el barrido de luz, el pase de sombra",
+          { "luz", "light", "sombra", "shadow", "prop" },
+          { { "TerrainLighting", testTerrainLighting }, { "PropLighting", testPropLighting }, { "PropLightSweep", testPropLightSweep }, { "TerrainShadow", testTerrainShadow } } },
+        { "escena", "todo junto: culling con proyeccion, costuras de la escena, terreno + prop, coste del sombreado (los ultimos a proposito)",
+          { "escena", "scene", "cull", "shade" },
+          { { "CullWindingWithProjection", testCullWindingWithProjection }, { "TerrainNodeSceneSeams", testTerrainNodeSceneSeams }, { "SceneTerrainAndProp", testSceneTerrainAndProp }, { "TerrainNodeShadeCost", testTerrainNodeShadeCost } } },
+    };
+    // El filtro admite ALTERNATIVAS con `|` ("hierba|cielo"): para reproducir una fuga de estado de
+    // un grupo al siguiente hace falta correr los dos en el mismo proceso, y solo esos.
+    std::vector<std::string> alts;
+    { size_t a = 0; while (a <= g_filter.size()) { const size_t b = g_filter.find('|', a);
+        alts.push_back(g_filter.substr(a, b == std::string::npos ? std::string::npos : b - a));
+        if (b == std::string::npos) break; a = b + 1; } }
+    auto has = [&](const std::string& s) { for (const auto& f : alts) if (s.find(f) != std::string::npos) return true; return false; };
+    struct Plan { const RhiGroup* g; std::vector<const RhiTest*> tests; };
+    std::vector<Plan> plan;
+    for (const RhiGroup& g : groups) {
+        bool whole = g_filter.empty() || has(g.name);
+        for (const char* k : g.keys) if (!g_filter.empty() && has(k)) whole = true;
+        Plan p{ &g, {} };
+        for (const RhiTest& t : g.tests) if (whole || has(t.name)) p.tests.push_back(&t);
+        if (!p.tests.empty()) plan.push_back(p);
+    }
+    size_t total = 0; for (const Plan& p : plan) total += p.tests.size();
+    std::printf("%zu grupos · %zu tests%s%s\n", plan.size(), total, g_filter.empty() ? "" : " · filtro: ", g_filter.c_str());
+    struct Result { const char* name; size_t tests; int pass, fail, xfail; double secs; };
+    std::vector<Result> results;
+    for (size_t gi = 0; gi < plan.size(); ++gi) {
+        const Plan& p = plan[gi];
+        std::printf("\n\033[1m==== [%zu/%zu] %s\033[0m · %zu tests · %s ====\n", gi + 1, plan.size(), p.g->name, p.tests.size(), p.g->what);
+        const int pass0 = g_pass, fail0 = g_fail, xfail0 = g_xfail;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (size_t ti = 0; ti < p.tests.size(); ++ti) {
+            std::printf("[%zu/%zu · %zu/%zu] %s\n", gi + 1, plan.size(), ti + 1, p.tests.size(), p.tests[ti]->name);
+            std::fflush(stdout);
+            p.tests[ti]->fn();
+            // `HARUKA_BENCH_FRAMES=<dir>`: lo que la VENTANA enseña al acabar cada test, a PNG. Es
+            // para saber que test dibujo lo que se ve en la ventana del banco (Andoni, 21-09: una
+            // captura de la ventana con "creo que es el problema del terreno" que no decia de que
+            // test era). Lee el backbuffer tal cual queda (GL) o la ultima imagen presentada (VK).
+            if (const char* dir = std::getenv("HARUKA_BENCH_FRAMES")) {
+                uint32_t fw = 0, fh = 0; g_dev->framebufferSize(fw, fh);
+                if (fw > 0 && fh > 0) {
+                    std::vector<uint8_t> px((size_t)fw * fh * 4, 0), img(px.size());
+                    g_dev->readPixels(0, 0, (int)fw, (int)fh, Format::RGBA8, px.data());
+                    const bool vk = (g_dev->backend() == Backend::Vulkan);
+                    for (uint32_t y = 0; y < fh; ++y)
+                        std::memcpy(&img[(size_t)y * fw * 4], &px[(size_t)(vk ? y : (fh - 1 - y)) * fw * 4], (size_t)fw * 4);
+                    const std::string path = std::string(dir) + "/" + (vk ? "vk_" : "gl_") + p.tests[ti]->name + ".png";
+                    Haruka::writePNG(path, (int)fw, (int)fh, 4, img.data());
+                }
+            }
+        }
+        results.push_back({ p.g->name, p.tests.size(), g_pass - pass0, g_fail - fail0, g_xfail - xfail0,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() });
+    }
+    std::printf("\n== por grupo (%s) ==\n", name);
+    for (const Result& r : results)
+        std::printf("  %-22s %3zu tests · %6d comprobaciones · %s%d fallos\033[0m · %d xfail · %6.1f s\n",
+                    r.name, r.tests, r.pass + r.fail, r.fail ? "\033[31m" : "", r.fail, r.xfail, r.secs);
 
     // ── ¿SIGUE SIENDO CIERTA LA LISTA DE DEFECTOS? ──────────────────────────────────────────────
     // Una entrada que no llegó a usarse en la tanda de SU backend y SU dispositivo describe algo que
@@ -10319,6 +11377,7 @@ static int runBackend(Backend backend)
 int main(int argc, char** argv)
 {
     std::string run = (argc > 1) ? argv[1] : "all";
+    g_filter = (argc > 2) ? argv[2] : "";
     if (run != "gl" && run != "vk" && run != "all") {
         std::fprintf(stderr, "uso: haruka_tests_rhi [gl|vk|all]\n");
         return 2;
@@ -10338,6 +11397,21 @@ int main(int argc, char** argv)
             setenv("__GLX_VENDOR_LIBRARY_NAME", "nvidia", 0);
         }
     }
+    // ⚠️ SIN LA CACHE DE SHADERS EN DISCO DE NVIDIA. Con ella (driver 615.71.09, RTX 3050 Laptop) el
+    // pase de nodos del terreno COLGABA la GPU en uno de cada tres arranques: `vkDeviceWaitIdle`
+    // devolvia -4 (DEVICE_LOST) a los 4,3 s en el segundo o tercer frame de un `TerrainNodeRenderer`
+    // recien creado, o se quedaba bloqueado sin volver. Medido el 20-09 sobre `vk NodeWaterDraws`
+    // y `vk TerrainNodeCoverage` (35 % y 40 %):
+    //   · no es el contenido: las instancias del frame que cuelga son BIT A BIT las del anterior;
+    //   · no es sincronizacion: validacion de sync y GPU-AV limpias (los dos hazards que si habia se
+    //     arreglaron aparte y no cambiaron la tasa); RADV en la AMD integrada 0/10;
+    //   · SI es la cache: con `__GL_SHADER_DISK_CACHE=0` 0/20 (intercalado con 4/10 con cache), y con
+    //     una cache NUEVA en un directorio vacio la primera corrida (que la escribe) pasa y las
+    //     siguientes (que la LEEN) vuelven a colgar 2/12. Es el driver cargando el pipeline desde
+    //     disco, no una entrada corrupta.
+    // El banco es reproducible o no es banco, asi que aqui se apaga; `HARUKA_NV_SHADER_CACHE=1` la
+    // deja como esta para volver a medirlo. El juego no lo toca: es decision de Andoni.
+    if (!std::getenv("HARUKA_NV_SHADER_CACHE")) setenv("__GL_SHADER_DISK_CACHE", "0", 0);
 
     if (run == "gl" || run == "all") runBackend(Backend::OpenGL);
     if (run == "vk" || run == "all") runBackend(Backend::Vulkan);

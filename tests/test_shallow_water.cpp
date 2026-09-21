@@ -25,7 +25,7 @@
 #include "test_common.h"
 
 #include "physics/fluid/shallow_water.h"
-#include "core/planet/ocean_wave.h"
+#include "world/water/ocean_wave.h"
 
 #include <glm/glm.hpp>
 #include <cmath>

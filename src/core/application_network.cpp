@@ -99,6 +99,17 @@ double Application::networkWorldTimeSeconds() const {
     return m_dgs.worldTimeSeconds();
 }
 
+Application::NetLinkStats Application::networkLinkStats() {
+    NetLinkStats o;
+    if (!m_dgs.isConnected()) return o;
+    const DGS::Client::LinkStats s = m_dgs.stats();
+    o.txBytes = s.txBytes; o.rxBytes = s.rxBytes;
+    o.headMs = s.headRttMs; o.headMinMs = s.headRttMinMs; o.headAvgMs = s.headRttAvgMs; o.headMaxMs = s.headRttMaxMs;
+    o.zoneMs = s.zoneRttMs; o.zoneMinMs = s.zoneRttMinMs; o.zoneAvgMs = s.zoneRttAvgMs; o.zoneMaxMs = s.zoneRttMaxMs; o.pingsLost = s.pingsLost;
+    o.zone = m_dgs.zoneEndpoint();
+    return o;
+}
+
 
 void Application::sendPlayerChat(uint32_t uuid, const std::string& username, const std::string& text,
                                  uint8_t channel) {

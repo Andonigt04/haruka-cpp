@@ -5,7 +5,19 @@
 
 namespace Haruka {
 
-static LogLevel s_level = LogLevel::Debug;
+// Por defecto INFO: las trazas DEBUG (colliders de props, escalas, listas de GPUs...) salian en
+// cada sesion y se comian el log. `HARUKA_DIAG=1` o `HARUKA_LOG_LEVEL=debug` las devuelven.
+static LogLevel initialLevel() {
+    if (const char* e = std::getenv("HARUKA_LOG_LEVEL")) {
+        if (!std::strcmp(e, "debug")) return LogLevel::Debug;
+        if (!std::strcmp(e, "info"))  return LogLevel::Info;
+        if (!std::strcmp(e, "warn"))  return LogLevel::Warn;
+        if (!std::strcmp(e, "error")) return LogLevel::Error;
+    }
+    if (const char* d = std::getenv("HARUKA_DIAG"); d && d[0] == '1') return LogLevel::Debug;
+    return LogLevel::Info;
+}
+static LogLevel s_level = initialLevel();
 
 void setLogLevel(LogLevel level) { s_level = level; }
 

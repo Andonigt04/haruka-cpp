@@ -13,8 +13,8 @@
 #include <glm/glm.hpp>
 
 #include "physics/physics_engine.h"
-#include "core/terrain/vox_world.h"
-#include "core/terrain/island_system.h"
+#include "world/vox/vox_world.h"
+#include "world/vox/island_system.h"
 #include <filesystem>
 
 // ---------------------------------------------- TEST: física — caída radial + determinismo (F1)
@@ -296,6 +296,32 @@ void test_physics_character() {
     std::printf("    caminó hasta x=%.2f m (muro en 2.5)\n", b->position.x);
     CHECK(b->position.x > 1.0, "el personaje ANDA");
     CHECK(b->position.x < 2.6, "el personaje NO ATRAVIESA el muro");
+}
+
+// LA CAPSULA DEL PERSONAJE TIENE CABEZA. Con la esfera de 0,4 m en los pies, un dintel a 1,2 m no
+// existia: el jugador pasaba por debajo con la camara (1,7 m) dentro de la viga. Con la capsula
+// (1,9 m de pie) choca. CONTRAPRUEBA: la misma viga a 2,3 m se pasa por debajo, y la esfera de
+// antes (characterHeight = 0) sigue pasando la de 1,2 — es la forma lo que lo para, no el muro.
+void test_physics_character_capsule() {
+    beginTest("physics_character_capsule");
+    auto run = [](double beamBottomM, double height) {
+        Haruka::Physics::PhysicsEngine eng; FlatMeshWorld w(glm::dvec3(0.0)); eng.setWorldProvider(&w);
+        // Viga horizontal de 0,3 m de grueso, ancha, cuyo borde inferior esta a `beamBottomM`.
+        eng.addPlacedOBB(glm::dvec3(4.0, beamBottomM + 0.15, 0.0), glm::dvec3(0.5, 0.15, 5.0), glm::dmat3(1.0));
+        auto b = std::make_shared<Haruka::Physics::RigidBody>();
+        b->position = glm::dvec3(0.0, 1.0, 0.0); b->radius = 0.4; b->mass = 70.0; b->name = "player";
+        b->isCharacter = true; b->characterHeight = height; b->characterRadius = 0.35;
+        eng.addBody(b);
+        for (int i = 0; i < 120; ++i) eng.advance(1.0 / 60.0);            // se asienta
+        for (int i = 0; i < 240; ++i) { b->velocity.x = 3.0; eng.advance(1.0 / 60.0); }   // camina 4 s hacia la viga
+        return b->position.x;
+    };
+    const double xCap12 = run(1.2, 1.9), xCap23 = run(2.3, 1.9), xSph12 = run(1.2, 0.0);
+    std::printf("    viga a 1,2 m: capsula llega a x=%.2f · esfera a x=%.2f · viga a 2,3 m: capsula a x=%.2f (viga en 3,5)\n",
+                xCap12, xSph12, xCap23);
+    CHECK(xCap12 > 1.0 && xCap12 < 3.6, "la CAPSULA (1,9 m) se para en la viga a 1,2 m: tiene cabeza");
+    CHECK(xCap23 > 5.0, "contraprueba: con la viga a 2,3 m pasa por debajo");
+    CHECK(xSph12 > 5.0, "contraprueba: la ESFERA de antes (0,8 m en los pies) pasaba bajo la viga de 1,2 m");
 }
 
 // QUIETO EN EL SUELO NO SE ACUMULA LA CAÍDA.

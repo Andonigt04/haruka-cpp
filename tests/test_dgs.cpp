@@ -4,7 +4,7 @@
 // movimiento REAL (paso legal → acepta; teleport y noclip → rechaza). El .so usa el MISMO sampler de
 // terreno que el cliente, así que cliente y host deciden igual con el mismo código.
 // ================================================================================================
-#include "core/weather_system.h"
+#include "world/weather_system.h"
 #include "core/scene/scene_render_policy.h"
 #include "test_common.h"
 
@@ -18,10 +18,10 @@
 
 #include "physics/physics_engine.h"
 #include "physics/world_provider.h"
-#include "core/terrain/terrain_sample.h"
-#include "core/planet/soi.h"
-#include "core/planet/terrain_detail.h"
-#include "core/planet/terrain_lod.h"
+#include "world/terrain/terrain_sample.h"
+#include "world/planet/soi.h"
+#include "world/terrain/terrain_detail.h"
+#include "world/terrain/terrain_lod.h"
 #include "net/height_field.h"
 #include <cstdio>
 #include <string>
@@ -1065,7 +1065,9 @@ void test_net_entity_visible() {
     player.objectType = Haruka::ObjectType::CHARACTER;
     Haruka::RenderCommand c = Haruka::classifySceneObject(player);
     CHECK(c.kind == Haruka::RenderKind::Primitive, "a networked player is drawn");
-    CHECK(c.primitive == Haruka::PrimitiveType::CAPSULE, "and it is drawn as a capsule");
+    // CHARACTER, no CAPSULE: la capsula de personaje (0,35 x 1,9, base en el pie), no la generica
+    // centrada de 0,5 x 1,5 que salia medio enterrada. Ver test_primitives `character_capsule_standing`.
+    CHECK(c.primitive == Haruka::PrimitiveType::CHARACTER, "and it is drawn as a standing character capsule");
 
     // Anything else the feed spawns (an item, a vehicle) with nothing to load.
     Haruka::SceneObject thing;
@@ -1074,7 +1076,7 @@ void test_net_entity_visible() {
     Haruka::RenderCommand t = Haruka::classifySceneObject(thing);
     CHECK(t.kind == Haruka::RenderKind::Primitive,
           "a MODEL with nothing to load is drawn anyway (it used to be silently invisible)");
-    CHECK(t.primitive == Haruka::PrimitiveType::CAPSULE, "as a capsule");
+    CHECK(t.primitive == Haruka::PrimitiveType::CHARACTER, "as a standing capsule");
 
     // COUNTER-PROOF: a real model must NOT be replaced by a capsule.
     Haruka::SceneObject real;

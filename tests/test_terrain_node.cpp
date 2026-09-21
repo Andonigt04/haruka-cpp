@@ -21,15 +21,15 @@
 #include "test_common.h"
 
 #include <cmath>
-#include "core/terrain/base_field.h"          // baseFieldHeightAt: el muestreo del bake del CUBO
+#include "world/terrain/base_field.h"          // baseFieldHeightAt: el muestreo del bake del CUBO
 #include <glm/gtc/matrix_transform.hpp>   // perspective/lookAt: la matriz es la verdad de referencia
                                             // del test de esquinas del frustum
 #include <cstring>
 #include <vector>
 #include <glm/glm.hpp>
 
-#include "core/terrain/terrain_node.h"
-#include "core/terrain/terrain_node_pool.h"
+#include "world/terrain/terrain_node.h"
+#include "world/terrain/terrain_node_pool.h"
 
 using namespace Haruka::Terrain;
 using Haruka::PlanetFace;
@@ -206,11 +206,38 @@ void test_terrain_node_scale() {
     // El nivel más fino tiene que bajar del metro por téxel: por debajo de eso vive la octava más
     // fina de `terrain_detail.h` (λ 4,5 m), y si el nodo no puede representarla, el quadtree no
     // arregla el "se ve basto" — solo mueve el problema.
-    const NodeId finest{ PlanetFace::FRONT, TERRAIN_NODE_MAX_LEVEL, 0, 0 };
+    const NodeId finest{ PlanetFace::FRONT, nodeMaxLevelFor(R), 0, 0 };
     const double finestTexel = nodeTexelM(finest, R);
     std::printf("    texel mas fino: %.3f m  (la octava mas fina es lambda 4.5 m -> hacen falta <2.25 m)\n",
                 finestTexel);
     CHECK(finestTexel < 2.25, "el nivel mas fino resuelve la octava mas fina del terreno");
+    CHECK(nodeMaxLevelFor(R) == 17u, "para la Tierra el tope derivado es el 17 de siempre");
+
+    // ── EL TOPE DEPENDE DEL RADIO ────────────────────────────────────────────────────────────────
+    // Era la constante 17, calculada para la Tierra. La regla: el primer nivel cuyo texel baja de
+    // lambda/4 = 1,125 m (donde la octava mas fina entra a peso completo). Un planeta 4 veces mayor
+    // necesita dos niveles mas para el MISMO texel; uno 4 veces menor, dos menos. Y el texel del tope
+    // queda siempre en la misma ventana [lambda/8, lambda/4): ni por encima (perderia la octava) ni
+    // un nivel de mas (interpolarse a si mismo, lo que costaba la mitad del pool con el tope 20).
+    std::printf("    radio        tope   m/texel en el tope   (ventana: %.3f..%.3f)\n",
+                TERRAIN_NODE_FINEST_LAMBDA_M / 8.0, TERRAIN_NODE_FINEST_LAMBDA_M / 4.0);
+    int badWindow = 0;
+    for (double Rk : { R / 16.0, R / 4.0, 3389.5e3, R, 4.0 * R, 16.0 * R, 100.0 * R }) {
+        const uint32_t L = nodeMaxLevelFor(Rk);
+        const double tx = nodeTexelM(NodeId{ PlanetFace::FRONT, L, 0, 0 }, Rk);
+        std::printf("    %8.0f km   %4u   %10.3f m\n", Rk / 1000.0, L, tx);
+        if (!(tx < TERRAIN_NODE_FINEST_LAMBDA_M / 4.0 && tx >= TERRAIN_NODE_FINEST_LAMBDA_M / 8.0)) ++badWindow;
+    }
+    CHECK(badWindow == 0, "el texel del tope cae en [lambda/8, lambda/4) para cualquier radio");
+    CHECK(nodeMaxLevelFor(4.0 * R) == 19u && nodeMaxLevelFor(R / 4.0) == 15u,
+          "x4 de radio son +2 niveles; /4 son -2 (mismo texel)");
+    // CONTRAPRUEBA: la constante de antes NO escala. Con el tope 17 fijo un planeta de 4 R tendria
+    // 2,4 m/texel y perderia la octava de 4,5 m entera.
+    const double stuck = nodeTexelM(NodeId{ PlanetFace::FRONT, 17u, 0, 0 }, 4.0 * R);
+    std::printf("    CONTRAPRUEBA: con el 17 fijo, 4 R tendria %.2f m/texel (> 2,25: sin la octava fina)\n", stuck);
+    CHECK(stuck > 2.25, "la contraprueba muestra lo que perdia la constante");
+    // Y el tope duro de la clave (26) solo muerde a partir de ~965 R: no es un caso real.
+    CHECK(nodeMaxLevelFor(2000.0 * R) == TERRAIN_NODE_MAX_LEVEL, "el tope duro de la clave recorta a los gigantes");
 
     // Y el nivel 0 tiene que cubrir la cara entera: es la raíz del quadtree.
     const NodeId root{ PlanetFace::FRONT, 0, 0, 0 };
@@ -402,7 +429,7 @@ void test_terrain_node_select() {
         const double px = nodeTexelM(n, R) / (std::max(best, 1.0) * radPerPx);
         worstPx = std::max(worstPx, px);
         if (px > TERRAIN_NODE_ERROR_PX * 1.001) {
-            if (n.level >= TERRAIN_NODE_MAX_LEVEL) ++atMaxLevel; else ++overBudget;
+            if (n.level >= nodeMaxLevelFor(R)) ++atMaxLevel; else ++overBudget;
         }
     }
     std::printf("    error peor %.2f px (presupuesto %.1f) · fuera de presupuesto %d · topados en nivel max %d\n",
@@ -568,7 +595,7 @@ void test_terrain_render_vs_collision() {
     auto levelAt = [&](const glm::dvec3& dir) -> int {
         PlanetFace f; double lx, ly;
         dirToCubeFaceClosed(dir, f, lx, ly);
-        for (int lv = (int)TERRAIN_NODE_MAX_LEVEL; lv >= 0; --lv) {
+        for (int lv = (int)nodeMaxLevelFor(R); lv >= 0; --lv) {
             const uint64_t lim = 1ull << lv;
             const int64_t i = (int64_t)((lx + 1.0) * 0.5 * (double)lim);
             const int64_t j = (int64_t)((ly + 1.0) * 0.5 * (double)lim);
@@ -672,7 +699,7 @@ void test_terrain_render_vs_collision() {
             NodeId nn{ PlanetFace::FRONT, 0, 0, 0 };
             PlanetFace f; double lx, ly;
             dirToCubeFaceClosed(dd, f, lx, ly);
-            for (; lv < (int)TERRAIN_NODE_MAX_LEVEL; ++lv) {
+            for (; lv < (int)nodeMaxLevelFor(R); ++lv) {
                 if (!nodeShouldSplit(nn, R, cam2, pc, radPerPx, TERRAIN_NODE_ERROR_PX, elev)) break;
                 const uint64_t lim = 1ull << (lv + 1);
                 nn = NodeId{ f, (uint32_t)(lv + 1),
@@ -923,7 +950,7 @@ void test_terrain_node_angle_independence() {
         const auto idx = nodeDrawnIndex(sel);
         PlanetFace f; double lx, ly;
         dirToCubeFaceClosed(probe, f, lx, ly);
-        for (int lv = (int)TERRAIN_NODE_MAX_LEVEL; lv >= 0; --lv) {
+        for (int lv = (int)nodeMaxLevelFor(R); lv >= 0; --lv) {
             const uint64_t lim = 1ull << lv;
             const NodeId n{ f, (uint32_t)lv,
                 (uint32_t)std::min<int64_t>((int64_t)((lx + 1.0) * 0.5 * (double)lim), (int64_t)lim - 1),
@@ -1054,7 +1081,7 @@ void test_terrain_node_split_uses_elevation() {
                 uint32_t lv = 0;
                 NodeId n{ PlanetFace::FRONT, 0, 0, 0 };
                 // Se baja por el hijo que contiene la direccion de la camara.
-                for (; lv < TERRAIN_NODE_MAX_LEVEL; ++lv) {
+                for (; lv < nodeMaxLevelFor(R); ++lv) {
                     if (!nodeShouldSplit(n, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX, e)) break;
                     PlanetFace f; double lx, ly;
                     dirToCubeFaceClosed(up0, f, lx, ly);
@@ -1083,9 +1110,9 @@ void test_terrain_node_split_uses_elevation() {
     const glm::dvec3 cam = pc + up0 * (R + 500.0);
     uint32_t a = 0, b = 0;
     NodeId n0{ PlanetFace::FRONT, 0, 0, 0 };
-    while (a < TERRAIN_NODE_MAX_LEVEL &&
+    while (a < nodeMaxLevelFor(R) &&
            nodeShouldSplit(n0, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX, 0.0)) { ++a; break; }
-    while (b < TERRAIN_NODE_MAX_LEVEL &&
+    while (b < nodeMaxLevelFor(R) &&
            nodeShouldSplit(n0, R, cam, pc, radPerPx, TERRAIN_NODE_ERROR_PX)) { ++b; break; }
     std::printf("    CONTRAPRUEBA: con cota 0 los dos criterios coinciden (%u == %u)\n", a, b);
     CHECK(a == b, "CONTRAPRUEBA: sin relieve el criterio NO cambia");
@@ -4626,15 +4653,15 @@ void test_terrain_node_demand_with_range() {
         uint32_t deepest = 0; double nearestDeep = 1e300;
         for (const NodeId& n : v) {
             deepest = std::max(deepest, n.level);
-            if (n.level == TERRAIN_NODE_MAX_LEVEL) {
+            if (n.level == nodeMaxLevelFor(R)) {
                 const glm::dvec3 p = center + nodeTexelDir(n, TERRAIN_NODE_CELLS/2,
                                                            TERRAIN_NODE_CELLS/2) * (R + 1026.0);
                 nearestDeep = std::min(nearestDeep, glm::length(p - cam2));
             }
         }
         // Y el stride del nodo bajo los pies, con el errorPx por defecto.
-        const NodeId foot{ PlanetFace::FRONT, TERRAIN_NODE_MAX_LEVEL,
-                           (1u << TERRAIN_NODE_MAX_LEVEL) / 2, (1u << TERRAIN_NODE_MAX_LEVEL) / 2 };
+        const uint32_t Lmax = nodeMaxLevelFor(R);
+        const NodeId foot{ PlanetFace::FRONT, Lmax, (1u << Lmax) / 2, (1u << Lmax) / 2 };
         const glm::dvec3 dF = nodeTexelDir(foot, TERRAIN_NODE_CELLS/2, TERRAIN_NODE_CELLS/2);
         const glm::dvec3 camF = center + dF * (R + 1026.0 + 2.0);
         const uint32_t sk = nodeStrideIndex(foot, R, camF, center, TERRAIN_NODE_ERROR_PX, 4.0,
@@ -4668,7 +4695,7 @@ void test_terrain_node_demand_with_range() {
 
     std::printf("\n    con el errorPx POR DEFECTO (%.0f): nivel mas fino %u · demanda %zu · "
                     "stride bajo los pies %u\n", TERRAIN_NODE_ERROR_PX, deepest, v.size(), 1u << sk);
-        CHECK(deepest == TERRAIN_NODE_MAX_LEVEL, "cerca se sigue llegando al nivel MAXIMO: subir el "
+        CHECK(deepest == nodeMaxLevelFor(R), "cerca se sigue llegando al nivel MAXIMO: subir el "
                                                  "umbral recorta el campo medio, no el que se pisa");
         CHECK(sk == 0, "y el stride bajo los pies sigue siendo 1, que es lo que iguala render y "
                        "colision (si esto falla, subir errorPx se ha llevado la paridad)");
@@ -5762,5 +5789,567 @@ void test_terrain_collision_refine_cost() {
         CHECK(monotone, "afinar la celda MEJORA el acuerdo en cada paso (monotono)");
         CHECK(best < prev * 0.5,
               "con celda fina Y corte del pie el acuerdo baja a menos de la mitad: hacen falta LOS DOS");
+    }
+}
+
+// =================================================================================================
+// LA PARTICION EXTRA BAJO AGUA SOMERA — `nodeShallowWantsSplit` en `nodeSelectVisible`
+//
+// Los "circulos en la costa": al cruzar la frontera entre dos niveles el texel se dobla y el fondo
+// dibujado suelta una octava. Bajo el agua eso se ve como un anillo, porque el agua se dibuja por
+// PROFUNDIDAD y es no lineal cerca de cero. Acotar la zancada (renderer) quito las bandas de
+// zancada; esto quita las de nivel donde llega (`waterReach`) y se mide:
+//   (1) con la regla, ninguna frontera de nivel dentro del alcance salta mas de 0,25 x profundidad;
+//   (2) lo que cuesta en nodos, comparado con el selector de siempre;
+//   (3) CONTRAPRUEBAS: sin agua el conjunto es IDENTICO; con mar hondo en todas partes la regla
+//       no pide nada; y sin la regla los saltos SI pasan del presupuesto (si no, el test no
+//       mediria nada).
+// =================================================================================================
+void test_terrain_node_shallow_split() {
+    beginTest("terrain_node_shallow_split");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / 1080.0;
+    const double waterLv = 15.0, frac = 0.25, reach = TERRAIN_NODE_WATER_SPLIT_REACH;
+
+    // Una costa sintetica: la linea `dot(dir, t1) = 0`. A un lado tierra (+5..+50 m); al otro una
+    // PLATAFORMA plana a `shelfM` bajo el agua durante `shelfKm`, y luego el talud hasta -2000. La
+    // plataforma es el caso que hace anillos: con una playa de pendiente normal (2 m por 100 m) las
+    // fronteras de nivel caen ya en agua honda (medido aqui mismo: 17->16 a 692 m con 29 m de
+    // fondo, salto 0,04 m: 0,1 % de la profundidad) y la regla no pide nada. Es el bake del juego,
+    // que interpola la costa sobre 80 km, el que deja fondos de pocos metros durante kilometros.
+    // El rango de un nodo es el de sus 5x5 muestras, como en `terrain_node_demand_with_range`.
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 t1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    struct Ctx { double R; glm::dvec3 up0, t1; double shelfM, shelfKm; bool deepEverywhere; };
+    static const auto floorAt = [](const Ctx& c, const glm::dvec3& d) -> float {
+        if (c.deepEverywhere) return -2000.0f;
+        const double x = glm::dot(d, c.t1) * c.R;     // metros desde la costa, + hacia el mar
+        if (x < 0.0) return 5.0f + (float)std::min(-x * 0.1, 45.0);
+        if (x < c.shelfKm * 1000.0) return (float)(15.0 - c.shelfM);   // lamina a 15 m: fondo a -shelfM
+        return (float)std::max(15.0 - c.shelfM - (x - c.shelfKm * 1000.0) * 0.05, -2000.0);
+    };
+    auto rangeFn = [](const NodeId& n, void* user) -> NodeRange {
+        const Ctx& c = *static_cast<const Ctx*>(user);
+        NodeRange r;
+        const uint32_t step = TERRAIN_NODE_CELLS / 4;
+        for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += step)
+            for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += step) {
+                const float h = floorAt(c, nodeTexelDir(n, u, v));
+                r.minM = std::min(r.minM, h); r.maxM = std::max(r.maxM, h);
+            }
+        return r;
+    };
+    Ctx coast{ R, up0, t1, 3.0, 30.0, false };
+    Ctx deep { R, up0, t1, 3.0, 30.0, true  };
+
+    // Camara en la playa, a 2 m sobre el mar, mirando al mar.
+    const glm::dvec3 cam = pc + up0 * (R + waterLv + 2.0);
+    const glm::dvec3 fwd = glm::normalize(t1 - up0 * 0.05);
+    const double cone = nodeFrustumConeHalfAngle(fovY, 1920.0 / 1080.0);
+
+    auto selectR = [&](Ctx& c, double lvl, double fr, double rch, size_t* splits) {
+        std::vector<NodeId> v;
+        nodeSelectVisible(R, cam, pc, radPerPx, v, 400000, TERRAIN_NODE_ERROR_PX, &fwd, cone,
+                          5000.0, rangeFn, &c, nullptr, nullptr, lvl, fr, rch, splits);
+        return v;
+    };
+    auto select = [&](Ctx& c, double lvl, double fr, size_t* splits) { return selectR(c, lvl, fr, reach, splits); };
+    size_t splitsOn = 0, splitsDry = 0, splitsDeep = 0;
+    const auto base = select(coast, -1e30, 0.0, nullptr);       // el selector de siempre
+    const auto on   = select(coast, waterLv, frac, &splitsOn);  // con la regla
+    const auto dry  = select(coast, -1e30, frac, &splitsDry);   // regla activa, sin agua
+    const auto dp   = select(deep,  waterLv, frac, &splitsDeep);// regla activa, todo hondo
+    const auto dpB  = select(deep,  -1e30, 0.0, nullptr);
+
+    std::printf("    seleccion: sin regla %zu nodos · con regla %zu (+%.0f %%, %zu particiones del agua)\n",
+                base.size(), on.size(), 100.0 * ((double)on.size() / (double)base.size() - 1.0), splitsOn);
+
+    // ── (1) EL SALTO EN CADA FRONTERA DE NIVEL, COMO FRACCION DE LA PROFUNDIDAD ─────────────────
+    // Se camina mar adentro por la linea de vista y se anota el nivel de la hoja que cubre cada
+    // punto. Donde cambia hay una frontera; su salto es lo que el texel grueso esconde y el fino
+    // no (`nodeMissingReliefM(t_fino, t_grueso)`), y se compara con la profundidad ALLI.
+    auto leafAt = [&](const std::vector<NodeId>& sel, const glm::dvec3& dir) -> int {
+        const auto idx = nodeDrawnIndex(sel);
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(dir, f, lx, ly);
+        for (int lv = (int)nodeMaxLevelFor(R); lv >= 0; --lv) {
+            const uint64_t lim = 1ull << lv;
+            const int64_t i = (int64_t)((lx + 1.0) * 0.5 * (double)lim);
+            const int64_t j = (int64_t)((ly + 1.0) * 0.5 * (double)lim);
+            const NodeId n{ f, (uint32_t)lv,
+                            (uint32_t)std::min<int64_t>(std::max<int64_t>(i, 0), (int64_t)lim - 1),
+                            (uint32_t)std::min<int64_t>(std::max<int64_t>(j, 0), (int64_t)lim - 1) };
+            if (idx.find(nodeKey(n)) != idx.end()) return lv;
+        }
+        return -1;
+    };
+    // Una frontera esta "al alcance" de la regla si el nodo GRUESO que la forma tiene error en
+    // pantalla > errorPx/reach — es la misma puerta que usa el selector, evaluada donde la linea de
+    // vista cruza la frontera. Fuera de ella la regla no promete nada (y los anillos siguen, mas
+    // lejos y mas pequeños en pantalla).
+    struct Jump { double distM, depthM, jumpM; int from, to; bool inReach; };
+    auto walk = [&](const std::vector<NodeId>& sel, std::vector<Jump>& out) {
+        out.clear();
+        int prev = -1;
+        for (double x = 5.0; x < 20000.0; x *= 1.02) {
+            const glm::dvec3 d = glm::normalize(up0 + t1 * (x / R));
+            const int lv = leafAt(sel, d);
+            if (prev >= 0 && lv >= 0 && lv != prev) {
+                const double tf = nodeTexelM(NodeId{ PlanetFace::FRONT, (uint32_t)std::max(lv, prev), 0, 0 }, R);
+                const double tc = nodeTexelM(NodeId{ PlanetFace::FRONT, (uint32_t)std::min(lv, prev), 0, 0 }, R);
+                const double depth = waterLv - (double)floorAt(coast, d);
+                const double distM = glm::length(pc + d * (R + waterLv - depth) - cam);
+                const bool inReach = tc / (distM * radPerPx) * reach > TERRAIN_NODE_ERROR_PX;
+                out.push_back(Jump{ x, depth, nodeMissingReliefM(tf, tc), prev, lv, inReach });
+            }
+            prev = lv;
+        }
+    };
+    std::vector<Jump> jBase, jOn;
+    walk(base, jBase);
+    walk(on, jOn);
+    auto report = [&](const char* tag, const std::vector<Jump>& js, double* worstIn, double* farBad) {
+        *worstIn = 0.0; *farBad = 0.0;
+        std::printf("    %s: frontera a (m)   nivel   profundidad   salto   salto/profundidad\n", tag);
+        for (const Jump& j : js) {
+            const double ratio = j.jumpM / std::max(j.depthM, 1.0);
+            std::printf("      %14.0f   %2d->%2d   %8.1f m   %6.2f m   %.3f%s\n",
+                        j.distM, j.from, j.to, j.depthM, j.jumpM, ratio, j.inReach ? "" : "   (fuera del alcance)");
+            if (j.inReach) *worstIn = std::max(*worstIn, ratio);
+            if (ratio > frac) *farBad = (*farBad == 0.0) ? j.distM : std::min(*farBad, j.distM);
+        }
+    };
+    double worstBaseIn, worstOnIn, nearBadBase, nearBadOn;
+    report("SIN regla", jBase, &worstBaseIn, &nearBadBase);
+    report("CON regla", jOn,   &worstOnIn,   &nearBadOn);
+    std::printf("    peor salto/profundidad al alcance: sin regla %.3f · con regla %.3f (presupuesto %.2f)\n",
+                worstBaseIn, worstOnIn, frac);
+    std::printf("    el anillo mas cercano que pasa del presupuesto: sin regla a %.0f m · con regla a %.0f m (x%.2f)\n",
+                nearBadBase, nearBadOn, nearBadOn / std::max(nearBadBase, 1.0));
+    CHECK(splitsOn > 0, "el agua somera pide particiones que la pantalla no pedia");
+    CHECK(worstBaseIn > frac, "CONTRAPRUEBA: sin la regla, al alcance, las fronteras de nivel SI saltan mas de lo que la profundidad tolera");
+    CHECK(worstOnIn <= frac + 1e-9, "con la regla, al alcance, ninguna frontera salta mas de 0,25 x profundidad");
+    CHECK(nearBadOn >= nearBadBase * 1.5, "el anillo que queda se va al menos 1,5 veces mas lejos (el alcance es 2, medido en la hoja)");
+    CHECK(on.size() > base.size(), "y cuesta nodos (los que ahora son finos bajo el agua)");
+
+    // ── (2) EL COSTE, MEDIDO POR ALCANCE ────────────────────────────────────────────────────────
+    // El alcance es lo que fija el coste, y crece como el CUADRADO (es un area de nodos finos
+    // alrededor de la camara). Se mide para elegirlo: con 4 la regla pedia +251 % (494 -> 1736
+    // nodos, mas que todo el presupuesto de la pantalla); la unica frontera que pasaba del
+    // presupuesto era la 14->13 a 6 km (0,42), y para llevarla a 12 km basta con 2 (+80 %).
+    std::printf("    alcance   nodos   +%%   particiones del agua\n");
+    for (double rch : { 1.0, 2.0, 3.0, 4.0 }) {
+        size_t sp = 0;
+        const auto v = selectR(coast, waterLv, frac, rch, &sp);
+        std::printf("    %7.0f   %5zu   %+4.0f %%   %zu%s\n", rch, v.size(),
+                    100.0 * ((double)v.size() / (double)base.size() - 1.0), sp,
+                    rch == reach ? "   <- el que corre" : "");
+    }
+    CHECK(on.size() <= base.size() * 2, "con el alcance que corre, la regla no llega a doblar la demanda en la costa");
+
+    // ── (3) CONTRAPRUEBAS ────────────────────────────────────────────────────────────────────────
+    std::printf("    CONTRAPRUEBA sin agua: %zu nodos, %zu particiones del agua (debe ser %zu y 0)\n",
+                dry.size(), splitsDry, base.size());
+    CHECK(dry == base && splitsDry == 0, "sin agua, la regla no cambia NADA: mismo conjunto, mismos nodos");
+    std::printf("    CONTRAPRUEBA mar hondo (-2000 m): %zu nodos, %zu particiones del agua (sin regla %zu)\n",
+                dp.size(), splitsDeep, dpB.size());
+    CHECK(dp == dpB && splitsDeep == 0, "con el fondo a -2000 m el presupuesto es 500 m: la regla no pide nada");
+}
+
+// =================================================================================================
+// LA RAMPA DEL MAPA POR ZANCADA — `TERRAIN_NODE_STRIDE_RAMP`, `nodeStrideMapF`
+//
+// Los circulos en el terreno: a 150 y 300 m el vertice pasaba de leer su mapa a leer el del padre y
+// el del abuelo DE GOLPE (una octava menos cada vez), y el sombreado cambiaba de rugosidad en una
+// circunferencia. Aqui se reconstruye en CPU, sobre los MISMOS mapas que dibuja la GPU, lo que el
+// vertice dibuja a lo largo de lineas radiales desde el observador: altura (mezcla de mapas por la
+// distancia) y normal (diferencias al paso del mapa), y se mide contra el mapa fino:
+//   · la desviacion media |dibujado − fino| por metro de distancia, sobre 16 azimuts;
+//   · su mayor cambio entre bandas contiguas de 2 m: con el escalon (rampa 0) es la octava entera;
+//     con la rampa, esa octava repartida en 37 y 75 m.
+// La CONTRAPRUEBA es la rampa a 0 (lo de antes). Y se comprueba que la rampa NO dibuja mas basto
+// que el escalon en ningun punto FUERA de las bandas de rampa (no añade disparidad donde no la habia).
+// =================================================================================================
+void test_terrain_node_stride_ramp_continuity() {
+    beginTest("terrain_node_stride_ramp_continuity");
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0, radPerPx = fovY / 1080.0;
+    const double errPx = TERRAIN_NODE_ERROR_PX, vertPx = 8.0, fineCell = 0.5, matchM = TERRAIN_NODE_STRIDE_MATCH_M;
+    const double screenWant = vertPx / errPx;
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 tA = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 tB = glm::normalize(glm::cross(up0, tA));
+    const double h0 = Haruka::Planet::terrainDetail(up0, R, 0.5f);
+    const glm::dvec3 cam = pc + up0 * (R + h0 + 2.0);      // a la altura del ojo
+
+    // Los mapas, como los hornea la GPU (sin bake: detalle sobre R). Cache por clave.
+    std::unordered_map<uint64_t, std::vector<float>> maps;
+    auto mapOf = [&](const NodeId& n) -> const std::vector<float>& {
+        auto it = maps.find(nodeKey(n));
+        if (it != maps.end()) return it->second;
+        std::vector<float> m((size_t)TERRAIN_NODE_TEXELS * TERRAIN_NODE_TEXELS);
+        nodeFillHeights(n, R, m.data());
+        return maps.emplace(nodeKey(n), std::move(m)).first->second;
+    };
+    // Gemelo de `harukaNodeSample`: el mapa `k` niveles arriba, bilineal en el texel (tu,tv) del hijo.
+    auto sampleUp = [&](const NodeId& n, int k, int tu, int tv) -> float {
+        NodeId a = n; a.level -= (uint32_t)k; a.i >>= k; a.j >>= k;
+        const std::vector<float>& m = mapOf(a);
+        const int N1 = (int)TERRAIN_NODE_TEXELS;
+        if (k == 0) return m[(size_t)tv * N1 + tu];
+        const int subI = (int)(n.i & ((1u << k) - 1u)), subJ = (int)(n.j & ((1u << k) - 1u));
+        const float cells = (float)TERRAIN_NODE_CELLS, inv = 1.0f / (float)(1 << k);
+        const float au = std::min(std::max(((float)subI * cells + (float)tu) * inv, 0.0f), cells);
+        const float av = std::min(std::max(((float)subJ * cells + (float)tv) * inv, 0.0f), cells);
+        const int iu = (int)std::floor(au), iv = (int)std::floor(av);
+        const int ju = std::min(iu + 1, N1 - 1), jv = std::min(iv + 1, N1 - 1);
+        const float fu = au - (float)iu, fv = av - (float)iv;
+        auto at = [&](int x, int y) { return m[(size_t)y * N1 + x]; };
+        return (at(iu, iv) * (1 - fu) + at(ju, iv) * fu) * (1 - fv) + (at(iu, jv) * (1 - fu) + at(ju, jv) * fu) * fv;
+    };
+    // Lo que dibuja el vertice (tu,tv) del nodo n con la rampa `ramp`: altura y pendiente (la
+    // normal, como diferencias al paso del mapa leido). Gemelo del bloque de `terrain_node.vert`.
+    struct Drawn { double h, slope; int iMap; double frac; };
+    // `farLaw` = el corte continuo mas alla de 300 m (lo que corre); sin el, el diente de sierra.
+    // La distancia de la ley va AL TERRENO (la cota del mapa del abuelo, como el .vert), no a la
+    // esfera lisa: con el terreno a +286 m el vertice creia estar a 339 m estando a 59 (v5 F3).
+    auto lawDist = [&](const NodeId& n, int tu, int tv) {
+        const glm::dvec3 d = nodeTexelDir(n, (uint32_t)tu, (uint32_t)tv);
+        const double hElev = (double)sampleUp(n, std::min(2, (int)n.level), tu, tv);
+        return std::max(glm::length(pc + d * (R + hElev) - cam), 1.0);
+    };
+    auto drawnK = [&](const NodeId& n, int tu, int tv, double ramp, bool farLaw, int maxK) -> Drawn {
+        const double dist = lawDist(n, tu, tv);
+        const double texel = nodeTexelM(n, R);
+        const uint32_t sk = nodeStrideIndex(n, R, cam, pc, errPx, vertPx, fineCell, 6, 0.0);
+        const double fEff = std::max(nodeStrideMapF(dist, texel, matchM, ramp, screenWant, fineCell,
+                                                    farLaw ? radPerPx : 0.0, errPx), (double)sk);
+        int i = (int)std::floor(fEff); double frac = fEff - i;
+        if (i >= maxK) { i = maxK; frac = 0.0; }
+        if (i >= (int)n.level) { i = (int)n.level; frac = 0.0; }   // sin ancestro (niveles < 6)
+        auto H = [&](int x, int y) {
+            const float a = sampleUp(n, i, x, y);
+            return (frac > 0.0) ? (double)a * (1.0 - frac) + (double)sampleUp(n, i + 1, x, y) * frac : (double)a;
+        };
+        const int N1 = (int)TERRAIN_NODE_TEXELS;
+        auto slopeAt = [&](int step) {
+            const int um = std::max(tu - step, 0), up_ = std::min(tu + step, N1 - 1);
+            const int vm = std::max(tv - step, 0), vp  = std::min(tv + step, N1 - 1);
+            const double gu = (H(up_, tv) - H(um, tv)) / ((up_ - um) * texel);
+            const double gv = (H(tu, vp) - H(tu, vm)) / ((vp - vm) * texel);
+            return std::sqrt(gu * gu + gv * gv);
+        };
+        double slope = slopeAt(1 << i);
+        if (frac > 0.0 && i < maxK) slope = slope * (1.0 - frac) + slopeAt(1 << (i + 1)) * frac;
+        return Drawn{ H(tu, tv), slope, i, frac };
+    };
+    auto drawn = [&](const NodeId& n, int tu, int tv, double ramp, bool farLaw) { return drawnK(n, tu, tv, ramp, farLaw, 6); };
+    auto fineOf = [&](const NodeId& n, int tu, int tv) -> Drawn {
+        const int N1 = (int)TERRAIN_NODE_TEXELS;
+        const double texel = nodeTexelM(n, R);
+        auto H = [&](int x, int y) { return (double)sampleUp(n, 0, x, y); };
+        const int um = std::max(tu - 1, 0), up_ = std::min(tu + 1, N1 - 1), vm = std::max(tv - 1, 0), vp = std::min(tv + 1, N1 - 1);
+        const double gu = (H(up_, tv) - H(um, tv)) / ((up_ - um) * texel), gv = (H(tu, vp) - H(tu, vm)) / ((vp - vm) * texel);
+        return Drawn{ H(tu, tv), std::sqrt(gu * gu + gv * gv), 0, 0.0 };
+    };
+    // Lo que dibuja un nodo CAIDO `kUp` niveles a su ancestro (gemelo del `kUp > 0` del .vert): el
+    // mapa base es el del ancestro, la ley se mide desde el (f − kUp) y los mapas por encima son los
+    // ancestros kUp + S. Con `oldRule` = lo de antes: el ancestro crudo (f = 0).
+    auto drawnFallen = [&](const NodeId& n, int tu, int tv, int kUp, bool oldRule) -> double {
+        // Un caido mide la cota en su mapa base (kUp): a un nivel de diferencia del abuelo del
+        // vecino, centimetros de cota, ~1e-4 de mapa en la ley.
+        const glm::dvec3 d = nodeTexelDir(n, (uint32_t)tu, (uint32_t)tv);
+        const double dist = std::max(glm::length(pc + d * (R + (double)sampleUp(n, kUp, tu, tv)) - cam), 1.0);
+        const double texel = nodeTexelM(n, R);
+        const double f = nodeStrideMapF(dist, texel, matchM, TERRAIN_NODE_STRIDE_RAMP, screenWant, fineCell, radPerPx, errPx);
+        double fEff = oldRule ? 0.0 : std::max(f - (double)kUp, 0.0);
+        int i = (int)std::floor(fEff); double frac = fEff - i;
+        if (kUp + i >= 6) { i = 6 - kUp; frac = 0.0; }
+        const float a = sampleUp(n, kUp + i, tu, tv);
+        return (frac > 0.0) ? (double)a * (1.0 - frac) + (double)sampleUp(n, kUp + i + 1, tu, tv) * frac : (double)a;
+    };
+    // El vertice mas cercano a una direccion, en la HOJA que el selector elige para ella (bajando por
+    // `nodeShouldSplit` desde la raiz, con la cota 0 como en el banco).
+    auto vertexAt = [&](const glm::dvec3& dir, NodeId& n, int& tu, int& tv) {
+        PlanetFace f; double lx, ly;
+        dirToCubeFaceClosed(dir, f, lx, ly);
+        uint32_t L = 0;
+        {
+            NodeId nn{ f, 0, 0, 0 };
+            while (L < nodeMaxLevelFor(R) && nodeShouldSplit(nn, R, cam, pc, radPerPx, errPx, 0.0)) {
+                ++L; const double lim2 = (double)(1ull << L);
+                nn = NodeId{ f, L, (uint32_t)std::min(std::max(std::floor((lx + 1.0) * 0.5 * lim2), 0.0), lim2 - 1.0),
+                                   (uint32_t)std::min(std::max(std::floor((ly + 1.0) * 0.5 * lim2), 0.0), lim2 - 1.0) };
+            }
+        }
+        const double lim = (double)(1ull << L);
+        const double fi = (lx + 1.0) * 0.5 * lim, fj = (ly + 1.0) * 0.5 * lim;
+        const uint32_t i = (uint32_t)std::min(std::max(std::floor(fi), 0.0), lim - 1.0);
+        const uint32_t j = (uint32_t)std::min(std::max(std::floor(fj), 0.0), lim - 1.0);
+        n = NodeId{ f, L, i, j };
+        tu = (int)std::min(std::max(std::lround((fi - i) * TERRAIN_NODE_CELLS), 0L), (long)TERRAIN_NODE_CELLS);
+        tv = (int)std::min(std::max(std::lround((fj - j) * TERRAIN_NODE_CELLS), 0L), (long)TERRAIN_NODE_CELLS);
+    };
+
+    // Barrido: 16 azimuts, de 20 a 3 000 m, en la hoja que toca a cada distancia (nivel 17 hasta
+    // 614 m, 16 hasta 1 228, 15 hasta 2 456...). Se acumula por banda de 2 m la media de |h − fino| y
+    // |pendiente − fina|. ⚠️ Las fronteras de NIVEL tambien son escalones (el morph por distancia
+    // esta apagado, `HARUKA_TERRAIN_V5_MORPH`): se imprimen para verlas, y se juzgan aparte.
+    const int kBins = 1500; const double binM = 2.0;
+    struct Acc { double dh = 0, ds = 0, sAbs = 0; size_t n = 0; };
+    std::vector<Acc> accRamp(kBins), accStep(kBins), accStepAn(kBins), accContAn(kBins);
+    size_t ggUsed = 0, ggN = 0; const double frontierA = 900.0, frontierB = 1228.0;
+    // Y para "no añade disparidad": por vertice, |h_rampa − fino| ≤ max(|h_escalon − fino| a este lado
+    // y al otro del radio) no se puede evaluar por vertice; se compara por banda mas abajo.
+    for (int az = 0; az < 16; ++az) {
+        const double a = az * 3.14159265358979 * 2.0 / 16.0;
+        const glm::dvec3 t = tA * std::cos(a) + tB * std::sin(a);
+        NodeId prevN{}; int prevU = -1, prevV = -1;
+        for (double dGround = 20.0; dGround < 3000.0; dGround += (dGround < 700.0 ? 0.3 : 1.0)) {
+            NodeId n; int tu, tv;
+            vertexAt(glm::normalize(up0 + t * (dGround / R)), n, tu, tv);
+            if (n == prevN && tu == prevU && tv == prevV) continue;
+            prevN = n; prevU = tu; prevV = tv;
+            const glm::dvec3 d = nodeTexelDir(n, (uint32_t)tu, (uint32_t)tv);
+            const double dist = lawDist(n, tu, tv);   // la misma distancia que usa la ley (al terreno)
+            const int bin = (int)(dist / binM); if (bin < 0 || bin >= kBins) continue;
+            const Drawn fine = fineOf(n, tu, tv);
+            const Drawn dr = drawn(n, tu, tv, TERRAIN_NODE_STRIDE_RAMP, false);   // solo la rampa de zancada
+            const Drawn ds = drawn(n, tu, tv, 0.0, false);                        // el escalon de antes
+            const Drawn dc = drawn(n, tu, tv, TERRAIN_NODE_STRIDE_RAMP, true);    // lo que corre: + corte continuo
+            accRamp[bin].dh += std::abs(dr.h - fine.h); accRamp[bin].ds += std::abs(dr.slope - fine.slope); accRamp[bin].sAbs += dr.slope; ++accRamp[bin].n;
+            accStep[bin].dh += std::abs(ds.h - fine.h); accStep[bin].ds += std::abs(ds.slope - fine.slope); accStep[bin].sAbs += ds.slope; ++accStep[bin].n;
+            // Contra el campo ANALITICO fino (corte 0,5 m, el de la colision de cerca): es la referencia
+            // que no cambia con el nivel, para ver las fronteras de NIVEL.
+            const double hAn = (double)Haruka::Planet::terrainDetail(d, R, 0.5f);
+            accStepAn[bin].dh += std::abs(ds.h - hAn); ++accStepAn[bin].n;
+            accContAn[bin].dh += std::abs(dc.h - hAn); ++accContAn[bin].n;
+            if (frontierA >= 0.0 && dist >= frontierA && dist < frontierB) {   // ¿el bisabuelo entra?
+                ggUsed += (dc.iMap == 3 || (dc.iMap == 2 && dc.frac > 0.0)) ? 1 : 0; ++ggN;
+            }
+        }
+    }
+    auto profile = [&](const std::vector<Acc>& acc, bool slope, std::vector<double>& out) {
+        out.assign(kBins, -1.0);
+        for (int b = 0; b < kBins; ++b) if (acc[b].n >= 8) out[b] = (slope ? acc[b].ds : acc[b].dh) / (double)acc[b].n;
+    };
+    std::vector<double> hRamp, hStep, sRamp, sStep;
+    profile(accRamp, false, hRamp); profile(accStep, false, hStep);
+    profile(accRamp, true,  sRamp); profile(accStep, true,  sStep);
+    // El mayor salto entre bandas contiguas, SOLO en [100, 320] m: los dos radios de zancada y sus
+    // rampas, dentro del nivel 17. Mas alla, con el mapa del abuelo, el ruido del perfil (16 azimuts,
+    // pocos vertices por banda de 2 m) ya es de 0,04 m entre bandas, del orden del propio escalon;
+    // y desde 614 m mandan las fronteras de NIVEL (ver abajo).
+    auto worstJump = [&](const std::vector<double>& p, int& at) {
+        double w = 0.0; at = -1;
+        for (int b = (int)(100.0 / binM); b < (int)(320.0 / binM); ++b) if (p[b] >= 0.0 && p[b - 1] >= 0.0 && std::abs(p[b] - p[b - 1]) > w) { w = std::abs(p[b] - p[b - 1]); at = b; }
+        return w;
+    };
+    int atHR, atHS, atSR, atSS;
+    const double jHR = worstJump(hRamp, atHR), jHS = worstJump(hStep, atHS);
+    const double jSR = worstJump(sRamp, atSR), jSS = worstJump(sStep, atSS);
+    std::printf("    %zu mapas horneados · perfil de |dibujado − fino| por banda de 2 m (16 azimuts):\n", maps.size());
+    std::printf("    distancia   ALTURA: escalon   rampa   |  PENDIENTE: escalon   rampa\n");
+    for (double dm : { 100.0, 112.0, 120.0, 130.0, 140.0, 148.0, 152.0, 200.0, 224.0, 240.0, 260.0, 280.0, 298.0, 302.0, 400.0, 600.0,
+                       610.0, 620.0, 800.0, 1200.0, 1240.0, 1500.0, 2000.0, 2440.0, 2480.0, 2900.0 }) {
+        const int b = (int)(dm / binM);
+        if (b < kBins && hStep[b] >= 0.0)
+            std::printf("    %6.0f m   %12.3f %7.3f   |  %14.4f %8.4f\n", dm, hStep[b], hRamp[b], sStep[b], sRamp[b]);
+    }
+    // La RUGOSIDAD ABSOLUTA dibujada (pendiente media) por banda de 20 m: es lo que la luz ve, y
+    // donde salta hay un anillo — sea de zancada (150, 300 m) o de NIVEL (614, 1 228, 2 456 m).
+    {
+        std::printf("    pendiente media DIBUJADA por banda de 20 m (escalon | rampa), y el cambio relativo con la banda anterior:\n");
+        double prevS = -1.0, prevR = -1.0;
+        for (int b0 = 0; b0 + 10 <= kBins; b0 += 10) {
+            double sS = 0, sR = 0; size_t n = 0;
+            for (int b = b0; b < b0 + 10; ++b) { sS += accStep[b].sAbs; sR += accRamp[b].sAbs; n += accStep[b].n; }
+            if (n < 20) continue;
+            sS /= n; sR /= n;
+            const double dm = (b0 + 5) * binM;
+            const bool interesting = dm < 340 || std::abs(dm - 614) < 40 || std::abs(dm - 1228) < 40 || std::abs(dm - 2456) < 40;
+            if (interesting && prevS > 0.0)
+                std::printf("      %5.0f m   %.4f | %.4f   %+5.1f %% | %+5.1f %%\n", dm, sS, sR,
+                            100.0 * (sS / prevS - 1.0), 100.0 * (sR / prevR - 1.0));
+            prevS = sS; prevR = sR;
+        }
+    }
+    std::printf("    mayor cambio entre bandas contiguas — altura: escalon %.3f m (a %.0f m) · rampa %.3f m (a %.0f m)\n",
+                jHS, atHS * binM, jHR, atHR * binM);
+    std::printf("                                        pendiente: escalon %.4f (a %.0f m) · rampa %.4f (a %.0f m)\n",
+                jSS, atSS * binM, jSR, atSR * binM);
+    // No añade disparidad FUERA de las rampas: en cada banda fuera de [112,150] y [225,300] la
+    // rampa dibuja lo mismo que el escalon (misma media de |h − fino|).
+    double worstOutside = 0.0;
+    for (int b = 0; b < kBins; ++b) {
+        const double dm = (b + 0.5) * binM;
+        const bool inRamp = (dm > matchM * (1 - TERRAIN_NODE_STRIDE_RAMP) - binM && dm < matchM + binM)
+                         || (dm > 2 * matchM * (1 - TERRAIN_NODE_STRIDE_RAMP) - binM && dm < 2 * matchM + binM);
+        if (inRamp || hRamp[b] < 0.0 || hStep[b] < 0.0) continue;
+        worstOutside = std::max(worstOutside, std::abs(hRamp[b] - hStep[b]));
+    }
+    std::printf("    fuera de las rampas, |media rampa − media escalon| peor: %.4f m\n", worstOutside);
+    // ⚠️ LAS CIFRAS, para no exagerar lo que esto arregla: en el nivel 17 el escalon de zancada vale
+    // 1,8 cm (150 m: el mapa del padre pierde el 12 % de la octava de 4,5 m) y 8 cm (300 m: el del
+    // abuelo la pierde entera); la pendiente cambia 0,01 y 0,027. Es un anillo TENUE. Los anillos
+    // GRANDES del terreno son las fronteras de NIVEL con el morph apagado: a 1 228 m el corte pasa de
+    // 4,8 a 9,6 m y se lleva el 85 % de la octava de 22 m (0,38 m de relieve, bultos de 19 px a
+    // 1080p); a 2 456 m, de 9,6 a 19 m; a 4,9 km la mitad de la octava de 111 m (3,8 m). Eso es el
+    // diente de sierra de `vertexPx = 8`: el corte en pixeles va de 16 a 32 px dentro de cada banda
+    // de nivel y vuelve a 16 en la frontera. Hacerlo continuo exige o dibujar mas basto en la mitad
+    // lejana de cada banda (la familia del geomorph que Andoni quito por la disparidad) o x4 de
+    // triangulos (VERTPX=4, 22 ms medidos). Queda en TODO.md; aqui se imprime para verlo.
+    CHECK(jHS > 0.05, "CONTRAPRUEBA: con el escalon, |dibujado − mapa propio| SALTA en el radio de zancada (>5 cm de una banda a la siguiente)");
+    CHECK(std::abs(atHS * binM - matchM) <= 4.0 || std::abs(atHS * binM - 2 * matchM) <= 4.0, "CONTRAPRUEBA: y el salto cae en 150 o en 300 m");
+    CHECK(jHR < jHS * 0.5, "con la rampa, el mayor cambio entre bandas (100-320 m) es menos de la mitad del escalon (altura)");
+    CHECK(jSR < jSS * 0.75, "y la pendiente (lo que ve la luz) tambien cambia mas suave");
+    CHECK(worstOutside < 1e-6, "fuera de las rampas la rampa dibuja EXACTAMENTE lo mismo que antes: no añade disparidad donde no la habia");
+    // Y lo que SI añade, en cifras: dentro de las rampas se dibuja como mucho lo que se dibujaba un
+    // metro mas alla del radio. Se mide: el maximo de la rampa en [112,150] no pasa del escalon en
+    // [150,160], y lo mismo en [225,300] contra [300,320].
+    auto maxIn = [&](const std::vector<double>& p, double a, double b) { double m = 0.0; for (int k = (int)(a / binM); k < (int)(b / binM); ++k) m = std::max(m, p[k]); return m; };
+    std::printf("    lo que la rampa añade: en [112,150] m dibuja hasta %.3f m del mapa propio (el escalon en [150,160]: %.3f) ·"
+                " en [225,300] hasta %.3f (el escalon en [300,320]: %.3f)\n",
+                maxIn(hRamp, 112, 150), maxIn(hStep, 150, 160), maxIn(hRamp, 225, 300), maxIn(hStep, 300, 320));
+    CHECK(maxIn(hRamp, 112, 150) <= maxIn(hStep, 150, 160) * 1.5 && maxIn(hRamp, 225, 300) <= maxIn(hStep, 300, 320) * 1.5,
+          "dentro de la rampa no se dibuja mas basto que justo pasado el radio (con margen del 50 % por el muestreo)");
+
+    // ── LAS FRONTERAS DE NIVEL: el corte continuo (lo que corre) contra el diente de sierra ──────
+    // |dibujado − campo analitico fino| por banda de 20 m, de 300 a 3 000 m. Con el diente de sierra
+    // salta en cada frontera de nivel (614, 1 228, 2 456 m: el corte vuelve de 8 a 16 px); con el
+    // corte continuo crece sin saltos. Se mira el mayor salto entre bandas contiguas de cada perfil.
+    {
+        const int W = 10;   // 10 bandas de 2 m = 20 m
+        std::vector<double> pS, pC; std::vector<int> bAt;
+        for (int b0 = (int)(300.0 / binM); b0 + W <= kBins; b0 += W) {
+            double sS = 0, sC = 0; size_t n = 0;
+            for (int b = b0; b < b0 + W; ++b) { sS += accStepAn[b].dh; sC += accContAn[b].dh; n += accStepAn[b].n; }
+            if (n < 30) continue;
+            pS.push_back(sS / n); pC.push_back(sC / n); bAt.push_back(b0);
+        }
+        double jS = 0, jC = 0; int aS = -1, aC = -1;
+        for (size_t k = 1; k < pS.size(); ++k) {
+            if (std::abs(pS[k] - pS[k-1]) > jS) { jS = std::abs(pS[k] - pS[k-1]); aS = bAt[k]; }
+            if (std::abs(pC[k] - pC[k-1]) > jC) { jC = std::abs(pC[k] - pC[k-1]); aC = bAt[k]; }
+        }
+        std::printf("    FRONTERAS DE NIVEL — |dibujado − analitico fino| por banda de 20 m (diente de sierra | corte continuo):\n");
+        for (size_t k = 0; k < pS.size(); ++k) {
+            const double dm = (bAt[k] + W / 2) * binM;
+            if (std::abs(dm - 614) < 45 || std::abs(dm - 1228) < 45 || std::abs(dm - 2456) < 45 || (bAt[k] / W) % 15 == 0)
+                std::printf("      %5.0f m   %.3f | %.3f\n", dm, pS[k], pC[k]);
+        }
+        std::printf("    mayor salto entre bandas: diente de sierra %.3f m (a %.0f m) · corte continuo %.3f m (a %.0f m)\n",
+                    jS, aS * binM, jC, aC * binM);
+        std::printf("      (el perfil fluctua de banda a banda por la propia octava perdida —22 m de longitud, bandas de 20—,\n"
+                    "       asi que el salto no discrimina; lo que discrimina es el ESCALON en la frontera, abajo)\n");
+        std::printf("    el bisabuelo (mapa 3) entra en %zu de %zu vertices entre %.0f y %.0f m\n", ggUsed, ggN, frontierA, frontierB);
+        CHECK(ggUsed > ggN / 2, "el mapa del bisabuelo se lee de verdad en la mitad lejana de la banda (si no, el corte no es continuo)");
+    }
+    // ── EL ESCALON EN LA FRONTERA DE NIVEL, MEDIDO EN LOS VERTICES QUE LAS DOS HOJAS COMPARTEN ──
+    // En la frontera, el hijo (nivel L) y el padre (L−1) dibujan el mismo punto: los vertices pares
+    // del hijo son vertices del padre. La diferencia entre lo que dibuja uno y otro ES el anillo.
+    // Con el diente de sierra el hijo lee su abuelo (L−2) y el padre el suyo (L−3): una octava.
+    // Con el corte continuo los dos leen el mapa L−3 en el mismo punto: cero por construccion.
+    {
+        double sumS = 0.0, sumC = 0.0, worstS = 0.0, worstC = 0.0; size_t n = 0;
+        for (int az = 0; az < 16; ++az) {
+            const double a = az * 3.14159265358979 * 2.0 / 16.0;
+            const glm::dvec3 t = tA * std::cos(a) + tB * std::sin(a);
+            int prevL = -1;
+            for (double dGround = 400.0; dGround < 3000.0; dGround += 1.0) {
+                NodeId nn; int tu, tv;
+                vertexAt(glm::normalize(up0 + t * (dGround / R)), nn, tu, tv);
+                if (prevL >= 0 && (int)nn.level == prevL - 1) {
+                    // Frontera L -> L−1 entre dGround−1 y dGround: los vertices pares del hijo en ±6 m.
+                    for (double dd = dGround - 6.0; dd <= dGround + 6.0; dd += 0.5) {
+                        NodeId c; int cu, cv;
+                        vertexAt(glm::normalize(up0 + t * (dd / R)), c, cu, cv);
+                        // Siempre en el nivel del HIJO (L): si el selector ya da L−1 aqui, se sube.
+                        if ((int)c.level != prevL) {
+                            PlanetFace f; double lx, ly; dirToCubeFaceClosed(glm::normalize(up0 + t * (dd / R)), f, lx, ly);
+                            const double lim = (double)(1ull << prevL);
+                            const double fi = (lx + 1.0) * 0.5 * lim, fj = (ly + 1.0) * 0.5 * lim;
+                            c = NodeId{ f, (uint32_t)prevL, (uint32_t)std::floor(fi), (uint32_t)std::floor(fj) };
+                            cu = (int)std::lround((fi - std::floor(fi)) * TERRAIN_NODE_CELLS);
+                            cv = (int)std::lround((fj - std::floor(fj)) * TERRAIN_NODE_CELLS);
+                        }
+                        cu &= ~1; cv &= ~1;                                  // vertice par: existe en el padre
+                        if (c.level < 5) continue;
+                        const NodeId par{ c.face, c.level - 1, c.i / 2, c.j / 2 };
+                        const int pu = (int)((c.i & 1u) * TERRAIN_NODE_CELLS + (uint32_t)cu) / 2;
+                        const int pv = (int)((c.j & 1u) * TERRAIN_NODE_CELLS + (uint32_t)cv) / 2;
+                        const double hcS = drawn(c, cu, cv, TERRAIN_NODE_STRIDE_RAMP, false).h, hpS = drawn(par, pu, pv, TERRAIN_NODE_STRIDE_RAMP, false).h;
+                        const double hcC = drawn(c, cu, cv, TERRAIN_NODE_STRIDE_RAMP, true).h,  hpC = drawn(par, pu, pv, TERRAIN_NODE_STRIDE_RAMP, true).h;
+                        sumS += std::abs(hcS - hpS); worstS = std::max(worstS, std::abs(hcS - hpS));
+                        sumC += std::abs(hcC - hpC); worstC = std::max(worstC, std::abs(hcC - hpC));
+                        ++n;
+                    }
+                }
+                prevL = (int)nn.level;
+            }
+        }
+        // ── Y LOS NODOS CAIDOS: un nodo dibujado desde su ancestro (kUp = 1, 2) tiene que dibujar LO
+        // MISMO que dibujaria con sus datos, porque la ley es absoluta (Andoni, 20-09: el desnivel de
+        // geometria "como que no ha sido adrede" eran los caidos leyendo el ancestro crudo).
+        {
+            double sum1 = 0, sum2 = 0, sumOld = 0, w1 = 0, w2 = 0, wOld = 0; size_t m = 0;
+            for (int az = 0; az < 16; ++az) {
+                const double a = az * 3.14159265358979 * 2.0 / 16.0;
+                const glm::dvec3 t = tA * std::cos(a) + tB * std::sin(a);
+                for (double dGround = 400.0; dGround < 3000.0; dGround += 7.0) {
+                    NodeId nn; int tu, tv;
+                    vertexAt(glm::normalize(up0 + t * (dGround / R)), nn, tu, tv);
+                    if (nn.level < 6) continue;
+                    const double h0 = drawn(nn, tu, tv, TERRAIN_NODE_STRIDE_RAMP, true).h;
+                    const double h1 = drawnFallen(nn, tu, tv, 1, false), h2 = drawnFallen(nn, tu, tv, 2, false);
+                    const double hO = drawnFallen(nn, tu, tv, 1, true);
+                    sum1 += std::abs(h1 - h0); w1 = std::max(w1, std::abs(h1 - h0));
+                    sum2 += std::abs(h2 - h0); w2 = std::max(w2, std::abs(h2 - h0));
+                    sumOld += std::abs(hO - h0); wOld = std::max(wOld, std::abs(hO - h0)); ++m;
+                }
+            }
+            std::printf("    NODOS CAIDOS contra su propio dibujo (%zu vertices): kUp=1 media %.4f peor %.4f · kUp=2 media %.4f peor %.4f"
+                        " · CONTRAPRUEBA, el ancestro crudo (lo de antes): media %.3f peor %.3f\n", m, sum1 / m, w1, sum2 / m, w2, sumOld / m, wOld);
+            CHECK(sumOld / m > 0.03, "CONTRAPRUEBA: el ancestro crudo dibuja otra superficie (>3 cm de media): ese era el desnivel");
+            CHECK(w1 < 0.02 && w2 < 0.02, "un nodo caido 1 o 2 niveles dibuja LO MISMO que con sus datos (la ley es absoluta)");
+        }
+        // ── Y LOS NODOS QUE EL AGUA SOMERA PARTE DOS NIVELES MAS: el mismo punto dibujado desde el
+        // nieto (nivel L+2) tiene que dar lo mismo que desde la hoja L, porque la ley es absoluta. Con
+        // la cadena recortada en 4 ancestros el nieto se quedaba en su mapa 4 = un nivel MAS FINO que
+        // el vecino: la costura recta de la costa (Andoni, 20-09). Con 6 cabe.
+        {
+            double sum6 = 0, w6 = 0, sum4 = 0, w4 = 0; size_t m = 0;
+            for (int az = 0; az < 16; ++az) {
+                const double a = az * 3.14159265358979 * 2.0 / 16.0;
+                const glm::dvec3 t = tA * std::cos(a) + tB * std::sin(a);
+                for (double dGround = 400.0; dGround < 3000.0; dGround += 7.0) {
+                    NodeId nn; int tu, tv;
+                    vertexAt(glm::normalize(up0 + t * (dGround / R)), nn, tu, tv);
+                    if (nn.level < 6 || nn.level + 2 > nodeMaxLevelFor(R)) continue;
+                    tu &= ~3; tv &= ~3;                                           // vertice que existe en el nieto
+                    const NodeId g{ nn.face, nn.level + 2, nn.i * 4 + (uint32_t)tu / 32, nn.j * 4 + (uint32_t)tv / 32 };
+                    const int gu = (tu * 4) % (int)TERRAIN_NODE_CELLS, gv = (tv * 4) % (int)TERRAIN_NODE_CELLS;
+                    const double h0 = drawn(nn, tu, tv, TERRAIN_NODE_STRIDE_RAMP, true).h;
+                    const double h6 = drawnK(g, gu, gv, TERRAIN_NODE_STRIDE_RAMP, true, 6).h;
+                    const double h4 = drawnK(g, gu, gv, TERRAIN_NODE_STRIDE_RAMP, true, 4).h;
+                    sum6 += std::abs(h6 - h0); w6 = std::max(w6, std::abs(h6 - h0));
+                    sum4 += std::abs(h4 - h0); w4 = std::max(w4, std::abs(h4 - h0)); ++m;
+                }
+            }
+            std::printf("    NODOS PARTIDOS DOS NIVELES MAS (agua somera), contra la hoja normal en el mismo vertice (%zu):"
+                        " con 6 ancestros media %.4f peor %.4f · CONTRAPRUEBA con 4: media %.3f peor %.3f\n", m, sum6 / m, w6, sum4 / m, w4);
+            CHECK(sum4 / m > 0.02, "CONTRAPRUEBA: con 4 ancestros el nieto dibuja otra superficie (la costura de la costa)");
+            CHECK(w6 < 0.02, "con 6 ancestros el nieto dibuja LO MISMO que la hoja: la ley es absoluta tambien para los nodos del agua");
+        }
+        std::printf("    ESCALON en las fronteras de nivel (hijo contra padre en el mismo vertice, %zu vertices, 400-3000 m):\n"
+                    "      diente de sierra: media %.3f m · peor %.3f  |  corte continuo: media %.4f m · peor %.4f\n",
+                    n, n ? sumS / n : 0.0, worstS, n ? sumC / n : 0.0, worstC);
+        CHECK(n > 100, "hay fronteras de nivel en el barrido");
+        CHECK(n && sumS / n > 0.05, "CONTRAPRUEBA: con el diente de sierra, en la frontera el hijo y el padre dibujan superficies distintas (>5 cm de media)");
+        CHECK(n && sumC / n < 0.1 * (sumS / n), "con el corte continuo, el escalon en la frontera baja al menos 10 veces");
+        CHECK(worstC < 0.02, "y el peor vertice queda por debajo de 2 cm (es cero salvo por el redondeo del punto)");
     }
 }

@@ -13,7 +13,7 @@
 //     mitades importan: la segunda prueba que el test detecta periodicidad de verdad.
 // ================================================================================================
 #include "test_common.h"
-#include "core/planet/orbit.h"
+#include "world/planet/orbit.h"
 
 #include <cmath>
 #include <cstdio>
@@ -244,7 +244,7 @@ void test_orbit_no_collision() {
 // el exponente equivocado (2/5 y 1/3 se confunden constantemente entre Laplace y Hill) o si alguien
 // cambia la densidad del proxy sin darse cuenta de que decide la gravedad que siente el jugador.
 // ================================================================================================
-#include "core/planet/soi.h"
+#include "world/planet/soi.h"
 
 void test_soi_gravity() {
     beginTest("soi_gravity");

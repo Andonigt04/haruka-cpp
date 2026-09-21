@@ -80,7 +80,7 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
         g.ib = dev->createBuffer(RHI::BufferUsage::Index, mesh.indices.size() * sizeof(unsigned), mesh.indices.data(), RHI::BufferMemory::Static);
         g.indexCount = (uint32_t)mesh.indices.size();
         g.origin = mesh.origin;
-        HARUKA_LOGI("Vox", "malla chunk (%d,%d,%d,%d): %zu vertices · %zu triangulos",
+        HARUKA_LOGDIAG("Vox", "malla chunk (%d,%d,%d,%d): %zu vertices · %zu triangulos",
                     k.face, k.i, k.j, k.k, mesh.positions.size(), mesh.triangleCount());
         // `HARUKA_VOX_DUMP=<carpeta>`: cada malla a un OBJ (posiciones relativas al origen del
         // chunk, con normales) para mirarla fuera del juego cuando lo que se ve no cuadra con lo
@@ -184,8 +184,8 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
         // Comprobación de la matriz con el propio pie: tiene que caer en (0,5, 0,5).
         const glm::vec4 uvPie = m_cutSpace * glm::vec4(glm::vec3(footRelCam), 1.0f);
         const glm::vec4 uv100 = m_cutSpace * glm::vec4(glm::vec3(footRelCam + e1 * 100.0), 1.0f);
-        HARUKA_LOGI("Vox", "  matriz: pie+100m·e1 -> uv (%.3f, %.3f) (esperado 0,656, 0,5)", uv100.x, uv100.y);
-        HARUKA_LOGI("Vox", "ventana de recorte: %zu texeles abiertos de %d (%.2f %%) · %zu chunks · bajo los pies %u/255 · uv(pie)=(%.3f, %.3f)",
+        HARUKA_LOGDIAG("Vox", "  matriz: pie+100m·e1 -> uv (%.3f, %.3f) (esperado 0,656, 0,5)", uv100.x, uv100.y);
+        HARUKA_LOGDIAG("Vox", "ventana de recorte: %zu texeles abiertos de %d (%.2f %%) · %zu chunks · bajo los pies %u/255 · uv(pie)=(%.3f, %.3f)",
                     abiertos, kCutRes * kCutRes, 100.0 * abiertos / (kCutRes * kCutRes), world.loadedCount(),
                     (unsigned)pie, uvPie.x, uvPie.y);
     }
@@ -301,7 +301,7 @@ void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm:
             if (!m_gpu.count(k)) ++sinMalla;
         }
         int caras = 0; const float costura = world.seamMismatch(&caras);
-        HARUKA_LOGI("Vox", "dibujados %zu chunks · %zu triangulos · fuera del frustum %zu · cargados %zu (con contenido %zu · %.1f MB de voxel · sucios %zu, sin malla %zu) · costura peor %.3f m en %d caras",
+        HARUKA_LOGDIAG("Vox", "dibujados %zu chunks · %zu triangulos · fuera del frustum %zu · cargados %zu (con contenido %zu · %.1f MB de voxel · sucios %zu, sin malla %zu) · costura peor %.3f m en %d caras",
                     m_drawn, m_tris, m_culled, world.loadedCount(), world.loadedWithContent(), world.voxelBytes() / 1048576.0, sucios, sinMalla, costura, caras);
     }
 }

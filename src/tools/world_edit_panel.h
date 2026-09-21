@@ -17,7 +17,7 @@
  *     avisa (`onCaveCreated`/`onIslandCreated`) para que el anfitrión añada la entrada al `.scene`
  *     (o el juego, a su partida). Sin anfitrión, queda sólo en memoria.
  */
-#include "core/terrain/vox_world.h"
+#include "world/vox/vox_world.h"
 #include "rhi/rhi_resources.h"
 
 #include <functional>

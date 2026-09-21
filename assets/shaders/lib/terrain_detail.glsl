@@ -152,6 +152,41 @@ float harukaTerrainDetail(dvec3 dir, double radius, float minFeatureM) {
     return h;
 }
 
+// ── EL MISMO DETALLE A VARIOS CORTES, PAGANDO LOS RUIDOS UNA VEZ ─────────────────────────────────
+//
+// `terrain_node_water.vert` evaluaba `harukaTerrainDetail` TRES veces por vertice (la cota para la
+// ley de distancia a 4 texeles, y el fondo a dos cortes que se mezclan por la rampa): hasta 21 ruidos
+// fp64, a 1/64 de velocidad en GeForce. El banco lo midio (20-09): el agua en la costa es 98 %
+// VERTICE (5,28 de 5,39 ms a 256²), y en el juego `v5.agua` 10-16 ms, el mayor pase del frame.
+//
+// Los ruidos NO dependen del corte: solo los pesos. Asi que se evaluan una vez (con la guarda del
+// corte MAS FINO que se vaya a pedir) y cada corte suma sus terminos. ⚠️ Cada linea de la suma va
+// escrita EXACTAMENTE como en `harukaTerrainDetail` —`(ruido − 0,5) · amp · peso`, en ese orden,
+// con el mismo `if`— para que el resultado sea bit a bit el mismo que la evaluacion directa y la
+// paridad con la CPU (§5) siga en pie. Solo cambia que el ruido viene de una variable.
+void harukaTerrainDetailNoises(dvec3 dir, double radius, float finestM, out float n[7]) {
+    precise dvec3 p = dir * radius;
+    n[0] = (finestM < 6000.0) ? harukaDetailNoise(p * 0.0000833LF) : 0.5;
+    n[1] = (finestM < 3000.0) ? harukaDetailNoise(p * 0.0001667LF) : 0.5;
+    n[2] = (finestM < 1428.5) ? harukaDetailNoise(p * 0.00035LF)   : 0.5;
+    n[3] = (finestM <  312.5) ? harukaDetailNoise(p * 0.0016LF)    : 0.5;
+    n[4] = (finestM <   55.5) ? harukaDetailNoise(p * 0.0090LF)    : 0.5;
+    n[5] = (finestM <   11.0) ? harukaDetailNoise(p * 0.0450LF)    : 0.5;
+    n[6] = (finestM <   2.25) ? harukaDetailNoise(p * 0.2200LF)    : 0.5;
+}
+float harukaTerrainDetailFrom(float n[7], float minFeatureM) {
+    if (minFeatureM >= 6000.0) return 0.0;
+    float h = 0.0;
+    if (minFeatureM < 6000.0) h += (n[0] - 0.5) * 969.3 * harukaOctaveWeight(12000.0, minFeatureM);
+    if (minFeatureM < 3000.0) h += (n[1] - 0.5) * 513.4 * harukaOctaveWeight( 6000.0, minFeatureM);
+    if (minFeatureM < 1428.5) h += (n[2] - 0.5) * 260.0 * harukaOctaveWeight(2857.0, minFeatureM);
+    if (minFeatureM <  312.5) h += (n[3] - 0.5) *  70.0 * harukaOctaveWeight( 625.0, minFeatureM);
+    if (minFeatureM <   55.5) h += (n[4] - 0.5) *  14.0 * harukaOctaveWeight( 111.0, minFeatureM);
+    if (minFeatureM <   11.0) h += (n[5] - 0.5) *   3.0 * harukaOctaveWeight(  22.0, minFeatureM);
+    if (minFeatureM <   2.25) h += (n[6] - 0.5) *   0.7 * harukaOctaveWeight(   4.5, minFeatureM);
+    return h;
+}
+
 float harukaTerrainDetail(vec3 dir, float radius, float minFeatureM) {
     // Early-out ANTES de pagar el primer ruido: si ni la octava más GRUESA (λ=2857 m) tiene
     // triángulos para ella, ninguna octava puede contribuir. `harukaOctaveWeight(2857, minFeatureM)`

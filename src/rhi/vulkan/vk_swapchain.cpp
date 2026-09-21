@@ -77,7 +77,7 @@ namespace Haruka::RHI::vulkan
         // ⚠️ SONDA: el swapchain salia a 1280x720 con la ventana a 1920x1080 (SDL lo confirmaba en
         // pixeles), asi que TODO el juego se renderizaba a 720p y se estiraba — y con el la UI, que
         // es como se noto ("ImGui no es nitido"). Esto dice quien manda en ese tamano.
-        HARUKA_LOGI("RHI/VK", "swapchain extent: surface dice %ux%u%s · SDL en pixeles %dx%d · min %ux%u max %ux%u",
+        HARUKA_LOGD("RHI/VK", "swapchain extent: surface dice %ux%u%s · SDL en pixeles %dx%d · min %ux%u max %ux%u",
                     caps.currentExtent.width, caps.currentExtent.height,
                     (caps.currentExtent.width == 0xFFFFFFFFu) ? " (indefinido: mando yo)" : "",
                     spw, sph,

@@ -61,6 +61,9 @@ namespace Haruka {
         CILINDER = 4,
         PLANE    = 5,
         TRIANGLE = 6,
+        /// La capsula de PERSONAJE: 0,35 m de radio y 1,9 m de alto, con la BASE en el origen (el pie).
+        /// La `CAPSULE` generica esta centrada y mide 0,5 x 1,5: a un jugador le salia media enterrada.
+        CHARACTER = 7,
     };
 
     inline PrimitiveType stringToPrimitiveType(const std::string& s) {

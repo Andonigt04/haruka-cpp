@@ -4,8 +4,8 @@
 #include <vector>
 #include <iostream>
 
-#include "core/planet/prop_cond.h"                 // parsePropCond: valida el `when` de las capas
-#include "core/planet/biomes.h"                    // biomeFromKey: un `biome == bosqe` es un error, no silencio
+#include "world/props/prop_cond.h"                 // parsePropCond: valida el `when` de las capas
+#include "world/planet/biomes.h"                    // biomeFromKey: un `biome == bosqe` es un error, no silencio
 
 namespace Haruka {
 

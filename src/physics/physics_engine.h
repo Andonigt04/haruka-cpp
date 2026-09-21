@@ -64,6 +64,12 @@ struct RigidBody {
     // rígido dinámico. Un rígido no es un personaje — emular a mano pisar escalones, pendientes,
     // "estar en el suelo" y la fricción sale mal pieza a pieza; el controlador lo hace nativo.
     bool isCharacter = false;
+        /// PERSONAJE: si `characterHeight > 0` la forma es una CAPSULA de esa altura total y `characterRadius`
+    /// de radio, con la base en `position − arriba·radius` (o sea: `radius` sigue siendo la altura del
+    /// centro sobre el pie y el juego no cambia su matematica). Con 0 es la esfera de `radius` de antes:
+    /// 0,8 m de bola en los pies y la cabeza (1,7 m) sin volumen — se metia bajo ramas y muros de cintura.
+    double characterHeight = 0.0;
+    double characterRadius = 0.35;
     // Lo RELLENA la física: ¿el controlador dice que pisa suelo? (fuente de verdad para el salto).
     bool onGround = false;
 

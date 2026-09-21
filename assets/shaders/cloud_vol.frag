@@ -283,7 +283,7 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
     // sin tope, mirando bajo, la fundamental se muestreaba una vez por paso y salia alias por pixel).
     const float dtMax = (1.0 / (1.3 * fscale)) / 3.0;
     dt = min(dt, dtMax);
-    float t = tEnter + g_jit * dt;
+    float t = tEnter;                    // el azar va por tramo (ver MUESTREO ESTRATIFICADO)
     // La columna entera desde dentro de ella: el rayo rasante va decenas de km por nube. x6.
     const int budget = steps * 6;
     float fineK = 1.0;
@@ -306,24 +306,25 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         const float stepMin = (tExit - t) / float(budget - i);
         float stepNow = max(dt, stepMin);
         const float kPixelRad = (u_vortexN.z > 1.0e-5) ? u_vortexN.z : 0.0045;
-        const vec3  p = g_ro + g_dir * t;
-        const float alt = length(p) - R;
+        // El INICIO del tramo: aqui se lee el clima y se decide el paso. El punto donde se evalua el
+        // CAMPO es otro (`p`, mas abajo): un sitio aleatorio por pixel dentro del tramo.
+        const vec3  p0   = g_ro + g_dir * t;
+        const float alt0 = length(p0) - R;
 
         // EL CLIMA DE ESTE PUNTO: la columna de aire de su texel.
-        const vec4 sky = harukaStormImprint(skyAtDir(p), p);   // x cobertura · y base · z techo · w lluvia
-        const vec4 hi  = skyHiAtDir(p);                         // x vapor alto · y vapor medio · z humedad · w T al nivel del mar
-        const vec3 upS = p / (R + alt);
+        const vec4 sky = harukaStormImprint(skyAtDir(p0), p0);  // x cobertura · y base · z techo · w lluvia
+        const vec4 hi  = skyHiAtDir(p0);                        // x vapor alto · y vapor medio · z humedad · w T al nivel del mar
 
         // ── LO CONVECTIVO: cada cumulo con su base y su desarrollo ───────────────────────────
         // Un ruido a escala de CELDA (unas pocas nubes) mueve la base ±100 m y el desarrollo x0,7-2:
         // la base de un cielo es comun (es una cota) pero varia algo; el desarrollo no lo es nada.
-        const float cv = harukaCloudVNoise3(p * fscale * 0.31 + vec3(7.1, 3.3, 9.7));
+        const float cv = harukaCloudVNoise3(p0 * fscale * 0.31 + vec3(7.1, 3.3, 9.7));
         // LA BASE NO ES UN PLANO. El nivel de condensacion es una cota, pero la base de un cumulo
         // tiene bultos de 100-200 m y cuelga mas bajo su nucleo (mas gotas, mas peso, la corriente
         // ascendente se hace notar): con `base = LCL` exacta se veia una lamina desde abajo
         // (Andoni, dos veces). Ondula con el mismo campo de bultos que la cima (a otra escala) y
         // con la celda (`cv`); el domo/erosion siguen dando el borde.
-        const vec3  pfB  = harukaCloudSquashedPos(p, R, alt, fscale);   // (ver la nota en cloud_volume.glsl)
+        const vec3  pfB  = harukaCloudSquashedPos(p0, R, alt0, fscale);   // (ver la nota en cloud_volume.glsl)
         const float bumpsB = harukaCloudTopBumps(pfB * 0.6 + vec3(2.7, 5.1, 8.3));                  // ~440 m
         const float lBase = sky.y + (cv - 0.5) * 200.0 - (bumpsB - 1.0) * 120.0;   // bultos de ±50 m: la base de un cumulo es CASI plana
         // ⚠️ El DESARROLLO ya no es un ruido por celda (x0,7-2 con `cv²`): "hay nubes grandes que
@@ -332,21 +333,21 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         // convectivo del clima (el maximo que puede subir) y la ALTURA la decide la nube: el domo
         // (`harukaCloudDensity`) sube con la fuerza y con el exceso del nucleo (`harukaCloudTowerMul`).
         const float lTop  = min(lBase + max((sky.z - sky.y) * 2.0, HARUKA_CLOUD_MIN_THICK_M * 1.6), topA);
-        const float fracC = ((mask & 1) != 0) ? harukaColConvective(sky.x, lBase, lTop, alt) : 0.0;
+        const float fracC = ((mask & 1) != 0) ? harukaColConvective(sky.x, lBase, lTop, alt0) : 0.0;
 
         // ── EL VAPOR EN ALTURA: condensa a su temperatura ────────────────────────────────────
         // La temperatura del punto lleva una perturbacion de celda (±3 °C a ~6 km): asi la cota a
         // la que condensa ondula, cada nube a su altura, sin bandas planas.
-        const float tCell = (harukaCloudVNoise3(p * fscaleA * 0.19 + vec3(51.0, 13.0, 27.0)) - 0.5) * 6.0;
-        const float tC    = harukaColAirTempC(hi.w, alt) + tCell;
+        const float tCell = (harukaCloudVNoise3(p0 * fscaleA * 0.19 + vec3(51.0, 13.0, 27.0)) - 0.5) * 6.0;
+        const float tC    = harukaColAirTempC(hi.w, alt0) + tCell;
         // Borreguillos de buen tiempo: humedad en altura sin frente, a escala de ~150 km (no va con
         // la humedad de superficie: atarla dejaba la llanura seca sin una nube alta). Se los come
         // la conveccion profunda.
-        const float manchas  = smoothstep(0.50, 0.76, harukaCloudVNoise3(p * 0.00003 + vec3(31.0, 5.0, 17.0)));
+        const float manchas  = smoothstep(0.50, 0.76, harukaCloudVNoise3(p0 * 0.00003 + vec3(31.0, 5.0, 17.0)));
         const float vaporMid = ((mask & 2) != 0) ? max(hi.y * 0.6, 0.55 * manchas * (0.6 + 0.4 * hi.z)) * (1.0 - smoothstep(3500.0, 6000.0, sky.z - sky.y)) : 0.0;
         // Vapor alto: la antesala del frente, el YUNQUE (la cima de la tormenta que se desparrama:
         // va con la lluvia) y jirones sueltos a escala de cientos de km.
-        const float manchasH = smoothstep(0.50, 0.78, harukaCloudVNoise3(p * 0.000012 + vec3(3.0, 41.0, 9.0)));
+        const float manchasH = smoothstep(0.50, 0.78, harukaCloudVNoise3(p0 * 0.000012 + vec3(3.0, 41.0, 9.0)));
         const float vaporHigh = ((mask & 4) != 0) ? max(max(hi.x * 0.7, smoothstep(0.30, 0.75, sky.w) * 0.85), 0.45 * manchasH * (0.6 + 0.4 * hi.z)) : 0.0;
         const float fracA = harukaColAloft(vaporMid, vaporHigh, tC);
 
@@ -360,8 +361,22 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         stepNow = max(stepNow, stepMin);
         if (convective) stepNow = min(stepNow, max(t * 0.06, 6.0) * refK * fineK);   // de cerca, proporcional
         stepNow = max(stepNow, max(4.0, stepMin));
+        // ── MUESTREO ESTRATIFICADO: el punto evaluado cae en un sitio ALEATORIO del tramo ────────
+        // Antes el campo se evaluaba en el INICIO del tramo y el unico azar era el arranque
+        // (`tEnter + jit·dt`, con dt = 50 m). Lejos, el paso es de 100-500 m y una funcion suave de t:
+        // dos pixeles vecinos muestrean a las mismas t ± 50 m, o sea los MISMOS planos. Con la marcha
+        // anclada en la camara (la banda es la columna entera, desde la base minima del planeta), la
+        // altura de cada plano respecto a la capa cambia con la elevacion del pixel y una capa de
+        // 600 m vista rasante se lee como BANDAS ("las nubes se ven con rayas horizontales", Andoni,
+        // 20-09; con RESDIV=1, MODES=1 y 24/64 pasos igual, y sin ellas con HARUKA_CLOUD_COVER, cuya
+        // banda arranca en la BASE de la capa y ancla los planos a ella). Muestrear en `t + jit·paso`
+        // rompe la coherencia entre pixeles: la misma integral (el tramo es el mismo), sin planos.
+        const float tSeg = t;
         t += stepNow;
         dt = min(dt * growth, dtMax);
+        const vec3  p   = g_ro + g_dir * min(tSeg + g_jit * stepNow, tExit);   // nunca tras el terreno (tExit)
+        const float alt = length(p) - R;
+        const vec3  upS = p / (R + alt);
         // Camino HORIZONTAL de este paso (respecto a la vertical local): es lo que decorrelaciona la
         // cobertura. Un rayo vertical no avanza en horizontal y ve UNA columna; uno rasante cruza
         // una celda nueva cada `widthM`. Se acumula tambien en aire limpio: un hueco cierra el segmento.

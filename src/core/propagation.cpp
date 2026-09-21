@@ -1,7 +1,7 @@
 #include "core/propagation.h"
 
 #include "core/application.h"
-#include "game/planetary_system.h"
+#include "world/planet/planetary_system.h"
 #include "physics/physics_engine.h"
 #include "renderer/motor_instance.h"
 

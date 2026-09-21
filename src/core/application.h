@@ -42,15 +42,26 @@
 
 #ifdef HARUKA_NETWORK
     #include "include/dgs/client.h"
+    #include "net/entity_sync.h"
 #endif
 
 #include "tools/math_types.h"
 #include "core/modules.h"      // HARUKA_MOD_* (gating de subsistemas opcionales)
-#include "core/world_system.h"
-#include "core/world_system_provider.h"  // adaptador IWorldProvider (cliente) para la física
+#include "world/world_system.h"
+#include "world/world_system_provider.h"  // adaptador IWorldProvider (cliente) para la física
 #include "core/window.h"
 #include "core/camera.h"
-#include "core/cloud_motion.h"   // deriva integrada y fundido de horneados (medidos en test_cloud_motion)
+#include "renderer/cloud_pass.h"   // el pase volumetrico de nubes (modulo)
+#include "renderer/post_pass.h"    // el post-proceso (modulo)
+#include "renderer/collision_wire.h"   // alambre de la malla de colision (modulo)
+#include "renderer/sky_pass.h"         // cielo + clima del frame (modulo)
+#include "renderer/scene_pass.h"       // objetos de la escena + construccion (modulo)
+#include "renderer/frame_lights.h"     // sol, luna, ambiente del cielo (modulo)
+#include "world/vox/vox_system.h"      // cuevas → Jolt y anillo del suelo cercano (modulo)
+#include "renderer/shadow_pass.h"      // sombra del sol + mascara cenital (modulo)
+#ifdef HARUKA_MOD_FLUIDS
+#include "world/water/fluid_bridge.h"   // el enganche del agua dinamica al planeta
+#endif
 #include "rhi/rhi_device.h"
 #include "core/scene/scene_manager.h"
 #include "core/scene/scene_render_policy.h"
@@ -58,14 +69,14 @@
 #include "renderer/shadow.h"
 #include "renderer/hdr.h"
 #include "renderer/bloom.h"
-#include "game/planet.h"        // TerrestrialPlanet::RenderStats (panel de performance)
+#include "world/planet/planet.h"        // TerrestrialPlanet::RenderStats (panel de performance)
 #include "tools/profiler.h"
 #include "renderer/ssao.h"
 #include "renderer/ibl.h"
 #include "renderer/point_shadow.h"
 #include "renderer/precipitation_renderer.h"  // lluvia/nieve EN EL MUNDO (con depth)
 #include "renderer/ground_stamp_renderer.h"   // HUELLAS en la capa granular (nieve/arena)
-#include "core/ground_layer.h"                // la capa granular en sí (GL-free)
+#include "world/ground_layer.h"                // la capa granular en sí (GL-free)
 #include "renderer/render_target.h"
 #include "renderer/simple_mesh.h"
 #include "renderer/gpu_instancing.h"
@@ -80,7 +91,8 @@
 #include "physics/physics_engine.h"
 #include "core/scene/scene_loader.h"
 #include "core/game_interface.h"
-#include "game/instanced_object.h"
+#include "world/props/instanced_object.h"
+#include "world/props/prop_system.h"
 
 namespace Haruka { namespace Renderer { class MotorInstance; } } using Haruka::Renderer::MotorInstance;
 namespace Haruka { namespace Renderer { class Model; class RenderTarget; } }
@@ -88,25 +100,11 @@ namespace Haruka { class MaterialComponent; }
 
 namespace Haruka { namespace Core {
 
-/** @brief Snapshot de debug de UNA instancia del scatter, para la jerarquía del editor. */
-struct PropInstanceDebug {
-    uint32_t seed    = 0;          ///< identidad determinista (celda del mundo)
-    uint32_t state   = 0;          ///< InstancedObjectState (0=viva, 1=destruida, 2=rebrotando)
-    bool     rendered = false;     ///< entró en el draw de este frame (Alive, dentro del tope y sin cull)
-    bool     culled   = false;     ///< viva pero sin draw este frame (cull activo)
-    uint8_t  cullReason = 0;       ///< 0 = ninguna (se dibujó), 1 = fuera del frustum, 2 = sub-pixel en pantalla
-};
+struct RenderFrame;   // lo que comparten los pases del frame (application_render.cpp)
 
-/** @brief Snapshot de debug de UN prototipo (GPUInstancing = un draw por prototipo). La jerarquía
- *  del editor lo usa como árbol de debug: instancias que no se renderizan → gris, y el nombre en
- *  ROJO + alerta si el prototipo NO tiene material per-pixel (solo color por vértice). */
-struct PropPrototypeDebug {
-    std::string name;                          ///< mesh/tipo ("tree", "rock", "house", …)
-    bool        hasPerPixel = false;           ///< material con texturas (mask != 0) vs color por vértice
-    int         totalInstances   = 0;          ///< instancias en el registro
-    int         renderedInstances = 0;         ///< las que entraron en el draw este frame
-    std::vector<PropInstanceDebug> instances;  ///< lista por instancia (para el árbol)
-};
+// Los props son un modulo (world/props/prop_system.h); estos nombres siguen valiendo para el editor.
+using PropInstanceDebug  = Haruka::World::PropInstanceDebug;
+using PropPrototypeDebug = Haruka::World::PropPrototypeDebug;
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -160,71 +158,24 @@ public:
     /** @brief Fuerza la lluvia (0..1) para pruebas; <0 vuelve al modo AUTO (según el clima). */
     void setRainOverride(float r) { m_rainOverride = r; }
 
-    /** @brief Activa/desactiva el scatter GLOBAL de props del motor (`scene.prop.instanced`).
-     *  El juego (Survival) usa SU propio sistema de props (ResourceSystem) y lo desactiva con
-     *  `setPropScatterEnabled(false)` para no duplicar árboles ni pagar su scatter de ~61k celdas. */
-    void setPropScatterEnabled(bool enabled) { m_propScatterEnabled = enabled; }
-    bool isPropScatterEnabled() const { return m_propScatterEnabled; }
-
-    /** @brief Resultado de un golpe contra un prop del scatter. `partId` identifica QUÉ parte se
-     *  rompió (0 = tronco → el prop entero cae; >0 = una rama) y `lengthM` es lo que medía ese
-     *  segmento en el mundo, que es lo que decide si el golpe deja un palo aprovechable. */
-    struct PropHit {
-        bool        hit       = false;
-        uint32_t    seed      = 0;      ///< identidad determinista de la instancia (celda del mundo)
-        std::string prototype;          ///< nombre del prototipo ("tree", "rock", …)
-        int         partId    = -1;
-        bool        trunk     = false;  ///< true = se ha tumbado el prop entero
-        double      lengthM   = 0.0;    ///< longitud del segmento roto (m), ya escalada
-        // RADIOS reales del tronco de cono roto, ya escalados. Con la longitud dan el VOLUMEN, y el
-        // volumen por la densidad del material da los KILOS — que es lo que decide cuánto material
-        // sacas. Sin esto solo se sabía "cuánto medía", y una rama fina y un tronco gordo del mismo
-        // largo rendían igual.
-        double      rBottomM  = 0.0;
-        double      rTopM     = 0.0;
-        glm::dvec3  pos{0.0};           ///< punto medio de la parte rota, en el mundo
-    };
-    /** @brief Rompe la parte de prop más cercana al golpe (esfera `center`+`radius`), si la hay.
-     *  Sin raycast: la caja de la parte contra la esfera del hachazo, que es lo mismo que usaba el
-     *  sistema de cosecha anterior. Marca el estado en el registro (tronco → `Destroyed`, rama →
-     *  bit en `breakMask`) y REGENERA los colliders, para que lo que has roto deje de estorbar.
-     *  Es PÚBLICA a propósito: el talado lo dispara el JUEGO (el hachazo), no el motor. */
+    // ── PROPS DEL MUNDO: el modulo es `World::PropSystem`; esto solo reenvia (la API que usa
+    //    Survival no cambia). Ver world/props/prop_system.h.
+    void setPropScatterEnabled(bool enabled) { m_props.setEnabled(enabled); }
+    bool isPropScatterEnabled() const { return m_props.enabled(); }
+    using PropHit = Haruka::World::PropSystem::Hit;
+    /** @brief Rompe la parte de prop mas cercana al golpe. La dispara el JUEGO (el hachazo). */
     PropHit breakPropAt(const glm::dvec3& center, double radius);
+    const Haruka::InstancedObjectRegistry& propRegistry() const { return m_props.registry(); }
+    Haruka::World::PropSystem& props() { return m_props; }
 
-    /** @brief Qué valor NEUTRO necesita cada slot de material. No es el mismo: blanco en metallic
-     *  significa METAL PURO y convierte el prop en un espejo. */
-    enum class FallbackTex { White = 0, Normal, Metallic, Count };
-    /** @brief Textura de relleno 1x1 (perezosa) para slots de material ausentes. */
-    Haruka::RHI::TextureHandle fallbackTexture(FallbackTex kind);
 
-    /** @brief Lo que le ha pasado a un prop concreto: talado y/o con ramas arrancadas. */
-    struct PropStateDelta {
-        uint32_t seed      = 0;
-        uint32_t state     = 0;    ///< InstancedObjectState
-        uint32_t breakMask = 0;    ///< partes rotas
-        float    regrow    = 0.0f;
-    };
-    /** @brief Todo lo que el jugador ha roto, para guardarlo en la partida.
-     *
-     *  ⚠️ Vive FUERA del registro de instancias a propósito. El scatter regenera las instancias
-     *  desde cero y solo conserva las que siguen cerca: si el estado viviera solo ahí, el árbol que
-     *  talaste reaparecería en cuanto te alejaras lo bastante para que saliera del radio del
-     *  scatter — que es a los pocos cientos de metros. El mapa es por SEMILLA (la celda del mundo),
-     *  que es una identidad estable para siempre.
-     *
-     *  Solo guarda lo ROTO, no todos los props: un mundo entero de árboles intactos no se
-     *  serializa, se regenera de la semilla. */
-    std::vector<PropStateDelta> serializePropState() const;
-    void restorePropState(const std::vector<PropStateDelta>& deltas);
-
-    /** @brief Activa/desactiva el snapshot de DEBUG del scatter (`getPropScatterDebug`). La
-     *  jerarquía del editor lo pide cuando muestra el árbol "Props (GPUInstancing)"; apagado por
-     *  defecto para no pagar el barrido de instancias por frame en el motor sin editor. */
-    void setPropDebugEnabled(bool enabled) { m_propDebugEnabled = enabled; }
-    bool isPropDebugEnabled() const { return m_propDebugEnabled; }
-    /** @brief Snapshot por prototipo (GPUInstancing) del pase de props del ÚLTIMO frame: cuántas
-     *  instancias hay, cuántas se dibujaron, cuál es su estado y si el material es per-pixel. */
-    const std::vector<PropPrototypeDebug>& getPropScatterDebug() const { return m_propScatterDebug; }
+    using PropStateDelta = Haruka::World::PropSystem::StateDelta;
+    /** @brief Todo lo que el jugador ha roto, para guardarlo en la partida (ver PropSystem). */
+    std::vector<PropStateDelta> serializePropState() const { return m_props.serializeState(); }
+    void restorePropState(const std::vector<PropStateDelta>& deltas) { m_props.restoreState(deltas); }
+    void setPropDebugEnabled(bool enabled) { m_props.setDebugEnabled(enabled); }
+    bool isPropDebugEnabled() const { return m_props.debugEnabled(); }
+    const std::vector<PropPrototypeDebug>& getPropScatterDebug() const { return m_props.scatterDebug(); }
 
     /** @brief LA CAPA GRANULAR (nieve/arena/barro): aquí se registran las HUELLAS. Cualquier cosa con
      *  collider puede pisar — el jugador por zancada, una criatura, una rueda; el motor solo necesita
@@ -232,11 +183,14 @@ public:
     Haruka::GroundLayer& getGroundLayer() { return m_groundLayer; }
     /** @brief Espesor de NIEVE acumulada [0,1] aquí y ahora. El juego lo usa para decidir si una
      *  pisada deja marca, cuánto te hundes y cuánto frena. */
-    float getSnowAccum() const { return m_snowAccum; }
+    float getSnowAccum() const { return m_sky.weather().snowAccum; }
     /** @brief Agua acumulada en el suelo [0,1] (mojado; baja el agarre). */
-    float getGroundWetness() const { return m_groundWetness; }
+    float getGroundWetness() const { return m_sky.weather().groundWetness; }
 #ifdef HARUKA_MOD_PHYSICS
     Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+    Haruka::PhysicsEngine* getPhysicsEngineOrNull() { return _physicsEngine.get(); }
+#else
+    Haruka::PhysicsEngine* getPhysicsEngineOrNull() { return nullptr; }
 #endif
 
     /** @brief AABB de un modelo (lo carga/cachea si hace falta). Para colisión de props
@@ -494,11 +448,19 @@ public:
     std::vector<DGS::ActionAck> pollActionResults();
     uint32_t networkSessionUuid() const;
     bool   networkHasWorldTime() const;
+    /// Lo que pasa por el cable + RTT al head (ver DGS::Client::stats). Para el panel de depuracion.
+    struct NetLinkStats { uint64_t txBytes = 0, rxBytes = 0; float headMs = -1, headMinMs = -1, headAvgMs = -1, headMaxMs = -1;
+                          float zoneMs = -1, zoneMinMs = -1, zoneAvgMs = -1, zoneMaxMs = -1; uint32_t pingsLost = 0; std::string zone; };
+    NetLinkStats networkLinkStats();
     double networkWorldTimeSeconds() const;
 
     /// Which uuid is US, so the world feed does not spawn a second copy of the local player: the zone
     /// broadcasts the sender's own entity back along with everyone else's. Set it before connecting.
-    void setLocalPlayerUuid(uint32_t uuid) { m_localPlayerUuid = uuid; }
+#ifdef HARUKA_NETWORK
+    void setLocalPlayerUuid(uint32_t uuid) { m_entitySync.setLocalUuid(uuid); }
+#else
+    void setLocalPlayerUuid(uint32_t) {}
+#endif
 
     /// "Este objeto del mundo YA LO TENGO YO": el juego lo colocó al pedirlo, con su física, y el
     /// servidor lo devuelve por el feed como cualquier otro. Sin esto aparecen DOS — el tuyo, que
@@ -506,7 +468,9 @@ public:
     /// mesa: la copia quieta es la que se ve, y parece que el objeto se ha "estancado".
     /// Se llama con el uuid que trae el acuse de la acción; si la entidad ya había llegado antes
     /// que el acuse, retira la copia que se creó.
-    void adoptWorldObject(uint32_t uuid);
+#ifdef HARUKA_NETWORK
+    void adoptWorldObject(uint32_t uuid) { m_entitySync.adoptWorldObject(uuid, _currentScene); }
+#endif
 
     /// The engine's opaque per-entity payload (an inventory, typically). The wire carries `dataSize`,
     /// so an empty one costs nothing; there was simply no way to reach it from a game.
@@ -547,10 +511,24 @@ public:
     /** @brief Renders one frame and updates timing state. */
     /// Drena lo que el cluster ha mandado y lo convierte en objetos de la escena (ver la nota larga
     /// en la definicion). Es SIMULACION, no render: el bucle del juego la llama antes de dibujar.
-    void syncNetworkEntities();
     void renderFrame();
     /** @brief Frame rendering body (logic-only path). */
-    void renderFrameContent();
+    void renderFrameContent();   // LA LISTA de pases (ver application_render.cpp)
+    // Los pases, en el orden de la lista. Cada uno con su trozo; `RenderFrame` con lo compartido.
+    void frameBegin(RenderFrame& f);
+    void passCompute(RenderFrame& f);
+    void passSky(RenderFrame& f);
+    void passSceneSetup(RenderFrame& f);
+    void passSceneObjects(RenderFrame& f);
+    void passProps(RenderFrame& f);
+    void passPlanetUpdate(RenderFrame& f);
+    void passShadows(RenderFrame& f);
+    void passPlanet(RenderFrame& f);
+    void passGameWorld(RenderFrame& f);
+    void passPrecipitation(RenderFrame& f);
+    void passFluid(RenderFrame& f);
+    void passClouds(RenderFrame& f);
+    void frameEnd(RenderFrame& f);
     /** @brief Releases allocated runtime resources. */
     void cleanup();
 
@@ -559,14 +537,8 @@ private:
     
 #ifdef HARUKA_NETWORK
     DGS::Client m_dgs;
-    uint32_t    m_localPlayerUuid = 0;   // 0 = not set: nothing is filtered
-    // uuid → when it was last heard from, for the TTL that removes players who left. See the loop in
-    // `application_render.cpp`: nothing on the wire says "gone".
-    std::map<uint32_t, double> m_netLastSeen;
-    /// Objetos del mundo que este cliente ya dibuja por su cuenta (los que él mismo pidió). Ver
-    /// `adoptWorldObject`.
-    std::unordered_set<uint32_t> m_locallyOwnedWorld;
-    static constexpr double    kNetEntityTtlS = 5.0;
+    /// Las entidades remotas en la escena (crear/mover/caducar): net/entity_sync.h.
+    Haruka::Net::EntitySync m_entitySync;
     std::vector<Haruka::SceneObject> m_ghostObjects;
 
     enum class LoginState { Idle, Show, Connecting, Failed, Done };
@@ -591,60 +563,36 @@ private:
     std::unique_ptr<Camera> _camera;
     
     /** @brief The main shader instance. */
-    std::unique_ptr<Shader> _mainShader;
     /** @brief Cielo atmosférico de fondo (pase 3 migrado a PSO/Context). Sin VBO ni VAO propios:
      *  el triángulo fullscreen sale de gl_VertexID y el VAO (vacío) lo aporta el pipeline. */
-    Haruka::RHI::PipelineHandle m_skyPSO;
-    Haruka::RHI::BufferHandle   m_skyUBO;   // SkyParams (binding 5)
-    Haruka::RHI::PipelineHandle m_rainPSO;  // pase de LLUVIA (fullscreen sobre la escena, blend)
-    Haruka::RHI::BufferHandle   m_rainUBO;  // RainParams (binding 5)
-    float                       m_rainAmount = 0.0f;  // 0..1, lo fija el pase de cielo desde el clima
-    float                       m_snowAmount = 0.0f;  // 0..1, ídem (nieve: la misma precipitación, otra forma)
-    // <0 = auto (clima); >=0 = forzado. Lo pone la consola (`rain`) o `HARUKA_RAIN=<0..1>`.
-    // ⚠️ La variable de entorno existe para poder CAPTURAR un cielo nublado sin depender de que pase
-    // un frente por donde estás: `HARUKA_SHOT_AFTER` sale y no da tiempo a teclear en la consola, así
-    // que sin esto "¿se ven bien las nubes?" no es una pregunta contestable con una medida. Fuerza la
-    // cobertura en LOS DOS sistemas de nube (el cúmulo volumétrico y el cirro de fondo), que es justo
-    // lo que hace falta para poder separarlos.
+    /// EL CIELO Y EL CLIMA DEL FRAME (renderer/sky_pass.h): lluvia, nieve, viento, mojado, aire.
+    Haruka::Renderer::SkyPass   m_sky;
     float                       m_rainOverride = [] {
         const char* e = std::getenv("HARUKA_RAIN");
         return (e && e[0]) ? std::max(-1.0f, std::min(1.0f, (float)std::atof(e))) : -1.0f;
     }();
-    float                       m_windSlant = 0.0f;   // inclinación de la lluvia = viento del clima (mismo vector que las nubes)
-    glm::vec3                   m_windVec{0.0f};
-    Haruka::CloudDrift          m_cloudDrift;          // deriva del campo de nubes, INTEGRADA (core/cloud_motion.h)
     /** @brief Lluvia/nieve como GEOMETRÍA en el pase de escena (con depth), no como filtro de pantalla. */
     Haruka::PrecipitationRenderer m_precip;
 
     /** @brief MÁSCARA DE EXPOSICIÓN AL CIELO: un shadow map con la "luz" en el CÉNIT → dice qué
      *  tienes ENCIMA. El depth de la escena descarta lo que tiene algo DELANTE; esto descarta lo que
      *  está bajo cubierto, que es otra pregunta y necesita su propio pase. */
-    std::unique_ptr<Haruka::Renderer::Shadow> m_skyMask;
-    glm::mat4                   m_skySpace{1.0f};     // matriz de la máscara cenital
-    bool                        m_skyMaskOn = false;  // se rellenó este frame (solo cuando precipita)
-    /** @brief Resolución y alcance de la máscara. ±48 m a 1024² = 9.4 cm/téxel: de sobra para un
-     *  alero o una copa (lo que se pregunta es "¿hay algo?", no su silueta exacta). */
-    static constexpr unsigned   kSkyMaskRes = 1024u;
-    static constexpr double     kSkyMaskExtentM = 48.0;
+    /// SOMBRA DEL SOL + MASCARA CENITAL (renderer/shadow_pass.h).
+    Haruka::Renderer::ShadowPass m_shadows;
     /** @brief Agua acumulada en el suelo [0,1]. Se INTEGRA (subir rápido, secar lento) → el suelo
      *  sigue mojado tras la lluvia. Es, de hecho, el canal "mojado" de la capa granular. */
-    float                       m_groundWetness = 0.0f;
-    /** @brief NIEVE acumulada [0,1]: cuaja nevando y FUNDE con la temperatura. Es una CAPA sobre el
-     *  suelo, no un bioma — el material del terreno no cambia porque haga frío. */
-    float                       m_snowAccum = 0.0f;
     /** @brief Las HUELLAS: la lista (GL-free, compartible con el servidor) y el pase que las pinta
      *  en su ventana cenital para que el terreno las muestree. */
     Haruka::GroundLayer         m_groundLayer;
     Haruka::GroundStampRenderer m_stampRenderer;
     /// Las paredes del campo volumétrico → cuerpos de Jolt. Por frame, sólo lo que cambió de revisión.
-    void syncVoxColliders();
-    std::unordered_map<uint64_t, uint64_t> m_voxColliderRev;
-    uint64_t m_propScatterVoxVersion = 0;   ///< el scatter se rehace cuando el campo cambia
+    /// Las paredes del campo volumetrico → Jolt, y el anillo del suelo cercano: world/vox/vox_system.h.
+    Haruka::World::VoxSystem m_vox;
+    void syncVoxColliders() { Haruka::World::VoxSystem::Frame vf; vf.camera = _camera.get(); vf.planets = _planetarySystem.get(); vf.physics = getPhysicsEngineOrNull(); m_vox.syncColliders(vf); }
     std::string m_worldEditsDir;
     /** @brief The lamp shader instance. */
     std::unique_ptr<Shader> _lampShader;
     /** @brief The shadow shader instance. */
-    std::unique_ptr<Shadow> _shadow;
     /** @brief The HDR shader instance. */
     std::unique_ptr<HDR> _hdr;
     /** @brief The bloom shader instance. */
@@ -653,9 +601,9 @@ private:
     std::unique_ptr<SSAO> _ssao;
     /** @brief Offscreen HDR scene target for the standalone post-processing stack
      *  (render-scale source + bloom/fxaa input). Sized to renderScale*window. */
-    std::unique_ptr<HDR> _postScene;
-    int m_postW = 0, m_postH = 0;          // current _postScene dimensions
-    bool m_postActive = false;             // standalone post stack engaged this frame
+    /// EL POST-PROCESO (target a escala de render, bloom, composite FXAA+upscale): renderer/post_pass.h.
+    Haruka::Renderer::PostPass m_post;
+    bool m_postActive = false;             // `m_post.active()` de este frame (lo leen varios pases)
     // Bloom ping-pong targets (own FBOs — the Bloom class isn't ping-pong shaped).
     // === MIGRADO A PSO (primer pase de la ruta Vulkan) ===
     // Los draws van por el Context del RHI (beginRenderPass/bindPipeline/bindVertexBuffer/
@@ -669,30 +617,21 @@ private:
     Haruka::RHI::RenderPassHandle m_sceneDepthCopy;
     int m_depthCopyW = 0, m_depthCopyH = 0;
 
-    Haruka::RHI::RenderPassHandle m_bloomPass[2];   // render targets RHI
-    Haruka::RHI::TextureHandle    m_bloomTexH[2];   // handles de color (Context::bindTexture)
-    Haruka::RHI::PipelineHandle   m_bloomExtractPSO, m_bloomBlurPSO; // horneados 1 vez (shader+layout+estado)
     /// ⚠️ UN UBO POR DRAW, NO UNO COMPARTIDO. En OpenGL cada draw se ejecuta al vuelo y reescribir
     /// el mismo buffer entre draws funciona; en Vulkan los comandos se GRABAN y todos acaban leyendo
     /// el ULTIMO valor escrito. El bloom hace 1 + 2xN draws con parametros distintos, asi que en
     /// Vulkan el extract se quedaba con `threshold = 0` —la escena ENTERA entraba al bloom— y el
     /// desenfoque horizontal se volvia vertical. Medido: el frame salia **1,48x mas claro** que en GL,
     /// y con el bloom apagado los dos backends daban la MISMA imagen hasta la decima.
-    std::vector<Haruka::RHI::BufferHandle> m_bloomUBOs;   // BloomParams (binding 2), uno por draw
-    int m_bloomW = 0, m_bloomH = 0;
     // Present/composite (pase 2 migrado): FXAA + bloom + upscale a pantalla.
-    Haruka::RHI::PipelineHandle   m_presentPSO;
-    Haruka::RHI::BufferHandle     m_presentUBO;     // PresentParams (binding 3)
     /** @brief Bright-pass + separable blur of a scene color texture. Toma y devuelve HANDLES RHI
      *  (no ids GL): toda la cadena bloom→composite dibuja por el Context (ruta PSO). Handle
      *  inválido = los pipelines no se pudieron crear → componer sin bloom. */
-    Haruka::RHI::TextureHandle renderBloom(Haruka::RHI::TextureHandle srcColorTex);
     /** @brief The IBL shader instance. */
     std::unique_ptr<IBL> _ibl;
     /** @brief The point shadow shader instance. */
     std::unique_ptr<PointShadow> _pointShadow;
     /** @brief The GPU instancing instance. */
-    std::unique_ptr<GPUInstancing> _instancing;
     /** @brief The cascaded shadow map instance. */
     std::unique_ptr<CascadedShadowMap> _cascadedShadow;
     /** @brief The raycast system instance. */
@@ -731,10 +670,6 @@ private:
     int _diagFramesLeft = 0;
 
     // Render targets
-    std::unique_ptr<RenderTarget> _lightingTarget;
-    std::unique_ptr<RenderTarget> _bloomExtractTarget;
-    std::unique_ptr<RenderTarget> _bloomPing;
-    std::unique_ptr<RenderTarget> _bloomPong;
     
     // Primitives (LOD spheres for celestial bodies)
     std::unique_ptr<SimpleMesh> sphereLOD[4];
@@ -752,11 +687,8 @@ private:
     //  construían — su único rastro era el `.reset()` del destructor. Sus shaders
     //  (point_shadow.*, instancing.*) se han borrado con ellos; el instancing real de las piezas de
     //  construcción va por GPUInstancing + construction_inst.*.)
-    bool _mainShaderUsesFinalLook = false;
     // Pase de ESCENA (objetos) migrado a PSO/Context. Dos variantes de fragment (final/preview)
     // → el pipeline se recrea si cambia useFinalLook.
-    Haruka::RHI::PipelineHandle m_scenePSO;
-    bool m_scenePSOFinalLook = false;
 
     // Preview de MATERIAL del editor: siempre el look final, sin depender de los ajustes de render
     // del usuario (ver renderMaterialPreview).
@@ -764,182 +696,31 @@ private:
 
     // Pase INSTANCIADO de piezas de construcción: mismo Vertex (binding 0) + stream de instancia
     // (binding 1). Un draw por modelo. Ver application_render.cpp (recolección + dibujo).
-    Haruka::RHI::PipelineHandle m_constInstPSO;
 
-    // Pase INSTANCIADO de PROPS del mundo (árboles/rocas/objetos). Prototipo compartido por tipo
-    // (malla con color de vértice + material del node graph) + stream de instancia (binding 1).
-    // El REGISTRO es de la Application (decisión de arquitectura): el scatter lo rellena, este
-    // pase lo lee por frame. Ver application_render.cpp (pase "scene.prop.instanced").
-    Haruka::InstancedObjectRegistry m_propRegistry;
-    /// Instancias YA TRANSFORMADAS, una por entrada del registro (mismo índice), con la posición
-    /// relativa a `m_propOrigin`. Se construyen en el scatter (cada ~30 m), NO por frame: construir
-    /// 180 000 matrices (quaternion + tres productos) cada frame costaba 31 ms. Por frame solo queda
-    /// cull + LOD + copiar 96 B. Ver `rebuildPropGpu`.
-    std::vector<Haruka::InstanceDataFloat> m_propGpu;
-    glm::dvec3                      m_propOrigin{0.0};
-    void rebuildPropGpu(const glm::dvec3& planetC, double planetR);
-    Haruka::RHI::PipelineHandle     m_propInstPSO;
-    /// Solo profundidad, instanciado: mete los props del motor en el mapa de sombras. Sin esto el
-    /// pase de sombras solo contenía lo que dibuja el hook del juego y ningún árbol proyectaba.
-    Haruka::RHI::PipelineHandle     m_propShadowPSO;
-    Haruka::RHI::BufferHandle       m_propShadowUBO;   ///< la matriz de luz del pase
-    // Pase VOLUMÉTRICO de nubes. El cúmulo bajo dejó de pintarse en el shader de CIELO (fondo, sin
-    // profundidad, antes que la escena) y pasó a ser un medio que se RECORRE, dibujado después de
-    // toda la geometría. Ese cambio es lo que hace posible atravesar una nube: un fondo no tiene
-    // interior, así que la única alternativa habría sido fingirlo con un efecto de pantalla.
-    Haruka::RHI::PipelineHandle     m_cloudPSO;
-    Haruka::RHI::BufferHandle       m_cloudUBO;
-    /// Copia del depth de la escena: no se puede samplear la profundidad del MISMO target al que se
-    /// dibuja (realimentación). Mismo patrón que usa el fluido para que sus partículas se ocluyan.
-    Haruka::RHI::RenderPassHandle   m_cloudDepthRT;
-    /// Cobertura de nube del PLANETA por direccion (equirect 128x64, R32F), horneada del
-    /// `WeatherSystem` cada 2 s. Antes el pase recibia UN escalar —el del punto bajo la camara— y lo
-    /// aplicaba a todo lo visible: desde orbita, miles de km con el tiempo de un solo sitio.
-    Haruka::RHI::TextureHandle      m_cloudCoverTex;
-    Haruka::RHI::TextureHandle      m_cloudCoverDummy;   // 1x1: nunca un sampler sin atar en Vulkan
-    float                           m_cloudCoverMax = 0.0f;
-    /// Humedad por direccion (equirect 128x64), horneada del terreno. Es ESTATICA (la fija el bioma),
-    /// pero no se puede hornear hasta que el planeta tiene su campo de clima: si se adelanta sale a
-    /// cero y, cacheada, deja el cielo sin una nube el resto de la partida. Vacia = aun no lista.
-    std::vector<float>              m_cloudHumField;
-    std::vector<float>              m_cloudTempField;   // temperatura, mismo horneado (decide la torre)
-    std::vector<float>              m_cloudWaterField;
-    std::vector<float>              m_cloudGroundField; // cota del suelo (m, >= 0): la base de la nube va SOBRE el suelo  // 1 = mar (complemento del landMask): humedad marina
-    Haruka::RHI::TextureHandle      m_cloudHiTex;       // capas ALTAS (cirro, nivel medio), desfasadas del frente
-    Haruka::RHI::TextureHandle      m_cloudCoverTexPrev; // el horneado ANTERIOR (se funde con el nuevo, ver el bake)
-    Haruka::RHI::TextureHandle      m_cloudHiTexPrev;
-    Haruka::BakeBlend               m_cloudBlend;        // fundido entre horneados (core/cloud_motion.h)
-    float                           m_cloudBaseMin = 700.0f;   // banda GLOBAL que marcha el pase
-    float                           m_cloudTopMax  = 1800.0f;
-    /// El horneado del cielo, EN VUELO. `bakeSky` a 256x128 son 134 ms medidos: en el hilo de render
-    /// eran 8 frames congelados cada 2 s de mundo. Corre en un hilo sobre una COPIA del clima (14
-    /// frentes; se copia para no leer `m_time` mientras el hilo principal lo escribe) y de los
-    /// campos estaticos; al terminar se sube la textura. Mientras, se sigue viendo el anterior.
-    struct SkyBake { std::vector<float> rgba, hi; float coverMax = 0, baseMin = 700, topMax = 1800; double ms = 0; int w = 0, h = 0; };
-    std::future<SkyBake>            m_skyBakeJob;
-    std::vector<float>              m_lastSkyRGBA;   ///< último cielo horneado (r cobertura · a precipitación), para el ciclo del agua
-    double                          m_lastWeatherT = -1.0;
+    /// LOS PROPS DEL MUNDO (scatter, registro, pase instanciado, sombras, colliders, rotura).
+    Haruka::World::PropSystem m_props;
+    /// LAS NUBES VOLUMETRICAS (horneado del cielo, marcha reducida, composicion): renderer/cloud_pass.h.
+    Haruka::Renderer::CloudPass     m_clouds;
     /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L (por metro) · y = día. Sale del clima
     /// en la cámara al montar el cielo y va al terreno, a los props y a las nubes: un solo aire.
-    glm::vec4                       m_aerial{1.0f / 60000.0f, 1.0f, 0.0f, 0.0f};
-    /// Target REDUCIDO donde se marcha la nube, y el pipeline que lo sube a la escena. El pase cuesta
-    /// ~80 hashes de ruido por paso y ~88 pasos por pixel: medido en el banco son 8,76 ms a 256x256,
-    /// del orden de 150-280 ms a 1920x1080. Y bajar los pasos NO lo arregla —de 64 a 24 el coste solo
-    /// cae al 58 %—, porque el termino que manda es el pixel. Por eso se dibuja a 1/N y se compone.
-    Haruka::RHI::RenderPassHandle   m_cloudRT;
-    Haruka::RHI::PipelineHandle     m_cloudUpPSO;
-    int  m_cloudRTW = 0, m_cloudRTH = 0;
-    int  m_cloudDepthW = 0, m_cloudDepthH = 0;
-    /// Formato con el que se creó la copia de profundidad. Tiene que seguir al de la FUENTE del blit
-    /// (backbuffer o target de post), que cambia al encender/apagar el post-proceso: si no, el blit
-    /// vuelve a ser ilegal y la textura se queda sin escribir. Ver el bloque del pase de nubes.
-    Haruka::RHI::Format m_cloudDepthFmt = Haruka::RHI::Format::D32F;
-    bool m_volumetricClouds = true;   ///< off = solo el cielo de fondo (nubes planas, no atravesables)
 
     /// TEXTURA DE RELLENO 1x1 blanca para los slots de material que un objeto NO tiene.
     /// ⚠️ No es cosmética: en OpenGL un sampler sin atar lee negro y el guard `hasTex()` del shader
     /// lo hace inofensivo, pero en Vulkan el descriptor queda INDEFINIDO y muestrearlo da basura —
     /// los props salían GRISES en vez de con su color. Se ata algo válido a TODOS los slots que el
     /// shader declara; el shader sigue ignorándolos por la máscara.
-    std::vector<Haruka::RHI::TextureHandle> m_fallbackTex;
 
     /// PropParams (binding 6), UNO POR PROTOTIPO.
-    /// ⚠️ Era un solo buffer reescrito entre draws. En OpenGL vale —cada draw se ejecuta al vuelo—
-    /// pero en Vulkan los comandos se GRABAN y se ejecutan después, así que todos los draws leían el
-    /// ÚLTIMO valor escrito: el material del último prototipo aplicado a todos los props. El propio
-    /// código ya lo avisaba para el UBO del bloom ("habrá que usar offsets dinámicos o un UBO por
-    /// draw"); esto es ese caso, y es lo que dejaba los props blancos y brillantes en Vulkan
-    /// (rugosidad y AO del prototipo equivocado → especular disparado).
-    std::vector<Haruka::RHI::BufferHandle> m_propParamsUBOs;
-    Haruka::RHI::BufferHandle       m_constParamsUBO;  // ConstParams (binding 6) del pase de construcción
-    /// Estado PERSISTENTE de los props rotos, por semilla de celda. Ver `serializePropState` para
-    /// por qué no puede vivir dentro de `m_propRegistry`. Crece solo con lo que el jugador rompe.
-    std::unordered_map<uint32_t, PropStateDelta> m_propState;
-    bool m_propScatterEnabled = true;                  // off = el juego gestiona sus props (Survival)
-    bool m_propDebugEnabled   = false;                 // snapshot de debug para la jerarquía del editor
-    std::vector<PropPrototypeDebug> m_propScatterDebug; // por frame, cuando m_propDebugEnabled
-    // Cache GPU de prototipos: por nombre de prototipo → malla (VBO/EBO) + material PER-PIXEL
-    // (albedo/normal/metallic/roughness/ao horneados con el node material graph y subidos a GPU).
-    // Sin material (mask == 0) → solo color por vértice (el caso del editor de debug "⚠ sin per-pixel").
-    struct PropPrototypeGpu {
-        /// NIVELES DE DETALLE de la malla. Existen porque, medido con RenderDoc, los árboles del
-        /// scatter son el **85,8 % de los triángulos del frame** (6320 instancias × 512 = 3,24 M) y el
-        /// instancing no lo arregla: instanciar ahorra draw calls, no trabajo de vértices — la GPU
-        /// ejecuta el vertex shader por instancia, vaya en un comando o en 6320.
-        ///
-        /// El material (texturas) es COMPARTIDO por los niveles: es el mismo prototipo, solo cambia la
-        /// densidad de la malla. Cada nivel es un draw instanciado propio, así que 4 prototipos × 3
-        /// niveles son 12 draws como máximo — sigue siendo nada al lado de los 3,24 M de triángulos.
-        static constexpr int kLods = 3;
-        Haruka::RHI::BufferHandle vbo[kLods] = {}, ebo[kLods] = {};
-        uint32_t vertexCount[kLods] = {0, 0, 0};
-        uint32_t indexCount[kLods]  = {0, 0, 0};
-        Haruka::RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
-        float   metallicS   = 0.0f;     ///< escalar fallback (si el bit no está en la máscara)
-        float   roughnessS  = 0.5f;
-        float   aoS         = 1.0f;
-        uint32_t mask       = 0u;       ///< bits de texturas presentes (mismo esquema que prop_inst.frag)
-    };
-    std::unordered_map<std::string, PropPrototypeGpu> m_propProtoMesh;
 
-    // Scatter GLOBAL de props (Todo 5): rellena `m_propRegistry` desde el campo del planeta activo.
-    // El refresh es por demanda: solo se re-enumera cuando la cámara cruza `kPropScatterCellM`/2
-    // desde la última posición — el scatter determinista por CELDA MUNDIAL no necesita correr cada
-    // frame (las instancias se mantienen estables hasta que el jugador se mueve un tramo).
-    void refreshPropScatter();
-    /** @brief Vuelca los props del scatter cercanos al jugador como cuerpos estáticos de la física.
-     *  Los colliders salen del ESQUELETO del prop (tronco + ramas por separado, ver
-     *  `prop_collider.h`), no de una caja envolvente: así se camina bajo las ramas y cada parte
-     *  tiene identidad para poder romperla. La llama `refreshPropScatter`, que es quien cambia el
-     *  conjunto de instancias. */
-    void refreshPropColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos);
-    /** @brief Ids de las mallas de colisión de un prototipo, una por PARTE (perezoso, cacheado).
-     *  La forma es la geometría REAL del prop; partirla por parte es lo que permite seguir
-     *  rompiendo una rama sin renunciar a la malla exacta. */
-    const std::vector<int>& propMeshShapesFor(int protoIdx);
-    std::unordered_map<int, std::vector<int>> m_propMeshShapes;
-    /// Copia en CPU de los TRIÁNGULOS de colisión por (prototipo, parte). Existe solo para que el
-    /// alambre de depuración pueda dibujar EXACTAMENTE la geometría que usa la física: sin ella el
-    /// alambre enseñaba primitivas que ya no existen, o sea nada.
-    std::unordered_map<int, std::vector<std::vector<glm::vec3>>> m_propMeshCpu;
-    /// Dibuja los props del motor en el mapa de sombras (culling por la caja de la LUZ, no por la
-    /// cámara: el volumen está centrado en ella e incluye lo que queda detrás).
-    void renderPropShadows(Haruka::RHI::Context* ctx, const glm::mat4& lightSpace);
 
-    /**
-     * @brief ALAMBRE DE LA MALLA DE COLISIÓN encima del terreno dibujado.
-     *
-     * La disparidad del terreno se veía a ojo y no la detectaba ninguna medida: la sonda de paridad da
-     * 2 cm, los pies quedan a centímetros del suelo, y el clipmap dibuja con quads de 4 m — la misma
-     * retícula que colisiona. Con todo coherente y el problema visible, la salida es dibujar la malla
-     * que la física TIENE de verdad sobre lo que el render pinta: si el alambre flota o se hunde, ya no
-     * es una impresión.
-     */
-    void renderCollisionWireframe(Haruka::RHI::Context* ctx, const glm::mat4& viewProjRotOnly);
-    /// Versión de estáticos con la que se construyó el alambre: los OBB de props cambian
-    /// mucho más a menudo que la malla del suelo y hay que recargar con ellos.
-    uint64_t m_dbgPropVer = ~0ull;
+    /// ALAMBRE DE LA MALLA DE COLISION (diagnostico): renderer/collision_wire.h.
+    Haruka::Renderer::CollisionWire m_wire;
 public:
     /** @brief Activa el alambre de la malla de colisión (F-tecla del juego / editor). */
-    void setCollisionWireframe(bool on);
-    bool isCollisionWireframe() const { return m_collisionWireOn; }
+    void setCollisionWireframe(bool on) { m_wire.setEnabled(on, getPhysicsEngineOrNull()); }
+    bool isCollisionWireframe() const { return m_wire.enabled(); }
 private:
-    bool m_collisionWireOn = false;
-    Haruka::RHI::PipelineHandle m_dbgLinePSO{};
-    Haruka::RHI::BufferHandle   m_dbgLineVB{}, m_dbgLineUBO{};
-    uint32_t                    m_dbgLineVerts = 0;
-    uint64_t                    m_dbgLineRev   = ~0ull;
 
-    // EL SUELO CERCANO DIBUJADO DESDE LA COLISIÓN. Dentro de ±192 m el suelo que se dibuja son los
-    // MISMOS vértices y los MISMOS triángulos que Jolt colisiona, con el material del terreno de
-    // siempre; el clipmap deja el hueco. ENCENDIDO por defecto (`HARUKA_NEAR_RING=0` lo apaga).
-    // Los buffers de GPU los posee `TerrestrialPlanet` (los dibuja con su propio material); aquí
-    // solo se recuerda QUÉ revisión se le entregó y desde qué ancla, para no re-subir por frame.
-    uint64_t                    m_nearRingRev     = ~0ull;
-    glm::dvec3                  m_nearRingAnchor{0.0};
-    void updateNearGroundRing();
-    glm::dvec3 m_propScatterLastCam{1e300, 1e300, 1e300};   // última posición muestreada
-    std::string m_propScatterPlanet;                        // planeta del último scatter (reset al cambiar)
 
     // ImGui injection callback (set by editor viewport)
     std::function<void()> _imguiCallback;
@@ -970,12 +751,14 @@ private:
      *  LA APLICACIÓN, no una estática de función: dos Application (editor + juego, o un test) tienen
      *  cada una su frame y su cadencia de log. */
     double m_diagClock   = 0.0;
-    double m_lastStarLog = -1e9;
     
     /** @brief The vertex array object for the screen quad. */
-    Haruka::RHI::BufferHandle m_quadBuf, m_uboPerFrameH, m_uboPerObjectH;
+    Haruka::RHI::BufferHandle m_uboPerFrameH;
+    /// LAS LUCES DEL FRAME: renderer/frame_lights.h.
+    Haruka::Renderer::FrameLights m_lights;
+    /// EL PASE DE ESCENA (objetos + construccion instanciada): renderer/scene_pass.h.
+    Haruka::Renderer::ScenePass m_scene;
     /** @brief Sets up the screen quad for post-processing. */
-    void setupQuad();
 
     /** @brief The render quality preset. */
     inline static int s_renderQualityPreset = 2; // 0=Low,1=Medium,2=High,3=Ultra

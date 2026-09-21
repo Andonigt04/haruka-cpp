@@ -8,8 +8,8 @@
  * contraprueba: lo que el campo viejo habría dicho, calculado con las mismas muestras.
  */
 #include "test_common.h"
-#include "core/terrain/island_system.h"
-#include "core/terrain/vox_world.h"
+#include "world/vox/island_system.h"
+#include "world/vox/vox_world.h"
 
 #include <algorithm>
 #include <chrono>

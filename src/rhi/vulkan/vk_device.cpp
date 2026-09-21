@@ -11,6 +11,7 @@
 #include "rhi/vulkan/vk_context.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -216,6 +217,7 @@ namespace Haruka::RHI::vulkan
         const auto toLower = [](unsigned char c) -> char { return (char)std::tolower(c); };
 
         std::string chosen_name;
+        std::string others;   // todas las candidatas, para la linea de resumen
         uint32_t    chosen_idx  = UINT32_MAX;
         int         chosen_score = INT32_MIN;
 
@@ -241,7 +243,8 @@ namespace Haruka::RHI::vulkan
             }
             if (fam == UINT32_MAX) continue;
 
-            HARUKA_LOGI("RHI/VK", "  GPU [%u] %s (%u graphics+present)", di, name.c_str(), fam);
+            HARUKA_LOGD("RHI/VK", "  GPU [%u] %s (%u graphics+present)", di, name.c_str(), fam);
+            others += (others.empty() ? "" : ", ") + name;
 
             // Preferencia automática: discreta >> integrada > el resto. Es también el DESEMPATE
             // cuando ninguna casa con lo pedido, así que un nombre guardado que ya no existe (otra
@@ -296,9 +299,12 @@ namespace Haruka::RHI::vulkan
                     break;
                 }
             }
-            HARUKA_LOGI("RHI/VK", "GPU = %s (idx %u, %s)", chosen_name.c_str(), chosen_idx,
+            // UNA linea: la elegida, por que, y que otras habia. Antes eran cuatro bloques entre
+            // el RHI y la aplicacion diciendo lo mismo (Andoni, 21-09: "limpia los logs del selector").
+            HARUKA_LOGI("RHI/VK", "GPU = %s (%s) · vistas: %s", chosen_name.c_str(),
                         (env && env[0]) ? "via HARUKA_VK_GPU"
-                                        : (m_preferredGpus.empty() ? "automatica" : "ajuste del juego"));
+                                        : (m_preferredGpus.empty() ? "automatica" : "ajuste del juego"),
+                        others.c_str());
         }
     }
 
@@ -525,12 +531,20 @@ namespace Haruka::RHI::vulkan
         sub.pColorAttachments = &colorRef;
         sub.pDepthStencilAttachment = &depthRef;
 
+        // ⚠️ LA PROFUNDIDAD TAMBIEN. Con solo COLOR_ATTACHMENT_OUTPUT, el `loadOp CLEAR` de la
+        // profundidad (EARLY_FRAGMENT_TESTS) no queda ordenado tras la transicion de layout que el
+        // propio vkCmdBeginRenderPass hace, ni tras las escrituras de profundidad del pase anterior
+        // del mismo frame (LATE_FRAGMENT_TESTS): la validacion de sincronizacion lo marca como
+        // WRITE_AFTER_WRITE en cada frame. La dependencia cubre las dos etapas y los dos accesos.
         VkSubpassDependency dep{};
         dep.srcSubpass = VK_SUBPASS_EXTERNAL;
         dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                         | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep.dstStageMask = dep.srcStageMask;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
+                          | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
         VkRenderPassCreateInfo rp{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
         rp.attachmentCount = 2;
@@ -596,6 +610,10 @@ namespace Haruka::RHI::vulkan
     {
         if (!m_swapchain || m_frameActive) return;
         if (!m_swapchain->recreate()) return;
+        // Los semaforos van por imagen y el swapchain nuevo puede tener otras tantas: se rehacen.
+        // Aqui no hay frame activo y el cierre anterior hizo vkDeviceWaitIdle, asi que nadie los usa.
+        for (VkSemaphore sem : m_renderFinished) if (sem) vkDestroySemaphore(m_device, sem, nullptr);
+        m_renderFinished.clear();
         destroyBackbufferDepth();
         if (!createBackbufferDepth(m_swapchain->extent())) return;
         m_swapchain->attachRenderPass(m_backbufferPass);
@@ -702,7 +720,7 @@ namespace Haruka::RHI::vulkan
             return false;
         }
         m_imguiActive = true;
-        HARUKA_LOGI("RHI/VK", "ImGui Vulkan activo (fase 7)");
+        HARUKA_LOGD("RHI/VK", "ImGui Vulkan activo (fase 7)");
         return true;
     }
 
@@ -1255,12 +1273,20 @@ namespace Haruka::RHI::vulkan
         sub.pColorAttachments = colorRefs.empty() ? nullptr : colorRefs.data();
         sub.pDepthStencilAttachment = d.hasDepth ? &depthRef : nullptr;
 
+        // ⚠️ LA PROFUNDIDAD TAMBIEN. Con solo COLOR_ATTACHMENT_OUTPUT, el `loadOp CLEAR` de la
+        // profundidad (EARLY_FRAGMENT_TESTS) no queda ordenado tras la transicion de layout que el
+        // propio vkCmdBeginRenderPass hace, ni tras las escrituras de profundidad del pase anterior
+        // del mismo frame (LATE_FRAGMENT_TESTS): la validacion de sincronizacion lo marca como
+        // WRITE_AFTER_WRITE en cada frame. La dependencia cubre las dos etapas y los dos accesos.
         VkSubpassDependency dep{};
         dep.srcSubpass = VK_SUBPASS_EXTERNAL;
         dep.dstSubpass = 0;
-        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                         | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        dep.dstStageMask = dep.srcStageMask;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT
+                          | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
 
         VkRenderPassCreateInfo rp{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
         rp.attachmentCount = (uint32_t)atts.size();
@@ -1669,7 +1695,7 @@ namespace Haruka::RHI::vulkan
 
         VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
         if (!vkSuccess(vkCreateSemaphore(m_device, &si, nullptr, &m_imgAvailable), "create imageAvailable sem")) return false;
-        if (!vkSuccess(vkCreateSemaphore(m_device, &si, nullptr, &m_renderFinished), "create renderFinished sem")) return false;
+        // `m_renderFinished` se crea perezoso, por imagen del swapchain (ver `renderFinishedFor`).
 
         VkFenceCreateInfo fi{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
         fi.flags = VK_FENCE_CREATE_SIGNALED_BIT;   // señalizada desde el inicio: la primera vkWaitForFences del cierre no bloquea
@@ -1681,13 +1707,29 @@ namespace Haruka::RHI::vulkan
     {
         if (!m_device) return;
         if (m_frameFence) { vkDestroyFence(m_device, m_frameFence, nullptr); m_frameFence = VK_NULL_HANDLE; }
-        if (m_renderFinished) { vkDestroySemaphore(m_device, m_renderFinished, nullptr); m_renderFinished = VK_NULL_HANDLE; }
+        for (VkSemaphore s : m_renderFinished) if (s) vkDestroySemaphore(m_device, s, nullptr);
+        m_renderFinished.clear();
         if (m_imgAvailable) { vkDestroySemaphore(m_device, m_imgAvailable, nullptr); m_imgAvailable = VK_NULL_HANDLE; }
         if (m_frameCmd) { vkFreeCommandBuffers(m_device, m_framePool, 1, &m_frameCmd); m_frameCmd = VK_NULL_HANDLE; }
         if (m_framePool) { vkDestroyCommandPool(m_device, m_framePool, nullptr); m_framePool = VK_NULL_HANDLE; }
         if (m_gpuQueryPool) { vkDestroyQueryPool(m_device, m_gpuQueryPool, nullptr); m_gpuQueryPool = VK_NULL_HANDLE; }
         if (m_descPool) { vkDestroyDescriptorPool(m_device, m_descPool, nullptr); m_descPool = VK_NULL_HANDLE; }
         m_descRing.clear();
+    }
+
+    VkSemaphore VKDevice::renderFinishedFor(uint32_t image)
+    {
+        if (!m_device || !m_swapchain) return VK_NULL_HANDLE;
+        const uint32_t n = m_swapchain->imageCount();
+        if (image >= n) return VK_NULL_HANDLE;
+        if (m_renderFinished.size() < n) m_renderFinished.resize(n, VK_NULL_HANDLE);
+        if (!m_renderFinished[image])
+        {
+            VkSemaphoreCreateInfo si{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+            if (!vkSuccess(vkCreateSemaphore(m_device, &si, nullptr, &m_renderFinished[image]), "create renderFinished sem"))
+                m_renderFinished[image] = VK_NULL_HANDLE;
+        }
+        return m_renderFinished[image];
     }
 
     // beginFrame() es IDEMPOTENTE dentro del frame real: el renderer lo llama muchísimas veces por
@@ -1755,7 +1797,7 @@ namespace Haruka::RHI::vulkan
             SDL_GetWindowSizeInPixels(m_swapchain->window(), &pw, &ph);
             const VkExtent2D cur = m_swapchain->extent();
             if (pw > 0 && ph > 0 && ((uint32_t)pw != cur.width || (uint32_t)ph != cur.height)) {
-                HARUKA_LOGI("RHI/VK", "la ventana es %dx%d y el swapchain %ux%u: recreando",
+                HARUKA_LOGD("RHI/VK", "la ventana es %dx%d y el swapchain %ux%u: recreando",
                             pw, ph, cur.width, cur.height);
                 onSwapchainResize();
                 return nullptr;
@@ -1819,8 +1861,9 @@ namespace Haruka::RHI::vulkan
             si.pWaitDstStageMask = &waitStage;
             si.commandBufferCount = 1;
             si.pCommandBuffers = &m_frameCmd;
-            si.signalSemaphoreCount = 1;
-            si.pSignalSemaphores = &m_renderFinished;
+            VkSemaphore renderFinished = renderFinishedFor(m_currentImage);
+            si.signalSemaphoreCount = renderFinished ? 1u : 0u;
+            si.pSignalSemaphores = &renderFinished;
             // Sin fence del frame: usamos vkDeviceWaitIdle al final para sincronizar submit+present,
             // así que el fence no hace falta y NO se reusa (evita el "fence still signaled" → 0001).
             if (vkQueueSubmit(m_graphicsQueue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS)
@@ -1846,8 +1889,8 @@ namespace Haruka::RHI::vulkan
 if (m_swapchain && m_swapchain->valid())
                 {
                     VkPresentInfoKHR pi{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-                    pi.waitSemaphoreCount = 1;
-                    pi.pWaitSemaphores = &m_renderFinished;
+                    pi.waitSemaphoreCount = renderFinished ? 1u : 0u;
+                    pi.pWaitSemaphores = &renderFinished;
                     pi.swapchainCount = 1;
                     VkSwapchainKHR sc = m_swapchain->swapchain();
                     pi.pSwapchains = &sc;
@@ -1859,7 +1902,24 @@ if (m_swapchain && m_swapchain->valid())
             // solo cubre el submit; el present reusa m_renderFinished, así que hay que garantizar que
             // SU wait haya consumido la señal antes de re-signalizarla en el próximo submit. Sin esto
             // la sem repite la señal sin espera → VVL 00067 → cuelga la GPU → NVIDIA TDR ~5s/frame.
-            vkDeviceWaitIdle(m_device);
+            //
+            // ⚠️ EL RESULTADO SE MIRA Y LA ESPERA SE CRONOMETRA. Un `VK_ERROR_DEVICE_LOST` aqui volvia en
+            // silencio y solo se veia frames despues, en el primer `submitOneShot` (readPixels) con
+            // "-4", sin saber que frame lo perdio ni cuanto tardo. Con esto el log dice EN QUE FRAME
+            // se fue el dispositivo y si la GPU tardo segundos (un shader que no acaba) o se cayo en
+            // seco (un fallo de acceso).
+            {
+                const auto t0 = std::chrono::steady_clock::now();
+                const VkResult wr = vkDeviceWaitIdle(m_device);
+                const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++m_framesSubmitted;
+                if (wr != VK_SUCCESS)
+                    HARUKA_LOGE("RHI/VK", "endFrame: vkDeviceWaitIdle = %d en el frame %llu (espera %.0f ms)",
+                                (int)wr, (unsigned long long)m_framesSubmitted, ms);
+                else if (ms > 1000.0)
+                    HARUKA_LOGW("RHI/VK", "endFrame: la GPU tardo %.0f ms en el frame %llu",
+                                ms, (unsigned long long)m_framesSubmitted);
+            }
             resolveGpuScopes();
         }
         m_frameActive = false;

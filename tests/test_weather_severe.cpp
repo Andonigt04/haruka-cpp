@@ -31,7 +31,7 @@
 //     pequeña y más débil. Las dos mitades se comprueban, porque sólo la primera sería un regalo.
 // ================================================================================================
 #include "test_common.h"
-#include "core/weather_system.h"
+#include "world/weather_system.h"
 #include "game/character.h"
 #include "physics/physics_engine.h"
 

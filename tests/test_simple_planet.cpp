@@ -1,6 +1,6 @@
 #include "test_common.h"
-#include "core/terrain/cube_sphere.h"
-#include "game/planetary_system.h"
+#include "world/terrain/cube_sphere.h"
+#include "world/planet/planetary_system.h"
 #include <glm/glm.hpp>
 
 void test_simple_planet_mesh() {

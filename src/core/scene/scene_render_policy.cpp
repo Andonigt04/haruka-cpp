@@ -117,7 +117,7 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
             // working game. Anything that has a path keeps going to the model renderer untouched.
             if (obj.modelPath.empty() && !(obj.meshRenderer && obj.meshRenderer->isResident())) {
                 command.kind = Haruka::RenderKind::Primitive;
-                command.primitive = Haruka::PrimitiveType::CAPSULE;
+                command.primitive = Haruka::PrimitiveType::CHARACTER;
                 return command;
             }
             command.kind = Haruka::RenderKind::Model;
@@ -141,7 +141,7 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
 
         case ObjectType::CHARACTER:
             command.kind = Haruka::RenderKind::Primitive;
-            command.primitive = Haruka::PrimitiveType::CAPSULE;
+            command.primitive = Haruka::PrimitiveType::CHARACTER;   // de pie sobre su pie, a su tamaño
             return command;
 
         case ObjectType::LIGHT:

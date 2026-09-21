@@ -5,9 +5,9 @@
 #include <map>
 #include <algorithm>
 // F5-albedo: las dos fuentes de color en órbita, medidas contra sus propias tablas.
-#include "core/planet/terrain_material.h"
-#include "core/planet/climate.h"
-#include "core/planet/biomes.h"
+#include "world/terrain/terrain_material.h"
+#include "world/planet/climate.h"
+#include "world/planet/biomes.h"
 #include "tools/procgraph/proc_climate.h"   // BiomeConfig: la paleta que DE VERDAD se hornea
 
 #include <algorithm>
@@ -16,11 +16,11 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-#include "core/terrain/cube_sphere.h"
-#include "core/weather_system.h"
-#include "core/ground_layer.h"
-#include "core/planet/terrain_detail.h"
-#include "core/planet/terrain_lod.h"
+#include "world/terrain/cube_sphere.h"
+#include "world/weather_system.h"
+#include "world/ground_layer.h"
+#include "world/terrain/terrain_detail.h"
+#include "world/terrain/terrain_lod.h"
 
 using namespace Haruka;
 

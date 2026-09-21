@@ -8,8 +8,8 @@
 // tiene que dar los tirones que se veian, y un salto del reloj no tiene que convertirse en viento.
 // ================================================================================================
 #include "test_common.h"
-#include "core/cloud_motion.h"
-#include "core/weather_system.h"
+#include "world/cloud_motion.h"
+#include "world/weather_system.h"
 
 #include <cmath>
 #include <cstdio>

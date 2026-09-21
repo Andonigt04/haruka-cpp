@@ -1,4 +1,4 @@
-#include "core/planet/ocean_wave.h"   // oceanWaterDisabled: el interruptor de biseccion
+#include "world/water/ocean_wave.h"   // oceanWaterDisabled: el interruptor de biseccion
 #include "shallow_water.h"
 #include <algorithm>
 #include <cmath>

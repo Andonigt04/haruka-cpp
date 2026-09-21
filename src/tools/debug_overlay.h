@@ -1,153 +1,94 @@
-/**
- * @file debug_overlay.h
- * @brief In-game performance and diagnostics overlay (singleton).
- *
- * `DebugOverlay` renders an ImGui panel over the viewport showing FPS,
- * frame time, draw calls, memory, lighting counts, and streaming stats.
- * Four presentation modes are available (`MINIMAL` → `GRAPH`).
- *
- * Custom metrics can be injected from any subsystem via `addMetric()`.
- * The overlay is designed to have negligible render cost — it reads from
- * `FrameMetrics` snapshots pushed each frame via `updateMetrics()`.
- */
 #pragma once
-
-#include <chrono>
+/**
+ * @file tools/debug_overlay.h
+ * @brief EL PANEL DE DEPURACION: anclado arriba a la derecha, sin fondo, sin bordes, no se mueve ni
+ *        recibe el raton. Una columna de cifras que se leen de un vistazo:
+ *
+ *   fps · p50 / p98 / p99.5 del tiempo de frame (ms, ultimos 240 frames)
+ *   mem: RSS del proceso / RAM total (MiB y %)
+ *   red: integrado o head remoto · RTT al head (ultimo · min/avg/max) · tx/rx en KiB/s · reloj del mundo
+ *   servidor / zona · objetos de la escena (+ props del scatter)
+ *   coords XYZ del mundo · cpu · gpu · pantalla · API grafica
+ *
+ * Andoni (21-09): "anclado arriba derecha transparente fondo estatico". Lo estatico (cpu, gpu,
+ * pantalla, API) se lee una vez; la memoria cada medio segundo; el resto llega por `pushFrame` desde
+ * el bucle del juego, que es quien sabe de red y de escena. Reemplaza al overlay de metricas viejo,
+ * que nadie llamaba.
+ */
+#include <cstdint>
 #include <deque>
 #include <string>
-#include <map>
 #include <glm/glm.hpp>
 
 namespace Haruka { namespace Tools {
 
-/**
- * @brief Real-time performance and diagnostics overlay.
- *
- * Displays FPS, frame time, draw calls, memory usage, lighting counts,
- * asset streaming stats, and GPU metrics with minimal overhead.
- */
+/// Lo de RED, que rellena el juego (el motor no sabe de DGS aqui). Bytes ACUMULADOS: el panel deriva.
+struct DebugNetInfo {
+    bool        connected = false;     ///< hay cliente DGS conectado
+    std::string server;                ///< "host:puerto" del head, o "local (sin DGS)"
+    std::string zone;                  ///< "host:puerto" de la zona, o vacio
+    float       headMs = -1.0f, headMinMs = -1.0f, headAvgMs = -1.0f, headMaxMs = -1.0f;   ///< -1 = sin muestra
+    float       zoneMs = -1.0f, zoneMinMs = -1.0f, zoneAvgMs = -1.0f, zoneMaxMs = -1.0f;   ///< ping/pong UDP a la zona
+    uint32_t    pingsLost = 0;
+    uint64_t    txBytes = 0, rxBytes = 0;
+    int         ghosts = 0;
+};
 
-/** @brief Snapshot of runtime performance counters. */
-struct FrameMetrics {
-    float fps = 0.0f;
-    float frameTimeMs = 0.0f;
-    int drawCalls = 0;
-    int renderTargetBinds = 0;
-    int shaderSwitches = 0;
-    
-    // Memory
-    size_t ramUsage = 0;
-    size_t vramUsage = 0;
-    
-    // Lighting
-    int totalLights = 0;
-    int culledLights = 0;
-    
-    // Assets
-    int loadedAssets = 0;
-    int pendingAssets = 0;
-    float cacheUtilization = 0.0f;
-    
-    // GPU
-    int totalTriangles = 0;
-    int totalVertices = 0;
-    
-    // Shadows
-    int activeCascade = 0;  // Cascada activa actual
-    int numCascades = 4;    // Total de cascadas
+/// Lo del FRAME, que rellena quien lo dibuja (una vez por frame, antes de `render`).
+struct DebugFrameInfo {
+    float       dtSeconds = 0.0f;      ///< el tiempo del frame anterior
+    double      worldTimeS = 0.0;      ///< reloj del mundo (simulacion; el del cluster si hay DGS)
+    glm::dvec3  worldPos{0.0};         ///< coords del jugador (XYZ del mundo, m)
+    int         sceneObjects = 0;
+    int         scatterProps = 0;
+    DebugNetInfo net;
 };
 
 class DebugOverlay {
 public:
-    static DebugOverlay& getInstance() {
-        static DebugOverlay instance;
-        return instance;
-    }
+    static DebugOverlay& get();
 
-    /** @brief Initializes overlay state and timing. */
-    void init();
+    void toggle() { m_visible = !m_visible; }
+    void show(bool on) { m_visible = on; }
+    bool visible() const { return m_visible; }
 
-    /** @brief Renders overlay UI. Call after rendering the frame. */
+    /// Cada frame (aunque el panel este oculto: asi los percentiles estan listos al abrirlo).
+    void pushFrame(const DebugFrameInfo& f);
+    /// Dentro del frame de ImGui. No hace nada si esta oculto.
     void render();
 
-    /** @brief Updates current metrics snapshot. */
-    void updateMetrics(const FrameMetrics& metrics);
-
-    /** @brief Toggles overlay visibility. */
-    void toggle() { visible = !visible; }
-    /** @brief Shows the overlay. */
-    void show() { visible = true; }
-    /** @brief Hides the overlay. */
-    void hide() { visible = false; }
-    /** @brief Returns current visibility state. */
-    bool isVisible() const { return visible; }
-
-    /** @brief Adds/updates a custom floating-point metric. */
-    void addMetric(const std::string& name, float value) {
-        customMetrics[name] = value;
-    }
-
-    void addMetric(const std::string& name, int value) {
-        customMetrics[name] = static_cast<float>(value);
-    }
-
-    void addMetric(const std::string& name, const std::string& value) {
-        customMetricsStr[name] = value;
-    }
-
-    /** @brief Available overlay presentation modes. */
-    enum OverlayMode {
-        MINIMAL,      // Solo FPS + frame time
-        STANDARD,     // FPS, memoria, luces, assets
-        DETAILED,     // Todo + historial de FPS
-        GRAPH         // Gráficas de performance
-    };
-
-    void setMode(OverlayMode mode) { overlayMode = mode; }
-    OverlayMode getMode() const { return overlayMode; }
-
-    /** @brief Returns the most recent metrics snapshot. */
-    FrameMetrics getLastMetrics() const { return lastMetrics; }
-    
-    /** @brief Returns averaged metrics over history buffers. */
-    FrameMetrics getAverageMetrics() const;
-
-    ~DebugOverlay() = default;
+    /// Recalcula fps y percentiles sobre la ventana (lo hace `render`; publico para el banco).
+    void computeStats();
+    /// Los percentiles del ultimo `computeStats` (para el banco / la consola). ms.
+    float p50Ms() const { return m_p50; }
+    float p98Ms() const { return m_p98; }
+    float p995Ms() const { return m_p995; }
+    float fps() const { return m_fps; }
+    float txKiBs() const { return m_txKiBs; }
+    float rxKiBs() const { return m_rxKiBs; }
 
 private:
     DebugOverlay() = default;
+    void readStatic();      ///< cpu, gpu, pantalla, API: una vez
+    void readMemory();      ///< RSS y total: cada 0,5 s
 
-    void renderMinimal();
-    void renderStandard();
-    void renderDetailed();
-    void renderGraphs();
+    bool m_visible = false;
+    bool m_staticRead = false;
+    std::string m_cpu, m_gpu, m_display, m_api;
 
-    void updateFPSHistory();
+    static constexpr size_t kWindow = 240;   ///< frames para los percentiles (~4 s a 60)
+    std::deque<float> m_dtMs;
+    float m_fps = 0.0f, m_p50 = 0.0f, m_p98 = 0.0f, m_p995 = 0.0f;
 
-    bool visible = true;
-    OverlayMode overlayMode = OverlayMode::STANDARD;
+    double   m_memClock = 0.0, m_memLast = -1.0;
+    uint64_t m_rssBytes = 0, m_totalBytes = 0;
 
-    FrameMetrics lastMetrics;
-    std::deque<float> fpsHistory;
-    std::deque<float> frameTimeHistory;
-    
-    std::map<std::string, float> customMetrics;
-    std::map<std::string, std::string> customMetricsStr;
+    // tx/rx: se deriva de los acumulados con el reloj del frame, media del ultimo segundo.
+    double   m_netClock = 0.0, m_netLast = -1.0;
+    uint64_t m_txLast = 0, m_rxLast = 0;
+    float    m_txKiBs = 0.0f, m_rxKiBs = 0.0f;
 
-    // Timing
-    std::chrono::high_resolution_clock::time_point lastFrameTime;
-    int frameCount = 0;
-    float averageFPS = 0.0f;
-
-    // Colores para overlay
-    glm::vec4 colorNormal = glm::vec4(0.0f, 1.0f, 0.0f, 1.0f);   // Verde
-    glm::vec4 colorWarning = glm::vec4(1.0f, 1.0f, 0.0f, 1.0f);  // Amarillo
-    glm::vec4 colorCritical = glm::vec4(1.0f, 0.0f, 0.0f, 1.0f); // Rojo
+    DebugFrameInfo m_last;
 };
 
-
 }} // namespace Haruka::Tools
-
-using Haruka::Tools::FrameMetrics;
-using Haruka::Tools::DebugOverlay;
-namespace Haruka { using Tools::FrameMetrics; using Tools::DebugOverlay; }

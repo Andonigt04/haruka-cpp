@@ -93,11 +93,13 @@ void main() {
     // dependen las tres propiedades del quadtree (grueso ⊂ fino, aristas sin grieta, determinismo).
     //
     // ⚠️ El numerador se acumula en DOUBLE, no en entero, y sigue siendo exacto: un double representa
-    // enteros sin error hasta 2^53, y aquí el máximo es `i·celdas + u` = 2^20 · 128 + 128 ≈ 1,3e8.
-    // Se hace así para no exigir `GL_ARB_gpu_shader_int64` (que no todas las GPU del fleet tienen):
-    // `double(a)·double(b) + double(c)` y `double(a·b + c)` son el MISMO valor mientras la suma no
-    // pase de 2^53, así que coincide bit a bit con el `uint64_t` que usa el gemelo C++.
-    // Si algún día `TERRAIN_NODE_MAX_LEVEL` sube de 20, revisar este límite ANTES de tocar nada.
+    // enteros sin error hasta 2^53, y aquí el máximo es `i·celdas + u` = 2^26 · 128 + 128 ≈ 8,6e9
+    // (el tope DURO `TERRAIN_NODE_MAX_LEVEL` = 26, el de la clave; el nivel al que se subdivide lo da
+    // `nodeMaxLevelFor(R)`: 17 en la Tierra). Se hace así para no exigir `GL_ARB_gpu_shader_int64`
+    // (que no todas las GPU del fleet tienen): `double(a)·double(b) + double(c)` y `double(a·b + c)`
+    // son el MISMO valor mientras la suma no pase de 2^53, así que coincide bit a bit con el
+    // `uint64_t` que usa el gemelo C++. Si algún día el tope duro sube de 45, revisar este límite
+    // ANTES de tocar nada (`terrain_node_content` lo comprueba para todos los niveles del tope).
     // `precise` por lo mismo que en `harukaCubeFaceToDir`: el gemelo C++ va con `-ffp-contract=off`.
     precise double cells = double(uGrid.y);
     precise double den   = double(1u << uint(uNode.y)) * cells;

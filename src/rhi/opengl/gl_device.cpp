@@ -925,6 +925,13 @@ namespace Haruka::RHI::opengl
         SDL_GL_SwapWindow(m_window);
     }
 
+    void GLDevice::framebufferSize(uint32_t& w, uint32_t& h) const
+    {
+        int pw = 0, ph = 0;
+        if (m_window) SDL_GetWindowSizeInPixels(m_window, &pw, &ph);
+        w = (uint32_t)std::max(pw, 0); h = (uint32_t)std::max(ph, 0);
+    }
+
     void GLDevice::readPixels(int x, int y, int w, int h, Format format, void* data)
     {
         glPixelStorei(GL_PACK_ALIGNMENT, 1);

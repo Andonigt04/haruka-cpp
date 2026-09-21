@@ -78,11 +78,23 @@ uint32_t AudioLoader::file(const std::string& path) {
     return buf;
 }
 
+uint32_t AudioLoader::synth(Audio::Sound s) {
+    auto it = m_synth.find((int)s);
+    if (it != m_synth.end()) return it->second;
+    const std::vector<int16_t> pcm = Audio::synthSound(s);
+    ALuint buf; alGenBuffers(1, &buf);
+    alBufferData(buf, AL_FORMAT_MONO16, pcm.data(), (ALsizei)(pcm.size() * sizeof(int16_t)), Audio::kRate);
+    m_synth[(int)s] = buf;
+    return buf;
+}
+
 void AudioLoader::clear() {
     for (auto& [k, b] : m_cache) { ALuint a = b; alDeleteBuffers(1, &a); }
     for (auto& [k, b] : m_files) { ALuint a = b; alDeleteBuffers(1, &a); }
+    for (auto& [k, b] : m_synth) { ALuint a = b; alDeleteBuffers(1, &a); }
     m_cache.clear();
     m_files.clear();
+    m_synth.clear();
 }
 
 } // namespace Haruka

@@ -6,8 +6,8 @@
  * dejar un campo continuo a través del plano y dos mallas que casen — ninguna pared invisible.
  */
 #include "test_common.h"
-#include "core/terrain/vox_world.h"
-#include "core/terrain/bake_util.h"
+#include "world/vox/vox_world.h"
+#include "world/terrain/bake_util.h"
 #include "tools/world_edit_panel.h"
 
 #include <algorithm>

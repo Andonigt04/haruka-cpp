@@ -2,6 +2,9 @@
 #include <vector>
 #include <algorithm>
 #include "settings/settings_manager.h"
+#include "input/gamepad.h"
+#include <cmath>
+#include <variant>
 #include "rhi/rhi_device.h"   // enumerar GPUs para el combo de tarjeta gráfica
 #include "renderer/motor_instance.h"
 #include "core/application.h"
@@ -19,9 +22,14 @@
 
 namespace Haruka::UI {
 
-void SettingsPanel::beginRebind(const std::string& action, int slotIndex) {
+void SettingsPanel::beginRebind(const std::string& action, int slotIndex, bool pad, bool padAxis,
+                                bool padGroup, bool chain) {
     m_rebindingAction = action;
     m_rebindIndex     = slotIndex;
+    m_rebindPad       = pad;
+    m_rebindPadAxis   = padAxis;
+    m_rebindPadGroup  = padGroup;
+    m_rebindChain     = chain;
     m_waitingForKey   = true;
     SettingsManager::get().setCapturing(true); // freeze all actions until a key lands
 }
@@ -29,6 +37,7 @@ void SettingsPanel::beginRebind(const std::string& action, int slotIndex) {
 void SettingsPanel::cancelRebind() {
     m_rebindingAction.clear();
     m_rebindIndex   = -1;
+    m_rebindPad = m_rebindPadAxis = m_rebindPadGroup = m_rebindChain = false;
     m_waitingForKey = false;
     SettingsManager::get().setCapturing(false);
 }
@@ -387,6 +396,7 @@ void SettingsPanel::tabAudio() {
     ImGui::SliderFloat(TR("audio.master").c_str(), &a.masterVolume, 0.0f, 1.0f);
     ImGui::SliderFloat(TR("audio.music").c_str(),  &a.musicVolume,  0.0f, 1.0f);
     ImGui::SliderFloat(TR("audio.sfx").c_str(),    &a.sfxVolume,    0.0f, 1.0f);
+    ImGui::SliderFloat(TR("audio.ambient").c_str(), &a.ambientVolume, 0.0f, 1.0f);
 }
 
 // ── Language tab (i18n) ──────────────────────────────────────────────────────
@@ -420,93 +430,317 @@ void SettingsPanel::tabLanguage() {
 void SettingsPanel::tabControls() {
     auto& sm = SettingsManager::get();
 
-    // While waiting for a key press, capture from SDL. SettingsManager is in
-    // capture mode (set by beginRebind) so no action fires from this keypress.
+    // ── EL MANDO: que el panel diga si SDL lo ve. "Los inputs no se leen" no se puede separar de
+    // "no hay mando abierto" sin esto (un joystick sin mapeo de gamepad no aparece en
+    // `SDL_GetGamepads`, y entonces no hay nada que leer).
+    {
+        Input::InputState probe;
+        Input::Gamepad::get().poll(probe);
+        if (Input::Gamepad::get().connected())
+            ImGui::TextColored(ImVec4(0.6f, 1.0f, 0.6f, 1.0f), "%s: %s", TR("ctrl.gamepad").c_str(),
+                               Input::Gamepad::get().name().c_str());
+        else
+            ImGui::TextDisabled("%s", TR("ctrl.padNone").c_str());
+    }
+
+    // Esperando una tecla O un boton/eje del mando (segun el hueco pulsado). SettingsManager esta
+    // en modo captura (beginRebind), asi que ninguna accion se dispara con lo que se pulse.
     if (m_waitingForKey) {
-        ImGui::TextColored(ImVec4(1,1,0,1), TR("ctrl.pressKey").c_str(), m_rebindingAction.c_str());
+        {
+            std::string what = m_rebindingAction;
+            // En cadena (teclado de una accion de direccion) se dice QUE hueco se esta asignando.
+            if (m_rebindChain && m_rebindIndex >= 0) {
+                static const char* dir4[4] = { "ctrl.dirUp", "ctrl.dirDown", "ctrl.dirLeft", "ctrl.dirRight" };
+                static const char* dir2[2] = { "ctrl.dirPlus", "ctrl.dirMinus" };
+                if (auto* act = sm.findAction(m_rebindingAction)) {
+                    const bool is2 = std::holds_alternative<Input::Axis2DBinding>(act->source);
+                    const int  n   = is2 ? 4 : 2;
+                    if (m_rebindIndex < n) what += std::string(" · ") + TR(is2 ? dir4[m_rebindIndex] : dir2[m_rebindIndex]);
+                }
+            }
+            const char* key = m_rebindPad ? (m_rebindPadGroup ? "ctrl.pressPadGroup" : "ctrl.pressPad") : "ctrl.pressKey";
+            ImGui::TextColored(ImVec4(1,1,0,1), TR(key).c_str(), what.c_str());
+        }
 
         int numKeys = 0;
         const bool* kbd = SDL_GetKeyboardState(&numKeys);
-        for (int i = 1; i < numKeys; ++i) {
-            if (!kbd[i]) continue;
-            SDL_Scancode sc = (SDL_Scancode)i;
-            if (sc == SDL_SCANCODE_ESCAPE) {
-                cancelRebind(); // cancel, keep current binding
-            } else if (m_rebindIndex >= 0) {
-                // Replace a specific slot (works for axis bindings too, where the
-                // slot count is fixed and appending would be discarded).
-                if (auto* act = sm.findAction(m_rebindingAction)) {
-                    auto keys = act->keys();
-                    if (m_rebindIndex < (int)keys.size()) {
-                        keys[m_rebindIndex] = sc;
-                        sm.setBindings(m_rebindingAction, keys);
+        bool done = false;
+        if (numKeys > SDL_SCANCODE_ESCAPE && kbd[SDL_SCANCODE_ESCAPE]) { cancelRebind(); done = true; }
+        if (m_chainWaitRelease != 0 && numKeys > m_chainWaitRelease && !kbd[m_chainWaitRelease])
+            m_chainWaitRelease = 0;
+        if (!done && !m_rebindPad) {
+            for (int i = 1; i < numKeys; ++i) {
+                if (!kbd[i]) continue;
+                if (i == (int)m_chainWaitRelease) continue;   // la tecla del hueco anterior, aun sin soltar
+                SDL_Scancode sc = (SDL_Scancode)i;
+                bool chainNext = false;
+                if (m_rebindIndex >= 0) {
+                    // Sustituye ESE hueco (vale para los ejes, cuyo numero de huecos es fijo).
+                    if (auto* act = sm.findAction(m_rebindingAction)) {
+                        auto keys = act->keys();
+                        if (m_rebindIndex < (int)keys.size()) {
+                            keys[m_rebindIndex] = sc;
+                            sm.setBindings(m_rebindingAction, keys);
+                            chainNext = m_rebindChain && m_rebindIndex + 1 < (int)keys.size();
+                        }
+                    }
+                } else {
+                    sm.addBinding(m_rebindingAction, sc); // anade (acciones Direct)
+                }
+                if (chainNext) {
+                    // La misma tecla aun esta pulsada: el siguiente hueco se captura cuando se suelte
+                    // y se pulse otra (ver `m_chainWaitRelease`).
+                    const std::string a = m_rebindingAction; const int nx = m_rebindIndex + 1;
+                    cancelRebind();
+                    beginRebind(a, nx, false, false, false, true);
+                    m_chainWaitRelease = (int)sc;
+                } else {
+                    cancelRebind();
+                }
+                done = true;
+                break;
+            }
+        }
+        if (!done && m_rebindPad) {
+            Input::InputState in;
+            Input::Gamepad::get().poll(in);
+            if (auto* act = sm.findAction(m_rebindingAction); act && in.gamepad) {
+                auto btns = act->padButtons();
+                auto axes = act->padAxes();
+                if (m_rebindPadGroup) {
+                    // GRUPO: un stick entero (los dos ejes) o la cruceta entera (los 4 botones), con
+                    // lo primero que se mueva o pulse.
+                    for (int a = 0; a < (int)SDL_GAMEPAD_AXIS_COUNT && !done; ++a) {
+                        if (std::fabs(in.axes[a]) < 0.6f) continue;
+                        const bool left = (a == SDL_GAMEPAD_AXIS_LEFTX || a == SDL_GAMEPAD_AXIS_LEFTY);
+                        const bool right = (a == SDL_GAMEPAD_AXIS_RIGHTX || a == SDL_GAMEPAD_AXIS_RIGHTY);
+                        if (!left && !right) continue;          // un gatillo no es un stick
+                        if (axes.size() >= 2) {
+                            axes[0] = left ? SDL_GAMEPAD_AXIS_LEFTX : SDL_GAMEPAD_AXIS_RIGHTX;
+                            axes[1] = left ? SDL_GAMEPAD_AXIS_LEFTY : SDL_GAMEPAD_AXIS_RIGHTY;
+                            act->setPad(btns, axes);
+                        }
+                        cancelRebind(); done = true;
+                    }
+                    for (int b = 0; b < (int)SDL_GAMEPAD_BUTTON_COUNT && !done; ++b) {
+                        if (!in.buttons[b]) continue;
+                        const bool dpad = (b >= SDL_GAMEPAD_BUTTON_DPAD_UP && b <= SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+                        if (!dpad) continue;
+                        if (btns.size() >= 4) {
+                            btns[0] = SDL_GAMEPAD_BUTTON_DPAD_UP;   btns[1] = SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+                            btns[2] = SDL_GAMEPAD_BUTTON_DPAD_LEFT; btns[3] = SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+                            act->setPad(btns, axes);
+                        }
+                        cancelRebind(); done = true;
                     }
                 }
-                cancelRebind();
-            } else {
-                sm.addBinding(m_rebindingAction, sc); // append (Direct actions)
-                cancelRebind();
+                if (done) {
+                } else if (m_rebindIndex < 0 && !m_rebindPadAxis) {
+                    // "+" del mando: lo primero que llegue. Un boton se anade; un eje (stick a fondo
+                    // o gatillo) ocupa el hueco de eje de la accion.
+                    for (int a = 0; a < (int)SDL_GAMEPAD_AXIS_COUNT && !done; ++a) {
+                        if (std::fabs(in.axes[a]) < 0.6f) continue;
+                        if (!axes.empty()) axes[0] = (SDL_GamepadAxis)a;
+                        act->setPad(btns, axes);
+                        cancelRebind(); done = true;
+                    }
+                }
+                if (done) {
+                } else if (m_rebindPadAxis) {
+                    // Un eje movido mas de 0,6 (stick a fondo o gatillo apretado) es el elegido.
+                    for (int a = 0; a < (int)SDL_GAMEPAD_AXIS_COUNT; ++a) {
+                        if (std::fabs(in.axes[a]) < 0.6f) continue;
+                        if (m_rebindIndex >= 0 && m_rebindIndex < (int)axes.size()) axes[m_rebindIndex] = (SDL_GamepadAxis)a;
+                        else if (!axes.empty()) axes[0] = (SDL_GamepadAxis)a;
+                        act->setPad(btns, axes);
+                        cancelRebind(); done = true;
+                        break;
+                    }
+                } else {
+                    for (int b = 0; b < (int)SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+                        if (!in.buttons[b]) continue;
+                        if (m_rebindIndex >= 0 && m_rebindIndex < (int)btns.size()) btns[m_rebindIndex] = (SDL_GamepadButton)b;
+                        else btns.push_back((SDL_GamepadButton)b);     // anade (acciones Direct)
+                        act->setPad(btns, axes);
+                        cancelRebind(); done = true;
+                        break;
+                    }
+                }
             }
-            break;
         }
         ImGui::Separator();
     }
 
-    // Table layout: Group header → Action rows
+    // Tabla: grupo → accion · teclado · mando. Las dos mitades de cada accion van en columnas
+    // separadas (Andoni, 21-09: "que se dividan los controles"); antes solo habia teclas, y una
+    // accion sin tecla (Mirar, solo mando) salia como cuatro botones vacios.
     for (const auto& group : sm.groups()) {
         ImGui::SeparatorText(group.c_str());
 
-        if (!ImGui::BeginTable(("##kg_" + group).c_str(), 3,
+        if (!ImGui::BeginTable(("##kg_" + group).c_str(), 4,
                 ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_SizingStretchProp))
             continue;
 
-        ImGui::TableSetupColumn(TR("ctrl.action").c_str(),   ImGuiTableColumnFlags_WidthStretch, 0.35f);
-        ImGui::TableSetupColumn(TR("ctrl.bindings").c_str(), ImGuiTableColumnFlags_WidthStretch, 0.50f);
-        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed,   90.0f);
+        ImGui::TableSetupColumn(TR("ctrl.action").c_str(),   ImGuiTableColumnFlags_WidthStretch, 0.25f);
+        ImGui::TableSetupColumn(TR("ctrl.bindings").c_str(), ImGuiTableColumnFlags_WidthStretch, 0.35f);
+        ImGui::TableSetupColumn(TR("ctrl.gamepad").c_str(),  ImGuiTableColumnFlags_WidthStretch, 0.30f);
+        ImGui::TableSetupColumn("##actions", ImGuiTableColumnFlags_WidthFixed,   52.0f);
         ImGui::TableHeadersRow();
 
         for (const auto* action : sm.actionsInGroup(group)) {
             ImGui::TableNextRow();
 
-            // Action display name
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(action->displayName.c_str());
 
-            // Current bindings as chips
+            // ⚠️ Acotado por ACCION, no solo por indice. Las tablas de ImGui NO meten la fila en la
+            // pila de ids, asi que dos acciones con la misma tecla en la misma posicion daban el
+            // mismo id y pulsar un chip reasignaba el de la otra fila.
+            ImGui::PushID(action->name.c_str());
+
+            // ── Teclado ─────────────────────────────────────────────────────────────────────
             ImGui::TableSetColumnIndex(1);
             auto keys = action->keys();
-            // ⚠️ Acotado por ACCIÓN, no solo por índice. Las tablas de ImGui NO meten la fila en la
-            // pila de ids (solo la columna, y eso en las cabeceras), así que dos acciones con la MISMA
-            // tecla en la misma posición —perfectamente posible: la misma tecla sirve para dos cosas en
-            // contextos distintos— daban `PushID(i)` + la misma etiqueta = el mismo id, y pulsar un chip
-            // reasignaba el de la otra fila.
-            ImGui::PushID(action->name.c_str());
+            const bool positional = !std::holds_alternative<Input::DirectBinding>(action->source);
+            bool anyKey = false; for (auto k : keys) anyKey = anyKey || (k != SDL_SCANCODE_UNKNOWN);
+            ImGui::PushID("kbd");
+            if (positional && !anyKey) {
+                // Una accion de direccion SIN teclas: un solo chip. Al pulsarlo se asignan en cadena
+                // (arriba, abajo, izquierda, derecha), no cuatro huecos vacios que parecen cuatro inputs.
+                ImGui::SmallButton("-");
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) beginRebind(action->name, 0, false, false, false, true);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.chainTip").c_str());
+                keys.clear();
+            }
             for (size_t i = 0; i < keys.size(); ++i) {
-                const char* kname = SDL_GetScancodeName(keys[i]);
+                // Hueco vacio = "-" (el guion largo no esta en la fuente por defecto: salia "?").
+                const char* kname = (keys[i] == SDL_SCANCODE_UNKNOWN) ? "-" : SDL_GetScancodeName(keys[i]);
                 ImGui::PushID((int)i);
-
-                ImGui::SmallButton(kname);
+                ImGui::SmallButton((kname && *kname) ? kname : "-");
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
-                    beginRebind(action->name, (int)i);  // rebind THIS slot
+                    beginRebind(action->name, (int)i);
                 if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
                     sm.removeBinding(action->name, keys[i]);
                 if (ImGui::IsItemHovered())
                     ImGui::SetTooltip("%s", TR("ctrl.chipTip").c_str());
-
                 ImGui::PopID();
                 if (i + 1 < keys.size()) ImGui::SameLine(0, 4);
             }
             ImGui::PopID();
 
-            // Add / clear buttons
+            // ── Mando: botones (por hueco) y ejes ───────────────────────────────────────────
             ImGui::TableSetColumnIndex(2);
-            ImGui::PushID(action->name.c_str());
+            const auto btns = action->padButtons();
+            const auto axes = action->padAxes();
+            // En las acciones de BOTON (Direct) los huecos no son posicionales: se ensenan solo los
+            // asignados y un "+" para capturar otro (boton o eje, lo que llegue). En las de eje
+            // (1D/2D) cada hueco significa algo (arriba/abajo/..., X/Y) y se ensena vacio con "-".
+            ImGui::PushID("pad");
+            bool first = true;
+            // Un STICK es UN input y la CRUCETA otro: se ensenan como un chip cada uno (Andoni,
+            // 21-09: "derecha izquierda solo deberia ser uno"). Solo los ejes/botones sueltos que no
+            // forman grupo salen uno a uno.
+            const bool is2D = std::holds_alternative<Input::Axis2DBinding>(action->source);
+            bool stickShown = false, dpadShown = false;
+            if (is2D && axes.size() >= 2) {
+                const bool left  = axes[0] == SDL_GAMEPAD_AXIS_LEFTX  && axes[1] == SDL_GAMEPAD_AXIS_LEFTY;
+                const bool right = axes[0] == SDL_GAMEPAD_AXIS_RIGHTX && axes[1] == SDL_GAMEPAD_AXIS_RIGHTY;
+                const bool none  = axes[0] == SDL_GAMEPAD_AXIS_INVALID && axes[1] == SDL_GAMEPAD_AXIS_INVALID;
+                if (left || right || none) {
+                    ImGui::PushID("stick");
+                    ImGui::SmallButton(TR(left ? "ctrl.stickL" : right ? "ctrl.stickR" : "ctrl.stickNone").c_str());
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) beginRebind(action->name, 0, true, true, true);
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && !none) {
+                        auto a2 = axes; a2[0] = a2[1] = SDL_GAMEPAD_AXIS_INVALID;
+                        if (auto* act = sm.findAction(action->name)) act->setPad(btns, a2);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.stickTip").c_str());
+                    ImGui::PopID();
+                    first = false; stickShown = true;
+                }
+            }
+            if (is2D && btns.size() >= 4) {
+                const bool dpad = btns[0] == SDL_GAMEPAD_BUTTON_DPAD_UP && btns[1] == SDL_GAMEPAD_BUTTON_DPAD_DOWN
+                               && btns[2] == SDL_GAMEPAD_BUTTON_DPAD_LEFT && btns[3] == SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+                bool noneB = true; for (auto b : btns) noneB = noneB && (b == SDL_GAMEPAD_BUTTON_INVALID);
+                if (dpad || noneB) {
+                    ImGui::PushID("dpad");
+                    if (!first) ImGui::SameLine(0, 4);
+                    ImGui::SmallButton(TR(dpad ? "ctrl.dpad" : "ctrl.dpadNone").c_str());
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) beginRebind(action->name, 0, true, false, true);
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && dpad) {
+                        auto b2 = btns; for (auto& b : b2) b = SDL_GAMEPAD_BUTTON_INVALID;
+                        if (auto* act = sm.findAction(action->name)) act->setPad(b2, axes);
+                    }
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.dpadTip").c_str());
+                    ImGui::PopID();
+                    first = false; dpadShown = true;
+                }
+            }
+            for (size_t i = 0; i < btns.size(); ++i) {
+                if (dpadShown) break;
+                const char* n = Input::Gamepad::buttonName(btns[i]);
+                if (!positional && !(n && *n)) continue;
+                ImGui::PushID((int)i);
+                if (!first) ImGui::SameLine(0, 4);
+                first = false;
+                ImGui::SmallButton((n && *n) ? n : "-");
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                    beginRebind(action->name, (int)i, true, false);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    auto b2 = btns; b2[i] = SDL_GAMEPAD_BUTTON_INVALID;
+                    if (auto* act = sm.findAction(action->name)) act->setPad(b2, axes);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.padChipTip").c_str());
+                ImGui::PopID();
+            }
+            for (size_t i = 0; i < axes.size(); ++i) {
+                if (stickShown) break;
+                const char* n = Input::Gamepad::axisName(axes[i]);
+                if (!positional && !(n && *n)) continue;
+                ImGui::PushID(100 + (int)i);
+                if (!first) ImGui::SameLine(0, 4);
+                first = false;
+                // Los ejes se distinguen de los botones por el prefijo: "~leftx".
+                const std::string label = std::string("~") + ((n && *n) ? n : "-");
+                ImGui::SmallButton(label.c_str());
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Left))
+                    beginRebind(action->name, (int)i, true, true);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                    auto a2 = axes; a2[i] = SDL_GAMEPAD_AXIS_INVALID;
+                    if (auto* act = sm.findAction(action->name)) act->setPad(btns, a2);
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.padAxisTip").c_str());
+                ImGui::PopID();
+            }
+            if (!positional) {
+                if (!first) ImGui::SameLine(0, 4);
+                if (ImGui::SmallButton("+")) beginRebind(action->name, -1, true, false);   // boton O eje: lo que llegue
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.padAddTip").c_str());
+            } else {
+                // INVERTIR: por eje, y vale para teclas y mando (es el valor final el que cambia de
+                // signo). Andoni (21-09): "poder invertir los controles".
+                bool ix = false, iy = false; action->invert(ix, iy);
+                ImGui::SameLine(0, 10);
+                if (ImGui::Checkbox(is2D ? "X" : TR("ctrl.invert").c_str(), &ix))
+                    if (auto* act = sm.findAction(action->name)) act->setInvert(ix, iy);
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.invertTip").c_str());
+                if (is2D) {
+                    ImGui::SameLine(0, 4);
+                    if (ImGui::Checkbox("Y", &iy))
+                        if (auto* act = sm.findAction(action->name)) act->setInvert(ix, iy);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.invertTip").c_str());
+                }
+            }
+            ImGui::PopID();
 
-            if (ImGui::SmallButton(TR("ctrl.add").c_str()))
-                beginRebind(action->name, -1); // append a new key (Direct actions)
+            // ── Anadir tecla / limpiar teclas: cortos, con tooltip (la tabla se salia del panel) ──
+            ImGui::TableSetColumnIndex(3);
+            if (ImGui::SmallButton("+")) beginRebind(action->name, -1); // anade una tecla (acciones Direct)
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.add").c_str());
             ImGui::SameLine(0, 6);
-            if (ImGui::SmallButton(TR("ctrl.clear").c_str()))
-                sm.setBindings(action->name, {});
+            if (ImGui::SmallButton("x")) sm.setBindings(action->name, {});
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("ctrl.clear").c_str());
 
             ImGui::PopID();
         }

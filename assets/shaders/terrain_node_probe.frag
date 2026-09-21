@@ -32,6 +32,8 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uTexAnchor;
     vec4  uLightDir;
     vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
+    vec4  uStrideRamp;  // rampa del mapa por zancada: x = radio zancada 1 · y = fracción de rampa ·
+                        // z = vertexPx/errorPx · w = celda fina de colisión (ver nodeStrideMapF)
 };
 
 layout(std140, binding = 3) uniform Probe {

@@ -1,0 +1,223 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64      : require
+/**
+ * @file grass_gen.comp
+ * @brief LA HIERBA SE GENERA EN LA GPU, CADA FRAME, SOBRE EL SUELO QUE SE DIBUJA.
+ *
+ * ── POR QUE NO ES UN PROP MAS ───────────────────────────────────────────────────────────────────
+ *
+ * La hierba de la capa de props (`mesh: grass`, 6 matas por celda de 12 m) se coloca en CPU con
+ * el resto de props: 0,04 matas/m², 12 triangulos cada una, y un refresco cada 30 m de camino. Para
+ * una pradera hacen falta decenas de briznas por m² en los 60 m que rodean a la camara — medio
+ * millon de briznas que ninguna CPU va a recolocar por frame, y que ademas tienen que TUMBARSE
+ * cuando algo pasa por encima. Asi que se generan aqui, por frame, y se dibujan con UN draw
+ * indirecto: la CPU no sabe cuantas hay ni donde.
+ *
+ * ── LA RETICULA: FIJA AL MUNDO, NO A LA CAMARA ─────────────────────────────────────────────────
+ *
+ * Cada hilo es (celda, indice de brizna). La celda es un cuadrado de la CARA DEL CUBO del planeta
+ * (`uCell` = 2^-kCellBits del lado de la cara: ~2,4 m en la Tierra), asi que la brizna `k` de la
+ * celda `(cx, cy)` tiene SIEMPRE la misma posicion, altura y fase: al andar entran celdas por
+ * delante y salen por detras, y ninguna brizna se recoloca. Anclada a la camara temblaria con cada
+ * paso (es lo que hacia el clipmap con el agua). La CPU solo manda el rango de celdas que cubre el
+ * radio y la cara en la que esta; una camara a caballo de dos caras pierde el trozo de la otra cara
+ * (medido donde importa: las aristas del cubo estan a ±45° de latitud/longitud, y ese trozo es la
+ * esquina lejana del radio, no lo que hay bajo los pies).
+ *
+ * ── LA ALTURA: EL MISMO MAPA QUE DIBUJA EL TERRENO ─────────────────────────────────────────────
+ *
+ * ⚠️ No se muestrea el campo de altura (el bake + `harukaTerrainDetail`): eso es lo que PISA la
+ * fisica, pero lo que se VE es el mapa del nodo que el pase de terreno dibuja, y entre los dos hay
+ * centimetros (medido en `terrain_node_drawn_vs_field`: 0,11 m de media a zancada 1). Una brizna
+ * apoyada en el campo flotaria o se hundiria por ese error. Aqui se busca el nodo HOJA dibujado que
+ * cubre la brizna (la tabla `uNodes`, que la CPU rellena con lo que `prepare` resolvio para este
+ * frame) y se lee su mapa con la MISMA bilineal que `terrain_node.vert` (`harukaNodeSample`,
+ * incluida la caida a ancestro `kUp`). La raiz va 4 cm bajo el suelo para que el error residual
+ * (el morph hacia el padre a media distancia) no deje briznas en el aire.
+ *
+ * ── DONDE HAY HIERBA: LO DICE EL MATERIAL DEL SUELO ────────────────────────────────────────────
+ *
+ * La misma regla que pinta el suelo de verde (`harukaSelectMaterial`, clima + pendiente + altura)
+ * pone la hierba: cada material declara `grass` (0..1) y la densidad es la media ponderada de las
+ * coberturas que ganan ese punto × el espesor del manto (`coverW`). Sin una segunda tabla de
+ * biomas que pueda contradecir a la primera. Con pendiente > 0,6 no crece nada, y bajo el mar
+ * tampoco.
+ *
+ * ── LOD POR DISTANCIA: MENOS BRIZNAS, MAS ANCHAS ───────────────────────────────────────────────
+ *
+ * La densidad cae de 1 a `uLod.y` entre `uLod.x` m y el radio; las que quedan se ensanchan en la
+ * misma proporcion (`width` en el registro), asi que la cobertura del suelo se conserva y la
+ * transicion no se ve como una linea. Mas alla del radio no hay nada: ahi siguen las matas de la
+ * capa de props, que llegan a 1 km.
+ *
+ * Salida: `Blades[]` (32 B por brizna) + `instanceCount` del comando indirecto (atomico).
+ */
+#include "lib/cube_face.glsl"           // harukaCubeFaceToDir (double)
+#include "lib/base_field.glsl"          // harukaSampleBaseField (clima)
+#include "lib/terrain_material.glsl"    // harukaGrassAmount
+
+layout(local_size_x = 64) in;
+
+layout(std140, binding = 0) uniform GrassGen {
+    vec4  uCenter;      // xyz = centro del planeta − camara, parte GRUESA (multiplo de 64 m) · w = R
+    vec4  uCenterLo;    // xyz = el resto fino (ver terrain_node.vert) · w = nivel del mar (m)
+    vec4  uCamFwd;      // xyz = direccion de vista · w = cos del semiangulo del cono de frustum
+    ivec4 uCells;       // x = cara · y = cx0 · z = cy0 · w = lado en celdas
+    vec4  uGrid;        // x = 2^kCellBits (celdas por cara) · y = briznas por celda · z = radio (m) · w = densidad global
+    vec4  uLod;         // x = distancia donde empieza a ralear · y = fraccion que queda en el radio · z = altura media (m) · w = anchura media (m)
+    ivec4 uNodeGrid;    // x = texeles por nodo (129) · y = celdas por nodo (128) · z = nodos en la tabla · w = (libre)
+    vec4  uMisc;        // x = texel (m) del nivel MAS FINO de la tabla · y = etapa de biseccion · z = altitud de la camara (m)
+    vec4  uPlane[4];    // los 4 planos laterales del frustum por el ojo (normales hacia dentro)
+};
+
+// Nodo hoja DIBUJADO cerca de la camara: gemelo de `GrassRenderer::NearNode`.
+struct NearNode { ivec4 node; ivec4 slot; };   // node = cara/nivel/i/j · slot = hueco/kUp/subI/subJ
+layout(std430, binding = 1) readonly buffer NearNodes { NearNode uNodes[]; };
+layout(std430, binding = 2) readonly buffer NodeHeights { float uHeights[]; };
+
+// La brizna que dibuja `grass.vert`: 32 B. `pos` relativa a la CAMARA (float: a 60 m el ulp es 4 um).
+struct Blade { vec4 pos; vec4 up; };           // pos.w = altura (m) · up.xyz = normal del suelo · up.w = hash
+layout(std430, binding = 3) writeonly buffer Blades { Blade uBlades[]; };
+layout(std430, binding = 4) buffer DrawCmd { uint indexCount, instanceCount, firstIndex, baseVertex, baseInstance; };
+
+layout(binding = 15) uniform sampler2DArray uBaseField;   // clima (elev, temp, humedad) para el material
+
+// ── HASH ────────────────────────────────────────────────────────────────────────────────────────
+uint harukaHashU(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float harukaHash01(uint a, uint b, uint c) {
+    return float(harukaHashU(a * 0x9E3779B1u ^ harukaHashU(b + 0x85EBCA77u * c)) & 0xFFFFFFu) / 16777216.0;
+}
+
+// La altura DIBUJADA bajo (lx, ly): busca el nodo hoja y lee su mapa con la bilineal de
+// `terrain_node.vert`. Devuelve false si ningun nodo de la tabla cubre el punto.
+bool drawnHeightAt(int face, double lx, double ly, out float h, out vec2 dhdt) {
+    const int N1    = uNodeGrid.x;
+    const float cells = float(uNodeGrid.y);
+    const double fx = (lx + 1.0LF) * 0.5LF, fy = (ly + 1.0LF) * 0.5LF;   // [0,1] en la cara
+    for (int n = 0; n < uNodeGrid.z; ++n) {
+        const NearNode nd = uNodes[n];
+        if (nd.node.x != face) continue;
+        const double cellsL = double(1 << nd.node.y);
+        const int i = int(floor(fx * cellsL)), j = int(floor(fy * cellsL));
+        if (i != nd.node.z || j != nd.node.w) continue;
+        // Texel FRACCIONARIO de la hoja, y de ahi el del ancestro `kUp` (sub-rectangulo).
+        float tu = float((fx * cellsL - double(i)) * double(cells));
+        float tv = float((fy * cellsL - double(j)) * double(cells));
+        const int kUp = nd.slot.y;
+        const float inv = 1.0 / float(1 << kUp);
+        float au = clamp((float(nd.slot.z) * cells + tu) * inv, 0.0, cells);
+        float av = clamp((float(nd.slot.w) * cells + tv) * inv, 0.0, cells);
+        const uint base = uint(nd.slot.x) * uint(N1) * uint(N1);
+        const int iu = int(floor(au)), iv = int(floor(av));
+        const int ju = min(iu + 1, N1 - 1), jv = min(iv + 1, N1 - 1);
+        const float fu = au - float(iu), fv = av - float(iv);
+        const float h00 = uHeights[base + uint(iv) * uint(N1) + uint(iu)];
+        const float h10 = uHeights[base + uint(iv) * uint(N1) + uint(ju)];
+        const float h01 = uHeights[base + uint(jv) * uint(N1) + uint(iu)];
+        const float h11 = uHeights[base + uint(jv) * uint(N1) + uint(ju)];
+        h = mix(mix(h00, h10, fu), mix(h01, h11, fu), fv);
+        // Pendiente del mapa (m por texel del ancestro): para la normal del suelo y la regla de pendiente.
+        dhdt = vec2(mix(h10 - h00, h11 - h01, fv), mix(h01 - h00, h11 - h10, fu));
+        return true;
+    }
+    return false;
+}
+
+void main() {
+    const uint id = gl_GlobalInvocationID.x;
+    const uint perCell = uint(uGrid.y);
+    const uint side    = uint(uCells.w);
+    const uint cellIdx = id / perCell;
+    const uint k       = id - cellIdx * perCell;
+    if (cellIdx >= side * side) return;
+    const int face = uCells.x;
+    const int cx = uCells.y + int(cellIdx % side);
+    const int cy = uCells.z + int(cellIdx / side);
+    const int cellsFace = int(uGrid.x);
+    // `uMisc.y` = etapa de biseccion (HARUKA_GRASS_DEBUG): con k > 0 los descartes de la etapa k en
+    // adelante NO se aplican, y la cuenta dice en que etapa muere la hierba. 0 = produccion.
+    const int dbg = int(uMisc.y);
+    #define SKIP(k) (dbg > 0 && dbg <= (k))
+    if (!SKIP(1) && (cx < 0 || cy < 0 || cx >= cellsFace || cy >= cellsFace)) return;   // fuera de la cara: la otra cara no esta
+
+    // ── LA BRIZNA `k` DE LA CELDA: hash del mundo, no del frame ─────────────────────────────────
+    const uint hc = harukaHashU(uint(cx) * 73856093u ^ uint(cy) * 19349663u ^ uint(face) * 83492791u);
+    const float r0 = harukaHash01(hc, k, 1u), r1 = harukaHash01(hc, k, 2u);
+    const float r2 = harukaHash01(hc, k, 3u), r3 = harukaHash01(hc, k, 4u);
+    // Densidad global: la brizna existe si su dado cae bajo la densidad pedida (uGrid.w en [0,1]).
+    if (!SKIP(2) && r3 > uGrid.w) return;
+
+    const double cellD = 2.0LF / double(cellsFace);
+    const double lx = -1.0LF + (double(cx) + double(r0)) * cellD;
+    const double ly = -1.0LF + (double(cy) + double(r1)) * cellD;
+    const dvec3  dirD = harukaCubeFaceToDir(face, lx, ly);
+    const vec3   dir  = vec3(dirD);
+    const double R    = double(uCenter.w);
+
+    // ── DISTANCIA ANTES DE LEER NADA CARO ───────────────────────────────────────────────────────
+    // Con el suelo a la ALTITUD DE LA CAMARA (uMisc.z) como estimacion: sobra para descartar. (Con
+    // el nivel del mar, una camara a −87 m de cota tenia TODAS las briznas "a 88 m" y el radio se
+    // comia el 97 %: medido en el banco, 9 886 de 108 000.)
+    vec3 approx = vec3(dirD * (R + double(uMisc.z)) + dvec3(uCenter.xyz)) + uCenterLo.xyz;
+    const float distA = length(approx);
+    if (!SKIP(3) && distA > uGrid.z + 30.0) return;
+    // ── LOD TEMPRANO, con la distancia aproximada y 10 m de margen ──────────────────────────────
+    // Con 300 matas/m² la mayoria de los hilos estan lejos y raleados: hay que echarlos ANTES de
+    // buscar el nodo y leer el mapa. El corte exacto (con la distancia real) va abajo y nunca es mas
+    // permisivo que este, asi que el resultado es el mismo que sin este atajo (banco: misma cuenta).
+    {
+        const float lodA  = clamp((distA - 10.0 - uLod.x) / max(uGrid.z - uLod.x, 1.0), 0.0, 1.0);
+        if (!SKIP(4) && r2 > mix(1.0, uLod.y, lodA)) return;
+    }
+
+    // ── EL SUELO DIBUJADO ───────────────────────────────────────────────────────────────────────
+    float h; vec2 dh;
+    if (!drawnHeightAt(face, lx, ly, h, dh)) { if (!SKIP(5)) return; h = 0.0; dh = vec2(0.0); }
+    if (!SKIP(6) && h < uCenterLo.w + 0.3) return;           // bajo el mar (o en la orilla mojada)
+
+    // ── EL MATERIAL: ¿aqui crece hierba? ────────────────────────────────────────────────────────
+    const vec3  fld   = harukaSampleBaseField(uBaseField, dir);
+    // Pendiente: del mapa dibujado, en metros por texel. El texel de la hoja mide R·π/2/(2^nivel·128)
+    // y el nivel varia por nodo; se usa el del nivel MAS FINO de la tabla (uMisc.x), que sesga hacia
+    // "mas pendiente" en los nodos gruesos — el lado seguro: menos hierba en un cortado, nunca mas.
+    const float texelM = uMisc.x;
+    // La normal del suelo (la esfera inclinada por el gradiente del mapa) y la pendiente EN LA MISMA
+    // CONVENCION que el material del terreno (`terrain_shade.glsl`: 1 − n·up; 0 llano, 1 vertical).
+    vec3 t1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0, 1, 0)) : cross(dir, vec3(1, 0, 0)));
+    vec3 t2 = cross(dir, t1);
+    const vec3  nrm   = normalize(dir - (t1 * dh.x + t2 * dh.y) / max(texelM, 0.05));
+    const float slope = 1.0 - dot(nrm, dir);
+    if (!SKIP(7) && slope > 0.30) return;                    // ~46°: mas alla no crece ni se sujeta
+    const float grass = harukaGrassAmount(clamp(fld.z, 0.0, 1.0), fld.y, slope, h * 0.001);
+    if (!SKIP(8) && grass < 0.02) return;
+    // La densidad del material se aplica como probabilidad: en el borde pradera/roca la hierba
+    // ralea en vez de cortarse.
+    if (!SKIP(9) && harukaHash01(hc, k, 5u) > grass) return;
+
+    // ── POSICION EXACTA, EN DOUBLE HASTA CANCELAR CON LA CAMARA ─────────────────────────────────
+    const dvec3 pRel = dirD * (R + double(h) - 0.04LF) + dvec3(uCenter.xyz);
+    const vec3  pos  = vec3(pRel) + uCenterLo.xyz;
+    const float dist = length(pos);
+    if (!SKIP(10) && dist > uGrid.z) return;
+    // ── LOD: ralea con la distancia; las que quedan se ensanchan ────────────────────────────────
+    const float lodT  = clamp((dist - uLod.x) / max(uGrid.z - uLod.x, 1.0), 0.0, 1.0);
+    const float keep  = mix(1.0, uLod.y, lodT);
+    if (!SKIP(4) && r2 > keep) return;
+    const float widen = min(1.0 / sqrt(max(keep, 0.02)), 3.5);   // la mata raleada se ensancha (tope x3,5)
+    // Los 4 planos del frustum (con 0,6 m de margen: la mata mide 0,26 m y se ensancha): lo que
+    // no cabe en la IMAGEN no se escribe. El cono del descarte temprano sobra por las esquinas.
+    if (!SKIP(11) && dist > 3.0) {
+        for (int i = 0; i < 4; ++i) if (dot(pos, uPlane[i].xyz) < -0.6) return;
+    }
+
+    // ── EL REGISTRO ─────────────────────────────────────────────────────────────────────────────
+    const uint slot = atomicAdd(instanceCount, 1u);
+    if (slot >= uBlades.length()) return;
+    const float height = uLod.z * (0.6 + 0.8 * harukaHash01(hc, k, 6u)) * mix(1.0, 0.85, lodT);
+    // up.w empaqueta el hash (fase de viento, matiz) y la anchura relativa: 16 bits cada uno.
+    const uint hash16  = harukaHashU(hc + k * 0x27d4eb2fu) & 0xFFFFu;
+    const uint width16 = uint(clamp(widen / 4.0, 0.0, 1.0) * 65535.0);
+    uBlades[slot].pos = vec4(pos, height);
+    uBlades[slot].up  = vec4(nrm, uintBitsToFloat((hash16 << 16) | width16));
+}

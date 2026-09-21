@@ -7,11 +7,11 @@
 // si no, se usa ESTE. La MISMA física servirá al cliente para predicción.
 // ================================================================================================
 #include "include/dgs/game_module.h"
-#include "core/terrain/terrain_sample.h"   // haruka_simbase: física por defecto (sampler de terreno)
+#include "world/terrain/terrain_sample.h"   // haruka_simbase: física por defecto (sampler de terreno)
 #include "game/construction/construction.h"    // EL MISMO núcleo de colocación que usa el cliente
 #include "physics/world_provider.h"
 #include "physics/physics_engine.h"   // LA MISMA fisica que el cliente: Jolt tambien en el servidor
-#include "core/planet/soi.h"           // kEarthMeanDensity: la masa del planeta, igual que el motor
+#include "world/planet/soi.h"           // kEarthMeanDensity: la masa del planeta, igual que el motor
 #include "net/height_field.h"          // EL SUELO DE VERDAD: el bake que pisa el cliente, sin GL
 
 #include <glm/glm.hpp>

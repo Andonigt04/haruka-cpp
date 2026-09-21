@@ -30,7 +30,7 @@
  * de que el terreno es lo que está decidiendo.
  */
 #include "net/height_field.h"
-#include "core/planet/terrain_detail.h"
+#include "world/terrain/terrain_detail.h"
 
 #include <dgs/packet.h>
 #include <dgs/network.h>

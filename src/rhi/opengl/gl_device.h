@@ -81,6 +81,9 @@ namespace Haruka::RHI::opengl
             void     endFrame() override;
             Backend  backend() const override { return Backend::OpenGL; }
             const std::string& deviceName() const override { return m_deviceName; }
+            /** @brief Tamaño en píxeles del backbuffer (la ventana). Es lo que el pase a pantalla usa de
+             *  viewport en `beginRenderPass`; antes GL devolvía 0 y el pase heredaba el último viewport. */
+            void framebufferSize(uint32_t& w, uint32_t& h) const override;
             void     readPixels(int x, int y, int w, int h, Format format, void* data) override;
 
             bool ready() const { return m_glContext != nullptr; }

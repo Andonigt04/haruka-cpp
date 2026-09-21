@@ -188,6 +188,7 @@ struct AudioSettings {
     float masterVolume = 1.0f;
     float musicVolume  = 0.6f;
     float sfxVolume    = 1.0f;
+    float ambientVolume = 0.8f;   ///< bucles del mundo (viento, hojas, agua): ver AudioManager::points()
     // Dispositivos elegidos (NOMBRE; vacío = predeterminado del sistema). input = micro
     // (voz/conjuros), output = altavoces (efectos/propagación).
     std::string inputDevice;

@@ -42,10 +42,12 @@
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>              // props con su malla exacta
 #include <Jolt/Physics/Collision/Shape/ScaledShape.h>            // escala por instancia
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Collision/Shape/CapsuleShape.h>            // el personaje: capsula de su altura
+#include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>  // ...con la base en el pie
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
-#include "core/planet/terrain_lod.h"
+#include "world/terrain/terrain_lod.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 // RAÍLES (docs/guides/PLAN_PUERTOS.md §4): puertas, rampas y suspensiones son MECANISMOS, no clips.
@@ -351,7 +353,7 @@ struct PhysicsEngine::JoltImpl {
             nearRing.extent = Haruka::Planet::TERRAIN_CLIP_HOLE_M;
             ++nearRing.revision;
             nearRingValid = true;
-            HARUKA_LOGI("Physics", "  anillo cercano publicado: rev %llu · %zu vert · %zu tris · "
+            HARUKA_LOGDIAG("Physics", "  anillo cercano publicado: rev %llu · %zu vert · %zu tris · "
                         "checksum %016llx", (unsigned long long)nearRing.revision,
                         nearRing.verts.size(), nearRing.tris.size() / 3, (unsigned long long)ck);
         }
@@ -406,7 +408,7 @@ struct PhysicsEngine::JoltImpl {
         // por separado.
         int seamK = -1; std::vector<double> seamPer;
         const double seam = IWorldProvider::terrainRingSeamStep(rings, &seamK, &seamPer);
-        HARUKA_LOGI("Physics", "suelo %s: %zu anillos (alcance +-%.0f m, %zu KB de muestras)"
+        HARUKA_LOGDIAG("Physics", "suelo %s: %zu anillos (alcance +-%.0f m, %zu KB de muestras)"
                     "  ·  %.0f ms = muestreo %.0f + shapes %.0f",
                     firstRing == 0 ? "CERCANO" : "lejano",
                     rings.size(), rings.back().spec.extent,
@@ -422,11 +424,11 @@ struct PhysicsEngine::JoltImpl {
             seams += buf;
         }
         if (firstRing == 0)
-            HARUKA_LOGI("Physics", "  twist del quad de 4 m (disparidad en el CENTRO del quad si las "
+            HARUKA_LOGDIAG("Physics", "  twist del quad de 4 m (disparidad en el CENTRO del quad si las "
                         "diagonales no casan): %.3f m a <8 m del jugador · %.3f m peor en el bloque",
                         twistNear, twistBlock);
         if (rings.size() > 1)
-            HARUKA_LOGI("Physics", "  escalon en costuras (distancia:escalon): %s  ·  peor %.2f m (nivel %d)",
+            HARUKA_LOGDIAG("Physics", "  escalon en costuras (distancia:escalon): %s  ·  peor %.2f m (nivel %d)",
                         seams.c_str(), seam, seamK);
         return cres.Get();
     }
@@ -648,9 +650,27 @@ struct PhysicsEngine::JoltImpl {
         charBody = b;
         if (!originSet) { origin = b->position; originSet = true; }
         JPH::Ref<JPH::CharacterVirtualSettings> cs = new JPH::CharacterVirtualSettings();
-        // ESFERA del mismo radio que el cuerpo: así `position` sigue siendo el CENTRO y el juego puede
-        // seguir sacando el pie como `centro − arriba·radio`, sin tocar su matemática.
-        cs->mShape         = new JPH::SphereShape((float)b->radius);
+        // `position` sigue siendo el punto a `radius` sobre el PIE: el juego saca el pie como
+        // `centro − arriba·radio` y no toca su matemática.
+        if (b->characterHeight > 2.0 * b->characterRadius) {
+            // CAPSULA con la base en el pie: local Y = arriba. El cilindro mide altura − 2·radio; el
+            // centro de la capsula queda a altura/2 sobre el pie, o sea a (altura/2 − radius) de
+            // `position`. Local Y se alinea con la vertical del planeta en cada paso (SetRotation).
+            const float r  = (float)b->characterRadius;
+            const float hh = (float)(0.5 * b->characterHeight - b->characterRadius);   // medio cilindro
+            const float dy = (float)(0.5 * b->characterHeight - b->radius);
+            JPH::RotatedTranslatedShapeSettings rts(JPH::Vec3(0.0f, dy, 0.0f), JPH::Quat::sIdentity(),
+                                                    new JPH::CapsuleShape(hh, r));
+            cs->mShape = rts.Create().Get();
+            // Solo el casquete de abajo sostiene (Jolt lo recomienda para capsulas): sin esto un
+            // contacto lateral con un muro contaba como "suelo" y se podia trepar por el.
+            // Sostiene todo contacto por debajo del CENTRO del casquete inferior (y ≤ radius −
+            // characterRadius en local): en una pendiente de 50° el contacto queda a 0,27 por debajo.
+            cs->mSupportingVolume = JPH::Plane(JPH::Vec3::sAxisY(), (float)(b->radius - b->characterRadius));
+        } else {
+            // ESFERA del mismo radio que el cuerpo (el comportamiento de antes).
+            cs->mShape = new JPH::SphereShape((float)b->radius);
+        }
         cs->mMaxSlopeAngle = JPH::DegreesToRadians(50.0f);   // más empinado que esto = resbalas
         const glm::dvec3 lp = b->position - origin;
         charCtrl = new JPH::CharacterVirtual(cs, JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
@@ -881,7 +901,7 @@ struct PhysicsEngine::JoltImpl {
             static size_t s_lastVox = ~(size_t)0;
             if (voxMade != s_lastVox) {
                 s_lastVox = voxMade;
-                HARUKA_LOGI("Physics", "paredes de cueva -> Jolt: %zu cuerpos de %zu mallas", voxMade, eng->voxMeshes().size());
+                HARUKA_LOGDIAG("Physics", "paredes de cueva -> Jolt: %zu cuerpos de %zu mallas", voxMade, eng->voxMeshes().size());
             }
         }
         {
@@ -947,6 +967,10 @@ struct PhysicsEngine::JoltImpl {
         const double gl = glm::length(gvec);
         const glm::dvec3 up = (gl > 1e-9) ? -gvec / gl : glm::dvec3(0.0, 1.0, 0.0);
         charCtrl->SetUp(JPH::Vec3((float)up.x, (float)up.y, (float)up.z));   // "arriba" es RADIAL y cambia al moverte
+        // Y la CAPSULA de pie sobre esa vertical: `SetUp` solo dice que es suelo; la forma la orienta
+        // la rotacion. Con la esfera daba igual; con la capsula, sin esto quedaba tumbada a cualquier
+        // latitud que no fuera el ecuador.
+        charCtrl->SetRotation(JPH::Quat::sFromTo(JPH::Vec3::sAxisY(), JPH::Vec3((float)up.x, (float)up.y, (float)up.z)));
         if (finite3(b->position))
             charCtrl->SetPosition(JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z));
         // La GRAVEDAD la integra el LLAMADOR: `ExtendedUpdate` no la aplica a la velocidad (su parámetro

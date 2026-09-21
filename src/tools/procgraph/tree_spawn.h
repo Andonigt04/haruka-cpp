@@ -19,7 +19,7 @@
 
 #include "proc_noise.h"                 // hash32
 #include "tree_prop.h"                  // treeSuitability, treePoisson, TreeSuit
-#include "core/terrain/planet_fields.h" // FieldSample
+#include "world/planet/planet_fields.h" // FieldSample
 
 #include <algorithm>
 #include <cmath>

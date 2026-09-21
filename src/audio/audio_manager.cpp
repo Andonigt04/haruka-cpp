@@ -3,6 +3,8 @@
 #include "core/propagation.h"
 
 #include <AL/alc.h>
+#include <chrono>
+#include <algorithm>
 #include <cstring>
 #include <glm/glm.hpp>
 
@@ -29,12 +31,15 @@ std::vector<std::string> AudioManager::playbackDevices() {
 void AudioManager::shutdown() {
     for (auto& [id, w] : m_world) m_sys.voiceDestroy(w.voice);
     m_world.clear();
+    for (auto& sv : m_slotVoices) if (sv.voice) m_sys.voiceDestroy(sv.voice);
+    m_slotVoices.clear();
     m_loader.clear();
     m_sys.shutdown();
 }
 
 void AudioManager::setListener(const glm::dvec3& pos, const glm::dvec3& fwd, const glm::dvec3& up) {
     m_listenerPos = pos;   // las fuentes se colocan RELATIVAS (sin jitter float a 1 UA)
+    m_listenerUp  = up;
     m_sys.setListenerOrientation(glm::normalize(glm::vec3(fwd)), glm::normalize(glm::vec3(up)));
 }
 
@@ -117,6 +122,56 @@ void AudioManager::update() {
         } else { --w.recalcIn; }
         m_sys.voiceSetGain(w.voice, w.gainCached);
     }
+    updatePoints();
+}
+
+void AudioManager::setVolumes(float master, float ambient, float sfx) {
+    m_sys.setMasterGain(master);
+    m_volAmbient = ambient;
+    m_volSfx     = sfx;
+}
+
+// Los grupos de SoundPoints → voces AL. Cada ranura de SoundPoints tiene su voz aqui, con el mismo
+// indice; si la ranura cambia de grupo (otra `key`) se vuelve a lanzar con el buffer que toque.
+void AudioManager::updatePoints() {
+    using clock = std::chrono::steady_clock;
+    const double now = std::chrono::duration<double>(clock::now().time_since_epoch()).count();
+    const float dt = (m_lastUpdateS < 0.0) ? (1.0f / 60.0f) : (float)std::min(0.1, now - m_lastUpdateS);
+    m_lastUpdateS = now;
+
+    m_points.update(m_listenerPos, glm::vec3(m_listenerUp), dt);
+
+    // Bajo el agua todo lo de fuera llega amortiguado; el bucle "sumergido" es el unico que no.
+    const float duck = m_submerged ? 0.15f : 1.0f;
+    auto volumeOf = [&](Audio::Sound snd) {
+        const float v = Audio::isLoop(snd) ? m_volAmbient : m_volSfx;
+        return (snd == Audio::Sound::Underwater) ? v : v * duck;
+    };
+
+    const auto& slots = m_points.voices();
+    if (m_slotVoices.size() < slots.size()) m_slotVoices.resize(slots.size());
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const auto& sl = slots[i];
+        SlotVoice& sv = m_slotVoices[i];
+        const bool wantPlaying = sl.active || sl.gain > 0.0f;
+        if (!wantPlaying) {
+            if (sv.playing) { m_sys.voiceDestroy(sv.voice); sv = SlotVoice{}; }
+            continue;
+        }
+        if (!sv.playing || sv.key != sl.key) {
+            if (!sv.voice) sv.voice = m_sys.voiceCreate();
+            if (!sv.voice) continue;
+            const uint32_t buf = m_loader.synth(sl.sound);
+            m_sys.voiceSetRolloff(sv.voice, 0.0f);            // atenua SoundPoints, no la distancia AL
+            m_sys.voicePlay(sv.voice, buf, sl.relPos, 0.0f, /*loop*/Audio::isLoop(sl.sound));
+            sv.key = sl.key; sv.playing = true;
+        }
+        m_sys.voiceSetPos(sv.voice, sl.relPos);
+        m_sys.voiceSetGain(sv.voice, sl.gain * volumeOf(sl.sound));
+        m_sys.voiceSetPitch(sv.voice, sl.pitch);
+    }
+    for (const auto& sh : m_points.oneShots())
+        m_sys.playOneShotFlat(m_loader.synth(sh.sound), sh.relPos, sh.gain * volumeOf(sh.sound), sh.pitch);
 }
 
 } // namespace Haruka

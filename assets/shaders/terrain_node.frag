@@ -22,6 +22,7 @@ layout(location = 5) in vec3 vUp;
 layout(location = 6) flat in int vStride;
 layout(location = 8) flat in int vKUp;   // vista 9: profundidad de caida a ancestro
 layout(location = 9) in float vDispM;   // vista 10: disparidad dibujado-dato, en metros
+layout(location = 10) in float vMapF;   // vista 12: mapa leido (0 propio, 1 padre, 2 abuelo; fraccion = rampa)
 layout(location = 7) flat in int vFace;
 
 // ⚠️ EL COLOR SALE DE LA MISMA LIBRERIA QUE EL CLIPMAP, NO DE UNA COPIA. Si el nodo y el clipmap
@@ -50,6 +51,8 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uTexAnchor;   // ancla planetaria del patrón, reducida módulo el tile en doubles por CPU
     vec4  uLightDir;
     vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
+    vec4  uStrideRamp;  // rampa del mapa por zancada: x = radio zancada 1 · y = fracción de rampa ·
+                        // z = vertexPx/errorPx · w = celda fina de colisión (ver nodeStrideMapF)
 };
 
 layout(location = 0) out vec4 fragColor;
@@ -128,6 +131,16 @@ void main() {
     if (dbg == 6) { fragColor = vec4(normalize(vNormal) * 0.5 + 0.5, 1.0); return; }
     if (dbg == 3) { fragColor = vec4(vec3(pow(gl_FragCoord.z, 0.15)), 1.0); return; }
     if (dbg == 4) { fragColor = vec4(debugLevelColor(vStride * 3), 1.0); return; }
+    // ── 12 = EL NIVEL ABSOLUTO DEL MAPA QUE SE LEE, en gris: `nivel del nodo − mapa`, 0,1 + 0,08·(A − 6)
+    // (A = 17 = el mapa mas fino de la Tierra, casi blanco; A = 6, casi negro). Con el corte continuo
+    // (`nodeStrideMapF`) tiene que ser un DEGRADADO sin escalones: en una frontera de nivel el hijo
+    // lee su mapa 3,1 y el padre su 2,1, que es el MISMO mapa absoluto. ⚠️ La primera version pintaba
+    // el indice RELATIVO (0..4) y Andoni vio "escalones de gris" que eran solo eso: la resta del nivel.
+    // Un escalon de gris AQUI si es un escalon del corte.
+    if (dbg == 12) { fragColor = vec4(vec3(clamp(0.1 + 0.08 * (float(vLevel) - vMapF - 6.0), 0.0, 1.0)), 1.0); return; }
+    // ── 13 = DISTANCIA al ojo, en gris (0..2 000 m). Para que el banco sepa a que distancia esta cada
+    // pixel de la vista 12 y compare el mapa leido con la ley (`nodeStrideMapF`).
+    if (dbg == 13) { fragColor = vec4(vec3(clamp(length(vFragPos) / 2000.0, 0.0, 1.0)), 1.0); return; }
     // ── 11 = MAPA DE "LO QUE SE VE MENOS LO QUE SE PISA", EN METROS ─────────────────────────────
     //
     // ⚠️ ESTA ES LA VISTA QUE FALTABA, Y LA RAZON DE QUE FALTARA ES EL PATRON DE SIEMPRE: toda la
@@ -145,7 +158,15 @@ void main() {
     // ⚠️ Y `radM` POR LA CUERDA, no con `acos`: un nodo de nivel 17 subtiende 6e-6 rad, `cos` de eso
     // es 1,0 exacto en float y `acos` devolvia 0. La sonda del banco se comio ese fallo hasta que la
     // contraprueba de perturbar la pendiente no cambio nada.
-    if (dbg == 11) {
+    // ── 14 = LA VISTA 11 EN NUMEROS: |dibujado − pisado| en 16 bits (R alto, G bajo, ±64 m, B = 255 =
+    // hay terreno), para que el BANCO lo lea y lo afirme (`testFrameDrawnVsBaked`). Misma referencia
+    // que la 11 —el campo con el corte de la colision desde el ancla bajo el ojo— pero CON EL BAKE,
+    // compuesto como `nodeFillHeights`/`terrain_node.comp`: base + detalle atenuado, sin hundir
+    // tierra bajo el mar. Sin el bake la 11 en el juego compara contra un planeta sin continentes.
+    // La 11 (colores) y la 14 (16 bits) comparten referencia. ⚠️ La 11 comparaba SIN bake
+    // (`detail(dir, R)`): en el juego, con continentes, pintaba magenta por el propio bake.
+    if (dbg == 14 || dbg == 11) {
+        const float  baseH  = vClimate.x * 1000.0;
         const dvec3  rel    = dvec3(vFragPos) - dvec3(uCenter.xyz) - dvec3(uCenterLo.xyz);
         const double r      = length(rel);
         const dvec3  dir    = rel / r;
@@ -153,8 +174,20 @@ void main() {
         // Gemelos de TERRAIN_TRIM_SLOPE y TERRAIN_TRIM_FLOOR (`terrain_lod.h`).
         const double radM = double(uMisc.x) * length(dir - anchor);
         const float  cut  = float(max(radM * 0.002LF, 0.5LF));
-        const double href = double(harukaTerrainDetail(dir, double(uMisc.x), cut));
+        double href = double(harukaTerrainDetail(dir, double(uMisc.x) + double(baseH), cut));
+        if (uMisc.w > 0.5 || uMisc.y > 0.5) {   // con bake: la composicion de `terrain_node.comp`
+            href *= double(harukaSeaLevelAttenuation(baseH));
+            if (baseH > 0.0 && href < -double(baseH)) href = -double(baseH);
+            href += double(baseH);
+        }
         const double err  = r - (double(uMisc.x) + href);      // + = se DIBUJA por encima de lo que se pisa
+        if (dbg == 14) {
+            const double fs = 64.0LF;
+            const double t  = clamp((err + fs) / (2.0LF * fs), 0.0LF, 1.0LF);   // 0,5 = error cero
+            const uint   q  = uint(t * 65535.0LF + 0.5LF);
+            fragColor = vec4(float(q >> 8u) / 255.0, float(q & 255u) / 255.0, 1.0, 1.0);
+            return;
+        }
         const float  a    = float(abs(err));
         vec3 col = (a < 0.05) ? vec3(0.0, 0.6, 0.1)
                  : (a < 0.25) ? mix(vec3(0.0,0.6,0.1), vec3(0.9,0.9,0.0), (a - 0.05) / 0.20)

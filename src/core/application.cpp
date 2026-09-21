@@ -43,7 +43,7 @@
 
 #include "renderer/motor_instance.h"
 #include "renderer/shader.h"
-#include "game/planetary_system.h"
+#include "world/planet/planetary_system.h"
 #include "renderer/texture.h"
 #include "core/scene/scene_loader.h"
 #include "tools/error_reporter.h"
@@ -288,56 +288,33 @@ void Application::cleanup() {
 
     if (RHI::Device* dev = RHI::device()) {
         if (RHI::valid(m_uboPerFrameH))  { dev->destroy(m_uboPerFrameH);  m_uboPerFrameH  = {}; }
-        if (RHI::valid(m_uboPerObjectH)) { dev->destroy(m_uboPerObjectH); m_uboPerObjectH = {}; }
-        if (RHI::valid(m_quadBuf))       { dev->destroy(m_quadBuf);       m_quadBuf       = {}; }
     }
 
     // Release ALL GL-owned resources before the context is destroyed.
     // Members not explicitly reset here would run their destructors AFTER
     // _window->shutdown() destroys the GL context, corrupting the heap.
-    _mainShader.reset();
     _lampShader.reset();
     _geomShader.reset();
     _ssaoShader.reset();
     _lightShader.reset();
     _flatShader.reset();
     _cascadeShadowShader.reset();
-    // POSTFX (ruta PSO — bloom + present): sus recursos los posee el RHI, no nosotros. Antes se
-    // borraban los FBO y las texturas del bloom con glDelete* crudos aunque pertenecen a los render
-    // targets del device (m_bloomPass) → doble-free / entrada huérfana en el pool. Ahora todo se
-    // libera por el device.
-    if (RHI::Device* dev = RHI::device()) {
-        if (RHI::valid(m_bloomExtractPSO)) { dev->destroy(m_bloomExtractPSO); m_bloomExtractPSO = {}; }
-        if (RHI::valid(m_bloomBlurPSO))    { dev->destroy(m_bloomBlurPSO);    m_bloomBlurPSO    = {}; }
-        for (auto& b : m_bloomUBOs) if (RHI::valid(b)) dev->destroy(b);
-        m_bloomUBOs.clear();
-        if (RHI::valid(m_presentPSO))      { dev->destroy(m_presentPSO);      m_presentPSO      = {}; }
-        if (RHI::valid(m_presentUBO))      { dev->destroy(m_presentUBO);      m_presentUBO      = {}; }
-        if (RHI::valid(m_skyPSO))          { dev->destroy(m_skyPSO);          m_skyPSO          = {}; }
-        if (RHI::valid(m_skyUBO))          { dev->destroy(m_skyUBO);          m_skyUBO          = {}; }
-        if (RHI::valid(m_scenePSO))        { dev->destroy(m_scenePSO);        m_scenePSO        = {}; }
-        for (int i = 0; i < 2; ++i)
-            if (RHI::valid(m_bloomPass[i])) { dev->destroy(m_bloomPass[i]); m_bloomPass[i] = {}; }
-    }
-    m_bloomTexH[0] = m_bloomTexH[1] = {};
-    m_bloomW = m_bloomH = 0;
-    _postScene.reset();
+    m_post.shutdown();    // bloom + present + target de escena (renderer/post_pass.h)
 
     // Render-pipeline objects with GL resources in their destructors
-    _shadow.reset();
     _hdr.reset();
     _bloom.reset();
     _ssao.reset();
     _ibl.reset();
     _pointShadow.reset();
-    _instancing.reset();
+    m_scene.shutdown();
+    m_props.shutdown();   // los props sueltan su GPU mientras el device sigue vivo
+    m_clouds.shutdown();  // idem las nubes (y espera al horneado del cielo si esta en vuelo)
+    m_wire.shutdown();
+    m_sky.shutdown();
     _cascadedShadow.reset();
 
     // Render targets (own FBOs / textures)
-    _lightingTarget.reset();
-    _bloomExtractTarget.reset();
-    _bloomPing.reset();
-    _bloomPong.reset();
 
     // Primitive meshes (own VAOs / VBOs)
     for (auto& lod : sphereLOD) lod.reset();
@@ -461,7 +438,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 for (size_t i = 0; i < ads.size(); ++i) if (ads[i].discrete) { pick = i; break; }
                 if (gw.preferredGpus.empty()) gw.preferredGpus.emplace_back();
                 gw.preferredGpus[0] = ads[pick].name;
-                HARUKA_LOGI("RHI", "GPU sin fijar -> la que elegiria la automatica: '%s'%s",
+                HARUKA_LOGD("RHI", "GPU sin fijar -> la que elegiria la automatica: '%s'%s",
                             ads[pick].name.c_str(), ads[pick].discrete ? " [dedicada]" : "");
             }
         }
@@ -523,7 +500,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
     _device = Haruka::RHI::Device::create(requestedBackend, _window->getNativeWindow(),
                                           gfx.preferredGpus);
     if (!gfx.preferredGpus.empty() && !gfx.preferredGpus[0].empty())
-        HARUKA_LOGI("RHI", "GPU preferida por ajuste: '%s'%s", gfx.preferredGpus[0].c_str(),
+        HARUKA_LOGD("RHI", "GPU preferida por ajuste: '%s'%s", gfx.preferredGpus[0].c_str(),
                     requestedBackend == Haruka::RHI::Backend::OpenGL
                         ? " (IGNORADA: OpenGL no permite elegir adaptador)" : "");
     Haruka::RHI::setDevice(_device.get());
@@ -564,10 +541,10 @@ void Application::run(const std::string& startScenePath, bool headless) {
         const auto adapters = Haruka::RHI::Device::enumerateAdapters(
             requestedBackend, _window->getNativeWindow());
         for (size_t i = 0; i < adapters.size(); ++i)
-            HARUKA_LOGI("RHI", "  GPU detectada [%zu] %s%s", i, adapters[i].name.c_str(),
+            HARUKA_LOGD("RHI", "  GPU detectada [%zu] %s%s", i, adapters[i].name.c_str(),
                         adapters[i].discrete ? "  [dedicada]" : "");
         if (adapters.size() <= 1)
-            HARUKA_LOGI("RHI", "  (solo una GPU listada: sin Vulkan disponible no se pueden "
+            HARUKA_LOGD("RHI", "  (solo una GPU listada: sin Vulkan disponible no se pueden "
                                "enumerar adaptadores y solo se ve la que ya usa el contexto)");
     }
 
@@ -919,7 +896,9 @@ void Application::run(const std::string& startScenePath, bool headless) {
         // del editor; el bucle del juego es este. El bloque que convierte las entidades que manda
         // el cluster en objetos de la escena vivia alli dentro, asi que en el juego no corria
         // nunca: el cliente recibia a los demas y en pantalla no habia nadie, sin un solo error.
-        syncNetworkEntities();
+#ifdef HARUKA_NETWORK
+        m_entitySync.sync(m_dgs, _currentScene);
+#endif
         syncVoxColliders();
 
         renderFrameContent();
@@ -988,8 +967,8 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 }
                 HARUKA_LOGI("Mem", "frame %d · RSS %.0f MB (pico %.0f MB) · VmData %.0f MB · props: %zu instancias, %.1f MB en CPU · GPU inst. arena %.1f MB",
                             memFrame, rssKb / 1024.0, hwmKb / 1024.0, dataKb / 1024.0,
-                            m_propGpu.size(), m_propGpu.size() * sizeof(m_propGpu[0]) / 1048576.0,
-                            _instancing ? _instancing->hostBytes() / 1048576.0 : 0.0);
+                            m_props.registry().instances().size(), m_props.hostBytes() / 1048576.0,
+                            m_scene.hostBytes() / 1048576.0);
             }
         }
 

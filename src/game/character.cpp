@@ -1,4 +1,6 @@
 #define GLM_ENABLE_EXPERIMENTAL
+#include <cstdio>
+#include <cstdlib>
 #include "character.h"
 #include <SDL3/SDL.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -183,6 +185,32 @@ void Character::applyWind(float deltaTime) {
 
     physicsBody->velocity += (m_windDrift - driftAntes);
     velocity = physicsBody->velocity;
+
+    // ── SONDA (`HARUKA_WIND_DIAG=1`): cada 2 s, lo que el viento le hace al personaje ───────────
+    // Andoni (20-09): "el viento hace que se mueva por si solo o impide el movimiento en una
+    // situacion normal". Con 3,5-6 m/s el arrastre es 0,06-0,19 m/s2, muy por debajo del rozamiento
+    // de 4,5: de pie no puede pasar nada... salvo que el viento que llega no sea el del log, o que
+    // `grounded` parpadee y la deriva se acumule sin freno. Esta linea lo separa: viento recibido,
+    // aceleracion, deriva, y el % de frames con los pies en el suelo.
+    {
+        static const bool s_diag = [] { const char* e = std::getenv("HARUKA_WIND_DIAG"); return e && e[0] == '1'; }();
+        if (s_diag) {
+            static double acc = 0.0, sumWind = 0.0, maxWind = 0.0, sumAcc = 0.0, maxAcc = 0.0, maxDrift = 0.0, maxRad = 0.0;
+            static int n = 0, nGround = 0;
+            acc += deltaTime; sumWind += glm::length(vAir); maxWind = std::max(maxWind, glm::length(vAir));
+            sumAcc += al; maxAcc = std::max(maxAcc, al);
+            maxDrift = std::max(maxDrift, glm::length(m_windDrift));
+            maxRad = std::max(maxRad, std::abs(glm::dot(glm::dvec3(physicsBody->velocity), up)));
+            ++n; if (grounded) ++nGround;
+            if (acc >= 2.0 && n > 0) {
+                std::printf("[Viento] recibido media %.2f max %.2f m/s · arrastre media %.3f max %.3f m/s2 · deriva max %.3f m/s"
+                            " · pies en el suelo %d%% de %d frames · |v radial| max %.2f m/s · v cuerpo %.2f m/s\n",
+                            sumWind / n, maxWind, sumAcc / n, maxAcc, maxDrift, 100 * nGround / n, n, maxRad,
+                            glm::length(glm::dvec3(physicsBody->velocity)));
+                acc = 0.0; sumWind = sumAcc = maxWind = maxAcc = maxDrift = maxRad = 0.0; n = nGround = 0;
+            }
+        }
+    }
 }
 
 void Character::processInput(SDL_Window* window, float deltaTime) {
@@ -195,6 +223,19 @@ void Character::processInput(SDL_Window* window, float deltaTime) {
         SDL_GetRelativeMouseState(&mx, &my);
         if (mx != 0.f || my != 0.f)
             rotate(mx, -my);
+    }
+    // EL STICK DERECHO: la accion "Look" (vec2, si el juego la registra) gira la vista a velocidad
+    // constante —`kStickDegPerSec` grados por segundo a tope— en vez de por desplazamiento como el
+    // raton. `rotate` multiplica por `mouseSensitivity`, asi que aqui se divide para que el ajuste
+    // del raton no cambie la velocidad del stick.
+    if (m_inputProvider.readValue && mouseSensitivity > 1e-6f) {
+        const Input::ActionValue lv = m_inputProvider.readValue("Look");
+        if (const glm::vec2* look = std::get_if<glm::vec2>(&lv)) {
+            constexpr float kStickDegPerSec = 160.0f;
+            if (look->x != 0.f || look->y != 0.f)
+                rotate(look->x * kStickDegPerSec * deltaTime / mouseSensitivity,
+                       look->y * kStickDegPerSec * deltaTime / mouseSensitivity);
+        }
     }
 
     if (m_bindings.empty()) return;

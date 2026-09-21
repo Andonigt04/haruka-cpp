@@ -52,6 +52,8 @@ layout(std140, binding = 0) uniform NodeDraw {
     vec4  uTexAnchor;
     vec4  uLightDir;
     vec4  uAerial;      // x = 1/L extinción por metro · y = día (ver lib/aerial.glsl)
+    vec4  uStrideRamp;  // rampa del mapa por zancada: x = radio zancada 1 · y = fracción de rampa ·
+                        // z = vertexPx/errorPx · w = celda fina de colisión (ver nodeStrideMapF)
 };
 
 // ⚠️ SE PROBÓ CON UN SSBO INSTANCIADO Y SE REVIRTIÓ. La idea era colapsar 1 008 draws en uno, y
@@ -110,6 +112,7 @@ layout(location = 6) flat out int vStride;  // indice de stride del nodo (vista 
 // dentro de uno normal, y esas dos cosas tienen causas y arreglos distintos.
 layout(location = 8) flat out int vKUp;
 layout(location = 9) out float vDispM;   // vista 10: dibujado - dato, en metros
+layout(location = 10) out float vMapF;   // vista 12: indice fraccionario del mapa leido (rampa de zancada)
 layout(location = 7) flat out int vFace;    // cara del cubo (vista 5: atribuir un agujero)
 
 // ── LEER UN SLOT QUE NO ES EL MIO: EL SUB-RECTANGULO ────────────────────────────────────────────
@@ -291,17 +294,39 @@ void main() {
     // hay que cerrar la costura; la copia apuntaba a otra cosa parecida.
     const int  parSlot  = int(IN.misc.x);
     const int  granSlot = int(IN.misc.y);
+    // Bisabuelo y tatarabuelo: los pide el corte continuo al final de cada banda de nivel. El
+    // nivel se decide por el punto MAS CERCANO del nodo, pero `fMap` va por vertice: en una hoja a
+    // punto de fundirse (texel de 1 px en su punto cercano) los vertices lejanos tienen el texel a
+    // 0,74 px (la esquina esta un 35 % mas lejos a 1080p) y piden f hasta 3,43. Sin el mapa 4 el
+    // hijo se recorta en 3 mientras el padre lee 2,43 en el mismo punto: quedaba un escalon de
+    // 0,075 m de media (0,43 el peor) en las fronteras, medido en `terrain_node_stride_ramp_continuity`.
+    const int  ggSlot   = int(IN.misc.z);
+    const int  gggSlot  = int(IN.misc.w);
+    // Ancestros 5 y 6 en `slot.w`, 16 bits cada uno (0xFFFF = no esta): los piden los nodos que la
+    // particion bajo agua somera baja mas niveles de los que la ley de pantalla pediria.
+    const int  a5raw    = IN.slot.w & 0xFFFF, a6raw = (IN.slot.w >> 16) & 0xFFFF;
+    const int  a5Slot   = (a5raw == 0xFFFF) ? -1 : a5raw;
+    const int  a6Slot   = (a6raw == 0xFFFF) ? -1 : a6raw;
     const uint slotBase = uint(slot) * texels;
     const uint parBase  = uint(max(parSlot,  0)) * texels;
     const uint granBase = uint(max(granSlot, 0)) * texels;
+    const uint ggBase   = uint(max(ggSlot,   0)) * texels;
+    const uint gggBase  = uint(max(gggSlot,  0)) * texels;
+    const uint a5Base   = uint(max(a5Slot,   0)) * texels;
+    const uint a6Base   = uint(max(a6Slot,   0)) * texels;
 
-    // `S` = cuantos niveles por encima de MI huella esta el dato. Con datos propios (`kUp == 0`) el
+    // `S` = cuantos niveles por encima del MAPA BASE esta el dato. Con datos propios (`kUp == 0`) el
     // nivel S vive en el hueco del ancestro S-esimo y le corresponde el sub-rectangulo `k = S`. Con
-    // datos de un fallback (`kUp > 0`) solo se usa S = 0, porque alli el morph esta apagado.
-    #define HARUKA_NODE_BASE(S) ((S) == 0 ? slotBase : ((S) == 1 ? parBase : granBase))
-    #define HARUKA_NODE_K(S)    ((kUp > 0) ? kUp : (S))
-    #define HARUKA_NODE_SUB(S, IDX) ((kUp > 0) ? ((IDX) & ((1 << kUp) - 1)) \
-                                               : ((IDX) & ((1 << (S)) - 1)))
+    // datos de un fallback (`kUp > 0`) el mapa base es el del ancestro `kUp` (`slotBase`), y S niveles
+    // por encima de el es el ancestro `kUp + S` de la hoja, con sub-rectangulo `k = kUp + S`.
+    // ⚠️ ANTES UN NODO CAIDO SOLO LEIA S = 0: su ancestro crudo, sin la ley continua. Con el corte
+    // continuo su vecino bien dibujado lee media octava mas fino en el mismo punto, y en la frontera
+    // quedaba un DESNIVEL (Andoni, 20-09: "el desnivel de geometria... como que no ha sido adrede").
+    // Antes coincidian por casualidad: el vecino leia exactamente el mapa del abuelo.
+    #define HARUKA_NODE_BASE(S) ((S) == 0 ? slotBase : ((kUp + (S)) == 1 ? parBase : ((kUp + (S)) == 2 ? granBase : \
+                                 ((kUp + (S)) == 3 ? ggBase : ((kUp + (S)) == 4 ? gggBase : ((kUp + (S)) == 5 ? a5Base : a6Base))))))
+    #define HARUKA_NODE_K(S)    (kUp + (S))
+    #define HARUKA_NODE_SUB(S, IDX) ((IDX) & ((1 << (kUp + (S))) - 1))
     #define HARUKA_NODE_AT(S, TU, TV) harukaNodeSample(HARUKA_NODE_BASE(S), (TU), (TV), \
                                           HARUKA_NODE_K(S), \
                                           HARUKA_NODE_SUB(S, uNode.z), HARUKA_NODE_SUB(S, uNode.w))
@@ -345,15 +370,84 @@ void main() {
     // meterlo en la distancia haria que el morph dependiera del resultado del morph, y ademas los dos
     // lados dejarian de compartir la entrada (cada uno tiene su propio mapa de alturas).
     float morph, morphPar;
+    // ── LA RAMPA DEL MAPA POR ZANCADA (ver `TERRAIN_NODE_STRIDE_RAMP` en terrain_node.h) ─────────
+    //
+    // `skMap` es el mapa que la ZANCADA del nodo obliga a leer (el corte a texel x zancada), y salta
+    // de golpe en el radio de cada zancada: a 150 y 300 m del observador el relieve dibujado suelta
+    // una octava en una circunferencia — los circulos en el terreno. Aqui el vertice calcula por su
+    // PROPIA distancia el indice FRACCIONARIO del mapa que le toca (`fMap`, gemelo de
+    // `nodeStrideMapF`: la misma ley que decide la zancada, con el tope de cerca hecho rampa) y
+    // mezcla el mapa `floor(fMap)` con el siguiente. Como la distancia sale del radio base y la ley
+    // es la misma en todos los nodos, las dos caras de una arista compartida dan lo mismo.
+    // ⚠️ NUNCA MAS FINO QUE LA ZANCADA: `max(fMap, skMap)`, o la malla a zancada 2 leeria el corte del
+    // texel y haria picos (sub-Nyquist, medido 4,5x). Y sin padre/abuelo residente no hay mapa al
+    // que ir: se recorta como `skMap`.
+    int   iMap = int(skMap);
+    float fracMap = 0.0;
     {
         const vec3  pRel = (uCenter.xyz + uCenterLo.xyz) + dir * uMisc.x;
-        const float dist = max(length(pRel), 1.0);
+        const float dist = max(length(pRel), 1.0);    // al radio BASE: la del morph (ver abajo)
+        {
+            // ⚠️ LA LEY DE ZANCADA MIDE AL TERRENO, NO A LA ESFERA LISA. La CPU decide la zancada con
+            // la cota del nodo (`nodeStrideWant`, `nodeElevM`); esto media `dir·R` y con el terreno a
+            // +286 m creia estar a 339 m del ojo estando a 59, y leia el mapa del abuelo bajo los
+            // pies (lo cazo `v5 F3`: los tres strides daban la misma cifra). A 1 000 m de cota, todo
+            // el campo cercano se dibujaba con el corte de 1 km mas lejos. La cota sale del mapa del
+            // ABUELO (o del mas fino residente): es funcion de la posicion —las dos caras de una
+            // arista leen el mismo texel bilineal—, asi que la ley sigue dando lo mismo a ambos lados.
+            // ⚠️ EN EL VERTICE COLAPSADO (u0, v0), NO EN (u, v): la posicion del vertice cosido es la
+            // del grueso, y la cota tiene que ser la de ESE punto o el mismo punto se evalua con dos
+            // cotas —dos `f`, dos alturas— a cada lado de una frontera de nivel. Regla 1 del 25-08
+            // ("funcion solo de (nivel, posicion)"); la rompi con (u, v) y volvieron los pinchos.
+            const int   kElev = (kUp > 0) ? 0 : ((int(IN.misc.y) >= 0) ? 2 : ((int(IN.misc.x) >= 0) ? 1 : 0));
+            const float hElev = HARUKA_NODE_AT(kElev, int(u0), int(v0));
+            const float distT = max(length(pRel + dir * hElev), 1.0);
+            const float texOwn   = (uLod.z / exp2(float(uNode.y))) / float(uGrid.y);
+            const float collWant = max(uStrideRamp.w, distT / float(uGrid.y / 2)) / max(texOwn, 1e-9);
+            float clampC;
+            if (uStrideRamp.y <= 0.0) {
+                clampC = (distT <= uStrideRamp.x) ? 1.0 : (distT <= 2.0 * uStrideRamp.x) ? 2.0 : 4.0;
+            } else {
+                float f = 0.0;
+                for (int k = 0; k < 2; ++k) {
+                    const float D = uStrideRamp.x * exp2(float(k));
+                    f += clamp((distT - D * (1.0 - uStrideRamp.y)) / (D * uStrideRamp.y), 0.0, 1.0);
+                }
+                clampC = exp2(f);
+            }
+            const float want = min(min(uStrideRamp.z, collWant), clampC);
+            float f = clamp(log2(max(want, 1.0)), 0.0, 2.0);
+            // ── EL CORTE CONTINUO, mas alla del radio de zancada 4 ──────────────────────────────
+            // El mapa leido mide `vertexPx` pixeles de espaciado a cualquier distancia:
+            // f = log2(vertexPx / texel_px). Dentro de una banda de nivel el texel va de errorPx a
+            // errorPx/2 pixeles, asi que f recorre una octava (2 -> 3) y en la frontera el hijo lee
+            // 8·texel = el 4·texel del padre: continuo por construccion. Sin esto cada frontera de
+            // nivel era un anillo (el corte saltaba de 8 a 16 px). Gemelo de `nodeStrideMapF`.
+            if (distT > 2.0 * uStrideRamp.x) {
+                const float texelPx = texOwn / max(distT * uLod.x, 1e-12);
+                const float fPx = log2(max(uStrideRamp.z * uLod.y / max(texelPx, 1e-9), 1.0));
+                f = max(f, min(fPx, 6.0));
+            }
+            float fEff = max(f, float(skMap));
+            // Un nodo CAIDO dibuja desde su ancestro `kUp`: la misma ley, medida desde ese mapa. Si la
+            // ley pide menos que eso (el ancestro ya es mas basto de lo que toca), se queda en 0: es
+            // el transitorio de un frame que ya existia.
+            fEff = max(fEff - float(kUp), 0.0);
+            // Y solo hasta donde hay ancestro residente (la cadena viaja en `IN.misc`, contada desde
+            // la HOJA: el mapa `S` del nodo caido es el ancestro `kUp + S`).
+            const int avail = (int(IN.misc.x) < 0) ? 0 : (int(IN.misc.y) < 0) ? 1 : (int(IN.misc.z) < 0) ? 2
+                            : (int(IN.misc.w) < 0) ? 3 : (a5Slot < 0) ? 4 : (a6Slot < 0) ? 5 : 6;
+            fEff = min(fEff, float(max(avail - kUp, 0)));
+            iMap    = int(floor(fEff));
+            fracMap = fEff - float(iMap);
+            if (iMap >= 6) { iMap = 6; fracMap = 0.0; }
+        }
         // ⚠️ EL MORPH VA AL NIVEL DEL MAPA QUE SE LEE, NO AL DEL NODO. Si este vertice lee el mapa del
         // padre (porque su arista se cose a una zancada mas gruesa), su morph tiene que ser el de ESE
         // nivel: si no, los dos lados de la arista usan los MISMOS mapas con PESOS distintos y la
         // costura se abre igual. Medido al intentarlo sin esto: de 0 agujeros a 132, todos en
         // frontera de nivel.
-        const int  lvRead = max(int(uNode.y) - int(skMap), 0);
+        const int  lvRead = max(int(uNode.y) - kUp - iMap, 0);
         const float texM = (uLod.z / exp2(float(lvRead))) / float(uGrid.y);
         const float e    = texM / (dist * uLod.x);
         // Una raiz (nivel 0) no tiene padre en el que fundirse. Gemelo de `nodeParentMorph`.
@@ -448,11 +542,15 @@ void main() {
     // Es el QUINTO parche de esta familia que hace lo mismo. La regla que los explica todos: el morph
     // tiene que ser funcion SOLO de (nivel, posicion del vertice); en cuanto mira a los vecinos, dos
     // nodos del mismo nivel con vecindarios distintos evaluan distinto el punto que comparten.
-    const int sOwn = int(skMap);                    // el stride sube de nivel, no de "mapa"
-    const int sPar = int(min(skMap + 1u, 2u));
+    const int sOwn = iMap;                          // el stride (y su rampa) sube de nivel, no de "mapa"
+    const int sPar = min(iMap + 1, 6);
+    const int sGr  = min(iMap + 2, 6);
     const float hPar0 = mix(HARUKA_NODE_AT(sPar, int(u0), int(v0)),
-                            HARUKA_NODE_AT(2,    int(u0), int(v0)), morphPar);
-    float h = mix(HARUKA_NODE_AT(sOwn, int(u0), int(v0)), hPar0, morph);
+                            HARUKA_NODE_AT(sGr,  int(u0), int(v0)), morphPar);
+    // El propio mapa ya es la mezcla de la rampa (`fracMap` hacia el siguiente); encima, el morph.
+    const float hOwn0 = mix(HARUKA_NODE_AT(sOwn, int(u0), int(v0)),
+                            HARUKA_NODE_AT(sPar, int(u0), int(v0)), fracMap);
+    float h = mix(hOwn0, hPar0, morph);
 
     // ── EL VERTICE SOBRANTE SE COLAPSA, NO SE INTERPOLA ─────────────────────────────────────────
     //
@@ -496,6 +594,7 @@ void main() {
     vDispM = (kUp > 0) ? -1.0 : (h - HARUKA_NODE_AT(0, int(u), int(v)));
     vStride = IN.slot.z;
     vKUp    = kUp;
+    vMapF   = float(kUp + iMap) + fracMap;   // absoluto respecto a la HOJA (vista 12: nivel − vMapF)
 
     const vec3 dirF = dir;
     // ⚠️ EL CENTRO VIENE EN DOS TROZOS, Y EL ORDEN DE LA SUMA NO ES NEGOCIABLE.
@@ -541,16 +640,25 @@ void main() {
     // Con el paso del stride, la normal describe la MISMA superficie que se rasteriza. Es la misma
     // regla que ya se aplica al morph y a la altura: todo lo que decide el vertice tiene que hablar
     // de la geometria que se dibuja, no de otra.
-    const int  nStep = 1 << IN.slot.z;                 // stride del nodo, en texeles
+    // ⚠️ EL PASO ES EL DEL MAPA QUE SE LEE, NO EL DE LA ZANCADA DE LA MALLA. Con la rampa de zancada
+    // una malla a zancada 1 puede estar leyendo el mapa del abuelo (corte a 4 texeles); si la normal
+    // se tomara a +-1 texel describiria las FACETAS de ese mapa interpolado, y la misma superficie
+    // leida por un nodo vecino a zancada 4 (paso +-4) saldria con otro sombreado: medido en
+    // `testStrideRingsOnLand`, rugosidad 0,31 contra 0,55 con el MISMO mapa a los dos lados de la
+    // frontera de zancada — el circulo seguia ahi con el relieve ya continuo. Con el paso del mapa,
+    // la normal es funcion del mapa y la distancia, como la altura, y la zancada de la malla ya no
+    // se ve. En la rampa se mezclan las dos normales (paso del mapa y del siguiente) con `fracMap`.
+    const int  nStep = 1 << iMap;                      // paso del mapa leido, en texeles
     const uint um = uint(max(int(u) - nStep, 0)),  up_ = uint(min(int(u) + nStep, N - 1));
     const uint vm = uint(max(int(v) - nStep, 0)),  vp  = uint(min(int(v) + nStep, N - 1));
     // La NORMAL sale del mismo mapa morfeado: si no, la iluminacion describiria una superficie que
     // no es la que se dibuja justo en la banda del morph.
     // La misma composicion de tres niveles que arriba: si la normal usara otra, la iluminacion
     // describiria una superficie distinta de la que se dibuja.
-    #define HARUKA_NODE_H(TU, TV) mix(HARUKA_NODE_AT(sOwn, (TU), (TV)), \
+    #define HARUKA_NODE_H(TU, TV) mix(mix(HARUKA_NODE_AT(sOwn, (TU), (TV)), \
+                                       HARUKA_NODE_AT(sPar, (TU), (TV)), fracMap), \
                                    mix(HARUKA_NODE_AT(sPar, (TU), (TV)), \
-                                       HARUKA_NODE_AT(2,    (TU), (TV)), morphPar), \
+                                       HARUKA_NODE_AT(sGr,  (TU), (TV)), morphPar), \
                                    morph)
     const float hL = HARUKA_NODE_H(int(um),  int(v));
     const float hR = HARUKA_NODE_H(int(up_), int(v));
@@ -595,6 +703,27 @@ void main() {
     const float duM = float(up_ - um) * stepM;
     const float dvM = float(vp  - vm) * stepM;
     vNormal = normalize(dirF - t1 * ((hR - hL) / max(duM, 1e-6)) - t2 * ((hU - hD) / max(dvM, 1e-6)));
+    if (fracMap > 0.0 && iMap < 6) {
+        // La normal con el paso del mapa SIGUIENTE, y la mezcla: sin esto el paso salta al acabar
+        // la rampa (de 2^i a 2^(i+1) texeles) y el sombreado con el.
+        const int  nStep2 = nStep * 2;
+        const uint um2 = uint(max(int(u) - nStep2, 0)),  up2 = uint(min(int(u) + nStep2, N - 1));
+        const uint vm2 = uint(max(int(v) - nStep2, 0)),  vp2 = uint(min(int(v) + nStep2, N - 1));
+        #define HARUKA_NODE_H(TU, TV) mix(mix(HARUKA_NODE_AT(sOwn, (TU), (TV)), \
+                                           HARUKA_NODE_AT(sPar, (TU), (TV)), fracMap), \
+                                       mix(HARUKA_NODE_AT(sPar, (TU), (TV)), \
+                                           HARUKA_NODE_AT(sGr,  (TU), (TV)), morphPar), \
+                                       morph)
+        const float hL2 = HARUKA_NODE_H(int(um2), int(v));
+        const float hR2 = HARUKA_NODE_H(int(up2), int(v));
+        const float hD2 = HARUKA_NODE_H(int(u),   int(vm2));
+        const float hU2 = HARUKA_NODE_H(int(u),   int(vp2));
+        #undef HARUKA_NODE_H
+        const float duM2 = float(up2 - um2) * stepM;
+        const float dvM2 = float(vp2 - vm2) * stepM;
+        const vec3 n2 = normalize(dirF - t1 * ((hR2 - hL2) / max(duM2, 1e-6)) - t2 * ((hU2 - hD2) / max(dvM2, 1e-6)));
+        vNormal = normalize(mix(vNormal, n2, fracMap));
+    }
 
     vLevel      = uNode.y;
     vFace       = uNode.x;

@@ -13,16 +13,16 @@
 //      Contraprueba: con agua quieta el mismo cuerpo no se desplaza.
 // ================================================================================================
 #include "test_common.h"
-#include "core/planet/terrain_detail.h"   // equirectUV / sampleHeightField / terrainDetail
-#include "core/planet/terrain_lod.h"      // terrainTriM
+#include "world/terrain/terrain_detail.h"   // equirectUV / sampleHeightField / terrainDetail
+#include "world/terrain/terrain_lod.h"      // terrainTriM
 
 #include <cmath>
 #include <memory>
 #include <vector>
 #include <glm/glm.hpp>
 
-#include "core/planet/ocean_wave.h"
-#include "core/planet/water_fill.h"
+#include "world/water/ocean_wave.h"
+#include "world/water/water_fill.h"
 #include "physics/physics_engine.h"
 
 using Haruka::Planet::oceanWaveHeight;
@@ -681,7 +681,7 @@ void test_ocean_swash() {
 // Se murió al bajar el tope de tesela de 64 a 32 por coste. Cualquier futuro ajuste de ese tope, o
 // del piso, puede volver a apagarla. Esto lo convierte en un fallo de test en vez de en una textura
 // que alguien encuentra rara meses después.
-#include "core/planet/terrain_lod.h"
+#include "world/terrain/terrain_lod.h"
 
 void test_terrain_finest_octave() {
     beginTest("terrain_finest_octave");

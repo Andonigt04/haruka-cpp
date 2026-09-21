@@ -22,7 +22,7 @@
 //     que es el fallo que ya ocurrió una vez con el yaw y dejó los árboles tumbados.
 // ================================================================================================
 #include "test_common.h"
-#include "core/planet/prop_collider.h"
+#include "world/props/prop_collider.h"
 #include "tools/procgraph/prop_mesh.h"   // bakeRockMesh / bakeHouseMesh (la malla REAL)
 
 #include <cmath>

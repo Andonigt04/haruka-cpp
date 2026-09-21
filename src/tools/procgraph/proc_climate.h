@@ -1,9 +1,9 @@
 #pragma once
 
 #include "proc_graph.h"
-#include "core/planet/climate.h"
-#include "core/planet/geology.h"
-#include "core/weather_system.h"
+#include "world/planet/climate.h"
+#include "world/planet/geology.h"
+#include "world/weather_system.h"
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>   // glm::pi — llegaba de rebote por el cube_sphere.h borrado
 

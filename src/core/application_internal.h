@@ -29,6 +29,10 @@ extern std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
 
 // Camera-relative model matrix in double precision (no jitter at planetary range).
 glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos);
+/// Un PERSONAJE: de pie sobre la vertical del planeta (`up`), girado su `rotation.y` alrededor de
+/// ella, con la base (el pie) en `obj.position`. La matriz general aplica Euler XYZ en el marco del
+/// mundo: a cualquier latitud que no sea el ecuador el personaje salia tumbado.
+glm::mat4 getCharacterTransform(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos, const glm::dvec3& up);
 
 // Lazily-loaded, cached model by path (nullptr for empty path / load failure).
 Model* getOrLoadModelCached(const std::string& path);

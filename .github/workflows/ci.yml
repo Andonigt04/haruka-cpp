@@ -60,6 +60,7 @@ jobs:
 
             cmake -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
+              -DHARUKA_BUILD_TESTS=ON \
               -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
             # `haruka_tests_rhi` arrastra HarukaEngine, que a su vez arrastra HarukaShaders: los
             # .spv se compilan solos. Un .spv que falte es MUDO en tiempo de ejecución, así que si
@@ -117,6 +118,7 @@ jobs:
 
             cmake -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
+              -DHARUKA_BUILD_TESTS=ON \
               -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"
             cmake --build build -j"$(nproc)" --target haruka_tests_rhi
 
@@ -175,6 +177,7 @@ jobs:
             # Configurar el motor Haruka
             cmake -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
+              -DHARUKA_BUILD_TESTS=ON \
               -DMODULES="${{ matrix.modules }}" \
               -DHARUKA_NETWORK=${{ matrix.network }} \
               -DCMAKE_PREFIX_PATH="/tmp/sdl3-install"

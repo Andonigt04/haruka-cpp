@@ -6,7 +6,7 @@
 
 #include <imgui.h>
 
-#include "core/terrain/bake_util.h"
+#include "world/terrain/bake_util.h"
 #include "core/logger.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_device.h"

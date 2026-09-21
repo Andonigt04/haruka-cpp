@@ -22,8 +22,8 @@
 // ================================================================================================
 #include "test_common.h"
 #include "tools/procgraph/tree_mesh.h"
-#include "core/planet/prop_scatter.h"   // scatterPropsNear: el alcance del scatter
-#include "core/planet/prop_collider.h"  // propTreeParams / propColliderParts por estilo
+#include "world/props/prop_scatter.h"   // scatterPropsNear: el alcance del scatter
+#include "world/props/prop_collider.h"  // propTreeParams / propColliderParts por estilo
 
 #include <cmath>
 #include <cstdio>
@@ -873,7 +873,7 @@ void test_prop_density() {
 // cuanto tarda el scatter. Lo que no se mide aqui es la GPU: eso esta en el banco RHI
 // (`instancing: anillo`). Los presupuestos son los del juego: 200 000 instancias de tope.
 // ================================================================================================
-#include "game/instanced_object.h"
+#include "world/props/instanced_object.h"
 #include "renderer/gpu_instancing.h"
 #include <chrono>
 

@@ -2,6 +2,7 @@
 
 #include <AL/al.h>
 #include <AL/alc.h>
+#include <algorithm>
 #include <iostream>
 
 namespace Haruka {
@@ -19,6 +20,10 @@ bool AudioSystem::init(const std::string& outputDevice) {
         return false;
     }
     m_device = dev; m_context = ctx;
+    // Antes solo se escribia al FALLAR: con exito el log no decia ni que dispositivo se abrio.
+    const char* nm = alcGetString(dev, ALC_ALL_DEVICES_SPECIFIER);
+    if (!nm || !*nm) nm = alcGetString(dev, ALC_DEVICE_SPECIFIER);
+    std::cerr << "[audio] OpenAL abierto: '" << (nm ? nm : "?") << "' (" << alGetString(AL_RENDERER) << " " << alGetString(AL_VERSION) << ")\n";
     alDistanceModel(AL_INVERSE_DISTANCE_CLAMPED);
     ALuint pool[16]; alGenSources(16, pool);
     for (ALuint s : pool) m_pool.push_back(s);
@@ -57,6 +62,8 @@ void AudioSystem::playOneShot(uint32_t buffer, const glm::vec3& relPos, float ga
     alSource3f(v, AL_POSITION, relPos.x, relPos.y, relPos.z);
     alSourcef(v, AL_GAIN, gain);
     alSourcef(v, AL_REFERENCE_DISTANCE, refDist);
+    alSourcef(v, AL_PITCH, 1.0f);            // el pool lo comparten los disparos "flat"
+    alSourcef(v, AL_ROLLOFF_FACTOR, 1.0f);
     alSourcePlay(v);
 }
 
@@ -89,6 +96,35 @@ void AudioSystem::voiceSetPos(uint32_t voice, const glm::vec3& relPos) {
 
 void AudioSystem::voiceSetGain(uint32_t voice, float gain) {
     if (m_ok && voice) alSourcef(voice, AL_GAIN, gain);
+}
+
+void AudioSystem::voiceSetPitch(uint32_t voice, float pitch) {
+    if (m_ok && voice) alSourcef(voice, AL_PITCH, pitch);
+}
+
+void AudioSystem::voiceSetRolloff(uint32_t voice, float rolloff) {
+    if (m_ok && voice) alSourcef(voice, AL_ROLLOFF_FACTOR, rolloff);
+}
+
+void AudioSystem::playOneShotFlat(uint32_t buffer, const glm::vec3& relPos, float gain, float pitch) {
+    if (!m_ok || !buffer) return;
+    ALuint v = 0;
+    for (ALuint s : m_pool) {
+        ALint st; alGetSourcei(s, AL_SOURCE_STATE, &st);
+        if (st != AL_PLAYING) { v = s; break; }
+    }
+    if (!v) return;
+    alSourcei(v, AL_LOOPING, AL_FALSE);
+    alSourcei(v, AL_BUFFER, (ALint)buffer);
+    alSource3f(v, AL_POSITION, relPos.x, relPos.y, relPos.z);
+    alSourcef(v, AL_GAIN, gain);
+    alSourcef(v, AL_PITCH, pitch);
+    alSourcef(v, AL_ROLLOFF_FACTOR, 0.0f);
+    alSourcePlay(v);
+}
+
+void AudioSystem::setMasterGain(float g) {
+    if (m_ok) alListenerf(AL_GAIN, std::max(0.0f, g));
 }
 
 } // namespace Haruka

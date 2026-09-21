@@ -20,6 +20,15 @@ namespace Haruka::RHI::opengl
         if (target.id == 0)
         {
             glBindFramebuffer(GL_FRAMEBUFFER, 0);          // backbuffer (pantalla)
+            // ⚠️ Y EL VIEWPORT DE LA VENTANA. Solo el pase a textura lo fijaba, asi que el de pantalla
+            // heredaba el ULTIMO (el de un mapa de 512² de la hierba, el de sombras...): la escena se
+            // dibujaba en una esquina. La app lo salvaba con un `setViewport` explicito tras abrir el
+            // pase; el banco no, y el pase de presion de la hierba dejo el cielo del test siguiente a
+            // 512² sobre 256². Vulkan lo hace siempre (`beginRenderPass`); GL ahora igual, y un
+            // `setViewport` posterior sigue mandando.
+            uint32_t fw = 0, fh = 0;
+            m_device->framebufferSize(fw, fh);
+            if (fw > 0 && fh > 0) glViewport(0, 0, (GLsizei)fw, (GLsizei)fh);
         }
         else if (const GLRenderTarget* rt = m_device->renderTarget(target))
         {

@@ -99,3 +99,56 @@ void test_primitive_winding() {
     Haruka::Renderer::PrimitiveShapes::createCapsule(0.5f, 2.0f, 24, 16, v, n, i);
     comprueba("capsula", v, n, i);
 }
+
+// ── LA CAPSULA DEL PERSONAJE, DE PIE ──────────────────────────────────────────────────────────
+// Lo que se dibuja de otro jugador es la primitiva CHARACTER (0,35 x 1,9, base en el origen) con
+// `getCharacterTransform`: de pie sobre la vertical del planeta, el pie en `position`. Se mide en
+// CPU: se transforman los vertices y se proyectan sobre la vertical local (extension 0..1,9) y sobre
+// el plano tangente (radio 0,35). CONTRAPRUEBA: la transformacion GENERICA (Euler del mundo) a esa
+// misma latitud deja la capsula tumbada y medio enterrada — que es lo que se veia.
+#include "core/application_internal.h"
+#include "core/scene/scene_manager.h"
+#include "tools/object_types.h"
+#include <vector>
+
+void test_character_capsule_standing() {
+    beginTest("character_capsule_standing");
+    std::vector<glm::vec3> verts, normals; std::vector<unsigned int> idx;
+    Haruka::Renderer::PrimitiveShapes::createCapsule(0.35f, 1.9f, 24, 12, verts, normals, idx);
+    for (auto& v : verts) v.y += 0.95f;   // lo mismo que hace getPrimitiveMesh(CHARACTER)
+
+    // Un jugador a 31° de latitud, 131° de longitud (donde arranca Survival), sobre una Tierra en el origen.
+    const double R = 6371000.0, lat = glm::radians(31.15586), lon = glm::radians(131.65449);
+    const glm::dvec3 up(std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon));
+    Haruka::SceneObject obj;
+    obj.position   = Haruka::WorldPos(up * R);      // el PIE
+    obj.rotation   = glm::dvec3(0.0, 37.0, 0.0);    // yaw cualquiera
+    obj.objectType = Haruka::ObjectType::CHARACTER;
+    const Haruka::WorldPos cam(up * (R + 10.0));    // camara a 10 m: el marco es camara-relativo
+
+    auto measure = [&](const glm::mat4& m, double& minUp, double& maxUp, double& maxRadial) {
+        minUp = 1e9; maxUp = -1e9; maxRadial = 0.0;
+        const glm::dvec3 footRel = glm::dvec3(obj.position - cam);   // el pie, relativo a la camara
+        for (const auto& v : verts) {
+            const glm::dvec3 p = glm::dvec3(m * glm::vec4(v, 1.0f)) - footRel;   // relativo al pie
+            const double h = glm::dot(p, up);
+            const glm::dvec3 t = p - up * h;
+            minUp = std::min(minUp, h); maxUp = std::max(maxUp, h); maxRadial = std::max(maxRadial, glm::length(t));
+        }
+    };
+    double lo, hi, rad;
+    measure(AppInternal::getCharacterTransform(obj, cam, up), lo, hi, rad);
+    char msg[200];
+    std::snprintf(msg, sizeof msg, "de pie: del pie %.3f al %.3f m sobre la vertical local, radio %.3f (esperado 0 / 1,9 / 0,35)", lo, hi, rad);
+    std::printf("    %s\n", msg);
+    CHECK(std::fabs(lo) < 0.02 && std::fabs(hi - 1.9) < 0.02 && std::fabs(rad - 0.35) < 0.02, msg);
+
+    // Contraprueba: la transformacion generica (Euler del MUNDO) con la primitiva CAPSULE de antes
+    // (0,5 x 1,5 centrada): tumbada 59° y con la mitad bajo el pie.
+    std::vector<glm::vec3> old, on; std::vector<unsigned int> oi;
+    Haruka::Renderer::PrimitiveShapes::createCapsule(0.5f, 1.5f, 24, 12, old, on, oi);
+    verts.swap(old);
+    measure(AppInternal::getTransformMatrix(obj, cam), lo, hi, rad);
+    std::snprintf(msg, sizeof msg, "contraprueba (antes): del %.2f al %.2f m sobre la vertical, radio tangente %.2f: enterrada y tumbada", lo, hi, rad);
+    CHECK(lo < -0.5 && hi < 1.2 && rad > 0.6, msg);   // de pie el radio seria 0,5: 0,71 es la inclinacion
+}

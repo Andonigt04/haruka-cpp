@@ -9,7 +9,7 @@
  * Cada comprobación lleva su contraprueba: un test que sólo mira lo que quiere ver no mide nada.
  */
 #include "test_common.h"
-#include "core/terrain/cave_system.h"
+#include "world/vox/cave_system.h"
 
 #include <algorithm>
 #include <cmath>
