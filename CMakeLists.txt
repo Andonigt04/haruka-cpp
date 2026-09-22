@@ -258,12 +258,40 @@ endif()
 # --- 6b. DGS Network Client (optional) ---
 option(HARUKA_NETWORK "Enable DGS network client" OFF)
 if(HARUKA_NETWORK)
+    # ⚠️ El cliente se RESUELVE (checkout local o git), nunca desde un `.a` vendido: el precompilado en
+    # external/dgs/sdk quedaba obsoleto en cuanto se tocaba network.cpp y el juego seguía mandando con
+    # el código viejo sin que nadie lo notara — el síntoma real era "en cli todo bien, la zona nunca
+    # recibe nada". Mismo patrón que HARUKA_ENGINE_LOCAL en el juego: checkout local si hay uno junto
+    # al motor, si no git desde GitHub; el tag pinnea releases reproducibles.
+    set(_default_dgs_local "")
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/CMakeLists.txt")
+        set(_default_dgs_local "${CMAKE_CURRENT_SOURCE_DIR}/../dgs")
+    endif()
+    set(HARUKA_DGS_LOCAL "${_default_dgs_local}" CACHE PATH "Checkout LOCAL de dgs (vacío = descargar de GitHub)")
+    set(DGS_GIT_TAG "main" CACHE STRING "Tag/rama de dgs a usar cuando no hay checkout local")
+    set(DGS_BUILD_NODES OFF CACHE BOOL "dgs: solo la lib del cliente (nunca nodos/tests) cuando lo trae el motor/juego" FORCE)
+    set(DGS_BUILD_NODES OFF CACHE BOOL "" FORCE)
+    include(FetchContent)
+    if(HARUKA_DGS_LOCAL)
+        get_filename_component(_dgs_abs "${HARUKA_DGS_LOCAL}" ABSOLUTE)
+        message(STATUS "DGS client: LOCAL @ ${_dgs_abs}")
+        FetchContent_Declare(dgs SOURCE_DIR "${_dgs_abs}")
+    else()
+        message(STATUS "DGS client: REMOTO (GitHub @ ${DGS_GIT_TAG})")
+        FetchContent_Declare(
+            dgs
+            GIT_REPOSITORY https://github.com/Andonigt04/dgs.git
+            GIT_TAG        ${DGS_GIT_TAG}
+        )
+    endif()
+    FetchContent_MakeAvailable(dgs)
+
     target_compile_definitions(HarukaEngine PUBLIC HARUKA_NETWORK)
-    target_include_directories(HarukaEngine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
-    target_link_libraries(HarukaEngine PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs/sdk/libdgs_client.a"
-        OpenSSL::SSL
-    )
+    # `"include/dgs/..."` se resuelve contra la RAÍZ del checkout de dgs (include/dgs/...), igual que
+    # hace `include_directories(.)` en su propio CMake. PUBLIC para que el juego lo herede al linkar
+    # el motor y el .so de reglas (dlopen) lo use.
+    target_include_directories(HarukaEngine PUBLIC "${dgs_SOURCE_DIR}")
+    target_link_libraries(HarukaEngine PRIVATE dgs_client OpenSSL::SSL)
 endif()
 
 # --- 6. Install Rules ---
