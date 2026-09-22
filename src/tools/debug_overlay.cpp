@@ -184,12 +184,10 @@ void DebugOverlay::render() {
     if (!n.zone.empty()) line("zona %s", n.zone.c_str());
     line("objs %d  props %d%s", m_last.sceneObjects, m_last.scatterProps,
          n.ghosts > 0 ? ("  ghosts " + std::to_string(n.ghosts)).c_str() : "");
-    // Jugadores = los que hay en la escena, TU incluido. Los remotos que trae el feed no incluyen tu
-    // propio uuid (el cliente se filtra a si mismo al recibir), asi que un "jugadores 0" mientras
-    // estas jugando era una mentira: el contador decia "0 remotos cerca". Sumado tu personaje, solo
-    // eres 1, con vecinos eres 1+remotos. Lo mismo que npcs, que ya suma las criaturas locales.
-    line("jugadores %d (remotos %d + tu)  npcs %d (red %d + local %d)  objetos del mundo %d",
-         n.players + 1, n.players, n.npcs + m_last.localNpcs, n.npcs, m_last.localNpcs, n.worldObjects);
+    // Jugadores = los REMOTOS que el feed tiene en la escena (tu no cuentas); npcs = los del feed +
+    // las criaturas locales del juego.
+    line("jugadores %d  npcs %d (red %d + local %d)  objetos del mundo %d",
+         n.players, n.npcs + m_last.localNpcs, n.npcs, m_last.localNpcs, n.worldObjects);
     line("xyz %.1f  %.1f  %.1f", m_last.worldPos.x, m_last.worldPos.y, m_last.worldPos.z);
     line("cpu %s", m_cpu.c_str());
     line("gpu %s", m_gpu.c_str());

@@ -373,7 +373,12 @@ void Application::run(const std::string& startScenePath, bool headless) {
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui::StyleColorsDark();
-        Haruka::SettingsManager::get().init();   // carga imgui.ini → m_graphics.renderBackend
+        // ⚠️ VARIOS JUEGOS EN LA MISMA MAQUINA: `HARUKA_INI=<ruta>` da a cada instancia su PROPIO
+        // imgui.ini. Sin él, los ajustes (resolucion, backend, bindings) de una instancia pisan a los
+        // de la otra en el mismo archivo y se pisan entre si al guardar. Con él, cada ventana tiene
+        // su config y las cierras sin romperle la resolucion a la vecina.
+        const char* iniPath = std::getenv("HARUKA_INI");
+        Haruka::SettingsManager::get().init(iniPath && *iniPath ? iniPath : "imgui.ini");   // → m_graphics.renderBackend
         useVulkan = Haruka::SettingsManager::get().graphics().renderBackend
                     == Haruka::Settings::RenderBackend::Vulkan;
 
