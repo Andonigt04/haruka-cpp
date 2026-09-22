@@ -167,6 +167,11 @@ void DebugOverlay::render() {
                                    n.pingsLost > 0 ? ("  perdidos " + std::to_string(n.pingsLost)).c_str() : "");
         else if (!n.zone.empty()) line("zona -- ms (sin pong%s)", n.pingsLost > 0 ? (": " + std::to_string(n.pingsLost) + " perdidos").c_str() : "");
         line("tx %.1f  rx %.1f KiB/s", m_txKiBs, m_rxKiBs);
+        // ⚠️ ESTO ES LO QUE FALTABA: "jugadores 0" tiene dos causas y ninguna se distinguia. La zona
+        // te devuelve tu propio eco por su broadcast (filtrado abajo antes de contar), asi que aqui se
+        // ve SI tu transform le llega: "ecо: no" separado de "no hay nadie mas".
+        if (n.selfEchoMs >= 0.0f) line("zona te oye: si (eco hace %.2f s)", n.selfEchoMs / 1000.0f);
+        else                      line("zona te oye: NO (aun sin eco)");
     } else {
         line("integrado (sin DGS)");
     }
@@ -179,6 +184,12 @@ void DebugOverlay::render() {
     if (!n.zone.empty()) line("zona %s", n.zone.c_str());
     line("objs %d  props %d%s", m_last.sceneObjects, m_last.scatterProps,
          n.ghosts > 0 ? ("  ghosts " + std::to_string(n.ghosts)).c_str() : "");
+    // Jugadores = los que hay en la escena, TU incluido. Los remotos que trae el feed no incluyen tu
+    // propio uuid (el cliente se filtra a si mismo al recibir), asi que un "jugadores 0" mientras
+    // estas jugando era una mentira: el contador decia "0 remotos cerca". Sumado tu personaje, solo
+    // eres 1, con vecinos eres 1+remotos. Lo mismo que npcs, que ya suma las criaturas locales.
+    line("jugadores %d (remotos %d + tu)  npcs %d (red %d + local %d)  objetos del mundo %d",
+         n.players + 1, n.players, n.npcs + m_last.localNpcs, n.npcs, m_last.localNpcs, n.worldObjects);
     line("xyz %.1f  %.1f  %.1f", m_last.worldPos.x, m_last.worldPos.y, m_last.worldPos.z);
     line("cpu %s", m_cpu.c_str());
     line("gpu %s", m_gpu.c_str());

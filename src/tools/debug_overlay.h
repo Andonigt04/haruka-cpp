@@ -32,6 +32,11 @@ struct DebugNetInfo {
     uint32_t    pingsLost = 0;
     uint64_t    txBytes = 0, rxBytes = 0;
     int         ghosts = 0;
+    int         players = 0, npcs = 0, worldObjects = 0;   ///< del feed, ahora en la escena
+    /// Edad (ms) del ULTIMO ECO que la zona devolvio de TU transform. -1 = todavia no ha llegado
+    /// ninguno, que es la diferencia entre "no hay nadie mas" (jugadores 0, eco si) y "mi transform
+    /// no llega a ninguna zona" (jugadores 0, eco no). Ver `EntitySync::selfEchoAgeS`.
+    float       selfEchoMs = -1.0f;
 };
 
 /// Lo del FRAME, que rellena quien lo dibuja (una vez por frame, antes de `render`).
@@ -40,6 +45,7 @@ struct DebugFrameInfo {
     double      worldTimeS = 0.0;      ///< reloj del mundo (simulacion; el del cluster si hay DGS)
     glm::dvec3  worldPos{0.0};         ///< coords del jugador (XYZ del mundo, m)
     int         sceneObjects = 0;
+    int         localNpcs = 0;         ///< criaturas del juego (MonsterManager)
     int         scatterProps = 0;
     DebugNetInfo net;
 };

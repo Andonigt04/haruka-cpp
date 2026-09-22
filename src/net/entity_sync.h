@@ -25,11 +25,24 @@ public:
     void adoptWorldObject(uint32_t uuid, SceneManager* scene);
     /// Cada frame de simulacion (antes de dibujar): la llaman el bucle del juego Y `renderFrame()`.
     void sync(DGS::Client& dgs, SceneManager* scene);
+    /// Lo que hay AHORA en la escena venido del feed, por tipo (para el panel de depuracion).
+    struct Counts { int players = 0, npcs = 0, worldObjects = 0; };
+    Counts counts() const;
+
+    /// ⚠️ "¿LA ZONA ME OYE?" — la unica prueba, y no era visible por ninguna parte. El panel cuenta
+    /// "jugadores" sin incluirte a ti (tu uuid se filtra abajo), asi que un contador a 0 no distingue
+    /// "no hay nadie mas" de "mi transform no llega a ninguna zona" (familias de direcciones, chunk
+    /// sin cubrir, radio de interes…). La zona SI te devuelve tu propio eco por su broadcast: esto
+    /// anota CUANDO pasó, y el panel lo enseña como "zona te oye: si (eco hace Xs)".
+    /// @return edad del ultimo eco en segundos, o -1 si la zona todavia no te ha devuelto nada.
+    double selfEchoAgeS() const;
 
 private:
     uint32_t m_localUuid = 0;                 // 0 = not set: nothing is filtered
     std::map<uint32_t, double> m_lastSeen;    // uuid → cuando se oyo por ultima vez (TTL)
+    std::map<uint32_t, uint8_t> m_kind;       // uuid → 0 jugador · 1 npc · 2 objeto del mundo
     std::unordered_set<uint32_t> m_locallyOwnedWorld;
+    double m_lastHeardSelfAt = 0.0;           // wall (steady) s del ultimo eco propio; 0 = nunca
     static constexpr double kTtlS = 5.0;
 };
 

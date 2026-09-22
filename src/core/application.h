@@ -452,6 +452,9 @@ public:
     struct NetLinkStats { uint64_t txBytes = 0, rxBytes = 0; float headMs = -1, headMinMs = -1, headAvgMs = -1, headMaxMs = -1;
                           float zoneMs = -1, zoneMinMs = -1, zoneAvgMs = -1, zoneMaxMs = -1; uint32_t pingsLost = 0; std::string zone; };
     NetLinkStats networkLinkStats();
+    /// Jugadores / npcs / objetos del mundo que el feed tiene ahora en la escena.
+    struct NetCounts { int players = 0, npcs = 0, worldObjects = 0; };
+    NetCounts networkEntityCounts() const { const auto c = m_entitySync.counts(); return { c.players, c.npcs, c.worldObjects }; }
     double networkWorldTimeSeconds() const;
 
     /// Which uuid is US, so the world feed does not spawn a second copy of the local player: the zone
@@ -486,6 +489,10 @@ public:
                     const std::string& apiHost = "", int apiPort = 0);
     bool isNetworkConnected() const;
     int  getGhostCount()      const;
+    /// ⚠️ "¿LA ZONA ME OYE?" — la prueba que no existia (ver `EntitySync::selfEchoAgeS`). Edad en
+    /// segundos del ultimo eco que la zona devolvio de TU transform; -1 mientras no llegue ninguno.
+    /// El panel de depuracion lo dibuja como "zona te oye: si/no".
+    double networkSelfEchoAgeS() const { return m_entitySync.selfEchoAgeS(); }
 #endif
 
     /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */

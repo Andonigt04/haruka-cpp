@@ -40,6 +40,7 @@ void EntitySync::adoptWorldObject(uint32_t uuid, SceneManager* scene) {
     // decide nadie. Si la copia ya está creada, se retira; si no, el filtro de arriba la evita.
     if (scene) scene->removeObject("entity_" + std::to_string(uuid));
     m_lastSeen.erase(uuid);
+    m_kind.erase(uuid);
 }
 
 void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
@@ -59,7 +60,11 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             //     scene's vector — the name registry is overwritten, the vector is not — so at 10 Hz
             //     with N players nearby the scene grew by 10*N objects a second, for ever. An entity
             //     that is already in the scene is MOVED, not added again.
-            if (transfer.uuid == m_localUuid) continue;
+            if (transfer.uuid == m_localUuid)
+            {
+                if (m_localUuid != 0) m_lastHeardSelfAt = nowSeconds;   // la zona devuelve tu eco
+                continue;
+            }
             // Y lo que este cliente ya dibuja por su cuenta: lo que TÚ tiraste vuelve por el feed
             // como cualquier otro objeto del mundo, y crear aquí una segunda copia deja tu objeto
             // real cayendo debajo de otro idéntico que no se mueve. Ver `adoptWorldObject`.
@@ -76,6 +81,8 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             const double yawDeg = (double)transfer.angle * (360.0 / 65536.0) - 180.0;
 
             m_lastSeen[transfer.uuid] = nowSeconds;
+            m_kind[transfer.uuid] = (transfer.state & DGS::STATE_WORLD_OWNED) ? 2
+                                  : (transfer.type == DGS::ENT_NPC) ? 1 : 0;
 
             if (auto existing = scene->getObject(name)) {
                 existing->position = where;
@@ -150,11 +157,25 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
         for (auto it = m_lastSeen.begin(); it != m_lastSeen.end(); ) {
             if (nowSeconds - it->second < kTtlS) { ++it; continue; }
             scene->removeObject("entity_" + std::to_string(it->first));
+            m_kind.erase(it->first);
             it = m_lastSeen.erase(it);
         }
     }
 }
 
+
+EntitySync::Counts EntitySync::counts() const {
+    Counts c;
+    for (const auto& [uuid, k] : m_kind) { if (k == 0) ++c.players; else if (k == 1) ++c.npcs; else ++c.worldObjects; }
+    return c;
+}
+
+double EntitySync::selfEchoAgeS() const {
+    if (m_lastHeardSelfAt <= 0.0) return -1.0;   // la zona aun no te ha devuelto tu propio eco
+    const double nowSeconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    return nowSeconds - m_lastHeardSelfAt;
+}
 
 } // namespace Haruka::Net
 #endif // HARUKA_NETWORK
