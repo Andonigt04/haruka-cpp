@@ -130,6 +130,7 @@ namespace Haruka::RHI::vulkan
             // la UI sobre el backbuffer. Solo Vulkan; los demás backends no-op.
             bool     initUi() override;
             Backend  backend() const override { return Backend::Vulkan; }
+            void     setVsync(bool fifo) override;
             const std::string& deviceName() const override { return m_deviceName; }
             void     readPixels(int x, int y, int w, int h, Format format, void* data) override;
             // Retorna el tamaño en píxeles del swapchain (extent físico de presentación). El host lo usa

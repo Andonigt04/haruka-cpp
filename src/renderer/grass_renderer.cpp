@@ -19,6 +19,12 @@ constexpr int    kCellBits   = 22;
 constexpr int    kCellsFace  = 1 << kCellBits;
 constexpr int    kMaxStamps  = 64;
 constexpr int    kNodesMax   = 512;
+// Rejilla del INDICE ESPACIAL de `drawnHeightAt` (ver grass_gen.comp): cubre el disco en coords de
+// la cara (lx,ly) con kIdxDim×kIdxDim celdas; por celda entran todos los nodos que la tocan
+// (tope kNodesMax: peor caso = un nodo grueso en todas las celdas).
+constexpr int    kIdxDim     = 16;
+
+bool s_warnMatUBO = false;
 
 struct GenUBO {
     glm::vec4  center, centerLo, camFwd;
@@ -27,10 +33,13 @@ struct GenUBO {
     glm::ivec4 nodeGrid;
     glm::vec4  misc;
     glm::vec4  plane[4];   ///< los 4 planos laterales del frustum (normal hacia DENTRO, por el ojo)
+    glm::dvec4 uIdx;       ///< x,y = esquina min de la rejilla (lx,ly) · z = lado de celda (lx) · w = lado total
+    glm::ivec4 uIdxGrid;   ///< x,y = dims de la rejilla (celdas) · z,w = (libre)
 };
 struct DrawUBO {
     glm::mat4 mvp;
     glm::vec4 wind, sun, pressA, pressE, pressN, shade, aerial, up;
+    glm::vec4 camShift;   ///< camara del ultimo dispatch − camara actual: ancla el campo al mundo
 };
 struct PressUBO {
     glm::vec4 shift, decay;
@@ -86,6 +95,25 @@ bool GrassRenderer::init(RHI::Device* dev, const std::string& shaderDir, const C
     m_nodesCap  = kNodesMax;
     m_nodesSSBO = dev->createBuffer(RHI::BufferUsage::Storage, m_nodesCap * sizeof(Haruka::Terrain::TerrainNodeRenderer::NearNode),
                                     nullptr, RHI::BufferMemory::Dynamic);
+    // La lista de celdas del disco (ivec2, coords de celda de la cara): la rellena la CPU en
+    // `dispatchBlades` con las celdas cuyo centro cae dentro del radio; el shader lee su celda de
+    // aqui. Tope acotado: celda minima plausible 0,2 m (planeta R≥5e5) y el radio del ajuste.
+    {
+        const int  sideCap = 2 * ((int)std::ceil(m_cfg.radiusM / 0.2) + 1) + 1;
+        m_cellCap           = (size_t)sideCap * (size_t)sideCap;
+        m_cellPairs = dev->createBuffer(RHI::BufferUsage::Storage, m_cellCap * sizeof(glm::ivec2),
+                                        nullptr, RHI::BufferMemory::Dynamic);
+    }
+    // El índice espacial de `drawnHeightAt` (binding 6): offsets por celda (kIdxDim²+1) y lista de
+    // índices de nodo (kIdxDim² × kNodesMax, el peor caso: N nodos solapando todas las celdas).
+    {
+        const size_t nCells = (size_t)kIdxDim * (size_t)kIdxDim;
+        std::vector<uint32_t> zOff(nCells + 1, 0u);
+        m_idxOff  = dev->createBuffer(RHI::BufferUsage::Storage, (nCells + 1) * sizeof(uint32_t),
+                                      zOff.data(), RHI::BufferMemory::Dynamic);
+        m_idxList = dev->createBuffer(RHI::BufferUsage::Storage, nCells * kNodesMax * sizeof(uint32_t),
+                                      nullptr, RHI::BufferMemory::Static);
+    }
     m_bladesSSBO = dev->createBuffer(RHI::BufferUsage::Storage, m_cfg.maxBlades * 32, nullptr, RHI::BufferMemory::Static);
     // DrawElementsIndirectCommand: {indexCount, instanceCount, firstIndex, baseVertex, baseInstance}.
     const uint32_t cmdInit[5] = { 45u, 0u, 0u, 0u, 0u };
@@ -109,6 +137,7 @@ bool GrassRenderer::init(RHI::Device* dev, const std::string& shaderDir, const C
     }
     m_ready = RHI::valid(m_genUBO) && RHI::valid(m_drawUBO) && RHI::valid(m_pressUBO) && RHI::valid(m_nodesSSBO)
            && RHI::valid(m_bladesSSBO) && RHI::valid(m_cmd) && RHI::valid(m_ib)
+           && RHI::valid(m_cellPairs) && RHI::valid(m_idxOff) && RHI::valid(m_idxList)
            && RHI::valid(m_pressRT[0]) && RHI::valid(m_pressRT[1]);
     if (m_ready)
         HARUKA_LOGI("Hierba", "radio %.0f m · %.0f briznas/m² · tope %zu (%.0f MB) · presion %d² a %.2f m/texel (%.0f m)",
@@ -120,7 +149,7 @@ bool GrassRenderer::init(RHI::Device* dev, const std::string& shaderDir, const C
 
 void GrassRenderer::shutdown() {
     if (!m_dev) return;
-    for (RHI::BufferHandle* b : { &m_genUBO, &m_drawUBO, &m_pressUBO, &m_nodesSSBO, &m_bladesSSBO, &m_cmd, &m_ib, &m_readback })
+    for (RHI::BufferHandle* b : { &m_genUBO, &m_drawUBO, &m_pressUBO, &m_nodesSSBO, &m_bladesSSBO, &m_cmd, &m_ib, &m_readback, &m_cellPairs, &m_idxOff, &m_idxList })
         if (RHI::valid(*b)) { m_dev->destroy(*b); *b = {}; }
     for (int i = 0; i < 2; ++i) if (RHI::valid(m_pressRT[i])) { m_dev->destroy(m_pressRT[i]); m_pressRT[i] = {}; m_pressTex[i] = {}; }
     for (RHI::PipelineHandle* p : { &m_genPipe, &m_drawPipe, &m_pressPipe })
@@ -248,11 +277,70 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     Haruka::dirToCubeFaceClosed(up, face, lx, ly);
     const double cellM  = f.planetRadiusM * 1.5707963267948966 / (double)kCellsFace;
     const int    halfC  = (int)std::ceil((double)m_cfg.radiusM / cellM) + 1;
-    const int    side   = 2 * halfC + 1;
     const int    cx     = (int)std::floor((lx + 1.0) * 0.5 * kCellsFace);
     const int    cy     = (int)std::floor((ly + 1.0) * 0.5 * kCellsFace);
     const double cellArea = cellM * cellM;
     const uint32_t perCell = (uint32_t)std::max(1.0, std::round(cellArea * (double)m_cfg.bladesPerM2));
+
+    // ── LAS CELDAS DENTRO DEL DISCO, NO LA REJILLA CUADRADA ───────────────────────────────────
+    // El cuadrado side×side (≈55 celdas de 2,4 m en la Tierra) paga las esquinas que envuelven al
+    // disco de `radiusM`. La CPU deja solo las celdas cuyo CENTRO cae dentro del radio + media
+    // diagonal + 2 m: las que pierde son exactamente las que el shader ya descartaba por distancia
+    // (SKIP 3), así que el resultado visual es idéntico con menos hilos que se pagan su fp64.
+    // `Haruka::cubeFaceToDir` en double, la misma convención que el compute.
+    const double cellD  = 2.0 / (double)kCellsFace;
+    const glm::dvec3 relCam = f.camPos - f.planetCenter;
+    const double altCam  = glm::length(relCam) - f.planetRadiusM;
+    const double padM    = cellM * 0.71 + 2.0;
+    std::vector<glm::ivec2> cells;
+    cells.reserve((size_t)(2 * halfC + 1) * (2 * halfC + 1));
+    for (int dy = -halfC; dy <= halfC && cells.size() < m_cellCap; ++dy) {
+        for (int dx = -halfC; dx <= halfC && cells.size() < m_cellCap; ++dx) {
+            const int ccx = cx + dx, ccy = cy + dy;
+            if (ccx < 0 || ccy < 0 || ccx >= kCellsFace || ccy >= kCellsFace) continue;
+            const double lxe = -1.0 + ((double)ccx + 0.5) * cellD;
+            const double lye = -1.0 + ((double)ccy + 0.5) * cellD;
+            const glm::dvec3 approx = Haruka::cubeFaceToDir(face, lxe, lye) * (f.planetRadiusM + altCam) - relCam;
+            if (glm::length(approx) > (double)m_cfg.radiusM + padM) continue;
+            cells.emplace_back(ccx, ccy);
+        }
+    }
+    const uint32_t nCells = (uint32_t)cells.size();
+    if (nCells == 0) return;   // sin celdas no hay briznas; el draw se salta por m_lastThreads == 0
+    m_dev->updateBuffer(m_cellPairs, 0, cells.size() * sizeof(glm::ivec2), cells.data());
+
+    // ── INDICE ESPACIAL DE LA TABLA DE NODOS ────────────────────────────────────────────────────
+    // `drawnHeightAt` barría TODA la tabla por brizna (O(briznas × nodos)). Aqui se reparte cada
+    // nodo por las celdas de la rejilla que su rectangulo toca (en orden de la tabla), y el shader
+    // solo prueba los candidatos de su celda. La rejilla cubre el disco en coords (lx,ly) con
+    // margen; fuera de ella el shader sigue barriendo la tabla entera: mismo resultado, el indice
+    // solo cambia CUANTOS nodos se prueban, no cual se elige.
+    const double spanL  = 2.0 * (m_cfg.radiusM + padM + cellM * 2.0) / f.planetRadiusM;
+    const double gridX0 = lx - spanL * 0.5, gridY0 = ly - spanL * 0.5;
+    const double cellL  = spanL / (double)kIdxDim;
+    const size_t kIdxCells = (size_t)kIdxDim * (size_t)kIdxDim;
+    std::vector<uint32_t> idxCnt(kIdxCells, 0u);
+    std::vector<uint32_t> idxList(kIdxCells * (size_t)kNodesMax);
+    for (size_t ni = 0; ni < nNodes; ++ni) {
+        const auto& nd = nodes->at(ni);
+        const double cellsL = std::ldexp(1.0, nd.node[1]);   // celdas por lado en el nivel del nodo
+        const double cw = 2.0 / cellsL;
+        const double nXA = -1.0 + (double)nd.node[2] * cw, nX1 = nXA + cw;
+        const double nYA = -1.0 + (double)nd.node[3] * cw, nY1 = nYA + cw;
+        if (nX1 <= gridX0 || nXA >= gridX0 + spanL || nY1 <= gridY0 || nYA >= gridY0 + spanL) continue;
+        const int gx0 = (int)std::floor((nXA - gridX0) / cellL), gx1 = (int)std::floor((nX1 - gridX0) / cellL);
+        const int gy0 = (int)std::floor((nYA - gridY0) / cellL), gy1 = (int)std::floor((nY1 - gridY0) / cellL);
+        for (int gy = std::max(gy0, 0); gy <= std::min(gy1, kIdxDim - 1); ++gy)
+            for (int gx = std::max(gx0, 0); gx <= std::min(gx1, kIdxDim - 1); ++gx) {
+                const size_t c = (size_t)gy * kIdxDim + (size_t)gx;
+                idxList[c * (size_t)kNodesMax + idxCnt[c]++] = (uint32_t)ni;
+            }
+    }
+    std::vector<uint32_t> idxOff(kIdxCells + 1, 0u);
+    for (size_t c = 0; c < kIdxCells; ++c) idxOff[c + 1] = idxOff[c] + idxCnt[c];
+    m_dev->updateBuffer(m_idxOff, 0, idxOff.size() * sizeof(uint32_t), idxOff.data());
+    if (idxOff[kIdxCells] > 0)
+        m_dev->updateBuffer(m_idxList, 0, idxOff[kIdxCells] * sizeof(uint32_t), idxList.data());
 
     // El centro del planeta relativo a la camara, partido en grueso (multiplo de 64 m, exacto en
     // float) y fino: la misma convencion que `terrain_node.vert`. Sin esto la raiz temblaria 0,5 m.
@@ -264,12 +352,14 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     g.center   = glm::vec4(glm::vec3(hi), (float)f.planetRadiusM);
     g.centerLo = glm::vec4(glm::vec3(rel - hi), f.seaLevelM);
     g.camFwd   = glm::vec4(glm::normalize(f.viewDir), std::cos(std::min(f.coneHalfAngle + 0.15f, 3.1f)));
-    g.cells    = glm::ivec4((int)face, cx - halfC, cy - halfC, side);
+    g.cells    = glm::ivec4((int)face, (int)nCells, 0, 0);
     g.grid     = glm::vec4((float)kCellsFace, (float)perCell, m_cfg.radiusM, m_cfg.density);
     g.lod      = glm::vec4(m_cfg.lodStartM, m_cfg.lodKeep, m_cfg.heightM, m_cfg.widthM);
     g.nodeGrid = glm::ivec4((int)Haruka::Terrain::TERRAIN_NODE_TEXELS, (int)Haruka::Terrain::TERRAIN_NODE_CELLS, (int)nNodes, 0);
     static const float s_dbg = [] { const char* e = std::getenv("HARUKA_GRASS_DEBUG"); return e ? (float)std::atoi(e) : 0.0f; }();
     g.misc     = glm::vec4(f.finestTexelM, s_dbg, (float)(glm::length(f.camPos - f.planetCenter) - f.planetRadiusM), 0.0f);
+    g.uIdx     = glm::dvec4(gridX0, gridY0, cellL, spanL);   // en double: las fronteras de la rejilla
+    g.uIdxGrid = glm::ivec4(kIdxDim, kIdxDim, 0, 0);        // del CPU y del compute coinciden al bit
     // ── LOS CUATRO PLANOS DEL FRUSTUM ─────────────────────────────────────────────────────────────
     // El cono que los envuelve (`nodeFrustumConeHalfAngle`) sobra por las esquinas: a 60° y 16:9 el
     // cono mide 49,7° de semiangulo y el rectangulo 30° x 46°, o sea que el cono genera ~1,7x de
@@ -288,7 +378,7 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     }
     m_dev->updateBuffer(m_genUBO, 0, sizeof(g), &g);
 
-    const uint64_t threads = (uint64_t)side * (uint64_t)side * (uint64_t)perCell;
+    const uint64_t threads = (uint64_t)nCells * (uint64_t)perCell;
     m_lastThreads = (size_t)threads;
     ctx->bindPipeline(m_genPipe);
     ctx->bindUniformBuffer(0, m_genUBO);
@@ -296,21 +386,60 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     ctx->bindStorageBuffer(2, f.heights);
     ctx->bindStorageBuffer(3, m_bladesSSBO);
     ctx->bindStorageBuffer(4, m_cmd);
-    if (RHI::valid(f.materialUBO)) ctx->bindUniformBuffer(12, f.materialUBO);
+    ctx->bindStorageBuffer(5, m_cellPairs);
+    ctx->bindStorageBuffer(6, m_idxOff);
+    ctx->bindStorageBuffer(7, m_idxList);
+    if (RHI::valid(f.materialUBO)) {
+        ctx->bindUniformBuffer(12, f.materialUBO);
+    } else if (!s_warnMatUBO) {
+        // Si la tabla de materiales (binding 12) no llega aqui, `harukaGrassAmount` lee uMatCount=0
+        // y mata TODAS las briznas (SKIP 8, grass<0.02) — un campo vacio silencioso. Se avisa UNA vez.
+        s_warnMatUBO = true;
+        HARUKA_LOGW("Hierba", "materialUBO (binding 12) NO disponible en el dispatch: la hierba saldra vacia (harukaGrassAmount=0)");
+    }
     ctx->bindTexture(15, f.baseField);
     ctx->dispatch((uint32_t)std::min<uint64_t>((threads + 63u) / 64u, 65535u), 1, 1);
     ctx->memoryBarrier();   // el draw lee briznas y comando
+
+    // Registro del estado que PRODUJO este dispatch: el REUSE de prepare compara contra esto (no
+    // contra el frame anterior). Si la camara se queda quieta, el buffer guarda briznas relativas a
+    // ESTA camara y `draw` las ancla al mundo con `camShift`.
+    m_lastCam      = f.camPos;
+    m_lastPlanet   = f.planetCenter;
+    m_lastViewDir  = f.viewDir;
+    m_lastViewUp   = f.viewUp;
+    m_lastTh       = f.tanHalfV;
+    m_lastAspect   = f.aspect;
+    m_lastNodes    = f.nodes ? (const void*)f.nodes->data() : nullptr;
+    m_lastNodesN   = f.nodes ? f.nodes->size() : 0;
 }
 
 void GrassRenderer::prepare(RHI::Context* ctx, const Frame& f) {
     if (!m_ready || !ctx || !enabled()) { m_stamps.clear(); return; }
     ++m_frame;
-    m_lastThreads = 0;
     static const std::string s_bis = [] { const char* e = std::getenv("HARUKA_GRASS_BIS"); return std::string(e ? e : ""); }();
     if (s_bis != "press") updatePressure(ctx, f);
     m_frameData = f;
     m_frameData.nodes = nullptr;   // el puntero es del llamante y no sobrevive al frame
-    if (!RHI::valid(f.heights) || s_bis == "gen") return;
+    if (!RHI::valid(f.heights) || s_bis == "gen") { m_lastThreads = 0; return; }
+    // ── ¿Este frame cambia algo de lo que genera? Si no, se reutiliza el dispatch anterior ──────
+    static const bool s_full = [] { const char* e = std::getenv("HARUKA_GRASS_FULL"); return e && std::string(e) == "1"; }();
+    int  changed = (m_first || s_full || !m_stamps.empty()) ? 1 : 0;
+    if (!changed && f.nodes) {
+        // m_last* es el estado del ULTIMO DISPATCH (lo rellena el final de dispatchBlades): si la
+        // comparacion fuera contra el frame anterior, caminando a < 0,25 m/frame el campo nunca se
+        // regeneraria y el draw (camara actual) arrastraria las briznas detras del jugador.
+        changed += (glm::length(f.camPos       - m_lastCam)    > 0.25);
+        changed += (glm::length(f.planetCenter - m_lastPlanet) > 0.25);
+        changed += (glm::dot(glm::normalize(f.viewDir), glm::normalize(m_lastViewDir)) < 0.9995f);   // ~1,8°
+        changed += (glm::dot(glm::normalize(f.viewUp),  glm::normalize(m_lastViewUp))  < 0.9995f);
+        changed += (std::abs(f.tanHalfV - m_lastTh)   > 0.03f * std::max(m_lastTh, 0.01f));
+        changed += (std::abs(f.aspect   - m_lastAspect) > 0.03f);
+        changed += (f.nodes->data() != m_lastNodes || f.nodes->size() != m_lastNodesN);
+    }
+    m_first = false;
+    if (!changed) return;   // conserva el contador y el buffer del frame anterior: el draw reusa
+    m_lastThreads = 0;      // solo aqui: si hay 0 nodos, el draw no debe dibujar nada
     dispatchBlades(ctx, f);
 }
 
@@ -325,12 +454,17 @@ void GrassRenderer::draw(RHI::Context* ctx, const glm::mat4& rotVP) {
     d.mvp    = rotVP;
     d.wind   = glm::vec4(f.wind, f.time);
     d.sun    = glm::vec4(glm::normalize(f.sunDir), f.sunIntensity);
-    d.pressA = glm::vec4(glm::vec3(m_pressAnchor - f.camPos), (float)((double)m_cfg.pressRes * m_cfg.pressTexelM));
+    d.pressA = glm::vec4(glm::vec3(m_pressAnchor - m_lastCam), (float)((double)m_cfg.pressRes * m_cfg.pressTexelM));
     d.pressE = glm::vec4(glm::vec3(m_pressE), 0.0f);
     d.pressN = glm::vec4(glm::vec3(m_pressN), 0.0f);
     d.shade  = glm::vec4(f.ambient, m_cfg.widthM, m_cfg.heightM, 0.0f);
     d.aerial = f.aerial;
     d.up     = glm::vec4(glm::vec3(glm::normalize(f.camPos - f.planetCenter)), 0.0f);
+    // Las briznas del buffer estan en el marco del ULTIMO dispatch (relativas a m_lastCam). El draw
+    // usa la camara actual: sin compensar, el campo se translada con el jugador entre dispatches y
+    // «salta» al regenerar. `camShift` lo traslada de vuelta y el ancla del mapa de presion se da en
+    // el mismo marco que las briznas para que el muestreo del texel siga clavado al mundo.
+    d.camShift = glm::vec4(glm::vec3(m_lastCam - f.camPos), 0.0f);
     m_dev->updateBuffer(m_drawUBO, 0, sizeof(d), &d);
     ctx->bindPipeline(m_drawPipe);
     ctx->bindUniformBuffer(0, m_drawUBO);

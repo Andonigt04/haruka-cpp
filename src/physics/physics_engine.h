@@ -410,6 +410,10 @@ public:
      *  reloj. Determinista → cliente y servidor coinciden. Ver kFixedDt. */
     void advance(double frameDt);
 
+    /** @brief Pasos fijos (1/60 s) que ejecutó el último `advance` (para el panel F5: cuánta
+     *  simulación pagó el frame). 0 en frames en los que el acumulador no llega a un paso. */
+    int lastSteps() const;
+
     /** @brief Paso fijo de la simulación (s). 1/60. La misma constante la usa el DGS. */
     static constexpr double kFixedDt  = 1.0 / 60.0;
     static constexpr double kMaxAccum = 0.25;   // tope anti-espiral (no recuperar >0.25 s de golpe)
@@ -539,6 +543,7 @@ private:
     IWorldProvider* m_world = nullptr;
     double gravitationalConstant = 6.67430e-11;
     double m_accum = 0.0;   // acumulador del timestep fijo (ver advance)
+    int    m_lastSteps = 0; // pasos fijos del último advance (panel F5)
 
     // Fase 1 — wrapper de Jolt (PIMPL): Jolt NO aparece en este header (forward-decl). Solo se crea si
     // se compiló con HARUKA_HAS_JOLT; si no, `m_jolt` queda null y el motor usa el solver a mano.

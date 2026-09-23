@@ -47,6 +47,8 @@ struct DebugFrameInfo {
     int         sceneObjects = 0;
     int         localNpcs = 0;         ///< criaturas del juego (MonsterManager)
     int         scatterProps = 0;
+    float       physicsMs = 0.0f;      ///< ms reales del último `PhysicsEngine::advance`
+    int         physicsSteps = 0;      ///< pasos fijos 1/60 s ejecutados en ese advance
     DebugNetInfo net;
 };
 

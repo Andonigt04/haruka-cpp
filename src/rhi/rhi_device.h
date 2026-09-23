@@ -157,6 +157,11 @@ namespace Haruka::RHI
              *         tamaño de presentación (físico), que puede diferir del tamaño lógico de SDL. */
             virtual void framebufferSize(uint32_t& w, uint32_t& h) const { w = 0; h = 0; }
 
+            /** @brief Fija vsync (solo tiene efecto en Vulkan: true = MAILBOX —vsync adaptativo, sin el
+             *  acoplamiento FIFO a vblanks—, false = IMMEDIATE). En OpenGL el swap interval lo
+             *  controla el motor vía SDL_GL_SetSwapInterval. */
+            virtual void setVsync(bool /*fifo*/) {}
+
             virtual Backend backend() const = 0;
 
             /** @brief Nombre del dispositivo ACTIVO (`GL_RENDERER` / `VkPhysicalDeviceProperties::

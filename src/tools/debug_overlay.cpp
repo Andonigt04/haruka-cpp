@@ -156,6 +156,11 @@ void DebugOverlay::render() {
 
     line("%.0f fps  %s", m_fps, colorFor(m_p50));
     line("p50 %.2f  p98 %.2f  p99.5 %.2f ms", m_p50, m_p98, m_p995);
+    // Física: ms del último advance + pasos fijos (1/60 s) que pagó ese frame. Con el timestep
+    // fijo, a 60 fps es 1 paso por frame; a 30 fps, 2; un tiron largo se ve como pasos >= el pacto
+    // con el reloj. Lo rellena el juego (`init.cpp`) leyendo `PhysicsEngine::lastSteps` y
+    // `Haruka::physicsFrameMs()` del frame anterior (el advance corre después del push).
+    line("fisica %.2f ms  (%d pasos)", m_last.physicsMs, m_last.physicsSteps);
     const double rssMiB = (double)m_rssBytes / 1048576.0, totMiB = (double)m_totalBytes / 1048576.0;
     line("mem %.0f %%  %.0f/%.0f MiB", totMiB > 0.0 ? 100.0 * rssMiB / totMiB : 0.0, rssMiB, totMiB);
 

@@ -591,7 +591,14 @@ void main() {
     // compute evalua el detalle con la direccion en DOUBLE (en float son 0,38-0,76 m a radio
     // terrestre, ver la nota de `vFragPos`) y con el corte del TEXEL DEL NODO, no uno fijo (1,32 m de
     // diferencia ya en el nivel 13). Sin igualar las dos, el careo mide el instrumento.
-    vDispM = (kUp > 0) ? -1.0 : (h - HARUKA_NODE_AT(0, int(u), int(v)));
+    //
+    // ⚠️ SOLO SE MUESTREA CON LA VISTA 10 ACTIVA. Antes esta resta corria para TODOS los vertices del
+    // frame — una `harukaNodeSample` extra por vertice — para alimentar una vista que no estaba
+    // mirando nadie. Con el muestreador de la altura del pool a kUp=0 (una carga directa) no era el
+    // cuello, pero es trabajo por vertice que no contribuye al frame normal. La vista 10 lee `vDispM`
+    // y el resto de las vistas no; fuera de depuracion se deja en -1 (sin dato fino), que era el valor
+    // que la vista 10 ya usaba para pintar "sin texel que comparar".
+    vDispM = (kUp > 0 || int(uMisc.z) != 10) ? -1.0 : (h - HARUKA_NODE_AT(0, int(u), int(v)));
     vStride = IN.slot.z;
     vKUp    = kUp;
     vMapF   = float(kUp + iMap) + fracMap;   // absoluto respecto a la HOJA (vista 12: nivel − vMapF)

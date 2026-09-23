@@ -14,6 +14,7 @@
  * en una linea para no cambiar a Survival.
  */
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -23,10 +24,12 @@
 #include "rhi/rhi_types.h"
 #include "rhi/rhi_resources.h"
 #include "world/props/instanced_object.h"
+#include "world/props/prop_scatter.h"   // ScatteredProp/PropScatterStats: el worker async del scatter
 #include "renderer/gpu_instancing.h"
 
 namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class WorldSystem;
-                   namespace Physics { class PhysicsEngine; } namespace RHI { class Context; } }
+                   namespace Physics { class PhysicsEngine; } namespace RHI { class Context; }
+                   namespace Planet { class TerrestrialPlanet; } }
 
 namespace Haruka::World {
 
@@ -164,6 +167,20 @@ private:
     void refreshColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos,
                           Physics::PhysicsEngine* physics);
     const std::vector<int>& meshShapesFor(int protoIdx, Physics::PhysicsEngine* physics);
+    /// Lo que devuelve el worker del scatter: las INSTANCIAS finales (prototipo deducido, yaw
+    /// determinista y estado inicial) y SUS MATRICES GPU ya construidas (relativas a `origin`):
+    /// la mitad de la re-siembra queda fuera del hilo de render. El filtro de boca NO va aquí:
+    /// `surfaceCut` lee el vox viviente, que solo el hilo de render puede tocar (raza de otro modo).
+    struct ScatterResult {
+        std::vector<Haruka::InstancedObject> objs;        // paralela a `gpu`
+        std::vector<InstanceDataFloat>       gpu;         // matrices relativas a `origin`
+        glm::dvec3  origin{0.0};                          // centro del anillo (m_origin al aplicar)
+    };
+    /// Parte FINAL de una re-siembra, en el hilo de render: sincroniza el estado roto, FILTRA las
+    /// bocas contra el vox VIVIENTE (no puede ir al worker) y publica registro + GPU + colliders.
+    void applyScatterResult(ScatterResult res, const glm::dvec3& planetC, double planetR,
+                            Core::Camera* camera, Physics::PhysicsEngine* physics,
+                            const Haruka::Planet::TerrestrialPlanet* planet);
 
     InstancedObjectRegistry m_registry;
     /// Instancias YA TRANSFORMADAS (mismo indice que el registro), relativas a `m_origin`. Se
@@ -189,6 +206,16 @@ private:
     std::string m_planet;
     uint64_t    m_voxVersion = 0;
     bool m_enabled = true, m_debugEnabled = false;
+    // Re-siembra ASINCRONA (el acceso al campo es seguro desde el hilo worker: el bake `m_heightCPU`
+    // es inmutable tras `bakeHeightMap`; el profiler es thread_local, así que el trabajo del worker
+    // NO aparece en el árbol del frame). El worker también TRANSFORMA el scatter a InstancedObject,
+    // así que la mitad de `applyScatterResult` ya salió del hilo de render. `m_scatterBusy` demarca
+    // EMPEZADO en refreshScatter; el número de versión del campo se refresca cuando se APLICA.
+    std::future<ScatterResult> m_scatterFut;
+    bool m_scatterBusy = false;
+    std::string m_scatterPlanet;   ///< planeta con el que se lanzó el worker (descartar si cambió)
+    glm::dvec3 m_scatterCam{0.0};  ///< centro del anillo PUBLICADO (posición de lanzamiento). El ACK
+                                   ///< del tramo usa la cámara ACTUAL (m_lastCam = camPos al aplicar)
 };
 
 } // namespace Haruka::World

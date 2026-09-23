@@ -32,6 +32,7 @@ layout(std140, binding = 0) uniform GrassDraw {
     vec4  uShade;       // x = ambiente · y = anchura media (m) · z = altura media (m) · w = (libre)
     vec4  uAerial;      // (frag) perspectiva aerea, la misma que el terreno
     vec4  uUp;          // (frag) xyz = arriba en la camara
+    vec4  uCamShift;    // camara del ultimo dispatch - camara actual: ancla el campo al mundo
 };
 struct Blade { vec4 pos; vec4 up; };
 layout(std430, binding = 3) readonly buffer Blades { Blade uBlades[]; };
@@ -121,5 +122,5 @@ void main() {
     // Color: verde con matiz por brizna y algo mas seco cuanto mas alta; la raiz oscura la pone el frag.
     const float hue = fract(hashB * 5.13);
     vColor = mix(vec3(0.16, 0.34, 0.08), vec3(0.42, 0.52, 0.16), hue) * (0.85 + 0.3 * fract(hashB * 9.7));
-    gl_Position = uMVP * vec4(pw, 1.0);
+    gl_Position = uMVP * vec4(pw + uCamShift.xyz, 1.0);
 }

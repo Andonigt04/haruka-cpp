@@ -1732,6 +1732,17 @@ namespace Haruka::RHI::vulkan
         return m_renderFinished[image];
     }
 
+    // Ajuste del present mode, el `VSync` del juego: true = MAILBOX (vsync adaptativo, sin el
+    // acoplamiento FIFO a vblanks que clava 50-100 ms), false = IMMEDIATE (suelto). Se aplica al
+    // (re)crear la swapchain, así que si el modo deseado cambia se recrea (ruta probada de resize).
+    void VKDevice::setVsync(bool fifo)
+    {
+        if (!m_swapchain) return;
+        const bool cambia = (m_swapchain->vsyncFifo() != fifo);
+        m_swapchain->setVsyncFifo(fifo);
+        if (cambia) onSwapchainResize();
+    }
+
     // beginFrame() es IDEMPOTENTE dentro del frame real: el renderer lo llama muchísimas veces por
     // frame (cada renderer pide "su" context) pero endFrame() solo una. La primera llamada de cada
     // frame adquiere la imagen de present y abre el command buffer; el resto devuelven el mismo.

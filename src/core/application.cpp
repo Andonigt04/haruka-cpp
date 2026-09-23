@@ -22,6 +22,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <cstdio>     // fprintf — volcado HARUKA_PROF_LOG a stderr (visible con nivel INFO+)
 #include <cstdlib>   // setenv/getenv — offload PRIME antes de crear el contexto GL
 #include <cmath>
 #include <csignal>
@@ -151,7 +152,14 @@ void Application::applyGraphicsSettings() {
         _camera->zoom = g.fov;
 
     if (_window) {
-        SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);
+        SDL_GL_SetSwapInterval(g.vsync ? 1 : 0);   // solo ata a GL; Vulkan tiene su propio camino (abajo)
+        // Vulkan NO obedece a SDL_GL_SetSwapInterval: sin esta llamada el swapchain quedaba SIEMPRE
+        // FIFO (vsync) y el ajuste era una no-op — medido: 10 fps / 100 ms clavados en juegos con la
+        // opción en OFF. El device (re)crea la swapchain si el modo deseado cambia. En Vulkan,
+        // `vsync=true` = MAILBOX (vsync adaptativo, sin el acoplamiento FIFO a vblanks que clava
+        // 50-100 ms con GPU a ~33 ms y pantalla a 60 Hz) y `false` = IMMEDIATE.
+        if (RHI::Device* dev = RHI::device())
+            dev->setVsync(g.vsync);
         _window->setWindowMode(static_cast<int>(g.windowMode)); // windowed / borderless / fullscreen
 
         // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────
@@ -638,8 +646,12 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         auto now = std::chrono::high_resolution_clock::now();
         deltaTime        = std::chrono::duration<float>(now - _frameStart).count();
-        deltaTime        = std::min(deltaTime, 0.1f); // cap: network stalls can't explode physics
+        // ⚠️ DOS dt: `_lastFrameTimeMs` se guarda SIN el recorte (es la MEDIDA, para el overlay del
+        // F5, `HARUKA_FRAMELOG` y la sonda) y `deltaTime` se recorta (es la SIMULACION: un stall de
+        // red no puede explotar la fisica). Antes se recortaba primero y el medidor veia los tirones
+        // reales >100 ms como 100 clavados — el p99.5 del F5 saturaba ciego por encima de 100.
         _lastFrameTimeMs = deltaTime * 1000.0f;
+        deltaTime        = std::min(deltaTime, 0.1f); // cap: network stalls can't explode physics
         _frameStart      = now;
 
         // ── SONDA DE TIEMPO DE FRAME (HARUKA_FRAMELOG=1) ────────────────────────────────────────
@@ -714,14 +726,30 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         // HARUKA_PROF_LOG=N → vuelca el árbol del profiler a stderr cada N frames. Permite medir
         // el coste de un cambio sin depender de leer el panel en una captura.
+        // ⚠️ Sale por `fprintf(stderr,...)`, NO por HARUKA_LOGD: con el nivel por defecto (INFO+) el
+        // árbol usaba LOGD y se descartaba en silencio — "no se ve nada" en vez de "no hay árbol".
+        //
+        // HARUKA_PROF_SPIKE_MS=X → vuelca el árbol COMPLETO solo cuando el frame supera X ms. Es la
+        // forma de cazar un tiron sin tener que acertar con el frame: el volcado periódico muestra el
+        // estado medio, que es justo lo que un pico no es. El árbol total (no solo el de >0,5 ms del
+        // HUD) dice QUÉ scope se comió los 150-200 ms del pico.
+        if (const char* sp = getenv("HARUKA_PROF_SPIKE_MS")) {
+            const float thr = (float)std::atof(sp);
+            if (thr > 0.0f && _lastFrameTimeMs >= thr) {
+                static int spikeN = 0;
+                fprintf(stderr, "[Profiler] — SPIKE frame %d · %6.1f ms (umbral %.0f) —\n",
+                        ++spikeN, _lastFrameTimeMs, thr);
+                fprintf(stderr, "%s", Haruka::Profiler::get().dumpTree().c_str());
+            }
+        }
         if (const char* pl = getenv("HARUKA_PROF_LOG")) {
             static int period = std::max(1, atoi(pl));
             static int frame  = 0;
             if (++frame % period == 0) {
                 const auto& nodes = Haruka::Profiler::get().nodes();
-                HARUKA_LOGD("Profiler", "--- frame %d ---", frame);
+                fprintf(stderr, "[Profiler] --- frame %d ---\n", frame);
                 for (size_t i = 1; i < nodes.size(); ++i)
-                    HARUKA_LOGD("Profiler", "%*s%-24s %7.2f ms  x%d", (nodes[i].depth - 1) * 2, "",
+                    fprintf(stderr, "[Profiler] %*s%-24s %7.2f ms  x%d\n", (nodes[i].depth - 1) * 2, "",
                             nodes[i].name.c_str(), nodes[i].ms, nodes[i].count);
             }
         }
@@ -937,6 +965,8 @@ void Application::run(const std::string& startScenePath, bool headless) {
         }
         // Tiempos de GPU del frame recién presentado, con la misma cadencia que HARUKA_PROF_LOG.
         // Es la otra mitad del perfil: lo que la CPU encola en 0,3 ms puede costar 30 en la GPU.
+        // ⚠️ Sale por fprintf(stderr): con HARUKA_LOGD (nivel debug) el árbol de GPU era invisible
+        // en consola INFO+ y atribuir coste GPU/CPU era imposible.
         if (RHI::device()) {
             static const int gpuPeriod = [] { const char* pl = getenv("HARUKA_PROF_LOG"); return pl ? std::max(1, atoi(pl)) : 0; }();
             static int gpuFrame = 0;
@@ -944,10 +974,10 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 const auto& scopes = RHI::device()->gpuScopes();
                 double total = 0.0;
                 for (const auto& sc : scopes) if (sc.depth == 0) total += sc.ms;
-                HARUKA_LOGD("GpuProf", "--- frame %d · GPU %.2f ms en tramos de nivel 0 (%zu tramos) ---",
-                            gpuFrame, total, scopes.size());
+                fprintf(stderr, "[GpuProf] --- frame %d · GPU %.2f ms en tramos de nivel 0 (%zu tramos) ---\n",
+                        gpuFrame, total, scopes.size());
                 for (const auto& sc : scopes)
-                    HARUKA_LOGD("GpuProf", "%*s%-36s %7.2f ms", sc.depth * 2, "", sc.name.c_str(), sc.ms);
+                    fprintf(stderr, "[GpuProf] %*s%-36s %7.2f ms\n", sc.depth * 2, "", sc.name.c_str(), sc.ms);
             }
         }
 

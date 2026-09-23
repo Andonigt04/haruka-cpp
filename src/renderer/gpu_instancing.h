@@ -68,6 +68,14 @@ public:
      *  addInstance del llamador cuando el conjunto se monta de una vez (props del scatter). */
     void setInstances(const std::vector<InstanceDataFloat>& data);
 
+    /** @brief Garantiza que el arena cabe `capacity` instancias SIN recrearse a mitad de frame.
+     *  Parte del coste de `inst.upload` no es el memcpy: es RECREAR el arena host-visible cuando el
+     *  total sub-asignado del frame cruza su potencia de dos, y cada recreacion llama a
+     *  `vkAllocateMemory` de un buffer que puede duplicar el anterior en tamaño. Quien conozca el
+     *  tope ANTES de dibujar (el anillo de props: la suma de todos los buckets cabe en el anillo) lo
+     *  reserva de una vez al empezar el pase y el bucle de draws no vuelve a cruzar el tope. */
+    void reserve(size_t capacity);
+
     /**
      * @brief Sube lo pendiente y dibuja TODAS las instancias en un solo draw.
      * @param ctx              contexto RHI (el PSO y la malla base ya deben estar atados).

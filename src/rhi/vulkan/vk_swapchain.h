@@ -70,6 +70,13 @@ namespace Haruka::RHI::vulkan
             uint32_t      minImageCount() const   { return m_minImageCount; }
             bool          valid() const           { return m_swapchain != VK_NULL_HANDLE; }
 
+            /** Fija el present mode deseado, el ajuste `VSync` del juego: true = MAILBOX (vsync
+             *  adaptativo, sin tearing ni acoplamiento FIFO), false = IMMEDIATE (suelto). En los
+             *  dos casos FIFO solo si el modo pedido no existe. Se aplica la PRÓXIMA vez que se
+             *  cree la swapchain (`createSwapchain`). */
+            void setVsyncFifo(bool fifo) { m_vsyncFifo = fifo; }
+            bool vsyncFifo() const        { return m_vsyncFifo; }
+
         private:
             // [WAYLAND-1]: en Wayland currentExtent es 0xFFFFFFFF ("tú decides") → tamaño en píxeles
             // de SDL clampeado al rango válido. En X11 currentExtent trae el tamaño real.
@@ -95,5 +102,6 @@ namespace Haruka::RHI::vulkan
             std::vector<VkFramebuffer> m_framebuffers;
             VkRenderPass  m_fbRenderPass   = VK_NULL_HANDLE;   // prestado del device (no owned)
             VkImageView   m_backbufferDepth = VK_NULL_HANDLE;  // prestado del device (no owned)
+            bool          m_vsyncFifo      = true;              // ajuste `VSync` (true = FIFO)
     };
 }

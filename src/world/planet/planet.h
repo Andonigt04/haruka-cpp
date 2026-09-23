@@ -610,6 +610,25 @@ private:
         double lonC = 0.0, latC = 0.0, invSpanLon = 0.0, invSpanLat = 0.0;
     };
     std::shared_ptr<const LakeWindow> m_lakeWin;      ///< la ventana vigente, o nula si no hay
+    /// ⚠️ ÉPOCA DE LA VENTANA + CAMPO DE LAGOS, para la CACHÉ del 9x9 del filtro de agua del terreno
+    /// (`TerrainNodeRenderer::Water::lakeEpoch`). Sube cuando se publica una ventana nueva, cuando se
+    /// vacía (órbita) o cuando el bake reconstruye `m_waterCPU`. Si la caché se llenara con otro valor,
+    /// un lago que cabía en la huella de un nodo dejaría de salir hasta que la época cambiara.
+    uint64_t m_lakeEpoch = 0;
+    /// Snapshot reutilizable de los mapas que el job de la ventana muestrea. ⚠️ `updateLakeWindow` los
+    /// copiaba por valor CADA VEZ que lanzaba un job (134 MB el de altura + 134 MB el de agua, ~10 ms
+    /// medidos dentro de `compute.prepare` al recentrar). Como `m_heightCPU` y `m_waterCPU` son
+    /// inmutables tras el bake —todo el juego digamos eso—, un `shared_ptr` que solo se reemplaza en
+    /// el bake da el MISMO resultado sin la copia. Se lee por valor en el job: para eso es shared.
+    std::shared_ptr<const std::vector<float>> m_heightCPUsh;
+    std::shared_ptr<const std::vector<float>> m_waterCPUsh;
+    /// ⚠️ RE-RANGO DEL POOL SOLO CUANDO EL RETRATO CAMBIA. El pase de nodos re-acota el rango de
+    /// TODOS los residentes con el muestreador (`TerrainNodeRenderer::setHeightSampler` → `rerange`).
+    /// Eso se hacía CADA FRAME en `prepare`, y `sampleHeight` es caro (el saco completo del terreno):
+    /// medido 12,7 ms de los ~14 de `compute.prepare`. El muestreo solo cambia tras un bake
+    /// (`build`/`rebuild`), y los nodos generados desde entonces publican su rango ya acotado, así que
+    /// `rerange` solo hace falta una vez (cuando el bake deja residentes con rango viejo).
+    bool m_heightSamplerDirty = true;
     /// Snapshot para los lectores. `atomic_load` sobre `shared_ptr` es lo que existe en C++17 para
     /// esto y no mete un candado en el camino caliente.
     std::shared_ptr<const LakeWindow> lakeWindow() const { return std::atomic_load(&m_lakeWin); }

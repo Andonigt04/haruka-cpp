@@ -30,9 +30,22 @@
  * alrededor de la camara. No proyecta sombra ni la recibe (v1). No colisiona. Y no se ve desde una
  * camara a caballo de dos caras del cubo en la esquina lejana de la otra cara (ver el .comp).
  *
- * Mandos para medir sin recompilar: `HARUKA_GRASS=0` (apaga), `HARUKA_GRASS_DENSITY=<0..1>`,
- * `HARUKA_GRASS_RADIUS=<m>`, `HARUKA_GRASS_BIS=press|gen|draw` (salta ese pase: atribucion de
- * coste y de fugas de estado), `HARUKA_GRASS_DEBUG=k` (el compute no descarta desde la etapa k).
+*  Mandos para medir sin recompilar: `HARUKA_GRASS=0` (apaga), `HARUKA_GRASS_DENSITY=<0..1>`,
+ *  `HARUKA_GRASS_RADIUS=<m>`, `HARUKA_GRASS_BIS=press|gen|draw` (salta ese pase: atribucion de
+ *  coste y de fugas de estado), `HARUKA_GRASS_DEBUG=k` (el compute no descarta desde la etapa k),
+ *  `HARUKA_GRASS_FULL=1` (regenera cada frame, para medir cuanto cuesta `v5.hierba.gen`).
+ *
+ *  ── CUANDO NO CAMBIA NADA ────────────────────────────────────────────────────────────────────
+ *
+ *  La generacion son ~2,7 M de hilos (rejilla de ~55×55 celdas de ~2,4 m, `kCellBits=22`) y se
+ *  relanza cada frame aunque la camara no se mueva. El generador siembra por hash del mundo y no
+ *  mete viento ni presion (eso lo hace el draw), asi que si la camara no ha movido > ~0,25 m, no
+ *  hay sellos y los nodos son los mismos, el dispatch anterior es valido y se REAPROVECHA: `prepare`
+ *  se salta el compute y `draw` reusa el contador. Parado, `v5.hierba.gen` pasa de 7,4 ms a nada.
+ *  (Ademas, la CPU manda una LISTA de celdas con el centro dentro del disco en vez de la rejilla
+ *  cuadrada —las esquinas del cuadrado mueren antes de pagar su fp64— y un INDICE ESPACIAL de la
+ *  tabla de nodos `uNodes`: en vez de barrer los N nodos por brizna, el compute solo prueba los
+ *  candidatos de su celda, en el mismo orden de tabla y con la misma comprobacion.)
  */
 #include "rhi/rhi_device.h"
 #include "world/terrain/terrain_node_renderer.h"   // TerrainNodeRenderer::NearNode
@@ -122,7 +135,9 @@ private:
     RHI::PipelineHandle m_genPipe{}, m_drawPipe{}, m_pressPipe{};
     RHI::BufferHandle  m_genUBO{}, m_drawUBO{}, m_pressUBO{};
     RHI::BufferHandle  m_nodesSSBO{}, m_bladesSSBO{}, m_cmd{}, m_ib{};
-    size_t             m_nodesCap = 0;
+    RHI::BufferHandle  m_cellPairs{};   // ivec2[]: las celdas del disco que recorre el compute
+    RHI::BufferHandle  m_idxOff{}, m_idxList{};   // índice espacial de `drawnHeightAt` (uints)
+    size_t             m_nodesCap = 0, m_cellCap = 0;
     RHI::RenderPassHandle m_pressRT[2]{};
     RHI::TextureHandle m_pressTex[2]{};
     int                m_pressCur = 0;
@@ -135,6 +150,16 @@ private:
     size_t             m_lastCount = 0, m_lastThreads = 0;
     uint32_t           m_frame = 0;
     RHI::BufferHandle  m_readback{};
+    // Ultimo estado que DETERMINO la generacion (lo rellena el final de `dispatchBlades`, no cada
+    // frame): si el frame actual es igual a eso dentro de umbrales, `prepare` reutiliza el dispatch
+    // anterior (y `m_lastThreads` conserva su valor para el draw). `m_lastCam` es la camara del
+    // BUFFER de briznas: el draw ancla el campo al mundo con `camShift = m_lastCam - camara actual`.
+    glm::dvec3         m_lastCam{0.0}, m_lastPlanet{0.0};
+    glm::vec3          m_lastViewDir{0, 0, -1}, m_lastViewUp{0, 1, 0};
+    float              m_lastTh = 0.0f, m_lastAspect = 0.0f;
+    const void*        m_lastNodes = nullptr;
+    size_t             m_lastNodesN = 0;
+    bool               m_first = true;
 };
 
 } // namespace Haruka::Renderer

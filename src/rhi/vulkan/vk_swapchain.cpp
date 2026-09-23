@@ -136,29 +136,50 @@ namespace Haruka::RHI::vulkan
         sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;   // una sola familia graphics+present
         sci.preTransform = caps.currentTransform;
         sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        // ⚠️ FIFO (vsync) por defecto, y SIN vsync solo si se pide. Con FIFO, cualquier medida de
-        // tiempo por frame queda clavada en 16,6 ms —que es 1/60— y deja de medir la GPU: mide la
-        // presentacion. Paso midiendo el coste del sombreado del terreno, donde el numero de Vulkan
-        // salio 16,61 -> 16,68 ms y no significaba nada.
+        // ▸ MODO DE PRESENT del ajuste `VSync` del juego. Antes era SIEMPRE FIFO y el ajuste solo
+        // ataba a GL vía `SDL_GL_SetSwapInterval` — Vulkan lo ignoraba y con una pantalla a baja
+        // frecuencia de refresco el bucle quedaba engarzado en 2-3 vblanks (60-100 ms) con el
+        // "VSync" del panel en OFF (medido en la 3050 Laptop: F5 leía 10 fps / 100 ms clavados).
+        // `HARUKA_NO_VSYNC=1` lo fuerza SUELTO siempre: es el mando de medir, y con FIFO el tiempo
+        // por frame queda clavado en 1/refresco y deja de medir la GPU — mide la presentacion
+        // (el coste del terreno en Vulkan salía 16,61 -> 16,68 ms, el número no significaba nada).
         //
-        // `HARUKA_NO_VSYNC=1` pide MAILBOX (triple buffer sin espera) y, si no lo hay, IMMEDIATE.
-        // Ninguno de los dos es obligatorio en la spec, asi que se comprueba antes de pedirlo.
-        sci.presentMode = VK_PRESENT_MODE_FIFO_KHR;         // siempre soportado (vsync, como GL)
-        if (const char* nv = std::getenv("HARUKA_NO_VSYNC")) {
-            if (nv[0] == '1') {
-                uint32_t pmCount = 0;
-                vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, nullptr);
-                std::vector<VkPresentModeKHR> modes(pmCount);
-                vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, modes.data());
-                for (VkPresentModeKHR want : { VK_PRESENT_MODE_MAILBOX_KHR,
-                                               VK_PRESENT_MODE_IMMEDIATE_KHR }) {
-                    if (std::find(modes.begin(), modes.end(), want) != modes.end()) {
-                        sci.presentMode = want;
-                        break;
-                    }
-                }
-            }
-        }
+        // AHORA, `vsync=true` NO es FIFO: el acoplamiento FIFO al refresh es el bug de los 100 ms
+        // (con GPU a ~33 ms y el panel a 60 Hz, la cola de 2 imágenes engarzaba cada frame a 2-3
+        // vblanks y el F5 leía 50-100 ms clavados pese a estar "sincronizado"). Para "sin tearing
+        // pero sin stall" el modo correcto es MAILBOX: presenta el frame completado más reciente,
+        // como los vsync adaptativos — el bucle corre a su ritmo natural y el confort del portátil
+        // lo cubre el cap `maxFps` del juego, no el vblank. `vsync=false` → IMMEDIATE (lo suelto).
+        const bool forceSuelto = [] {
+            const char* nv = std::getenv("HARUKA_NO_VSYNC");
+            return nv && nv[0] == '1';
+        }();
+        // MAILBOX e IMMEDIATE no son obligatorios en la spec: se comprueban antes de pedirlos.
+        uint32_t pmCount = 0;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, nullptr);
+        std::vector<VkPresentModeKHR> modes(pmCount);
+        vkGetPhysicalDeviceSurfacePresentModesKHR(m_physical, m_surface, &pmCount, modes.data());
+        auto has = [&](VkPresentModeKHR pm) { return std::find(modes.begin(), modes.end(), pm) != modes.end(); };
+        // Preferencia: vsync=true → MAILBOX (vsync adaptativo; "tear cuando llegas tarde", nunca
+        // engarza a 2-3 vblanks como sana FIFO con GPU > 1/refresco). Si el driver no lo expone
+        // (algunos Wayland/XWayland solo traen FIFO/FIFO_RELAXED), FIFO_RELAXED hace casi lo mismo:
+        // espera al vblank si le das tiempo, pero si llegas tarde presenta en seguida en vez de
+        // engancharse. Solo si tampoco está, FIFO a secas (el engarzado que se medía como 24 fps).
+        // vsync=false → IMMEDIATE (lo suelto), con MAILBOX/FIFO_RELAXED como degradados razonables.
+        const VkPresentModeKHR wanted = forceSuelto ? VK_PRESENT_MODE_IMMEDIATE_KHR
+                                     : (m_vsyncFifo ? VK_PRESENT_MODE_MAILBOX_KHR
+                                                    : VK_PRESENT_MODE_IMMEDIATE_KHR);
+        const VkPresentModeKHR fallbacksVsync[]  = { VK_PRESENT_MODE_MAILBOX_KHR,    VK_PRESENT_MODE_FIFO_RELAXED_KHR, VK_PRESENT_MODE_FIFO_KHR };
+        const VkPresentModeKHR fallbacksSuelto[] = { VK_PRESENT_MODE_IMMEDIATE_KHR,  VK_PRESENT_MODE_MAILBOX_KHR,     VK_PRESENT_MODE_FIFO_RELAXED_KHR };
+        const VkPresentModeKHR* fb = m_vsyncFifo && !forceSuelto ? fallbacksVsync : fallbacksSuelto;
+        VkPresentModeKHR pm = VK_PRESENT_MODE_FIFO_KHR;
+        for (int i = 0; i < 3; ++i) { if (has(fb[i])) { pm = fb[i]; break; } }
+        if (pm != wanted)
+            HARUKA_LOGW("RHI/VK", "swapchain: present mode %d no soportado (modos: %u) -> %d",
+                        (int)wanted, pmCount, (int)pm);
+        sci.presentMode = pm;
+        HARUKA_LOGI("RHI/VK", "swapchain: vsync=%d querido=%d usado=%d · imagenes %u (min %u)",
+                    m_vsyncFifo ? 1 : 0, (int)wanted, (int)pm, imgCount, caps.minImageCount);
         sci.clipped = VK_TRUE;
         sci.oldSwapchain = VK_NULL_HANDLE;
         if (!vkSuccess(vkCreateSwapchainKHR(m_device, &sci, nullptr, &m_swapchain), "create swapchain"))

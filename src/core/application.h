@@ -275,6 +275,9 @@ public:
     int getTotalVertices()         const { return _iTotalVertices; }
     int getTotalTriangles()        const { return _iTotalTriangles; }
     int getTotalDrawCalls()        const { return _iTotalDrawCalls; }
+    /// Duración REAL del último frame en ms, SIN el recorte de 100 ms del bucle (application.cpp).
+    /// Para medidores (F5, sonda, `HARUKA_FRAMELOG`): la física sigue usando `deltaTime` recortado.
+    float getFrameTimeMs()         const { return _lastFrameTimeMs; }
 
     // Stats de geometría del TERRENO del último frame (malla base + clipmap + agua), para el
     // panel de performance del editor. Sustituye al "Chunk Streaming" legacy (no existe streaming

@@ -63,12 +63,14 @@ layout(std140, binding = 0) uniform GrassGen {
     vec4  uCenter;      // xyz = centro del planeta − camara, parte GRUESA (multiplo de 64 m) · w = R
     vec4  uCenterLo;    // xyz = el resto fino (ver terrain_node.vert) · w = nivel del mar (m)
     vec4  uCamFwd;      // xyz = direccion de vista · w = cos del semiangulo del cono de frustum
-    ivec4 uCells;       // x = cara · y = cx0 · z = cy0 · w = lado en celdas
+    ivec4 uCells;       // x = cara · y = Nº de celdas en `uCellPairs` (binding 5) · z,w = (libre)
     vec4  uGrid;        // x = 2^kCellBits (celdas por cara) · y = briznas por celda · z = radio (m) · w = densidad global
     vec4  uLod;         // x = distancia donde empieza a ralear · y = fraccion que queda en el radio · z = altura media (m) · w = anchura media (m)
     ivec4 uNodeGrid;    // x = texeles por nodo (129) · y = celdas por nodo (128) · z = nodos en la tabla · w = (libre)
     vec4  uMisc;        // x = texel (m) del nivel MAS FINO de la tabla · y = etapa de biseccion · z = altitud de la camara (m)
     vec4  uPlane[4];    // los 4 planos laterales del frustum por el ojo (normales hacia dentro)
+    dvec4 uIdx;         // x,y = esquina min de la rejilla del indice (lx,ly) · z = lado de celda (lx) · w = lado total
+    ivec4 uIdxGrid;     // x,y = dims de la rejilla (celdas) · z,w = (libre)
 };
 
 // Nodo hoja DIBUJADO cerca de la camara: gemelo de `GrassRenderer::NearNode`.
@@ -81,6 +83,16 @@ struct Blade { vec4 pos; vec4 up; };           // pos.w = altura (m) · up.xyz =
 layout(std430, binding = 3) writeonly buffer Blades { Blade uBlades[]; };
 layout(std430, binding = 4) buffer DrawCmd { uint indexCount, instanceCount, firstIndex, baseVertex, baseInstance; };
 
+// La celda de cada hilo: la CPU manda una LISTA (solo las celdas cuyo centro cae dentro del disco
+// de `radiusM`), no la rejilla cuadrada — el cuadrado pagaba las esquinas que el shader descartaba
+// por distancia. Cada hilo es (celda, k) con `cells` = uCells.y.
+layout(std430, binding = 5) readonly buffer CellPairs { ivec2 uCellPairs[]; };
+// Indice espacial de la tabla de nodos (uNodes): offsets por celda (kIdxDim²+1) y lista de indices
+// de nodo. La CPU los reparte por las celdas que cada nodo toca, en orden de la tabla; el shader
+// solo prueba los candidatos de su celda en vez de barrer los N nodos por brizna.
+layout(std430, binding = 6) readonly buffer IndexOffs { uint uIdxOff[]; };
+layout(std430, binding = 7) readonly buffer IndexList { uint uIdxList[]; };
+
 layout(binding = 15) uniform sampler2DArray uBaseField;   // clima (elev, temp, humedad) para el material
 
 // ── HASH ────────────────────────────────────────────────────────────────────────────────────────
@@ -91,35 +103,68 @@ float harukaHash01(uint a, uint b, uint c) {
 
 // La altura DIBUJADA bajo (lx, ly): busca el nodo hoja y lee su mapa con la bilineal de
 // `terrain_node.vert`. Devuelve false si ningun nodo de la tabla cubre el punto.
-bool drawnHeightAt(int face, double lx, double ly, out float h, out vec2 dhdt) {
+//
+// ANTES el shader barría TODA la tabla (uNodeGrid.z) por brizna: O(briznas × nodos). Ahora la CPU
+// reparte los nodos por una REJILLA que cubre el disco (uIdx/uIdxGrid + uIdxOff/uIdxList), y el
+// hilo solo prueba los candidatos de su celda (casi siempre 1-3). La rejilla cubre el disco con
+// margen.
+//
+// ⚠️ SI UNA CELDA NO DA CANDIDATOS (o el punto cae fuera de la rejilla, que no deberia), se vuelve
+// al barrido completo de antes: mismo resultado, el indice solo cambia CUANTOS nodos se prueban,
+// no cual se elige (misma comprobacion, mismo orden de tabla). Sin este respaldo, una celda VACIA
+// por un desajuste al limite produjo un hueco de briznas alrededor de la camara — el "anillo a
+// media distancia que sigue al jugador" (la celda central sin candidatos y el `return false` que
+// cortaba el barrido).
+
+// Muestreo del mapa de un nodo `nd` que se sabe que cubre (fx,fy): bilineal, igual que terrain_node.vert.
+bool nodeHeightAt(const NearNode nd, const double fx, const double fy, out float h, out vec2 dhdt) {
     const int N1    = uNodeGrid.x;
     const float cells = float(uNodeGrid.y);
+    const double cellsL = double(1 << nd.node.y);
+    const int i = int(floor(fx * cellsL)), j = int(floor(fy * cellsL));
+    if (i != nd.node.z || j != nd.node.w) return false;
+    // Texel FRACCIONARIO de la hoja, y de ahi el del ancestro `kUp` (sub-rectangulo).
+    float tu = float((fx * cellsL - double(i)) * double(cells));
+    float tv = float((fy * cellsL - double(j)) * double(cells));
+    const int kUp = nd.slot.y;
+    const float inv = 1.0 / float(1 << kUp);
+    float au = clamp((float(nd.slot.z) * cells + tu) * inv, 0.0, cells);
+    float av = clamp((float(nd.slot.w) * cells + tv) * inv, 0.0, cells);
+    const uint base = uint(nd.slot.x) * uint(N1) * uint(N1);
+    const int iu = int(floor(au)), iv = int(floor(av));
+    const int ju = min(iu + 1, N1 - 1), jv = min(iv + 1, N1 - 1);
+    const float fu = au - float(iu), fv = av - float(iv);
+    const float h00 = uHeights[base + uint(iv) * uint(N1) + uint(iu)];
+    const float h10 = uHeights[base + uint(iv) * uint(N1) + uint(ju)];
+    const float h01 = uHeights[base + uint(jv) * uint(N1) + uint(iu)];
+    const float h11 = uHeights[base + uint(jv) * uint(N1) + uint(ju)];
+    h = mix(mix(h00, h10, fu), mix(h01, h11, fu), fv);
+    // Pendiente del mapa (m por texel del ancestro): para la normal del suelo y la regla de pendiente.
+    dhdt = vec2(mix(h10 - h00, h11 - h01, fv), mix(h01 - h00, h11 - h10, fu));
+    return true;
+}
+
+bool drawnHeightAt(int face, double lx, double ly, out float h, out vec2 dhdt) {
     const double fx = (lx + 1.0LF) * 0.5LF, fy = (ly + 1.0LF) * 0.5LF;   // [0,1] en la cara
+    // ── VIA DEL INDICE: solo los candidatos de la celda ─────────────────────────────────────────
+    const double ix = uIdx.x, iy = uIdx.y;
+    const double iL = uIdx.z, iS = uIdx.w;
+    if (lx >= ix && lx < ix + iS && ly >= iy && ly < iy + iS) {
+        const int gx = int(clamp(floor((lx - ix) / iL), 0.0, double(uIdxGrid.x - 1)));
+        const int gy = int(clamp(floor((ly - iy) / iL), 0.0, double(uIdxGrid.y - 1)));
+        const int gid = gy * uIdxGrid.x + gx;
+        for (int t = int(uIdxOff[gid]); t < int(uIdxOff[gid + 1]); ++t) {
+            const NearNode nd = uNodes[uIdxList[t]];
+            if (nd.node.x == face && nodeHeightAt(nd, fx, fy, h, dhdt)) return true;
+        }
+        // Sin candidato en la celda: NO cortar aqui (solía `return false`). Se cae al barrido
+        // completo de abajo, que es el respaldo obligado: el indice acelera, no cambia el resultado.
+    }
+    // ── RESPALDO: barrido completo de la tabla (comportamiento original) ────────────────────────
     for (int n = 0; n < uNodeGrid.z; ++n) {
         const NearNode nd = uNodes[n];
         if (nd.node.x != face) continue;
-        const double cellsL = double(1 << nd.node.y);
-        const int i = int(floor(fx * cellsL)), j = int(floor(fy * cellsL));
-        if (i != nd.node.z || j != nd.node.w) continue;
-        // Texel FRACCIONARIO de la hoja, y de ahi el del ancestro `kUp` (sub-rectangulo).
-        float tu = float((fx * cellsL - double(i)) * double(cells));
-        float tv = float((fy * cellsL - double(j)) * double(cells));
-        const int kUp = nd.slot.y;
-        const float inv = 1.0 / float(1 << kUp);
-        float au = clamp((float(nd.slot.z) * cells + tu) * inv, 0.0, cells);
-        float av = clamp((float(nd.slot.w) * cells + tv) * inv, 0.0, cells);
-        const uint base = uint(nd.slot.x) * uint(N1) * uint(N1);
-        const int iu = int(floor(au)), iv = int(floor(av));
-        const int ju = min(iu + 1, N1 - 1), jv = min(iv + 1, N1 - 1);
-        const float fu = au - float(iu), fv = av - float(iv);
-        const float h00 = uHeights[base + uint(iv) * uint(N1) + uint(iu)];
-        const float h10 = uHeights[base + uint(iv) * uint(N1) + uint(ju)];
-        const float h01 = uHeights[base + uint(jv) * uint(N1) + uint(iu)];
-        const float h11 = uHeights[base + uint(jv) * uint(N1) + uint(ju)];
-        h = mix(mix(h00, h10, fu), mix(h01, h11, fu), fv);
-        // Pendiente del mapa (m por texel del ancestro): para la normal del suelo y la regla de pendiente.
-        dhdt = vec2(mix(h10 - h00, h11 - h01, fv), mix(h01 - h00, h11 - h10, fu));
-        return true;
+        if (nodeHeightAt(nd, fx, fy, h, dhdt)) return true;
     }
     return false;
 }
@@ -127,13 +172,12 @@ bool drawnHeightAt(int face, double lx, double ly, out float h, out vec2 dhdt) {
 void main() {
     const uint id = gl_GlobalInvocationID.x;
     const uint perCell = uint(uGrid.y);
-    const uint side    = uint(uCells.w);
     const uint cellIdx = id / perCell;
     const uint k       = id - cellIdx * perCell;
-    if (cellIdx >= side * side) return;
+    if (cellIdx >= uint(uCells.y)) return;
     const int face = uCells.x;
-    const int cx = uCells.y + int(cellIdx % side);
-    const int cy = uCells.z + int(cellIdx / side);
+    const int cx = uCellPairs[cellIdx].x;
+    const int cy = uCellPairs[cellIdx].y;
     const int cellsFace = int(uGrid.x);
     // `uMisc.y` = etapa de biseccion (HARUKA_GRASS_DEBUG): con k > 0 los descartes de la etapa k en
     // adelante NO se aplican, y la cuenta dice en que etapa muere la hierba. 0 = produccion.

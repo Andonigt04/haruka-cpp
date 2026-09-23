@@ -22,21 +22,24 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <functional>
 
 #include "world/terrain/terrain_lod.h"   // TERRAIN_RING_FINE_CELL: la celda de la malla que se PISA
 #include "world/terrain/terrain_node.h"
-#include "world/terrain/terrain_node_pool.h"
+#include "world/terrain/terrain_node_pool.h"   // nodeKey
 #include "world/terrain/terrain_node_gpu.h"
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_resources.h"
 #include "rhi/rhi_gpu_scope.h"
 #include "core/logger.h"
+#include "tools/profiler.h"   // HARUKA_PROFILE: el reparto del CPU del pase v5 (select/stride/gen)
 
 namespace Haruka { namespace Terrain {
 
@@ -252,7 +255,15 @@ public:
             //
             // O sea: **18 ms de GPU** por un cambio que Andoni juzgo *"se sigue viendo bien"*. El coste
             // del terreno NUNCA fue generarlo (85 nodos = 4,7 ms) sino dibujarlo.
-            return v ? std::atof(v) : 8.0;
+            //
+            // ⚠️ AHORA 24 (23-09): el objetivo era entrar en el presupuesto de 60 fps. Con 16 el pase
+            // de terreno quedaba en ~10,25 ms de GPU (medido con HARUKA_PROF_LOG=600); con 24 baja a
+            // **~8 ms** y el total de GPU de ~18,44 a ~16,2 ms — por debajo de los 16,67 del frame a
+            // 60 Hz. Andoni lo juzgó *"se sigue viendo bien"*. El stride de cerca NO cambia: bajo los
+            // pies la ley está bloqueada en 1 por paridad con colisión (`collWant`, `nodeStrideWant`),
+            // así que editar terreno no queda limitado. `HARUKA_TERRAIN_V5_VERTPX` vuelve a 16 (o 8)
+            // sin recompilar.
+            return v ? std::atof(v) : 24.0;
         }();
         return s_px;
     }
@@ -660,6 +671,12 @@ public:
         /// el lago más alto que el mapa de lagos conozca en su huella) no se dibuja en este pase.
         /// `lakeLevelFn(dir)` = cota del lago en esa dirección (0 = no hay); lo pone el planeta.
         std::function<float(const glm::dvec3&)> lakeLevelFn;
+        /// ⚠️ ÉPOCA DE LO QUE `lakeLevelFn` MUESTREA: la ventana fina (cambia al recentrar) + el campo
+        /// global (cambia solo en bake/rebuild) + el margen (`seaMarginM`). El filtro de agua cachea el
+        /// 9x9 por nodo y se invalida ENTERO cuando esta época cambia. Si no se pasara, cada frame
+        /// recalcularía las mismas 81 lecturas de `lakeLevelAt` (2 pares de trig doble por muestra →
+        /// 9,2 ms medidos en `v5.water.inst`) para nodos cuya respuesta no cambia.
+        uint64_t lakeEpoch = 0;
         float seaMarginM = 15.0f;          ///< marea + amplitud de ola + margen
         /// El PARCHE de agua interior (lluvia, charcas, lagos sembrados) se dibuja sobre estos mismos
         /// nodos (`inlandSSBO`), y no esta en el mapa de lagos: sin esto el filtro lo dejaba fuera y
@@ -687,7 +704,10 @@ public:
         /// `agua.costa_ms` 4,96 -> ver linea base; con un tope FIJO de zancada 4 el test "la ola
         /// viaja" desde 5 km caia (137 m = 7 px alli, y un quad de 160 m se la comia).
         /// `HARUKA_WATER_VERTEX_PX` lo cambia para medir (0 = la zancada del terreno).
-        float     waveVertexPx = 2.0f;
+        /// ⚠️ 2 → 16 (22-09, A/B cerrado): 2 px/vertice era la malla mas densa de la escena —el 98 %
+        /// del pase es vertice— y costaba 4,8 ms; con 16, 0,8 ms (frame total 25 → 18, ~54 FPS). El
+        /// tren largo sigue vivo hasta 32 px en pantalla; si el mar lejano se ve liso, baja a 8.
+        float     waveVertexPx = 16.0f;
     };
     void setWater(const Water& w) { m_water = w; }
 
@@ -747,28 +767,34 @@ public:
         const size_t selBudget = m_gpu.capacity() - m_gpu.capacity() / 4;
         // El agua somera pide particion extra (`nodeShallowWantsSplit`), con el mismo presupuesto
         // de relieve que la zancada (`kWaterReliefFrac`) y con el alcance por defecto.
+        { HARUKA_PROFILE("v5.select");
         nodeSelectVisible(planetRadiusM, camPos, planetCenter, radPerPx, m_sel,
                           selBudget, errorPx(), &viewDir, coneHalfAngle,
                           5000.0, &TerrainNodePool::rangeFnAdapter, &m_pool,
                           &fs.culledHorizon, &fs.culledFrustum,
                           (m_water.on && waterFixOn()) ? (double)m_water.seaMarginM : -1e30,
                           kWaterReliefFrac, TERRAIN_NODE_WATER_SPLIT_REACH, &fs.waterSplit);
+        }
         fs.selected  = m_sel.size();
         fs.selBudget = selBudget;
         // El desglose lo cuenta el propio selector (ver `nodeSelectVisible`): aqui se hacia
         // re-ejecutandolo dos veces con los MISMOS argumentos y restando, o sea siempre 0 para el
         // horizonte, y costaba dos pasadas por frame.
+        { HARUKA_PROFILE("v5.stats");
         for (const NodeId& n : m_sel) {
             fs.levelMin = std::min(fs.levelMin, n.level);
             fs.levelMax = std::max(fs.levelMax, n.level);
             const glm::dvec3 p = planetCenter + nodeTexelDir(n, TERRAIN_NODE_CELLS/2, TERRAIN_NODE_CELLS/2) * planetRadiusM;
             fs.farthestKm = std::max(fs.farthestKm, glm::length(p - camPos) / 1000.0);
         }
+        }
 
         // Resolver ANTES de generar: así el frame dibuja lo que hay (con fallback por ancestro) y la
         // generación de lo que falta se paga en paralelo, no bloqueando el dibujo.
+        { HARUKA_PROFILE("v5.resolve");
         m_resolved.clear(); m_resolved.reserve(m_sel.size());
         for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
+        }
         // ── PRESUPUESTO ELÁSTICO: se gasta cuando hay cola, no siempre ──────────────────────────
         //
         // ⚠️ EL NÚMERO FIJO SE PAGA AL GIRAR. 85 nodos/frame son 4,7 ms y 170 son 9,4 (medido, ver
@@ -840,8 +866,10 @@ public:
             fs.genBudget = m_genPerFrameBase;
         }
         // ⚠️ ORDENAR ANTES DE GENERAR. El presupuesto es el mismo; lo que cambia es CUÁLES entran.
+        { HARUKA_PROFILE("v5.prioritise");
         m_pool.prioritisePending(camPos, planetCenter, planetRadiusM);
-        fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM);
+        }
+        { HARUKA_PROFILE("v5.gen"); fs.generated = m_gpu.generatePending(ctx, m_pool, planetRadiusM); }
         fs.nodesPerSec = (dtSeconds > 0.0) ? (double)fs.generated / dtSeconds : 0.0;
 
         // ── VOLVER A RESOLVER CON LO QUE SE ACABA DE GENERAR ────────────────────────────────────
@@ -864,6 +892,7 @@ public:
         //     girando, re-resolviendo 252 emitidos ·   0 tapados     <- igual que estando quieto
         //
         // De regalo, casi la mitad de instancias: los ancestros gordos ya no se emiten.
+        { HARUKA_PROFILE("v5.reparse");
         if (fs.generated > 0) {
             m_resolved.clear();
             for (const NodeId& n : m_sel) m_resolved.push_back(m_pool.request(n));
@@ -903,7 +932,11 @@ public:
         m_drawn.clear(); m_drawn.reserve(m_resolved.size());
         for (size_t i = 0; i < m_resolved.size(); ++i)
             if (m_resolved[i].slot >= 0) m_drawn.push_back(m_sel[i]);
-        const auto index = nodeDrawnIndex(m_drawn);
+        }   // v5.reparse
+        { HARUKA_PROFILE("v5.drawnIndex");
+        auto index = nodeDrawnIndex(m_drawn);   // la huella dibujada: la usa el cosido y el stride
+        m_index.swap(index);                     // y `draw` la vuelve a mirar (avoid re-alloc)
+        }
 
         // ── STRIDE POR NODO ─────────────────────────────────────────────────────────────────────
         //
@@ -919,6 +952,7 @@ public:
         // ⚠️ Y el mapa se consulta TAMBIEN para el vecino al coser (ver `draw`). Recalcular alli el
         // stride del vecino daria el valor SIN historia, que puede no ser el que el vecino esta
         // usando de verdad — y coser contra una zancada que el otro lado no tiene es una grieta.
+        { HARUKA_PROFILE("v5.stride");
         m_skOf.clear(); m_skOf.reserve(m_resolved.size());
         m_skNow.clear(); m_skNow.reserve(m_resolved.size() * 2);
         // Media del relieve del conjunto DIBUJADO: es la referencia que hace el reparto neutro (ver
@@ -1002,12 +1036,12 @@ public:
             // numero: sin el cose contra un nivel que este nodo no esta dibujando (ver el uso).
             m_kUpNow[key] = (uint32_t)((int)leaf.level - (int)r.node.level);
         }
+        }   // v5.stride
         m_skPrev.swap(m_skNow);   // lo de este frame pasa a ser la historia del siguiente
         m_kUpPrev.swap(m_kUpNow);
         fs.stride    = m_skOf.empty() ? 1u : (1u << *std::max_element(m_skOf.begin(), m_skOf.end()));
         fs.strideMin = m_skOf.empty() ? 1u : (1u << *std::min_element(m_skOf.begin(), m_skOf.end()));
         m_lastRadPerPx = radPerPx;
-        m_index = index;
         m_stats = fs;
         return fs;
     }
@@ -1038,6 +1072,7 @@ public:
         m_inst.clear(); m_inst.reserve(m_resolved.size());
         m_deepKeys.clear();
         m_group.assign(m_strideCount + 1, 0);
+        { HARUKA_PROFILE("v5.inst.build");
         for (uint32_t pass = 0; pass < m_strideCount; ++pass) {
         for (size_t ri = 0; ri < m_resolved.size(); ++ri) {
             const auto& r = m_resolved[ri];
@@ -1188,6 +1223,7 @@ public:
         }
         m_group[pass + 1] = m_inst.size();       // fin del grupo `pass`, inicio del siguiente
         }
+        }   // v5.inst.build
         // Ancestros distintos entre los nodos caidos >=2 niveles: `ancDeep - ancDeepCovers` es lo
         // que se dejaria de dibujar si se aplicara la regla "sin padre residente no se dibuja".
         std::sort(m_deepKeys.begin(), m_deepKeys.end());
@@ -1218,6 +1254,7 @@ public:
         // Sin rango publicado (no debería pasar) se dibuja, por si acaso.
         m_instWater.clear();
         m_groupWater.assign(m_strideCount + 1, 0);
+        { HARUKA_PROFILE("v5.water.inst");
         fs.waterNodes = 0;
         fs.waterCoarsened = 0;
         // `HARUKA_WATER_ALLNODES=1`: sin filtro (A/B: si algo de agua falta, esto dice si es el filtro).
@@ -1274,16 +1311,39 @@ public:
                     if (!keep) {
                         float waterMax = m_water.seaMarginM;
                         if (m_water.lakeLevelFn) {
-                            // ⚠️ 9x9 Y NO 5 PUNTOS. Con centro + esquinas un lago de 100 m dentro de un
-                            // nodo de 300 m se quedaba sin muestrear: el agua del lago del spawn salia
-                            // como ARENA en una de cada dos corridas (segun que nodo cayera encima).
-                            // 81 lecturas por nodo son ~100 000 por frame: lecturas de tabla, no coste.
-                            const double cells = (double)(1u << n.level);
-                            for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
-                                const double lx = -1.0 + 2.0 * (((double)n.i + (a + 0.5) / 9.0) / cells);
-                                const double ly = -1.0 + 2.0 * (((double)n.j + (b + 0.5) / 9.0) / cells);
-                                const float lk = m_water.lakeLevelFn(cubeFaceToDir(n.face, lx, ly));
-                                if (lk > 0.0f) waterMax = std::max(waterMax, lk + m_water.seaMarginM);
+                            // CACHÉ del 9x9 por NODO. `waterMax` de un nodo es FUNCIÓN PURA de su huella
+                            // y de lo que `lakeLevelFn` muestrea (ventana fina + campo global + margen),
+                            // y eso solo cambia con la época de la ventana o un bake. Medido en
+                            // `v5.water.inst`: 81 lecturas de trig doble × ~1000 nodos = 9,2 ms por frame
+                            // que este `find` convierte en ~0. ⚠️ La época sale de `setWater`; si el
+                            // planeta no la pasa, el renderer la ve en 0 la primera vez y la rellena.
+                            if (m_waterCacheEpoch != m_water.lakeEpoch ||
+                                m_waterCacheSea    != m_water.seaMarginM) {
+                                m_waterMaxCache.clear();
+                                m_waterCacheEpoch = m_water.lakeEpoch;
+                                m_waterCacheSea   = m_water.seaMarginM;
+                            }
+                            const uint64_t wkey = nodeKey(n);
+                            const auto wIt = m_waterMaxCache.find(wkey);
+                            if (wIt != m_waterMaxCache.end()) {
+                                waterMax = wIt->second;
+                            } else {
+                                // ⚠️ 9x9 Y NO 5 PUNTOS. Con centro + esquinas un lago de 100 m dentro de un
+                                // nodo de 300 m se quedaba sin muestrear: el agua del lago del spawn salia
+                                // como ARENA en una de cada dos corridas (segun que nodo cayera encima).
+                                // 81 lecturas por nodo son ~100 000 por frame: lecturas de tabla, no coste.
+                                const double cells = (double)(1u << n.level);
+                                for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
+                                    const double lx = -1.0 + 2.0 * (((double)n.i + (a + 0.5) / 9.0) / cells);
+                                    const double ly = -1.0 + 2.0 * (((double)n.j + (b + 0.5) / 9.0) / cells);
+                                    const float lk = m_water.lakeLevelFn(cubeFaceToDir(n.face, lx, ly));
+                                    if (lk > 0.0f) waterMax = std::max(waterMax, lk + m_water.seaMarginM);
+                                }
+                                // ⚠️ TOPE: si creciera sin control al caminar por mucho terreno, la caché
+                                // engordaría sin límite. Al llegar al tope se vacía entera (un frame paga
+                                // el 9x9 otra vez, que es lo que costaba SIEMPRE antes de la caché).
+                                if (m_waterMaxCache.size() >= 8192) m_waterMaxCache.clear();
+                                m_waterMaxCache.emplace(wkey, waterMax);
                             }
                         }
                         keep = r.minM <= waterMax;
@@ -1306,9 +1366,10 @@ public:
                     m_instWaterSSBO[k] = m_dev->createBuffer(RHI::BufferUsage::Storage, m_instWaterCap[k],
                                                              nullptr, RHI::BufferMemory::Dynamic);
                 }
-                m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWater[k]);
+m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWater[k]);
             }
         }
+        }   // v5.water.inst
 
         DrawUBO du{};
         du.mvp     = mvp;
@@ -1613,6 +1674,13 @@ private:
     std::vector<size_t>      m_groupWater;
     RHI::BufferHandle   m_instWaterSSBO[kStrides]{};
     size_t              m_instWaterCap[kStrides]{};
+    /// Caché del 9x9 del filtro de agua: `waterMax` por clave de nodo. El resultado solo cambia con
+    /// la época de la ventana (recentre) o del campo global (bake/rebuild) o con el margen, así que
+    /// entre cambios se reutiliza — medido en `v5.water.inst`: 81 lecturas × ~1000 nodos = 9,2 ms de
+    /// trig doble por frame, que la caché convierte en un `find` por nodo.
+    std::unordered_map<uint64_t, float> m_waterMaxCache;
+    uint64_t m_waterCacheEpoch = UINT64_MAX;   ///< época con que se llenó (invalida en el 1er frame)
+    float    m_waterCacheSea  = 0.0f;          ///< margen con que se llenó
     uint32_t            m_strideCount = 0;
     bool                m_ready = false;
     bool                m_rootsPinned = false;

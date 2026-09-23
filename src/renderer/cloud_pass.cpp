@@ -216,7 +216,11 @@ void CloudPass::draw(const Frame& f) {
             // El divisor es de LADO: 4 son 16 veces menos pixeles. La nube es de frecuencia baja y ya
             // va con jitter, asi que aguanta el reescalado; lo que no aguanta el motor es pagarla a
             // resolucion completa (ver la nota del miembro en application.h).
-            int resDiv = 4;
+            // ⚠️ DEFAULT: 4 → 6 → 8 (22-09, A/B del FPS cerrado en el juego). Medido con
+            // `HARUKA_PROF_LOG` en la 3050 Laptop: la marcha a 1/4 (480x270x64) costaba 38 ms de un
+            // frame de 62 —el 60 % del frame GPU—; a 1/6, 16 ms; a 1/8 (240x135) oscila 5-6 ms y el
+            // upsample + jitter la dejan igual. `HARUKA_CLOUD_RESDIV` vuelve a 6 sin recompilar.
+            int resDiv = 8;
             if (const char* e = std::getenv("HARUKA_CLOUD_RESDIV")) {
                 const int v = std::atoi(e);
                 if (v >= 1 && v <= 8) resDiv = v;

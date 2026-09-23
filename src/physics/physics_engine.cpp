@@ -1869,11 +1869,15 @@ void PhysicsEngine::advance(double frameDt) {
     // Cota anti-espiral: si el frame se congela (breakpoint, hitch), no intentar recuperar segundos
     // de simulación de golpe (bloquearía más) — se descarta el exceso.
     if (m_accum > kMaxAccum) m_accum = kMaxAccum;
+    m_lastSteps = 0;   // para el panel F5: cuántos pasos fijos pagó este frame
     while (m_accum >= kFixedDt) {
         update(kFixedDt);
         m_accum -= kFixedDt;
+        ++m_lastSteps;
     }
 }
+
+int PhysicsEngine::lastSteps() const { return m_lastSteps; }
 
 glm::dvec3 PhysicsEngine::waterForceOn(RigidBody& body, const glm::dvec3& gravityAcc, double dt) {
     if (!m_world || !m_world->hasActivePlanet() || body.radius <= 1e-4 || body.mass <= 1e-9) {

@@ -802,6 +802,9 @@ void TerrestrialPlanet::clearGPU() {
     m_propDensityTex.clear();
     if (RHI::valid(m_propUBO)) { dev->destroy(m_propUBO); m_propUBO = {}; }
     m_heightCPU.clear(); m_heightW = 0; m_heightH = 0;
+    m_heightCPUsh.reset();   // los snapshots de la ventana quedaron viejo (si los hubiera)
+    m_waterCPU.clear();
+    m_waterCPUsh.reset();
     m_indexCount = 0;
 }
 
@@ -2737,7 +2740,9 @@ void TerrestrialPlanet::bakeWaterMap() {
 
     m_waterCPU     = std::move(r.levelM);
     m_fetchCPU     = std::move(r.fetchM);
+    m_waterCPUsh.reset();                    // el snapshot de la ventana quedó viejo: que recopie
     m_hasWater     = r.hasWater;
+    ++m_lakeEpoch;   // el campo global que muestrea `lakeLevelFn` acaba de cambiar: vaciar la caché del agua
     // ⚠️ INTERRUPTOR DE BISECCION. `HARUKA_NOWATER=1` apaga TODA el agua (mar, lagos y el parche), que
     // es como se contesta "¿lo que veo raro es el agua?" en una sola ejecucion.
     //
@@ -2831,6 +2836,7 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
         const double texelM = (2.0 * kLakeWinHalfM) / (double)kLakeWinRes;
         if (alt > texelM * 320.0) {          // 62 m x 320 = ~20 km
             std::atomic_store(&m_lakeWin, std::shared_ptr<const LakeWindow>());
+            ++m_lakeEpoch;
             return;
         }
     }
@@ -2853,6 +2859,7 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
         // que un lector ve la ventana NUEVA con el centro VIEJO — o sea un lago desplazado.
         std::atomic_store(&m_lakeWin, ok ? std::shared_ptr<const LakeWindow>(snap)
                                          : std::shared_ptr<const LakeWindow>());
+        ++m_lakeEpoch;   // invalida la caché del 9x9 del agua: la misma huella ahora mira otra ventana
 
         // ── A LA GPU. Mismo formato, mismo NEAREST y mismo intercalado que `m_lakeTex`: el nivel y
         // el fetch salen del mismo relleno y se leen en el mismo texel.
@@ -2911,11 +2918,18 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
     m_lakeWinJobLonC = lon; m_lakeWinJobLatC = lat;
 
     // Copias por VALOR de lo que el hilo necesita. Nada de capturar `this` para leer miembros que el
-    // hilo principal puede reasignar (`rebuild` reconstruye `m_waterCPU` entero).
+    // hilo principal puede reasignar (`rebuild` reconstruye `m_waterCPU` entero). ⚠️ SON SNAPSHOTS
+    // COMPARTIDOS, NO COPÍAS: `m_heightCPUsh`/`m_waterCPUsh` solo se reemplazan en el bake, así que
+    // el job se lleva el puntero de un tirón. Antes se copiaba aquí (134 + 134 MB por recentre,
+    // ~10 ms en `compute.prepare`); compartir el puntero da los mismos datos sin pagarlo.
     const int   hw = m_heightW, hh = m_heightH;
     const float baseR = m_baseRadius;
-    auto heightCPU = std::make_shared<std::vector<float>>(m_heightCPU);
-    auto waterCPU  = std::make_shared<std::vector<float>>(m_waterCPU);
+    auto heightCPU = (m_heightCPUsh && (int)m_heightCPUsh->size() == hw * hh)
+                    ? m_heightCPUsh : std::make_shared<std::vector<float>>(m_heightCPU);
+    auto waterCPU  = (m_waterCPUsh  && (int)m_waterCPUsh->size()  == hw * hh) ? m_waterCPUsh
+                     : std::make_shared<std::vector<float>>(m_waterCPU);
+    m_heightCPUsh = heightCPU;   // reutilizar la próxima vez: el bake no corrió entre medias
+    m_waterCPUsh  = waterCPU;
     const float triM = Haruka::Planet::terrainTriM(0.0);
 
     m_lakeWinJob = std::async(std::launch::async,
@@ -3104,8 +3118,10 @@ void TerrestrialPlanet::bakeHeightMap() {
     HeightUpload up = uploadHeight(field);
     m_heightTex  = up.tex;
     m_heightCPU  = std::move(up.cpuField);   // copia CPU del R32F: la física usa el mismo campo
+    m_heightCPUsh.reset();                    // el snapshot de la ventana quedó viejo: que recopie
     m_heightW    = up.w;
     m_heightH    = up.h;
+    m_heightSamplerDirty = true;   // el retrato cambió: re-acotar el rango de los residentes (1 vez)
 
     // EL SUELO PARA EL SERVIDOR. El validador del DGS juzgaba el noclip contra el analítico, que en
     // esta rama es un stub (esfera lisa a nivel del mar): un jugador legítimo en un valle se
@@ -3257,12 +3273,14 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
     // LA VENTANA FINA DE LAGOS. Va aqui y no en el bake porque SIGUE AL OBSERVADOR: el bake se hace
     // una vez y esto se recentra al caminar. No bloquea — lanza un hilo y recoge cuando esta.
     {
+        HARUKA_PROFILE("planet.lake");
         const glm::dvec3 rel = cameraPos - m_config.position;
         if (glm::length(rel) > 1.0) updateLakeWindow(rel);
     }
     RHI::Device* dev = RHI::device();
     if (!dev) return;
-    RHI::Context* ctx = dev->beginFrame();
+    RHI::Context* ctx = nullptr;
+    { HARUKA_PROFILE("planet.beginFrame"); ctx = dev->beginFrame(); }
     if (!ctx) return;
 
     // ── EL CAMPO VOLUMÉTRICO: streaming, remallado y ventana de recorte ────────────────────────
@@ -3287,16 +3305,22 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         // mar: el criterio de subdivision, el stride por nodo y la envolvente del frustum. El log lo
         // decia con `SIN RANGO 3070` de 3070. Se usa `sampleHeight`, que es la MISMA altura que
         // consulta la fisica — asi la cota que decide el LOD y la que se pisa no pueden divergir.
-        m_nodeRenderer.setHeightSampler(
-            [](const glm::dvec3& dir, void* ctx) -> float {
-                return (float)static_cast<const TerrestrialPlanet*>(ctx)->sampleHeight(dir);
-            }, this);
+        if (m_heightSamplerDirty) {
+            HARUKA_PROFILE("planet.sampler");
+            m_nodeRenderer.setHeightSampler(
+                [](const glm::dvec3& dir, void* ctx) -> float {
+                    return (float)static_cast<const TerrestrialPlanet*>(ctx)->sampleHeight(dir);
+                }, this);
+            m_heightSamplerDirty = false;
+        }
         m_nodeRenderer.setBaseField(m_baseFieldTex);
         m_nodeRenderer.setHeightTex(m_heightTex);   // la MISMA elevación que el clipmap y la física
         const double radPerPx = fovYRad / std::max(viewportH, 1.0);
         const double cone     = Haruka::Terrain::nodeFrustumConeHalfAngle(fovYRad, aspect);
+        { HARUKA_PROFILE("v5.prepare");
         m_nodeRenderer.prepare(ctx, cameraPos, m_config.position, m_config.radius,
                                viewDir, radPerPx, cone, m_frameDt);
+        }
         // ── LA HIERBA, sobre lo que `prepare` acaba de resolver ─────────────────────────────────
         // Pase de presion + compute, aqui fuera del render pass. Lee el mapa de alturas de los
         // nodos (generado en el mismo command buffer: la barrera de `prepare` ya lo ordena).
@@ -3340,6 +3364,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         !RHI::valid(m_patchBoundsSSBO) || !RHI::valid(m_patchIdxSSBO) ||
         !RHI::valid(m_patchIdxCulled) || !RHI::valid(m_patchCullCmd))
         return;
+    { HARUKA_PROFILE("planet.gpucull"); HARUKA_GPU_SCOPE("planet.gpucull");
 
     // El comando se resetea por CPU cada frame: el compute solo ACUMULA con atomicAdd, así que si no
     // se pusiera indexCount a 0 crecería sin fin entre frames.
@@ -3369,6 +3394,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
     ctx->memoryBarrier();
 
     m_cullReady = true;
+    }
 }
 
 void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
@@ -4257,6 +4283,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 w.inlandSSBO  = m_inlandWaterValid ? m_inlandWaterSSBO : RHI::BufferHandle{};
                 w.on          = m_hasWater;
                 w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeLevelAt(dir); };
+                w.lakeEpoch   = m_lakeEpoch;   // invalida la caché del 9x9 si cambió ventana o campo
                 w.inlandRelEye  = m_inlandWaterValid ? m_inlandCenterRelEye : glm::vec3(0.0f);
                 w.inlandRadiusM = m_inlandWaterValid ? m_inlandSpanM * 0.75f : 0.0f;
                 m_nodeRenderer.setWater(w);

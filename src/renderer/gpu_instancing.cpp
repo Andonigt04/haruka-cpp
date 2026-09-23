@@ -69,15 +69,34 @@ void GPUInstancing::setInstancesGather(const InstanceDataFloat* src, const std::
     m_dirty = true;
 }
 
+void GPUInstancing::reserve(size_t capacity) {
+    if (capacity <= m_arenaCap) return;
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    // Los draws de este frame ya grabados pueden seguir leyendo el arena viejo: se retira como en
+    // `upload` (se destruye en el beginFrame siguiente, cuando la GPU ya termino el frame).
+    const size_t c = capacity < (size_t)m_maxInstances ? (size_t)m_maxInstances : capacity;
+    if (RHI::valid(m_arena)) m_retired.push_back(m_arena);
+    m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, c * sizeof(InstanceDataFloat),
+                                nullptr, RHI::BufferMemory::Dynamic);
+    m_arenaCap = c;
+    m_arenaUsed = 0;
+}
+
 void GPUInstancing::upload() {
     if (m_instances.empty()) return;
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     const size_t need = m_instances.size();
     if (!RHI::valid(m_arena) || m_arenaUsed + need > m_arenaCap) {
-        // No cabe: arena nuevo (potencia de dos por encima de lo usado + lo que viene) y el viejo se
-        // retira hasta el frame siguiente — los draws ya grabados este frame lo siguen leyendo.
-        size_t c = 4096; while (c < m_arenaUsed + need) c <<= 1;
+        // No cabe: arena nuevo del tamaño EXACTO de lo sub-asignado + lo que viene (el viejo se
+        // retira hasta el frame siguiente — los draws ya grabados este frame lo siguen leyendo).
+        // Potencias de dos hacian explotar el arena: cada frame que cruzaba el tope recreaba AL
+        // DOBLE un buffer host-visible (una allocacion que en este portatil hibrido cuesta cientos
+        // de ms y dobla cada frame: 157 -> 278 -> 671 ms). Con el tamaño exacto, si vuelve a cruzar
+        // crece por el DELTA, nunca al doble, y lo retenido cubre al frame siguiente.
+        size_t c = m_arenaUsed + need;
+        if (c < (size_t)m_maxInstances) c = (size_t)m_maxInstances;
         if (RHI::valid(m_arena)) m_retired.push_back(m_arena);
         m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, c * sizeof(InstanceDataFloat),
                                     nullptr, RHI::BufferMemory::Dynamic);
