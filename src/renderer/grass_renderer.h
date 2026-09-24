@@ -99,6 +99,7 @@ public:
         // `uVoxCut`; sin ventana (no hay vox cargados/cortados) llega vacia y no se descarta nada.
         RHI::TextureHandle cutTex{};
         glm::mat4          cutSpace{1.0f};
+        uint64_t           cutVersion{};    ///< versión del campo que refleja `cutTex` (`VoxRenderer::cutVersion`)
         const std::vector<Haruka::Terrain::TerrainNodeRenderer::NearNode>* nodes = nullptr;
         float      finestTexelM = 1.0f;      ///< texel del nivel mas fino de `nodes`
     };
@@ -167,8 +168,11 @@ private:
     const void*        m_lastNodes = nullptr;
     size_t             m_lastNodesN = 0;
     // Ventana de recorte del ULTIMO dispatch: si cambia (el `VoxRenderer` rehace la textura o
-    // reancla la matriz) hay que volver a generar, aunque la camara no se mueva.
+    // reancla la matriz) hay que volver a generar, aunque la camara no se mueva. El id NO es fiable
+    // solo (se recicla); la version del campo la complementa: un trazo edita el campo, la textura se
+    // rehace y la version avisa aun si el id reciclado coincidiera.
     RHI::TextureHandle m_lastCutTex{};
+    uint64_t           m_lastCutVersion = 0;
     bool               m_first = true;
 };
 

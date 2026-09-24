@@ -78,8 +78,10 @@ constexpr float kCloudExtinction = 0.008f;
 /// banco no lo vio porque midio a 25° y desde arriba, no RASANTE desde el suelo, que es donde el
 /// presupuesto repartido sobre decenas de km da pasos de cientos de metros y los planos de muestreo
 /// (t constante) se ven como bandas. Ahora el banco mide tambien esa vista; hasta que 24 la pase
-/// alli, se queda 64. `HARUKA_CLOUD_STEPS` sigue siendo el mando.
-constexpr int kCloudStepsDefault = 64;
+/// alli, se queda 48 (A/B 24-09: 64 marcaba 9,7 ms de GPU mirando al cielo en 1080p; 48 lo deja en
+/// ~6 ms con la caja calibrada, y 32 —el piso de la muestra— en ~4,9). `HARUKA_CLOUD_STEPS` sigue
+/// siendo el mando.
+constexpr int kCloudStepsDefault = 48;
 
 /// `HARUKA_CLOUD_STEPS=N` sobreescribe los pasos (8..128) sin recompilar: para el A/B en el juego
 /// con la misma sonda (`HARUKA_PROF_LOG`). Nació cuando el banco (`nubes.pase_64pasos_ms_1080p`)

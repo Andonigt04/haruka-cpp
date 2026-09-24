@@ -39,10 +39,15 @@ endif()
 function(target_apply_network TGT)
     if(HARUKA_NETWORK)
         target_compile_definitions(${TGT} PRIVATE HARUKA_NETWORK)
-        target_include_directories(${TGT} PRIVATE "${ENGINE_ROOT}/external/dgs")
-        target_link_libraries(${TGT} PRIVATE
-            "${ENGINE_ROOT}/external/dgs/sdk/libdgs_client.a"
-            OpenSSL::SSL)
+        # dgs_bridge.h incluye el ABI (`include/dgs/types.h`): se resuelve igual que el motor —
+        # checkout local `../dgs` si existe, si no la copia del árbol. NADA de enlazar el
+        # precompilado `external/dgs/sdk/libdgs_client.a` (queda obsoleto en cuanto se toca
+        # `network.cpp`): aquí las llamadas DGS viven DENTRO de libHarukaEngine.so.
+        set(_dgs_inc "${ENGINE_ROOT}/external/dgs")
+        if(EXISTS "${ENGINE_ROOT}/../dgs/include/dgs")
+            set(_dgs_inc "${ENGINE_ROOT}/../dgs")
+        endif()
+        target_include_directories(${TGT} PRIVATE "${_dgs_inc}")
     endif()
 endfunction()
 

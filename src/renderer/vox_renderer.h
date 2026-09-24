@@ -29,10 +29,11 @@ namespace Haruka {
  */
 class VoxRenderer {
 public:
-    static constexpr int    kCutRes    = 256;
+    static constexpr int    kCutRes    = 160;   ///< ventana 160² (téxel ~4 m sobre ±320 m): con 256² el rebarrido por texel era ~40 ms
     static constexpr double kCutHalfM  = 320.0;   ///< la ventana cubre ±320 m
     static constexpr int    kMaxRemeshPerFrame = 16;    ///< tope duro; el que manda es el tiempo
     static constexpr double kRemeshBudgetMs    = 5.0;   ///< ms de remallado por frame (3 chunks fijos tardaban 7 s en levantar una isla)
+    static constexpr size_t kMaxCutCache = 1u << 18;    ///< ≈ 4 ventanas de 256²; al pasar se vacía (recalculo aislado)
 
     /** @brief Remalla los chunks sucios (acotado) y rehace la ventana de recorte si hace falta.
      *  @param camRelPlanet cámara relativa al CENTRO del planeta (m) */
@@ -49,6 +50,10 @@ public:
     RHI::TextureHandle cutTexture() const { return m_cutTex; }
     /** @brief Lleva una posición RELATIVA A LA CÁMARA a la ventana de recorte ([0,1]²). */
     const glm::mat4& cutSpace() const { return m_cutSpace; }
+    /** @brief Versión del campo que la ventana ACTUAL refleja (más fiable que comparar el id de la
+     *  textura: el id se recicla y un reencuadre por >40 m no cambia el contenido). Un consumidor
+     *  (la hierba) regenera cuando esto cambia Y SU TEXURA SIGUE SIENDO LA MISMA ALGUN FRAME. */
+    uint64_t cutVersion() const { return m_cutVersion; }
     bool cutValid() const { return RHI::valid(m_cutTex) && m_cutReady; }
 
     /** @brief La copia CPU de cada malla subida, con su revisión: es lo que la física convierte en
@@ -87,10 +92,17 @@ private:
     void refreshCutSpace(const glm::dvec3& camRelPlanet);
     bool                m_cutReady = false;
     uint64_t            m_cutVersion = ~0ull;
+    bool                m_cutDirty = false;   ///< un chunk DENTRO de la ventana se remalló → rehacer
     bool                m_failed = false;
     size_t              m_drawn = 0, m_tris = 0, m_culled = 0;
     std::unordered_map<VoxKey, Gpu, VoxKeyHash> m_gpu;
     std::unordered_map<VoxKey, CpuMesh, VoxKeyHash> m_cpu;
+    /// Cache de la VENTANA DE RECORTE por chunk (clave compacta `physicsKey`): `surfaceCut` y
+    /// `floorDepthM` dependen SÓLO del campo (dirección), no de la cámara. Entre rebuilds se reusan
+    /// las columnas cuya malla no cambió (revisión): re-centrar cada 40 m o remallar no rehace los
+    /// 65 536 `surfaceCut` (~40 ms) de la ventana. Se invalida al soltar el chunk y al pasar el tope.
+    struct CutCache { uint64_t rev = 0; float cut = 0.0f; float depth = 0.0f; };
+    std::unordered_map<uint64_t, CutCache> m_cutCache;
     std::vector<unsigned char> m_cutPixels;
 };
 

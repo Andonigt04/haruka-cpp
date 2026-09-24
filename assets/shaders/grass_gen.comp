@@ -201,16 +201,20 @@ void main() {
     const double cellD = 2.0LF / double(cellsFace);
     const double lx = -1.0LF + (double(cx) + double(r0)) * cellD;
     const double ly = -1.0LF + (double(cy) + double(r1)) * cellD;
-    const dvec3  dirD = harukaCubeFaceToDir(face, lx, ly);
-    const vec3   dir  = vec3(dirD);
-    const double R    = double(uCenter.w);
 
     // ── DISTANCIA ANTES DE LEER NADA CARO ───────────────────────────────────────────────────────
-    // Con el suelo a la ALTITUD DE LA CAMARA (uMisc.z) como estimacion: sobra para descartar. (Con
-    // el nivel del mar, una camara a −87 m de cota tenia TODAS las briznas "a 88 m" y el radio se
-    // comia el 97 %: medido en el banco, 9 886 de 108 000.)
-    vec3 approx = vec3(dirD * (R + double(uMisc.z)) + dvec3(uCenter.xyz)) + uCenterLo.xyz;
-    const float distA = length(approx);
+    // Las celdas viven en LA CARA de la camara (uIdx/uIdxGrid, camara en el centro de la rejilla),
+    // asi que la distancia se estima PLANA sobre la cara — un par de diferencias de (lx,ly) y un
+    // sqrt barato, SIN la inversa cubo→esfera en fp64. A 60 m del pie la distancia sobre la cara es
+    // plana al cm (~1e-7 rad): el corte exacto (con `dist` real, abajo) nunca es mas permisivo que
+    // este, y con
+    // el margen de 10 m el resultado es el mismo (el atajo solo decide si un hilo SE SIENTA a pagar
+    // su fp64 o no). Antes TODOS los ~2,7 M de hilos llamaban `harukaCubeFaceToDir` (raiz de Newton
+    // ×3, fp64 a 1/64) y el 86 % moria justo despues en este descarte: el regen de 7,6 ms era eso.
+    const double lxCam = uIdx.x + uIdx.w * 0.5LF, lyCam = uIdx.y + uIdx.w * 0.5LF;
+    const double cellLxM = (double(uCenter.w) + double(uMisc.z)) * 0.7853981633974483LF; // m por unidad lx (±45° por cara)
+    const double distA0 = (lx - lxCam) * (lx - lxCam) + (ly - lyCam) * (ly - lyCam);
+    const float  distA  = float(sqrt(distA0) * cellLxM);
     if (!SKIP(3) && distA > uGrid.z + 30.0) return;
     // ── LOD TEMPRANO, con la distancia aproximada y 10 m de margen ──────────────────────────────
     // Con 300 matas/m² la mayoria de los hilos estan lejos y raleados: hay que echarlos ANTES de
@@ -220,6 +224,11 @@ void main() {
         const float lodA  = clamp((distA - 10.0 - uLod.x) / max(uGrid.z - uLod.x, 1.0), 0.0, 1.0);
         if (!SKIP(4) && r2 > mix(1.0, uLod.y, lodA)) return;
     }
+
+    // ── SOLO LOS SUPERVIVIENTES pagan la inversa cubo→esfera en fp64 ────────────────────────────
+    const dvec3  dirD = harukaCubeFaceToDir(face, lx, ly);
+    const vec3   dir  = vec3(dirD);
+    const double R    = double(uCenter.w);
 
     // ── EL SUELO DIBUJADO ───────────────────────────────────────────────────────────────────────
     float h; vec2 dh;

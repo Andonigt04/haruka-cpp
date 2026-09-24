@@ -431,6 +431,7 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     m_lastNodes     = f.nodes ? (const void*)f.nodes->data() : nullptr;
     m_lastNodesN    = f.nodes ? f.nodes->size() : 0;
     m_lastCutTex    = f.cutTex;
+    m_lastCutVersion = f.cutVersion;
 }
 
 void GrassRenderer::prepare(RHI::Context* ctx, const Frame& f) {
@@ -461,6 +462,9 @@ void GrassRenderer::prepare(RHI::Context* ctx, const Frame& f) {
         // cámara (no dispara aquí: la regenera ya el umbral de `camPos`, y compararla con `!=`
         // rompería el reuse con movimientos de sub-mm).
         changed += (f.cutTex.id != m_lastCutTex.id);
+        // La VERSION del campo que la textura refleja: un trazo edita el campo y la textura se
+        // rehace (id nuevo, casi siempre); si el id reciclara, la version aun avisaria.
+        changed += (f.cutVersion != m_lastCutVersion);
     }
     m_first = false;
     if (!changed) return;   // conserva el contador y el buffer del frame anterior: el draw reusa

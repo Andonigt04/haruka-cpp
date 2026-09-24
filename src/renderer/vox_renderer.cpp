@@ -5,6 +5,7 @@
 #include "renderer/shader.h"
 #include "rhi/rhi_context.h"
 #include "rhi/rhi_device.h"
+#include "tools/profiler.h"
 
 #include <chrono>
 #include <cmath>
@@ -50,6 +51,7 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
     int remeshed = 0;
     std::vector<VoxKey> keys = world.loadedKeys();
     const auto tRemesh0 = std::chrono::high_resolution_clock::now();
+    { HARUKA_PROFILE("vox.mesh");
     for (const VoxKey& k : keys) {
         VoxChunk* c = world.get(k);
         if (!c || !c->dirty) continue;
@@ -61,6 +63,13 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
         CaveMesh mesh;
         world.buildMesh(k, mesh);
         ++remeshed;
+        // La ventana de recorte SOLO se rehace si el chunk remallado cae dentro (± margen): un
+        // chunk lejano no pinta bocas en ella y no merece rebarridar los kCutRes².
+        if (glm::dot(camRelPlanet, camRelPlanet) > 1.0) {
+            const glm::dvec3 cc = world.chunkCenterDir(k);
+            const double ang = std::acos(std::clamp(glm::dot(camRelPlanet / glm::length(camRelPlanet), cc), -1.0, 1.0));
+            if (ang * world.planetRadius() < kCutHalfM * 1.7) m_cutDirty = true;
+        }
         Gpu& g = m_gpu[k];
         if (!RHI::valid(g.ubo)) {
             VoxUBO z{};
@@ -99,14 +108,16 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
                 std::fclose(f);
             }
         }
-    }
+    } }
     // Lo descargado se suelta de la GPU.
     for (auto it = m_gpu.begin(); it != m_gpu.end();) {
         if (world.get(it->first)) { ++it; continue; }
         if (RHI::valid(it->second.vb)) dev->destroy(it->second.vb);
         if (RHI::valid(it->second.ib)) dev->destroy(it->second.ib);
         if (RHI::valid(it->second.ubo)) dev->destroy(it->second.ubo);
+        const uint64_t ck = physicsKey(it->first);
         m_cpu.erase(it->first);
+        m_cutCache.erase(ck);
         it = m_gpu.erase(it);
     }
 
@@ -114,13 +125,17 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
     const double camR = glm::length(camRelPlanet);
     if (camR < 1.0) return;
     const glm::dvec3 foot = camRelPlanet / camR * (world.planetRadius() + surfaceElevM);
-    if (world.version() != m_cutVersion || remeshed > 0 || glm::length(foot - m_cutCenter) > 40.0)
+    { HARUKA_PROFILE("vox.cut");
+    if (world.version() != m_cutVersion || m_cutDirty || glm::length(foot - m_cutCenter) > 40.0) {
+        m_cutDirty = false;
         rebuildCut(world, camRelPlanet, surfaceElevM);
+    }
     // ⚠️ LA MATRIZ SE REHACE CADA FRAME, LA TEXTURA NO. `vFragPos` es relativo a la cámara de ESTE
     // frame; la textura se rehace cada 40 m. Con la matriz congelada en el rehecho, la ventana se
     // movía con la cámara hasta 40 m antes de volver a su sitio: el agujero se desplazaba al andar.
     // El marco (e1, e2, up, pie) es el del rehecho; sólo la traslación cambia.
     else refreshCutSpace(camRelPlanet);
+    }
 }
 
 void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
@@ -133,6 +148,8 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
 
     m_cutPixels.assign((size_t)kCutRes * kCutRes * 4, 0);
     size_t abiertos = 0;
+    { HARUKA_PROFILE("vox.cut.loop");
+    double depthMs = 0.0;
     for (int y = 0; y < kCutRes; ++y)
         for (int x = 0; x < kCutRes; ++x) {
             const double fx = ((double)x / (kCutRes - 1) - 0.5) * 2.0 * kCutHalfM;
@@ -147,19 +164,40 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
             // Mientras se remalla, la malla vieja sigue dibujándose, así que el recorte puede quedarse.
             const VoxKey sk = world.keyAt(dir * (world.planetRadius() + (double)(world.elevAt(dir)) - 3.0));
             const VoxChunk* sc = world.get(sk);
-            const float cut = (sc && m_cpu.count(sk)) ? world.surfaceCut(dir) : 0.0f;
+            float cut = 0.0f, depth = 0.0f;
+            const auto cpuIt = m_cpu.find(sk);
+            if (sc && cpuIt != m_cpu.end()) {
+                // Cache por chunk: surfaceCut/floorDepthM no cambian entre rebuilds salvo que el
+                // chunk se remalle (revisión). Reusar es EXACTO mientras la malla sea la misma.
+                const uint64_t ck = physicsKey(sk);
+                const auto cIt = m_cutCache.find(ck);
+                if (cIt != m_cutCache.end() && cIt->second.rev == cpuIt->second.revision) {
+                    cut   = cIt->second.cut;
+                    depth = cIt->second.depth;
+                } else {
+                    cut = world.surfaceCut(dir);
+                    if (cut > 0.0f) {
+                        const auto t0 = std::chrono::high_resolution_clock::now();
+                        depth = world.floorDepthM(dir, 255.0f);
+                        depthMs += std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+                    }
+                    if (m_cutCache.size() >= kMaxCutCache) m_cutCache.clear();
+                    m_cutCache[ck] = { cpuIt->second.revision, cut, depth };
+                }
+            }
             const unsigned char v = (unsigned char)std::lround(cut * 255.0f);
             // G = el LECHO: metros de aire bajo la superficie (hasta 255). Es lo que baja el suelo
             // para el agua: la lámina de un lago que cubra la boca se dibuja DENTRO del foso, y la
             // que quede por debajo del lecho, no. Sólo se calcula donde hay recorte (baja por la
             // columna metro a metro).
-            const float depth = (v > 0) ? world.floorDepthM(dir, 255.0f) : 0.0f;
             const size_t o = ((size_t)y * kCutRes + x) * 4;
             m_cutPixels[o + 0] = v;
             m_cutPixels[o + 1] = (unsigned char)std::lround(std::min(depth, 255.0f));
             m_cutPixels[o + 2] = 0; m_cutPixels[o + 3] = 255;
             if (v > 127) ++abiertos;
         }
+    Haruka::Profiler::get().add("vox.cut.depth", depthMs);
+    }
     // El RHI no tiene "actualizar textura": se recrea, como hace la ventana de lagos del planeta.
     // ⚠️ La textura vieja NO se destruye en este frame: puede estar atada a un command buffer en
     // vuelo (Vulkan). Se aparca y se suelta en el siguiente `update`.
@@ -176,6 +214,14 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
         writePNG(dump, kCutRes, kCutRes, 4, m_cutPixels.data());
     }
     m_cutReady = true;
+    // DIAG DEL BUG "LA HIERBA TAPA LA BOCA": la primera ventana con boca (abiertos>0) se volca
+    // SIEMPRE a `voxcut_first.png` y se resume — sin depender de env ni del ciclo de 30 rebuilds.
+    // Con eso se ve si la textura que recibe la hierba tiene la boca (blanco) o no (negro).
+    static bool s_hadOpen = false;
+    if (abiertos > 0 && !s_hadOpen) {
+        s_hadOpen = true;
+        writePNG("voxcut_first.png", kCutRes, kCutRes, 4, m_cutPixels.data());
+    }
     static uint64_t s_log = 0;
     if (abiertos > 0 && (s_log++ % 30) == 0) {
         // Y el valor BAJO LOS PIES: si la cámara está sobre una boca y aquí sale 0, el recorte no

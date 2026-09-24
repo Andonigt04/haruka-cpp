@@ -3353,6 +3353,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
             // enseñar la boca (la brizna quedaría en el aire). Sin ventana (cutTex vacia) no recorta.
             gf.cutTex        = m_voxRenderer.cutTexture();
             gf.cutSpace      = m_voxRenderer.cutSpace();
+            gf.cutVersion    = m_voxRenderer.cutVersion();
             m_grass.prepare(ctx, gf);
         }
     }
@@ -4288,6 +4289,14 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 w.on          = m_hasWater;
                 w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeLevelAt(dir); };
                 w.lakeEpoch   = m_lakeEpoch;   // invalida la caché del 9x9 si cambió ventana o campo
+                if (const auto lw = lakeWindow()) {
+                    // Rect (lon, lat) de la ventana fina, para el atajo del filtro de agua: si el nodo
+                    // cae fuera, `lakeLevelFn` es el campo grueso y centro + 3x3 bastan sin el 9x9.
+                    const double halfLon = 0.5 * (lw->invSpanLon > 0.0 ? 1.0 / lw->invSpanLon : 0.0);
+                    const double halfLat = 0.5 * (lw->invSpanLat > 0.0 ? 1.0 / lw->invSpanLat : 0.0);
+                    w.lakeWindowRect = glm::vec4((float)(lw->lonC - halfLon), (float)(lw->latC - halfLat),
+                                                 (float)(lw->lonC + halfLon), (float)(lw->latC + halfLat));
+                }
                 w.inlandRelEye  = m_inlandWaterValid ? m_inlandCenterRelEye : glm::vec3(0.0f);
                 w.inlandRadiusM = m_inlandWaterValid ? m_inlandSpanM * 0.75f : 0.0f;
                 m_nodeRenderer.setWater(w);

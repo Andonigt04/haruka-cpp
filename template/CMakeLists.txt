@@ -46,6 +46,16 @@ else()
     )
 endif()
 
+# --- DGS network (optional) ---
+# ⚠️ Se DECLARA ANTES de traerse el motor (mismo patrón que Survival): el motor lee su PROPIA
+# opción HARUKA_NETWORK al configurarse y es quien resuelve el cliente DGS (checkout local `../dgs`
+# o git con DGS_GIT_TAG). Declararla después de FetchContent_MakeAvailable haría que un juego de
+# este template con red activada no tuviera el target `dgs_client`.
+option(HARUKA_NETWORK "Enable DGS network client" OFF)
+if(HARUKA_NETWORK)
+    find_package(OpenSSL REQUIRED)
+endif()
+
 FetchContent_MakeAvailable(haruka_engine)
 
 set(ENGINE_ROOT          "${haruka_engine_SOURCE_DIR}")
@@ -53,19 +63,13 @@ set(ENGINE_ROOT          "${haruka_engine_SOURCE_DIR}")
 # y compile-definitions PUBLIC (GLM_FORCE_DEPTH_ZERO_TO_ONE).
 set(HarukaEngine_LIBRARY HarukaEngine)
 
-# --- DGS network (optional) ---
-option(HARUKA_NETWORK "Enable DGS network client" OFF)
-if(HARUKA_NETWORK)
-    find_package(OpenSSL REQUIRED)
-endif()
-
 function(target_apply_network TGT)
     if(HARUKA_NETWORK)
         target_compile_definitions(${TGT} PRIVATE HARUKA_NETWORK)
-        target_include_directories(${TGT} PRIVATE "${ENGINE_ROOT}/external/dgs")
-        target_link_libraries(${TGT} PRIVATE
-            "${ENGINE_ROOT}/external/dgs/sdk/libdgs_client.a"
-            OpenSSL::SSL)
+        # El cliente DGS lo resuelve el motor (checkout local `../dgs` o git con DGS_GIT_TAG; release
+        # reproducible por tag). El include llega PUBLIC con HarukaEngine; aquí SOLO se enlaza el
+        # target. Nada de `.a` hardcodeado: el precompilado vendido quedaba obsoleto.
+        target_link_libraries(${TGT} PRIVATE dgs_client OpenSSL::SSL)
     endif()
 endfunction()
 

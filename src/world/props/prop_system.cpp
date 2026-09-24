@@ -20,6 +20,7 @@
 #include "tools/procgraph/proc_texture.h"    // evaluateToRGBA / evaluateToNormalMap / createRHIFromRGBA
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -358,6 +359,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     // durante el vuelo la cámara YA cruzó otro tramo (aceleración brusca) se relanza AL INSTANTE,
     // centrado en la cámara actual, en vez de esperar a la siguiente muestra.
     bool relaunchNow = false;
+    { HARUKA_PROFILE("re-siembra.aplica");   // checkout del worker + apply + re-lanzamiento rapido
     if (m_scatterBusy) {
         if (m_scatterFut.valid() &&
             m_scatterFut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
@@ -389,6 +391,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
         }
         if (!relaunchNow) return;   // en vuelo (o recién aplicada): aguantar el anillo anterior
     }
+    }   // re-siembra.aplica (tambien sale si se vuelve en vuelo)
 
     // Solo re-enumera cuando la camara cruza un tramo desde la ultima muestra. El scatter (~61k
     // celdas × muestreo del campo) es caro (~121 ms). El tramo es ADAPTATIVO a la velocidad: al
@@ -408,6 +411,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             return;
     }
 
+    { HARUKA_PROFILE("re-siembra.lanza");   // preparacion (registro de prototipos, copias) + lanzar worker
     PlanetSphereField field;
     field.planet = planet;
     const Haruka::Planet::PropLayerTable& table = planet->propLayers();
@@ -554,6 +558,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             }
             return ScatterResult{ std::move(objs), std::move(gpu), camPos };
         });
+    }   // re-siembra.lanza
 }
 
 void PropSystem::applyScatterResult(ScatterResult res,
@@ -565,9 +570,11 @@ void PropSystem::applyScatterResult(ScatterResult res,
     // rama arrancada) se conserva por semilla en `m_state`, que sobrevive a que el prop salga del
     // radio. Se sincroniza primero lo que haya en el registro por si algo lo toco sin pasar por
     // `breakAt`, y luego el mapa manda.
-    for (const auto& io : m_registry.instances()) {
-        if (io.state == (uint32_t)InstancedObjectState::Alive && io.breakMask == 0u) continue;
-        m_state[io.seed] = StateDelta{ io.seed, io.state, io.breakMask, io.regrow };
+    { HARUKA_PROFILE("re-siembra.sync");   // solo guarda los NO-Alive: barrido barato
+      for (const auto& io : m_registry.instances()) {
+          if (io.state == (uint32_t)InstancedObjectState::Alive && io.breakMask == 0u) continue;
+          m_state[io.seed] = StateDelta{ io.seed, io.state, io.breakMask, io.regrow };
+      }
     }
     // UN pase en el hilo de render: filtra las BOCAS contra el VOX VIVIENTE (pueden haber cambiado
     // durante el vuelo; por eso no puede ir al worker) y cuadra el estado ACTUAL (el worker usó un
@@ -593,34 +600,86 @@ void PropSystem::applyScatterResult(ScatterResult res,
     // Se colecta una vez la lista de columnas con un chunk de HUECO y `surfaceCut` solo se llama en
     // las que existen; en el resto devuelve 0 por construcción (ver `VoxWorld::loadedCutColumns`).
     const std::unordered_set<Haruka::VoxKey, Haruka::VoxKeyHash> voxCols = planet->vox().loadedCutColumns();
-    for (size_t i = 0; i < res.objs.size(); ++i) {
-        Haruka::InstancedObject io = res.objs[i];
-        // ⚠️ NADA SOBRE UNA BOCA: el suelo ahi no se dibuja ni se pisa (campo volumetrico); un arbol
-        // encima flota en el aire. Misma funcion que el shader y la fisica. `columnAt` es la forma
-        // barata de `keyAt` para dir ya unitaria (aquí): sin `length`/`normalize`/`k` por instancia.
-        if (!voxCols.empty()) {
-            const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
-            if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) { ++sobreBoca; continue; }
-        }
-        if (!m_state.empty()) {
-            auto it = m_state.find(io.seed);
-            if (it != m_state.end()) {
-                io.state     = it->second.state;
-                io.regrow    = it->second.regrow;
-                io.breakMask = it->second.breakMask;
+    // EL FILTRO (boca + estado) EN PARALELO: es O(N) con dos lookups por instancia (~13 ms a 178k
+    // en un hilo) pero SOLO LEE (`voxCols`, `m_state`, `res.gpu`) → se parte en K trozos y cada uno
+    // acumula en buffers propios; el hilo de render concatena en orden sobre el nuevo anillo. La
+    // generación de matrices GPU ya corre en el worker; esto es lo único del apply que queda aquí.
+    const size_t N = res.objs.size();
+    const size_t K = std::min<size_t>(8u, std::max<size_t>(1u, N / 20000u));
+    std::atomic<size_t> aSobreBoca(0);
+    auto filtroRango = [&](size_t b, size_t e) {
+        std::vector<Haruka::InstancedObject> lo; lo.reserve(e - b);
+        std::vector<InstanceDataFloat> li;       li.reserve(e - b);
+        for (size_t i = b; i < e; ++i) {
+            Haruka::InstancedObject io = res.objs[i];
+            if (!voxCols.empty()) {
+                const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
+                if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) {
+                    aSobreBoca.fetch_add(1, std::memory_order_relaxed); continue;
+                }
             }
+            if (!m_state.empty()) {
+                auto it = m_state.find(io.seed);
+                if (it != m_state.end()) {
+                    io.state     = it->second.state;
+                    io.regrow    = it->second.regrow;
+                    io.breakMask = it->second.breakMask;
+                }
+            }
+            InstanceDataFloat inst = res.gpu[i];
+            inst.breakMask = (float)io.breakMask;
+            lo.push_back(std::move(io));
+            li.push_back(inst);
         }
-        InstanceDataFloat inst = res.gpu[i];
-        inst.breakMask = (float)io.breakMask;
-        objs.push_back(io);
-        m_gpu.push_back(inst);
+        return std::pair{ std::move(lo) , std::move(li) };
+    };
+    if (K > 1) {
+        std::vector<std::future<std::pair<std::vector<Haruka::InstancedObject>, std::vector<InstanceDataFloat>>>> futs;
+        futs.reserve(K);
+        for (size_t ki = 0; ki < K; ++ki) {
+            const size_t b = N * ki / K, e = N * (ki + 1) / K;
+            if (b == e) continue;
+            futs.push_back(std::async(std::launch::async, [&, b, e]() { return filtroRango(b, e); }));
+        }
+        for (auto& f : futs) {
+            auto pr = f.get();
+            std::vector<Haruka::InstancedObject>& lo = pr.first;
+            std::vector<InstanceDataFloat>& li = pr.second;
+            m_gpu.insert(m_gpu.end(), li.begin(), li.end());   // `m_gpu` MANTIENE su capacidad persistente
+            objs.insert(objs.end(), lo.begin(), lo.end());
+        }
+    } else {
+        for (size_t i = 0; i < N; ++i) {
+            Haruka::InstancedObject io = res.objs[i];
+            if (!voxCols.empty()) {
+                const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
+                if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) { aSobreBoca.fetch_add(1, std::memory_order_relaxed); continue; }
+            }
+            if (!m_state.empty()) {
+                auto it = m_state.find(io.seed);
+                if (it != m_state.end()) {
+                    io.state     = it->second.state;
+                    io.regrow    = it->second.regrow;
+                    io.breakMask = it->second.breakMask;
+                }
+            }
+            InstanceDataFloat inst = res.gpu[i];
+            inst.breakMask = (float)io.breakMask;
+            objs.push_back(io);
+            m_gpu.push_back(inst);
+        }
     }
+    sobreBoca = aSobreBoca.load(std::memory_order_relaxed);
     m_origin = res.origin;                    // las matrices del worker son relativas a ESTE origen
-    m_registry.setInstances(std::move(objs));
+    { HARUKA_PROFILE("re-siembra.filtro");
+      m_registry.setInstances(std::move(objs));
+    }
     if (sobreBoca > 0) HARUKA_LOGDIAG("Vox", "props retirados por estar sobre una boca: %zu", sobreBoca);
 
     // Los props COLISIONAN: se alimenta aqui porque el scatter es quien cambia el conjunto.
-    refreshColliders(planetC, planetR, camPos, physics);
+    { HARUKA_PROFILE("re-siembra.colliders");
+      refreshColliders(planetC, planetR, camPos, physics);
+    }
 }
 
 // ── pase de color ─────────────────────────────────────────────────────────────────────────────

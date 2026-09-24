@@ -44,7 +44,7 @@ public:
     /// Pase apagado en ajustes. `enabled()` incluye ademas `HARUKA_CLOUD_VOL=0`.
     void setEnabled(bool on) { m_enabled = on; }
     bool enabled() const { return m_enabled && !envOff(); }
-    /// `HARUKA_CLOUD_STEPS=N` (8..128; 64 por defecto) y `HARUKA_CLOUD_VOL=0`.
+    /// `HARUKA_CLOUD_STEPS=N` (8..128; 48 por defecto) y `HARUKA_CLOUD_VOL=0`.
     static int  steps();
     static bool envOff();
 

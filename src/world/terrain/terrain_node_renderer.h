@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 #include <functional>
+#include <list>
 
 #include "world/terrain/terrain_lod.h"   // TERRAIN_RING_FINE_CELL: la celda de la malla que se PISA
 #include "world/terrain/terrain_node.h"
@@ -678,6 +679,12 @@ public:
         /// 9,2 ms medidos en `v5.water.inst`) para nodos cuya respuesta no cambia.
         uint64_t lakeEpoch = 0;
         float seaMarginM = 15.0f;          ///< marea + amplitud de ola + margen
+        /// Recuadro de la ventana fina en (lon, lat): (lonMin, latMin, lonMax, latMax); `z<=x` = sin
+        /// ventana. Fuera de la ventana `lakeLevelFn` es el campo grueso, constante por texel de unos
+        /// 78 km, y el filtro puede muestrear el nodo con una rejilla 3x3 en vez del 9x9; solo dentro
+        /// o sobre la ventana (62 m/texel) hace falta el 9x9 (un lago de 100 m entre 9 puntos se
+        /// perdería, ver `v5.water.filtro`). Lo pone el planeta (junto a `lakeEpoch`).
+        glm::vec4 lakeWindowRect{0.0f, 0.0f, -1.0f, -1.0f};
         /// El PARCHE de agua interior (lluvia, charcas, lagos sembrados) se dibuja sobre estos mismos
         /// nodos (`inlandSSBO`), y no esta en el mapa de lagos: sin esto el filtro lo dejaba fuera y
         /// el lago del spawn salia como arena. Centro relativo al ojo + radio; 0 = no hay parche.
@@ -1289,6 +1296,7 @@ public:
             waterBuckets[kW].push_back(gw);
         };
         if (m_water.on) {
+            { HARUKA_PROFILE("v5.water.filtro");   // decidir que nodos llevan agua + repartirlos por zancada
             for (uint32_t k = 0; k < m_strideCount; ++k) {
                 for (size_t ii = m_group[k]; ii < m_group[k + 1]; ++ii) {
                     const NodeInstGPU& g = m_inst[ii];
@@ -1320,30 +1328,70 @@ public:
                             if (m_waterCacheEpoch != m_water.lakeEpoch ||
                                 m_waterCacheSea    != m_water.seaMarginM) {
                                 m_waterMaxCache.clear();
+                                m_waterMaxLru.clear();
                                 m_waterCacheEpoch = m_water.lakeEpoch;
                                 m_waterCacheSea   = m_water.seaMarginM;
                             }
                             const uint64_t wkey = nodeKey(n);
                             const auto wIt = m_waterMaxCache.find(wkey);
                             if (wIt != m_waterMaxCache.end()) {
-                                waterMax = wIt->second;
+                                waterMax = wIt->second.first;
+                                m_waterMaxLru.splice(m_waterMaxLru.end(), m_waterMaxLru,
+                                                     wIt->second.second);   // LRU: se re-ve → al final
                             } else {
-                                // ⚠️ 9x9 Y NO 5 PUNTOS. Con centro + esquinas un lago de 100 m dentro de un
-                                // nodo de 300 m se quedaba sin muestrear: el agua del lago del spawn salia
-                                // como ARENA en una de cada dos corridas (segun que nodo cayera encima).
-                                // 81 lecturas por nodo son ~100 000 por frame: lecturas de tabla, no coste.
                                 const double cells = (double)(1u << n.level);
-                                for (int a = 0; a < 9; ++a) for (int b = 0; b < 9; ++b) {
+                                // ⚠️ FUERA DE LA VENTANA: rejilla 3x3 y NO el 9x9. `lakeLevelFn` fuera
+                                // de la ventana fina es el campo grueso, CONSTANTE por texel de ~78 km y
+                                // el nodo cabe en 1-2 texeles: centro + 3x3 (a,b ∈ {0,4,8}) lo agotan con
+                                // ~5 µs en vez de ~45. Dentro o sobre la ventana, el campo varia a
+                                // 62 m/texel y el 9x9 es obligatorio — con centro + esquinas un lago de
+                                // 100 m dentro de un nodo de 300 m se quedaba sin muestrear: el agua del
+                                // lago del spawn salia como ARENA en una de cada dos corridas.
+                                bool outsideWin = m_water.lakeWindowRect.z <= m_water.lakeWindowRect.x;
+                                if (!outsideWin) {
+                                    const glm::vec4 wr = m_water.lakeWindowRect;
+                                    const double lon0 = wr.x, lat0 = wr.y;
+                                    const double kTwoPi = 6.28318530717958647692;
+                                    double x0 = 1e300, x1 = -1e300, y0 = 1e300, y1 = -1e300;
+                                    for (int c = 0; c < 4; ++c) {   // AABB de las 4 esquinas de la huella
+                                        const double cc = (c & 1) ? 9.0 : 0.0;
+                                        const double dd = (c & 2) ? 9.0 : 0.0;
+                                        const glm::dvec3 cd = cubeFaceToDir(n.face,
+                                            -1.0 + 2.0 * ((double)n.i + cc / 9.0) / cells,
+                                            -1.0 + 2.0 * ((double)n.j + dd / 9.0) / cells);
+                                        double lon = std::atan2((double)cd.z, (double)cd.x);
+                                        const double lat = std::asin(glm::clamp((double)cd.y, -1.0, 1.0));
+                                        lon -= kTwoPi * std::floor((lon - lon0) / kTwoPi); // desenvuelve
+                                        x0 = std::min(x0, lon); x1 = std::max(x1, lon);
+                                        y0 = std::min(y0, lat); y1 = std::max(y1, lat);
+                                    }
+                                    outsideWin = x1 < lon0 || x0 > (double)wr.z ||
+                                                 y1 < lat0 || y0 > (double)wr.w;
+                                }
+                                // 9x9 dentro/sobre la ventana; 3x3 fuera (barato y exacto para texel).
+                                for (int a = 0; a < 9; a += outsideWin ? 4 : 1)
+                                for (int b = 0; b < 9; b += outsideWin ? 4 : 1) {
                                     const double lx = -1.0 + 2.0 * (((double)n.i + (a + 0.5) / 9.0) / cells);
                                     const double ly = -1.0 + 2.0 * (((double)n.j + (b + 0.5) / 9.0) / cells);
                                     const float lk = m_water.lakeLevelFn(cubeFaceToDir(n.face, lx, ly));
                                     if (lk > 0.0f) waterMax = std::max(waterMax, lk + m_water.seaMarginM);
                                 }
-                                // ⚠️ TOPE: si creciera sin control al caminar por mucho terreno, la caché
-                                // engordaría sin límite. Al llegar al tope se vacía entera (un frame paga
-                                // el 9x9 otra vez, que es lo que costaba SIEMPRE antes de la caché).
-                                if (m_waterMaxCache.size() >= 8192) m_waterMaxCache.clear();
-                                m_waterMaxCache.emplace(wkey, waterMax);
+                                // ⚠️ EVICCIÓN LRU, NO VACIAR. Vaciar entero al llegar a un tope
+                                // re-pagaba el 9x9 del anillo actual en un frame (13 ms — el pico al
+                                // cruzar: al caminar, el tope de 8192 se alcanzaba cada ~7 frames y el
+                                // refill del ring completo volvia a caer). Con LRU se evicta UNO por
+                                // insercion (el que mas lleva sin verse) y el coste se reparte; los
+                                // nodos calientes del anillo actual se re-ven cada frame (splice en el
+                                // hit), asi que NO se evictan — solo salen los que ya no se ven.
+                                // `waterMax` de un nodo no cambia sin época; al cambiar la época
+                                // (bake / ventana recentrada) se vacía ARRIBA, que es lo correcto.
+                                if (m_waterMaxCache.size() >= 8192) {
+                                    const uint64_t oldKey = m_waterMaxLru.front();
+                                    m_waterMaxLru.pop_front();
+                                    m_waterMaxCache.erase(oldKey);
+                                }
+                                const auto lruIt = m_waterMaxLru.insert(m_waterMaxLru.end(), wkey);
+                                m_waterMaxCache.emplace(wkey, std::make_pair(waterMax, lruIt));
                             }
                         }
                         keep = r.minM <= waterMax;
@@ -1351,6 +1399,8 @@ public:
                     if (keep) pushWater(g, k, n);
                 }
             }
+            }   // v5.water.filtro
+            { HARUKA_PROFILE("v5.water.subir");   // concatenar buckets + subir SSBOs de agua
             for (uint32_t k = 0; k < m_strideCount; ++k) {
                 m_instWater.insert(m_instWater.end(), waterBuckets[k].begin(), waterBuckets[k].end());
                 m_groupWater[k + 1] = m_instWater.size();
@@ -1368,6 +1418,7 @@ public:
                 }
 m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWater[k]);
             }
+            }   // v5.water.subir
         }
         }   // v5.water.inst
 
@@ -1678,7 +1729,8 @@ private:
     /// la época de la ventana (recentre) o del campo global (bake/rebuild) o con el margen, así que
     /// entre cambios se reutiliza — medido en `v5.water.inst`: 81 lecturas × ~1000 nodos = 9,2 ms de
     /// trig doble por frame, que la caché convierte en un `find` por nodo.
-    std::unordered_map<uint64_t, float> m_waterMaxCache;
+    std::unordered_map<uint64_t, std::pair<float, std::list<uint64_t>::iterator>> m_waterMaxCache;
+    std::list<uint64_t> m_waterMaxLru;   ///< orden LRU de `m_waterMaxCache` (evicción 1-a-1 en el tope)
     uint64_t m_waterCacheEpoch = UINT64_MAX;   ///< época con que se llenó (invalida en el 1er frame)
     float    m_waterCacheSea  = 0.0f;          ///< margen con que se llenó
     uint32_t            m_strideCount = 0;
