@@ -10,10 +10,111 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 
 namespace Haruka::Net {
+
+namespace {
+
+constexpr double kPi         = 3.14159265358979323846;
+// Apuntar a `now - retardo` convierte una serie de snapshots a ~10 Hz en movimiento continuo a ritmo
+// de render. Retardo fijo -> no mezcla pasados distintos; extrapolacion corta y ACOTADA, para que al
+// quedarse el feed un instante la entidad no se congele en seco ni despegue.
+constexpr double kInterpDelayS = 0.12;
+constexpr double kExtrapS      = 0.10;
+constexpr double kHistKeepS    = kInterpDelayS + kExtrapS + 0.25;   // mas viejo que esto no sirve
+
+double wrapPi(double a)
+{
+    while (a >  kPi) a -= 2.0 * kPi;
+    while (a < -kPi) a += 2.0 * kPi;
+    return a;
+}
+
+/// Muestrea la trayectoria de una entidad en `target` segundos de reloj: interpolacion entre los dos
+/// snapshots que lo flanquean (lo normal), clavada al primero antes de que haya historial, y
+/// extrapolacion por velocidad (diferencia entre los dos ultimos, acotada a `kExtrapS`) por detras
+/// del ultimo. Devuelve false solo si no hay historial; si no hay datos para `target`, clava algo.
+bool sampleAt(const std::vector<Sample>& v, double target,
+              double& x, double& y, double& z, double& yaw)
+{
+    if (v.empty()) return false;
+    const Sample& first = v.front();
+    const Sample& last  = v.back();
+
+    if (target <= first.t) { x = first.x; y = first.y; z = first.z; yaw = first.yaw; return true; }
+
+    if (target >= last.t)
+    {
+        if (v.size() >= 2)
+        {
+            const Sample& prev = v[v.size() - 2];
+            const double  dt   = last.t - prev.t;
+            if (dt > 1e-5)
+            {
+                const double f = std::min(target - last.t, kExtrapS) / dt;
+                x = last.x + (last.x - prev.x) * f;
+                y = last.y + (last.y - prev.y) * f;
+                z = last.z + (last.z - prev.z) * f;
+                yaw = last.yaw + wrapPi(last.yaw - prev.yaw) * f;
+                return true;
+            }
+        }
+        x = last.x; y = last.y; z = last.z; yaw = last.yaw;
+        return true;
+    }
+
+    for (size_t i = 0; i + 1 < v.size(); ++i)
+    {
+        if (target < v[i + 1].t)   // primera pareja con v[i].t <= target < v[i+1].t
+        {
+            const Sample& a = v[i];
+            const Sample& b = v[i + 1];
+            const double  f = (b.t - a.t > 1e-9) ? (target - a.t) / (b.t - a.t) : 0.0;
+            x = a.x + (b.x - a.x) * f;
+            y = a.y + (b.y - a.y) * f;
+            z = a.z + (b.z - a.z) * f;
+            yaw = a.yaw + wrapPi(b.yaw - a.yaw) * f;
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+void EntitySync::pushSample(uint32_t uuid, double t, double x, double y, double z, double yawRad)
+{
+    auto& v = m_hist[uuid];
+    if (!v.empty() && t <= v.back().t) return;   // fuera de orden: no romper la serie
+    v.push_back({t, x, y, z, yawRad});
+    if (v.size() > 8) v.erase(v.begin());
+}
+
+void EntitySync::interpolateAll(SceneManager* scene, double nowSeconds)
+{
+    for (auto hit = m_hist.begin(); hit != m_hist.end(); )
+    {
+        auto& v = hit->second;
+        while (!v.empty() && v.front().t < nowSeconds - kHistKeepS) v.erase(v.begin());
+        if (v.empty()) { hit = m_hist.erase(hit); continue; }   // el TTL lo retiro arriba/abajo
+
+        const double target = nowSeconds - kInterpDelayS;
+        double x, y, z, yaw;
+        if (sampleAt(v, target, x, y, z, yaw))
+        {
+            const std::string name = "entity_" + std::to_string(hit->first);
+            if (auto o = scene->getObject(name))
+            {
+                o->position    = Haruka::WorldPos(x, y, z);
+                o->rotation.y  = yaw * (180.0 / kPi);
+            }
+        }
+        ++hit;
+    }
+}
 
 // ⚠️ ESTO VIVIA DENTRO DE `renderFrame()`, QUE EL JUEGO NO LLAMA NUNCA.
 //
@@ -41,6 +142,7 @@ void EntitySync::adoptWorldObject(uint32_t uuid, SceneManager* scene) {
     if (scene) scene->removeObject("entity_" + std::to_string(uuid));
     m_lastSeen.erase(uuid);
     m_kind.erase(uuid);
+    m_hist.erase(uuid);
 }
 
 void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
@@ -84,11 +186,14 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             m_kind[transfer.uuid] = (transfer.state & DGS::STATE_WORLD_OWNED) ? 2
                                   : (transfer.type == DGS::ENT_NPC) ? 1 : 0;
 
-            if (auto existing = scene->getObject(name)) {
-                existing->position = where;
-                existing->rotation.y = yawDeg;
-                continue;
-            }
+            // ⚠️ EL OBJETO YA NO SE DESPLAZA AQUI. Antes, cada snapshot (~10 Hz de egress) hacia
+            // `existing->position = where`: salto directo a la ultima posicion = el "a tirones" con un
+            // server remoto. Ahora el snapshot va al historial y la posicion la pone POR FRAME
+            // `interpolateAll` (ritmo de render, retardo fijo de `kInterpDelayS` contra la cola).
+            // Un objeto ya creado se mueve SOLO desde ahi.
+            pushSample(transfer.uuid, nowSeconds,
+                       where.x, where.y, where.z, yawDeg * (kPi / 180.0));
+            if (scene->getObject(name)) continue;
 
             auto obj = std::make_shared<Haruka::SceneObject>();
             obj->name = name;
@@ -158,8 +263,13 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             if (nowSeconds - it->second < kTtlS) { ++it; continue; }
             scene->removeObject("entity_" + std::to_string(it->first));
             m_kind.erase(it->first);
+            m_hist.erase(it->first);
             it = m_lastSeen.erase(it);
         }
+
+        // EL MOVIMIENTO REAL, EN EL FRAME NO EN EL PAQUETE: al margen de si llego snapshot este
+        // frame, todo ente con historial se coloca a `now - kInterpDelayS` interpolando/extrapolando.
+        interpolateAll(scene, nowSeconds);
     }
 }
 

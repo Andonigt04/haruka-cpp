@@ -8,13 +8,19 @@
  */
 #include <cstdint>
 #include <map>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "include/dgs/client.h"
 
 namespace Haruka { class SceneManager; }
 
 namespace Haruka::Net {
+
+/// One received snapshot of a remote entity's transform. World coordinates (chunk*KM + local) so a
+/// chunk border never makes the path discontinuous; yaw in radians.
+struct Sample { double t, x, y, z, yaw; };
 
 class EntitySync {
 public:
@@ -44,6 +50,10 @@ private:
     std::unordered_set<uint32_t> m_locallyOwnedWorld;
     double m_lastHeardSelfAt = 0.0;           // wall (steady) s del ultimo eco propio; 0 = nunca
     static constexpr double kTtlS = 5.0;
+    std::unordered_map<uint32_t, std::vector<Sample>> m_hist;   // uuid → historia de snapshots
+
+    void pushSample(uint32_t uuid, double t, double x, double y, double z, double yawRad);
+    void interpolateAll(SceneManager* scene, double nowSeconds);
 };
 
 } // namespace Haruka::Net
