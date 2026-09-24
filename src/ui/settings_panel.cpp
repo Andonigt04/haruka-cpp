@@ -8,6 +8,7 @@
 #include "rhi/rhi_device.h"   // enumerar GPUs para el combo de tarjeta gráfica
 #include "renderer/motor_instance.h"
 #include "core/application.h"
+#include "core/window.h"        // enumerar monitores / nombres de display para el selector
 #include "core/locale.h"
 #include "core/modules.h"
 #ifdef HARUKA_MOD_AUDIO
@@ -131,63 +132,126 @@ void SettingsPanel::tabGraphics() {
             app->applyGraphicsSettings();
     }
 
-    // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────────
+    // ── MONITOR + RESOLUCION ────────────────────────────────────────────────────────────────────
     //
-    // ⚠️ SIN ENTRADA "AUTO", A PROPOSITO. El combo lista SOLO resoluciones reales del monitor y el
-    // defecto es la nativa, ya resuelta por `Application` en el primer arranque. Un "Auto" en la
-    // lista parece cómodo y es peor: el que lo tiene puesto no sabe a que resolucion juega, y el que
-    // elige una concreta no puede volver a la nativa sin adivinar cual era.
+    // El selector de monitor se guarda por NOMBRE en `monitorName` (vacio = automatico), igual que
+    // `preferredGpus`. Un INDICE no sirve: SDL reenumera las pantallas cuando se conecta/reordena
+    // un monitor, y "monitor 1" de ayer es otra pantalla hoy. Si el nombre guardado ya no existe
+    // (desenchufado, EDID cambiado), `Window`/`Application` caen a la primaria sin ruido.
     //
-    // La lista se construye UNA vez: `SDL_GetFullscreenDisplayModes` reserva, y rehacerlo cada frame
-    // seria una llamada al driver por frame para un combo que casi nunca se abre.
+    // El nombre de cada pantalla lo anuncia SDL; si no (X11 sin EDID, Wayland parcial) se usa la
+    // etiqueta "Monitor N". El combo enseña SIEMPRE las resoluciones del monitor seleccionado (no
+    // las de la primaria): "admita esas resoluciones" es elegir un monitor y ver las suyas.
+    //
+    // El selector se re-enumera al cambiar el Nº de pantallas (hot-plug en medio de la sesion, el
+    // tramo portatil+dock). La lista de resoluciones se rehace SOLO cuando cambia el monitor
+    // elegido —la de monitores es barata porque el contador esta cacheado por SDL; el barrido gordo
+    // (nombres) solo cuando difiere del que vimos.
     {
-        struct Res { int w, h; };
-        static std::vector<Res>         s_modes;
-        static std::vector<std::string> s_labels;
-        static bool                     s_built = false;
-        if (!s_built) {
-            s_built = true;
-            // La primaria, no la de la ventana: `Application` no expone el `SDL_Window*` y anadir
-            // un accesor para esto no compensa. En multimonitor la lista puede no ser la del monitor
-            // donde esta la ventana; lo cubre el respaldo de mas abajo, que mete siempre la actual.
-            const SDL_DisplayID disp = SDL_GetPrimaryDisplay();
+        struct Mon { SDL_DisplayID id; std::string name; };
+        // La lista de monitores se RE-ENUMERA al detectar un cambio de Nº de pantallas: un monitor
+        // puede aparecer/desaparecer EN MEDIO DE LA SESION (portatil + dock) sin reiniciar la
+        // partida, y una lista static construida una vez se quedaria ciega. Cada frame se lee solo
+        // el CONTADOR (SDL lo tiene cacheado; barato) y el trabajo gordo —nombres, etiquetas— solo
+        // cuando difiere del que vimos. Es el equivalente por polling del `WantUpdateMonitors` de
+        // ImGui: el evento SDL no llega al panel, el contador sí y no cuesta nada.
+        static std::vector<Mon> s_mons;
+        static int              s_monCount = -1;
+        const int monCount = SDL_GetNumVideoDrivers();
+        if (monCount != s_monCount) {
+            s_monCount = monCount;
+            s_mons.clear();
             int n = 0;
-            if (SDL_DisplayMode** dm = SDL_GetFullscreenDisplayModes(disp, &n)) {
-                for (int i = 0; i < n; ++i) {
-                    // Se DEDUPLICA por w×h: el monitor expone el mismo tamaño a varias frecuencias
-                    // y a varias escalas, y sin esto la lista sale con 1920x1080 seis veces.
-                    const Res r{ dm[i]->w, dm[i]->h };
-                    bool dup = false;
-                    for (const Res& e : s_modes) if (e.w == r.w && e.h == r.h) { dup = true; break; }
-                    if (!dup) s_modes.push_back(r);
-                }
-                SDL_free(dm);
+            if (SDL_DisplayID* displays = SDL_GetDisplays(&n)) {
+                for (int i = 0; i < n; ++i)
+                    s_mons.push_back({ displays[i], Haruka::Core::Window::displayLabel(displays[i]) });
+                SDL_free(displays);
             }
-            // Si el monitor no expone modos (Wayland sin fullscreen exclusivo, por ejemplo), al menos
-            // la actual tiene que estar: si no, el combo saldria vacio y no se podria ni ver cual es.
-            const auto& gg = SettingsManager::get().graphics();
-            if (gg.resolutionW > 0) {
-                bool has = false;
-                for (const Res& e : s_modes) if (e.w == gg.resolutionW && e.h == gg.resolutionH) { has = true; break; }
-                if (!has) s_modes.push_back({ gg.resolutionW, gg.resolutionH });
-            }
-            std::sort(s_modes.begin(), s_modes.end(),
-                      [](const Res& a, const Res& b) { return a.w * a.h > b.w * b.h; });
-            for (const Res& r : s_modes)
-                s_labels.push_back(std::to_string(r.w) + " x " + std::to_string(r.h));
+            if (s_mons.empty()) s_mons.push_back({ 0, "?" });   // headless raro: combo nunca vacio
         }
-        if (!s_modes.empty()) {
-            int cur = 0;
-            for (size_t i = 0; i < s_modes.size(); ++i)
-                if (s_modes[i].w == g.resolutionW && s_modes[i].h == g.resolutionH) { cur = (int)i; break; }
-            std::vector<const char*> items;
-            items.reserve(s_labels.size());
-            for (const std::string& l : s_labels) items.push_back(l.c_str());
-            if (ImGui::Combo(TR("gfx.resolution").c_str(), &cur, items.data(), (int)items.size())) {
-                g.resolutionW = s_modes[(size_t)cur].w;
-                g.resolutionH = s_modes[(size_t)cur].h;
+
+        int curMon = 0;
+        // "Automatico" (monitorName vacio) enseña la PRIMARIA. Si el guardado se DESCONECTA en medio
+        // de la sesion su nombre ya no casa → curMon=0 (primera de la lista), que es donde SDL habra
+        // movido la ventana al quedar hueca su pantalla.
+        const SDL_DisplayID primaryDisp = SDL_GetPrimaryDisplay();
+        for (size_t i = 0; i < s_mons.size(); ++i) {
+            if ((!g.monitorName.empty() && s_mons[i].name == g.monitorName) ||
+                ( g.monitorName.empty() && s_mons[i].id  == primaryDisp)) { curMon = (int)i; break; }
+        }
+
+        // SIEMPRE se enseña, tambien con un solo monitor: el tramo portatil de un solo display es el
+        // caso tipico al que un segundo monitor se conecta en caliente a mitad de partida, y un
+        // selector invisible no se puede descubrir.
+        {
+            std::vector<const char*> mons;
+            mons.reserve(s_mons.size());
+            for (const Mon& m : s_mons) mons.push_back(m.name.c_str());
+            if (ImGui::Combo(TR("gfx.monitor").c_str(), &curMon, mons.data(), (int)mons.size())) {
+                g.monitorName = s_mons[(size_t)curMon].name;
                 if (auto* app = MotorInstance::getInstance().getApplication())
                     app->applyGraphicsSettings();
+            }
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s", TR("gfx.monitor.tip").c_str());
+        }
+        const SDL_DisplayID selDisp = s_mons[(size_t)curMon].id;
+
+        // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────
+        //
+        // ⚠️ SIN ENTRADA "AUTO", A PROPOSITO. El combo lista SOLO resoluciones reales del monitor
+        // (el de arriba, no la primaria) y el defecto es la nativa, ya resuelta por `Application`.
+        // Un "Auto" en la lista parece cómodo y es peor: el que lo tiene puesto no sabe a que
+        // resolucion juega, y el que elige una concreta no puede volver a la nativa sin adivinar.
+        {
+            struct Res { int w, h; };
+            static std::vector<Res>         s_modes;
+            static std::vector<std::string> s_labels;
+            static SDL_DisplayID            s_modeFor = 0;
+            if (s_modeFor != selDisp) {
+                s_modeFor = selDisp;
+                s_modes.clear();
+                s_labels.clear();
+                if (selDisp) {
+                    int n = 0;
+                    if (SDL_DisplayMode** dm = SDL_GetFullscreenDisplayModes(selDisp, &n)) {
+                        for (int i = 0; i < n; ++i) {
+                            // DEDUPLICA por w×h: el monitor expone el mismo tamaño a varias
+                            // frecuencias y escalas; sin esto 1920x1080 saldria seis veces.
+                            const Res r{ dm[i]->w, dm[i]->h };
+                            bool dup = false;
+                            for (const Res& e : s_modes) if (e.w == r.w && e.h == r.h) { dup = true; break; }
+                            if (!dup) s_modes.push_back(r);
+                        }
+                        SDL_free(dm);
+                    }
+                    // Si el monitor no expone modos (Wayland sin fullscreen exclusivo), la actual
+                    // AL MENOS tiene que estar: si no, el combo saldria vacio.
+                    if (g.resolutionW > 0) {
+                        bool has = false;
+                        for (const Res& e : s_modes)
+                            if (e.w == g.resolutionW && e.h == g.resolutionH) { has = true; break; }
+                        if (!has) s_modes.push_back({ g.resolutionW, g.resolutionH });
+                    }
+                }
+                std::sort(s_modes.begin(), s_modes.end(),
+                          [](const Res& a, const Res& b) { return a.w * a.h > b.w * b.h; });
+                for (const Res& r : s_modes)
+                    s_labels.push_back(std::to_string(r.w) + " x " + std::to_string(r.h));
+            }
+            if (!s_modes.empty()) {
+                int cur = 0;
+                for (size_t i = 0; i < s_modes.size(); ++i)
+                    if (s_modes[i].w == g.resolutionW && s_modes[i].h == g.resolutionH) { cur = (int)i; break; }
+                std::vector<const char*> items;
+                items.reserve(s_labels.size());
+                for (const std::string& l : s_labels) items.push_back(l.c_str());
+                if (ImGui::Combo(TR("gfx.resolution").c_str(), &cur, items.data(), (int)items.size())) {
+                    g.resolutionW = s_modes[(size_t)cur].w;
+                    g.resolutionH = s_modes[(size_t)cur].h;
+                    if (auto* app = MotorInstance::getInstance().getApplication())
+                        app->applyGraphicsSettings();
+                }
             }
         }
     }

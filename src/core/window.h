@@ -38,7 +38,15 @@ namespace Haruka::Core {
         uint32_t setWidth(uint32_t w) { m_data.width = w; return m_data.width; }
         uint32_t setHeight(uint32_t h) { m_data.height = h; return m_data.height; }
 
-        void setWindowMode(int mode);
+        void setWindowMode(int mode, SDL_DisplayID preferredDisplay = 0);
+
+        // ── MONITORES ──────────────────────────────────────────────────────────────────────────
+        // Helpers estaticos sobre lo que SDL ve AHORA. `displayForName` devuelve 0 cuando el nombre
+        // guardado ya no existe (monitor desenchufado, EDID cambiado) — el llamante se cae a la
+        // primaria en vez de apuntar a una pantalla equivocada. Resuelve ADEMÁS las etiquetas
+        // "Monitor N" que `displayLabel` genera cuando el compositor no anuncia nombres.
+        static SDL_DisplayID     displayForName(const std::string& name);
+        static std::string       displayLabel(SDL_DisplayID disp); // nombre, o "Monitor N" si no hay
 
     private:
         SDL_Window* m_window = nullptr;

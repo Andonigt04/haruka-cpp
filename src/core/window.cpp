@@ -2,6 +2,7 @@
 #include "stb_image.h"
 
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <filesystem>
 
@@ -131,17 +132,31 @@ namespace Haruka::Core {
         return true;
     }
 
-    void Window::setWindowMode(int mode) {
+    void Window::setWindowMode(int mode, SDL_DisplayID preferredDisplay) {
         if (!m_window) return;
+        // Monitor efectivo: el pedido si es valido; si no (o no se pidio ninguno), el que tenga la
+        // ventana; ultimo recurso, la primaria.
+        SDL_DisplayID disp = preferredDisplay ? preferredDisplay : SDL_GetDisplayForWindow(m_window);
+        if (!disp) disp = SDL_GetPrimaryDisplay();
+        SDL_Rect b;
         switch (mode) {
-            case 2:
+            case 2: {
+                // Exclusiva: SDL llena el monitor SOBRE EL QUE ESTA LA VENTANA, y una ventana ya a
+                // pantalla completa NO se mueve (el WM la clava en el monitor actual; posicionar es
+                // no-op y `SetWindowFullscreen(true)` otra vez también). Para cambiar de monitor hay
+                // que salir, mover y volver a entrar. Si ya está en el monitor pedido, no tocar nada.
+                const SDL_DisplayID curDisp = SDL_GetDisplayForWindow(m_window);
+                if (curDisp != disp) {
+                    SDL_SetWindowFullscreen(m_window, false);
+                    if (SDL_GetDisplayBounds(disp, &b))
+                        SDL_SetWindowPosition(m_window, b.x, b.y);
+                }
                 SDL_SetWindowFullscreen(m_window, true);
                 break;
+            }
             case 1: {
                 SDL_SetWindowFullscreen(m_window, false);
                 SDL_SetWindowBordered(m_window, false);
-                SDL_DisplayID disp = SDL_GetDisplayForWindow(m_window);
-                SDL_Rect b;
                 if (SDL_GetDisplayBounds(disp, &b)) {
                     SDL_SetWindowPosition(m_window, b.x, b.y);
                     SDL_SetWindowSize(m_window, b.w, b.h);
@@ -152,6 +167,14 @@ namespace Haruka::Core {
             default:
                 SDL_SetWindowFullscreen(m_window, false);
                 SDL_SetWindowBordered(m_window, true);
+                // En modo ventana, sin monitor objetivo (preferredDisplay=0) no se mueve nada: SDL
+                // recuerda donde estaba. Con monitor elegido se CENTRA en el, que es la diferencia
+                // entre "salio en el monitor pedido" y "salio donde le dio la gana".
+                if (preferredDisplay && SDL_GetDisplayBounds(disp, &b)) {
+                    int w = 0, h = 0;
+                    SDL_GetWindowSize(m_window, &w, &h);
+                    SDL_SetWindowPosition(m_window, b.x + (b.w - w) / 2, b.y + (b.h - h) / 2);
+                }
                 break;
         }
         int w = 0, h = 0;
@@ -176,5 +199,40 @@ namespace Haruka::Core {
 
     void Window::shutdown() {
         if (m_window) SDL_DestroyWindow(m_window);
+    }
+
+    // ── MONITORES ───────────────────────────────────────────────────────────────────────────────
+    SDL_DisplayID Window::displayForName(const std::string& name) {
+        if (name.empty()) return 0;   // "auto": el llamante decide (primaria / la de la ventana)
+        int count = 0;
+        SDL_DisplayID* displays = SDL_GetDisplays(&count);
+        SDL_DisplayID hit = 0;
+        if (displays) {
+            for (int i = 0; i < count; ++i) {
+                const char* dn = SDL_GetDisplayName(displays[i]);
+                if (dn && name == dn) { hit = displays[i]; break; }
+            }
+            // Compositores SIN nombre (X11 sin EDID, Wayland parcial): el selector guarda la
+            // etiqueta "Monitor N" de `displayLabel`. Si el nombre no existe hay que resolver la
+            // etiqueta por INDICE, o elegir pantalla ahí no movería la ventana. Asume el risco
+            // de reordenacion documentado en `monitorName`, que es el único que queda.
+            if (!hit && name.rfind("Monitor ", 0) == 0) {
+                const int idx = std::atoi(name.c_str() + 8);
+                if (idx >= 0 && idx < count) hit = displays[idx];
+            }
+            SDL_free(displays);
+        }
+        return hit;
+    }
+
+    std::string Window::displayLabel(SDL_DisplayID disp) {
+        if (const char* dn = SDL_GetDisplayName(disp); dn && dn[0]) return dn;
+        // Algunos compositores no anuncian nombre; la etiqueta "Monitor N" al menos distingue.
+        int count = 0;
+        SDL_DisplayID* displays = SDL_GetDisplays(&count);
+        int idx = 0;
+        for (int i = 0; i < count; ++i) { if (displays[i] == disp) idx = i; break; }
+        SDL_free(displays);
+        return "Monitor " + std::to_string(idx);
     }
 }

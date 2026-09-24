@@ -160,7 +160,12 @@ void Application::applyGraphicsSettings() {
         // 50-100 ms con GPU a ~33 ms y pantalla a 60 Hz) y `false` = IMMEDIATE.
         if (RHI::Device* dev = RHI::device())
             dev->setVsync(g.vsync);
-        _window->setWindowMode(static_cast<int>(g.windowMode)); // windowed / borderless / fullscreen
+        // Monitor objetivo: se resuelve por NOMBRE aqui y ahora (un indice de SDL no es estable al
+        // reordenar monitores; un nombre desenchufado devuelve 0 → "auto" → el monitor de la ventana).
+        // Se mueve la ventana antes de fullscreen en `setWindowMode`, o SDL llenaria el monitor
+        // equivocado (la ventana todavia estaria en el anterior).
+        const SDL_DisplayID selDisp = Haruka::Core::Window::displayForName(g.monitorName);
+        _window->setWindowMode(static_cast<int>(g.windowMode), selDisp); // windowed / borderless / fullscreen
 
         // ── RESOLUCION ──────────────────────────────────────────────────────────────────────────
         //
@@ -175,7 +180,9 @@ void Application::applyGraphicsSettings() {
             // que los escribe, y va por el accesor mutable a proposito, para que se vea.
             auto& gw = Haruka::SettingsManager::get().graphics();
             if (g.resolutionW <= 0 || g.resolutionH <= 0) {
-                const SDL_DisplayID disp = SDL_GetDisplayForWindow(w);
+                // Nativa del monitor ELEGIDO (no de donde este la ventana en ese momento): si el
+                // usuario apunto a otro monitor, el "primer arranque" se resuelve contra el suyo.
+                const SDL_DisplayID disp = selDisp ? selDisp : SDL_GetDisplayForWindow(w);
                 if (const SDL_DisplayMode* dm = SDL_GetDesktopDisplayMode(disp)) {
                     gw.resolutionW = dm->w;
                     gw.resolutionH = dm->h;

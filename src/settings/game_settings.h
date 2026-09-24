@@ -42,6 +42,16 @@ struct GraphicsSettings {
     /// `Window::init`, que va despues. Lo rellena `Application` justo tras crear la ventana.
     int             resolutionW     = 0;
     int             resolutionH     = 0;
+    /// Monitor objetivo de la ventana y de la lista de resoluciones. VACIO = automatico (la ventana
+    /// se queda donde este, o la primaria).
+    ///
+    /// Se guarda por NOMBRE, como `preferredGpus` y por la misma razon: SDL reenumera las pantallas
+    /// al conectar o reordenar monitores, y un INDICE guardado apuntaria manana a otra pantalla.
+    ///
+    /// ⚠️ Algunos servidores no anuncian nombre (X11 sin EDID, Wayland parcial); el panel ensena
+    /// "Monitor N" y guarda esa etiqueta, porque un selector no puede prometer nada que no se vea.
+    /// Si el nombre ya no existe al aplicar (monitor desenchufado), se cae a la primaria sin drama.
+    std::string     monitorName     = "";
     /// ── VULKAN POR DEFECTO desde el 2026-08-31. OpenGL SIGUE SOPORTADO ──────────────────────────
     ///
     /// No es por milisegundos: medido a altura de ojo son parejos, y en algunos casos Vulkan sale un
