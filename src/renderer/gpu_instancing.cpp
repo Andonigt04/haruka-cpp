@@ -1,8 +1,10 @@
 #include "renderer/gpu_instancing.h"
+#include "core/logger.h"
 #include "rhi/rhi_device.h"
 #include "rhi/rhi_context.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cstddef>
 #include "tools/profiler.h"
 
@@ -23,7 +25,7 @@ void GPUInstancing::init(int maxInstances) {
     if (RHI::valid(m_arena)) dev->destroy(m_arena);
     for (auto& b : m_retired) if (RHI::valid(b)) dev->destroy(b);
     m_retired.clear();
-    m_arena = {}; m_arenaCap = 0; m_arenaUsed = 0; m_lastOff = 0; m_draws = 0;
+    m_arena = {}; m_arenaCap = 0; m_arenaUsed = 0; m_lastOff = 0; m_draws = 0; m_lastCount = 0;
     // El arena nace al primer uso y del tamaño que haga falta (ver la nota de la cabecera).
 }
 
@@ -70,25 +72,60 @@ void GPUInstancing::setInstancesGather(const InstanceDataFloat* src, const std::
 }
 
 void GPUInstancing::reserve(size_t capacity) {
-    if (capacity <= m_arenaCap) return;
     RHI::Device* dev = RHI::device();
     if (!dev) return;
+    // Con tope duro el arena nace a ESE tamaño y solo se reasigna cuando la NECESIDAD ((anillo del frame)
+    // cruza lo ya reservado: en ese caso salta DIRECTO al tope (= anillo histórico ×2 + margen), así
+    // el margen absorbe las subidas modestas del anillo sin reasignar. Cada `vkAllocateMemory`
+    // host-visible cuesta ~110 ms en este portátil híbrido, así que crecer solo en saltos grandes.
+    const size_t floor_ = (size_t)m_maxInstances;
+    size_t target;
+    if (m_hardCap > 0) {
+        // arenaCap == 0 o la necesidad del frame ya no cabe → salto al tope (margen incluido).
+        // Si aún cabe, se queda como está (jamás se encoge).
+        target = (m_arenaCap == 0 || capacity > m_arenaCap) ? m_hardCap : m_arenaCap;
+    } else {
+        target = std::max({ m_arenaCap, capacity, floor_ });
+    }
+    if (target <= m_arenaCap) return;
     // Los draws de este frame ya grabados pueden seguir leyendo el arena viejo: se retira como en
     // `upload` (se destruye en el beginFrame siguiente, cuando la GPU ya termino el frame).
-    const size_t c = capacity < (size_t)m_maxInstances ? (size_t)m_maxInstances : capacity;
+    HARUKA_LOGI("Instancing", "arena %s -> %zu instancias (%.1f MB) · hardCap=%zu · maxInst=%d",
+                m_arenaCap == 0 ? "NACE" : "CRECE",
+                target, target * (double)sizeof(InstanceDataFloat) / (1024.0 * 1024.0),
+                m_hardCap, m_maxInstances);
     if (RHI::valid(m_arena)) m_retired.push_back(m_arena);
-    m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, c * sizeof(InstanceDataFloat),
+    m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, target * sizeof(InstanceDataFloat),
                                 nullptr, RHI::BufferMemory::Dynamic);
-    m_arenaCap = c;
+    m_arenaCap = target;
     m_arenaUsed = 0;
 }
 
 void GPUInstancing::upload() {
-    if (m_instances.empty()) return;
+    if (m_instances.empty()) { m_lastCount = 0; return; }
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     const size_t need = m_instances.size();
     if (!RHI::valid(m_arena) || m_arenaUsed + need > m_arenaCap) {
+        if (m_hardCap > 0 && RHI::valid(m_arena)) {
+            // Tope duro: NO se reasigna (cada alloc host-visible cuesta ~110 ms). Se escribe lo que
+            // quepa del lote y el sobrante se deja fuera este frame; aviso con el estado del arena
+            // (primeras 24 veces, luego el frame siguiente re-borra arenaUsed y vuelve a haber hueco).
+            const size_t written = m_arenaCap - m_arenaUsed;
+            static int s_warns = 0;
+            if (s_warns < 24) { ++s_warns;
+                HARUKA_LOGI("Instancing",
+                            "tope duro: %zu/%zu del lote fuera (entran %zu) · arena %zu/%zu · hardCap=%zu · draws=%d",
+                            need - written, need, written, m_arenaUsed, m_arenaCap, m_hardCap, m_draws); }
+            m_lastOff = m_arenaUsed * sizeof(InstanceDataFloat);
+            if (written > 0)
+                dev->updateBuffer(m_arena, m_lastOff, written * sizeof(InstanceDataFloat), m_instances.data());
+            m_lastCount = (uint32_t)written;
+            m_arenaUsed += written;
+            ++m_draws;
+            m_dirty = false;
+            return;
+        }
         // No cabe: arena nuevo del tamaño EXACTO de lo sub-asignado + lo que viene (el viejo se
         // retira hasta el frame siguiente — los draws ya grabados este frame lo siguen leyendo).
         // Potencias de dos hacian explotar el arena: cada frame que cruzaba el tope recreaba AL
@@ -107,6 +144,7 @@ void GPUInstancing::upload() {
     if (!RHI::valid(m_arena)) return;
     m_lastOff = m_arenaUsed * sizeof(InstanceDataFloat);
     dev->updateBuffer(m_arena, m_lastOff, need * sizeof(InstanceDataFloat), m_instances.data());
+    m_lastCount = (uint32_t)need;
     m_arenaUsed += need;
     ++m_draws;
     m_dirty = false;
@@ -115,11 +153,14 @@ void GPUInstancing::upload() {
 void GPUInstancing::render(RHI::Context* ctx, uint32_t indexCount, uint32_t instanceBinding) {
     if (!ctx || m_instances.empty() || indexCount == 0) return;
     { HARUKA_PROFILE("inst.upload(memcpy)"); upload(); }
+    // Si el tope duro dejó este lote a cero (arena lleno), se salta el draw: bindear en
+    // m_lastOff == m_arenaCap * size sería un offset un-pasado-el-final del buffer.
+    if (m_lastCount == 0) return;
     // El divisor NO se toca aquí: vive en el PSO (InputRate::Instance). El llamador ya ató su
     // pipeline y la malla base; nosotros solo añadimos el stream de instancias y disparamos el draw.
     HARUKA_PROFILE("inst.bind+draw");
     ctx->bindVertexBuffer(m_arena, instanceBinding, m_lastOff);
-    ctx->drawIndexed(indexCount, /*first*/0, (uint32_t)m_instances.size());
+    ctx->drawIndexed(indexCount, /*first*/0, m_lastCount);   // m_lastCount = lo que realmente entro en el arena
 }
 
 void GPUInstancing::clear() {

@@ -71,6 +71,11 @@ layout(std140, binding = 0) uniform GrassGen {
     vec4  uPlane[4];    // los 4 planos laterales del frustum por el ojo (normales hacia dentro)
     dvec4 uIdx;         // x,y = esquina min de la rejilla del indice (lx,ly) · z = lado de celda (lx) · w = lado total
     ivec4 uIdxGrid;     // x,y = dims de la rejilla (celdas) · z,w = (libre)
+    // VENTANA DE RECORTE DE LOS VOX: misma convención que `terrain_node.frag` (uVoxCut/uVoxCutInfo).
+    // La hierba no puede crecer donde el suelo se recorta para mostrar la boca: el discard del pase
+    // de terreno dejaría la brizna en el aire (el "campo" de altura del nodo SÍ sigue existiendo allí).
+    mat4  uVoxCutSpace; // posición relativa al ojo → uv [0,1] de la ventana
+    vec4  uVoxCutInfo;  // x = 1 si la ventana vale (0 = no hay campo: no se recorta nada)
 };
 
 // Nodo hoja DIBUJADO cerca de la camara: gemelo de `GrassRenderer::NearNode`.
@@ -94,6 +99,7 @@ layout(std430, binding = 6) readonly buffer IndexOffs { uint uIdxOff[]; };
 layout(std430, binding = 7) readonly buffer IndexList { uint uIdxList[]; };
 
 layout(binding = 15) uniform sampler2DArray uBaseField;   // clima (elev, temp, humedad) para el material
+layout(binding = 16) uniform sampler2D     uVoxCut;       // ventana de recorte de los vox (R = recorte)
 
 // ── HASH ────────────────────────────────────────────────────────────────────────────────────────
 uint harukaHashU(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -256,6 +262,15 @@ void main() {
     }
 
     // ── EL REGISTRO ─────────────────────────────────────────────────────────────────────────────
+    // VENTANA DE RECORTE DE LOS VOX: donde el pase de terreno `discard` el suelo para enseñar la
+    // boca, no puede crecer hierba — la brizna quedaria en el aire encima del torreón recortado.
+    // Misma regla y misma matriz que `terrain_node.frag` (uVoxCut/uVoxCutSpace, `cut > 0.5`); `pos`
+    // es relativa al ojo, igual que `vFragPos`. `textureLod` porque en compute no hay derivadas.
+    if (uVoxCutInfo.x > 0.5) {
+        const vec2 cuv = (uVoxCutSpace * vec4(pos, 1.0)).xy;
+        const bool dentro = cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0;
+        if (dentro && textureLod(uVoxCut, cuv, 0.0).r > 0.5) { if (!SKIP(12)) return; }
+    }
     const uint slot = atomicAdd(instanceCount, 1u);
     if (slot >= uBlades.length()) return;
     const float height = uLod.z * (0.6 + 0.8 * harukaHash01(hc, k, 6u)) * mix(1.0, 0.85, lodT);

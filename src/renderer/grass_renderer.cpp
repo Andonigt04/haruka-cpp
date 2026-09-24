@@ -35,6 +35,8 @@ struct GenUBO {
     glm::vec4  plane[4];   ///< los 4 planos laterales del frustum (normal hacia DENTRO, por el ojo)
     glm::dvec4 uIdx;       ///< x,y = esquina min de la rejilla (lx,ly) · z = lado de celda (lx) · w = lado total
     glm::ivec4 uIdxGrid;   ///< x,y = dims de la rejilla (celdas) · z,w = (libre)
+    glm::mat4  cutSpace;   ///< ventana de recorte de los vox: pos rel. al ojo -> uv [0,1]
+    glm::vec4  cutInfo;    ///< x = 1 si la ventana vale (0 = sin campo: no se recorta nada)
 };
 struct DrawUBO {
     glm::mat4 mvp;
@@ -135,10 +137,20 @@ bool GrassRenderer::init(RHI::Device* dev, const std::string& shaderDir, const C
         m_pressRT[i]  = dev->createRenderTarget(rd);
         m_pressTex[i] = dev->getColorTexture(m_pressRT[i], 0);
     }
+    // El dummy para el binding 16 (ventana de recorte) cuando `Frame::cutTex` no llega: un 1x1
+    // negro que el shader no lee (`cutInfo.x = 0`). Vulkan no admite un descriptor sin atar.
+    {
+        const uint8_t black[4] = { 0, 0, 0, 255 };
+        RHI::TextureDesc dd;
+        dd.width = dd.height = 1; dd.format = RHI::Format::RGBA8;
+        dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
+        dd.mipmaps = false; dd.initialData = black;
+        m_cutDummy = dev->createTexture(dd);
+    }
     m_ready = RHI::valid(m_genUBO) && RHI::valid(m_drawUBO) && RHI::valid(m_pressUBO) && RHI::valid(m_nodesSSBO)
            && RHI::valid(m_bladesSSBO) && RHI::valid(m_cmd) && RHI::valid(m_ib)
            && RHI::valid(m_cellPairs) && RHI::valid(m_idxOff) && RHI::valid(m_idxList)
-           && RHI::valid(m_pressRT[0]) && RHI::valid(m_pressRT[1]);
+           && RHI::valid(m_pressRT[0]) && RHI::valid(m_pressRT[1]) && RHI::valid(m_cutDummy);
     if (m_ready)
         HARUKA_LOGI("Hierba", "radio %.0f m · %.0f briznas/m² · tope %zu (%.0f MB) · presion %d² a %.2f m/texel (%.0f m)",
                     m_cfg.radiusM, m_cfg.bladesPerM2 * m_cfg.density, m_cfg.maxBlades,
@@ -152,6 +164,7 @@ void GrassRenderer::shutdown() {
     for (RHI::BufferHandle* b : { &m_genUBO, &m_drawUBO, &m_pressUBO, &m_nodesSSBO, &m_bladesSSBO, &m_cmd, &m_ib, &m_readback, &m_cellPairs, &m_idxOff, &m_idxList })
         if (RHI::valid(*b)) { m_dev->destroy(*b); *b = {}; }
     for (int i = 0; i < 2; ++i) if (RHI::valid(m_pressRT[i])) { m_dev->destroy(m_pressRT[i]); m_pressRT[i] = {}; m_pressTex[i] = {}; }
+    if (RHI::valid(m_cutDummy)) { m_dev->destroy(m_cutDummy); m_cutDummy = {}; }
     for (RHI::PipelineHandle* p : { &m_genPipe, &m_drawPipe, &m_pressPipe })
         if (RHI::valid(*p)) { m_dev->destroy(*p); *p = {}; }
     m_ready = false; m_dev = nullptr;
@@ -360,6 +373,10 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     g.misc     = glm::vec4(f.finestTexelM, s_dbg, (float)(glm::length(f.camPos - f.planetCenter) - f.planetRadiusM), 0.0f);
     g.uIdx     = glm::dvec4(gridX0, gridY0, cellL, spanL);   // en double: las fronteras de la rejilla
     g.uIdxGrid = glm::ivec4(kIdxDim, kIdxDim, 0, 0);        // del CPU y del compute coinciden al bit
+    // La ventana de recorte: para que el compute descarte las briznas que caerian donde el suelo
+    // se recorta (el agujero de los vox). Sin ventana, `cutInfo.x = 0` y no se descarta nada.
+    g.cutSpace = f.cutSpace;
+    g.cutInfo  = glm::vec4(RHI::valid(f.cutTex) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
     // ── LOS CUATRO PLANOS DEL FRUSTUM ─────────────────────────────────────────────────────────────
     // El cono que los envuelve (`nodeFrustumConeHalfAngle`) sobra por las esquinas: a 60° y 16:9 el
     // cono mide 49,7° de semiangulo y el rectangulo 30° x 46°, o sea que el cono genera ~1,7x de
@@ -398,20 +415,22 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
         HARUKA_LOGW("Hierba", "materialUBO (binding 12) NO disponible en el dispatch: la hierba saldra vacia (harukaGrassAmount=0)");
     }
     ctx->bindTexture(15, f.baseField);
+    ctx->bindTexture(16, RHI::valid(f.cutTex) ? f.cutTex : m_cutDummy);
     ctx->dispatch((uint32_t)std::min<uint64_t>((threads + 63u) / 64u, 65535u), 1, 1);
     ctx->memoryBarrier();   // el draw lee briznas y comando
 
     // Registro del estado que PRODUJO este dispatch: el REUSE de prepare compara contra esto (no
     // contra el frame anterior). Si la camara se queda quieta, el buffer guarda briznas relativas a
     // ESTA camara y `draw` las ancla al mundo con `camShift`.
-    m_lastCam      = f.camPos;
-    m_lastPlanet   = f.planetCenter;
-    m_lastViewDir  = f.viewDir;
-    m_lastViewUp   = f.viewUp;
-    m_lastTh       = f.tanHalfV;
-    m_lastAspect   = f.aspect;
-    m_lastNodes    = f.nodes ? (const void*)f.nodes->data() : nullptr;
-    m_lastNodesN   = f.nodes ? f.nodes->size() : 0;
+    m_lastCam       = f.camPos;
+    m_lastPlanet    = f.planetCenter;
+    m_lastViewDir   = f.viewDir;
+    m_lastViewUp    = f.viewUp;
+    m_lastTh        = f.tanHalfV;
+    m_lastAspect    = f.aspect;
+    m_lastNodes     = f.nodes ? (const void*)f.nodes->data() : nullptr;
+    m_lastNodesN    = f.nodes ? f.nodes->size() : 0;
+    m_lastCutTex    = f.cutTex;
 }
 
 void GrassRenderer::prepare(RHI::Context* ctx, const Frame& f) {
@@ -436,6 +455,12 @@ void GrassRenderer::prepare(RHI::Context* ctx, const Frame& f) {
         changed += (std::abs(f.tanHalfV - m_lastTh)   > 0.03f * std::max(m_lastTh, 0.01f));
         changed += (std::abs(f.aspect   - m_lastAspect) > 0.03f);
         changed += (f.nodes->data() != m_lastNodes || f.nodes->size() != m_lastNodesN);
+        // La ventana de recorte de los vox: cuando el `VoxRenderer` la rehace (campo editado, o el
+        // pie se movió > 40 m y la textura se reancla), hay briznas que ya no tocan suelo o que
+        // entran nuevas — hay que regenerar. El refresco de la MATRIZ es solo traslación con la
+        // cámara (no dispara aquí: la regenera ya el umbral de `camPos`, y compararla con `!=`
+        // rompería el reuse con movimientos de sub-mm).
+        changed += (f.cutTex.id != m_lastCutTex.id);
     }
     m_first = false;
     if (!changed) return;   // conserva el contador y el buffer del frame anterior: el draw reusa

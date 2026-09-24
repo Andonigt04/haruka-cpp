@@ -93,6 +93,12 @@ public:
         RHI::BufferHandle  heights{};        ///< `TerrainNodeRenderer::heightsBuffer()`
         RHI::TextureHandle baseField{};      ///< clima (binding 15), con relleno si no hay
         RHI::BufferHandle  materialUBO{};    ///< la tabla de materiales del terreno (binding 12)
+        // VENTANA DE RECORTE DE LOS VOX (binding 16): donde el terreno se salta el suelo para
+        // enseñar la boca, tampoco crece hierba — la brizna quedaría clavada en el aire (ver la
+        // nota del `.comp`). Rellena la hierba la misma matriz que el pase de terreno usa para
+        // `uVoxCut`; sin ventana (no hay vox cargados/cortados) llega vacia y no se descarta nada.
+        RHI::TextureHandle cutTex{};
+        glm::mat4          cutSpace{1.0f};
         const std::vector<Haruka::Terrain::TerrainNodeRenderer::NearNode>* nodes = nullptr;
         float      finestTexelM = 1.0f;      ///< texel del nivel mas fino de `nodes`
     };
@@ -134,6 +140,7 @@ private:
     bool               m_ready = false;
     RHI::PipelineHandle m_genPipe{}, m_drawPipe{}, m_pressPipe{};
     RHI::BufferHandle  m_genUBO{}, m_drawUBO{}, m_pressUBO{};
+    RHI::TextureHandle m_cutDummy{};     // 1x1 para el binding 16 cuando no hay ventana (Vulkan: sin descriptor sin atar)
     RHI::BufferHandle  m_nodesSSBO{}, m_bladesSSBO{}, m_cmd{}, m_ib{};
     RHI::BufferHandle  m_cellPairs{};   // ivec2[]: las celdas del disco que recorre el compute
     RHI::BufferHandle  m_idxOff{}, m_idxList{};   // índice espacial de `drawnHeightAt` (uints)
@@ -159,6 +166,9 @@ private:
     float              m_lastTh = 0.0f, m_lastAspect = 0.0f;
     const void*        m_lastNodes = nullptr;
     size_t             m_lastNodesN = 0;
+    // Ventana de recorte del ULTIMO dispatch: si cambia (el `VoxRenderer` rehace la textura o
+    // reancla la matriz) hay que volver a generar, aunque la camara no se mueva.
+    RHI::TextureHandle m_lastCutTex{};
     bool               m_first = true;
 };
 

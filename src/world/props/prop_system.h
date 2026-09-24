@@ -188,6 +188,12 @@ private:
     std::vector<InstanceDataFloat> m_gpu;
     glm::dvec3 m_origin{0.0};
     std::unique_ptr<Renderer::GPUInstancing> m_instancing;
+    /// Tope duro del arena de instancias. NO se fija en el primer frame (entonces el registro aún
+    /// está vacío: el scatter llega en el frame de gen y fijarlo antes congelaba 2×0+256k, con el
+    /// arena llenándose y RECORTANDO los props: "faltan las rocas y los árboles"). Se actualiza al
+    /// MÁXIMO HISTÓRICO del anillo: solo crece cuando el mundo toca un nuevo máximo (los reallocs
+    /// caen en frames de gen, ya de por sí gigantescos); en juego estable jamás se reasigna.
+    size_t m_arenaHiRing = 0;
     RHI::PipelineHandle m_instPSO{}, m_shadowPSO{};
     RHI::BufferHandle   m_shadowUBO{};
     /// UNO POR PROTOTIPO: en Vulkan los draws se graban y se ejecutan despues; un buffer

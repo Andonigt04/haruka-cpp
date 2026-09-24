@@ -575,27 +575,47 @@ void PropSystem::applyScatterResult(ScatterResult res,
     // matriz NO depende del estado (solo la `breakMask` del stream), así que se re-etiqueta aquí.
     std::vector<Haruka::InstancedObject> objs;
     objs.reserve(res.objs.size());
-    std::vector<InstanceDataFloat> gpu;
-    gpu.reserve(res.gpu.size());
+    // BUFFER PERSISTENTE para `m_gpu`: un vector nuevo por aplicar era un mmap de ~17 MB por
+    // re-siembra; en el primer barrido tras el apply sus páginas estaban aún frías (TLB/cache) y
+    // `model[3]` se leía a ~112 ns/instancia (~20 ms) vs ~9 ns/instancia en régimen. Al reusar
+    // la capacidad (solo se agranda si el anillo crece), las páginas quedan residentes y el
+    // sweep se mantiene en ~2 ms incluso el frame que aplica.
+    if (m_gpu.capacity() < res.gpu.size()) m_gpu.reserve(res.gpu.size());
+    m_gpu.clear();
     size_t sobreBoca = 0;
+    // ⚠️ EL FILTRO DE BOCA ES ~50 MS SI SE HACE POR INSTANCIA. `surfaceCut` paga el muestreo de
+    // COTA del planeta (sampleHeight, ~0,4 µs) ANTES de mirar si hay chunk, y con ~130k props lo
+    // único que importa es saber dónde el resultado puede ser ≠0. `surfaceCut` sólo puede recortar
+    // donde el chunk del cinturón del probe tiene `d` (lo quitado: cuevas, trazos, edición) — si `d`
+    // está vacío el chunk es todo roca y devuelve 0 por construcción. Un gate que admitiera
+    // "cualquier chunk cargado" seguía pagando la muestra para todos los props del disco visible en
+    // el spawn (~22 ms): la malla del terreno carga chunks en todas partes aunque sean roca maciza.
+    // Se colecta una vez la lista de columnas con un chunk de HUECO y `surfaceCut` solo se llama en
+    // las que existen; en el resto devuelve 0 por construcción (ver `VoxWorld::loadedCutColumns`).
+    const std::unordered_set<Haruka::VoxKey, Haruka::VoxKeyHash> voxCols = planet->vox().loadedCutColumns();
     for (size_t i = 0; i < res.objs.size(); ++i) {
         Haruka::InstancedObject io = res.objs[i];
         // ⚠️ NADA SOBRE UNA BOCA: el suelo ahi no se dibuja ni se pisa (campo volumetrico); un arbol
-        // encima flota en el aire. Misma funcion que el shader y la fisica.
-        if (planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) { ++sobreBoca; continue; }
-        auto it = m_state.find(io.seed);
-        if (it != m_state.end()) {
-            io.state     = it->second.state;
-            io.regrow    = it->second.regrow;
-            io.breakMask = it->second.breakMask;
+        // encima flota en el aire. Misma funcion que el shader y la fisica. `columnAt` es la forma
+        // barata de `keyAt` para dir ya unitaria (aquí): sin `length`/`normalize`/`k` por instancia.
+        if (!voxCols.empty()) {
+            const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
+            if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) { ++sobreBoca; continue; }
+        }
+        if (!m_state.empty()) {
+            auto it = m_state.find(io.seed);
+            if (it != m_state.end()) {
+                io.state     = it->second.state;
+                io.regrow    = it->second.regrow;
+                io.breakMask = it->second.breakMask;
+            }
         }
         InstanceDataFloat inst = res.gpu[i];
         inst.breakMask = (float)io.breakMask;
         objs.push_back(io);
-        gpu.push_back(inst);
+        m_gpu.push_back(inst);
     }
     m_origin = res.origin;                    // las matrices del worker son relativas a ESTE origen
-    m_gpu    = std::move(gpu);
     m_registry.setInstances(std::move(objs));
     if (sobreBoca > 0) HARUKA_LOGDIAG("Vox", "props retirados por estar sobre una boca: %zu", sobreBoca);
 
@@ -670,20 +690,30 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     const float tanV = std::tan(glm::radians(f.camera->zoom * 0.5f));
     const float tanH = tanV * std::max(f.aspect, 0.01f);
     const float vpPx = std::max((float)f.heightPx, 1.0f);
-    const float kMinPropPixels = 1.0f, kLodPx0 = 90.0f, kLodPx1 = 25.0f;
+    const float kLodPx0 = 90.0f, kLodPx1 = 25.0f;
+    // Culling en ESPACIO AL CUADRADO: px = (radio/dist)/tanV*vpPx, y las comparaciones
+    // (sub-pixel (1 px) y LOD) se reescriben como dist^2 comparado con (radio * k)^2. Con
+    // 178k instancias en el registro, el `sqrt` del length y la division del px por instancia
+    // eran el grueso del barrido (~22 ms en el frame tras la re-siembra).
+    const float kPixPerM   = vpPx / tanV;                  // px = radio * kPixPerM / dist
+    const float kPixPerM2  = kPixPerM * kPixPerM;          // sub-pixel: dist^2 > radio^2 * kPixPerM2
+    const float kLod02     = kPixPerM / kLodPx0;           // LOD0: dist^2 <= radio^2 * kLod02^2
+    const float kLod12     = kPixPerM / kLodPx1;           // LOD1: dist^2 <= radio^2 * kLod12^2
+    const float kLod02Sq   = kLod02 * kLod02;
+    const float kLod12Sq   = kLod12 * kLod12;
     // `HARUKA_PROP_LOD=0..2` fuerza el nivel para TODOS los props (A/B de un fallo por nivel).
     static const int s_forceLod = [] { const char* e = std::getenv("HARUKA_PROP_LOD"); return e ? std::atoi(e) : -1; }();
     auto propCull = [&](const glm::vec3& posF, float radius, int& outLod) -> uint8_t {
         outLod = 0;
-        const float dist = glm::length(posF);
-        if (dist <= 1e-3f) return 0;
+        const float d2 = glm::dot(posF, posF);
+        if (d2 <= 1e-6f) return 0;
         const float fwd = glm::dot(posF, camF);
         if (fwd < -radius) return 1;                      // detras de la camara
         if (std::abs(glm::dot(posF, camR)) > fwd * tanH + radius) return 1;
         if (std::abs(glm::dot(posF, camU)) > fwd * tanV + radius) return 1;
-        const float px = (radius / dist) / tanV * vpPx;
-        if (px < kMinPropPixels) return 2;                // sub-pixel
-        outLod = (px >= kLodPx0) ? 0 : (px >= kLodPx1 ? 1 : 2);
+        const float r2 = radius * radius;
+        if (d2 > r2 * kPixPerM2) return 2;                // sub-pixel (px < kMinPropPixels)
+        outLod = (d2 <= r2 * kLod02Sq) ? 0 : (d2 <= r2 * kLod12Sq ? 1 : 2);
         if (s_forceLod >= 0) outLod = std::min(s_forceLod, PrototypeGpu::kLods - 1);
         return 0;
     };
@@ -727,6 +757,14 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // de sombras comparten este instancer y cada uno sub-asigna lo suyo, o sea 2× el anillo como
     // tope duro. Sin margen, la acumulacion cruzaba el tope tras cada re-siembra y `upload` recreaba
     // el arena (hasta 157..671 ms). El +64k extra es relleno para que el segundo pase no roce el borde.
+    // TOPE DURO ADAPTATIVO: se fija al MÁXIMO HISTÓRICO del anillo, no al tamaño del frame actual.
+    // El primer frame no vale (el registro aún está vacío y congelar 2×0+256k hacía que el arena se
+    // llenara al llegar el scatter y RECORTAR los props: "faltan las rocas y los árboles"). Cada
+    // re-siembra que agranda el anillo mueve el tope hacia arriba — los reallocs solo pasan en
+    // frames de gen (gigantescos de por sí); en juego estable el tope queda fijo y `upload` no
+    // vuelve a llamar a vkAllocateMemory (~110 ms c/u en este portátil híbrido).
+    const size_t ringNow = m_registry.instances().size();
+    if (ringNow > m_arenaHiRing) { m_arenaHiRing = ringNow; m_instancing->setHardCap(m_arenaHiRing * 2 + 262144); }
     m_instancing->reserve(m_registry.instances().size() * 2 + 65536);
     const glm::vec3 originRel = glm::vec3(m_origin - camD);
 
@@ -735,7 +773,14 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     const auto tSweep0 = PClock::now();
     size_t nSwept = 0, nKept = 0;
     const auto& insts = m_registry.instances();
-    for (uint32_t ii = 0; ii < (uint32_t)insts.size(); ++ii) {
+    const size_t nInst = insts.size();
+    for (uint32_t ii = 0; ii < (uint32_t)nInst; ++ii) {
+        // Prefetch a 8 instancias de `m_gpu` y del registro: en el primer barrido tras el apply
+        // las páginas están frías y la latencia de cada `model[3]`/`io` dominaba (~20 ms).
+        if (ii + 8 < nInst) {
+            __builtin_prefetch(&m_gpu[ii + 8], 0, 3);
+            __builtin_prefetch(&insts[ii + 8], 0, 3);
+        }
         const auto& io = insts[ii];
         ++nSwept;
         const int pi = io.prototype;
@@ -830,6 +875,22 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
         m_drawnCounts[(size_t)pi] = drawnTotal;
     }
 
+    // Diagnóstico no-diag (protegido por s_logProps cada ~2 s): tamaño REAL del registro y lotes
+    // subidos. Despeja la duda del log del tope (¿el arena se queda corto o hay MÁS registro?).
+    {
+        static double s_lastLog2 = -1e9;
+        if (f.diagClock - s_lastLog2 > 2.0) {
+            s_lastLog2 = f.diagClock;
+            size_t noVacios = 0;
+            for (int li = 0; li < protoCount * kLods; ++li)
+                if (!m_buckets[(size_t)li].empty()) ++noVacios;
+            HARUKA_LOGI("PropInst",
+                        "registro=%zu (arena hi-ring=%zu) · protoCount=%d · buckets no vacios=%zu · lotes subidos=%d · arena %zu/%zu",
+                        m_registry.instances().size(), m_arenaHiRing, protoCount, noVacios,
+                        m_instancing->ringSize(), m_instancing->arenaUsed(), m_instancing->arenaCap());
+        }
+    }
+
     // Diagnostico cada 120 frames: por prototipo vivos / en bucket / dibujados, y la instancia de
     // nivel 0 mas cercana (distingue "esta a 300 m" de "mide 2 cm" de "esta bajo tierra").
     {
@@ -902,6 +963,9 @@ void PropSystem::drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Cor
     if (!planets || !planets->getActivePlanet(planetC, planetR)) return;
     const glm::dvec3 camD = glm::dvec3(camera->position);
     if (m_gpu.size() != m_registry.instances().size()) rebuildGpu(planetC, planetR, camera);
+    // Ídem del pase principal: el tope adaptativo se actualiza ANTES de cualquier reserva.
+    const size_t ringNow = m_registry.instances().size();
+    if (ringNow > m_arenaHiRing) { m_arenaHiRing = ringNow; m_instancing->setHardCap(m_arenaHiRing * 2 + 262144); }
     m_instancing->reserve(m_registry.instances().size() * 2 + 65536);
     const glm::vec3 originRel = glm::vec3(m_origin - camD);
 
@@ -920,7 +984,12 @@ void PropSystem::drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Cor
     m_shadowBuckets.resize((size_t)protoCount);
     for (auto& b : m_shadowBuckets) b.clear();
     const auto& insts = m_registry.instances();
-    for (uint32_t ii = 0; ii < (uint32_t)insts.size(); ++ii) {
+    const size_t nInstS = insts.size();
+    for (uint32_t ii = 0; ii < (uint32_t)nInstS; ++ii) {
+        if (ii + 8 < nInstS) {
+            __builtin_prefetch(&m_gpu[ii + 8], 0, 3);
+            __builtin_prefetch(&insts[ii + 8], 0, 3);
+        }
         const auto& io = insts[ii];
         if (io.prototype < 0 || io.prototype >= protoCount) continue;
         if (io.state != (uint32_t)InstancedObjectState::Alive) continue;

@@ -73,8 +73,16 @@ public:
      *  total sub-asignado del frame cruza su potencia de dos, y cada recreacion llama a
      *  `vkAllocateMemory` de un buffer que puede duplicar el anterior en tamaño. Quien conozca el
      *  tope ANTES de dibujar (el anillo de props: la suma de todos los buckets cabe en el anillo) lo
-     *  reserva de una vez al empezar el pase y el bucle de draws no vuelve a cruzar el tope. */
+     *  reserva de una vez al empezar el pase y el bucle de draws no vuelve a cruzar el tope.
+     *  Con `setHardCap` (tope duro) el arena NACE a ese tamaño la primera vez y jamás se reasigna:
+     *  cada `vkAllocateMemory` host-visible cuesta ~110 ms en este portátil híbrido, y las
+     *  re-siembras del mundo (que agrandan el anillo) disparaban un golpe por re-siembra. */
     void reserve(size_t capacity);
+
+    /** @brief Tope duro del arena (instancias): la primera reserva salta directamente a él y
+     *  `upload` NUNCA recrea por debajo. Si un frame pide más, se escribe lo que quepa en el arena
+     *  (un aviso la primera vez) en vez de asignar. 0 = sin tope (comportamiento antiguo). */
+    void setHardCap(size_t capacity) { m_hardCap = capacity; }
 
     /**
      * @brief Sube lo pendiente y dibuja TODAS las instancias en un solo draw.
@@ -116,9 +124,11 @@ private:
     size_t m_arenaCap  = 0;    ///< capacidad del arena (instancias)
     size_t m_arenaUsed = 0;    ///< instancias ya sub-asignadas este frame
     size_t m_lastOff   = 0;    ///< offset (bytes) del lote actual dentro del arena
+    uint32_t m_lastCount = 0;  ///< instancias del lote actual (puede ser menor que `m_instances` si el tope duro recortó)
     int    m_draws     = 0;    ///< lotes subidos este frame (diagnóstico)
     std::vector<Haruka::RHI::BufferHandle> m_retired;   ///< arenas viejos: se destruyen al frame siguiente
     int  m_maxInstances = 0;
+    size_t m_hardCap   = 0;    ///< tope duro del arena (0 = sin tope, se crece como antes)
     bool m_dirty = false;
 
 public:
@@ -128,6 +138,10 @@ public:
     void beginFrame();
     /// Lotes subidos en el último frame (diagnóstico: cuántos draws instanciados hubo).
     int ringSize() const { return m_draws; }
+    /// Instancias ya sub-asignadas este frame (diagnóstico del tope duro).
+    size_t arenaUsed() const { return m_arenaUsed; }
+    /// Capacidad del arena (instancias).
+    size_t arenaCap() const { return m_arenaCap; }
     /// Bytes reservados en buffers de instancias (host-visible: cuentan como RAM).
     size_t hostBytes() const;
 };

@@ -3349,6 +3349,10 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
             gf.heights       = m_nodeRenderer.heightsBuffer();
             gf.baseField     = m_nodeRenderer.baseFieldOrDummy();
             gf.materialUBO   = m_materialUBO;
+            // La ventana de recorte de los vox: la hierba no crece donde el suelo se recorta para
+            // enseñar la boca (la brizna quedaría en el aire). Sin ventana (cutTex vacia) no recorta.
+            gf.cutTex        = m_voxRenderer.cutTexture();
+            gf.cutSpace      = m_voxRenderer.cutSpace();
             m_grass.prepare(ctx, gf);
         }
     }

@@ -181,6 +181,13 @@ struct RenderFrame {
 
 void Application::renderFrameContent() {
     HARUKA_PROFILE("renderFrameContent");
+    // LOS ANILLOS DE INSTANCIAS EMPIEZAN DE CERO CADA FRAME *AQUÍ*, no en `renderFrame()`: el bucle
+    // del juego (`Application::run`) llama a `renderFrameContent()` directo y a `renderFrame()` nunca
+    // (es la ruta del editor). Hubo el mismo bug con `EntitySync`: el ring de props/scene se
+    // acumulaba, el arena de instancias se llenaba y `upload` cortaba todo lote posterior → en
+    // pantalla no salía ni un prop, con el log lleno de `tope duro`.
+    m_scene.beginFrame();
+    m_props.beginFrame();
     // LA LISTA DE PASES. Cada uno es una funcion con SU trozo del frame (`RenderFrame` lleva lo que
     // comparten: tamaño, target, contexto de escena, UBO por frame, contadores). El orden es el que
     // era; los `// ⚠️` de cada pase explican por que no puede moverse.
@@ -880,8 +887,6 @@ void Application::renderFrame() {
     // In standalone mode (run()), the main loop handles swap + FPS.
     // In editor mode (no _window), renderFrame() is called externally
     // and the editor manages the swap.
-    m_scene.beginFrame();                          // el anillo de instancias de construccion empieza de cero (ver kRing)
-    m_props.beginFrame();                          // idem para el anillo de los props
     buildRenderQueue();
     renderFrameContent();
 

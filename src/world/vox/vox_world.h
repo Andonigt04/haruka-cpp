@@ -7,6 +7,7 @@
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "world/vox/cave_system.h"
@@ -141,6 +142,15 @@ namespace Haruka {
 
         /** @brief La clave del chunk que contiene un punto (relativo al centro del planeta). */
         VoxKey keyAt(const glm::dvec3& p) const;
+        /** @brief La COLUMNA (face,i,j, k=0) de una dirección ya UNITARIA, sin la cota radial.
+         *
+         *  Variante barata de `keyAt` para el filtro de boca del scatter, que recorre ~130k
+         *  instancias: `io.dir` del scatter ya es unitario, así que este camino ahorra el
+         *  `length`+`normalize`+`floor` de `k` de `keyAt`. La columna de un punto depende solo de su
+         *  dirección (cualquier escala positiva da el mismo `face,i,j`); `k` se fuerza a 0, que es
+         *  lo que el filtro usa. EXACTO: mismo `face/i/j` que `keyAt(dir·R)`.
+         */
+        VoxKey columnAt(const glm::dvec3& unitDir) const;
         /** @brief El lado MENOR (m) de la celda de chunk en una dirección. No es 128: la retícula
          *  (u,v) de la cara del cubo se aprieta hacia las esquinas y allí las celdas miden ~50 m. */
         double chunkSideAt(const glm::dvec3& dir) const;
@@ -161,6 +171,25 @@ namespace Haruka {
          * compara con la enumeración por índice.
          */
         std::vector<VoxKey> columnsNear(const glm::dvec3& dir, double radiusM) const;
+        /**
+         * @brief Las COLUMNAS de los chunks CARGADOS con HUECO (d ≠ vacío), compactas (k=0).
+         *
+         * Para el filtro de boca del scatter (`surfaceCut` en `PropSystem::applyScatterResult`):
+         * `surfaceCut` cuesta un muestreo de COTA del planeta (sampleHeight, ~0,4 µs) AUNQUE el
+         * resultado sea 0; con ~130k instancias eso eran ~50 ms del apply, y una primera versión del
+         * gate que admitía "cualquier chunk cargado" aún pagaba la muestra para todos los props del
+         * disco visible en el spawn (~22 ms), porque la malla del terreno tiene chunks cargados en
+         * todas partes aunque sean TODO ROCA.
+         *
+         * EXACTO y ESTRECHO: `surfaceCut > 0` EXIGE que el chunk del cinturón del probe tenga
+         * `d` NO vacío — `caveDensityNoLock` responde `+kVoxRockM` (roca) si `d` está vacío, y con
+         * eso `max(caveDensity, addedDensity) ≥ kVoxRockM > 0` → el recorte `-max/2` es ≤ 0. Una
+         * columna sin ningún chunk con `d` no vacío (ni cueva, ni trazo, ni edición) devuelve 0 por
+         * construcción, así que saltarse `surfaceCut` ahí es idéntico. EXACTO también con la cota:
+         * la clave de columna (face,i,j) de un punto depende solo de la DIRECCIÓN, no de su radio,
+         * así que el probe de `surfaceCut` cae en la misma columna que `keyAt(dir·R)`.
+         */
+        std::unordered_set<VoxKey, VoxKeyHash> loadedCutColumns() const;
 
         // ── CUEVAS E ISLAS: OBJETOS DE LA ESCENA ─────────────────────────────────────────────────
         // ⚠️ SIN SEMILLA (Andoni, 13-09): una cueva o isla colocada es una entrada del `.scene` con
@@ -362,6 +391,7 @@ namespace Haruka {
 
         uint32_t    m_seed = 0;
         double      m_radius = 0.0;
+        int         m_chunksPerFace = 0;                       ///< cache de chunksPerFaceFor(m_radius)
         std::string m_bakes, m_save;
         VoxElevFn   m_elev;
         int         m_lastBakeCaves = 0;

@@ -57,6 +57,7 @@ glm::vec3 VoxChunk::metresPerVoxel() const {
 void VoxWorld::configure(uint32_t seed, double planetRadiusM, const std::string& bakesDir,
                          const std::string& saveDir, VoxElevFn elev) {
     m_seed = seed; m_radius = planetRadiusM; m_bakes = bakesDir; m_save = saveDir; m_elev = std::move(elev);
+    m_chunksPerFace = std::max(1, (int)std::lround((3.14159265358979 * 0.5) / (kVoxChunkM / planetRadiusM)));
     m_chunks.clear(); m_strokes.clear(); m_caves.clear(); m_caveDefs.clear(); m_placedBoxes.clear();
     m_islands.clear(); m_islandDefs.clear(); m_placedIslandBoxes.clear();
 }
@@ -314,12 +315,23 @@ static int chunksPerFaceFor(double R) {
 }
 int VoxWorld::chunksPerFace() const { return chunksPerFaceFor(m_radius); }
 
+VoxKey VoxWorld::columnAt(const glm::dvec3& unitDir) const {
+    VoxKey k;
+    const int n = m_chunksPerFace > 0 ? m_chunksPerFace : chunksPerFaceFor(m_radius);
+    double u, v;
+    dirToFaceUV(unitDir, k.face, u, v);
+    k.i = std::clamp((int)std::floor((u + 1.0) * 0.5 * n), 0, n - 1);
+    k.j = std::clamp((int)std::floor((v + 1.0) * 0.5 * n), 0, n - 1);
+    k.k = 0;
+    return k;
+}
+
 VoxKey VoxWorld::keyAt(const glm::dvec3& p) const {
     VoxKey k;
     const double r = glm::length(p);
     if (r < 1e-9) return k;
     const glm::dvec3 d = p / r;
-    const int n = chunksPerFaceFor(m_radius);
+    const int n = m_chunksPerFace > 0 ? m_chunksPerFace : chunksPerFaceFor(m_radius);
     double u, v;
     dirToFaceUV(d, k.face, u, v);
     k.i = std::clamp((int)std::floor((u + 1.0) * 0.5 * n), 0, n - 1);
@@ -1134,6 +1146,22 @@ float VoxWorld::surfaceCut(const glm::dvec3& dir) const {
     std::shared_lock<std::shared_mutex> lk(m_mx);
     if (!findNoLock(keyAt(p))) return 0.0f;
     return std::clamp(-std::max(caveDensityNoLock(p), addedDensityNoLock(p)) / 2.0f, 0.0f, 1.0f);
+}
+
+std::unordered_set<VoxKey, VoxKeyHash> VoxWorld::loadedCutColumns() const {
+    std::unordered_set<VoxKey, VoxKeyHash> cols;
+    if (!configured()) return cols;
+    cols.reserve(m_chunks.size());
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    for (const auto& kv : m_chunks) {
+        // un chunk con `d` vacío es TODO ROCA (ni cueva, ni trazo, ni edición): `surfaceCut`
+        // devolvería `clamp(-kVoxRockM/2…) = 0` en él, así que no cuela en el filtro
+        if (kv.second.d.empty()) continue;
+        VoxKey c = kv.first;
+        c.k = 0;   // ⇩ la clave de COLUMNA (face,i,j) ignora la cota radial
+        cols.insert(c);
+    }
+    return cols;
 }
 
 void VoxWorld::buildMesh(const VoxKey& key, CaveMesh& out, size_t maxTris) {
