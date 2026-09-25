@@ -2,6 +2,7 @@
 
 #include <SDL3/SDL.h>
 #include <string>
+#include <vector>
 #include <iostream>
 
 namespace Haruka::Core {
@@ -47,6 +48,17 @@ namespace Haruka::Core {
         // "Monitor N" que `displayLabel` genera cuando el compositor no anuncia nombres.
         static SDL_DisplayID     displayForName(const std::string& name);
         static std::string       displayLabel(SDL_DisplayID disp); // nombre, o "Monitor N" si no hay
+
+        /** @brief ¿La lista de pantallas de AHORA (`ids`,`n`) difiere de la que tiene cacheada quien
+         *  pregunta (`cached`)? Para el selector de monitor, que re-enumera solo cuando cambia.
+         *
+         *  ⚠️ COMPARA LOS IDs, NO CUÁNTOS SON. Un dock que cambia dos pantallas por otras dos deja el
+         *  mismo número y otros monitores; con un contador, el selector seguiría enseñando los que ya
+         *  no están. (Y el contador que había ahí no contaba ni pantallas: ver `settings_panel.cpp`.)
+         *  Se saca aquí, fuera del panel, para que se pueda probar sin monitores de verdad. */
+        static bool displayListDiffers(const SDL_DisplayID* ids, int n, const std::vector<SDL_DisplayID>& cached);
+        /** @brief Posición de `disp` en la lista, o 0 si no está (la que usa la etiqueta "Monitor N"). */
+        static int  displayIndexIn(const SDL_DisplayID* ids, int n, SDL_DisplayID disp);
 
     private:
         SDL_Window* m_window = nullptr;

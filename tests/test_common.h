@@ -100,6 +100,7 @@ void test_simple_planet_config();
 // Terrain quality → resolution  (test_terrain_quality.cpp)
 void test_terrain_quality_mapping();
 void test_input_gamepad_bindings();
+void test_display_selector_list();   // selector de monitor: cuando re-enumerar y que indice ocupa cada pantalla
 // Sonido del mundo sin dispositivo: sintesis de bucles/disparos y puntos logicos agrupados por sector.
 void test_sound_synth();
 void test_sound_points_grouping();

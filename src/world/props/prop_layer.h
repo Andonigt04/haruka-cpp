@@ -548,4 +548,19 @@ struct PlacedProp {
     uint32_t    meshSeed   = 0;    ///< semilla de la MÓDULO (bake determinista)
 };
 
+/** @brief Nº de MALLAS de cúmulo por prototipo base (variedad de "bosque ya fundido": dos formas
+ *  distintas por capa, elegidas por hash de celda — misma celda, misma forma). */
+inline constexpr int kClumpKinds = 2;
+
+/** @brief Nombre del prototipo de cúmulo de un prototipo base: `clump#<base>#k`. El prefijo hace
+ *  que `propShapeKind`/`propTreeStyle` lo clasifiquen por subcadena como el árbol de origen. */
+inline std::string clumpProtoName(const std::string& base, int kind) {
+    return "clump#" + base + "#" + std::to_string(kind % kClumpKinds);
+}
+
+/** @brief ¿Es un prototipo de cúmulo? (despacho del bake y del collider). */
+inline bool isClumpProto(const std::string& name) {
+    return name.rfind("clump#", 0) == 0;
+}
+
 }} // namespace Haruka::Planet

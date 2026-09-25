@@ -31,12 +31,14 @@
 #include <glm/glm.hpp>
 
 #include "world/props/prop_layer.h"        // PropLayerTable, PlacedProp
+#include "world/props/prop_collider.h"     // shouldClumpFar (fusión de lejanía por forma + estilo)
 #include "world/planet/biomes.h"            // classifyBiome / biomeKey: la identidad `biome` del when
 #include "world/planet/planet_fields.h"    // FieldSample
 #include "world/terrain/cube_sphere.h"      // cubeFaceToDir / dirToCubeFaceClosed: el cuantizador
 #include "tools/procgraph/tree_spawn.h"    // slopeAt pattern, IPropField
 #include "tools/procgraph/tree_prop.h"     // treePoisson
 #include "tools/procgraph/proc_noise.h"    // hash32
+#include "tools/procgraph/clump_mesh.h"    // bakeClumpMesh + kClumpFootprintM
 
 namespace Haruka { namespace Planet {
 namespace PG = Haruka::Tools::ProcGraph;
@@ -189,6 +191,29 @@ inline std::vector<ScatteredProp> scatterPropsNear(
 
     const double R = params.radius;
 
+    // Arco de cara completo (radianes·R): el tamaño global con que se cuantiza la celda del cubo.
+    const double kFaceArc = R * 1.5707963267948966;
+
+    // ── FUSIÓN DE LEJANÍA: "el mismo sistema con que se colocan árboles y props". El bioma/clima
+    // ya decide DÓNDE hay bosque (la capa pasa coverage/pickPrototype y gana el sorteo de la celda);
+    // aquí solo se pregunta a qué NIVEL de celda del cubo los individuos son demasiado escasos para
+    // leerse (siluetas perdidas en 40-300 m de malla) y se FUNDEN en UNA masa por celda. Umbral:
+    // celdas ≥ ~kClumpMinCellM (el de la banda 3000 m); las de 12 m del anillo próximo (el bosque
+    // por el que Caminas) siguen colocando árboles sueltos. Es FUNCIÓN DE LA CELDA (face+nivel), no
+    // del jugador → cualquier jugador ve la misma masa en el mismo sitio, y su estado (destruible,
+    // seed = celda) se sincroniza. Nada autorado.
+    const float kClumpMinCellM = 40.0f;
+    const int clumpLvlMax = std::max(0, std::min(28,
+        (int)std::lround(std::log2(kFaceArc / (double)kClumpMinCellM))));
+
+    // NIVEL de celda por banda (la identidad con que cuantiza cada uno). Sirve para el crossfade
+    // entre bandas: solo se funden las de nivel DISTINTO (misma rejilla = mismo contenido, corte
+    // seco y no se nota); también para no fundir dos bandas que comparten nivel al estirar anillos.
+    std::vector<int> bandLvl(params.lods.size());
+    for (size_t bi = 0; bi < params.lods.size(); ++bi)
+        bandLvl[bi] = std::max(0, std::min(28,
+            (int)std::lround(std::log2(kFaceArc / (double)params.lods[bi].cellM))));
+
     // ¿Alguna capa usa `zones` o la condición `when`? Si ninguna, NO se muestrean el zoneMap y el
     // material por celda (2 muestreos + el match por celda): es el grueso del coste del pase en
     // la tabla por defecto (~61k celdas).
@@ -269,12 +294,25 @@ inline std::vector<ScatteredProp> scatterPropsNear(
         // El nivel sale del `cellM` que pide la banda: una cara abarca `pi/2` de arco, asi que al
         // nivel L la celda mide `R*(pi/2)/2^L`. Se redondea al nivel mas cercano — el `cellM` de la
         // configuracion es un objetivo, no un contrato.
-        const double faceArc = R * 1.5707963267948966;
+        const double faceArc = kFaceArc;
         const int    lvl     = std::max(0, std::min(28,
                                    (int)std::lround(std::log2(faceArc / (double)cell))));
         const double cells   = (double)(1u << lvl);      // celdas por lado de cara
         const float inner = prevRad;      // lo que ya cubre la banda anterior
         prevRad = rad;
+
+        // ── CROSSFADE ENTRE BANDAS (borde compartido) ─────────────────────────────
+        // El fundido viejo apagaba las DOS bandas a la vez en el borde → un ARO casi
+        // vacío ("el claro") y las masas haciendo "pop" al cruzar. Ahora: la banda de
+        // NIVEL distinto empieza a enumerar `f` metros ANTES de `inner` y entra con
+        // rampa 0→1 mientras la anterior agota la suya 1→0 → la densidad suma ~constante
+        // y la morfología cruza de árboles sueltos a masa sin hueco. Si la siguiente
+        // banda comparte nivel, corte seco (es la misma rejilla, el contenido encaja).
+        const bool isLast   = (bi + 1 == params.lods.size());
+        const bool change   = (bi > 0) && bandLvl[bi] != bandLvl[bi - 1];
+        const bool nextChng = !isLast && bandLvl[bi + 1] != bandLvl[bi];
+        const float innerTo = change ? std::max(0.0f, inner - std::max(params.fadeInM, 1.0f))
+                                     : inner;
 
         for (int j = -n; j <= n; ++j) {
             for (int i = -n; i <= n; ++i) {
@@ -285,19 +323,20 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     const float cx = (float)i * step, cy = (float)j * step;
                     d = std::sqrt(cx * cx + cy * cy);
                     if (d >= rad) continue;                  // fuera del alcance de la banda
-                    if (inner > 0.0f && d < inner) continue; // ya la sembro la banda anterior
-                    // ── "SIN ANILLOS": fundido de densidad en los bordes de banda ──
-                    // El borde EXTERIOR de cada banda agota: t=1 dentro, rampa a 0 en los ultimos
-                    // `fadeInM` metros — el circulo donde los props acaban se desvanece en vez de
-                    // cortarse. El borde INTERIOR (d≈inner) rampa de 0 a 1: la banda fina agota su
-                    // corona y la siguiente entra poco a poco, sin el escalon duro de densidad de
-                    // las antiguas coronas (celdas 12→40→120 m). Solo con `fadeInM>0` (PropSystem);
-                    // el resto de llamadas se quedan con el corte seco de siempre.
+                    if (inner > 0.0f && d < innerTo) continue; // ya la sembro (o la solapa) la banda anterior
+                    // ── CROSSFADE: un borde se "apaga" solo si el vecino lo "enciende" ──
+                    // edgeT (exterior) rampa 1→0 sobre los últimos `fadeInM` m; innerT
+                    // (interior de la banda siguiente, que ya solapa ese trecho) rampa
+                    // 0→1 sobre lo mismo. Las dos rampas lineales se compensan → la
+                    // densidad NO cae a cero en el borde (antes caía: aro vacío). Solo el
+                    // borde de la ÚLTIMA banda agota de verdad (ahí el mundo acaba) y las
+                    // bandas que no cambian de nivel cortan en seco (misma rejilla).
                     if (params.fadeInM > 0.0f) {
                         const float f = std::max(params.fadeInM, 1.0f);
-                        const float edgeT  = std::max(0.0f, std::min(1.0f, (rad  - d) / f)); // exterior
-                        const float innerT = inner > 0.0f
-                                           ? std::max(0.0f, std::min(1.0f, (d - inner) / f)) : 1.0f;
+                        const float edgeT  = (isLast || nextChng)
+                                           ? std::max(0.0f, std::min(1.0f, (rad - d) / f)) : 1.0f;
+                        const float innerT = change
+                                           ? std::max(0.0f, std::min(1.0f, (d - innerTo) / f)) : 1.0f;
                         siteFade = edgeT * innerT;
                     }
                 }
@@ -437,6 +476,29 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                             ++stats->placedByBiome[(size_t)li * (size_t)Biome::COUNT + (size_t)biome];
                     }
                     const int nInst = std::max(1, L.perCell);
+                    // CÚMULO de lejanía: la capa YA pasó la ecología (coverage + variante + sorteo);
+                    // si la celda es gruesa (nivel del cubo ≤ clumpLvlMax) y la forma es de bosque
+                    // (árbol, no hierba) se instala UNA MASA por celda en vez de los individuos: la
+                    // escala hace que el footprint nominal del bake (kClumpFootprintM=30) cubra
+                    // ~0,7×celda → masa aplanada por construcción. El kind (forma), la escala y el
+                    // tinte salen del hash de la celda: mismo sitio, mismo bosque → REPRODUCIBLE
+                    // entre jugadores, y con estado destruible (un golpe tumba la masa, seed = hc).
+                    if (lvl <= clumpLvlMax && Haruka::Planet::shouldClumpFar(protoOf[li])) {
+                        const uint32_t hk = PG::hash32(hc ^ (uint32_t)(li * 0x9E3779B1u) ^ params.seed);
+                        ScatteredProp pr;
+                        pr.mesh       = clumpProtoName(protoOf[li], (int)(hk % (uint32_t)kClumpKinds));
+                        pr.layerIndex = li;
+                        pr.dir        = dir;
+                        pr.heightM    = hM;
+                        pr.cellSeed   = hc;
+                        pr.scale      = (cell * (0.55f + 0.30f * PG::WhiteNode::hashFloat((int)hc, 301 + li, 0, params.seed)))
+                                        / PG::kClumpFootprintM;
+                        const float tv = PG::WhiteNode::hashFloat((int)hc, 400 + li, 0, params.seed);
+                        pr.tint = glm::vec3(0.85f + 0.30f * tv);
+                        pr.state = 0;
+                        out.push_back(pr);
+                        return;
+                    }
                     for (int k = 0; k < nInst; ++k) {
                         const uint32_t hk = (k == 0) ? hc : PG::hash32(hc ^ (uint32_t)(k * 0x9E3779B9u) ^ (uint32_t)(li * 0x85EBCA6Bu));
                         glm::vec3 dk = dir;

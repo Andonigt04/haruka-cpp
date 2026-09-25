@@ -225,13 +225,28 @@ namespace Haruka::Core {
         return hit;
     }
 
+    bool Window::displayListDiffers(const SDL_DisplayID* ids, int n, const std::vector<SDL_DisplayID>& cached) {
+        if (n < 0) n = 0;
+        if ((size_t)n != cached.size()) return true;
+        for (int i = 0; i < n; ++i) if (ids[i] != cached[(size_t)i]) return true;
+        return false;
+    }
+
+    int Window::displayIndexIn(const SDL_DisplayID* ids, int n, SDL_DisplayID disp) {
+        for (int i = 0; i < n; ++i) if (ids[i] == disp) return i;
+        return 0;
+    }
+
     std::string Window::displayLabel(SDL_DisplayID disp) {
         if (const char* dn = SDL_GetDisplayName(disp); dn && dn[0]) return dn;
         // Algunos compositores no anuncian nombre; la etiqueta "Monitor N" al menos distingue.
         int count = 0;
         SDL_DisplayID* displays = SDL_GetDisplays(&count);
-        int idx = 0;
-        for (int i = 0; i < count; ++i) { if (displays[i] == disp) idx = i; break; }
+        // ⚠️ EL `break` ESTABA FUERA DEL `if`: el bucle salia SIEMPRE en la primera vuelta, asi que
+        // toda pantalla sin nombre se llamaba "Monitor 0". Con dos monitores mudos el selector
+        // enseñaba dos entradas iguales, `displayForName` resolvia la primera para las dos, y elegir
+        // la segunda no movia nada. El indice vive ahora en `displayIndexIn`, que si se puede probar.
+        const int idx = displayIndexIn(displays, count, disp);
         SDL_free(displays);
         return "Monitor " + std::to_string(idx);
     }

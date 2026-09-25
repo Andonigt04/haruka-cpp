@@ -156,19 +156,31 @@ void SettingsPanel::tabGraphics() {
         // cuando difiere del que vimos. Es el equivalente por polling del `WantUpdateMonitors` de
         // ImGui: el evento SDL no llega al panel, el contador sí y no cuesta nada.
         static std::vector<Mon> s_mons;
-        static int              s_monCount = -1;
-        const int monCount = SDL_GetNumVideoDrivers();
-        if (monCount != s_monCount) {
-            s_monCount = monCount;
+        // ⚠️ EL CONTADOR ERA `SDL_GetNumVideoDrivers()`, QUE NO CUENTA PANTALLAS. Cuenta los BACKENDS
+        // que SDL trae compilados (x11, wayland, offscreen, dummy…): es una constante del binario, no
+        // cambia nunca, y con ella la lista se enumeraba UNA sola vez —la primera vez que se abre el
+        // panel— y se quedaba congelada. Sintoma: enchufas un monitor externo y en el selector no
+        // aparece, ni cerrando y reabriendo los ajustes; solo reiniciando el juego.
+        //
+        // Lo barato de verdad es `SDL_GetDisplays`: SDL mantiene la lista y aqui solo se copia. Se
+        // compara la LISTA DE IDs, no el tamaño: dos pantallas cambiadas por otras dos (dock) dan el
+        // mismo numero y otros monitores. El barrido caro (nombres) sigue corriendo solo al cambiar.
+        int n = 0;
+        SDL_DisplayID* displays = SDL_GetDisplays(&n);
+        if (n < 0) n = 0;
+        std::vector<SDL_DisplayID> known;
+        known.reserve(s_mons.size());
+        for (const Mon& m : s_mons) known.push_back(m.id);
+        bool monsChanged = Haruka::Core::Window::displayListDiffers(displays, n, known);
+        // Sin pantallas ya se metio el hueco de abajo: no rehacerlo cada frame.
+        if (n == 0 && s_mons.size() == 1 && s_mons[0].id == 0) monsChanged = false;
+        if (monsChanged) {
             s_mons.clear();
-            int n = 0;
-            if (SDL_DisplayID* displays = SDL_GetDisplays(&n)) {
-                for (int i = 0; i < n; ++i)
-                    s_mons.push_back({ displays[i], Haruka::Core::Window::displayLabel(displays[i]) });
-                SDL_free(displays);
-            }
+            for (int i = 0; i < n; ++i)
+                s_mons.push_back({ displays[i], Haruka::Core::Window::displayLabel(displays[i]) });
             if (s_mons.empty()) s_mons.push_back({ 0, "?" });   // headless raro: combo nunca vacio
         }
+        if (displays) SDL_free(displays);
 
         int curMon = 0;
         // "Automatico" (monitorName vacio) enseña la PRIMARIA. Si el guardado se DESCONECTA en medio

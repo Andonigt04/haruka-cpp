@@ -233,7 +233,7 @@ private:
     static constexpr float kRingFloorM = 6000.0f;    ///< radio historico (probado): nunca se baja
     static constexpr float kRingMaxM   = 24000.0f;   ///< techo del radio (m)
     static constexpr float kRingStepM  = 3000.0f;    ///< paso del radio por tick de control (m)
-    static constexpr float kRingFadeM  = 1200.0f;    ///< fundido de densidad en el borde (m)
+    static constexpr float kRingFadeM  = 300.0f;     ///< crossfade entre bandas (m); las rampas se compensan → sin aro vacío
     static constexpr double kRingPaceS = 1.5;        ///< cada cuanto mueve el radio (s)
     static constexpr float kNearM      = 45.0f;      ///< PRIORIDAD CERCANA: dentro, SIEMPRE nivel 0
     // buckets del pase (reusados entre frames)

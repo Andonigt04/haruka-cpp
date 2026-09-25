@@ -40,6 +40,7 @@
 
 #include "tools/procgraph/tree_mesh.h"   // TreeSkeleton / treeSkeleton / TreePartKind
 #include "tools/procgraph/prop_mesh.h"   // rockExtent / houseExtent (envolventes de la MALLA)
+#include "tools/procgraph/clump_mesh.h"  // kClumpFootprintM (huella del cúmulo)
 
 namespace Haruka { namespace Planet {
 
@@ -119,6 +120,26 @@ struct PropColliderPart {
     float     length = 0.0f;           ///< longitud del segmento (m) — decide si deja un palo
 };
 
+/** @brief Radio de CULL VISIBLE (m) de un prototipo a escala 1: con el que el draw decide si se
+ *  dibuja (sub-píxel < 1 px) y a qué LOD. NO es la envolvente del mesh: es cuánto "casa" su silueta
+ *  lejana (el 8 m histórico es ~1 px a 12 km con 1080p/70°, y un mesh-derived lo hundiría todo).
+ *  Constante por NOMBRE → reproducible entre jugadores (contenido igual para todos). */
+inline float propCullRadiusM(const std::string& protoName) {
+    if (protoName.rfind("clump#", 0) == 0)        return Haruka::Tools::ProcGraph::kClumpFootprintM;  // masa: su huella (30 m → ~46 km)
+    if (propShapeKind(protoName) == PropShapeKind::Rock) return 18.0f;   // la roca lee hasta el borde del anillo (24 km)
+    return 8.0f;                                  // árbol/casa: ~1 px a 12 km (ya su límite natural)
+}
+
+/** @brief ¿Esta capa de árbol se FUSIONA en masa de lejanía? DERIVADO, nada autorado en JSON: forma
+ *  de árbol salvo HIERBA (sotobosque libre — la pradera lejana no se funde). El bioma/clima ya
+ *  decidió DÓNDE hay bosque (la capa pasó coverage/pickPrototype y ganó el sorteo de la celda);
+ *  esto solo dice si sus individuos se empaquetan. Qué celda lo hace lo decide el nivel del cubo en
+ *  el scatter (celdas gruesas ≥ ~40 m). Constante por nombre → reproducible. */
+inline bool shouldClumpFar(const std::string& protoName) {
+    return propShapeKind(protoName) == PropShapeKind::Tree &&
+           propTreeStyle(protoName) != Haruka::Tools::ProcGraph::TreeStyle::Grass;
+}
+
 /**
  * @brief Colliders locales de un prototipo. Para un árbol salen del esqueleto (tronco + ramas);
  *        para roca/casa es UNA caja, porque no tienen partes que romper por separado.
@@ -128,6 +149,22 @@ struct PropColliderPart {
 inline std::vector<PropColliderPart> propColliderParts(const std::string& protoName,
                                                        uint32_t meshSeed) {
     std::vector<PropColliderPart> out;
+    // CÚMULO de lejanía: la masa fundida se DESTRUYE como bloque (un golpe la tumba, como la roca).
+    // Una sola caja envolvente, que es todo lo que necesita quien la parte — el hueco llegaría de
+    // una malla con la masa derribada, no de 8-15 troncos individuales a millones de metros.
+    if (protoName.rfind("clump#", 0) == 0) {
+        const PropTreeParams tp = propTreeParams(protoName);
+        const float r = Haruka::Tools::ProcGraph::kClumpFootprintM;
+        PropColliderPart c;
+        c.partId    = 0;
+        c.breakable = true;               // destruible; el shader degenera los vértices de la parte 0
+        c.axis      = glm::vec3(0, 1, 0);
+        c.center    = glm::vec3(0.0f, tp.height * 0.30f, 0.0f);
+        c.half      = glm::vec3(r, tp.height * 0.30f, r);
+        c.length    = 2.0f * c.half.y;
+        out.push_back(c);
+        return out;
+    }
     const PropShapeKind kind = propShapeKind(protoName);
 
     if (kind == PropShapeKind::Tree) {

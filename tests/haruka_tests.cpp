@@ -68,6 +68,7 @@ static std::vector<TestGroup> harukaTestGroups() {
               { "simple_planet_config", test_simple_planet_config },
               { "terrain_quality_mapping", test_terrain_quality_mapping },
               { "input_gamepad_bindings", test_input_gamepad_bindings },
+              { "display_selector_list", test_display_selector_list },
           } },
         { "sonido",
           "sintesis de bucles y disparos; puntos logicos de sonido agrupados por sector (sin OpenAL)",

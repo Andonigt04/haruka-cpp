@@ -26,6 +26,7 @@ add_executable(haruka_tests
     tests/test_simple_planet.cpp         # SimplePlanet mesh & config
     tests/test_terrain_quality.cpp       # terrain quality → resolution mappings
     tests/test_input.cpp                 # acciones de entrada: teclado + mando en la misma accion
+    tests/test_display.cpp               # selector de monitor: re-enumerar al enchufar, indice por pantalla
     tests/test_sound.cpp                 # sonido: sintesis + puntos logicos agrupados (sin OpenAL)
     tests/test_sky_ambient.cpp           # ambiente SH: paridad con sky_palette.glsl + simetría
     tests/test_procgraph.cpp             # ProcGraph nodes, BiomeConfig, RGBAImage

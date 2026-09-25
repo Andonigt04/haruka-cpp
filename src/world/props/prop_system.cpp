@@ -16,6 +16,7 @@
 #include "tools/profiler.h"
 #include "tools/procgraph/tree_mesh.h"
 #include "tools/procgraph/prop_mesh.h"
+#include "tools/procgraph/clump_mesh.h"           // bakeClumpMesh + kClumpFootprintM (cúmulos de lejanía)
 #include "tools/procgraph/tree_textures.h"   // TreeCombineRGBNode (bake de material per-pixel)
 #include "tools/procgraph/proc_texture.h"    // evaluateToRGBA / evaluateToNormalMap / createRHIFromRGBA
 
@@ -171,6 +172,14 @@ struct PlanetSphereField : Haruka::Planet::IPropSphereField {
 // bake decidiera por su cuenta que es un arbol y con que altura, chocarias con otro arbol.
 Haruka::Tools::ProcGraph::TreeMeshData bakePrototypeMesh(const InstancedPrototype& proto, float detail) {
     Haruka::Tools::ProcGraph::TreeMeshData tm;
+    // CÚMULO de lejanía: el prefijo `clump#` lo firma — bake APLANADO (la escala de instancia
+    // estira la celda por el ancho; si fuera alto también parecería un rascacielos).
+    if (Haruka::Planet::isClumpProto(proto.name)) {
+        const Haruka::Planet::PropTreeParams tp = Haruka::Planet::propTreeParams(proto.name);
+        return Haruka::Tools::ProcGraph::bakeClumpMesh(
+            proto.meshSeed, tp.style, tp.height, tp.trunkR, tp.canopy,
+            Haruka::Tools::ProcGraph::kClumpFootprintM, detail);
+    }
     const Haruka::Planet::PropShapeKind shape = Haruka::Planet::propShapeKind(proto.name);
     if (shape == Haruka::Planet::PropShapeKind::Rock) {
         tm = Haruka::Tools::ProcGraph::bakeRockMesh((int)proto.meshSeed, 1.0f, 0.72f);
@@ -421,21 +430,28 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     if (table.layers.empty()) return;   // sin capas declaradas = sin props
 
     // UN prototipo por NOMBRE (el mesh de la capa, o cada variante × cada semilla "conifer#2").
-    // `meshSeed` = hash32 de planeta+nombre: un arbol es SIEMPRE el mismo arbol.
+    // `meshSeed` = hash32 de planeta+nombre: un arbol es SIEMPRE el mismo arbol. Los prototipos de
+    // árbol (excepto hierba) registran TAMBIÉN sus CÚMULOS (`clump#<proto>#k`): las celdas gruesas
+    // de lejanía instalan una masa por celda en vez de individuos (la malla del cúmulo se hornea
+    // bajo este mismo nombre). Es DERIVADO (shouldClumpFar), no un flag del JSON.
+    auto registerProto = [&](const std::string& pn) {
+        for (int i = 0; i < m_registry.prototypeCount(); ++i)
+            if (m_registry.prototype(i).name == pn) return;
+        InstancedPrototype p;
+        p.name = pn;
+        uint32_t h = 2166136261u;
+        for (const char c : m_planet) h = (h ^ (uint8_t)c) * 16777619u;
+        for (const char c : pn)       h = (h ^ (uint8_t)c) * 16777619u;
+        p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
+        p.lodLevel = 0;
+        m_registry.addPrototype(p);
+    };
     for (const auto& L : table.layers) {
         for (const std::string& pn : L.prototypeNames()) {
-            bool found = false;
-            for (int i = 0; i < m_registry.prototypeCount(); ++i)
-                if (m_registry.prototype(i).name == pn) { found = true; break; }
-            if (found) continue;
-            InstancedPrototype p;
-            p.name = pn;
-            uint32_t h = 2166136261u;
-            for (const char c : m_planet) h = (h ^ (uint8_t)c) * 16777619u;
-            for (const char c : pn)       h = (h ^ (uint8_t)c) * 16777619u;
-            p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
-            p.lodLevel = 0;
-            m_registry.addPrototype(p);
+            registerProto(pn);
+            if (Haruka::Planet::shouldClumpFar(pn))
+                for (int k = 0; k < Haruka::Planet::kClumpKinds; ++k)
+                    registerProto(Haruka::Planet::clumpProtoName(pn, k));
         }
     }
     if (m_registry.prototypeCount() == 0) return;
@@ -445,6 +461,12 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     params.seed     = planet->config().seed ? planet->config().seed : 1u;
     params.maxProps = 300000;
     params.fadeInM  = kRingFadeM;
+    // ⚠️ NO hay horizonte de cúmulos "por carga" NI "por autor" AQUÍ. La fusión sale del bioma/clima
+    // (la capa sólo se coloca donde su ecología la acepta) + el NIVEL de celda del cubo (lo decide
+    // shouldClumpFar dentro del scatter): el contenido de una celda es función de (celda, seed del
+    // planeta, config) y nada más — reproducible entre jugadores y sincronizable al destruirse. La
+    // dinámica del presupuesto se queda en la RENDERIZACIÓN (umbrales por píxel, cull), que no toca
+    // lo que existe en el mundo.
     // Banda exterior por carga: el radio lo manda el controlador (`m_ringM`); las coronas se
     // estiran con el — celdas ~proporcionales al radio, asi la densidad por area no explota y el
     // recuento crece logaritmico (no cuadratico). Con m_ringM=6000 (arranque, piso) es EXACTAMENTE
@@ -905,6 +927,12 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     if (!(f.planets && f.planets->getActivePlanet(planetC, planetR))) planetC = glm::dvec3(0.0);
     const int protoCount = m_registry.prototypeCount();
     const int kLods = PrototypeGpu::kLods;
+    // Radio de cull por PROTOTIPO (a escala 1): constante por nombre (`propCullRadiusM`), así que es
+    // reproducible entre jugadores — la roca aguanta hasta el borde del anillo, el cúmulo usa su
+    // huella, y el árbol se queda en su ~1 px natural. Un barrido antes del bucle: protoCount ≈ decenas.
+    std::vector<float> cullRadius((size_t)protoCount, 8.0f);
+    for (int pi = 0; pi < protoCount; ++pi)
+        cullRadius[(size_t)pi] = Haruka::Planet::propCullRadiusM(m_registry.prototype(pi).name);
 
     // Buckets por (prototipo, nivel), reusados entre frames: UN barrido O(N) del registro (antes
     // era O(prototipos × instancias) y era el grueso de los 39 ms del pase).
@@ -973,7 +1001,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
             ++m_aliveCounts[(size_t)pi];
             const glm::vec3 posF = glm::vec3(m_gpu[ii].model[3]) + originRel;
             int lod = 0;
-            cull = propCull(posF, io.scale * 8.0f, lod);
+            cull = propCull(posF, io.scale * cullRadius[(size_t)pi], lod);
             if (cull == 0) { m_buckets[(size_t)(pi * kLods + lod)].push_back(ii); ++nKept; }
         }
         if (snapshotDbg) {
