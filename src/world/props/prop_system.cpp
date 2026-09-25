@@ -407,9 +407,12 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
         const double refreshM = std::max(30.0, speed * 1.5);
         const bool tooSoon = elapsed < 0.5;
         const bool campoCambio = planet->vox().version() != m_voxVersion;
-        if ((distCam < refreshM || tooSoon) && !campoCambio && !m_planet.empty())
+        if ((distCam < refreshM || tooSoon) && !campoCambio && !m_rescatter && !m_planet.empty())
             return;
     }
+
+    // El controlador de carga pidio re-sembrar por un cambio de RADIO: este intento la cubre.
+    m_rescatter = false;
 
     { HARUKA_PROFILE("re-siembra.lanza");   // preparacion (registro de prototipos, copias) + lanzar worker
     PlanetSphereField field;
@@ -438,8 +441,24 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     if (m_registry.prototypeCount() == 0) return;
 
     Haruka::Planet::PropScatterParams params;
-    params.radius = planetR;
-    params.seed   = planet->config().seed ? planet->config().seed : 1u;
+    params.radius   = planetR;
+    params.seed     = planet->config().seed ? planet->config().seed : 1u;
+    params.maxProps = 300000;
+    params.fadeInM  = kRingFadeM;
+    // Banda exterior por carga: el radio lo manda el controlador (`m_ringM`); las coronas se
+    // estiran con el — celdas ~proporcionales al radio, asi la densidad por area no explota y el
+    // recuento crece logaritmico (no cuadratico). Con m_ringM=6000 (arranque, piso) es EXACTAMENTE
+    // el anillo historico {1000/12, 3000/40, 6000/120}: en reposo nada cambia.
+    params.lods.clear();
+    {
+        struct B { float rad; float cell; };
+        const std::vector<B> kBase = { {1000.0f, 12.0f}, {3000.0f, 40.0f}, {6000.0f, 120.0f} };
+        for (const B& b : kBase)
+            if (b.rad <= m_ringM) params.lods.push_back({ b.rad, b.cell, 0.30f });
+        for (float rad = 9000.0f; rad <= m_ringM; rad += 3000.0f)
+            params.lods.push_back({ rad, 120.0f * (rad / 6000.0f), 0.30f });   // ceil gruesa y creciente
+        if (params.lods.empty()) params.lods.push_back({ m_ringM, 12.0f, 0.30f });
+    }
 
     // El worker construye ADEMÁS las InstancedObject finales (prototipo + yaw + estado) y sus MATRICES
     // GPU: se le pasan copias del nombre→índice y del estado roto. `m_state` la toca el juego en el
@@ -741,21 +760,121 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
 
     // Frustum culling con esfera contra los 4 planos laterales + CULL POR TAMAÑO EN PANTALLA
     // (sub-pixel) + LOD por RADIO EN PIXELES (no en metros: un prop grande conserva detalle mas
-    // lejos, sin tablas por tipo, y sale de la misma division que el descarte sub-pixel).
-    //   ≥ 90 px de radio -> nivel 0 (464 tris) · ≥ 25 px -> nivel 1 (130) · resto -> nivel 2 (40)
+    // lejos, sin tablas por tipo, y sale de la misma division que el descarte sub-pixel). Los
+    // umbrales los pone el controlador de carga (abajo): historicos 90 px -> nivel 0 (464 tris),
+    // 25 px -> nivel 1 (130), resto -> nivel 2 (40), pero con holgura de GPU suben a nivel 0 todo
+    // lo que no sea sub-pixel.
     const glm::vec3 camF = f.camera->getFront();
     const glm::vec3 camU = f.camera->getUp();
     const glm::vec3 camR = glm::normalize(glm::cross(camF, camU));
     const float tanV = std::tan(glm::radians(f.camera->zoom * 0.5f));
     const float tanH = tanV * std::max(f.aspect, 0.01f);
     const float vpPx = std::max((float)f.heightPx, 1.0f);
-    const float kLodPx0 = 90.0f, kLodPx1 = 25.0f;
+
+    // ── LOD POR CARGA (no por distancia) ───────────────────────────────────────────────────────
+    // En vez de tabla fija, el detalle lo decide la CARGA del pase: con holgura todo lo que no sea
+    // sub-pixel se dibuja a nivel 0 (la distancia NO limita); si el pase se pasa del presupuesto,
+    // los umbrales en px suben y pierde nivel PRIMERO lo mas pequeno en pantalla (= lo mas lejano),
+    // que es lo que menos se nota. La distancia SOLO ordena el gasto; cuantos ms se gastan lo pone
+    // este controlador sobre el scope del frame anterior.
+    //
+    // Senal: ms del scope `scene.prop.instanced` (solo Vulkan: `RHI::gpuScopes()` trae la medicion
+    // resuelta del frame ANTERIOR; GL no tiene timestamps y vuelve vacia → nos quedamos en fijo).
+    // Control: EMA (~1 s) + paso cada 0.5 s + zona muerta, para que no patalée (el popping global
+    // del que huimos). Prioridad: SOBRE presupuesto → baja el detalle (pierde nivel primero lo mas
+    // pequeno en pantalla = lo mas lejano; el tramo cercano esta protegido) y el radio solo se
+    // recorta como ultimo recurso; HOLGURA → sube el detalle hasta 1.0 y, ya a tope, DIBUJA MAS:
+    // extiende el radio (re-siembra con celdas mas gruesas, recuento log). Nunca se pasa del
+    // presupuesto: es la definicion de "no saturar la GPU".
+    // `HARUKA_PROP_LOAD=0` lo apaga (comportamiento historico) · `HARUKA_PROP_BUDGET_MS=<n>`
+    // presupuesto del pase · `HARUKA_PROP_BUDGET_KI=<n>` paso por unidad de error ·
+    // `HARUKA_PROP_DETAIL=<0..1000>` fuerza el detalle (A/B; 1000 = todo nivel 0) ·
+    // `HARUKA_PROP_DETAIL_MIN=<permil>` suelo del detalle por debajo del historico (def. -1000):
+    // cuando ni 90/25 px alcanza el presupuesto, baja mas (umbrales mas altos) hasta llegar ·
+    // `HARUKA_PROP_RING=<m>` techo del radio (<=6000 = bloqueado al piso historico).
+    static const bool   s_loadEnv    = [] { const char* e = std::getenv("HARUKA_PROP_LOAD");      return !(e && e[0] == '0'); }();
+    static const double s_budgetMs   = [] { const char* e = std::getenv("HARUKA_PROP_BUDGET_MS"); return e ? std::atof(e) : kPropBudgetMs; }();
+    static const double s_loadKi     = [] { const char* e = std::getenv("HARUKA_PROP_BUDGET_KI"); return e ? std::atof(e) : kLoadKi; }();
+    static const int    s_loadDetail = [] { const char* e = std::getenv("HARUKA_PROP_DETAIL");    return e ? std::atoi(e) : -1; }();
+    static const float  s_detailMin  = [] { const char* e = std::getenv("HARUKA_PROP_DETAIL_MIN"); return e ? (float)std::atoi(e) / 1000.0f : kDetailMin; }();
+    static const float  s_ringMax    = [] { const char* e = std::getenv("HARUKA_PROP_RING");      return e ? std::max(kRingFloorM, (float)std::atoi(e)) : kRingMaxM; }();
+    static double       s_lastRingOp = -1e18;   // reloj diag del ultimo movimiento de radio
+    if (s_loadEnv) {
+        double propMs = 0.0;
+        if (RHI::Device* dev = RHI::device())
+            for (const auto& s : dev->gpuScopes())
+                if (s.name == kPropScope) { propMs = s.ms; break; }
+        if (propMs > 0.0) {
+            m_loadDriven = true;
+            // semilla: el primer muestreo ES el estado, y el detalle arranca en EQUILIBRIO
+            // (budget/lectura) — no desde 1.0. "Todo a nivel 0" el primer frame cargado-de-GPU
+            // seria un pico de triangulos de entrada que el controlador luego pagaría en popping,
+            // justo lo que intentamos evitar con la rampa lenta.
+            if (m_propMsSmooth <= 0.0) {
+                m_propMsSmooth = propMs;
+                m_propDetail   = (float)std::clamp(s_budgetMs / std::max(propMs, 1e-3), (double)s_detailMin, 1.0);
+            } else {
+                m_propMsSmooth += (propMs - m_propMsSmooth) * 0.05;          // tau≈1 s a 60 fps
+            }
+            if (f.diagClock - m_lastLoadStep >= kLoadStepS) {
+                m_lastLoadStep = f.diagClock;
+                const double err = (m_propMsSmooth - s_budgetMs) / s_budgetMs;   // >0 = sobre presupuesto
+                if (err > 0.06) {
+                    // SOBRE presupuesto → bajar el DETALLE: pierde nivel primero lo mas pequeno en
+                    // pantalla (= lo mas lejano) y lo cercano esta protegido por la garantia
+                    // LOD0. Es el mango de la GPU: el radio NO se recorta aqui — los props lejanos
+                    // ya son sub-pixel (no se dibujan) y una re-siembra de recorte añadiria un
+                    // refundido justo en el frame saturado. Solo como ULTIMO recurso (detalle ya en
+                    // el suelo y aun sobre) se recorta el radio, lento, para aliviar el barrido.
+                    m_propDetail = std::clamp(m_propDetail - (float)(s_loadKi * err), s_detailMin, 1.0f);
+                    if (m_propDetail <= s_detailMin && m_ringM > kRingFloorM &&
+                        f.diagClock - s_lastRingOp >= kRingPaceS) {
+                        s_lastRingOp = f.diagClock;
+                        m_rescatter  = true;
+                        m_ringM      = std::max(kRingFloorM, m_ringM - kRingStepM);
+                    }
+                } else if (err < -0.06) {
+                    // HOLGURA → sube el detalle hasta el maximo.
+                    m_propDetail = std::clamp(m_propDetail - (float)(s_loadKi * err), s_detailMin, 1.0f);
+                }
+                // ── RADIO: DESACOPLADO DEL DETALLE ──
+                // Las bandas lejanas son casi exclusivamente sub-pixel (el cull por tamaño ni las
+                // dibuja) o LOD2 de 40 tris: coste GPU ~nulo. Que la GPU este saturada por el tramo
+                // CERCANO (y el detalle bajando) NO debe negar "dibuja mas de lejos": el radio se
+                // estira hasta su techo a su propio ritmo — el coste real del radio es CPU (barrido
+                // O(N) + arena), y lo limite la cota `maxProps` del scatter. Solo se recorta como
+                // ultimo recurso (arriba), cuando ni en el suelo de detalle se llega al presupuesto.
+                if (m_ringM < s_ringMax && f.diagClock - s_lastRingOp >= kRingPaceS) {
+                    s_lastRingOp = f.diagClock;
+                    m_rescatter  = true;
+                    m_ringM      = std::min(s_ringMax, m_ringM + kRingStepM);
+                }
+            }
+        } else {
+            m_loadDriven = false;   // sin medicion (GL): umbrales fijos de siempre
+        }
+    }
+    if (s_loadDetail >= 0) m_propDetail = (float)s_loadDetail / 1000.0f;
+    const float kLodPx0 = m_loadDriven ? (1.0f - m_propDetail) * 90.0f : 90.0f;
+    const float kLodPx1 = m_loadDriven ? (1.0f - m_propDetail) * 25.0f : 25.0f;
+    // /!\\ con detalle 1.0 los umbrales son 0 px: kLod0 = kPixPerM/0 = +inf y todo lo que paso el
+    // cull sub-pixel (>1 px) cumple dist^2 <= radio^2 * inf → nivel 0. Ahi no hay division por cero
+    // en el cull (el sub-pixel ya se descarto antes); solo flota a inf, que es exactamente el LOD0.
+    static double s_lastLoadLog = -1e18;
+    if (f.diagClock - s_lastLoadLog >= 2.0) {
+        s_lastLoadLog = f.diagClock;
+        HARUKA_LOGDIAG("PropLoad", "ms=%.2f (budget %.1f) detalle=%.2f umbral-px=%d/%d anillo=%dm%s",
+                       m_propMsSmooth, s_budgetMs, m_loadDriven ? (double)m_propDetail : -1.0,
+                       (int)std::lround(kLodPx0), (int)std::lround(kLodPx1),
+                       (int)std::lround(m_ringM), m_loadDriven ? "" : " [fijo: sin timestamps]");
+    }
     // Culling en ESPACIO AL CUADRADO: px = (radio/dist)/tanV*vpPx, y las comparaciones
     // (sub-pixel (1 px) y LOD) se reescriben como dist^2 comparado con (radio * k)^2. Con
     // 178k instancias en el registro, el `sqrt` del length y la division del px por instancia
     // eran el grueso del barrido (~22 ms en el frame tras la re-siembra).
     const float kPixPerM   = vpPx / tanV;                  // px = radio * kPixPerM / dist
     const float kPixPerM2  = kPixPerM * kPixPerM;          // sub-pixel: dist^2 > radio^2 * kPixPerM2
+    const float kNearM2    = kNearM * kNearM;              // prioridad cercana (LOD0 garantizado)
     const float kLod02     = kPixPerM / kLodPx0;           // LOD0: dist^2 <= radio^2 * kLod02^2
     const float kLod12     = kPixPerM / kLodPx1;           // LOD1: dist^2 <= radio^2 * kLod12^2
     const float kLod02Sq   = kLod02 * kLod02;
@@ -772,6 +891,10 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
         if (std::abs(glm::dot(posF, camU)) > fwd * tanV + radius) return 1;
         const float r2 = radius * radius;
         if (d2 > r2 * kPixPerM2) return 2;                // sub-pixel (px < kMinPropPixels)
+        // PRIORIDAD CERCANA: dentro de `kNearM` se dibuja SIEMPRE a nivel 0, haga lo que haga el
+        // controlador de carga. Son pocos y baratos, y el player los ve de cerca: "lo mas cercano
+        // al 100 %" no se negocia ni cuando el pase va sobre presupuesto.
+        if (d2 <= kNearM2) { outLod = 0; return 0; }
         outLod = (d2 <= r2 * kLod02Sq) ? 0 : (d2 <= r2 * kLod12Sq ? 1 : 2);
         if (s_forceLod >= 0) outLod = std::min(s_forceLod, PrototypeGpu::kLods - 1);
         return 0;

@@ -204,6 +204,38 @@ private:
     std::unordered_map<int, std::vector<int>> m_meshShapes;
     std::unordered_map<int, std::vector<std::vector<glm::vec3>>> m_meshCpu;
     std::vector<PropPrototypeDebug> m_scatterDebug;
+    // ── LOD POR CARGA ──
+    // `m_propDetail` = 1 → sin LOD por distancia (todo nivel 0 por encima del sub-pixel) · 0 →
+    // umbrales historicos (90/25 px) · NEGATIVO → mas agresivo que el historico (umbrales por
+    // encima de 90/25): el controlador baja AQUI cuando ni el config historico alcanza el
+    // presupuesto ("no saturar la GPU" manda sobre conservar el detalle de siempre). Solo manda
+    // cuando `m_loadDriven` (tenemos la medicion GPU del pase = Vulkan); en GL se queda en false y
+    // los umbrales son los fijos de siempre.
+    bool   m_loadDriven   = false;
+    float  m_propDetail   = 1.0f;
+    double m_propMsSmooth = 0.0;    ///< EMA del ms del pase de props (frame anterior)
+    double m_lastLoadStep = -1e18;  ///< reloj diag del último paso del controlador
+    static constexpr double       kPropBudgetMs = 6.0;   ///< presupuesto del pase de props (ms GPU)
+    static constexpr double       kLoadStepS    = 0.5;   ///< cada cuanto ajusta el controlador (s)
+    static constexpr double       kLoadKi       = 0.25;  ///< paso de detalle por unidad de error
+    static constexpr const char*  kPropScope    = "scene.prop.instanced";
+    static constexpr float        kDetailMin    = -1.0f; ///< suelo del detalle (por debajo del historico)
+    // ── RADIO DEL SCATTER POR CARGA ──
+    // El borde exterior del scatter (donde los props acaban) se estira hasta su techo a su propio
+    // ritmo, DESACOPLADO del detalle: las bandas lejanas son sub-pixel (cull por tamaño, no se
+    // dibujan) o LOD2 de 40 tris → coste GPU ~nulo, asi que una GPU saturada por el tramo cercano
+    // no debe negar "dibuja mas de lejos". El coste real del radio es CPU (barrido O(N), arena) y
+    // lo limita la cota `maxProps` del scatter. Solo se RECORTA como ultimo recurso —cuando ni en
+    // el suelo de detalle se llega al presupuesto— para aliviar el barrido. Cada cambio fuerza una
+    // re-siembra (`m_rescatter`).
+    float m_ringM     = kRingFloorM;   ///< borde exterior actual del scatter (m)
+    bool  m_rescatter = false;         ///< el controlador pidio re-sembrar por un cambio de radio
+    static constexpr float kRingFloorM = 6000.0f;    ///< radio historico (probado): nunca se baja
+    static constexpr float kRingMaxM   = 24000.0f;   ///< techo del radio (m)
+    static constexpr float kRingStepM  = 3000.0f;    ///< paso del radio por tick de control (m)
+    static constexpr float kRingFadeM  = 1200.0f;    ///< fundido de densidad en el borde (m)
+    static constexpr double kRingPaceS = 1.5;        ///< cada cuanto mueve el radio (s)
+    static constexpr float kNearM      = 45.0f;      ///< PRIORIDAD CERCANA: dentro, SIEMPRE nivel 0
     // buckets del pase (reusados entre frames)
     std::vector<std::vector<uint32_t>> m_buckets, m_shadowBuckets;
     std::vector<int> m_aliveCounts, m_drawnCounts;

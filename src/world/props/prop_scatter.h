@@ -104,6 +104,11 @@ struct PropScatterParams {
     uint32_t seed    = 1u;       ///< semilla del planeta
     double   radius  = 6371000.0;///< radio del planeta (m) — convierte m locales en arco
     int      maxProps = 200000;  ///< cota de seguridad de instancias por scatter
+    /// Fundido de densidad (m) en los bordes de banda. 0 = corte seco historico (el circulo donde
+    /// los props acaban). >0 suaviza el borde exterior (la densidad agota) Y el paso entre bandas
+    /// (la fina agota y la siguiente entra), para que no se vean "anillos". El resto de llamadas
+    /// con el default no cambian: solo PropSystem lo enciende.
+    float fadeInM = 0.0f;
 };
 
 /** @brief Una instancia colocada con coordenadas de MUNDO (dir + cota), lista para instancing.
@@ -275,11 +280,26 @@ inline std::vector<ScatteredProp> scatterPropsNear(
             for (int i = -n; i <= n; ++i) {
                 // Corona euclidea: dentro de ESTA banda y fuera de la anterior. El corte exterior
                 // es lo que quita el cuadrado; el interior evita apilar un prop sobre otro.
+                float d = 0.0f, siteFade = 1.0f;
                 {
                     const float cx = (float)i * step, cy = (float)j * step;
-                    const float d  = std::sqrt(cx * cx + cy * cy);
+                    d = std::sqrt(cx * cx + cy * cy);
                     if (d >= rad) continue;                  // fuera del alcance de la banda
                     if (inner > 0.0f && d < inner) continue; // ya la sembro la banda anterior
+                    // ── "SIN ANILLOS": fundido de densidad en los bordes de banda ──
+                    // El borde EXTERIOR de cada banda agota: t=1 dentro, rampa a 0 en los ultimos
+                    // `fadeInM` metros — el circulo donde los props acaban se desvanece en vez de
+                    // cortarse. El borde INTERIOR (d≈inner) rampa de 0 a 1: la banda fina agota su
+                    // corona y la siguiente entra poco a poco, sin el escalon duro de densidad de
+                    // las antiguas coronas (celdas 12→40→120 m). Solo con `fadeInM>0` (PropSystem);
+                    // el resto de llamadas se quedan con el corte seco de siempre.
+                    if (params.fadeInM > 0.0f) {
+                        const float f = std::max(params.fadeInM, 1.0f);
+                        const float edgeT  = std::max(0.0f, std::min(1.0f, (rad  - d) / f)); // exterior
+                        const float innerT = inner > 0.0f
+                                           ? std::max(0.0f, std::min(1.0f, (d - inner) / f)) : 1.0f;
+                        siteFade = edgeT * innerT;
+                    }
                 }
                 // Punto de la rejilla tangente (solo ENUMERA qué zona cubrir).
                 const glm::dvec3 wp = planetC + glm::dvec3(dirCam) * R
@@ -398,7 +418,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                         PG::WhiteNode::hashFloat((int)hc, 600 + li, 0, params.seed),
                         PG::WhiteNode::hashFloat((int)hc, 700 + li, 0, params.seed));
                     if (protoOf[li].empty()) { if (stats) ++stats->noVariant[(size_t)li]; continue; }
-                    w[li] = L.density * cov * L.clumpFactor(dir, R, params.seed, li);
+                    w[li] = L.density * cov * L.clumpFactor(dir, R, params.seed, li) * siteFade;
                     if (w[li] <= 0.0f) { w[li] = 0.0f; if (stats) ++stats->noDensity[(size_t)li]; continue; }
                     if (L.claimRadius <= 0.0f) continue;          // libre: su dado va aparte
                     total += w[li];
