@@ -1,7 +1,7 @@
 /*
  * haruka_flow.js — arbol de ejecucion reactivo para la documentacion de Doxygen.
  *
- * Los datos los genera Tools/doc_flow.py a partir del AST real de Clang y se
+ * Los datos los genera tools/doc_flow.py a partir del AST real de Clang y se
  * publican en html/flow/<pagina>.js. Cada fichero llama a harukaFlowRegister().
  * Se carga con una etiqueta <script> (no fetch) para que funcione tambien
  * abriendo la documentacion con file://.

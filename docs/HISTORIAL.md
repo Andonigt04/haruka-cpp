@@ -95,7 +95,7 @@ umbral lo pasa hasta un alfa de 0,03, o sea que habría dado verde con la nube f
 
 ### Antes de las nubes, en la misma sesión
 
-- **El validador DGS camina el suelo del cliente.** `Src/Haruka/Network/HeightField.h` (nuevo): `HeightField`
+- **El validador DGS camina el suelo del cliente.** `src/Haruka/Network/HeightField.h` (nuevo): `HeightField`
   sin dependencias de GL, gemelo exacto de `TerrestrialPlanet::sampleHeight`, con sidecar `.hfield`
   escrito en `bakeHeightMap`. `DefaultRules.cpp` gana `currentField()`, `groundElevM()` y una
   tolerancia de transporte derivada del **medio ulp del float** de la posición, no de una constante.
@@ -521,7 +521,7 @@ paleta propia = lo que lo hace único (Genshin/SAO son mundos cerrados). Tablero
 Plan: `docs/guides/PLAN_CONSTRUCCION.md`. Estado F1 hecho (colocar/validar/preview una pieza). Siguiente:
 
 - **✅ ARQUITECTURA — construcción SACADA de físicas (2026-07-19).** `construction.{h,cpp}` movido a
-  `Src/Haruka/Game/Construction/` y a su **propia lib GL-free `HarukaConstruction`** (PIC), fuera de `HarukaPhysics`.
+  `src/Haruka/Game/Construction/` y a su **propia lib GL-free `HarukaConstruction`** (PIC), fuera de `HarukaPhysics`.
   No es física: es **validación** determinista (para el DGS). La linkan `HarukaEngine` y `haruka_simbase`.
   Verificado GL-free (`nm` sin GL/SDL) + 6/6 tests. Include: `"Game/Construction/Construction.h"`.
 - **Kit de PIEZAS**: beams (vigas), paredes, suelo/techo, remates… Kit modular con SOCKETS/puntos de

@@ -17,13 +17,13 @@ endif()
 find_library(HarukaEngine_LIBRARY NAMES HarukaEngine
     PATHS ${ENGINE_BUILD_DIR} NO_DEFAULT_PATH REQUIRED)
 
-file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS Scripts/*.cpp)
+file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS scripts/*.cpp)
 if(NOT GAME_SOURCES)
-    message(FATAL_ERROR "No source files found in Scripts/")
+    message(FATAL_ERROR "No source files found in scripts/")
 endif()
 
 set(ENGINE_INCLUDES
-    "${ENGINE_ROOT}/Src"
+    "${ENGINE_ROOT}/src"
     "${ENGINE_ROOT}/third_party/glm"
     "${ENGINE_ROOT}/third_party/json/include"
     "${ENGINE_ROOT}/third_party/glad/include"
@@ -62,7 +62,7 @@ set_target_properties(ServerTestLib PROPERTIES
 
 # --- Standalone exe ---
 find_package(SDL3 QUIET)
-add_executable(ServerTestExe Main.cpp ${GAME_SOURCES})
+add_executable(ServerTestExe main.cpp ${GAME_SOURCES})
 target_include_directories(ServerTestExe PRIVATE ${ENGINE_INCLUDES})
 target_link_libraries(ServerTestExe PRIVATE ${HarukaEngine_LIBRARY})
 if(SDL3_FOUND)

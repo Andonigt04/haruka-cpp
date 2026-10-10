@@ -33,15 +33,15 @@ primeros niveles.
 ## Cómo se genera
 
 ```bash
-./Tools/build_docs.sh          # doxygen completo + árbol de ejecución
-./Tools/build_docs.sh --fast   # sin grafos de dot, mucho más rápido
-./Tools/build_docs.sh --flow   # solo regenera el árbol de ejecución
+./tools/build_docs.sh          # doxygen completo + árbol de ejecución
+./tools/build_docs.sh --fast   # sin grafos de dot, mucho más rápido
+./tools/build_docs.sh --flow   # solo regenera el árbol de ejecución
 ```
 
 Requisitos: `build/compile_commands.json` (lo genera CMake con
 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`) y `pip install --user libclang`.
 
-El analizador es `Tools/doc_flow.py`: lee el XML de Doxygen para saber a qué
+El analizador es `tools/doc_flow.py`: lee el XML de Doxygen para saber a qué
 página pertenece cada función y recorre el AST de cada unidad de traducción para
 construir el árbol. Escribe un fichero por página en `docs/html/flow/`, que la
 página carga solo cuando hace falta.

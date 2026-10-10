@@ -666,7 +666,7 @@ elevación **dos veces**, en dos parametrizaciones distintas:
 
 ⚠️ **`m_baseHeights` llevaba el comentario "es el suelo que consultará la física" y no lo leía
 NADIE.** Se rellenaba en el bake y se quedaba ahí, dato muerto, mientras la física iba contra el
-equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`Src/Haruka/Core/terrain/base_field.h`),
+equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`src/Haruka/Core/terrain/base_field.h`),
 gemelo CPU de `lib/base_field.glsl` — y **está demostrado, no solo escrito**: el test de paridad del
 bake lo valida contra la GPU a **0,0007 m** en Vulkan.
 

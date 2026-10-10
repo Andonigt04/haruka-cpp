@@ -15,7 +15,7 @@ is given where it is not obvious.
 
 | Element | Style | Example |
 |---|---|---|
-| Directories | PascalCase | `Src/Haruka/World/Planet/` |
+| Directories | PascalCase | `src/Haruka/World/Planet/` |
 | Files | PascalCase, named after their main type | `PlanetarySystem.h` / `PlanetarySystem.cpp` |
 | Acronyms | Upper case, in files and types | `RHIDevice.h`, `VKSwapchain`, `TerrainLOD.h` |
 | Types | PascalCase | `TerrainNodeRenderer` |
@@ -52,19 +52,19 @@ is given where it is not obvious.
 - Physics (Jolt) runs on one thread on purpose: the authoritative server must reproduce it
   exactly. Do not parallelise it.
 - **Do not create threads.** No `std::thread`, `std::async` or private pools. Submit work to
-  `Haruka::Jobs::jobs()` (`Src/Haruka/Core/Jobs/JobSystem.h`) with the right priority. Use `parallelFor`
+  `Haruka::Jobs::jobs()` (`src/Haruka/Core/Jobs/JobSystem.h`) with the right priority. Use `parallelFor`
   for data-parallel loops, and `postToMain` for anything that must touch the GPU or the scene.
   `std::async(std::launch::async)` creates a new OS thread per call; the job system's test measures
   64 concurrent threads with it against the pool's fixed cap.
 - A long-lived thread with its own loop (audio capture, for example) is created with
   `spawnDedicated`, so it is named and counted.
-- **CPU and GPU copies of the same data go through `ResourceStore`** (`Src/Haruka/Renderer/ResourceStore.h`).
+- **CPU and GPU copies of the same data go through `ResourceStore`** (`src/Haruka/Renderer/ResourceStore.h`).
   Do not invent another revision counter, upload budget or `destroy` call.
 - GPU resources are created and destroyed on the render thread only.
 
 ## Tests
 
-- **Every behaviour change comes with a test**, in the CPU suite (`Tests/`, `haruka_tests`) or,
+- **Every behaviour change comes with a test**, in the CPU suite (`tests/`, `haruka_tests`) or,
   if it needs a GPU, in the RHI bench (`haruka_tests_rhi`). Put it in the group it belongs to.
 - **Every test has a counter-test.** Show that the check fails when the thing it guards is
   broken: the same check against a deliberately wrong input, or the old behaviour. A test that

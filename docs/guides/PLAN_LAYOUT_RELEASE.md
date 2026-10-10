@@ -14,7 +14,7 @@ build/bin/
 ├── shaders/              .spv + fuentes .vert/.frag (legibles)
 └── scenes/               .scene JSON (legibles)
 ```
-Resolución de rutas: Main.cpp hace `current_path(exeDir)` y busca `shaders/`,
+Resolución de rutas: main.cpp hace `current_path(exeDir)` y busca `shaders/`,
 `scenes/` RELATIVOS al exe. Shaders vía `Shader::setBaseDir(SDL_GetBasePath())`.
 
 ## 1. Layout objetivo (RELEASE)
@@ -43,7 +43,7 @@ El motor hoy asume `shaders/` y `scenes/` junto al exe. Para assets/:
 - `app.run("scenes/main")` → en release resolver a `<assetsRoot>/maps/main.hmap`.
   resolveScenePath() ya prueba .scene→.hmap; solo cambia la carpeta base
   (scenes/ en dev, assets/maps/ en release).
-- Main.cpp: `current_path(exeDir)` se mantiene; las rutas base salen de AssetPaths.
+- main.cpp: `current_path(exeDir)` se mantiene; las rutas base salen de AssetPaths.
 
 ## 3. Cambios de BUILD (CMake)
 Flag `-DRELEASE=ON` (default OFF = dev). Cuando RELEASE:

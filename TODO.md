@@ -71,17 +71,17 @@ ahora dice **dónde** está el peor vértice, no solo cuánto.
 | 1 | **SSAO es un HUECO**: el ajuste viaja al shader pero no hay pase que genere la oclusión. Implementar o quitar el ajuste — hoy promete algo que no ocurre. | `settings` → `final.frag` |
 | 2 | **Render targets estáticos**: `bloom` / `ssao` / `hdr` se crean con tamaño FIJO y no siguen el resize de ventana. | `ApplicationRender.cpp` |
 | 3 | **Objetos de escena sin LOD ni cull**: full detalle a cualquier distancia (solo hay un corte por distancia). Con el instancing ya migrado, toca darles cull + LOD. | `ApplicationRender.cpp` |
-| 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `Src/Haruka/RHI/` |
+| 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `src/Haruka/RHI/` |
 | ~~5~~ | ✅ **ARREGLADO (2026-08-24)**: `preview.vert` borrado. Nadie lo referenciaba — `preview.frag` sí se usa, pero pareado con `simple.vert`. | — |
 | 5-viejo | **`preview.vert` es código muerto** y además declara un `PerObjectData` DESACTUALIZADO (sin los campos de material). Nadie lo compila hoy; el día que alguien lo use, falla al LINKAR sin decir por qué. Borrarlo o actualizarlo. | `assets/shaders/preview.vert` |
 | 7 | **Nadie fija la raíz de assets salvo el editor**: `Shader::setBaseDir` no lo llama ni el motor ni Survival, así que ambos dependen de que el cwd sea el del ejecutable. El editor ya la deriva de `SDL_GetBasePath`; el resto sigue a merced de desde dónde se lance. | `Renderer/Shader.h` |
-| ~~9~~ | ✅ **NO EXISTIA (2026-08-24).** "En OpenGL un compute no puede muestrear texturas" fue un hecho durante una sesión entera: el generador devolvía 0,00 en los 16 641 téxeles y el terreno salía sin continentes. **Falso.** Todos los síntomas venían de una **fence que faltaba DESPUÉS de `copyBuffer`**: se leía el destino a medio llenar y se interpretaba como que el shader había calculado mal. En Vulkan no se notaba, así que parecía un fallo del backend de GL. Era del banco. Arreglado con `copyThenWait` en los tres tests que lo tenían. | `Tests/RHITestMain.cpp` |
+| ~~9~~ | ✅ **NO EXISTIA (2026-08-24).** "En OpenGL un compute no puede muestrear texturas" fue un hecho durante una sesión entera: el generador devolvía 0,00 en los 16 641 téxeles y el terreno salía sin continentes. **Falso.** Todos los síntomas venían de una **fence que faltaba DESPUÉS de `copyBuffer`**: se leía el destino a medio llenar y se interpretaba como que el shader había calculado mal. En Vulkan no se notaba, así que parecía un fallo del backend de GL. Era del banco. Arreglado con `copyThenWait` en los tres tests que lo tenían. | `tests/RHITestMain.cpp` |
 | ~~9b~~ | ✅ **TAMPOCO EXISTIA**: los 399,59 m de divergencia GL↔Vulkan en `testTerrainNodeRender` eran la MISMA fence. Con ella, GL da 0,0204 m. | — |
-| 14 | ⚠️ **El contrato de `copyBuffer` + `mappedData` no está documentado en el RHI**, y no esperar no da error: da datos a medio llenar. Debería exigir la fence en la firma, o hacerla dentro. Tres tests cayeron en lo mismo. | `Src/Haruka/RHI/RHIDevice.h` |
-| 10 | **Un render target offscreen deja el backend movido.** `testTerrainNodeShadeCost` es el único test que dibuja a un target propio, y tras él falla el siguiente que lee píxeles del framebuffer por defecto. NO lo explican ni el viewport (`beginRenderPass` lo restaura), ni destruir el target, ni un frame de restauración explícito. Mitigado poniéndolo EL ÚLTIMO del banco — mientras siga así, nadie puede añadir un test detrás sin comprobar que no hereda basura. | `Src/Haruka/RHI/` |
+| 14 | ⚠️ **El contrato de `copyBuffer` + `mappedData` no está documentado en el RHI**, y no esperar no da error: da datos a medio llenar. Debería exigir la fence en la firma, o hacerla dentro. Tres tests cayeron en lo mismo. | `src/Haruka/RHI/RHIDevice.h` |
+| 10 | **Un render target offscreen deja el backend movido.** `testTerrainNodeShadeCost` es el único test que dibuja a un target propio, y tras él falla el siguiente que lee píxeles del framebuffer por defecto. NO lo explican ni el viewport (`beginRenderPass` lo restaura), ni destruir el target, ni un frame de restauración explícito. Mitigado poniéndolo EL ÚLTIMO del banco — mientras siga así, nadie puede añadir un test detrás sin comprobar que no hereda basura. | `src/Haruka/RHI/` |
 | 11 | **`readPixels` solo sabe leer del framebuffer por defecto.** No hay forma de leer un render target offscreen, así que cualquier test que dibuje a 1080p tiene que hacer su contraprueba en la ventana. | `RHIDevice.h` |
-| ~~12~~ | ✅ **ARREGLADO (2026-08-24)**: el comentario cita ahora los nueve shaders que de verdad leen el binding 16. | `Src/Haruka/Game/planet.cpp` |
-| 13 | ✅ **ARREGLADO, y encontrado de camino**: `HARUKA_GL_SPIRV` **solo sabía encender**. Con `=0` caía al camino automático, que enciende SPIR-V en cualquier GL 4.6 — así que un experimento que creía comparar "con SPIR-V / sin SPIR-V" comparaba SPIR-V consigo mismo, y me dio por descartada una hipótesis correcta. | `Src/Haruka/RHI/OpenGL/GLDevice.cpp` |
+| ~~12~~ | ✅ **ARREGLADO (2026-08-24)**: el comentario cita ahora los nueve shaders que de verdad leen el binding 16. | `src/Haruka/Game/planet.cpp` |
+| 13 | ✅ **ARREGLADO, y encontrado de camino**: `HARUKA_GL_SPIRV` **solo sabía encender**. Con `=0` caía al camino automático, que enciende SPIR-V en cualquier GL 4.6 — así que un experimento que creía comparar "con SPIR-V / sin SPIR-V" comparaba SPIR-V consigo mismo, y me dio por descartada una hipótesis correcta. | `src/Haruka/RHI/OpenGL/GLDevice.cpp` |
 | ~~8~~ | ✅ **ARREGLADO (2026-08-24)**: el clear usa un gris azulado DECLARADO cuando no hay planeta activo, en vez del ~0,005 que devuelve `getSkyColor` para el espacio. Con planeta no cambia nada. | `ApplicationRender.cpp` |
 | 8-viejo | **El clear del frame usa el color de cielo aunque no haya cielo**: sin planeta activo `getSkyColor` devuelve 0.005 → un viewport casi negro que parece roto. Para el editor conviene un fondo neutro declarado, no el del espacio. | `ApplicationRender.cpp` |
 
@@ -771,7 +771,7 @@ las dos imagenes**. Por eso una diferencia asi podia estar a la vista y pasar po
     OpenGL   99,8 % de los pixeles cambian al encender el sombreado
     Vulkan   48,8 %                     <- misma escena, mismo test, la MITAD
 
-Añadido `compareBackends()` en `Tests/RHITestMain.cpp`: guarda la captura de cada backend bajo un
+Añadido `compareBackends()` en `tests/RHITestMain.cpp`: guarda la captura de cada backend bajo un
 nombre y al terminar los dos las carea — % de pixeles distintos, |delta| medio, peor canal, **mapa
 ASCII de lo que dibuja CADA UNO** y del sitio donde difieren. La forma identifica la causa, que es la
 regla que ya cerro las "capas que tapan el terreno".
@@ -1859,7 +1859,7 @@ el frame: 67-98 ms. Volcado de GPU (`HARUKA_PROF_LOG=120 HARUKA_NO_VSYNC=1`, cos
 **Qué había**: OpenAL con tonos procedurales y WAV, `playSound(pos)`/`addSource(pos)` con oclusión
 por pathfind, y NI UN asset de audio (assets/ no tiene carpeta de sonido). Nada sonaba en el mundo.
 
-**Qué hay** (`Src/Haruka/Audio/`):
+**Qué hay** (`src/Haruka/Audio/`):
 - `sound_synth.*`: 12 sonidos SINTETIZADOS al arrancar (bucles: viento en el oído, hojas, rompiente,
   chapoteo, sumergido; disparos: pisada hierba/arena/roca/nieve/agua, chapuzón, crujido). Ruido
   filtrado + envolvente con periodos enteros en el bucle + fundido cola→cabeza. ~3 MB PCM a 22 050 Hz.
@@ -1872,7 +1872,7 @@ por pathfind, y NI UN asset de audio (assets/ no tiene carpeta de sonido). Nada 
   en ningún sitio: ahora es AL_GAIN del listener) + `setSubmerged` (amortigua ×0,15). Ajuste nuevo
   `AmbientVolume` (panel, ini, `audio.ambient`).
 
-**Juego**: `Scripts/WorldSound.cpp` — viento en el oído (punto en la cámara, potencia por
+**Juego**: `scripts/WorldSound.cpp` — viento en el oído (punto en la cámara, potencia por
 `windAt`, tono 0,85–1,15), cada árbol a < 120 m con hojas (no hierba/muerto/cactus) un punto
 en la copa (barrido cada 0,5 s), retícula polar 12×3 (18/40/90 m) de agua: rompiente por espuma
 y chapoteo por presencia, sumergido si la lámina tapa la cámara. `Player::updateSounds`: pisada
@@ -1919,7 +1919,7 @@ y lo que hay encima (hoy `core/terrain` + `core/planet` + `game/`); `physics/ au
 igual. Primero sacar los ★ de `ApplicationRender.cpp` sin mover ficheros; después UN commit de
 `git mv` a `world/`.
 
-**★ 1/5 hecho — props** (`Src/Haruka/World/Props/prop_system.{h,cpp}`, 1 220 líneas): scatter global,
+**★ 1/5 hecho — props** (`src/Haruka/World/Props/prop_system.{h,cpp}`, 1 220 líneas): scatter global,
 registro, mallas/materiales de prototipo, pase instanciado (cull, LOD, buckets), sombras, colliders
 por parte, `breakAt`, estado persistente. `Application` reenvía en una línea (`breakPropAt`,
 `propRegistry`, `serializePropState`…): Survival no cambia. `renderer/fallback_texture.*` para las
@@ -1953,12 +1953,12 @@ terreno, fluido, lluvia — la LISTA de pases todavía es esta función). Sin ve
 **`git mv` a `world/` HECHO** (56 renombrados, en el índice; 95 ficheros con includes reescritos en
 motor, tests, Survival y el editor `haruka/`; CMake de `haruka_simbase` actualizado):
 ```
-Src/Haruka/World/            weather_system, world_system(_provider), cloud_column, cloud_motion, ground_layer, noise_generator
-Src/Haruka/World/Planet/     planet, planetary_system, planet_fields, planet_geology, biomes, climate, geology, orbit, soi
-Src/Haruka/World/Terrain/    terrain_node*, terrain_lod/grid/detail/material/strata/deform/sample, base_field, cube_sphere, bake_util
-Src/Haruka/World/Water/      ocean_wave, water_fill
-Src/Haruka/World/Vox/        vox_world, cave_system, island_system
-Src/Haruka/World/Props/      prop_system, prop_*, zone_shape, instanced_object, prop_assembler, terrain_prop_field
+src/Haruka/World/            weather_system, world_system(_provider), cloud_column, cloud_motion, ground_layer, noise_generator
+src/Haruka/World/Planet/     planet, planetary_system, planet_fields, planet_geology, biomes, climate, geology, orbit, soi
+src/Haruka/World/Terrain/    terrain_node*, terrain_lod/grid/detail/material/strata/deform/sample, base_field, cube_sphere, bake_util
+src/Haruka/World/Water/      ocean_wave, water_fill
+src/Haruka/World/Vox/        vox_world, cave_system, island_system
+src/Haruka/World/Props/      prop_system, prop_*, zone_shape, instanced_object, prop_assembler, terrain_prop_field
 ```
 `core/` queda con lo indispensable (+ scene/, components/, cache/, sky_ambient, propagation);
 `game/` con character, spawn_system, construction/, inventory/, ports/, prefab/. Los renderers de

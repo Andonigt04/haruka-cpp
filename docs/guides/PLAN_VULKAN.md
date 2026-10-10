@@ -1,6 +1,6 @@
 # Plan del backend Vulkan (port desde OpenGL, por fases)
 
-> Estado: **FASE 4 IMPLEMENTADA** (2026-08-07). El backend VK vive en `Src/Haruka/RHI/Vulkan/`: fases 1-3
+> Estado: **FASE 4 IMPLEMENTADA** (2026-08-07). El backend VK vive en `src/Haruka/RHI/Vulkan/`: fases 1-3
 > hechas (`vk_device.{h,cpp}` con instance/device/swapchain/pipelines y pools con free-list),
 > fase 4 hecha (`vk_pipeline.{h,cpp}` con compilación GLSL→SPIR-V vía glslang con shifts, descriptor
 > set layout COMPARTIDO y builders gráfico/compute; `VKDevice::createPipeline` delega en ellos y
@@ -34,7 +34,7 @@ del bind), igual que `GLContext` copia `m_vao`/`m_strides`.
 
 ## 1. Fase 1 — `VKCommon.h`: traducción de enums RHI → Vulkan
 
-**Ficheros**: `Src/Haruka/RHI/Vulkan/VKCommon.h` (hoy 15 líneas, namespace vacío) + `VKCommon.cpp` (0 B).
+**Ficheros**: `src/Haruka/RHI/Vulkan/VKCommon.h` (hoy 15 líneas, namespace vacío) + `VKCommon.cpp` (0 B).
 **Referencia**: `GLCommon.h` (traducción GL ya verificada, 1:1 en casos).
 
 Contenido (funciones `inline`, sin estado, como `GLCommon.h`):
@@ -58,14 +58,14 @@ El default NO debe ser silencioso: replicar la política de `GLCommon.h:35-38` (
 y devolver un formato de relleno).
 
 **Hecho (ya en el header)**: include de `<vulkan/vulkan.h>` solo aquí y en los `.cpp` del backend —
-nada de Vulkan fuera de `Src/Haruka/RHI/Vulkan/` (RHIDevice.h:1-5).
+nada de Vulkan fuera de `src/Haruka/RHI/Vulkan/` (RHIDevice.h:1-5).
 
 ---
 
 ## 2. Fase 2 — `vk_swapchain.{h,cpp}`: surface + swapchain + imágenes + framebuffers
 
-**Ficheros**: `Src/Haruka/RHI/Vulkan/vk_swapchain.{h,cpp}` (hoy 0 B).
-**Referencia**: `Src/Haruka/RHI/Vulkan/VKSwapchain.cpp` (implementación definitiva; el spike `tests/vk_resize` se eliminó al quedar integrado).
+**Ficheros**: `src/Haruka/RHI/Vulkan/vk_swapchain.{h,cpp}` (hoy 0 B).
+**Referencia**: `src/Haruka/RHI/Vulkan/VKSwapchain.cpp` (implementación definitiva; el spike `tests/vk_resize` se eliminó al quedar integrado).
 
 Clase interna `VKSwapchain` que posee:
 - `VkSurfaceKHR` (creada vía `SDL_Vulkan_CreateSurface`)
@@ -86,8 +86,8 @@ cuando exista `VKContext`. No adelantar aquí la sincronización.
 
 ## 3. Fase 3 — `VKDevice.cpp`: instance / physical / logical device + recursos
 
-**Ficheros**: `Src/Haruka/RHI/Vulkan/vk_device.{h,cpp}` (hoy a medias; base = `VKDevice.cpp:23-67`).
-**Referencia**: `GLDevice.cpp` (639 líneas) + `Src/Haruka/RHI/Vulkan/VKDevice.cpp` (setup del device).
+**Ficheros**: `src/Haruka/RHI/Vulkan/vk_device.{h,cpp}` (hoy a medias; base = `VKDevice.cpp:23-67`).
+**Referencia**: `GLDevice.cpp` (639 líneas) + `src/Haruka/RHI/Vulkan/VKDevice.cpp` (setup del device).
 
 ### 3.1 Arranque (constructor)
 Reescribir `VKDevice::VKDevice` y `createInstance` (VKDevice.cpp:23-67) con el patrón del spike,
@@ -153,8 +153,8 @@ que existan. La fase 3 completa la implementación entera de la clase.
 
 ## 4. Fase 4 — `vk_pipeline.{h,cpp}`: compilación SPIR-V + graphics/compute pipelines
 
-**Ficheros**: `Src/Haruka/RHI/Vulkan/vk_pipeline.{h,cpp}` (hoy 0 B).
-**Referencia**: `GLDevice.cpp:344-450` (createPipeline) + `Src/Haruka/RHI/Vulkan/VKPipeline.cpp` (pipeline mínimo).
+**Ficheros**: `src/Haruka/RHI/Vulkan/vk_pipeline.{h,cpp}` (hoy 0 B).
+**Referencia**: `GLDevice.cpp:344-450` (createPipeline) + `src/Haruka/RHI/Vulkan/VKPipeline.cpp` (pipeline mínimo).
 
 ### 4.1 Shaders
 - `createPipeline(PipelineDesc)` recibe: rutas (`*.spv`), bytes SPIR-V directos, o GLSL source.
@@ -265,8 +265,8 @@ con el mismo pipeline layout. Sin estado de rasterizado ni de mezcla (GLDevice.c
 
 ## 5. Fase 5 — `VKContext`: grabado de command buffers + render pass + frame
 
-**Ficheros**: nuevo `Src/Haruka/RHI/Vulkan/vk_context.{h,cpp}`.
-**Referencia**: `GLContext.cpp` (300 líneas) + `Src/Haruka/RHI/Vulkan/VKContext.cpp` (cmd pool/buffers, sync).
+**Ficheros**: nuevo `src/Haruka/RHI/Vulkan/vk_context.{h,cpp}`.
+**Referencia**: `GLContext.cpp` (300 líneas) + `src/Haruka/RHI/Vulkan/VKContext.cpp` (cmd pool/buffers, sync).
 
 `VKContext : RHI::Context` con `VKDevice*` (igual que `GLContext` guarda `GLDevice*`).
 
@@ -344,7 +344,7 @@ perezosamente antes del primer draw**.
 migración (RHIDevice.h:59-73). En VK: ImGui tiene un `VkDescriptorSet`/atlas propio, así que esos
 handles no le sirven. **Revisar llamadores** (`imgui`, `Texture.cpp`, `renderer/*`) durante la fase 3:
 los que solo piden el id para bindearlo a GL hay que portarlos a slots RHI puros. Si un llamador
-obstaculiza el port, es candidato a extraerse del camino de VK (como GL lo hizo con `Main.cpp`).
+obstaculiza el port, es candidato a extraerse del camino de VK (como GL lo hizo con `main.cpp`).
 
 ### 6.5 Riesgos de sincronización
 - `updateBuffer` en mitad del frame con la GPU aún leyendo el buffer anterior → puede hacer que el
@@ -380,9 +380,9 @@ compila y el motor sigue 100% GL.
 ---
 
 ## 8. Referencias
-- `Src/Haruka/RHI/Vulkan/VKSwapchain.cpp` / `VKDevice.cpp` / `VKContext.cpp` — setup de instance/surface/
+- `src/Haruka/RHI/Vulkan/VKSwapchain.cpp` / `VKDevice.cpp` / `VKContext.cpp` — setup de instance/surface/
   device/swapchain probado (el spike `tests/vk_resize` se eliminó al quedar integrado en el backend).
-- `Src/Haruka/RHI/OpenGL/GLCommon.h` — traducciones GL de referencia (1:1 con fase 1).
-- `Src/Haruka/RHI/OpenGL/GLDevice.cpp` / `GLContext.cpp` — el comportamiento a replicar.
-- `Src/Haruka/RHI/RHIDevice.h` / `RHIContext.h` / `RHIResources.h` / `RHITypes.h` — API FROZEN.
-- `Src/Haruka/RHI/Vulkan/VKDevice.h` — esqueleto de la clase VKDevice + pools (base de fase 3).
+- `src/Haruka/RHI/OpenGL/GLCommon.h` — traducciones GL de referencia (1:1 con fase 1).
+- `src/Haruka/RHI/OpenGL/GLDevice.cpp` / `GLContext.cpp` — el comportamiento a replicar.
+- `src/Haruka/RHI/RHIDevice.h` / `RHIContext.h` / `RHIResources.h` / `RHITypes.h` — API FROZEN.
+- `src/Haruka/RHI/Vulkan/VKDevice.h` — esqueleto de la clase VKDevice + pools (base de fase 3).

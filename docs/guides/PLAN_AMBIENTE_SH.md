@@ -37,7 +37,7 @@ cuanto dos superficies comparten plano.
 
 ### 1.2 IBL: código que genera texturas que nadie lee
 
-`Src/Haruka/Renderer/IBL.cpp` (328 líneas) construye toda la tubería:
+`src/Haruka/Renderer/IBL.cpp` (328 líneas) construye toda la tubería:
 
 - `setupCubemap()` → `hEnv` (cubemap RGB16F 512³)
 - `generateDefaultSky()` → rellena `hEnv` con un cielo planimétrico
@@ -61,7 +61,7 @@ deuda sin consumidor, no una feature a medias**.
 - `harukaSkyBase(t, day)` → gradiente horizonte→cénit (interpolado noche↔día)
 
 y **`sky.frag` ya lo usa** (`sky.frag:76-77`). Su cabecera declara ser gemelo de
-`Src/Haruka/Core/sky_ambient.{h,cpp}` — **pero ese fichero no existe** (glob 2026-08-06). El plan no inventa
+`src/Haruka/Core/sky_ambient.{h,cpp}` — **pero ese fichero no existe** (glob 2026-08-06). El plan no inventa
 una pieza nueva: rellena la mitad del contrato que el propio shader ya declara.
 
 ---
@@ -69,7 +69,7 @@ una pieza nueva: rellena la mitad del contrato que el propio shader ya declara.
 ## 2. Arquitectura objetivo
 
 ```
-Src/Haruka/Core/sky_ambient.{h,cpp}   ← NUEVO (el gemelo CPU que sky_palette.glsl ya promete)
+src/Haruka/Core/sky_ambient.{h,cpp}   ← NUEVO (el gemelo CPU que sky_palette.glsl ya promete)
   · harukaSkyBase(t, day)       · mismo gradiente que el GLSL (mismas constantes, doble del GLSL)
   · skyDiffuseIrradiance(dir)   · integra el cielo a SH (ver §3) o por muestreo directo
   · coeffs() → 9 × vec3         · coeficientes SH de banda 0..2, actualizados por frame
@@ -119,7 +119,7 @@ convergencia (no debería).
 
 ## 4. Cambios por fichero
 
-### 4.1 NUEVO `Src/Haruka/Core/sky_ambient.{h,cpp}` — el gemelo CPU
+### 4.1 NUEVO `src/Haruka/Core/sky_ambient.{h,cpp}` — el gemelo CPU
 - Constantas de paleta idénticas a `sky_palette.glsl` (en `double` donde proceda; el resto del motor
   ya mezcla double/flota con criterio, ver `terrain_sampler_v2.cpp`).
 - `harukaSkyBase(float t, float day)` y `harukaSkyDay(float sunElev)` — mismo cuerpo que el GLSL.
@@ -205,7 +205,7 @@ desincronizadas) con el menor cambio.
 
 ## 7. Orden de implementación (fases verificables)
 
-1. **Fase 1 — gemelo CPU**: `Src/Haruka/Core/sky_ambient.{h,cpp}` con las mismas constantes y funciones que
+1. **Fase 1 — gemelo CPU**: `src/Haruka/Core/sky_ambient.{h,cpp}` con las mismas constantes y funciones que
    `sky_palette.glsl`. Verificación: test unitario que muestrea `harukaSkyBase` y compara contra el
    GLSL para los mismos inputs (día/noche, cénit/horizonte). Paridad numérica exacta en `float`.
 2. **Fase 2 — UBO**: ampliar `PerFrameData` con `shCoef[9]` en TODOS los shaders y rellenarlo en

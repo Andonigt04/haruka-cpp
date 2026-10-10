@@ -1,5 +1,5 @@
 # ================================================================================================
-# Modulos en tiempo de compilacion (MODULES=1011...): mascara, dependencias y Src/Haruka/Core/Modules.h
+# Modulos en tiempo de compilacion (MODULES=1011...): mascara, dependencias y src/Haruka/Core/Modules.h
 # ================================================================================================
 
 # --- 3b. Build-time modules (MODULES=1011...) ---
@@ -57,9 +57,9 @@ foreach(_mod ${HARUKA_MODULE_LIST})
 endforeach()
 
 # Generate the single source of truth header used by #ifdef across the code.
-# Written INTO the source tree (Src/Haruka/Core/) so any consumer that includes
+# Written INTO the source tree (src/Haruka/Core/) so any consumer that includes
 # ENGINE_ROOT/src (e.g. the game) sees it without extra include paths.
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules.h.in"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Core/Modules.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Core/Modules.h"
     @ONLY)

@@ -30,13 +30,13 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 # --- 1/2/3. Dependencias del sistema, header-only y fuentes de terceros ---
 include(cmake/HarukaDependencies.cmake)
 
-# --- 3b. Modulos (MODULES=1011...) -> HARUKA_MOD_* y Src/Haruka/Core/Modules.h ---
+# --- 3b. Modulos (MODULES=1011...) -> HARUKA_MOD_* y src/Haruka/Core/Modules.h ---
 include(cmake/HarukaModules.cmake)
 
 # Collect sources, then drop the ones belonging to OFF modules.
-file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "Src/*.cpp")
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 
-# --- Src/Haruka/Main.cpp FUERA de la librería compartida -------------------------------------------
+# --- src/main.cpp FUERA de la librería compartida -------------------------------------------
 # Es el `main()` del runtime antiguo (arrancar el motor a pelo desde un project.hrk). El glob lo
 # metía en libHarukaEngine.so, así que la .so EXPORTABA el símbolo `main`:
 #     $ nm -D build/libHarukaEngine.so | grep -w main
@@ -44,22 +44,22 @@ file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "Src/*.cpp")
 # No rompía nada —el ejecutable del juego define el suyo y el símbolo fuerte del ejecutable gana—
 # pero un `main` público en una librería compartida es una colisión esperando a pasar. Ningún
 # add_executable lo usa: el punto de entrada vivo es el del juego.
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Src/Haruka/Main\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")
 
 # --- HarukaPhysics: la física en su PROPIA librería, SIN GL ---------------------------------
 # Motivo: pasarla al DGS (servidor autoritativo) y validar el movimiento con el MISMO código en
-# cliente y servidor. La física solo depende de glm + IWorldProvider (ver Src/Haruka/Physics/WorldProvider.h);
+# cliente y servidor. La física solo depende de glm + IWorldProvider (ver src/Haruka/Physics/WorldProvider.h);
 # no toca renderer, SDL ni assets. `octree` es su broad-phase (GL-free, solo lo usa la física).
 # El engine EXCLUYE estas fuentes y linka HarukaPhysics.
 list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/Octree\\.cpp$")
 list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/PhysicsEngine\\.cpp$")
-set(PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Physics/Octree.cpp")
+set(PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Physics/Octree.cpp")
 if(HARUKA_MOD_PHYSICS)
-    list(APPEND PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Physics/PhysicsEngine.cpp")
+    list(APPEND PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Physics/PhysicsEngine.cpp")
 endif()
 add_library(HarukaPhysics STATIC ${PHYSICS_SOURCES})
 target_include_directories(HarukaPhysics PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
 set_target_properties(HarukaPhysics PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
 
 # --- HarukaConstruction: el núcleo del sistema de construcción, GL-free y FUERA de físicas ----
@@ -67,9 +67,9 @@ set_target_properties(HarukaPhysics PROPERTIES POSITION_INDEPENDENT_CODE ON)  # 
 # + terreno vía IWorldProvider). Vive en game/construction, GL-free y PIC, en su PROPIA lib para que
 # el cliente prediga y el DGS valide con el MISMO código. No cuelga de HarukaPhysics (no es física).
 list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Game/Construction/Construction\\.cpp$")
-add_library(HarukaConstruction STATIC "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Game/Construction/Construction.cpp")
+add_library(HarukaConstruction STATIC "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Game/Construction/Construction.cpp")
 target_include_directories(HarukaConstruction PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
 set_target_properties(HarukaConstruction PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
 
 # Per-module source patterns to exclude when the module is OFF.
@@ -101,7 +101,7 @@ list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Network/DefaultRules\\.cpp$")
 # haruka_simbase: el sampler de terreno CPU (sin GL) que el módulo necesita para validar contra el
 # suelo. Mismas fuentes que usa el engine, aquí en una lib GL-free reusable por el .so de reglas.
 add_library(haruka_simbase STATIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Planet/PlanetGeology.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/Planet/PlanetGeology.cpp"
     # El cubo↔esfera, que el servidor necesita para hablar de direcciones en la misma retícula que
     # el cliente.
     #
@@ -110,15 +110,15 @@ add_library(haruka_simbase STATIC
     # devolvía 0.0, así que lo que compartían era un cero. Retirada; el problema que describía ese
     # comentario SIGUE ABIERTO —el DGS valida contra el nivel del mar— y el arreglo real es que el
     # servidor reproduzca el bake de altura, no una clase que devuelve constantes.
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Terrain/CubeSphere.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/Terrain/CubeSphere.cpp"
     # EL CLIMA (frentes deterministas). GL-free y aquí, no solo en el motor, por el mismo motivo
     # que la superficie de referencia: el servidor tiene que poder ver LA MISMA tormenta que el
     # cliente para validarla. Es una funcion pura de (seed, tiempo, direccion) → replicarla solo
     # exige compartir el reloj.
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/WeatherSystem.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/NoiseGenerator.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/WeatherSystem.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/NoiseGenerator.cpp")
 target_include_directories(haruka_simbase PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
 target_link_libraries(haruka_simbase PUBLIC HarukaPhysics HarukaConstruction)
 set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -131,14 +131,14 @@ set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # "sin modulo de reglas -> fallback generico" y sigue con su regla propia, así que **el anti-cheat del
 # juego no se estaba aplicando en despliegue** y nada lo delataba.
 #
-# No lo veía ningún test: `Tests/TestDGS.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
+# No lo veía ningún test: `tests/TestDGS.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
 # motor, así que el símbolo aparecía por la puerta de atrás. Lo destapó `dgs_live_terrain`, que carga
 # el módulo desde el nodo de verdad.
 add_library(haruka_rules SHARED
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Network/DefaultRules.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Core/Logger.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Network/DefaultRules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/Core/Logger.cpp")
 target_include_directories(haruka_rules PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
     "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
 target_link_libraries(haruka_rules PRIVATE haruka_simbase HarukaPhysics)
 
@@ -155,7 +155,7 @@ add_dependencies(HarukaEngine haruka_version)   # version.h fresco antes de comp
 
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
     "${NLOHMANN_JSON_INCLUDE_DIR}"
     "${GLM_INCLUDE_DIR}"
     "${STB_INCLUDE_DIR}"
@@ -217,7 +217,7 @@ endif()
 include(cmake/HarukaShaders.cmake)
 
 # --- 6a. mapc: map compiler tool (.scene -> .hmap) ---
-add_executable(mapc Tools/Mapc.cpp)
+add_executable(mapc tools/Mapc.cpp)
 target_link_libraries(mapc PRIVATE HarukaEngine)
 set_target_properties(mapc PROPERTIES
     BUILD_RPATH   "$ORIGIN"
@@ -308,7 +308,7 @@ if(PROJECT_IS_TOP_LEVEL)
         LIBRARY DESTINATION "bin"
         RUNTIME DESTINATION "bin")
 
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Src/"
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
         DESTINATION "lib64/haruka-cpp"
         FILES_MATCHING
         PATTERN "*.h"

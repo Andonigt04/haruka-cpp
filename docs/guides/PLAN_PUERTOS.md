@@ -19,7 +19,7 @@
 ## §1 — ESTADO ACTUAL: el hueco
 
 Hoy los sockets se **derivan del AABB**: los centros de cara de la caja envolvente
-(`Survival/Scripts/BuildSystem.cpp:240`, y así está apuntado en [[PLAN_CONSTRUCCION.md]] —
+(`Survival/scripts/BuildSystem.cpp:240`, y así está apuntado en [[PLAN_CONSTRUCCION.md]] —
 *"Sockets/SNAP derivados del AABB"*).
 
 Eso vale para muros y bloques. **No puede valer** para nada de lo que ya está diseñado:
@@ -189,7 +189,7 @@ Un puerto `cls="interact"` es donde vive un panel (asiento de piloto, manómetro
 
 **HECHO (2026-08-15):**
 
-1. ✅ **`Port` + `Rail` + serialización** — `Src/Haruka/Game/Ports/port.{h,cpp}`. Registro por assetId,
+1. ✅ **`Port` + `Rail` + serialización** — `src/Haruka/Game/Ports/port.{h,cpp}`. Registro por assetId,
    `portWorld`/`railAxisWorld`, `portAccepts`, `raycastPorts`, `railClamp`/`railBreaks`/`railStep`,
    ida y vuelta por JSON y carga de directorio con **orden estable** (`directory_iterator` no lo
    garantiza y el registro acabaría dependiendo del sistema de ficheros).
@@ -199,7 +199,7 @@ Un puerto `cls="interact"` es donde vive un panel (asiento de piloto, manómetro
    (volumen, anclaje, estanqueidad), luego lo que se arregla añadiendo una pieza. Así el motivo que
    se le enseña al jugador es el **de fondo**, no el primero del struct.
 
-**Tests** (`Tests/TestPorts.cpp` en el motor, `Survival/Tests/TestPlacement.cpp` en el proyecto),
+**Tests** (`tests/TestPorts.cpp` en el motor, `Survival/tests/TestPlacement.cpp` en el proyecto),
 todos con **contraprueba** — un test que solo comprueba que algo "no peta" no distingue una
 implementación buena de una que devuelve siempre lo mismo:
 
@@ -212,7 +212,7 @@ implementación buena de una que devuelve siempre lo mismo:
   lo que se pide de más **y se llega a él** (89,7° al pedir 500° — sin esa segunda mitad, un raíl que
   no se moviera pasaría el test), sin motor **no se mueve sola**, con más carga que par **se queda a
   medias y lo reporta**, y por encima de `breakForce` **cede y ya no obedece**.
-- Enganches (`Survival/Tests/TestSockets.cpp`): **las dos mitades por separado** — sin `PortSet`
+- Enganches (`Survival/tests/TestSockets.cpp`): **las dos mitades por separado** — sin `PortSet`
   salen los cinco centros de cara de siempre (si solo se probara el caso autorizado, un
   `pieceSockets` que ignorase el AABB pasaría igual, y eso sería la regresión); con `PortSet` mandan
   los puertos y el AABB **no se mezcla**; el socket inferior **mira hacia abajo**, que es justo lo
@@ -223,7 +223,7 @@ implementación buena de una que devuelve siempre lo mismo:
   (contraprueba de que `canPlace` no rechaza por costumbre).
 
 3. ✅ **Puente a Jolt** — `PhysicsEngine::addRail/railSetTarget/railGet/removeRail` con
-   `RailSpec`/`RailInfo` (`Src/Haruka/Physics/PhysicsEngine.h`). ⚠️ `HarukaPhysics` no puede depender de
+   `RailSpec`/`RailInfo` (`src/Haruka/Physics/PhysicsEngine.h`). ⚠️ `HarukaPhysics` no puede depender de
    `game/`, así que la especificación se repite en la frontera de la librería a propósito.
 
    **Cuatro cosas que solo aparecen al atarlo de verdad** (todas comentadas en el código):

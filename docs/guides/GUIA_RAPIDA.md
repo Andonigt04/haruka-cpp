@@ -4,7 +4,7 @@
 
 ### ObjectType
 ```
-📍 Ubicación: Src/Haruka/Tools/ObjectTypes.h
+📍 Ubicación: src/Haruka/Tools/ObjectTypes.h
 📌 Propósito: Clasificar objetos para diferentes pipelines
 🔍 Busca: stringToObjectType(), isPlanetary(), isRenderable()
 
@@ -16,7 +16,7 @@ CHARACTER → Physics + Animation
 
 ### SceneManager
 ```
-📍 Ubicación: Src/Haruka/Core/Scene/SceneManager.h
+📍 Ubicación: src/Haruka/Core/Scene/SceneManager.h
 📌 Propósito: Almacenar y buscar SceneObjects
 🔍 Busca: getObjectByName(), getAllObjects(), addLoadedObject()
 
@@ -28,7 +28,7 @@ Características:
 
 ### WorldSystem
 ```
-📍 Ubicación: Src/Haruka/Core/world_system.h / .cpp
+📍 Ubicación: src/Haruka/Core/world_system.h / .cpp
 📌 Propósito: Orquestador central + Floating Origin
 🔍 Busca: shiftOrigin(), toLocal(), getPlanetarySystem()
 
@@ -40,7 +40,7 @@ Responsabilidades:
 
 ### PlanetarySystem
 ```
-📍 Ubicación: Src/Haruka/Game/planetary_system.h
+📍 Ubicación: src/Haruka/Game/planetary_system.h
 📌 Propósito: Simular y renderizar planetas
 🔍 Busca: update(), addPlanet(), renderTerrain()
 
@@ -54,7 +54,7 @@ Subsistemas internos:
 
 ### PlanetChunkKey
 ```
-📍 Ubicación: Src/Haruka/Tools/PlanetaryTypes.h
+📍 Ubicación: src/Haruka/Tools/PlanetaryTypes.h
 📌 Propósito: Identificador único de chunk
 Estructura: face + lod + x + y
 
@@ -341,17 +341,17 @@ printf("Distance %.2f → LOD %d\n", distance, lod);
 
 | Archivo | Responsabilidad |
 |---------|-----------------|
-| `Src/Haruka/Tools/ObjectTypes.h` | Clasificación de objetos |
-| `Src/Haruka/Tools/PlanetaryTypes.h` | Tipos para planetas |
-| `Src/Haruka/Tools/MathTypes.h` | WorldPos, LocalPos, double/float |
-| `Src/Haruka/Core/Scene/SceneManager.h` | Almacén de SceneObjects |
-| `Src/Haruka/Core/world_system.h` / `.cpp` | Orquestador + Floating Origin |
-| `Src/Haruka/Game/planetary_system.h` | Motor de planetas |
-| `Src/Haruka/Core/lod_system.h` | Cálculo de Level of Detail |
-| `Src/Haruka/Core/terrain/terrain_generator.h` | Generación procedural |
-| `Src/Haruka/Core/terrain/chunk_cache.h` | Caché de chunks |
-| `Src/Haruka/Core/terrain/terrain_streaming_system.h` | Carga asincrónica |
-| `Src/Haruka/Renderer/TerrainRenderer.h` | Renderizado de terreno |
+| `src/Haruka/Tools/ObjectTypes.h` | Clasificación de objetos |
+| `src/Haruka/Tools/PlanetaryTypes.h` | Tipos para planetas |
+| `src/Haruka/Tools/MathTypes.h` | WorldPos, LocalPos, double/float |
+| `src/Haruka/Core/Scene/SceneManager.h` | Almacén de SceneObjects |
+| `src/Haruka/Core/world_system.h` / `.cpp` | Orquestador + Floating Origin |
+| `src/Haruka/Game/planetary_system.h` | Motor de planetas |
+| `src/Haruka/Core/lod_system.h` | Cálculo de Level of Detail |
+| `src/Haruka/Core/terrain/terrain_generator.h` | Generación procedural |
+| `src/Haruka/Core/terrain/chunk_cache.h` | Caché de chunks |
+| `src/Haruka/Core/terrain/terrain_streaming_system.h` | Carga asincrónica |
+| `src/Haruka/Renderer/TerrainRenderer.h` | Renderizado de terreno |
 | `haruka/src/panels/viewport.cpp` | Integración editor |
 
 ---

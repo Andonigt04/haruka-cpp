@@ -7,7 +7,7 @@
 
 ## ESTADO ACTUAL (2026-07-22) — apunta todo
 
-**Core GL-free (lib `HarukaConstruction`, `Src/Haruka/Game/Construction/construction.{h,cpp}`; suite 131 OK · 0 fallos):**
+**Core GL-free (lib `HarukaConstruction`, `src/Haruka/Game/Construction/construction.{h,cpp}`; suite 131 OK · 0 fallos):**
 - **F1** colocación: `validate(typeId,pos,orient,IWorldProvider) → Placement {Ok,UnknownType,OverlapsPiece,
   NotAnchored,WrongSupport,TooSteep}`. OBB-OBB SAT en double. NO rechaza por penetrar terreno (el relieve se
   moldea con la herramienta de terreno). `add(...,world)`.
@@ -68,7 +68,7 @@ sigue en el core GL-free y testeado. A archivos van los **markers de control** �
 proporción —, no la generación. La carga **valida y lo canta** por log (material inexistente, tejado con material
 de muro, plano con un rol que no existe, imperio incompleto → descartado).
 
-Tests: `Survival/Tests/TestBuildings.cpp` (`ctest -R survival_buildings`, 159 OK) — no comprueba que el JSON se
+Tests: `Survival/tests/TestBuildings.cpp` (`ctest -R survival_buildings`, 159 OK) — no comprueba que el JSON se
 parsee, sino que **manda**: Bram es de ladrillo con aguja porque lo dice su archivo, un templo es >1.5× la casa
 del mismo imperio, un almacén sin `window` no abre ni un hueco, y la generación sigue siendo determinista.
 Por eso el spawn en escena se movió a `building_spawn.cpp`: así `building_gen.cpp` es GL-free y se puede probar

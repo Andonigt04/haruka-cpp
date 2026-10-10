@@ -36,11 +36,11 @@ The parts of the engine that handle data from outside the process are the most r
 
 | Area | Where | Why it matters |
 |---|---|---|
-| Networking (DGS client) | `Src/Haruka/Network/`, `external/dgs` | parses packets from a server |
+| Networking (DGS client) | `src/Haruka/Network/`, `external/dgs` | parses packets from a server |
 | Server rules module | `haruka_rules` (loaded with `dlopen`) | runs inside the authoritative server |
-| Scenes, saves and settings | `Src/Haruka/Core/Scene/`, `Src/Haruka/Settings/` | JSON from disk, possibly from other players |
-| Prefabs | `Src/Haruka/Game/Prefab/` | JSON and glTF (`.glb`/`.gltf`) from disk |
-| Assets | `Src/Haruka/IO/`, `Src/Haruka/Renderer/Model.*` | images, models and audio through stb, assimp and OpenAL |
+| Scenes, saves and settings | `src/Haruka/Core/Scene/`, `src/Haruka/Settings/` | JSON from disk, possibly from other players |
+| Prefabs | `src/Haruka/Game/Prefab/` | JSON and glTF (`.glb`/`.gltf`) from disk |
+| Assets | `src/Haruka/IO/`, `src/Haruka/Renderer/Model.*` | images, models and audio through stb, assimp and OpenAL |
 
 Bugs in third-party components (Dear ImGui, Jolt, nlohmann/json, stb, assimp, SDL…) should be
 reported upstream. Tell us as well if the engine is affected in a way that needs a change here.

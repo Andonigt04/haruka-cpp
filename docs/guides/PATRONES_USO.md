@@ -10,7 +10,7 @@ Quieres agregar un nuevo planeta a tu escena en el editor.
 #### 1.1 Definir ObjectType (si es nuevo tipo)
 ```cpp
 // Si es un tipo de objeto completamente nuevo
-// Src/Haruka/Tools/ObjectTypes.h
+// src/Haruka/Tools/ObjectTypes.h
 
 enum class ObjectType {
     // ... tipos existentes ...
@@ -146,7 +146,7 @@ void loadScene(const std::string& filepath) {
 
 #### 1.4 Renderizar
 ```cpp
-// haruka/Src/Haruka/Renderer/main_renderer.cpp
+// haruka/src/Haruka/Renderer/main_renderer.cpp
 void Renderer::render() {
     auto& sceneManager = getSceneManager();
     
@@ -197,7 +197,7 @@ glm::vec3 localPos = toLocal(worldPos);  // Resta origin
 
 #### 2.1 WorldSystem coordina el shifting
 ```cpp
-// Src/Haruka/Core/world_system.cpp
+// src/Haruka/Core/world_system.cpp
 
 void WorldSystem::update(double dt, const glm::dvec3& cameraPos) {
     // CRITICAL: Verificar si estamos muy lejos del origen
@@ -332,7 +332,7 @@ m_renderer->addChunk(*chunk);
 
 #### 3.2 Generación procedural
 ```cpp
-// Src/Haruka/Core/terrain/terrain_generator.cpp
+// src/Haruka/Core/terrain/terrain_generator.cpp
 
 ChunkData TerrainGenerator::generateChunk(
     const PlanetChunkKey& key,
@@ -433,7 +433,7 @@ ChunkData TerrainGenerator::generateChunk(
 
 #### 3.3 Caché y evicción
 ```cpp
-// Src/Haruka/Core/terrain/chunk_cache.cpp
+// src/Haruka/Core/terrain/chunk_cache.cpp
 
 class ChunkCache {
 private:
@@ -507,7 +507,7 @@ La cámara está a 1000 m del planeta. Necesitas renderizar LOD 1, no LOD 0 (dem
 
 #### 4.1 Calcular LOD basado en distancia
 ```cpp
-// Src/Haruka/Core/lod_system.cpp
+// src/Haruka/Core/lod_system.cpp
 
 class LODSystem {
     struct LODLevel {
@@ -541,7 +541,7 @@ public:
 
 #### 4.2 Usar LOD en TerrainRenderer
 ```cpp
-// Src/Haruka/Renderer/TerrainRenderer.cpp
+// src/Haruka/Renderer/TerrainRenderer.cpp
 
 void TerrainRenderer::render(const Camera* camera) {
     glm::dvec3 camPos = camera->getWorldPosition();
@@ -617,7 +617,7 @@ void InspectorPanel::onTerrainSettingChanged(
 
 #### 5.2 Invalidación de caché
 ```cpp
-// Src/Haruka/Game/planetary_system.cpp
+// src/Haruka/Game/planetary_system.cpp
 
 void PlanetarySystem::invalidateCache(const std::string& planetName) {
     // Encontrar todos los chunks de este planeta
@@ -640,7 +640,7 @@ void PlanetarySystem::invalidateCache(const std::string& planetName) {
 
 #### 5.3 Regeneración automática
 ```cpp
-// Src/Haruka/Game/planetary_system.cpp
+// src/Haruka/Game/planetary_system.cpp
 
 void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
     // ...
@@ -717,7 +717,7 @@ public:
 
 #### ✅ 5. Integrate with renderer
 ```cpp
-// Src/Haruka/Renderer/main_renderer.cpp
+// src/Haruka/Renderer/main_renderer.cpp
 void Renderer::render() {
     // ... existentes ...
     

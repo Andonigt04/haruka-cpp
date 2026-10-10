@@ -73,15 +73,15 @@ function(target_apply_network TGT)
     endif()
 endfunction()
 
-file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS Scripts/*.cpp)
+file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS scripts/*.cpp)
 if(NOT GAME_SOURCES)
-    message(FATAL_ERROR "No source files in Scripts/")
+    message(FATAL_ERROR "No source files in scripts/")
 endif()
 
 # --- Plugin .so (el editor lo carga vía getGameInterface) ---
 # El editor busca lib<Nombre>.so en build/bin/ (layout del juego moderno).
 add_library(${PROJECT_NAME}Lib SHARED ${GAME_SOURCES})
-target_include_directories(${PROJECT_NAME}Lib PRIVATE Scripts)
+target_include_directories(${PROJECT_NAME}Lib PRIVATE scripts)
 target_link_libraries(${PROJECT_NAME}Lib PRIVATE ${HarukaEngine_LIBRARY})
 target_apply_network(${PROJECT_NAME}Lib)
 set_target_properties(${PROJECT_NAME}Lib PROPERTIES
@@ -90,8 +90,8 @@ set_target_properties(${PROJECT_NAME}Lib PROPERTIES
 
 # --- Ejecutable standalone ---
 find_package(SDL3 QUIET)
-add_executable(${PROJECT_NAME}Exe Main.cpp ${GAME_SOURCES})
-target_include_directories(${PROJECT_NAME}Exe PRIVATE Scripts)
+add_executable(${PROJECT_NAME}Exe main.cpp ${GAME_SOURCES})
+target_include_directories(${PROJECT_NAME}Exe PRIVATE scripts)
 target_link_libraries(${PROJECT_NAME}Exe PRIVATE ${HarukaEngine_LIBRARY})
 if(SDL3_FOUND)
     target_link_libraries(${PROJECT_NAME}Exe PRIVATE SDL3::SDL3)

@@ -2,7 +2,7 @@
 
 HarukaEngine is split into **compile-time modules**. Each can be turned ON/OFF so you ship
 only the features you need (smaller binary, no dead code). The whole system is driven by a
-single **bitmask** and a single generated header, `Src/Haruka/Core/Modules.h`.
+single **bitmask** and a single generated header, `src/Haruka/Core/Modules.h`.
 
 > Source of truth: [`CMakeLists.txt`](../CMakeLists.txt) (`HARUKA_MODULE_LIST`) and
 > [`cmake/modules.h.in`](../cmake/modules.h.in).
@@ -56,7 +56,7 @@ For the game, drive both engine and game from one place:
 1. **CMake reads the mask** ([`CMakeLists.txt`](../CMakeLists.txt), `foreach` over
    `HARUKA_MODULE_LIST`). For every ON module it appends `#define HARUKA_MOD_<NAME> 1`.
 
-2. **`Modules.h` is generated** via `configure_file(cmake/modules.h.in → Src/Haruka/Core/Modules.h)`.
+2. **`Modules.h` is generated** via `configure_file(cmake/modules.h.in → src/Haruka/Core/Modules.h)`.
    It is written **into the source tree** on purpose, so the game (which includes `ENGINE/src`)
    sees the exact same switches. It's the single header every `#ifdef` keys off.
 
@@ -77,7 +77,7 @@ For the game, drive both engine and game from one place:
 
 5. **Engine and game must use the same mask.** Because `Modules.h` lives in the source tree
    and the game includes it, both must be configured with the same `-DMODULES`. Reconfiguring
-   with a different `-DMODULES` **rewrites** `Src/Haruka/Core/Modules.h`.
+   with a different `-DMODULES` **rewrites** `src/Haruka/Core/Modules.h`.
 
 ---
 
@@ -100,7 +100,7 @@ set(HARUKA_MODULE_LIST
 
 ### 2. Put your sources under an identifiable path and exclude them when OFF
 
-Place the module's code under e.g. `src/weather/*.cpp` and `Src/Haruka/Renderer/weather_renderer.cpp`.
+Place the module's code under e.g. `src/weather/*.cpp` and `src/Haruka/Renderer/weather_renderer.cpp`.
 Then add an exclusion block next to the others in [`CMakeLists.txt`](../CMakeLists.txt):
 
 ```cmake
@@ -160,6 +160,6 @@ Update the module table in [`README.md`](../README.md) and this file.
 
 - **Positional bitmask** → new modules go at the **end**, never the middle.
 - A missing position in the mask is **ON**, not off.
-- Reconfiguring with `-DMODULES` **rewrites `Src/Haruka/Core/Modules.h`** in the source tree, so the
+- Reconfiguring with `-DMODULES` **rewrites `src/Haruka/Core/Modules.h`** in the source tree, so the
   engine and the game must be reconfigured together (use `[PROJECT_FOLDER]/build.sh`).
 - Inside a module: no `#ifdef` needed. Only the engine code that *consumes* it gets guarded.

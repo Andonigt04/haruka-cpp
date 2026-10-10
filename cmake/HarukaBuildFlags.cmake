@@ -140,9 +140,9 @@ if(NOT MSVC)
     # Coste: estos ficheros pierden vectorización agresiva; el grueso del tiempo de generación está en
     # la GPU, no aquí. Si algún día hace falta, se mide antes de tocarlo.
     set_source_files_properties(
-        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/NoiseGenerator.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Planet/PlanetGeology.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Terrain/CubeSphere.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/NoiseGenerator.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/Planet/PlanetGeology.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/Haruka/World/Terrain/CubeSphere.cpp"
         DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()

@@ -6,7 +6,7 @@
 # --- 6a-bis. bench_dgs_bandwidth: test de estrés de transferencia entre nodos DGS (sin .a, sin
 # sockets). Modela el límite BDP (min(enlace, ventana/RTT)) y estresa el PacketFramer real (bug 6)
 # con el volumen completo. Header-only → compila en CI; `--fast` para verificación rápida. ---
-add_executable(bench_dgs_bandwidth Tools/BenchDGSBandwidth.cpp)
+add_executable(bench_dgs_bandwidth tools/BenchDGSBandwidth.cpp)
 target_include_directories(bench_dgs_bandwidth PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
 
 # (el if(HARUKA_BUILD_TESTS) lo pone quien incluye este fichero)
@@ -14,39 +14,39 @@ target_include_directories(bench_dgs_bandwidth PRIVATE "${CMAKE_CURRENT_SOURCE_D
 # Subsistemas puros-CPU dirigidos con entrada sintética + verificación de invariantes → depurar a
 # pequeña escala, determinista y rápido, sin cargar un planeta entero. `ctest` o `./bin/haruka_tests`.
 add_executable(haruka_tests
-    Tests/HarukaTests.cpp      # main() — selecciona/dirige
-    Tests/TestCommon.cpp       # framework de aserciones compartido
-    Tests/TestJobs.cpp         # pool central de trabajos (Core/Jobs)
-    Tests/TestResourceStore.cpp # almacen de recursos CPU<->GPU (Renderer/ResourceStore)
-    Tests/TestTerrain.cpp      # cube-sphere / climate / weather fronts / ground layer (CPU)
-    Tests/TestPhysics.cpp      # caída radial + determinismo (sin GL)
-    Tests/TestXPBD.cpp         # enganche de tela a un hueso (piel/membranas de criaturas)
-    Tests/TestConstruction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
-    Tests/TestPorts.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
-    Tests/TestPrefab.cpp       # prefabricados: los cambios de UN conjunto no tocan el montaje
-    Tests/TestPrimitives.cpp   # primitivas: ninguna cara bobinada al revés (una tapa invertida no da error, desaparece)
-    Tests/TestDGS.cpp
-    Tests/TestSimplePlanet.cpp         # SimplePlanet mesh & config
-    Tests/TestTerrainQuality.cpp       # terrain quality → resolution mappings
-    Tests/TestInput.cpp                 # acciones de entrada: teclado + mando en la misma accion
-    Tests/TestDisplay.cpp               # selector de monitor: re-enumerar al enchufar, indice por pantalla
-    Tests/TestSound.cpp                 # sonido: sintesis + puntos logicos agrupados (sin OpenAL)
-    Tests/TestSkyAmbient.cpp           # ambiente SH: paridad con sky_palette.glsl + simetría
-    Tests/TestProcGraph.cpp             # ProcGraph nodes, BiomeConfig, RGBAImage
-    Tests/TestOrbit.cpp                 # órbitas Kepler con elementos precesantes
-    Tests/TestImageWriter.cpp          # PNG: ida y vuelta + compresión DEFLATE
-    Tests/TestPropLOD.cpp              # LOD de malla de props: envolvente estable
-    Tests/TestPropCollider.cpp         # colliders de props por PARTE (esqueleto del arbol)
-    Tests/TestRockInterior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
-    Tests/TestCaves.cpp                 # cuevas: mapas en disco, conectividad garantizada, campo
-    Tests/TestVoxWorld.cpp             # el mundo por chunks: sin costura, trazos de la partida
-    Tests/TestIslands.cpp               # islas flotantes: roca AÑADIDA al mismo campo
-    Tests/TestWeatherSevere.cpp        # tiempo adverso: severidad por condiciones + vortices (Rankine)
-    Tests/TestCloudMotion.cpp          # frame a frame: la deriva integrada y el fundido de horneados (sin tirones)
-    Tests/TestCloudFormation.cpp       # el UNICO test de formacion: la columna de aire (CloudColumn.h)
-    Tests/TestOcean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
-    Tests/TestShallowWater.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
-    Tests/TestTerrainNode.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)
+    tests/HarukaTests.cpp      # main() — selecciona/dirige
+    tests/TestCommon.cpp       # framework de aserciones compartido
+    tests/TestJobs.cpp         # pool central de trabajos (Core/Jobs)
+    tests/TestResourceStore.cpp # almacen de recursos CPU<->GPU (Renderer/ResourceStore)
+    tests/TestTerrain.cpp      # cube-sphere / climate / weather fronts / ground layer (CPU)
+    tests/TestPhysics.cpp      # caída radial + determinismo (sin GL)
+    tests/TestXPBD.cpp         # enganche de tela a un hueso (piel/membranas de criaturas)
+    tests/TestConstruction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
+    tests/TestPorts.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
+    tests/TestPrefab.cpp       # prefabricados: los cambios de UN conjunto no tocan el montaje
+    tests/TestPrimitives.cpp   # primitivas: ninguna cara bobinada al revés (una tapa invertida no da error, desaparece)
+    tests/TestDGS.cpp
+    tests/TestSimplePlanet.cpp         # SimplePlanet mesh & config
+    tests/TestTerrainQuality.cpp       # terrain quality → resolution mappings
+    tests/TestInput.cpp                 # acciones de entrada: teclado + mando en la misma accion
+    tests/TestDisplay.cpp               # selector de monitor: re-enumerar al enchufar, indice por pantalla
+    tests/TestSound.cpp                 # sonido: sintesis + puntos logicos agrupados (sin OpenAL)
+    tests/TestSkyAmbient.cpp           # ambiente SH: paridad con sky_palette.glsl + simetría
+    tests/TestProcGraph.cpp             # ProcGraph nodes, BiomeConfig, RGBAImage
+    tests/TestOrbit.cpp                 # órbitas Kepler con elementos precesantes
+    tests/TestImageWriter.cpp          # PNG: ida y vuelta + compresión DEFLATE
+    tests/TestPropLOD.cpp              # LOD de malla de props: envolvente estable
+    tests/TestPropCollider.cpp         # colliders de props por PARTE (esqueleto del arbol)
+    tests/TestRockInterior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
+    tests/TestCaves.cpp                 # cuevas: mapas en disco, conectividad garantizada, campo
+    tests/TestVoxWorld.cpp             # el mundo por chunks: sin costura, trazos de la partida
+    tests/TestIslands.cpp               # islas flotantes: roca AÑADIDA al mismo campo
+    tests/TestWeatherSevere.cpp        # tiempo adverso: severidad por condiciones + vortices (Rankine)
+    tests/TestCloudMotion.cpp          # frame a frame: la deriva integrada y el fundido de horneados (sin tirones)
+    tests/TestCloudFormation.cpp       # el UNICO test de formacion: la columna de aire (CloudColumn.h)
+    tests/TestOcean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
+    tests/TestShallowWater.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
+    tests/TestTerrainNode.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # TestDGS.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre
 # se propaga desde HarukaEngine (solo con HARUKA_NETWORK), así que se lo damos al test directamente.
@@ -80,7 +80,7 @@ add_test(NAME haruka_tests COMMAND haruka_tests)
 # cubemaps & samplers, y un ciclo completo del frame (acquire->clear->present: la cadena que
 # daba TDR en NVIDIA). Si no hay display, SDL_CreateWindow falla y el test se salta con "skip".
 add_executable(haruka_tests_rhi
-    Tests/RHITestMain.cpp)
+    tests/RHITestMain.cpp)
 target_link_libraries(haruka_tests_rhi PRIVATE HarukaEngine)
 set_target_properties(haruka_tests_rhi PROPERTIES
     BUILD_RPATH   "$ORIGIN"
@@ -127,9 +127,9 @@ find_program(HARUKA_DGS_VALIDADOR validador_node
 find_library(HARUKA_DGS_CLIENT_LIB dgs_client
              PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/build" NO_DEFAULT_PATH)
 if (HARUKA_DGS_VALIDADOR AND HARUKA_DGS_CLIENT_LIB)
-    add_executable(haruka_dgs_live Tests/DGSLiveTest.cpp)
+    add_executable(haruka_dgs_live tests/DGSLiveTest.cpp)
     target_include_directories(haruka_dgs_live PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/Src"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/../dgs"
         "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/include")
     target_link_libraries(haruka_dgs_live PRIVATE
@@ -149,3 +149,31 @@ else()
     message(STATUS "DGS vivo: sin validador_node -> el test cruzado NO se registra")
 endif()
 
+
+# --- PILOTO DE MÓDULOS C++20 (Haruka.Jobs) -----------------------------------------------------------
+# Mide si `import` funciona aquí antes de decidir nada para el motor. AISLADO: ni el motor ni el juego
+# lo usan, y Survival/el IDE (Makefiles) no lo ven — CMake solo construye módulos con Ninja.
+# `cmake_minimum_required` es 3.14, así que la política de escaneo de módulos (CMP0155) va en OLD: se
+# activa por objetivo con CXX_SCAN_FOR_MODULES.
+if(CMAKE_GENERATOR MATCHES "Ninja")
+    add_library(haruka_jobs_module STATIC)
+    target_sources(haruka_jobs_module PUBLIC
+        FILE_SET haruka_jobs_mod TYPE CXX_MODULES FILES src/Haruka/Core/Jobs/Jobs.cppm)
+    target_link_libraries(haruka_jobs_module PUBLIC HarukaEngine)
+    set_target_properties(haruka_jobs_module PROPERTIES CXX_SCAN_FOR_MODULES ON)
+
+    add_executable(haruka_module_pilot tests/ModulePilot.cpp)
+    target_link_libraries(haruka_module_pilot PRIVATE haruka_jobs_module)
+    set_target_properties(haruka_module_pilot PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    add_test(NAME haruka_module_pilot COMMAND haruka_module_pilot)
+
+    # CONTRAPRUEBA: usar algo NO exportado tiene que fallar al compilar.
+    add_executable(haruka_module_pilot_hidden EXCLUDE_FROM_ALL tests/ModulePilotHidden.cpp)
+    target_link_libraries(haruka_module_pilot_hidden PRIVATE haruka_jobs_module)
+    set_target_properties(haruka_module_pilot_hidden PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    add_test(NAME haruka_module_hidden
+             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target haruka_module_pilot_hidden)
+    set_tests_properties(haruka_module_hidden PROPERTIES WILL_FAIL TRUE)
+else()
+    message(STATUS "Piloto de modulos C++20: solo con Ninja (generador actual: ${CMAKE_GENERATOR})")
+endif()
