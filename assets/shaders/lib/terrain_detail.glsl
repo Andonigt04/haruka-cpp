@@ -1,5 +1,5 @@
 // ===========================================================================================
-// DETALLE FINO DEL TERRENO — gemelo GLSL de `src/core/planet/terrain_detail.h`.
+// DETALLE FINO DEL TERRENO — gemelo GLSL de `Src/Core/planet/terrain_detail.h`.
 //
 // La malla base tiene un vértice cada ~39 km. Todo lo que hay entre dos vértices lo pone esta
 // función: la evalúa la GPU por vértice teselado y la CPU por consulta, y **tiene que dar
@@ -244,14 +244,14 @@ float harukaTerrainDetailGrad(vec3 dir, float radius, float minFeatureM, out vec
 // la fila 0, longitud 0 en la columna central (gema de `equirectUV` de biome.frag y de la inversa
 // con la que se hornean los mapas, ver tools/gen_planet_zones.py). Es la proyección que rellena los
 // mapas, así que leer un mapa con ella devuelve el valor del punto correcto. La CPU tiene la gemela
-// exacta en terrain_detail.h.
+// exacta en TerrainDetail.h.
 vec2 harukaEquirectUV(vec3 dir) {
     vec3 d = normalize(dir);
     return vec2(0.5 + atan(d.z, d.x) * 0.1591549,
                 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.3183099);
 }
 
-// Bilineal A MANO del campo de altura horneado (R32F), gemela de la CPU en terrain_detail.h.
+// Bilineal A MANO del campo de altura horneado (R32F), gemela de la CPU en TerrainDetail.h.
 // Envuelve la longitud (borde ±π) y abraza los polos (la fila del polo se repite). texelFetch +
 // aritmética en el MISMO orden que C++, o el suelo que se pisa y el que se ve dejarían de coincidir
 // en centímetros: el bilineal del hardware usa pesos de precisión limitada (8 bits en varias GPU).

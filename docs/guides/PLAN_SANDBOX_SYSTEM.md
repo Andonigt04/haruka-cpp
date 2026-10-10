@@ -11,18 +11,18 @@
   sabe crearlos/destruirlos. Hoy los crea en `init()`; el sandbox los creará bajo demanda.
 - `getTerrainHeightAt(worldPos)` (engine) → raycast/colocación sobre el terreno.
 - `MotorInstance::getCamera()` → posición + frente para apuntar.
-- Input: `init.cpp` ya registra acciones y captura SDL en `gameOnEvent` (teclas +
+- Input: `Init.cpp` ya registra acciones y captura SDL en `gameOnEvent` (teclas +
   mouse-motion). Falta capturar BOTONES de ratón.
 - `WindField` (zonas) → modelo de datos ya listo para "pincelar" viento/tormentas.
 
 **NO reutilizable directamente:**
-- `game/spawn_system.h` (engine) es para spawn points de NPCs/respawn de gameplay
+- `Game/SpawnSystem.h` (engine) es para spawn points de NPCs/respawn de gameplay
   clásico, NO para colocación libre sandbox. Lo dejamos como está.
 
 ## 1. Arquitectura
 
 Una capa nueva en Survival: **`Sandbox`** (scripts/sandbox.{h,cpp}), poseída por
-`World` o por `init.cpp`. Responsabilidades:
+`World` o por `Init.cpp`. Responsabilidades:
 1. **Estado de herramienta**: qué va a colocar el jugador (enum `SandboxTool`).
 2. **Targeting**: dónde colocar → ray desde cámara, intersección con el terreno
    (marcha de rayo sobre `getTerrainHeightAt`, barato) → punto de colocación + un

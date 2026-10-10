@@ -60,7 +60,7 @@ void main()
     //        el jugador y el que dibuja el alambre de depuracion.
     //
     // ⚠️ `radM` es la distancia SOBRE LA SUPERFICIE desde el ancla, no la distancia a la camara:
-    // es lo que recibe `terrainTriM` en `world_system_provider.h`. Medirla desde el ojo daria un
+    // es lo que recibe `terrainTriM` en `WorldSystemProvider.h`. Medirla desde el ojo daria un
     // corte mas grueso del real en cuanto la camara se levanta del suelo.
     float cut = uProbe.x;
     if (uProbe.z > 0.0) {

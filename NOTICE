@@ -1,0 +1,22 @@
+Haruka Engine
+Copyright 2026 Andoni García Torres
+
+This product includes software developed as part of the Haruka Engine project
+(https://github.com/Andonigt04/haruka-cpp), created by Andoni García Torres.
+
+Under section 4(d) of the Apache License 2.0, any redistribution of this work or of a
+derivative work (including forks) must keep this NOTICE file, or reproduce its attribution
+notices, in the places the license describes.
+
+The Apache License 2.0 does not grant permission to use the name "Haruka" or any related
+trademarks (section 6). Forks are welcome; please give them their own name.
+
+Third-party components bundled in third_party/ and external/ keep their own licenses,
+which are found in each component:
+  - Dear ImGui (MIT)
+  - Jolt Physics (MIT)
+  - nlohmann/json (MIT)
+  - stb_image (MIT or public domain, at your choice)
+  - nativefiledialog (zlib)
+  - glad (generated OpenGL loader)
+  - DGS client (external/dgs)

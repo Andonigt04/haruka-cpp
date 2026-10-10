@@ -10,7 +10,7 @@ layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; lay
 layout(location = 5) out float vSurfKind;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
-    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver Planet.cpp)
 };
 // Campo base horneado (R32F, metros): la altura de la malla ya no viaja en el clima del vértice.
 layout(binding = 16) uniform sampler2D uHeightTex;
@@ -19,7 +19,7 @@ layout(std140, binding = 13) uniform ClipParams {
     vec4 uClipOrigin; vec4 uClipTanU; vec4 uClipTanV; vec4 uClipCover;
 };
 
-// El detalle fino sale de la librería COMPARTIDA con C++ (`terrain_detail.h`). Es lo que hace que
+// El detalle fino sale de la librería COMPARTIDA con C++ (`TerrainDetail.h`). Es lo que hace que
 // el suelo que se ve y el que se pisa sean el mismo: los dos evalúan la misma función, con las
 // mismas operaciones en el mismo orden.
 #include "lib/terrain_detail.glsl"
@@ -71,7 +71,7 @@ void main() {
     // se asoman por el sesgo de profundidad del clipmap y salen PINCOS a los pies — y pinta el suelo
     // dos veces (coste de fragmento). Se recorta la base dentro de la MISMA caja que cubre el clipmap
     // (±1984 m en el plano tangente de la cámara, con el MISMO marco tangente que calcula la CPU en
-    // planet.cpp). Los vértices recortados se salen del NDC → no se rasterizan, y se salta el detalle
+    // Planet.cpp). Los vértices recortados se salen del NDC → no se rasterizan, y se salta el detalle
     // (el muestreo de ruido caro) para ellos. La FÍSICA no recorta: sigue consultando el campo fino.
     vec3 rel = dir * baseR + uCenter.xyz;
     vec3 upv = normalize(-uCenter.xyz);
@@ -96,7 +96,7 @@ void main() {
         h = harukaTerrainDetailGrad(dir, baseR, triM, grad) * att;
         grad *= att;
         // La tierra nunca baja del nivel del mar: el océano es una esfera en R, y si el detalle
-        // hundiera el suelo en tierra, el agua lo taparía. Paridad con planet.cpp sampleHeight.
+        // hundiera el suelo en tierra, el agua lo taparía. Paridad con Planet.cpp sampleHeight.
         // Donde el recorte MUERDE, la superficie es plana → el gradiente también.
         if (baseH > 0.0 && h < -baseH) { h = -baseH; grad = vec3(0.0); }
     }

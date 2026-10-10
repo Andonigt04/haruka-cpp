@@ -1,5 +1,5 @@
 // ===========================================================================================
-// INVERSA cubo↔esfera — gemelo GLSL de `dirToCubeFaceClosed` en src/core/terrain/cube_sphere.cpp.
+// INVERSA cubo↔esfera — gemelo GLSL de `dirToCubeFaceClosed` en Src/Core/terrain/cube_sphere.cpp.
 //
 // La malla del planeta se construye recorriendo (lx,ly) en [-1,1] por cara y llamando a
 // `cubeFaceToDir`. Cualquier shader que quiera leer esa retícula desde una DIRECCIÓN tiene que
@@ -9,7 +9,7 @@
 // oceánico, con lo que la rejilla se hundía kilómetros y no se dibujaba ni un píxel. El síntoma no
 // era un error de GL ni un shader que no compila: era simplemente que no se veía nada.
 //
-// La derivación de la forma cerrada está en cube_sphere.h.
+// La derivación de la forma cerrada está en CubeSphere.h.
 // ⚠️ CUALQUIER CAMBIO VA EN LOS DOS FICHEROS A LA VEZ.
 // ===========================================================================================
 #ifndef HARUKA_CUBE_FACE_GLSL

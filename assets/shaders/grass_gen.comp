@@ -76,6 +76,10 @@ layout(std140, binding = 0) uniform GrassGen {
     // de terreno dejaría la brizna en el aire (el "campo" de altura del nodo SÍ sigue existiendo allí).
     mat4  uVoxCutSpace; // posición relativa al ojo → uv [0,1] de la ventana
     vec4  uVoxCutInfo;  // x = 1 si la ventana vale (0 = no hay campo: no se recorta nada)
+    // CRÁTERES (gemelo de `NodeCraters` de terrain_node.vert): dentro del cuenco no hay hierba.
+    ivec4 uCraterInfo;  // x = cuántos
+    vec4  uCraterC[32]; // xyz = centro relativo al ojo · w = radio (m)
+    vec4  uCraterU[32]; // xyz = vertical del cráter · w = hondo (m)
 };
 
 // Nodo hoja DIBUJADO cerca de la camara: gemelo de `GrassRenderer::NearNode`.
@@ -262,8 +266,17 @@ void main() {
     // ── LOD: ralea con la distancia; las que quedan se ensanchan ────────────────────────────────
     const float lodT  = clamp((dist - uLod.x) / max(uGrid.z - uLod.x, 1.0), 0.0, 1.0);
     const float keep  = mix(1.0, uLod.y, lodT);
-    if (!SKIP(4) && r2 > keep) return;
-    const float widen = min(1.0 / sqrt(max(keep, 0.02)), 3.5);   // la mata raleada se ensancha (tope x3,5)
+    // ── FUNDIDO DEL BORDE ───────────────────────────────────────────────────────────────────────
+    // La hierba densa es un SISTEMA aparte de las matas de props (GrassRenderer): sin esto, en
+    // `uGrid.z` la densidad caia del 10 % del LOD a CERO — ese "disco de 60 m" que se dibuja como
+    // una rotula alrededor del jugador, porque los props (matas/clumps) quedan ralos debajo. En el
+    // anillo exterior la densidad se apaga SUAVE hasta 0 (y la mata encoge); por debajo entran las
+    // matas/props/clumps, asi el horizonte deja de cortarse en disco.
+    const float fadeM    = min(18.0, uGrid.z * 0.30);
+    const float edgeFade = smoothstep(0.0, 1.0, clamp((uGrid.z - dist) / max(fadeM, 0.5), 0.0, 1.0));
+    const float keepEdge = keep * edgeFade;
+    if (!SKIP(4) && r2 > keepEdge) return;
+    const float widen = min(1.0 / sqrt(max(keepEdge, 0.05)), 3.5);   // la mata raleada se ensancha (tope x3,5)
     // Los 4 planos del frustum (con 0,6 m de margen: la mata mide 0,26 m y se ensancha): lo que
     // no cabe en la IMAGEN no se escribe. El cono del descarte temprano sobra por las esquinas.
     if (!SKIP(11) && dist > 3.0) {
@@ -280,9 +293,17 @@ void main() {
         const bool dentro = cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0;
         if (dentro && textureLod(uVoxCut, cuv, 0.0).r > 0.5) { if (!SKIP(12)) return; }
     }
+    // CRÁTERES: una explosión deja tierra desnuda, y la brizna está a la cota de ANTES (el mapa del
+    // nodo no sabe del cuenco): quedaría en el aire. Misma distancia horizontal que el vértice.
+    for (int ci = 0; ci < uCraterInfo.x; ++ci) {
+        const vec3 q  = pos - uCraterC[ci].xyz;
+        const vec3 hq = q - uCraterU[ci].xyz * dot(q, uCraterU[ci].xyz);
+        if (dot(hq, hq) < uCraterC[ci].w * uCraterC[ci].w) return;
+    }
     const uint slot = atomicAdd(instanceCount, 1u);
     if (slot >= uBlades.length()) return;
-    const float height = uLod.z * (0.6 + 0.8 * harukaHash01(hc, k, 6u)) * mix(1.0, 0.85, lodT);
+    const float height = uLod.z * (0.6 + 0.8 * harukaHash01(hc, k, 6u))
+                       * mix(1.0, 0.85, lodT) * (0.6 + 0.4 * edgeFade);   // la mata encoge en el fundido
     // up.w empaqueta el hash (fase de viento, matiz) y la anchura relativa: 16 bits cada uno.
     const uint hash16  = harukaHashU(hc + k * 0x27d4eb2fu) & 0xFFFFu;
     const uint width16 = uint(clamp(widen / 4.0, 0.0, 1.0) * 65535.0);

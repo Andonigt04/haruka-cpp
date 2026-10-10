@@ -2,7 +2,7 @@
 // MATERIALES DEL TERRENO — definición ÚNICA, compartida por los dos shaders de terreno.
 //
 // La incluyen `planet.frag` (terreno V3 por chunks) y el shader inline del SimplePlanet
-// (`kBiomeFragSrc` en planetary_system.cpp). Antes cada uno tenía su copia del mismo look y
+// (`kBiomeFragSrc` en PlanetarySystem.cpp). Antes cada uno tenía su copia del mismo look y
 // cualquier ajuste había que hacerlo dos veces — la misma clase de duplicación que en este motor
 // ya produjo "tres suelos distintos" y "dos climas describiendo el mismo planeta". Si el color de
 // un bioma se ve distinto en el terreno de cerca y en el planeta de lejos, es que alguien tocó
@@ -36,9 +36,9 @@
 #define MAX_TERRAIN_MATERIALS 16
 
 // `f` = banda de ALTURA en km: (elevMin, elevMax, elevFeather, libre). Gemelo de `GpuMat` en
-// planet.cpp — si uno crece y el otro no, el UBO se desalinea y TODOS los materiales salen mal.
+// Planet.cpp — si uno crece y el otro no, el UBO se desalinea y TODOS los materiales salen mal.
 // `g` = banda de PROFUNDIDAD en km: (depthMin, depthMax, depthFeather, libre). Los ESTRATOS.
-// ⚠️ GEMELO EXACTO de `GpuMat` en planet.cpp. Es std140: un vec4 de diferencia entre los dos
+// ⚠️ GEMELO EXACTO de `GpuMat` en Planet.cpp. Es std140: un vec4 de diferencia entre los dos
 // desalinea TODOS los materiales del UBO, no solo el campo nuevo.
 struct TerrainMat { vec4 a; vec4 b; vec4 c; vec4 d; vec4 e; vec4 f; vec4 g; };
 
@@ -84,7 +84,7 @@ bool harukaHasZone(int i) { return mod(uMat[i].d.w, 2.0) >= 1.0; }
  */
 bool harukaIsWaterMat(int i) { return mod(floor(uMat[i].d.w / 2.0), 2.0) >= 1.0; }
 
-/** @brief ¿Es LECHO (la roca de debajo) en vez de cobertura? — flags bit2. Ver `terrain_strata.h`. */
+/** @brief ¿Es LECHO (la roca de debajo) en vez de cobertura? — flags bit2. Ver `TerrainStrata.h`. */
 bool harukaIsBedrock(int i) { return mod(floor(uMat[i].d.w / 4.0), 2.0) >= 1.0; }
 
 /**
@@ -105,7 +105,7 @@ bool harukaIsBedrock(int i) { return mod(floor(uMat[i].d.w / 4.0), 2.0) >= 1.0; 
  * mar promediados hasta en el desierto — y la textura se la llevaba el primero declarado en caso de
  * empate, así que reordenar la escena cambiaba el planeta.
  *
- * Ahora hay dos concursos cortos y separados por `role` (ver `terrain_strata.h`): uno entre lechos y
+ * Ahora hay dos concursos cortos y separados por `role` (ver `TerrainStrata.h`): uno entre lechos y
  * otro entre coberturas. Nada se promedia entre grupos; se MEZCLAN por el espesor del manto, que
  * sale de la física del sitio (pendiente, humedad, cuenca) y no de una regla de arte.
  *

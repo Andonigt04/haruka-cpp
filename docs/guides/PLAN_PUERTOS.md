@@ -19,7 +19,7 @@
 ## §1 — ESTADO ACTUAL: el hueco
 
 Hoy los sockets se **derivan del AABB**: los centros de cara de la caja envolvente
-(`Survival/scripts/build_system.cpp:240`, y así está apuntado en [[PLAN_CONSTRUCCION.md]] —
+(`Survival/Scripts/BuildSystem.cpp:240`, y así está apuntado en [[PLAN_CONSTRUCCION.md]] —
 *"Sockets/SNAP derivados del AABB"*).
 
 Eso vale para muros y bloques. **No puede valer** para nada de lo que ya está diseñado:
@@ -189,7 +189,7 @@ Un puerto `cls="interact"` es donde vive un panel (asiento de piloto, manómetro
 
 **HECHO (2026-08-15):**
 
-1. ✅ **`Port` + `Rail` + serialización** — `src/game/ports/port.{h,cpp}`. Registro por assetId,
+1. ✅ **`Port` + `Rail` + serialización** — `Src/Haruka/Game/Ports/port.{h,cpp}`. Registro por assetId,
    `portWorld`/`railAxisWorld`, `portAccepts`, `raycastPorts`, `railClamp`/`railBreaks`/`railStep`,
    ida y vuelta por JSON y carga de directorio con **orden estable** (`directory_iterator` no lo
    garantiza y el registro acabaría dependiendo del sistema de ficheros).
@@ -199,7 +199,7 @@ Un puerto `cls="interact"` es donde vive un panel (asiento de piloto, manómetro
    (volumen, anclaje, estanqueidad), luego lo que se arregla añadiendo una pieza. Así el motivo que
    se le enseña al jugador es el **de fondo**, no el primero del struct.
 
-**Tests** (`tests/test_ports.cpp` en el motor, `Survival/tests/test_placement.cpp` en el proyecto),
+**Tests** (`Tests/TestPorts.cpp` en el motor, `Survival/Tests/TestPlacement.cpp` en el proyecto),
 todos con **contraprueba** — un test que solo comprueba que algo "no peta" no distingue una
 implementación buena de una que devuelve siempre lo mismo:
 
@@ -208,11 +208,11 @@ implementación buena de una que devuelve siempre lo mismo:
 - `portAccepts` rechaza talla mayor, otro `kind` y los puertos de interacción.
 - El raíl **BLOQUEA** cuando la resistencia supera el motor y **ROMPE** cuando supera `breakForce`,
   y una vez roto no vuelve a obedecer. Es exactamente lo que una animación no sabe hacer.
-- Contra Jolt (`test_physics.cpp`): el motor **llega** al objetivo (44,8° de 45°), el tope **acota**
+- Contra Jolt (`TestPhysics.cpp`): el motor **llega** al objetivo (44,8° de 45°), el tope **acota**
   lo que se pide de más **y se llega a él** (89,7° al pedir 500° — sin esa segunda mitad, un raíl que
   no se moviera pasaría el test), sin motor **no se mueve sola**, con más carga que par **se queda a
   medias y lo reporta**, y por encima de `breakForce` **cede y ya no obedece**.
-- Enganches (`Survival/tests/test_sockets.cpp`): **las dos mitades por separado** — sin `PortSet`
+- Enganches (`Survival/Tests/TestSockets.cpp`): **las dos mitades por separado** — sin `PortSet`
   salen los cinco centros de cara de siempre (si solo se probara el caso autorizado, un
   `pieceSockets` que ignorase el AABB pasaría igual, y eso sería la regresión); con `PortSet` mandan
   los puertos y el AABB **no se mezcla**; el socket inferior **mira hacia abajo**, que es justo lo
@@ -223,7 +223,7 @@ implementación buena de una que devuelve siempre lo mismo:
   (contraprueba de que `canPlace` no rechaza por costumbre).
 
 3. ✅ **Puente a Jolt** — `PhysicsEngine::addRail/railSetTarget/railGet/removeRail` con
-   `RailSpec`/`RailInfo` (`src/physics/physics_engine.h`). ⚠️ `HarukaPhysics` no puede depender de
+   `RailSpec`/`RailInfo` (`Src/Haruka/Physics/PhysicsEngine.h`). ⚠️ `HarukaPhysics` no puede depender de
    `game/`, así que la especificación se repite en la frontera de la librería a propósito.
 
    **Cuatro cosas que solo aparecen al atarlo de verdad** (todas comentadas en el código):
@@ -256,7 +256,7 @@ implementación buena de una que devuelve siempre lo mismo:
      se cae al respaldo: caerse convertiría una decisión deliberada en un despiste.
    - **Convenio de la normal**: el **+Y local** del puerto. Es el mismo eje de referencia que ya usa
      la construcción (`glm::rotation({0,1,0}, up)`).
-   - Los `PortSet` se cargan en `init.cpp` desde `assets/data/ports/`. La carpeta puede no existir.
+   - Los `PortSet` se cargan en `Init.cpp` desde `assets/data/ports/`. La carpeta puede no existir.
    - Primer asset autorizado: `stone_column.json` — una columna quiere apilarse **por arriba y por
      abajo y no por los lados**, y la derivación del AABB da exactamente lo contrario (arriba y los
      cuatro laterales, ninguno abajo). Es el caso donde la diferencia se ve.

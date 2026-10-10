@@ -2,7 +2,7 @@
 layout(location = 0) in vec3 vNorm; layout(location = 1) in vec3 vFragPos; layout(location = 2) in vec3 vColor; layout(location = 3) in vec2 vUv;
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
-    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver Planet.cpp)
 };
 layout(location = 0) out vec4 fragColor;
 void main() {

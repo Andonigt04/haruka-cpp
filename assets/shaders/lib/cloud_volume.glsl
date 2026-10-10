@@ -23,7 +23,7 @@
 #ifndef HARUKA_CLOUD_VOLUME_GLSL
 #define HARUKA_CLOUD_VOLUME_GLSL
 
-// Bordes de la losa, en fracción del grosor. GEMELOS de los de weather_system.cpp.
+// Bordes de la losa, en fracción del grosor. GEMELOS de los de WeatherSystem.cpp.
 // La base es un plano bastante definido (el nivel de condensación es una cota, y por eso todas las
 // nubes de un cielo tienen la panza a la misma altura); el techo se desfleca.
 // ⚠️ BASE PLANA, TECHO REDONDO. Eran 0,28 / 0,62: la nube entraba en 670 m y se deshilachaba desde

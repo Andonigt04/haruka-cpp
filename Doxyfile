@@ -12,11 +12,11 @@ CREATE_SUBDIRS         = YES
 #---------------------------------------------------------------------------
 # Input
 #---------------------------------------------------------------------------
-INPUT                  = src shaders README.md docs/guides
+INPUT                  = Src shaders README.md docs/guides
 FILE_PATTERNS          = *.h *.hpp *.cpp *.vert *.frag *.comp *.geom *.md
 EXTENSION_MAPPING      = vert=C frag=C comp=C geom=C
 RECURSIVE              = YES
-EXCLUDE                = src/core/json.hpp
+EXCLUDE                = Src/Haruka/Core/json.hpp
 EXCLUDE_PATTERNS       = */third_party/*
 
 #--------------------------------------------------------------------------
@@ -68,7 +68,7 @@ TREEVIEW_WIDTH         = 250
 USE_MATHJAX            = NO
 
 #---------------------------------------------------------------------------
-# XML output (lo consume tools/doc_flow.py para el arbol de ejecucion)
+# XML output (lo consume Tools/doc_flow.py para el arbol de ejecucion)
 #---------------------------------------------------------------------------
 GENERATE_XML           = YES
 XML_OUTPUT             = xml

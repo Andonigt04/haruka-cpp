@@ -15,7 +15,7 @@ project(HarukaEngine VERSION ${VERSION})
 include(cmake/HarukaVersion.cmake)
 
 set(OpenGL_GL_PREFERENCE GLVND)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # --- Como se compila: tipo de build, HARUKA_BUILD_TESTS, -ffp-contract, HARUKA_ARCH, sanitizadores ---
@@ -30,13 +30,13 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 # --- 1/2/3. Dependencias del sistema, header-only y fuentes de terceros ---
 include(cmake/HarukaDependencies.cmake)
 
-# --- 3b. Modulos (MODULES=1011...) -> HARUKA_MOD_* y src/core/modules.h ---
+# --- 3b. Modulos (MODULES=1011...) -> HARUKA_MOD_* y Src/Haruka/Core/Modules.h ---
 include(cmake/HarukaModules.cmake)
 
 # Collect sources, then drop the ones belonging to OFF modules.
-file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "Src/*.cpp")
 
-# --- src/main.cpp FUERA de la librería compartida -------------------------------------------
+# --- Src/Haruka/Main.cpp FUERA de la librería compartida -------------------------------------------
 # Es el `main()` del runtime antiguo (arrancar el motor a pelo desde un project.hrk). El glob lo
 # metía en libHarukaEngine.so, así que la .so EXPORTABA el símbolo `main`:
 #     $ nm -D build/libHarukaEngine.so | grep -w main
@@ -44,51 +44,51 @@ file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS "src/*.cpp")
 # No rompía nada —el ejecutable del juego define el suyo y el símbolo fuerte del ejecutable gana—
 # pero un `main` público en una librería compartida es una colisión esperando a pasar. Ningún
 # add_executable lo usa: el punto de entrada vivo es el del juego.
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Src/Haruka/Main\\.cpp$")
 
 # --- HarukaPhysics: la física en su PROPIA librería, SIN GL ---------------------------------
 # Motivo: pasarla al DGS (servidor autoritativo) y validar el movimiento con el MISMO código en
-# cliente y servidor. La física solo depende de glm + IWorldProvider (ver src/physics/world_provider.h);
+# cliente y servidor. La física solo depende de glm + IWorldProvider (ver Src/Haruka/Physics/WorldProvider.h);
 # no toca renderer, SDL ni assets. `octree` es su broad-phase (GL-free, solo lo usa la física).
 # El engine EXCLUYE estas fuentes y linka HarukaPhysics.
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/octree\\.cpp$")
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/physics_engine\\.cpp$")
-set(PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/physics/octree.cpp")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/Octree\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/PhysicsEngine\\.cpp$")
+set(PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Physics/Octree.cpp")
 if(HARUKA_MOD_PHYSICS)
-    list(APPEND PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/physics/physics_engine.cpp")
+    list(APPEND PHYSICS_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Physics/PhysicsEngine.cpp")
 endif()
 add_library(HarukaPhysics STATIC ${PHYSICS_SOURCES})
 target_include_directories(HarukaPhysics PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}")
 set_target_properties(HarukaPhysics PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
 
 # --- HarukaConstruction: el núcleo del sistema de construcción, GL-free y FUERA de físicas ----
 # El sistema de construcción NO es física: es lógica de VALIDACIÓN determinista de colocación (OBB SAT
 # + terreno vía IWorldProvider). Vive en game/construction, GL-free y PIC, en su PROPIA lib para que
 # el cliente prediga y el DGS valide con el MISMO código. No cuelga de HarukaPhysics (no es física).
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "game/construction/construction\\.cpp$")
-add_library(HarukaConstruction STATIC "${CMAKE_CURRENT_SOURCE_DIR}/src/game/construction/construction.cpp")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Game/Construction/Construction\\.cpp$")
+add_library(HarukaConstruction STATIC "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Game/Construction/Construction.cpp")
 target_include_directories(HarukaConstruction PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}")
 set_target_properties(HarukaConstruction PROPERTIES POSITION_INDEPENDENT_CODE ON)  # para el .so del DGS
 
 # Per-module source patterns to exclude when the module is OFF.
 if(NOT HARUKA_MOD_SOFTBODY)
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/xpbd/.*\\.cpp$")
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/softbody_renderer\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/XPBD/.*\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Renderer/SoftbodyRenderer\\.cpp$")
 endif()
 if(NOT HARUKA_MOD_FLUIDS)
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "physics/fluid/.*\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Physics/Fluid/.*\\.cpp$")
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/shallow_water_renderer\\.cpp$")
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/fluid_renderer\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Renderer/FluidRenderer\\.cpp$")
 endif()
 if(NOT HARUKA_MOD_AUDIO)
     list(FILTER ENGINE_SOURCES EXCLUDE REGEX "audio/.*\\.cpp$")
 endif()
-# (physics_engine.cpp / octree.cpp los gestiona el target HarukaPhysics — ver arriba. El gating de
+# (PhysicsEngine.cpp / Octree.cpp los gestiona el target HarukaPhysics — ver arriba. El gating de
 #  PHYSICS off ya se aplica allí: sin PHYSICS, HarukaPhysics contiene solo octree.)
 if(NOT HARUKA_MOD_PARTICLES)
-    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "renderer/particle_system\\.cpp$")
+    list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Renderer/ParticleSystem\\.cpp$")
 endif()
 
 # --- Módulo de reglas DGS (ABI dgs_game_module_v1) — se compila como .so APARTE (dlopen) -------
@@ -96,12 +96,12 @@ endif()
 # cliente para predicción y el host/DGS para validar. Es GL-FREE: solo el ABI + el sampler de terreno
 # CPU (haruka_simbase) + HarukaPhysics. Para el DGS real cargaría con dlopen; en LOCAL, el host de la
 # partida lo usa igual. No lo linka el motor (se excluye de ENGINE_SOURCES).
-list(FILTER ENGINE_SOURCES EXCLUDE REGEX "net/default_rules\\.cpp$")
+list(FILTER ENGINE_SOURCES EXCLUDE REGEX "Network/DefaultRules\\.cpp$")
 
 # haruka_simbase: el sampler de terreno CPU (sin GL) que el módulo necesita para validar contra el
 # suelo. Mismas fuentes que usa el engine, aquí en una lib GL-free reusable por el .so de reglas.
 add_library(haruka_simbase STATIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/world/planet/planet_geology.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Planet/PlanetGeology.cpp"
     # El cubo↔esfera, que el servidor necesita para hablar de direcciones en la misma retícula que
     # el cliente.
     #
@@ -110,35 +110,35 @@ add_library(haruka_simbase STATIC
     # devolvía 0.0, así que lo que compartían era un cero. Retirada; el problema que describía ese
     # comentario SIGUE ABIERTO —el DGS valida contra el nivel del mar— y el arreglo real es que el
     # servidor reproduzca el bake de altura, no una clase que devuelve constantes.
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/world/terrain/cube_sphere.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Terrain/CubeSphere.cpp"
     # EL CLIMA (frentes deterministas). GL-free y aquí, no solo en el motor, por el mismo motivo
     # que la superficie de referencia: el servidor tiene que poder ver LA MISMA tormenta que el
     # cliente para validarla. Es una funcion pura de (seed, tiempo, direccion) → replicarla solo
     # exige compartir el reloj.
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/world/weather_system.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/world/noise_generator.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/WeatherSystem.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/NoiseGenerator.cpp")
 target_include_directories(haruka_simbase PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
 target_link_libraries(haruka_simbase PUBLIC HarukaPhysics HarukaConstruction)
 set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # haruka_rules.so: el módulo por defecto (dgs_game_module_v1). GL-free.
 #
-# ⚠️ `logger.cpp` VA AQUÍ, y no es un detalle de compilación: sin él el `.so` queda con
+# ⚠️ `Logger.cpp` VA AQUÍ, y no es un detalle de compilación: sin él el `.so` queda con
 # `Haruka::diagLogs()` y `Haruka::log(...)` SIN RESOLVER —los usa por `HARUKA_LOGI`/`HARUKA_LOGW`— y
 # `dlopen` FALLA en cualquier proceso que no tenga ya el motor cargado. O sea: en un `validador_node`
 # headless, que es el único sitio donde este módulo tiene sentido. El nodo no se cae; dice
 # "sin modulo de reglas -> fallback generico" y sigue con su regla propia, así que **el anti-cheat del
 # juego no se estaba aplicando en despliegue** y nada lo delataba.
 #
-# No lo veía ningún test: `tests/test_dgs.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
+# No lo veía ningún test: `Tests/TestDGS.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
 # motor, así que el símbolo aparecía por la puerta de atrás. Lo destapó `dgs_live_terrain`, que carga
 # el módulo desde el nodo de verdad.
 add_library(haruka_rules SHARED
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/net/default_rules.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/core/logger.cpp")
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Network/DefaultRules.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/Core/Logger.cpp")
 target_include_directories(haruka_rules PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src" "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs"
     "${GLM_INCLUDE_DIR}" "${NLOHMANN_JSON_INCLUDE_DIR}")
 target_link_libraries(haruka_rules PRIVATE haruka_simbase HarukaPhysics)
 
@@ -155,7 +155,7 @@ add_dependencies(HarukaEngine haruka_version)   # version.h fresco antes de comp
 
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/Src"
     "${NLOHMANN_JSON_INCLUDE_DIR}"
     "${GLM_INCLUDE_DIR}"
     "${STB_INCLUDE_DIR}"
@@ -164,6 +164,11 @@ target_include_directories(HarukaEngine PUBLIC
     "${THIRD_PARTY_DIR}/imgui/backends"
     "${THIRD_PARTY_DIR}/nativefiledialog/src/include"
 )
+
+# C++26 va PUBLIC: las cabeceras del motor lo exigen (p. ej. `std::atomic<std::shared_ptr>` en
+# Planet.h, que no existe antes de C++20). CMAKE_CXX_STANDARD solo fija ESTE proyecto; un consumidor
+# con el suyo en 17 (el IDE `haruka`) incluía Planet.h en 17 y no compilaba.
+target_compile_features(HarukaEngine PUBLIC cxx_std_26)
 
 # zstd for save/asset compression (codec). System lib via pkg-config, fallback to find_library.
 pkg_check_modules(ZSTD libzstd)
@@ -212,7 +217,7 @@ endif()
 include(cmake/HarukaShaders.cmake)
 
 # --- 6a. mapc: map compiler tool (.scene -> .hmap) ---
-add_executable(mapc tools/mapc.cpp)
+add_executable(mapc Tools/Mapc.cpp)
 target_link_libraries(mapc PRIVATE HarukaEngine)
 set_target_properties(mapc PROPERTIES
     BUILD_RPATH   "$ORIGIN"
@@ -244,8 +249,8 @@ if(HARUKA_MOD_PHYSICS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/JoltPh
     target_compile_options(Jolt PRIVATE -Os -g0)
 
     # Fase 1: HarukaPhysics ENVUELVE a Jolt (PIMPL) → el juego nunca ve Jolt. PRIVATE = encapsulado;
-    # las include-dirs llegan a physics_engine.cpp y los símbolos se enlazan en el consumidor final.
-    # HARUKA_HAS_JOLT activa el camino Jolt en physics_engine.cpp (si no, cae al solver a mano).
+    # las include-dirs llegan a PhysicsEngine.cpp y los símbolos se enlazan en el consumidor final.
+    # HARUKA_HAS_JOLT activa el camino Jolt en PhysicsEngine.cpp (si no, cae al solver a mano).
     target_link_libraries(HarukaPhysics PRIVATE Jolt)
     target_compile_definitions(HarukaPhysics PRIVATE HARUKA_HAS_JOLT)
 endif()
@@ -303,7 +308,7 @@ if(PROJECT_IS_TOP_LEVEL)
         LIBRARY DESTINATION "bin"
         RUNTIME DESTINATION "bin")
 
-    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/"
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Src/"
         DESTINATION "lib64/haruka-cpp"
         FILES_MATCHING
         PATTERN "*.h"

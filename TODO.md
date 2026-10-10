@@ -69,21 +69,21 @@ ahora dice **dónde** está el peor vértice, no solo cuánto.
 | # | Bug | Dónde |
 |---|---|---|
 | 1 | **SSAO es un HUECO**: el ajuste viaja al shader pero no hay pase que genere la oclusión. Implementar o quitar el ajuste — hoy promete algo que no ocurre. | `settings` → `final.frag` |
-| 2 | **Render targets estáticos**: `bloom` / `ssao` / `hdr` se crean con tamaño FIJO y no siguen el resize de ventana. | `application_render.cpp` |
-| 3 | **Objetos de escena sin LOD ni cull**: full detalle a cualquier distancia (solo hay un corte por distancia). Con el instancing ya migrado, toca darles cull + LOD. | `application_render.cpp` |
-| 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `src/rhi/` |
+| 2 | **Render targets estáticos**: `bloom` / `ssao` / `hdr` se crean con tamaño FIJO y no siguen el resize de ventana. | `ApplicationRender.cpp` |
+| 3 | **Objetos de escena sin LOD ni cull**: full detalle a cualquier distancia (solo hay un corte por distancia). Con el instancing ya migrado, toca darles cull + LOD. | `ApplicationRender.cpp` |
+| 4 | **Memory leaks / dangling refs en RHI**: sin auditar. Handles que se crean y nunca se destruyen, y punteros a recursos que sobreviven al `Device`. | `Src/Haruka/RHI/` |
 | ~~5~~ | ✅ **ARREGLADO (2026-08-24)**: `preview.vert` borrado. Nadie lo referenciaba — `preview.frag` sí se usa, pero pareado con `simple.vert`. | — |
 | 5-viejo | **`preview.vert` es código muerto** y además declara un `PerObjectData` DESACTUALIZADO (sin los campos de material). Nadie lo compila hoy; el día que alguien lo use, falla al LINKAR sin decir por qué. Borrarlo o actualizarlo. | `assets/shaders/preview.vert` |
-| 7 | **Nadie fija la raíz de assets salvo el editor**: `Shader::setBaseDir` no lo llama ni el motor ni Survival, así que ambos dependen de que el cwd sea el del ejecutable. El editor ya la deriva de `SDL_GetBasePath`; el resto sigue a merced de desde dónde se lance. | `renderer/shader.h` |
-| ~~9~~ | ✅ **NO EXISTIA (2026-08-24).** "En OpenGL un compute no puede muestrear texturas" fue un hecho durante una sesión entera: el generador devolvía 0,00 en los 16 641 téxeles y el terreno salía sin continentes. **Falso.** Todos los síntomas venían de una **fence que faltaba DESPUÉS de `copyBuffer`**: se leía el destino a medio llenar y se interpretaba como que el shader había calculado mal. En Vulkan no se notaba, así que parecía un fallo del backend de GL. Era del banco. Arreglado con `copyThenWait` en los tres tests que lo tenían. | `tests/rhi_test_main.cpp` |
+| 7 | **Nadie fija la raíz de assets salvo el editor**: `Shader::setBaseDir` no lo llama ni el motor ni Survival, así que ambos dependen de que el cwd sea el del ejecutable. El editor ya la deriva de `SDL_GetBasePath`; el resto sigue a merced de desde dónde se lance. | `Renderer/Shader.h` |
+| ~~9~~ | ✅ **NO EXISTIA (2026-08-24).** "En OpenGL un compute no puede muestrear texturas" fue un hecho durante una sesión entera: el generador devolvía 0,00 en los 16 641 téxeles y el terreno salía sin continentes. **Falso.** Todos los síntomas venían de una **fence que faltaba DESPUÉS de `copyBuffer`**: se leía el destino a medio llenar y se interpretaba como que el shader había calculado mal. En Vulkan no se notaba, así que parecía un fallo del backend de GL. Era del banco. Arreglado con `copyThenWait` en los tres tests que lo tenían. | `Tests/RHITestMain.cpp` |
 | ~~9b~~ | ✅ **TAMPOCO EXISTIA**: los 399,59 m de divergencia GL↔Vulkan en `testTerrainNodeRender` eran la MISMA fence. Con ella, GL da 0,0204 m. | — |
-| 14 | ⚠️ **El contrato de `copyBuffer` + `mappedData` no está documentado en el RHI**, y no esperar no da error: da datos a medio llenar. Debería exigir la fence en la firma, o hacerla dentro. Tres tests cayeron en lo mismo. | `src/rhi/rhi_device.h` |
-| 10 | **Un render target offscreen deja el backend movido.** `testTerrainNodeShadeCost` es el único test que dibuja a un target propio, y tras él falla el siguiente que lee píxeles del framebuffer por defecto. NO lo explican ni el viewport (`beginRenderPass` lo restaura), ni destruir el target, ni un frame de restauración explícito. Mitigado poniéndolo EL ÚLTIMO del banco — mientras siga así, nadie puede añadir un test detrás sin comprobar que no hereda basura. | `src/rhi/` |
-| 11 | **`readPixels` solo sabe leer del framebuffer por defecto.** No hay forma de leer un render target offscreen, así que cualquier test que dibuje a 1080p tiene que hacer su contraprueba en la ventana. | `rhi_device.h` |
-| ~~12~~ | ✅ **ARREGLADO (2026-08-24)**: el comentario cita ahora los nueve shaders que de verdad leen el binding 16. | `src/game/planet.cpp` |
-| 13 | ✅ **ARREGLADO, y encontrado de camino**: `HARUKA_GL_SPIRV` **solo sabía encender**. Con `=0` caía al camino automático, que enciende SPIR-V en cualquier GL 4.6 — así que un experimento que creía comparar "con SPIR-V / sin SPIR-V" comparaba SPIR-V consigo mismo, y me dio por descartada una hipótesis correcta. | `src/rhi/opengl/gl_device.cpp` |
-| ~~8~~ | ✅ **ARREGLADO (2026-08-24)**: el clear usa un gris azulado DECLARADO cuando no hay planeta activo, en vez del ~0,005 que devuelve `getSkyColor` para el espacio. Con planeta no cambia nada. | `application_render.cpp` |
-| 8-viejo | **El clear del frame usa el color de cielo aunque no haya cielo**: sin planeta activo `getSkyColor` devuelve 0.005 → un viewport casi negro que parece roto. Para el editor conviene un fondo neutro declarado, no el del espacio. | `application_render.cpp` |
+| 14 | ⚠️ **El contrato de `copyBuffer` + `mappedData` no está documentado en el RHI**, y no esperar no da error: da datos a medio llenar. Debería exigir la fence en la firma, o hacerla dentro. Tres tests cayeron en lo mismo. | `Src/Haruka/RHI/RHIDevice.h` |
+| 10 | **Un render target offscreen deja el backend movido.** `testTerrainNodeShadeCost` es el único test que dibuja a un target propio, y tras él falla el siguiente que lee píxeles del framebuffer por defecto. NO lo explican ni el viewport (`beginRenderPass` lo restaura), ni destruir el target, ni un frame de restauración explícito. Mitigado poniéndolo EL ÚLTIMO del banco — mientras siga así, nadie puede añadir un test detrás sin comprobar que no hereda basura. | `Src/Haruka/RHI/` |
+| 11 | **`readPixels` solo sabe leer del framebuffer por defecto.** No hay forma de leer un render target offscreen, así que cualquier test que dibuje a 1080p tiene que hacer su contraprueba en la ventana. | `RHIDevice.h` |
+| ~~12~~ | ✅ **ARREGLADO (2026-08-24)**: el comentario cita ahora los nueve shaders que de verdad leen el binding 16. | `Src/Haruka/Game/planet.cpp` |
+| 13 | ✅ **ARREGLADO, y encontrado de camino**: `HARUKA_GL_SPIRV` **solo sabía encender**. Con `=0` caía al camino automático, que enciende SPIR-V en cualquier GL 4.6 — así que un experimento que creía comparar "con SPIR-V / sin SPIR-V" comparaba SPIR-V consigo mismo, y me dio por descartada una hipótesis correcta. | `Src/Haruka/RHI/OpenGL/GLDevice.cpp` |
+| ~~8~~ | ✅ **ARREGLADO (2026-08-24)**: el clear usa un gris azulado DECLARADO cuando no hay planeta activo, en vez del ~0,005 que devuelve `getSkyColor` para el espacio. Con planeta no cambia nada. | `ApplicationRender.cpp` |
+| 8-viejo | **El clear del frame usa el color de cielo aunque no haya cielo**: sin planeta activo `getSkyColor` devuelve 0.005 → un viewport casi negro que parece roto. Para el editor conviene un fondo neutro declarado, no el del espacio. | `ApplicationRender.cpp` |
 
 ⚠️ **Sobre el bug 5 y cualquier cambio al UBO per-object**: un bloque `uniform` debe declararse
 **IDÉNTICO en todas las etapas del mismo programa**. Declararlo con menos campos en una de ellas da
@@ -160,7 +160,7 @@ quieto sobre terreno llano (`HARUKA_DIAG=1`):
     onGround=1 · v radial -83.4 m/s · v TANGENCIAL 0.005 m/s      ← ≈ -10 m/s por segundo
 
 `CharacterVirtual` **no devuelve la velocidad cancelada por el contacto** (no es un rígido), y
-`physics_engine.cpp` integraba `gvec * dt` en TODOS los pasos. A 83 m/s el personaje pide meterse
+`PhysicsEngine.cpp` integraba `gvec * dt` en TODOS los pasos. A 83 m/s el personaje pide meterse
 **1,3 m dentro del terreno cada frame** y la colisión lo expulsa: caro (pesado), inestable (el sentido
 de la expulsión depende de qué triángulos toque → "me redirige", "pisa un montículo") y errático con el
 paso de escalera. Los cuatro síntomas, una causa. La tangencial era 0,005 m/s: **no resbalaba**.
@@ -211,7 +211,7 @@ resolvía contra un pool que todavía no la tenía. Traza por frame del giro:
 Un destello de un frame, cada dos frames, mientras giras.
 
 **Dos arreglos, los dos medidos:**
-1. **Re-resolver tras generar**, en el mismo frame (`terrain_node_renderer.h`). 457 tapados → 0, y de
+1. **Re-resolver tras generar**, en el mismo frame (`TerrainNodeRenderer.h`). 457 tapados → 0, y de
    regalo el conjunto dibujado baja de 499 a 252 instancias: los ancestros gordos ya no se emiten.
 2. **`nodeCoveredMask`** deja el conjunto como una PARTICIÓN (solo los maximales) para cuando el
    presupuesto no dé de sí. No abre agujeros —lo que se quita estaba tapado por algo que sigue— y **no
@@ -436,11 +436,11 @@ que se vea bien y sea el default definitivo"*.
 
 ### 🔴 EN CURSO — Vulkan bien visto y por defecto (2026-08-26)
 
-**Primera pista, y encaja con `vulkan-is-opengl-assumed`**: `camera.cpp` compensa el eje Y de Vulkan
+**Primera pista, y encaja con `vulkan-is-opengl-assumed`**: `Camera.cpp` compensa el eje Y de Vulkan
 con `p[1][1] = -f` (invertir el VIEWPORT se probo y rompe el post: espeja los quads a pantalla
 completa y con el bloom iterando cambia la PARIDAD de espejados). Pero invertir la PROYECCION **espeja
 la geometria 3D**, y con ella el bobinado efectivo que ve el rasterizador — mientras
-`vk_pipeline.cpp` declara `VK_FRONT_FACE_COUNTER_CLOCKWISE` **siempre**.
+`VKPipeline.cpp` declara `VK_FRONT_FACE_COUNTER_CLOCKWISE` **siempre**.
 
 Hipotesis: para geometria 3D, Vulkan deberia tratar como frontal el bobinado CONTRARIO al de GL. Eso
 explicaria exactamente lo unico que esta medido de este fallo:
@@ -521,7 +521,7 @@ medida anterior mentia:
 2. **La captura del juego va DESPUES del present.** `readPixels` copia la ultima imagen PRESENTADA;
    llamarlo a mitad de frame devolvia en Vulkan algo que no era la escena: daba los MISMOS valores con
    el Sol en cualquier sitio y hasta con el terreno apagado (`cambia 0,0` contra `355,8` en GL). Es la
-   regla que el banco de RHI ya documentaba y que `application.cpp` no seguia.
+   regla que el banco de RHI ya documentaba y que `Application.cpp` no seguia.
 3. **El volcado invertia las filas siempre** (convenio de GL), asi que la captura de Vulkan salia boca
    abajo. Ahora el orden depende del backend.
 
@@ -771,7 +771,7 @@ las dos imagenes**. Por eso una diferencia asi podia estar a la vista y pasar po
     OpenGL   99,8 % de los pixeles cambian al encender el sombreado
     Vulkan   48,8 %                     <- misma escena, mismo test, la MITAD
 
-Añadido `compareBackends()` en `tests/rhi_test_main.cpp`: guarda la captura de cada backend bajo un
+Añadido `compareBackends()` en `Tests/RHITestMain.cpp`: guarda la captura de cada backend bajo un
 nombre y al terminar los dos las carea — % de pixeles distintos, |delta| medio, peor canal, **mapa
 ASCII de lo que dibuja CADA UNO** y del sitio donde difieren. La forma identifica la causa, que es la
 regla que ya cerro las "capas que tapan el terreno".
@@ -850,7 +850,7 @@ porque una simetrica saldria igual del derecho que del reves):
     careo: 98.1% vs 98.1% (diferencia 0.0 pts)
 
 **Y la trampa que solo aparecio al medir:** la primera version SI invertia la Y en la proyeccion para
-Vulkan, copiando lo que hace `camera.cpp`. Parece lo correcto y no lo es — aquello corrige la imagen que
+Vulkan, copiando lo que hace `Camera.cpp`. Parece lo correcto y no lo es — aquello corrige la imagen que
 se PRESENTA, y un icono es una textura que se MUESTREA: el tejel (0,0) ya es el de NDC y=-1 en GL y el
 de y=+1 en Vulkan, asi que el convenio ya esta en el destino e invertir ademas la proyeccion lo aplica
 DOS VECES. Con el flip la tinta caia en las filas 128..255 en GL y en las 0..127 en Vulkan (espejado, 0
@@ -870,7 +870,7 @@ Andoni sospechaba que era de ImGui y no de Vulkan, y acertaba. Es el detector de
 encendido por defecto (`imgui.h`, `ConfigDebugHighlightIdConflicts = true`).
 
 **Pero no podia venir del loading**, y eso descarto el sitio donde se estaba mirando: durante la carga
-`init.cpp` solo dibuja `g_loading.render()` y vuelve, y ahi dentro no hay UN SOLO widget con id —
+`Init.cpp` solo dibuja `g_loading.render()` y vuelve, y ahi dentro no hay UN SOLO widget con id —
 `TextColored` y `ProgressBar` se registran con id 0, que el detector ignora. Ademas el aviso solo salta
 **al pasar el raton por encima** de un item cuyo id comparten varios visibles (`imgui.cpp`: se compara
 contra `HoveredIdPreviousFrame`), asi que lo que se vio venia de otra pantalla — el menu, que es lo
@@ -920,9 +920,9 @@ prueba es exactamente ese: crear dos mundos seguidos sin cambiar el nombre.
 | A | ✅ **ARREGLADO** — **Las normales del vértice eran RADIALES, no del terreno**: `v.n = normalize(dir)`, o sea la normal de una esfera perfecta. Consecuencias: `slope = 1 - dot(n, up)` vale **0 en todo el planeta**, así que el material de roca (pendiente > 0.55) **no se puede seleccionar jamás**; y el relieve no existe en la iluminación — una cordillera se sombrea igual que una llanura. | Render de material: nunca aparece la capa `rock` salvo en el limbo |
 | B | **El terreno SUBMARINO se clasifica como tierra**: la humedad del vértice usa `ocean = elevKm < 0` → sobre océano vale **1.0**, y con temperatura cálida gana el material húmedo. El fondo oceánico entero sale de "pradera". Normalmente lo tapa la esfera de agua, pero el material no debería existir ahí. | ~80 % del disco visible clasificado como `green` |
 | 0 | ✅ **ARREGLADO** — **el planeta era 97 % océano.** Medido sobre el disco visible: solo el **3 %** está por encima del nivel del mar (la Tierra real: 29 %). Todo lo demás que se ve raro **se deriva de esto**: el fondo oceánico se clasifica con humedad 1.0 y temperatura media 4.2 °C → gana `taiga` en el 77 % de la superficie, y el planeta se lee como una bola azul-verdosa uniforme. No es un fallo de materiales ni de biomas: es la distribución de ELEVACIÓN o el nivel del mar. | `heightFn` / nivel del mar |
-| C' | ✅ **ARREGLADO** — **dos niveles del mar que no coincidían**: la clasificación usa `ocean = elevKm < 0` (nivel = `radius`) y la malla de agua se dibuja en `radius - 500`. 500 m de desacuerdo entre "aquí hay mar" y "aquí se dibuja mar". | `planetary_system.cpp` |
+| C' | ✅ **ARREGLADO** — **dos niveles del mar que no coincidían**: la clasificación usa `ocean = elevKm < 0` (nivel = `radius`) y la malla de agua se dibuja en `radius - 500`. 500 m de desacuerdo entre "aquí hay mar" y "aquí se dibuja mar". | `PlanetarySystem.cpp` |
 | C | **`ClimateOutput::humidity` devuelve 1.0 sobre océano** y eso entra en el mapa de biomas y en la selección de material. Es correcto como "el mar es la fuente", pero no como "aquí crece hierba": el fondo oceánico sigue clasificándose con un material de tierra, aunque ahora lo tape el agua. | mismo render |
-| ~~H~~ | ✅ **ERA UNA ENTRADA OBSOLETA (2026-08-24)**: `glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)` **sí se llama**, en `gl_device.cpp:375`. El grep que la abrió no lo encontró porque la llamada va tras `if (glad_glClipControl)` y el símbolo lleva el prefijo de glad. Lo que sí era un riesgo real: ese `if` fallaba **en silencio** si el driver no lo expone — modo degradado indistinguible de un bug. Ahora lo dice con un error explícito. |
+| ~~H~~ | ✅ **ERA UNA ENTRADA OBSOLETA (2026-08-24)**: `glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE)` **sí se llama**, en `GLDevice.cpp:375`. El grep que la abrió no lo encontró porque la llamada va tras `if (glad_glClipControl)` y el símbolo lleva el prefijo de glad. Lo que sí era un riesgo real: ese `if` fallaba **en silencio** si el driver no lo expone — modo degradado indistinguible de un bug. Ahora lo dice con un error explícito. |
 | I | **`tiling` se usaba INVERTIDO** (`wp = vFragPos * tiling` con un scale de 0.5 encima): con `tiling=100` daba un tile cada **2 cm**, muy por debajo del píxel, así que la textura se promediaba a gris plano. Es la razón de que el terreno se viera sin grano ni relieve por muchos PNG de 4096 que hubiera. ✅ ARREGLADO: `tiling` es metros por tile. | lectura del shader inline |
 | J | **La malla del SimplePlanet tiene un vértice cada ~39 km** (`faceRes=256` sobre 6371 km). A 2,5 km de altura estás sobre UN triángulo: no hay geometría que sombrear, así que el primer plano es plano por construcción. El detalle cercano es del terreno V3 por chunks (quadtree LOD), que existe y no está cableado para esta escena. | (π/2)·R/256 = 39 090 m |
 | G | **Manchas claras en el océano**, alargadas y de borde suave, en posición fija sobre el planeta. NO son el agua (siguen con `HARUKA_NOWATER=1`) y NO son la zona (el volcado del color leído del mapa sale limpio: solo los 5 colores de paleta, ice al 0.0 %). Están por tanto en el pipeline de color/iluminación posterior a la selección de material — el sospechoso es la modulación por macro-variación (`col *= 0.85 + 0.30 * macro.r`). | render 4096 con y sin agua |
@@ -931,7 +931,7 @@ prueba es exactamente ese: crear dos mundos seguidos sin cambiar el nombre.
 | F | **El umbral de roca (`slope > 0.55`) es inalcanzable en malla planetaria**: con ~39 km entre vértices la pendiente medida no pasa de 0.026, así que el material de roca nunca gana. El valor lo escribí pensando en terreno cercano. | medido: slope 0.0004–0.026 |
 
 ⚠️ **Trampa de la sonda, y cuesta caro**: `renderSimplePlanet` hay que llamarlo con la proyección
-**reversed-Z** del motor (`camera.cpp`, `near→1`, `∞→0`), no con `glm::perspective`. El pipeline
+**reversed-Z** del motor (`Camera.cpp`, `near→1`, `∞→0`), no con `glm::perspective`. El pipeline
 compara con GREATER y limpia depth a 0, así que una proyección normal **invierte el test** y se
 queda con lo más LEJANO. Varias medidas de esta sesión se hicieron así y hubo que repetirlas; las
 manchas claras (G) sobreviven a la corrección, o sea que son reales.
@@ -1043,22 +1043,22 @@ próximo síntoma raro en Vulkan, ESA es la primera pregunta: *¿qué está asum
 
 | Síntoma | Causa | Dónde |
 |---|---|---|
-| Con RenderDoc "carga OpenGL" | RenderDoc no soporta superficies Wayland → la ventana Vulkan no se crea y el motor abortaba. Reintento automático en x11 (XWayland) | `core/window.cpp` |
-| Captura en negro absoluto | 4 fallos: `image(0)` cableada · `oldLayout=UNDEFINED` (autoriza a DESCARTAR) · leía el frame EN CURSO · copia con tamaño de ventana → `DEVICE_LOST` | `vk_device.cpp` |
-| Colores intercambiados | swapchain `B8G8R8A8`, el llamador pide RGBA | `vk_device.cpp` |
-| Manchas blancas | bindings de GL son PEGAJOSOS; un descriptor set es una TABLA. Sombra de estado que se vuelca en cada set nuevo | `vk_context.cpp` |
+| Con RenderDoc "carga OpenGL" | RenderDoc no soporta superficies Wayland → la ventana Vulkan no se crea y el motor abortaba. Reintento automático en x11 (XWayland) | `Core/Window.cpp` |
+| Captura en negro absoluto | 4 fallos: `image(0)` cableada · `oldLayout=UNDEFINED` (autoriza a DESCARTAR) · leía el frame EN CURSO · copia con tamaño de ventana → `DEVICE_LOST` | `VKDevice.cpp` |
+| Colores intercambiados | swapchain `B8G8R8A8`, el llamador pide RGBA | `VKDevice.cpp` |
+| Manchas blancas | bindings de GL son PEGAJOSOS; un descriptor set es una TABLA. Sombra de estado que se vuelca en cada set nuevo | `VKContext.cpp` |
 | **Cerraba el programa** | `vkCmdDispatch` DENTRO de un render pass es ilegal (en GL es normal). Compute movido a `TerrestrialPlanet::prepare`, antes de abrir el pase | `game/planet.cpp` |
 | **MUNDO NEGRO** | el `loadOp` va HORNEADO en la render pass: `clearColor=false` limpiaba a negro igual, y el motor reabre el pase varias veces por frame → cada `begin` borraba lo anterior. 4 variantes por `(clearColor, clearDepth)` | `vk_device/vk_context` |
-| Frame fantasma | la variante LOAD declara `initialLayout=COLOR_ATTACHMENT`, pero esas texturas venían de ser MUESTREADAS. Transición antes de abrir el pase | `vk_context.cpp` |
-| Imagen repetida ×3 | el resize tomaba el tamaño LÓGICO; el swapchain usa PÍXELES | `application.cpp`, `window.cpp` |
-| **TERRENO EN EL CIELO** | origen del dominio de teselación: GL `lower-left`, Vulkan `upper-left` → `gl_TessCoord.y` invertido. Solo afecta a lo teselado | `vk_pipeline.cpp` |
-| Props grises | un sampler sin atar en GL lee negro; en Vulkan el descriptor es INDEFINIDO. Textura blanca 1x1 de relleno en todos los slots | `application_render.cpp` |
+| Frame fantasma | la variante LOAD declara `initialLayout=COLOR_ATTACHMENT`, pero esas texturas venían de ser MUESTREADAS. Transición antes de abrir el pase | `VKContext.cpp` |
+| Imagen repetida ×3 | el resize tomaba el tamaño LÓGICO; el swapchain usa PÍXELES | `Application.cpp`, `Window.cpp` |
+| **TERRENO EN EL CIELO** | origen del dominio de teselación: GL `lower-left`, Vulkan `upper-left` → `gl_TessCoord.y` invertido. Solo afecta a lo teselado | `VKPipeline.cpp` |
+| Props grises | un sampler sin atar en GL lee negro; en Vulkan el descriptor es INDEFINIDO. Textura blanca 1x1 de relleno en todos los slots | `ApplicationRender.cpp` |
 
 **Eje Y — se probó DOS veces y solo la segunda forma es la correcta.** La compensación estándar
 (altura de viewport NEGATIVA) **no sirve aquí**: afecta a TODOS los pases, y un pase de post-proceso
 dibuja un quad fullscreen muestreando una textura, así que lo espeja otra vez. Con el bloom iterando
 un número configurable de veces, la PARIDAD de espejados cambiaba y el frame salía derecho o del
-revés ALTERNANDO. Va en la PROYECCIÓN (`camera.cpp`: `p[1][1] = -f`), que solo toca lo que se
+revés ALTERNANDO. Va en la PROYECCIÓN (`Camera.cpp`: `p[1][1] = -f`), que solo toca lo que se
 proyecta y deja intactos los quads en NDC.
 
 ⚠️ **Y la trampa de método que costó una hora**: la inversión de Y se descartó al principio porque
@@ -1246,7 +1246,7 @@ píxel. Un raymarch recién escrito puede salir negro, invisible o costar el fra
   anime"*). Un volumen con autosombra no es lo mismo. Si no gusta, se decide a propósito.
 
 ✅ **Ya atado**: el perfil vertical estaba duplicado a mano entre C++ y GLSL. Ahora `kProfileRise`/
-`kProfileFall` viven en `weather_system.h` y el test `weather_3d` **lee
+`kProfileFall` viven en `WeatherSystem.h` y el test `weather_3d` **lee
 `lib/cloud_volume.glsl` y compara los números** (con contraprueba de que el lector distingue un
 valor distinto). Si divergen, el test cae.
 
@@ -1255,7 +1255,7 @@ valor distinto). Si divergen, el test cae.
 Los árboles del scatter global **no colisionaban ni se podían talar** desde que `gameOnInit` apagó
 el `ResourceSystem` del juego (`setGenerationEnabled(false)`): ese sistema era el único que llenaba
 `m_propsQuery`, y con él se fueron `registerPropColliders()` y `harvestAt()`. Ahora el collider sale
-del **esqueleto** del árbol (`treeSkeleton` en `tree_mesh.h` → `prop_collider.h`): tronco y cada rama
+del **esqueleto** del árbol (`treeSkeleton` en `TreeMesh.h` → `PropCollider.h`): tronco y cada rama
 por separado, con `partId` propio.
 
 **Lo que SÍ está medido** (no hace falta volver a mirarlo):
@@ -1497,8 +1497,8 @@ un backend nuevo da espuma rara, mirar aquí primero.
 
 | Qué | El número | La pregunta |
 |---|---|---|
-| **Escala de marea ×15** | `ocean_wave.h:167` multiplica el término P₂ por 15 → **5,6 m** de carrera de marea | La marea real de la Tierra en mar abierto son ~0,5 m; 5,6 m es la de un estuario. ¿Se queda por jugabilidad o baja a lo físico? |
-| **`buoyRatio = 1.1` a fuego** | `physics_engine.cpp:1422` — razón densidad agua/objeto, la MISMA para todo | Un tronco y una piedra flotan igual. ¿Va por material, por cuerpo, o se queda? |
+| **Escala de marea ×15** | `OceanWave.h:167` multiplica el término P₂ por 15 → **5,6 m** de carrera de marea | La marea real de la Tierra en mar abierto son ~0,5 m; 5,6 m es la de un estuario. ¿Se queda por jugabilidad o baja a lo físico? |
+| **`buoyRatio = 1.1` a fuego** | `PhysicsEngine.cpp:1422` — razón densidad agua/objeto, la MISMA para todo | Un tronco y una piedra flotan igual. ¿Va por material, por cuerpo, o se queda? |
 
 ## 🤔 Sin decidir (2026-08-18) — medido, esperando criterio
 
@@ -1508,7 +1508,7 @@ Hornearlo a la resolución de subida lo dejaría en <1 s (arranque ~6 s), a camb
 que el streaming futuro querría y de re-hornear al subir la calidad de terreno.
 
 **393 líneas de solver a mano** (`integrateForces`, `broadPhaseAABB`, `detectCollisions`,
-`resolveCollisions`, `resolveStaticCollisions`) = el **19 % de `physics_engine.cpp`**, alcanzables
+`resolveCollisions`, `resolveStaticCollisions`) = el **19 % de `PhysicsEngine.cpp`**, alcanzables
 solo con `HARUKA_JOLT=0`. No es código muerto por accidente, pero obliga a hacer cada cambio dos veces
 o se pudre en silencio — y Jolt cuesta 0,02 ms/frame.
 
@@ -1859,7 +1859,7 @@ el frame: 67-98 ms. Volcado de GPU (`HARUKA_PROF_LOG=120 HARUKA_NO_VSYNC=1`, cos
 **Qué había**: OpenAL con tonos procedurales y WAV, `playSound(pos)`/`addSource(pos)` con oclusión
 por pathfind, y NI UN asset de audio (assets/ no tiene carpeta de sonido). Nada sonaba en el mundo.
 
-**Qué hay** (`src/audio/`):
+**Qué hay** (`Src/Haruka/Audio/`):
 - `sound_synth.*`: 12 sonidos SINTETIZADOS al arrancar (bucles: viento en el oído, hojas, rompiente,
   chapoteo, sumergido; disparos: pisada hierba/arena/roca/nieve/agua, chapuzón, crujido). Ruido
   filtrado + envolvente con periodos enteros en el bucle + fundido cola→cabeza. ~3 MB PCM a 22 050 Hz.
@@ -1872,12 +1872,12 @@ por pathfind, y NI UN asset de audio (assets/ no tiene carpeta de sonido). Nada 
   en ningún sitio: ahora es AL_GAIN del listener) + `setSubmerged` (amortigua ×0,15). Ajuste nuevo
   `AmbientVolume` (panel, ini, `audio.ambient`).
 
-**Juego**: `scripts/world_sound.cpp` — viento en el oído (punto en la cámara, potencia por
+**Juego**: `Scripts/WorldSound.cpp` — viento en el oído (punto en la cámara, potencia por
 `windAt`, tono 0,85–1,15), cada árbol a < 120 m con hojas (no hierba/muerto/cactus) un punto
 en la copa (barrido cada 0,5 s), retícula polar 12×3 (18/40/90 m) de agua: rompiente por espuma
 y chapoteo por presencia, sumergido si la lámina tapa la cámara. `Player::updateSounds`: pisada
 por zancada (0,85 m) con material (charco/nieve/arena/hierba), chapuzón al cruzar la lámina.
-`init.cpp`: crujido DONDE se rompe la rama/tronco. Consola: `sonido`.
+`Init.cpp`: crujido DONDE se rompe la rama/tronco. Consola: `sonido`.
 
 **Medido** (`haruka_tests sonido`, 53 comprobaciones): costura de cada bucle ≤ p99 de saltos
 vecinos (y la contraprueba con un salto a mano la detecta); hojas 60 %+ de energía > 800 Hz,
@@ -1895,7 +1895,7 @@ sector la voz vieja y la nueva se solapan 100 ms con fases distintas del mismo b
 
 ## 21-09 — LOG LIMPIO (Andoni: «limpia los logs de terreno y del selector de GPU, la detección, etc.»)
 
-- El nivel por defecto del logger pasa de DEBUG a **INFO** (`logger.cpp`): las trazas `[DEBUG]`
+- El nivel por defecto del logger pasa de DEBUG a **INFO** (`Logger.cpp`): las trazas `[DEBUG]`
   (colliders de props, escalas, listas de GPU) salían en cada sesión. `HARUKA_LOG_LEVEL=debug` o
   `HARUKA_DIAG=1` las devuelven.
 - GPU: cuatro bloques (pre-resolución, lista del VK, lista de la aplicación, elegida) → **una línea**
@@ -1916,15 +1916,15 @@ sector la voz vieja y la nueva se solapan 100 ms con fases distintas del mismo b
 
 Plan acordado: `core/` = lo indispensable; `renderer/` = piezas + pases; `world/` (nueva) = planeta
 y lo que hay encima (hoy `core/terrain` + `core/planet` + `game/`); `physics/ audio/ net/ ui/ scene/`
-igual. Primero sacar los ★ de `application_render.cpp` sin mover ficheros; después UN commit de
+igual. Primero sacar los ★ de `ApplicationRender.cpp` sin mover ficheros; después UN commit de
 `git mv` a `world/`.
 
-**★ 1/5 hecho — props** (`src/world/props/prop_system.{h,cpp}`, 1 220 líneas): scatter global,
+**★ 1/5 hecho — props** (`Src/Haruka/World/Props/prop_system.{h,cpp}`, 1 220 líneas): scatter global,
 registro, mallas/materiales de prototipo, pase instanciado (cull, LOD, buckets), sombras, colliders
 por parte, `breakAt`, estado persistente. `Application` reenvía en una línea (`breakPropAt`,
 `propRegistry`, `serializePropState`…): Survival no cambia. `renderer/fallback_texture.*` para las
-texturas de relleno (las usan props y construcción). Cifras: `application_render.cpp` 4 751 → 3 500;
-`application.h` 1 025 → 885 (18 miembros `m_prop*` → 1 `m_props`). Los props tienen ahora SU
+texturas de relleno (las usan props y construcción). Cifras: `ApplicationRender.cpp` 4 751 → 3 500;
+`Application.h` 1 025 → 885 (18 miembros `m_prop*` → 1 `m_props`). Los props tienen ahora SU
 `GPUInstancing` (antes compartían el de construcción): +1,9 MB host, y `beginFrame` propio.
 
 **Sin verificar**: el juego no se ha lanzado con el corte (el banco RHI no tiene `Application`, así
@@ -1942,10 +1942,10 @@ y crea el target; `composite()` al final. `renderBloom`, `setupQuad`, `_postScen
 de props + el autotest contra la función de altura. Queda en Application `renderMaterialPreview`
 (102 líneas, editor: comparte los UBO de escena) y el diagnóstico de emisores.
 **★ 5/5 red** → `net/entity_sync.{h,cpp}`: crear/mover/caducar entidades remotas en la escena,
-`adoptWorldObject`, uuid local. `application_network.cpp` (126) se queda: son los reenvíos a
+`adoptWorldObject`, uuid local. `ApplicationNetwork.cpp` (126) se queda: son los reenvíos a
 `DGS::Client`. Compila a nada sin `HARUKA_NETWORK`.
 
-Cifras finales de la fase ★: `application_render.cpp` **4 751 → 2 024**, `application.h`
+Cifras finales de la fase ★: `ApplicationRender.cpp` **4 751 → 2 024**, `Application.h`
 **1 025 → 810**; `renderFrameContent` sigue en 1 380 líneas (cielo, escena, construcción, sombras,
 terreno, fluido, lluvia — la LISTA de pases todavía es esta función). Sin verificar en el juego
 (compila; `haruka_tests` 332 797 OK, `haruka_tests_rhi gl nube|hierba|agua` 219 OK).
@@ -1953,12 +1953,12 @@ terreno, fluido, lluvia — la LISTA de pases todavía es esta función). Sin ve
 **`git mv` a `world/` HECHO** (56 renombrados, en el índice; 95 ficheros con includes reescritos en
 motor, tests, Survival y el editor `haruka/`; CMake de `haruka_simbase` actualizado):
 ```
-src/world/            weather_system, world_system(_provider), cloud_column, cloud_motion, ground_layer, noise_generator
-src/world/planet/     planet, planetary_system, planet_fields, planet_geology, biomes, climate, geology, orbit, soi
-src/world/terrain/    terrain_node*, terrain_lod/grid/detail/material/strata/deform/sample, base_field, cube_sphere, bake_util
-src/world/water/      ocean_wave, water_fill
-src/world/vox/        vox_world, cave_system, island_system
-src/world/props/      prop_system, prop_*, zone_shape, instanced_object, prop_assembler, terrain_prop_field
+Src/Haruka/World/            weather_system, world_system(_provider), cloud_column, cloud_motion, ground_layer, noise_generator
+Src/Haruka/World/Planet/     planet, planetary_system, planet_fields, planet_geology, biomes, climate, geology, orbit, soi
+Src/Haruka/World/Terrain/    terrain_node*, terrain_lod/grid/detail/material/strata/deform/sample, base_field, cube_sphere, bake_util
+Src/Haruka/World/Water/      ocean_wave, water_fill
+Src/Haruka/World/Vox/        vox_world, cave_system, island_system
+Src/Haruka/World/Props/      prop_system, prop_*, zone_shape, instanced_object, prop_assembler, terrain_prop_field
 ```
 `core/` queda con lo indispensable (+ scene/, components/, cache/, sky_ambient, propagation);
 `game/` con character, spawn_system, construction/, inventory/, ports/, prefab/. Los renderers de
@@ -1978,15 +1978,15 @@ en el juego (compila; `gl nube|hierba` 147 OK). Convertir cada `pass*` en clase 
 nieve, viento, mojado y nieve acumulada integrados, aire — lo escribe sólo el cielo, lo leen
 lluvia/fluido/nubes/props/sombras; `getSnowAccum`/`getGroundWetness` reenvían),
 `renderer/shadow_pass` (sombra del sol + máscara cenital + `setGroundWet`; `skyMaskTexture()` para
-la lluvia, `shadowReady()` para el UBO) y `world/water/fluid_bridge` (las lambdas del `FluidHost`
-que capturaban `this`, ahora `[ps]`). `application_render.cpp` 2 024 → **1 650**; `application.h`
+la lluvia, `shadowReady()` para el UBO) y `World/Water/fluid_bridge` (las lambdas del `FluidHost`
+que capturaban `this`, ahora `[ps]`). `ApplicationRender.cpp` 2 024 → **1 650**; `Application.h`
 53 miembros. Compila motor y juego; `gl nube|hierba|agua` 219 OK; juego sin lanzar.
 **Y cuatro más** (Andoni: «sigue con el mover líneas»): `renderer/scene_pass` (objetos +
 construcción instanciada, 460 líneas; abre el pass sin clear y lo deja abierto para los props;
-`pso()`/`perObjectUBO()` para props y preview), `renderer/scene_ubo.h` (PerFrame/PerObject UBO +
-bits de material, compartidos), `world/vox/vox_system` (cuevas → Jolt + anillo del suelo cercano),
+`pso()`/`perObjectUBO()` para props y preview), `Renderer/SceneUBO.h` (PerFrame/PerObject UBO +
+bits de material, compartidos), `World/Vox/vox_system` (cuevas → Jolt + anillo del suelo cercano),
 `renderer/frame_lights` (sol, luna, ambiente SH → UBO y planeta; diagnóstico de estrellas). Se fue
-`_mainShader` (se creaba y nadie lo usaba). `application_render.cpp` **4 751 → 963**, `application.h`
+`_mainShader` (se creaba y nadie lo usaba). `ApplicationRender.cpp` **4 751 → 963**, `Application.h`
 171 → 48 miembros. Test `net_entity_visible` actualizado a la primitiva `CHARACTER`. Compila motor y
 juego; `haruka_tests` 332 805 OK; `gl nube|hierba|agua` 219 OK; juego sin lanzar.
 Queda en `Application` lo de la aplicación: `frameBegin` (tamaño, post, near, clear), el resto de

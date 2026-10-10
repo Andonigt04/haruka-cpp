@@ -28,7 +28,7 @@ golpe el campo de humedad y el de cobertura.
 target es un *renderbuffer* y no se puede muestrear: `getDepthTexture()` devuelve un handle INVÁLIDO,
 `bindTexture(0, ...)` no ata nada y en Vulkan un descriptor sin atar es INDEFINIDO. El shader leía
 basura como profundidad de escena, `min(tExit, sceneT)` dejaba el recorrido en nada y no se dibujaba
-nada. El cielo, que NO lee profundidad, se seguía viendo. En todo el motor solo `shadow.cpp` ponía
+nada. El cielo, que NO lee profundidad, se seguía viendo. En todo el motor solo `Shadow.cpp` ponía
 ese flag.
 
 ⚠️ **Por qué el banco decía que sí dibujaba (98,4 % del cuadro):** ataba al binding 0 una textura de
@@ -40,7 +40,7 @@ dibujando el 98,4 %, porque `bindTexture` con handle inválido deja **pegado lo 
 discriminante no era el conteo de píxeles sino `valid(getDepthTexture(...))`. Contar píxeles habría
 dado verde con el bug puesto.
 
-Arreglado en `application_render.cpp`: `dd.depthAsTexture = true`, más una comprobación que desactiva
+Arreglado en `ApplicationRender.cpp`: `dd.depthAsTexture = true`, más una comprobación que desactiva
 el pase con un aviso si el handle sale inválido, en vez de ocluir contra basura. Test nuevo (caso 6d
 de `cloud_volume_draws`) que monta el camino real: target de escena → `blitDepth` → copia → sampler.
 
@@ -95,9 +95,9 @@ umbral lo pasa hasta un alfa de 0,03, o sea que habría dado verde con la nube f
 
 ### Antes de las nubes, en la misma sesión
 
-- **El validador DGS camina el suelo del cliente.** `src/net/height_field.h` (nuevo): `HeightField`
+- **El validador DGS camina el suelo del cliente.** `Src/Haruka/Network/HeightField.h` (nuevo): `HeightField`
   sin dependencias de GL, gemelo exacto de `TerrestrialPlanet::sampleHeight`, con sidecar `.hfield`
-  escrito en `bakeHeightMap`. `default_rules.cpp` gana `currentField()`, `groundElevM()` y una
+  escrito en `bakeHeightMap`. `DefaultRules.cpp` gana `currentField()`, `groundElevM()` y una
   tolerancia de transporte derivada del **medio ulp del float** de la posición, no de una constante.
   ⚠️ El test que existía no probaba nada: su mundo "Tierra" tenía relieve cero, así que solo medía la
   constante vieja de −2,0 m. Reescrito situando al jugador RELATIVO al suelo calculado, con
@@ -149,7 +149,7 @@ Dos cosas nuevas para que no se repita:
 
 Los 6 de fp64 en Mesa por software no dicen nada del motor. Pero en AMD **el mismo fallo es el bug
 CRÍTICO del suelo** y tiene que seguir en rojo. Así que no se borra el test ni se le baja el umbral:
-`g_driverDefects` (en `rhi_test_main.cpp`) declara backend + subcadena del dispositivo + test + check
+`g_driverDefects` (en `RHITestMain.cpp`) declara backend + subcadena del dispositivo + test + check
 + **motivo obligatorio**, y sólo ahí cuenta como XFAIL.
 
 ⚠️ **La regla que hace que esto no se pudra: una entrada que NO llega a usarse en la tanda de su
@@ -195,7 +195,7 @@ hilos en 8 con 16 disponibles; lo subí a 32 y **no cambió nada** (bioma 22 s a
 sonda que faltaba lo zanjó: `height 18750x9375: muestreo 2475 ms (16 hilos) · guardar PNG 8704 ms`.
 **El 78 % era escribir**, y escribir iba en un solo hilo.
 
-`io/image_writer.cpp` ahora paraleliza las dos etapas:
+`IO/ImageWriter.cpp` ahora paraleliza las dos etapas:
 - **Filtrado de filas** por bandas. Cada fila depende solo de las filas `y` e `y-1` de la imagen
   ORIGINAL (no de las ya filtradas), así que no había cadena que romper.
 - **DEFLATE por trozos.** Cada hilo comprime su rango sin referencias LZ77 que crucen la frontera y
@@ -215,7 +215,7 @@ sacarlo a un hilo exige copiar los mapas (+700 MB de pico) para ahorrar 3,4 s.
 
 ### La ventana ya no se marca como "no responde"
 
-`core/progress_hook.h` (enganche global, vacío por defecto) + los dos bucles de horneado, que ya no
+`Core/ProgressHook.h` (enganche global, vacío por defecto) + los dos bucles de horneado, que ya no
 bloquean el hilo principal en `join`: esperan despiertos cada 30 ms sobre un contador atómico y vacían
 la cola de SDL. Coste medido: 14 649 ms frente a 14 789 ms — dentro del ruido.
 **Límite honesto:** la ventana NO se repinta; esto solo evita el "no responde".
@@ -258,7 +258,7 @@ sobreviven igual entre draws: destruir una malla dejaba un `VkBuffer` muerto y e
 ataba → `Invalid VkBuffer Object` y **SIGSEGV**. En GL es inofensivo. Lo dispara cualquier cosa que
 libere geometría con el streaming andando.
 
-⚠️ **HIPÓTESIS DESCARTADA, no volver a perseguirla.** `camera.cpp` niega `p[1][1]` en Vulkan y
+⚠️ **HIPÓTESIS DESCARTADA, no volver a perseguirla.** `Camera.cpp` niega `p[1][1]` en Vulkan y
 `frontFace` es la misma constante en los dos backends, así que parece que Vulkan debe descartar las
 caras al revés. **No lo hace**: la Y del clip invertida y el origen del framebuffer arriba se cancelan.
 Demostrado con `testCullWindingWithProjection`, que existe justamente para que nadie repita el
@@ -300,11 +300,11 @@ Suites al cerrar: motor **25922 OK · 0 fallos**; juego **53 + 43 + 35 + 24 + 23
 
 ### Añadido
 
-**Motor** — `game/ports/port.{h,cpp}`: puertos AUTORIZADOS en el asset (montaje + interacción) y
+**Motor** — `Game/Ports/port.{h,cpp}`: puertos AUTORIZADOS en el asset (montaje + interacción) y
 **raíles** (mecanismos con un grado de libertad), con puente a Jolt en `PhysicsEngine::addRail/
 railSetTarget/railGet/removeRail`. `RigidBody::Shape::Compound` (una caja por pieza → el vehículo
 tiene interior). `ConstructionState`: `JointKind::Mechanism`, `rigidIsland`, `islandMass`,
-`distancesFrom`. `game/prefab/prefab.{h,cpp}`. `HARUKA_LOGDIAG` + `HARUKA_DIAG`.
+`distancesFrom`. `Game/Prefab/prefab.{h,cpp}`. `HARUKA_LOGDIAG` + `HARUKA_DIAG`.
 Plan: `docs/guides/PLAN_PUERTOS.md`.
 
 **Editor** — paneles **Ports** y **Prefabs**, con gizmo de ImGuizmo sobre el puerto/pieza activa,
@@ -323,7 +323,7 @@ Diseño: `Survival/docs/VEHICULOS.md` (§1-§15).
 - **`glClearDepth` y reversed-Z.** El preview 3D del inventario no pintaba NADA: el motor usa
   reversed-Z (`CompareOp::Greater`) y deja `glClearDepth` en **0.0**; el preview limpiaba la
   profundidad heredando ese 0 y comparaba con `GL_LESS`. Ningún fragmento puede pasar `z < 0`, y el
-  clear de COLOR sí escribe → textura vacía **sin un solo error de GL**. `ui_world_panel.cpp:73` ya
+  clear de COLOR sí escribe → textura vacía **sin un solo error de GL**. `UIWorldPanel.cpp:73` ya
   ponía `glClearDepth(1.0)` por lo mismo. Costó cinco rondas porque el código no comprobaba NADA:
   ni compilación de shader, ni enlazado, ni completitud del FBO, ni `glGetError`.
   **Regla:** un render a textura NO debe heredar estado (scissor, máscaras, depth range, stencil,
@@ -521,9 +521,9 @@ paleta propia = lo que lo hace único (Genshin/SAO son mundos cerrados). Tablero
 Plan: `docs/guides/PLAN_CONSTRUCCION.md`. Estado F1 hecho (colocar/validar/preview una pieza). Siguiente:
 
 - **✅ ARQUITECTURA — construcción SACADA de físicas (2026-07-19).** `construction.{h,cpp}` movido a
-  `src/game/construction/` y a su **propia lib GL-free `HarukaConstruction`** (PIC), fuera de `HarukaPhysics`.
+  `Src/Haruka/Game/Construction/` y a su **propia lib GL-free `HarukaConstruction`** (PIC), fuera de `HarukaPhysics`.
   No es física: es **validación** determinista (para el DGS). La linkan `HarukaEngine` y `haruka_simbase`.
-  Verificado GL-free (`nm` sin GL/SDL) + 6/6 tests. Include: `"game/construction/construction.h"`.
+  Verificado GL-free (`nm` sin GL/SDL) + 6/6 tests. Include: `"Game/Construction/Construction.h"`.
 - **Kit de PIEZAS**: beams (vigas), paredes, suelo/techo, remates… Kit modular con SOCKETS/puntos de
   anclaje (no modelar 100 paredes: combinar ~15 piezas). AABB real del `.glb` para la colisión (hecho en F1b-3).
 - **F2 — PREFABS + FIJACIONES.** Además de beams sueltos, colocar un **suelo/estructura COMPLETO pre-hecho de

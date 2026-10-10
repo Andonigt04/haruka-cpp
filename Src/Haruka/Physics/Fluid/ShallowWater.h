@@ -1,0 +1,199 @@
+/**
+ * @file ShallowWater.h
+ * @brief Regional shallow-water simulation (Fase D): rivers, lakes, flooding.
+ *
+ * Uses the "virtual pipes" model (Mei et al., "Fast Hydraulic Erosion Simulation
+ * and Visualization on GPU", 2007): a 2D grid of water columns connected to their
+ * 4 neighbours by pipes. Flux is driven by the difference in TOTAL height
+ * (terrain + water); flux is clamped so a cell never drains more water than it
+ * holds, which makes the scheme unconditionally mass-conserving.
+ *
+ * The grid is a flat tangent patch anchored near the player. At regional scale
+ * (tens–hundreds of metres) planet curvature is negligible, so a flat grid over
+ * the real sampled terrain height is accurate and cheap. Designed CPU-first with
+ * flat arrays (SoA) so it can move to a compute shader later unchanged.
+ */
+#pragma once
+
+#include <glm/glm.hpp>
+#include <vector>
+#include <functional>
+
+namespace Haruka::fluid {
+
+class ShallowWaterSim {
+public:
+    /**
+     * @brief Builds the grid and samples terrain.
+     * @param anchor   world-space center of the patch
+     * @param tangent  unit vector along the grid +X axis (in the tangent plane)
+     * @param bitangent unit vector along the grid +Z axis
+     * @param up       surface normal (terrain sampled along this axis)
+     * @param spanM    patch side length in metres
+     * @param n        cells per side (grid is n×n)
+     * @param terrainHeight  callback: world pos → terrain elevation along `up`
+     *                       (metres). Same source the renderer/collision use.
+     */
+    /// @param bakedWaterLevel  cota de la lámina HORNEADA con el planeta (m sobre el nivel del mar),
+    ///        o `nullptr`. Ver la nota de `seedLakes`: con este campo, la siembra deja de depender
+    ///        del BORDE del parche, que es lo que hacía aparecer un lago al caminar.
+    /// @param bedRoughness  `n` de Manning del LECHO en un punto del mundo (ver `manningForBiome`),
+    ///        o `nullptr` = 0,03 en todo el parche (hierba corta). Se muestrea UNA vez por celda al
+    ///        construir, igual que el terreno: la fricción es del sitio, no del parche.
+    void init(const glm::dvec3& anchor,
+              const glm::dvec3& tangent,
+              const glm::dvec3& bitangent,
+              const glm::dvec3& up,
+              double spanM, int n,
+              std::function<double(const glm::dvec3&)> terrainHeight,
+              std::function<double(const glm::dvec3&)> bakedWaterLevel = nullptr,
+              std::function<double(const glm::dvec3&)> bedRoughness = nullptr);
+
+    /** @brief Advances the simulation by dt seconds (sub-stepped internally for CFL). */
+    void step(float dt);
+
+    /** @brief Llena las hondonadas del parche hasta su punto de derrame (priority-flood).
+     *
+     *  La llama `init` tras muestrear el terreno. Sin esto la simulación arranca SECA y no hay lagos
+     *  ni ríos: las únicas fuentes eran la lluvia y el rellenado costero, así que el sistema era un
+     *  acumulador de lluvia. Ver la nota larga de la implementación (incluida su limitación: el
+     *  resultado depende del borde del parche). */
+    void seedLakes();
+
+    /** @brief Adds water depth (m) at a grid cell (sources: springs, rain). */
+    void addWater(int i, int j, float depth);
+
+    /** @brief Adds uniform rain (m of depth per call) across the whole patch. */
+    void addRain(float depth);
+
+    /**
+     * @brief EL CICLO: quita lámina de las celdas mojadas — evaporación (vuelve al aire) e
+     *        infiltración (se la traga el suelo) — sin bajar nunca del nivel HORNEADO del mundo
+     *        (`m_baseWater`: mar y lagos son del mundo, lo que se va es lo que llovió).
+     * @param evapM   metros de lámina que evaporan en este paso (ya multiplicado por dt)
+     * @param infilM  metros que se infiltran en este paso
+     * @return metros CÚBICOS evaporados (lo que sube a la humedad del clima), no los infiltrados.
+     *
+     * Sin esto el parche era un acumulador: la lluvia sumaba y nadie restaba, y con un temporal el
+     * jugador acababa dentro de un bloque de agua de 420 m ("se acumulará infinitamente").
+     */
+    double drain(float evapM, float infilM);
+    /** @brief Metros cúbicos de agua de LLUVIA en el parche (por encima del nivel horneado). */
+    double dynamicVolumeM3() const;
+
+    /** @brief Adds a circular spring at world position (radius in m, rate m/s). */
+    void addSpringWorld(const glm::dvec3& worldPos, float radiusM, float ratePerSec, float dt);
+
+    /**
+     * @brief Pours a volume (m³) of water into the cell nearest a world position.
+     * Used by the hybrid coupler to absorb PBF particles into the heightfield
+     * (cascade → lake), conserving mass. Returns false if the point is off-grid.
+     */
+    bool addVolumeAtWorld(const glm::dvec3& worldPos, float volumeM3);
+
+    /** @brief True if the world position projects inside this patch. */
+    bool containsWorld(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief Water surface height (terrain + water, up-relative metres) at the
+     * grid cell nearest a world position. Returns -1e9 if off-grid.
+     */
+    float surfaceAlongUpAtWorld(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief Lámina de agua (m) en la celda más cercana a una posición del mundo; -1 si cae fuera.
+     *
+     * La contraparte de `surfaceAlongUpAtWorld` para cuando lo que interesa es el AGUA y no la
+     * superficie. Comparar dos parches por la superficie mezcla agua y relieve: dos rejillas
+     * desplazadas muestrean el terreno en puntos distintos, y en pendiente esa diferencia es mucho
+     * mayor que cualquier lámina. La profundidad vale 0 en seco caiga donde caiga la celda.
+     */
+    float waterAtWorld(const glm::dvec3& worldPos) const;
+
+    /**
+     * @brief Clamps coastal water to the sea level so rivers meet the ocean
+     * without piling up. seaLevelAlongUp is the ocean surface height measured in
+     * the same up-relative frame as the terrain (metres). Cells whose terrain is
+     * at/below sea level have their water surface pinned to it.
+     */
+    void applySeaLevel(float seaLevelAlongUp);
+
+    int   size() const { return m_n; }
+    float cellSize() const { return (float)m_dx; }
+    double totalWater() const; // sum of depth*cellArea (m³), for mass checks
+    /** @brief true si la malla está lista para render/step: grid > 1 y arrays CPU dimensionados. */
+    bool valid() const { return m_n > 1 && m_terrain.size() >= size_t(m_n) * (size_t)m_n
+                                        && m_water.size()  >= size_t(m_n) * (size_t)m_n; }
+
+    // --- Accessors for rendering ---
+    float terrainAt(int i, int j) const { return m_terrain[idx(i,j)]; }
+    float waterAt(int i, int j)   const { return m_water[idx(i,j)]; }
+    /** @brief `n` de Manning del lecho de la celda (ver `init`). */
+    float roughnessAt(int i, int j) const { return m_manning[idx(i,j)]; }
+    /// Escala de velocidad SUB-CELDA a la que se evalúa la ley de Manning como mínimo (m/s): la
+    /// velocidad media de una celda de 4,4 m no ve los remolinos que disipan. Ver `substep`.
+    static constexpr float kTurbU0 = 2.0f;
+    /**
+     * @brief FETCH de la celda: diámetro equivalente (m) de la masa de agua conexa a la que
+     *        pertenece, 0 en seco. Es lo que le dice al oleaje cuánta ola puede sostener ESTE charco.
+     *
+     * ⚠️ Sin esto el parche recibía el swell del océano entero: fuera del lago horneado y de la
+     * ventana, el fetch del punto era "ilimitado" (`harukaWaterFetchAt`), y un charco de lluvia de
+     * 30 cm oscilaba 0,33 m en horizontal sobre celdas de 4,4 m — 40 veces lo que le toca a una
+     * masa de 20 m (medido con `oceanDisplacement`, viento 4 m/s). Eso era "el agua dinámica
+     * palpita". Se recalcula en cada `step` (BFS sobre 96², ~9 k celdas: microsegundos).
+     */
+    float fetchAt(int i, int j) const { return m_fetch.empty() ? 0.0f : m_fetch[idx(i,j)]; }
+    /** @brief Recalcula `fetchAt` para el estado actual (lo llama `step`; expuesto para los tests). */
+    void computeFetch();
+    glm::dvec3 worldPosAt(int i, int j) const;
+    bool  hasWaterAt(int i, int j, float eps = 0.02f) const { return m_water[idx(i,j)] > eps; }
+
+    const glm::dvec3& anchor() const { return m_anchor; }
+    const glm::dvec3& up()     const { return m_up; }
+    /** @brief Ejes del parche en el plano tangente. Los necesita el render del AGUA para llevar una
+     *  dirección del planeta a la celda (i,j) — ver `TerrestrialPlanet::setInlandWater`. */
+    const glm::dvec3& tangent()   const { return m_tan; }
+    const glm::dvec3& bitangent() const { return m_bit; }
+    // F5.3: último nivel del mar aplicado (up-relativo). El render salta las celdas cuya
+    // SUPERFICIE (terreno+agua) está a/bajo este nivel → esas las dibuja el océano (sin doble lámina).
+    float seaLevelAlongUp() const { return m_seaLevelAlongUp; }
+    float surfaceAt(int i, int j) const { return m_terrain[idx(i,j)] + m_water[idx(i,j)]; }
+
+    /** @brief One overflow point: a wet cell spilling over a steep terrain drop. */
+    struct Overflow {
+        glm::dvec3 worldPos;   // world position of the spilling cell surface
+        glm::dvec3 flowDir;    // unit world direction of the spill (downhill)
+        float      rate;       // spill volume rate proxy (m³/s)
+        float      drop;       // terrain height drop over the edge (m)
+    };
+    /**
+     * @brief Finds cells whose water spills over a steep edge (waterfall sources).
+     * A cell qualifies when it holds water AND a 4-neighbour has a terrain drop
+     * greater than dropThresh metres. Used by the hybrid coupler to spawn PBF
+     * cascade particles (lake overflow → waterfall). Cheap: one grid pass.
+     */
+    void collectOverflowEdges(float dropThresh, std::vector<Overflow>& out) const;
+
+private:
+    int idx(int i, int j) const { return j * m_n + i; }
+    void substep(float dt);
+
+    int    m_n = 0;
+    double m_dx = 1.0;
+    double m_span = 0.0;
+    glm::dvec3 m_anchor{0.0}, m_tan{1,0,0}, m_bit{0,0,1}, m_up{0,1,0};
+
+    float  m_seaLevelAlongUp = -1e9f; // F5.3: nivel del mar aplicado (-1e9 = sin océano acoplado)
+    std::vector<float> m_terrain;  // elevation (m) along up at each cell
+    std::vector<float> m_water;
+    // water depth (m)
+    std::vector<float> m_baseWater;   ///< lámina HORNEADA por celda (mar/lagos del mundo): el suelo del ciclo
+    std::vector<float> m_manning;     ///< `n` de Manning del lecho por celda (ver `init`)
+    std::vector<float> m_fetch;       ///< diámetro de la masa conexa por celda (m), 0 en seco
+    std::vector<int>   m_fetchLabel;  ///< scratch del BFS de `computeFetch`
+    // Outgoing flux per cell to L,R,B,T neighbours (m³/s-ish, pipe model units).
+    std::vector<float> m_fL, m_fR, m_fB, m_fT;
+};
+
+} // namespace Haruka::fluid

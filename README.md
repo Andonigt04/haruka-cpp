@@ -1,380 +1,280 @@
-# HarukaEngine (v1.0.0)
+# Haruka Engine
 
-## 🚧 Work in Progress / Active Development
+A C++26 real-time engine for **seamless planetary-scale worlds**: you can orbit a planet at its real
+size, fly down and walk on it without loading screens. It ships as a shared library
+(`libHarukaEngine.so`) and renders through **OpenGL 4.6** or **Vulkan**.
 
-**C++17 / OpenGL 4.6** real-time 3D engine for space exploration, planetary terrain generation, and game development.
+> **Status: active development.** The engine runs end to end, but parts of it are still being
+> rebuilt. The [test status](#test-status) section lists what passes, what fails and why. Nothing
+> in this README is a promise beyond what those tests show.
 
-Distributed as a shared library (`libHarukaEngine.so`) with integrated asset pipeline, physics engine, and procedural world generation.
-
-<img src="image.png" />
-
-## ✨ What makes Haruka unique
-
-Most engines render a *level*. Haruka renders a **solar system at true scale** and lets you walk on it — the same code path takes you from orbiting a star to a pebble at your feet, with no loading screens and no fake skybox.
-
-- **🪐 Real-scale planets, centimetre agreement.** Earth sits ~1 AU (1.5×10¹¹ m) from the sun at its real radius (6 371 km). Rendering is **camera-relative double precision**: the world is re-centred on the camera every frame so GPU floats never lose precision, no matter how far from the origin you are. You can fly from interplanetary space down to the grass without a seam — and within the play radius, **what you see and what you collide with agree to 0.3 mm** (measured, see [Terrain status](#-terrain-status)).
-
-- **⚡ GPU-compute terrain, streamed grueso→fino.** The planetary heightfield is generated on the **GPU via compute shaders** and harvested **asynchronously with GL fences** — the CPU never blocks on the GPU. Chunk vertex directions are **derived on the GPU** (not built and uploaded), the readback lands in **persistently-mapped buffers**, and the copy + mesh assembly happen on **worker threads**. A cube-sphere **quadtree LOD** streams chunks **progressively coarse→fine**: a node only subdivides once its parent is resident, so you **never see a black hole** while detail loads.
-
-- **🌋 Terrain by process, not by noise.** Elevation isn't a noise formula — it's the **output of a simulation** run once per seed: **plate tectonics** (Voronoi plates, noise-warped boundaries, convergence → orogeny, continental margins) feeds **hydrology and erosion** (priority-flood lakes, D8 flow accumulation, stream-power incision, thermal talus), and that in turn drives **climate** (temperature by latitude + lapse rate, humidity advected from the sea with **orographic rain shadow**). The eroded field is the **single source of truth**, shared by the terrain compute shader, the physics sampler, the water shader and prop placement — so mountains have *drainage*, rivers run *downhill into* lakes, deserts sit *behind* mountain ranges, and the coast is simply where elevation = 0.
-
-- **🧭 One ground, not three.** The surface the game runs on is the **reference surface** (`reference_surface.h`): the terrain sampled on the *same vertex lattice the renderer draws*, with the same bilinear filter. Physics, props, scripts, tests and the renderer all read it. It is **GL-free** and lives in `haruka_simbase`, so the authoritative server can evaluate the exact ground the client walks on. Before it there were three different "grounds" and you could watch the player fall through one of them. *(During the terrain **v4** rewrite the reference surface's sampled height is a flat-sphere fallback; it is re-parited against the new clipmap when v4 lands — see [Terrain status](#-terrain-status).)*
-
-- **🌗 Movable celestial bodies.** Planets and moons **orbit** (day/night from the sun, moonlight, sun–moon tides). Terrain chunks are stored **planet-local**, so a body can move every frame **without regenerating a single chunk**. Moons, gas giants and home worlds are declared entirely in the **scene file** (a `terran` / `moon` / `gas` generation profile), not in game code.
-
-- **🌦️ Weather as world state.** Fronts with position and drift travel the planet as a **pure function of (seed, time, direction)** — deterministic, GL-free, server-verifiable. Precipitation is *derived from cloud cover*, so "it rains only where there are clouds" is an invariant, not a coincidence. A **zenith mask** pass means it doesn't rain under a roof, and a **granular layer** (snow / sand / mud) sits *above* the reference surface with footprints that slow you down — without touching the ground the collision reads.
-
-- **🔊 One solver, two senses.** The **propagation** system finds the path A→B **around walls and through openings** (placed colliders + terrain occlusion). It's shared by **audio** (sound bends around corners; AI literally "hears" the player for stealth) **and** by **curving projectiles** (serpentine spells follow the same route).
-
-- **🧩 Modular by bitmask.** Fluids, soft-body, networking, audio, particles, terrain, post-FX, shadows and physics are **compile-time modules** — strip what you don't need to a lean binary; the game is built with the same mask.
-
-> In short: a **source-available, single-`.so` engine purpose-built for seamless planetary-scale worlds** — double-precision origin, GPU-streamed procedural terrain, one authoritative ground shared by client and server, orbiting editable planets, and a propagation model that unifies stealth audio and curving spells.
+<img src="image.png" alt="Haruka Engine screenshot" />
 
 ---
 
-## 🎯 Core Features
+## What it does
 
-> Honesty note: this list is what is **wired and running**. Several classes exist in the tree
-> without an active call site (deferred G-Buffer, cascaded/point shadows, IBL, SSAO pass, virtual
-> texturing, compute post-processing) — they are listed under
-> [Not wired](#-present-in-the-tree-but-not-wired), not here. See
-> [docs/ESTADO_MOTOR.md](docs/ESTADO_MOTOR.md) for the per-subsystem audit with file:line references.
-
-### 🖼️ Rendering
-- **RHI abstraction** (`src/rhi/`) — Device/Context + **pipeline state objects**; the scene renderers issue no raw GL calls. OpenGL is the one backend; the seam for a Vulkan one is in place (`src/rhi/vulkan/` is still empty).
-- **Reversed-Z with an infinite far plane** — depth as `near/dist`, `glClipControl(ZERO_TO_ONE)`, D32F. Precision is uniform from a pebble to a planet; a conventional 0.1 / 3e11 range collapsed all terrain depth into the last 0.004% of the buffer.
-- **Forward shading + stylised pass** — `simple.vert` + `final.frag` (soft cel + rim light), one directional shadow map, and a **zenith sky-exposure mask** used by the weather system.
-- **Post-Processing** — HDR, bloom (bright-pass + blur), tone mapping, FXAA, render-scale.
-- **Pooled terrain draws** — chunks share vertex pools and are drawn with `drawIndexedIndirect` (`gl_DrawID` indexes a per-draw SSBO), so there are no per-chunk uniforms or VAO rebinds.
-- **GPU instancing** — construction pieces and props (index + matrix + tint), through the PSO layer.
-
-### 🌍 Procedural Worlds
-- **Double-Precision Coordinates** — camera-relative; tested to AU distances.
-- **Geology → hydrology → climate → terrain** — plate tectonics (`planet_geology`) drives an eroded cube-sphere field (`planet_fields`: lakes, rivers, stream-power + thermal erosion, temperature and orographic humidity), cached once per seed and sampled by CPU *and* GPU.
-- **Cube-sphere Quadtree LOD** — screen-space error driven, with a **keep radius** (the terrain around you is fine *whichever way you look*) and a **pinned ground LOD** so a single lattice exists under your feet.
-- **Reference surface** — the authoritative, camera-independent ground (see above). GL-free.
-- **Async Chunk Generation** — GPU dispatch harvested via **GL fences** into persistently-mapped buffers; copy + mesh assembly on a worker pool (never blocks the frame); LRU RAM cache + versioned disk cache. *(En reescritura v4: con el generador movido a la teselación ya no hay malla discreta que cachear — la caché desaparece como **simplificación**, no como deuda. Ver [Terrain status](#-terrain-status).)*
-- **MESO tiles** *(opt-in legacy: `HARUKA_MESO=1`)* — on-demand ~5 km tiles (128², radius-derived) re-eroded locally with **inherited flow + margin** so tile borders don't seam. *(Durante la reescritura v4, el detalle meso se hornea dentro de `terrain_gen.comp` y el interruptor runtime ya no tiene call-site.)*
-- **Floating Origin** — per-frame world re-centering on the camera.
-
-### ⚙️ Physics & Simulation
-- **Jolt Physics v5.6.0** — mature rigid-body engine (git submodule), wrapped behind `HarukaPhysics` via PIMPL so the game never sees Jolt. Compiled only when the `PHYSICS` module is on and the submodule is present; otherwise the in-house solver takes over.
-- **GL-free physics library** — `HarukaPhysics` depends only on glm + `IWorldProvider`. That's the prerequisite for running the *same* movement validation on client and authoritative server.
-- **Planetary Gravity** — radial gravity, float-safe local frame, `CharacterVirtual` controller, ground mesh built from the reference surface with async refresh.
-- **Broad-Phase Octree** + terrain raycast.
-
-### 🎮 Game Systems
-- **Weather** (`core/weather_system.*`) — deterministic fronts, cloud cover → precipitation with depth, zenith mask (no rain under cover), rain/snow/sand.
-- **Granular ground layer** (`core/ground_layer.*`) — snow / sand / mud accumulation and footprints *above* the reference surface; a sink scalar the character controller reads, not geometry.
-- **Construction** (`game/construction/`) — free-form placement validated by the DGS, per-piece graph with propagated failure (Jolt), instanced rendering.
-- **3D Audio** — OpenAL listener (camera) + world sound sources + one-shot SFX. Device selection in-settings (SDL3).
-- **Propagation / nav** (`core/propagation.*`) — path A→B around walls and through openings + terrain occlusion; `through()` returns a 0..1 throughput (playback **and** logical: AI "hears" the player → stealth), `path()` returns the waypoints. Shared by audio and by curving spells.
-- **i18n / Locale** — `assets/lang/<code>.json`, `TR("key")`, base-language fallback.
-- **Terrain editing** — deformation field (dig / build / flatten, sphere or oriented-box footprint) with chunk re-streaming.
-- **Particles** — GL_POINTS additive radiant system (trails, impacts) + a dedicated precipitation renderer.
-- **Settings** — persisted graphics/audio/controls/language; rebindable input actions; in-game panel.
-- **Component Architecture** — scripts, materials, meshes attached to entities.
-
-### 🔻 Present in the tree but **not wired**
-`GBuffer` / deferred pipeline · `CascadedShadowMap` · `PointShadow` · `IBL` · `LightCuller` ·
-`ComputePostProcess` · `VirtualTexturing` · the SSAO **pass** (the class allocates buffers;
-Details and file:line in [docs/ESTADO_MOTOR.md](docs/ESTADO_MOTOR.md).
+- **Real-scale planets with double precision.** Positions are kept in `double` and the world is
+  re-centred on the camera every frame, so GPU floats stay precise from orbit down to a pebble.
+- **Terrain as the output of a process.** Elevation comes from a per-seed simulation: plate
+  tectonics, then hydrology and erosion, then climate. The same baked fields feed rendering,
+  physics, water and prop placement (`Src/Haruka/World/Planet/`).
+- **Node-based GPU terrain.** A cube-sphere quadtree of terrain nodes is generated by compute
+  shaders and drawn from a node pool (`Src/Haruka/World/Terrain/`).
+- **Caves and floating islands.** A chunked volumetric field is meshed with surface nets. It cuts
+  holes in the terrain where there is a cave mouth (`Src/Haruka/World/Vox/`, `Src/Haruka/Renderer/VoxRenderer.*`).
+- **Atmosphere and weather.** Volumetric clouds formed from an air-column model, deterministic
+  weather fronts, precipitation, ocean waves and inland water.
+- **Two graphics backends behind one RHI.** OpenGL 4.6 and Vulkan implement the same device
+  interface (`Src/Haruka/RHI/`). The backend is a setting; `HARUKA_BACKEND=vulkan|opengl` overrides it for
+  one run.
+- **Deterministic physics.** Jolt Physics runs single-threaded on purpose, so an authoritative
+  server (DGS) can replay the same rules (`haruka_simbase`, `haruka_rules`).
+- **Construction and prefabs as data.** Pieces, ports, rails and prefabricated assemblies are
+  plain data. A prefab is a JSON file or a `.glb` built in Blender; for a `.glb` the engine reads
+  only the node poses, never the geometry (`Src/Haruka/Game/`).
+- **Compile-time modules.** Fluids, deformation, soft bodies, networking, audio, particles,
+  terrain, post-processing, shadows and physics can be compiled out with a bitmask.
 
 ---
 
-## 🔧 Dependencies
+## Architecture
 
-### 1. Vendored — committed in the tree (nothing to download)
+### Layers
 
-| Path | Library | Role |
-|------|---------|------|
-| `third_party/glad`            | GLAD            | OpenGL 4.6 function loader |
-| `third_party/json`            | nlohmann/json   | scene & save serialization |
-| `third_party/stb`             | stb_image       | image loading |
-| `external/dgs`                | DGS client      | optional networking (`HARUKA_NETWORK`) |
+```mermaid
+flowchart TB
+    game["Game (e.g. Survival)<br/>GameInterface callbacks"]
+    ide["Editor (haruka)<br/>loads the engine as a backend .so"]
+    subgraph engine["libHarukaEngine.so"]
+        core["Core<br/>Application · frame loop · scene · camera"]
+        world["World<br/>planets · terrain · vox · water · props · weather"]
+        renderer["Renderer<br/>passes · post · clouds · grass · shadows"]
+        rhi["RHI<br/>OpenGL 4.6 · Vulkan"]
+        gamesys["Game systems<br/>construction · prefabs · ports · inventory"]
+        misc["Audio · Input · IO · UI · Settings · Network · Tools"]
+    end
+    physics["HarukaPhysics (static)<br/>Jolt, single-threaded"]
+    simbase["haruka_simbase (static)<br/>GL-free shared ground + rules base"]
+    rules["haruka_rules (.so)<br/>DGS rules module"]
 
-### 2. Git submodules — one command
-
-```bash
-git submodule update --init --recursive
+    game --> core
+    ide --> core
+    core --> world --> renderer --> rhi
+    core --> gamesys
+    core --> misc
+    world --> physics
+    simbase --> physics
+    rules --> simbase
 ```
 
-| Path | Library | Role |
-|------|---------|------|
-| `third_party/imgui`            | Dear ImGui      | editor / debug UI |
-| `third_party/nativefiledialog` | nativefiledialog| file dialogs |
-| `third_party/JoltPhysics`      | Jolt Physics    | rigid bodies (only built if `PHYSICS` is on) |
+A game does not subclass the engine. It fills in a `GameInterface`, a table of callbacks
+(`onInit`, `onUpdate`, `onRenderWorld`, `onRenderShadow`, `onEvent`, `onShutdown`), and hands it to
+`Application` (`Src/Haruka/Core/GameInterface.h`).
 
-> Without the Jolt submodule the build still works: `HarukaPhysics` falls back to the in-house solver.
+### Source layout (`Src/Haruka/`)
 
-### 3. System libraries — one install command
+Engine headers are included with the library's name as prefix, like `<Jolt/...>` or `<SDL3/...>`:
+`#include "Haruka/World/Planet/Planet.h"`. The include root is `Src/`, so a game's own `Core/` or
+`UI/` folders can never be confused with the engine's.
+
+| Module | Responsibility | Size |
+|---|---|---|
+| `Core/` | `Application` (startup, frame loop, render passes), scene and components, camera, logging, locale, cache, propagation (sound/path solver) | 46 files · 7.4 k lines |
+| `World/` | Planets (geology, fields, climate, orbits), terrain nodes, volumetric caves, water, props, weather, ground layer | 62 files · 29.4 k lines |
+| `Renderer/` | Render passes and their resources: clouds, grass, props, vox, shadows, fluids, post chain | 73 files · 9.0 k lines |
+| `RHI/` | Device/context interface with OpenGL and Vulkan backends, pipeline state objects, GPU timestamps | 21 files · 7.5 k lines |
+| `Physics/` | Jolt wrapper (PIMPL), planetary gravity, character controller, XPBD soft bodies, shallow water | 20 files · 5.9 k lines |
+| `Tools/` | Profiler, debug overlay, editor panels, ProcGraph (procedural node graphs) | 36 files · 7.0 k lines |
+| `Game/` | Construction, prefabs, ports and rails, inventory | 13 files · 3.1 k lines |
+| `UI/`, `Settings/`, `Input/`, `Audio/`, `IO/`, `Network/`, `Cinematics/` | Interface, settings, keyboard and gamepad actions, OpenAL audio, asset IO, DGS client, camera sequences | 45 files |
+
+### CMake targets
+
+| Target | Kind | Purpose |
+|---|---|---|
+| `HarukaEngine` | shared | The engine. Requires C++26 publicly (`cxx_std_26`), so every consumer compiles with it |
+| `HarukaPhysics` | static | Physics, depends only on glm and an `IWorldProvider` |
+| `HarukaConstruction` | static | Construction validation, shared with the server |
+| `haruka_simbase` | static | GL-free simulation base: the ground both client and server agree on |
+| `haruka_rules` | shared | Rules module loaded by the DGS server with `dlopen` |
+| `haruka_tests`, `haruka_tests_rhi` | executables | CPU suite and GPU (RHI) bench, see [Testing](#testing) |
+| `mapc`, `bench_dgs_bandwidth` | executables | Map compiler and a DGS bandwidth bench |
+
+### One frame
+
+`Application::renderFrameContent()` (`Src/Haruka/Core/ApplicationRender.cpp`) is the list of passes,
+in this order:
+
+1. `frameBegin`: size, post chain, celestial mechanics, near plane, prop scatter, clear
+2. `passCompute`: terrain compute, before any render pass opens (a Vulkan requirement)
+3. `passSky`: sky, weather, sun and the frame's air
+4. `passSceneSetup`: per-frame UBO, lights, physics, tonemapping
+5. `passSceneObjects`: scene objects and instanced construction pieces
+6. `passProps`: world props
+7. `passPlanetUpdate`: planet LOD and streaming
+8. `passShadows`: sun shadow map, zenith mask, wet ground
+9. `passPlanet`: terrain and water
+10. `passGameWorld`: the game's `onRenderWorld` hook
+11. `passPrecipitation`, `passFluid`, `passClouds`
+12. Post composite: FXAA, bloom, upscale to the backbuffer
+
+### Threads
+
+Jolt runs on one thread by design (determinism for the server). Everything else that runs in the
+background goes through **one job system** (`Src/Haruka/Core/Jobs/JobSystem.h`). It has a fixed pool of
+threads and three priority queues (frame, streaming, background), plus a queue of continuations
+that run on the main thread at the start of the frame. Data that lives on both CPU and GPU goes
+through the **resource store** (`Src/Haruka/Renderer/ResourceStore.h`): one revision per resource, one
+upload per revision, a shared per-frame upload budget, and GPU objects destroyed only after the
+frames in flight are done with them.
+
+Every background thread in the engine and the game now goes through it: the former `std::async`
+calls, the planet bake pools, the world provider's ring sampling, the image writer, and the vox
+meshes as store resources. The physics library receives the pool through
+`PhysicsEngine::setTaskRunner`, because the server links physics without the engine. The game's
+voice capture is a registered dedicated thread. Not migrated: `IO/AssetStreamer` and
+`Core/Cache/Cache.h`, which nothing uses.
+
+---
+
+## Building
+
+### Requirements
+
+| | Version | Notes |
+|---|---|---|
+| Compiler | GCC 16 or newer | C++26. Only GCC 16.2 has been tested; Clang and MSVC have not |
+| CMake | 3.25 or newer | needed for the `cxx_std_26` compile feature |
+| SDL3 | 3.x | not packaged by most distros yet, see below |
+| Vulkan headers | optional | the Vulkan backend is compiled only if `<vulkan/vulkan.h>` is found |
+
+System libraries (Fedora; this is the list CI installs):
 
 ```bash
-# Fedora
-sudo dnf install cmake gcc-c++ pkgconf-pkg-config \
-    glm-devel glslang \
-    assimp-devel openal-soft-devel libzstd-devel \
+sudo dnf install cmake ninja-build gcc-c++ pkgconf-pkg-config \
+    glm-devel glslang assimp-devel openal-soft-devel libzstd-devel \
     openssl-devel postgresql-devel gtk3-devel
 ```
 
-```bash
-# Debian / Ubuntu (equivalents)
-sudo apt install cmake g++ pkg-config \
-    libglm-dev glslang-tools \
-    libassimp-dev libopenal-dev libzstd-dev \
-    libssl-dev libpq-dev libgtk-3-dev
-```
-
-### 4. SDL3 — download & build manually
-
-SDL3 isn't in most distro repos yet. Pick one option:
+SDL3, if your distro does not ship it:
 
 ```bash
-# Option A: Vendorize (recommended)
-git clone https://github.com/libsdl-org/SDL third_party/SDL
-cd third_party/SDL && git checkout SDL3 && cd ../..
-
-# Option B: Compile and install system-wide
-git clone https://github.com/libsdl-org/SDL third_party/SDL
-cmake -B third_party/SDL/build -S third_party/SDL -DCMAKE_BUILD_TYPE=Release
-cmake --build third_party/SDL/build -j$(nproc)
-sudo cmake --install third_party/SDL/build
+git clone https://github.com/libsdl-org/SDL /tmp/SDL
+cmake -S /tmp/SDL -B /tmp/SDL/build -DCMAKE_BUILD_TYPE=Release
+cmake --build /tmp/SDL/build -j"$(nproc)"
+sudo cmake --install /tmp/SDL/build
 ```
 
-### System-library reference
-
-| Package (Fedora) | Role |
-|---------|------|
-| **cmake** | Build system |
-| **gcc-c++** | C++17 compiler |
-| **pkgconf-pkg-config** | Library discovery |
-| **sdl3** | Window/context/input (**compile manually**, see above) |
-| **glm-devel** | Vector math (vec3, mat4, **dvec3 for astronomical precision**) |
-| **glslang** | GLSL → SPIR-V shader compilation (build-time; `glslc` also works) |
-| **assimp-devel** | 3D model loading (OBJ, FBX, GLTF) |
-| **openal-soft-devel** | 3D positional audio |
-| **libzstd-devel** | Save / asset compression codec |
-| **postgresql-devel** | Player/world persistence |
-| **openssl-devel** | WebSocket TLS |
-| **gtk3-devel** | File dialogs |
-
----
-
-## 🔨 Build
-
-### Quick Start
+Submodules (Dear ImGui, nativefiledialog, Jolt Physics):
 
 ```bash
 git submodule update --init --recursive
-cmake -B build -DHARUKA_NETWORK=ON      # or OFF
-cmake --build build -j$(nproc)
 ```
 
-### Modules (build-time)
-
-The engine is split into optional modules toggled by a bitmask. CMake generates
-`src/core/modules.h` (`#define HARUKA_MOD_<NAME> 1`) and excludes the sources of
-disabled modules. Order of the bitmask = the list below.
-
-| Bit | Module | Purpose |
-|-----|--------|---------|
-| 0 | `FLUIDS` | ocean + shallow-water + PBF particles (hybrid water) |
-| 1 | `DEFORM` | terrain deformation field (dig / build / flatten) |
-| 2 | `SOFTBODY` | XPBD cloth / jelly / wind |
-| 3 | `NETWORK` | DGS network client |
-| 4 | `AUDIO` | 3D audio: `audio_manager` → `audio_loader` + `audio_system` (OpenAL) |
-| 5 | `PARTICLES` | particle system |
-| 6 | `TERRAIN` | planetary terrain (default-ON; off = no planet) |
-| 7 | `POSTFX` | bloom / HDR / post chain |
-| 8 | `SHADOWS` | shadow maps |
-| 9 | `PHYSICS` | rigid-body physics + colliders + Jolt (default-ON) |
+### Configure and build
 
 ```bash
-# All modules ON (default)
-cmake -B build
-
-# Custom mask (1 char per module, in list order): e.g. fluids+deform off
-cmake -B build -DMODULES=0011111111
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake --build build -j6
 ```
 
-> ⚠️ Configuring with `-DMODULES=...` rewrites `src/core/modules.h` in the source
-> tree (via `configure_file`). The game (`Survival`) must be built with the **same**
-> mask — its `build.sh` keeps engine + game in sync from one place.
+- **Use a modest `-j`.** Several translation units need around 500 MB each; `-j16` has run the
+  development machine out of memory.
+- **`Debug` is refused** unless you pass `-DHARUKA_ALLOW_DEBUG=ON`. At `-O0` the suite is too slow
+  to be useful, and there is a crash that only exists at `-O0`.
+- **Tests are not built in `Release`.** Ask for them with `-DHARUKA_BUILD_TESTS=ON`.
 
-> Weather, ground layer, construction and the DGS rules module do **not** have their own bits yet;
-> they ride along inside `TERRAIN` / `PHYSICS` / `NETWORK` or are ungated.
+### Modules
 
-### Shaders (engine vs game)
+One character per module, in this order; a missing position counts as on:
 
-Engine shaders live in `haruka-cpp/assets/shaders/` and are compiled to `.spv` (+ GLSL copy) at
-build time into the runtime `assets/shaders/` dir. **Game-specific shaders live in the game repo**
-and the game's build compiles them into the **same** dir, coexisting by name. Each shader is
-compiled **once** by its owner. (Runtime path resolution: `AssetPaths::shaders()`, identical in dev
-and release.)
+| Bit | Module | Bit | Module |
+|---|---|---|---|
+| 0 | `FLUIDS` | 5 | `PARTICLES` |
+| 1 | `DEFORM` | 6 | `TERRAIN` |
+| 2 | `SOFTBODY` | 7 | `POSTFX` |
+| 3 | `NETWORK` | 8 | `SHADOWS` |
+| 4 | `AUDIO` | 9 | `PHYSICS` |
 
-### Environment switches
+```bash
+cmake -S . -B build -DMODULES=0011111111   # fluids and deformation off
+```
+
+The mask generates `Src/Haruka/Core/Modules.h` inside the source tree, so the engine and the game must be
+configured with the **same** mask. See [docs/MODULES.md](docs/MODULES.md).
+
+### Useful runtime switches
 
 | Variable | Effect |
 |---|---|
-| `HARUKA_DISKCACHE=0` | disable the versioned chunk disk cache (**on** by default) — *legacy v3; sin call-site durante la reescritura v4 (ver [terrain status](#-terrain-status))* |
-| `HARUKA_MESO=1` | enable the ~5 km eroded meso tiles — *legacy v3; el detalle meso se hornea ahora en `terrain_gen.comp`* |
-| `HARUKA_GROUNDPIN=1` | pin the ground disc in the cache (see [terrain status](#-terrain-status)) — *legacy v3* |
-| `HARUKA_PROF_LOG=N` | dump the profiler tree to stderr every N frames |
-| `HARUKA_FIELD_DBG=1` | print the elevation range of the field uploaded to the GPU |
+| `HARUKA_BACKEND=vulkan\|opengl` | Force a graphics backend for this run, without touching settings |
+| `HARUKA_FRAMELOG=1` | Mean, p95 and worst frame time every 3 s, plus physics time |
+| `HARUKA_DIAG=1` | Turn on per-frame diagnostic logs (off by default) |
+| `HARUKA_LOG_LEVEL` | Log verbosity |
+| `HARUKA_PROF_LOG=N` | Dump the profiler tree every N frames |
+| `HARUKA_COLLISION_WIRE=1` | Draw the collision mesh as a green wireframe |
+| `HARUKA_JOLT=0` | Use the in-house solver instead of Jolt |
 
 ---
 
-## 📖 Documentation
+## Testing
+
+| Suite | Command | What it covers |
+|---|---|---|
+| CPU | `./build/haruka_tests [group]` | Terrain, planets, physics, construction, prefabs, ports, water, clouds, sound, DGS… grouped, simplest first |
+| GPU / RHI | `./build/haruka_tests_rhi gl\|vk\|all [group]` | Backend parity, CPU↔GPU terrain parity, water, grass, clouds, lighting, scene |
+
+The group filter matches the group's name or keys. Every parity test carries a **counter-test**
+that shows it can fail. A test that only checks "it did not crash" cannot tell a correct
+implementation from one that does nothing.
+
+CI (`.github/workflows/ci.yml`) builds the engine with several module masks and runs the RHI
+bench without a GPU: OpenGL on Mesa llvmpipe and Vulkan on lavapipe.
+
+### Test status
+
+Measured on 2026-10-10 (GCC 16.2, RelWithDebInfo, RTX 3050 Laptop):
+
+| Suite | Result |
+|---|---|
+| CPU (`haruka_tests`) | 332 874 checks, **0 failures** |
+| RHI Vulkan (`haruka_tests_rhi vk`) | 421 OK, **14 known failures**: grass generation (6), instancing arena (3), terrain stride and relief (3), ocean shading (2). They predate the C++26 move. The cloud blend counter-test also fails intermittently. |
+
+---
+
+## Documentation
 
 | Document | Content |
-|----------|---------|
-| [ESTADO_MOTOR.md](docs/ESTADO_MOTOR.md) | **Per-subsystem audit**: what's wired, what's broken, what's dead code (file:line) |
-| [PLAN_TERRENO_V3.md](docs/guides/PLAN_TERRENO_V3.md) | The terrain redesign: tectonics → erosion → climate → biomes → props |
-| [PLAN_LOD_V3.md](docs/guides/PLAN_LOD_V3.md) | Screen-space LOD, keep radius, ground pin |
-| [PLAN_DGS_ANTICHEAT.md](docs/guides/PLAN_DGS_ANTICHEAT.md) | Authoritative server, per-project rules via `dlopen` |
-| [PLAN_CONSTRUCCION.md](docs/guides/PLAN_CONSTRUCCION.md) | Free-form building, validated placement |
-| [PLAN_PUERTOS.md](docs/guides/PLAN_PUERTOS.md) | Authored ports (mount + interact) and **rails**: doors, ramps and suspensions as mechanisms, not animations |
-| [ANALISIS_SISTEMAS.md](docs/guides/ANALISIS_SISTEMAS.md) | ObjectType, SceneManager, WorldSystem, PlanetarySystem |
-| [MODULES.md](docs/MODULES.md) | The module bitmask |
-| [FLUJO_INTERACTIVO.md](docs/guides/FLUJO_INTERACTIVO.md) | The **Execution flow** button: per-function tree of calls, branches and modified variables, taken from Clang's AST |
-| Doxygen | run `./tools/build_docs.sh` → `docs/html/index.html` (plain `doxygen Doxyfile` skips the execution trees) |
+|---|---|
+| [docs/MODULES.md](docs/MODULES.md) | The module bitmask and how to add a module |
+| [docs/HISTORIAL.md](docs/HISTORIAL.md) | Development log (Spanish) |
+| [docs/guides/](docs/guides/) | Design notes and plans: terrain v5, Vulkan, construction, ports, packaging… (Spanish) |
+| Doxygen | `./Tools/build_docs.sh` → `docs/html/index.html` |
 
 ---
 
-## 🏗️ Architecture Highlights
+## Contributing
 
-Chunks are **generated asynchronously on the GPU** from the planet's eroded geological field (not
-from raw noise), assembled on a worker pool and cached in RAM (LRU eviction, budget auto-sized from
-system RAM) with a versioned disk cache. *(La caché RAM/disco es del camino v3; en la reescritura v4
-el generador vive en la teselación y no hay malla discreta que cachear — ver
-[Terrain status](#-terrain-status).)*
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first (it explains the DCO
+sign-off), and [QUALITY.md](QUALITY.md) for the code and testing standards. Please report security
+problems privately as described in [SECURITY.md](SECURITY.md), not in public issues. Everyone taking
+part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-### Scene JSON Format
+## License
 
-```json
-{
-  "objects": [
-    {
-      "name": "Earth",
-      "type": "Planet",
-      "position": [0.0, 0.0, 0.0],
-      "hasChunks": true,
-      "terrainSettings": {
-        "config": {
-          "seed": 42,
-          "genVersion": 2,
-          "gpuTerrain": true,
-          "profile": "terran",
-          "chunkSize": 96,
-          "reliefStrength": 1.0
-        }
-      },
-      "lodSettings":       { "distances": [100.0, 500.0, 2000.0, 10000.0] },
-      "streamingSettings": { "mode": "procedural", "cacheSizeMB": 256 }
-    }
-  ]
-}
-```
+Licensed under the [Apache License 2.0](LICENSE). You may use, modify and redistribute the engine,
+commercially or not, and forks are welcome. Two things travel with every copy:
 
-> `genVersion: 2` selects the geology→erosion pipeline. The legacy `config.layers` block (v1 noise
-> stacking) is still parsed but **no longer read by any planet** — see
-> [ESTADO_MOTOR.md §1.9](docs/ESTADO_MOTOR.md).
+- **The [NOTICE](NOTICE) file.** Any redistribution, including forks, must keep it (section 4(d)),
+  so the origin of the project stays visible.
+- **The name.** The license does not grant use of the name "Haruka" (section 6). Please give your
+  fork its own name.
 
----
+Third-party components keep their own licenses; NOTICE lists them.
 
-## 📝 Engine status
+## Related projects
 
-**v1.0 — playable.** A real-scale solar system streams and renders end to end: you can orbit, fly
-in, land and walk, dig the ground, swim, build, and the planet stays consistent between what you
-*see* and what you *collide with*. Below is an honest account.
-
-### ✅ Working (on by default)
-
-| Area | State |
-|------|-------|
-| Rendering | Forward + stylised pass + one directional shadow + post chain, through the **RHI/PSO** layer |
-| Depth | **Reversed-Z + infinite far plane** — no z-fighting between terrain and water at any scale |
-| Terrain | GPU compute generation from the **eroded geological field** (tectonics → hydrology → erosion → climate) |
-| Ground | **One** reference surface, camera-independent and GL-free, read by physics, props, scripts and tests |
-| Streaming | Async LOD recompute on a worker; GPU-derived vertex grids; persistently-mapped readback; worker pool for mesh assembly *(disk cache on — legacy v3, ver [terrain status](#-terrain-status))* |
-| Water | Ocean (Gerstner) + lakes/rivers + PBF particles; signed-depth clipping so the shoreline is exact per-pixel |
-| Weather | Deterministic fronts; precipitation implies cloud cover by construction; zenith mask; granular layer + footprints |
-| Physics | Jolt (rigid bodies, `CharacterVirtual`), radial gravity, octree broad-phase, terrain raycast |
-| Tests | **19 460 OK · 0 failures** (`haruka_tests`) — CPU↔GPU parity, water parity, LOD invariants, streaming settle, ground stability on turn/climb, orbit closure. *⚠️ Este recuento debe re-verificarse: TODO.md declara 20 135. Ambos se corrigen cuando se re-ejecute la suite.* |
-
-### 🎯 Terrain status
-
-> ⚠️ **Terrain v4 in rewrite.** The engine is being re-based from the v3 *chunk + quadtree* pipeline
-> to a v4 *clipmap* generator (GPU compute in the tessellation stage). The numbers below — the
-> **0.0001 / 0.0003 m** parity and the recurring "0.3 mm / 1 cm" claims — were measured on the **v3
-> chunks** code path. Until v4 is wired end-to-end and re-measured, those parity figures describe the
-> previous terrain, **not the one the current binary draws**. They will be updated (or the claim
-> re-worded) as soon as v4 ships. Nobody benefits from a number the code no longer produces.
->
-> The consequence of switching to a clipmap: the terrain no longer builds a discrete chunk mesh to
-> cache, so the **RAM LRU cache and the versioned disk cache disappear by simplification**, not as a
-> brute omission — with the generator living in the tessellator, there is no mesh to store. The
-> reference surface stays the single source of truth for collision (GL-free, shared with the
-> authoritative server), and remains the ground to re-parity against once v4 lands.
-
-Measured today with `HARUKA_DISKCACHE=0` (cold cache — the case of a player starting a new world):
-
-| Scope | mean | worst | outside 1 cm |
-|---|---|---|---|
-| Node-by-node (GPU-baked vertex vs reference surface) | 0.0001 m | 0.0003 m | — |
-| Inside the keep radius (≤ 400 m) | 0.0001 m | 0.0003 m | **0 / 200** |
-| Outside (512 m – 3 km) | 0.731 m | 8.171 m | 132 / 200 |
-
-The outer band is **by design**: past the keep radius the LOD thins out. The 1 cm requirement is
-about the ground you actually stand on.
-
-What the number cost, and what protects it: the direction is normalised **once, in double**, on both
-sides; the field is sampled in double and **copied** (never re-sampled) into the SSBO; the driver's
-double `sqrt` is refined with Newton because it is only ~1e-8, not IEEE; and the height path is
-compiled with `-fno-fast-math -ffp-contract=off` because `-ffast-math` would break parity **only in
-Release**, with the tests still green.
-
-Open items on the terrain, none of them blocking — full detail in
-[ESTADO_MOTOR.md §1](docs/ESTADO_MOTOR.md):
-
-- the reference surface only exists for the **active planet**; other bodies fall back to the
-  point-analytic sampler
-- a single dig disables the GPU terrain path **planet-wide**
-- lake levels are computed **before** erosion runs and never recomputed
-- the ground-disc cache pin is **off by default** — it touches residency, and there a mistake looks
-  like "there is no terrain", not like "less detail"
-
-### 🚧 Next
-
-1. **Validate in-game** what this cycle closed: weather, spellcasting, construction-from-files,
-   world panel. The suite is green; a human has not confirmed them yet.
-2. **Materials** — per-material textures (buildings, construction pieces and items share them) and a
-   height/slope-blended splatmap. Today a stone tile is a flat-coloured cube.
-3. **Procedural organic meshes** by seed (`log`/`branch`/`rock`/`ore`) — today they draw as boxes.
-4. **Cleanup pass** — the dead code inventoried in ESTADO_MOTOR.md (~150 lines of dead compute
-   shader, the v1 generator, the unwired renderer classes, `main` in the `.so`).
-5. **Vulkan backend** — the RHI/PSO seam is done; this is a backend, not a rewrite. It would *not*
-   fix a CPU-bound frame.
-6. **Parked:** caves and floating islands — postponed until the surface is credible.
-
----
-
-## 📄 License
-
-**Haruka Source-Available License v1.0** — © 2026 Andoni García Torres. See [LICENSE](LICENSE.md).
-
-Free to view, study, modify, and use for **non-commercial** purposes; **commercial use needs
-written permission**. Any improvement built using the engine is **licensed back** to the author
-(grant-back). Third-party components (DGS, Dear ImGui, GLAD, GLM, SDL3, OpenAL, Jolt, …) keep their
-own licenses.
-
----
-
-## 🔗 Related Projects
-
-- **Survival** — the game built on HarukaEngine (same module mask)
-- **haruka** — ImGui-based editor built on top of HarukaEngine
-
----
-
-**Last Updated:** 27 July 2026 | **OpenGL 4.6 (RHI: Vulkan-ready)** | **C++17/20**
+- **[Survival](https://github.com/Andonigt04/Survival)**: the game built on this engine.
+- **[haruka](https://github.com/Andonigt04/haruka)**: the editor. It loads this engine as a
+  backend plugin and can also drive a remote engine.

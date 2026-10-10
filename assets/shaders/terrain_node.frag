@@ -24,6 +24,7 @@ layout(location = 8) flat in int vKUp;   // vista 9: profundidad de caida a ance
 layout(location = 9) in float vDispM;   // vista 10: disparidad dibujado-dato, en metros
 layout(location = 10) in float vMapF;   // vista 12: mapa leido (0 propio, 1 padre, 2 abuelo; fraccion = rampa)
 layout(location = 7) flat in int vFace;
+layout(location = 11) in float vCrater;  // 0..1 cuenco de cráter (terrain_node.vert): tierra desnuda
 
 // ⚠️ EL COLOR SALE DE LA MISMA LIBRERIA QUE EL CLIPMAP, NO DE UNA COPIA. Si el nodo y el clipmap
 // divergen en color, la transicion entre los dos se ve como una costura — justo lo que el v5 venia
@@ -149,7 +150,7 @@ void main() {
     // contra el dato del propio vertice, donde coinciden por construccion, y por eso salia verde.
     //
     // Aqui la referencia es la SUPERFICIE DE COLISION: `harukaTerrainDetail` con el corte que usa
-    // `world_system_provider.h`, o sea `terrainTriM(radM) = max(radM*0,002 , 0,5)` con `radM` medido
+    // `WorldSystemProvider.h`, o sea `terrainTriM(radM) = max(radM*0,002 , 0,5)` con `radM` medido
     // desde el punto del planeta bajo el ojo. Verde <5 cm · amarillo 0,25 m · rojo >= 1 m.
     //
     // ⚠️ EN DOUBLE, Y NO ES OPCIONAL: un float a 6,37e6 tiene un ulp de 0,5 m, que es justo lo que se
@@ -171,7 +172,7 @@ void main() {
         const double r      = length(rel);
         const dvec3  dir    = rel / r;
         const dvec3  anchor = normalize(-(dvec3(uCenter.xyz) + dvec3(uCenterLo.xyz)));
-        // Gemelos de TERRAIN_TRIM_SLOPE y TERRAIN_TRIM_FLOOR (`terrain_lod.h`).
+        // Gemelos de TERRAIN_TRIM_SLOPE y TERRAIN_TRIM_FLOOR (`TerrainLOD.h`).
         const double radM = double(uMisc.x) * length(dir - anchor);
         const float  cut  = float(max(radM * 0.002LF, 0.5LF));
         double href = double(harukaTerrainDetail(dir, double(uMisc.x) + double(baseH), cut));
@@ -260,6 +261,12 @@ void main() {
     if (dbg == 7) { fragColor = vec4(rawTex, 1.0); return; }
     if (dbg == 8) { fragColor = vec4(vec3(texW), 1.0); return; }
 
+    // CRÁTER: la explosión levanta la capa de hierba/suelo — tierra removida, oscura, con la misma
+    // variación de textura debajo (se conserva el grano del albedo, se le quita el color).
+    if (vCrater > 0.0) {
+        const float lum = dot(col, vec3(0.299, 0.587, 0.114));
+        col = mix(col, vec3(0.20, 0.15, 0.11) * (0.6 + 0.8 * lum / max(dot(col, vec3(0.333)), 0.05)), vCrater * 0.85);
+    }
     // `harukaTerrainAlbedo` MODIFICA `n` con el normal map, asi que la iluminacion va despues.
     const float d = max(dot(n, normalize(uLightDir.xyz)), 0.0);
     vec3 lit = col * (0.25 + 0.75 * d);

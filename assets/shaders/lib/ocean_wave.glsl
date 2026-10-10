@@ -31,7 +31,7 @@
 const float HARUKA_G = 9.81;
 
 // El estado del mar (los cuatro trenes + la cota de la lámina) llega RESUELTO desde la CPU: aquí
-// había una tabla `const` gemela a mano de la de `ocean_wave.h`, y deja de poder serlo en cuanto el
+// había una tabla `const` gemela a mano de la de `OceanWave.h`, y deja de poder serlo en cuanto el
 // oleaje depende del viento. Ver la nota larga de `ocean_params.glsl` — ahí está el porqué.
 // ⚠️ RUTA DESDE LA RAÍZ DE SHADERS, NO HERMANA. El resolvedor de `#include` del backend busca desde
 // `assets/shaders/`, no desde la carpeta del archivo que incluye. Puesto como `"ocean_params.glsl"`

@@ -3,7 +3,7 @@
  * @brief EL ESTADO DEL MAR, resuelto en la CPU y subido. Gemelo de `Haruka::Planet::OceanState`.
  *
  * ⚠️ POR QUÉ NO SE DERIVA AQUÍ. Antes los trenes de olas eran una tabla `const` en
- * `ocean_wave.glsl`, gemela a mano de la de `ocean_wave.h`: cuatro líneas de números que un humano
+ * `ocean_wave.glsl`, gemela a mano de la de `OceanWave.h`: cuatro líneas de números que un humano
  * mantenía sincronizadas. Eso aguanta mientras el oleaje sea FIJO.
  *
  * En cuanto el mar depende del viento y de la marea, "el mismo gemelo" pasa a significar "las mismas

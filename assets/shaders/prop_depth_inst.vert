@@ -7,7 +7,7 @@
  * pase de sombras solo llamaba al hook del juego, que dibuja SUS recursos. Resultado: ni un árbol en
  * el mapa de sombras, y por tanto ninguna sombra de prop.
  *
- * Es el mismo layout de instancia que `gpu_instancing.h` declara (locations 3..6 = mat4 model,
+ * Es el mismo layout de instancia que `GPUInstancing.h` declara (locations 3..6 = mat4 model,
  * 7 = color, 8 = escala), para poder reusar el MISMO buffer de instancias que el pase de color —
  * si el layout divergiera, las sombras saldrían en otro sitio que los objetos.
  *

@@ -1,7 +1,7 @@
 // ===========================================================================================
 // CAPAS DE PROPS — definición ÚNICA para la VISTA DE SPAWN (depuración del editor).
 //
-// La incluye `biome.frag`. Es el espejo GLSL de `Haruka::Planet::PropLayerTable` (prop_layer.h):
+// La incluye `biome.frag`. Es el espejo GLSL de `Haruka::Planet::PropLayerTable` (PropLayer.h):
 // la misma tabla que el placer recorre para instalar los objetos (árboles, rocas, casas), subida
 // a un UBO para que el shader pueda pintar DÓNDE instalaría cada capa en el planeta — las
 // "áreas de spawn" que el editor quería ver al seleccionar una capa.
@@ -12,7 +12,7 @@
 // "aquí nacería un árbol de esta capa". No comparte struct con el placer (ese corre en CPU,
 // GL-free, sin GLSL); este layout solo tiene que CASAR con el UBO que sube `TerrestrialPlanet::render`.
 //
-// Layout (debe coincidir con el struct GpuPropLayer de planet.cpp y con su subida a la GPU):
+// Layout (debe coincidir con el struct GpuPropLayer de Planet.cpp y con su subida a la GPU):
 //   a = (humMin, humMax, tempMin, tempMax)
 //   b = (slopeMin, slopeMax, _, feather)
 //   c = (hasDensityMap, _, _, _)     hasDensityMap > 0.5 → multiplicar por uPropDensityMap

@@ -73,7 +73,7 @@ layout(binding = 15) uniform sampler2DArray uBaseField;
 //
 //     baseH = uDebug.z > 0.5 ? harukaSampleHeightField(uHeightTex, ...) : fld.x;
 //
-// El motor pone ese flag a 1 SIEMPRE que existe el bake equirect (planet.cpp), asi que el camino
+// El motor pone ese flag a 1 SIEMPRE que existe el bake equirect (Planet.cpp), asi que el camino
 // normal es el equirect y el campo del cubo es solo el respaldo. La fisica (`sampleHeight`) tambien
 // va contra el equirect. Cablear aqui el del cubo —que fue el primer intento— dejaba al nodo
 // discrepando de los OTROS DOS, que si coinciden entre si.

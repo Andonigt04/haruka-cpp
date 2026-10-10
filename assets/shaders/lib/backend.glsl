@@ -6,7 +6,7 @@
  * ── POR QUÉ ───────────────────────────────────────────────────────────────────────────────────
  * GL tiene TRES espacios de binding SEPARADOS (UBO, SSBO, textura): un sampler puede ir a
  * binding 0 a la vez que un UBO a binding 0. Vulkan tiene UN solo espacio por descriptor set, y
- * el set COMPARTIDO del motor lo divide en rangos fijos (vk_common.h §4.3):
+ * el set COMPARTIDO del motor lo divide en rangos fijos (VKCommon.h §4.3):
  *     UBO  : binding 0..31    → uboSlotToBinding(slot)   = slot
  *     SSBO : binding 32..63   → ssboSlotToBinding(slot)  = slot + 32
  *     textura: binding 64..95 → textureSlotToBinding(slot) = slot + 64
@@ -22,7 +22,7 @@
  * ── CÓMO SE ACTIVA ────────────────────────────────────────────────────────────────────────────
  * La compilación de VULKAN pasa -DVULKAN (CMake: glslc --target-env=vulkan -DVULKAN). GL no la
  * define → rama #else. La rama #ifdef del glslangValidator runtime de emergencia también define
- * -DVULKAN (ver vk_pipeline.cpp). El backend GL nunca ve este símbolo.
+ * -DVULKAN (ver VKPipeline.cpp). El backend GL nunca ve este símbolo.
  */
 #ifndef HARUKA_BACKEND_GLSL
 #define HARUKA_BACKEND_GLSL

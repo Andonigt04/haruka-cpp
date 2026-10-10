@@ -45,7 +45,7 @@ La misma fórmula vive en tres sitios que deben coincidir *exactamente*:
 | Sitio | Para qué |
 |---|---|
 | `assets/shaders/terrain_gen.comp` | generar la malla del chunk (GPU) |
-| `src/core/terrain/terrain_sampler_v2.cpp` | física / colisión / spawn (CPU) |
+| `Src/Haruka/Core/terrain/terrain_sampler_v2.cpp` | física / colisión / spawn (CPU) |
 | `assets/shaders/water.frag` (`oceanElevKm`) | **recortar la costa per-píxel** (copiada a mano, "PORT EXACTO") |
 
 El agua re-deriva el terreno en cada píxel para saber dónde hay mar. **El bug actual del agua
@@ -240,7 +240,7 @@ que la física exija, además de "bajo el nivel del mar", que **no haya roca enc
 
 ## 3.5 PROPS — dónde se generan (parte del alcance)
 
-**Hoy** (`Survival/scripts/resources/resource_scatter.cpp`): rejilla + hash determinista, y el TIPO
+**Hoy** (`Survival/Scripts/Resources/ResourceScatter.cpp`): rejilla + hash determinista, y el TIPO
 se elige por **banda de altitud** (`sampleTerrainHeight`). No mira pendiente, ni bioma, ni agua, ni
 suelo. Resultado: un bosque idéntico repartido por igual, árboles en cornisas imposibles y minerales
 que aparecen "porque estás a tal altura". Es colocación por ruido, no por **ecología**.

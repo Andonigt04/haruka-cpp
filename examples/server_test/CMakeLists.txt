@@ -17,13 +17,13 @@ endif()
 find_library(HarukaEngine_LIBRARY NAMES HarukaEngine
     PATHS ${ENGINE_BUILD_DIR} NO_DEFAULT_PATH REQUIRED)
 
-file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS scripts/*.cpp)
+file(GLOB_RECURSE GAME_SOURCES CONFIGURE_DEPENDS Scripts/*.cpp)
 if(NOT GAME_SOURCES)
-    message(FATAL_ERROR "No source files found in scripts/")
+    message(FATAL_ERROR "No source files found in Scripts/")
 endif()
 
 set(ENGINE_INCLUDES
-    "${ENGINE_ROOT}/src"
+    "${ENGINE_ROOT}/Src"
     "${ENGINE_ROOT}/third_party/glm"
     "${ENGINE_ROOT}/third_party/json/include"
     "${ENGINE_ROOT}/third_party/glad/include"
@@ -39,7 +39,7 @@ endif()
 function(target_apply_network TGT)
     if(HARUKA_NETWORK)
         target_compile_definitions(${TGT} PRIVATE HARUKA_NETWORK)
-        # dgs_bridge.h incluye el ABI (`include/dgs/types.h`): se resuelve igual que el motor —
+        # DGSBridge.h incluye el ABI (`include/dgs/types.h`): se resuelve igual que el motor —
         # checkout local `../dgs` si existe, si no la copia del árbol. NADA de enlazar el
         # precompilado `external/dgs/sdk/libdgs_client.a` (queda obsoleto en cuanto se toca
         # `network.cpp`): aquí las llamadas DGS viven DENTRO de libHarukaEngine.so.
@@ -62,7 +62,7 @@ set_target_properties(ServerTestLib PROPERTIES
 
 # --- Standalone exe ---
 find_package(SDL3 QUIET)
-add_executable(ServerTestExe main.cpp ${GAME_SOURCES})
+add_executable(ServerTestExe Main.cpp ${GAME_SOURCES})
 target_include_directories(ServerTestExe PRIVATE ${ENGINE_INCLUDES})
 target_link_libraries(ServerTestExe PRIVATE ${HarukaEngine_LIBRARY})
 if(SDL3_FOUND)

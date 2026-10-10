@@ -58,7 +58,7 @@ namespace Haruka::vfs {
 - `read("models/ship.glb")` busca en orden de montaje: loose → pak → embedded.
 - Dev monta loose (assets/ del proyecto). Release monta el .pak. El código del
   motor **no cambia** entre modos.
-- Refactor necesario: `texture.cpp`, `model.cpp`, `scene_loader.cpp`, `shader.h`
+- Refactor necesario: `Texture.cpp`, `Model.cpp`, `SceneLoader.cpp`, `Shader.h`
   pasan de rutas a `vfs::read()`. assimp necesita su `IOSystem` custom (lee de
   memoria); stb_image ya tiene `stbi_load_from_memory`.
 
@@ -110,7 +110,7 @@ comprimido dentro del .pak (mismo pipeline que cualquier asset) → no legibles.
   + waterQuality que ya dejé como hook). Editar cualquiera → preset pasa a Custom.
 - Persistencia: `settings.json` en carpeta de usuario (SDL_GetPrefPath). Migrar
   de imgui.ini (hoy) a un json propio para gráficos+audio+keybinds.
-- `applyGraphicsSettings()` (ya existe parcial en application.cpp) se completa
+- `applyGraphicsSettings()` (ya existe parcial en Application.cpp) se completa
   para aplicar cada opción en caliente.
 
 ---

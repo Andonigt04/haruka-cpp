@@ -1,5 +1,5 @@
 // ================================================================================================
-// PALETA Y GRADIENTE BASE DEL CIELO — gemelo GLSL de `src/core/sky_ambient.{h,cpp}`.
+// PALETA Y GRADIENTE BASE DEL CIELO — gemelo GLSL de `Src/Core/sky_ambient.{h,cpp}`.
 //
 // ── QUÉ ES ──────────────────────────────────────────────────────────────────────────────────────
 // El cielo, reducido a lo que DOS consumidores necesitan compartir:

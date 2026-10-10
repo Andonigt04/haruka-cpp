@@ -46,12 +46,13 @@ layout(std140, binding = 5) uniform CloudParams {
     vec4  u_sunColor;  // rgb = color · a = día[0,1]
     vec4  u_wind;      // xy = deriva · z = tiempo · w = altitud del ojo
     vec4  u_misc;      // x = atmósfera · y = pasos · z = escala del campo · w = EXTINCIÓN por metro
-    // EMBUDOS. Mismo layout que `CloudParams` en application_render.cpp (hay static_assert allí).
+    // EMBUDOS. Mismo layout que `CloudParams` en ApplicationRender.cpp (hay static_assert allí).
     vec4  u_vortexPos[4];   // xyz = punto de SUELO del eje, relativo a la cámara · w = radio del núcleo
     vec4  u_vortexInfo[4];  // x = techo (m) · y = viento (m/s) · z = giro · w = 1 tromba / 0 tornado
     vec4  u_vortexN;        // x = cuántos · y = tiempo · z = ángulo de UN PÍXEL del target (rad) · w = máscara de capas (diagnóstico)
     vec4  u_aerial;         // perspectiva aérea (lib/aerial.glsl): x = 1/L · y = día
     vec4  u_blend;          // x = peso del horneado NUEVO (bindings 1/2) frente al ANTERIOR (3/4)
+    vec4  u_vortexEmit[4];   // rgb = color que EMITE · w = 1 del JUEGO (hechizo: metros, sin tormenta, sin oscurecer)
 };
 
 layout(binding = 0) uniform sampler2D u_sceneDepth;
@@ -119,6 +120,17 @@ vec4 harukaStormImprint(vec4 sky, vec3 p) {
         const vec3  G = u_vortexPos[k].xyz - u_planetC.xyz;
         const float top = u_vortexInfo[k].x;
         if (top <= 1.0) continue;
+        if (u_vortexEmit[k].w > 0.5) {
+            // Del JUEGO: sin cumulonimbo de 6 km, pero las nubes SE JUNTAN sobre el eje (lo que
+            // hay a su alrededor se espesa en un disco que luego `harukaGameSwirl` hace girar).
+            const vec3  ag = normalize(G);
+            const vec3  qg = p - G;
+            const float dg = length(qg - ag * dot(qg, ag));
+            const float gR = clamp(top * 12.0, 300.0, 3000.0);   // un tornado grande no cierra 10 km de cielo
+            const float gather = 1.0 - smoothstep(gR * 0.3, gR, dg);
+            sky.x = max(sky.x, 0.75 * gather);
+            continue;
+        }
         const vec3  a  = normalize(G);
         const vec3  q  = p - G;
         const float dH = length(q - a * dot(q, a));      // distancia horizontal al eje
@@ -257,6 +269,35 @@ float harukaCorrT(float logClear, float tauIn)
     return 1.0 - (1.0 - exp(logClear)) * (1.0 - exp(-tauIn));
 }
 
+/// LAS NUBES QUE ARRASTRA UN TORNADO CONJURADO. Un tornado cuelga de una nube que GIRA: las nubes
+/// que tenga encima (hasta `swirlR` del eje) se retuercen alrededor de él, más cerca del eje y cuanto
+/// más tiempo lleva vivo. Se hace girando el PUNTO donde se lee el campo (rotación de Rodrigues sobre
+/// el eje local): el campo es el mismo, visto desde un marco que da vueltas, así que la nube conserva
+/// su forma y se enrolla en espiral. Solo los del JUEGO (los del clima traen su propia tormenta).
+vec3 harukaGameSwirl(vec3 p) {
+    const int n = int(u_vortexN.x);
+    for (int k = 0; k < 4; ++k) {
+        if (k >= n) break;
+        if (u_vortexEmit[k].w < 0.5) continue;
+        const vec3  G   = u_vortexPos[k].xyz - u_planetC.xyz;
+        const vec3  a   = normalize(G);
+        const vec3  q   = p - G;
+        const float h   = dot(q, a);
+        const vec3  rv  = q - a * h;
+        const float dH  = length(rv);
+        const float swirlR = clamp(u_vortexInfo[k].x * 25.0, 600.0, 5000.0);
+        if (dH >= swirlR) continue;
+        const float age = u_vortexInfo[k].w;
+        const float w   = 1.0 - smoothstep(0.0, swirlR, dH);
+        // Diferencial (más giro cerca del eje) → espiral; con la edad, más vueltas, hasta un tope.
+        const float ang = u_vortexInfo[k].z * (0.5 + 0.45 * min(age, 10.0)) * w * w * 2.2;
+        const float c = cos(ang), s = sin(ang);
+        const vec3  rr = rv * c + cross(a, rv) * s + a * dot(a, rv) * (1.0 - c);
+        p = G + a * h + rr;
+    }
+    return p;
+}
+
 void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
                        inout float optical, inout float lit, inout float wsum)
 {
@@ -375,6 +416,7 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         t += stepNow;
         dt = min(dt * growth, dtMax);
         const vec3  p   = g_ro + g_dir * min(tSeg + g_jit * stepNow, tExit);   // nunca tras el terreno (tExit)
+        const vec3  pS  = harukaGameSwirl(p);   // el campo, visto desde el marco que gira con un tornado conjurado
         const float alt = length(p) - R;
         const vec3  upS = p / (R + alt);
         // Camino HORIZONTAL de este paso (respecto a la vertical local): es lo que decorrelaciona la
@@ -407,9 +449,9 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         const float ice = harukaColIce(tC);
         float ext = u_misc.w;
         if (convective) {
-            const vec3  pf  = p * fscale;
+            const vec3  pf  = pS * fscale;
             const float fp0U = fpPix * fscale, fpU = fpM * fscale;
-            const vec3  pfC = harukaCloudSquashedPos(p, R, alt, fscale);
+            const vec3  pfC = harukaCloudSquashedPos(pS, R, alt, fscale);
             const float fieldC = harukaCloudField3LOD(pfC, wv, fp0U * HARUKA_CLOUD_HORIZ_SCALE, fpU * HARUKA_CLOUD_HORIZ_SCALE);
             const float sNraw = harukaCloudStrengthCumulo(fieldC, lo);
             // Lo que el LOD se ha llevado del campo: con ello, la FRACCION LOCAL de nube de esta
@@ -440,7 +482,7 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
             // (el AO por bultos y el sombreado por pendiente hacia el Sol se fueron: la cara al Sol y
             // la panza salen ahora de la transmitancia MARCHADA hacia el Sol, ver `g_rad`)
         } else {
-            const vec3  pf  = p * fscaleA;
+            const vec3  pf  = pS * fscaleA;
             const float fp0U = fpPix * fscaleA, fpU = fpM * fscaleA;
             const float fieldL = harukaCloudFieldLayer(pf, wv, fp0U, fpU);
             const float sNraw = harukaCloudStrength(fieldL, lo);
@@ -586,7 +628,8 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
 ///
 /// ⚠️ ES UNA REGIÓN APARTE de las cáscaras: vive ENTRE el suelo y la base de la nube, donde
 /// `harukaMarchShell` no pisa nunca. Por eso tiene su propio marchado y su propio recinto.
-void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, inout float dust, inout float manga)
+void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, inout float dust, inout float manga,
+                        inout vec3 glow, inout float glowW)
 {
     const int n = int(u_vortexN.x);
     const float time = u_vortexN.y;
@@ -597,17 +640,26 @@ void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, 
         const float top  = u_vortexInfo[k].x;
         const float wind = u_vortexInfo[k].y;
         const float spin = u_vortexInfo[k].z;
-        const float water = u_vortexInfo[k].w;
+        const float water = (u_vortexEmit[k].w > 0.5) ? 0.0 : u_vortexInfo[k].w;   // (del juego: w es la edad)
         if (core <= 0.0 || top <= 1.0 || wind <= 0.0) continue;
+        // DEL JUEGO (un tornado conjurado): la misma manga, pero a escala de METROS y EMITIENDO su
+        // color (fuego, rayo…) en vez de ser nube oscura. Los números del clima están ajustados a
+        // núcleos de 60-120 m; aquí todo lo que era una constante en metros pasa a ir por el núcleo.
+        const bool  game = u_vortexEmit[k].w > 0.5;
+        const vec3  emitC = u_vortexEmit[k].rgb;
 
         const vec3  a  = normalize(G);          // el eje es la vertical LOCAL del punto
-        const float Rb = core * 2.4;            // radio del recinto: la manga abre hasta ~1,6 núcleos y el polvo hasta ~2,2
+        // LA COPA (solo del juego): un disco de nube/humo que gira en espiral encima del embudo, donde
+        // un tornado de verdad tiene su nube madre. Ensancha el recinto y sube por encima del techo.
+        const float capR = core * 7.0;
+        const float Rb = game ? capR : core * 2.4;   // radio del recinto: la manga abre hasta ~1,6 núcleos y el polvo hasta ~2,2
 
         // Recinto: la esfera que envuelve el cilindro (radio Rb, altura top). Un rayo que no la toca
         // no paga nada — que es casi todos los píxeles de casi todos los frames.
         float s0, s1;
-        const vec3  cen = G + a * (top * 0.5);
-        const float rad = sqrt(top * top * 0.25 + Rb * Rb);
+        const float topX = game ? top * 1.3 : top;   // la copa sobresale por arriba
+        const vec3  cen = G + a * (topX * 0.5);
+        const float rad = sqrt(topX * topX * 0.25 + Rb * Rb);
         if (!harukaRaySphere(g_ro - cen, g_dir, rad, s0, s1)) continue;
         float tEnter = max(s0, 0.0);
         float tExit  = max(s1, 0.0);
@@ -621,14 +673,16 @@ void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, 
         const int   steps = int(clamp((tExit - tEnter) / (core * 0.22), 24.0, 96.0));
         const float dt = (tExit - tEnter) / float(steps);
         float t = tEnter + g_jit * dt;
-        const float ext = u_misc.w * 4.0;       // el embudo es DENSO: se lee como cuerpo, no como velo
+        // el embudo es DENSO: se lee como cuerpo, no como velo. Uno de 2 m de núcleo es 50 veces más
+        // estrecho que uno del clima: con la misma extinción sería transparente.
+        const float ext = u_misc.w * 4.0 * (game ? 40.0 / max(core, 0.5) : 1.0);
         const float strength = clamp(wind / 70.0, 0.35, 1.3);
 
         for (int i = 0; i < steps; ++i, t += dt) {
             const vec3  p  = g_ro + g_dir * t;
             const vec3  q  = p - G;
             const float h  = dot(q, a);
-            if (h < 0.0 || h > top) continue;
+            if (h < 0.0 || h > topX) continue;
             const vec3  rv = q - a * h;
             const float d  = length(rv);
             const float hn = h / top;
@@ -640,11 +694,16 @@ void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, 
             // girar en vez de ser un cono quieto. La velocidad angular sale del viento en el núcleo.
             const float ang  = atan(dot(rv, cross(a, vec3(0.0, 0.0, 1.0))), dot(rv, cross(cross(a, vec3(0.0, 0.0, 1.0)), a)) + 1e-6);
             const float omega = spin * wind / max(core, 1.0);
-            const vec3  swirl = vec3(d * 0.05, h * 0.004 - time * 0.6, ang * 3.0 - time * omega * 0.25);
+            const vec3  swirl = game
+                ? vec3(d / core * 3.0, hn * 9.0 - time * 1.6, ang * 3.0 + hn * 7.0 - time * omega * 0.35)
+                : vec3(d * 0.05, h * 0.004 - time * 0.6, ang * 3.0 - time * omega * 0.25);
             const float noise = harukaCloudDetail(swirl);
-            float dens = smoothstep(rF, rF * 0.45, d) * (0.85 + 0.25 * noise) * strength;
+            // El del JUEGO es turbulento (llama): el ruido abre huecos en vez de solo matizar.
+            float dens = smoothstep(rF, rF * 0.45, d) * (game ? (0.15 + 1.1 * noise) : (0.85 + 0.25 * noise)) * strength;
             // Se funde con la nube madre por arriba: sin esto hay un corte seco justo en la base.
-            dens *= smoothstep(0.0, 0.08, 1.0 - hn) + smoothstep(0.92, 1.0, hn) * 0.6;
+            // El del juego NO tiene nube madre: se deshilacha hacia arriba.
+            dens *= game ? smoothstep(0.0, 0.35, 1.0 - hn)
+                         : smoothstep(0.0, 0.08, 1.0 - hn) + smoothstep(0.92, 1.0, hn) * 0.6;
 
             // LO QUE LEVANTA. Un anillo BAJO y algo más ancho que la manga: polvo/escombros en tierra,
             // rociones en el mar.
@@ -653,10 +712,24 @@ void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, 
             // ir teñido de tierra— hacía que el tornado entero pareciera de arena. La nube de
             // escombros real tiene decenas de metros de alto, no cientos: va en METROS, no en
             // fracción de la columna, porque la altura de la nube madre no tiene nada que ver.
-            const float ringH = clamp(core * 0.9, 40.0, 140.0);
+            const float ringH = game ? core * 0.9 : clamp(core * 0.9, 40.0, 140.0);
             const float ring = smoothstep(ringH, ringH * 0.15, h) * smoothstep(core * 2.2, core * 0.6, d)
                              * (0.45 + 0.55 * noise) * strength * 0.45;
             dens += ring;
+            // COPA: disco que empieza a ~3/4 de la columna y se abre arriba, con brazos en espiral
+            // que giran. Es HUMO (oscuro), iluminado desde abajo por el color del embudo.
+            float cap = 0.0;
+            if (game) {
+                // Yunque: una losa fina (de 0,85 a 1,15 de la columna), no una bola.
+                const float band = smoothstep(top * 0.82, top * 0.95, h) * (1.0 - smoothstep(top * 1.05, top * 1.18, h));
+                const float rad01 = d / capR;
+                const float disk = 1.0 - smoothstep(0.45, 1.0, rad01);
+                // BRAZOS en espiral: el ruido en coordenadas polares que se enrollan con el radio,
+                // con umbral para que haya humo y huecos (no una niebla uniforme).
+                const float arms = harukaCloudDetail(vec3(rad01 * 2.5, hn * 1.5, ang * 2.0 + rad01 * 6.0 - time * omega * 0.12));
+                cap = band * disk * (0.04 + 1.3 * smoothstep(0.40, 0.72, arms)) * strength;
+                dens += cap;
+            }
             if (dens <= 0.0) continue;
 
             optical += dens * dt * ext;
@@ -667,8 +740,21 @@ void harukaMarchFunnels(inout float optical, inout float lit, inout float wsum, 
             lit  += (0.03 + 0.12 * noise) * dens + 0.30 * ring;
             wsum += dens;
             g_tsum += t * dens;
-            dust  += ring * (1.0 - water) * 0.6;   // tinte terroso sólo en tierra
-            manga += dens - ring;                  // cuánto de lo atravesado era la manga (oscura)
+            if (game) {
+                // FUEGO: más caliente (hacia blanco-amarillo) cerca del eje, y parpadea con el ruido.
+                // Las brasas del anillo brillan menos que la manga.
+                const float core01 = 1.0 - clamp(d / max(rF, 1e-3), 0.0, 1.0);
+                const vec3  hot = mix(emitC, vec3(1.0, 0.92, 0.65) * max(max(emitC.r, emitC.g), emitC.b), core01 * 0.3);
+                // Donde el ruido es bajo, HUMO (casi negro); donde es alto, llama.
+                const float flame = noise * noise;
+                glow  += (dens - ring - cap) * hot * (0.08 + 1.1 * flame) * (1.0 + 0.6 * core01) + ring * emitC * 0.6
+                       // humo casi negro; solo el centro, justo encima de la boca del embudo, recibe su luz
+                       + cap * mix(vec3(0.05, 0.045, 0.045), emitC * 0.35, pow(clamp(1.0 - d / capR, 0.0, 1.0), 3.0));
+                glowW += dens;
+            } else {
+                dust  += ring * (1.0 - water) * 0.6;   // tinte terroso sólo en tierra
+                manga += dens - ring;                  // cuánto de lo atravesado era la manga (oscura)
+            }
             if (optical > 4.0) return;
         }
     }
@@ -774,8 +860,9 @@ void main()
     harukaMarchColumn(u_slab.x, u_slab.y, u_misc.z, int(clamp(u_misc.y, 16.0, 96.0)), optical, lit, wsum);
 
     // Y los embudos, si hay alguno cerca (casi nunca: la salida por recinto es inmediata).
-    float dust = 0.0, manga = 0.0;
-    harukaMarchFunnels(optical, lit, wsum, dust, manga);
+    float dust = 0.0, manga = 0.0, glowW = 0.0;
+    vec3  glow = vec3(0.0);
+    harukaMarchFunnels(optical, lit, wsum, dust, manga, glow, glowW);
 
     // (dbg & 64): PINTA EN ROJO los pixeles cuya marcha se quedo sin presupuesto antes de salir de la
     // losa: ahi la nube se CORTA por donde se acabaron los pasos (bordes rectos, Andoni con captura
@@ -822,6 +909,8 @@ void main()
         // de sombra de la nube (0,55 de gris a pleno día) salía blanca contra el cielo en la captura.
         col *= mix(1.0, 0.38, clamp(manga / wsum, 0.0, 1.0));
         col  = mix(col, vec3(0.42, 0.34, 0.24) * (0.5 + 0.5 * day), clamp(dust / wsum, 0.0, 0.8));
+        // Embudo del JUEGO: su propio color, que no depende del día — el fuego se ve igual de noche.
+        if (glowW > 0.0) col = mix(col, min(glow / glowW, vec3(1.0)), clamp(glowW / wsum, 0.0, 1.0));
     }
 
     // EL AIRE DE EN MEDIO: una nube a 100 km se ve a través de 100 km de aire, y con L = 18-60 km

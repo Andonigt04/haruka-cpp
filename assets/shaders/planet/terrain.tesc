@@ -5,7 +5,7 @@ layout(location = 0) in vec3 cpPos[]; layout(location = 1) in vec3 cpColor[]; la
 layout(location = 0) out vec3 ePos[]; layout(location = 1) out vec3 eColor[]; layout(location = 2) out vec3 eClimate[];
 layout(std140, binding = 0) uniform SimplePlanetUBO {
     mat4 uMVP; vec4 uCenter; vec4 uLightDir; vec4 uLightColor; vec4 uAmbient; vec4 uExtra; vec4 uDebug;
-    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver Planet.cpp)
 };
 // El MISMO bake que usa terrain.tese (binding 16) para la banda costera del edgeFactor.
 layout(binding = 16) uniform sampler2D uHeightTex;

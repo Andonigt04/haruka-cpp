@@ -86,7 +86,7 @@ if(NOT MSVC)
     # — que es justo lo que la nota de abajo predecía que pasaría.
     #
     # El blindaje por FICHERO era insuficiente por un motivo estructural: la aritmética del terreno
-    # vive en CABECERAS (`terrain_detail.h`, `terrain_lod.h`), así que se compila dentro de cada
+    # vive en CABECERAS (`TerrainDetail.h`, `TerrainLOD.h`), así que se compila dentro de cada
     # unidad que las incluya. Marcar tres `.cpp` no puede cubrirla.
     #
     # Y `-ffp-contract` en GCC vale `fast` POR DEFECTO desde -O2: la fusión `a*b+c` -> FMA ocurriría
@@ -140,9 +140,9 @@ if(NOT MSVC)
     # Coste: estos ficheros pierden vectorización agresiva; el grueso del tiempo de generación está en
     # la GPU, no aquí. Si algún día hace falta, se mide antes de tocarlo.
     set_source_files_properties(
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/world/noise_generator.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/world/planet/planet_geology.cpp"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/world/terrain/cube_sphere.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/NoiseGenerator.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Planet/PlanetGeology.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Src/Haruka/World/Terrain/CubeSphere.cpp"
         DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
         PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()

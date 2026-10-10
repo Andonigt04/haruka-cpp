@@ -13,7 +13,7 @@
 ## 1. Tipos de Objetos (ObjectType) {#tipos-de-objetos}
 
 ### 📌 Ubicación
-[src/tools/object_types.h](src/tools/object_types.h)
+[Src/Haruka/Tools/ObjectTypes.h](Src/Haruka/Tools/ObjectTypes.h)
 
 ### 🎯 Propósito
 Define la clasificación de todos los objetos en la escena. Es un sistema de **etiquetado jerárquico** que permite a diferentes subsistemas (renderer, physics, streaming) identificar qué pipeline usar para cada entidad.
@@ -78,7 +78,7 @@ bool isRenderable(ObjectType type)
 ## 2. Sistema de Escenas (SceneManager) {#sistema-de-escenas}
 
 ### 📌 Ubicación
-[src/core/scene/scene_manager.h](src/core/scene/scene_manager.h)
+[Src/Haruka/Core/Scene/SceneManager.h](Src/Haruka/Core/Scene/SceneManager.h)
 
 ### 🎯 Propósito
 Gestiona una **colección unificada de entidades** que representa el universo completo. Soporta desde objetos microscópicos hasta planetas procedurales usando **doble precisión** para evitar jittering.
@@ -177,7 +177,7 @@ m_idRegistry[hash(obj->name)]
 ## 3. Sistema de Mundo (WorldSystem) {#sistema-de-mundo}
 
 ### 📌 Ubicación
-[src/core/world_system.h](src/core/world_system.h) / [src/core/world_system.cpp](src/core/world_system.cpp)
+[Src/Haruka/Core/world_system.h](Src/Haruka/Core/world_system.h) / [Src/Haruka/Core/world_system.cpp](Src/Haruka/Core/world_system.cpp)
 
 ### 🎯 Propósito
 **Orquestador central** que gestiona:
@@ -271,7 +271,7 @@ gl_Position = projection * view * model * vec4(vertexPos + localPos, 1.0);
 ## 4. Sistema Planetario (PlanetarySystem) {#sistema-planetario}
 
 ### 📌 Ubicación
-[src/game/planetary_system.h](src/game/planetary_system.h)
+[Src/Haruka/Game/planetary_system.h](Src/Haruka/Game/planetary_system.h)
 
 ### 🎯 Propósito
 Motor de **simulación y renderizado de planetas procedurales** con:
@@ -349,7 +349,7 @@ PlanetarySystem::update(dt, camPos)
 ## 5. Tipos Planetarios {#tipos-planetarios}
 
 ### 📌 Ubicación
-[src/tools/planetary_types.h](src/tools/planetary_types.h)
+[Src/Haruka/Tools/PlanetaryTypes.h](Src/Haruka/Tools/PlanetaryTypes.h)
 
 ### 📊 Estructura
 
@@ -601,5 +601,5 @@ Frame N
 
 ## 📚 Referencias
 - Editor: [haruka/src/panels/viewport.cpp](haruka/src/panels/viewport.cpp)
-- Runtime: [haruka-cpp/src/main.cpp](haruka-cpp/src/main.cpp)
-- Inicialización: [haruka/template/scripts/init.cpp](haruka/template/scripts/init.cpp)
+- Runtime: [haruka-cpp/Src/Haruka/Main.cpp](haruka-cpp/Src/Haruka/Main.cpp)
+- Inicialización: [haruka/template/Scripts/Init.cpp](haruka/template/Scripts/Init.cpp)

@@ -77,7 +77,7 @@ vec3 harukaTerrainAlbedo(sampler2DArray albedoTex, sampler2DArray normalTex,
 
     vec3 zoneRGB = hasZone ? texture(zoneTex, bUV).rgb * 255.0 : vec3(0.0);
     vec3  tint; float grainAmt, detailAmt; int tile; vec4 matColor; int matIdx;
-    int   tileBed; float coverW;   // capa del LECHO y cuánto manto la tapa (ver terrain_strata.h)
+    int   tileBed; float coverW;   // capa del LECHO y cuánto manto la tapa (ver TerrainStrata.h)
     harukaSelectMaterial(humid, tempC, slope, elevKm, 0.0, zoneRGB, hasZone,
                          tint, grainAmt, detailAmt, tile, tileBed, coverW, matColor, matIdx);
     biomeCol = mix(biomeCol, matColor.rgb, matColor.a);

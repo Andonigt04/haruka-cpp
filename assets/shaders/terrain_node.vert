@@ -97,6 +97,17 @@ layout(std430, binding = 2) readonly buffer NodeInsts { NodeInst uInst[]; };
 // define la banda de arena de la costa (−30 m … +12 m). Sumarle el detalle la corrompe — el mismo
 // error que `clipmap.tese` documenta al reves. Asi que se vuelve a muestrear el bake aqui, que es
 // exactamente lo que hace el clipmap por vertice teselado.
+// ── LOS CRÁTERES ─────────────────────────────────────────────────────────────────────────────
+// Gemelo de `VoxWorld::surfaceDeltaM`: cada cráter es un cuenco −D·(1−s²)², s = distancia
+// horizontal / radio, y se SUMAN. No es una textura: un hoyo de medio metro cabe entre dos téxeles
+// de cualquier ventana razonable, y aquí se evalúa en el propio vértice. Centros RELATIVOS AL OJO
+// (la CPU resta en double): cerca de la cámara el float da micras. `TerrainNodeRenderer::CraterUBO`.
+layout(std140, binding = 4) uniform NodeCraters {
+    ivec4 uCraterInfo;      // x = cuántos
+    vec4  uCraterC[64];     // xyz = centro relativo al ojo (m) · w = radio (m)
+    vec4  uCraterU[64];     // xyz = vertical del cráter · w = hondo en el centro (m)
+};
+
 layout(binding = 15) uniform sampler2DArray uBaseField;
 layout(binding = 16) uniform sampler2D      uHeightTex;   // el bake EQUIRECT: ver terrain_node.comp
 
@@ -114,6 +125,7 @@ layout(location = 8) flat out int vKUp;
 layout(location = 9) out float vDispM;   // vista 10: dibujado - dato, en metros
 layout(location = 10) out float vMapF;   // vista 12: indice fraccionario del mapa leido (rampa de zancada)
 layout(location = 7) flat out int vFace;    // cara del cubo (vista 5: atribuir un agujero)
+layout(location = 11) out float vCrater;   // 0..1: cuánto de cuenco de cráter hay aquí (tierra desnuda)
 
 // ── LEER UN SLOT QUE NO ES EL MIO: EL SUB-RECTANGULO ────────────────────────────────────────────
 //
@@ -370,7 +382,7 @@ void main() {
     // meterlo en la distancia haria que el morph dependiera del resultado del morph, y ademas los dos
     // lados dejarian de compartir la entrada (cada uno tiene su propio mapa de alturas).
     float morph, morphPar;
-    // ── LA RAMPA DEL MAPA POR ZANCADA (ver `TERRAIN_NODE_STRIDE_RAMP` en terrain_node.h) ─────────
+    // ── LA RAMPA DEL MAPA POR ZANCADA (ver `TERRAIN_NODE_STRIDE_RAMP` en TerrainNode.h) ─────────
     //
     // `skMap` es el mapa que la ZANCADA del nodo obliga a leer (el corte a texel x zancada), y salta
     // de golpe en el radio de cada zancada: a 150 y 300 m del observador el relieve dibujado suelta
@@ -632,6 +644,28 @@ void main() {
     precise dvec3 pRel = dirD * (double(uMisc.x) + double(h)) + dvec3(uCenter.xyz);
     vFragPos = vec3(pRel) + uCenterLo.xyz;
 
+    // Cráteres: cuánto baja el suelo aquí y su gradiente horizontal (para la normal, abajo).
+    float craterDH = 0.0;
+    vec3  craterG  = vec3(0.0);
+    float craterW  = 0.0;
+    for (int ci = 0; ci < uCraterInfo.x; ++ci) {
+        const vec3  q  = vFragPos - uCraterC[ci].xyz;
+        const vec3  cu = uCraterU[ci].xyz;
+        const vec3  hq = q - cu * dot(q, cu);          // horizontal: el relieve no cuenta como distancia
+        const float R2 = uCraterC[ci].w * uCraterC[ci].w;
+        const float s2 = dot(hq, hq) / R2;
+        if (s2 >= 1.0) continue;
+        const float w = 1.0 - s2;
+        craterDH -= uCraterU[ci].w * w * w;
+        craterG  += hq * (4.0 * uCraterU[ci].w * w / R2);   // d(−D·w²)/dx = 4·D·w·x/R²
+        craterW   = max(craterW, smoothstep(0.0, 0.35, w));   // tierra hasta casi el borde, que funde
+    }
+    vCrater = craterW;
+    if (craterDH != 0.0) {
+        vFragPos += dir * craterDH;
+        h += craterDH;
+    }
+
     // Normal por diferencias del propio heightmap: los vecinos están en el pool, así que sale de dos
     // lecturas más y no de evaluar el gradiente del ruido. En los bordes se usa el téxel propio
     // (el nodo comparte esa fila con su vecino, así que la costura no se abre por esto).
@@ -730,6 +764,13 @@ void main() {
         const float dvM2 = float(vp2 - vm2) * stepM;
         const vec3 n2 = normalize(dirF - t1 * ((hR2 - hL2) / max(duM2, 1e-6)) - t2 * ((hU2 - hD2) / max(dvM2, 1e-6)));
         vNormal = normalize(mix(vNormal, n2, fracMap));
+    }
+
+    // El cuenco inclina la normal con su gradiente (tangente: se quita la parte radial).
+    if (craterDH != 0.0) {
+        const vec3 gT = craterG - dirF * dot(craterG, dirF);
+        vNormal = normalize(vNormal - gT);
+        vHeight = h;
     }
 
     vLevel      = uNode.y;

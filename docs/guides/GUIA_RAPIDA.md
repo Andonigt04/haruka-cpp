@@ -4,7 +4,7 @@
 
 ### ObjectType
 ```
-📍 Ubicación: src/tools/object_types.h
+📍 Ubicación: Src/Haruka/Tools/ObjectTypes.h
 📌 Propósito: Clasificar objetos para diferentes pipelines
 🔍 Busca: stringToObjectType(), isPlanetary(), isRenderable()
 
@@ -16,7 +16,7 @@ CHARACTER → Physics + Animation
 
 ### SceneManager
 ```
-📍 Ubicación: src/core/scene/scene_manager.h
+📍 Ubicación: Src/Haruka/Core/Scene/SceneManager.h
 📌 Propósito: Almacenar y buscar SceneObjects
 🔍 Busca: getObjectByName(), getAllObjects(), addLoadedObject()
 
@@ -28,7 +28,7 @@ Características:
 
 ### WorldSystem
 ```
-📍 Ubicación: src/core/world_system.h / .cpp
+📍 Ubicación: Src/Haruka/Core/world_system.h / .cpp
 📌 Propósito: Orquestador central + Floating Origin
 🔍 Busca: shiftOrigin(), toLocal(), getPlanetarySystem()
 
@@ -40,7 +40,7 @@ Responsabilidades:
 
 ### PlanetarySystem
 ```
-📍 Ubicación: src/game/planetary_system.h
+📍 Ubicación: Src/Haruka/Game/planetary_system.h
 📌 Propósito: Simular y renderizar planetas
 🔍 Busca: update(), addPlanet(), renderTerrain()
 
@@ -54,7 +54,7 @@ Subsistemas internos:
 
 ### PlanetChunkKey
 ```
-📍 Ubicación: src/tools/planetary_types.h
+📍 Ubicación: Src/Haruka/Tools/PlanetaryTypes.h
 📌 Propósito: Identificador único de chunk
 Estructura: face + lod + x + y
 
@@ -341,17 +341,17 @@ printf("Distance %.2f → LOD %d\n", distance, lod);
 
 | Archivo | Responsabilidad |
 |---------|-----------------|
-| `src/tools/object_types.h` | Clasificación de objetos |
-| `src/tools/planetary_types.h` | Tipos para planetas |
-| `src/tools/math_types.h` | WorldPos, LocalPos, double/float |
-| `src/core/scene/scene_manager.h` | Almacén de SceneObjects |
-| `src/core/world_system.h` / `.cpp` | Orquestador + Floating Origin |
-| `src/game/planetary_system.h` | Motor de planetas |
-| `src/core/lod_system.h` | Cálculo de Level of Detail |
-| `src/core/terrain/terrain_generator.h` | Generación procedural |
-| `src/core/terrain/chunk_cache.h` | Caché de chunks |
-| `src/core/terrain/terrain_streaming_system.h` | Carga asincrónica |
-| `src/renderer/terrain_renderer.h` | Renderizado de terreno |
+| `Src/Haruka/Tools/ObjectTypes.h` | Clasificación de objetos |
+| `Src/Haruka/Tools/PlanetaryTypes.h` | Tipos para planetas |
+| `Src/Haruka/Tools/MathTypes.h` | WorldPos, LocalPos, double/float |
+| `Src/Haruka/Core/Scene/SceneManager.h` | Almacén de SceneObjects |
+| `Src/Haruka/Core/world_system.h` / `.cpp` | Orquestador + Floating Origin |
+| `Src/Haruka/Game/planetary_system.h` | Motor de planetas |
+| `Src/Haruka/Core/lod_system.h` | Cálculo de Level of Detail |
+| `Src/Haruka/Core/terrain/terrain_generator.h` | Generación procedural |
+| `Src/Haruka/Core/terrain/chunk_cache.h` | Caché de chunks |
+| `Src/Haruka/Core/terrain/terrain_streaming_system.h` | Carga asincrónica |
+| `Src/Haruka/Renderer/TerrainRenderer.h` | Renderizado de terreno |
 | `haruka/src/panels/viewport.cpp` | Integración editor |
 
 ---
@@ -419,7 +419,7 @@ gdb> break object_types.cpp if stringToObjectType == PLANET
 gdb> break terrain_generator.cpp:42
 
 # Cuando se cambia el Floating Origin
-gdb> break world_system.cpp if shiftOrigin
+gdb> break WorldSystem.cpp if shiftOrigin
 ```
 
 ### Logging

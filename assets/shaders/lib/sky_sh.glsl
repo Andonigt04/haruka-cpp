@@ -3,7 +3,7 @@
  * @brief La CARA GPU de `SkySH`: irradiancia del cielo evaluada POR NORMAL.
  *
  * ── POR QUÉ EXISTE ─────────────────────────────────────────────────────────────────────────────
- * `sky_ambient.cpp` integra el cielo en 9 coeficientes de armónicos esféricos, y su cabecera pide
+ * `SkyAmbient.cpp` integra el cielo en 9 coeficientes de armónicos esféricos, y su cabecera pide
  * explícitamente que el fragment replique la fórmula. En la primera versión no se hizo: se evaluaba
  * UNA vez en la CPU para una normal hacia arriba y se pasaba como constante.
  *

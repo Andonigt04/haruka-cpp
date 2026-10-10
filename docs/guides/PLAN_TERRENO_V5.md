@@ -38,7 +38,7 @@ píxel.
 | Parche | Dónde | Qué tapa |
 |---|---|---|
 | Sphere-trace por píxel | `biome.frag::reanchorToFine` | la malla base no lleva detalle |
-| Banda de mezcla (70-95 %) | `planet.cpp` ClipParams + `clipmap.tese` | el salto de `rad·0.002` a `camD·0.012` (6×) |
+| Banda de mezcla (70-95 %) | `Planet.cpp` ClipParams + `clipmap.tese` | el salto de `rad·0.002` a `camD·0.012` (6×) |
 | Sesgo de profundidad | pase del clipmap | tres superficies COPLANARES dibujando el mismo suelo |
 | Redondeo a potencia de dos | `clipmap.tesc::edgeFactor` | que la colisión pueda compartir vértices con el render |
 
@@ -117,7 +117,7 @@ El v5 las hereda y las contesta:
       reescribe, pero deja de estar huérfano.
 - [ ] **Fences + mapeo persistente sin consumidor** — v5: el pool de nodos sí hace subida asíncrona.
       Vuelven a tener call-site o se retiran del README.
-- [ ] **Caché LRU + caché en disco (`core/cache/`), cero consumidores** — v5: el pool **es** una LRU
+- [ ] **Caché LRU + caché en disco (`Core/Cache/`), cero consumidores** — v5: el pool **es** una LRU
       (en VRAM, no en disco). Se reutiliza el concepto o se borra el código muerto.
 - [ ] **MESO** — retirar del README y de los switches si ya no existe.
 - [ ] **`drawIndexedIndirect` / `gl_DrawID`** — v5 es GPU-driven por naturaleza; decidir aquí.
@@ -203,7 +203,7 @@ nuevos por segundo caminando y descendiendo.
 
 #### ✅ RESULTADO F1 (2026-08-23) — el proyecto es viable, con una tolerancia declarada
 
-`terrain_node.h` + `terrain_node.comp` + `terrain_node_lattice`/`_scale`/`_content` (headless) y
+`TerrainNode.h` + `terrain_node.comp` + `terrain_node_lattice`/`_scale`/`_content` (headless) y
 `testTerrainNodeGpuParity` (en `haruka_tests_rhi`, con device real).
 
 **El direccionamiento es exacto**, sin tolerancia:
@@ -322,7 +322,7 @@ En R16F sería la mitad, y el rango del nodo hace que 16 bits sobren de sobra.
 
 #### ✅ EL POOL (2026-08-23) — y el número que justifica el v5 entero
 
-`terrain_node_pool.h` (`TerrainNodePool`), con `terrain_node_pool` y `terrain_node_pool_reuse`.
+`TerrainNodePool.h` (`TerrainNodePool`), con `terrain_node_pool` y `terrain_node_pool_reuse`.
 
 ```
 REUTILIZACION al andar 48 m:  1 044 de 1 169 = 89,3 %
@@ -349,7 +349,7 @@ Tres invariantes, verificados:
 
 #### ✅ ADAPTADOR GPU (2026-08-23) — F2 CERRADA
 
-`terrain_node_gpu.h` (`TerrainNodeGpu`) + `testTerrainNodePoolGpu` en `haruka_tests_rhi`. Primera vez
+`TerrainNodeGpu.h` (`TerrainNodeGpu`) + `testTerrainNodePoolGpu` en `haruka_tests_rhi`. Primera vez
 que las piezas corren JUNTAS:
 
 ```
@@ -587,7 +587,7 @@ selección de material usa `vClimate.x`, que **es** `baseH` (define la banda de 
 El test de paridad de F1 no lo veía porque corre **sin bake**, o sea por la rama sin muestreo.
 
 Arreglado en los dos lados a la vez (`terrain_node.comp` y `nodeFillHeights`, que ahora acepta un
-proveedor de altura base inyectado para que `terrain_node.h` siga sin depender del planeta ni de la
+proveedor de altura base inyectado para que `TerrainNode.h` siga sin depender del planeta ni de la
 GPU). Medido con un campo base sintético de ±3 km (`testTerrainNodeBaseField`):
 
     referencia                    2162.7 .. 2212.7 m
@@ -666,7 +666,7 @@ elevación **dos veces**, en dos parametrizaciones distintas:
 
 ⚠️ **`m_baseHeights` llevaba el comentario "es el suelo que consultará la física" y no lo leía
 NADIE.** Se rellenaba en el bake y se quedaba ahí, dato muerto, mientras la física iba contra el
-equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`src/core/terrain/base_field.h`),
+equirect. Ahora sí tiene un lector: `Terrain::baseFieldHeightAt` (`Src/Haruka/Core/terrain/base_field.h`),
 gemelo CPU de `lib/base_field.glsl` — y **está demostrado, no solo escrito**: el test de paridad del
 bake lo valida contra la GPU a **0,0007 m** en Vulkan.
 
@@ -853,7 +853,7 @@ declarada de 0,05 m, pero el margen pasó de tres órdenes a uno: las octavas gr
 ~1 km y su coordenada de ruido es diminuta (`p·0.0000833`), así que amplifican la divergencia float.
 
 ⚠️ **La escalera vive en CUATRO sitios** y los cuatro hay que tocarlos a la vez: `terrainDetail` y
-`terrainDetailGrad` en `terrain_detail.h`, y sus dos gemelos en `terrain_detail.glsl`. Actualizar
+`terrainDetailGrad` en `TerrainDetail.h`, y sus dos gemelos en `terrain_detail.glsl`. Actualizar
 tres de cuatro lo cazó `terrain_detail_gradient` en el acto — el gradiente dejaba de describir la
 altura y la iluminación mentía.
 
@@ -914,14 +914,14 @@ valen lo mismo, así que no cambia nada de antes.
 **Lo que queda del borrado, y lo que cuesta:**
 
     clipmap.tesc/.tese/.vert            236 lineas
-    el bloque de draw en planet.cpp      86 lineas
+    el bloque de draw en Planet.cpp      86 lineas
     reanchorToFine en biome.frag         27 lineas
     + la banda de mezcla, el sesgo de profundidad, el recorte de la malla base y HARUKA_PLANET_DEBUG=9
 
 La rejilla de anillos y sus `ClipParams` **se quedan**: son del mar ahora.
 
 ⚠️ **NO SE BORRA TODAVÍA, y la razón es concreta**: `HARUKA_TERRAIN_V5` es **opt-in por variable de
-entorno** (`terrain_node_renderer.h`), o sea que el clipmap es el terreno POR DEFECTO. Borrarlo hoy
+entorno** (`TerrainNodeRenderer.h`), o sea que el clipmap es el terreno POR DEFECTO. Borrarlo hoy
 deja el juego **sin terreno**, y el sustituto no se ha visto funcionar en pantalla ni una vez. El
 orden obligatorio es: (1) verificar el v5 en el juego → (2) hacerlo el defecto → (3) borrar.
 El paso (1) es el único que no puedo hacer yo.

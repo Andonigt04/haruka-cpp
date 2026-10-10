@@ -7,7 +7,7 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
     vec4 uDebug; // x = vista de depuración: 0=normal, 1=elev, 2=zonas, 3=bioma, 4=temp, 5=humedad
     // xyz = posición de la CÁMARA en el marco del planeta, REDUCIDA módulo `uExtra.y` (el tile) en
     // doubles por la CPU. Sirve para anclar el patrón de textura al planeta sin reconstruir nunca una
-    // coordenada de 6,37e6 en el fragmento: ver la nota larga de `planet.cpp`.
+    // coordenada de 6,37e6 en el fragmento: ver la nota larga de `Planet.cpp`.
     vec4 uTexAnchor;
 };
 // ⚠️ LAS OCHO TEXTURAS SUELTAS DE BIOMA SE FUERON (bindings 1-8).

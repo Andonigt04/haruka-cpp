@@ -252,10 +252,10 @@ float fBm(dvec3 pos, int seed, int octaves, float persistence, float lacunarity,
 
 const float A_NORM = 0.45;
 
-// (Aquí vivía el ruido de valor 3D portado de planet_geology.cpp —`gHashU`/`gHashC`/`gH01`/`gVHash`/
+// (Aquí vivía el ruido de valor 3D portado de PlanetGeology.cpp —`gHashU`/`gHashC`/`gH01`/`gVHash`/
 //  `gVNoise`/`gWarp`—. Solo lo usaba `geologyElevKm`, que se fue con la tectónica: ver la cabecera.)
 
-// --- Cube-sphere: dirección -> (cara,u,v). PORT EXACTO de planet_fields.cpp -------------------
+// --- Cube-sphere: dirección -> (cara,u,v). PORT EXACTO de PlanetFields.cpp -------------------
 // En DOUBLE: la división en double es IEEE-exacta en CPU y GPU, así que u/v salen bit a bit iguales.
 // En float, cada lado redondeaba a su manera ANTES de escalar por faceRes (256), y ese redondeo se
 // convertía en error del peso bilineal (ver sampleField4).

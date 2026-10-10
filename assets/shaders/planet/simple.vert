@@ -12,11 +12,11 @@ layout(std140, binding = 0) uniform SimplePlanetUBO {
     vec4 uAmbient;
     vec4 uExtra; // x = hasTex, y = tiling
     vec4 uDebug; // x = vista de depuración (ver TerrestrialPlanet::debugView)
-    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver planet.cpp)
+    vec4 uTexAnchor;   // ancla planetaria de las UV de terreno (la usa biome.frag; ver Planet.cpp)
 };
 layout(location = 0) out vec3 vNorm; layout(location = 1) out vec3 vFragPos; layout(location = 2) out vec3 vColor; layout(location = 3) out vec2 vUv; layout(location = 4) out vec3 vClimate;
 // Este vertex se empareja con `biome.frag` en el pipeline de bioma SIN teselar (`s_biomePipeline`,
-// ver planet.cpp). `biome.frag` declara `vSurfKind` en la location 5 y aquí no existía: el programa
+// ver Planet.cpp). `biome.frag` declara `vSurfKind` en la location 5 y aquí no existía: el programa
 // NO ENLAZABA ("vSurfKind not declared as input from previous stage") y esa ruta se quedaba sin
 // pipeline. Vale 1.0 porque dibuja la MALLA BASE — lo mismo que pone `terrain.tese`, que es esa misma
 // superficie ya teselada. El clipmap y el anillo cercano ponen 0.0.

@@ -1,0 +1,47 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Security problems go through SECURITY.md, not here.**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest steps, scene, command or test that shows it.
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Graphics backend
+      options: [OpenGL, Vulkan, Both, Not graphics-related]
+    validations:
+      required: true
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver
+      placeholder: "e.g. NVIDIA RTX 3050 Laptop, driver 615.x / AMD Radeon 780M, Mesa 25.x"
+  - type: input
+    id: build
+    attributes:
+      label: Commit and build type
+      placeholder: "e.g. 1627230, RelWithDebInfo, MODULES=1111111111"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log lines. `HARUKA_DIAG=1` turns on diagnostic logs.
+      render: text

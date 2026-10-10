@@ -2,7 +2,7 @@
 #extension GL_GOOGLE_include_directive : require
 // ── SONDA DE LA COLUMNA DE AIRE ─────────────────────────────────────────────────────────────────
 // Evalua `lib/cloud_column.glsl` (fraccion convectiva, fraccion del vapor en altura, hielo) en una
-// lista de columnas x alturas, para que el banco compare contra `src/core/cloud_column.h`: es la
+// lista de columnas x alturas, para que el banco compare contra `Src/Core/cloud_column.h`: es la
 // mitad GPU del unico test de formacion. Si divergen, el jugador estaria "dentro de la nube" (CPU)
 // donde el cielo no la dibuja (GPU), o al reves.
 #include "lib/cloud_column.glsl"

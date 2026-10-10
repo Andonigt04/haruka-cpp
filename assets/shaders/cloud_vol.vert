@@ -27,6 +27,7 @@ layout(std140, binding = 5) uniform CloudParams {
     vec4  u_vortexN;
     vec4  u_aerial;    // (solo lo usa el fragmento; el bloque tiene que coincidir con el .frag)
     vec4  u_blend;
+    vec4  u_vortexEmit[4];   // rgb = color que EMITE · w = 1 del JUEGO (hechizo: metros, sin tormenta, sin oscurecer)
 };
 
 layout(location = 0) out vec3 vRayDir;

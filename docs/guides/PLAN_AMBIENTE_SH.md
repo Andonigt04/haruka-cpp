@@ -22,10 +22,10 @@ mínimo correcto para irradiancia difusa y cuesta 1 UBO de 48 B.
 |---|---|---|
 | `final.frag:87` | `shadowCol = baseColor * vec3(0.40, 0.46, 0.60) * ao` | tint de sombra TOON del pase de objetos |
 | `sky.frag:139` | `cShad = vec3(0.46, 0.52, 0.67)` | base fría de las nubes (color de dibujado) |
-| `planet.cpp:2402` | `ubo.uAmbient = ambientStrength * vec3(0.55, 0.65, 0.85)` | UBO del terreno (clipmap/simple/textured/biome/water) |
+| `Planet.cpp:2402` | `ubo.uAmbient = ambientStrength * vec3(0.55, 0.65, 0.85)` | UBO del terreno (clipmap/simple/textured/biome/water) |
 
-Más el escalar `ambientStrength` del `PerFrameData` (`application_render.cpp:811` = `mix(0.11, 0.28, day)`,
-`application_render.cpp:1965` = `0.25`), que llega a todos los shaders como `ambientStrength` pero que
+Más el escalar `ambientStrength` del `PerFrameData` (`ApplicationRender.cpp:811` = `mix(0.11, 0.28, day)`,
+`ApplicationRender.cpp:1965` = `0.25`), que llega a todos los shaders como `ambientStrength` pero que
 **cada consumidor interpreta como le da la gana** (`final.frag` ni siquiera lo usa para la sombra: lo
 multiplica `prop_inst.frag`, `softbody.frag`, `fluid_particle.frag`, `water.frag:283`, `preview.frag:56`
 con `max(ambientStrength, 0.15)`, etc.).
@@ -37,7 +37,7 @@ cuanto dos superficies comparten plano.
 
 ### 1.2 IBL: código que genera texturas que nadie lee
 
-`src/renderer/ibl.cpp` (328 líneas) construye toda la tubería:
+`Src/Haruka/Renderer/IBL.cpp` (328 líneas) construye toda la tubería:
 
 - `setupCubemap()` → `hEnv` (cubemap RGB16F 512³)
 - `generateDefaultSky()` → rellena `hEnv` con un cielo planimétrico
@@ -47,9 +47,9 @@ cuanto dos superficies comparten plano.
 
 Pero **ningún shader de `assets/shaders/` muestra `uIrradiance`, `uPrefilter` ni `uBrdf`** (grep
 exhaustivo, 2026-08-06: cero coincidencias). `final.frag` declara `enableIBL` en el `PerFrameData`
-(`final.frag:30`) y `application_render.cpp:839` lo rellena, pero **no se usa en el shader**. El único
-uso real de `_ibl` es construirlo (`application_render.cpp` → `application.h:482`) y destruirlo
-(`application.cpp:275`). El README ya lo marca como "no conectado"; esta auditoría lo confirma: **es
+(`final.frag:30`) y `ApplicationRender.cpp:839` lo rellena, pero **no se usa en el shader**. El único
+uso real de `_ibl` es construirlo (`ApplicationRender.cpp` → `Application.h:482`) y destruirlo
+(`Application.cpp:275`). El README ya lo marca como "no conectado"; esta auditoría lo confirma: **es
 deuda sin consumidor, no una feature a medias**.
 
 ### 1.3 La semilla del plan ya existe: `lib/sky_palette.glsl`
@@ -61,7 +61,7 @@ deuda sin consumidor, no una feature a medias**.
 - `harukaSkyBase(t, day)` → gradiente horizonte→cénit (interpolado noche↔día)
 
 y **`sky.frag` ya lo usa** (`sky.frag:76-77`). Su cabecera declara ser gemelo de
-`src/core/sky_ambient.{h,cpp}` — **pero ese fichero no existe** (glob 2026-08-06). El plan no inventa
+`Src/Haruka/Core/sky_ambient.{h,cpp}` — **pero ese fichero no existe** (glob 2026-08-06). El plan no inventa
 una pieza nueva: rellena la mitad del contrato que el propio shader ya declara.
 
 ---
@@ -69,7 +69,7 @@ una pieza nueva: rellena la mitad del contrato que el propio shader ya declara.
 ## 2. Arquitectura objetivo
 
 ```
-src/core/sky_ambient.{h,cpp}   ← NUEVO (el gemelo CPU que sky_palette.glsl ya promete)
+Src/Haruka/Core/sky_ambient.{h,cpp}   ← NUEVO (el gemelo CPU que sky_palette.glsl ya promete)
   · harukaSkyBase(t, day)       · mismo gradiente que el GLSL (mismas constantes, doble del GLSL)
   · skyDiffuseIrradiance(dir)   · integra el cielo a SH (ver §3) o por muestreo directo
   · coeffs() → 9 × vec3         · coeficientes SH de banda 0..2, actualizados por frame
@@ -93,7 +93,7 @@ los dos lados — se acaba la desincronización.
 ### Opción B1 — SH por muestreo de `harukaSkyBase` (recomendada)
 
 La irradiancia difusa en un punto con normal `N` es `∫ L(ω) max(ω·N,0) dω`. Con los 9 coeficientes SH
-de banda 0..2 basta para luz difusa. Procedimiento por frame (CPU, en `sky_ambient.cpp`):
+de banda 0..2 basta para luz difusa. Procedimiento por frame (CPU, en `SkyAmbient.cpp`):
 
 1. Construir las **funciones de transferencia convolucionadas** una vez (constantes, solo dependen del
    kernel `max(ω·N,0)` y de la base SH): 9 coeficientes fijos.
@@ -107,7 +107,7 @@ depende de la cámara.
 
 ### Opción B2 — SH resuelto en shader (deferido)
 
-Variante que deja `sky_ambient.cpp` fuera: un compute/lookup por texel. NO recomendada: duplica el
+Variante que deja `SkyAmbient.cpp` fuera: un compute/lookup por texel. NO recomendada: duplica el
 costo y complica la paridad CPU↔GPU. Se documenta por si el 1D por bandas diera problemas de
 convergencia (no debería).
 
@@ -119,7 +119,7 @@ convergencia (no debería).
 
 ## 4. Cambios por fichero
 
-### 4.1 NUEVO `src/core/sky_ambient.{h,cpp}` — el gemelo CPU
+### 4.1 NUEVO `Src/Haruka/Core/sky_ambient.{h,cpp}` — el gemelo CPU
 - Constantas de paleta idénticas a `sky_palette.glsl` (en `double` donde proceda; el resto del motor
   ya mezcla double/flota con criterio, ver `terrain_sampler_v2.cpp`).
 - `harukaSkyBase(float t, float day)` y `harukaSkyDay(float sunElev)` — mismo cuerpo que el GLSL.
@@ -139,24 +139,24 @@ convergencia (no debería).
   `water.frag`, `preview.frag`, `shallow_water.frag`, `planet.frag`, `construction_inst.frag`, etc.
   (todos los que hoy declaran `PerFrameData` con `ambientStrength`).
 
-### 4.4 CPU que rellena el UBO — `application_render.cpp` (~línea 811)
+### 4.4 CPU que rellena el UBO — `ApplicationRender.cpp` (~línea 811)
 - Sustituir `frameData.ambientStrength = mix(0.11f, 0.28f, day)` por:
   - `SkySH sh = skySH(sunElev);` → volcar los 9 coeficientes al `PerFrameData`.
   - `ambientStrength` se mantiene como **gainer** final (escalar) o se elimina; decisión en §5.2.
-- `PerFrameData` está en `application_render.cpp` (~línea 60) → añadir los 9 `vec4`.
+- `PerFrameData` está en `ApplicationRender.cpp` (~línea 60) → añadir los 9 `vec4`.
 
 ### 4.5 Consumidores — quitar constantes hardcodeadas
 - `final.frag:87` `vec3(0.40, 0.46, 0.60)` → `shadowCol = baseColor * amb(N) * ao` donde
   `amb(N)` evalúa el SH.
 - `sky.frag:139` `vec3(0.46, 0.52, 0.67)` es el color de las nubes, NO ambiente: **NO se toca** (ver
   §5.1 — es un arte del dibujado, y el SH no debe alimentarlo para no contar el sol dos veces).
-- `planet.cpp:2402` `uAmbient = ambientStrength * vec3(0.55, 0.65, 0.85)` → los shaders del terreno
+- `Planet.cpp:2402` `uAmbient = ambientStrength * vec3(0.55, 0.65, 0.85)` → los shaders del terreno
   (`planet/simple.frag:17`, `textured.frag:25`, `biome.frag:245`, `water.frag:123`) leen el SH del
   `PerFrameData` y usan `uAmbient` como fallback.
 - `preview.frag:56` `max(ambientStrength, 0.15)` → SH.
 
 ### 4.6 IBL — decidir al implementar (§6.1)
-- Conservar `ibl.cpp` (sirve de referencia y para un futuro render PBR de verdad) pero **no es
+- Conservar `IBL.cpp` (sirve de referencia y para un futuro render PBR de verdad) pero **no es
   necesario para este plan**; el SH difuso lo cubre para la estética toon.
 - El README ya lo lista como no conectado → el plan puede dejarlo marcado "fuera de alcance" o
   borrarlo; decisión del autor.
@@ -180,7 +180,7 @@ convergencia (no debería).
   interpreta distinto. Propuesta: mantenerlo como **multiplicador final único** (el artista ajusta un
   solo número), definido en un sitio central.
 - ¿Los shaders del terreno migran al SH o conservan `uAmbient` como única vía? (El terreno tiene su
-  propio UBO `planet.*`: `uAmbient` de `planet.cpp:2402`.) Propuesta: migrar, dejando `uAmbient`
+  propio UBO `planet.*`: `uAmbient` de `Planet.cpp:2402`.) Propuesta: migrar, dejando `uAmbient`
   como fallback si falta el `PerFrameData`.
 - ¿EL SH se evalúa por normal en el fragment (coste 9 mults/px, trivial) o se pasa irradiance de
   banda baja? Propuesta: por fragment, es el estándar.
@@ -205,18 +205,18 @@ desincronizadas) con el menor cambio.
 
 ## 7. Orden de implementación (fases verificables)
 
-1. **Fase 1 — gemelo CPU**: `src/core/sky_ambient.{h,cpp}` con las mismas constantes y funciones que
+1. **Fase 1 — gemelo CPU**: `Src/Haruka/Core/sky_ambient.{h,cpp}` con las mismas constantes y funciones que
    `sky_palette.glsl`. Verificación: test unitario que muestrea `harukaSkyBase` y compara contra el
    GLSL para los mismos inputs (día/noche, cénit/horizonte). Paridad numérica exacta en `float`.
 2. **Fase 2 — UBO**: ampliar `PerFrameData` con `shCoef[9]` en TODOS los shaders y rellenarlo en
-   `application_render.cpp`. Verificación: se compila, no cambia la imagen (el campo no se consume aún).
+   `ApplicationRender.cpp`. Verificación: se compila, no cambia la imagen (el campo no se consume aún).
 3. **Fase 3 — integrar SH**: `skySH(sunElev)` en CPU + volcar al UBO. Verificación: con
    `HARUKA_DEBUG=1` (o el flag de debug del renderer) imprimir `shCoef[0]` — debe ser el color medio
    del cielo (≈ `lerp(horiz, zenith, 0.5)` para `day=1`).
 4. **Fase 4 — consumidores**: migrar `final.frag` (sombra toon) y luego los demás shaders al SH.
    Verificación: al atardecer la sombra se vuelve cálida/cercana al horizonte sin tocar la cámara; al
    mediodía, fría y azul. Comparar contra la imagen anterior con `ambientStrength` fija.
-5. **Fase 5 — limpieza**: decidir `ambientStrength`, `uAmbient` fallback, y el futuro de `ibl.cpp`.
+5. **Fase 5 — limpieza**: decidir `ambientStrength`, `uAmbient` fallback, y el futuro de `IBL.cpp`.
 
 Cada fase es independiente y comprobable; el plan NO depende de poder renderizar (las fases 1-3 se
 verifican por test/valor impreso; la 4 necesita pantalla).

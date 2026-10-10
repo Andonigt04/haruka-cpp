@@ -53,7 +53,7 @@ el lecho). Reemplaza el parche "colinas por landMask".
 - Fase 2 (pxCoast siempre-on) ✅ — agua recortada per-píxel al contorno también en Low (antes rectángulos).
 - "Terreno desaparece al mover cámara" ✅ ARREGLADO — el LOD refina solo en frustum (F2) y solo
   recalculaba al TRASLADAR → al ROTAR la zona revelada quedaba con el set viejo (grueso/vacío). Fix
-  (planetary_system.cpp): recompute también cuando la vista cambia (Σ|Δ cull VP| > 0.02); el recompute
+  (PlanetarySystem.cpp): recompute también cuando la vista cambia (Σ|Δ cull VP| > 0.02); el recompute
   es ~1ms sin allocs → asumible. Pendiente validar por el usuario.
 - Fase 3 (unificar lámina agua) ✅ RESUELTO con **superficie única de océano** (`WaterRenderer::renderSingleOcean`,
   DEFAULT; toggle `oceanshell off` = por-chunk). Rejilla a nivel del mar que sigue a la cámara (densa

@@ -18,6 +18,10 @@ layout(std140, binding = 0) uniform GrassDraw {
     vec4  uShade;       // x = ambiente · y = anchura · z = altura · w = (libre)
     vec4  uAerial;      // la misma que el terreno (ver lib/aerial.glsl)
     vec4  uUp;          // xyz = arriba en la camara (para la elevacion de la perspectiva aerea)
+    // (vert) No se usa aquí, pero el bloque es UNO para las dos etapas: sin él OpenGL no enlaza
+    // ("struct type mismatch ... GrassDraw") y en GL no se dibujaba ni una brizna. Vulkan enlaza por
+    // etapa y no se quejaba.
+    vec4  uCamShift;
 };
 
 layout(location = 0) in vec3 vNormal;

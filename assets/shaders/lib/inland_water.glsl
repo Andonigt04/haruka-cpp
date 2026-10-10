@@ -126,7 +126,7 @@ float harukaBakedLakeAt(vec3 dir) {
  *
  * En el océano devuelve el centinela de "ilimitado" y el oleaje no se toca. En un lago devuelve su
  * diámetro equivalente, y con él `harukaFetchFactor` baja la ola a lo que ese lago puede sostener —
- * sin esto, un lago de 400 m tiene el swell del Atlántico. Ver `water_fill.h`.
+ * sin esto, un lago de 400 m tiene el swell del Atlántico. Ver `WaterFill.h`.
  */
 float harukaBakedFetchAt(vec3 dir) {
     ivec2 sz = textureSize(uLakeTex, 0);

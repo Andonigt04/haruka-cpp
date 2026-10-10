@@ -7,7 +7,7 @@
 
 ## ESTADO ACTUAL (2026-07-22) — apunta todo
 
-**Core GL-free (lib `HarukaConstruction`, `src/game/construction/construction.{h,cpp}`; suite 131 OK · 0 fallos):**
+**Core GL-free (lib `HarukaConstruction`, `Src/Haruka/Game/Construction/construction.{h,cpp}`; suite 131 OK · 0 fallos):**
 - **F1** colocación: `validate(typeId,pos,orient,IWorldProvider) → Placement {Ok,UnknownType,OverlapsPiece,
   NotAnchored,WrongSupport,TooSteep}`. OBB-OBB SAT en double. NO rechaza por penetrar terreno (el relieve se
   moldea con la herramienta de terreno). `add(...,world)`.
@@ -20,7 +20,7 @@
   `fixtureFits(op, half)`.
 - **Layout de edificio**: `WallRun`/`BuildingLayout` + `buildingLayout(...)` — la estructura en datos, sin render.
 
-**Cliente (`Survival/scripts/build_system.{h,cpp}` + `init.cpp`/`init_console.cpp`):**
+**Cliente (`Survival/scripts/build_system.{h,cpp}` + `Init.cpp`/`init_console.cpp`):**
 - Modo construcción con **preview** (fantasma verde/rojo) + **catálogo DATA-DRIVEN desde items** (tag `construccion`
   + modelo). AABB real del `.glb`. **Sockets/SNAP** derivados del AABB. **Herramienta de terreno** (nivelar/subir/
   bajar) reusando `DeformationField`. **Prefab suelo 3×3**. **Modo camino** (puntos de referencia → hilera).
@@ -68,7 +68,7 @@ sigue en el core GL-free y testeado. A archivos van los **markers de control** �
 proporción —, no la generación. La carga **valida y lo canta** por log (material inexistente, tejado con material
 de muro, plano con un rol que no existe, imperio incompleto → descartado).
 
-Tests: `Survival/tests/test_buildings.cpp` (`ctest -R survival_buildings`, 159 OK) — no comprueba que el JSON se
+Tests: `Survival/Tests/TestBuildings.cpp` (`ctest -R survival_buildings`, 159 OK) — no comprueba que el JSON se
 parsee, sino que **manda**: Bram es de ladrillo con aguja porque lo dice su archivo, un templo es >1.5× la casa
 del mismo imperio, un almacén sin `window` no abre ni un hueco, y la generación sigue siendo determinista.
 Por eso el spawn en escena se movió a `building_spawn.cpp`: así `building_gen.cpp` es GL-free y se puede probar
@@ -114,7 +114,7 @@ hasta ver el ladrillo uno a uno).
 
 **INSTANCING de PRIMITIVAS (2026-07-22)**: el pase instanciado solo cogía `RenderKind::Model` con `.glb` y prop
 `construction` — las piezas tejidas son PRIMITIVAS (`cube`) con prop `building`, o sea que cada tabla era un
-draw. Ahora `application_render.cpp` acumula también las primitivas con prop `construction`/`building` en
+draw. Ahora `ApplicationRender.cpp` acumula también las primitivas con prop `construction`/`building` en
 `primInstances` (clave = tipo de primitiva) y las dibuja con el mismo PSO instanciado (bind VBO/EBO de la
 primitiva + `GPUInstancing::render`) → **1 draw por primitiva**. Además el buffer de instancias es FIJO (20 000,
 `addInstance` DESCARTA en silencio al pasarse), así que ambos caminos dibujan **por lotes** del tamaño del
@@ -156,7 +156,7 @@ cada ~12 m para que la calzada siga el relieve en vez de aplanar un plano.
 3. **F3 por FUERZA** (Jolt: carga > `breakThreshold` → romper constraints). Hoy el disparador es manual (X).
 4. **Carreteras**: superficie/visual + **roller** (tierra) + que el generador las use mejor; spline suave.
 5. **Camino**: yaw (girar según el tramo), spline (curvas), escaleras.
-6. **Instancing**: verificar en juego; **mesh-cut** (recorte real de geometría) aparcado en `mesh_cut.h`.
+6. **Instancing**: verificar en juego; **mesh-cut** (recorte real de geometría) aparcado en `MeshCut.h`.
 7. **Items naturales proc** (log/branch/rock/ore): malla procedural por semilla + icono seed 1 (aparcado, ver memoria).
 
 ## 0. Decisiones CERRADAS (usuario, 2026-07-18)

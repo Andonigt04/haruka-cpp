@@ -1,7 +1,7 @@
 #ifndef HARUKA_CLOUD_COLUMN_GLSL
 #define HARUKA_CLOUD_COLUMN_GLSL
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
-//  LA COLUMNA DE AIRE — gemelo GLSL de `src/core/cloud_column.h`. LEE AQUEL PRIMERO.
+//  LA COLUMNA DE AIRE — gemelo GLSL de `Src/Core/cloud_column.h`. LEE AQUEL PRIMERO.
 //
 //  Una nube es donde el aire esta saturado, no una capa a una cota. Aqui la columna llega ya
 //  horneada por texel: base y techo de lo convectivo (m sobre el nivel del mar; la base es el

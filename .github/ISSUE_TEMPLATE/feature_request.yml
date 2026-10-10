@@ -1,0 +1,23 @@
+name: Feature or change proposal
+description: Propose a new feature or a change in behaviour
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do and what stops you today. Describe the problem, not only a solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How you would solve it, and which parts of the engine it touches.
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and costs
+      description: |
+        Does it affect determinism (server parity), CPU↔GPU parity, the module masks, or frame time?
+        How would you measure it?
