@@ -22,7 +22,11 @@
  *     "pieces": [ { "item": "armor_plate",
  *                   "pos":  [x,y,z],        // metros, marco del prefabricado
  *                   "rot":  [w,x,y,z],      // opcional; identidad si falta
- *                   "joint": "rigid|mechanism" } ] }
+ *                   "joint": "rigid|mechanism",
+ *                   "name": "puerta" } ],              // opcional: para que una junta la nombre
+ *     "juntas": [ { "a": 0, "b": 3,                     // índices en pieces (o el "name" de la pieza)
+ *                   "pos": [x,y,z], "rot": [w,x,y,z],   // punto de giro y marco de la junta
+ *                   "rail": { ...como en ports/<item>.json... } } ] }
  *
  * O MONTADO EN BLENDER (assets/data/prefabs/<nombre>.glb / .gltf). Es la MISMA lista de referencias
  * con pose, no una malla: del fichero sólo se lee el trozo JSON (nodos y poses); la geometría ni se
@@ -35,6 +39,8 @@
  *             tiene que ser esa caja centrada en su origen (ver Survival/Tools/blender_prefab_palette.py).
  *   · `joint` = "mechanism" y `arc` = grados, también como propiedades personalizadas.
  *   · Un vacío con la propiedad `anchor` (o llamado "anclaje...") es un punto de anclaje.
+ *   · Un vacío llamado "junta..." es una JUNTA (`PrefabJoint`): `a`/`b` = nombres de los objetos que
+ *     une, su Z = el eje; `dof`, `limites`, `motor`, `muelle`, `amortiguacion`, `rotura`.
  * ⚠️ Una pieza ESCALADA o espejada se descarta con aviso: el tamaño lo declara el item, no el
  * montaje — escalar una plancha en Blender no la haría más grande en el juego, solo mentiría.
  * Hay que exportar con "Include > Custom Properties" para que lleguen `item`/`joint`/`arc`.
@@ -43,6 +49,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
+#include "Haruka/Game/Ports/Port.h"
 
 namespace Haruka::Game::Prefab {
 
@@ -66,6 +73,29 @@ struct PrefabPiece {
     /// se hace. Lo que coloca la tabla en su sitio no es un ángulo ajustado, es su ANCLAJE a la
     /// cuaderna — ver `tools/gen_forro.py`.
     double      arc = 0.0;
+    /// Nombre del objeto en Blender (o `"name"` en el JSON). Sólo sirve para que una junta diga A QUÉ
+    /// piezas une; vacío si nadie lo nombra.
+    std::string node;
+};
+
+/**
+ * @brief UNA JUNTA DEL MONTAJE: une la pieza `a` con la `b` con un raíl (bisagra, deslizadera...).
+ *
+ * Existe porque los puertos no bastan para un edificio de ladrillos. Un puerto lo declara el ITEM
+ * y vale para todas sus copias: el ladrillo número 300 no sabe que ESE es el marco de una puerta, y el
+ * panel no sabe hacia dónde abre. Eso lo sabe el montaje, así que la junta vive en el montaje.
+ *
+ * Gana sobre el puerto: si el par (a, b) tiene junta, el raíl es éste, aunque el item declare otro.
+ *
+ * En Blender es un VACÍO llamado `junta…` (o con la propiedad `joint_a`/`a`): su Z es el eje de la
+ * bisagra (o de la deslizadera), su origen el punto de giro. Ver Survival/docs/BLENDER.md.
+ */
+struct PrefabJoint {
+    int         a = -1, b = -1;               ///< índices en `Prefab::pieces`
+    glm::dvec3  pos{0.0};                     ///< punto de giro, marco del prefabricado
+    glm::dquat  rot{1.0, 0.0, 0.0, 0.0};      ///< marco de la junta; `rail.axis` va en ÉL
+    Ports::Rail rail;                         ///< por defecto bisagra en +Y del marco (la Z de Blender)
+    std::string name;
 };
 
 struct Prefab {
@@ -81,6 +111,8 @@ struct Prefab {
     /// No son puertos: un puerto lo declara el ASSET y vale para todas sus copias; esto lo declara
     /// el MONTAJE y sólo vale para él. Un tablón no sabe dónde lo vas a cortar.
     std::vector<glm::dvec3> anchors;
+    /// Las partes MÓVILES del montaje (puertas, trampillas, compuertas). Ver `PrefabJoint`.
+    std::vector<PrefabJoint> joints;
     bool empty() const { return pieces.empty(); }
 };
 

@@ -42,10 +42,12 @@ void XPBDSolver::dampAttached(float h) {
         for (size_t i = 0; i < attachments.size(); ++i)
             if (attachments[i].p >= 0 && attachments[i].p < np) m_attachOf[attachments[i].p] = (int)i;
     }
-    const float k = std::exp(-attachDampingRate * h);
+    const float kSolver = std::exp(-attachDampingRate * h);
     for (int i = 0; i < np; ++i) {
         const int a = m_attachOf[i];
         if (a < 0 || particles.inverseMass[i] == 0.0f) continue;
+        const float r = attachments[a].dampingRate;
+        const float k = r < 0.0f ? kSolver : std::exp(-r * h);
         const glm::vec3 tv = attachments[a].targetVel;
         particles.velocity[i] = tv + (particles.velocity[i] - tv) * k;
     }

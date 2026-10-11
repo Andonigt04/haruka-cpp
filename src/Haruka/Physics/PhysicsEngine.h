@@ -24,6 +24,11 @@ struct RigidBody {
     double mass;
     double radius;
     bool isKinematic = false;
+    /// ANCLADO: está en Jolt (otros cuerpos chocan con él y se le pueden atar RAÍLES) pero nada lo
+    /// mueve: ni la gravedad ni las fuerzas, ni el juego. Es el MARCO de un edificio fijo al que va
+    /// atada su puerta. A diferencia de `isKinematic` —que lo saca de Jolt y lo lleva el juego—, un
+    /// raíl necesita que el cuerpo exista en Jolt.
+    bool anchored = false;
     bool inWater = false;   // estado agua↔aire para disparar el splash SOLO al ENTRAR (no cada frame)
     std::string name;
 

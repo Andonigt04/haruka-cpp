@@ -319,6 +319,7 @@ void testNodeWaterDraws();
 void testOceanWaveParity();
 void testOceanFoldParity();
 void testWaterShapes();
+void testSoftBodyMesh();
 void testCloudPassDraws();
 void testCloudPassOrbit();
 void testCloudHighLayers();

@@ -784,7 +784,7 @@ struct PhysicsEngine::JoltImpl {
         const glm::dvec3 lp = b->position - origin;                   // posición en el marco local
         JPH::BodyCreationSettings s(shape,
             JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
-            JPH::Quat::sIdentity(), JPH::EMotionType::Dynamic,
+            JPH::Quat::sIdentity(), b->anchored ? JPH::EMotionType::Kinematic : JPH::EMotionType::Dynamic,
             b->ignoreProps ? JLayers::MOVING_NO_PROPS : JLayers::MOVING);
         s.mOverrideMassProperties = JPH::EOverrideMassProperties::CalculateInertia;
         s.mMassPropertiesOverride.mMass = (float)b->mass;
@@ -1653,6 +1653,26 @@ struct PhysicsEngine::JoltImpl {
         JPH::BodyInterface& bi = system.GetBodyInterface();
         for (auto& sp : bodies) {
             auto it = map.find(sp.get()); if (it == map.end()) continue;
+            // ANCLADO (el marco de un edificio fijo): cinemático y QUIETO. Se le lleva a su pose cuando
+            // se coloca (`transformDirty`) y nada más: ni gravedad ni fuerzas, y su velocidad es cero,
+            // así que lo que se le ata (una puerta) gira contra algo que no cede.
+            if (sp->anchored) {
+                if (bi.GetMotionType(it->second) != JPH::EMotionType::Kinematic)
+                    bi.SetMotionType(it->second, JPH::EMotionType::Kinematic, JPH::EActivation::Activate);
+                if (sp->transformDirty) {
+                    const glm::dquat q = glm::normalize(sp->orientation);
+                    if (finite3(sp->position) && std::isfinite(q.w + q.x + q.y + q.z)) {
+                        const glm::dvec3 lp = sp->position - origin;
+                        bi.SetPositionAndRotation(it->second, JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z),
+                                                  JPH::Quat((float)q.x, (float)q.y, (float)q.z, (float)q.w).Normalized(),
+                                                  JPH::EActivation::Activate);
+                    }
+                    sp->transformDirty = false;
+                }
+                bi.SetLinearAndAngularVelocity(it->second, JPH::Vec3::sZero(), JPH::Vec3::sZero());
+                sp->velocity = glm::dvec3(0.0); sp->angularVel = glm::dvec3(0.0);
+                continue;
+            }
             // ¿Lo manda el JUEGO ahora mismo (volar, nadar)? Entonces Jolt NO debe integrarlo: pasa a
             // KINEMÁTICO y se le lleva a la posición que dicta el juego. Antes el juego ponía
             // `isKinematic=true` pero Jolt lo ignoraba y lo seguía simulando con gravedad → los dos
@@ -1775,6 +1795,7 @@ struct PhysicsEngine::JoltImpl {
         for (auto& sp : bodies) {
             auto it = map.find(sp.get()); if (it == map.end()) continue;
             if (sp->isKinematic) continue;   // lo mueve el juego (vuelo/nado): no le pisemos la posición
+            if (sp->anchored) continue;      // anclado: su pose es la que se le dio
             const JPH::RVec3 p = bi.GetPosition(it->second);
             const JPH::Vec3  v = bi.GetLinearVelocity(it->second);
             const JPH::Quat  q = bi.GetRotation(it->second);

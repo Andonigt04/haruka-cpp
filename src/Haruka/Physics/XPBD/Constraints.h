@@ -101,6 +101,11 @@ struct AttachmentConstraint {
     /// lo avanza con `targetVel`.
     glm::vec3 subTarget{0.0f};
     float     compliance = 0.0f;
+    /// Amortiguamiento RELATIVO al hueso de ESTE enganche (1/s); < 0 = el del solver
+    /// (`XPBDSolver::attachDampingRate`). Hace falta por partícula cuando los enganches tienen
+    /// frecuencias distintas: con una tasa común, ζ = tasa/(2ω) sale bajo en los rígidos (se pasan) y
+    /// muy alto en los blandos (se arrastran sin rebotar), justo al revés de lo que se quiere.
+    float     dampingRate = -1.0f;
     float     lambda = 0.0f;
     /// Reacción sobre el hueso, MEDIA de todos los subpasos del último `step` (N). Ver `project`.
     glm::vec3 force{0.0f};
