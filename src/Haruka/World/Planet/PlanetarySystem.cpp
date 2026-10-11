@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <random>
 #include <filesystem>
+#include "Haruka/Core/AssetPaths.h"
 #include <system_error>
 #include "Haruka/Core/Logger.h"
 #include <utility>
@@ -546,6 +547,10 @@ Vox::CaveDef caveDefFromSceneObject(const Core::Scene::SceneObject& obj, const g
     if (pr.contains("mouth") && pr["mouth"].is_array() && pr["mouth"].size() >= 3)
         d.mouth = glm::vec3(pr["mouth"][0].get<float>(), pr["mouth"][1].get<float>(), pr["mouth"][2].get<float>());
     d.planta = pr.value("planta", std::string()); d.perfil = pr.value("perfil", std::string());
+    // The layers (`[{"ceiling": "...png", "floor": "...png"}, ...]`): when present, they ARE the cave.
+    if (pr.contains("layers") && pr["layers"].is_array())
+        for (const auto& l : pr["layers"])
+            if (l.is_object()) d.layers.push_back({ l.value("ceiling", std::string()), l.value("floor", std::string()) });
     d.draftSeed = pr.value("draftSeed", 0u);
     return d;
 }
@@ -565,7 +570,8 @@ Vox::IslandDef islandDefFromSceneObject(const Core::Scene::SceneObject& obj, con
 
 bool sameCaveDef(const Vox::CaveDef& a, const Vox::CaveDef& b) {
     return a.name == b.name && glm::length(a.centerDir - b.centerDir) < 1e-9 && a.radiusM == b.radiusM &&
-           a.depthM == b.depthM && a.mouth == b.mouth && a.planta == b.planta && a.perfil == b.perfil && a.draftSeed == b.draftSeed;
+           a.depthM == b.depthM && a.mouth == b.mouth && a.planta == b.planta && a.perfil == b.perfil && a.layers == b.layers &&
+           a.draftSeed == b.draftSeed;
 }
 bool sameIslandDef(const Vox::IslandDef& a, const Vox::IslandDef& b) {
     return a.name == b.name && glm::length(a.centerDir - b.centerDir) < 1e-9 && a.radiusM == b.radiusM && a.topM == b.topM &&
@@ -653,8 +659,14 @@ void PlanetarySystem::buildFromScene(Core::Scene::SceneManager& scene) {
         }
         for (auto& objPtr : scene.getObjectsMutable()) {
             if (!objPtr || !objPtr->surfaceConfig.is_object()) continue;
-            const std::string edits = objPtr->surfaceConfig.value("voxEdits", std::string());
+            std::string edits = objPtr->surfaceConfig.value("voxEdits", std::string());
             if (edits.empty()) continue;
+            // ⚠️ RELATIVA AL PROYECTO, no al directorio de trabajo. La escena dice "assets/vox/earth/"
+            // y eso se usaba tal cual: en el juego (lanzado desde Survival/) caía bien, pero el IDE se
+            // lanza desde haruka/ y los trazos del diseñador acababan en haruka/assets/vox/earth/vox/
+            // — fuera del proyecto, donde el juego no los lee nunca.
+            if (std::filesystem::path(edits).is_relative() && !Core::AssetPaths::projectRoot().empty())
+                edits = Core::AssetPaths::projectRoot() + edits;
             for (auto& sp : m_simplePlanets) if (sp->name() == objPtr->name) sp->setVoxDesignerDir(edits);
         }
     }

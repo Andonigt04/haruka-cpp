@@ -97,17 +97,64 @@ namespace Haruka::World::Vox {
         bool empty() const { return d.empty(); }
     };
 
+    /**
+     * @brief ONE GALLERY LAYER: two heights over the footprint, like the planet's `elevationMap`.
+     *
+     * Why layers instead of footprint x profile: the profile only depended on (u, depth), so anything
+     * painted in it was EXTRUDED across the whole patch (the entrance shaft came out as a bar and had
+     * to be opened as a stroke). A layer says, at EVERY (u, v), how deep the ceiling and the floor are:
+     * there is air where `ceiling < depth < floor`. It is a heightfield like the planet's —pixel =
+     * metres within a range (here `[0, depthM]`)— and several layers allow galleries stacked on top
+     * of each other. Where `floor <= ceiling` there is no gallery; where `ceiling = 0` the gallery
+     * reaches the ground: that is the mouth, with no special case.
+     *
+     * In memory and in the PNG (16-bit gray) the value v in [0, 1] maps LINEARLY to a depth in
+     * `[-kCaveOpenM, depthM]` (`caveLayerToM`), the way the elevation map maps to `elevationRange`.
+     * The few metres ABOVE the ground are what let a mouth open to the sky: a ceiling at exactly 0
+     * leaves the field at -0.75 m right under the ground, too little to cut the terrain there.
+     */
+    struct CaveLayer {
+        CaveMap ceiling, floor;
+        /// DERIVED (`caveLayersPrepare`): 1/sqrt(1 + |slope|^2) of each map, per texel. With them the
+        /// field reads four maps with one set of bilinear weights instead of ten lookups per layer.
+        CaveMap ceilingK, floorK;
+    };
+    /** @brief Fills the derived slope factors of every layer (call after loading or painting).
+     *  Without them the field still works, on the slow path. */
+    void caveLayersPrepare(std::vector<CaveLayer>& layers, const CaveBox& box);
+    /**
+     * @brief A DRAFT cave written directly as layers (no volume): 1-3 levels of corridors from the
+     *        seed, each level kept as ONE 2D component, consecutive levels joined by a shaft and the
+     *        first one opened to the ground at `box.mouth`. Connected by construction, in 2D.
+     * @param stats x = 2D components before keeping the largest (all levels), y = components after
+     *              (`caveLayerComponents`), z = open texels.
+     */
+    void caveBakeLayers(const CaveBox& box, int res, std::vector<CaveLayer>& out, glm::ivec3* stats = nullptr);
+    /// Maximum layers per cave (stacked galleries in one column).
+    inline constexpr int kCaveMaxLayers = 4;
+    /// How far ABOVE the ground a layer map reaches (its value 0): a mouth is a ceiling up there.
+    inline constexpr float kCaveOpenM = 8.0f;
+    /** @brief Layer map value [0,1] -> depth below the ground (m), and back (clamped). */
+    inline float caveLayerToM(const CaveBox& b, float v) { return -kCaveOpenM + v * (b.depthM + kCaveOpenM); }
+    inline float caveLayerFromM(const CaveBox& b, float m) {
+        const float v = (m + kCaveOpenM) / (b.depthM + kCaveOpenM);
+        return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+    }
+
     /** @brief Un sistema de cuevas cargado: su caja y sus mapas. */
     struct CaveSystem {
         CaveBox    box;
-        CaveMap    planta;   ///< M_top
-        CaveMap    perfil;   ///< M_side
-        CaveVolume vol;      ///< resuelto (lo que se muestrea)
+        /// THE DEFINITION (scene caves): with layers, the field comes from them, at the point and
+        /// without a grid (`caveDensityAt`). Empty = legacy-format / seeded cave: `vol` rules.
+        std::vector<CaveLayer> layers;
+        CaveMap    planta;   ///< M_top   (legacy format and drafts)
+        CaveMap    perfil;   ///< M_side  (legacy format and drafts)
+        CaveVolume vol;      ///< resolved (sampled when there are no layers)
         CaveMap    boca;     ///< EL ACOPLAMIENTO con el terreno (ver `caveBakeEntrance`)
         /// Estadística del horneado, para que el banco pueda medir en vez de suponer:
         /// x = componentes de aire ANTES de tallar · y = DESPUÉS · z = vóxeles de aire.
         glm::ivec3 connectStats{0, 0, 0};
-        bool valid() const { return !vol.empty(); }
+        bool valid() const { return !vol.empty() || !layers.empty(); }
     };
 
     /// Lado de los mapas 2D horneados (planta y perfil).
@@ -125,8 +172,11 @@ namespace Haruka::World::Vox {
         std::string name;                        ///< identidad (nombre del objeto de escena)
         glm::dvec3  centerDir{0.0, 1.0, 0.0};    ///< dirección del centro de la caja
         float       radiusM = 300.0f, depthM = 150.0f;
-        glm::vec3   mouth{0.5f, 0.5f, 0.06f};    ///< boca: (u, v, radio) en fracción de la caja
-        std::string planta, perfil;              ///< rutas de los PNG (relativas al proyecto)
+        glm::vec3   mouth{0.5f, 0.5f, 0.06f};    ///< boca: (u, v, radio) en fracción de la caja (legacy format)
+        /// THE LAYERS (paths of their 16-bit PNGs, project-relative). When present, they ARE the cave.
+        struct LayerPaths { std::string ceiling, floor; bool operator==(const LayerPaths&) const = default; };
+        std::vector<LayerPaths> layers;
+        std::string planta, perfil;              ///< LEGACY format: still read, converted to layers on load
         uint32_t    draftSeed = 0;               ///< sólo si faltan los PNG
     };
     uint32_t caveIdFromName(const std::string& name);
@@ -145,6 +195,26 @@ namespace Haruka::World::Vox {
     /** @brief Deriva volumen y boca de los mapas YA cargados en `out` (caja + planta + perfil): lo
      *  que hace el editor tras pintar. Cache en `bakes/` por hash de caja + texels. */
     bool caveDeriveFromMaps(CaveSystem& out, const std::string& bakesDir = std::string(), int volRes = kCaveVolRes);
+    /**
+     * @brief Extracts LAYERS from an already resolved volume (legacy format or a draft).
+     *
+     * Per texel of `res` x `res`, walks the column in depth and records the air spans (ceiling and
+     * floor of each, linearly interpolated between samples). Span k does not go blindly to layer k:
+     * it is matched to the layer whose span in the neighbouring texel has the closest depth, or a
+     * forking gallery would blend two depths when interpolated. Where a layer has no span it is filled
+     * "closed" with the neighbour's depth, so the wall falls half a texel away instead of as a step.
+     * @return spans that did NOT fit in `kCaveMaxLayers` (0 = the conversion lost no gallery).
+     */
+    int caveLayersFromVolume(const CaveSystem& withVolume, int res, std::vector<CaveLayer>& out);
+    /** @brief Connectivity of some layers: air components (layer texels with a gallery, joined when
+     *  their spans overlap the neighbour's or another layer's in the same column). */
+    int caveLayerComponents(const std::vector<CaveLayer>& layers);
+    /** @brief 16-bit gray PNG <-> map in [0,1] (the layer format). */
+    bool caveSaveMap16(const std::string& path, const CaveMap& m);
+    bool caveLoadMap16(const std::string& path, CaveMap& m);
+    /** @brief Default layer paths of a cave: `<base>_layer<i>_ceiling.png` / `_floor.png`. */
+    std::vector<CaveDef::LayerPaths> caveLayerPathsFor(const std::string& base, int count);
+
     /** @brief Resuelve una ruta de asset: tal cual si existe, si no bajo la raíz del proyecto. */
     std::string caveResolveAssetPath(const std::string& path);
 
@@ -220,6 +290,10 @@ namespace Haruka::World::Vox {
      *  ("el terreno en el nodo vecino y la cueva no aparecen"). Drapeada, la cueva sigue al relieve
      *  como una capa: la misma galería está siempre a la misma profundidad bajo el suelo. */
     float caveDensityAtDraped(const CaveSystem& sys, const glm::dvec3& p, double surfaceR);
+
+    /** @brief The cave field at LOCAL box coordinates (x, y tangential, z = depth below the
+     *  surface, metres): layers if it has them, the volume otherwise. 1e9 outside the box. */
+    float caveDensityLocal(const CaveSystem& sys, const glm::vec3& local);
 
     /** @brief Gradiente de `caveDensityAt` (diferencias centrales): la normal de la pared. */
     glm::vec3 caveDensityGradient(const CaveSystem& sys, const glm::dvec3& p, float hM = 1.0f);
@@ -323,6 +397,8 @@ namespace Haruka::World::Vox {
      */
     void caveBakeEntrance(const CaveBox& box, const CaveVolume& vol, int res, CaveMap& out,
                           float metrosDeTecho = 6.0f);
+    /** @brief Same, from the cave FIELD (layers or volume): what a layered cave uses. */
+    void caveBakeEntrance(const CaveSystem& sys, int res, CaveMap& out, float metrosDeTecho = 6.0f);
 
     /** @brief El recorte del terreno en una dirección: 1 = no dibujes suelo aquí (hay boca). */
     float caveSurfaceCut(const CaveSystem& sys, const glm::dvec3& dir);

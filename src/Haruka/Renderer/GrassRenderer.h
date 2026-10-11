@@ -100,6 +100,9 @@ public:
         // `uVoxCut`; sin ventana (no hay vox cargados/cortados) llega vacia y no se descarta nada.
         RHI::TextureHandle cutTex{};
         glm::mat4          cutSpace{1.0f};
+        glm::mat4          cutFineSpace{1.0f};   ///< the fine window (see `TerrainNodeRenderer::Shade::cutFineSpace`)
+        float              cutFineR = 0.0f;
+        glm::vec4          cutAtlas{0.0f};
         uint64_t           cutVersion{};    ///< versión del campo que refleja `cutTex` (`VoxRenderer::cutVersion`)
         /// Los CRÁTERES cercanos (misma convención que `TerrainNodeRenderer::Shade::craterC/U`):
         /// dentro del cuenco no crece hierba.

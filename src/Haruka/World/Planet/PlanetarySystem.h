@@ -374,7 +374,11 @@ public:
         bool surfaceCutAt(const glm::dvec3& worldPos) const {
             const glm::dvec3 rel = worldPos - center;
             const double len = glm::length(rel);
-            return len > 1e-9 && planet->vox().surfaceCut(rel / len) > 0.5f;
+            if (!(len > 1e-9)) return false;
+            // + where a FINE BRICK replaces the ground (a decimetre hole: its own mesh, ground
+            // included, is what is stood on there — the 0.5 m heightfield cannot open it).
+            return planet->vox().surfaceCut(rel / len) > 0.5f ||
+                   planet->voxRenderer().fineBricks().replacesGroundAt(planet->vox(), rel);
         }
         /** @brief ¿Es este punto ESPACIO EXCAVADO (dentro de una cueva o de lo picado)? Solo el canal
          *  de lo QUITADO, sin el terreno: fuera de cuevas vale roca, así que en el suelo normal es

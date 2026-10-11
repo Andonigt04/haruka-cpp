@@ -596,7 +596,11 @@ bool VoxWorld::cavesPending() const {
 }
 
 void VoxWorld::bake(VoxChunk& c) {
+    ++c.revision;
     c.d.clear();   // roca maciza: sin reservar hasta que una cueva o un trazo escriban algo
+    // The caves and shafts it is baked with are cleared HERE, not after the "no caves" early return,
+    // or a chunk rebaked without a cave kept the old ones and `fieldAt` still saw them.
+    c.caveCells.clear(); c.shafts.clear();
     // Las cuevas sembradas que pueden cruzar este chunk: cajas de hasta 400 m de radio, así que se
     // buscan hasta lado + 450 m del centro. Las que no lo tocan devuelven "roca" y el `min` las
     // ignora — no hace falta recortar por caja a mano.
@@ -650,10 +654,11 @@ void VoxWorld::bake(VoxChunk& c) {
     // centro; el terreno, no. Aquí el pozo se prolonga desde el techo de la caja hasta la cota del
     // terreno en cada columna, como el trazo que es: sin esto la boca queda enterrada bajo la ladera
     // (o colgando en el aire donde el terreno baja).
-    c.caveCells.clear(); c.shafts.clear();
     for (int i = 0; i < nb; ++i) {
         if (!m_caves.count(boxes[i].cell)) continue;
         c.caveCells.push_back(boxes[i].cell);
+        // A layered cave carries its mouth in its maps (ceiling = 0): no extra shaft.
+        if (!m_caves.at(boxes[i].cell).layers.empty()) continue;
         const glm::dvec3 md = caveEntranceDir(boxes[i]);
         c.shafts.push_back({ md, (double)caveEntranceRadiusM(boxes[i]), boxes[i].surfaceRM });
     }
@@ -883,72 +888,50 @@ CaveStroke VoxWorld::caveStrokeFrom(const Stroke& s) {
     return c;
 }
 
-int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
-    if ((Brush::Op)st.op == Brush::Op::Crater) return 0;   // no va a la rejilla: ver `surfaceDeltaM`
-    // `st.local` = centro en coordenadas de REJILLA. La distancia se mide en el MUNDO (metros de
-    // verdad, por la posición de cada vóxel), no en vóxeles: el vóxel no es cúbico ni igual en dos
-    // chunks.
-    const glm::vec3 g = st.local;
-    const glm::vec3 mpv = c.metresPerVoxel();
-    const Brush::Shape shape = (Brush::Shape)st.shape;
-    const Brush::Op op = (Brush::Op)st.op;
-    const glm::dvec3 centerW = c.worldOfGrid(g.x, g.y, g.z);
-    const glm::dvec3 endW = (shape == Brush::Shape::Capsule) ? c.worldOfGrid(st.localB.x, st.localB.y, st.localB.z) : centerW;
-    // Alcance en metros alrededor del centro (la cápsula, alrededor de su segmento).
-    float reach = std::max(st.r, st.halfM) * (shape == Brush::Shape::Box ? 1.42f : 1.0f);
-    if (op == Brush::Op::Raise || op == Brush::Op::Lower || op == Brush::Op::Flatten || op == Brush::Op::Sculpt) reach = std::max(reach, st.r + std::fabs(st.amount) + 2.0f);
-    const glm::vec3 gB = (shape == Brush::Shape::Capsule) ? st.localB : g;
-    const int kx = (int)std::ceil(reach / mpv.x) + 1, ky = (int)std::ceil(reach / mpv.y) + 1, kz = (int)std::ceil(reach / mpv.z) + 1;
-    const int x0 = std::max(0, (int)std::floor(std::min(g.x, gB.x)) - kx), x1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.x, gB.x)) + kx);
-    const int y0 = std::max(0, (int)std::floor(std::min(g.y, gB.y)) - ky), y1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.y, gB.y)) + ky);
-    const int z0 = std::max(0, (int)std::floor(std::min(g.z, gB.z)) - kz), z1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.z, gB.z)) + kz);
-    // Marco local de la forma: vertical = radial en el centro, tangentes deterministas (las mismas
-    // que en `gradient`/`stroke`): el mismo trazo al recargar cae exactamente igual.
-    const glm::dvec3 up = glm::normalize(centerW);
-    const glm::dvec3 ref = (std::fabs(up.y) < 0.99) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
-    const glm::dvec3 e1 = glm::normalize(glm::cross(ref, up)), e2 = glm::cross(up, e1);
-    auto sdf = [&](const glm::dvec3& p) -> float {   // < 0 dentro de la forma
+// ── A STROKE AT ONE POINT ───────────────────────────────────────────────────────────────────────
+// What a stroke does to the field at ONE world point, without the grid. Both paths use it: the grid
+// (`applyLocal`, at every node) and the fine field (`fieldAt`, at whatever point is asked). Two copies
+// of this arithmetic would drift apart — that is why the per-voxel loop has no other.
+struct VoxWorld::StrokeFrame {
+    const Stroke* st = nullptr;
+    Brush::Shape shape = Brush::Shape::Sphere;
+    Brush::Op    op = Brush::Op::Remove;
+    glm::dvec3 centerW{0.0}, endW{0.0}, up{0.0}, e1{0.0}, e2{0.0};
+    double planeR = 0.0;   ///< Flatten/Raise/Lower: the sphere of radius |centre| (+ amount)
+    float  edgeM = 0.5f;   ///< width of the footprint's soft edge
+    float  reach = 0.0f;   ///< reach (m) around the centre (the capsule: around its segment)
+
+    float sdf(const glm::dvec3& p) const {   // < 0 dentro de la forma
         const glm::dvec3 rel = p - centerW;
         switch (shape) {
             case Brush::Shape::Cylinder: {
                 const double h = glm::dot(rel, up);
                 const double lat = glm::length(rel - up * h);
-                return (float)std::max(lat - (double)st.r, std::fabs(h) - (double)st.halfM);
+                return (float)std::max(lat - (double)st->r, std::fabs(h) - (double)st->halfM);
             }
             case Brush::Shape::Box: {
                 const double h = glm::dot(rel, up), x = glm::dot(rel, e1), y = glm::dot(rel, e2);
-                return (float)std::max({ std::fabs(x) - (double)st.r, std::fabs(y) - (double)st.r, std::fabs(h) - (double)st.halfM });
+                return (float)std::max({ std::fabs(x) - (double)st->r, std::fabs(y) - (double)st->r, std::fabs(h) - (double)st->halfM });
             }
             case Brush::Shape::Capsule: {
                 // Distancia al SEGMENTO centro→extremo: un túnel entre dos puntos del arrastre.
                 const glm::dvec3 ab = endW - centerW;
                 const double l2 = glm::dot(ab, ab);
                 const double t = l2 > 1e-9 ? std::clamp(glm::dot(rel, ab) / l2, 0.0, 1.0) : 0.0;
-                return (float)(glm::length(rel - ab * t) - (double)st.r);
+                return (float)(glm::length(rel - ab * t) - (double)st->r);
             }
-            default: return (float)(glm::length(rel) - (double)st.r);
+            default: return (float)(glm::length(rel) - (double)st->r);
         }
-    };
-    // El plano de Allanar/Subir/Bajar: la esfera de radio |centro| (+ cantidad). `plano(p)` > 0 =
-    // por debajo (roca). Es radial, no un plano tangente: en 60 m de radio la diferencia es de cm y
-    // así "a la misma cota" significa lo mismo que para el terreno.
-    const double planeR = glm::length(centerW) + (op == Brush::Op::Raise ? (double)st.amount : op == Brush::Op::Lower ? -(double)st.amount : 0.0);
-    auto plane = [&](const glm::dvec3& p) -> float { return (float)(planeR - glm::length(p)); };
+    }
+    // `plano(p)` > 0 = por debajo (roca). Es radial, no un plano tangente: en 60 m de radio la
+    // diferencia es de cm y así "a la misma cota" significa lo mismo que para el terreno.
+    float plane(const glm::dvec3& p) const { return (float)(planeR - glm::length(p)); }
     // Peso de la huella para los pinceles "de suelo": 1 en el centro, cae a 0 en el borde según la
     // dureza (borde blando = la rampa empieza antes).
-    const float edgeM = std::max((1.0f - st.hardness) * st.r, 0.5f);
-    auto weight = [&](float sd) -> float { return std::clamp(-sd / edgeM, 0.0f, 1.0f); };
-
-    // Rellenar escribe también en el canal AÑADIDO (es lo que levanta roca donde el terreno dice
-    // aire); picar lo baja también (quita lo construido y lo de la isla). Se reserva `a` sólo al
-    // primer relleno; `d` sólo al primer picado (rellenar sobre roca maciza no cambia `d`).
-    // ESCULPIR: la superficie se desplaza ±amount a lo largo de su normal → F' = F + δ (mover el
-    // conjunto de nivel de una distancia con signo). δ = amount · caída(r/R) · patrón(x,y). El campo
-    // completo F incluye el terreno (que el chunk no guarda), así que se escribe explícito en los
-    // dos canales: d = a = F + δ, atenuado por el peso de la huella.
-    auto falloffOf = [&](float x) -> float {   // x = distancia normalizada 0 (centro) .. 1 (borde)
+    float weight(float sd) const { return std::clamp(-sd / edgeM, 0.0f, 1.0f); }
+    float falloffOf(float x) const {   // x = distancia normalizada 0 (centro) .. 1 (borde)
         x = std::clamp(x, 0.0f, 1.0f);
-        switch ((Brush::Falloff)st.falloff) {
+        switch ((Brush::Falloff)st->falloff) {
             case Brush::Falloff::FSphere:    return std::sqrt(std::max(0.0f, 1.0f - x * x));
             case Brush::Falloff::FRoot:      return std::sqrt(1.0f - x);
             case Brush::Falloff::FSharp:     return (1.0f - x) * (1.0f - x);
@@ -957,10 +940,10 @@ int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
             case Brush::Falloff::FInvSquare: return 1.0f / (1.0f + 8.0f * x * x) - 1.0f / 9.0f;
             default: { const float t = 1.0f - x; return t * t * (3.0f - 2.0f * t); }   // smoothstep
         }
-    };
-    auto patternOf = [&](double x, double y) -> float {   // x, y tangentes en metros desde el centro
-        const double k = 6.283185307179586 / std::max((double)st.patternM, 0.5);
-        switch ((Brush::Pattern)st.pattern) {
+    }
+    float patternOf(double x, double y) const {   // x, y tangentes en metros desde el centro
+        const double k = 6.283185307179586 / std::max((double)st->patternM, 0.5);
+        switch ((Brush::Pattern)st->pattern) {
             case Brush::Pattern::PWaves:   return (float)std::sin(x * k);
             case Brush::Pattern::PRings:   return (float)std::cos(std::sqrt(x * x + y * y) * k);
             case Brush::Pattern::PHex: {   // celdas hexagonales: 1 en el centro de cada celda, −1 en las aristas
@@ -972,15 +955,137 @@ int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
             case Brush::Pattern::PNoise:   return Terrain::BakeUtil::fbm2((float)(x * k * 0.16), (float)(y * k * 0.16), 7u, 3) * 2.0f - 1.0f;
             default: return 1.0f;
         }
-    };
+    }
+    /// THE NODE BOX the stroke touches in chunk `c` (inclusive). Outside it the stroke does NOT
+    /// exist, in both paths: the grid does not visit it and `fieldAt` skips it. Without this the fine
+    /// field followed the shape further (a dug sphere left +3.5 m of distance 12 m below ground where
+    /// the grid leaves +24), and flatten/lower, which act on the whole footprint column, would have
+    /// opened air where the grid does not.
+    void bounds(const VoxChunk& c, int& x0, int& x1, int& y0, int& y1, int& z0, int& z1) const {
+        const glm::vec3 g = st->local;
+        const glm::vec3 gB = (shape == Brush::Shape::Capsule) ? st->localB : g;
+        const glm::vec3 mpv = c.metresPerVoxel();
+        const int kx = (int)std::ceil(reach / mpv.x) + 1, ky = (int)std::ceil(reach / mpv.y) + 1, kz = (int)std::ceil(reach / mpv.z) + 1;
+        x0 = std::max(0, (int)std::floor(std::min(g.x, gB.x)) - kx); x1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.x, gB.x)) + kx);
+        y0 = std::max(0, (int)std::floor(std::min(g.y, gB.y)) - ky); y1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.y, gB.y)) + ky);
+        z0 = std::max(0, (int)std::floor(std::min(g.z, gB.z)) - kz); z1 = std::min(kVoxN - 1, (int)std::ceil(std::max(g.z, gB.z)) + kz);
+    }
+
     // Huella poligonal (lados ≥ 3): distancia con signo a un polígono regular en el plano tangente.
-    auto footprint = [&](double x, double y) -> float {
-        if (st.sides < 3) return (float)(std::sqrt(x * x + y * y) - (double)st.r);
-        const double ang = std::atan2(y, x), sector = 6.283185307179586 / (double)st.sides;
+    float footprint(double x, double y) const {
+        if (st->sides < 3) return (float)(std::sqrt(x * x + y * y) - (double)st->r);
+        const double ang = std::atan2(y, x), sector = 6.283185307179586 / (double)st->sides;
         const double a = std::fmod(std::fabs(ang) + sector * 0.5, sector) - sector * 0.5;   // ángulo dentro del sector
-        const double apothem = (double)st.r * std::cos(sector * 0.5);
+        const double apothem = (double)st->r * std::cos(sector * 0.5);
         return (float)(std::sqrt(x * x + y * y) * std::cos(a) - apothem);
-    };
+    }
+
+    /**
+     * Applies the stroke to both channels at `p`. Null `d`/`a` = channel not reserved (not written,
+     * as on the grid). Smooth does NOT go through here: it averages neighbours, it is not a shape.
+     *
+     * Rellenar escribe también en el canal AÑADIDO (es lo que levanta roca donde el terreno dice
+     * aire); picar lo baja también (quita lo construido y lo de la isla).
+     * ESCULPIR: la superficie se desplaza ±amount a lo largo de su normal → F' = F + δ (mover el
+     * conjunto de nivel de una distancia con signo). δ = amount · caída(r/R) · patrón(x,y). El campo
+     * completo F incluye el terreno (que el chunk no guarda), así que se escribe explícito en los
+     * dos canales: d = a = F + δ, atenuado por el peso de la huella.
+     */
+    void apply(const glm::dvec3& p, float* d, float* a, double radius, const VoxElevFn& elev) const {
+        switch (op) {
+            case Brush::Op::Remove: {   // abrir = unir aire (min con la distancia)
+                const float sd = sdf(p);
+                if (d) *d = std::min(*d, sd);
+                if (a) *a = std::min(*a, sd);
+                break;
+            }
+            case Brush::Op::Add: {      // rellenar = unir roca (max con −distancia)
+                const float sd = sdf(p);
+                if (d) *d = std::max(*d, -sd);
+                if (a) *a = std::max(*a, -sd);
+                break;
+            }
+            case Brush::Op::Raise: case Brush::Op::Lower: case Brush::Op::Flatten: {
+                // Dentro de la huella (peso w): roca bajo el plano (Subir/Allanar) y aire
+                // sobre él (Bajar/Allanar). La huella es la forma SIN su alto: se usa la
+                // distancia lateral (cilindro infinito) para que el plano mande en vertical.
+                const glm::dvec3 rel = p - centerW;
+                const double h = glm::dot(rel, up);
+                float lat;
+                if (shape == Brush::Shape::Box) { lat = (float)std::max(std::fabs(glm::dot(rel, e1)) - st->r, std::fabs(glm::dot(rel, e2)) - st->r); }
+                else lat = (float)(glm::length(rel - up * h) - (double)st->r);
+                const float w = weight(lat);
+                if (w <= 0.0f) break;
+                const float pl = std::clamp(plane(p), -kVoxRockM, kVoxRockM);
+                if (op != Brush::Op::Lower) {   // roca bajo el plano: como Add con el semiespacio, atenuado por w
+                    if (d) *d = std::max(*d, *d + (pl - *d) * w);
+                    if (a) *a = std::max(*a, *a + (pl - *a) * w);
+                }
+                if (op != Brush::Op::Raise) {   // aire sobre el plano: como Remove con el semiespacio
+                    if (d) *d = std::min(*d, *d + (pl - *d) * w);
+                    if (a) *a = std::min(*a, *a + (pl - *a) * w);
+                }
+                break;
+            }
+            case Brush::Op::Sculpt: {
+                const glm::dvec3 rel = p - centerW;
+                const double h = glm::dot(rel, up), x = glm::dot(rel, e1), y = glm::dot(rel, e2);
+                const float fp = footprint(x, y);                   // < 0 dentro de la huella
+                if (fp >= 0.0f || std::fabs(h) > (double)st->r + std::fabs(st->amount) + 8.0) break;
+                const float xn = 1.0f + fp / std::max(st->r, 0.5f);   // 0 centro .. 1 borde
+                const float w = falloffOf(xn) * (st->hardness < 1.0f ? weight(fp) : 1.0f);
+                if (w <= 0.0f) break;
+                const float delta = st->amount * w * patternOf(x, y);
+                // F actual con el terreno; F' explícito en los dos canales.
+                const glm::dvec3 dir = p / std::max(glm::length(p), 1e-9);
+                const float t = (float)std::clamp((radius + (elev ? (double)elev(dir) : 0.0)) - glm::length(p), -(double)kVoxRockM, (double)kVoxRockM);
+                const float F = std::max(std::min(d ? *d : kVoxRockM, t), a ? *a : -kVoxRockM);
+                // Sólo cerca de la superficie: lejos el campo está saturado y no hay nada que desplazar.
+                if (std::fabs(F) >= kVoxRockM - 0.01f) break;
+                const float Fn = std::clamp(F + delta, -kVoxRockM, kVoxRockM);
+                if (d) *d = Fn;
+                if (a) *a = Fn;
+                break;
+            }
+            default: break;   // Smooth (neighbours) and Crater (surface) are not on this path
+        }
+        if (d) *d = std::clamp(*d, -kVoxRockM, kVoxRockM);
+        if (a) *a = std::clamp(*a, -kVoxRockM, kVoxRockM);
+    }
+};
+
+VoxWorld::StrokeFrame VoxWorld::frameOf(const VoxChunk& c, const Stroke& st) {
+    // `st.local` = centro en coordenadas de REJILLA. La distancia se mide en el MUNDO (metros de
+    // verdad), no en vóxeles: el vóxel no es cúbico ni igual en dos chunks.
+    StrokeFrame f;
+    f.st = &st;
+    f.shape = (Brush::Shape)st.shape;
+    f.op = (Brush::Op)st.op;
+    f.centerW = c.worldOfGrid(st.local.x, st.local.y, st.local.z);
+    f.endW = (f.shape == Brush::Shape::Capsule) ? c.worldOfGrid(st.localB.x, st.localB.y, st.localB.z) : f.centerW;
+    f.reach = std::max(st.r, st.halfM) * (f.shape == Brush::Shape::Box ? 1.42f : 1.0f);
+    if (f.op == Brush::Op::Raise || f.op == Brush::Op::Lower || f.op == Brush::Op::Flatten || f.op == Brush::Op::Sculpt)
+        f.reach = std::max(f.reach, st.r + std::fabs(st.amount) + 2.0f);
+    // Marco local de la forma: vertical = radial en el centro, tangentes deterministas (las mismas
+    // que en `gradient`/`stroke`): el mismo trazo al recargar cae exactamente igual.
+    f.up = glm::normalize(f.centerW);
+    const glm::dvec3 ref = (std::fabs(f.up.y) < 0.99) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+    f.e1 = glm::normalize(glm::cross(ref, f.up)); f.e2 = glm::cross(f.up, f.e1);
+    f.planeR = glm::length(f.centerW) + (f.op == Brush::Op::Raise ? (double)st.amount : f.op == Brush::Op::Lower ? -(double)st.amount : 0.0);
+    f.edgeM = std::max((1.0f - st.hardness) * st.r, 0.5f);
+    return f;
+}
+
+int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
+    if ((Brush::Op)st.op == Brush::Op::Crater) return 0;   // no va a la rejilla: ver `surfaceDeltaM`
+    ++c.revision;
+    const StrokeFrame f = frameOf(c, st);
+    const Brush::Op op = f.op;
+    int x0, x1, y0, y1, z0, z1;
+    f.bounds(c, x0, x1, y0, y1, z0, z1);
+
+    // Se reserva `a` sólo al primer relleno; `d` sólo al primer picado (rellenar sobre roca maciza
+    // no cambia `d`).
     const bool needCut = (op != Brush::Op::Add), needAdded = (op != Brush::Op::Remove);
     if (op == Brush::Op::Smooth) { if (c.d.empty() && c.a.empty()) return 0; }
     else { if (needCut) c.reserveCut(); if (needAdded) c.reserveAdded(); }
@@ -997,7 +1102,7 @@ int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
             for (int z = std::max(z0, 1); z <= std::min(z1, kVoxN - 2); ++z)
                 for (int y = std::max(y0, 1); y <= std::min(y1, kVoxN - 2); ++y)
                     for (int x = std::max(x0, 1); x <= std::min(x1, kVoxN - 2); ++x) {
-                        const float w = weight(sdf(c.worldOfGrid(x, y, z))) * std::clamp(st.amount, 0.0f, 1.0f);
+                        const float w = f.weight(f.sdf(c.worldOfGrid(x, y, z))) * std::clamp(st.amount, 0.0f, 1.0f);
                         if (w <= 0.0f) continue;
                         float sum = 0.0f;
                         for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx)
@@ -1013,77 +1118,267 @@ int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
     for (int z = z0; z <= z1; ++z)
         for (int y = y0; y <= y1; ++y)
             for (int x = x0; x <= x1; ++x) {
-                const glm::dvec3 p = c.worldOfGrid(x, y, z);
-                const float sd = sdf(p);
                 const size_t idx = (size_t)z * kVoxN * kVoxN + (size_t)y * kVoxN + x;
                 // "Cambia de medio" = alguno de los dos canales cruza el cero (el chunk no sabe del
                 // terreno, así que no puede juzgar el campo completo; para el conteo basta).
                 const float dAntes = c.cutAt(x, y, z), aAntes = c.addedAt(x, y, z);
                 float* d = c.d.empty() ? nullptr : &c.d[idx];
                 float* a = c.a.empty() ? nullptr : &c.a[idx];
-                switch (op) {
-                    case Brush::Op::Remove:   // abrir = unir aire (min con la distancia)
-                        if (d) *d = std::min(*d, sd);
-                        if (a) *a = std::min(*a, sd);
-                        break;
-                    case Brush::Op::Add:      // rellenar = unir roca (max con −distancia)
-                        if (d) *d = std::max(*d, -sd);
-                        if (a) *a = std::max(*a, -sd);
-                        break;
-                    case Brush::Op::Raise: case Brush::Op::Lower: case Brush::Op::Flatten: {
-                        // Dentro de la huella (peso w): roca bajo el plano (Subir/Allanar) y aire
-                        // sobre él (Bajar/Allanar). La huella es la forma SIN su alto: se usa la
-                        // distancia lateral (cilindro infinito) para que el plano mande en vertical.
-                        const glm::dvec3 rel = p - centerW;
-                        const double h = glm::dot(rel, up);
-                        float lat;
-                        if (shape == Brush::Shape::Box) { lat = (float)std::max(std::fabs(glm::dot(rel, e1)) - st.r, std::fabs(glm::dot(rel, e2)) - st.r); }
-                        else lat = (float)(glm::length(rel - up * h) - (double)st.r);
-                        const float w = weight(lat);
-                        if (w <= 0.0f) break;
-                        const float pl = std::clamp(plane(p), -kVoxRockM, kVoxRockM);
-                        if (op != Brush::Op::Lower) {   // roca bajo el plano: como Add con el semiespacio, atenuado por w
-                            const float target = pl;
-                            if (d) *d = std::max(*d, *d + (target - *d) * w);
-                            if (a) *a = std::max(*a, *a + (target - *a) * w);
-                        }
-                        if (op != Brush::Op::Raise) {   // aire sobre el plano: como Remove con el semiespacio
-                            const float target = pl;
-                            if (d) *d = std::min(*d, *d + (target - *d) * w);
-                            if (a) *a = std::min(*a, *a + (target - *a) * w);
-                        }
-                        break;
-                    }
-                    case Brush::Op::Smooth:
-                        if (d && !newD.empty()) *d = newD[idx];
-                        if (a && !newA.empty()) *a = newA[idx];
-                        break;
-                    case Brush::Op::Sculpt: {
-                        const glm::dvec3 rel = p - centerW;
-                        const double h = glm::dot(rel, up), x = glm::dot(rel, e1), y = glm::dot(rel, e2);
-                        const float fp = footprint(x, y);                   // < 0 dentro de la huella
-                        if (fp >= 0.0f || std::fabs(h) > (double)st.r + std::fabs(st.amount) + 8.0) break;
-                        const float xn = 1.0f + fp / std::max(st.r, 0.5f);   // 0 centro .. 1 borde
-                        const float w = falloffOf(xn) * (st.hardness < 1.0f ? weight(fp) : 1.0f);
-                        if (w <= 0.0f) break;
-                        const float delta = st.amount * w * patternOf(x, y);
-                        // F actual con el terreno; F' explícito en los dos canales.
-                        const glm::dvec3 dir = p / std::max(glm::length(p), 1e-9);
-                        const float t = (float)std::clamp((m_radius + (m_elev ? (double)m_elev(dir) : 0.0)) - glm::length(p), -(double)kVoxRockM, (double)kVoxRockM);
-                        const float F = std::max(std::min(d ? *d : kVoxRockM, t), a ? *a : -kVoxRockM);
-                        // Sólo cerca de la superficie: lejos el campo está saturado y no hay nada que desplazar.
-                        if (std::fabs(F) >= kVoxRockM - 0.01f) break;
-                        const float Fn = std::clamp(F + delta, -kVoxRockM, kVoxRockM);
-                        if (d) *d = Fn;
-                        if (a) *a = Fn;
-                        break;
-                    }
+                if (op == Brush::Op::Smooth) {
+                    if (d && !newD.empty()) *d = newD[idx];
+                    if (a && !newA.empty()) *a = newA[idx];
+                    if (d) *d = std::clamp(*d, -kVoxRockM, kVoxRockM);
+                    if (a) *a = std::clamp(*a, -kVoxRockM, kVoxRockM);
+                } else {
+                    f.apply(c.worldOfGrid(x, y, z), d, a, m_radius, m_elev);
                 }
-                if (d) *d = std::clamp(*d, -kVoxRockM, kVoxRockM);
-                if (a) *a = std::clamp(*a, -kVoxRockM, kVoxRockM);
                 if ((c.cutAt(x, y, z) < 0.0f) != (dAntes < 0.0f) || (c.addedAt(x, y, z) < 0.0f) != (aAntes < 0.0f)) ++cambiados;
             }
     return cambiados;
+}
+
+void VoxWorld::finePartsNoLock(const glm::dvec3& p, const VoxChunk* hint, float& dc, float& da) const {
+    const VoxKey key = keyAt(p);
+    const VoxChunk* c = findNoLock(key);
+    const VoxKey ck = c ? key : (hint ? hint->key : key);
+    if (!c) c = hint;
+    if (!c) { dc = kVoxRockM; da = -kVoxRockM; return; }
+    // The baked part, at the point (not at the nodes): caves and shafts, islands.
+    dc = bakedFieldNoLock(*c, p);
+    da = bakedAddedNoLock(*c, p);
+    // Then the chunk's strokes in the order they were made: the same ones `applyLocal` applied to its
+    // nodes (a stroke is recorded in EVERY chunk it touches, so this chunk's list is enough). Each one
+    // only inside ITS node box (`StrokeFrame::bounds`), as on the grid; the 1e-3 voxel slack is the
+    // world<->grid round trip at the node itself.
+    auto it = m_strokes.find(ck);
+    if (it == m_strokes.end()) return;
+    const glm::dvec3 g = c->gridOf(p);
+    for (const Stroke& st : it->second) {
+        const Brush::Op op = (Brush::Op)st.op;
+        if (op == Brush::Op::Crater || op == Brush::Op::Smooth) continue;   // surface / neighbours
+        const StrokeFrame f = frameOf(*c, st);
+        int x0, x1, y0, y1, z0, z1;
+        f.bounds(*c, x0, x1, y0, y1, z0, z1);
+        constexpr double tol = 1e-3;
+        if (g.x < x0 - tol || g.x > x1 + tol || g.y < y0 - tol || g.y > y1 + tol || g.z < z0 - tol || g.z > z1 + tol) continue;
+        f.apply(p, &dc, &da, m_radius, m_elev);
+    }
+}
+
+struct VoxWorld::FrameCache {
+    const VoxChunk* chunk = nullptr;
+    struct Entry { StrokeFrame f; int x0, x1, y0, y1, z0, z1; };
+    std::vector<Entry> entries;
+};
+
+void VoxWorld::finePartsCached(const glm::dvec3& p, const VoxChunk* hint, FrameCache& cache, float& dc, float& da) const {
+    const VoxKey key = keyAt(p);
+    const VoxChunk* c = findNoLock(key);
+    const VoxKey ck = c ? key : (hint ? hint->key : key);
+    if (!c) c = hint;
+    if (!c) { dc = kVoxRockM; da = -kVoxRockM; return; }
+    if (cache.chunk != c) {   // another chunk: its frames, once
+        cache.chunk = c;
+        cache.entries.clear();
+        auto it = m_strokes.find(ck);
+        if (it != m_strokes.end())
+            for (const Stroke& st : it->second) {
+                const Brush::Op op = (Brush::Op)st.op;
+                if (op == Brush::Op::Crater || op == Brush::Op::Smooth) continue;
+                FrameCache::Entry e{ frameOf(*c, st), 0, 0, 0, 0, 0, 0 };
+                e.f.bounds(*c, e.x0, e.x1, e.y0, e.y1, e.z0, e.z1);
+                cache.entries.push_back(e);
+            }
+    }
+    dc = bakedFieldNoLock(*c, p);
+    da = bakedAddedNoLock(*c, p);
+    if (cache.entries.empty()) return;
+    const glm::dvec3 g = c->gridOf(p);
+    constexpr double tol = 1e-3;
+    for (const FrameCache::Entry& e : cache.entries) {
+        if (g.x < e.x0 - tol || g.x > e.x1 + tol || g.y < e.y0 - tol || g.y > e.y1 + tol || g.z < e.z0 - tol || g.z > e.z1 + tol) continue;
+        e.f.apply(p, &dc, &da, m_radius, m_elev);
+    }
+}
+
+void VoxWorld::surfaceCutFineMany(const std::vector<glm::dvec3>& dirs, std::vector<float>& out) const {
+    out.assign(dirs.size(), 0.0f);
+    if (!configured()) return;
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    FrameCache cache;
+    for (size_t i = 0; i < dirs.size(); ++i) {
+        const glm::dvec3 d = glm::normalize(dirs[i]);
+        const double ground = m_radius + (m_elev ? (double)m_elev(d) : 0.0) + (double)surfaceDeltaNoLock(d);
+        const glm::dvec3 p = d * (ground - 0.05);
+        if (!findNoLock(keyAt(p))) continue;
+        float dc, da;
+        finePartsCached(p, nullptr, cache, dc, da);
+        out[i] = std::clamp(0.5f - std::max(dc, da) / 0.25f, 0.0f, 1.0f);   // same rule as `surfaceCutFine`
+    }
+}
+
+float VoxWorld::fieldAt(const glm::dvec3& p) const {
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    const float t = terrainDensity(p);
+    if (!findNoLock(keyAt(p))) return t;
+    float d, a;
+    finePartsNoLock(p, nullptr, d, a);
+    return std::max(std::min(d, t), a);
+}
+
+float VoxWorld::surfaceCutFine(const glm::dvec3& dir) const {
+    if (!configured()) return 0.0f;
+    const glm::dvec3 d = glm::normalize(dir);
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    const double ground = m_radius + (m_elev ? (double)m_elev(d) : 0.0) + (double)surfaceDeltaNoLock(d);
+    const glm::dvec3 p = d * (ground - 0.05);
+    if (!findNoLock(keyAt(p))) return 0.0f;
+    float dc, da;
+    finePartsNoLock(p, nullptr, dc, da);
+    // 0.5 exactly at the wall, 1 at 12.5 cm inside the air: the shader cuts where > 0.5.
+    return std::clamp(0.5f - std::max(dc, da) / 0.25f, 0.0f, 1.0f);
+}
+
+bool VoxWorld::fineBrickMayHaveWalls(const VoxKey& key, const glm::ivec3& cell) const {
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    const VoxChunk* c = findNoLock(key);
+    if (!c) return false;
+    const glm::dvec3 centre = c->worldOfGrid(cell.x + 0.5, cell.y + 0.5, cell.z + 0.5);
+    const double halfDiag = 0.5 * glm::length(glm::dvec3(c->metresPerVoxel()));
+    bool candidate = false;
+    // A stroke whose SHAPE reaches the brick (not its node box: with 4 m voxels and a node of margin
+    // that box is ~8 cells wide, and a 30 cm pick chose 241 bricks — measured). Flatten/raise/lower
+    // act on the whole footprint column, so for them the lateral distance is what counts.
+    auto it = m_strokes.find(key);
+    if (it != m_strokes.end())
+        for (const Stroke& st : it->second) {
+            const Brush::Op op = (Brush::Op)st.op;
+            if (op == Brush::Op::Crater) continue;
+            const StrokeFrame f = frameOf(*c, st);
+            glm::dvec3 rel = centre - f.centerW;
+            if (f.shape == Brush::Shape::Capsule) {
+                const glm::dvec3 ab = f.endW - f.centerW;
+                const double l2 = glm::dot(ab, ab);
+                rel -= ab * (l2 > 1e-9 ? std::clamp(glm::dot(rel, ab) / l2, 0.0, 1.0) : 0.0);
+            }
+            if (op == Brush::Op::Raise || op == Brush::Op::Lower || op == Brush::Op::Flatten || op == Brush::Op::Smooth)
+                rel -= f.up * glm::dot(rel, f.up);
+            if (glm::length(rel) <= (double)f.reach + halfDiag) { candidate = true; break; }
+        }
+    // Caves and islands: the stored channels are (approximate) distances to their walls.
+    if (!candidate) {
+        const float diag = 2.0f * (float)halfDiag + 1.0f;
+        for (int dz = 0; dz <= 1 && !candidate; ++dz)
+            for (int dy = 0; dy <= 1 && !candidate; ++dy)
+                for (int dx = 0; dx <= 1 && !candidate; ++dx) {
+                    const int x = std::min(cell.x + dx, kVoxN - 1), y = std::min(cell.y + dy, kVoxN - 1), z = std::min(cell.z + dz, kVoxN - 1);
+                    candidate = c->cutAt(x, y, z) < diag || c->addedAt(x, y, z) > -diag;
+                }
+    }
+    if (!candidate) return false;
+    // And the wall must come near: the field is a distance (approximately), so if the cut and added
+    // channels are both further than the brick's half diagonal (with margin) from the centre, no
+    // wall of its own crosses it. One sample of the analytic field instead of ~43 000.
+    float dc, da;
+    finePartsNoLock(centre, c, dc, da);
+    const float reachM = 1.5f * (float)halfDiag;
+    return std::fabs(dc) <= reachM || std::fabs(da) <= reachM;
+}
+
+void VoxWorld::buildFineMesh(const VoxKey& key, const glm::ivec3& cell, int S, CaveMesh& out, size_t maxTris, CaveMesh* solidOut) const {
+    out.positions.clear(); out.normals.clear(); out.indices.clear();
+    if (solidOut) { solidOut->positions.clear(); solidOut->normals.clear(); solidOut->indices.clear(); }
+    S = std::max(S, 1);
+    if (!fineBrickMayHaveWalls(key, cell)) return;
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    const VoxChunk* c = findNoLock(key);
+    if (!c) return;
+    // Lattice node i (0..S, plus one apron node each side) of the brick = chunk grid coordinate
+    // cell + i/S. Index in the sampled array: i + 1.
+    const int n = S + 3;
+    const double inv = 1.0 / (double)S;
+    auto gridAt = [&](int i) { return (double)i * inv - inv; };   // array index -> offset in coarse cells
+    out.origin = c->worldOfGrid(cell.x, cell.y, cell.z);
+    std::vector<float> f((size_t)n * n * n);
+    std::vector<uint8_t> own((size_t)n * n * n, 0);
+    std::vector<double> ground((size_t)n * n);
+    std::vector<glm::dvec3> colDir((size_t)n * n);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const glm::dvec3 p = c->worldOfGrid(cell.x + gridAt(x), cell.y + gridAt(y), cell.z);
+            const glm::dvec3 dir = glm::normalize(p);
+            colDir[(size_t)y * n + x] = dir;
+            ground[(size_t)y * n + x] = m_radius + (m_elev ? (double)m_elev(dir) : 0.0) + (double)surfaceDeltaNoLock(dir);
+        }
+    auto nodeWorld = [&](double x, double y, double z) { return c->worldOfGrid(cell.x + x * inv - inv, cell.y + y * inv - inv, cell.z + z * inv - inv); };
+    FrameCache cache;
+    for (int z = 0; z < n; ++z)
+        for (int y = 0; y < n; ++y)
+            for (int x = 0; x < n; ++x) {
+                const glm::dvec3 p = nodeWorld(x, y, z);
+                float dc, da;
+                finePartsCached(p, c, cache, dc, da);
+                const float dt = (float)std::clamp(ground[(size_t)y * n + x] - glm::length(p), -(double)kVoxRockM, (double)kVoxRockM);
+                const float base = std::min(dc, dt);
+                f[(size_t)z * n * n + (size_t)y * n + x] = std::max(base, da);
+                // Same ownership bits as `buildMesh`: 0 = the air is the cave's · 1 = under the terrain
+                // or added rock · 2 = the rock is the ADDED channel. The ground band is scaled to the
+                // fine cell (the coarse one tolerates 0.5 m; here that would swallow a 10 cm hole).
+                const bool added = da >= 0.0f && da > base;
+                const float band = (float)std::min(0.5, 0.5 * glm::length(nodeWorld(1, 0, 0) - nodeWorld(0, 0, 0)));
+                own[(size_t)z * n * n + (size_t)y * n + x] = (uint8_t)(((dc <= dt) ? 1u : 0u) | ((dt >= -band || added) ? 2u : 0u) | (added ? 4u : 0u));
+            }
+    harukaSurfaceNets(n, f.data(), [&](float x, float y, float z) {
+        return glm::vec3(nodeWorld(x, y, z) - out.origin);
+    }, out, maxTris, own.data());
+    if (solidOut) {   // every surface of the field in the brick, the ground included: for collision
+        harukaSurfaceNets(n, f.data(), [&](float x, float y, float z) {
+            return glm::vec3(nodeWorld(x, y, z) - out.origin);
+        }, *solidOut, maxTris, nullptr);
+        solidOut->origin = out.origin;
+    }
+    // THE SKIRT, as in `buildMesh`: vertices of cells where a cave crosses the ground go to the exact
+    // ground height, so the wall meets the cut of the terrain.
+    for (size_t i = 0; i < out.positions.size(); ++i) {
+        const glm::dvec3 pw = out.origin + glm::dvec3(out.positions[i]);
+        const glm::dvec3 g = c->gridOf(pw);
+        const int gx = (int)std::floor((g.x - cell.x) * S) + 1, gy = (int)std::floor((g.y - cell.y) * S) + 1, gz = (int)std::floor((g.z - cell.z) * S) + 1;
+        bool above = false, below = false, cave = false;
+        for (int dz = 0; dz <= 1; ++dz)
+            for (int dy = 0; dy <= 1; ++dy)
+                for (int dx = 0; dx <= 1; ++dx) {
+                    const int ax = gx + dx, ay = gy + dy, az = gz + dz;
+                    if (ax < 0 || ay < 0 || az < 0 || ax >= n || ay >= n || az >= n) continue;
+                    const double dt = ground[(size_t)ay * n + ax] - glm::length(nodeWorld(ax, ay, az));
+                    (dt < 0.0 ? above : below) = true;
+                    cave = cave || (own[(size_t)az * n * n + (size_t)ay * n + ax] & 1u) != 0u;
+                }
+        if (!(above && below && cave)) continue;
+        const glm::dvec3 dir = glm::normalize(pw);
+        const double groundR = m_radius + (m_elev ? (double)m_elev(dir) : 0.0) + (double)surfaceDeltaNoLock(dir);
+        out.positions[i] = glm::vec3(dir * groundR - out.origin);
+    }
+    // Normals from the FIELD gradient at the vertex (step = one fine cell), like `buildMesh`.
+    const double h = std::max(0.01, glm::length(nodeWorld(1, 0, 0) - nodeWorld(0, 0, 0)));
+    auto F = [&](const glm::dvec3& q) {
+        float dc, da;
+        finePartsCached(q, c, cache, dc, da);
+        const glm::dvec3 qd = glm::normalize(q);
+        const double gq = m_radius + (m_elev ? (double)m_elev(qd) : 0.0) + (double)surfaceDeltaNoLock(qd);
+        return std::max(std::min(dc, (float)std::clamp(gq - glm::length(q), -(double)kVoxRockM, (double)kVoxRockM)), da);
+    };
+    for (size_t i = 0; i < out.positions.size(); ++i) {
+        const glm::dvec3 p = out.origin + glm::dvec3(out.positions[i]);
+        const glm::dvec3 up = glm::normalize(p);
+        const glm::dvec3 ref = (std::fabs(up.y) < 0.99) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+        const glm::dvec3 e1 = glm::normalize(glm::cross(ref, up)), e2 = glm::cross(up, e1);
+        const glm::vec3 gr((F(p + e1 * h) - F(p - e1 * h)) / (2.0f * (float)h),
+                           (F(p + e2 * h) - F(p - e2 * h)) / (2.0f * (float)h),
+                           (F(p + up * h) - F(p - up * h)) / (2.0f * (float)h));
+        const glm::vec3 gw = glm::vec3(e1) * gr.x + glm::vec3(e2) * gr.y + glm::vec3(up) * gr.z;
+        const float gl = glm::length(gw);
+        if (gl > 1e-6f) out.normals[i] = gw / gl;
+    }
 }
 
 int VoxWorld::stroke(const glm::dvec3& worldPos, const Brush& brush) {

@@ -41,6 +41,7 @@
 #include "lib/ocean_params.glsl"     // harukaSeaLevelM, harukaWaveAt
 #include "lib/ocean_wave.glsl"       // harukaGerstner
 #include "lib/inland_water.glsl"     // harukaWaterLevelAt (mar + lago horneado + parche)
+#include "lib/vox_cut.glsl"           // harukaVoxCutLookup
 
 layout(location = 0) in vec2 aTexel;
 
@@ -62,6 +63,8 @@ layout(binding = 17) uniform sampler2D uVoxCut;
 layout(std140, binding = 3) uniform VoxCut {
     mat4 uVoxCutSpace;
     vec4 uVoxCutInfo;
+    mat4 uVoxCutFineSpace;   // the fine window (lib/vox_cut.glsl): position relative to the eye -> uv
+    vec4 uVoxCutAtlas;       // where each window sits in the cut texture (lib/vox_cut.glsl)
 };
 
 layout(location = 0) out vec3  vNormal;
@@ -213,11 +216,10 @@ void main() {
     // el lecho, y una que quede por debajo del lecho no se dibuja. Misma ventana que recorta el suelo.
     const vec3  posRelEye = dir * R + uCenter.xyz;
     if (uVoxCutInfo.x > 0.5) {
-        const vec2 cuv = (uVoxCutSpace * vec4(posRelEye + uCenterLo.xyz, 1.0)).xy;
-        if (cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0) {
-            const vec4 vc = textureLod(uVoxCut, cuv, 0.0);
-            if (vc.r > 0.5) groundH -= vc.g * 255.0;
-        }
+        // Coarse window only: the water bed of a decimetre hole changes nothing that can be seen.
+        bool inside;
+        const vec4 vc = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, posRelEye + uCenterLo.xyz, false, inside);
+        if (inside && vc.r > 0.5) groundH -= vc.g * 255.0;
     }
 
     // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────

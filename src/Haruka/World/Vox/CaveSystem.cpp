@@ -703,20 +703,71 @@ bool caveLoadBox(const CaveDef& def, const CaveBox& box, CaveSystem& out, const 
                  int mapRes, int volRes) {
     out = CaveSystem{};
     out.box = box;
-    // Los mapas: de sus rutas. Si faltan, BORRADOR con la semilla, guardado en esas rutas: a partir
-    // de ahí son autoría y el generador no vuelve a tocarlos.
+    auto finish = [&](const char* how) {
+        caveLayersPrepare(out.layers, out.box);
+        const int comps = caveLayerComponents(out.layers);
+        out.connectStats = glm::ivec3(out.connectStats.x ? out.connectStats.x : comps, comps, out.connectStats.z);
+        caveBakeEntrance(out, mapRes, out.boca);
+        HARUKA_LOGD("Cuevas", "'%s': %zu layer(s) %s · %d component(s)", def.name.c_str(), out.layers.size(), how, comps);
+        return !out.layers.empty();
+    };
+    // 1. THE LAYERS, when the definition has them: they are the cave, read as-is.
+    if (!def.layers.empty()) {
+        bool ok = (int)def.layers.size() <= kCaveMaxLayers;
+        for (const CaveDef::LayerPaths& lp : def.layers) {
+            if (!ok) break;
+            CaveLayer L;
+            ok = caveLoadMap16(caveResolveAssetPath(lp.ceiling), L.ceiling) && caveLoadMap16(caveResolveAssetPath(lp.floor), L.floor)
+              && L.ceiling.w == L.floor.w && L.ceiling.h == L.floor.h
+              && (out.layers.empty() || (L.ceiling.w == out.layers[0].ceiling.w && L.ceiling.h == out.layers[0].ceiling.h));
+            if (ok) out.layers.push_back(std::move(L));
+        }
+        if (ok) return finish("from their maps");
+        HARUKA_LOGW("Cuevas", "'%s': layer maps missing or mismatched -> draft from the seed (not saved)", def.name.c_str());
+        out.layers.clear();
+    }
+    // 2. LEGACY FORMAT (footprint + profile): resolved to a volume as always (with its connectivity
+    //    carved) and converted to layers. The conversion is cached in `bakes/` by the texels.
     int w = 0, h = 0; std::vector<float> px;
     const std::string pPlanta = caveResolveAssetPath(def.planta), pPerfil = caveResolveAssetPath(def.perfil);
     if (!pPlanta.empty() && loadPNGGray(pPlanta, w, h, px)) { out.planta.w = w; out.planta.h = h; out.planta.v = px; }
     if (!pPerfil.empty() && loadPNGGray(pPerfil, w, h, px)) { out.perfil.w = w; out.perfil.h = h; out.perfil.v = px; }
-    if (out.planta.empty() || out.perfil.empty()) {
-        caveBakeMaps(out.box, mapRes, out.planta, out.perfil);
-        if (!pPlanta.empty()) savePNGGray(pPlanta, out.planta.w, out.planta.h, out.planta.v);
-        if (!pPerfil.empty()) savePNGGray(pPerfil, out.perfil.w, out.perfil.h, out.perfil.v);
-        HARUKA_LOGI("Cuevas", "'%s': sin mapas -> borrador (semilla %u)%s", def.name.c_str(), def.draftSeed,
-                    pPlanta.empty() ? " (no se guarda: sin ruta)" : ", guardado como asset");
+    if (!out.planta.empty() && !out.perfil.empty()) {
+        uint64_t hh = 1469598103934665603ull;
+        const char* version = "cave-layers-from-legacy-v1";
+        mix(hh, version, std::strlen(version));
+        mix(hh, &out.box.radiusM, sizeof(out.box.radiusM)); mix(hh, &out.box.depthM, sizeof(out.box.depthM));
+        mix(hh, &out.box.mouth, sizeof(out.box.mouth));     mix(hh, &out.box.seed, sizeof(out.box.seed));
+        mix(hh, &volRes, sizeof(volRes));                   mix(hh, &mapRes, sizeof(mapRes));
+        const uint64_t hp = mapHash(out.planta), hs = mapHash(out.perfil);
+        mix(hh, &hp, sizeof(hp)); mix(hh, &hs, sizeof(hs));
+        const auto cached = caveLayerPathsFor(bakesDir(dir) + "cave_" + hex16(hh), kCaveMaxLayers);
+        for (const auto& lp : cached) {
+            CaveLayer L;
+            if (!caveLoadMap16(lp.ceiling, L.ceiling) || !caveLoadMap16(lp.floor, L.floor)) break;
+            out.layers.push_back(std::move(L));
+        }
+        if (!out.layers.empty()) return finish("converted from the legacy maps (cached)");
+        if (!caveDeriveFromMaps(out, dir, volRes)) return false;
+        const int dropped = caveLayersFromVolume(out, mapRes, out.layers);
+        const int comps = caveLayerComponents(out.layers);
+        // A LOSSY conversion is not applied: the cave keeps its volume, exactly as before. Measured
+        // on the old seeded generator (a sponge of strata): up to 1 208 spans over the layer limit
+        // and 1 piece of air becoming 6. Such a cave stays legacy until someone repaints it.
+        if (dropped > 0 || comps > std::max(out.connectStats.y, 1)) {
+            HARUKA_LOGW("Cuevas", "'%s': legacy maps do not fit in %d layers without losing air (%d spans over, %d -> %d pieces): kept as a volume",
+                        def.name.c_str(), kCaveMaxLayers, dropped, std::max(out.connectStats.y, 1), comps);
+            out.layers.clear();
+            return true;
+        }
+        for (size_t i = 0; i < out.layers.size(); ++i) { caveSaveMap16(cached[i].ceiling, out.layers[i].ceiling); caveSaveMap16(cached[i].floor, out.layers[i].floor); }
+        return finish("converted from the legacy maps");
     }
-    return caveDeriveFromMaps(out, dir, volRes);
+    // 3. NO MAPS: a draft written directly as layers, from the seed. Not saved here: the editor
+    //    creates drafts with their paths and saves them itself.
+    caveBakeLayers(out.box, mapRes, out.layers, &out.connectStats);
+    HARUKA_LOGI("Cuevas", "'%s': no maps -> layered draft (seed %u)", def.name.c_str(), def.draftSeed);
+    return finish("drafted from the seed");
 }
 
 bool caveDeriveFromMaps(CaveSystem& out, const std::string& dir, int volRes) {
@@ -755,12 +806,347 @@ bool caveDeriveFromMaps(CaveSystem& out, const std::string& dir, int volRes) {
     return !out.vol.empty();
 }
 
+float caveDensityLocal(const CaveSystem& sys, const glm::vec3& l);
+
+// ── Layers ──────────────────────────────────────────────────────────────────────────────────────
+void caveLayersPrepare(std::vector<CaveLayer>& layers, const CaveBox& box) {
+    const float range = box.depthM + kCaveOpenM;   // metres per unit of map value
+    for (CaveLayer& L : layers) {
+        auto factor = [&](const CaveMap& m, CaveMap& k) {
+            k.w = m.w; k.h = m.h; k.v.assign(m.v.size(), 1.0f);
+            if (m.w < 2 || m.h < 2) return;
+            const float texelM = 2.0f * box.radiusM / (float)(m.w - 1);   // metres between texels
+            for (int y = 0; y < m.h; ++y)
+                for (int x = 0; x < m.w; ++x) {
+                    const int xa = std::max(x - 1, 0), xb = std::min(x + 1, m.w - 1), ya = std::max(y - 1, 0), yb = std::min(y + 1, m.h - 1);
+                    const float gx = (m.v[(size_t)y * m.w + xb] - m.v[(size_t)y * m.w + xa]) * range / ((float)(xb - xa) * texelM);
+                    const float gy = (m.v[(size_t)yb * m.w + x] - m.v[(size_t)ya * m.w + x]) * range / ((float)(yb - ya) * texelM);
+                    k.v[(size_t)y * m.w + x] = 1.0f / std::sqrt(1.0f + gx * gx + gy * gy);
+                }
+        };
+        factor(L.ceiling, L.ceilingK);
+        factor(L.floor, L.floorK);
+    }
+}
+
+void caveBakeLayers(const CaveBox& box, int res, std::vector<CaveLayer>& out, glm::ivec3* stats) {
+    res = std::max(16, res);
+    out.clear();
+    const uint32_t s = box.seed ^ (box.cell * 2654435761u);
+    const float D = std::max(box.depthM, 1e-3f);
+    const float texelM = 2.0f * box.radiusM / (float)(res - 1);
+    const int levels = 1 + (int)std::floor(hash01(box.cell, s ^ 0x1234u) * 2.999f);   // 1..3
+    const size_t N = (size_t)res * res;
+    int compsBefore = 0;
+    // Per level: MID depth (smooth, defined everywhere) and THICKNESS (continuous: > 0 is gallery,
+    // crossing 0 at the corridor's edge, so the wall falls where the noise says and not on a texel).
+    std::vector<std::vector<float>> mid(levels, std::vector<float>(N)), thick(levels, std::vector<float>(N));
+    for (int k = 0; k < levels; ++k) {
+        const uint32_t sk = s ^ (0x9e3779b9u * (uint32_t)(k + 1));
+        const float freq = 2.5f + 3.0f * hash01(box.cell, sk ^ 0x1111u);
+        const float tau = 0.42f + 0.08f * hash01(box.cell, sk ^ 0x2222u);
+        const float hMax = 6.0f + 8.0f * hash01(box.cell, sk ^ 0x3333u);          // tallest gallery (m)
+        const float base = D * (0.2f + 0.6f * ((float)k + 0.5f) / (float)levels);   // the level's depth
+        std::vector<uint8_t> inside(N, 0);
+        for (int y = 0; y < res; ++y)
+            for (int x = 0; x < res; ++x) {
+                const float u = (float)x / (float)(res - 1), t = (float)y / (float)(res - 1);
+                const float wx = 0.35f * fbm2(u * 3.0f + 11.3f, t * 3.0f, sk ^ 0x4444u, 3);
+                const float wy = 0.35f * fbm2(u * 3.0f, t * 3.0f + 7.7f, sk ^ 0x5555u, 3);
+                float m = ridged2((u + wx) * freq, (t + wy) * freq, sk ^ 0x6666u, 4);
+                // Fades towards the box edge: a cave cannot leave its box.
+                const float dx = (u - 0.5f) * 2.0f, dy = (t - 0.5f) * 2.0f;
+                m *= 1.0f - std::clamp((std::sqrt(dx * dx + dy * dy) - 0.72f) / 0.28f, 0.0f, 1.0f);
+                const size_t i = (size_t)y * res + x;
+                // The edge is a WALL, not a wedge: thickness jumps +-1.5 m across the contour. A
+                // thickness that fell to 0 left a band thinner than any grid, sampled as loose
+                // slivers of a few voxels (measured: up to 23 voxels apart from the cave).
+                const float raw = hMax * (m - tau) / std::max(1.0f - tau, 1e-3f) * 2.0f;
+                thick[k][i] = raw + (raw > 0.0f ? 1.5f : -1.5f);
+                mid[k][i] = base + D * 0.08f * (fbm2(u * 2.0f, t * 2.0f, sk ^ 0x7777u, 3) * 2.0f - 1.0f);
+                inside[i] = thick[k][i] > 0.0f ? 1 : 0;
+            }
+        // ONE piece per level: the other components are closed.
+        compsBefore += keepLargestComponent2D(res, res, inside);
+        for (size_t i = 0; i < N; ++i) if (!inside[i] && thick[k][i] > 0.0f) thick[k][i] = -2.0f;
+    }
+    // A corridor in level k from texel A to texel B (straight, `radiusTx` wide, at least `hM` tall).
+    auto corridor = [&](int k, int ax, int ay, int bx, int by, float radiusTx, float hM) {
+        const float len = std::sqrt((float)((bx - ax) * (bx - ax) + (by - ay) * (by - ay)));
+        const int steps = std::max(1, (int)std::ceil(len * 2.0f));
+        for (int st = 0; st <= steps; ++st) {
+            const float cx = ax + (bx - ax) * (float)st / (float)steps, cy = ay + (by - ay) * (float)st / (float)steps;
+            const int r = (int)std::ceil(radiusTx);
+            for (int y = std::max(0, (int)cy - r); y <= std::min(res - 1, (int)cy + r); ++y)
+                for (int x = std::max(0, (int)cx - r); x <= std::min(res - 1, (int)cx + r); ++x) {
+                    const float d = std::sqrt((x - cx) * (x - cx) + (y - cy) * (y - cy));
+                    if (d > radiusTx) continue;
+                    float& th = thick[k][(size_t)y * res + x];
+                    th = std::max(th, hM * (1.0f - d / std::max(radiusTx, 1e-3f)) + 0.5f);   // tapers to the wall
+                }
+        }
+    };
+    auto nearestOpen = [&](int k, int px, int py, int& ox, int& oy) {
+        float best = 1e30f; ox = px; oy = py;
+        for (int y = 0; y < res; ++y)
+            for (int x = 0; x < res; ++x)
+                if (thick[k][(size_t)y * res + x] > 1.0f) {
+                    const float d = (float)((x - px) * (x - px) + (y - py) * (y - py));
+                    if (d < best) { best = d; ox = x; oy = y; }
+                }
+        return best < 1e30f;
+    };
+    const float shaftTx = std::max(2.5f, 5.0f / texelM);   // ~5 m radius
+    // THE MOUTH: a corridor in level 0 from the mouth to its nearest gallery, and the ceiling to 0
+    // in a disc there (ceiling = 0 IS the mouth).
+    const int mx = (int)std::lround(box.mouth.x * (float)(res - 1)), my = (int)std::lround(box.mouth.y * (float)(res - 1));
+    const float mouthTx = std::max(2.0f, box.mouth.z * (float)(res - 1));
+    int ox = mx, oy = my;
+    if (nearestOpen(0, mx, my, ox, oy)) corridor(0, mx, my, ox, oy, mouthTx, 8.0f);
+    // THE SHAFTS: level k joined to k+1 where k+1 is closest to an open texel of k.
+    std::vector<std::pair<int, int>> shafts;
+    for (int k = 0; k + 1 < levels; ++k) {
+        int bestX = -1, bestY = -1; float bestD = 1e30f;
+        for (int y = 0; y < res; y += 2)
+            for (int x = 0; x < res; x += 2) {
+                if (thick[k][(size_t)y * res + x] <= 2.0f) continue;
+                int nx, ny;
+                if (!nearestOpen(k + 1, x, y, nx, ny)) continue;
+                const float d = (float)((nx - x) * (nx - x) + (ny - y) * (ny - y));
+                if (d < bestD) { bestD = d; bestX = x; bestY = y; }
+                if (d == 0.0f) break;
+            }
+        if (bestX < 0) { // level k+1 has no gallery: it and the ones below are dropped
+            mid.resize(k + 1); thick.resize(k + 1); break;
+        }
+        int nx, ny; nearestOpen(k + 1, bestX, bestY, nx, ny);
+        if (nx != bestX || ny != bestY) corridor(k + 1, nx, ny, bestX, bestY, shaftTx, 6.0f);
+        shafts.push_back({ bestX, bestY });
+    }
+    const int L = (int)thick.size();
+    out.resize(L);
+    for (int k = 0; k < L; ++k) {
+        CaveLayer& layer = out[k];
+        layer.ceiling.w = layer.floor.w = layer.ceiling.h = layer.floor.h = res;
+        layer.ceiling.v.resize(N); layer.floor.v.resize(N);
+        for (size_t i = 0; i < N; ++i) {
+            layer.ceiling.v[i] = caveLayerFromM(box, mid[k][i] - 0.5f * thick[k][i]);
+            layer.floor.v[i]   = caveLayerFromM(box, mid[k][i] + 0.5f * thick[k][i]);
+        }
+    }
+    // Shafts: in a disc, level k's floor goes down to level k+1's floor (the spans overlap).
+    for (size_t k = 0; k < shafts.size() && k + 1 < (size_t)L; ++k) {
+        const int cx = shafts[k].first, cy = shafts[k].second, r = (int)std::ceil(shaftTx);
+        for (int y = std::max(0, cy - r); y <= std::min(res - 1, cy + r); ++y)
+            for (int x = std::max(0, cx - r); x <= std::min(res - 1, cx + r); ++x) {
+                if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > shaftTx * shaftTx) continue;
+                const size_t i = (size_t)y * res + x;
+                out[k].floor.v[i] = std::max(out[k].floor.v[i], out[k + 1].floor.v[i]);
+                out[k].ceiling.v[i] = std::min(out[k].ceiling.v[i], out[k + 1].ceiling.v[i]);
+            }
+    }
+    // The mouth disc: ceiling to the ground.
+    {
+        const int r = (int)std::ceil(mouthTx);
+        for (int y = std::max(0, my - r); y <= std::min(res - 1, my + r); ++y)
+            for (int x = std::max(0, mx - r); x <= std::min(res - 1, mx + r); ++x)
+                if ((float)((x - mx) * (x - mx) + (y - my) * (y - my)) <= mouthTx * mouthTx)
+                    out[0].ceiling.v[(size_t)y * res + x] = 0.0f;
+    }
+    caveLayersPrepare(out, box);
+    if (stats) {
+        int open = 0;
+        for (const CaveLayer& layer : out) for (size_t i = 0; i < N; ++i) open += layer.floor.v[i] > layer.ceiling.v[i] ? 1 : 0;
+        *stats = glm::ivec3(compsBefore, caveLayerComponents(out), open);
+    }
+}
+
+bool caveSaveMap16(const std::string& path, const CaveMap& m) {
+    if (path.empty() || m.empty()) return false;
+    std::vector<unsigned short> px(m.v.size());
+    for (size_t i = 0; i < px.size(); ++i)
+        px[i] = (unsigned short)std::lround(std::clamp(m.v[i], 0.0f, 1.0f) * 65535.0f);
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    return IO::writePNG16(path, m.w, m.h, px.data());
+}
+
+bool caveLoadMap16(const std::string& path, CaveMap& m) {
+    int w = 0, h = 0, n = 0;
+    stbi_us* p = stbi_load_16(path.c_str(), &w, &h, &n, 1);
+    if (!p) return false;
+    m.w = w; m.h = h;
+    m.v.resize((size_t)w * h);
+    for (size_t i = 0; i < m.v.size(); ++i) m.v[i] = (float)p[i] / 65535.0f;
+    stbi_image_free(p);
+    return true;
+}
+
+std::vector<CaveDef::LayerPaths> caveLayerPathsFor(const std::string& base, int count) {
+    std::vector<CaveDef::LayerPaths> out;
+    if (base.empty()) return out;
+    for (int i = 0; i < count; ++i)
+        out.push_back({ base + "_layer" + std::to_string(i) + "_ceiling.png", base + "_layer" + std::to_string(i) + "_floor.png" });
+    return out;
+}
+
+int caveLayersFromVolume(const CaveSystem& withVolume, int res, std::vector<CaveLayer>& out) {
+    out.clear();
+    if (withVolume.vol.empty()) return 0;
+    res = std::max(8, res);
+    CaveSystem volOnly; volOnly.box = withVolume.box; volOnly.vol = withVolume.vol;   // sample the VOLUME, not layers
+    const CaveBox& B = volOnly.box;
+    const float D = std::max(B.depthM, 1e-3f);
+    // Four samples per volume voxel in depth; spans are refined by linear interpolation.
+    const int nz = 4 * (std::max(volOnly.vol.n, 2) - 1) + 1;
+    const float dz = D / (float)(nz - 1);
+    struct Span { float top, bottom; };
+    const size_t N = (size_t)res * res;
+    std::vector<std::vector<Span>> cols(N);
+    int dropped = 0, used = 0;
+    for (int py = 0; py < res; ++py)
+        for (int px = 0; px < res; ++px) {
+            const float lx = ((float)px / (float)(res - 1) - 0.5f) * 2.0f * B.radiusM;
+            const float ly = ((float)py / (float)(res - 1) - 0.5f) * 2.0f * B.radiusM;
+            std::vector<Span>& c = cols[(size_t)py * res + px];
+            float prev = caveDensityLocal(volOnly, glm::vec3(lx, ly, 0.0f));
+            // Air right at the ground = a mouth: its ceiling goes up into the open range.
+            float start = prev < 0.0f ? -kCaveOpenM : -1.0f;
+            for (int k = 1; k < nz; ++k) {
+                const float z = dz * (float)k;
+                const float cur = caveDensityLocal(volOnly, glm::vec3(lx, ly, z));
+                const float cross = z - dz + dz * prev / (prev - cur);   // where the sign flips
+                if (prev >= 0.0f && cur < 0.0f) start = cross;
+                if (prev < 0.0f && cur >= 0.0f) c.push_back({ start, cross });
+                prev = cur;
+            }
+            if (prev < 0.0f) c.push_back({ start, D });
+            if ((int)c.size() > kCaveMaxLayers) {
+                // Keep the thickest, in depth order; the rest is reported (the caller logs it).
+                dropped += (int)c.size() - kCaveMaxLayers;
+                std::sort(c.begin(), c.end(), [](const Span& a, const Span& b) { return (a.bottom - a.top) > (b.bottom - b.top); });
+                c.resize(kCaveMaxLayers);
+                std::sort(c.begin(), c.end(), [](const Span& a, const Span& b) { return a.top < b.top; });
+            }
+            used = std::max(used, (int)c.size());
+        }
+    if (used == 0) return dropped;
+
+    // Match each span to a layer by continuity with the left/up neighbours (closest mid depth).
+    // K <= 4, so every assignment is tried (at most 4! = 24).
+    const int K = used;
+    std::vector<float> top((size_t)K * N, 0.0f), bottom((size_t)K * N, 0.0f);
+    std::vector<uint8_t> has((size_t)K * N, 0);
+    auto at = [&](int L, size_t i) { return (size_t)L * N + i; };
+    std::vector<int> perm(K);
+    for (int py = 0; py < res; ++py)
+        for (int px = 0; px < res; ++px) {
+            const size_t i = (size_t)py * res + px;
+            const std::vector<Span>& c = cols[i];
+            if (c.empty()) continue;
+            float ref[kCaveMaxLayers]; bool hasRef[kCaveMaxLayers];
+            for (int L = 0; L < K; ++L) {
+                float sum = 0.0f; int cnt = 0;
+                if (px > 0 && has[at(L, i - 1)])   { sum += 0.5f * (top[at(L, i - 1)] + bottom[at(L, i - 1)]); ++cnt; }
+                if (py > 0 && has[at(L, i - res)]) { sum += 0.5f * (top[at(L, i - res)] + bottom[at(L, i - res)]); ++cnt; }
+                hasRef[L] = cnt > 0; ref[L] = cnt ? sum / (float)cnt : 0.0f;
+            }
+            for (int L = 0; L < K; ++L) perm[L] = L;
+            float bestCost = 1e30f; std::vector<int> best;
+            do {
+                // perm[k] = layer of span k (only the first c.size() matter)
+                float cost = 0.0f;
+                for (size_t k = 0; k < c.size(); ++k) {
+                    const int L = perm[k];
+                    const float mid = 0.5f * (c[k].top + c[k].bottom);
+                    // A far reference is a different gallery: costs the same as a fresh layer, and
+                    // fresh layers prefer depth order (lower index for shallower spans).
+                    cost += hasRef[L] ? std::min(std::fabs(mid - ref[L]), 0.5f * D) : 0.5f * D + 0.01f * (float)std::abs(L - (int)k);
+                }
+                if (cost < bestCost) { bestCost = cost; best.assign(perm.begin(), perm.begin() + (long)c.size()); }
+            } while (std::next_permutation(perm.begin(), perm.end()));
+            for (size_t k = 0; k < c.size(); ++k) {
+                const size_t j = at(best[k], i);
+                top[j] = c[k].top; bottom[j] = c[k].bottom; has[j] = 1;
+            }
+        }
+
+    // Fill the texels a layer does NOT cover, "closed" (floor above ceiling) with the depth and the
+    // thickness of the nearest covered texel, so bilinear interpolation puts the wall half a texel
+    // away. Breadth-first from the covered texels, per layer.
+    out.resize(K);
+    for (int L = 0; L < K; ++L) {
+        std::vector<float> mid(N, 0.5f * D), thick(N, D);
+        std::vector<uint8_t> done(N, 0);
+        std::vector<size_t> frontier;
+        for (size_t i = 0; i < N; ++i)
+            if (has[at(L, i)]) { mid[i] = 0.5f * (top[at(L, i)] + bottom[at(L, i)]); thick[i] = bottom[at(L, i)] - top[at(L, i)]; done[i] = 1; frontier.push_back(i); }
+        while (!frontier.empty()) {
+            std::vector<size_t> next;
+            for (size_t i : frontier) {
+                const int x = (int)(i % res), y = (int)(i / res);
+                const int nb[4][2] = { {1,0}, {-1,0}, {0,1}, {0,-1} };
+                for (auto& o : nb) {
+                    const int nx = x + o[0], ny = y + o[1];
+                    if (nx < 0 || ny < 0 || nx >= res || ny >= res) continue;
+                    const size_t j = (size_t)ny * res + nx;
+                    if (done[j]) continue;
+                    done[j] = 1; mid[j] = mid[i]; thick[j] = std::max(thick[i], 0.5f); next.push_back(j);
+                }
+            }
+            frontier.swap(next);
+        }
+        CaveLayer& layer = out[L];
+        layer.ceiling.w = layer.floor.w = res; layer.ceiling.h = layer.floor.h = res;
+        layer.ceiling.v.resize(N); layer.floor.v.resize(N);
+        for (size_t i = 0; i < N; ++i) {
+            float t, b;
+            if (has[at(L, i)]) { t = top[at(L, i)]; b = bottom[at(L, i)]; }
+            else { t = mid[i] + 0.5f * thick[i]; b = mid[i] - 0.5f * thick[i]; }   // closed: floor above ceiling
+            layer.ceiling.v[i] = caveLayerFromM(B, t);
+            layer.floor.v[i]   = caveLayerFromM(B, b);
+        }
+    }
+    return dropped;
+}
+
+int caveLayerComponents(const std::vector<CaveLayer>& layers) {
+    if (layers.empty() || layers[0].ceiling.empty()) return 0;
+    const int w = layers[0].ceiling.w, h = layers[0].ceiling.h, K = (int)layers.size();
+    const size_t N = (size_t)w * h;
+    std::vector<int> parent((size_t)K * N, -1);
+    auto open = [&](int L, size_t i) { return layers[L].floor.v[i] > layers[L].ceiling.v[i]; };
+    auto find = [&](int a) { while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    auto join = [&](int a, int b) { a = find(a); b = find(b); if (a != b) parent[a] = b; };
+    for (int L = 0; L < K; ++L) for (size_t i = 0; i < N; ++i) if (open(L, i)) parent[(size_t)L * N + i] = (int)((size_t)L * N + i);
+    auto overlap = [&](int La, size_t a, int Lb, size_t b) {
+        return std::min(layers[La].floor.v[a], layers[Lb].floor.v[b]) > std::max(layers[La].ceiling.v[a], layers[Lb].ceiling.v[b]);
+    };
+    for (int La = 0; La < K; ++La)
+        for (size_t i = 0; i < N; ++i) {
+            if (!open(La, i)) continue;
+            const int x = (int)(i % w), y = (int)(i / w);
+            // Same layer, neighbouring texels both open: joined, whatever their depths — the bilinear
+            // slab between them stays open all the way (its thickness is positive at both ends).
+            // Another layer: only if the spans overlap (same column or the neighbour's).
+            for (int Lb = 0; Lb < K; ++Lb) {
+                const bool same = (Lb == La);
+                if (Lb > La && open(Lb, i) && overlap(La, i, Lb, i)) join((int)((size_t)La * N + i), (int)((size_t)Lb * N + i));
+                if (x + 1 < w && open(Lb, i + 1) && (same || overlap(La, i, Lb, i + 1))) join((int)((size_t)La * N + i), (int)((size_t)Lb * N + i + 1));
+                if (y + 1 < h && open(Lb, i + w) && (same || overlap(La, i, Lb, i + w))) join((int)((size_t)La * N + i), (int)((size_t)Lb * N + i + w));
+            }
+        }
+    int roots = 0;
+    for (size_t k = 0; k < parent.size(); ++k) if (parent[k] == (int)k) ++roots;
+    return roots;
+}
+
 // ── Muestreo ────────────────────────────────────────────────────────────────────────────────────
 
 float caveDensityLocal(const CaveSystem& sys, const glm::vec3& l);
 
 float caveDensityAtDraped(const CaveSystem& sys, const glm::dvec3& p, double surfaceR) {
-    if (sys.vol.empty()) return 1e9f;
+    if (!sys.valid()) return 1e9f;
     // Mismas cuentas que `toLocal`, con el techo en `surfaceR` en vez de en `surfaceRM`: la
     // tangencial sigue medida desde el centro de la caja; la profundidad, desde el suelo LOCAL.
     const double r = glm::length(p);
@@ -771,11 +1157,67 @@ float caveDensityAtDraped(const CaveSystem& sys, const glm::dvec3& p, double sur
 }
 
 float caveDensityAt(const CaveSystem& sys, const glm::dvec3& p) {
-    if (sys.vol.empty()) return 1e9f;
+    if (!sys.valid()) return 1e9f;
     return caveDensityLocal(sys, sys.box.toLocal(p));
 }
 
+namespace {
+/// Layer field at local (x, y, depth z), in metres; 1e9 outside the box. Analytic over the maps:
+/// per layer, the signed distance to the slab `ceiling < z < floor`, each face divided by
+/// sqrt(1 + |slope|^2) so it is a DISTANCE on a sloped ceiling too (a raw `ceiling - z` on a 60°
+/// wall reads 2x the real distance, and that is what pushes the player out of the rock). The cave is
+/// the union of its layers (min). No grid: it answers at any scale, like the strokes.
+float layeredDensityLocal(const CaveSystem& sys, const glm::vec3& l) {
+    const CaveBox& B = sys.box;
+    const float u = (l.x / B.radiusM) * 0.5f + 0.5f, v = (l.y / B.radiusM) * 0.5f + 0.5f;
+    const float D = std::max(B.depthM, 1e-3f);
+    const CaveMap& m0 = sys.layers[0].ceiling;
+    // One texel of lateral slack; vertically the map's own range [-kCaveOpenM, depthM] plus the
+    // volume's slack (see `caveDensityLocal`).
+    const float tolU = 1.0f / (float)std::max(m0.w - 1, 1), tolZ = D / (float)std::max(kCaveVolRes - 1, 1);
+    if (u < -tolU || u > 1.0f + tolU || v < -tolU || v > 1.0f + tolU || l.z < -kCaveOpenM - tolZ || l.z > D + tolZ) return 1e9f;
+    const float uc = std::clamp(u, 0.0f, 1.0f), vc = std::clamp(v, 0.0f, 1.0f);
+    float best = 1e9f;
+    // FAST PATH: prepared layers of one resolution -> one set of bilinear weights for every map.
+    bool prepared = true;
+    for (const CaveLayer& L : sys.layers)
+        prepared = prepared && L.ceilingK.w == m0.w && L.ceilingK.h == m0.h && L.floorK.w == m0.w && L.floor.w == m0.w && L.ceiling.w == m0.w
+                            && L.floor.h == m0.h && L.ceiling.h == m0.h && L.floorK.h == m0.h;
+    if (prepared) {
+        const int w = m0.w, h = m0.h;
+        const float fx = uc * (float)(w - 1), fy = vc * (float)(h - 1);
+        const int x0 = std::min((int)fx, w - 1), y0 = std::min((int)fy, h - 1);
+        const int x1 = std::min(x0 + 1, w - 1), y1 = std::min(y0 + 1, h - 1);
+        const float ax = fx - (float)x0, ay = fy - (float)y0;
+        const size_t i00 = (size_t)y0 * w + x0, i10 = (size_t)y0 * w + x1, i01 = (size_t)y1 * w + x0, i11 = (size_t)y1 * w + x1;
+        const float w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay), w01 = (1 - ax) * ay, w11 = ax * ay;
+        auto bl = [&](const std::vector<float>& m) { return m[i00] * w00 + m[i10] * w10 + m[i01] * w01 + m[i11] * w11; };
+        for (const CaveLayer& L : sys.layers) {
+            const float above = (caveLayerToM(B, bl(L.ceiling.v)) - l.z) * bl(L.ceilingK.v);
+            const float below = (l.z - caveLayerToM(B, bl(L.floor.v))) * bl(L.floorK.v);
+            best = std::min(best, std::max(above, below));
+        }
+        return std::clamp(best, -kVolRangeM, kVolRangeM);
+    }
+    for (const CaveLayer& L : sys.layers) {
+        const float du = 1.0f / (float)std::max(L.ceiling.w - 1, 1), dv = 1.0f / (float)std::max(L.ceiling.h - 1, 1);
+        const float mPerU = 2.0f * B.radiusM;   // metres per unit of u (and of v)
+        auto slope = [&](const CaveMap& m) {
+            const float gx = (m.at(uc + du, vc) - m.at(uc - du, vc)) * (D + kCaveOpenM) / (2.0f * du * mPerU);
+            const float gy = (m.at(uc, vc + dv) - m.at(uc, vc - dv)) * (D + kCaveOpenM) / (2.0f * dv * mPerU);
+            return std::sqrt(1.0f + gx * gx + gy * gy);
+        };
+        const float ceil = caveLayerToM(B, L.ceiling.at(uc, vc)), floor = caveLayerToM(B, L.floor.at(uc, vc));
+        const float above = (ceil - l.z) / slope(L.ceiling);   // > 0 above the ceiling (rock)
+        const float below = (l.z - floor) / slope(L.floor);    // > 0 below the floor (rock)
+        best = std::min(best, std::max(above, below));
+    }
+    return std::clamp(best, -kVolRangeM, kVolRangeM);
+}
+} // namespace
+
 float caveDensityLocal(const CaveSystem& sys, const glm::vec3& l) {
+    if (!sys.layers.empty()) return layeredDensityLocal(sys, l);
     float u = (l.x / sys.box.radiusM) * 0.5f + 0.5f;
     float v = (l.y / sys.box.radiusM) * 0.5f + 0.5f;
     float t =  l.z / std::max(sys.box.depthM, 1e-3f);
@@ -958,12 +1400,26 @@ void harukaSurfaceNets(int n, const float* dd,
 
 void caveBuildMesh(const CaveSystem& sys, CaveMesh& out, size_t maxTris) {
     out.positions.clear(); out.normals.clear(); out.indices.clear();
-    if (sys.vol.empty()) return;
-    const int n = sys.vol.n;
+    if (!sys.valid()) return;
     const CaveBox& B = sys.box;
+    // A layered cave has no volume: it is sampled onto a grid of the same size for this mesh (the
+    // bench's whole-cave mesh; the world's mesh comes from `VoxWorld`).
+    std::vector<float> sampled;
+    const int n = sys.vol.empty() ? kCaveVolRes : sys.vol.n;
+    if (sys.vol.empty()) {
+        sampled.resize((size_t)n * n * n);
+        for (int z = 0; z < n; ++z)
+            for (int y = 0; y < n; ++y)
+                for (int x = 0; x < n; ++x)
+                    sampled[(size_t)z * n * n + (size_t)y * n + x] = caveDensityLocal(sys, glm::vec3(
+                        ((float)x / (float)(n - 1) - 0.5f) * 2.0f * B.radiusM,
+                        ((float)y / (float)(n - 1) - 0.5f) * 2.0f * B.radiusM,
+                        (float)z / (float)(n - 1) * B.depthM));
+    }
+    const float* field = sys.vol.empty() ? sampled.data() : sys.vol.d.data();
     out.origin = B.centerDir * B.surfaceRM;
     // El vóxel NO es cúbico: la caja es ancha y poco profunda, y la malla tiene que respetarlo.
-    harukaSurfaceNets(n, sys.vol.d.data(), [&](float x, float y, float z) {
+    harukaSurfaceNets(n, field, [&](float x, float y, float z) {
         return glm::vec3(((x / (float)(n - 1)) - 0.5f) * 2.0f * B.radiusM,
                          ((y / (float)(n - 1)) - 0.5f) * 2.0f * B.radiusM,
                           (z / (float)(n - 1)) * B.depthM);
@@ -1092,6 +1548,26 @@ void caveBakeEntrance(const CaveBox& box, const CaveVolume& vol, int res, CaveMa
         }
 }
 
+void caveBakeEntrance(const CaveSystem& sys, int res, CaveMap& out, float ceilingM) {
+    res = std::max(8, res);
+    out.w = out.h = res;
+    out.v.assign((size_t)res * res, 0.0f);
+    if (!sys.valid()) return;
+    const CaveBox& B = sys.box;
+    // Same rule as the volume version: the least rock in the first `ceilingM` metres of the column,
+    // with a 3 m soft edge. Sampled every 0.5 m from the field instead of per volume slice.
+    const int steps = std::max(1, (int)std::ceil(ceilingM / 0.5f));
+    for (int y = 0; y < res; ++y)
+        for (int x = 0; x < res; ++x) {
+            const float lx = ((float)x / (float)(res - 1) - 0.5f) * 2.0f * B.radiusM;
+            const float ly = ((float)y / (float)(res - 1) - 0.5f) * 2.0f * B.radiusM;
+            float worst = 1e9f;
+            for (int k = 0; k <= steps; ++k)
+                worst = std::min(worst, caveDensityLocal(sys, glm::vec3(lx, ly, ceilingM * (float)k / (float)steps)));
+            out.v[(size_t)y * res + x] = std::clamp(-worst / 3.0f, 0.0f, 1.0f);
+        }
+}
+
 float caveSurfaceCut(const CaveSystem& sys, const glm::dvec3& dir) {
     if (sys.boca.empty()) return 0.0f;
     // La dirección se lleva a la superficie de la caja y de ahí al plano tangente.
@@ -1103,7 +1579,7 @@ float caveSurfaceCut(const CaveSystem& sys, const glm::dvec3& dir) {
 }
 
 float caveEntranceMask(const CaveSystem& sys, const glm::dvec3& dir) {
-    if (sys.vol.empty()) return 0.0f;
+    if (!sys.valid()) return 0.0f;
     // "Rompe la superficie" = hay aire justo bajo el techo de la caja. Se mide a un par de metros,
     // no a 0: a profundidad exactamente 0 el campo está en el borde del volumen y la trilineal
     // sujeta contra el borde.

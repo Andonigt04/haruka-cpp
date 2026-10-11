@@ -75,7 +75,9 @@ layout(std140, binding = 0) uniform GrassGen {
     // La hierba no puede crecer donde el suelo se recorta para mostrar la boca: el discard del pase
     // de terreno dejaría la brizna en el aire (el "campo" de altura del nodo SÍ sigue existiendo allí).
     mat4  uVoxCutSpace; // posición relativa al ojo → uv [0,1] de la ventana
-    vec4  uVoxCutInfo;  // x = 1 si la ventana vale (0 = no hay campo: no se recorta nada)
+    vec4  uVoxCutInfo;  // x = 1 si la ventana vale (0 = no hay campo: no se recorta nada) · z: lib/vox_cut.glsl
+    mat4  uVoxCutFineSpace; // the fine window (lib/vox_cut.glsl)
+    vec4  uVoxCutAtlas;     // where each window sits in the cut texture (lib/vox_cut.glsl)
     // CRÁTERES (gemelo de `NodeCraters` de terrain_node.vert): dentro del cuenco no hay hierba.
     ivec4 uCraterInfo;  // x = cuántos
     vec4  uCraterC[32]; // xyz = centro relativo al ojo · w = radio (m)
@@ -104,6 +106,7 @@ layout(std430, binding = 7) readonly buffer IndexList { uint uIdxList[]; };
 
 layout(binding = 15) uniform sampler2DArray uBaseField;   // clima (elev, temp, humedad) para el material
 layout(binding = 16) uniform sampler2D     uVoxCut;       // ventana de recorte de los vox (R = recorte)
+#include "lib/vox_cut.glsl"   // harukaVoxCutLookup
 
 // ── HASH ────────────────────────────────────────────────────────────────────────────────────────
 uint harukaHashU(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
@@ -289,9 +292,9 @@ void main() {
     // Misma regla y misma matriz que `terrain_node.frag` (uVoxCut/uVoxCutSpace, `cut > 0.5`); `pos`
     // es relativa al ojo, igual que `vFragPos`. `textureLod` porque en compute no hay derivadas.
     if (uVoxCutInfo.x > 0.5) {
-        const vec2 cuv = (uVoxCutSpace * vec4(pos, 1.0)).xy;
-        const bool dentro = cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0;
-        if (dentro && textureLod(uVoxCut, cuv, 0.0).r > 0.5) { if (!SKIP(12)) return; }
+        bool dentro;
+        const float cut = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, pos, true, dentro).r;
+        if (dentro && cut > 0.5) { if (!SKIP(12)) return; }
     }
     // CRÁTERES: una explosión deja tierra desnuda, y la brizna está a la cota de ANTES (el mapa del
     // nodo no sabe del cuenco): quedaría en el aire. Misma distancia horizontal que el vértice.

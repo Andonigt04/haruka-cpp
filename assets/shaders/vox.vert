@@ -18,6 +18,7 @@ layout(std140, binding = 5) uniform VoxParams {
     vec4 uUp;
     vec4 uTexOrigin;
     vec4 uTexInfo;
+    vec4 uFineClip;     // x = fine radius around the eye (m) · y = 1: coarse, discard inside · 2: fine, discard outside
 };
 
 layout(location = 0) out vec3 vNormal;

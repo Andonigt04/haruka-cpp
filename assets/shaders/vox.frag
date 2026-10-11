@@ -27,6 +27,7 @@ layout(std140, binding = 5) uniform VoxParams {
     vec4 uUp;           // xyz = la vertical LOCAL (radial), no la Y del mundo
     vec4 uTexOrigin;    // xyz = origen del chunk mod tile (m) · w = capa de roca (<0 = sin textura)
     vec4 uTexInfo;      // x = metros por tile
+    vec4 uFineClip;     // x = fine radius around the eye (m) · y = 1: coarse, discard inside · 2: fine, discard outside
 };
 layout(binding = 1) uniform sampler2DArray uAlbedo;
 
@@ -41,6 +42,13 @@ vec3 voxTriplanar(sampler2DArray tex, float layer, vec3 wp, vec3 n, float s) {
 }
 
 void main() {
+    // THE HAND-OVER between the 4 m walls and the fine bricks: one sphere around the eye, the same
+    // radius the terrain uses for its fine cut (lib/vox_cut.glsl). Each surface is drawn by exactly
+    // one of the two meshes.
+    if (uFineClip.y > 0.5) {
+        const bool near = length(vPosRel) < uFineClip.x;
+        if ((uFineClip.y < 1.5) == near) discard;
+    }
     const vec3 n   = -normalize(vNormal);
     const vec3 l   = normalize(uLightDir.xyz);
     const vec3 up  = normalize(uUp.xyz);

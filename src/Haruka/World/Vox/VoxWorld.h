@@ -90,6 +90,9 @@ namespace Haruka::World::Vox {
         std::vector<float> d;                                ///< kVoxN³ o vacío: lo quitado (cuevas, picar)
         std::vector<float> a;                                ///< kVoxN³ o vacío: lo añadido (islas, construir)
         bool edited = false;                                 ///< tiene trazos (se guarda en la partida)
+        /// Bumped by every change of the field in this chunk (bake, stroke): what the fine bricks
+        /// compare to know they are stale (`dirty` belongs to the coarse mesh and is cleared by it).
+        uint64_t revision = 0;
         bool dirty  = true;                                  ///< la malla no refleja `d`
         bool pendingCave = false;                            ///< una cueva que lo cruza se está horneando en hilo: `d` es provisional
         /// Las cuevas (celdas) y pozos con los que se horneó: con ellos el delantal de la malla puede
@@ -267,6 +270,22 @@ namespace Haruka::World::Vox {
          * Sin chunk cargado, sólo el terreno.
          */
         float density(const glm::dvec3& p) const;
+        /**
+         * @brief THE SAME FIELD, WITHOUT THE GRID: the baked part (caves, shafts, islands) and the
+         *        chunk's strokes, in order, evaluated AT `p` instead of at the 4 m nodes.
+         *
+         * Why it exists: the grid quantises everything dug. Measured in `test_vox_crater_scale`, a
+         * stroke of r <= 4 m opened nothing, and at a 1 m voxel a chunk cost 37 ms and 8 MB. What is
+         * stored are already SHAPES (the strokes), so the field can be answered at any scale without
+         * storing more: here a 10 cm hole measures 10 cm.
+         *
+         * At the NODES it equals `density` (same arithmetic, same order): measured by
+         * `test_vox_field_fine`. Between nodes it is finer, not different.
+         * Smooth strokes are NOT included: they average grid neighbours, they are not a shape — in a
+         * chunk with smooth strokes this field and the grid differ where it was smoothed.
+         * With no chunk loaded, terrain only (like `density`).
+         */
+        float fieldAt(const glm::dvec3& p) const;
         /** @brief Sólo el canal QUITADO (sin el terreno). Roca donde no hay chunk. */
         float caveDensity(const glm::dvec3& p) const;
         /** @brief Sólo el canal AÑADIDO. Aire donde no hay chunk (o no se reservó). */
@@ -360,6 +379,35 @@ namespace Haruka::World::Vox {
         /** @brief Malla de las paredes de un chunk (surface nets, con delantal del vecino). */
         void buildMesh(const VoxKey& key, CaveMesh& out, size_t maxTris = 100000);
 
+        /**
+         * @brief THE FINE MESH of one coarse cell: cell `cell` (0..kVoxN-2 per axis) of chunk `key`,
+         *        subdivided `S` times per axis and sampled from the ANALYTIC field (`fieldAt`), so a
+         *        10 cm hole has walls. Same surface nets, ownership bits, skirt and field normals as
+         *        `buildMesh`; positions relative to `out.origin` (the cell's corner).
+         *
+         * The lattice is the chunk's own grid subdivided, so two neighbouring bricks (also across a
+         * chunk face, which shares its (u,v) line) sample the same points on their common face.
+         * Read-only: it does not create chunks (an unloaded neighbour reads the baked field).
+         * `solidOut`: the same brick with EVERY surface, the ground inside it too (no ownership): what
+         * the physics collides with where the brick replaces the heightfield (see `VoxFineBricks`).
+         */
+        void buildFineMesh(const VoxKey& key, const glm::ivec3& cell, int S, CaveMesh& out, size_t maxTris = 200000,
+                           CaveMesh* solidOut = nullptr) const;
+        /** @brief Can this brick have walls of its own? Cheap: a stroke reaches it, or the stored cut /
+         *  added channel at its 8 corners is closer to a wall than the cell's diagonal (they are
+         *  distances). False = `buildFineMesh` would return nothing; it is not sampled. */
+        bool fineBrickMayHaveWalls(const VoxKey& key, const glm::ivec3& cell) const;
+        /// Coarse cells of a chunk per axis (the bricks of `buildFineMesh`).
+        static constexpr int kFineCellsPerAxis = kVoxN - 1;
+
+        /** @brief The terrain cut at FINE scale (from the analytic field, 5 cm under the ground): 0.5
+         *  exactly at the hole's wall, 1 inside. What a small hole needs; `surfaceCut` samples 0.75 m
+         *  down and saturates at -2 m, so a 10 cm hole never reaches it. */
+        float surfaceCutFine(const glm::dvec3& dir) const;
+        /** @brief `surfaceCutFine` for many directions at once (one lock, stroke frames built once per
+         *  chunk instead of once per sample): what the fine cut window uses. */
+        void surfaceCutFineMany(const std::vector<glm::dvec3>& dirs, std::vector<float>& out) const;
+
         /** @brief Descarga los chunks a más de `keepRadiusM` de `nearDir` (los editados se guardan antes). */
         void unloadFar(const glm::dvec3& nearDir, double keepRadiusM);
 
@@ -410,6 +458,13 @@ namespace Haruka::World::Vox {
         float bakedAddedNoLock(const VoxChunk& c, const glm::dvec3& p) const;
         VoxChunk& ensureNoLock(const VoxKey& key);
         float caveDensityNoLock(const glm::dvec3& p) const;
+        /// The analytic field split in its parts at `p`: cut channel (caves + strokes), added channel
+        /// (islands + strokes). `hint` = chunk to use when the owner is not loaded (may be null).
+        void finePartsNoLock(const glm::dvec3& p, const VoxChunk* hint, float& dc, float& da) const;
+        /// The stroke frames of ONE chunk, built once and reused while samples stay in that chunk
+        /// (building a frame per stroke per sample was most of the cost: ~1.5 us a sample).
+        struct FrameCache;
+        void finePartsCached(const glm::dvec3& p, const VoxChunk* hint, FrameCache& cache, float& dc, float& da) const;
         float addedDensityNoLock(const glm::dvec3& p) const;
         /// Trilineal de un canal de un chunk en coordenadas de rejilla (sujetadas).
         static float sampleChannel(const VoxChunk& c, const std::vector<float>& ch, const glm::dvec3& g);
@@ -451,6 +506,9 @@ namespace Haruka::World::Vox {
         void frameFor(const VoxKey& key, VoxChunk& c) const;
         void bake(VoxChunk& c);
         const CaveSystem* caveFor(const CaveBox& box);
+        /// A stroke with its frame in the WORLD: what it does at one point, without the grid (see the .cpp).
+        struct StrokeFrame;
+        static StrokeFrame frameOf(const VoxChunk& c, const Stroke& st);
         int  applyLocal(VoxChunk& c, const Stroke& st);
         int  applyLocal(VoxChunk& c, const glm::vec3& local, float r, bool remove) { Stroke st; st.local = local; st.r = r; st.remove = remove; st.op = remove ? 0 : 1; return applyLocal(c, st); }
         static Stroke strokeFrom(const VoxChunk& c, const glm::dvec3& worldPos, const Brush& b, bool designer, uint64_t seq);

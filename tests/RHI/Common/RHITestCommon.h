@@ -313,6 +313,8 @@ void testTerrainNodeShadeCost();
 void testTerrainLighting();
 void testTerrainShadow();
 void testNodeVoxCut();
+void testNodeVoxCutFine();
+void testVoxFineBricks();
 void testWaterFieldParity();
 void testWaveNumberParity();
 void testNodeWaterDraws();

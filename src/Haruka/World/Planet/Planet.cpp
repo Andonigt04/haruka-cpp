@@ -3373,6 +3373,9 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
             // enseñar la boca (la brizna quedaría en el aire). Sin ventana (cutTex vacia) no recorta.
             gf.cutTex        = m_voxRenderer.cutTexture();
             gf.cutSpace      = m_voxRenderer.cutSpace();
+            gf.cutFineSpace  = m_voxRenderer.fineCutSpace();
+            gf.cutFineR      = m_voxRenderer.fineRadius();
+            gf.cutAtlas      = m_voxRenderer.cutAtlas();
             // + los cráteres: la hierba no crece en el cuenco (una explosión deja tierra desnuda) y
             // uno nuevo tiene que regenerarla. Las dos versiones sólo crecen: la suma cambia siempre.
             gf.cutVersion    = m_voxRenderer.cutVersion() + m_vox.craterVersion();
@@ -4282,7 +4285,10 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 sh.aerial      = m_aerial;
                 const char* flat = std::getenv("HARUKA_TERRAIN_V5_FLAT");
                 sh.on = !(flat && flat[0] == '1');
-                if (m_voxRenderer.cutValid()) { sh.cutTex = m_voxRenderer.cutTexture(); sh.cutSpace = m_voxRenderer.cutSpace(); }
+                if (m_voxRenderer.cutValid()) {
+                    sh.cutTex = m_voxRenderer.cutTexture(); sh.cutSpace = m_voxRenderer.cutSpace();
+                    sh.cutFineSpace = m_voxRenderer.fineCutSpace(); sh.cutFineR = m_voxRenderer.fineRadius(); sh.cutAtlas = m_voxRenderer.cutAtlas();
+                }
                 craterListNear(cameraPos, Terrain::TerrainNodeRenderer::kMaxCraters, sh.craterC, sh.craterU);
                 m_nodeRenderer.setShade(sh);
                 // Las paredes del campo se pintan con la MISMA roca que el terreno.

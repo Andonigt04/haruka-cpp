@@ -644,6 +644,11 @@ public:
         /// Inválido = no se recorta nada. Ver `VoxRenderer::cutTexture`.
         RHI::TextureHandle cutTex{};
         glm::mat4 cutSpace{1.0f};
+        /// The FINE cut window (decimetre holes; lib/vox_cut.glsl): its matrix, the radius around the
+        /// eye where it applies (0 = none) and where each window sits in the texture (x = 0: no atlas).
+        glm::mat4 cutFineSpace{1.0f};
+        float     cutFineR = 0.0f;
+        glm::vec4 cutAtlas{0.0f};
         /// Los CRÁTERES cercanos (`VoxWorld::surfaceDeltaM`), hasta `kMaxCraters`: c = centro
         /// RELATIVO AL OJO (m) + radio en w · u = vertical del cráter + hondo en w. El vértice evalúa
         /// la misma suma de cuencos que la física, a su propia resolución.
@@ -1498,7 +1503,9 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
             if (haveCut && !s_saidCut) { s_saidCut = true; HARUKA_LOGD("TerrenoV5", "recorte volumetrico ATADO (binding 17 + UBO 3)"); }
             vc.space = m_shade.cutSpace;
             static const float s_voxDbg = [] { const char* e = std::getenv("HARUKA_VOX_DEBUG"); return e ? (float)std::atoi(e) : 0.0f; }();
-            vc.info  = glm::vec4(haveCut ? 1.0f : 0.0f, s_voxDbg, 0.0f, 0.0f);
+            vc.info  = glm::vec4(haveCut ? 1.0f : 0.0f, s_voxDbg, haveCut ? m_shade.cutFineR : 0.0f, 0.0f);
+            vc.fine  = m_shade.cutFineSpace;
+            vc.atlas = haveCut ? m_shade.cutAtlas : glm::vec4(0.0f);
             m_dev->updateBuffer(m_voxCutUBO, 0, sizeof(vc), &vc);
             ctx->bindUniformBuffer(3, m_voxCutUBO);
             ctx->bindTexture(17, haveCut ? m_shade.cutTex : m_lakeDummy);
@@ -1685,7 +1692,7 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
 private:
 
     /// Gemelo del bloque `NodeDraw` de `terrain_node.vert`. std140: mat4 + 4 vec4 de 16 B.
-    struct VoxCutUBO { glm::mat4 space{1.0f}; glm::vec4 info{0.0f}; };
+    struct VoxCutUBO { glm::mat4 space{1.0f}; glm::vec4 info{0.0f}; glm::mat4 fine{1.0f}; glm::vec4 atlas{0.0f}; };   // = VoxCut in terrain_node.frag / _water.vert
     RHI::BufferHandle m_voxCutUBO{};
     /// Gemelo de `NodeCraters` (binding 4) de `terrain_node.vert`. std140.
     struct CraterUBO { int32_t info[4]{}; glm::vec4 c[kMaxCraters]{}; glm::vec4 u[kMaxCraters]{}; };

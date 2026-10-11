@@ -33,6 +33,7 @@ layout(location = 11) in float vCrater;  // 0..1 cuenco de cráter (terrain_node
 #include "lib/aerial.glsl"            // harukaAerial: perspectiva aérea (la misma que props y nubes)   // harukaSelectMaterial + su UBO (binding 12)
 #include "lib/terrain_shade.glsl"      // harukaTerrainAlbedo
 #include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
+#include "lib/vox_cut.glsl"             // harukaVoxCutLookup: coarse + fine cut windows
 #include "lib/sea_tint.glsl"           // harukaSeaTint — vista 15 (cota sobre el mar)
 
 layout(binding = 10) uniform sampler2D      uMacroVar;
@@ -72,6 +73,8 @@ layout(binding = 17) uniform sampler2D uVoxCut;
 layout(std140, binding = 3) uniform VoxCut {
     mat4 uVoxCutSpace;
     vec4 uVoxCutInfo;
+    mat4 uVoxCutFineSpace;   // the fine window (lib/vox_cut.glsl): position relative to the eye -> uv
+    vec4 uVoxCutAtlas;       // where each window sits in the cut texture (lib/vox_cut.glsl)
 };
 
 /**
@@ -104,8 +107,8 @@ vec3 debugLevelColor(int lv) {
 void main() {
     if (uVoxCutInfo.x > 0.5) {
         const vec2 cuv = (uVoxCutSpace * vec4(vFragPos, 1.0)).xy;
-        const bool dentro = cuv.x > 0.0 && cuv.x < 1.0 && cuv.y > 0.0 && cuv.y < 1.0;
-        const float cut = dentro ? texture(uVoxCut, cuv).r : 0.0;
+        bool dentro;
+        const float cut = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, vFragPos, true, dentro).r;
         // `HARUKA_VOX_DEBUG=1` (uVoxCutInfo.y): en vez de recortar, PINTA: rojo = recorte, verde =
         // dentro de la ventana. Distingue "la ventana no llega aquí" de "llega y no recorta".
         if (uVoxCutInfo.y > 1.5) {          // =2: la uv como color (R = u, G = v, B = recorte)

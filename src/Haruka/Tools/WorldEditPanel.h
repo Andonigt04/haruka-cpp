@@ -97,9 +97,14 @@ public:
     // ── Mapas (también sin ratón: el anfitrión puede pintar por programa) ───────────────────────
     void selectCave(int index)   { m_selectedCave = index; m_selectedIsland = -1; }
     void selectIsland(int index) { m_selectedIsland = index; m_selectedCave = -1; }
-    /** @brief Pinta en el mapa `mapIndex` (0 planta · 1 perfil/cima · 2 raíz) de la selección, en
-     *  (u, t) ∈ [0,1]², con el valor/radio/dureza actuales. Carga los mapas si hace falta. */
+    /** @brief Paints map `mapIndex` of the selection at (u, t) in [0,1]^2 with the current
+     *  value/radius/hardness, loading the maps if needed. Cave: 2i = layer i ceiling, 2i+1 = its
+     *  floor (value = `caveLayerFromM` of a depth). Island: 0 planta · 1 cima · 2 raiz. */
     void paintMap(int mapIndex, float u, float t);
+    /** @brief Cave selected: adds an empty (closed) layer to paint on. false if already at the max. */
+    bool addCaveLayer();
+    /** @brief How many maps are loaded for the selection (caves: 2 per layer). */
+    int mapCount() { ensureMapsLoaded(); return (int)m_maps.size(); }
     void setPaint(float value, float radiusTexels, float hardness) { m_paintValue = value; m_paintRadiusTx = radiusTexels; m_paintHardness = hardness; }
     /** @brief Guarda los PNG de la selección en sus rutas y la vuelve a colocar (rehornea). */
     bool rebakeSelected();
@@ -128,9 +133,10 @@ private:
     void ensureMapsLoaded();
 
     std::string m_bakesDir;
-    MapView     m_maps[3];
+    std::vector<MapView> m_maps;                      // cave: ceiling/floor per layer · island: planta, cima, raiz
     int         m_mapsCave = -1, m_mapsIsland = -1;   // qué está cargado en `m_maps`
-    int         m_mapCount = 0;
+    World::Vox::CaveBox m_mapsCaveBox;                // the loaded cave's box (depth range of its maps)
+    int         m_mapsLossy = 0;                      // legacy cave shown converted: air spans that did not fit (0 = exact)
     float       m_paintValue = 1.0f, m_paintRadiusTx = 8.0f, m_paintHardness = 0.6f;
     int         m_paintMode = 0;          // 0 pincel · 1 corredor (dos clics)
     bool        m_corridorHasA = false; float m_corridorAu = 0, m_corridorAv = 0;

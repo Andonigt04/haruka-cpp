@@ -36,7 +36,9 @@ struct GenUBO {
     glm::dvec4 uIdx;       ///< x,y = esquina min de la rejilla (lx,ly) · z = lado de celda (lx) · w = lado total
     glm::ivec4 uIdxGrid;   ///< x,y = dims de la rejilla (celdas) · z,w = (libre)
     glm::mat4  cutSpace;   ///< ventana de recorte de los vox: pos rel. al ojo -> uv [0,1]
-    glm::vec4  cutInfo;    ///< x = 1 si la ventana vale (0 = sin campo: no se recorta nada)
+    glm::vec4  cutInfo;    ///< x = 1 si la ventana vale (0 = sin campo: no se recorta nada) · z, w: lib/vox_cut.glsl
+    glm::mat4  cutFineSpace;   ///< the fine cut window (lib/vox_cut.glsl)
+    glm::vec4  cutAtlas;       ///< where each window sits in the cut texture
     glm::ivec4 craterInfo; ///< x = cuántos cráteres
     glm::vec4  craterC[GrassRenderer::kMaxCraters];   ///< centro rel. al ojo + radio
     glm::vec4  craterU[GrassRenderer::kMaxCraters];   ///< vertical + hondo
@@ -382,7 +384,9 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     // La ventana de recorte: para que el compute descarte las briznas que caerian donde el suelo
     // se recorta (el agujero de los vox). Sin ventana, `cutInfo.x = 0` y no se descarta nada.
     g.cutSpace = f.cutSpace;
-    g.cutInfo  = glm::vec4(RHI::valid(f.cutTex) ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    g.cutInfo  = glm::vec4(RHI::valid(f.cutTex) ? 1.0f : 0.0f, 0.0f, RHI::valid(f.cutTex) ? f.cutFineR : 0.0f, 0.0f);
+    g.cutFineSpace = f.cutFineSpace;
+    g.cutAtlas = RHI::valid(f.cutTex) ? f.cutAtlas : glm::vec4(0.0f);
     {
         const int n = (int)std::min<size_t>({ f.craterC.size(), f.craterU.size(), (size_t)kMaxCraters });
         g.craterInfo = glm::ivec4(n, 0, 0, 0);

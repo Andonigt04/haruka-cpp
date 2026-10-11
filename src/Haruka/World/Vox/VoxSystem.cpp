@@ -27,17 +27,50 @@ void VoxSystem::syncColliders(const Frame& f) {
     if (!tp) return;
     // Las mallas las lleva el almacén central; aquí solo se recorren con su revisión.
     std::unordered_set<uint64_t> vivos;
+    const VoxFineBricks& fine = tp->voxRenderer().fineBricks();
+    const uint64_t fineVer = fine.version();
+    const VoxWorld& world = tp->vox();
     tp->voxRenderer().forEachCpuMesh([&](const VoxKey& key, const CaveMesh& mesh, uint64_t rev) {
         const uint64_t pk = Renderer::VoxRenderer::physicsKey(key);
         vivos.insert(pk);
+        // The revision seen includes the fine bricks' version: the cells they cover change the mesh.
+        const uint64_t seen = rev * 1000003ull + fineVer;
         auto it = m_colliderRev.find(pk);
-        if (it != m_colliderRev.end() && it->second == rev) return;
-        m_colliderRev[pk] = rev;
+        if (it != m_colliderRev.end() && it->second == seen) return;
+        m_colliderRev[pk] = seen;
         if (mesh.empty()) { f.physics->removeVoxMesh(pk); return; }
+        // THE CELLS A FINE BRICK COVERS lose their 4 m triangles: there the fine brick collides, and
+        // the coarse wall (up to ~2 m off the fine one) would stick out into a fine tunnel.
+        const VoxChunk* c = world.get(key);
+        std::vector<unsigned> idx;
+        idx.reserve(mesh.indices.size());
+        for (size_t t = 0; t + 2 < mesh.indices.size(); t += 3) {
+            if (c) {
+                const glm::vec3 cen = (mesh.positions[mesh.indices[t]] + mesh.positions[mesh.indices[t + 1]] + mesh.positions[mesh.indices[t + 2]]) / 3.0f;
+                const glm::dvec3 g = c->gridOf(mesh.origin + glm::dvec3(cen));
+                if (fine.coversCell(key, glm::ivec3((int)std::floor(g.x), (int)std::floor(g.y), (int)std::floor(g.z)))) continue;
+            }
+            idx.insert(idx.end(), { mesh.indices[t], mesh.indices[t + 1], mesh.indices[t + 2] });
+        }
+        if (idx.empty()) { f.physics->removeVoxMesh(pk); return; }
         // El cuerpo va en coordenadas de MUNDO: origen del chunk + centro del planeta.
         f.physics->setVoxMesh(pk, &mesh.positions[0].x, mesh.positions.size(),
-                                   mesh.indices.data(), mesh.indices.size(),
+                                   idx.data(), idx.size(),
                                    tp->position() + mesh.origin);
+    });
+    // THE FINE BRICKS: the solid mesh (ground included) where they replace the heightfield, the
+    // walls elsewhere. Their keys have the top bit set (the chunks' never do).
+    fine.forEach([&](const VoxFineBricks::Brick& b) {
+        if (!b.built()) return;
+        const uint64_t pk = (1ull << 63) | (uint64_t)VoxFineBricks::KeyHash{}(b.key);
+        vivos.insert(pk);
+        auto it = m_colliderRev.find(pk);
+        if (it != m_colliderRev.end() && it->second == b.revision) return;
+        m_colliderRev[pk] = b.revision;
+        const std::shared_ptr<const CaveMesh>& m = (b.ground && b.solid) ? b.solid : b.walls;
+        if (!m || m->empty()) { f.physics->removeVoxMesh(pk); return; }
+        f.physics->setVoxMesh(pk, &m->positions[0].x, m->positions.size(), m->indices.data(), m->indices.size(),
+                              tp->position() + m->origin);
     });
     { static size_t s_last = ~(size_t)0; if (vivos.size() != s_last) { s_last = vivos.size();
       HARUKA_LOGDIAG("Vox", "syncVoxColliders: %zu mallas CPU del render", vivos.size()); } }

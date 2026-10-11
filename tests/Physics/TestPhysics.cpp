@@ -14,6 +14,9 @@
 
 #include "Haruka/Physics/PhysicsEngine.h"
 #include "Haruka/World/Vox/VoxWorld.h"
+#include "Haruka/World/Vox/VoxFineBricks.h"
+#include "Haruka/World/Terrain/TerrainLOD.h"
+#include <limits>
 #include "Haruka/World/Vox/IslandSystem.h"
 #include <filesystem>
 
@@ -1038,6 +1041,177 @@ void test_physics_island() {
     std::filesystem::remove_all(tmp, ec);
 }
 
+// ---------------------------------------------- TEST: physics — falling into a DECIMETRE pick
+// A pit of ~1 m opening is dug with the analytic field; `VoxFineBricks` builds its bricks; the
+// collision ring is NaN only where a fine brick replaces the ground (`replacesGroundAt`, the same
+// call the game's ring makes) and the bricks go to Jolt as `syncColliders` sends them (solid mesh
+// where they replace the ground). A 10 cm ball over the hole must fall to its bottom; over visible
+// ground next to it, it must stay up. Controls: without the replacement the heightfield covers the
+// hole (the ball stays at the surface). Three pits: in the middle of a brick, on a corner between
+// bricks, and a small one 0.35 m from a brick's edge (the heightfield is kept 0.6 m inside a brick).
+namespace {
+    struct FineGroundWorld : Haruka::Physics::IWorldProvider {
+        glm::dvec3 center{0, 0, 0};
+        double R = 6371000.0, surf = 100.0;
+        const Haruka::World::Vox::VoxWorld* vox = nullptr;
+        const Haruka::World::Vox::VoxFineBricks* fine = nullptr;   // null = the heightfield is never cut
+        std::vector<Haruka::Physics::GravBody> grav;
+        FineGroundWorld() { const double G = 6.67430e-11, g = 9.81; grav.push_back({ center, g * R * R / G }); }
+        bool       hasActivePlanet()    const override { return true; }
+        glm::dvec3 activePlanetCenter() const override { return center; }
+        double     activePlanetRadius() const override { return R; }
+        const std::vector<Haruka::Physics::GravBody>& gravBodies() const override { return grav; }
+        double     terrainHeightAt(const glm::dvec3&) const override { return surf; }
+        bool terrainHeightFieldRings(const glm::dvec3& near, double halfExtent, std::vector<TerrainRing>& out,
+                                     glm::dvec3& org, glm::dvec3& t1, glm::dvec3& up, glm::dvec3& t2, size_t firstRing) const override {
+            const glm::dvec3 rel = near - center; const double len = glm::length(rel);
+            if (len < 1e-9) return false;
+            up = rel / len;
+            t1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up)); t2 = glm::cross(t1, up);   // right-handed (see HoleWorld)
+            org = center + up * (R + surf);
+            const auto layout = Haruka::World::Terrain::terrainRingLayout(halfExtent);
+            out.clear();
+            for (size_t k = firstRing; k < layout.size(); ++k) {
+                TerrainRing r; r.spec = layout[k];
+                const uint32_t n = r.spec.samples;
+                r.samples.assign((size_t)n * n, 0.0f);
+                for (uint32_t j = 0; j < n; ++j)
+                    for (uint32_t i = 0; i < n; ++i) {
+                        const double x = Haruka::World::Terrain::terrainRingNode(i, r.spec), z = Haruka::World::Terrain::terrainRingNode(j, r.spec);
+                        float& sm = r.samples[(size_t)j * n + i];
+                        const glm::dvec3 p = org + t1 * x + t2 * z;
+                        const bool cut = fine && firstRing == 0 && fine->replacesGroundAt(*vox, p - center);
+                        sm = (i == 0 || j == 0 || Haruka::World::Terrain::terrainRingHole(r.spec, x, z) || cut) ? std::numeric_limits<float>::quiet_NaN() : 0.0f;
+                    }
+                out.push_back(std::move(r));
+            }
+            return true;
+        }
+    };
+}
+
+void test_physics_fine_pick() {
+    beginTest("physics: a ball falls into a decimetre pick (fine bricks replace the ground) and not next to it");
+    namespace V = Haruka::World::Vox;
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_phys_finepick").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    V::caveSetAutoProbability(0.0f);
+    const glm::dvec3 up(1, 0, 0);
+    const glm::dvec3 t1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up));
+    for (int variant = 0; variant < 3; ++variant) {
+        V::VoxWorld vox;
+        vox.configure(5u, 6371000.0, tmp + "/bakes" + std::to_string(variant), "", [](const glm::dvec3&) { return 100.0f; });
+        vox.setSynchronousBake(true);
+        const double R = 6371000.0, surf = 100.0;
+        // Variant 0: the pit at the CENTRE of a cell column; variant 1: on a CORNER between cells.
+        glm::dvec3 ground = glm::normalize(up + t1 * 3e-6) * (R + surf);   // off the face centre (a chunk corner)
+        {
+            const V::VoxKey k = vox.keyAt(ground - up * 0.5);
+            const V::VoxChunk& c = vox.ensure(k);
+            const glm::dvec3 g = c.gridOf(ground);
+            // Variant 2: a SMALL pit (r 0.3 m) 0.35 m from a cell's edge: its sphere does not reach the
+            // neighbour (no wall there) while the ground check `kGroundInsetM` around the hole does.
+            const glm::dvec3 at = variant == 0 ? c.worldOfGrid(std::floor(g.x) + 0.5, std::floor(g.y) + 0.5, g.z)
+                                : variant == 1 ? c.worldOfGrid(std::round(g.x), std::round(g.y), g.z)
+                                               : c.worldOfGrid(std::floor(g.x) + 1.0 - 0.35 / c.metresPerVoxel().x, std::floor(g.y) + 0.5, g.z);
+            ground = glm::normalize(at) * (R + surf);
+            const glm::dvec3 gg = c.gridOf(ground);
+            std::printf("    pit at grid (%.2f, %.2f) of its chunk\n", gg.x, gg.y);
+        }
+        const glm::dvec3 gUp = glm::normalize(ground);
+        const glm::dvec3 gT1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), gUp));
+        // r 0.6: opening 0.52 m, bottom 0.9 m down (ball rests at -0.8). r 0.3: opening 0.26 m, bottom 0.45 m (-0.35).
+        const double r = variant == 2 ? 0.3 : 0.6;
+        vox.stroke(ground - gUp * (0.5 * r), (float)r, true);
+        const double rest = -1.5 * r + 0.1;
+        V::VoxFineBricks fine;
+        for (int i = 0; i < 20; ++i) { fine.update(vox, ground + gUp * 1.7); fine.finishJobs(); }
+        fine.update(vox, ground + gUp * 1.7);   // publishes the snapshot of what finished
+        size_t ground_ = 0, walls = 0;
+        fine.forEach([&](const V::VoxFineBricks::Brick& b) { ground_ += b.ground ? 1 : 0; walls += (b.walls && !b.walls->empty()) ? 1 : 0; });
+
+        auto drop = [&](double offsetM, bool replace) {
+            Haruka::Physics::PhysicsEngine eng;
+            FineGroundWorld w; w.vox = &vox; w.fine = replace ? &fine : nullptr;
+            eng.setWorldProvider(&w);
+            uint64_t key = 1;
+            fine.forEach([&](const V::VoxFineBricks::Brick& b) {
+                const std::shared_ptr<const V::CaveMesh>& m = (b.ground && b.solid) ? b.solid : b.walls;
+                if (!m || m->empty()) return;
+                eng.setVoxMesh(key++, &m->positions[0].x, m->positions.size(), m->indices.data(), m->indices.size(), m->origin);
+            });
+            auto body = std::make_shared<Haruka::Physics::RigidBody>();
+            body->position = ground + gUp * 1.0 + gT1 * offsetM;
+            body->radius = 0.1; body->mass = 10.0; body->name = "probe";
+            eng.addBody(body);
+            for (int i = 0; i < 4 * 60; ++i) eng.advance(1.0 / 60.0);
+            return glm::length(body->position) - (R + surf);   // height over the surface
+        };
+        const double inHole = drop(0.0, true), covered = drop(0.0, false), rim = drop(variant == 2 ? 0.45 : 0.75, true), side = drop(1.5, true);
+        std::printf("    %s: %zu bricks (%zu with walls, %zu replace the ground) · over the hole %+.2f m · CONTROL without the replacement %+.2f m · at the rim %+.2f m · 1.5 m away %+.2f m (rest expected %+.2f)\n",
+                    variant == 0 ? "pit in a brick" : variant == 1 ? "pit on a brick CORNER" : "small pit 0.35 m from a brick edge", fine.size(), walls, ground_, inHole, covered, rim, side, rest);
+        CHECK(ground_ > 0, "some bricks replace the ground");
+        CHECK(std::fabs(inHole - rest) < 0.12, "over the hole the ball falls in and rests on its bottom");
+        CHECK(std::fabs(covered - 0.1) < 0.06, "CONTROL: without the replacement the heightfield covers the hole");
+        CHECK(std::fabs(rim - 0.1) < 0.06 && std::fabs(side - 0.1) < 0.06, "next to the hole the ball stays on the ground (no gap around it)");
+    }
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// ---------------------------------------------- TEST: physics — the PLAYER in a pit dug with the field
+// Same set-up as `physics_fine_pick`, with the game's player body: a CharacterVirtual capsule of
+// 1.9 m and 0.35 m radius (`Survival/scripts/Player.cpp`), `radius` 0.4 = centre to foot. The pit is
+// what a pick would leave: a vertical cylinder 0.6 m in radius and 1.2 m deep. Over it the player
+// must go down to its floor; 1.5 m from its edge he must stay on the ground. Control: without the
+// fine bricks replacing the ground, the heightfield holds him at the surface.
+void test_physics_fine_pick_character() {
+    beginTest("physics: the player's capsule goes down into a 1.2 m pit dug with the field, and not next to it");
+    namespace V = Haruka::World::Vox;
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_phys_finepick_char").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    V::caveSetAutoProbability(0.0f);
+    const double R = 6371000.0, surf = 100.0;
+    V::VoxWorld vox;
+    vox.configure(5u, R, tmp + "/bakes", "", [](const glm::dvec3&) { return 100.0f; });
+    vox.setSynchronousBake(true);
+    const glm::dvec3 up = glm::normalize(glm::dvec3(1, 0, 0) + glm::normalize(glm::cross(glm::dvec3(0, 1, 0), glm::dvec3(1, 0, 0))) * 3e-6);
+    const glm::dvec3 ground = up * (R + surf);
+    const glm::dvec3 t1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up));
+    V::VoxWorld::Brush b; b.shape = V::VoxWorld::Brush::Shape::Cylinder; b.op = V::VoxWorld::Brush::Op::Remove;
+    b.radiusM = 0.6f; b.halfM = 0.7f;   // from 1.2 m down to 0.2 m above the ground
+    vox.stroke(ground - up * 0.5, b);
+    V::VoxFineBricks fine;
+    for (int i = 0; i < 20; ++i) { fine.update(vox, ground + up * 1.7); fine.finishJobs(); }
+    fine.update(vox, ground + up * 1.7);
+
+    auto drop = [&](double offsetM, bool replace) {
+        Haruka::Physics::PhysicsEngine eng;
+        FineGroundWorld w; w.vox = &vox; w.fine = replace ? &fine : nullptr;
+        eng.setWorldProvider(&w);
+        uint64_t key = 1;
+        fine.forEach([&](const V::VoxFineBricks::Brick& br) {
+            const std::shared_ptr<const V::CaveMesh>& m = (br.ground && br.solid) ? br.solid : br.walls;
+            if (!m || m->empty()) return;
+            eng.setVoxMesh(key++, &m->positions[0].x, m->positions.size(), m->indices.data(), m->indices.size(), m->origin);
+        });
+        auto body = std::make_shared<Haruka::Physics::RigidBody>();
+        body->radius = 0.4; body->characterHeight = 1.9; body->characterRadius = 0.35;
+        body->mass = 70.0; body->name = "player"; body->isCharacter = true;
+        body->position = ground + up * (0.4 + 0.5) + t1 * offsetM;   // the foot half a metre up
+        eng.addBody(body);
+        for (int i = 0; i < 4 * 60; ++i) eng.advance(1.0 / 60.0);
+        const double foot = glm::length(body->position - up * body->radius) - (R + surf);
+        return std::make_pair(foot, body->onGround);
+    };
+    const auto inPit = drop(0.0, true), covered = drop(0.0, false), side = drop(2.1, true);
+    std::printf("    player's FOOT: over the pit %+.2f m (floor at -1.20, onGround %s) · CONTROL without the replacement %+.2f m · 1.5 m from the edge %+.2f m (onGround %s)\n",
+                inPit.first, inPit.second ? "yes" : "no", covered.first, side.first, side.second ? "yes" : "no");
+    CHECK(std::fabs(inPit.first - (-1.2)) < 0.15 && inPit.second, "over the pit the player goes down to its floor and stands there");
+    CHECK(std::fabs(covered.first) < 0.1, "CONTROL: without the fine bricks the heightfield holds him at the surface");
+    CHECK(std::fabs(side.first) < 0.1 && side.second, "1.5 m from the edge he stands on the ground");
+    std::filesystem::remove_all(tmp, ec);
+}
+
 // Registro: el grupo sale de la carpeta de este archivo (ver Common/TestCommon.h).
 HARUKA_REGISTER_TESTS(
     { "physics_radial_fall", test_physics_radial_fall },
@@ -1053,5 +1227,7 @@ HARUKA_REGISTER_TESTS(
     { "physics_far_ground_from_query", test_physics_far_ground_from_query },
     { "physics_two_instances_agree", test_physics_two_instances_agree },
     { "physics_cave_mouth", test_physics_cave_mouth },
+    { "physics_fine_pick", test_physics_fine_pick },
+    { "physics_fine_pick_character", test_physics_fine_pick_character },
     { "physics_island", test_physics_island },
     { "rail_mechanism_jolt", test_rail_mechanism_jolt });

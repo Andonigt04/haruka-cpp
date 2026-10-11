@@ -11,6 +11,7 @@
 #include "Haruka/Tools/WorldEditPanel.h"
 
 #include <algorithm>
+#include <chrono>
 #include <tuple>
 #include <cstring>
 #include <array>
@@ -673,12 +674,13 @@ void test_vox_brush() {
     std::filesystem::remove_all(tmp, ec);
 }
 
-// ---------------------------------------------- TEST: el panel del pincel, sin ratón ni ImGui
-// Lo que el editor hace al pintar un mapa y pulsar "Rehornear", llamado por programa: pintar un
-// corredor en la planta de una cueva de la escena, guardar sus PNG y volver a colocarla. El campo
-// tiene que abrir aire por el corredor pintado (y el PNG en disco es el que se pintó).
+// ---------------------------------------------- TEST: the brush panel, without mouse or ImGui
+// What the editor does when painting a cave's LAYER maps and pressing "Rebake", called from code:
+// paint a gallery (ceiling 90 m, floor 110 m) along a corridor, save the 16-bit PNGs and place the
+// cave again. The field must open air along the painted corridor (and the PNG on disk is what was
+// painted). Then a LEGACY cave (footprint + profile) opened in the panel and saved becomes layers.
 void test_world_edit_panel() {
-    beginTest("pincel del mundo (panel): pintar la planta de una cueva y rehornear");
+    beginTest("world brush (panel): paint a cave layer and rebake; a legacy cave is saved as layers");
     const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_world_panel").string();
     std::error_code ec; std::filesystem::remove_all(tmp, ec);
     std::filesystem::create_directories(tmp + "/assets/vox", ec);
@@ -686,47 +688,74 @@ void test_world_edit_panel() {
     World::Vox::VoxWorld w; w.configure(0u, kR, tmp + "/bakes", "", [](const glm::dvec3&) { return 500.0f; });
     w.setSynchronousBake(true);
     World::Vox::CaveDef def;
-    def.name = "mina"; def.centerDir = glm::normalize(glm::dvec3(0.2, 0.9, -0.3));
-    def.radiusM = 300.0f; def.depthM = 200.0f; def.mouth = glm::vec3(0.5f, 0.5f, 0.05f);
-    def.planta = tmp + "/assets/vox/mina_planta.png"; def.perfil = tmp + "/assets/vox/mina_perfil.png";
-    // Los PNG existen ya, TODO ROCA (planta y perfil a 0): sin pintar, la cueva es sólo su pozo.
+    def.name = "mine"; def.centerDir = glm::normalize(glm::dvec3(0.2, 0.9, -0.3));
+    def.radiusM = 300.0f; def.depthM = 200.0f;
+    def.layers = World::Vox::caveLayerPathsFor(tmp + "/assets/vox/mine", 1);
+    // The PNGs exist, ALL ROCK (ceiling at the bottom of the range, floor at the top).
     {
-        std::vector<float> z((size_t)256 * 256, 0.0f), zp((size_t)256 * 128, 0.0f);
-        World::Terrain::BakeUtil::savePNGGray(def.planta, 256, 256, z);
-        World::Terrain::BakeUtil::savePNGGray(def.perfil, 256, 128, zp);
+        World::Vox::CaveMap closedC, closedF;
+        closedC.w = closedC.h = closedF.w = closedF.h = 256;
+        closedC.v.assign((size_t)256 * 256, 1.0f); closedF.v.assign((size_t)256 * 256, 0.0f);
+        World::Vox::caveSaveMap16(def.layers[0].ceiling, closedC);
+        World::Vox::caveSaveMap16(def.layers[0].floor, closedF);
     }
-    CHECK(w.placeCave(def), "cueva de la escena colocada");
+    CHECK(w.placeCave(def), "scene cave placed");
     const World::Vox::CaveBox B = w.placedCaveBoxes()[0];
-    // Un punto a media profundidad, a 90 m del centro a lo largo de +x: roca antes de pintar.
+    // A point at mid depth, 90 m from the centre along +x: rock before painting.
     const glm::dvec3 pc = B.toWorld(glm::vec3(90.0f, 0.0f, 0.5f * B.depthM));
     w.ensure(w.keyAt(pc));
-    const float antes = w.density(pc);
-    CHECK(antes > 0.0f, "antes de pintar, roca");
+    const float before = w.density(pc);
+    CHECK(before > 0.0f, "before painting, rock");
 
     Tools::WorldEditPanel panel;
     panel.setWorld(&w, glm::dvec3(0.0), kR);
     panel.setAssetDir(tmp + "/assets/vox/");
     panel.selectCave(0);
-    panel.setPaint(1.0f, 6.0f, 1.0f);
-    // Corredor en la planta: a lo largo de u por v = 0,5, del 20 % al 80 %.
+    CHECK(panel.mapCount() == 2, "one layer = two maps (ceiling, floor)");
+    // Corridor along u at v = 0.5, from 20 % to 80 %: ceiling 90 m, floor 110 m.
+    panel.setPaint(World::Vox::caveLayerFromM(B, 90.0f), 6.0f, 1.0f);
     for (int k = 0; k <= 60; ++k) panel.paintMap(0, 0.2f + 0.6f * (float)k / 60.0f, 0.5f);
-    // Perfil: la banda del 40-60 % de profundidad, en todo u.
-    for (int k = 0; k <= 80; ++k) for (int j = 0; j <= 4; ++j) panel.paintMap(1, (float)k / 80.0f, 0.4f + 0.05f * (float)j);
-    CHECK(panel.rebakeSelected(), "rehornear guarda los PNG y vuelve a colocar la cueva");
+    panel.setPaint(World::Vox::caveLayerFromM(B, 110.0f), 6.0f, 1.0f);
+    for (int k = 0; k <= 60; ++k) panel.paintMap(1, 0.2f + 0.6f * (float)k / 60.0f, 0.5f);
+    CHECK(panel.rebakeSelected(), "rebake saves the PNGs and places the cave again");
     const glm::ivec3 st = panel.lastRebakeStats();
-    std::printf("    rehorneado: %d componentes -> %d · %d voxeles de aire\n", st.x, st.y, st.z);
-    CHECK(st.z > 0 && st.y == 1, "el volumen nuevo tiene aire y es UNA pieza");
-    // El PNG en disco es lo pintado: el texel del centro del corredor vale 1, uno lejos vale 0.
+    std::printf("    rebaked: %d air piece(s) · %d open texels\n", st.y, st.z);
+    CHECK(st.z > 0 && st.y == 1, "the painted gallery has air and is ONE piece");
+    // The PNG on disk is what was painted: the corridor centre texel holds 90 m, one far away does not.
     {
-        int pw = 0, ph = 0; std::vector<float> px;
-        CHECK(World::Terrain::BakeUtil::loadPNGGray(def.planta, pw, ph, px) && pw == 256, "la planta se guardo en su ruta");
-        CHECK(px[(size_t)128 * 256 + 128] > 0.9f && px[(size_t)30 * 256 + 128] < 0.1f, "y contiene el corredor pintado (1 dentro, 0 fuera)");
+        World::Vox::CaveMap c;
+        CHECK(World::Vox::caveLoadMap16(def.layers[0].ceiling, c) && c.w == 256, "the ceiling map was saved at its path");
+        const float centre = World::Vox::caveLayerToM(B, c.v[(size_t)128 * 256 + 128]), far = World::Vox::caveLayerToM(B, c.v[(size_t)30 * 256 + 128]);
+        std::printf("    ceiling on disk: corridor %.2f m · far %.2f m\n", centre, far);
+        CHECK(std::fabs(centre - 90.0f) < 0.05f && far > 199.0f, "and it holds the painted corridor (90 m inside, closed outside)");
     }
     w.ensure(w.keyAt(pc));
-    const float despues = w.density(pc);
-    std::printf("    campo en el corredor: %+.2f antes -> %+.2f despues\n", antes, despues);
-    CHECK(despues < 0.0f, "tras rehornear, el corredor pintado es aire en el mundo");
-    CHECK(w.density(B.toWorld(glm::vec3(90.0f, 60.0f, 0.5f * B.depthM))) > 0.0f, "CONTRAPRUEBA: a 60 m del corredor sigue siendo roca");
+    const float after = w.density(pc);
+    std::printf("    field in the corridor: %+.2f before -> %+.2f after\n", before, after);
+    CHECK(after < 0.0f, "after rebaking, the painted corridor is air in the world");
+    CHECK(w.density(B.toWorld(glm::vec3(90.0f, 60.0f, 0.5f * B.depthM))) > 0.0f, "CONTROL: 60 m from the corridor it is still rock");
+
+    // A LEGACY cave in the panel: shown as layers, saved as layers, and the scene stops naming the old maps.
+    {
+        World::Vox::CaveDef old;
+        old.name = "old"; old.centerDir = glm::normalize(glm::dvec3(-0.4, 0.8, 0.3));
+        old.radiusM = 200.0f; old.depthM = 120.0f; old.mouth = glm::vec3(0.5f, 0.5f, 0.05f);
+        old.planta = tmp + "/assets/vox/old_planta.png"; old.perfil = tmp + "/assets/vox/old_perfil.png";
+        std::vector<float> fp((size_t)256 * 256, 0.0f), pf((size_t)256 * 128, 0.0f);
+        for (int y = 0; y < 256; ++y) for (int x = 0; x < 256; ++x) if (std::abs(y - 128) <= 6 && x > 50 && x < 200) fp[(size_t)y * 256 + x] = 1.0f;
+        for (int y = 50; y < 70; ++y) for (int x = 0; x < 256; ++x) pf[(size_t)y * 256 + x] = 1.0f;
+        World::Terrain::BakeUtil::savePNGGray(old.planta, 256, 256, fp);
+        World::Terrain::BakeUtil::savePNGGray(old.perfil, 256, 128, pf);
+        CHECK(w.placeCave(old), "legacy cave placed");
+        panel.selectCave(1);
+        const int maps = panel.mapCount();
+        panel.paintMap(0, 0.01f, 0.01f);   // any edit enables the rebake
+        CHECK(maps >= 2 && panel.rebakeSelected(), "the legacy cave opens as layers and rebakes");
+        const World::Vox::CaveDef& saved = w.caveDefs().back();
+        std::printf("    legacy cave -> %d map(s) in the panel · saved with %zu layer(s) · planta '%s'\n", maps, saved.layers.size(), saved.planta.c_str());
+        CHECK(saved.name == "old" && (int)saved.layers.size() * 2 == maps && saved.planta.empty() && saved.perfil.empty(),
+              "saved as layers, without the legacy paths");
+    }
     std::filesystem::remove_all(tmp, ec);
 }
 
@@ -1020,6 +1049,235 @@ void test_vox_crater_scale() {
     std::filesystem::remove_all(tmp, ec);
 }
 
+// ── THE FIELD WITHOUT THE GRID ──────────────────────────────────────────────────────────────────
+// `fieldAt` evaluates the baked part and the strokes AT the point. Two claims, each with its control:
+//   (1) at the NODES it equals the grid (same definition, not a similar one) — and a smooth stroke,
+//       which is not a shape, DOES tell them apart: the comparison sees differences;
+//   (2) between nodes it is fine: a 10 cm stroke opens a ~10 cm hole where the 4 m grid opens
+//       nothing (the control is the same measurement with `density`).
+void test_vox_field_fine() {
+    beginTest("vox: field without the grid - equal at the nodes, decimetre holes between them");
+    using Brush = World::Vox::VoxWorld::Brush;
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_vox_fine").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    const glm::dvec3 d = glm::normalize(glm::dvec3(0.3, 0.8, 0.5));
+    const glm::dvec3 e1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), d)), e2 = glm::cross(d, e1);
+
+    // (1) PARITY AT THE NODES, with every operation that is a shape.
+    {
+        World::Vox::VoxWorld w;
+        World::Vox::caveSetAutoProbability(0.0f);
+        w.configure(77u, kR, tmp + "/bakes", tmp + "/save", [](const glm::dvec3& p) {
+            return (float)(20.0 + 15.0 * std::sin(p.x * 4000.0) * std::cos(p.z * 3000.0)); });
+        w.setSynchronousBake(true);
+        auto surf = [&](const glm::dvec3& dir) { const glm::dvec3 u = glm::normalize(dir); return u * (kR + (double)w.elevAt(u)); };
+        auto put = [&](const glm::dvec3& at, Brush b) { w.stroke(at, b); };
+        Brush b;
+        b.shape = Brush::Shape::Sphere;   b.op = Brush::Op::Remove; b.radiusM = 9.0f;  put(surf(d) - d * 4.0, b);
+        b.shape = Brush::Shape::Sphere;   b.op = Brush::Op::Add;    b.radiusM = 5.0f;  put(surf(d + e1 * 2e-6) + d * 2.0, b);
+        b.shape = Brush::Shape::Cylinder; b.op = Brush::Op::Remove; b.radiusM = 3.0f; b.halfM = 12.0f; put(surf(d + e2 * 3e-6), b);
+        b.shape = Brush::Shape::Box;      b.op = Brush::Op::Add;    b.radiusM = 4.0f; b.halfM = 2.0f;  put(surf(d - e2 * 4e-6) + d * 1.0, b);
+        b.shape = Brush::Shape::Capsule;  b.op = Brush::Op::Remove; b.radiusM = 2.5f; b.capsuleEnd = surf(d - e1 * 6e-6) - d * 6.0; put(surf(d - e1 * 2e-6) - d * 3.0, b);
+        b = Brush{}; b.op = Brush::Op::Raise;   b.radiusM = 10.0f; b.amountM = 3.0f; put(surf(d + e1 * 7e-6), b);
+        b = Brush{}; b.op = Brush::Op::Lower;   b.radiusM = 8.0f;  b.amountM = 2.0f; put(surf(d + e2 * 7e-6), b);
+        b = Brush{}; b.op = Brush::Op::Flatten; b.radiusM = 12.0f; put(surf(d - e2 * 9e-6) + d * 1.5, b);
+        b = Brush{}; b.op = Brush::Op::Sculpt;  b.radiusM = 14.0f; b.amountM = 3.0f; b.pattern = Brush::Pattern::PWaves; b.patternM = 6.0f; put(surf(d + e1 * 1e-5), b);
+
+        // A node on the face two chunks share is ONE point with two copies; the field (and
+        // `density`) answers it with the OWNER chunk (`keyAt`). Compare against that one; the copies
+        // the owner never reads are counted apart (that is the grid's seam, not the fine field's).
+        size_t foreign = 0, foreignSign = 0; float worstForeign = 0.0f;
+        auto compare = [&](size_t& nodes, size_t& touched) {
+            float worst = 0.0f; nodes = 0; touched = 0; foreign = 0; foreignSign = 0; worstForeign = 0.0f;
+            for (const World::Vox::VoxKey& k : w.loadedKeys()) {
+                const World::Vox::VoxChunk* c = w.get(k);
+                if (!c) continue;
+                for (int z = 0; z < World::Vox::kVoxN; ++z)
+                    for (int y = 0; y < World::Vox::kVoxN; ++y)
+                        for (int x = 0; x < World::Vox::kVoxN; ++x) {
+                            const glm::dvec3 p = c->worldOfGrid(x, y, z);
+                            const float t = w.terrainDensity(p);
+                            const float grid = std::max(std::min(c->cutAt(x, y, z), t), c->addedAt(x, y, z));
+                            const float fine = w.fieldAt(p);
+                            if (!(w.keyAt(p) == k)) {
+                                ++foreign;
+                                if ((fine < 0.0f) != (grid < 0.0f)) ++foreignSign;
+                                worstForeign = std::max(worstForeign, std::fabs(fine - grid));
+                                continue;
+                            }
+                            worst = std::max(worst, std::fabs(fine - grid));
+                            ++nodes;
+                            if (grid != std::max(std::min(World::Vox::kVoxRockM, t), -World::Vox::kVoxRockM)) ++touched;
+                        }
+            }
+            return worst;
+        };
+        size_t nodes = 0, touched = 0;
+        const float worst = compare(nodes, touched);
+        std::printf("    owned nodes: %zu (%zu touched by the 9 strokes) · worst |fine - grid| = %.6f m\n", nodes, touched, worst);
+        std::printf("    foreign copies on shared faces: %zu · worst difference with the owner %.3f m · sign flipped %zu (grid seam)\n",
+                    foreign, worstForeign, foreignSign);
+        CHECK(touched > 1000, "the strokes really touch nodes (otherwise comparing measures nothing)");
+        CHECK(worst < 1e-4f, "at the nodes, the fine field IS the grid field");
+        CHECK(foreignSign == 0, "the grid seam only differs far from the walls (never in sign)");
+
+        Brush sm; sm.op = Brush::Op::Smooth; sm.radiusM = 20.0f; sm.amountM = 1.0f; sm.hardness = 1.0f;
+        w.stroke(surf(d), sm);
+        const float worstSmooth = compare(nodes, touched);
+        std::printf("    CONTROL with a smooth stroke: worst |fine - grid| = %.3f m\n", worstSmooth);
+        CHECK(worstSmooth > 0.05f, "CONTROL: smooth (a neighbour average) separates both fields and the comparison sees it");
+    }
+
+    // (2) DECIMETRE HOLES. The pick stroke: centre half a radius below the ground. 2 cm below the
+    // ground the hole is a disc of radius sqrt(r^2 - (r/2 - 0.02)^2).
+    {
+        const float radii[] = { 0.05f, 0.1f, 0.2f, 0.3f, 0.5f, 1.0f, 2.0f };
+        float worstRel = 0.0f; bool gridNothing = true;
+        for (float r : radii) {
+            World::Vox::VoxWorld w;
+            World::Vox::caveSetAutoProbability(0.0f);
+            w.configure(5u, kR, tmp + "/bakes2", tmp + "/save2", [](const glm::dvec3&) { return 10.0f; });
+            w.setSynchronousBake(true);
+            const glm::dvec3 ground = d * (kR + 10.0);
+            w.stroke(ground - d * (0.5 * r), r, true);
+            const double step = r / 40.0, depth = 0.02; const int nn = 70;
+            int fine = 0, grid = 0;
+            for (int j = -nn; j <= nn; ++j)
+                for (int i = -nn; i <= nn; ++i) {
+                    const glm::dvec3 p = glm::normalize(ground + e1 * (i * step) + e2 * (j * step)) * (kR + 10.0 - depth);
+                    if (w.fieldAt(p) < 0.0f) ++fine;
+                    if (w.density(p) < 0.0f) ++grid;
+                }
+            const double dFine = 2.0 * std::sqrt(fine * step * step / 3.14159265);
+            const double dGrid = 2.0 * std::sqrt(grid * step * step / 3.14159265);
+            const double h = 0.5 * r - depth, expected = 2.0 * std::sqrt(std::max(0.0, (double)r * r - h * h));
+            const float rel = (float)std::fabs(dFine - expected) / (float)expected;
+            worstRel = std::max(worstRel, rel);
+            if (grid > 0) gridNothing = false;
+            std::printf("    r = %5.2f m -> fine hole %6.3f m (expected %6.3f, %+.1f %%) · grid %6.3f m\n",
+                        r, dFine, expected, 100.0 * (dFine - expected) / expected, dGrid);
+        }
+        CHECK(worstRel < 0.03f, "the fine hole measures what was asked (< 3 %) from 5 cm to 2 m");
+        CHECK(gridNothing, "CONTROL: the 4 m grid opens none of those holes");
+    }
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// ── FINE BRICKS ─────────────────────────────────────────────────────────────────────────────────
+// `buildFineMesh` meshes one coarse cell subdivided S times from the analytic field. Measured:
+//   (1) a 15 cm pick has walls in the fine brick and none in the coarse chunk mesh (control);
+//   (2) the vertices sit on the field (|f| below one fine cell) and the hole is the size asked;
+//   (3) two neighbouring bricks agree on their shared face (control: a different S does not);
+//   (4) the fine terrain cut opens the hole (control: the coarse cut does not); and the cost.
+void test_vox_fine_mesh() {
+    beginTest("vox: fine bricks - decimetre walls, seamless bricks, fine terrain cut");
+    using clk = std::chrono::high_resolution_clock;
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_vox_finemesh").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    World::Vox::VoxWorld w;
+    World::Vox::caveSetAutoProbability(0.0f);
+    w.configure(5u, kR, tmp + "/bakes", tmp + "/save", [](const glm::dvec3&) { return 10.0f; });
+    w.setSynchronousBake(true);
+    const glm::dvec3 d = glm::normalize(glm::dvec3(0.3, 0.8, 0.5));
+    const glm::dvec3 e1 = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), d)), e2 = glm::cross(d, e1);
+    const glm::dvec3 ground = d * (kR + 10.0);
+    const float r = 0.15f;
+    w.stroke(ground - d * (0.5 * r), r, true);
+    const World::Vox::VoxKey key = w.keyAt(ground - d * 0.05);
+    const World::Vox::VoxChunk* c = w.get(key);
+    CHECK(c != nullptr, "the chunk of the pick is loaded");
+    if (!c) return;
+    const glm::dvec3 g = c->gridOf(ground - d * 0.05);
+    const glm::ivec3 cell((int)std::floor(g.x), (int)std::floor(g.y), (int)std::floor(g.z));
+    const int S = 32;
+
+    // (1) fine vs coarse
+    World::Vox::CaveMesh fine, coarse;
+    auto t0 = clk::now();
+    w.buildFineMesh(key, cell, S, fine);
+    const double fineMs = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
+    w.buildMesh(key, coarse);
+    size_t coarseNear = 0;
+    for (const glm::vec3& v : coarse.positions) if (glm::length(coarse.origin + glm::dvec3(v) - ground) < 2.0) ++coarseNear;
+    const double cellM = glm::length(c->worldOfGrid(cell.x + 1.0 / S, cell.y, cell.z) - c->worldOfGrid(cell.x, cell.y, cell.z));
+    std::printf("    fine brick (S = %d, cell %.3f m): %zu triangles in %.1f ms · coarse chunk: %zu vertices within 2 m of the pick\n",
+                S, cellM, fine.triangleCount(), fineMs, coarseNear);
+    CHECK(fine.triangleCount() > 20, "the 15 cm pick has walls in the fine brick");
+    CHECK(coarseNear == 0, "CONTROL: the 4 m chunk mesh has nothing there");
+
+    // (2) on the field, and the size of the hole
+    float worstF = 0.0f; double widest = 0.0;
+    for (const glm::vec3& v : fine.positions) {
+        const glm::dvec3 p = fine.origin + glm::dvec3(v);
+        worstF = std::max(worstF, std::fabs(w.fieldAt(p)));
+        const glm::dvec3 rel = p - ground;
+        widest = std::max(widest, glm::length(rel - d * glm::dot(rel, d)));
+    }
+    const double expected = std::sqrt(r * r - 0.25 * r * r);   // the opening radius at the ground
+    std::printf("    vertices: worst |field| %.4f m (cell %.3f) · widest wall %.3f m from the axis (opening %.3f m)\n", worstF, cellM, widest, expected);
+    CHECK(worstF < cellM, "every vertex is on the field (within one fine cell)");
+    CHECK(std::fabs(widest - expected) < cellM, "the wall is as wide as the hole asked for");
+
+    // (3) seam between two neighbouring bricks: a pick on their shared face
+    {
+        World::Vox::VoxWorld w2;
+        w2.configure(5u, kR, tmp + "/bakes3", tmp + "/save3", [](const glm::dvec3&) { return 10.0f; });
+        w2.setSynchronousBake(true);
+        w2.ensure(key);
+        const World::Vox::VoxChunk* c2 = w2.get(key);
+        // the face x = cell.x + 1 between bricks `cell` and `cell + x`, at the ground
+        const glm::dvec3 onFace = glm::normalize(c2->worldOfGrid(cell.x + 1.0, cell.y + 0.5, cell.z)) * (kR + 10.0);
+        w2.stroke(onFace - glm::normalize(onFace) * 0.3, 0.6f, true);
+        World::Vox::CaveMesh A, B, Bother;
+        w2.buildFineMesh(key, cell, S, A);
+        w2.buildFineMesh(key, cell + glm::ivec3(1, 0, 0), S, B);
+        w2.buildFineMesh(key, cell + glm::ivec3(1, 0, 0), S - 8, Bother);
+        // A vertex one brick builds INSIDE the other's region (its apron cell) must be one the other
+        // builds too: that is what closes the seam. Checked both ways. (A vertex in a brick's own
+        // last cell, used only by its own quads, need not exist in the neighbour.)
+        auto match = [&](const World::Vox::CaveMesh& a, const World::Vox::CaveMesh& b, bool aIsLeft, int& cand, int& matched) {
+            cand = matched = 0;
+            for (const glm::vec3& v : a.positions) {
+                const glm::dvec3 p = a.origin + glm::dvec3(v);
+                const double gx = c2->gridOf(p).x - (cell.x + 1.0);   // signed, in coarse cells, from the face
+                if (aIsLeft ? (gx <= 1e-6) : (gx >= -1e-6)) continue;  // only vertices in the OTHER brick's region
+                ++cand;
+                double best = 1e9;
+                for (const glm::vec3& u : b.positions) best = std::min(best, glm::length(b.origin + glm::dvec3(u) - p));
+                if (best < 1e-3) ++matched;
+            }
+        };
+        int cand = 0, matched = 0, candO = 0, matchedO = 0, cand2 = 0, matched2 = 0;
+        match(A, B, true, cand, matched);
+        match(B, A, false, cand2, matched2);
+        cand += cand2; matched += matched2;
+        match(A, Bother, true, candO, matchedO);
+        std::printf("    shared face: %d/%d vertices built in the neighbour's region found there (< 1 mm) · CONTROL with S = %d in B: %d/%d\n",
+                    matched, cand, S - 8, matchedO, candO);
+        CHECK(cand > 10 && matched == cand, "two neighbouring bricks build the same vertices on their face");
+        CHECK(matchedO < candO / 2, "CONTROL: with another subdivision they do not (the check can fail)");
+    }
+
+    // (4) the fine terrain cut, and the cost of an empty brick
+    const float cutIn = w.surfaceCutFine(ground), cutOut = w.surfaceCutFine(ground + e1 * (3.0 * expected));
+    const float coarseIn = w.surfaceCut(ground);
+    std::printf("    fine cut: centre %.2f · at 3x the radius %.2f · CONTROL coarse cut at the centre %.2f\n", cutIn, cutOut, coarseIn);
+    CHECK(cutIn > 0.5f && cutOut < 0.5f, "the fine cut opens the ground in the hole and only there");
+    CHECK(coarseIn < 0.5f, "CONTROL: the coarse cut does not open a 15 cm hole");
+    {
+        World::Vox::CaveMesh empty;
+        auto t1 = clk::now();
+        w.buildFineMesh(key, cell + glm::ivec3(0, 0, 6), S, empty);   // 24 m under: all rock
+        std::printf("    an all-rock brick: %zu triangles in %.1f ms\n", empty.triangleCount(),
+                    std::chrono::duration<double, std::milli>(clk::now() - t1).count());
+        CHECK(empty.empty(), "a brick with no wall has no mesh");
+        CHECK(!w.fineBrickMayHaveWalls(key, cell + glm::ivec3(0, 0, 6)) && w.fineBrickMayHaveWalls(key, cell),
+              "the cheap pre-check skips it, and does NOT skip the brick of the pick (control)");
+    }
+    (void)e2;
+    std::filesystem::remove_all(tmp, ec);
+}
+
 // ── CRÁTERES: EL TAMAÑO ES EL PEDIDO ────────────────────────────────────────────────────────────
 // El trazo `Crater` no pasa por la rejilla de 4 m: la superficie baja exacto. Lo que se mide es lo
 // que pidió Andoni ("todo lo pequeño que quieran", que dependa de la potencia): el diámetro del
@@ -1153,6 +1411,8 @@ HARUKA_REGISTER_TESTS(
     { "vox_world", test_vox_world },
     { "vox_mesh_lean", test_vox_mesh_lean },
     { "vox_crater_scale", test_vox_crater_scale },
+    { "vox_field_fine", test_vox_field_fine },
+    { "vox_fine_mesh", test_vox_fine_mesh },
     { "vox_crater", test_vox_crater },
     { "vox_placed_cave", test_vox_placed_cave },
     { "vox_draped_cave", test_vox_draped_cave },

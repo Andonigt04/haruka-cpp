@@ -350,7 +350,8 @@ public:
         const auto* tp = m_planetary->activeTerrestrial();
         // Los cráteres no cambian la versión del campo (no tocan la malla): se suman aparte. Las dos
         // sólo crecen, así que la suma cambia siempre que cambie cualquiera.
-        return tp ? tp->vox().version() + tp->vox().craterVersion() : 0;
+        // + the fine bricks: one that starts (or stops) replacing the ground changes the ring too.
+        return tp ? tp->vox().version() + tp->vox().craterVersion() + tp->voxRenderer().fineBricks().version() : 0;
     }
 
     float ringSample(const Planet::PlanetarySystem::TerrainSampler& src,

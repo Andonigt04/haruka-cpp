@@ -106,12 +106,25 @@ bool WorldEditPanel::createCaveAt(const glm::dvec3& dir) {
     World::Vox::CaveDef d = m_nextCave;
     d.name = uniqueName("cueva", true);
     d.centerDir = glm::normalize(dir);
-    if (!m_assetDir.empty()) {
-        const std::string base = (m_assetDir.back() == '/' ? m_assetDir : m_assetDir + "/") + d.name;
-        d.planta = base + "_planta.png"; d.perfil = base + "_perfil.png";
-    } else { d.planta.clear(); d.perfil.clear(); }
     // Otro borrador cada vez (semilla distinta), aunque los parámetros sean los mismos.
     d.draftSeed = m_nextCave.draftSeed++;
+    d.planta.clear(); d.perfil.clear(); d.layers.clear();
+    // A new cave is born as LAYERS: the draft from its seed, saved as its 16-bit maps. Without an
+    // asset folder it stays a draft in memory (the loader makes the same one from the seed).
+    if (!m_assetDir.empty()) {
+        const std::string base = (m_assetDir.back() == '/' ? m_assetDir : m_assetDir + "/") + d.name;
+        const World::Vox::CaveBox box = World::Vox::caveBoxFromDef(d, m_radius);
+        std::vector<World::Vox::CaveLayer> layers;
+        World::Vox::caveBakeLayers(box, World::Vox::kCaveMapRes, layers);
+        d.layers = World::Vox::caveLayerPathsFor(base, (int)layers.size());
+        for (size_t i = 0; i < layers.size(); ++i)
+            if (!World::Vox::caveSaveMap16(World::Vox::caveResolveAssetPath(d.layers[i].ceiling), layers[i].ceiling) ||
+                !World::Vox::caveSaveMap16(World::Vox::caveResolveAssetPath(d.layers[i].floor), layers[i].floor)) {
+                HARUKA_LOGW("Mundo", "could not save the layer maps of '%s': it stays a draft", d.name.c_str());
+                d.layers.clear();
+                break;
+            }
+    }
     if (!m_world->placeCave(d)) return false;
     if (m_onCave) m_onCave(d);
     if (m_onChanged) m_onChanged();
@@ -248,7 +261,8 @@ void WorldEditPanel::renderPlaceTab() {
             const World::Vox::CaveDef& d = defs[i];
             if (ImGui::RadioButton("##selc", m_selectedCave == (int)i)) { m_selectedCave = (int)i; m_selectedIsland = -1; }
             ImGui::SameLine();
-            ImGui::Text("%s · %.0f x %.0f m · %s", d.name.c_str(), d.radiusM, d.depthM, d.planta.empty() ? "borrador" : "con mapas");
+            ImGui::Text("%s · %.0f x %.0f m · %s", d.name.c_str(), d.radiusM, d.depthM,
+                        !d.layers.empty() ? "layers" : (d.planta.empty() ? "draft" : "legacy maps"));
             ImGui::SameLine();
             if (ImGui::SmallButton("Quitar")) {
                 const std::string name = d.name;
@@ -290,9 +304,9 @@ void WorldEditPanel::releaseMaps() {
     for (MapView& v : m_maps) {
         if (dev && RHI::valid(v.tex)) dev->destroy(v.tex);
         if (dev && RHI::valid(v.texOld)) dev->destroy(v.texOld);
-        v = MapView{};
     }
-    m_mapCount = 0; m_mapsCave = -1; m_mapsIsland = -1; m_mapsEdited = false; m_corridorHasA = false;
+    m_maps.clear();
+    m_mapsCave = -1; m_mapsIsland = -1; m_mapsEdited = false; m_corridorHasA = false; m_mapsLossy = 0;
 }
 
 void WorldEditPanel::loadMapsFor(int caveIndex, int islandIndex) {
@@ -306,14 +320,24 @@ void WorldEditPanel::loadMapsFor(int caveIndex, int islandIndex) {
     };
     if (caveIndex >= 0 && caveIndex < (int)m_world->caveDefs().size()) {
         const World::Vox::CaveDef d = m_world->caveDefs()[caveIndex];
-        // Sus PNG; si aún no existen (borrador nunca guardado), el borrador que vería el juego.
-        if (!loadOrEmpty(d.planta, m_maps[0].map) || !loadOrEmpty(d.perfil, m_maps[1].map)) {
-            const World::Vox::CaveBox box = World::Vox::caveBoxFromDef(d, m_radius);
-            World::Vox::caveBakeMaps(box, World::Vox::kCaveMapRes, m_maps[0].map, m_maps[1].map);
+        // The layers the game would see: its own maps, the legacy ones converted, or the draft.
+        World::Vox::CaveSystem sys;
+        World::Vox::caveLoad(d, sys, m_radius, m_bakesDir);
+        m_mapsCaveBox = sys.box;
+        m_mapsLossy = 0;
+        // A legacy cave the loader kept as a volume (it does not fit in layers): shown converted
+        // anyway, with the loss on screen. Rebaking accepts that loss; discarding keeps the volume.
+        if (sys.layers.empty() && !sys.vol.empty()) {
+            m_mapsLossy = std::max(1, World::Vox::caveLayersFromVolume(sys, World::Vox::kCaveMapRes, sys.layers));
         }
-        m_mapCount = 2; m_mapsCave = caveIndex;
+        for (World::Vox::CaveLayer& L : sys.layers) {
+            m_maps.emplace_back(); m_maps.back().map = std::move(L.ceiling);
+            m_maps.emplace_back(); m_maps.back().map = std::move(L.floor);
+        }
+        m_mapsCave = caveIndex;
     } else if (islandIndex >= 0 && islandIndex < (int)m_world->islandDefs().size()) {
         const World::Vox::IslandDef d = m_world->islandDefs()[islandIndex];
+        m_maps.resize(3);
         if (!loadOrEmpty(d.planta, m_maps[0].map) || !loadOrEmpty(d.cima, m_maps[1].map) || !loadOrEmpty(d.raiz, m_maps[2].map)) {
             const World::Vox::IslandBox box = World::Vox::islandBoxFromDef(d, m_radius);
             World::Vox::islandBakeMaps(box, World::Vox::kIslandMapRes, m_maps[0].map, m_maps[1].map, m_maps[2].map);
@@ -322,9 +346,22 @@ void WorldEditPanel::loadMapsFor(int caveIndex, int islandIndex) {
         // y al rehornear se vuelve a convertir en distancia (chanfle), como hace el horneado.
         for (float& v : m_maps[0].map.v) v = v > 0.5f ? 1.0f : 0.0f;
         m_maps[0].mask = true;
-        m_mapCount = 3; m_mapsIsland = islandIndex;
+        m_mapsIsland = islandIndex;
     }
-    for (int i = 0; i < m_mapCount; ++i) m_maps[i].dirty = true;
+    for (MapView& v : m_maps) v.dirty = true;
+}
+
+bool WorldEditPanel::addCaveLayer() {
+    ensureMapsLoaded();
+    if (m_mapsCave < 0 || (int)m_maps.size() / 2 >= World::Vox::kCaveMaxLayers) return false;
+    const int w = m_maps.empty() ? World::Vox::kCaveMapRes : m_maps[0].map.w, h = m_maps.empty() ? w : m_maps[0].map.h;
+    // Closed everywhere: ceiling at the bottom of the range, floor at the top (no air until painted).
+    for (float v : { 1.0f, 0.0f }) {
+        m_maps.emplace_back();
+        m_maps.back().map.w = w; m_maps.back().map.h = h; m_maps.back().map.v.assign((size_t)w * h, v);
+    }
+    m_mapsEdited = true;
+    return true;
 }
 
 void WorldEditPanel::uploadMap(MapView& v) {
@@ -362,7 +399,7 @@ void WorldEditPanel::paintOn(MapView& v, float u, float t) {
 
 bool WorldEditPanel::rebakeSelected() {
     ensureMapsLoaded();
-    if (!m_world || m_mapCount == 0) return false;
+    if (!m_world || m_maps.empty()) return false;
     auto save = [&](const std::string& path, const World::Vox::CaveMap& m) {
         const std::string p = World::Vox::caveResolveAssetPath(path);
         if (p.empty()) return false;
@@ -373,13 +410,24 @@ bool WorldEditPanel::rebakeSelected() {
     };
     if (m_mapsCave >= 0 && m_mapsCave < (int)m_world->caveDefs().size()) {
         World::Vox::CaveDef d = m_world->caveDefs()[m_mapsCave];
-        if (d.planta.empty()) { d.planta = basePath(d.name) + "_planta.png"; d.perfil = basePath(d.name) + "_perfil.png"; }   // borrador sin ruta: ahora la tiene
-        if (!save(d.planta, m_maps[0].map) || !save(d.perfil, m_maps[1].map)) { HARUKA_LOGW("Mundo", "no se pudieron guardar los mapas de '%s'", d.name.c_str()); return false; }
-        // Conectividad del volumen nuevo, para enseñarla: se deriva aquí (y queda en `bakes/` con
-        // la clave de estos texels, así que el mundo no lo repite).
-        World::Vox::CaveSystem sys; sys.box = World::Vox::caveBoxFromDef(d, m_radius); sys.planta = m_maps[0].map; sys.perfil = m_maps[1].map;
-        World::Vox::caveDeriveFromMaps(sys, m_bakesDir);
-        m_lastStats = sys.connectStats;
+        // Saved as LAYERS: a draft or a legacy cave gets layer paths now, and stops being legacy.
+        const int nLayers = (int)m_maps.size() / 2;
+        if ((int)d.layers.size() != nLayers) d.layers = World::Vox::caveLayerPathsFor(basePath(d.name), nLayers);
+        std::vector<World::Vox::CaveLayer> layers(nLayers);
+        for (int i = 0; i < nLayers; ++i) {
+            layers[i].ceiling = m_maps[2 * i].map; layers[i].floor = m_maps[2 * i + 1].map;
+            if (!World::Vox::caveSaveMap16(World::Vox::caveResolveAssetPath(d.layers[i].ceiling), layers[i].ceiling) ||
+                !World::Vox::caveSaveMap16(World::Vox::caveResolveAssetPath(d.layers[i].floor), layers[i].floor)) {
+                HARUKA_LOGW("Mundo", "could not save the layer maps of '%s'", d.name.c_str());
+                return false;
+            }
+        }
+        d.planta.clear(); d.perfil.clear();
+        // Connectivity of what was painted, to show it (x = y: painted caves are not carved).
+        int open = 0;
+        for (const auto& L : layers) for (size_t k = 0; k < L.ceiling.v.size(); ++k) open += L.floor.v[k] > L.ceiling.v[k] ? 1 : 0;
+        const int comps = World::Vox::caveLayerComponents(layers);
+        m_lastStats = glm::ivec3(comps, comps, open);
         m_world->removeCave(d.name);
         m_world->placeCave(d);   // mismo nombre, mismas rutas: los chunks se rehornean con los texels nuevos
         if (m_onCaveRemoved) m_onCaveRemoved(d.name);
@@ -414,27 +462,39 @@ void WorldEditPanel::ensureMapsLoaded() {
 
 void WorldEditPanel::paintMap(int mapIndex, float u, float t) {
     ensureMapsLoaded();
-    if (mapIndex < 0 || mapIndex >= m_mapCount) return;
+    if (mapIndex < 0 || mapIndex >= (int)m_maps.size()) return;
     paintOn(m_maps[mapIndex], u, t);
 }
 
 void WorldEditPanel::renderMapsTab() {
     if (m_selectedCave < 0 && m_selectedIsland < 0) { ImGui::TextDisabled("Selecciona una cueva o isla en la pestaña Colocar."); return; }
     ensureMapsLoaded();
-    const bool esCueva = m_mapsCave >= 0;
-    const char* nombres[3] = { esCueva ? "Planta (huella desde arriba)" : "Planta (silueta: dentro/fuera)",
-                               esCueva ? "Perfil (que profundidades tienen hueco)" : "Cima (relieve, fraccion de topM)",
-                               "Raiz (fraccion de rootM)" };
-    ImGui::SliderFloat("Valor", &m_paintValue, 0.0f, 1.0f, "%.2f");
+    const bool isCave = m_mapsCave >= 0;
+    if (isCave) {
+        // Caves paint DEPTHS: the value is metres below the ground, mapped to the layer range.
+        float depthM = World::Vox::caveLayerToM(m_mapsCaveBox, m_paintValue);
+        if (ImGui::SliderFloat("Depth (m)", &depthM, -World::Vox::kCaveOpenM, m_mapsCaveBox.depthM, "%.1f"))
+            m_paintValue = World::Vox::caveLayerFromM(m_mapsCaveBox, depthM);
+        ImGui::TextDisabled("Air where the floor is deeper than the ceiling. A ceiling at %.0f m (top) opens the ground.", -World::Vox::kCaveOpenM);
+        if (m_mapsLossy > 0)
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f), "Legacy cave: it does NOT fit in %d layers (%d air spans over). Rebaking saves this lossy version.",
+                               World::Vox::kCaveMaxLayers, m_mapsLossy);
+        ImGui::BeginDisabled((int)m_maps.size() / 2 >= World::Vox::kCaveMaxLayers);
+        if (ImGui::Button("Add layer")) addCaveLayer();
+        ImGui::EndDisabled();
+    } else ImGui::SliderFloat("Valor", &m_paintValue, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Radio (texels)", &m_paintRadiusTx, 1.0f, 40.0f, "%.0f");
     ImGui::SliderFloat("Dureza", &m_paintHardness, 0.0f, 1.0f, "%.2f");
     ImGui::RadioButton("Pincel", &m_paintMode, 0); ImGui::SameLine();
     ImGui::RadioButton("Corredor (dos clics)", &m_paintMode, 1);
     ImGui::Separator();
-    for (int i = 0; i < m_mapCount; ++i) {
+    static const char* kIslandNames[3] = { "Planta (silueta: dentro/fuera)", "Cima (relieve, fraccion de topM)", "Raiz (fraccion de rootM)" };
+    for (int i = 0; i < (int)m_maps.size(); ++i) {
         MapView& v = m_maps[i];
         if (v.dirty) uploadMap(v);
-        ImGui::Text("%s", nombres[i]);
+        ImGui::PushID(i);
+        if (isCave) ImGui::Text("Layer %d %s (darker = shallower)", i / 2, (i % 2) ? "floor" : "ceiling");
+        else        ImGui::Text("%s", kIslandNames[std::min(i, 2)]);
         const float side = std::min(ImGui::GetContentRegionAvail().x, 320.0f);
         const float aspect = v.map.w > 0 ? (float)v.map.h / (float)v.map.w : 1.0f;
         const ImVec2 size(side, side * aspect);
@@ -459,6 +519,7 @@ void WorldEditPanel::renderMapsTab() {
             ImGui::SetTooltip("%s (%.2f, %.2f)%s", m_paintMode == 0 ? "pintar" : (m_corridorHasA ? "segundo clic" : "primer clic"), u, t,
                               v.mask ? " · mascara" : "");
         }
+        ImGui::PopID();
     }
     ImGui::Separator();
     ImGui::BeginDisabled(!m_mapsEdited);
@@ -466,7 +527,7 @@ void WorldEditPanel::renderMapsTab() {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Descartar cambios")) loadMapsFor(m_mapsCave, m_mapsIsland);
-    if (esCueva) ImGui::TextDisabled("ultimo rehorneado: %d componentes de aire -> %d · %d voxeles de aire", m_lastStats.x, m_lastStats.y, m_lastStats.z);
+    if (isCave) ImGui::TextDisabled("last rebake: %d air piece(s) · %d open layer texels", m_lastStats.y, m_lastStats.z);
     else         ImGui::TextDisabled("ultimo rehorneado: %d componentes de silueta -> 1", m_lastStats.x);
 }
 

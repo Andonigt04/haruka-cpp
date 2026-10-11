@@ -10,8 +10,10 @@
  */
 #include "Common/TestCommon.h"
 #include "Haruka/World/Vox/CaveSystem.h"
+#include "Haruka/World/Terrain/BakeUtil.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -63,6 +65,31 @@ int componentesDeAire(const World::Vox::CaveVolume& v) {
         }
     }
     return comps;
+}
+
+/// Sizes of the air components (same flood fill as above), largest first.
+std::vector<int> airComponentSizes(const World::Vox::CaveVolume& v) {
+    const int n = v.n;
+    std::vector<uint8_t> vis((size_t)n * n * n, 0);
+    std::vector<size_t> stack; std::vector<int> sizes;
+    for (size_t s0 = 0; s0 < v.d.size(); ++s0) {
+        if (!(v.d[s0] < 0.0f) || vis[s0]) continue;
+        int count = 0; stack.assign(1, s0); vis[s0] = 1;
+        while (!stack.empty()) {
+            const size_t c = stack.back(); stack.pop_back(); ++count;
+            const int z = (int)(c / ((size_t)n * n)), y = (int)((c / n) % n), x = (int)(c % n);
+            for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = x + dx, ny = y + dy, nz = z + dz;
+                if (nx < 0 || ny < 0 || nz < 0 || nx >= n || ny >= n || nz >= n) continue;
+                const size_t k = (size_t)nz * n * n + (size_t)ny * n + nx;
+                if (!(v.d[k] < 0.0f) || vis[k]) continue;
+                vis[k] = 1; stack.push_back(k);
+            }
+        }
+        sizes.push_back(count);
+    }
+    std::sort(sizes.rbegin(), sizes.rend());
+    return sizes;
 }
 
 } // namespace
@@ -433,9 +460,267 @@ void test_caves_cache() {
     std::filesystem::remove_all(dir, ec);
 }
 
+// ── LAYERS: the cave as heightfields ────────────────────────────────────────────────────────────
+// A layer is a ceiling map and a floor map (metres, as a fraction of depthM), like the planet's
+// elevation map. Measured here:
+//   (1) converting the legacy volume to layers keeps the air (control: another cave's layers don't);
+//   (2) layers express what footprint x profile could not: a gallery whose depth changes ALONG v;
+//   (3) 16-bit round trip; (4) ceiling = 0 is the mouth; (5) the field is a distance on a slope.
+void test_cave_layers() {
+    beginTest("caves: layers (ceiling/floor heightfields) - conversion, expressiveness, mouth, distance");
+    using namespace World::Vox;
+    using clk = std::chrono::high_resolution_clock;
+    auto ms = [](clk::time_point a, clk::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+
+    CaveBox box;
+    if (!findBox(1234u, box)) { CHECK(false, "there is a cell with a cave to test"); return; }
+
+    // (1a) CONVERSION of a legacy cave PAINTED the old way: a curved corridor in the footprint and
+    // TWO depth bands in the profile = two galleries per column. Compared voxel by voxel against
+    // the volume it came from; the control is another cave's layers in the same box.
+    auto compareAir = [&](const CaveSystem& vol, const CaveSystem& other, int& air, int& wrong, int& wrongFar) {
+        air = wrong = wrongFar = 0;
+        const int n = vol.vol.n;
+        for (int z = 0; z < n; ++z)
+            for (int y = 0; y < n; ++y)
+                for (int x = 0; x < n; ++x) {
+                    const float dv = vol.vol.d[(size_t)z * n * n + (size_t)y * n + x];
+                    const glm::vec3 l(((float)x / (float)(n - 1) - 0.5f) * 2.0f * vol.box.radiusM,
+                                      ((float)y / (float)(n - 1) - 0.5f) * 2.0f * vol.box.radiusM, (float)z / (float)(n - 1) * vol.box.depthM);
+                    const float dl = caveDensityLocal(other, l);
+                    if (dv < 0.0f) ++air;
+                    if ((dv < 0.0f) == (dl < 0.0f)) continue;
+                    ++wrong;
+                    // AT THE WALL = some neighbour (26) has the other sign; outside the box counts as
+                    // rock. Not the volume's distance: its chamfer uses the SMALLER voxel side, so
+                    // "5 m" can be less than one 7.5 m lateral voxel.
+                    bool wall = false;
+                    for (int dz = -1; dz <= 1 && !wall; ++dz)
+                        for (int dy = -1; dy <= 1 && !wall; ++dy)
+                            for (int dx = -1; dx <= 1 && !wall; ++dx) {
+                                const int nx = x + dx, ny = y + dy, nz = z + dz;
+                                const bool nAir = (nx >= 0 && ny >= 0 && nz >= 0 && nx < n && ny < n && nz < n)
+                                                  && vol.vol.d[(size_t)nz * n * n + (size_t)ny * n + nx] < 0.0f;
+                                wall = nAir != (dv < 0.0f);
+                            }
+                    if (!wall) ++wrongFar;
+                }
+    };
+    CaveSystem painted; painted.box = box;
+    {
+        const int res = kCaveMapRes;
+        painted.planta.w = painted.planta.h = res; painted.planta.v.assign((size_t)res * res, 0.0f);
+        painted.perfil.w = res; painted.perfil.h = res / 2; painted.perfil.v.assign((size_t)res * (res / 2), 0.0f);
+        for (int y = 0; y < res; ++y)
+            for (int x = 0; x < res; ++x) {
+                const float u = (float)x / (float)(res - 1), v = (float)y / (float)(res - 1);
+                const float centre = 0.5f + 0.15f * std::sin(u * 6.0f);   // a curved corridor
+                if (u > 0.15f && u < 0.85f && std::fabs(v - centre) < 0.04f) painted.planta.v[(size_t)y * res + x] = 1.0f;
+            }
+        for (int y = 0; y < res / 2; ++y)
+            for (int x = 0; x < res; ++x) {
+                const float t = (float)y / (float)(res / 2 - 1);
+                if ((t > 0.25f && t < 0.35f) || (t > 0.6f && t < 0.72f)) painted.perfil.v[(size_t)y * res + x] = 1.0f;
+            }
+        caveBakeVolume(box, painted.planta, painted.perfil, kCaveVolRes, painted.vol, &painted.connectStats);
+    }
+    CaveSystem paintedL; paintedL.box = box;
+    auto t0 = clk::now();
+    const int droppedP = caveLayersFromVolume(painted, kCaveMapRes, paintedL.layers);
+    const double extractMs = ms(t0, clk::now());
+    caveLayersPrepare(paintedL.layers, box);
+    int air = 0, wrong = 0, wrongFar = 0;
+    compareAir(painted, paintedL, air, wrong, wrongFar);
+    std::printf("    painted legacy cave -> %zu layers in %.0f ms · %d spans dropped · air voxels %d · sign differs at %d (%.2f %%), %d away from the wall\n",
+                paintedL.layers.size(), extractMs, droppedP, air, wrong, 100.0 * wrong / std::max(air, 1), wrongFar);
+    std::printf("    connectivity: volume %d -> layers %d\n", painted.connectStats.y, caveLayerComponents(paintedL.layers));
+    CHECK(air > 1000, "the painted legacy cave has air to compare");
+    CHECK(droppedP == 0 && wrongFar == 0, "conversion keeps the air: differences only at the wall itself");
+    CHECK(caveLayerComponents(paintedL.layers) == painted.connectStats.y, "and the same number of air pieces");
+
+    // CONTROL: the layers of ANOTHER cave do not match this volume.
+    CaveSystem seeded; seeded.box = box;
+    caveBakeMaps(box, kCaveMapRes, seeded.planta, seeded.perfil);
+    caveBakeVolume(box, seeded.planta, seeded.perfil, kCaveVolRes, seeded.vol, &seeded.connectStats);
+    CaveSystem seededL; seededL.box = box;
+    const int droppedS = caveLayersFromVolume(seeded, kCaveMapRes, seededL.layers);
+    caveLayersPrepare(seededL.layers, box);
+    int airB = 0, wrongB = 0, wrongFarB = 0;
+    compareAir(painted, seededL, airB, wrongB, wrongFarB);
+    std::printf("    CONTROL another cave's layers: sign differs at %d (%d far from the wall)\n", wrongB, wrongFarB);
+    CHECK(wrongFarB > 100, "CONTROL: the comparison tells two different caves apart");
+
+    // (1c) INFORMATION, not a requirement: the OLD seeded generator is a sponge of strata (the
+    // profile's ridged noise), more than 4 spans in some columns. Seeded caves are test-only
+    // (automatic seeding is 0); drafts are now written directly as layers (1b).
+    {
+        int a2 = 0, w2 = 0, f2 = 0;
+        compareAir(seeded, seededL, a2, w2, f2);
+        std::printf("    (info) old seeded sponge -> layers: %d spans dropped · sign differs at %.2f %% of the air (%d far) · components %d -> %d\n",
+                    droppedS, 100.0 * w2 / std::max(a2, 1), f2, seeded.connectStats.y, caveLayerComponents(seededL.layers));
+    }
+
+    // (1d) THE LOADER decides: a legacy cave that converts exactly is loaded as layers; one that
+    // would lose air (the sponge) keeps its volume, so a cave that worked does not get worse.
+    {
+        const std::string ldir = (std::filesystem::temp_directory_path() / "haruka_cave_legacy_load").string();
+        std::error_code lec; std::filesystem::remove_all(ldir, lec);
+        auto loadLegacy = [&](const CaveSystem& src, const char* name, CaveSystem& out) {
+            CaveDef def; def.name = name; def.radiusM = box.radiusM; def.depthM = box.depthM; def.mouth = box.mouth; def.draftSeed = box.seed;
+            def.planta = ldir + "/" + name + "_planta.png"; def.perfil = ldir + "/" + name + "_perfil.png";
+            World::Terrain::BakeUtil::savePNGGray(def.planta, src.planta.w, src.planta.h, src.planta.v);
+            World::Terrain::BakeUtil::savePNGGray(def.perfil, src.perfil.w, src.perfil.h, src.perfil.v);
+            CaveBox b = caveBoxFromDef(def, kR); b.seed = box.seed; b.cell = box.cell;   // same tau as the source volume
+            return caveLoadBox(def, b, out, ldir + "/bakes");
+        };
+        CaveSystem exact, lossy;
+        const bool okE = loadLegacy(painted, "exact", exact), okL = loadLegacy(seeded, "sponge", lossy);
+        std::printf("    loader: painted legacy -> %zu layer(s) · sponge legacy -> %zu layer(s), volume %s\n",
+                    exact.layers.size(), lossy.layers.size(), lossy.vol.empty() ? "EMPTY" : "kept");
+        CHECK(okE && !exact.layers.empty(), "an exact legacy conversion is loaded as layers");
+        CHECK(okL && lossy.layers.empty() && !lossy.vol.empty(), "a lossy one keeps its volume (nothing gets worse)");
+        std::filesystem::remove_all(ldir, lec);
+    }
+
+    // (1b) NATIVE DRAFTS: written as layers, connected by construction, open at the mouth.
+    {
+        int ok = 0, total = 0, multi = 0;
+        float worstMouth = 1.0f, worstShare = 1.0f;
+        for (int i = 0; i < 12; ++i) {
+            CaveBox b2 = box; b2.seed = 1000u + (uint32_t)i * 7919u; b2.cell = box.cell + (uint32_t)i;
+            CaveSystem draft; draft.box = b2;
+            glm::ivec3 st;
+            caveBakeLayers(b2, kCaveMapRes, draft.layers, &st);
+            CaveMap mouthMap; caveBakeEntrance(draft, kCaveMapRes, mouthMap);
+            const float m = mouthMap.at(b2.mouth.x, b2.mouth.y);
+            worstMouth = std::min(worstMouth, m);
+            // INDEPENDENT count: the field sampled on a 3D grid and flood-filled with this file's own
+            // counter (26 neighbours), not the 2D counter the generator uses.
+            CaveVolume grid; grid.n = 128; grid.d.resize((size_t)128 * 128 * 128);
+            for (int z = 0; z < 128; ++z)
+                for (int y = 0; y < 128; ++y)
+                    for (int x = 0; x < 128; ++x)
+                        grid.d[(size_t)z * 128 * 128 + (size_t)y * 128 + x] = caveDensityLocal(draft, glm::vec3(
+                            ((float)x / 127.0f - 0.5f) * 2.0f * b2.radiusM, ((float)y / 127.0f - 0.5f) * 2.0f * b2.radiusM, (float)z / 127.0f * b2.depthM));
+            const int comps3d = componentesDeAire(grid);
+            const std::vector<int> sizes = airComponentSizes(grid);
+            int airAll = 0; for (int q : sizes) airAll += q;
+            const float mainShare = sizes.empty() ? 0.0f : (float)sizes[0] / (float)std::max(airAll, 1);
+            worstShare = std::min(worstShare, mainShare);
+            ++total; if (st.y == 1 && mainShare > 0.999f) ++ok; if (draft.layers.size() > 1) ++multi;
+            std::printf("      draft %2d: %zu level(s) · 2D pieces %2d -> %d · 3D: %d piece(s), the main one holds %.4f of the air (others:",
+                        i, draft.layers.size(), st.x, st.y, comps3d, mainShare);
+            for (size_t q = 1; q < sizes.size() && q < 6; ++q) std::printf(" %d", sizes[q]);
+            std::printf(" voxels)\n");
+        }
+        std::printf("    native drafts: %d/%d connected · %d with 2-3 levels · worst main-piece share %.4f · worst mouth %.2f\n", ok, total, multi, worstShare, worstMouth);
+        CHECK(ok == total, "every native draft is one piece in 2D, and in an independent 3D flood fill the main piece holds > 99.9 % of the air");
+        CHECK(multi > 0, "and some have several levels (the shafts were really tested)");
+        CHECK(worstMouth > 0.9f, "and every one opens the ground at its mouth");
+    }
+
+    // Sampling cost: prepared layers vs trilinear volume.
+    {
+        const int n = painted.vol.n;
+        auto local = [&](int i) { return glm::vec3(((float)(i % n) / (float)(n - 1) - 0.5f) * 2.0f * box.radiusM,
+                                                   ((float)((i / n) % n) / (float)(n - 1) - 0.5f) * 2.0f * box.radiusM,
+                                                   (float)((i / 7) % n) / (float)(n - 1) * box.depthM); };
+        volatile float sink = 0.0f; const int samples = 200000;
+        auto t1 = clk::now();
+        for (int i = 0; i < samples; ++i) sink = sink + caveDensityLocal(paintedL, local(i));
+        auto t2 = clk::now();
+        for (int i = 0; i < samples; ++i) sink = sink + caveDensityLocal(painted, local(i));
+        auto t3 = clk::now();
+        std::printf("    one sample: %zu prepared layers %.0f ns · volume %.0f ns\n", paintedL.layers.size(), ms(t1, t2) * 1e6 / samples, ms(t2, t3) * 1e6 / samples);
+    }
+
+    // (2) EXPRESSIVENESS: two hand-painted layers. Layer 0: a gallery along u at 30-40 m. Layer 1: a
+    // gallery along v whose depth RAMPS with v (ceiling 60 + 40 v m). The old profile only depended
+    // on (u, depth): a depth that changes along v did not exist in it.
+    CaveSystem art; art.box = box; art.box.radiusM = 200.0f; art.box.depthM = 120.0f;
+    const float D = art.box.depthM; const int res = 128;
+    auto F = [&](float metres) { return caveLayerFromM(art.box, metres); };
+    auto blank = [&](CaveMap& m, float metres) { m.w = m.h = res; m.v.assign((size_t)res * res, F(metres)); };
+    art.layers.resize(2);
+    for (CaveLayer& L : art.layers) { blank(L.ceiling, D); blank(L.floor, 0.0f); }   // closed everywhere
+    for (int y = 0; y < res; ++y)
+        for (int x = 0; x < res; ++x) {
+            const float u = (float)x / (float)(res - 1), v = (float)y / (float)(res - 1);
+            const size_t i = (size_t)y * res + x;
+            if (std::fabs(v - 0.5f) < 0.05f && u > 0.2f && u < 0.8f) { art.layers[0].ceiling.v[i] = F(30.0f); art.layers[0].floor.v[i] = F(40.0f); }
+            if (std::fabs(u - 0.5f) < 0.05f && v > 0.1f && v < 0.9f) { art.layers[1].ceiling.v[i] = F(60.0f + 40.0f * v); art.layers[1].floor.v[i] = F(70.0f + 40.0f * v); }
+        }
+    auto at = [&](const CaveSystem& sys, float u, float v, float z) {
+        return caveDensityAtDraped(sys, sys.box.toWorld(glm::vec3((u - 0.5f) * 2.0f * sys.box.radiusM, (v - 0.5f) * 2.0f * sys.box.radiusM, z)), sys.box.surfaceRM);
+    };
+    const bool g0 = at(art, 0.3f, 0.5f, 35.0f) < 0.0f && at(art, 0.3f, 0.5f, 50.0f) > 0.0f && at(art, 0.3f, 0.5f, 25.0f) > 0.0f;
+    const bool rampLo = at(art, 0.5f, 0.2f, 73.0f) < 0.0f && at(art, 0.5f, 0.2f, 97.0f) > 0.0f;
+    const bool rampHi = at(art, 0.5f, 0.8f, 97.0f) < 0.0f && at(art, 0.5f, 0.8f, 73.0f) > 0.0f;
+    const bool cross = at(art, 0.5f, 0.5f, 35.0f) < 0.0f && at(art, 0.5f, 0.5f, 85.0f) < 0.0f && at(art, 0.5f, 0.5f, 55.0f) > 0.0f;
+    std::printf("    painted: layer-0 gallery %s · ramp at v=0.2 %s · at v=0.8 %s · crossing two levels %s · components %d\n",
+                g0 ? "ok" : "NO", rampLo ? "ok" : "NO", rampHi ? "ok" : "NO", cross ? "ok" : "NO", caveLayerComponents(art.layers));
+    CHECK(g0, "layer 0: air in its gallery, rock above and below");
+    CHECK(rampLo && rampHi, "layer 1 follows its depth ALONG v (73 m at v=0.2, 97 m at v=0.8)");
+    CHECK(cross, "two galleries stacked in one column, rock between them");
+    CHECK(caveLayerComponents(art.layers) == 2, "two separate galleries are counted as two components");
+    CaveSystem art0 = art; art0.layers.resize(1);
+    CHECK(at(art0, 0.5f, 0.2f, 73.0f) > 0.0f, "CONTROL: without layer 1 that point is rock");
+
+    // (3) 16-bit round trip.
+    const std::string dir = (std::filesystem::temp_directory_path() / "haruka_cave_layers").string();
+    std::error_code ec; std::filesystem::remove_all(dir, ec);
+    const auto paths = caveLayerPathsFor(dir + "/art", 2);
+    float worstRt = 0.0f;
+    for (int L = 0; L < 2; ++L) {
+        CHECK(caveSaveMap16(paths[L].ceiling, art.layers[L].ceiling) && caveSaveMap16(paths[L].floor, art.layers[L].floor), "layer maps saved");
+        CaveMap c, f;
+        CHECK(caveLoadMap16(paths[L].ceiling, c) && caveLoadMap16(paths[L].floor, f), "layer maps loaded");
+        for (size_t i = 0; i < c.v.size(); ++i)
+            worstRt = std::max({ worstRt, std::fabs(c.v[i] - art.layers[L].ceiling.v[i]), std::fabs(f.v[i] - art.layers[L].floor.v[i]) });
+    }
+    std::printf("    16-bit round trip: worst %.6f of the range = %.2f mm\n", worstRt, worstRt * (D + kCaveOpenM) * 1000.0f);
+    CHECK(worstRt <= 0.5f / 65535.0f + 1e-7f, "the PNG keeps the value to half a 16-bit step");
+
+    // (4) THE MOUTH: ceiling 0 in a disc of layer 0 = the gallery reaches the ground.
+    CaveSystem mouth = art;
+    for (int y = 0; y < res; ++y)
+        for (int x = 0; x < res; ++x)
+            if ((x - res * 3 / 10) * (x - res * 3 / 10) + (y - res / 2) * (y - res / 2) <= 16)
+                mouth.layers[0].ceiling.v[(size_t)y * res + x] = 0.0f;   // the top of the range: open to the sky
+    CaveMap boca, bocaArt;
+    caveBakeEntrance(mouth, res, boca); caveBakeEntrance(art, res, bocaArt);
+    const float mouthHere = boca.at(0.3f, 0.5f), mouthArt = bocaArt.at(0.3f, 0.5f);
+    std::printf("    mouth map at the disc: %.2f (control, ceiling 30 m: %.2f)\n", mouthHere, mouthArt);
+    CHECK(mouthHere > 0.9f, "ceiling = 0 opens the ground (the mouth, no special case)");
+    CHECK(mouthArt < 0.01f, "CONTROL: with a 30 m ceiling there is no mouth");
+
+    // (5) DISTANCE on a 45° ceiling: |grad| ~ 1 a couple of metres below it. Raw `ceiling - z`
+    // would give sqrt(2).
+    CaveSystem slope = art; slope.layers.resize(1);
+    for (int y = 0; y < res; ++y)
+        for (int x = 0; x < res; ++x) {
+            const float xm = ((float)x / (float)(res - 1) - 0.5f) * 2.0f * slope.box.radiusM;   // ceiling rises 1 m per metre
+            slope.layers[0].ceiling.v[(size_t)y * res + x] = F(50.0f + xm);
+            slope.layers[0].floor.v[(size_t)y * res + x] = 1.0f;
+        }
+    float gradWorst = 0.0f, gradBest = 9.0f;
+    for (float xm = -30.0f; xm <= 30.0f; xm += 10.0f) {
+        const float z = 50.0f + xm - 3.0f;   // 3 m above the ceiling surface, in rock
+        const float h = 0.25f;
+        auto f = [&](float x, float zz) { return caveDensityLocal(slope, glm::vec3(x, 0.0f, zz)); };
+        const float gx = (f(xm + h, z) - f(xm - h, z)) / (2 * h), gz = (f(xm, z + h) - f(xm, z - h)) / (2 * h);
+        const float g = std::sqrt(gx * gx + gz * gz);
+        gradWorst = std::max(gradWorst, g); gradBest = std::min(gradBest, g);
+    }
+    std::printf("    45 degree ceiling: |grad| between %.3f and %.3f (raw ceiling - z would be 1.414)\n", gradBest, gradWorst);
+    CHECK(gradBest > 0.9f && gradWorst < 1.1f, "the layer field is a distance on a slope, not 1.41x it");
+    std::filesystem::remove_all(dir, ec);
+}
+
 // Registro: el grupo sale de la carpeta de este archivo (ver Common/TestCommon.h).
 HARUKA_REGISTER_TESTS(
     { "caves_bake", test_caves_bake },
     { "caves_cache", test_caves_cache },
     { "caves_mesh_and_strokes", test_caves_mesh_and_strokes },
-    { "caves_coupling", test_caves_coupling });
+    { "caves_coupling", test_caves_coupling },
+    { "cave_layers", test_cave_layers });

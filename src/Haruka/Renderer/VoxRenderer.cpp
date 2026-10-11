@@ -1,5 +1,6 @@
 #include "Haruka/Renderer/VoxRenderer.h"
 
+#include "Haruka/Core/Jobs/JobSystem.h"
 #include "Haruka/Core/Logger.h"
 #include "Haruka/IO/ImageWriter.h"
 #include "Haruka/Renderer/Shader.h"
@@ -7,13 +8,22 @@
 #include "Haruka/RHI/RHIDevice.h"
 #include "Haruka/Tools/Profiler.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <unordered_set>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
 namespace Haruka::Renderer {
+
+VoxRenderer::~VoxRenderer() {
+    if (m_fineCutPending) m_fineCutJob.wait();   // reads the world
+    m_fine.finishJobs();   // the jobs read the world: done before anything goes
+    for (auto& kv : m_gpuBricks) if (kv.second.id) Renderer::resources().release(kv.second.id);
+}
 
 bool VoxRenderer::ensurePipeline() {
     if (m_failed) return false;
@@ -113,10 +123,12 @@ void VoxRenderer::update(World::Vox::VoxWorld& world, const glm::dvec3& camRelPl
     const double camR = glm::length(camRelPlanet);
     if (camR < 1.0) return;
     const glm::dvec3 foot = camRelPlanet / camR * (world.planetRadius() + surfaceElevM);
+    bool upload = false;
     { HARUKA_PROFILE("vox.cut");
     if (world.version() != m_cutVersion || m_cutDirty || glm::length(foot - m_cutCenter) > 40.0) {
         m_cutDirty = false;
         rebuildCut(world, camRelPlanet, surfaceElevM);
+        upload = true;
     }
     // ⚠️ LA MATRIZ SE REHACE CADA FRAME, LA TEXTURA NO. `vFragPos` es relativo a la cámara de ESTE
     // frame; la textura se rehace cada 40 m. Con la matriz congelada en el rehecho, la ventana se
@@ -124,7 +136,195 @@ void VoxRenderer::update(World::Vox::VoxWorld& world, const glm::dvec3& camRelPl
     // El marco (e1, e2, up, pie) es el del rehecho; sólo la traslación cambia.
     else refreshCutSpace(camRelPlanet);
     }
+
+    // ── The fine bricks and the fine window ─────────────────────────────────────────────────────
+    { HARUKA_PROFILE("vox.fine");
+    static const bool s_fineOff = [] { const char* e = std::getenv("HARUKA_VOX_FINE"); return e && e[0] == '0'; }();
+    m_fineOn = !s_fineOff;
+    updateFine(world, camRelPlanet);
+    bool anyWanted = false;
+    m_fine.forEach([&](const World::Vox::VoxFineBricks::Brick& b) { anyWanted = anyWanted || b.wanted; });
+    if (collectFineCut(camRelPlanet)) upload = true;   // a fine window computed in a job landed
+    if (!anyWanted) {
+        if (m_fineCutHave) { m_fineCutHave = false; upload = true; }   // back to the plain coarse texture
+    } else {
+        if (!m_fineCutPending && (!m_fineCutHave || world.version() + m_fine.version() != m_fineCutVersion || glm::length(foot - m_fineCutCenter) > 2.0))
+            rebuildFineCut(world, camRelPlanet, surfaceElevM);   // starts the job; the current window stays
+        if (m_fineCutHave) refreshFineCutSpace(camRelPlanet);
+    }
+    if (upload) uploadCutAtlas();
+    // THE FINE RADIUS: as far as every wanted brick is uploaded (or empty), and inside the fine window.
+    // Built (world side) AND uploaded (GPU side).
+    double R = (m_fineOn && m_fineCutHave) ? std::min(kFineRadiusM, m_fine.builtRadius()) : 0.0;
+    for (const auto& [bk, g] : m_gpuBricks) {
+        if (R <= 0.0) break;
+        uint64_t gpuRev = 0;
+        const bool uploaded = g.empty || (g.id && Renderer::resources().gpu(g.id, &gpuRev) && gpuRev >= g.storeRev);
+        if (!uploaded) R = std::min(R, g.dist - g.halfDiag);
+    }
+    if (m_fineCutHave) R = std::min(R, kFineCutHalfM - glm::length(foot - m_fineCutCenter) - 0.5);
+    m_fineR = (float)std::max(R, 0.0);
+    }
 }
+
+void VoxRenderer::updateFine(World::Vox::VoxWorld& world, const glm::dvec3& cam) {
+    if (m_fineOn) m_fine.update(world, cam);
+    // The GPU side follows the bricks: a new revision of `walls` is published (the store uploads it
+    // within the frame budget); a brick the world dropped is released.
+    std::unordered_set<World::Vox::VoxFineBricks::Key, World::Vox::VoxFineBricks::KeyHash> alive;
+    m_fine.forEach([&](const World::Vox::VoxFineBricks::Brick& b) {
+        if (!b.wanted || !b.built()) return;
+        alive.insert(b.key);
+        GpuBrick& g = m_gpuBricks[b.key];
+        g.dist = b.dist; g.halfDiag = b.halfDiag;
+        if (g.brickRev == b.revision) return;
+        g.brickRev = b.revision;
+        g.empty = !b.walls || b.walls->empty();
+        if (g.empty) return;
+        if (!g.id) g.id = Renderer::resources().create("voxfine", true);
+        g.storeRev = Renderer::resources().publish<World::Vox::CaveMesh>(g.id, b.walls, &VoxRenderer::uploadMesh);
+    });
+    for (auto it = m_gpuBricks.begin(); it != m_gpuBricks.end();) {
+        if (alive.count(it->first)) { ++it; continue; }
+        if (it->second.id) Renderer::resources().release(it->second.id);
+        it = m_gpuBricks.erase(it);
+    }
+}
+
+void VoxRenderer::rebuildFineCut(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
+    const double camR = glm::length(camRelPlanet);
+    const glm::dvec3 up = camRelPlanet / camR;
+    const glm::dvec3 foot = up * (world.planetRadius() + surfaceElevM);
+    const glm::dvec3 ref = (std::fabs(up.y) < 0.9) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
+    const glm::dvec3 e1 = glm::normalize(glm::cross(ref, up)), e2 = glm::cross(up, e1);
+    const int W = kFineCutRes;
+    // Only the texels under a wanted brick WITH a wall or with air in it are evaluated (its 8 corners
+    // projected on the window's plane, one texel of margin): elsewhere nothing is cut. Measured on a
+    // 30 cm pick: 11 bricks chosen, 3.8 ms for all of them; most have no wall.
+    std::vector<uint8_t> want((size_t)W * W, 0);
+    const double footUp = glm::dot(foot, up);
+    m_fine.forEach([&](const World::Vox::VoxFineBricks::Brick& b) {
+        if (!b.wanted || (b.built() && (!b.walls || b.walls->empty()) && !b.air)) return;   // built, no wall, no air: nothing to cut
+        const World::Vox::VoxFineBricks::Key& bk = b.key;
+        const World::Vox::VoxChunk* c = world.get(bk.key);
+        if (!c) return;
+        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+        bool ok = true;
+        for (int corner = 0; corner < 8 && ok; ++corner) {
+            const glm::dvec3 d = glm::normalize(c->worldOfGrid(bk.cell.x + (corner & 1), bk.cell.y + ((corner >> 1) & 1), bk.cell.z + ((corner >> 2) & 1)));
+            const double du = glm::dot(d, up);
+            if (du <= 1e-6) { ok = false; break; }
+            const glm::dvec3 q = d * (footUp / du) - foot;
+            const double tx = (glm::dot(q, e1) / (2.0 * kFineCutHalfM) + 0.5) * W - 0.5, ty = (glm::dot(q, e2) / (2.0 * kFineCutHalfM) + 0.5) * W - 0.5;
+            x0 = std::min(x0, tx); x1 = std::max(x1, tx); y0 = std::min(y0, ty); y1 = std::max(y1, ty);
+        }
+        if (!ok) return;
+        const int ix0 = std::max(0, (int)std::floor(x0) - 1), ix1 = std::min(W - 1, (int)std::ceil(x1) + 1);
+        const int iy0 = std::max(0, (int)std::floor(y0) - 1), iy1 = std::min(W - 1, (int)std::ceil(y1) + 1);
+        for (int y = iy0; y <= iy1; ++y) for (int x = ix0; x <= ix1; ++x) want[(size_t)y * W + x] = 1;
+    });
+    // Texel CENTRES ((x + 0.5) / W), the same convention the shader's bilinear uses; all in one call.
+    std::vector<glm::dvec3> dirs; std::vector<size_t> where;
+    for (int y = 0; y < W; ++y)
+        for (int x = 0; x < W; ++x) {
+            if (!want[(size_t)y * W + x]) continue;
+            const double fx = (((double)x + 0.5) / W - 0.5) * 2.0 * kFineCutHalfM;
+            const double fy = (((double)y + 0.5) / W - 0.5) * 2.0 * kFineCutHalfM;
+            dirs.push_back(foot + e1 * fx + e2 * fy);
+            where.push_back((size_t)y * W + x);
+        }
+    // THE TEXELS ARE EVALUATED IN A JOB: measured 1.8-4.5 ms on the render thread every 2 m walked
+    // (and the game's heightfield costs more than the tests'). The window in use stays valid until
+    // the new one lands: it carries its own frame, and the fine radius is capped by its coverage.
+    const World::Vox::VoxWorld* wp = &world;
+    const uint64_t version = world.version() + m_fine.version();
+    m_fineCutJob = Core::Jobs::jobs().submit(Core::Jobs::Priority::Frame,
+        [wp, dirs = std::move(dirs), where = std::move(where), foot, e1, e2, up, version]() {
+            FineCut r;
+            r.pixels.assign((size_t)kFineCutRes * kFineCutRes * 4, 0);
+            for (size_t o = 3; o < r.pixels.size(); o += 4) r.pixels[o] = 255;
+            std::vector<float> cuts;
+            wp->surfaceCutFineMany(dirs, cuts);
+            for (size_t i = 0; i < where.size(); ++i) {
+                r.pixels[where[i] * 4] = (unsigned char)std::lround(cuts[i] * 255.0f);
+                if (cuts[i] > 0.5f) ++r.open;
+            }
+            r.evaluated = dirs.size();
+            r.center = foot; r.e1 = e1; r.e2 = e2; r.up = up; r.version = version;
+            return r;
+        });
+    m_fineCutPending = true;
+    (void)camRelPlanet;
+}
+
+bool VoxRenderer::collectFineCut(const glm::dvec3& camRelPlanet) {
+    if (!m_fineCutPending || m_fineCutJob.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return false;
+    FineCut r = m_fineCutJob.get();
+    m_fineCutPending = false;
+    m_fineCutPixels = std::move(r.pixels);
+    m_fineCutCenter = r.center; m_fineE1 = r.e1; m_fineE2 = r.e2; m_fineUp = r.up;
+    m_fineCutVersion = r.version;
+    m_fineCutHave = true;
+    refreshFineCutSpace(camRelPlanet);
+    HARUKA_LOGDIAG("Vox", "fine cut window: %zu texels evaluated · %zu open", r.evaluated, r.open);
+    return true;
+}
+
+void VoxRenderer::refreshFineCutSpace(const glm::dvec3& camRelPlanet) {
+    const glm::dvec3 footRelCam = m_fineCutCenter - camRelPlanet;
+    const glm::dvec3 &e1 = m_fineE1, &e2 = m_fineE2, &up = m_fineUp;
+    glm::dmat4 toFrame(1.0);
+    toFrame[0] = glm::dvec4(e1.x, e2.x, up.x, 0.0);
+    toFrame[1] = glm::dvec4(e1.y, e2.y, up.y, 0.0);
+    toFrame[2] = glm::dvec4(e1.z, e2.z, up.z, 0.0);
+    toFrame[3] = glm::dvec4(-glm::dot(footRelCam, e1), -glm::dot(footRelCam, e2), -glm::dot(footRelCam, up), 1.0);
+    glm::dmat4 toUV(1.0);
+    toUV[0][0] = 0.5 / kFineCutHalfM; toUV[1][1] = 0.5 / kFineCutHalfM; toUV[3] = glm::dvec4(0.5, 0.5, 0.0, 1.0);
+    m_fineCutSpace = glm::mat4(toUV * toFrame);
+}
+
+float VoxRenderer::fineCutAt(const glm::vec3& posRelEye) const {
+    if (!m_fineCutHave || m_fineCutPixels.empty()) return -1.0f;
+    const glm::vec4 uv = m_fineCutSpace * glm::vec4(posRelEye, 1.0f);
+    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f) return -1.0f;
+    const int x = std::min((int)(uv.x * kFineCutRes), kFineCutRes - 1), y = std::min((int)(uv.y * kFineCutRes), kFineCutRes - 1);
+    return (float)m_fineCutPixels[((size_t)y * kFineCutRes + x) * 4] / 255.0f;
+}
+
+glm::vec4 VoxRenderer::cutAtlas() const {
+    if (!m_fineCutHave) return glm::vec4(0.0f);
+    const float aw = (float)(kCutRes + kFineCutRes), ah = (float)std::max(kCutRes, kFineCutRes);
+    return glm::vec4((float)kCutRes / aw, (float)kCutRes / ah, (float)kCutRes / aw, (float)kFineCutRes / aw);
+}
+
+void VoxRenderer::uploadCutAtlas() {
+    RHI::Device* dev = RHI::device();
+    if (!dev || m_cutPixels.empty()) return;
+    // The RHI has no "update texture": it is recreated, and the old one is parked until the next
+    // `update` (it may be bound to a command buffer in flight — Vulkan).
+    if (RHI::valid(m_cutTex)) {
+        if (RHI::valid(m_cutTexOld)) dev->destroy(m_cutTexOld);   // only one upload per update: this one is a frame old
+        m_cutTexOld = m_cutTex;
+    }
+    RHI::TextureDesc td; td.format = RHI::Format::RGBA8;   // R = cut · G = water bed (m, coarse only)
+    td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::ClampToEdge; td.mipmaps = false;
+    std::vector<unsigned char> atlas;
+    if (!m_fineCutHave) {
+        td.width = kCutRes; td.height = kCutRes; td.initialData = m_cutPixels.data();
+    } else {
+        // ATLAS: the coarse window in the lower-left corner, the fine one to its right, full height.
+        const int aw = kCutRes + kFineCutRes, ah = std::max(kCutRes, kFineCutRes);
+        atlas.assign((size_t)aw * ah * 4, 0);
+        for (size_t o = 3; o < atlas.size(); o += 4) atlas[o] = 255;
+        for (int y = 0; y < kCutRes; ++y)
+            std::memcpy(&atlas[((size_t)y * aw) * 4], &m_cutPixels[((size_t)y * kCutRes) * 4], (size_t)kCutRes * 4);
+        for (int y = 0; y < kFineCutRes; ++y)
+            std::memcpy(&atlas[((size_t)y * aw + kCutRes) * 4], &m_fineCutPixels[((size_t)y * kFineCutRes) * 4], (size_t)kFineCutRes * 4);
+        td.width = aw; td.height = ah; td.initialData = atlas.data();
+    }
+    m_cutTex = dev->createTexture(td);
+}
+
 
 void VoxRenderer::rebuildCut(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
     RHI::Device* dev = RHI::device();
@@ -211,14 +411,8 @@ void VoxRenderer::rebuildCut(World::Vox::VoxWorld& world, const glm::dvec3& camR
     }
     // Alfa a 255 también fuera de la huella (lo que había antes en toda la ventana).
     for (size_t o = 3; o < m_cutPixels.size(); o += 4) m_cutPixels[o] = 255;
-    // El RHI no tiene "actualizar textura": se recrea, como hace la ventana de lagos del planeta.
-    // ⚠️ La textura vieja NO se destruye en este frame: puede estar atada a un command buffer en
-    // vuelo (Vulkan). Se aparca y se suelta en el siguiente `update`.
-    if (RHI::valid(m_cutTex)) m_cutTexOld = m_cutTex;
-    RHI::TextureDesc td; td.width = kCutRes; td.height = kCutRes; td.format = RHI::Format::RGBA8;   // R = recorte · G = lecho (m)
-    td.filter = RHI::Filter::Linear; td.wrap = RHI::Wrap::ClampToEdge; td.mipmaps = false;
-    td.initialData = m_cutPixels.data();
-    m_cutTex = dev->createTexture(td);
+    // The texture itself is made once per `update`, from both windows (`uploadCutAtlas`).
+    (void)dev;
     m_cutCenter = foot; m_cutE1 = e1; m_cutE2 = e2; m_cutUp = up;
     refreshCutSpace(camRelPlanet);
     const glm::dvec3 footRelCam = foot - camRelPlanet;
@@ -297,7 +491,7 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
                        const glm::vec3& sunDir, const glm::vec3& viewDir) {
     m_drawn = 0; m_tris = 0; m_culled = 0;
     static const bool s_off = [] { const char* e = std::getenv("HARUKA_VOX_DRAW"); return e && e[0] == '0'; }();
-    if (s_off || !RHI::valid(m_pipe) || m_ids.empty()) return;
+    if (s_off || !RHI::valid(m_pipe) || (m_ids.empty() && m_gpuBricks.empty())) return;
     RHI::Device* dev = RHI::device();
     RHI::Context* ctx = dev->beginFrame();
     if (!ctx) return;
@@ -366,6 +560,7 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
         u.texOrigin = glm::vec4((float)(o.x - std::floor(o.x / T) * T), (float)(o.y - std::floor(o.y / T) * T),
                                 (float)(o.z - std::floor(o.z / T) * T), RHI::valid(m_albedo) ? (float)m_rockLayer : -1.0f);
         u.texInfo = glm::vec4((float)T, 0.0f, 0.0f, 0.0f);
+        u.fineClip = glm::vec4(m_fineR, m_fineR > 0.0f ? 1.0f : 0.0f, 0.0f, 0.0f);   // inside the fine sphere the bricks draw
         // ⚠️ UN UBO POR CHUNK. `updateBuffer` sobre el mismo buffer entre dos draws del mismo
         // command buffer NO se versiona: todos los draws leerían la última escritura (el pase de
         // nodos, por eso, sube su UBO UNA vez antes de cualquier draw).
@@ -379,6 +574,35 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
         ctx->drawIndexed(d->indexCount, 0, 1);
         ++m_drawn; m_tris += d->indexCount / 3;
     }
+    // THE FINE BRICKS, inside the fine sphere only (the coarse meshes discard there).
+    m_fineDrawn = 0;
+    if (m_fineR > 0.0f)
+        for (const auto& [bk, b] : m_gpuBricks) {
+            if (!b.id || b.empty || b.dist - b.halfDiag > m_fineR) continue;
+            const Renderer::GpuSet* gs = Renderer::resources().gpu(b.id);
+            const VoxDraw* d = gs ? gs->metaAs<VoxDraw>() : nullptr;
+            if (!d || !d->indexCount || gs->buffers.size() < 3) continue;
+            const World::Vox::VoxChunk* c = world.get(bk.key);
+            VoxUBO u{};
+            u.rotVP = rotVP;
+            u.originRel = glm::vec4(glm::vec3(d->origin - camRelPlanet), 0.0f);
+            u.lightDir = glm::vec4(sunDir, 0.0f);
+            u.color = glm::vec4(0.42f, 0.38f, 0.34f, 1.0f);
+            u.up = glm::vec4(glm::vec3(c ? c->centerDir : glm::normalize(d->origin)), 0.0f);
+            const double T = (double)std::max(m_tiling, 0.01f);
+            const glm::dvec3 o = d->origin;
+            u.texOrigin = glm::vec4((float)(o.x - std::floor(o.x / T) * T), (float)(o.y - std::floor(o.y / T) * T),
+                                    (float)(o.z - std::floor(o.z / T) * T), RHI::valid(m_albedo) ? (float)m_rockLayer : -1.0f);
+            u.texInfo = glm::vec4((float)T, 0.0f, 0.0f, 0.0f);
+            u.fineClip = glm::vec4(m_fineR, 2.0f, 0.0f, 0.0f);
+            dev->updateBuffer(gs->buffers[2], 0, sizeof(u), &u);
+            ctx->bindUniformBuffer(5, gs->buffers[2]);
+            ctx->bindTexture(1, RHI::valid(m_albedo) ? m_albedo : m_cutTex);
+            ctx->bindVertexBuffer(gs->buffers[0]);
+            ctx->bindIndexBuffer(gs->buffers[1]);
+            ctx->drawIndexed(d->indexCount, 0, 1);
+            ++m_fineDrawn; m_tris += d->indexCount / 3;
+        }
     static bool s_first = true;
     static auto s_last = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();
