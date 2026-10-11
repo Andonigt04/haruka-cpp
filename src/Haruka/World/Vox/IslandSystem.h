@@ -34,7 +34,7 @@
  * malla, la colisión y el render son los del campo — los mismos que las cuevas y que lo que
  * construye el jugador. Una isla es "lo que sería levantar un parapeto, pero a 200 m de altura".
  */
-namespace Haruka {
+namespace Haruka::World::Vox {
 
     /** @brief Marco local de una isla: una caja centrada en su BASE, flotando sobre el relieve.
      *
@@ -127,4 +127,4 @@ namespace Haruka {
      *  de la silueta. Es lo que consulta quien quiera "el suelo de la isla" sin muestrear el campo. */
     bool islandColumnAt(const IslandSystem& sys, const glm::dvec3& dir, float& topH, float& bottomH);
 
-} // namespace Haruka
+} // namespace Haruka::World::Vox

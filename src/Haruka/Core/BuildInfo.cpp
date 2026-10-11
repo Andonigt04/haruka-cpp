@@ -2,7 +2,7 @@
 
 #include "version.h"   // GENERADO por cmake/version_gen.cmake en cada compilacion
 
-namespace Haruka {
+namespace Haruka::Core {
 
 const char* versionString() { return HARUKA_VERSION; }
 
@@ -13,4 +13,4 @@ const std::string& buildString() {
     return s;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

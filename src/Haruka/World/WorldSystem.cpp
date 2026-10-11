@@ -5,7 +5,7 @@
 #include <cmath>
 #include <numbers>
 
-namespace Haruka {
+namespace Haruka::World {
 
 // Duración de un día completo (s). Showcase: ~4 min para que se note el ciclo sin
 // marear. (Futuro: exponer como ajuste.)
@@ -18,7 +18,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
     WorldSystem::~WorldSystem() = default;
 
     void WorldSystem::init() {
-        m_planetarySystem = std::make_unique<PlanetarySystem>();
+        m_planetarySystem = std::make_unique<Planet::PlanetarySystem>();
         m_planetarySystem->init();
         
         // Aquí podrías cargar tu base de datos de planetas inicial
@@ -107,8 +107,8 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
         // Dirección al Sol (primera estrella) y a la Luna (objeto de escena).
         const CelestialBody* sun = nullptr;
-        for (const auto& b : m_bodies) { if (b.type == ObjectType::STAR) { sun = &b; break; } }
-        std::shared_ptr<SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
+        for (const auto& b : m_bodies) { if (b.type == Tools::ObjectType::STAR) { sun = &b; break; } }
+        std::shared_ptr<Core::Scene::SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
         if (!sun || !moon) { m_tideFactor = 1.0f; return; }
 
         glm::dvec3 sunD  = sun->worldPos - pc;
@@ -136,10 +136,10 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
             return weight * (3.0 * c * c - 1.0) * 0.5;
         };
         double h = 0.0;
-        std::shared_ptr<SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
+        std::shared_ptr<Core::Scene::SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
         if (moon) h += bulge(glm::dvec3(moon->position), 1.0);
         const CelestialBody* sun = nullptr;
-        for (const auto& b : m_bodies) { if (b.type == ObjectType::STAR) { sun = &b; break; } }
+        for (const auto& b : m_bodies) { if (b.type == Tools::ObjectType::STAR) { sun = &b; break; } }
         if (sun) h += bulge(sun->worldPos, 0.46);
 
         const double kTideAmplitudeM = 0.7; // amplitud suave para que no rompa la costa
@@ -174,7 +174,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
         // Localiza el Sol (primera estrella). Guarda su offset inicial al planeta.
         CelestialBody* sun = nullptr;
-        for (auto& b : m_bodies) { if (b.type == ObjectType::STAR) { sun = &b; break; } }
+        for (auto& b : m_bodies) { if (b.type == Tools::ObjectType::STAR) { sun = &b; break; } }
         if (!sun) return;
         if (!m_celestialInit) {
             // Offset inicial desde el OBJETO DE ESCENA (absoluto, nunca desplazado por
@@ -227,9 +227,9 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         }
     }
 
-    void WorldSystem::syncFromScene(const SceneManager& scene) {
+    void WorldSystem::syncFromScene(const Core::Scene::SceneManager& scene) {
         // Guardamos la escena para poder mover el Sol/Luna VISIBLES en updateDayNight.
-        m_scene = const_cast<SceneManager*>(&scene);
+        m_scene = const_cast<Core::Scene::SceneManager*>(&scene);
         m_bodies.clear();
         for (const auto& objPtr : scene.getAllObjects()) {
             if (!objPtr) continue;
@@ -239,7 +239,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
 
             CelestialBody body;
             body.name     = objPtr->name;
-            body.type     = ObjectType::STAR;
+            body.type     = Tools::ObjectType::STAR;
             body.worldPos = glm::dvec3(objPtr->position);
             body.radius   = std::max({(float)objPtr->scale.x, (float)objPtr->scale.y, (float)objPtr->scale.z});
             body.mass     = 1.989e30; // default solar mass
@@ -254,7 +254,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         glm::dvec3 sum(0.0);
         bool any = false;
         for (const auto& body : m_bodies) {
-            if (body.type != ObjectType::STAR) continue;
+            if (body.type != Tools::ObjectType::STAR) continue;
             glm::dvec3 delta = body.worldPos - observerPos;
             double dist2 = glm::dot(delta, delta);
             if (dist2 < 1e-12) continue;
@@ -271,10 +271,10 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
     }
 
     bool WorldSystem::getMoonLight(const glm::dvec3& observer, glm::vec3& outDir, float& outIntensity) const {
-        std::shared_ptr<SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
+        std::shared_ptr<Core::Scene::SceneObject> moon = m_scene ? m_scene->getObject("Moon") : nullptr;
         if (!moon) return false;
         const CelestialBody* sun = nullptr;
-        for (const auto& b : m_bodies) { if (b.type == ObjectType::STAR) { sun = &b; break; } }
+        for (const auto& b : m_bodies) { if (b.type == Tools::ObjectType::STAR) { sun = &b; break; } }
 
         glm::dvec3 moonPos = glm::dvec3(moon->position);
         glm::dvec3 toMoon  = moonPos - observer;
@@ -300,7 +300,7 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         glm::dvec3 colorSum(0.0);
         double weightSum = 0.0;
         for (const auto& body : m_bodies) {
-            if (body.type != ObjectType::STAR) continue;
+            if (body.type != Tools::ObjectType::STAR) continue;
             glm::dvec3 delta = body.worldPos - observerPos;
             double dist2 = glm::dot(delta, delta);
             if (dist2 < 1e-12) continue;
@@ -318,4 +318,4 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         // y el resultado lo bajamos a float para la GPU.
         return glm::vec3(worldPos - m_worldOrigin);
     }
-}
+} // namespace Haruka::World

@@ -11,9 +11,9 @@
 #include "Haruka/Renderer/SimpleMesh.h"
 
 namespace Haruka { namespace RHI { class Context; } }
-namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
+namespace Haruka { namespace Renderer { class Shader; } }
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Simple mesh renderer with source-data cache.
@@ -35,14 +35,14 @@ public:
     bool isResident() const { return mesh != nullptr; }
     
     /** @brief Issues a draw call when a resident mesh exists. */
-    void render(Shader& shader) const;
+    void render(Renderer::Shader& shader) const;
     /** @brief Ruta PSO/Context (el pipeline lo bindea el llamador). Ver Mesh::drawRHI. */
     void renderRHI(Haruka::RHI::Context& ctx) const;
     /** @brief Inspector ImGui de rutas auxiliares. */
     void renderInspector();
     
     /** @brief Returns shared resident mesh pointer. */
-    std::shared_ptr<SimpleMesh> getMesh() const { return mesh; }
+    std::shared_ptr<Renderer::Mesh> getMesh() const { return mesh; }
     /** @brief Cached vertex count of the last assigned mesh. */
     int getVertexCount() const { return cachedVertexCount; }
     /** @brief Cached triangle count of the last assigned mesh. */
@@ -61,7 +61,7 @@ public:
     const std::vector<unsigned int>& getSourceIndices() const { return sourceIndices; }
     
 private:
-    std::shared_ptr<SimpleMesh> mesh;
+    std::shared_ptr<Renderer::Mesh> mesh;
     std::string meshPath;
     std::string materialPath;
     int cachedVertexCount = 0;
@@ -72,5 +72,5 @@ private:
     std::vector<unsigned int> sourceIndices;
 };
 
-} // namespace Haruka
-using Haruka::MeshRendererComponent;   // back-compat alias (migration)
+} // namespace Haruka::Core::Components
+   // back-compat alias (migration)

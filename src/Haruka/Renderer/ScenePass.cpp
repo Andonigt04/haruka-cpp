@@ -23,11 +23,11 @@
 
 namespace Haruka::Renderer {
 
-using AppInternal::getTransformMatrix;
-using AppInternal::getCharacterTransform;
-using AppInternal::getOrLoadModelCached;
-using AppInternal::getPrimitiveMesh;
-using AppInternal::getOrLoadMaterialTexture;
+using Haruka::Core::AppInternal::getTransformMatrix;
+using Haruka::Core::AppInternal::getCharacterTransform;
+using Haruka::Core::AppInternal::getOrLoadModelCached;
+using Haruka::Core::AppInternal::getPrimitiveMesh;
+using Haruka::Core::AppInternal::getOrLoadMaterialTexture;
 
 namespace {
 
@@ -50,7 +50,7 @@ struct ConstGroupMaterial {
 
 // Resuelve el material de un objeto instanciado → texturas cargadas + escalares + máscara.
 // Sin MaterialComponent (o sin slots) → mascara 0 (el aspecto de siempre por color de instancia).
-static ConstGroupMaterial resolveInstancedMaterial(const Haruka::MaterialComponent* mat) {
+static ConstGroupMaterial resolveInstancedMaterial(const Core::Components::MaterialComponent* mat) {
     ConstGroupMaterial m;
     if (!mat) return m;
     m.metallicS = mat->metallic; m.roughnessS = mat->roughness; m.aoS = mat->ao;
@@ -58,7 +58,7 @@ static ConstGroupMaterial resolveInstancedMaterial(const Haruka::MaterialCompone
         (void)unit;
         auto it = mat->textures.find(key);
         if (it == mat->textures.end() || it->second.empty()) return;
-        Haruka::RHI::TextureHandle tex = AppInternal::getOrLoadMaterialTexture(it->second);
+        Haruka::RHI::TextureHandle tex = Haruka::Core::AppInternal::getOrLoadMaterialTexture(it->second);
         if (!Haruka::RHI::valid(tex)) return;
         out = tex; m.mask |= bit;
     };
@@ -72,7 +72,7 @@ static ConstGroupMaterial resolveInstancedMaterial(const Haruka::MaterialCompone
 
 // Clave de material para el agrupamiento: las rutas de texturas + los escalares. Dos piezas con la
 // misma malla y la MISMA clave comparten un draw (mismo bind de texturas y misma máscara).
-static std::string instancedMaterialKey(const Haruka::MaterialComponent* mat) {
+static std::string instancedMaterialKey(const Core::Components::MaterialComponent* mat) {
     std::string k;
     if (!mat) return k;
     static const char* kSlots[] = {"albedo", "normal", "metallic", "roughness", "ao"};
@@ -92,7 +92,7 @@ struct ConstInstGroup {
     std::string  meshKey;
     int          primitive = -1;
     ConstGroupMaterial mat;
-    std::vector<Haruka::InstanceDataFloat> instances;
+    std::vector<InstanceDataFloat> instances;
 };
 
 } // namespace
@@ -162,7 +162,7 @@ void ScenePass::begin(RHI::Context* ctx, const Frame& f, bool useFinalLook) {
     }
 }
 
-void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector<Haruka::RenderCommand>& queue, DrawStats& st) {
+void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector<Core::Scene::RenderCommand>& queue, DrawStats& st) {
     RHI::Device* dev = RHI::device();
     if (!dev || !ctx || !f.camera) return;
     // Cull face handled by the pipeline
@@ -213,14 +213,14 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
 
         // El albedo del material TIÑE el color de la pieza (misma regla que el pase de escena:
         // `baseColor × mat.albedo`). El material entero (texturas + escalares) viaja con el grupo.
-        const Haruka::MaterialComponent* mat = obj->material ? obj->material.get() : nullptr;
+        const Core::Components::MaterialComponent* mat = obj->material ? obj->material.get() : nullptr;
         const glm::vec3 instColor = baseColor * (mat ? mat->albedo : glm::vec3(1.0f));
 
         // Pieza de construcción → al pase INSTANCIADO (no draw individual). Mismo model/color que
         // llevaría por-objeto, así se ve idéntica; el cull de arriba ya se aplicó.
-        if (command.instanced && command.kind == Haruka::RenderKind::Model && !obj->modelPath.empty()) {
-            Haruka::InstanceDataFloat inst;
-            inst.model = AppInternal::getTransformMatrix(*obj, f.camera->position);
+        if (command.instanced && command.kind == Core::Scene::RenderKind::Model && !obj->modelPath.empty()) {
+            InstanceDataFloat inst;
+            inst.model = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
             inst.color = glm::vec4(instColor, 1.0f);
             inst.scale = glm::vec3(obj->scale);
             const std::string key = obj->modelPath + "|" + instancedMaterialKey(mat);
@@ -235,9 +235,9 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         // Primitiva de construcción/edificio → al mismo pase instanciado, agrupada por (primitiva,
         // material): un edificio tejido son cientos o miles de cubos —las tablas/sillares del muro—
         // y por-objeto serían cientos o miles de draws.
-        if (command.instanced && command.kind == Haruka::RenderKind::Primitive) {
-            Haruka::InstanceDataFloat inst;
-            inst.model = AppInternal::getTransformMatrix(*obj, f.camera->position);
+        if (command.instanced && command.kind == Core::Scene::RenderKind::Primitive) {
+            InstanceDataFloat inst;
+            inst.model = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
             inst.color = glm::vec4(instColor, 1.0f);
             inst.scale = glm::vec3(obj->scale);
             const std::string key = std::string("prim:") + std::to_string((int)command.primitive) +
@@ -252,13 +252,13 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         }
 
         PerObjectUBOData objData{};
-        if (command.kind == Haruka::RenderKind::Primitive && command.primitive == Haruka::PrimitiveType::CHARACTER) {
+        if (command.kind == Core::Scene::RenderKind::Primitive && command.primitive == Tools::PrimitiveType::CHARACTER) {
             glm::dvec3 pc(0.0); double pr = 0.0;
             const glm::dvec3 upC = (f.planets && f.planets->getActivePlanet(pc, pr) && glm::length(obj->position - pc) > 1e-9)
                                  ? glm::normalize(obj->position - pc) : glm::dvec3(0.0, 1.0, 0.0);
-            objData.model = AppInternal::getCharacterTransform(*obj, f.camera->position, upC);
+            objData.model = Haruka::Core::AppInternal::getCharacterTransform(*obj, f.camera->position, upC);
         } else {
-            objData.model                    = AppInternal::getTransformMatrix(*obj, f.camera->position);
+            objData.model                    = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
         }
         objData.baseColorAndPlanetRadius = glm::vec4(baseColor, 1.0f);
         // w = 0: normal, 1: procedural terrain, 2: emissive star (no diffuse shading)
@@ -271,7 +271,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         // Los slots del MaterialComponent son los MISMOS que hornea el editor de node graph
         // del IDE, así que un grafo bakeado se ve aquí sin más paso intermedio.
         if (obj->material) {
-            const Haruka::MaterialComponent& mat = *obj->material;
+            const Core::Components::MaterialComponent& mat = *obj->material;
             // El color del material TIÑE el del objeto: un material no debe borrar el tinte
             // por objeto (dos props del mismo material se distinguen por su color).
             objData.baseColorAndPlanetRadius = glm::vec4(baseColor * mat.albedo, 1.0f);
@@ -281,7 +281,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             auto bindSlot = [&](const char* key, uint32_t unit, int bit) {
                 auto it = mat.textures.find(key);
                 if (it == mat.textures.end() || it->second.empty()) return;
-                RHI::TextureHandle tex = AppInternal::getOrLoadMaterialTexture(it->second);
+                RHI::TextureHandle tex = Haruka::Core::AppInternal::getOrLoadMaterialTexture(it->second);
                 if (!RHI::valid(tex)) return;
                 ctx->bindTexture(unit, tex);
                 texMask |= bit;
@@ -298,8 +298,8 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         dev->updateBuffer(m_perObjectUBO, 0, sizeof(PerObjectUBOData), &objData);
 
         switch (command.kind) {
-            case Haruka::RenderKind::Model: {
-                Model* model = AppInternal::getOrLoadModelCached(obj->modelPath);
+            case Core::Scene::RenderKind::Model: {
+                Model* model = Haruka::Core::AppInternal::getOrLoadModelCached(obj->modelPath);
                 if (!model) break;
                 if (!RHI::valid(m_scenePSO)) break;
                 // La carga PEREZOSA de arriba crea mallas, y Mesh::setupMesh() deja el VAO a 0
@@ -316,7 +316,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 st.totalTriangles += model->getTriangleCount();
                 break;
             }
-            case Haruka::RenderKind::MeshComponent: {
+            case Core::Scene::RenderKind::MeshComponent: {
                 if (!obj->meshRenderer || !obj->meshRenderer->isResident()) break;
                 if (!RHI::valid(m_scenePSO)) break;
                 ctx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
@@ -329,8 +329,8 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 st.totalTriangles += obj->meshRenderer->getResidentTriangleCount();
                 break;
             }
-            case Haruka::RenderKind::Primitive: {
-                SimpleMesh* primitiveMesh = AppInternal::getPrimitiveMesh(command.primitive);
+            case Core::Scene::RenderKind::Primitive: {
+                SimpleMesh* primitiveMesh = Haruka::Core::AppInternal::getPrimitiveMesh(command.primitive);
                 if (!primitiveMesh) break;
                 if (!RHI::valid(m_scenePSO)) break;
                 ctx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
@@ -343,7 +343,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 st.totalTriangles += primitiveMesh->getTriangleCount();
                 break;
             }
-            case Haruka::RenderKind::None:
+            case Core::Scene::RenderKind::None:
                 break;
         }
     }
@@ -386,7 +386,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             // tejido puede traer miles de piezas → se dibuja POR LOTES del tamaño del buffer, así
             // no desaparece ninguna. `fill` sube el lote [off, off+n) y el llamador dispara el draw.
             const std::size_t cap = (std::size_t)std::max(1, m_instancing->getMaxInstances());
-            auto fillChunk = [&](const std::vector<Haruka::InstanceDataFloat>& src, std::size_t off) {
+            auto fillChunk = [&](const std::vector<InstanceDataFloat>& src, std::size_t off) {
                 const std::size_t n = std::min(cap, src.size() - off);
                 m_instancing->clear();
                 for (std::size_t i = 0; i < n; ++i)
@@ -415,9 +415,9 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 ConstInstGroup& g = kv.second;
                 if (g.instances.empty()) continue;
                 // Malla del modelo (pieza de obra) o primitiva de edificio (cubos tejidos).
-                Model* model = g.primitive < 0 ? AppInternal::getOrLoadModelCached(g.meshKey) : nullptr;
+                Model* model = g.primitive < 0 ? Haruka::Core::AppInternal::getOrLoadModelCached(g.meshKey) : nullptr;
                 SimpleMesh* pm = g.primitive >= 0
-                                 ? AppInternal::getPrimitiveMesh((Haruka::PrimitiveType)g.primitive) : nullptr;
+                                 ? Haruka::Core::AppInternal::getPrimitiveMesh((Tools::PrimitiveType)g.primitive) : nullptr;
                 if (g.primitive < 0 && !model) continue;
                 if (g.primitive >= 0 && (!pm || pm->getIndexCount() == 0 ||
                                          !RHI::valid(pm->vertexBuffer()) || !RHI::valid(pm->indexBuffer()))) continue;

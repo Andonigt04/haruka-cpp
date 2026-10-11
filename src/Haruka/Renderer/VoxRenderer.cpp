@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <string>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 bool VoxRenderer::ensurePipeline() {
     if (m_failed) return false;
@@ -42,18 +42,18 @@ bool VoxRenderer::ensurePipeline() {
     return true;
 }
 
-void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
+void VoxRenderer::update(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
     if (!ensurePipeline()) return;
     RHI::Device* dev = RHI::device();
     if (RHI::valid(m_cutTexOld)) { dev->destroy(m_cutTexOld); m_cutTexOld = {}; }
 
     // ── Mallas: los sucios, acotado por frame ──────────────────────────────────────────────────
     int remeshed = 0;
-    std::vector<VoxKey> keys = world.loadedKeys();
+    std::vector<World::Vox::VoxKey> keys = world.loadedKeys();
     const auto tRemesh0 = std::chrono::high_resolution_clock::now();
     { HARUKA_PROFILE("vox.mesh");
-    for (const VoxKey& k : keys) {
-        VoxChunk* c = world.get(k);
+    for (const World::Vox::VoxKey& k : keys) {
+        World::Vox::VoxChunk* c = world.get(k);
         if (!c || !c->dirty) continue;
         // Presupuesto por TIEMPO, no por número: un chunk todo roca sale en microsegundos y uno
         // con isla en ~2 ms; con "3 por frame" una isla de 20 chunks tardaba 7 s en aparecer (y el
@@ -62,8 +62,8 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
         if (remeshed >= kMaxRemeshPerFrame || (remeshed > 0 && ms > kRemeshBudgetMs)) break;
         // La malla se construye DIRECTAMENTE en el objeto que se publica: una vez publicado no se toca
         // (lo leen la subida y la física), así que todo lo de abajo solo lo lee.
-        auto shared = std::make_shared<CaveMesh>();
-        CaveMesh& mesh = *shared;
+        auto shared = std::make_shared<World::Vox::CaveMesh>();
+        World::Vox::CaveMesh& mesh = *shared;
         const auto tB0 = std::chrono::high_resolution_clock::now();
         world.buildMesh(k, mesh);
         const double buildMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - tB0).count();
@@ -80,7 +80,7 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
         // La copia de CPU se queda (`keepCpu`): la física la lee por revisión.
         Renderer::ResourceId& id = m_ids[k];
         if (!id) id = Renderer::resources().create("vox", true);
-        Renderer::resources().publish<CaveMesh>(id, shared, &VoxRenderer::uploadMesh);
+        Renderer::resources().publish<World::Vox::CaveMesh>(id, shared, &VoxRenderer::uploadMesh);
         if (mesh.empty()) continue;   // todo roca o todo aire: nada que dibujar, y no cuesta
         HARUKA_LOGDIAG("Vox", "malla chunk (%d,%d,%d,%d): %zu vertices · %zu triangulos · %.2f ms",
                     k.face, k.i, k.j, k.k, mesh.positions.size(), mesh.triangleCount(), buildMs);
@@ -126,7 +126,7 @@ void VoxRenderer::update(VoxWorld& world, const glm::dvec3& camRelPlanet, double
     }
 }
 
-void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
+void VoxRenderer::rebuildCut(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM) {
     RHI::Device* dev = RHI::device();
     const double camR = glm::length(camRelPlanet);
     const glm::dvec3 up = camRelPlanet / camR;
@@ -153,13 +153,13 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
         ty = (glm::dot(q, e2) / (2.0 * kCutHalfM) + 0.5) * (kCutRes - 1);
         return true;
     };
-    for (const VoxKey& k : world.loadedKeys()) {
-        const VoxChunk* c = world.get(k);
+    for (const World::Vox::VoxKey& k : world.loadedKeys()) {
+        const World::Vox::VoxChunk* c = world.get(k);
         if (!c || c->d.empty()) continue;
-        if (glm::dot(c->centerDir, up) < std::cos((kCutHalfM * 1.5 + kVoxChunkM) / world.planetRadius())) continue;
+        if (glm::dot(c->centerDir, up) < std::cos((kCutHalfM * 1.5 + World::Vox::kVoxChunkM) / world.planetRadius())) continue;
         double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
         bool ok = true;
-        const double N = (double)(kVoxN - 1);
+        const double N = (double)(World::Vox::kVoxN - 1);
         for (int cy = 0; cy <= 1 && ok; ++cy)
             for (int cx = 0; cx <= 1 && ok; ++cx) {
                 double tx, ty;
@@ -186,7 +186,7 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
             // a sus 26 vecinos) apagaba el recorte hasta que el remallado los alcanzaba: el suelo
             // original reaparecía un momento sobre el agujero ("la malla original fantasma").
             // Mientras se remalla, la malla vieja sigue dibujándose, así que el recorte puede quedarse.
-            const VoxKey sk = world.keyAt(dir * (world.planetRadius() + (double)(world.elevAt(dir)) - 3.0));
+            const World::Vox::VoxKey sk = world.keyAt(dir * (world.planetRadius() + (double)(world.elevAt(dir)) - 3.0));
             float cut = 0.0f, depth = 0.0f;
             if (world.get(sk) && m_ids.count(sk)) {
                 cut = world.surfaceCut(dir);
@@ -207,7 +207,7 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
             m_cutPixels[o + 2] = 0; m_cutPixels[o + 3] = 255;
             if (v > 127) ++abiertos;
         }
-    Haruka::Profiler::get().add("vox.cut.depth", depthMs);
+    Tools::Profiler::get().add("vox.cut.depth", depthMs);
     }
     // Alfa a 255 también fuera de la huella (lo que había antes en toda la ventana).
     for (size_t o = 3; o < m_cutPixels.size(); o += 4) m_cutPixels[o] = 255;
@@ -224,7 +224,7 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
     const glm::dvec3 footRelCam = foot - camRelPlanet;
     m_cutVersion = world.version();
     if (const char* dump = std::getenv("HARUKA_VOX_CUT_PNG")) {   // lo que la CPU cree que sube
-        writePNG(dump, kCutRes, kCutRes, 4, m_cutPixels.data());
+        IO::writePNG(dump, kCutRes, kCutRes, 4, m_cutPixels.data());
     }
     m_cutReady = true;
     // DIAG DEL BUG "LA HIERBA TAPA LA BOCA": la primera ventana con boca (abiertos>0) se volca
@@ -233,7 +233,7 @@ void VoxRenderer::rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, do
     static bool s_hadOpen = false;
     if (abiertos > 0 && !s_hadOpen) {
         s_hadOpen = true;
-        writePNG("voxcut_first.png", kCutRes, kCutRes, 4, m_cutPixels.data());
+        IO::writePNG("voxcut_first.png", kCutRes, kCutRes, 4, m_cutPixels.data());
     }
     static uint64_t s_log = 0;
     if (abiertos > 0 && (s_log++ % 30) == 0) {
@@ -266,7 +266,7 @@ void VoxRenderer::refreshCutSpace(const glm::dvec3& camRelPlanet) {
 }
 
 Renderer::GpuSet VoxRenderer::uploadMesh(const void* cpu) {
-    const CaveMesh& mesh = *static_cast<const CaveMesh*>(cpu);
+    const World::Vox::CaveMesh& mesh = *static_cast<const World::Vox::CaveMesh*>(cpu);
     Renderer::GpuSet set;
     if (mesh.empty()) return set;   // nada que dibujar: sin buffers (la física sí la ve, vacía)
     RHI::Device* dev = RHI::device();
@@ -286,14 +286,14 @@ Renderer::GpuSet VoxRenderer::uploadMesh(const void* cpu) {
 }
 
 void VoxRenderer::forEachCpuMesh(
-        const std::function<void(const VoxKey&, const CaveMesh&, uint64_t revision)>& fn) const {
+        const std::function<void(const World::Vox::VoxKey&, const World::Vox::CaveMesh&, uint64_t revision)>& fn) const {
     for (const auto& [key, id] : m_ids) {
         uint64_t rev = 0;
-        if (auto m = Renderer::resources().cpu<CaveMesh>(id, &rev)) fn(key, *m, rev);
+        if (auto m = Renderer::resources().cpu<World::Vox::CaveMesh>(id, &rev)) fn(key, *m, rev);
     }
 }
 
-void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm::dvec3& camRelPlanet,
+void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP, const glm::dvec3& camRelPlanet,
                        const glm::vec3& sunDir, const glm::vec3& viewDir) {
     m_drawn = 0; m_tris = 0; m_culled = 0;
     static const bool s_off = [] { const char* e = std::getenv("HARUKA_VOX_DRAW"); return e && e[0] == '0'; }();
@@ -322,13 +322,13 @@ void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm:
         const VoxDraw* d = gs ? gs->metaAs<VoxDraw>() : nullptr;
         if (!d || !d->indexCount || gs->buffers.size() < 3) continue;   // aún sin subir, o vacía
         const RHI::BufferHandle vb = gs->buffers[0], ib = gs->buffers[1], ubo = gs->buffers[2];
-        const VoxChunk* c = world.get(key);
+        const World::Vox::VoxChunk* c = world.get(key);
         if (!c) continue;
         {
-            const glm::vec3 centerRel = glm::vec3(c->centerDir * (c->baseR + 0.5 * kVoxChunkM) - camRelPlanet);
+            const glm::vec3 centerRel = glm::vec3(c->centerDir * (c->baseR + 0.5 * World::Vox::kVoxChunkM) - camRelPlanet);
             // ⚠️ ×1,3 de margen: el chunk no es una esfera ni un cubo (es un trozo de casquete), y con
             // el radio justo la contraprueba de abajo cazó descartes con una esquina en pantalla.
-            const float radius = 1.3f * 0.5f * std::sqrt(c->sideU * c->sideU + c->sideV * c->sideV + (float)(kVoxChunkM * kVoxChunkM)) + 4.0f;
+            const float radius = 1.3f * 0.5f * std::sqrt(c->sideU * c->sideU + c->sideV * c->sideV + (float)(World::Vox::kVoxChunkM * World::Vox::kVoxChunkM)) + 4.0f;
             static const bool s_noCull = [] { const char* e = std::getenv("HARUKA_VOX_NOCULL"); return e && e[0] == '1'; }();
             bool out = false;
             for (const auto& p : planes)
@@ -341,7 +341,7 @@ void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm:
                 for (int cz = 0; cz <= 1 && !esquinaDentro; ++cz)
                     for (int cy = 0; cy <= 1 && !esquinaDentro; ++cy)
                         for (int cx = 0; cx <= 1 && !esquinaDentro; ++cx) {
-                            const double N = (double)(kVoxN - 1);
+                            const double N = (double)(World::Vox::kVoxN - 1);
                             const glm::vec3 rel = glm::vec3(c->worldOfGrid(cx * N, cy * N, cz * N) - camRelPlanet);
                             const glm::vec4 q = rotVP * glm::vec4(rel, 1.0f);
                             if (q.w > 0.0f && std::fabs(q.x) <= q.w && std::fabs(q.y) <= q.w) esquinaDentro = true;
@@ -385,8 +385,8 @@ void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm:
     if ((m_drawn > 0 && s_first) || std::chrono::duration<double>(now - s_last).count() > 5.0) {
         s_first = m_drawn == 0; s_last = now;
         size_t sucios = 0, sinMalla = 0;
-        for (const VoxKey& k : world.loadedKeys()) {
-            const VoxChunk* c = world.get(k);
+        for (const World::Vox::VoxKey& k : world.loadedKeys()) {
+            const World::Vox::VoxChunk* c = world.get(k);
             if (c && c->dirty) ++sucios;
             if (!m_ids.count(k)) ++sinMalla;
         }
@@ -396,4 +396,4 @@ void VoxRenderer::draw(const VoxWorld& world, const glm::mat4& rotVP, const glm:
     }
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

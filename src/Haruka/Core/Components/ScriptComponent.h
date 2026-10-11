@@ -6,7 +6,7 @@
 #include "Haruka/Core/Component.h"
 #include <string>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Componente que referencia un script asociado al objeto.
@@ -24,4 +24,4 @@ public:
     void renderInspector() override;
 };
 
-}
+} // namespace Haruka::Core::Components

@@ -1,7 +1,7 @@
 #include "Inventory.h"
 #include <algorithm>
 
-namespace Haruka {
+namespace Haruka::Game::Inventory {
 
 // Sin política instalada apila solo lo EXACTAMENTE igual: es lo que hacía el sistema de siempre y
 // es la opción segura. El juego instala su criterio de bandas en el arranque.
@@ -95,4 +95,4 @@ void Inventory::clear() {
     for (auto& s : m_slots) s.clear();
 }
 
-} // namespace Haruka
+} // namespace Haruka::Game::Inventory

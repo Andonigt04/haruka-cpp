@@ -19,7 +19,7 @@
 #include <string>
 #include <cstdint>
 
-namespace Haruka::codec {
+namespace Haruka::IO::codec {
 
 using Bytes = std::vector<uint8_t>;
 
@@ -33,4 +33,4 @@ bool decode(const Bytes& blob, const std::string& key, Bytes& out);
 Bytes encodeString(const std::string& text, const std::string& key);
 bool  decodeString(const Bytes& blob, const std::string& key, std::string& out);
 
-} // namespace Haruka::codec
+} // namespace Haruka::IO::codec

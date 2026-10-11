@@ -31,7 +31,7 @@
 
 #include "Haruka/World/Terrain/TerrainNode.h"
 
-namespace Haruka { namespace Terrain {
+namespace Haruka::World { namespace Terrain {
 
 /**
  * @brief ¿Son válidos los índices de este nodo? En el nivel L el rango es [0, 2^L).
@@ -558,4 +558,4 @@ inline std::unordered_map<uint64_t, uint32_t> nodeDrawnIndex(const std::vector<N
     return m;
 }
 
-}} // namespace Haruka::Terrain
+}} // namespace Haruka::World

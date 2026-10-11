@@ -11,16 +11,16 @@
 #include "stb_image.h"
 
 namespace {
-    void freePatchBuffers(Haruka::TerrainPatch& p) {
+    void freePatchBuffers(Haruka::Renderer::TerrainPatch& p) {
         using namespace Haruka;
-        if (RHI::valid(p.hVbo)) {
-            if (RHI::Device* dev = RHI::device()) { dev->destroy(p.hVbo); dev->destroy(p.hEbo); }
+        if (Haruka::RHI::valid(p.hVbo)) {
+            if (Haruka::RHI::Device* dev = Haruka::RHI::device()) { dev->destroy(p.hVbo); dev->destroy(p.hEbo); }
             p.hVbo = p.hEbo = {};
         }
     }
 }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 Terrain::Terrain(int size, float scale)
     : size(size), scale(scale) {
@@ -44,12 +44,12 @@ void Terrain::loadHeightmap(const std::string& filepath) {
     unsigned char* data = stbi_load(filepath.c_str(), &width, &height, &channels, 1);
 
     if (!data) {
-        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load heightmap: " + filepath);
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load heightmap: " + filepath);
         return;
     }
 
     if (width != size || height != size) {
-        HARUKA_RENDERER_ERROR(ErrorCode::ASSET_FORMAT_INVALID,
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::ASSET_FORMAT_INVALID,
             "Heightmap size mismatch. Expected " + std::to_string(size) + "x" + std::to_string(size)
             + ", got " + std::to_string(width) + "x" + std::to_string(height));
     }
@@ -353,4 +353,4 @@ glm::vec3 Terrain::getNormal(float x, float z) const {
     return normal;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

@@ -2,7 +2,7 @@
 #include <string>
 #include <glm/glm.hpp>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World { namespace Planet {
 
 // ===========================================================================
 // Biomes layer — optional
@@ -289,4 +289,4 @@ inline glm::vec3 BiomesOutput::color(Biome b) const {
     }
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World

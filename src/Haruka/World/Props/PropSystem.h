@@ -28,11 +28,11 @@
 #include "Haruka/World/Props/PropScatter.h"   // ScatteredProp/PropScatterStats: el worker async del scatter
 #include "Haruka/Renderer/GPUInstancing.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class WorldSystem;
-                   namespace Physics { class PhysicsEngine; } namespace RHI { class Context; }
-                   namespace Planet { class TerrestrialPlanet; } }
+namespace Haruka { namespace Core { class Camera; } namespace Physics { class PhysicsEngine; } namespace RHI { class Context; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::World { class WorldSystem; namespace Planet { class TerrestrialPlanet; } }
 
-namespace Haruka::World {
+namespace Haruka::World::Props {
 
 /** @brief Snapshot de debug de UNA instancia del scatter, para la jerarquia del editor. */
 struct PropInstanceDebug {
@@ -86,7 +86,7 @@ public:
     /// Lo que el pase de color necesita del frame y no es suyo.
     struct DrawFrame {
         Core::Camera*            camera    = nullptr;
-        PlanetarySystem*         planets   = nullptr;
+        Planet::PlanetarySystem*         planets   = nullptr;
         const WorldSystem*       world     = nullptr;   ///< viento (nullptr = calma)
         RHI::BufferHandle        perFrameUBO{};         ///< view/proj + luces (binding 0)
         RHI::PipelineHandle      scenePSO{};            ///< se restaura al acabar (el cierre lo asume)
@@ -109,19 +109,19 @@ public:
     void beginFrame() { if (m_instancing) m_instancing->beginFrame(); }
     /** @brief Re-siembra por demanda (cuando la camara cruza un tramo o cambia el campo) y
      *  actualiza los colliders. ANTES de abrir ningun render pass. */
-    void refreshScatter(Core::Camera* camera, PlanetarySystem* planets, Physics::PhysicsEngine* physics);
+    void refreshScatter(Core::Camera* camera, Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics);
     /** @brief Pase instanciado de color. Dentro del render pass de escena. */
     void draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats);
     /** @brief Solo profundidad, en el mapa de sombras (culling por la caja de la LUZ). */
     void drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Core::Camera* camera,
-                     PlanetarySystem* planets);
+                     Planet::PlanetarySystem* planets);
 
     // ── API del juego ──────────────────────────────────────────────────────────────────────────
     /** @brief Rompe la parte de prop mas cercana al golpe (esfera `center`+`radius`), si la hay.
      *  Marca el estado en el registro (tronco → `Destroyed`, rama → bit en `breakMask`) y REGENERA
      *  los colliders. La dispara el JUEGO (el hachazo), no el motor. */
     Hit breakAt(const glm::dvec3& center, double radius, Core::Camera* camera,
-                PlanetarySystem* planets, Physics::PhysicsEngine* physics);
+                Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics);
     /** @brief Una parte de prop cercana, SIN romperla: para quien decide si romper por su cuenta (una
      *  criatura enorme lo hace por energía, no por un golpe de hacha). */
     struct NearPart {
@@ -129,16 +129,16 @@ public:
         std::string prototype;
         int         partId = -1;
         bool        trunk = false;
-        Haruka::Planet::PropWorldOBB box;
+        PropWorldOBB box;
     };
     /** @brief Las partes rompibles de los props vivos a menos de `radius` de `center`. UNA pasada por
      *  el registro: para no recorrerlo una vez por cada pieza que pregunta. */
-    std::vector<NearPart> partsNear(const glm::dvec3& center, double radius, PlanetarySystem* planets) const;
+    std::vector<NearPart> partsNear(const glm::dvec3& center, double radius, Planet::PlanetarySystem* planets) const;
     /** @brief Rompe UNA parte (tronco = el prop entero) SIN rehacer los colliders: quien rompa varias
      *  en un frame los rehace una vez al final con `refreshCollidersAround`. false si ya estaba rota. */
     bool breakPart(uint32_t seed, int partId, bool trunk, const glm::dvec3& pos, const std::string& prototype,
-                   double rBottomM, PlanetarySystem* planets);
-    void refreshCollidersAround(Core::Camera* camera, PlanetarySystem* planets, Physics::PhysicsEngine* physics);
+                   double rBottomM, Planet::PlanetarySystem* planets);
+    void refreshCollidersAround(Core::Camera* camera, Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics);
     /** @brief Todo lo que el jugador ha roto, para guardarlo en la partida.
      *
      *  ⚠️ Vive FUERA del registro de instancias a proposito. El scatter regenera las instancias
@@ -185,7 +185,7 @@ public:
     /// depuracion dibuja EXACTAMENTE la geometria que usa la fisica.
     const std::unordered_map<int, std::vector<int>>& meshShapes() const { return m_meshShapes; }
     const std::unordered_map<int, std::vector<std::vector<glm::vec3>>>& meshCpu() const { return m_meshCpu; }
-    size_t hostBytes() const { return m_gpu.size() * sizeof(InstanceDataFloat) + (m_instancing ? m_instancing->hostBytes() : 0); }
+    size_t hostBytes() const { return m_gpu.size() * sizeof(Renderer::InstanceDataFloat) + (m_instancing ? m_instancing->hostBytes() : 0); }
 
 private:
     // Cache GPU de prototipos: por nombre → malla (VBO/EBO por nivel) + material PER-PIXEL.
@@ -211,20 +211,20 @@ private:
     /// la mitad de la re-siembra queda fuera del hilo de render. El filtro de boca NO va aquí:
     /// `surfaceCut` lee el vox viviente, que solo el hilo de render puede tocar (raza de otro modo).
     struct ScatterResult {
-        std::vector<Haruka::InstancedObject> objs;        // paralela a `gpu`
-        std::vector<InstanceDataFloat>       gpu;         // matrices relativas a `origin`
+        std::vector<InstancedObject> objs;        // paralela a `gpu`
+        std::vector<Renderer::InstanceDataFloat>       gpu;         // matrices relativas a `origin`
         glm::dvec3  origin{0.0};                          // centro del anillo (m_origin al aplicar)
     };
     /// Parte FINAL de una re-siembra, en el hilo de render: sincroniza el estado roto, FILTRA las
     /// bocas contra el vox VIVIENTE (no puede ir al worker) y publica registro + GPU + colliders.
     void applyScatterResult(ScatterResult res, const glm::dvec3& planetC, double planetR,
                             Core::Camera* camera, Physics::PhysicsEngine* physics,
-                            const Haruka::Planet::TerrestrialPlanet* planet);
+                            const Planet::TerrestrialPlanet* planet);
 
     InstancedObjectRegistry m_registry;
     /// Instancias YA TRANSFORMADAS (mismo indice que el registro), relativas a `m_origin`. Se
     /// construyen en el scatter, NO por frame: 180 000 matrices por frame costaban 31 ms.
-    std::vector<InstanceDataFloat> m_gpu;
+    std::vector<Renderer::InstanceDataFloat> m_gpu;
     glm::dvec3 m_origin{0.0};
     std::unique_ptr<Renderer::GPUInstancing> m_instancing;
     /// Tope duro del arena de instancias. NO se fija en el primer frame (entonces el registro aún
@@ -316,4 +316,4 @@ private:
                                    ///< del tramo usa la cámara ACTUAL (m_lastCam = camPos al aplicar)
 };
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Props

@@ -7,7 +7,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>   // glm::pi — llegaba de rebote por el cube_sphere.h borrado
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // SampleClimateNode — samples temperature, humidity, precipitation at (x,y,z)
@@ -18,8 +18,8 @@ namespace Haruka { namespace Tools { namespace ProcGraph {
 // ===========================================================================
 class SampleClimateNode : public Node {
 public:
-    const Haruka::Planet::ClimateOutput* climate = nullptr;
-    const Haruka::Planet::GeologyOutput* geology = nullptr;
+    const World::Planet::ClimateOutput* climate = nullptr;
+    const World::Planet::GeologyOutput* geology = nullptr;
 
     SampleClimateNode() = default;
 
@@ -66,7 +66,7 @@ public:
 // ===========================================================================
 class SampleElevationNode : public Node {
 public:
-    const Haruka::Planet::GeologyOutput* geology = nullptr;
+    const World::Planet::GeologyOutput* geology = nullptr;
 
     SampleElevationNode() = default;
 
@@ -96,7 +96,7 @@ public:
 // ===========================================================================
 class SampleSlopeNode : public Node {
 public:
-    const Haruka::Planet::GeologyOutput* geology = nullptr;
+    const World::Planet::GeologyOutput* geology = nullptr;
 
     SampleSlopeNode() = default;
 
@@ -154,7 +154,7 @@ public:
 // ===========================================================================
 class SampleWeatherNode : public Node {
 public:
-    const Haruka::WeatherSystem* weather = nullptr;
+    const World::WeatherSystem* weather = nullptr;
 
     SampleWeatherNode() = default;
 
@@ -187,7 +187,7 @@ public:
         // but we don't always have that. Use defaults (15°C, 0.5 humidity).
         // For a fully connected graph, wire SampleClimateNode outputs into
         // a MathNode → SampleWeatherNode when exact values are needed.
-        Haruka::WeatherSample ws = weather->sampleAt(dir, 15.0f, 0.5f);
+        World::WeatherSample ws = weather->sampleAt(dir, 15.0f, 0.5f);
 
         if (numOutputs > 0) outputs[0] = Value::Float(ws.cloudCover);
         if (numOutputs > 1) outputs[1] = Value::Float(ws.precip);
@@ -292,8 +292,8 @@ private:
 // ===========================================================================
 class BiomeClassifyNode : public Node {
 public:
-    const Haruka::Planet::ClimateOutput* climate = nullptr;
-    const Haruka::Planet::GeologyOutput* geology = nullptr;
+    const World::Planet::ClimateOutput* climate = nullptr;
+    const World::Planet::GeologyOutput* geology = nullptr;
     BiomeConfig config;
 
     BiomeClassifyNode() = default;
@@ -388,4 +388,4 @@ inline void generateClimateField(const Graph& graph,
     }
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

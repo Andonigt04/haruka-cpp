@@ -4,7 +4,7 @@
 #include <chrono>
 #include <random>
 
-namespace Haruka {
+namespace Haruka::Game {
 
 SpawnSystem::SpawnSystem() {
     std::cout << "[SpawnSystem] Initialized" << std::endl;
@@ -209,4 +209,4 @@ SpawnPoint* SpawnSystem::findBestSpawnPoint(SpawnType type, const std::string& z
     return best;
 }
 
-}
+} // namespace Haruka::Game

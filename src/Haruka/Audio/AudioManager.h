@@ -17,7 +17,7 @@
 #include "Haruka/Audio/AudioLoader.h"
 #include "Haruka/Audio/SoundPoints.h"
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 class AudioManager {
 public:
@@ -92,4 +92,4 @@ private:
     void updatePoints();
 };
 
-} // namespace Haruka
+} // namespace Haruka::Audio

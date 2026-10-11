@@ -101,7 +101,7 @@ bool GrassRenderer::init(RHI::Device* dev, const std::string& shaderDir, const C
     m_drawUBO  = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(d), &d, RHI::BufferMemory::Dynamic);
     m_pressUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(p), &p, RHI::BufferMemory::Dynamic);
     m_nodesCap  = kNodesMax;
-    m_nodesSSBO = dev->createBuffer(RHI::BufferUsage::Storage, m_nodesCap * sizeof(Haruka::Terrain::TerrainNodeRenderer::NearNode),
+    m_nodesSSBO = dev->createBuffer(RHI::BufferUsage::Storage, m_nodesCap * sizeof(World::Terrain::TerrainNodeRenderer::NearNode),
                                     nullptr, RHI::BufferMemory::Dynamic);
     // La lista de celdas del disco (ivec2, coords de celda de la cara): la rellena la CPU en
     // `dispatchBlades` con las celdas cuyo centro cae dentro del radio; el shader lee su celda de
@@ -288,12 +288,12 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     const auto* nodes = f.nodes;
     const size_t nNodes = nodes ? std::min(nodes->size(), m_nodesCap) : 0;
     if (nNodes == 0) return;
-    m_dev->updateBuffer(m_nodesSSBO, 0, nNodes * sizeof(Haruka::Terrain::TerrainNodeRenderer::NearNode), nodes->data());
+    m_dev->updateBuffer(m_nodesSSBO, 0, nNodes * sizeof(World::Terrain::TerrainNodeRenderer::NearNode), nodes->data());
 
     // La celda del cubo bajo la camara y el rango que cubre el radio.
     const glm::dvec3 up = glm::normalize(f.camPos - f.planetCenter);
-    Haruka::PlanetFace face; double lx, ly;
-    Haruka::dirToCubeFaceClosed(up, face, lx, ly);
+    Tools::PlanetFace face; double lx, ly;
+    World::Terrain::dirToCubeFaceClosed(up, face, lx, ly);
     const double cellM  = f.planetRadiusM * 1.5707963267948966 / (double)kCellsFace;
     const int    halfC  = (int)std::ceil((double)m_cfg.radiusM / cellM) + 1;
     const int    cx     = (int)std::floor((lx + 1.0) * 0.5 * kCellsFace);
@@ -306,7 +306,7 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     // disco de `radiusM`. La CPU deja solo las celdas cuyo CENTRO cae dentro del radio + media
     // diagonal + 2 m: las que pierde son exactamente las que el shader ya descartaba por distancia
     // (SKIP 3), así que el resultado visual es idéntico con menos hilos que se pagan su fp64.
-    // `Haruka::cubeFaceToDir` en double, la misma convención que el compute.
+    // `Haruka::World::Terrain::cubeFaceToDir` en double, la misma convención que el compute.
     const double cellD  = 2.0 / (double)kCellsFace;
     const glm::dvec3 relCam = f.camPos - f.planetCenter;
     const double altCam  = glm::length(relCam) - f.planetRadiusM;
@@ -319,7 +319,7 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
             if (ccx < 0 || ccy < 0 || ccx >= kCellsFace || ccy >= kCellsFace) continue;
             const double lxe = -1.0 + ((double)ccx + 0.5) * cellD;
             const double lye = -1.0 + ((double)ccy + 0.5) * cellD;
-            const glm::dvec3 approx = Haruka::cubeFaceToDir(face, lxe, lye) * (f.planetRadiusM + altCam) - relCam;
+            const glm::dvec3 approx = World::Terrain::cubeFaceToDir(face, lxe, lye) * (f.planetRadiusM + altCam) - relCam;
             if (glm::length(approx) > (double)m_cfg.radiusM + padM) continue;
             cells.emplace_back(ccx, ccy);
         }
@@ -374,7 +374,7 @@ void GrassRenderer::dispatchBlades(RHI::Context* ctx, const Frame& f) {
     g.cells    = glm::ivec4((int)face, (int)nCells, 0, 0);
     g.grid     = glm::vec4((float)kCellsFace, (float)perCell, m_cfg.radiusM, m_cfg.density);
     g.lod      = glm::vec4(m_cfg.lodStartM, m_cfg.lodKeep, m_cfg.heightM, m_cfg.widthM);
-    g.nodeGrid = glm::ivec4((int)Haruka::Terrain::TERRAIN_NODE_TEXELS, (int)Haruka::Terrain::TERRAIN_NODE_CELLS, (int)nNodes, 0);
+    g.nodeGrid = glm::ivec4((int)World::Terrain::TERRAIN_NODE_TEXELS, (int)World::Terrain::TERRAIN_NODE_CELLS, (int)nNodes, 0);
     static const float s_dbg = [] { const char* e = std::getenv("HARUKA_GRASS_DEBUG"); return e ? (float)std::atoi(e) : 0.0f; }();
     g.misc     = glm::vec4(f.finestTexelM, s_dbg, (float)(glm::length(f.camPos - f.planetCenter) - f.planetRadiusM), 0.0f);
     g.uIdx     = glm::dvec4(gridX0, gridY0, cellL, spanL);   // en double: las fronteras de la rejilla

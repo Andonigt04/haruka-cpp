@@ -23,5 +23,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::GBuffer;
-namespace Haruka { using Renderer::GBuffer; }

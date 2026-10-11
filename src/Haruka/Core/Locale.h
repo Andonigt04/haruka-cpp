@@ -11,7 +11,7 @@
 #include <vector>
 #include <unordered_map>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 class Locale {
 public:
@@ -41,7 +41,7 @@ private:
     std::vector<LangInfo> m_available;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Core
 
 // Azúcar para el código de UI.
-#define TR(key) Haruka::Locale::get().tr(key)
+#define TR(key) Haruka::Core::Locale::get().tr(key)

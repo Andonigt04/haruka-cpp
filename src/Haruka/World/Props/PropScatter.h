@@ -40,7 +40,7 @@
 #include "Haruka/Tools/ProcGraph/ProcNoise.h"    // hash32
 #include "Haruka/Tools/ProcGraph/ClumpMesh.h"    // bakeClumpMesh + kClumpFootprintM
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 namespace PG = Haruka::Tools::ProcGraph;
 
 /** @brief Interfaz del campo ESFÉRICO (ecología + cota por DIRECCIÓN). La implementa el motor
@@ -51,7 +51,7 @@ public:
     virtual ~IPropSphereField() = default;
 
     /// Ecología del punto (humedad/temp/…).
-    virtual FieldSample sampleAt(const glm::vec3& dir) const = 0;
+    virtual Planet::FieldSample sampleAt(const glm::vec3& dir) const = 0;
     /// Cota del suelo (m) sobre el radio en la dirección, como ver para asentar el prop.
     virtual float heightAt(const glm::vec3& dir) const = 0;
     /// Distribución por mapa [0,1] en la dirección (1 = sin mapa de distribución).
@@ -172,14 +172,14 @@ struct PropScatterStats {
 
     /// Celdas visitadas por bioma y colocadas por (capa, bioma): `placedByBiome[li*COUNT + b]`. Es
     /// lo que dice si "en la taiga solo hay coníferas" es verdad en el planeta real, no en el test.
-    int              cellsByBiome[(int)Biome::COUNT] = {};
+    int              cellsByBiome[(int)Planet::Biome::COUNT] = {};
     std::vector<int> placedByBiome;
 
     void resize(size_t n) { offered.assign(n,0); noSubmerged.assign(n,0); noCoverage.assign(n,0);
                             noDensity.assign(n,0); noVariant.assign(n,0); placed.assign(n,0);
                             failZone.assign(n,0); failWhen.assign(n,0); failHum.assign(n,0);
                             failTemp.assign(n,0); failSlope.assign(n,0); failMap.assign(n,0);
-                            placedByBiome.assign(n * (size_t)Biome::COUNT, 0); }
+                            placedByBiome.assign(n * (size_t)Planet::Biome::COUNT, 0); }
 };
 
 inline std::vector<ScatteredProp> scatterPropsNear(
@@ -359,8 +359,8 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                                     + glm::dvec3(Bd) * (double)(j * step);
                 // CELDA DEL PLANETA: (cara, nivel, i, j). La identidad de un prop sale SOLO de eso
                 // y de la semilla — ni de la camara, ni de la banda, ni del paso de enumeracion.
-                Haruka::PlanetFace face; double lx = 0.0, ly = 0.0;
-                Haruka::dirToCubeFaceClosed(glm::normalize(wp - planetC), face, lx, ly);
+                Tools::PlanetFace face; double lx = 0.0, ly = 0.0;
+                Terrain::dirToCubeFaceClosed(glm::normalize(wp - planetC), face, lx, ly);
                 const int gi = (int)std::floor((lx * 0.5 + 0.5) * cells);
                 const int gj = (int)std::floor((ly * 0.5 + 0.5) * cells);
                 if (gi < 0 || gj < 0 || gi >= (int)cells || gj >= (int)cells) continue;
@@ -381,7 +381,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                 const double jy = (double)PG::WhiteNode::hashFloat((int)hc, 2, 0, params.seed) - 0.5;
                 const double clx = -1.0 + ((double)gi + 0.5 + jx * 0.7) * cw;
                 const double cly = -1.0 + ((double)gj + 0.5 + jy * 0.7) * cw;
-                const glm::vec3 dir = glm::vec3(Haruka::cubeFaceToDir(face, clx, cly));
+                const glm::vec3 dir = glm::vec3(Terrain::cubeFaceToDir(face, clx, cly));
 
                 // Cota de seguridad: no rellenar el buffer si hay demasiado (LOD bajo / planeta raro).
                 if ((int)out.size() >= params.maxProps) return out;
@@ -389,7 +389,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                 // Ecología/pendiente locales → ¿cuánto cumple la capa? 0 = fuera de su territorio.
                 // La cota del suelo se muestrea UNA vez y se reusa para la pendiente y para asentar
                 // el prop (antes se llamaba `heightAt(dir)` 2× más dentro de sphereSlopeAt).
-                const FieldSample fs = field.sampleAt(dir);
+                const Planet::FieldSample fs = field.sampleAt(dir);
                 const float hM    = field.heightAt(dir);         // cota del suelo (m), precisión exacta
                 // BAJO EL NIVEL DEL MAR se salta por CAPA, no global: la mayoría de los props
                 // (árbol/casa/camino) no deben instalarse sumergidos — se dibujan igual pero el
@@ -403,9 +403,9 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                 // Material del terreno en la celda: alimenta la condición booleana `when` de cada capa.
                 const std::string layer = needLayer ? field.layerAt(dir) : std::string{};
                 // Bioma de la celda: de lo YA muestreado (clima, cota, pendiente), sin ir al campo.
-                const Biome biome = needBiome
-                    ? classifyBiome(BiomeSample{fs.tempC, fs.humidity, hM, slope}) : Biome::COUNT;
-                const std::string biomeK = needBiome ? std::string(biomeKey(biome)) : std::string{};
+                const Planet::Biome biome = needBiome
+                    ? Planet::classifyBiome(Planet::BiomeSample{fs.tempC, fs.humidity, hM, slope}) : Planet::Biome::COUNT;
+                const std::string biomeK = needBiome ? std::string(Planet::biomeKey(biome)) : std::string{};
 
                 // Lo que el terreno DA aquí, para poder contrastarlo con lo que las bandas PIDEN.
                 if (stats) {
@@ -416,7 +416,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     stats->tempHi  = std::max(stats->tempHi,  fs.tempC);
                     stats->slopeLo = std::min(stats->slopeLo, slope);
                     stats->slopeHi = std::max(stats->slopeHi, slope);
-                    if (biome != Biome::COUNT) ++stats->cellsByBiome[(int)biome];
+                    if (biome != Planet::Biome::COUNT) ++stats->cellsByBiome[(int)biome];
                 }
 
                 // ── SORTEO ENTRE CAPAS, NO "LA PRIMERA QUE ACEPTA" ───────────────────────────────
@@ -485,8 +485,8 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     const PropLayer& L = table.layers[li];
                     if (stats) {
                         ++stats->placed[(size_t)li];
-                        if (biome != Biome::COUNT)
-                            ++stats->placedByBiome[(size_t)li * (size_t)Biome::COUNT + (size_t)biome];
+                        if (biome != Planet::Biome::COUNT)
+                            ++stats->placedByBiome[(size_t)li * (size_t)Planet::Biome::COUNT + (size_t)biome];
                     }
                     // `nearD` > 1 = el halo de primer plano pide mas matas aqui (capa libre cerca de
                     // la camara): mas individuos de un BROTE compartido, no mallas nuevas.
@@ -500,7 +500,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     // kind (forma), la escala y el tinte salen del hash de la celda: mismo sitio,
                     // mismo mundo → REPRODUCIBLE entre jugadores, y con estado destruible (un golpe
                     // tumba la masa, seed = hc).
-                    if (lvl <= clumpLvlMax && Haruka::Planet::shouldClumpFar(protoOf[li])) {
+                    if (lvl <= clumpLvlMax && shouldClumpFar(protoOf[li])) {
                         const uint32_t hk = PG::hash32(hc ^ (uint32_t)(li * 0x9E3779B1u) ^ params.seed);
                         ScatteredProp pr;
                         pr.mesh       = clumpProtoName(protoOf[li], (int)(hk % (uint32_t)kClumpKinds));
@@ -522,7 +522,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                         if (k > 0) {
                             const double kx = (double)PG::WhiteNode::hashFloat((int)hk, 1, 0, params.seed) - 0.5;
                             const double ky = (double)PG::WhiteNode::hashFloat((int)hk, 2, 0, params.seed) - 0.5;
-                            dk = glm::vec3(Haruka::cubeFaceToDir(face, -1.0 + ((double)gi + 0.5 + kx * 0.9) * cw,
+                            dk = glm::vec3(Terrain::cubeFaceToDir(face, -1.0 + ((double)gi + 0.5 + kx * 0.9) * cw,
                                                                        -1.0 + ((double)gj + 0.5 + ky * 0.9) * cw));
                         }
                         ScatteredProp pr;
@@ -549,7 +549,7 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     if (params.grassNearM <= 0.0f || params.grassNearMul <= 1.0f) return 1.0f;
                     // Solo ALTURA DE HIERBA/Hierba: el halo sustituye al renderer GPU de hierba del
                     // primer plano; los arbustos/liquenes (otras capas libres) NO se disparan cerca.
-                    if (!Haruka::Planet::isGrassProp(table.layers[li].mesh)) return 1.0f;
+                    if (!isGrassProp(table.layers[li].mesh)) return 1.0f;
                     const float t = (params.grassNearM - d) / std::max(params.grassNearFadeM, 1.0f);
                     return 1.0f + (params.grassNearMul - 1.0f) * std::clamp(t, 0.0f, 1.0f);
                 };
@@ -598,4 +598,4 @@ inline std::vector<ScatteredProp> scatterPropsNear(
     return out;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

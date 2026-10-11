@@ -22,7 +22,7 @@
 
 #include "TreeMesh.h"   // TreeMeshData (formato de salida compartido)
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Roca: cluster de blobs achatados (un "guijarro de montaña").
@@ -322,4 +322,4 @@ inline TreeMeshData bakeHouseMesh(int seed, float scale = 1.0f) {
     return m;
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

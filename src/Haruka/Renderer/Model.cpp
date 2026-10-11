@@ -45,7 +45,7 @@ void Model::loadModel(std::string const &path) {
     this->scene = importer.ReadFile(path, aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_CalcTangentSpace);
 
     if(!this->scene || this->scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !this->scene->mRootNode) {
-        HARUKA_RENDERER_ERROR(ErrorCode::MODEL_LOAD_FAILED,
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::MODEL_LOAD_FAILED,
             std::string("Assimp error: ") + importer.GetErrorString());
         return;
     }
@@ -180,7 +180,7 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
         int index = std::stoi(filename.substr(1));
 
         if (index >= scene->mNumTextures) {
-            HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED,
+            HARUKA_RENDERER_ERROR(Tools::ErrorCode::TEXTURE_LOAD_FAILED,
                 "Texture index out of range: " + std::to_string(index));
             return 0;
         }
@@ -235,7 +235,7 @@ unsigned int TextureFromFile(const char *path, const std::string &directory, con
         return textureID;
     }
 
-    HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED,
+    HARUKA_RENDERER_ERROR(Tools::ErrorCode::TEXTURE_LOAD_FAILED,
         std::string("Failed to load texture: ") + path);
     return 0;
 }

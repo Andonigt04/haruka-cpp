@@ -31,7 +31,7 @@ void AssetStreamer::init(size_t maxCacheMemoryMB, int numWorkerThreads) {
     } catch (const std::exception& e) {
         running = false;
         healthy = false;
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_STREAMER_INIT_FAILED,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_STREAMER_INIT_FAILED,
             std::string("init failed, falling back to sync loading: ") + e.what());
     }
 }
@@ -45,7 +45,7 @@ void AssetStreamer::shutdown() {
             try {
                 worker.join();
             } catch (const std::system_error& e) {
-                HARUKA_IO_ERROR(ErrorCode::THREAD_ERROR,
+                HARUKA_IO_ERROR(Tools::ErrorCode::THREAD_ERROR,
                     std::string("thread join failed during shutdown: ") + e.what());
             }
         }
@@ -75,7 +75,7 @@ void AssetStreamer::requestAsset(
 
     // If async workers are not available, load synchronously as fallback.
     if (!healthy) {
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_STREAMER_INIT_FAILED,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_STREAMER_INIT_FAILED,
             "async system unavailable, loading '" + assetId + "' synchronously");
         auto asset = loadAssetSync(request);
         if (asset) {
@@ -84,7 +84,7 @@ void AssetStreamer::requestAsset(
             totalCacheMemory += asset->sizeBytes;
             assetCache[assetId] = std::move(asset);
         } else {
-            HARUKA_ASSET_ERROR(ErrorCode::ASSET_NOT_FOUND,
+            HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_NOT_FOUND,
                 "sync fallback also failed for '" + assetId + "'");
         }
         return;
@@ -116,7 +116,7 @@ Asset* AssetStreamer::getAsset(const std::string& assetId, float timeoutMs) {
         ).count();
 
         if (elapsed > timeoutMs) {
-            HARUKA_ASSET_ERROR(ErrorCode::ASSET_LOAD_TIMEOUT,
+            HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_LOAD_TIMEOUT,
                 "getAsset timeout for '" + assetId + "' after "
                 + std::to_string(static_cast<int>(timeoutMs)) + " ms");
             return nullptr;
@@ -158,7 +158,7 @@ size_t AssetStreamer::estimateAssetSize(const std::string& path) {
         if (fs::exists(path))
             return fs::file_size(path);
     } catch (const std::exception& e) {
-        HARUKA_IO_ERROR(ErrorCode::FILE_READ_ERROR,
+        HARUKA_IO_ERROR(Tools::ErrorCode::FILE_READ_ERROR,
             std::string("estimateAssetSize failed for '") + path + "': " + e.what());
     }
     return 0;
@@ -170,7 +170,7 @@ void AssetStreamer::makeRoomInCache(size_t neededBytes) {
         evictLRU();
     }
     if (totalCacheMemory + neededBytes > maxCacheMemoryBytes) {
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_CACHE_FULL,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_CACHE_FULL,
             "cache full — could not evict enough assets to fit "
             + std::to_string(neededBytes / 1024) + " KB");
     }
@@ -203,7 +203,7 @@ std::unique_ptr<Asset> AssetStreamer::loadAssetSync(const StreamRequest& request
 
     try {
         if (!fs::exists(request.assetPath)) {
-            HARUKA_ASSET_ERROR(ErrorCode::ASSET_NOT_FOUND,
+            HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_NOT_FOUND,
                 "asset not found: '" + request.assetPath + "'");
             failedAssets++;
             return nullptr;
@@ -211,7 +211,7 @@ std::unique_ptr<Asset> AssetStreamer::loadAssetSync(const StreamRequest& request
 
         std::ifstream file(request.assetPath, std::ios::binary | std::ios::ate);
         if (!file.is_open()) {
-            HARUKA_IO_ERROR(ErrorCode::FILE_READ_ERROR,
+            HARUKA_IO_ERROR(Tools::ErrorCode::FILE_READ_ERROR,
                 "cannot open asset: '" + request.assetPath + "'");
             failedAssets++;
             return nullptr;
@@ -221,7 +221,7 @@ std::unique_ptr<Asset> AssetStreamer::loadAssetSync(const StreamRequest& request
         file.seekg(0, std::ios::beg);
         asset->data.reset(new (std::nothrow) std::byte[asset->sizeBytes]);   // nothrow: la rama de abajo es la de "sin memoria"
         if (!asset->data) {
-            HARUKA_IO_ERROR(ErrorCode::OUT_OF_MEMORY,
+            HARUKA_IO_ERROR(Tools::ErrorCode::OUT_OF_MEMORY,
                 "out of memory loading '" + request.assetPath
                 + "' (" + std::to_string(asset->sizeBytes / 1024) + " KB)");
             failedAssets++;
@@ -233,7 +233,7 @@ std::unique_ptr<Asset> AssetStreamer::loadAssetSync(const StreamRequest& request
                   << " (" << asset->sizeBytes / 1024 << " KB)\n";
         return asset;
     } catch (const std::exception& e) {
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_CORRUPTED,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_CORRUPTED,
             std::string("exception loading '") + request.assetPath + "': " + e.what());
         failedAssets++;
         return nullptr;
@@ -266,12 +266,12 @@ void AssetStreamer::workerThread() {
         }
     } catch (const std::exception& e) {
         healthy = false;
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_STREAMER_INIT_FAILED,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_STREAMER_INIT_FAILED,
             std::string("worker thread crashed: ") + e.what()
             + " — future requests will use sync fallback");
     } catch (...) {
         healthy = false;
-        HARUKA_ASSET_ERROR(ErrorCode::ASSET_STREAMER_INIT_FAILED,
+        HARUKA_ASSET_ERROR(Tools::ErrorCode::ASSET_STREAMER_INIT_FAILED,
             "worker thread crashed (unknown exception) — future requests will use sync fallback");
     }
 }

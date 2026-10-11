@@ -10,34 +10,31 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-#include "Haruka/Tools/MathTypes.h"                 // Haruka::WorldPos
+#include "Haruka/Tools/MathTypes.h"                 // Haruka::Tools::WorldPos
 #include "Haruka/Core/Scene/SceneRenderPolicy.h"   // RenderCommand / RenderKind / PrimitiveType
 #include "Haruka/RHI/RHITypes.h"                    // Haruka::RHI::TextureHandle
 
 namespace Haruka { namespace Renderer { class Model; class Mesh; } } // Haruka::Renderer::*
-using Haruka::Renderer::Model;                            // back-compat aliases (migration)
-using Haruka::Renderer::Mesh;
-using SimpleMesh = Mesh;   // matches Renderer/SimpleMesh.h (SimpleMesh is an alias, not a class)
-namespace Haruka { struct SceneObject; }
+namespace Haruka::Core::Scene { struct SceneObject; }
 
-namespace AppInternal {
+namespace Haruka::Core::AppInternal {
 
 // Frame render queue: filled by Application::buildRenderQueue (render TU),
 // consumed by renderFrameContent (render TU) and cleared by cleanup (core TU).
-extern std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
+extern std::vector<Haruka::Core::Scene::RenderCommand> g_sceneRenderQueue;
 
 // Camera-relative model matrix in double precision (no jitter at planetary range).
-glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos);
+glm::mat4 getTransformMatrix(const Haruka::Core::Scene::SceneObject& obj, const Haruka::Tools::WorldPos& camPos);
 /// Un PERSONAJE: de pie sobre la vertical del planeta (`up`), girado su `rotation.y` alrededor de
 /// ella, con la base (el pie) en `obj.position`. La matriz general aplica Euler XYZ en el marco del
 /// mundo: a cualquier latitud que no sea el ecuador el personaje salia tumbado.
-glm::mat4 getCharacterTransform(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos, const glm::dvec3& up);
+glm::mat4 getCharacterTransform(const Haruka::Core::Scene::SceneObject& obj, const Haruka::Tools::WorldPos& camPos, const glm::dvec3& up);
 
 // Lazily-loaded, cached model by path (nullptr for empty path / load failure).
-Model* getOrLoadModelCached(const std::string& path);
+Haruka::Renderer::Model* getOrLoadModelCached(const std::string& path);
 
 // Lazily-built shared primitive mesh for a primitive kind (nullptr if unknown).
-SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive);
+Renderer::Mesh* getPrimitiveMesh(Haruka::Tools::PrimitiveType primitive);
 
 // Texture of a MaterialComponent slot, by path. Cached (failures included → un PNG que falta
 // no se reintenta cada frame). Handle inválido si no se pudo cargar.
@@ -47,5 +44,5 @@ Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path);
 // is destroyed. Must run while the GL context is still current.
 void cleanupGLStatics();
 
-} // namespace AppInternal
+} // namespace Haruka::Core::AppInternal
 

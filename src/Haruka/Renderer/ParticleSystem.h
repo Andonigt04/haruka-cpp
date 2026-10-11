@@ -10,9 +10,9 @@
 #include <glm/glm.hpp>
 #include "Haruka/RHI/RHITypes.h"
 
-namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
+namespace Haruka { namespace Renderer { class Shader; } }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class ParticleSystem {
 public:
@@ -37,4 +37,4 @@ private:
     Haruka::RHI::BufferHandle   m_vboH;   // VBO Stream (se re-sube cada frame)
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

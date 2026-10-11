@@ -40,7 +40,7 @@
 #include "Haruka/Core/Components/MaterialComponent.h"
 #include "Haruka/Core/Scene/SceneManager.h"           // SceneObject, SceneManager
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 
 /** @brief Ancla del parche en el MUNDO (dónde vive la retícula plana sobre la esfera). */
 struct PropWorldAnchor {
@@ -138,13 +138,13 @@ inline glm::vec3 propPatchDir(const PropWorldAnchor& a, float px, float pz) {
  * @param scene  SceneManager donde registrar los objetos (nullptr = solo devolverlos).
  * @return Los SceneObject creados (el que llame decide registrarlos/borrarlos).
  */
-inline std::vector<std::shared_ptr<SceneObject>> assembleSceneObjects(
+inline std::vector<std::shared_ptr<Core::Scene::SceneObject>> assembleSceneObjects(
     const std::vector<BakedProp>& baked,
     const PropWorldAnchor& anchor,
-    SceneManager* scene = nullptr) {
-    std::vector<std::shared_ptr<SceneObject>> objs;
+    Core::Scene::SceneManager* scene = nullptr) {
+    std::vector<std::shared_ptr<Core::Scene::SceneObject>> objs;
     for (const auto& b : baked) {
-        auto obj = std::make_shared<SceneObject>();
+        auto obj = std::make_shared<Core::Scene::SceneObject>();
         obj->name = b.baseName;
         obj->type = "Prop";
 
@@ -152,7 +152,7 @@ inline std::vector<std::shared_ptr<SceneObject>> assembleSceneObjects(
         const glm::vec3 dir = propPatchDir(anchor, b.placed.localPos.x, b.placed.localPos.z);
         obj->position = anchor.planetCenter
             + glm::dvec3(dir) * (anchor.radius + b.placed.heightM);
-        obj->scale = Haruka::DScale(b.placed.scale);   // DScale = glm::dvec3 (uniform)
+        obj->scale = Tools::DScale(b.placed.scale);   // DScale = glm::dvec3 (uniform)
 
         // ORIENTAR el tronco hacia la superficie: la malla del árbol se hornea con el tronco en +Y
         // (TreeMesh.h), y sin rotación el objeto queda apuntando a +Y GLOBAL — en el ecuador del
@@ -165,12 +165,12 @@ inline std::vector<std::shared_ptr<SceneObject>> assembleSceneObjects(
         obj->useOrientation = true;
 
         // Malla procedural subida a GPU (necesita device RHI).
-        auto mrc = std::make_shared<MeshRendererComponent>();
+        auto mrc = std::make_shared<Core::Components::MeshRendererComponent>();
         mrc->setMesh(b.mesh.positions, b.mesh.normals, b.mesh.colors, b.mesh.indices);
         obj->meshRenderer = mrc;
 
         // Material PBR con las texturas horneadas.
-        auto mat = std::make_shared<MaterialComponent>();
+        auto mat = std::make_shared<Core::Components::MaterialComponent>();
         mat->name = b.baseName;
         mat->shaderPath = "shaders/pbr.frag";
         mat->textures["albedo"]    = b.tex.albedo;
@@ -186,4 +186,4 @@ inline std::vector<std::shared_ptr<SceneObject>> assembleSceneObjects(
     return objs;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

@@ -18,7 +18,7 @@
  * repetida, el día que una cambie el chunk deja de casar con la cueva y no hay test que lo avise
  * antes que el jugador. Aquí sólo hay funciones puras y sin estado.
  */
-namespace Haruka { namespace BakeUtil {
+namespace Haruka::World::Terrain { namespace BakeUtil {
 
     /// Dirección unitaria → (cara del cubo, u, v) con u,v ∈ [-1,1].
     inline void dirToFaceUV(const glm::dvec3& d, int& face, double& u, double& v) {
@@ -108,4 +108,4 @@ namespace Haruka { namespace BakeUtil {
     /// Se queda con la componente conexa MAYOR (4 vecinos) de la máscara. Devuelve cuántas había.
     int keepLargestComponent2D(int w, int h, std::vector<uint8_t>& inside);
 
-} } // namespace Haruka::BakeUtil
+} } // namespace Haruka::World::Terrain

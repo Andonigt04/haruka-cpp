@@ -6,7 +6,7 @@
 
 namespace fs = std::filesystem;
 
-namespace Haruka {
+namespace Haruka::Core {
 
 Locale& Locale::get() { static Locale l; return l; }
 
@@ -53,4 +53,4 @@ const std::string& Locale::tr(const std::string& key) const {
     return key;                                          // nada → la clave (visible = "falta")
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

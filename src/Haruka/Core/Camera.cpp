@@ -6,7 +6,7 @@
 
 namespace Haruka { namespace Core {
 
-Camera::Camera(Haruka::WorldPos startPos)
+Camera::Camera(Tools::WorldPos startPos)
     : position(startPos), orientation(glm::dvec3(0.0, 0.0, 0.0)), zoom(45.0f) {}
 
 glm::vec3 Camera::getFront() const {
@@ -21,7 +21,7 @@ glm::mat4 Camera::getViewMatrix() const {
     // Use double-precision lookAt so the forward direction (pos + front) doesn't
     // get lost to float rounding at large world positions (e.g. 1.5e8 units).
     // The resulting dmat4 is then narrowed to mat4 for the shader.
-    Haruka::WorldPos pos = position;
+    Tools::WorldPos pos = position;
     glm::dvec3 front = glm::dvec3(getFront());
     glm::dvec3 up    = glm::dvec3(getUp());
     return glm::mat4(glm::lookAt(pos, pos + front, up));

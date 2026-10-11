@@ -29,7 +29,7 @@
 #include "Haruka/RHI/RHIContext.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Terrain {
+namespace Haruka::World { namespace Terrain {
 
 class TerrainNodeGpu {
 public:
@@ -270,4 +270,4 @@ private:
     size_t              m_capacity = 0;
 };
 
-}} // namespace Haruka::Terrain
+}} // namespace Haruka::World

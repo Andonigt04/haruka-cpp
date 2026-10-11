@@ -159,7 +159,7 @@ void DebugOverlay::render() {
     // Física: ms del último advance + pasos fijos (1/60 s) que pagó ese frame. Con el timestep
     // fijo, a 60 fps es 1 paso por frame; a 30 fps, 2; un tiron largo se ve como pasos >= el pacto
     // con el reloj. Lo rellena el juego (`Init.cpp`) leyendo `PhysicsEngine::lastSteps` y
-    // `Haruka::physicsFrameMs()` del frame anterior (el advance corre después del push).
+    // `Haruka::Core::physicsFrameMs()` del frame anterior (el advance corre después del push).
     line("fisica %.2f ms  (%d pasos)", m_last.physicsMs, m_last.physicsSteps);
     const double rssMiB = (double)m_rssBytes / 1048576.0, totMiB = (double)m_totalBytes / 1048576.0;
     line("mem %.0f %%  %.0f/%.0f MiB", totMiB > 0.0 ? 100.0 * rssMiB / totMiB : 0.0, rssMiB, totMiB);
@@ -194,6 +194,11 @@ void DebugOverlay::render() {
     line("jugadores %d  npcs %d (red %d + local %d)  objetos del mundo %d",
          n.players, n.npcs + m_last.localNpcs, n.npcs, m_last.localNpcs, n.worldObjects);
     line("xyz %.1f  %.1f  %.1f", m_last.worldPos.x, m_last.worldPos.y, m_last.worldPos.z);
+    if (m_last.geoOk) {
+        line("lat %.5f  lon %.5f  (SURVIVAL_SPAWN=%.5f,%.5f)", m_last.latDeg, m_last.lonDeg, m_last.latDeg, m_last.lonDeg);
+        line("sobre el mar %.1f m  ·  suelo %.1f m%s  ·  sobre el suelo %.1f m", m_last.altSeaM, m_last.groundSeaM,
+             m_last.groundSeaM < 0.0 ? " (bajo el mar)" : "", m_last.altSeaM - m_last.groundSeaM);
+    }
     line("cpu %s", m_cpu.c_str());
     line("gpu %s", m_gpu.c_str());
     line("pantalla %s", m_display.c_str());

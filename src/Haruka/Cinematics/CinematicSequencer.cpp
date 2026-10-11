@@ -11,7 +11,7 @@
 #include <glm/gtx/quaternion.hpp>   // glm::quatLookAt
 #include <glm/gtc/quaternion.hpp>   // glm::slerp
 
-namespace Haruka {
+namespace Haruka::Cinematics {
 
 static glm::dvec3 readVec3(const nlohmann::json& a, const glm::dvec3& fallback) {
     if (a.is_array() && a.size() >= 3)
@@ -146,7 +146,7 @@ void CinematicSequencer::sample(double time, glm::dvec3& pos, glm::dquat& orient
     fov    = (float)glm::mix((double)k1.fov, (double)k2.fov, us);
 }
 
-bool CinematicSequencer::update(double dt, Camera& out, const Camera& gameplayCam) {
+bool CinematicSequencer::update(double dt, Core::Camera& out, const Core::Camera& gameplayCam) {
     if (!m_playing) return false;
 
     // Capture the live gameplay camera on the first frame, then bake anchors/relative
@@ -193,4 +193,4 @@ float CinematicSequencer::letterbox() const {
     return std::min(in, out);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Cinematics

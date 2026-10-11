@@ -31,7 +31,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 /** @brief Ancho nominal de la masa (m). Quien la instancia escala `celda/este`.
  *  Lo usa también el collider del cúmulo (una sola caja envolvente). */
@@ -350,4 +350,4 @@ inline TreeMeshData bakeClumpMesh(uint32_t seed, TreeStyle style, float heightM,
     return finishMesh();
 }
 
-}}}   // Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools   // Haruka::Tools::ProcGraph

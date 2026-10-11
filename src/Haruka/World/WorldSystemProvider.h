@@ -27,11 +27,11 @@
 #include <utility>
 #include "Haruka/Tools/Profiler.h"   // HARUKA_PROFILE: el coste de llenar los anillos no se medía
 
-namespace Haruka {
+namespace Haruka::World {
 
 class WorldSystemProvider : public Physics::IWorldProvider {
 public:
-    WorldSystemProvider(WorldSystem* world, PlanetarySystem* planetary)
+    WorldSystemProvider(WorldSystem* world, Planet::PlanetarySystem* planetary)
         : m_world(world), m_planetary(planetary) {}
 
     bool       hasActivePlanet()    const override { return m_world && m_world->hasActivePlanet(); }
@@ -73,14 +73,14 @@ public:
                 // terrestre da 9,82 m/s² en superficie, o sea que el jugador en la Tierra no nota el
                 // cambio respecto al 9.81 que estaba a mano. Lo que cambia es que una luna pesa como
                 // una luna.
-                const double mass = Haruka::Planet::kEarthMeanDensity * (4.0 / 3.0)
+                const double mass = Planet::kEarthMeanDensity * (4.0 / 3.0)
                                   * 3.14159265358979323846 * p.radius * p.radius * p.radius;
                 // El radio de la SOI necesita el semieje: sin órbita declarada no hay `a`, y se usa la
                 // distancia actual a la estrella, que es lo mismo para una órbita circular.
                 double a = p.orbit.a;
                 if (a <= 0.0 && starIdx >= 0)
                     a = glm::length(glm::dvec3(p.position) - m_grav[(size_t)starIdx].pos);
-                const double soi = Haruka::Planet::laplaceSoiRadius(a, mass, starMass);
+                const double soi = Planet::laplaceSoiRadius(a, mass, starMass);
                 m_grav.push_back({ glm::dvec3(p.position), mass, p.radius, soi, starIdx });
             }
         }
@@ -90,7 +90,7 @@ public:
     /** @brief Índice en `gravBodies()` del cuerpo cuya gravedad domina en `worldPos` (-1 si ninguno).
      *  Es quien define el marco local, el terreno con el que colisionas y el cielo que ves. */
     int dominantBody(const glm::dvec3& worldPos) const override {
-        return Haruka::Planet::dominantBodyIndex(gravBodies(), worldPos);
+        return Planet::dominantBodyIndex(gravBodies(), worldPos);
     }
 
     double terrainHeightAt(const glm::dvec3& worldPos) const override {
@@ -110,7 +110,7 @@ public:
     double waterSurfaceAt(const glm::dvec3& worldPos) const override {
         if (!m_planetary || !hasActivePlanet()) return kNoWater;
         const double lvl = m_planetary->sampleWaterLevel(worldPos);
-        return (lvl > PlanetarySystem::kNoWater * 0.5) ? lvl : kNoWater;
+        return (lvl > Planet::PlanetarySystem::kNoWater * 0.5) ? lvl : kNoWater;
     }
 
     /** @brief Velocidad orbital del agua en la superficie (m/s). Ver `oceanWaveVelocity`. */
@@ -147,16 +147,16 @@ public:
         // MISMO marco ANCLADO que el clipmap: si la colisión usara un marco sin anclar, las dos
         // retículas nacerían desfasadas y la disparidad no podría bajar de la cuerda de la celda.
         glm::dvec3 up, t1, t2;
-        Haruka::Planet::terrainClipFrame(center, pc, up, t1, t2, R);
+        Terrain::terrainClipFrame(center, pc, up, t1, t2, R);
         // ── Rejilla NO-uniforme: paso ~innerStep al pie, ×growth por anillo hasta ±radius. Barata de
         // construir (una entrada por anillo de distancia) y estrictamente rectangular → sin costuras
         // entre densidades. Un rectángulo de ~200-300 km cuesta así una pocas decenas de miles de
         // vértices: las celdas lejanas son kilométricas, justo lo que la colisión necesita a ese rango.
         // La genera `terrainRingGrid` (TerrainLOD.h), que es también la que auditan los tests.
         const double halfR = std::max(radius, 200.0);
-        const std::vector<double> xs = Haruka::Planet::terrainRingGrid(halfR);
+        const std::vector<double> xs = Terrain::terrainRingGrid(halfR);
         const std::vector<double> zs = xs;              // misma retícula en X y Z (cuadrado)
-        Haruka::WorldGenParams W; double Rp;
+        Terrain::WorldGenParams W; double Rp;
         if (!m_planetary->getActivePlanetParams(W, Rp)) return false;
         const size_t N = xs.size();
         outVerts.clear(); outVerts.reserve(N * N);
@@ -226,7 +226,7 @@ public:
             // float es lo que se comparte con la GPU) y solo corrige el módulo.
             const glm::dvec3 dir = glm::normalize(up + (t1 * x) / R + (t2 * z) / R);
             const double radM = std::sqrt(x * x + z * z);                     // distancia tangente al centro
-            const float  triM = Haruka::Planet::terrainTriM(radM);            // MISMO triM que el clipmap
+            const float  triM = Terrain::terrainTriM(radM);            // MISMO triM que el clipmap
             const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);  // física = render
             const glm::dvec3 P = pc + dir * (R + h);
             outVerts.push_back(P);                                            // punto de superficie (mundo)
@@ -248,8 +248,8 @@ public:
         outTris.clear(); outTris.reserve((size_t)(N - 1) * (N - 1) * 6);
         size_t skipped = 0;
         for (size_t j = 0; j < N - 1; ++j) for (size_t i = 0; i < N - 1; ++i) {
-            if (Haruka::Planet::terrainHeightFieldCovers(xs[i], xs[i + 1]) &&
-                Haruka::Planet::terrainHeightFieldCovers(zs[j], zs[j + 1])) { ++skipped; continue; }
+            if (Terrain::terrainHeightFieldCovers(xs[i], xs[i + 1]) &&
+                Terrain::terrainHeightFieldCovers(zs[j], zs[j + 1])) { ++skipped; continue; }
             const uint32_t a = (uint32_t)(j * N + i), b = a + 1, c = a + (uint32_t)N, dd = c + 1;
             outTris.insert(outTris.end(), { a, b, c, b, dd, c });   // winding → normal saliente
         }
@@ -268,7 +268,7 @@ public:
         if (glm::length(center - pc) < 1e-6 || R <= 0.0) return false;
 
         glm::dvec3 up, t1, t2;
-        Haruka::Planet::terrainClipFrame(center, pc, up, t1, t2, R);   // MISMO marco anclado que la malla
+        Terrain::terrainClipFrame(center, pc, up, t1, t2, R);   // MISMO marco anclado que la malla
         // ⚠️ EL EJE Z DEL HEIGHTFIELD ES `-t2`, NO `t2`. `terrainClipFrame` entrega `(t1, t2, up)` con
         // `cross(t1,t2) == up`, o sea que la terna `(t1, up, t2)` —el orden en que un heightfield espera
         // sus ejes (X, altura, Z)— tiene determinante **-1**: es levógira. Construir la rotación con
@@ -278,8 +278,8 @@ public:
         const glm::dvec3 hz = -t2;
         outT1 = t1; outUp = up; outT2 = hz;
         outOrigin = pc + up * R;                    // punto de superficie del ancla (altura 0 del campo)
-        outCell = Haruka::Planet::TERRAIN_CLIP_QUAD_M;
-        outN    = Haruka::Planet::TERRAIN_HF_SAMPLES;
+        outCell = Terrain::TERRAIN_CLIP_QUAD_M;
+        outN    = Terrain::TERRAIN_HF_SAMPLES;
 
         // MISMA reconstrucción de `dir` que la malla y que `clipmap.tese`: marco recortado a float y el
         // orden `(tan*loc)/R`. No es pedantería — un ulp de un `dir` unitario son 0,38-0,76 m sobre la
@@ -288,9 +288,9 @@ public:
         const float     fR = (float)R;
         outSamples.clear(); outSamples.resize((size_t)outN * outN);
         for (uint32_t j = 0; j < outN; ++j) {
-            const double z = Haruka::Planet::TERRAIN_HF_LO + (double)j * outCell;
+            const double z = Terrain::TERRAIN_HF_LO + (double)j * outCell;
             for (uint32_t i = 0; i < outN; ++i) {
-                const double x = Haruka::Planet::TERRAIN_HF_LO + (double)i * outCell;
+                const double x = Terrain::TERRAIN_HF_LO + (double)i * outCell;
                 const glm::vec3 dirF = glm::normalize(fUp + (fT1 * (float)x) / fR + (fHz * (float)z) / fR);
                 // ⚠️ RENORMALIZAR EN DOUBLE, y no es redundante aunque `dirF` ya venga de un `normalize`.
             //
@@ -323,7 +323,7 @@ public:
         // 0,2539 m es ESTRUCTURAL: la colisión es una rejilla de 4 m y el render de 0,596 m. La única
         // forma de cerrarla es afinar la rejilla de colisión — 45× más muestras, ~135 ms — no mover
         // el corte de octavas.
-        const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
+        const float triM = Terrain::terrainTriM(std::sqrt(x * x + z * z));
                 const double h = m_planetary->sampleTerrainHeight(pc + dir * R, triM);
                 // ⚠️ Componente RADIAL respecto al plano tangente, no la altitud. Un heightfield es
                 // PLANO y el terreno está sobre una esfera: el nodo a 256 m está 5,1 mm por debajo del
@@ -353,7 +353,7 @@ public:
         return tp ? tp->vox().version() + tp->vox().craterVersion() : 0;
     }
 
-    float ringSample(const PlanetarySystem::TerrainSampler& src,
+    float ringSample(const Planet::PlanetarySystem::TerrainSampler& src,
                      const glm::dvec3& pc, double R, const glm::dvec3& up,
                      const glm::dvec3& t1d, const glm::dvec3& hzd,
                      const glm::dvec3& org, double x, double z) const {
@@ -388,7 +388,7 @@ public:
         // 0,2539 m es ESTRUCTURAL: la colisión es una rejilla de 4 m y el render de 0,596 m. La única
         // forma de cerrarla es afinar la rejilla de colisión — 45× más muestras, ~135 ms — no mover
         // el corte de octavas.
-        const float triM = Haruka::Planet::terrainTriM(std::sqrt(x * x + z * z));
+        const float triM = Terrain::terrainTriM(std::sqrt(x * x + z * z));
         // ⚠️ `src` YA RESUELTO por el llamador. Antes esto era `m_planetary->sampleTerrainHeight(...)`,
         // que por dentro rehacía la búsqueda del planeta —dos bucles y una comparación de `std::string`—
         // en cada una de las 235 564 muestras, para un puntero que no cambia. `heightAt` hace las mismas
@@ -441,7 +441,7 @@ public:
         if (glm::length(center - pc) < 1e-6 || R <= 0.0) return false;
 
         glm::dvec3 up, t1, t2;
-        Haruka::Planet::terrainClipFrame(center, pc, up, t1, t2, R);
+        Terrain::terrainClipFrame(center, pc, up, t1, t2, R);
         // ⚠️ EJE Z NEGADO, por lo mismo que en `terrainHeightField`: `(t1, up, t2)` es LEVÓGIRA y un
         // heightfield espera sus ejes como (X, altura, Z) dextrógiros. Sin negar, Jolt recibe el
         // relieve espejado en una diagonal.
@@ -451,13 +451,13 @@ public:
 
         const glm::vec3 fUp(up), fT1(t1), fHz(hz);
         const float     fR = (float)R;
-        const std::vector<Haruka::Planet::TerrainRingSpec> layout =
-            Haruka::Planet::terrainRingLayout(halfExtent);
+        const std::vector<Terrain::TerrainRingSpec> layout =
+            Terrain::terrainRingLayout(halfExtent);
         if (firstRing >= layout.size()) return false;
         outRings.clear(); outRings.resize(layout.size() - firstRing);
 
         // EL PLANETA SE RESUELVE UNA VEZ, no por muestra. Ver `PlanetarySystem::TerrainSampler`.
-        const PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(center);
+        const Planet::PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(center);
 
         // ── EL COSTE VIVE AQUÍ, Y HASTA AHORA NO SE MEDÍA ───────────────────────────────────────
         //
@@ -490,16 +490,16 @@ public:
         }
         auto doRow = [&](size_t r) {
             auto& ring = outRings[rows[r].first];
-            const Haruka::Planet::TerrainRingSpec& spec = ring.spec;
+            const Terrain::TerrainRingSpec& spec = ring.spec;
             const uint32_t n = spec.samples, j = rows[r].second;
-            const double z = Haruka::Planet::terrainRingNode(j, spec);
+            const double z = Terrain::terrainRingNode(j, spec);
             for (uint32_t i = 0; i < n; ++i) {
-                const double x = Haruka::Planet::terrainRingNode(i, spec);
+                const double x = Terrain::terrainRingNode(i, spec);
                 float& out = ring.samples[(size_t)j * n + i];
                 // Sin superficie: el nodo sobrante del borde (índice 0, ver TERRAIN_RING_SAMPLES)
                 // y el hueco central que cubre el nivel de dentro. Emitir los dos sería darle a
                 // Jolt DOS superficies sobre el mismo suelo → contactos dobles en la frontera.
-                if (i == 0 || j == 0 || Haruka::Planet::terrainRingHole(spec, x, z)) {
+                if (i == 0 || j == 0 || Terrain::terrainRingHole(spec, x, z)) {
                     out = std::numeric_limits<float>::quiet_NaN();
                     continue;
                 }
@@ -623,7 +623,7 @@ public:
         // Marco EXACTAMENTE el de los anillos: anclado, centrado donde se construyeron, y con el eje
         // Z NEGADO (`hz`), que es el que se le entrega a Jolt.
         glm::dvec3 up, t1, t2;
-        Haruka::Planet::terrainClipFrame(meshCenter, pc, up, t1, t2, R);
+        Terrain::terrainClipFrame(meshCenter, pc, up, t1, t2, R);
         const glm::dvec3 hz = -t2;
         const glm::dvec3 org = pc + up * R;
         const glm::vec3 fUp(up), fT1(t1), fHz(hz);
@@ -635,20 +635,20 @@ public:
 
         // El anillo que lo cubre: el MÁS INTERNO cuya celda no cae en el hueco. Recorrer de dentro
         // a fuera reproduce el reparto real — dentro del hueco manda el anillo de dentro.
-        const std::vector<Haruka::Planet::TerrainRingSpec> layout =
-            Haruka::Planet::terrainRingLayout(200000.0);
+        const std::vector<Terrain::TerrainRingSpec> layout =
+            Terrain::terrainRingLayout(200000.0);
         for (const auto& spec : layout) {
             if (std::abs(px) >= spec.extent || std::abs(pz) >= spec.extent) continue;
             // Índice de celda y fracción, como hace Jolt: `(local - offset) / scale`.
-            const double lo = Haruka::Planet::terrainRingNode(0, spec);
+            const double lo = Terrain::terrainRingNode(0, spec);
             double xf = (px - lo) / spec.cell, zf = (pz - lo) / spec.cell;
             const int ix = (int)std::floor(xf), iz = (int)std::floor(zf);
             xf -= ix; zf -= iz;
             if (ix < 0 || iz < 0 || ix + 1 >= (int)spec.samples || iz + 1 >= (int)spec.samples)
                 continue;
             auto nodeXZ = [&](int i, int j) {
-                return std::pair<double, double>(Haruka::Planet::terrainRingNode((uint32_t)i, spec),
-                                                 Haruka::Planet::terrainRingNode((uint32_t)j, spec));
+                return std::pair<double, double>(Terrain::terrainRingNode((uint32_t)i, spec),
+                                                 Terrain::terrainRingNode((uint32_t)j, spec));
             };
             // ¿Tiene superficie la celda? Basta con que un nodo esté en el hueco (o sea el sobrante
             // del índice 0) para que Jolt tire el quad entero.
@@ -656,14 +656,14 @@ public:
             for (int dx = 0; dx <= 1 && solid; ++dx) for (int dz = 0; dz <= 1 && solid; ++dz) {
                 const auto p = nodeXZ(ix + dx, iz + dz);
                 if (ix + dx == 0 || iz + dz == 0 ||
-                    Haruka::Planet::terrainRingHole(spec, p.first, p.second)) solid = false;
+                    Terrain::terrainRingHole(spec, p.first, p.second)) solid = false;
             }
             if (!solid) continue;
 
             // La sonda de paridad es puntual (4 muestras), así que resolver el planeta aquí no está
             // en ningún camino caliente — pero se usa el MISMO `TerrainSampler` que el bucle masivo
             // para que las dos rutas no puedan describir suelos distintos.
-            const PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(worldPos);
+            const Planet::PlanetarySystem::TerrainSampler src = m_planetary->terrainSampler(worldPos);
             auto S = [&](int i, int j) {
                 const auto p = nodeXZ(i, j);
                 return (double)ringSample(src, pc, R, up, t1, hz, org, p.first, p.second);
@@ -691,8 +691,8 @@ private:
     // Sin caché ni retícula PROPIAS: las tenía y ese era el bug. La altura la define
     // `PlanetarySystem::sampleTerrainHeight` → `ReferenceSurface`, que ya cachea por nudo de retícula.
     WorldSystem*     m_world;
-    PlanetarySystem* m_planetary;
+    Planet::PlanetarySystem* m_planetary;
     mutable std::vector<Physics::GravBody> m_grav;   // buffer reusado (gravBodies devuelve referencia)
 };
 
-} // namespace Haruka
+} // namespace Haruka::World

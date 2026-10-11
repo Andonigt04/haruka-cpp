@@ -7,7 +7,7 @@
  * metros y los modelos tiemblan. Por eso el motor mantiene dos mundos separados y
  * este fichero es la frontera:
  *
- * - Arriba, **`double` y kilómetros**: cada @ref Haruka::CelestialBody guarda su
+ * - Arriba, **`double` y kilómetros**: cada @ref Haruka::World::CelestialBody guarda su
  *   `WorldPos`, y ahí se simula.
  * - Abajo, **`float` y metros relativos a la cámara**: lo único que sube a la GPU.
  *
@@ -25,25 +25,25 @@
 #include "Haruka/Tools/PlanetaryTypes.h" // El World posee al PlanetaryTypes
 #include "Haruka/Tools/ObjectTypes.h" // Para ObjectType en CelestialBody
 
-namespace Haruka {
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::Core::Scene { class SceneManager; }
 
-    class PlanetarySystem;
-    class SceneManager;
 
+namespace Haruka::World {
     /**
      * @brief Representa una entidad macroscópica en el vacío del espacio.
      */
     struct CelestialBody {
         std::string name;
-        Haruka::ObjectType type;
-        WorldPos worldPos;     // Posición en double (km)
+        Tools::ObjectType type;
+        Tools::WorldPos worldPos;     // Posición en double (km)
         glm::vec3 velocity;    // km/s
         double mass = 0.0;     // kg
         float radius;          // km
         glm::vec3 color;
         
         // Propiedades de renderizado calculadas cada frame
-        LocalPos localPos;     // Posición relativa a la cámara (float)
+        Tools::LocalPos localPos;     // Posición relativa a la cámara (float)
     };
 
     /**
@@ -73,12 +73,12 @@ namespace Haruka {
         void shiftOrigin(const glm::dvec3& newOrigin);
 
         // Getters de los sistemas especializados
-        PlanetarySystem& getPlanetarySystem() { return *m_planetarySystem; }
+        Planet::PlanetarySystem& getPlanetarySystem() { return *m_planetarySystem; }
         const std::vector<CelestialBody>& getBodies() const { return m_bodies; }
         std::vector<CelestialBody>& getBodies() { return m_bodies; }
 
         /** Reads CelestialBody/Star objects from the scene into m_bodies. */
-        void syncFromScene(const SceneManager& scene);
+        void syncFromScene(const Core::Scene::SceneManager& scene);
 
         /**
          * Returns the combined normalized light direction summed from all stars,
@@ -142,7 +142,7 @@ namespace Haruka {
         void updateMoon(double dt);
 
         // Sistemas coordinados por el Mundo
-        std::unique_ptr<PlanetarySystem> m_planetarySystem;
+        std::unique_ptr<Planet::PlanetarySystem> m_planetarySystem;
         
         // El "Floating Origin" (Punto 0,0,0 real en el espacio)
         glm::dvec3 m_worldOrigin;
@@ -155,7 +155,7 @@ namespace Haruka {
         // su eje, pero sin mover el terreno ni al jugador). La dirección de luz sigue
         // al Sol → amanece y anochece. El Sol visible (objeto de escena) se mueve con
         // él. m_scene permite escribir la posición del objeto de escena.
-        SceneManager* m_scene = nullptr;
+        Core::Scene::SceneManager* m_scene = nullptr;
         bool          m_celestialInit = false;
         glm::dvec3    m_sunOffset0{0.0}; // offset Sol→planeta inicial (se rota en Y)
         double        m_dayAngle = 0.0;  // ángulo del día acumulado (rad)
@@ -178,5 +178,5 @@ namespace Haruka {
         double        m_planetRadius = 0.0;
         bool          m_hasActivePlanet = false;
     };
+} // namespace Haruka::World
 
-}

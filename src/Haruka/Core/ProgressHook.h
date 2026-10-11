@@ -22,7 +22,7 @@
 
 #include <functional>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 /// @param stage  etiqueta legible de la etapa ("bioma 18750x9375").
 /// @param frac   avance [0,1], o negativo si no se puede estimar.
@@ -47,4 +47,4 @@ inline double& physicsFrameMs() {
     return ms;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

@@ -50,7 +50,7 @@
 #include <cmath>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::World {
 namespace Planet {
 
 /// 2π en double, para no repetir el literal ni depender de M_PI (que no es estándar).
@@ -285,5 +285,5 @@ inline void defaultPrecession(uint32_t seed, OrbitElements& el) {
     el.eCycles = 380.0 + 260.0 * r1;
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World
 

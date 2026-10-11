@@ -13,7 +13,7 @@
 #include <cstdlib>
 #include <vector>
 
-namespace Haruka::World {
+namespace Haruka::World::Vox {
 
 // ── LAS PAREDES DE LAS CUEVAS COLISIONAN ────────────────────────────────────────────────────────
 // Lo que el render remalló este frame va a Jolt con la MISMA malla (surface nets del mismo campo),
@@ -27,8 +27,8 @@ void VoxSystem::syncColliders(const Frame& f) {
     if (!tp) return;
     // Las mallas las lleva el almacén central; aquí solo se recorren con su revisión.
     std::unordered_set<uint64_t> vivos;
-    tp->voxRenderer().forEachCpuMesh([&](const Haruka::VoxKey& key, const Haruka::CaveMesh& mesh, uint64_t rev) {
-        const uint64_t pk = Haruka::VoxRenderer::physicsKey(key);
+    tp->voxRenderer().forEachCpuMesh([&](const VoxKey& key, const CaveMesh& mesh, uint64_t rev) {
+        const uint64_t pk = Renderer::VoxRenderer::physicsKey(key);
         vivos.insert(pk);
         auto it = m_colliderRev.find(pk);
         if (it != m_colliderRev.end() && it->second == rev) return;
@@ -107,7 +107,7 @@ void VoxSystem::updateNearGroundRing(const Frame& f) {
     {
         const char* force = std::getenv("HARUKA_NEAR_RING");
         const bool forced = force && force[0] == '1';
-        if (!forced && Haruka::Terrain::TerrainNodeRenderer::enabled()) {
+        if (!forced && Terrain::TerrainNodeRenderer::enabled()) {
             static bool s_said = false;
             if (!s_said) { s_said = true;
                 HARUKA_LOGI("NearGround", "no se dibuja: el pase v5 ya cubre esa franja y las dos "
@@ -164,10 +164,10 @@ void VoxSystem::updateNearGroundRing(const Frame& f) {
     // sonda medía un invariante que ya no puede romperse. Se retira en vez de dejarla avisando: un
     // instrumento que sigue dando números después de que su objeto desaparezca es peor que ninguno.)
 
-    if (Haruka::Planet::TerrestrialPlanet* tp = f.planets->activeTerrestrialMut())
+    if (Planet::TerrestrialPlanet* tp = f.planets->activeTerrestrialMut())
         tp->setNearGroundRing(fresh ? &s_pos : nullptr, fresh ? &s_tris : nullptr,
                               anchorRelEye, glm::vec3(upD), m_ringAnchor);
 #endif
 }
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Vox

@@ -61,6 +61,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Model;
-using Haruka::Renderer::TextureFromFile;
-namespace Haruka { using Renderer::Model; }

@@ -6,7 +6,7 @@
 #include <cstdlib>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 ParticleSystem& ParticleSystem::get() { static ParticleSystem s; return s; }
 
@@ -98,4 +98,4 @@ void ParticleSystem::render(const glm::dvec3& camPos) {
     ctx->draw((uint32_t)m_parts.size());
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

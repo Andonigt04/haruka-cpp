@@ -26,7 +26,7 @@
 
 #include "Haruka/Game/Prefab/Prefab.h"
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 /** @brief Malla intercalada tal y como la espera el pipeline: pos3 + nrm3 + col3. */
 struct PreviewGeo {
@@ -61,7 +61,7 @@ using PreviewGeoOf = std::function<PreviewGeo(const std::string& itemId)>;
  *
  *  Las mallas se cachean por itemId DENTRO de la llamada: un casco de 43 piezas usa cinco items
  *  distintos, y sin eso se trocearía el mismo `.glb` cuarenta veces para una imagen de 128 px. */
-PreviewGeo previewPrefabGeo(const Prefab& pf, const PreviewGeoOf& geoOf);
+PreviewGeo previewPrefabGeo(const Game::Prefab::Prefab& pf, const PreviewGeoOf& geoOf);
 
 /**
  * @brief Renderiza una geometría a una textura cacheada por `key`, y devuelve su `ImTextureID`.
@@ -95,4 +95,4 @@ void clearPreviews();
  */
 void invalidatePreview(const std::string& key);
 
-} // namespace Haruka
+} // namespace Haruka::Tools

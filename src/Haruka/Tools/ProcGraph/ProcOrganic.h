@@ -17,8 +17,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Haruka {
-namespace Tools {
+namespace Haruka::Tools {
 namespace ProcGraph {
 
 namespace organic_internal {
@@ -192,5 +191,4 @@ inline std::vector<float> BranchNode::m_xy;
 inline std::vector<float> BranchNode::m_wi;
 
 } // namespace ProcGraph
-} // namespace Tools
-} // namespace Haruka
+} // namespace Haruka::Tools

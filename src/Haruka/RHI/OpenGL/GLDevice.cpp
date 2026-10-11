@@ -266,7 +266,7 @@ namespace Haruka::RHI::OpenGL
     std::string& shaderIncludeDir() {
         static std::string s;
         if (s.empty())
-            s = Haruka::AssetPaths::shaders();
+            s = Core::AssetPaths::shaders();
         return s;
     }
 

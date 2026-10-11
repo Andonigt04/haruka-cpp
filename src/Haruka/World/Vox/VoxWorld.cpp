@@ -16,10 +16,10 @@
 #include <filesystem>
 #include <mutex>
 
-namespace Haruka {
+namespace Haruka::World::Vox {
 
-using BakeUtil::dirToFaceUV;
-using BakeUtil::faceUVToDir;
+using Terrain::BakeUtil::dirToFaceUV;
+using Terrain::BakeUtil::faceUVToDir;
 
 // ── VoxChunk ────────────────────────────────────────────────────────────────────────────────────
 
@@ -969,7 +969,7 @@ int VoxWorld::applyLocal(VoxChunk& c, const Stroke& st) {
                 return (float)std::clamp((a + b + c2) * 0.6667, -1.0, 1.0);
             }
             case Brush::Pattern::PChecker: return (std::fmod(std::floor(x * k / 6.2831853) + std::floor(y * k / 6.2831853), 2.0) == 0.0) ? 1.0f : -1.0f;
-            case Brush::Pattern::PNoise:   return BakeUtil::fbm2((float)(x * k * 0.16), (float)(y * k * 0.16), 7u, 3) * 2.0f - 1.0f;
+            case Brush::Pattern::PNoise:   return Terrain::BakeUtil::fbm2((float)(x * k * 0.16), (float)(y * k * 0.16), 7u, 3) * 2.0f - 1.0f;
             default: return 1.0f;
         }
     };
@@ -1497,4 +1497,4 @@ std::vector<VoxKey> VoxWorld::loadedKeys() const {
     return k;
 }
 
-} // namespace Haruka
+} // namespace Haruka::World::Vox

@@ -44,7 +44,7 @@
 #include <cstdint>
 #include "Haruka/World/CloudColumn.h"
 
-namespace Haruka {
+namespace Haruka::World {
 
 /** @brief Qué cae del cielo. La temperatura del punto decide entre lluvia y nieve. */
 enum class Precip : uint8_t {
@@ -562,4 +562,4 @@ private:
     MoistureStats      m_moistStats;
 };
 
-} // namespace Haruka
+} // namespace Haruka::World

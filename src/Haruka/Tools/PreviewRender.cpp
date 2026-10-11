@@ -14,7 +14,7 @@
 #include <cmath>
 #include <SDL3/SDL_log.h>
 
-namespace Haruka {
+namespace Haruka::Tools {
 namespace {
 
 namespace R = Haruka::RHI;
@@ -42,8 +42,8 @@ R::PipelineHandle pipeline() {
     R::Device* dev = R::device();
     if (!dev) return {};
 
-    const std::string vs = Haruka::Shader::baseDir() + "shaders/item_preview.vert";
-    const std::string fs = Haruka::Shader::baseDir() + "shaders/item_preview.frag";
+    const std::string vs = Renderer::Shader::baseDir() + "shaders/item_preview.vert";
+    const std::string fs = Renderer::Shader::baseDir() + "shaders/item_preview.frag";
 
     R::PipelineDesc pd;
     pd.vertexPath   = vs.c_str();
@@ -114,7 +114,7 @@ void previewAddPosed(PreviewGeo& dst, const PreviewGeo& src,
 PreviewGeo previewModelGeo(const std::string& modelPath, const glm::vec3& tint) {
     PreviewGeo g;
     if (modelPath.empty()) return g;
-    Application* app = MotorInstance::getInstance().getApplication();
+    Core::Application* app = Renderer::MotorInstance::getInstance().getApplication();
     if (!app) return g;
     auto* m = app->getModel(modelPath);
     if (!m) return g;
@@ -127,7 +127,7 @@ PreviewGeo previewModelGeo(const std::string& modelPath, const glm::vec3& tint) 
     return g;
 }
 
-PreviewGeo previewPrefabGeo(const Prefab& pf, const PreviewGeoOf& geoOf) {
+PreviewGeo previewPrefabGeo(const Game::Prefab::Prefab& pf, const PreviewGeoOf& geoOf) {
     PreviewGeo g;
     if (!geoOf) return g;
     std::unordered_map<std::string, PreviewGeo> mallaDe;
@@ -277,4 +277,4 @@ void clearPreviews() {
     g_pipe = {};
 }
 
-} // namespace Haruka
+} // namespace Haruka::Tools

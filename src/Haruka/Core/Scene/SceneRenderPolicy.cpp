@@ -33,7 +33,7 @@ bool iContains(const std::string& value, const char* needle) {
     return containsInsensitive(value, std::string(needle));
 }
 
-bool hasVisualMeshPrimitive(const Haruka::SceneObject& obj, Haruka::PrimitiveType& primitive) {
+bool hasVisualMeshPrimitive(const Haruka::Core::Scene::SceneObject& obj, Haruka::Tools::PrimitiveType& primitive) {
     if (!obj.components.is_object() || !obj.components.contains("visual") || !obj.components["visual"].is_object()) {
         return false;
     }
@@ -46,27 +46,27 @@ bool hasVisualMeshPrimitive(const Haruka::SceneObject& obj, Haruka::PrimitiveTyp
     const std::string& meshName = visual["mesh"].get_ref<const std::string&>();
 
     if (iContains(meshName, "sphere")) {
-        primitive = Haruka::PrimitiveType::SPHERE;
+        primitive = Haruka::Tools::PrimitiveType::SPHERE;
         return true;
     }
     if (iContains(meshName, "cube")) {
-        primitive = Haruka::PrimitiveType::CUBE;
+        primitive = Haruka::Tools::PrimitiveType::CUBE;
         return true;
     }
     if (iContains(meshName, "capsule")) {
-        primitive = Haruka::PrimitiveType::CAPSULE;
+        primitive = Haruka::Tools::PrimitiveType::CAPSULE;
         return true;
     }
     if (iContains(meshName, "plane")) {
-        primitive = Haruka::PrimitiveType::PLANE;
+        primitive = Haruka::Tools::PrimitiveType::PLANE;
         return true;
     }
     if (iContains(meshName, "cylinder") || iContains(meshName, "cilinder")) {
-        primitive = Haruka::PrimitiveType::CILINDER;
+        primitive = Haruka::Tools::PrimitiveType::CILINDER;
         return true;
     }
     if (iContains(meshName, "triangle")) {
-        primitive = Haruka::PrimitiveType::TRIANGLE;
+        primitive = Haruka::Tools::PrimitiveType::TRIANGLE;
         return true;
     }
 
@@ -75,9 +75,9 @@ bool hasVisualMeshPrimitive(const Haruka::SceneObject& obj, Haruka::PrimitiveTyp
 
 } // namespace
 
-namespace Haruka {
-RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
-    Haruka::RenderCommand command;
+namespace Haruka::Core::Scene {
+RenderCommand classifySceneObject(const SceneObject& obj) {
+    RenderCommand command;
     command.object = &obj;
     // Se resuelve AQUÍ (una vez por objeto, no una vez por frame): las piezas de construcción y de
     // edificio van al pase instanciado. Consultar este mapa JSON en el bucle de dibujo costaba dos
@@ -88,23 +88,23 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
 
     // Dispatch rápido por ObjectType enum (evita substring matching)
     switch (obj.objectType) {
-        case ObjectType::CAMERA:
-        case ObjectType::EMPTY:
+        case Tools::ObjectType::CAMERA:
+        case Tools::ObjectType::EMPTY:
             return command;
 
-        case ObjectType::MESH:
+        case Tools::ObjectType::MESH:
             if (obj.meshRenderer && obj.meshRenderer->isResident()) {
-                command.kind = Haruka::RenderKind::MeshComponent;
+                command.kind = RenderKind::MeshComponent;
             } else {
-                Haruka::PrimitiveType p = Haruka::PrimitiveType::NONE;
+                Tools::PrimitiveType p = Tools::PrimitiveType::NONE;
                 if (hasVisualMeshPrimitive(obj, p)) {
-                    command.kind = Haruka::RenderKind::Primitive;
+                    command.kind = RenderKind::Primitive;
                     command.primitive = p;
                 }
             }
             return command;
 
-        case ObjectType::MODEL:
+        case Tools::ObjectType::MODEL:
             // ⚠️ A MODEL WITH NO MODEL DRAWS NOTHING, AND SAYS NOTHING. The draw case does
             // `getOrLoadModelCached(obj->modelPath)` and `break`s on null, so an object with an empty
             // path is added to the scene, moved every frame, culled, counted — and never appears.
@@ -116,39 +116,39 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
             // says something is standing beats an empty patch of ground that looks exactly like a
             // working game. Anything that has a path keeps going to the model renderer untouched.
             if (obj.modelPath.empty() && !(obj.meshRenderer && obj.meshRenderer->isResident())) {
-                command.kind = Haruka::RenderKind::Primitive;
-                command.primitive = Haruka::PrimitiveType::CHARACTER;
+                command.kind = RenderKind::Primitive;
+                command.primitive = Tools::PrimitiveType::CHARACTER;
                 return command;
             }
-            command.kind = Haruka::RenderKind::Model;
+            command.kind = RenderKind::Model;
             return command;
 
-        case ObjectType::PLANET:
-        case ObjectType::SATELLITE:
+        case Tools::ObjectType::PLANET:
+        case Tools::ObjectType::SATELLITE:
             // Cuerpos con terreno: la geometría la suministra el TerrainRenderer.
             // Un cuerpo LUMINOSO (suelta/emisor, p.ej. el Sol con `castLight`) NO tiene terreno:
             // se dibuja como esfera emissiva en el pase normal (estilo del sol anime).
             if (obj.flags.castLight) {
-                command.kind = Haruka::RenderKind::Primitive;
-                command.primitive = Haruka::PrimitiveType::SPHERE;
+                command.kind = RenderKind::Primitive;
+                command.primitive = Tools::PrimitiveType::SPHERE;
             }
             return command;
 
-        case ObjectType::STAR:
-            command.kind = Haruka::RenderKind::Primitive;
-            command.primitive = Haruka::PrimitiveType::SPHERE;
+        case Tools::ObjectType::STAR:
+            command.kind = RenderKind::Primitive;
+            command.primitive = Tools::PrimitiveType::SPHERE;
             return command;
 
-        case ObjectType::CHARACTER:
-            command.kind = Haruka::RenderKind::Primitive;
-            command.primitive = Haruka::PrimitiveType::CHARACTER;   // de pie sobre su pie, a su tamaño
+        case Tools::ObjectType::CHARACTER:
+            command.kind = RenderKind::Primitive;
+            command.primitive = Tools::PrimitiveType::CHARACTER;   // de pie sobre su pie, a su tamaño
             return command;
 
-        case ObjectType::LIGHT:
-        case ObjectType::DIRECTIONAL_LIGHT:
-        case ObjectType::SPOTLIGHT:
-            command.kind = Haruka::RenderKind::Primitive;
-            command.primitive = Haruka::PrimitiveType::SPHERE;
+        case Tools::ObjectType::LIGHT:
+        case Tools::ObjectType::DIRECTIONAL_LIGHT:
+        case Tools::ObjectType::SPOTLIGHT:
+            command.kind = RenderKind::Primitive;
+            command.primitive = Tools::PrimitiveType::SPHERE;
             return command;
 
         default:
@@ -157,22 +157,22 @@ RenderCommand classifySceneObject(const Haruka::SceneObject& obj) {
 
     // Objetos con ObjectType::CUSTOM o UNKNOWN: resuelve por heurísticas legacy
     if (obj.meshRenderer && obj.meshRenderer->isResident()) {
-        command.kind = Haruka::RenderKind::MeshComponent;
+        command.kind = RenderKind::MeshComponent;
         return command;
     }
     if (!obj.modelPath.empty()) {
-        command.kind = Haruka::RenderKind::Model;
+        command.kind = RenderKind::Model;
         return command;
     }
-    Haruka::PrimitiveType primitive = Haruka::PrimitiveType::NONE;
+    Tools::PrimitiveType primitive = Tools::PrimitiveType::NONE;
     if (hasVisualMeshPrimitive(obj, primitive)) {
-        command.kind = Haruka::RenderKind::Primitive;
+        command.kind = RenderKind::Primitive;
         command.primitive = primitive;
         return command;
     }
     if (obj.flags.castLight) {
-        command.kind = Haruka::RenderKind::Primitive;
-        command.primitive = Haruka::PrimitiveType::SPHERE;
+        command.kind = RenderKind::Primitive;
+        command.primitive = Tools::PrimitiveType::SPHERE;
         return command;
     }
 
@@ -196,4 +196,4 @@ std::vector<RenderCommand> buildSceneRenderQueue(const SceneManager& scene) {
     return commands;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core::Scene

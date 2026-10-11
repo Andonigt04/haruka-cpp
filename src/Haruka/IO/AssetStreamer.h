@@ -179,8 +179,3 @@ private:
 
 }} // namespace Haruka::IO
 
-using Haruka::IO::AssetType;
-using Haruka::IO::Asset;
-using Haruka::IO::StreamRequest;
-using Haruka::IO::AssetStreamer;
-namespace Haruka { using IO::AssetType; using IO::Asset; using IO::StreamRequest; using IO::AssetStreamer; }

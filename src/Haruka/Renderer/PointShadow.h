@@ -25,5 +25,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::PointShadow;
-namespace Haruka { using Renderer::PointShadow; }

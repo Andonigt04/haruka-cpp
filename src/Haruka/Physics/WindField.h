@@ -18,7 +18,7 @@
 #include <vector>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::Physics {
 
 struct WindZone {
     glm::dvec3 center{0.0};        ///< world-space centre
@@ -76,4 +76,4 @@ public:
     }
 };
 
-} // namespace Haruka
+} // namespace Haruka::Physics

@@ -12,9 +12,9 @@
 #include <cmath>
 #include <cstring>
 
-namespace Haruka {
+namespace Haruka::World::Vox {
 
-using namespace BakeUtil;
+using namespace Terrain::BakeUtil;
 
 namespace {
 inline int cellsPerFace() { return (int)std::lround((3.14159265358979 * 0.5) / kIslandCellRad); }
@@ -273,4 +273,4 @@ bool islandColumnAt(const IslandSystem& sys, const glm::dvec3& dir, float& topH,
     return true;
 }
 
-} // namespace Haruka
+} // namespace Haruka::World::Vox

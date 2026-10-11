@@ -94,7 +94,3 @@ private:
 
 }} // namespace Haruka::Physics
 
-using Haruka::Physics::AABB;
-using Haruka::Physics::OctreeNode;
-using Haruka::Physics::Octree;
-namespace Haruka { using Physics::AABB; using Physics::OctreeNode; using Physics::Octree; }

@@ -39,7 +39,7 @@
  * muestreado del vecino. `test_vox_seam` pica una esfera a caballo de dos chunks y mide que el campo
  * sea continuo a través del plano.
  */
-namespace Haruka {
+namespace Haruka::World::Vox {
 
     inline constexpr double kVoxChunkM = 128.0;  ///< lado del chunk (m), radial exacto
     inline constexpr int    kVoxN      = 32;     ///< vóxeles por lado
@@ -470,4 +470,4 @@ namespace Haruka {
         float surfaceDeltaNoLock(const glm::dvec3& unitDir) const;
     };
 
-} // namespace Haruka
+} // namespace Haruka::World::Vox

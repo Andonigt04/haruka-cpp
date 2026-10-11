@@ -222,10 +222,26 @@ configured with the **same** mask. See [docs/MODULES.md](docs/MODULES.md).
 
 | Suite | Command | What it covers |
 |---|---|---|
-| CPU | `./build/haruka_tests [group]` | Terrain, planets, physics, construction, prefabs, ports, water, clouds, sound, DGS… grouped, simplest first |
+| CPU | `./build/haruka_tests [filter]` or `--group World/Terrain` | Terrain, planets, physics, construction, prefabs, ports, water, clouds, sound, DGS… one group per folder, simplest first |
 | GPU / RHI | `./build/haruka_tests_rhi gl\|vk\|all [group]` | Backend parity, CPU↔GPU terrain parity, water, grass, clouds, lighting, scene |
 
-The group filter matches the group's name or keys. Every parity test carries a **counter-test**
+`tests/` mirrors `src/Haruka/`: the tests for `src/Haruka/World/Terrain/` live in
+`tests/World/Terrain/`, and that folder is their group. Each test file registers its own tests
+(`HARUKA_REGISTER_TESTS`), so there is no central list to forget. GPU tests sit next to the CPU ones of the
+same module as `*GPU.cpp` (`tests/World/Water/TestWaterGPU.cpp`) and build into `haruka_tests_rhi`,
+whose `main`, group order and shared fixtures are in `tests/RHI/`. Shaders used only by tests live in
+`tests/Shaders/` and are built only with `HARUKA_BUILD_TESTS`; they are never installed.
+
+CTest has one test per folder, labelled `cpu` plus the top-level module (`world`, `physics`…); the RHI
+benches are labelled `gpu`:
+
+```bash
+ctest --test-dir build -L cpu -j8          # the whole CPU suite, one folder per job
+ctest --test-dir build -R World.Terrain    # one folder
+ctest --test-dir build --rerun-failed --output-on-failure
+```
+
+The group filter of the executable matches a folder, its description or its keys. Every parity test carries a **counter-test**
 that shows it can fail. A test that only checks "it did not crash" cannot tell a correct
 implementation from one that does nothing.
 
@@ -238,7 +254,7 @@ Measured on 2026-10-10 (GCC 16.2, RelWithDebInfo, RTX 3050 Laptop):
 
 | Suite | Result |
 |---|---|
-| CPU (`haruka_tests`) | 332 874 checks, **0 failures** |
+| CPU (`haruka_tests`) | 332 913 checks in 219 tests and 20 folders, **0 failures** |
 | RHI Vulkan (`haruka_tests_rhi vk`) | 421 OK, **14 known failures**: grass generation (6), instancing arena (3), terrain stride and relief (3), ocean shading (2). They predate the C++26 move. The cloud blend counter-test also fails intermittently. |
 
 ---

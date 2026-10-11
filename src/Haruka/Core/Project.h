@@ -12,8 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace Haruka
-{
+namespace Haruka::Core {
     /**
      * @brief Persistent project configuration contract.
      */
@@ -64,7 +63,7 @@ namespace Haruka
         /** @brief Saves current project configuration. */
         bool save();
 
-        Haruka::ProjectConfig& getConfig() { return config; }
+        ProjectConfig& getConfig() { return config; }
         const std::string& getPath() const { return projectPath; }
 
         /** @brief Adds scene entry to project config list. */
@@ -73,7 +72,7 @@ namespace Haruka
         bool removeScene(const std::string& sceneName);
 
     private:
-        Haruka::ProjectConfig config;
+        ProjectConfig config;
         std::string projectPath;
 
         /** @brief Parses JSON project file. */
@@ -82,4 +81,4 @@ namespace Haruka
         bool saveToJSON(const std::string& filepath);
     };
 
-}
+} // namespace Haruka::Core

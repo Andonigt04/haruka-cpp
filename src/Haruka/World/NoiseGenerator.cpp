@@ -1,7 +1,7 @@
 #include "Haruka/World/NoiseGenerator.h"
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::World {
 
 float NoiseGenerator::smoothstep(float t) {
     return t * t * (3.0f - 2.0f * t);
@@ -227,4 +227,4 @@ float NoiseGenerator::fBm_d(
     return value / maxValue;
 }
 
-}
+} // namespace Haruka::World

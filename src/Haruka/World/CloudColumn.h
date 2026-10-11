@@ -3,7 +3,7 @@
 #include <cmath>
 #include <algorithm>
 
-namespace Haruka {
+namespace Haruka::World {
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //  LA COLUMNA DE AIRE: de dónde sale una nube
@@ -139,4 +139,4 @@ inline float iceFractionAt(const AirColumn& c, float zM) {
 /// "estoy dentro de la nube" del jugador, que no marchan la columna entera.
 inline float convectiveTopM(const AirColumn& c) { return c.groundM + c.blDepthM + kBlTopFadeM * 0.5f; }
 
-} // namespace Haruka
+} // namespace Haruka::World

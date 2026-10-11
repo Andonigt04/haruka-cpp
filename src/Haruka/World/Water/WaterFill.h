@@ -63,7 +63,7 @@
 #include <utility>
 #include <vector>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Water { 
 
 /// Cota que marca "aquí no hay lámina". No es 0: 0 es el nivel del mar y es una cota válida.
 inline constexpr float WATER_FILL_DRY = -1.0e30f;
@@ -501,4 +501,4 @@ inline bool waterWindowNeedsRecenter(const glm::dvec3& observerDir, bool haveWin
     return (std::acos(dot) * radiusM) > (halfM * 0.5);
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Water

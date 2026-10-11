@@ -42,7 +42,7 @@
 #include "Haruka/Tools/ProcGraph/PropMesh.h"   // rockExtent / houseExtent (envolventes de la MALLA)
 #include "Haruka/Tools/ProcGraph/ClumpMesh.h"  // kClumpFootprintM (huella del cúmulo)
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 
 /** @brief Qué clase de prop es un prototipo. Se decide por el NOMBRE porque es lo que el scatter
  *  conoce (la capa declara `mesh: "tree"`); el bake ya lo hacía así y esta es ahora la única copia. */
@@ -330,4 +330,4 @@ inline std::vector<PropWorldOBB> propWorldColliders(
     return out;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

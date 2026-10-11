@@ -3,7 +3,7 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 
 // Event for any object change (create, update, delete, etc.)

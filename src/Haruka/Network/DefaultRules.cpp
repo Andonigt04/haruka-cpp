@@ -73,7 +73,7 @@ namespace
 
     /// Cota del suelo (m sobre el nivel del mar) en una direccion unitaria.
     double groundElevM(const std::shared_ptr<const Haruka::Network::HeightField>& f,
-                       const glm::dvec3& dir, const Haruka::WorldGenParams& W, double R)
+                       const glm::dvec3& dir, const Haruka::World::Terrain::WorldGenParams& W, double R)
     {
         if (f && f->valid()) return f->heightAt(dir);   // el MISMO bake que pisa el cliente
         // Sin campo: el analitico, que en esta rama es un stub y devuelve 0 (esfera lisa). Se avisa
@@ -88,7 +88,7 @@ namespace
                 "haruka_rules_set_height_field()/haruka_rules_load_height_field(), o "
                 "HARUKA_RULES_HEIGHT_FIELD=<ruta>.");
         }
-        return (double)Haruka::sampleTerrainV2(glm::vec3(dir), W, R).elevKm * 1000.0;
+        return (double)Haruka::World::Terrain::sampleTerrainV2(glm::vec3(dir), W, R).elevKm * 1000.0;
     }
 
     // SUELO MÍNIMO del terreno, cacheado por celda. Resuelve DOS problemas medidos a la vez:
@@ -108,7 +108,7 @@ namespace
     //      más barato que el código anterior, que muestreaba en CADA validación.
     //
     // ⚠️⚠️ SIN CAMPO DE ALTURA, TODO LO DE ARRIBA DESCRIBE UN SAMPLER QUE YA NO ESTA.
-    // `Haruka::sampleTerrainV2` es un STUB en esta rama (`terrain sampler removed`, devuelve 0).
+    // `Haruka::World::Terrain::sampleTerrainV2` es un STUB en esta rama (`terrain sampler removed`, devuelve 0).
     // Medido el 2026-09-01, planeta de radio terrestre, 512 direcciones por angulo aureo:
     //
     //     RELIEVE del analitico:             +0,00 m .. +0,00 m
@@ -151,7 +151,7 @@ namespace
         // Mínimo del analítico en la celda MÁS un anillo de holgura: se muestrea una rejilla 3×3 que
         // abarca ±lado alrededor del centro, así cualquier punto DENTRO de la celda tiene al menos un
         // lado de vecindario cubierto en todas las direcciones (que es lo que se midió que acota).
-        double minElevM(const glm::dvec3& dir, const Haruka::WorldGenParams& W, double R,
+        double minElevM(const glm::dvec3& dir, const Haruka::World::Terrain::WorldGenParams& W, double R,
                         const std::shared_ptr<const Haruka::Network::HeightField>& f) {
             const uint64_t k = key(dir, R);
             auto it = cells.find(k);
@@ -215,14 +215,14 @@ namespace
     {
         glm::dvec3 center{0.0};
         double     radius = 0.0;
-        Haruka::WorldGenParams params{};
+        Haruka::World::Terrain::WorldGenParams params{};
         std::vector<Haruka::Physics::GravBody> grav;
         std::shared_ptr<const Haruka::Network::HeightField> field;   // el bake, si el host lo entrego
 
         explicit RulesWorld(const DGS::WorldQuery& w)
             : center(w.planetCenter[0], w.planetCenter[1], w.planetCenter[2]), radius(w.planetRadius)
         {
-            params = Haruka::deriveWorldParams(w.seed, w.planetRadius);
+            params = Haruka::World::Terrain::deriveWorldParams(w.seed, w.planetRadius);
             field  = currentField();   // se fija al crear la zona y no cambia bajo ella
             // ⚠️ `grav` ESTABA VACIO, y con Jolt eso no es "sin gravedad": es que el cuerpo no cae y
             // cualquier validacion contra la fisica daria por bueno flotar. La masa sale del MISMO
@@ -230,7 +230,7 @@ namespace
             // cuerpo de radio terrestre da 9,82 m/s2 en superficie — el servidor no puede tener otra
             // gravedad que el cliente.
             if (radius > 0.0) {
-                const double mass = Haruka::Planet::kEarthMeanDensity * (4.0 / 3.0)
+                const double mass = Haruka::World::Planet::kEarthMeanDensity * (4.0 / 3.0)
                                   * 3.14159265358979323846 * radius * radius * radius;
                 grav.push_back({ center, mass, radius, 0.0, -1 });
             }
@@ -385,7 +385,7 @@ namespace
             const glm::dvec3 rel = glm::dvec3(gx, gy, gz) - center;
             const double playerR = glm::length(rel);
             if (playerR > 1.0) {
-                Haruka::WorldGenParams W = Haruka::deriveWorldParams(w->seed, w->planetRadius);
+                Haruka::World::Terrain::WorldGenParams W = Haruka::World::Terrain::deriveWorldParams(w->seed, w->planetRadius);
                 W.reliefStrength = w->reliefStrength;
                 W.profile        = w->profile;
                 const glm::dvec3 dir = rel / playerR;
@@ -638,8 +638,8 @@ namespace
     // (GL-free) — deriva params de un seed demo y muestrea una dirección. Log una vez, no valida nada.
     void selfCheck()
     {
-        Haruka::WorldGenParams W = Haruka::deriveWorldParams(42u, 1.5e6);
-        Haruka::TerrainSample  t = Haruka::sampleTerrainV2(glm::normalize(glm::vec3(1, 1, 1)), W, 1.5e6);
+        Haruka::World::Terrain::WorldGenParams W = Haruka::World::Terrain::deriveWorldParams(42u, 1.5e6);
+        Haruka::World::Terrain::TerrainSample  t = Haruka::World::Terrain::sampleTerrainV2(glm::normalize(glm::vec3(1, 1, 1)), W, 1.5e6);
         HARUKA_LOGI("Rules", "sampler del motor OK (GL-free): elevKm=%.4f en dir(1,1,1)", t.elevKm);
     }
 

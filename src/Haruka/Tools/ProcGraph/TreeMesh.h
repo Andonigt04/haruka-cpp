@@ -23,7 +23,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Datos de la malla generada (CPU, sin GPU).
@@ -694,4 +694,4 @@ inline bool bakeTreeMesh(Graph& g, int nodeIndex, TreeMeshData& out) {
     return !out.positions.empty();
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

@@ -61,15 +61,15 @@ void FrameLights::fill(PerFrameUBOData& fd, const Frame& f) {
         // los shaders que lo leen. El ambiente del cielo lo consume el planeta por su propia
         // vía (`setSunLight` → `SimplePlanetUBO`), así que vive fuera de ese struct.
         {
-            static Haruka::SkySH s_sh;
+            static Core::SkySH s_sh;
             static float         s_shElev = -999.0f;
             if (std::abs(el - s_shElev) > 0.01f) {
                 s_shElev = el;
-                s_sh = Haruka::skyAmbientSH(el, 0.0f);
+                s_sh = Core::skyAmbientSH(el, 0.0f);
                 for (int i = 0; i < 9; ++i) s_shCoef[i] = s_sh.coef[i];
             }
             const glm::vec3 up(0.0f, 1.0f, 0.0f);
-            s_skyAmbient = Haruka::skyAmbientEval(s_sh, up, up)
+            s_skyAmbient = Core::skyAmbientEval(s_sh, up, up)
                          * (1.0f / 3.14159265358979323846f);
         }
     }
@@ -107,7 +107,7 @@ void FrameLights::starDiagnostics(const PerFrameUBOData& fd, const Frame& f) {
         if (f.world && f.diagClock - m_lastStarLog > 5.0) {
         const glm::dvec3 camD = glm::dvec3(f.camera->position);
         for (const auto& b : f.world->getBodies()) {
-            if (b.type != Haruka::ObjectType::STAR) continue;
+            if (b.type != Tools::ObjectType::STAR) continue;
             const glm::dvec3 rel  = b.worldPos - camD;
             const double     dist = glm::length(rel);
             if (dist < 1.0) continue;

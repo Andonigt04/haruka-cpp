@@ -106,8 +106,11 @@ void SkyPass::draw(const Frame& f) {
             // calculaba SUS nubes con `fbm(t·0.008)`. Dos fórmulas sin relación → llovía con el
             // cielo despejado. Ahora ambos leen el MISMO `WeatherSample`: la cobertura que el shader
             // dibuja es la que produjo la lluvia, y la precipitación existe solo bajo esa nube.
-            Haruka::WeatherSample wx;
+            World::WeatherSample wx;
             if (f.planets) wx = f.planets->weatherAt(camD);
+            if (f.clearWeather) {                   // vista de edicion: el cielo de un dia despejado
+                wx.cloudCover = 0.0f; wx.precip = 0.0f; wx.humidity = 0.0f;
+            }
             float precip = wx.precip;               // lluvia O nieve: las dos encapotan el cielo
             float rain   = wx.rainAmount();         // solo LLUVIA: es lo que dibuja el pase de gotas
             float cover  = wx.cloudCover;

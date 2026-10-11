@@ -44,7 +44,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace Haruka {
+namespace Haruka::Game::Prefab {
 
 /** @brief Una pieza del prefabricado, en su marco LOCAL. */
 struct PrefabPiece {
@@ -135,4 +135,4 @@ std::string findPrefabFile(const std::string& dir, const std::string& name);
 /** @brief Lo guarda: es lo que escribirá el editor y lo que exporta el comando de consola. */
 bool savePrefab(const            std::string& path, const Prefab& p);
 
-} // namespace Haruka
+} // namespace Haruka::Game::Prefab

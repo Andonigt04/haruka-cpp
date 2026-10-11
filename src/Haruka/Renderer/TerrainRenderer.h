@@ -8,7 +8,7 @@
 
 namespace Haruka::RHI { class Device; }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class TerrainRenderer {
 public:
@@ -47,4 +47,4 @@ private:
     bool m_hasRock = false;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

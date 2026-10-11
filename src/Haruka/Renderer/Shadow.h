@@ -25,5 +25,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Shadow;
-namespace Haruka { using Renderer::Shadow; }

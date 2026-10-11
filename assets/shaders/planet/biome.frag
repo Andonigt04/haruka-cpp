@@ -54,6 +54,7 @@ layout(binding = 17) uniform sampler2D uSkyMaskTerrain;
 
 #include "lib/terrain_material.glsl"
 #include "lib/prop_layer_debug.glsl"
+#include "lib/sea_tint.glsl"   // harukaSeaTint: vista 15, la misma que los nodos
 // La función de altura COMPARTIDA con C++ (harukaTerrainDetail y compañía): el per-pixel evalúa
 // exactamente lo mismo que la malla y la física, solo que con un triM de PÍXEL (§9, Fase 2).
 #include "lib/terrain_detail.glsl"
@@ -769,6 +770,8 @@ void main() {
         // geometría tenía relieve, y eso despistaba al autor).
         float realElevKm = frameAlt(pf, fragP) * 0.001;   // sin la cancelación de `length(...) - R`
         col = heatmap(realElevKm * 0.1 + 0.5);
+    } else if (dbg == 15) {               // cota sobre el nivel del mar (vista de edición del IDE)
+        col = harukaSeaTint(frameAlt(pf, fragP), clamp(dot(col, vec3(0.299, 0.587, 0.114)) * 1.6, 0.0, 1.0));
     } else if (dbg == 2) {                // zonas del autor (paleta del mapa)
         col = hasZoneMap ? zoneRGB / 255.0 : vec3(0.3, 0.3, 0.35);
     } else if (dbg == 3) {                // bioma clasificado (mapa horneado)

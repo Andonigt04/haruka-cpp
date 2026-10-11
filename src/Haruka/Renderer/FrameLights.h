@@ -11,7 +11,10 @@
 
 #include "Haruka/Renderer/SceneUBO.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class WorldSystem; class SceneManager; }
+namespace Haruka { namespace Core { class Camera; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::World { class WorldSystem; }
+namespace Haruka::Core::Scene { class SceneManager; }
 
 namespace Haruka::Renderer {
 
@@ -19,9 +22,9 @@ class FrameLights {
 public:
     struct Frame {
         Core::Camera*    camera  = nullptr;
-        WorldSystem*     world   = nullptr;
-        PlanetarySystem* planets = nullptr;
-        SceneManager*    scene   = nullptr;     ///< para el sync perezoso de los cuerpos del mundo
+        World::WorldSystem*     world   = nullptr;
+        World::Planet::PlanetarySystem* planets = nullptr;
+        Core::Scene::SceneManager*    scene   = nullptr;     ///< para el sync perezoso de los cuerpos del mundo
         glm::vec3        cameraOrigin{0.0f};
         int              heightPx = 1;          ///< para el tamaño en pixeles del diagnostico
         double           diagClock = 0.0;

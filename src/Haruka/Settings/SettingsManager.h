@@ -7,7 +7,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace Haruka {
+namespace Haruka::Settings {
 
 class SettingsManager {
 public:
@@ -112,4 +112,4 @@ private:
     std::string                 m_iniPath;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Settings

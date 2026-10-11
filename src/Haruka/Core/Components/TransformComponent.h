@@ -8,7 +8,7 @@
 #include <glm/glm.hpp>
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Componente de transformación espacial en doble precisión.
@@ -55,4 +55,4 @@ public:
     void renderInspector() override;
 };
 
-}
+} // namespace Haruka::Core::Components

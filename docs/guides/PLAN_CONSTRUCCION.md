@@ -68,7 +68,7 @@ sigue en el core GL-free y testeado. A archivos van los **markers de control** �
 proporción —, no la generación. La carga **valida y lo canta** por log (material inexistente, tejado con material
 de muro, plano con un rol que no existe, imperio incompleto → descartado).
 
-Tests: `Survival/tests/TestBuildings.cpp` (`ctest -R survival_buildings`, 159 OK) — no comprueba que el JSON se
+Tests: `Survival/tests/Data/TestBuildings.cpp` (`ctest -R Survival.Data`, 159 OK) — no comprueba que el JSON se
 parsee, sino que **manda**: Bram es de ladrillo con aguja porque lo dice su archivo, un templo es >1.5× la casa
 del mismo imperio, un almacén sin `window` no abre ni un hueco, y la generación sigue siendo determinista.
 Por eso el spawn en escena se movió a `building_spawn.cpp`: así `building_gen.cpp` es GL-free y se puede probar

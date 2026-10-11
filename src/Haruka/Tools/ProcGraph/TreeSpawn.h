@@ -26,7 +26,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Árbol colocado: todo lo que el ensamblado a objeto necesita.
@@ -49,7 +49,7 @@ public:
     virtual ~IPropField() = default;
 
     /// Ecología del punto (humedad/temp/caudal/lago…).
-    virtual FieldSample sampleAt(float px, float pz) const = 0;
+    virtual World::Planet::FieldSample sampleAt(float px, float pz) const = 0;
     /// Cota del suelo (m) en el punto, como ver para asentar el árbol.
     virtual float heightAt(float px, float pz) const = 0;
     /// Distribución por mapa [0,1] en el punto (1 = sin mapa de distribución).
@@ -103,7 +103,7 @@ inline std::vector<PlacedTree> spawnTrees(const IPropField& field,
             float pz = ((float)iy + pp.uv.y) * cellM;
 
             // REGLA ECOLÓGICA (campo): ¿hay un árbol aquí?
-            FieldSample fs = field.sampleAt(px, pz);
+            World::Planet::FieldSample fs = field.sampleAt(px, pz);
             float slope  = slopeAt(field, px, pz);
 
             TreeSuit suit = treeSuitability(fs, slope, pp.seed);
@@ -121,4 +121,4 @@ inline std::vector<PlacedTree> spawnTrees(const IPropField& field,
     return out;
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

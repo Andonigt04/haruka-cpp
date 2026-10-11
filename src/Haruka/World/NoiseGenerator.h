@@ -6,7 +6,7 @@
 
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::World {
 
 /**
  * @brief Deterministic 3D noise helper for procedural terrain generation.
@@ -118,4 +118,4 @@ private:
     static int hash(int x, int y, int z, int seed);
 };
 
-}
+} // namespace Haruka::World

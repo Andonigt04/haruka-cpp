@@ -39,7 +39,7 @@
 #include <deque>
 #include <cstdint>
 
-namespace Haruka {
+namespace Haruka::World {
 
 /** @brief De qué está hecha la capa. Gobierna look, vida de la huella, hundimiento y agarre. */
 enum class GroundMaterial : uint8_t {
@@ -99,4 +99,4 @@ private:
     std::deque<Stamp> m_stamps;
 };
 
-} // namespace Haruka
+} // namespace Haruka::World

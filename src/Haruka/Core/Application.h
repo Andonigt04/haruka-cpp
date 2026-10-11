@@ -6,7 +6,7 @@
  *
  * Application es el objeto que `main()` construye y del que cuelga todo lo demás:
  * la @ref Haruka::Core::Window, el @ref Haruka::RHI::Device, la escena activa, la
- * cámara, el @ref Haruka::WorldSystem, el @ref Haruka::PlanetarySystem, el
+ * cámara, el @ref Haruka::World::WorldSystem, el @ref Haruka::World::Planet::PlanetarySystem, el
  * @ref PhysicsEngine y los recursos del renderer. Es también quien decide el
  * backend gráfico y quien corre el bucle principal.
  *
@@ -93,17 +93,17 @@
 #include "Haruka/World/Props/InstancedObject.h"
 #include "Haruka/World/Props/PropSystem.h"
 
-namespace Haruka { namespace Renderer { class MotorInstance; } } using Haruka::Renderer::MotorInstance;
+namespace Haruka { namespace Renderer { class MotorInstance; } }
 namespace Haruka { namespace Renderer { class Model; class RenderTarget; } }
-namespace Haruka { class MaterialComponent; }
+namespace Haruka::Core::Components { class MaterialComponent; }
 
 namespace Haruka { namespace Core {
 
 struct RenderFrame;   // lo que comparten los pases del frame (ApplicationRender.cpp)
 
 // Los props son un modulo (World/Props/PropSystem.h); estos nombres siguen valiendo para el editor.
-using PropInstanceDebug  = Haruka::World::PropInstanceDebug;
-using PropPrototypeDebug = Haruka::World::PropPrototypeDebug;
+using PropInstanceDebug  = World::Props::PropInstanceDebug;
+using PropPrototypeDebug = World::Props::PropPrototypeDebug;
 
 /**
  * @brief Haruka runtime application orchestrator.
@@ -125,13 +125,13 @@ public:
     /** @name Accessors */
     ///@{
     Camera* getCamera() { return _camera.get(); }
-    Haruka::SceneManager* getCurrentScene() { return _currentScene; }
-    RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
-    Haruka::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
+    Scene::SceneManager* getCurrentScene() { return _currentScene; }
+    Physics::RaycastSimple* getRaycastSystem() { return _raycastSystem.get(); }
+    World::Planet::PlanetarySystem* getPlanetarySystem() { return _planetarySystem.get(); }
     /** @brief El host de fluidos del motor (ríos/lagos + splash). Es el ÚNICO dueño de la sim de
      *  aguas someras: el juego le pide la suya en vez de crear otra. Puede ser null antes del
      *  primer frame de render. */
-    Haruka::FluidHost* getFluidHost() { return _fluidHost.get(); }
+    Renderer::FluidHost* getFluidHost() { return _fluidHost.get(); }
     /** @brief Vista de depuración del terreno (0=normal, 1=elevación, 2=zonas, 3=bioma,
      *  4=temperatura, 5=humedad, 6=capas, 10+i=máscara de capa i). La usa el editor. */
     void setPlanetDebugView(int view) {
@@ -156,31 +156,43 @@ public:
     }
     /** @brief Fuerza la lluvia (0..1) para pruebas; <0 vuelve al modo AUTO (según el clima). */
     void setRainOverride(float r) { m_rainOverride = r; }
+    /**
+     * @brief VISTA DE EDICIÓN DEL TERRENO (IDE). Para ver la ROCA mientras se esculpe:
+     *   · `weather = false`: sin nubes, sin lluvia ni nieve, cielo despejado y aire limpio.
+     *   · `water = false`:   sin mar, lagos ni fluidos dibujados (el campo y la física no cambian:
+     *     el agua sigue existiendo, sólo no se pinta).
+     *   · `seaTint = true`:  el terreno teñido por su COTA SOBRE EL NIVEL DEL MAR — verde→marrón→
+     *     blanco sobre 0, azul bajo 0 (donde habrá agua), línea de costa en 0 e isolíneas.
+     * No se guarda en la escena: es cómo se mira, no cómo es el mundo.
+     */
+    struct EditView { bool weather = true; bool water = true; bool seaTint = false; };
+    void setEditView(const EditView& v) { m_editView = v; }
+    const EditView& editView() const { return m_editView; }
 
     // ── PROPS DEL MUNDO: el modulo es `World::PropSystem`; esto solo reenvia (la API que usa
     //    Survival no cambia). Ver World/Props/PropSystem.h.
     void setPropScatterEnabled(bool enabled) { m_props.setEnabled(enabled); }
     bool isPropScatterEnabled() const { return m_props.enabled(); }
-    using PropHit = Haruka::World::PropSystem::Hit;
+    using PropHit = World::Props::PropSystem::Hit;
     /** @brief Rompe la parte de prop mas cercana al golpe. La dispara el JUEGO (el hachazo). */
     PropHit breakPropAt(const glm::dvec3& center, double radius);
     /** @brief Partes de props cerca, sin romperlas; y romper una concreta sin rehacer colliders (ver
      *  `PropSystem::partsNear/breakPart`). Tras romper varias, `refreshPropColliders()` una vez. */
-    std::vector<Haruka::World::PropSystem::NearPart> propPartsNear(const glm::dvec3& center, double radius) const {
+    std::vector<World::Props::PropSystem::NearPart> propPartsNear(const glm::dvec3& center, double radius) const {
         return m_props.partsNear(center, radius, _planetarySystem.get());
     }
-    bool breakPropPart(const Haruka::World::PropSystem::NearPart& p) {
+    bool breakPropPart(const World::Props::PropSystem::NearPart& p) {
         return m_props.breakPart(p.seed, p.partId, p.trunk, p.box.center, p.prototype, p.box.rBottom,
                                  _planetarySystem.get());
     }
     void refreshPropColliders() {
         m_props.refreshCollidersAround(_camera.get(), _planetarySystem.get(), getPhysicsEngineOrNull());
     }
-    const Haruka::InstancedObjectRegistry& propRegistry() const { return m_props.registry(); }
-    Haruka::World::PropSystem& props() { return m_props; }
+    const World::Props::InstancedObjectRegistry& propRegistry() const { return m_props.registry(); }
+    World::Props::PropSystem& props() { return m_props; }
 
 
-    using PropStateDelta = Haruka::World::PropSystem::StateDelta;
+    using PropStateDelta = World::Props::PropSystem::StateDelta;
     /** @brief Todo lo que el jugador ha roto, para guardarlo en la partida (ver PropSystem). */
     std::vector<PropStateDelta> serializePropState() const { return m_props.serializeState(); }
     void restorePropState(const std::vector<PropStateDelta>& deltas) { m_props.restoreState(deltas); }
@@ -191,15 +203,15 @@ public:
     /** @brief LA CAPA GRANULAR (nieve/arena/barro): aquí se registran las HUELLAS. Cualquier cosa con
      *  collider puede pisar — el jugador por zancada, una criatura, una rueda; el motor solo necesita
      *  dónde y con qué huella. Ver `GroundLayer` para por qué esto NO pasa por `DeformationField`. */
-    Haruka::GroundLayer& getGroundLayer() { return m_groundLayer; }
+    World::GroundLayer& getGroundLayer() { return m_groundLayer; }
     /** @brief Espesor de NIEVE acumulada [0,1] aquí y ahora. El juego lo usa para decidir si una
      *  pisada deja marca, cuánto te hundes y cuánto frena. */
     float getSnowAccum() const { return m_sky.weather().snowAccum; }
     /** @brief Agua acumulada en el suelo [0,1] (mojado; baja el agarre). */
     float getGroundWetness() const { return m_sky.weather().groundWetness; }
 #ifdef HARUKA_MOD_PHYSICS
-    Haruka::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
-    Haruka::PhysicsEngine* getPhysicsEngineOrNull() { return _physicsEngine.get(); }
+    Physics::PhysicsEngine* getPhysicsEngine() { return _physicsEngine.get(); }
+    Physics::PhysicsEngine* getPhysicsEngineOrNull() { return _physicsEngine.get(); }
 #else
     Haruka::PhysicsEngine* getPhysicsEngineOrNull() { return nullptr; }
 #endif
@@ -227,7 +239,7 @@ public:
      *
      * Nunca devuelve 0: encuadrar con radio 0 pondría la cámara EXACTAMENTE sobre el objeto.
      */
-    double getObjectBoundingRadius(const Haruka::SceneObject& obj);
+    double getObjectBoundingRadius(const Scene::SceneObject& obj);
 
     /**
      * @brief Identificador GL de una textura de material, cargándola y cacheándola si hace falta.
@@ -247,9 +259,9 @@ public:
      * que verás en la escena. Iluminación fija de tres cuartos para que dos materiales se puedan
      * comparar entre sí sin que la hora del día del mundo cambie el resultado.
      */
-    void renderMaterialPreview(const Haruka::MaterialComponent& material,
+    void renderMaterialPreview(const Components::MaterialComponent& material,
                                Haruka::Renderer::RenderTarget& target);
-    Haruka::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
+    World::WorldSystem* getWorldSystem() { return _worldSystem.get(); }
     ///@}
 
     /** @brief Sets the render quality preset. */
@@ -293,19 +305,51 @@ public:
     // Stats de geometría del TERRENO del último frame (malla base + clipmap + agua), para el
     // panel de performance del editor. Sustituye al "Chunk Streaming" legacy (no existe streaming
     // por chunks: el planeta es malla fija + clipmap, así que el panel muestra el desglose real).
-    Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainStats() const { return m_terrainStats; }
+    World::Planet::TerrestrialPlanet::RenderStats getTerrainStats() const { return m_terrainStats; }
 
     /** @brief Árbol CPU del ÚLTIMO FRAME del hilo de render (ms inclusivos por etapa, anidado):
      *  renderFrameContent → scene.objects.draw, scene.prop.instanced, simple_planet.draw →
      *  planet.base/clipmap/water.draw, etc. Los scopes son THREAD-LOCAL; este getter devuelve el
      *  árbol del hilo que llama (el del editor = el de render, ya que el imgui corre dentro del
      *  frame). Se añade `Haruka::Profiler::get().add()` con el tiempo GPU cuando exista. */
-    const std::vector<Haruka::Profiler::Node>& profilerNodes() const {
-        return Haruka::Profiler::get().nodes();
+    const std::vector<Tools::Profiler::Node>& profilerNodes() const {
+        return Tools::Profiler::get().nodes();
     }
     /** @brief Terrain height (metres above reference sphere) at a world position. */
     double getTerrainHeightAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleTerrainHeight(worldPos) : 0.0;
+    }
+    /**
+     * @brief DÓNDE ESTÁ UN PUNTO, para los paneles de depuración: lat/lon y cotas sobre el nivel del
+     * mar. Misma convención que `SURVIVAL_SPAWN=lat,lon` (lat = asin(dir.y), lon = atan2(dir.z,
+     * dir.x)), así que unas coordenadas leídas aquí sirven para aparecer en ese sitio. El nivel del
+     * mar es el radio del planeta: el campo ya está desplazado para que lo sea.
+     * ⚠️ `underWater` mira solo el MAR; un lago por encima del nivel del mar no cuenta.
+     */
+    struct SurfaceProbe {
+        bool   ok = false;            ///< false = no hay planeta activo
+        double latDeg = 0.0, lonDeg = 0.0;
+        double altSeaM = 0.0;         ///< cota del punto sobre el nivel del mar
+        double groundSeaM = 0.0;      ///< cota del SUELO de esa vertical sobre el nivel del mar
+        double aboveGroundM = 0.0;    ///< altSeaM − groundSeaM
+        bool   underWater = false;    ///< el suelo queda bajo el nivel del mar
+    };
+    SurfaceProbe probeSurface(const glm::dvec3& worldPos) const {
+        SurfaceProbe p;
+        glm::dvec3 pc; double pr = 0.0;
+        if (!_planetarySystem || !_planetarySystem->getActivePlanet(pc, pr) || pr <= 0.0) return p;
+        const glm::dvec3 rel = worldPos - pc;
+        const double r = glm::length(rel);
+        if (r < 1e-9) return p;
+        const glm::dvec3 dir = rel / r;
+        p.ok = true;
+        p.latDeg = glm::degrees(std::asin(glm::clamp(dir.y, -1.0, 1.0)));
+        p.lonDeg = glm::degrees(std::atan2(dir.z, dir.x));
+        p.altSeaM = r - pr;
+        p.groundSeaM = getTerrainHeightAt(pc + dir * (pr + 100000.0));   // muy por encima: la vertical
+        p.aboveGroundM = p.altSeaM - p.groundSeaM;
+        p.underWater = p.groundSeaM < 0.0;
+        return p;
     }
     /** @brief ¿Está el SUELO recortado aquí (boca de cueva, lo picado)? Si sí, la altura del
      *  heightfield NO es suelo: debajo hay aire y el jugador puede estar más abajo que ella.
@@ -396,7 +440,7 @@ public:
      *  no hay agua. Ver PlanetarySystem::sampleWaterLevel — un hoyo cavado en tierra NO es mar. */
     double getWaterLevelAt(const glm::dvec3& worldPos) const {
         return _planetarySystem ? _planetarySystem->sampleWaterLevel(worldPos)
-                                : Haruka::PlanetarySystem::kNoWater;
+                                : World::Planet::PlanetarySystem::kNoWater;
     }
 
     /** @brief Mean sea surface for the nearest planet. Returns false if none. */
@@ -416,8 +460,8 @@ public:
         return _window ? (int)_window->getWidth() : 0;
     }
 
-    CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
-    Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
+    Renderer::CascadedShadowMap* getCascadedShadowMap() { return _cascadedShadow.get(); }
+    Renderer::Shader* getCascadedShadowShader() { return _cascadeShadowShader.get(); }
 
     void setImGuiRenderCallback(std::function<void()> cb) { _imguiCallback = std::move(cb); }
 
@@ -429,7 +473,7 @@ public:
      * @brief Callback invoked by `MotorInstance` when active scene changes.
      * @note Performs internal copy into owned scene storage.
      */
-    void onSceneChanged(Haruka::SceneManager* scene) {
+    void onSceneChanged(Scene::SceneManager* scene) {
         _currentScene = scene;
     }
     /**
@@ -451,7 +495,7 @@ public:
 #ifdef HARUKA_NETWORK
     /// Lo que este jugador dice de si mismo, en UNA llamada. `data` es el payload del juego (vida,
     /// inventario, lo que sea); `size = 0` significa "sin cambios", no "vacio".
-    void sendPlayerState(uint32_t uuid, const Haruka::WorldPos& pos, const Haruka::Rotation& rot,
+    void sendPlayerState(uint32_t uuid, const Tools::WorldPos& pos, const Tools::Rotation& rot,
                          const uint8_t* data = nullptr, uint16_t size = 0);
     /// ⚠️ WITHOUT THIS THE PLAYER IS CAPPED AT ~20 m/s AND NOBODY IS TOLD. The zone's S1 filter allows
     /// `maxSpeed * dt + 1 m` between updates and believes the most recent packet, and a transform that
@@ -467,10 +511,10 @@ public:
     /// what puts every player in the same day and the same storm.
     /// Pide al cluster colocar una pieza (ver `Haruka::Network::sendPlacePiece`).
     void sendPlacePiece(uint32_t actor, uint16_t typeId,
-                        const Haruka::WorldPos& pos, const glm::dquat& orient);
+                        const Tools::WorldPos& pos, const glm::dquat& orient);
     /// Pide al cluster tirar un objeto al mundo (ver `Haruka::Network::sendDropItem`).
     /// @return el `requestId` con el que reconocer el veredicto, o 0 si no se pudo pedir.
-    uint32_t sendDropItem(uint32_t actor, const Haruka::WorldPos& pos, const std::string& kind);
+    uint32_t sendDropItem(uint32_t actor, const Tools::WorldPos& pos, const std::string& kind);
     /// Los veredictos de acciones que han llegado desde la ultima vez. Un juego que coloca al
     /// instante necesita esto para poder DESHACERLO cuando el servidor dice que no.
     std::vector<DGS::ActionAck> pollActionResults();
@@ -524,17 +568,17 @@ public:
 #endif
 
     /** @brief Attaches a game interface — run() will call onInit/onUpdate/onShutdown automatically. */
-    void setGameInterface(Haruka::GameInterface* gi) { _gameInterface = gi; }
+    void setGameInterface(GameInterface* gi) { _gameInterface = gi; }
 
     /** @brief Starts runtime using a scene path bootstrap. */
     void run(const std::string& startScenePath, bool headless = false);
     /** @brief Initializes systems from a scene instance. */
-    void init(Haruka::SceneManager& scene);
+    void init(Scene::SceneManager& scene);
     /** @brief Recreates all size-dependent FBOs when the viewport is resized. */
     void recreateFBOs(int newWidth, int newHeight);
     /** @brief Sets the viewport-owned FBO that the editor render path writes into.
      *  Must be called after recreateRenderTarget() on the viewport side. */
-    void setEditorTarget(RenderTarget* rt) { _editorTarget = rt; }
+    void setEditorTarget(Renderer::RenderTarget* rt) { _editorTarget = rt; }
     /** @brief Sets the render size used in editor mode (when no Window exists). */
     void setEditorViewportSize(int w, int h);
     /** @brief Scans current scene and initialises PlanetarySystem with planet objects. */
@@ -574,7 +618,7 @@ private:
     DGS::Client m_dgs;
     /// Las entidades remotas en la escena (crear/mover/caducar): Network/EntitySync.h.
     Haruka::Network::EntitySync m_entitySync;
-    std::vector<Haruka::SceneObject> m_ghostObjects;
+    std::vector<Scene::SceneObject> m_ghostObjects;
 
     enum class LoginState { Idle, Show, Connecting, Failed, Done };
     LoginState  m_loginState   = LoginState::Idle;
@@ -591,9 +635,9 @@ private:
      *  destruirse ANTES que la Window (libera el contexto GL mientras la ventana aún existe). */
     std::unique_ptr<Haruka::RHI::Device> _device = nullptr;
     /** @brief The currently active scene. */
-    Haruka::SceneManager* _currentScene = nullptr;
+    Scene::SceneManager* _currentScene = nullptr;
     /** @brief The owned scene instance. */
-    std::unique_ptr<Haruka::SceneManager> _ownedScene;
+    std::unique_ptr<Scene::SceneManager> _ownedScene;
     /** @brief The active camera instance. */
     std::unique_ptr<Camera> _camera;
     
@@ -602,12 +646,13 @@ private:
      *  el triángulo fullscreen sale de gl_VertexID y el VAO (vacío) lo aporta el pipeline. */
     /// EL CIELO Y EL CLIMA DEL FRAME (Renderer/SkyPass.h): lluvia, nieve, viento, mojado, aire.
     Haruka::Renderer::SkyPass   m_sky;
+    EditView                    m_editView;   ///< ver setEditView
     float                       m_rainOverride = [] {
         const char* e = std::getenv("HARUKA_RAIN");
         return (e && e[0]) ? std::max(-1.0f, std::min(1.0f, (float)std::atof(e))) : -1.0f;
     }();
     /** @brief Lluvia/nieve como GEOMETRÍA en el pase de escena (con depth), no como filtro de pantalla. */
-    Haruka::PrecipitationRenderer m_precip;
+    Renderer::PrecipitationRenderer m_precip;
 
     /** @brief MÁSCARA DE EXPOSICIÓN AL CIELO: un shadow map con la "luz" en el CÉNIT → dice qué
      *  tienes ENCIMA. El depth de la escena descarta lo que tiene algo DELANTE; esto descarta lo que
@@ -618,22 +663,22 @@ private:
      *  sigue mojado tras la lluvia. Es, de hecho, el canal "mojado" de la capa granular. */
     /** @brief Las HUELLAS: la lista (GL-free, compartible con el servidor) y el pase que las pinta
      *  en su ventana cenital para que el terreno las muestree. */
-    Haruka::GroundLayer         m_groundLayer;
-    Haruka::GroundStampRenderer m_stampRenderer;
+    World::GroundLayer         m_groundLayer;
+    Renderer::GroundStampRenderer m_stampRenderer;
     /// Las paredes del campo volumétrico → cuerpos de Jolt. Por frame, sólo lo que cambió de revisión.
     /// Las paredes del campo volumetrico → Jolt, y el anillo del suelo cercano: World/Vox/VoxSystem.h.
-    Haruka::World::VoxSystem m_vox;
-    void syncVoxColliders() { Haruka::World::VoxSystem::Frame vf; vf.camera = _camera.get(); vf.planets = _planetarySystem.get(); vf.physics = getPhysicsEngineOrNull(); m_vox.syncColliders(vf); }
+    World::Vox::VoxSystem m_vox;
+    void syncVoxColliders() { World::Vox::VoxSystem::Frame vf; vf.camera = _camera.get(); vf.planets = _planetarySystem.get(); vf.physics = getPhysicsEngineOrNull(); m_vox.syncColliders(vf); }
     std::string m_worldEditsDir;
     /** @brief The lamp shader instance. */
-    std::unique_ptr<Shader> _lampShader;
+    std::unique_ptr<Renderer::Shader> _lampShader;
     /** @brief The shadow shader instance. */
     /** @brief The HDR shader instance. */
-    std::unique_ptr<HDR> _hdr;
+    std::unique_ptr<Renderer::HDR> _hdr;
     /** @brief The bloom shader instance. */
-    std::unique_ptr<Bloom> _bloom;
+    std::unique_ptr<Renderer::Bloom> _bloom;
     /** @brief The SSAO shader instance. */
-    std::unique_ptr<SSAO> _ssao;
+    std::unique_ptr<Renderer::SSAO> _ssao;
     /** @brief Offscreen HDR scene target for the standalone post-processing stack
      *  (render-scale source + bloom/fxaa input). Sized to renderScale*window. */
     /// EL POST-PROCESO (target a escala de render, bloom, composite FXAA+upscale): Renderer/PostPass.h.
@@ -663,29 +708,29 @@ private:
      *  (no ids GL): toda la cadena bloom→composite dibuja por el Context (ruta PSO). Handle
      *  inválido = los pipelines no se pudieron crear → componer sin bloom. */
     /** @brief The IBL shader instance. */
-    std::unique_ptr<IBL> _ibl;
+    std::unique_ptr<Renderer::IBL> _ibl;
     /** @brief The point shadow shader instance. */
-    std::unique_ptr<PointShadow> _pointShadow;
+    std::unique_ptr<Renderer::PointShadow> _pointShadow;
     /** @brief The GPU instancing instance. */
     /** @brief The cascaded shadow map instance. */
-    std::unique_ptr<CascadedShadowMap> _cascadedShadow;
+    std::unique_ptr<Renderer::CascadedShadowMap> _cascadedShadow;
     /** @brief The raycast system instance. */
-    std::unique_ptr<RaycastSimple> _raycastSystem;
+    std::unique_ptr<Physics::RaycastSimple> _raycastSystem;
     /** @brief The world system instance. */
-    std::unique_ptr<Haruka::WorldSystem> _worldSystem;
+    std::unique_ptr<World::WorldSystem> _worldSystem;
     /** @brief The planetary system instance. */
-    std::unique_ptr<Haruka::PlanetarySystem> _planetarySystem;
+    std::unique_ptr<World::Planet::PlanetarySystem> _planetarySystem;
 #ifdef HARUKA_MOD_FLUIDS
     /** @brief Hito 2: host del stack de fluido (ríos/lagos/splash) frente al jugador. */
-    std::unique_ptr<Haruka::FluidHost> _fluidHost;
+    std::unique_ptr<Renderer::FluidHost> _fluidHost;
 #endif
     /** @brief The physics engine instance. */
 #ifdef HARUKA_MOD_PHYSICS
-    std::unique_ptr<Haruka::PhysicsEngine>      _physicsEngine;
-    std::unique_ptr<Haruka::WorldSystemProvider> _worldProvider; // adaptador mundo→física (vive con el motor)
+    std::unique_ptr<Physics::PhysicsEngine>      _physicsEngine;
+    std::unique_ptr<World::WorldSystemProvider> _worldProvider; // adaptador mundo→física (vive con el motor)
 #endif
     // Editor viewport target — set explicitly by viewport, bypasses MotorInstance singleton split.
-    RenderTarget* _editorTarget = nullptr;
+    Renderer::RenderTarget* _editorTarget = nullptr;
     // Editor viewport size (used when no _window exists).
     int m_editorViewportW = 0;
     int m_editorViewportH = 0;
@@ -707,15 +752,15 @@ private:
     // Render targets
     
     // Primitives (LOD spheres for celestial bodies)
-    std::unique_ptr<SimpleMesh> sphereLOD[4];
+    std::unique_ptr<Renderer::Mesh> sphereLOD[4];
     
     // Shaders (cached to avoid recreation every frame)
-    std::unique_ptr<Shader> _geomShader;
-    std::unique_ptr<Shader> _ssaoShader;
-    std::unique_ptr<Shader> _lightShader;
+    std::unique_ptr<Renderer::Shader> _geomShader;
+    std::unique_ptr<Renderer::Shader> _ssaoShader;
+    std::unique_ptr<Renderer::Shader> _lightShader;
     // (_compositeShader eliminado: el present dibuja por PSO/Context — m_presentPSO.)
-    std::unique_ptr<Shader> _flatShader;
-    std::unique_ptr<Shader> _cascadeShadowShader;
+    std::unique_ptr<Renderer::Shader> _flatShader;
+    std::unique_ptr<Renderer::Shader> _cascadeShadowShader;
     // (_bloomExtractShader/_bloomBlurShader eliminados: el bloom ya dibuja por PSO/Context —
     //  el shader vive dentro del PipelineHandle, no en un objeto Shader suelto.)
     // (`_pointShadowShader` y `_instancingShader` vivían aquí: dos unique_ptr que NUNCA se
@@ -733,7 +778,7 @@ private:
     // (binding 1). Un draw por modelo. Ver ApplicationRender.cpp (recolección + dibujo).
 
     /// LOS PROPS DEL MUNDO (scatter, registro, pase instanciado, sombras, colliders, rotura).
-    Haruka::World::PropSystem m_props;
+    World::Props::PropSystem m_props;
     /// LAS NUBES VOLUMETRICAS (horneado del cielo, marcha reducida, composicion): Renderer/CloudPass.h.
     Haruka::Renderer::CloudPass     m_clouds;
     /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L (por metro) · y = día. Sale del clima
@@ -761,7 +806,7 @@ private:
     std::function<void()> _imguiCallback;
 
     // Optional game interface — used by standalone runtime (not editor)
-    Haruka::GameInterface* _gameInterface = nullptr;
+    GameInterface* _gameInterface = nullptr;
     bool m_cleanedUp = false;
 
     // Screenshot: captured at the end of the 3D pass (before ImGui) for a clean
@@ -831,10 +876,9 @@ private:
     int _iTotalDrawCalls        = 0;
 
     // Último desglose de geometría del terreno (lo rellena el render tras el pase del planeta).
-    Haruka::Planet::TerrestrialPlanet::RenderStats m_terrainStats;
+    World::Planet::TerrestrialPlanet::RenderStats m_terrainStats;
 };
 
 }} // namespace Haruka::Core
 
-using Haruka::Core::Application;                 // back-compat alias (migration)
-namespace Haruka { using Core::Application; }
+                 // back-compat alias (migration)

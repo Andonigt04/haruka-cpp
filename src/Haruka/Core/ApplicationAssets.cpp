@@ -17,7 +17,7 @@
 #include "Haruka/Renderer/Model.h"
 #include "Haruka/Renderer/SimpleMesh.h"
 #include "Haruka/Renderer/PrimitiveShapes.h"
-#include "Haruka/Core/Scene/SceneManager.h"   // Haruka::SceneObject
+#include "Haruka/Core/Scene/SceneManager.h"   // Haruka::Core::Scene::SceneObject
 #include "Haruka/World/Planet/PlanetarySystem.h"      // radio real de un planeta (getObjectBoundingRadius)
 #include "Haruka/Core/AssetPaths.h"
 #include "Haruka/Core/Logger.h"
@@ -27,22 +27,22 @@
 #include <algorithm>
 #include <cmath>
 
-namespace AppInternal {
+namespace Haruka::Core::AppInternal {
 
-std::vector<Haruka::RenderCommand> g_sceneRenderQueue;
+std::vector<Haruka::Core::Scene::RenderCommand> g_sceneRenderQueue;
 
 namespace {
 // GL-owning caches at namespace scope so cleanupGLStatics() can reset them
 // before the GL context is destroyed. Function-local statics would destruct
 // at program exit (after main() returns), which is after the context is gone.
-std::unordered_map<std::string, std::shared_ptr<Model>> g_modelCache;
-std::unique_ptr<SimpleMesh> g_sphereMesh;
-std::unique_ptr<SimpleMesh> g_cubeMesh;
-std::unique_ptr<SimpleMesh> g_capsuleMesh;
-std::unique_ptr<SimpleMesh> g_characterMesh;
-std::unique_ptr<SimpleMesh> g_planeMesh;
-std::unique_ptr<SimpleMesh> g_cylinderMesh;
-std::unique_ptr<SimpleMesh> g_triangleMesh;
+std::unordered_map<std::string, std::shared_ptr<Haruka::Renderer::Model>> g_modelCache;
+std::unique_ptr<Renderer::Mesh> g_sphereMesh;
+std::unique_ptr<Renderer::Mesh> g_cubeMesh;
+std::unique_ptr<Renderer::Mesh> g_capsuleMesh;
+std::unique_ptr<Renderer::Mesh> g_characterMesh;
+std::unique_ptr<Renderer::Mesh> g_planeMesh;
+std::unique_ptr<Renderer::Mesh> g_cylinderMesh;
+std::unique_ptr<Renderer::Mesh> g_triangleMesh;
 
 // Texturas de MATERIAL por ruta. Cachea también los FALLOS (handle inválido): sin eso, un
 // material que apunta a un PNG que no existe reintentaría el stbi_load de cada objeto y de
@@ -66,7 +66,7 @@ void cleanupGLStatics() {
     g_triangleMesh.reset();
 }
 
-glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos) {
+glm::mat4 getTransformMatrix(const Haruka::Core::Scene::SceneObject& obj, const Haruka::Tools::WorldPos& camPos) {
     // Camera-relative in DOUBLE precision: the position-minus-camera subtraction is done
     // in double and ONLY the offset (small near the camera) is cast to float. Avoids the
     // ~0.5 m jitter that appeared when casting surface positions (millions of m) to float.
@@ -86,7 +86,7 @@ glm::mat4 getTransformMatrix(const Haruka::SceneObject& obj, const Haruka::World
     return glm::scale(transform, glm::vec3(obj.scale));
 }
 
-glm::mat4 getCharacterTransform(const Haruka::SceneObject& obj, const Haruka::WorldPos& camPos, const glm::dvec3& up) {
+glm::mat4 getCharacterTransform(const Haruka::Core::Scene::SceneObject& obj, const Haruka::Tools::WorldPos& camPos, const glm::dvec3& up) {
     glm::mat4 transform = glm::translate(glm::mat4(1.0f), glm::vec3(obj.position - camPos));
     // Marco local: Y = arriba del planeta. `glm::rotation` lleva +Y a `up`; el yaw gira alrededor de
     // ese Y LOCAL (post-multiplicado), como en el pase de props.
@@ -96,15 +96,15 @@ glm::mat4 getCharacterTransform(const Haruka::SceneObject& obj, const Haruka::Wo
     return glm::scale(transform, glm::vec3(obj.scale));
 }
 
-Model* getOrLoadModelCached(const std::string& path) {
+Haruka::Renderer::Model* getOrLoadModelCached(const std::string& path) {
     if (path.empty()) return nullptr;   // item sin modelo (p.ej. minerales) → no cargar ""
     auto it = g_modelCache.find(path);
     if (it != g_modelCache.end()) {
         return it->second.get();
     }
 
-    auto model = std::make_shared<Model>(path);
-    Model* modelPtr = model.get();
+    auto model = std::make_shared<Haruka::Renderer::Model>(path);
+    Haruka::Renderer::Model* modelPtr = model.get();
     g_modelCache.emplace(path, std::move(model));
     return modelPtr;
 }
@@ -115,7 +115,7 @@ Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path) {
     auto it = g_materialTexCache.find(path);
     if (it != g_materialTexCache.end()) return it->second;   // incluido el fallo cacheado
 
-    RHI::Device* dev = RHI::device();
+    Haruka::RHI::Device* dev = Haruka::RHI::device();
     if (!dev) return {};
 
     // Las rutas de material vienen del JSON de la escena y las escribe el IDE como
@@ -124,9 +124,9 @@ Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path) {
     // raíz de assets del MOTOR (el IDE la fija a la suya) y contra la del PROYECTO abierto.
     const std::string candidates[] = {
         path,
-        AssetPaths::assetsDir() + path,
-        AssetPaths::textures() + path,
-        AssetPaths::projectRoot() + path,
+        Haruka::Core::AssetPaths::assetsDir() + path,
+        Haruka::Core::AssetPaths::textures() + path,
+        Haruka::Core::AssetPaths::projectRoot() + path,
     };
     int w = 0, h = 0, n = 0;
     unsigned char* pixels = nullptr;
@@ -137,89 +137,89 @@ Haruka::RHI::TextureHandle getOrLoadMaterialTexture(const std::string& path) {
     }
     if (!pixels) {
         HARUKA_LOGW("Material", "textura no encontrada: %s", path.c_str());
-        g_materialTexCache.emplace(path, RHI::TextureHandle{});
+        g_materialTexCache.emplace(path, Haruka::RHI::TextureHandle{});
         return {};
     }
 
-    RHI::TextureDesc td;
+    Haruka::RHI::TextureDesc td;
     td.width = (uint32_t)w; td.height = (uint32_t)h;
-    td.format = RHI::Format::RGBA8;
+    td.format = Haruka::RHI::Format::RGBA8;
     td.mipmaps = true;
     td.maxAnisotropy = 8.0f;
     td.initialData = pixels;
-    RHI::TextureHandle handle = dev->createTexture(td);
+    Haruka::RHI::TextureHandle handle = dev->createTexture(td);
     stbi_image_free(pixels);
 
     g_materialTexCache.emplace(path, handle);
     return handle;
 }
 
-SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
+Renderer::Mesh* getPrimitiveMesh(Haruka::Tools::PrimitiveType primitive) {
     switch (primitive) {
-        case Haruka::PrimitiveType::CUBE:
+        case Haruka::Tools::PrimitiveType::CUBE:
             if (!g_cubeMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createCube(1.0f, vertices, normals, indices);
-                g_cubeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createCube(1.0f, vertices, normals, indices);
+                g_cubeMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_cubeMesh.get();
-        case Haruka::PrimitiveType::SPHERE:
+        case Haruka::Tools::PrimitiveType::SPHERE:
             if (!g_sphereMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createSphereLOD(1.0f, 24, 16, vertices, normals, indices);
-                g_sphereMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createSphereLOD(1.0f, 24, 16, vertices, normals, indices);
+                g_sphereMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_sphereMesh.get();
-        case Haruka::PrimitiveType::CAPSULE:
+        case Haruka::Tools::PrimitiveType::CAPSULE:
             if (!g_capsuleMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createCapsule(0.5f, 1.5f, 24, 12, vertices, normals, indices);
-                g_capsuleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createCapsule(0.5f, 1.5f, 24, 12, vertices, normals, indices);
+                g_capsuleMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_capsuleMesh.get();
-        case Haruka::PrimitiveType::CHARACTER:
+        case Haruka::Tools::PrimitiveType::CHARACTER:
             if (!g_characterMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
                 // Las MISMAS cifras que la capsula de Jolt del jugador (player.cpp: 1,9 m de pie,
                 // radio 0,35): lo que se ve es lo que choca. Se sube 0,95 m para que la base sea el pie.
-                PrimitiveShapes::createCapsule(0.35f, 1.9f, 24, 12, vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createCapsule(0.35f, 1.9f, 24, 12, vertices, normals, indices);
                 for (auto& v : vertices) v.y += 0.95f;
-                g_characterMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                g_characterMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_characterMesh.get();
-        case Haruka::PrimitiveType::PLANE:
+        case Haruka::Tools::PrimitiveType::PLANE:
             if (!g_planeMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createPlane(1.0f, 1.0f, 1, vertices, normals, indices);
-                g_planeMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createPlane(1.0f, 1.0f, 1, vertices, normals, indices);
+                g_planeMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_planeMesh.get();
-        case Haruka::PrimitiveType::CILINDER:
+        case Haruka::Tools::PrimitiveType::CILINDER:
             if (!g_cylinderMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createCylinder(0.5f, 1.0f, 24, vertices, normals, indices);
-                g_cylinderMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createCylinder(0.5f, 1.0f, 24, vertices, normals, indices);
+                g_cylinderMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_cylinderMesh.get();
-        case Haruka::PrimitiveType::TRIANGLE:
+        case Haruka::Tools::PrimitiveType::TRIANGLE:
             if (!g_triangleMesh) {
                 std::vector<glm::vec3> vertices;
                 std::vector<glm::vec3> normals;
                 std::vector<unsigned int> indices;
-                PrimitiveShapes::createTriangle(0.5f, vertices, normals, indices);
-                g_triangleMesh = std::make_unique<SimpleMesh>(vertices, normals, indices);
+                Haruka::Renderer::PrimitiveShapes::createTriangle(0.5f, vertices, normals, indices);
+                g_triangleMesh = std::make_unique<Renderer::Mesh>(vertices, normals, indices);
             }
             return g_triangleMesh.get();
         default:
@@ -227,7 +227,7 @@ SimpleMesh* getPrimitiveMesh(Haruka::PrimitiveType primitive) {
     }
 }
 
-} // namespace AppInternal
+} // namespace Haruka::Core::AppInternal
 
 // Model bounds (AABB) — an ASSET query (Application owns the model cache).
 // Not collision logic: the physics module uses these bounds for its collider.
@@ -237,14 +237,14 @@ Haruka::Renderer::Model* Application::getModel(const std::string& path) {
 }
 
 bool Application::getModelBounds(const std::string& path, glm::vec3& outMin, glm::vec3& outMax) {
-    Model* m = AppInternal::getOrLoadModelCached(path);
+    Renderer::Model* m = AppInternal::getOrLoadModelCached(path);
     if (!m || !m->hasBounds()) return false;
     outMin = m->boundsMin();
     outMax = m->boundsMax();
     return true;
 }
 
-double Application::getObjectBoundingRadius(const Haruka::SceneObject& obj) {
+double Application::getObjectBoundingRadius(const Scene::SceneObject& obj) {
     const double maxScale = std::max({ std::abs(obj.scale.x),
                                        std::abs(obj.scale.y),
                                        std::abs(obj.scale.z) });

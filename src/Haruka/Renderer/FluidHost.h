@@ -27,7 +27,7 @@
 
 namespace Haruka::Physics::Fluid { class ShallowWaterSim; class PBFSolver; class HybridWater; }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class FluidHost {
 public:
@@ -64,11 +64,11 @@ public:
     double dynamicWaterM3 = 0.0; ///< agua de lluvia que hay en el parche (medida)
 
     /** @brief Avanza sims + acoplador. Re-ancla el parche cuando el jugador se aleja. */
-    void update(float dt, const WorldPos& cameraPos);
+    void update(float dt, const Tools::WorldPos& cameraPos);
 
     /** @brief Dibuja el parche de ríos/lagos y, si hay splash, el fluido (modo superficie
      *  compuesto sobre `scenePass`). El binding 0 debe estar en el UBO per-frame del engine. */
-    void render(const WorldPos& cameraPos, int vpW, int vpH, RHI::RenderPassHandle scenePass);
+    void render(const Tools::WorldPos& cameraPos, int vpW, int vpH, RHI::RenderPassHandle scenePass);
 
     /** @brief La simulación de ríos/lagos del MOTOR. Se expone para que el juego le añada
      *  manantiales o vierta volumen SIN crear una segunda sim.
@@ -80,7 +80,7 @@ public:
     Physics::Fluid::ShallowWaterSim* sim() { return m_sim.get(); }
 
 private:
-    void ensurePatch(const WorldPos& cameraPos);
+    void ensurePatch(const Tools::WorldPos& cameraPos);
 
     std::unique_ptr<Physics::Fluid::ShallowWaterSim> m_sim;
     /// Superficie del agua que se publica al planeta (m sobre el nivel del mar; centinela = seca).
@@ -89,11 +89,11 @@ private:
     std::unique_ptr<Physics::Fluid::PBFSolver>       m_pbf;
     std::unique_ptr<Physics::Fluid::HybridWater>     m_hybrid;
 
-    WorldPos m_anchor{0.0};
+    Tools::WorldPos m_anchor{0.0};
     bool     m_anchored = false;
     float    m_pendingRain = 0.0f;
     float m_pendingEvap = 0.0f, m_pendingInfil = 0.0f;
     float    m_splashAccum = 0.0f;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

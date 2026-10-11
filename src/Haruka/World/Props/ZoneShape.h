@@ -16,7 +16,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 
 /** @brief Perímetro de una zona: UN círculo O UN polígono (los dos pueden estar ausentes = zona
  *  solo por color pintado). El radio del círculo está en METROS sobre la superficie. */
@@ -82,4 +82,4 @@ inline bool zoneShapeContains(const ZoneShape& z, const glm::vec3& dir, double p
     return false;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

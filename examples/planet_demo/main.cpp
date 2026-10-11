@@ -258,19 +258,19 @@ int main(int, char**) {
     glDeleteShader(wireVs); glDeleteShader(wireFs);
 
     // ---- Planet with Geology + Erosion + Biomes ----
-    Haruka::Planet::GeologyConfig gcfg;
+    Haruka::World::Planet::GeologyConfig gcfg;
     gcfg.seed = 42;
     gcfg.numPlates = 12;
-    auto geology = Haruka::Planet::generateGeology(gcfg);
+    auto geology = Haruka::World::Planet::generateGeology(gcfg);
 
-    Haruka::Planet::ClimateOutput climate;
-    Haruka::Planet::BiomesOutput biomes;
+    Haruka::World::Planet::ClimateOutput climate;
+    Haruka::World::Planet::BiomesOutput biomes;
 
     // Build TerrainGrid from geology (pre-computed erosion, always-on)
     auto geoHeight = [&](const glm::dvec3& dir) -> float {
         return (float)geology.elevationModifier(dir);
     };
-    Haruka::Planet::TerrainGridConfig tcfg;
+    Haruka::World::Terrain::TerrainGridConfig tcfg;
     tcfg.faceRes = 256;
     tcfg.erosionIters = 5;
     Haruka::Planet::TerrainGrid terrainGrid;
@@ -486,7 +486,7 @@ int main(int, char**) {
             static unsigned geoSeed = 100;
             geoSeed++;
             gcfg.seed = geoSeed;
-            geology = Haruka::Planet::generateGeology(gcfg);
+            geology = Haruka::World::Planet::generateGeology(gcfg);
 
             auto newGeoHeight = [&](const glm::dvec3& dir) -> float {
                 return (float)geology.elevationModifier(dir);

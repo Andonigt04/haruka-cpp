@@ -7,9 +7,9 @@
 #include "Haruka/RHI/RHITypes.h"
 
 namespace Haruka { namespace RHI { class Context; class Device; } }
-namespace Haruka { namespace Core { class Camera; } } using Haruka::Core::Camera;
+namespace Haruka { namespace Core { class Camera; } }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 struct TerrainPatch {
     glm::vec2 offset;
@@ -40,7 +40,7 @@ public:
 
     float getHeightNormalized(int x, int z) const;
 
-    void setCamera(const Camera* cam) { m_camera = cam; }
+    void setCamera(const Core::Camera* cam) { m_camera = cam; }
 
 private:
     int size;
@@ -54,9 +54,9 @@ private:
     float lodDistance[4] = {50.0f, 100.0f, 200.0f, 400.0f};
     int patchSize = 64;
 
-    const Camera* m_camera = nullptr;
+    const Core::Camera* m_camera = nullptr;
     Haruka::RHI::BufferHandle m_patchUBO;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer
 

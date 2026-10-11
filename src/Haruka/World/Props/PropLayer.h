@@ -39,7 +39,7 @@
 #include "Haruka/Tools/ProcGraph/TreeSpawn.h"             // IPropField, PropGrid, slopeAt (GL-free)
 #include "Haruka/Tools/ProcGraph/ProcNoise.h"             // hash32
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 
 /**
  * @brief Ruido de VALOR 3D trilineal, [0,1], anclado al mundo (la entrada es un punto en metros
@@ -170,9 +170,9 @@ struct PropLayer {
      *  `mapForcesBiome` y el mapa lo pinta. `biome` = clave de `biomeKey` (vacío = sin clasificar). */
     std::string biomeFor(const std::string& biome, float mapDensity, float tempC) const {
         if (!mapForcesBiome || densityMap.empty() || mapDensity < 0.5f || biome.empty()) return biome;
-        const Biome b = biomeFromKey(biome);
-        if (b == Biome::COUNT || !biomeAcceptsForestMap(b)) return biome;
-        return biomeKey(forestBiomeForTemp(tempC));
+        const Planet::Biome b = Planet::biomeFromKey(biome);
+        if (b == Planet::Biome::COUNT || !Planet::biomeAcceptsForestMap(b)) return biome;
+        return Planet::biomeKey(Planet::forestBiomeForTemp(tempC));
     }
 
     /** @brief ZONAS donde esta capa puede instalar: lista de NOMBRES de zona de la escena (las
@@ -297,7 +297,7 @@ struct PropLayer {
      *  clima/forma. 0 = no es su territorio; >0 = cuánto es. `zoneName` (opcional) aplica el
      *  filtro de zona declarado en `zones`; `layerName` y `biomeKey` (opcionales) alimentan la
      *  condición `when`. */
-    float coverage(const FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
+    float coverage(const Planet::FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
                    const std::string& zoneName = {}, const std::string& layerName = {},
                    const std::string& biomeKey = {}) const {
         if (!zoneAllowed(zoneName)) return 0.0f;
@@ -339,7 +339,7 @@ struct PropLayer {
      *  de multiplicar informa de cuáles se anulan. Se llama solo desde el diagnóstico, así que
      *  puede permitirse mirar todos los factores en vez de cortocircuitar en el primero: si tienes
      *  la humedad Y la pendiente mal, quieres saberlo de una vez, no en dos arranques. */
-    uint32_t coverageFailMask(const FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
+    uint32_t coverageFailMask(const Planet::FieldSample& fs, float slopeRad, float mapDensity = 1.0f,
                               const std::string& zoneName = {},
                               const std::string& layerName = {},
                               const std::string& biomeKey = {}) const {
@@ -563,4 +563,4 @@ inline bool isClumpProto(const std::string& name) {
     return name.rfind("clump#", 0) == 0;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

@@ -14,7 +14,9 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class WorldSystem; }
+namespace Haruka { namespace Core { class Camera; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::World { class WorldSystem; }
 
 namespace Haruka::Renderer {
 
@@ -22,12 +24,13 @@ class SkyPass {
 public:
     struct Frame {
         Core::Camera*         camera  = nullptr;
-        PlanetarySystem*      planets = nullptr;
-        WorldSystem*          world   = nullptr;
+        World::Planet::PlanetarySystem*      planets = nullptr;
+        World::WorldSystem*          world   = nullptr;
         RHI::RenderPassHandle sceneTargetPass{};   ///< invalido = backbuffer
         int   renderW = 1, renderH = 1;            ///< del target de escena (con escala de render)
         uint32_t width = 1, height = 1;            ///< de la ventana/viewport (viewport del backbuffer)
         float rainOverride = -1.0f;                ///< consola `rain`: fuerza el temporal; <0 = auto
+        bool  clearWeather = false;                ///< vista de edicion: sin nube ni precipitacion, aire limpio
     };
     /// El clima del frame, desde la camara. Lo escribe `draw`; lo leen los demas pases.
     struct Weather {

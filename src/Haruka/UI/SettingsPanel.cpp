@@ -32,7 +32,7 @@ void SettingsPanel::beginRebind(const std::string& action, int slotIndex, bool p
     m_rebindPadGroup  = padGroup;
     m_rebindChain     = chain;
     m_waitingForKey   = true;
-    SettingsManager::get().setCapturing(true); // freeze all actions until a key lands
+    Settings::SettingsManager::get().setCapturing(true); // freeze all actions until a key lands
 }
 
 void SettingsPanel::cancelRebind() {
@@ -40,7 +40,7 @@ void SettingsPanel::cancelRebind() {
     m_rebindIndex   = -1;
     m_rebindPad = m_rebindPadAxis = m_rebindPadGroup = m_rebindChain = false;
     m_waitingForKey = false;
-    SettingsManager::get().setCapturing(false);
+    Settings::SettingsManager::get().setCapturing(false);
 }
 
 static const char* texQualityNames[]   = { "Low", "Medium", "High", "Ultra" };
@@ -51,7 +51,7 @@ static const char* windowModeNames[]   = { "Windowed", "Borderless", "Fullscreen
 static const char* renderBackendNames[] = { "OpenGL", "Vulkan" };
 
 bool SettingsPanel::render() {
-    auto& sm = SettingsManager::get();
+    auto& sm = Settings::SettingsManager::get();
     bool close = false;
 
     ImGuiIO& io = ImGui::GetIO();
@@ -80,7 +80,7 @@ bool SettingsPanel::render() {
 
     if (ImGui::Button(TR("ui.saveClose").c_str(), ImVec2(140, 0))) {
         sm.save();
-        if (auto* app = MotorInstance::getInstance().getApplication())
+        if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
             app->applyGraphicsSettings();
         close = true;
     }
@@ -100,18 +100,18 @@ bool SettingsPanel::render() {
 // ── Graphics tab ─────────────────────────────────────────────────────────────
 
 void SettingsPanel::tabGraphics() {
-    auto& g = SettingsManager::get().graphics();
+    auto& g = Settings::SettingsManager::get().graphics();
 
     ImGui::SeparatorText(TR("gfx.performance").c_str());
     if (ImGui::Button(TR("gfx.presetLow").c_str())) {
         Settings::applyLowPreset(g);
-        if (auto* app = MotorInstance::getInstance().getApplication())
+        if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
             app->applyGraphicsSettings();
     }
     ImGui::SameLine();
     if (ImGui::Button(TR("gfx.presetHigh").c_str())) {
         Settings::applyHighPreset(g);
-        if (auto* app = MotorInstance::getInstance().getApplication())
+        if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
             app->applyGraphicsSettings();
     }
     {
@@ -128,7 +128,7 @@ void SettingsPanel::tabGraphics() {
     int wm = (int)g.windowMode;
     if (ImGui::Combo(TR("gfx.windowMode").c_str(), &wm, windowModeNames, 3)) {
         g.windowMode = (Settings::WindowMode)wm;
-        if (auto* app = MotorInstance::getInstance().getApplication())
+        if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
             app->applyGraphicsSettings();
     }
 
@@ -201,7 +201,7 @@ void SettingsPanel::tabGraphics() {
             for (const Mon& m : s_mons) mons.push_back(m.name.c_str());
             if (ImGui::Combo(TR("gfx.monitor").c_str(), &curMon, mons.data(), (int)mons.size())) {
                 g.monitorName = s_mons[(size_t)curMon].name;
-                if (auto* app = MotorInstance::getInstance().getApplication())
+                if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
                     app->applyGraphicsSettings();
             }
             if (ImGui::IsItemHovered())
@@ -261,7 +261,7 @@ void SettingsPanel::tabGraphics() {
                 if (ImGui::Combo(TR("gfx.resolution").c_str(), &cur, items.data(), (int)items.size())) {
                     g.resolutionW = s_modes[(size_t)cur].w;
                     g.resolutionH = s_modes[(size_t)cur].h;
-                    if (auto* app = MotorInstance::getInstance().getApplication())
+                    if (auto* app = Renderer::MotorInstance::getInstance().getApplication())
                         app->applyGraphicsSettings();
                 }
             }
@@ -437,7 +437,7 @@ static void deviceCombo(const char* label, bool recording, std::string& sel) {
 }
 
 void SettingsPanel::tabAudio() {
-    auto& a = SettingsManager::get().audio();
+    auto& a = Settings::SettingsManager::get().audio();
 
     ImGui::SeparatorText(TR("audio.devices").c_str());
     // Entrada (micro): la enumera SDL (la captura de audio del motor lee de SDL).
@@ -452,7 +452,7 @@ void SettingsPanel::tabAudio() {
         const char* preview = a.outputDevice.empty() ? def.c_str() : a.outputDevice.c_str();
         if (ImGui::BeginCombo(TR("audio.output").c_str(), preview)) {
             if (ImGui::Selectable(def.c_str(), a.outputDevice.empty())) a.outputDevice.clear();
-            const auto& devs = AudioManager::playbackDevices();
+            const auto& devs = Audio::AudioManager::playbackDevices();
             for (size_t di = 0; di < devs.size(); ++di) {
                 const std::string& d = devs[di];
                 bool sel = (a.outputDevice == d);
@@ -479,8 +479,8 @@ void SettingsPanel::tabAudio() {
 // SOLO selección entre los idiomas INSTALADOS (los que tienen assets/lang/<c>.json). La
 // gestión modular (instalar/quitar idiomas, voz y audio) se hace en el LAUNCHER, no aquí.
 void SettingsPanel::tabLanguage() {
-    auto& sm  = SettingsManager::get();
-    auto& loc = Locale::get();
+    auto& sm  = Settings::SettingsManager::get();
+    auto& loc = Core::Locale::get();
 
     static bool s_scanned = false;
     if (!s_scanned) { loc.scan(); s_scanned = true; }
@@ -504,7 +504,7 @@ void SettingsPanel::tabLanguage() {
 // ── Controls tab ─────────────────────────────────────────────────────────────
 
 void SettingsPanel::tabControls() {
-    auto& sm = SettingsManager::get();
+    auto& sm = Settings::SettingsManager::get();
 
     // ── EL MANDO: que el panel diga si SDL lo ve. "Los inputs no se leen" no se puede separar de
     // "no hay mando abierto" sin esto (un joystick sin mapeo de gamepad no aparece en

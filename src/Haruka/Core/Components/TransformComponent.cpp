@@ -1,7 +1,7 @@
 #include "TransformComponent.h"
 #include <imgui.h>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 // Editor de transform con controles escalares por componente.
 void TransformComponent::renderInspector() {
@@ -18,4 +18,4 @@ void TransformComponent::renderInspector() {
     ImGui::InputDouble("Scale Z", &scale.z);
 }
 
-}
+} // namespace Haruka::Core::Components

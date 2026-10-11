@@ -17,10 +17,10 @@
 #include <cmath>
 #include <vector>
 
-namespace Haruka::World {
+namespace Haruka::World::Water {
 
-void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
-    PlanetarySystem* ps = f.planets;
+void FluidBridge::run(std::unique_ptr<Renderer::FluidHost>& host, const Frame& f) {
+    Planet::PlanetarySystem* ps = f.planets;
     // --- HITO 2: RÍOS/LAGOS + SPLASH (FluidHost) -------------------------------------------
     // Dibuja en el pase de escena DESPUÉS del planeta y la precipitación: el color/depth de la
     // escena ya están completos, que es lo que el modo superficie del fluido necesita para sembrar
@@ -43,7 +43,7 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
     const bool bodyHasWater = ps && ps->activeTerrestrial()
                             ? ps->activeTerrestrial()->hasWater()
                             : true;   // sin planeta terrestre resuelto, no se decide aquí
-    if (!host && bodyHasWater) host = std::make_unique<FluidHost>();
+    if (!host && bodyHasWater) host = std::make_unique<Renderer::FluidHost>();
     if (host && bodyHasWater && ps && f.camera) {
         HARUKA_PROFILE("fluid.setup+render(rios/lagos)"); HARUKA_GPU_SCOPE("fluid.setup+render(rios/lagos)");
         glm::dvec3 pc; double pr;
@@ -68,13 +68,13 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
             // El campo de lagos HORNEADO: con él, la siembra del parche deja de depender de su borde.
             host->bakedWaterFn = [ps](const glm::dvec3& wp) -> double {
                 const auto* t = ps ? ps->activeTerrestrial() : nullptr;
-                if (!t) return (double)Haruka::Planet::WATER_FILL_DRY;
+                if (!t) return (double)WATER_FILL_DRY;
                 glm::dvec3 pc; double pr = 0.0;
                 if (!ps->getActivePlanet(pc, pr) || pr <= 0.0)
-                    return (double)Haruka::Planet::WATER_FILL_DRY;
+                    return (double)WATER_FILL_DRY;
                 const glm::dvec3 rel = wp - pc;
                 const double len = glm::length(rel);
-                if (len < 1e-9) return (double)Haruka::Planet::WATER_FILL_DRY;
+                if (len < 1e-9) return (double)WATER_FILL_DRY;
                 return (double)t->lakeLevelAt(rel / len);
             };
             // LA RUGOSIDAD DEL LECHO, del bioma del punto (el mismo clasificador que pinta el suelo
@@ -89,7 +89,7 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
                 const double len = glm::length(rel);
                 if (len < 1e-9) return 0.03;
                 const glm::dvec3 dir = rel / len;
-                const Haruka::FieldSample f = t->fieldSampleAt(glm::vec3(dir));
+                const Planet::FieldSample f = t->fieldSampleAt(glm::vec3(dir));
                 const double hM = ps->sampleTerrainHeight(wp);
                 // Pendiente por diferencias sobre 8 m, en el plano tangente: basta para separar
                 // "acantilado" (0,55 rad) de lo demás, que es lo único que el bioma le pide.
@@ -100,9 +100,9 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
                 const double dh1 = ps->sampleTerrainHeight(wp + t1 * e) - ps->sampleTerrainHeight(wp - t1 * e);
                 const double dh2 = ps->sampleTerrainHeight(wp + t2 * e) - ps->sampleTerrainHeight(wp - t2 * e);
                 const float slope = (float)std::atan(std::sqrt(dh1 * dh1 + dh2 * dh2) / (2.0 * e));
-                const Haruka::Planet::Biome b = Haruka::Planet::classifyBiome(
-                    Haruka::Planet::BiomeSample{f.tempC, f.humidity, (float)hM, slope});
-                return (double)Haruka::Planet::manningForBiome(b);
+                const Planet::Biome b = Planet::classifyBiome(
+                    Planet::BiomeSample{f.tempC, f.humidity, (float)hM, slope});
+                return (double)Planet::manningForBiome(b);
             };
             const auto* tp = ps->activeTerrestrial();
             if (tp) {
@@ -161,10 +161,10 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
             // que la lluvia: 1e-5 m/s a 25 °C y cielo abierto = 36x lo real) y se infiltra despacio
             // en el suelo. Lo evaporado vuelve al clima como vapor en la celda del jugador.
             {
-                const Haruka::WeatherSample wxl = ps ? ps->weatherAt(glm::dvec3(f.camera->position)) : Haruka::WeatherSample{};
+                const WeatherSample wxl = ps ? ps->weatherAt(glm::dvec3(f.camera->position)) : WeatherSample{};
                 const float fT  = glm::clamp((wxl.tempC + 5.0f) / 35.0f, 0.0f, 1.5f);
                 const float sun = 1.0f - 0.8f * glm::clamp(wxl.cloudCover, 0.0f, 1.0f);
-                const float speed = (float)Haruka::WeatherSystem::cycleSpeed();
+                const float speed = (float)WeatherSystem::cycleSpeed();
                 host->evapPerSec  = 1.0e-5f * fT * sun * speed;
                 host->infilPerSec = 0.5e-5f * speed;
             }
@@ -188,5 +188,5 @@ void FluidBridge::run(std::unique_ptr<FluidHost>& host, const Frame& f) {
         }
 }
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Water
 #endif // HARUKA_MOD_FLUIDS

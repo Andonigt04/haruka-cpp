@@ -26,12 +26,11 @@
 #include "Haruka/Tools/ObjectTypes.h"
 #include "Haruka/Game/Prefab/Prefab.h"   // PrefabEdit: lo que se desvía del montaje en ESTE conjunto
 
-namespace Haruka {
+namespace Haruka::Core::Components { class MeshRendererComponent; class MaterialComponent; }
+namespace Haruka::Tools { class EventManager; }
 
-    class MeshRendererComponent;
-    class EventManager;
-    class MaterialComponent;
 
+namespace Haruka::Core::Scene {
     struct LODLayerSettings {
         double threshold = 0.0;
         std::string asset;
@@ -92,14 +91,14 @@ namespace Haruka {
         uint64_t    uid = nextSceneObjectUid();   // identidad estable (ver nextSceneObjectUid)
         std::string name;
         std::string type; // "CelestialBody", "Planet", "Spacecraft", "Camera", etc.
-        ObjectType  objectType = ObjectType::UNKNOWN; // clasificación rápida para dispatch
+        Tools::ObjectType  objectType = Tools::ObjectType::UNKNOWN; // clasificación rápida para dispatch
         std::string templateName; // El arquetipo del que hereda (opcional)
 
         // Transformación con precisión astronómica (double precision)
         // Vital para evitar el jittering en escalas de KM
-        Haruka::WorldPos position = Haruka::WorldPos(0.0);
-        Haruka::Rotation rotation = Haruka::Rotation(); // Euler angles en grados
-        Haruka::DScale   scale    = Haruka::DScale(1.0);
+        Tools::WorldPos position = Tools::WorldPos(0.0);
+        Tools::Rotation rotation = Tools::Rotation(); // Euler angles en grados
+        Tools::DScale   scale    = Tools::DScale(1.0);
         // ORIENTACIÓN EXACTA (opcional). Quien ya tiene un cuaternión NO debe pasarlo por Euler: el
         // viaje quat→Euler→matriz se degrada en la singularidad del cardán y devuelve orientaciones
         // basura (síntoma: piezas de un muro entero desperdigadas y girando mal). Con `useOrientation`
@@ -112,8 +111,8 @@ namespace Haruka {
         double intensity = 1.0;
         int renderLayer = 1;
         std::string modelPath;
-        std::shared_ptr<MaterialComponent> material;
-        std::shared_ptr<MeshRendererComponent> meshRenderer;
+        std::shared_ptr<Components::MaterialComponent> material;
+        std::shared_ptr<Components::MeshRendererComponent> meshRenderer;
         
         // Flags de sistema
         Flags flags;
@@ -160,7 +159,7 @@ namespace Haruka {
         /// que aquí van las desviaciones —pieza rota, movida, sustituida— y el `.json` del montaje se
         /// queda como está. Tres tablas rotas son tres entradas, no las 870 del casco. La regla de
         /// qué significa cada cambio vive en `applyPrefabEdits`, una sola vez para juego y editor.
-        std::vector<PrefabEdit> prefabEdits;
+        std::vector<Game::Prefab::PrefabEdit> prefabEdits;
 
         /// Esta ENTRADA ya se expandió en sus piezas. Runtime, no se serializa: al cargar de nuevo
         /// vuelve a false y la escena se expande otra vez. Existe para que `expandPrefabs()` se
@@ -225,8 +224,8 @@ namespace Haruka {
         void setName(const std::string& name) { m_name = name; }
         const std::string& getName() const { return m_name; }
 
-        void setEventManager(EventManager* eventManager) { m_eventManager = eventManager; }
-        EventManager* getEventManager() const { return m_eventManager; }
+        void setEventManager(Tools::EventManager* eventManager) { m_eventManager = eventManager; }
+        Tools::EventManager* getEventManager() const { return m_eventManager; }
 
         std::vector<SceneObject> getObjects() const {
             std::vector<SceneObject> objects;
@@ -308,7 +307,7 @@ namespace Haruka {
             auto obj = std::make_shared<SceneObject>();
             obj->name = name;
             obj->type = type;
-            obj->objectType = Haruka::classifyObjectType(type);
+            obj->objectType = Tools::classifyObjectType(type);
             return obj;
         }
 
@@ -335,10 +334,10 @@ namespace Haruka {
         std::unordered_map<std::string, std::shared_ptr<SceneObject>> m_registry;
         std::unordered_map<uint64_t, std::shared_ptr<SceneObject>> m_idRegistry;
         std::string m_name = "Untitled";
-        EventManager* m_eventManager = nullptr;
+        Tools::EventManager* m_eventManager = nullptr;
         PrefabExpander m_prefabExpander;   ///< ver setPrefabExpander
         
         mutable std::mutex m_mutex; // Para que el StreamingSystem pueda leer mientras el Loader carga
     };
+} // namespace Haruka::Core::Scene
 
-} // namespace Haruka

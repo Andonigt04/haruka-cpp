@@ -5,7 +5,7 @@
 #include <cmath>
 #include <queue>
 
-namespace Haruka {
+namespace Haruka::World::Planet {
 
 namespace {
 
@@ -399,4 +399,4 @@ FieldSample PlanetFields::sample(const glm::vec3& dirIn) const {
     return s;
 }
 
-} // namespace Haruka
+} // namespace Haruka::World::Planet

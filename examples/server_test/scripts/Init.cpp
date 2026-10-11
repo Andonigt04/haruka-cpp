@@ -14,21 +14,21 @@
 #include <imgui.h>
 #include <glad/glad.h>
 #ifdef HARUKA_NETWORK
-#include "Haruka/Tools/DGSBridge.h"
+#include "Haruka/Network/DGSBridge.h"
 #endif
 
 // 3x3 km room — chunks (-1,-1) to (1,1) in X and Z.
 // Player spawns at world center (0,0,0) = chunk (0,0,0), local (0,0,0).
 // All scene coordinates are in METRES (Units::METER = 1.0, Units::KM = 1000.0).
 // Objects that represent km-scale structures use Units::KM in their scale/position.
-static constexpr double ROOM_HALF_EXTENT = 1.5 * Haruka::Units::KM; // 1500 m = 1.5 km each side
+static constexpr double ROOM_HALF_EXTENT = 1.5 * Haruka::Tools::Units::KM; // 1500 m = 1.5 km each side
 static constexpr uint32_t PLAYER_UUID    = 1;
 static const char*        PLAYER_NAME    = "player1";
 
 static Camera*                            g_gameCamera      = nullptr;
-static Haruka::Character*                 g_playerCharacter = nullptr;
-static Haruka::SceneManager*              g_scene           = nullptr;
-static std::unique_ptr<Haruka::Character> g_playerOwned;
+static Haruka::Game::Character*                 g_playerCharacter = nullptr;
+static Haruka::Core::Scene::SceneManager*              g_scene           = nullptr;
+static std::unique_ptr<Haruka::Game::Character> g_playerOwned;
 static std::shared_ptr<RigidBody>         g_playerBody;
 
 // Chat state
@@ -83,7 +83,7 @@ static void registerActions() {
     sm.registerAction("Quit",      "Quit",      "UI", { SDL_SCANCODE_F4 });
 }
 
-void gameOnInit(Haruka::SceneManager* scene) {
+void gameOnInit(Haruka::Core::Scene::SceneManager* scene) {
     g_scene = scene;
     g_playerOwned.reset();
 
@@ -113,7 +113,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
     g_panelShader = std::make_unique<Shader>(
         "shaders/ui_world_panel.vert", "shaders/ui_world_panel.frag");
 
-    g_playerOwned     = std::make_unique<Haruka::Character>(Haruka::WorldPos(0.0, 0.0, 0.0), PLAYER_NAME);
+    g_playerOwned     = std::make_unique<Haruka::Game::Character>(Haruka::Tools::WorldPos(0.0, 0.0, 0.0), PLAYER_NAME);
     g_gameCamera      = g_playerOwned->getCamera();
     g_playerCharacter = g_playerOwned.get();
     g_playerOwned->setFlightMode(true);
@@ -148,7 +148,7 @@ void gameOnInit(Haruka::SceneManager* scene) {
     // Wire SettingsManager as the input provider
     {
         auto& sm = Haruka::SettingsManager::get();
-        Haruka::CharacterInputProvider provider;
+        Haruka::Game::CharacterInputProvider provider;
         provider.readValue   = [&sm](const std::string& a) { return sm.readValue(a); };
         provider.isPerformed = [&sm](const std::string& a) { return sm.isPerformed(a); };
         provider.isStarted   = [&sm](const std::string& a) { return sm.isStarted(a); };
@@ -157,24 +157,24 @@ void gameOnInit(Haruka::SceneManager* scene) {
     }
 
     // Bind behaviors — developer decides which action does what, with full freedom
-    using AT = Haruka::ActionTrigger;
+    using AT = Haruka::Game::ActionTrigger;
 
     // Move: vec2 action (WASD composite) → character.move()
     g_playerOwned->bindAction<glm::vec2>("Move", AT::Performed,
-        [](Haruka::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
+        [](Haruka::Game::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
 
     // Jump: physics impulse — works because physicsBody is now set
     g_playerOwned->bindAction("Jump", AT::Started,
-        [](Haruka::Character& c, float) { c.jump(); });
+        [](Haruka::Game::Character& c, float) { c.jump(); });
 
     // Sprint: held → sprint on, released → sprint off
     g_playerOwned->bindAction("Sprint", AT::Started,
-        [](Haruka::Character& c, float) { c.sprint(true); });
+        [](Haruka::Game::Character& c, float) { c.sprint(true); });
     g_playerOwned->bindAction("Sprint", AT::Canceled,
-        [](Haruka::Character& c, float) { c.sprint(false); });
+        [](Haruka::Game::Character& c, float) { c.sprint(false); });
 
 #ifdef HARUKA_NETWORK
-    g_playerCharacter->onTransformChanged = [](const Haruka::WorldPos& pos, const Haruka::Rotation& rot) {
+    g_playerCharacter->onTransformChanged = [](const Haruka::Tools::WorldPos& pos, const Haruka::Tools::Rotation& rot) {
         Haruka::Network::sendTransform(PLAYER_UUID, pos, rot);
     };
 
@@ -463,10 +463,10 @@ void gameOnShutdown() {
     g_scene           = nullptr;
 }
 
-Haruka::SceneManager* gameGetScene() { return g_scene; }
+Haruka::Core::Scene::SceneManager* gameGetScene() { return g_scene; }
 
 namespace GameLogic {
-    Haruka::GameInterface gameInterface = {
+    Haruka::Core::GameInterface gameInterface = {
         .onInit          = gameOnInit,
         .onUpdate        = gameOnUpdate,
         .onShutdown      = gameOnShutdown,
@@ -480,7 +480,7 @@ namespace GameLogic {
 }
 
 extern "C" {
-    Haruka::GameInterface* getGameInterface() {
+    Haruka::Core::GameInterface* getGameInterface() {
         return &GameLogic::gameInterface;
     }
 }

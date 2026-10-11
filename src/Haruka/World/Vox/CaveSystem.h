@@ -44,7 +44,7 @@
  * La clave es un hash de (versión, seed, celda, resolución, parámetros de la celda): cambiar
  * cualquier cosa que altere el resultado invalida el fichero, como en `bakeCacheKey` del planeta.
  */
-namespace Haruka {
+namespace Haruka::World::Vox {
 
     /** @brief Marco local de un sistema de cuevas: una caja bajo un parche de superficie.
      *
@@ -333,4 +333,4 @@ namespace Haruka {
      *  labio de la malla tapa el borde. 0 donde no hay sistema. */
     float caveEntranceMask(const CaveSystem& sys, const glm::dvec3& dir);
 
-} // namespace Haruka
+} // namespace Haruka::World::Vox

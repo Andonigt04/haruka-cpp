@@ -54,7 +54,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::World {
 namespace Planet {
 
 /// Constante de gravitación. ⚠️ Tiene que ser la MISMA que `PhysicsEngine::gravitationalConstant`:
@@ -207,5 +207,5 @@ inline double specificOrbitalEnergy(double gm, double r, double speed) {
     return 0.5 * speed * speed - gm / r;
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World
 

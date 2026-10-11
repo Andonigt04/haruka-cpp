@@ -29,7 +29,7 @@
 #include "Haruka/World/Terrain/CubeSphere.h"          // dirToCubeFaceClosed — el mismo reparto de caras que el shader
 #include "Haruka/Tools/PlanetaryTypes.h"
 
-namespace Haruka { namespace Terrain {
+namespace Haruka::World { namespace Terrain {
 
 /**
  * @brief Altura base (m) en `dir`, de la retícula de 6 caras.
@@ -40,7 +40,7 @@ namespace Haruka { namespace Terrain {
  */
 inline float baseFieldHeightAt(const float* heights, int res, const glm::dvec3& dir) {
     if (!heights || res <= 0) return 0.0f;
-    PlanetFace f; double lx, ly;
+    Tools::PlanetFace f; double lx, ly;
     dirToCubeFaceClosed(dir, f, lx, ly);
 
     const int N   = res;
@@ -62,4 +62,4 @@ inline float baseFieldHeightAt(const float* heights, int res, const glm::dvec3& 
     return (float)(a + (b - a) * ty);
 }
 
-}} // namespace Haruka::Terrain
+}} // namespace Haruka::World

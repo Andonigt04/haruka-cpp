@@ -45,7 +45,7 @@
 #include "Haruka/Tools/ProcGraph/ProcGraph.h"
 #include "Haruka/Tools/ProcGraph/ProcClimate.h"
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World { namespace Planet {
 
 /** @brief Configuración de superficie: tiling de textura y resolución procedural. */
 struct SurfaceConfig {
@@ -86,7 +86,7 @@ struct SurfaceConfig {
  */
 struct NamedZone {
     std::string name;
-    ZoneShape   shape;                    ///< perímetro (círculo/polígono); vacío = solo pintada
+    Props::ZoneShape   shape;                    ///< perímetro (círculo/polígono); vacío = solo pintada
     glm::vec3   color = glm::vec3(-1.0f); ///< color en el zoneMap (0-255); negativo = sin color
     bool hasColor()    const { return color.r >= 0.0f; }
     bool hasGeometry() const { return shape.hasGeometry(); }
@@ -115,7 +115,7 @@ struct TerrestrialPlanetConfig {
     double orbitPhase   = 0.0;
     /// Elementos completos + tasas de precesión. La base (u,v) del plano se DERIVA de aquí en cada
     /// frame: guardarla congelaba el plano al cargar la escena y la órbita no podía precesar.
-    Haruka::Planet::OrbitElements orbit;
+    OrbitElements orbit;
 
     SurfaceConfig surface;                    // textura/mapas (paths)
     /** @brief `surfaceConfig` JSON crudo: biomePalette, materials, seed, … Lo interpreta el planeta. */
@@ -178,7 +178,7 @@ public:
      *
      * @param faceRes Resolución de la retícula base (celdas por arista); <=0 conserva la actual.
      */
-    void rebuild(const Haruka::Planet::GeologyConfig& geo, int faceRes = 0);
+    void rebuild(const GeologyConfig& geo, int faceRes = 0);
 
     /**
      * @brief Reconstruye la malla sumando EDICIONES del orquestador a la base que ya usó `build`.
@@ -297,7 +297,7 @@ public:
      *  que la física apague los mismos trenes de ola que el render. */
     float waterQuadAt(const glm::dvec3& dir) const {
         const double q = m_nodeRenderer.waterQuadAt(dir, m_config.radius);
-        return (q > 0.0) ? (float)q : Haruka::Planet::OCEAN_MIN_QUAD_M;
+        return (q > 0.0) ? (float)q : Water::OCEAN_MIN_QUAD_M;
     }
 
     double sampleHeight(const glm::dvec3& dir) const;
@@ -320,7 +320,7 @@ public:
      * por el mismo clima que dibuja la hierba. `elevKm` sale del suelo muestreado (`sampleHeight`),
      * `tempC`/`humidity` del ClimateOutput del planeta.
      */
-    Haruka::FieldSample fieldSampleAt(const glm::vec3& dir) const;
+    FieldSample fieldSampleAt(const glm::vec3& dir) const;
 
     /**
      * @brief Densidad [0,1] de un mapa de distribución (densityMap de una capa de prop) en la
@@ -361,8 +361,14 @@ public:
     void setOrbit(int parent, double a, double ecc, double period, double phase,
                   const glm::dvec3& u, const glm::dvec3& v);
     /// Camino preferente: los elementos son la fuente de verdad del plano orbital.
-    void setOrbit(int parent, const Haruka::Planet::OrbitElements& el);
+    void setOrbit(int parent, const OrbitElements& el);
     void setWeatherTime(double t) { m_weather.setTime(t); }
+    /** @brief VISTA DE EDICIÓN (IDE): sin la lámina de agua (mar y lagos no se dibujan; el campo
+     *  y la física no cambian). */
+    void setWaterVisible(bool on) { m_waterVisible = on; }
+    /** @brief Vista de depuración del terreno (`terrain_node.frag`): 15 = cota sobre el nivel del
+     *  mar (tinte + isolíneas + costa). −1 = la del entorno (`HARUKA_TERRAIN_V5_DEBUG`). */
+    void setTerrainDebugView(int v) { m_nodeRenderer.setDebugViewOverride(v); m_editDebugView = v; }
 
     // --- MAR DINÁMICO POR MASA (Hito 1) -------------------------------------------------------
     /** @brief Cuerpo masivo que atrae/mueve el océano de este planeta. */
@@ -389,7 +395,7 @@ public:
      */
     /// @param anchorRelEye  el ANCLA del mar (punto fijo del mundo desde el que se mide la fase de
     ///        la ola) relativa a la cámara, en metros. Ver `OceanState::phase`.
-    void setOceanState(const Haruka::Planet::OceanState& st, const glm::vec3& anchorRelEye);
+    void setOceanState(const Water::OceanState& st, const glm::vec3& anchorRelEye);
 
     // --- Stats de geometría del último frame (para el panel del editor) ---------------------
     /** @brief Lo que dibujó el planeta el último render: base + clipmap + agua, separados. */
@@ -413,12 +419,12 @@ public:
 
     /** @brief Tabla de materiales del terreno (capas + nombres + zonas). La lee el editor para
      *  poblar el selector de capas. */
-    const Haruka::Planet::TerrainMaterialTable& terrainMaterials() const { return m_materialTable; }
+    const Terrain::TerrainMaterialTable& terrainMaterials() const { return m_materialTable; }
 
     /** @brief Tabla de CAPAS DE PROPS (regla clima/forma → qué objeto instala). La sube `render`
      *  a un UBO para la VISTA DE SPAWN del editor (dónde instalaría cada capa). La lee también el
      *  scatter global (`scatterPropsNear`), que parsea la misma config por separado. */
-    const Haruka::Planet::PropLayerTable& propLayers() const { return m_propLayers; }
+    const Props::PropLayerTable& propLayers() const { return m_propLayers; }
 
 private:
     /// ¿Se ejecutó el culling por compute en `prepare()` de este frame? Lo consume `render()`
@@ -426,10 +432,10 @@ private:
     bool m_cullReady = false;
 
     TerrestrialPlanetConfig m_config;
-    Haruka::Planet::GeologyOutput m_geology;
-    Haruka::Planet::ClimateOutput m_climate;
-    Haruka::Planet::BiomesOutput m_biomes;
-    Haruka::WeatherSystem m_weather;
+    GeologyOutput m_geology;
+    ClimateOutput m_climate;
+    BiomesOutput m_biomes;
+    WeatherSystem m_weather;
 
     /**
      * @brief Altura (m) que se resta al campo para que el NIVEL DEL MAR quede en 0.
@@ -437,6 +443,7 @@ private:
      * Cuantil de la distribución de alturas que deja la fracción de tierra emergida pedida.
      */
     float m_seaLevelOffsetM = 0.0f;
+    bool  m_waterVisible = true;   ///< ver setWaterVisible
 
     /** @brief Ancho de la biome map horneada (2:1, alto = ancho/2). */
     int m_mapRes = 512;
@@ -465,13 +472,13 @@ private:
     bool m_propNeedZoneMap = false;
     // Tabla de MATERIALES del terreno (regla clima/forma → aspecto). Se sube a un UBO y la recorre
     // el shader: añadir un material es un objeto más en el JSON, no un `if` más en GLSL.
-    Haruka::Planet::TerrainMaterialTable m_materialTable =
-        Haruka::Planet::TerrainMaterialTable::defaults();
+    Terrain::TerrainMaterialTable m_materialTable =
+        Terrain::TerrainMaterialTable::defaults();
     Haruka::RHI::BufferHandle m_materialUBO;
 
     // Tabla de CAPAS DE PROPS (regla clima/forma → qué instala). Se sube a un UBO (binding 14) para
     // la VISTA DE SPAWN del editor; el densityMap de la capa seleccionada se sube aparte (textura).
-    Haruka::Planet::PropLayerTable m_propLayers;
+    Props::PropLayerTable m_propLayers;
     Haruka::RHI::BufferHandle m_propUBO;
     // Textura del densityMap de la capa activa (cargada/cacheadas por ruta). Se bindea en el 17 del
     // shader para que la vista de spawn multiplique por el mapa — igual que hace el placer en CPU.
@@ -499,6 +506,7 @@ private:
 
     /** @brief Vista de depuración activa (ver `debugView()`); se sube al shader por frame. */
     int m_debugView = 0;
+    int m_editDebugView = -1;   ///< vista de edición del IDE (15 = cota sobre el mar); −1 = no manda
     // Luz del sol para el UBO del planeta. Por defecto la antigua fija; la sobrescribe
     // `setSunLight` (el orquestador la lee de la escena). Sin esto el terreno era un color
     // plano: el `uLightDir`/`uLightColor`/`uAmbient` venían fijos y no seguían al sol.
@@ -607,7 +615,7 @@ private:
     /// Publicarla entera por `shared_ptr` la elimina: el lector se lleva el puntero de un tiron y ve
     /// un estado coherente —datos Y recuadro— aunque justo despues llegue una ventana nueva.
     struct LakeWindow {
-        Haruka::Planet::WaterWindowResult r;
+        Water::WaterWindowResult r;
         double lonC = 0.0, latC = 0.0, invSpanLon = 0.0, invSpanLat = 0.0;
     };
     std::atomic<std::shared_ptr<const LakeWindow>> m_lakeWin;   ///< la ventana vigente, o nula si no hay
@@ -637,7 +645,7 @@ private:
     /// ⚠️ Recomputar bloqueando el frame no vale: son 65 536 muestras del terreno REAL. Se calcula en
     /// un hilo y se recoge cuando esta. `m_heightCPU` es inmutable tras el bake, asi que leerlo desde
     /// ahi es seguro sin candado (lo dice tambien `groundHeightKmAtDir`).
-    std::future<Haruka::Planet::WaterWindowResult> m_lakeWinJob;
+    std::future<Water::WaterWindowResult> m_lakeWinJob;
     /// El centro que se le pidio al trabajo en vuelo (el recuadro se arma al recogerlo).
     bool   m_lakeWinJobLive = false;
     double m_lakeWinJobLonC = 0.0, m_lakeWinJobLatC = 0.0;
@@ -783,12 +791,12 @@ private:
     /// PASE DE TERRENO v5 (quadtree + pool de nodos). Opt-in con `HARUKA_TERRAIN_V5=1`; cuando está
     /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
     /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
-    Haruka::Terrain::TerrainNodeRenderer m_nodeRenderer;
+    Terrain::TerrainNodeRenderer m_nodeRenderer;
     /// LA HIERBA DENSA (primer plano, ~60 m): generada en GPU sobre los nodos que dibuja el pase v5
     /// y aplastada por lo que se mueve (ver `Renderer/GrassRenderer.h`). Va pegada al pase de nodos
     /// porque lee SU mapa de alturas: sin v5 no hay hierba densa (queda la capa de props).
     Haruka::Renderer::GrassRenderer m_grass;
-    std::vector<Haruka::Terrain::TerrainNodeRenderer::NearNode> m_grassNodes;
+    std::vector<Terrain::TerrainNodeRenderer::NearNode> m_grassNodes;
     glm::vec3 m_grassWind{0.0f};
     float     m_grassTime = 0.0f;
 
@@ -796,12 +804,12 @@ private:
     // Una sola forma de tocar el mundo (ver `VoxWorld.h`). El planeta lo streamea alrededor de la
     // cámara en `prepare`, lo dibuja en `render` tras el terreno y le pasa al pase de nodos la
     // ventana de recorte para que el suelo no se dibuje sobre una boca.
-    Haruka::VoxWorld     m_vox;
-    Haruka::VoxRenderer  m_voxRenderer;
+    Vox::VoxWorld     m_vox;
+    Renderer::VoxRenderer  m_voxRenderer;
     std::string          m_voxEditsDir;      ///< carpeta de la PARTIDA para los trazos (vacía = no persiste)
     std::string          m_voxDesignerDir;   ///< carpeta del MUNDO para los trazos del editor
-    std::vector<Haruka::CaveDef>   m_sceneCaves;
-    std::vector<Haruka::IslandDef> m_sceneIslands;
+    std::vector<Vox::CaveDef>   m_sceneCaves;
+    std::vector<Vox::IslandDef> m_sceneIslands;
     bool                 m_voxWarnedNoSave = false;
     void streamVox(const glm::dvec3& camRelPlanet);
 public:
@@ -811,9 +819,9 @@ public:
      *  nodos y la hierba (el mismo cuenco en los dos). */
     void craterListNear(const glm::dvec3& cameraPos, size_t maxN,
                         std::vector<glm::vec4>& C, std::vector<glm::vec4>& U) const;
-    Haruka::VoxWorld&       vox()       { return m_vox; }
-    const Haruka::VoxWorld& vox() const { return m_vox; }
-    const Haruka::VoxRenderer& voxRenderer() const { return m_voxRenderer; }
+    Vox::VoxWorld&       vox()       { return m_vox; }
+    const Vox::VoxWorld& vox() const { return m_vox; }
+    const Renderer::VoxRenderer& voxRenderer() const { return m_voxRenderer; }
     /// La hierba del primer plano. Pase optativo de GPU (`GrassRenderer`, `HARUKA_GRASS=1`); por
     /// defecto la hierba vive en el instancing de props y quien se mueve la aplasta con
     /// `PropSystem::flattenNear` (jugador, objetos con física, props derribados).
@@ -823,12 +831,12 @@ public:
     /// Dónde guarda la partida los trazos. Sin esto, lo picado se pierde al salir (se avisa una vez).
     void setVoxEditsDir(const std::string& dir) { m_voxEditsDir = dir; if (m_vox.configured()) m_vox.setSaveDir(dir); }
     /// Cuevas e islas de la ESCENA (se aplican al configurar el campo, o al momento si ya lo está).
-    void addSceneCave(const Haruka::CaveDef& d)     { m_sceneCaves.push_back(d);   if (m_vox.configured()) m_vox.placeCave(d); }
-    void addSceneIsland(const Haruka::IslandDef& d) { m_sceneIslands.push_back(d); if (m_vox.configured()) m_vox.placeIsland(d); }
+    void addSceneCave(const Vox::CaveDef& d)     { m_sceneCaves.push_back(d);   if (m_vox.configured()) m_vox.placeCave(d); }
+    void addSceneIsland(const Vox::IslandDef& d) { m_sceneIslands.push_back(d); if (m_vox.configured()) m_vox.placeIsland(d); }
     /// Carpeta de trazos del diseñador (`surface.voxEdits` del planeta en la escena).
     void setVoxDesignerDir(const std::string& dir) { m_voxDesignerDir = dir; if (m_vox.configured()) m_vox.setDesignerDir(dir); }
-    const std::vector<Haruka::CaveDef>&   sceneCaves()   const { return m_sceneCaves; }
-    const std::vector<Haruka::IslandDef>& sceneIslands() const { return m_sceneIslands; }
+    const std::vector<Vox::CaveDef>&   sceneCaves()   const { return m_sceneCaves; }
+    const std::vector<Vox::IslandDef>& sceneIslands() const { return m_sceneIslands; }
     /// Radio de streaming de chunks alrededor del pie de la cámara (m).
     static constexpr double kVoxStreamM = 260.0;
     /// Una cueva colocada a menos de esto se carga ENTERA (todas sus columnas y profundidad).
@@ -843,7 +851,7 @@ private:
     /// ⚠️ Se guarda TAMBIÉN en CPU, no solo en el UBO: hace falta para poder decir cuántos trenes
     /// sobreviven a Nyquist con la celda que el agua está dibujando (el log de `[Mar]`). Sin él, "el
     /// mar está plano" y "el mar no se dibuja" se ven igual desde fuera.
-    Haruka::Planet::OceanState m_oceanStateCPU = Haruka::Planet::oceanDefaultState();
+    Water::OceanState m_oceanStateCPU = Water::oceanDefaultState();
     Haruka::RHI::BufferHandle  m_oceanParamsUBO;
     bool                       m_oceanParamsValid = false;
 
@@ -913,4 +921,4 @@ private:
     static bool s_shadersReady;
 };
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World

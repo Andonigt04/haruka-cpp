@@ -5,7 +5,7 @@
 #include "Haruka/RHI/RHIDevice.h"
 #include "imgui.h"
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 MeshRendererComponent::MeshRendererComponent()
     : mesh(nullptr), meshPath(""), materialPath("") {}
@@ -17,7 +17,7 @@ void MeshRendererComponent::setMesh(const std::vector<glm::vec3>& vertices,
                                     const std::vector<glm::vec3>& normals,
                                     const std::vector<glm::vec3>& colors,
                                     const std::vector<unsigned int>& indices) {
-    mesh = std::make_shared<SimpleMesh>(vertices, normals, indices);
+    mesh = std::make_shared<Renderer::Mesh>(vertices, normals, indices);
     sourceVertices = vertices;
     sourceNormals = normals;
     sourceColors = colors;
@@ -32,7 +32,7 @@ void MeshRendererComponent::releaseMesh() {
 }
 
 // Dibuja únicamente cuando existe malla válida.
-void MeshRendererComponent::render(Shader& shader) const {
+void MeshRendererComponent::render(Renderer::Shader& shader) const {
     if (mesh) {
         if (Haruka::RHI::Device* dev = Haruka::RHI::device())
             mesh->drawRHI(*dev->beginFrame());
@@ -58,4 +58,4 @@ void MeshRendererComponent::renderInspector() {
         materialPath = matBuffer;
     }
 }
-}  // namespace Haruka
+} // namespace Haruka::Core::Components

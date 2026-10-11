@@ -16,8 +16,9 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; namespace World { class PropSystem; }
-                   namespace RHI { class Context; } }
+namespace Haruka { namespace Core { class Camera; } namespace RHI { class Context; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::World::Props { class PropSystem; }
 
 namespace Haruka::Renderer {
 
@@ -27,9 +28,9 @@ public:
     struct WeatherView { float rainAmount = 0, snowAmount = 0, groundWetness = 0, snowAccum = 0; };
     struct Frame {
         Core::Camera*      camera  = nullptr;
-        PlanetarySystem*   planets = nullptr;
-        World::PropSystem* props   = nullptr;
-        Haruka::GameInterface::OnRenderShadowFunc onRenderShadow = nullptr;   ///< los casters del JUEGO
+        World::Planet::PlanetarySystem*   planets = nullptr;
+        World::Props::PropSystem* props   = nullptr;
+        Core::GameInterface::OnRenderShadowFunc onRenderShadow = nullptr;   ///< los casters del JUEGO
         glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
         const WeatherView* weather = nullptr;
     };

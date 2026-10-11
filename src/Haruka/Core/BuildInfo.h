@@ -12,7 +12,7 @@
  */
 #include <string>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 /** @brief Version semantica del motor, p.ej. "1.0.0". */
 const char* versionString();
@@ -25,4 +25,4 @@ const char* versionString();
  *  a la esquina del menu y a cualquier reporte. */
 const std::string& buildString();
 
-} // namespace Haruka
+} // namespace Haruka::Core

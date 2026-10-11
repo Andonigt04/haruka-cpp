@@ -6,7 +6,7 @@
 #include "Haruka/Core/Logger.h"
 #include <cstdio>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 namespace {
 
@@ -121,4 +121,4 @@ void PrecipitationRenderer::render(const Params& p) {
     ctx->draw(drops * 6);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

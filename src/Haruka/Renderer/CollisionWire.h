@@ -21,8 +21,8 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem;
-                   namespace Physics { class PhysicsEngine; } namespace RHI { class Context; } }
+namespace Haruka { namespace Core { class Camera; } namespace Physics { class PhysicsEngine; } namespace RHI { class Context; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
 
 namespace Haruka::Renderer {
 
@@ -30,7 +30,7 @@ class CollisionWire {
 public:
     struct Frame {
         Core::Camera*            camera  = nullptr;
-        PlanetarySystem*         planets = nullptr;
+        World::Planet::PlanetarySystem*         planets = nullptr;
         Physics::PhysicsEngine*  physics = nullptr;
         /// Mallas de colision de los props por (prototipo → parte) y su copia CPU (PropSystem).
         const std::unordered_map<int, std::vector<int>>*                    meshShapes = nullptr;

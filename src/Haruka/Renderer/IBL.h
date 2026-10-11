@@ -41,5 +41,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::IBL;
-namespace Haruka { using Renderer::IBL; }

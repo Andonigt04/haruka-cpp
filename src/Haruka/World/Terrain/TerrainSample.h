@@ -22,7 +22,7 @@
  * Cada campo indica en qué FASE se rellena. Las fases aún no implementadas dejan
  * el valor por defecto documentado abajo.
  */
-namespace Haruka {
+namespace Haruka::World::Terrain {
 
     /** @brief Tipo de lámina de agua aplicable en un punto. */
     enum class WaterType : uint8_t {
@@ -125,4 +125,4 @@ namespace Haruka {
         return W;
     }
 
-} // namespace Haruka
+} // namespace Haruka::World::Terrain

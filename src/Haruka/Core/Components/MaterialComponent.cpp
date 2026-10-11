@@ -1,7 +1,7 @@
 #include "MaterialComponent.h"
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 // Inicializa slots estándar para evitar comprobaciones de existencia repetidas.
 MaterialComponent::MaterialComponent() {
@@ -46,4 +46,4 @@ void MaterialComponent::fromJSON(const nlohmann::json& j) {
     if (j.contains("textures")) textures = j["textures"];
 }
 
-}
+} // namespace Haruka::Core::Components

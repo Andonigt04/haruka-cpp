@@ -27,10 +27,10 @@
 #include "Haruka/World/Planet/PlanetFields.h"        // FieldSample
 #include "Haruka/Tools/ProcGraph/TreeSpawn.h"        // IPropField (Haruka::Tools::ProcGraph)
 
-namespace Haruka {
+namespace Haruka::World::Props {
 
 /** @brief Sonda de ecología que aporta el orquestador: FieldSample de una dirección del parche. */
-using PropDirField  = std::function<Haruka::FieldSample(const glm::vec3& dir)>;
+using PropDirField  = std::function<Planet::FieldSample(const glm::vec3& dir)>;
 /** @brief Sonda de cota (m) que aporta el orquestador: altura del suelo en una dirección. */
 using PropDirHeight = std::function<float(const glm::vec3& dir)>;
 /** @brief Sonda de densidad por mapa [0,1] en una dirección (1 = sin mapa). La aporta el
@@ -70,8 +70,8 @@ public:
     }
 
     /** @brief La ecología de un punto del parche: FieldSample de su dirección. */
-    Haruka::FieldSample sampleAt(float px, float pz) const override {
-        return fieldFn ? fieldFn(dirAt(px, pz)) : Haruka::FieldSample{};
+    Planet::FieldSample sampleAt(float px, float pz) const override {
+        return fieldFn ? fieldFn(dirAt(px, pz)) : Planet::FieldSample{};
     }
     /** @brief Cota (m) del suelo en un punto del parche. */
     float heightAt(float px, float pz) const override {
@@ -113,4 +113,4 @@ private:
     double    m_R = 1.0;
 };
 
-} // namespace Haruka
+} // namespace Haruka::World::Props

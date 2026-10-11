@@ -14,13 +14,15 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class FluidHost; }
+namespace Haruka { namespace Core { class Camera; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::Renderer { class FluidHost; }
 
-namespace Haruka::World {
+namespace Haruka::World::Water {
 
 struct FluidBridge {
     struct Frame {
-        PlanetarySystem* planets = nullptr;
+        Planet::PlanetarySystem* planets = nullptr;
         Core::Camera*    camera  = nullptr;
         float dt = 0.016f;
         float rainAmount = 0.0f;                 ///< 0..1 (SkyPass::weather()); se convierte a m/s de lamina
@@ -29,7 +31,7 @@ struct FluidBridge {
         RHI::BufferHandle     perFrameUBO{};     ///< binding 0 (PerFrameData) para softbody/fluido
     };
     /// Cada frame, tras el planeta y la precipitacion. Crea el host la primera vez que hay agua.
-    static void run(std::unique_ptr<FluidHost>& host, const Frame& f);
+    static void run(std::unique_ptr<Renderer::FluidHost>& host, const Frame& f);
 };
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Water

@@ -9,7 +9,7 @@
 #include "Haruka/RHI/RHIResources.h"
 #include "Haruka/Renderer/ResourceStore.h"
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 /**
  * @file VoxRenderer.h
@@ -38,11 +38,11 @@ public:
 
     /** @brief Remalla los chunks sucios (acotado) y rehace la ventana de recorte si hace falta.
      *  @param camRelPlanet cámara relativa al CENTRO del planeta (m) */
-    void update(VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM);
+    void update(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM);
 
     /** @brief Dibuja los chunks cargados. Dentro del render pass de la escena.
      *  @param rotVP proj·rot(view) · @param camRelPlanet ídem que en `update` */
-    void draw(const VoxWorld& world, const glm::mat4& rotVP, const glm::dvec3& camRelPlanet,
+    void draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP, const glm::dvec3& camRelPlanet,
               const glm::vec3& sunDir, const glm::vec3& viewDir = glm::vec3(0.0f));
 
     /** @brief La textura de roca: el array de albedo del terreno y su capa; tiling en metros por tile. */
@@ -60,8 +60,8 @@ public:
     /** @brief La copia CPU de cada malla, con su revisión: es lo que la física convierte en cuerpos
      *  (`PhysicsEngine::setVoxMesh`). Quien la lea guarda la revisión que vio. La lleva el almacén
      *  central (`Renderer::resources()`), no este renderer. */
-    void forEachCpuMesh(const std::function<void(const VoxKey&, const CaveMesh&, uint64_t revision)>& fn) const;
-    static uint64_t physicsKey(const VoxKey& k) {
+    void forEachCpuMesh(const std::function<void(const World::Vox::VoxKey&, const World::Vox::CaveMesh&, uint64_t revision)>& fn) const;
+    static uint64_t physicsKey(const World::Vox::VoxKey& k) {
         return ((uint64_t)(uint32_t)k.face << 60) ^ ((uint64_t)(uint32_t)k.i << 40)
              ^ ((uint64_t)(uint32_t)k.j << 20) ^ (uint64_t)(uint32_t)(k.k + 512);
     }
@@ -78,7 +78,7 @@ private:
     struct VoxUBO { glm::mat4 rotVP; glm::vec4 originRel; glm::vec4 lightDir; glm::vec4 color; glm::vec4 up; glm::vec4 texOrigin; glm::vec4 texInfo; };
 
     bool ensurePipeline();
-    void rebuildCut(VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM);
+    void rebuildCut(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet, double surfaceElevM);
 
     RHI::PipelineHandle m_pipe{};
     RHI::BufferHandle   m_ubo{};
@@ -98,7 +98,7 @@ private:
     /// ⚠️ ANTES ERAN DOS MAPAS (`m_gpu` y `m_cpu`) que tenían que tener las mismas claves a mano. Ahora
     /// un chunk es UN recurso del almacén central: CPU, GPU y revisión juntos. Aquí solo queda qué
     /// recurso es cada chunk; que exista la clave = "mallado alguna vez".
-    std::unordered_map<VoxKey, Renderer::ResourceId, VoxKeyHash> m_ids;
+    std::unordered_map<World::Vox::VoxKey, Renderer::ResourceId, World::Vox::VoxKeyHash> m_ids;
     /// ⚠️ AQUÍ HUBO UNA CACHÉ "POR CHUNK" DEL RECORTE, y era un valor POR CHUNK (128 m) que se
     /// copiaba a todos sus téxeles: el primero que se miraba decidía el chunk entero. En campo
     /// abierto ese téxel casi nunca cae en el hoyo, así que un cráter no recortaba el suelo NUNCA
@@ -108,4 +108,4 @@ private:
     std::vector<unsigned char> m_cutPixels;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

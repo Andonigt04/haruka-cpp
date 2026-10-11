@@ -8,7 +8,7 @@
 #include "SceneManager.h" // Donde reside SceneObject
 #include "SceneValidator.h"
 
-namespace Haruka {
+namespace Haruka::Core::Scene {
 
     class SceneLoader {
     public:
@@ -47,4 +47,4 @@ namespace Haruka {
         glm::dvec3 parseDVec3(const nlohmann::json& j, const std::string& key, glm::dvec3 defaultValue);
     };
 
-}
+} // namespace Haruka::Core::Scene

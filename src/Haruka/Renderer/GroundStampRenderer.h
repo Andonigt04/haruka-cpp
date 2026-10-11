@@ -17,7 +17,7 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/World/GroundLayer.h"
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class GroundStampRenderer {
 public:
@@ -27,7 +27,7 @@ public:
 
     /** @brief Re-pinta la ventana alrededor de `center`. `up` = cénit local; `now` = reloj del mundo.
      *  @return false si no hay nada que pintar (ninguna huella viva) o si el pase no está disponible. */
-    bool render(const GroundLayer& layer, const glm::dvec3& center, const glm::vec3& up, double now);
+    bool render(const World::GroundLayer& layer, const glm::dvec3& center, const glm::vec3& up, double now);
 
     /** @brief Textura de huellas (rojo = hundido, verde = reborde). Válida tras un `render` con éxito. */
     RHI::TextureHandle texture() const { return m_tex; }
@@ -43,4 +43,4 @@ private:
     bool                  m_failed = false;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

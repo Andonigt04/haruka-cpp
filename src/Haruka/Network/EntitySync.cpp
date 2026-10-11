@@ -93,7 +93,7 @@ void EntitySync::pushSample(uint32_t uuid, double t, double x, double y, double 
     if (v.size() > 8) v.erase(v.begin());
 }
 
-void EntitySync::interpolateAll(SceneManager* scene, double nowSeconds)
+void EntitySync::interpolateAll(Core::Scene::SceneManager* scene, double nowSeconds)
 {
     for (auto hit = m_hist.begin(); hit != m_hist.end(); )
     {
@@ -108,7 +108,7 @@ void EntitySync::interpolateAll(SceneManager* scene, double nowSeconds)
             const std::string name = "entity_" + std::to_string(hit->first);
             if (auto o = scene->getObject(name))
             {
-                o->position    = Haruka::WorldPos(x, y, z);
+                o->position    = Haruka::Tools::WorldPos(x, y, z);
                 o->rotation.y  = yaw * (180.0 / kPi);
             }
         }
@@ -133,7 +133,7 @@ void EntitySync::interpolateAll(SceneManager* scene, double nowSeconds)
 // el cuerpo, y así el motor dejaba de compilar SIN red: "no declaration matches". No se vio en el
 // juego porque el juego siempre define `HARUKA_NETWORK` — quien lo compila sin red es el EDITOR, y
 // nadie lo había construido desde entonces.
-void EntitySync::adoptWorldObject(uint32_t uuid, SceneManager* scene) {
+void EntitySync::adoptWorldObject(uint32_t uuid, Core::Scene::SceneManager* scene) {
     if (!uuid) return;
     m_locallyOwnedWorld.insert(uuid);
     // El acuse puede llegar DESPUÉS de la primera difusión que ya trae el objeto: la zona contesta a
@@ -145,7 +145,7 @@ void EntitySync::adoptWorldObject(uint32_t uuid, SceneManager* scene) {
     m_hist.erase(uuid);
 }
 
-void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
+void EntitySync::sync(DGS::Client& dgs, Core::Scene::SceneManager* scene) {
     if (scene) {
         // A clock of its own: the TTL below is about wall time since a player was last heard from,
         // which no frame counter answers.
@@ -173,10 +173,10 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             if (m_locallyOwnedWorld.count(transfer.uuid)) continue;
 
             const std::string name = "entity_" + std::to_string(transfer.uuid);
-            const Haruka::WorldPos where(
-                transfer.chunkX * Haruka::Units::KM + transfer.pos[0],
-                transfer.chunkY * Haruka::Units::KM + transfer.pos[1],
-                transfer.chunkZ * Haruka::Units::KM + transfer.pos[2]
+            const Haruka::Tools::WorldPos where(
+                transfer.chunkX * Haruka::Tools::Units::KM + transfer.pos[0],
+                transfer.chunkY * Haruka::Tools::Units::KM + transfer.pos[1],
+                transfer.chunkZ * Haruka::Tools::Units::KM + transfer.pos[2]
             );
             // The wire carries yaw as a uint16 over the full turn, packed by `Client::sendTransform`.
             // Dropping it, which is what happened, left every remote player facing the same way.
@@ -195,7 +195,7 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
                        where.x, where.y, where.z, yawDeg * (kPi / 180.0));
             if (scene->getObject(name)) continue;
 
-            auto obj = std::make_shared<Haruka::SceneObject>();
+            auto obj = std::make_shared<Haruka::Core::Scene::SceneObject>();
             obj->name = name;
             obj->type = (transfer.type == DGS::ENT_PLAYER) ? "Character" :
                         (transfer.type == DGS::ENT_NPC)    ? "Character" : "Spacecraft";
@@ -207,7 +207,7 @@ void EntitySync::sync(DGS::Client& dgs, SceneManager* scene) {
             // players you could see were the distant ones and the players you could not were the ones
             // standing next to you.
             obj->objectType = (transfer.type == DGS::ENT_PLAYER || transfer.type == DGS::ENT_NPC)
-                              ? Haruka::ObjectType::CHARACTER : Haruka::ObjectType::MODEL;
+                              ? Tools::ObjectType::CHARACTER : Tools::ObjectType::MODEL;
 
             // ⚠️ UN OBJETO DEL MUNDO NO ES UN JUGADOR SIN MODELO. Lleva el bit STATE_WORLD_OWNED (lo
             // exime del GC de leases de la zona) y su payload dice QUE es — el otro cliente no puede

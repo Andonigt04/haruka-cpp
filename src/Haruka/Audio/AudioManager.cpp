@@ -8,7 +8,7 @@
 #include <cstring>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 AudioManager& AudioManager::get() { static AudioManager m; return m; }
 
@@ -44,9 +44,9 @@ void AudioManager::setListener(const glm::dvec3& pos, const glm::dvec3& fwd, con
 }
 
 // Cuánta señal llega de from a to: navegación por huecos (rodea muros + oclusión de terreno).
-// Compartido con los conjuros serpenteantes vía Haruka::Propagation.
+// Compartido con los conjuros serpenteantes vía Haruka::Core::Propagation.
 float AudioManager::propagation(const glm::dvec3& from, const glm::dvec3& to) const {
-    return Haruka::Propagation::through(from, to);
+    return Core::Propagation::through(from, to);
 }
 
 void AudioManager::playTone(const glm::dvec3& pos, float freq, float dur, float volume,
@@ -174,4 +174,4 @@ void AudioManager::updatePoints() {
         m_sys.playOneShotFlat(m_loader.synth(sh.sound), sh.relPos, sh.gain * volumeOf(sh.sound), sh.pitch);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Audio

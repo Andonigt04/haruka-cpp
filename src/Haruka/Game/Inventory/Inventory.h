@@ -15,7 +15,7 @@
 #include <cstdint>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Game::Inventory {
 
 /** @brief Static definition of an item type. Registered once in ItemRegistry. */
 struct ItemDef {
@@ -163,4 +163,4 @@ private:
     std::vector<ItemStack> m_slots;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Game::Inventory

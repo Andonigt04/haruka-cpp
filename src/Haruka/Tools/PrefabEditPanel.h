@@ -33,7 +33,7 @@
 
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 /** @brief Panel de edición de prefabricados, común a juego y editor. */
 class PrefabEditPanel {
@@ -55,7 +55,7 @@ public:
      * de guardarlo — el panel ya suelta la selección él mismo antes de tocar el vector, pero un
      * anfitrión que se lo guarde de un frame para otro se salta esa garantía.
      */
-    PrefabPiece* selectedPiece();
+    Game::Prefab::PrefabPiece* selectedPiece();
     /** @brief Origen del montaje en el mundo: sus poses son LOCALES y sin ancla no significan nada. */
     const glm::dvec3& origin() const { return m_origin; }
     void setOrigin(const glm::dvec3& o) { m_origin = o; }
@@ -91,7 +91,7 @@ private:
     std::string m_prefabDir;
     std::vector<std::string> m_available;      ///< nombres (sin .json) de la carpeta
 
-    Prefab      m_prefab;
+    Game::Prefab::Prefab      m_prefab;
     std::string m_openName;
     int         m_selected = -1;
     bool        m_dirty = false;
@@ -104,4 +104,4 @@ private:
     bool m_scrollToSelected = false;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Tools

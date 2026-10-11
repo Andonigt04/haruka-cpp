@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::World::Props {
 
 /** @brief Estado de una instancia. Extensible: el renderer decide cómo pintar cada uno. */
 enum class InstancedObjectState : uint32_t {
@@ -152,4 +152,4 @@ private:
     std::vector<InstancedObject>    m_instances;
 };
 
-} // namespace Haruka
+} // namespace Haruka::World::Props

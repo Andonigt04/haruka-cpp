@@ -63,7 +63,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Vertex;
-using Haruka::Renderer::MeshTexture;
-using Haruka::Renderer::Mesh;
-namespace Haruka { using Renderer::Vertex; using Renderer::MeshTexture; using Renderer::Mesh; }

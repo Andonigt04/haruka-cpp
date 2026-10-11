@@ -2,7 +2,7 @@
 #include "Haruka/Core/GameInterface.h"
 #include <filesystem>
 
-extern "C" Haruka::GameInterface* getGameInterface();
+extern "C" Haruka::Core::GameInterface* getGameInterface();
 
 int main() {
     auto exeDir = std::filesystem::read_symlink("/proc/self/exe").parent_path();

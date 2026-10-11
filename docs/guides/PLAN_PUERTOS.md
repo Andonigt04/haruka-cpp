@@ -199,7 +199,7 @@ Un puerto `cls="interact"` es donde vive un panel (asiento de piloto, manómetro
    (volumen, anclaje, estanqueidad), luego lo que se arregla añadiendo una pieza. Así el motivo que
    se le enseña al jugador es el **de fondo**, no el primero del struct.
 
-**Tests** (`tests/TestPorts.cpp` en el motor, `Survival/tests/TestPlacement.cpp` en el proyecto),
+**Tests** (`tests/Game/Ports/TestPorts.cpp` en el motor, `Survival/tests/TestPlacement.cpp` en el proyecto),
 todos con **contraprueba** — un test que solo comprueba que algo "no peta" no distingue una
 implementación buena de una que devuelve siempre lo mismo:
 

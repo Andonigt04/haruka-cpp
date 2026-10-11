@@ -2,7 +2,7 @@
 #include <glm/glm.hpp>
 #include <algorithm>
 
-namespace Haruka {
+namespace Haruka::World {
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 //  EL MOVIMIENTO DE LAS NUBES ENTRE FRAMES — lo que hace que vayan (o no) a tirones.
@@ -58,4 +58,4 @@ struct BakeBlend {
     }
 };
 
-} // namespace Haruka
+} // namespace Haruka::World

@@ -10,10 +10,10 @@
 #include <limits>
 #include <queue>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 // --- Segmento ∩ OBB (slab test en el espacio local de la caja) -----------------------
-static bool segmentHitsOBB(const glm::dvec3& a, const glm::dvec3& b, const StaticOBB& o) {
+static bool segmentHitsOBB(const glm::dvec3& a, const glm::dvec3& b, const Physics::StaticOBB& o) {
     glm::dmat3 inv = glm::transpose(o.rot);          // rot ortonormal → inversa = transpuesta
     glm::dvec3 d = inv * (b - a);
     glm::dvec3 m = inv * (a - o.center);
@@ -33,7 +33,7 @@ static bool segmentHitsOBB(const glm::dvec3& a, const glm::dvec3& b, const Stati
 
 // Oclusión del terreno entre a y b: fracción del tramo que NO queda bajo la superficie.
 static float terrainOcclusion(const glm::dvec3& a, const glm::dvec3& b) {
-    Application* app = MotorInstance::getInstance().getApplication();
+    Application* app = Renderer::MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return 1.0f;
     glm::dvec3 center; double radius;
@@ -46,14 +46,14 @@ static float terrainOcclusion(const glm::dvec3& a, const glm::dvec3& b) {
     return 1.0f - (float)blocked / (float)(N - 1);
 }
 
-static const std::vector<StaticOBB>* placedOBBs() {
-    Application* app = MotorInstance::getInstance().getApplication();
+static const std::vector<Physics::StaticOBB>* placedOBBs() {
+    Application* app = Renderer::MotorInstance::getInstance().getApplication();
     auto* phys = app ? app->getPhysicsEngine() : nullptr;
     return phys ? &phys->getPlacedOBBs() : nullptr;
 }
 
 // ¿Algún muro (OBB) corta el segmento?
-static bool blockedByWall(const glm::dvec3& a, const glm::dvec3& b, const std::vector<StaticOBB>* obbs) {
+static bool blockedByWall(const glm::dvec3& a, const glm::dvec3& b, const std::vector<Physics::StaticOBB>* obbs) {
     if (!obbs) return false;
     for (const auto& o : *obbs) if (segmentHitsOBB(a, b, o)) return true;
     return false;
@@ -62,7 +62,7 @@ static bool blockedByWall(const glm::dvec3& a, const glm::dvec3& b, const std::v
 // ¿El terreno corta el segmento? (algún punto del tramo queda BAJO la superficie). Bloqueo DURO
 // (vs terrainOcclusion que es gradual) → se usa para enrutar el rodeo de colinas.
 static bool terrainBlocks(const glm::dvec3& a, const glm::dvec3& b) {
-    Application* app = MotorInstance::getInstance().getApplication();
+    Application* app = Renderer::MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return false;
     glm::dvec3 center; double radius;
@@ -77,7 +77,7 @@ static bool terrainBlocks(const glm::dvec3& a, const glm::dvec3& b) {
 
 // Punto a 'clearance' metros SOBRE la superficie en la vertical de p (waypoint de aire válido).
 static glm::dvec3 snapAboveTerrain(const glm::dvec3& p, double clearance) {
-    Application* app = MotorInstance::getInstance().getApplication();
+    Application* app = Renderer::MotorInstance::getInstance().getApplication();
     auto* ps = app ? app->getPlanetarySystem() : nullptr;
     if (!app || !ps) return p;
     glm::dvec3 center; double radius;
@@ -89,12 +89,12 @@ static glm::dvec3 snapAboveTerrain(const glm::dvec3& p, double clearance) {
 }
 
 // Bloqueo total (terreno O muro) — para las aristas del grafo de navegación.
-static bool segmentBlocked(const glm::dvec3& a, const glm::dvec3& b, const std::vector<StaticOBB>* obbs) {
+static bool segmentBlocked(const glm::dvec3& a, const glm::dvec3& b, const std::vector<Physics::StaticOBB>* obbs) {
     return terrainBlocks(a, b) || blockedByWall(a, b, obbs);
 }
 
 std::vector<glm::dvec3> Propagation::path(const glm::dvec3& a, const glm::dvec3& b) {
-    const std::vector<StaticOBB>* obbs = placedOBBs();
+    const std::vector<Physics::StaticOBB>* obbs = placedOBBs();
     if (!segmentBlocked(a, b, obbs)) return { a, b };     // recto: ni muro ni colina en medio
 
     // Nodos = A, B + esquinas de muros cercanos + waypoints de rodeo de TERRENO (laterales
@@ -118,7 +118,7 @@ std::vector<glm::dvec3> Propagation::path(const glm::dvec3& a, const glm::dvec3&
         glm::dvec3 dir = b - a; double len = glm::length(dir);
         // "Arriba" RADIAL respecto al CENTRO del planeta (no al origen del mundo, que está a 1 UA).
         glm::dvec3 up(0, 1, 0);
-        if (Application* app = MotorInstance::getInstance().getApplication())
+        if (Application* app = Renderer::MotorInstance::getInstance().getApplication())
             if (auto* ps = app->getPlanetarySystem()) {
                 glm::dvec3 c; double r;
                 if (ps->getActivePlanet(c, r)) {
@@ -182,4 +182,4 @@ float Propagation::through(const glm::dvec3& a, const glm::dvec3& b) {
     return std::max(0.1f, terr * detour);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

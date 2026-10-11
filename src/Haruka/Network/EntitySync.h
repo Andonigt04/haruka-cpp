@@ -14,7 +14,7 @@
 
 #include "include/dgs/client.h"
 
-namespace Haruka { class SceneManager; }
+namespace Haruka::Core::Scene { class SceneManager; }
 
 namespace Haruka::Network {
 
@@ -28,9 +28,9 @@ public:
     /// zone broadcasts the sender's own entity back along with everyone else's.
     void setLocalUuid(uint32_t uuid) { m_localUuid = uuid; }
     /// Un objeto del mundo que ESTE cliente ya dibuja por su cuenta (lo pidio el): no se duplica.
-    void adoptWorldObject(uint32_t uuid, SceneManager* scene);
+    void adoptWorldObject(uint32_t uuid, Core::Scene::SceneManager* scene);
     /// Cada frame de simulacion (antes de dibujar): la llaman el bucle del juego Y `renderFrame()`.
-    void sync(DGS::Client& dgs, SceneManager* scene);
+    void sync(DGS::Client& dgs, Core::Scene::SceneManager* scene);
     /// Lo que hay AHORA en la escena venido del feed, por tipo (para el panel de depuracion).
     struct Counts { int players = 0, npcs = 0, worldObjects = 0; };
     Counts counts() const;
@@ -53,7 +53,7 @@ private:
     std::unordered_map<uint32_t, std::vector<Sample>> m_hist;   // uuid → historia de snapshots
 
     void pushSample(uint32_t uuid, double t, double x, double y, double z, double yawRad);
-    void interpolateAll(SceneManager* scene, double nowSeconds);
+    void interpolateAll(Core::Scene::SceneManager* scene, double nowSeconds);
 };
 
 } // namespace Haruka::Network

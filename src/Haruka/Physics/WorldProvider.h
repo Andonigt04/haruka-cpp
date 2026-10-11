@@ -26,7 +26,7 @@ namespace Haruka { namespace Physics {
 
 /** @brief Un cuerpo que ejerce gravedad.
  *
- *  Es un ALIAS de `Haruka::Planet::GravityBody`, no una copia reducida. Antes era un struct propio
+ *  Es un ALIAS de `Haruka::World::Planet::GravityBody`, no una copia reducida. Antes era un struct propio
  *  `{worldPos, mass}` y el motor tenía que traducir; con dos definiciones de "cuerpo que ejerce
  *  gravedad" cualquier campo nuevo hay que añadirlo dos veces y convertirlo en medio. Ese header es
  *  matemática pura (sin dependencias del motor ni del render), así que la física puede incluirlo sin
@@ -36,7 +36,7 @@ namespace Haruka { namespace Physics {
  *  dentro de qué cuerpo estás (la gravedad de una esfera uniforme DECRECE hacia el centro; con GM/r²
  *  a secas, atravesar el suelo un frame te dispara al infinito) ni en la esfera de influencia de
  *  quién estás (qué cuerpo define tu marco, tu terreno y tu cielo). */
-using GravBody = Haruka::Planet::GravityBody;
+using GravBody = World::Planet::GravityBody;
 
 class IWorldProvider {
 public:
@@ -59,7 +59,7 @@ public:
      *  colisionas y el cielo que ves. La implementación por defecto lo resuelve con la jerarquía que
      *  ya viene en `gravBodies()`, así que un proveedor no tiene que hacer nada para tenerlo. */
     virtual int dominantBody(const glm::dvec3& worldPos) const {
-        return Haruka::Planet::dominantBodyIndex(gravBodies(), worldPos);
+        return World::Planet::dominantBodyIndex(gravBodies(), worldPos);
     }
 
     /** @brief Altura del terreno en `worldPos`: metros SOBRE la esfera de referencia (radio). El
@@ -146,7 +146,7 @@ public:
     /** @brief Un nivel de la pila de ANILLOS de heightfield (ver `terrainHeightFieldRings`). */
     struct TerrainRing {
         std::vector<float>          samples;  ///< `n·n` alturas radiales (fila mayor); NaN = sin superficie.
-        Haruka::Planet::TerrainRingSpec spec; ///< Celda, alcance, hueco y tamaño. NO es igual en todos.
+        World::Terrain::TerrainRingSpec spec; ///< Celda, alcance, hueco y tamaño. NO es igual en todos.
     };
 
     /** @brief EL TERRENO ENTERO como una PILA DE ANILLOS de heightfield, sin un solo triángulo.

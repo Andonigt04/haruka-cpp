@@ -8,15 +8,15 @@
 #include <string>
 #include <vector>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 namespace {
 // El UBO es un array fijo: siempre se dibujan `kMaxStamps` quads y las muertas salen degeneradas en
 // el vertex shader. Un draw de tamaño fijo evita re-crear buffers al cambiar el número de huellas.
-struct StampUBO { glm::vec4 stamps[GroundLayer::kMaxStamps]; };
+struct StampUBO { glm::vec4 stamps[World::GroundLayer::kMaxStamps]; };
 } // namespace
 
-bool GroundStampRenderer::render(const GroundLayer& layer, const glm::dvec3& center,
+bool GroundStampRenderer::render(const World::GroundLayer& layer, const glm::dvec3& center,
                                  const glm::vec3& up, double now) {
     if (m_failed) return false;
     RHI::Device* dev = RHI::device();
@@ -57,14 +57,14 @@ bool GroundStampRenderer::render(const GroundLayer& layer, const glm::dvec3& cen
                                                                              : glm::vec3(1, 0, 0)));
     const glm::vec3 e2 = glm::cross(u, e1);
     const glm::dvec3 e1d(e1), e2d(e2);
-    const double R = GroundLayer::kWindowM;
+    const double R = World::GroundLayer::kWindowM;
 
     // Proyección de cada pisada a la ventana [-1,1], EN DOUBLE (ver la nota de la cabecera).
     StampUBO ub{};
     size_t n = 0, live = 0;
     for (const auto& s : layer.stamps()) {
-        if (n >= GroundLayer::kMaxStamps) break;
-        const float d = GroundLayer::fade(s, now);
+        if (n >= World::GroundLayer::kMaxStamps) break;
+        const float d = World::GroundLayer::fade(s, now);
         if (d <= 0.0f) continue;
         const glm::dvec3 rel = s.pos - center;
         const double x = glm::dot(rel, e1d) / R;
@@ -88,9 +88,9 @@ bool GroundStampRenderer::render(const GroundLayer& layer, const glm::dvec3& cen
     ctx->setViewport(0, 0, (int)kRes, (int)kRes);
     ctx->bindPipeline(m_pso);
     ctx->bindUniformBuffer(5, m_ubo);
-    ctx->draw((int)(GroundLayer::kMaxStamps * 6));
+    ctx->draw((int)(World::GroundLayer::kMaxStamps * 6));
     ctx->endRenderPass();
     return true;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

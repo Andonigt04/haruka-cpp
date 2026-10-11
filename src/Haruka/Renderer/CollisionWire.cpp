@@ -105,7 +105,7 @@ void CollisionWire::draw(RHI::Context* ctx, const glm::mat4& viewProjRotOnly, co
                     worst = std::max(worst, std::abs(d)); sum += d; ++n;
                     // Cerca es donde se pisa y donde se compara con lo dibujado; lejos las celdas son
                     // kilometricas y un desvio grande ahi no significa lo mismo.
-                    if (glm::length(w - center) < Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M) {
+                    if (glm::length(w - center) < Haruka::World::Terrain::TERRAIN_COLLIDE_UNIFORM_M) {
                         worstN = std::max(worstN, std::abs(d)); sumN += d; ++nN;
                     }
                 }
@@ -115,7 +115,7 @@ void CollisionWire::draw(RHI::Context* ctx, const glm::mat4& viewProjRotOnly, co
                                    "medio %+.4f m peor %.4f m · CERCA (<%.0f m) %zu vert "
                                    "medio %+.4f m peor %.4f m",
                                    n, sum / (double)n, worst,
-                                   Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M,
+                                   Haruka::World::Terrain::TERRAIN_COLLIDE_UNIFORM_M,
                                    nN, nN ? sumN / (double)nN : 0.0, worstN);
             }
         }
@@ -134,7 +134,7 @@ void CollisionWire::draw(RHI::Context* ctx, const glm::mat4& viewProjRotOnly, co
         // kilométricas: dibujarlo entero son 175 k triángulos de alambre que además tapan la pantalla.
         // Lo que hay que poder comparar es el suelo que se pisa, así que se recorta a lo que el bloque
         // uniforme cubre (±256 m, `TERRAIN_COLLIDE_UNIFORM_M`) con algo de margen.
-        const double kShowM = Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M * 1.25;
+        const double kShowM = Haruka::World::Terrain::TERRAIN_COLLIDE_UNIFORM_M * 1.25;
         const glm::dvec3 camD = glm::dvec3(f.camera->position);
         std::vector<glm::vec3> lines;
         lines.reserve(4096);
@@ -315,7 +315,7 @@ void CollisionWire::draw(RHI::Context* ctx, const glm::mat4& viewProjRotOnly, co
                     const glm::dvec3 rel = v - center;
                     const double radM = glm::length(rel - up * glm::dot(rel, up));
                     const double funcR = f.planets->sampleTerrainHeight(
-                                             v, Haruka::Planet::terrainTriM(radM));
+                                             v, Haruka::World::Terrain::terrainTriM(radM));
                     const double d = std::abs(alt - func), dR = std::abs(alt - funcR);
                     // ⚠️ DONDE, no solo cuanto. La media (3,7 mm) y el pico (0,104 m) dicen que son
                     // OUTLIERS, no una desviacion repartida: unos pocos vertices fuera de sitio. Un
@@ -346,7 +346,7 @@ void CollisionWire::draw(RHI::Context* ctx, const glm::mat4& viewProjRotOnly, co
                     for (const Outlier& o : outliers) {
                         // El anillo al que pertenece el radio: si todos caen en el mismo, o en una
                         // frontera entre dos, la causa es del anillo y no del terreno.
-                        const auto lay = Haruka::Planet::terrainRingLayout(o.rad * 1.5 + 8.0);
+                        const auto lay = Haruka::World::Terrain::terrainRingLayout(o.rad * 1.5 + 8.0);
                         int ring = -1; double cellM = 0.0;
                         for (size_t k = 0; k < lay.size(); ++k)
                             if (o.rad <= lay[k].extent) { ring = (int)k; cellM = lay[k].cell; break; }

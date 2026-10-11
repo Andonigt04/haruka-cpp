@@ -17,9 +17,9 @@
 
 namespace Haruka::RHI { class Context; }
 
-namespace Haruka {
-namespace Physics::Fluid { class PBFSolver; }
+namespace Haruka { namespace Physics::Fluid { class PBFSolver; } }
 
+namespace Haruka::Renderer {
 class FluidRenderer {
 public:
     FluidRenderer() = default;
@@ -30,7 +30,7 @@ public:
 
     /** @brief Uploads particle positions and draws the fluid. Per-frame UBO
      *  (binding 0) must already be bound. vpW/vpH = framebuffer size in pixels. */
-    void render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
+    void render(const Tools::WorldPos& cameraPos, int vpW, int vpH,
                 Haruka::RHI::RenderPassHandle scenePass = {});
 
     // Switch between the screen-space surface (true) and the sphere fallback.
@@ -93,13 +93,13 @@ private:
     /** @brief Sube m_params al UBO y lo ata (los 4 pases lo comparten). */
     void bindParams(Haruka::RHI::Context* ctx);
     void ensureTargets(int w, int h, Haruka::RHI::Format srcDepthFmt);
-    void uploadParticles(const Haruka::WorldPos& cameraPos, int n);
+    void uploadParticles(const Tools::WorldPos& cameraPos, int n);
     void renderSpheres(int n, float vpH);
     /** @brief Modo superficie completo: sembra oclusión/refracción desde `scenePass`
      *  (blit de color+depth de la escena), pase de profundidad de partículas, blur
      *  bilateral y composición OPAQUE final sobre `scenePass`. */
     void renderSurface(int n, int vpW, int vpH, Haruka::RHI::RenderPassHandle scenePass);
 };
+} // namespace Haruka::Renderer
 
-} // namespace Haruka
 

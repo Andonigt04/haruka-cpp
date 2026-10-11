@@ -104,7 +104,7 @@ public:
         /// Los CRÁTERES cercanos (misma convención que `TerrainNodeRenderer::Shade::craterC/U`):
         /// dentro del cuenco no crece hierba.
         std::vector<glm::vec4> craterC, craterU;
-        const std::vector<Haruka::Terrain::TerrainNodeRenderer::NearNode>* nodes = nullptr;
+        const std::vector<World::Terrain::TerrainNodeRenderer::NearNode>* nodes = nullptr;
         float      finestTexelM = 1.0f;      ///< texel del nivel mas fino de `nodes`
     };
 

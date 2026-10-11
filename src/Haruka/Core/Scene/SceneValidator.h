@@ -7,7 +7,7 @@
 #include "Haruka/World/Props/PropCond.h"                 // parsePropCond: valida el `when` de las capas
 #include "Haruka/World/Planet/Biomes.h"                    // biomeFromKey: un `biome == bosqe` es un error, no silencio
 
-namespace Haruka {
+namespace Haruka::Core::Scene {
 
     class SceneValidator {
     public:
@@ -227,15 +227,15 @@ namespace Haruka {
                                 result.addError(powner + ".when debe ser string.");
                             } else if (!p["when"].get<std::string>().empty()) {   // vacío = sin condición
                                 std::string perr;
-                                auto cond = Haruka::Planet::parsePropCond(p["when"].get<std::string>(), perr);
+                                auto cond = World::Props::parsePropCond(p["when"].get<std::string>(), perr);
                                 if (!cond) {
                                     result.addError(powner + ".when: " + perr);
                                 } else {
                                     // `biome` compara contra un conjunto CERRADO de claves; una errata
                                     // dejaría la capa muda para siempre sin que nadie lo dijera.
-                                    cond->eachCompare([&](const Haruka::Planet::PropCondCompare& c) {
+                                    cond->eachCompare([&](const World::Props::PropCondCompare& c) {
                                         if (c.var == "biome" &&
-                                            Haruka::Planet::biomeFromKey(c.value) == Haruka::Planet::Biome::COUNT)
+                                            World::Planet::biomeFromKey(c.value) == World::Planet::Biome::COUNT)
                                             result.addError(powner + ".when: '" + c.value +
                                                 "' no es un bioma (taiga, bosque, selva, desierto, playa...).");
                                     });
@@ -344,4 +344,4 @@ namespace Haruka {
             }
         }
     };
-}
+} // namespace Haruka::Core::Scene

@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Combine RGB del motor (3 floats -> Vec3) para el color del albedo.
@@ -135,7 +135,7 @@ inline TreeBakeResult bakeTreeTextures(int seed, bool foliage,
 
     auto write = [&](const char* suffix, const RGBAImage& img) -> bool {
         std::string path = outDir + "/" + baseName + "_" + suffix + ".png";
-        return Haruka::writePNG(path, img.width, img.height, 4, img.data());
+        return IO::writePNG(path, img.width, img.height, 4, img.data());
     };
     auto rel = [&](const char* suffix) {
         return relDir + baseName + "_" + suffix + ".png";
@@ -211,7 +211,7 @@ inline bool bakeSunTexture(const std::string& outDir, const std::string& baseNam
     }
 
     std::string path = outDir + "/" + baseName + ".png";
-    return Haruka::writePNG(path, size, size, 4, img.data());
+    return IO::writePNG(path, size, size, 4, img.data());
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

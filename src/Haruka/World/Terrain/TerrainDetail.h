@@ -30,7 +30,7 @@
 
 #include "Haruka/World/Terrain/TerrainLOD.h"   // las cifras de LOD (triM y su piso) viven ahí, no aquí
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Terrain { 
 
 /**
  * @brief Hash de una CELDA a [0,1), con aritmética ENTERA.
@@ -336,4 +336,4 @@ inline float sampleHeightField(const glm::vec2& uv, int w, int h, const float* f
     return a + (b - a) * t.y;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Terrain

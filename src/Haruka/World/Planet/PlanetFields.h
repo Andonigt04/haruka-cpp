@@ -32,7 +32,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace Haruka {
+namespace Haruka::World::Planet {
 
     class PlanetGeology;
 
@@ -95,4 +95,4 @@ namespace Haruka {
         void computeClimate();
     };
 
-} // namespace Haruka
+} // namespace Haruka::World::Planet

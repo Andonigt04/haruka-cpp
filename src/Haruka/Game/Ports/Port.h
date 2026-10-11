@@ -31,7 +31,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace Haruka {
+namespace Haruka::Game::Ports {
 
 /** @brief Para qué sirve el puerto. Es lo único que el MOTOR interpreta. */
 enum class PortClass {
@@ -229,4 +229,4 @@ bool parsePortClass(const std::string&, PortClass&);
 bool parseRailDof(const std::string&, RailDof&);
 bool parseRailDrive(const std::string&, RailDrive&);
 
-} // namespace Haruka
+} // namespace Haruka::Game::Ports

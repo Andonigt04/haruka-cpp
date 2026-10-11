@@ -8,7 +8,7 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Mesh resource reference component.

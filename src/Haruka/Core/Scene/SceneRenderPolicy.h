@@ -6,7 +6,7 @@
 #include "SceneManager.h"
 #include "Haruka/Tools/ObjectTypes.h"
 
-namespace Haruka {
+namespace Haruka::Core::Scene {
 
 enum class RenderKind {
     None,
@@ -18,7 +18,7 @@ enum class RenderKind {
 struct RenderCommand {
     const SceneObject* object = nullptr;
     RenderKind kind = RenderKind::None;
-    PrimitiveType primitive = PrimitiveType::NONE;
+    Tools::PrimitiveType primitive = Tools::PrimitiveType::NONE;
     // ¿Va por el pase INSTANCIADO? Se decide UNA vez, al construir la cola. Antes se preguntaba a
     // `properties` (un mapa JSON con clave de CADENA) por CADA objeto y CADA frame: con una ciudad
     // son decenas de miles de búsquedas por cadena por frame, y eso se veía en el perfil.
@@ -35,4 +35,4 @@ std::vector<RenderCommand> buildSceneRenderQueue(const SceneManager& scene);
  *  para poder hacerlo SOLO con los objetos nuevos en vez de reclasificar la escena entera. */
 RenderCommand classifySceneObject(const SceneObject& obj);
 
-}
+} // namespace Haruka::Core::Scene

@@ -4,7 +4,7 @@
 #include <glm/gtc/constants.hpp>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::World {
 
 /// Metros de lámina evaporada → vapor [0,1]: 20 mm saturan una celda.
 static constexpr float kLaminaToVapor = 1.0f / 0.020f;
@@ -277,8 +277,8 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // añaden los frentes es convectivo entero. `cloudCover` (lluvia, oscuridad del cielo) no cambia.
     const float bgCover  = glm::clamp(0.73f * w.humidity, 0.0f, 1.0f);
     const float fairPart = std::min(w.cloudCover, bgCover);
-    w.column.cover = glm::clamp(fairPart * Haruka::kFairWeatherCumulusShare + (w.cloudCover - fairPart), 0.0f, 1.0f);
-    w.cloudBaseM = Haruka::cloudBaseM(w.column);
+    w.column.cover = glm::clamp(fairPart * kFairWeatherCumulusShare + (w.cloudCover - fairPart), 0.0f, 1.0f);
+    w.cloudBaseM = cloudBaseM(w.column);
 
     // ── TECHO: el DESARROLLO VERTICAL ───────────────────────────────────────────────────────────
     // Aquí es donde la nube deja de ser una superficie y pasa a ser un cuerpo. El grosor NO es una
@@ -320,7 +320,7 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
         w.column.vaporHigh = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time + kCirrusLeadS / m_timeScale) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
         w.column.vaporMid  = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time - kMidLagS / m_timeScale)   - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
         // Y la parte del fondo de buen tiempo que NO es cúmulo, como velo de nivel medio.
-        w.column.vaporMid  = glm::clamp(w.column.vaporMid + fairPart * (1.0f - Haruka::kFairWeatherCumulusShare), 0.0f, 1.0f);
+        w.column.vaporMid  = glm::clamp(w.column.vaporMid + fairPart * (1.0f - kFairWeatherCumulusShare), 0.0f, 1.0f);
     }
 
     // ── VIENTO ──────────────────────────────────────────────────────────────────────────────────
@@ -766,4 +766,4 @@ void WeatherSystem::stepMoisture(double dt, const float* precipRGBA) {
     m_moistStats.evapTotal += evap; m_moistStats.rainTotal += rain;
 }
 
-} // namespace Haruka
+} // namespace Haruka::World

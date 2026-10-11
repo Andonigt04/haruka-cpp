@@ -3,5 +3,5 @@
 #include "Haruka/Core/GameInterface.h"
 
 namespace GameLogic {
-    extern Haruka::GameInterface gameInterface;
+    extern Haruka::Core::GameInterface gameInterface;
 }

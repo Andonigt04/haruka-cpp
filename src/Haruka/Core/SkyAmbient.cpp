@@ -12,7 +12,7 @@
 
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 // ---------------------------------------------------------------------------
 // Parte 1 — GEMELOS de lib/sky_palette.glsl (CUALQUIER CAMBIO EN LOS DOS A LA VEZ)
@@ -152,4 +152,4 @@ glm::vec3 skyAmbientEval(const SkySH& sh, const glm::vec3& n, const glm::vec3& u
     return v;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

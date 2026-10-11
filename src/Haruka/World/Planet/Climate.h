@@ -3,7 +3,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>   // glm::pi — llegaba de rebote por el cube_sphere.h borrado
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World { namespace Planet {
 
 // ===========================================================================
 // Climate layer — optional
@@ -125,4 +125,4 @@ inline double ClimateOutput::precipitation(const glm::dvec3& dir, double elevati
     return std::max(0.0, p);
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World

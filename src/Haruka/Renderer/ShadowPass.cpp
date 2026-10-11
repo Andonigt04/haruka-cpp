@@ -28,7 +28,7 @@ void ShadowPass::draw(RHI::Context* ctx, const Frame& f) {
     m_shadowsOn = false;
     glm::mat4& lightSpace = m_lightSpace;
     // Read the LIVE setting (config panel + save): 0=Off,1=Low,2=Medium,3=High.
-    int sq = (int)Haruka::SettingsManager::get().graphics().shadowQuality;
+    int sq = (int)Settings::SettingsManager::get().graphics().shadowQuality;
     if (f.camera && f.onRenderShadow && sq > 0) {
         unsigned res = (sq == 1) ? 1024u : (sq == 2) ? 2048u : 4096u; // resolution per quality
         if (!m_shadow || m_shadow->shadowWidth != res) m_shadow = std::make_unique<Shadow>(res, res);

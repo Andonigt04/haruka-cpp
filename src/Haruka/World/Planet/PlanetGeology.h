@@ -34,7 +34,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace Haruka {
+namespace Haruka::World::Planet {
 
     /** @brief Una placa tectónica. `motion` es tangente a la esfera en `site`. */
     struct TectonicPlate {
@@ -87,4 +87,4 @@ namespace Haruka {
         uint32_t m_seed = 0;
     };
 
-} // namespace Haruka
+} // namespace Haruka::World::Planet

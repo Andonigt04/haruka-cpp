@@ -4,7 +4,7 @@
 #include "Haruka/Renderer/Shader.h"
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 SoftBodyRenderer::~SoftBodyRenderer() { clear(); }
 
@@ -92,7 +92,7 @@ void SoftBodyRenderer::remove(int id) {
     }
 }
 
-void SoftBodyRenderer::uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos) {
+void SoftBodyRenderer::uploadEntry(Entry& e, const Tools::WorldPos& cameraPos) {
     auto& ps = e.solver->particles;
     const int base = e.handle.firstParticle;
     const int cnt  = e.handle.particleCount;
@@ -125,7 +125,7 @@ void SoftBodyRenderer::uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos) 
         dev->uploadBuffer(e.hVbo, e.cpuVerts.size() * sizeof(float), e.cpuVerts.data());
 }
 
-void SoftBodyRenderer::render(const Haruka::WorldPos& cameraPos) {
+void SoftBodyRenderer::render(const Tools::WorldPos& cameraPos) {
     if (m_entries.empty()) return;
     ensurePSO();
     if (!RHI::valid(m_pso) || !RHI::valid(m_paramsUBO)) return;
@@ -147,4 +147,4 @@ void SoftBodyRenderer::render(const Haruka::WorldPos& cameraPos) {
     }
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

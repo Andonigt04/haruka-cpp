@@ -10,7 +10,7 @@
 #include <functional>
 #include <regex>
 
-namespace Haruka {
+namespace Haruka::Game::Prefab {
 
 namespace {
 
@@ -244,4 +244,4 @@ void applyPrefabEdits(Prefab& pf, const std::vector<PrefabEdit>& edits) {
     pf.pieces.resize(w);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Game::Prefab

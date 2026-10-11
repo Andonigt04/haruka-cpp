@@ -63,7 +63,7 @@
 #include "Haruka/World/Terrain/CubeSphere.h"             // cubeFaceToDir — la proyección, que NO se reimplementa aquí
 #include "Haruka/World/Terrain/TerrainDetail.h"   // terrainDetail(dvec3,...) — la altura, gemela del .glsl
 
-namespace Haruka { namespace Terrain {
+namespace Haruka::World { namespace Terrain {
 
 /**
  * @brief Téxeles por lado de un nodo.
@@ -116,7 +116,7 @@ inline uint32_t nodeMaxLevelFor(double planetRadiusM) {
 
 /** @brief Identidad de un nodo del quadtree. Solo enteros: es la clave del pool y del test golden. */
 struct NodeId {
-    PlanetFace face  = PlanetFace::FRONT;
+    Tools::PlanetFace face  = Tools::PlanetFace::FRONT;
     uint32_t   level = 0;   ///< 0 = la cara entera; 2^level nodos por lado
     uint32_t   i     = 0;   ///< índice de nodo en el eje lx, [0, 2^level)
     uint32_t   j     = 0;   ///< índice de nodo en el eje ly, [0, 2^level)
@@ -194,7 +194,7 @@ inline bool nodeNeighbourAcrossFace(const NodeId& n, int edge, NodeId& out) {
     const glm::dvec3 em = cubeFaceToDir(n.face, ex, ey);   // costura
     const glm::dvec3 d  = glm::normalize(em + (em - dc) * 0.5);   // un cuarto de celda al otro lado
 
-    PlanetFace nf; double nlx, nly;
+    Tools::PlanetFace nf; double nlx, nly;
     dirToCubeFaceClosed(d, nf, nlx, nly);
 
     const double fi = (nlx + 1.0) * 0.5 * (double)lim;
@@ -428,12 +428,12 @@ inline void nodeFillHeights(const NodeId& n, double planetRadiusM, float* out,
             float h;
             if (baseFn) {
                 const float baseH = baseFn(d, baseCtx);
-                h = Haruka::Planet::terrainDetail(d, planetRadiusM + (double)baseH, triM)
-                  * Haruka::Planet::seaLevelAttenuation(baseH);
+                h = terrainDetail(d, planetRadiusM + (double)baseH, triM)
+                  * seaLevelAttenuation(baseH);
                 if (baseH > 0.0f && h < -baseH) h = -baseH;
                 h += baseH;
             } else {
-                h = Haruka::Planet::terrainDetail(d, planetRadiusM, triM);
+                h = terrainDetail(d, planetRadiusM, triM);
             }
             out[(size_t)v * TERRAIN_NODE_TEXELS + u] = h;
             rg.minM = std::min(rg.minM, h);
@@ -1067,7 +1067,7 @@ inline bool nodeBelowHorizon(const NodeId& n, double planetRadiusM,
     // La región visible es un disco alrededor del punto sub-cámara. Si ese disco no toca el borde
     // del nodo, está entero dentro; y entonces la única sonda que puede verlo es el propio punto
     // sub-cámara. Por eso esta regla no es una optimización: es el caso que las sondas no cubren.
-    PlanetFace camFace; double camLx, camLy;
+    Tools::PlanetFace camFace; double camLx, camLy;
     dirToCubeFaceClosed(camHat, camFace, camLx, camLy);
     if (camFace == n.face) {
         double lx0, ly0, lx1, ly1;
@@ -1291,7 +1291,7 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
     if (outCulledHorizon) *outCulledHorizon = 0;
     if (outCulledFrustum) *outCulledFrustum = 0;
     if (outWaterSplit)    *outWaterSplit    = 0;
-    for (int f = 0; f < 6; ++f) admit(NodeId{ (PlanetFace)f, 0, 0, 0 });
+    for (int f = 0; f < 6; ++f) admit(NodeId{ (Tools::PlanetFace)f, 0, 0, 0 });
     while (!stack.empty()) {
         if (byError) std::pop_heap(stack.begin(), stack.end(), worse);
         const Cand cand = stack.back(); stack.pop_back();
@@ -1324,4 +1324,4 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
     }
 }
 
-}} // namespace Haruka::Terrain
+}} // namespace Haruka::World

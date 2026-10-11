@@ -14,7 +14,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-namespace Haruka {
+namespace Haruka::Tools {
     /** @brief World-space position type used across astronomical systems. */
     using WorldPos = glm::dvec3; 
     /** @brief Local-space position type used for render/gameplay transforms. */
@@ -78,4 +78,4 @@ namespace Haruka {
         inline glm::dvec3 kmToRender(const glm::dvec3& kmVec) { return kmVec * KM / METER; }
         inline glm::vec3  kmToRender(const glm::vec3&  kmVec) { return kmVec * static_cast<float>(KM / METER); }
     }
-};
+} // namespace Haruka::Tools;

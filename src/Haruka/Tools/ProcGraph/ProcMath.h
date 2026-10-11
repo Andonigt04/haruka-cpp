@@ -3,7 +3,7 @@
 #include "ProcGraph.h"
 #include <algorithm>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Constant value node
@@ -479,4 +479,4 @@ private:
     float m_size;
 };
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

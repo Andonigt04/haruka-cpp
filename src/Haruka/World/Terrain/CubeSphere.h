@@ -17,11 +17,11 @@
 #include <glm/glm.hpp>
 #include "Haruka/Tools/PlanetaryTypes.h"   // PlanetFace (GL-free)
 
-namespace Haruka {
+namespace Haruka::World::Terrain {
 
     /** @brief (cara, lx, ly) con lx,ly ∈ [-1,1] → dirección unitaria. Spherify de Cobb: reparte la
      *  distorsión mucho mejor que normalizar el cubo (las esquinas no se estiran). */
-    glm::dvec3 cubeFaceToDir(PlanetFace face, double lx, double ly);
+    glm::dvec3 cubeFaceToDir(Tools::PlanetFace face, double lx, double ly);
 
     /**
      * @brief INVERSA de cubeFaceToDir, en FORMA CERRADA.
@@ -44,11 +44,11 @@ namespace Haruka {
      * vértice teselado, y ahí un Newton con jacobiano numérico son 12 evaluaciones del spherify.
      * El gemelo GLSL es `assets/shaders/lib/cube_face.glsl` — cualquier cambio va en los dos.
      */
-    void dirToCubeFaceClosed(const glm::dvec3& dir, PlanetFace& outFace, double& lx, double& ly);
+    void dirToCubeFaceClosed(const glm::dvec3& dir, Tools::PlanetFace& outFace, double& lx, double& ly);
 
     /** @brief Igual, refinando además con Newton. Es la que usa todo lo que ya existía; hoy la
      *  semilla ya es exacta, así que Newton solo confirma. Se conserva porque es la referencia
      *  contra la que se valida la forma cerrada (test `cube_sphere_inverse`). */
-    void dirToCubeFace(const glm::dvec3& dir, PlanetFace& outFace, double& lx, double& ly);
+    void dirToCubeFace(const glm::dvec3& dir, Tools::PlanetFace& outFace, double& lx, double& ly);
 
-} // namespace Haruka
+} // namespace Haruka::World::Terrain

@@ -1,7 +1,7 @@
 // Motor — panel de edición de prefabricados. Ver PrefabEditPanel.h.
 //
 // ⚠️ DOS COSAS SE LLAMAN "PREFAB" Y NO SON LA MISMA. El editor guarda ESCENAS con extensión
-// `.prefab` (lo que abre "Enter Prefab" en su jerarquía). Esto edita `Haruka::Prefab`: una lista de
+// `.prefab` (lo que abre "Enter Prefab" en su jerarquía). Esto edita `Haruka::Game::Prefab::Prefab`: una lista de
 // PIEZAS con item y pose (`assets/data/prefabs/<x>.json`), que es lo que se coloca como vehículo o
 // estructura, lo que dibuja `previewPrefabGeo` y lo que valida el DGS.
 #include "Haruka/Tools/PrefabEditPanel.h"
@@ -17,7 +17,7 @@
 
 namespace fs = std::filesystem;
 
-namespace Haruka {
+namespace Haruka::Tools {
 namespace {
 
 /// Clave de caché de la miniatura del CONJUNTO. Prefijo propio: la clave "prefab:<nombre>" ya la usa
@@ -36,7 +36,7 @@ void PrefabEditPanel::setPrefabDir(const std::string& dir) {
     rescan();
 }
 
-PrefabPiece* PrefabEditPanel::selectedPiece() {
+Game::Prefab::PrefabPiece* PrefabEditPanel::selectedPiece() {
     if (m_selected < 0 || m_selected >= (int)m_prefab.pieces.size()) return nullptr;
     return &m_prefab.pieces[m_selected];
 }
@@ -67,14 +67,14 @@ void PrefabEditPanel::openPrefab(const std::string& name) {
     m_openName.clear();
     m_dirty = false;
     if (m_prefabDir.empty()) return;
-    if (!loadPrefab(findPrefabFile(m_prefabDir, name), m_prefab)) return;
+    if (!Game::Prefab::loadPrefab(Game::Prefab::findPrefabFile(m_prefabDir, name), m_prefab)) return;
     m_openName = name;
     invalidatePreview(prefabKey(name));     // por si quedaba la de una sesión anterior
 }
 
 void PrefabEditPanel::savePrefabFile() {
     if (m_openName.empty() || m_prefabDir.empty()) return;
-    if (savePrefab(m_prefabDir + "/" + m_openName + ".json", m_prefab)) m_dirty = false;
+    if (Game::Prefab::savePrefab(m_prefabDir + "/" + m_openName + ".json", m_prefab)) m_dirty = false;
 }
 
 void PrefabEditPanel::onImGuiRender() {
@@ -172,7 +172,7 @@ void PrefabEditPanel::onImGuiRender() {
     while (clipper.Step()) {
         for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
             const int i = visibles[row];
-            const PrefabPiece& p = m_prefab.pieces[i];
+            const Game::Prefab::PrefabPiece& p = m_prefab.pieces[i];
             ImGui::PushID(i);
             if (previewWorks()) {
                 const uint64_t t = previewTexture("item:" + p.id, [&geoOf, &p] { return geoOf(p.id); },
@@ -200,7 +200,7 @@ void PrefabEditPanel::onImGuiRender() {
     ImGui::EndChild();
 
     // ── LA PIEZA SELECCIONADA ───────────────────────────────────────────────────────────────────
-    if (PrefabPiece* p = selectedPiece()) {
+    if (Game::Prefab::PrefabPiece* p = selectedPiece()) {
         ImGui::Text("Pieza %d — %s", m_selected, p->id.c_str());
 
         glm::vec3 pos = glm::vec3(p->pos);
@@ -237,7 +237,7 @@ void PrefabEditPanel::onImGuiRender() {
     ImGui::SameLine();
     if (ImGui::Button("Añadir pieza") && m_newItemId[0]) {
         m_selected = -1;                      // idem: el vector puede realojarse al crecer
-        PrefabPiece np;
+        Game::Prefab::PrefabPiece np;
         np.id = m_newItemId;
         m_prefab.pieces.push_back(np);
         m_selected = (int)m_prefab.pieces.size() - 1;
@@ -247,4 +247,4 @@ void PrefabEditPanel::onImGuiRender() {
     ImGui::End();
 }
 
-} // namespace Haruka
+} // namespace Haruka::Tools

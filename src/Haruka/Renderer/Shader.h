@@ -16,15 +16,15 @@ public:
     unsigned int ID;
 
     static void setBaseDir(const char* dir) {
-        if (!dir) { s_baseDir.clear(); Haruka::AssetPaths::setAssetsDir({}); return; }
+        if (!dir) { s_baseDir.clear(); Core::AssetPaths::setAssetsDir({}); return; }
         s_baseDir = dir;
         if (!s_baseDir.empty() && s_baseDir.back() != '/' && s_baseDir.back() != '\\')
             s_baseDir += '/';
-        Haruka::AssetPaths::setAssetsDir(s_baseDir);
+        Core::AssetPaths::setAssetsDir(s_baseDir);
         // Raíz de los `#include` de GLSL. Va aquí, con las otras dos, por la misma razón que dice
         // el comentario de AssetPaths: tenerlas separadas es cómo se coló que una ruta siguiera
         // yendo por el cwd mientras las demás ya iban por la raíz.
-        Haruka::RHI::setShaderIncludeDir(Haruka::AssetPaths::shaders());
+        Haruka::RHI::setShaderIncludeDir(Core::AssetPaths::shaders());
     }
 
     static const std::string& baseDir() { return s_baseDir; }
@@ -66,5 +66,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Shader;
-namespace Haruka { using Renderer::Shader; }

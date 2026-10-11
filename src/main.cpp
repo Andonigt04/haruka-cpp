@@ -3,14 +3,14 @@
  * @brief Punto de entrada del runtime suelto — y **ningún target lo compila**.
  *
  * Este `main()` arranca el motor a pelo desde un `project.hrk`: lee la
- * configuración con @ref Haruka::Project y llama a
+ * configuración con @ref Haruka::Core::Project y llama a
  * @ref Haruka::Core::Application::run(). Es el runtime antiguo.
  *
  * `CMakeLists.txt` lo excluye a propósito del glob de fuentes
  * (`list(FILTER ENGINE_SOURCES EXCLUDE REGEX "src/main\\.cpp$")`), porque metido en
  * `libHarukaEngine.so` hacía que la librería compartida **exportara el símbolo
  * `main`**. El punto de entrada vivo es el del juego: `template/main.cpp` (y el del
- * proyecto real), que inyecta su @ref Haruka::GameInterface antes de arrancar:
+ * proyecto real), que inyecta su @ref Haruka::Core::GameInterface antes de arrancar:
  *
  * @code
  * Application app;
@@ -56,7 +56,7 @@
  * There are two entry points, and both end in the same call:
  *
  * - **The game** (`template/main.cpp`, and the real project's `main.cpp`) — the
- *   live one. It injects its @ref Haruka::GameInterface with
+ *   live one. It injects its @ref Haruka::Core::GameInterface with
  *   `setGameInterface()` and starts at the menu scene.
  * - **The bare runtime** (`src/main.cpp`) — reads `project.hrk` and starts its
  *   `startScene` with no game module. No target compiles it; see the note at the
@@ -79,14 +79,14 @@
  * 5. Installs SIGINT/SIGTERM handlers and enters the frame loop.
  *
  * @ref Haruka::Core::Application::init() "init()" is deliberately small: it wires
- * @ref Haruka::WorldSystem, @ref PhysicsEngine, the camera and the planetary
+ * @ref Haruka::World::WorldSystem, @ref PhysicsEngine, the camera and the planetary
  * system, and publishes them through `MotorInstance`. The heavy renderer
  * resources are created by the passes that need them.
  *
  * @section sec_loop The frame
  *
  * Each iteration clamps the delta to 100 ms, pumps SDL input, reacts to a resize,
- * opens a @ref Haruka::Profiler frame, ticks the game module's `onUpdate`, and
+ * opens a @ref Haruka::Tools::Profiler frame, ticks the game module's `onUpdate`, and
  * then runs the two halves of the frame:
  *
  * - `buildRenderQueue()` — culls the scene into the render queue, and only
@@ -101,10 +101,10 @@
  * A float loses metres at astronomical distances, so the engine splits the two
  * worlds and never mixes them:
  *
- * - @ref Haruka::WorldSystem holds every @ref Haruka::CelestialBody in
+ * - @ref Haruka::World::WorldSystem holds every @ref Haruka::World::CelestialBody in
  *   `WorldPos` (double, km) and shifts the floating origin to the camera every
  *   frame. `toLocal()` is the only sanctioned way down to the float the GPU sees.
- * - @ref Haruka::PlanetarySystem owns the planets: orbits, terrain sampling
+ * - @ref Haruka::World::Planet::PlanetarySystem owns the planets: orbits, terrain sampling
  *   (`sampleTerrainHeight`, `sampleSurface`), water (`sampleWaterLevel`,
  *   `getSeaSurface`), weather (`weatherAt`) and ground cover. It is also the
  *   authority the physics asks through @ref Haruka::Physics::IWorldProvider.
@@ -150,7 +150,7 @@
 /**
  * @brief Entry point of the bare runtime (not compiled into any target).
  *
- * Loads `project.hrk` through `Haruka::Project`, extracts `startScene` when
+ * Loads `project.hrk` through `Haruka::Core::Project`, extracts `startScene` when
  * present, and passes that path to `Application::run()`. No `GameInterface` is
  * installed, so the game callbacks (`onInit`, `onUpdate`, `onRenderWorld`) never
  * fire — that is what the game's own `main()` is for.
@@ -175,7 +175,7 @@ int main(int argc, char* argv[]) {
 
     std::string startScenePath = "";
 
-    Haruka::Project project;
+    Haruka::Core::Project project;
     if (project.load(".")) {
         startScenePath = project.getConfig().startScene;
     }

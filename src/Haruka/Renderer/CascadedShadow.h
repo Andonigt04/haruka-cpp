@@ -57,5 +57,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::CascadedShadowMap;
-namespace Haruka { using Renderer::CascadedShadowMap; }

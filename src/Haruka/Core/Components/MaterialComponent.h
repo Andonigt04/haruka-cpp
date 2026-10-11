@@ -9,7 +9,7 @@
 #include <memory>
 #include "Haruka/Core/Component.h"
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Serializable PBR material data container.
@@ -68,4 +68,4 @@ public:
     void fromJSON(const nlohmann::json& j);
 };
 
-}
+} // namespace Haruka::Core::Components

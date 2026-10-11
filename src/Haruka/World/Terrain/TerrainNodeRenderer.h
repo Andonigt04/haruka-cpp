@@ -42,7 +42,7 @@
 #include "Haruka/Core/Logger.h"
 #include "Haruka/Tools/Profiler.h"   // HARUKA_PROFILE: el reparto del CPU del pase v5 (select/stride/gen)
 
-namespace Haruka { namespace Terrain {
+namespace Haruka::World { namespace Terrain {
 
 class TerrainNodeRenderer {
 public:
@@ -201,7 +201,7 @@ public:
     static double strideMatchM() {
         static const double s_m = []() {
             const char* v = std::getenv("HARUKA_TERRAIN_V5_STRIDEMATCH");
-            if (!v || !*v) return Haruka::Terrain::TERRAIN_NODE_STRIDE_MATCH_M;
+            if (!v || !*v) return TERRAIN_NODE_STRIDE_MATCH_M;
             return std::max(0.0, atof(v));
         }();
         return s_m;
@@ -762,9 +762,9 @@ public:
         // dirección — la propiedad que el pool documenta y que el renderer no estaba cumpliendo.
         if (!m_rootsPinned) {
             m_pool.beginFrame();
-            for (int f = 0; f < 6; ++f) m_pool.request(NodeId{ (PlanetFace)f, 0, 0, 0 });
+            for (int f = 0; f < 6; ++f) m_pool.request(NodeId{ (Tools::PlanetFace)f, 0, 0, 0 });
             if (m_gpu.generatePending(ctx, m_pool, planetRadiusM) > 0) {
-                for (int f = 0; f < 6; ++f) m_pool.pin(NodeId{ (PlanetFace)f, 0, 0, 0 });
+                for (int f = 0; f < 6; ++f) m_pool.pin(NodeId{ (Tools::PlanetFace)f, 0, 0, 0 });
                 m_rootsPinned = true;
             }
         }
@@ -1003,7 +1003,7 @@ public:
             const uint32_t prev = (it == m_skPrev.end()) ? kNoPrevStride : it->second;
             double want = nodeStrideWant(leaf, planetRadiusM, camPos, planetCenter,
                                                errorPx(), vertexPx(),
-                                               Planet::TERRAIN_RING_FINE_CELL, elevM,
+                                               TERRAIN_RING_FINE_CELL, elevM,
                                                m_strideMatchOverride >= 0.0
                                                    ? m_strideMatchOverride : strideMatchM(),
                                                reliefM, reliefRef,
@@ -1309,7 +1309,7 @@ public:
             for (uint32_t k = 0; k < m_strideCount; ++k) {
                 for (size_t ii = m_group[k]; ii < m_group[k + 1]; ++ii) {
                     const NodeInstGPU& g = m_inst[ii];
-                    NodeId n; n.face = (PlanetFace)g.node[0]; n.level = (uint32_t)g.node[1];
+                    NodeId n; n.face = (Tools::PlanetFace)g.node[0]; n.level = (uint32_t)g.node[1];
                     n.i = (uint32_t)g.node[2]; n.j = (uint32_t)g.node[3];
                     if (s_allNodes) { pushWater(g, k, n); continue; }
                     const NodeRange r = m_pool.rangeOf(n);
@@ -1473,7 +1473,7 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
         du.strideRamp = glm::vec4((float)(m_strideMatchOverride >= 0.0 ? m_strideMatchOverride : strideMatchM()),
                                   (float)(m_strideRampOverride >= 0.0 ? m_strideRampOverride : strideRamp()),
                                   (float)(vertexPx() / std::max(errorPx(), 1e-3)),
-                                  (float)Planet::TERRAIN_RING_FINE_CELL);
+                                  (float)TERRAIN_RING_FINE_CELL);
         m_dev->updateBuffer(m_ubo, 0, sizeof(du), &du);   // UNA vez, antes de cualquier draw
 
         ctx->bindPipeline(m_pipe);
@@ -1667,7 +1667,7 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
     RHI::BufferHandle  heightsBuffer()    const { return m_gpu.heights(); }
 
     double waterQuadAt(const glm::dvec3& dir, double planetRadiusM) const {
-        PlanetFace face; double lx, ly;
+        Tools::PlanetFace face; double lx, ly;
         dirToCubeFaceClosed(dir, face, lx, ly);
         const double span0 = planetRadiusM * 1.5707963267948966;   // gemelo de `uLod.z`
         for (const NodeInstGPU& g : m_instWater) {
@@ -1775,4 +1775,4 @@ private:
 
 };
 
-}} // namespace Haruka::Terrain
+}} // namespace Haruka::World

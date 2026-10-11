@@ -14,7 +14,7 @@
 #pragma once
 #include <string>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 class AssetPaths {
 public:
@@ -98,4 +98,4 @@ private:
     inline static std::string s_projectRoot; // vacía = sin proyecto abierto (rutas relativas)
 };
 
-} // namespace Haruka
+} // namespace Haruka::Core

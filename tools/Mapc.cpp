@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
             out = in + ".hmap";
     }
 
-    if (!Haruka::SceneLoader::packToFile(in, out)) {
+    if (!Haruka::Core::Scene::SceneLoader::packToFile(in, out)) {
         std::fprintf(stderr, "mapc: failed to pack '%s' -> '%s'\n", in.c_str(), out.c_str());
         return 1;
     }

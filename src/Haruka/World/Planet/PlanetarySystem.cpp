@@ -58,7 +58,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
-namespace Haruka {
+namespace Haruka::World::Planet {
 
 // ── PlanetarySystem: el orquestador fino ──────────────────────────────────
 // Cada planeta (TerrestrialPlanet) se crea a sí mismo desde su config: interpreta su biomePalette,
@@ -70,7 +70,7 @@ namespace Haruka {
 
 PlanetarySystem::PlanetarySystem() {}
 PlanetarySystem::~PlanetarySystem() {
-    Haruka::Planet::TerrestrialPlanet::cleanupStatics();
+    TerrestrialPlanet::cleanupStatics();
 }
 
 void PlanetarySystem::init() {}
@@ -87,9 +87,9 @@ static constexpr int kEditRefLod    = 4;
 static constexpr int kEditChunkSize = 24;
 
 uint64_t PlanetarySystem::dirToHeightKey(const glm::dvec3& dir, int refLod, int chunkSize) {
-    PlanetFace f;
+    Tools::PlanetFace f;
     double lx, ly;
-    dirToCubeFace(dir, f, lx, ly);
+    Terrain::dirToCubeFace(dir, f, lx, ly);
     const double step = terrainLatticeStep(refLod, chunkSize);
     const int64_t k = (int64_t)std::floor((lx + 1.0) / step);
     const int64_t l = (int64_t)std::floor((ly + 1.0) / step);
@@ -120,8 +120,8 @@ void PlanetarySystem::editHeightsInRadius(std::unordered_map<uint64_t, float>& e
     const glm::dvec3 centerDir = local / localLen;
 
     // Compute face-local bounds for the brush
-    PlanetFace cf; double clx, cly;
-    dirToCubeFace(centerDir, cf, clx, cly);
+    Tools::PlanetFace cf; double clx, cly;
+    Terrain::dirToCubeFace(centerDir, cf, clx, cly);
     const double step = terrainLatticeStep(refLod, chunkSize);
     // Radius in face-local units
     const double radiusLocal = radius / planet->radius;
@@ -136,7 +136,7 @@ void PlanetarySystem::editHeightsInRadius(std::unordered_map<uint64_t, float>& e
             const double lx2 = (double)k * step * 2.0 - 1.0 + step;
             const double ly2 = (double)l * step * 2.0 - 1.0 + step;
             if (lx2 < -1.0 || lx2 > 1.0 || ly2 < -1.0 || ly2 > 1.0) continue;
-            const glm::dvec3 worldDir = cubeFaceToDir(cf, lx2, ly2);
+            const glm::dvec3 worldDir = Terrain::cubeFaceToDir(cf, lx2, ly2);
             const glm::dvec3 worldPt = planet->position + worldDir * planet->radius;
             const double dist = glm::length(worldPt - center);
             if (dist > radius) continue;
@@ -187,8 +187,8 @@ void PlanetarySystem::craterTerrain(const glm::dvec3& worldPos, double radiusM, 
     auto* tp = activeTerrestrialMut();
     glm::dvec3 pc; double pr = 0.0;
     if (!tp || !getActivePlanet(pc, pr) || pr <= 0.0) return;
-    Haruka::VoxWorld::Brush b;
-    b.op = Haruka::VoxWorld::Brush::Op::Crater;
+    Vox::VoxWorld::Brush b;
+    b.op = Vox::VoxWorld::Brush::Op::Crater;
     b.radiusM = (float)radiusM; b.amountM = (float)depthM;
     tp->vox().stroke(worldPos - pc, b);
     HARUKA_LOGDIAG("Vox", "crater r=%.2f m, hondo %.2f m", radiusM, depthM);
@@ -294,7 +294,7 @@ void PlanetarySystem::update(double dt, const glm::dvec3& cameraPos) {
 
 void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
     glm::dvec3 pc; double pr = 0.0;
-    if (!getActivePlanet(pc, pr) || pr <= 0.0) { m_oceanState = Haruka::Planet::oceanDefaultState(); return; }
+    if (!getActivePlanet(pc, pr) || pr <= 0.0) { m_oceanState = Water::oceanDefaultState(); return; }
     const glm::dvec3 rel = cameraPos - pc;
     const double len = glm::length(rel);
     const glm::dvec3 dir = (len > 1e-9) ? rel / len : glm::dvec3(0, 1, 0);
@@ -312,25 +312,25 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
             std::vector<glm::dvec3> pos; std::vector<double> gm;
             pos.reserve(bodies.size()); gm.reserve(bodies.size());
             for (const auto& b : bodies) { pos.push_back(b.posCenter); gm.push_back(b.gm); }
-            tideM = Haruka::Planet::oceanTideAt(dir, pr, pos.data(), gm.data(), (int)bodies.size());
+            tideM = Water::oceanTideAt(dir, pr, pos.data(), gm.data(), (int)bodies.size());
         }
     }
 
     // ── EL VIENTO QUE LEVANTA EL MAR ────────────────────────────────────────────────────────────
     // El mismo campo de clima que mueve las nubes y la lluvia. Antes el oleaje era una tabla fija:
     // una galerna y un día en calma daban olas idénticas.
-    const Haruka::WeatherSample ws = weatherAt(cameraPos);
+    const WeatherSample ws = weatherAt(cameraPos);
     // El viento del clima viene en el marco local del planeta; sus dos primeras componentes sirven
     // de rumbo en el plano tangente, que es lo que `oceanStateFromWind` espera.
     const float speed = glm::length(ws.wind);
     // ⚠️ FILTRADO, no instantáneo: el mar es una integral del viento (ver `SeaFollower`). Y con el
     // ancla de la fase, que sin ella el mar entero subía en bloque (`OceanState::phase`).
-    const float nowS = Haruka::Planet::oceanClockSeconds();
+    const float nowS = Water::oceanClockSeconds();
     const glm::vec2 wSea = m_sea.filterWind(glm::vec2(ws.wind.x, ws.wind.z), nowS);
-    m_oceanState = Haruka::Planet::oceanStateFromWind(glm::length(wSea), wSea.x, wSea.y, (float)tideM);
+    m_oceanState = Water::oceanStateFromWind(glm::length(wSea), wSea.x, wSea.y, (float)tideM);
     if (m_sea.anchorFor(m_oceanState, cameraPos, pc, pr))
         HARUKA_LOGI("Mar", "ancla del mar movida (%d): la camara estaba a mas de %.0f km",
-                    m_sea.reanchors, Haruka::Planet::SeaFollower::kReanchorM / 1000.0);
+                    m_sea.reanchors, Water::SeaFollower::kReanchorM / 1000.0);
 
     // ⚠️ EL VIENTO ES LA MITAD DE "NO VEO OLAS". La amplitud va con U² y `oceanStateFromWind` topa U
     // por abajo en 4 m/s: con el clima en calma TODOS los trenes salen al 12 % de la tabla y el mar
@@ -342,13 +342,13 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
         if (u != s_lastU) {
             s_lastU = u;
             double sumAmp = 0.0;
-            for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) sumAmp += m_oceanState.wave[i][1];
+            for (int i = 0; i < Water::OCEAN_WAVES; ++i) sumAmp += m_oceanState.wave[i][1];
             HARUKA_LOGI("Mar", "viento del mar %.1f m/s (clima ahora %.1f)%s -> Sigma amp %.2f m (cresta-valle ~%.2f m) · lambda %.0f..%.0f m · marea %.2f m",
                         uSea, speed,
-                        (uSea < Haruka::Planet::OCEAN_WIND_MIN) ? " (TOPADO: mar en calma)" : "",
+                        (uSea < Water::OCEAN_WIND_MIN) ? " (TOPADO: mar en calma)" : "",
                         sumAmp, sumAmp * 2.0,
                         (double)m_oceanState.wave[0][0],
-                        (double)m_oceanState.wave[Haruka::Planet::OCEAN_WAVES - 1][0], tideM);
+                        (double)m_oceanState.wave[Water::OCEAN_WAVES - 1][0], tideM);
         }
     }
 
@@ -359,13 +359,13 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
     // el escalón de severidad cuando CAMBIA y el embudo más cercano cuando hay alguno, con su
     // distancia: si el número dice que el más cercano está a 4000 km, el problema no es el render.
     {
-        const float sev = Haruka::WeatherSystem::severityAt(ws);
-        const auto  cls = Haruka::WeatherSystem::severityClass(sev);
+        const float sev = WeatherSystem::severityAt(ws);
+        const auto  cls = WeatherSystem::severityClass(sev);
         static int s_lastClass = -1;
         if ((int)cls != s_lastClass) {
             s_lastClass = (int)cls;
             HARUKA_LOGI("Clima", "%s (severidad %.2f) · viento %.1f m/s · nube %.0f-%.0f m · precip %.2f",
-                        Haruka::WeatherSystem::severityName(cls), sev, speed,
+                        WeatherSystem::severityName(cls), sev, speed,
                         ws.cloudBaseM, ws.cloudTopM, ws.precip);
         }
 
@@ -373,7 +373,7 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
         static size_t s_lastN = (size_t)-1;
         if (vs.size() != s_lastN) {
             s_lastN = vs.size();
-            double bestKm = -1.0; const Haruka::WeatherSystem::Vortex* best = nullptr;
+            double bestKm = -1.0; const WeatherSystem::Vortex* best = nullptr;
             for (const auto& v : vs) {
                 const double km = std::acos(glm::clamp(glm::dot(dir, v.dir), -1.0, 1.0)) * pr / 1000.0;
                 if (!best || km < bestKm) { bestKm = km; best = &v; }
@@ -381,12 +381,12 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
             if (best)
                 HARUKA_LOGI("Clima", "%zu embudo(s) a menos de %.0f km · el mas cercano: %s a %.1f km, "
                             "%.0f m/s, nucleo %.0f m, edad %.0f%%",
-                            vs.size(), Haruka::WeatherSystem::kVortexSearchM / 1000.0,
+                            vs.size(), WeatherSystem::kVortexSearchM / 1000.0,
                             best->overWater ? "TROMBA MARINA" : "TORNADO", bestKm,
                             (double)best->windMS, best->coreRadiusM, best->age01 * 100.0f);
             else
                 HARUKA_LOGI("Clima", "sin embudos en %.0f km a la redonda",
-                            Haruka::WeatherSystem::kVortexSearchM / 1000.0);
+                            WeatherSystem::kVortexSearchM / 1000.0);
         }
     }
 
@@ -411,7 +411,7 @@ void PlanetarySystem::updateOrbits(double /*dt*/) {
             // La posición sale de los ELEMENTOS evaluados en `t`, no de una base congelada: la elipse
             // precesa dentro de su plano y el plano gira, así que la órbita nunca se repite. Sigue
             // siendo función de `t` (O(1), sin deriva, idéntica en todos los clientes del DGS).
-            p.position = focus + Haruka::Planet::orbitPositionAt(p.orbit, m_simulationTime);
+            p.position = focus + orbitPositionAt(p.orbit, m_simulationTime);
         }
         return glm::dvec3(p.position);
     };
@@ -442,13 +442,13 @@ bool PlanetarySystem::setPlanetOrbit(const std::string& planetName, const std::s
     const glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
     const glm::dvec3 v = glm::normalize(glm::cross(axis, u));
     pl.orbitParent = par;
-    pl.orbit = Haruka::Planet::OrbitElements{};
+    pl.orbit = OrbitElements{};
     pl.orbit.a = dist / std::max(1.0 - e, 1e-3);
     pl.orbit.e = e;
     pl.orbit.period = period;
     pl.orbit.meanAnom0 = -2.0 * 3.14159265358979323846 * (m_simulationTime / period);
-    Haruka::Planet::orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
-    Haruka::Planet::defaultPrecession(pl.seed, pl.orbit);
+    orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
+    defaultPrecession(pl.seed, pl.orbit);
     pl.orbitA = pl.orbit.a; pl.orbitEcc = pl.orbit.e;
     pl.orbitPeriod = pl.orbit.period; pl.orbitPhase = pl.orbit.meanAnom0;
     return true;
@@ -462,7 +462,7 @@ static void buildCrateredMoonMesh(std::vector<glm::vec3>& verts,
                                   std::vector<glm::vec3>& cols,
                                   std::vector<unsigned int>& idx) {
     std::vector<glm::vec3> base, bn;
-    PrimitiveShapes::createSphereLOD(1.0f, 72, 54, base, bn, idx);
+    Renderer::PrimitiveShapes::createSphereLOD(1.0f, 72, 54, base, bn, idx);
 
     struct Crater { glm::vec3 dir; float ang; float depth; };
     std::vector<Crater> craters;
@@ -512,8 +512,8 @@ namespace {
 // crudo (`raw`), que el planeta reinterpreta en su `build()` (biomePalette, materials, …).
 // Es la MISMA interpretación para `buildFromScene` (crear) y `updatePlanetFromScene` (regenerar
 // tras editarlo en el editor): un planeta se ve igual la primera vez que después de cambiarlo.
-Haruka::Planet::TerrestrialPlanetConfig planetConfigFromObject(const Haruka::SceneObject& obj) {
-    Haruka::Planet::TerrestrialPlanetConfig cfg;
+TerrestrialPlanetConfig planetConfigFromObject(const Core::Scene::SceneObject& obj) {
+    TerrestrialPlanetConfig cfg;
     cfg.name     = obj.name;
     cfg.position = obj.position;
     cfg.radius   = std::max({obj.scale.x, obj.scale.y, obj.scale.z});
@@ -537,8 +537,8 @@ Haruka::Planet::TerrestrialPlanetConfig planetConfigFromObject(const Haruka::Sce
 
 } // namespace
 
-Haruka::CaveDef caveDefFromSceneObject(const Haruka::SceneObject& obj, const glm::dvec3& planetPos) {
-    Haruka::CaveDef d;
+Vox::CaveDef caveDefFromSceneObject(const Core::Scene::SceneObject& obj, const glm::dvec3& planetPos) {
+    Vox::CaveDef d;
     const auto& pr = obj.properties;
     d.name = obj.name;
     d.centerDir = glm::normalize(obj.position - planetPos);
@@ -550,8 +550,8 @@ Haruka::CaveDef caveDefFromSceneObject(const Haruka::SceneObject& obj, const glm
     return d;
 }
 
-Haruka::IslandDef islandDefFromSceneObject(const Haruka::SceneObject& obj, const glm::dvec3& planetPos) {
-    Haruka::IslandDef d;
+Vox::IslandDef islandDefFromSceneObject(const Core::Scene::SceneObject& obj, const glm::dvec3& planetPos) {
+    Vox::IslandDef d;
     const auto& pr = obj.properties;
     d.name = obj.name;
     d.centerDir = glm::normalize(obj.position - planetPos);
@@ -563,16 +563,16 @@ Haruka::IslandDef islandDefFromSceneObject(const Haruka::SceneObject& obj, const
     return d;
 }
 
-bool sameCaveDef(const Haruka::CaveDef& a, const Haruka::CaveDef& b) {
+bool sameCaveDef(const Vox::CaveDef& a, const Vox::CaveDef& b) {
     return a.name == b.name && glm::length(a.centerDir - b.centerDir) < 1e-9 && a.radiusM == b.radiusM &&
            a.depthM == b.depthM && a.mouth == b.mouth && a.planta == b.planta && a.perfil == b.perfil && a.draftSeed == b.draftSeed;
 }
-bool sameIslandDef(const Haruka::IslandDef& a, const Haruka::IslandDef& b) {
+bool sameIslandDef(const Vox::IslandDef& a, const Vox::IslandDef& b) {
     return a.name == b.name && glm::length(a.centerDir - b.centerDir) < 1e-9 && a.radiusM == b.radiusM && a.topM == b.topM &&
            a.rootM == b.rootM && a.altitudeM == b.altitudeM && a.planta == b.planta && a.cima == b.cima && a.raiz == b.raiz && a.draftSeed == b.draftSeed;
 }
 
-void PlanetarySystem::buildFromScene(SceneManager& scene) {
+void PlanetarySystem::buildFromScene(Core::Scene::SceneManager& scene) {
     struct OrbitIntent { size_t planetIdx; std::string parent; double period, ecc; };
     std::vector<OrbitIntent> orbitIntents;
     for (auto& objPtr : scene.getObjectsMutable()) {
@@ -606,7 +606,7 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
             // interpreta biomePalette, materials, mapas de zona/elevación, nivel del mar, malla y
             // texturas. El sistema solo le pasa la config y lo guarda.
             auto cfg = planetConfigFromObject(obj);
-            auto p = std::make_unique<Haruka::Planet::TerrestrialPlanet>();
+            auto p = std::make_unique<TerrestrialPlanet>();
             p->build(cfg);
             m_simplePlanets.push_back(std::move(p));
 
@@ -621,7 +621,7 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
         // Procedural mesh (e.g. cratered moon)
         if (!obj.meshRenderer &&
             obj.getProperty<std::string>("proceduralMesh", std::string{}) == "cratered_moon") {
-            auto mrc = std::make_shared<MeshRendererComponent>();
+            auto mrc = std::make_shared<Core::Components::MeshRendererComponent>();
             std::vector<glm::vec3> v, n, c; std::vector<unsigned int> idx;
             buildCrateredMoonMesh(v, n, c, idx);
             mrc->setMesh(v, n, c, idx);
@@ -634,8 +634,8 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
     // mapas como assets. Van al planeta más cercano a su posición (sin semilla: ver `CaveDef`).
     // Y la carpeta de trazos del diseñador: `surface.voxEdits` del planeta.
     {
-        auto nearestPlanet = [&](const glm::dvec3& pos) -> Haruka::Planet::TerrestrialPlanet* {
-            Haruka::Planet::TerrestrialPlanet* best = nullptr; double bestD = 1e300;
+        auto nearestPlanet = [&](const glm::dvec3& pos) -> TerrestrialPlanet* {
+            TerrestrialPlanet* best = nullptr; double bestD = 1e300;
             for (auto& sp : m_simplePlanets) {
                 const double d = glm::length(pos - sp->position()) / std::max(sp->radius(), 1.0);
                 if (d < bestD) { bestD = d; best = sp.get(); }
@@ -646,10 +646,10 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
             if (!objPtr) continue;
             const auto& obj = *objPtr;
             if (obj.type != "Cave" && obj.type != "Island") continue;
-            Haruka::Planet::TerrestrialPlanet* tp = nearestPlanet(obj.position);
+            TerrestrialPlanet* tp = nearestPlanet(obj.position);
             if (!tp) continue;
-            if (obj.type == "Cave") tp->addSceneCave(Haruka::caveDefFromSceneObject(obj, tp->position()));
-            else                    tp->addSceneIsland(Haruka::islandDefFromSceneObject(obj, tp->position()));
+            if (obj.type == "Cave") tp->addSceneCave(caveDefFromSceneObject(obj, tp->position()));
+            else                    tp->addSceneIsland(islandDefFromSceneObject(obj, tp->position()));
         }
         for (auto& objPtr : scene.getObjectsMutable()) {
             if (!objPtr || !objPtr->surfaceConfig.is_object()) continue;
@@ -676,12 +676,12 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
         const glm::dvec3 axis = (std::abs(u.y) < 0.95) ? glm::dvec3(0, 1, 0) : glm::dvec3(1, 0, 0);
         const glm::dvec3 v = glm::normalize(glm::cross(axis, u));
         pl.orbitParent = parentIdx;
-        pl.orbit = Haruka::Planet::OrbitElements{};
+        pl.orbit = OrbitElements{};
         pl.orbit.a = dist / std::max(1.0 - e, 1e-3);
         pl.orbit.e = e;
         pl.orbit.period = oi.period;
-        Haruka::Planet::orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
-        Haruka::Planet::defaultPrecession(pl.seed, pl.orbit);
+        orbitElementsFromBasis(u, v, pl.orbit.incRad, pl.orbit.nodeRad, pl.orbit.argPRad);
+        defaultPrecession(pl.seed, pl.orbit);
         pl.orbitA = pl.orbit.a; pl.orbitEcc = pl.orbit.e;
         pl.orbitPeriod = pl.orbit.period; pl.orbitPhase = pl.orbit.meanAnom0;
         HARUKA_LOGI("Orbit", "'%s' orbita '%s': a=%.3e e=%.2f T=%.1fs · precesion: apsides 1 vuelta/%.0f "
@@ -712,7 +712,7 @@ void PlanetarySystem::buildFromScene(SceneManager& scene) {
     // instanciado. Los props de la escena solo salen del scatter global.
 }
 
-void PlanetarySystem::updatePlanetFromScene(SceneManager& scene, const std::string& name) {
+void PlanetarySystem::updatePlanetFromScene(Core::Scene::SceneManager& scene, const std::string& name) {
     const auto obj = scene.getObject(name);
     if (!obj || !obj->surfaceConfig.is_object() || obj->surfaceConfig.empty()) {
         HARUKA_LOGW("SimplePlanet", "updatePlanetFromScene: '%s' sin surfaceConfig en la escena", name.c_str());
@@ -780,8 +780,8 @@ std::vector<std::string> PlanetarySystem::activePropLayerNames() const {
     return names;
 }
 
-Haruka::Planet::TerrestrialPlanet::RenderStats PlanetarySystem::getTerrainRenderStats() const {
-    Haruka::Planet::TerrestrialPlanet::RenderStats sum;
+TerrestrialPlanet::RenderStats PlanetarySystem::getTerrainRenderStats() const {
+    TerrestrialPlanet::RenderStats sum;
     for (const auto& sp : m_simplePlanets) {
         if (!sp) continue;
         const auto& s = sp->lastRenderStats();
@@ -792,7 +792,7 @@ Haruka::Planet::TerrestrialPlanet::RenderStats PlanetarySystem::getTerrainRender
     return sum;
 }
 
-void PlanetarySystem::syncFromScene(const SceneManager& scene) {
+void PlanetarySystem::syncFromScene(const Core::Scene::SceneManager& scene) {
     HARUKA_PROFILE("lod.sync");
     for (auto& planet : m_planets) {
         auto obj = scene.getObject(planet.name);
@@ -837,18 +837,18 @@ bool PlanetarySystem::getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outC
     return true;
 }
 
-Haruka::WeatherSample PlanetarySystem::weatherAt(const glm::dvec3& worldPos) const {
+WeatherSample PlanetarySystem::weatherAt(const glm::dvec3& worldPos) const {
     glm::dvec3 pc; double pr;
-    if (!getActivePlanet(pc, pr)) return Haruka::WeatherSample{};
+    if (!getActivePlanet(pc, pr)) return WeatherSample{};
 
     glm::dvec3 dir = worldPos - pc;
     const double len = glm::length(dir);
-    if (len < 1e-9) return Haruka::WeatherSample{};
+    if (len < 1e-9) return WeatherSample{};
     dir /= len;
 
     constexpr double kFieldRefreshM = 500.0;
     if (glm::length(worldPos - m_weatherFieldPos) > kFieldRefreshM) {
-        const Haruka::TerrainSample ts = sampleSurface(worldPos);
+        const Terrain::TerrainSample ts = sampleSurface(worldPos);
         m_weatherFieldTempC = ts.tempC;
         m_weatherFieldHumid = ts.humidity;
         m_weatherFieldGroundM = std::max(ts.elevKm, 0.0f) * 1000.0f;
@@ -860,7 +860,7 @@ Haruka::WeatherSample PlanetarySystem::weatherAt(const glm::dvec3& worldPos) con
     return m_weather.sampleAt(dir, m_weatherFieldTempC, m_weather.effectiveHumidity(dir, m_weatherFieldHumid), m_weatherFieldGroundM);
 }
 
-const std::vector<Haruka::WeatherSystem::Vortex>& PlanetarySystem::activeVortices() const {
+const std::vector<WeatherSystem::Vortex>& PlanetarySystem::activeVortices() const {
     // Puro ⇒ el mismo instante y el mismo sitio dan el mismo resultado. La caché no es estado, es no
     // repetir trabajo: en un frame lo preguntan el jugador, los props, la lluvia y el render.
     if (m_vortexCacheTime == m_weather.time()) return m_vortexCache;
@@ -880,17 +880,17 @@ const std::vector<Haruka::WeatherSystem::Vortex>& PlanetarySystem::activeVortice
     // La sonda: las condiciones DEBAJO de cada hueco, no las del jugador. Es lo que hace que el
     // tornado salga donde hay energía y la tromba donde hay mar.
     struct Ctx { const PlanetarySystem* self; glm::dvec3 center; double radius; } ctx{ this, pc, pr };
-    Haruka::WeatherSystem::Vortex buf[Haruka::WeatherSystem::kMaxVortices];
-    const int n = m_weather.activeVortices(obs, Haruka::WeatherSystem::kVortexSearchM, pr,
-        buf, Haruka::WeatherSystem::kMaxVortices,
+    WeatherSystem::Vortex buf[WeatherSystem::kMaxVortices];
+    const int n = m_weather.activeVortices(obs, WeatherSystem::kVortexSearchM, pr,
+        buf, WeatherSystem::kMaxVortices,
         [](const glm::dvec3& dir, void* user, float& tempC, float& humidity, bool& overWater) {
             const Ctx* c = (const Ctx*)user;
-            const Haruka::TerrainSample ts = c->self->sampleSurface(c->center + dir * c->radius);
+            const Haruka::World::Terrain::TerrainSample ts = c->self->sampleSurface(c->center + dir * c->radius);
             tempC     = ts.tempC;
             humidity  = ts.humidity;
             // ⚠️ NO `landMask` (la puerta del continente, que aqui vale 1 en todo el planeta): el
             // mar es la cota bajo el nivel del mar, que es lo que `sampleSurface` ya decide.
-            overWater = (ts.waterType == Haruka::WaterType::Ocean);
+            overWater = (ts.waterType == Terrain::WaterType::Ocean);
         }, &ctx);
 
     m_vortexCache.assign(buf, buf + n);
@@ -909,7 +909,7 @@ const std::vector<Haruka::WeatherSystem::Vortex>& PlanetarySystem::activeVortice
         if (glm::length(east) < 1e-6) east = glm::cross(glm::dvec3(1, 0, 0), obs);
         east = glm::normalize(east);
         const double ang = std::fabs(s_debugM) / pr;
-        Haruka::WeatherSystem::Vortex v;
+        WeatherSystem::Vortex v;
         v.dir         = glm::normalize(obs * std::cos(ang) + east * std::sin(ang));
         v.travel      = east;
         v.travelMS    = 0.0f;                   // quieto, para poder mirarlo
@@ -940,7 +940,7 @@ glm::dvec3 PlanetarySystem::windAt(const glm::dvec3& worldPos, float altAboveGro
 
     glm::dvec3 w = glm::dvec3(weatherAt(worldPos).wind);
     for (const auto& v : activeVortices())
-        w += Haruka::WeatherSystem::vortexWindAt(v, dir, pr, altAboveGroundM);
+        w += WeatherSystem::vortexWindAt(v, dir, pr, altAboveGroundM);
     for (const auto& j : m_gameJets) w += jetWindAt(j, worldPos);
     return w;
 }
@@ -960,23 +960,23 @@ glm::dvec3 PlanetarySystem::jetWindAt(const AirJet& j, const glm::dvec3& p) {
 }
 
 float PlanetarySystem::severityAt(const glm::dvec3& worldPos) const {
-    return Haruka::WeatherSystem::severityAt(weatherAt(worldPos));
+    return WeatherSystem::severityAt(weatherAt(worldPos));
 }
 
 PlanetarySystem::GroundCover PlanetarySystem::groundCoverAt(const glm::dvec3& worldPos,
                                                            float snowAccum) const {
     GroundCover c;
-    if (snowAccum > 0.05f) { c.material = Haruka::GroundMaterial::Snow; c.amount = snowAccum; return c; }
+    if (snowAccum > 0.05f) { c.material = GroundMaterial::Snow; c.amount = snowAccum; return c; }
 
     constexpr double kFieldRefreshM = 500.0;
     if (glm::length(worldPos - m_weatherFieldPos) > kFieldRefreshM) {
-        const Haruka::TerrainSample ts = sampleSurface(worldPos);
+        const Terrain::TerrainSample ts = sampleSurface(worldPos);
         m_weatherFieldTempC = ts.tempC;
         m_weatherFieldHumid = ts.humidity;
         m_weatherFieldPos   = worldPos;
     }
     const float arid = 1.0f - glm::smoothstep(0.08f, 0.26f, m_weatherFieldHumid);
-    if (arid > 0.15f) { c.material = Haruka::GroundMaterial::Sand; c.amount = arid; }
+    if (arid > 0.15f) { c.material = GroundMaterial::Sand; c.amount = arid; }
     return c;
 }
 
@@ -1005,8 +1005,8 @@ PlanetarySystem::GroundCover PlanetarySystem::groundCoverAt(const glm::dvec3& wo
  *    otro criterio, la orilla que se ve y la que se nada serían dos líneas distintas. El bake ya
  *    viene desplazado para que el nivel del mar sea la cota 0, así que no hay constante que elegir.
  */
-Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos) const {
-    Haruka::TerrainSample s;
+Terrain::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos) const {
+    Terrain::TerrainSample s;
     glm::dvec3 pc; double pr = 0.0;
     if (!getActivePlanet(pc, pr) || pr <= 0.0) return s;
     const glm::dvec3 rel = worldPos - pc;
@@ -1026,7 +1026,7 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
     // mismo `seaLevelM` que se subió a la GPU, así que la orilla que se nada y la que se ve son una.
     const float seaKm = m_oceanState.seaLevelM / 1000.0f;
     if (s.elevKm < seaKm) {
-        s.waterType    = Haruka::WaterType::Ocean;
+        s.waterType    = Terrain::WaterType::Ocean;
         s.waterLevelKm = seaKm;
     } else if (const auto* tpw = activeTerrestrial()) {
         // ── Y LOS LAGOS, QUE AHORA SÍ SE DECIDEN AQUÍ ───────────────────────────────────────────
@@ -1042,8 +1042,8 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
         // someras sigue existiendo, pero para lo DINÁMICO (lluvia, caudal), no para decir dónde hay
         // una lámina quieta.
         const float lakeM = tpw->lakeLevelAt(dir);
-        if (lakeM > Haruka::Planet::WATER_FILL_DRY && s.elevKm * 1000.0f < lakeM) {
-            s.waterType    = Haruka::WaterType::Lake;
+        if (lakeM > Water::WATER_FILL_DRY && s.elevKm * 1000.0f < lakeM) {
+            s.waterType    = Terrain::WaterType::Lake;
             s.waterLevelKm = lakeM / 1000.0f;
         }
     }
@@ -1052,7 +1052,7 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
     // repartieron los props. Sin esto `groundCoverAt` recibía los valores por defecto (15 °C, 0.5 de
     // humedad) y su `arid` salía 0 siempre: la capa de arena nunca se activaba en ningún punto.
     if (const auto* tp = activeTerrestrial()) {
-        const Haruka::FieldSample f = tp->fieldSampleAt(glm::vec3(dir));
+        const FieldSample f = tp->fieldSampleAt(glm::vec3(dir));
         s.tempC    = f.tempC;
         s.humidity = f.humidity;
     }
@@ -1060,8 +1060,8 @@ Haruka::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos)
 }
 
 double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
-    const Haruka::TerrainSample s = sampleSurface(worldPos);
-    if (s.waterType == Haruka::WaterType::None) return kNoWater;
+    const Terrain::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Terrain::WaterType::None) return kNoWater;
     const double levelM = double(s.waterLevelKm) * 1000.0;
 
     // ── Y LA OLA, QUE HASTA AHORA NO EXISTÍA PARA LA FÍSICA ─────────────────────────────────────
@@ -1090,7 +1090,7 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
 
     // EL MISMO reloj que llena `uDebug.y` en el shader — ahora de verdad. Aquí había un `static` local
     // propio: otro origen de tiempo, o sea otra fase. Ver la nota de `oceanClockSeconds()`.
-    const float t = Haruka::Planet::oceanClockSeconds();
+    const float t = Water::oceanClockSeconds();
     // La ola se evalúa en la superficie EN REPOSO, igual que en el vert — y RELATIVA AL ANCLA del
     // mar, que es desde donde se mide la fase (ver `OceanState::phase`: con la posición
     // planetocéntrica la fase era la misma en todo el mar).
@@ -1098,7 +1098,7 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // ⚠️ MISMO ORDEN QUE `ocean.tese`: primero la lámina trepa (swash), y la ola se evalúa sobre la
     // profundidad ya trepada. Invertirlo aquí daría una cota parecida pero no la misma, y "parecida"
     // es exactamente el fallo que se persigue — la orilla que se nada dejaría de ser la que se ve.
-    const double swash = (double)Haruka::Planet::oceanSwash((float)depthRest, wp, glm::vec3(up), t,
+    const double swash = (double)Water::oceanSwash((float)depthRest, wp, glm::vec3(up), t,
                                                             m_oceanState);
     const double level2 = levelM + swash;
     const double depth2 = level2 - double(s.elevKm) * 1000.0;
@@ -1108,27 +1108,27 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // la ola oceánica en un lago de montaña mientras el render dibuja el rizo que le toca — la misma
     // discrepancia "lo que se pisa contra lo que se ve" que este fichero entero existe para impedir.
     const auto* tpf = activeTerrestrial();
-    const float fetchM = tpf ? tpf->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    const float fetchM = tpf ? tpf->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     // ⚠️ Y LA PENDIENTE DEL FONDO, por lo mismo que el fetch: la ola REFRACTA al perder fondo, y si
     // el shader la girara y la fisica no, la cresta que se ve y la que empuja apuntarian a distinto.
     const glm::vec3 slopeH = tpf ? tpf->baseSlopeAt(up) : glm::vec3(0.0f);
     // ⚠️ Y EL QUAD CON EL QUE SE DIBUJA AQUI. El desvanecido de Nyquist apaga los trenes cortos segun
     // el quad del nodo; con el piso fijo de 4 m la fisica evaluaba 8 trenes donde el render (zancada
     // 4, 9,5 m de celda) dibuja 3 — se nadaba una ola que no se ve. Ver `waterQuadAt`.
-    const float quadH = tpf ? tpf->waterQuadAt(up) : Haruka::Planet::OCEAN_MIN_QUAD_M;
-    return level2 + (double)Haruka::Planet::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
+    const float quadH = tpf ? tpf->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
+    return level2 + (double)Water::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
                                                             1.0f, m_oceanState, fetchM, slopeH, quadH);
 }
 
 double PlanetarySystem::sampleWaterDepth(const glm::dvec3& worldPos) const {
-    const Haruka::TerrainSample s = sampleSurface(worldPos);
-    if (s.waterType == Haruka::WaterType::None) return 0.0;
+    const Terrain::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Terrain::WaterType::None) return 0.0;
     return std::max(0.0, (double(s.waterLevelKm) - double(s.elevKm)) * 1000.0);
 }
 
 glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) const {
-    const Haruka::TerrainSample s = sampleSurface(worldPos);
-    if (s.waterType == Haruka::WaterType::None) return glm::dvec3(0.0);
+    const Terrain::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Terrain::WaterType::None) return glm::dvec3(0.0);
     glm::dvec3 pc; double pr = 0.0;
     if (!getActivePlanet(pc, pr) || pr <= 0.0) return glm::dvec3(0.0);
     const glm::dvec3 rel = worldPos - pc;
@@ -1140,13 +1140,13 @@ glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) cons
     const double depth  = levelM - double(s.elevKm) * 1000.0;
     if (depth <= 0.0) return glm::dvec3(0.0);
 
-    const float     t  = Haruka::Planet::oceanClockSeconds();
+    const float     t  = Water::oceanClockSeconds();
     const glm::vec3 wp = glm::vec3(pc + up * (pr + levelM) - m_sea.anchor);   // relativa al ancla
     const auto* tpv = activeTerrestrial();
-    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
-    const float quadV = tpv ? tpv->waterQuadAt(up) : Haruka::Planet::OCEAN_MIN_QUAD_M;
-    return glm::dvec3(Haruka::Planet::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
+    const float quadV = tpv ? tpv->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
+    return glm::dvec3(Water::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
                                                     1.0f, m_oceanState, fetchV, slopeV, quadV));
 }
 
@@ -1154,8 +1154,8 @@ float PlanetarySystem::sampleWaterFoam(const glm::dvec3& worldPos) const {
     // Gemela EXACTA de `sampleWaterVelocity`: mismo muestreo, mismo reloj, mismo fetch y misma
     // pendiente. Si estas dos se separaran, el agua blanca de la fisica caeria en otro sitio que la
     // que se dibuja — que es la clase de discrepancia que `OceanWave.h` existe para impedir.
-    const Haruka::TerrainSample s = sampleSurface(worldPos);
-    if (s.waterType == Haruka::WaterType::None) return 0.0f;
+    const Terrain::TerrainSample s = sampleSurface(worldPos);
+    if (s.waterType == Terrain::WaterType::None) return 0.0f;
     glm::dvec3 pc; double pr = 0.0;
     if (!getActivePlanet(pc, pr) || pr <= 0.0) return 0.0f;
     const glm::dvec3 rel = worldPos - pc;
@@ -1167,20 +1167,20 @@ float PlanetarySystem::sampleWaterFoam(const glm::dvec3& worldPos) const {
     const double depth  = levelM - double(s.elevKm) * 1000.0;
     if (depth <= 0.0) return 0.0f;
 
-    const float     t  = Haruka::Planet::oceanClockSeconds();
+    const float     t  = Water::oceanClockSeconds();
     const glm::vec3 wp = glm::vec3(pc + up * (pr + levelM) - m_sea.anchor);   // relativa al ancla
     const auto* tpv = activeTerrestrial();
-    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    const float fetchV = tpv ? tpv->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
-    const float quadV = tpv ? tpv->waterQuadAt(up) : Haruka::Planet::OCEAN_MIN_QUAD_M;
-    return Haruka::Planet::oceanFoam(wp, glm::vec3(up), t, (float)depth,
+    const float quadV = tpv ? tpv->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
+    return Water::oceanFoam(wp, glm::vec3(up), t, (float)depth,
                                      1.0f, m_oceanState, fetchV, slopeV, quadV);
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
     // Sin `triM` explícito = campo cercano: el piso de `terrainTriM`, que es el lado real del quad
     // del clipmap. Un literal aquí volvería a desalinear la física del render en silencio.
-    return sampleTerrainHeight(worldPos, Haruka::Planet::terrainTriM(0.0));
+    return sampleTerrainHeight(worldPos, Terrain::terrainTriM(0.0));
 }
 
 PlanetarySystem::TerrainSampler PlanetarySystem::terrainSampler(const glm::dvec3& nearWorldPos) const {
@@ -1198,7 +1198,7 @@ PlanetarySystem::TerrainSampler PlanetarySystem::terrainSampler(const glm::dvec3
     // pisando y el que se está dibujando. Antes se pasaba directo a `ReferenceSurface`, o sea a
     // devolver 0: la física caminaba sobre una esfera lisa mientras el render pintaba relieve. Un
     // planeta renderizable a mano es infinitamente mejor suelo que el nivel del mar.
-    const Haruka::Planet::TerrestrialPlanet* best = nullptr;
+    const TerrestrialPlanet* best = nullptr;
     double bestD = 1e300;
     for (const auto& sp : m_simplePlanets) {
         if (!sp) continue;
@@ -1289,7 +1289,7 @@ const std::string& PlanetarySystem::getActivePlanetName() const {
     return m_planets.empty() ? kNone : m_planets.front().name;
 }
 
-const Haruka::Planet::TerrestrialPlanet* PlanetarySystem::activeTerrestrial() const {
+const TerrestrialPlanet* PlanetarySystem::activeTerrestrial() const {
     const std::string name = getActivePlanetName();
     for (const auto& sp : m_simplePlanets)
         if (sp && sp->config().name == name) return sp.get();
@@ -1297,7 +1297,7 @@ const Haruka::Planet::TerrestrialPlanet* PlanetarySystem::activeTerrestrial() co
     return m_simplePlanets.size() == 1 ? m_simplePlanets.front().get() : nullptr;
 }
 
-bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const {
+bool PlanetarySystem::getActivePlanetParams(Terrain::WorldGenParams& out, double& outRadius) const {
     if (m_planets.empty()) return false;
     const Planet* home = nullptr;
     for (const auto& p : m_planets) {
@@ -1306,7 +1306,7 @@ bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double&
     }
     if (!home) return false;
     uint32_t seed = home->seed ? home->seed : static_cast<uint32_t>(std::hash<std::string>{}(home->name));
-    out = Haruka::deriveWorldParams(seed, home->radius);
+    out = Terrain::deriveWorldParams(seed, home->radius);
     outRadius = home->radius;
     return true;
 }
@@ -1314,11 +1314,11 @@ bool PlanetarySystem::getActivePlanetParams(Haruka::WorldGenParams& out, double&
 // ── SimplePlanet API: delega en los TerrestrialPlanet ──────────────────────
 
 void PlanetarySystem::addSimplePlanet(const SimplePlanet& orbit,
-                                      const Haruka::Planet::GeologyConfig& geo,
-                                      const Haruka::Planet::TerrainGridConfig& grid) {
+                                      const GeologyConfig& geo,
+                                      const Terrain::TerrainGridConfig& grid) {
     try {
-        auto p = std::make_unique<Haruka::Planet::TerrestrialPlanet>();
-        Haruka::Planet::TerrestrialPlanetConfig cfg = orbit;   // SimplePlanet ES TerrestrialPlanetConfig
+        auto p = std::make_unique<TerrestrialPlanet>();
+        TerrestrialPlanetConfig cfg = orbit;   // SimplePlanet ES TerrestrialPlanetConfig
         // El llamador legado aporta semilla/resolución por `geo`/`grid`; los respeta si los trae.
         if (geo.seed != 0) cfg.seed = geo.seed;
         if (grid.faceRes > 0) cfg.faceRes = grid.faceRes;
@@ -1348,8 +1348,8 @@ void PlanetarySystem::addSimplePlanet(const SimplePlanet& orbit,
 }
 
 void PlanetarySystem::rebuildSimplePlanet(const std::string& name,
-                                           const Haruka::Planet::GeologyConfig& geo,
-                                           const Haruka::Planet::TerrainGridConfig& grid) {
+                                           const GeologyConfig& geo,
+                                           const Terrain::TerrainGridConfig& grid) {
     for (auto& p : m_simplePlanets) {
         if (p->config().name != name) continue;
         // El planeta regenera su geología y reconstruye malla + texturas; el sistema solo le pasa
@@ -1428,11 +1428,11 @@ int PlanetarySystem::validateOrbits() const {
         std::sort(kids.begin(), kids.end(), [&](size_t a, size_t b) {
             return m_planets[a].orbit.a < m_planets[b].orbit.a;
         });
-        const double centralMass = Haruka::Planet::bodyMassFromRadius(m_planets[parent].radius);
+        const double centralMass = bodyMassFromRadius(m_planets[parent].radius);
         for (size_t k = 0; k + 1 < kids.size(); ++k) {
             const Planet& in  = m_planets[kids[k]];
             const Planet& out = m_planets[kids[k + 1]];
-            if (!Haruka::Planet::orbitsSeparated(in.orbit, out.orbit)) {
+            if (!orbitsSeparated(in.orbit, out.orbit)) {
                 HARUKA_LOGW("Orbit", "'%s' y '%s' PUEDEN CRUZARSE: apoapsis max %.4e >= periapsis min "
                             "%.4e (con e maxima %.3f y %.3f). Sube el semieje de '%s' o baja su "
                             "excentricidad.",
@@ -1442,9 +1442,9 @@ int PlanetarySystem::validateOrbits() const {
                 ++problems;
                 continue;   // sin separación geométrica, el criterio de Hill no aporta nada
             }
-            const double delta = Haruka::Planet::mutualHillSeparation(
-                in.orbit.a,  Haruka::Planet::bodyMassFromRadius(in.radius),
-                out.orbit.a, Haruka::Planet::bodyMassFromRadius(out.radius), centralMass);
+            const double delta = mutualHillSeparation(
+                in.orbit.a,  bodyMassFromRadius(in.radius),
+                out.orbit.a, bodyMassFromRadius(out.radius), centralMass);
             // Δ > 10 sobrevive escalas de gigaaños; por debajo de 3.5 los pares se cruzan. Entre
             // ambos hay una zona gris: se avisa, no se rechaza, porque la precesión de este sistema
             // es una función acotada y no puede llevarlos a cruzarse (eso ya lo garantiza el test de
@@ -1480,7 +1480,7 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
             // MISMA función que `updateOrbits`. Antes eran dos copias del resolvedor de Kepler, y con
             // la precesión serían dos copias que además tienen que precesar igual: el planeta que se
             // dibuja y el cuerpo que orbita se habrían separado en cuanto una de las dos cambiara.
-            p.setPosition(focus + Haruka::Planet::orbitPositionAt(cfg.orbit, m_simulationTime));
+            p.setPosition(focus + orbitPositionAt(cfg.orbit, m_simulationTime));
         }
         return p.position();
     };
@@ -1491,7 +1491,7 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
     // Planet no expone masa: proxy por densidad uniforme a partir del radio ⇒ GM ≈ G·ρ·(4/3)π·r³.
     // Sin m_planets no hay cuerpos → setTidalBodies({}) deja el mar neutro (mismo que antes).
     if (!m_planets.empty() || m_simplePlanets.size() > 1) {
-        using MB = Haruka::Planet::TerrestrialPlanet::MassiveBody;
+        using MB = TerrestrialPlanet::MassiveBody;
         const double den = 3000.0;              // kg/m³ proxy planetario
         // Candidatos masivos = cuerpos orbitales (m_planets: soles) + el resto de planetas/lunas
         // de agua (m_simplePlanets). Cada uno se convierte a GM por proxy de radio y densidad.
@@ -1528,4 +1528,4 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
     }
 }
 
-} // namespace Haruka
+} // namespace Haruka::World::Planet

@@ -13,10 +13,10 @@
 #include <SDL3/SDL.h>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Scene { class SceneManager; }
 
-class SceneManager;
 
+namespace Haruka::Core {
 /**
  * @brief ABI-friendly bridge for project-defined gameplay callbacks.
  *
@@ -25,7 +25,7 @@ class SceneManager;
  */
 struct GameInterface {
     /** @brief Called once when the game session starts. */
-    using OnInitFunc = void (*)(SceneManager* scene);
+    using OnInitFunc = void (*)(Scene::SceneManager* scene);
     /** @brief Called every frame while the game is running. */
     using OnUpdateFunc = void (*)(SDL_Window* window, float deltaTime);
     /** @brief Called once during shutdown. */
@@ -34,7 +34,7 @@ struct GameInterface {
     /** @brief Returns the active camera, if the game exposes one. */
     using GetCameraFunc = Camera* (*)();
     /** @brief Returns the active scene, if the game exposes one. */
-    using GetSceneFunc = SceneManager* (*)();
+    using GetSceneFunc = Scene::SceneManager* (*)();
     /** @brief Called after the main scene pass — use to draw world-space overlays.
      *  view/proj are the camera matrices for this frame. camPos is in world space. */
     using OnRenderWorldFunc = void (*)(const glm::mat4& view, const glm::mat4& proj,
@@ -64,8 +64,8 @@ struct GameInterface {
     const char* version = "1.0.0";
     ///@}
 };
+} // namespace Haruka::Core
 
 /** @brief Export macro for game interface symbols. */
 #define GAME_INTERFACE_EXPORT extern "C"
 
-}

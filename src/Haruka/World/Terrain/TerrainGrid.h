@@ -1,6 +1,6 @@
 #pragma once
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Terrain { 
 
 /**
  * @brief Resolución de la retícula de una cara del cubo.
@@ -21,4 +21,4 @@ struct TerrainGridConfig {
     int faceRes = 256;          // celdas por arista de cara del cubo (total: 6 · res²)
 };
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Terrain

@@ -49,7 +49,7 @@
 #include <unordered_set>
 #include <unordered_map>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World { namespace Planet {
 
 using namespace Haruka::Tools::ProcGraph;
 
@@ -71,7 +71,7 @@ namespace {
 // caía en `src` (a menudo 512 px). Ahora el MAESTRO es siempre la imagen de mayor área disponible y
 // la calidad decide cuánto se reduce antes de subirla a la GPU.
 int terrainQualityTarget() {
-    switch (SettingsManager::get().graphics().terrainQuality) {
+    switch (Settings::SettingsManager::get().graphics().terrainQuality) {
         case Settings::TerrainQuality::Ultra:  return 0;      // maestro completo
         case Settings::TerrainQuality::High:   return 8192;
         case Settings::TerrainQuality::Medium: return 4096;
@@ -143,14 +143,14 @@ void TerrestrialPlanet::setOrbit(int parent, double a, double ecc, double period
     // Sobrecarga HEREDADA: recibe la base (u,v) que el llamador derivó de la posición. Se convierte a
     // elementos para que la órbita pueda precesar — con la base guardada tal cual, el plano quedaba
     // congelado y la órbita era exactamente periódica (ver core/planet/orbit.h).
-    Haruka::Planet::OrbitElements el;
+    OrbitElements el;
     el.a = a; el.e = ecc; el.period = period; el.meanAnom0 = phase;
-    Haruka::Planet::orbitElementsFromBasis(u, v, el.incRad, el.nodeRad, el.argPRad);
-    Haruka::Planet::defaultPrecession(m_config.seed, el);
+    orbitElementsFromBasis(u, v, el.incRad, el.nodeRad, el.argPRad);
+    defaultPrecession(m_config.seed, el);
     setOrbit(parent, el);
 }
 
-void TerrestrialPlanet::setOrbit(int parent, const Haruka::Planet::OrbitElements& el) {
+void TerrestrialPlanet::setOrbit(int parent, const OrbitElements& el) {
     m_config.orbitParent = parent;
     m_config.orbit       = el;
     // Espejos planos, que son los que expone el API pública y los que lee el editor.
@@ -172,7 +172,7 @@ void TerrestrialPlanet::ensureShaders() {
     //
     // ⚠️ Las rutas tienen que seguir VIVAS mientras se llama a createPipeline: PipelineDesc
     // guarda `const char*`, no copia. Por eso son locales de esta función y no temporales.
-    const std::string shaderDir = Shader::baseDir() + "shaders/planet/";
+    const std::string shaderDir = Renderer::Shader::baseDir() + "shaders/planet/";
     const std::string pBiomeFrag       = shaderDir + "biome.frag";
     const std::string pTerrainCull     = shaderDir + "terrain_cull.comp";
     const std::string pSimpleFrag      = shaderDir + "simple.frag";
@@ -245,7 +245,7 @@ void TerrestrialPlanet::ensureShaders() {
     // ⚠️ EL DEL ANILLO CERCANO NO ENTRA AQUI aunque cueste 97 ms: su draw esta detras de `!v5Drew`,
     // que es una red de seguridad EN TIEMPO DE EJECUCION (si el v5 no dibuja un frame, tapa el
     // agujero). Quitarlo cambiaria comportamiento, no solo coste.
-    const bool v5Draws = Haruka::Terrain::TerrainNodeRenderer::enabled();
+    const bool v5Draws = Terrain::TerrainNodeRenderer::enabled();
 
     if (!v5Draws) s_biomePipeline = dev->createPipeline(bpd);
 
@@ -409,19 +409,19 @@ void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n
     (void)up;   // el marco lo fijan tan/bit; `up` queda por si el parche deja de ser tangente
 }
 
-void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st, const glm::vec3& anchorRelEye) {
+void TerrestrialPlanet::setOceanState(const Water::OceanState& st, const glm::vec3& anchorRelEye) {
     m_oceanStateCPU = st;   // ver el log de `[Mar]`: cuantos trenes caben en la celda del agua
     RHI::Device* dev = RHI::device();
     if (!dev) { m_oceanParamsValid = false; return; }
     // Gemelo EXACTO del bloque `OceanParams` de `lib/ocean_params.glsl`: 8 vec4 de trenes + misc +
     // 2 vec4 de desfase + ancla. std140 alinea cada elemento de un array a 16 bytes, y un vec4 ya
     // los ocupa — sin relleno.
-    struct OceanParamsUBO { glm::vec4 wave[Haruka::Planet::OCEAN_WAVES]; glm::vec4 misc;
+    struct OceanParamsUBO { glm::vec4 wave[Water::OCEAN_WAVES]; glm::vec4 misc;
                             glm::vec4 phase[2]; glm::vec4 anchor; } up{};
-    static_assert(sizeof(OceanParamsUBO) == (Haruka::Planet::OCEAN_WAVES + 4) * 16, "OceanParams descuadrado");
-    for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i)
+    static_assert(sizeof(OceanParamsUBO) == (Water::OCEAN_WAVES + 4) * 16, "OceanParams descuadrado");
+    for (int i = 0; i < Water::OCEAN_WAVES; ++i)
         up.wave[i] = glm::vec4(st.wave[i][0], st.wave[i][1], st.wave[i][2], st.wave[i][3]);
-    for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) up.phase[i / 4][i % 4] = st.phase[i];
+    for (int i = 0; i < Water::OCEAN_WAVES; ++i) up.phase[i / 4][i % 4] = st.phase[i];
     // El ANCLA del mar relativa al ojo: la fase de cada vertice se mide desde ella (ver
     // `OceanState::phase`). Y el viento filtrado, para que el fetch y los borreguillos de la GPU
     // usen el mismo que la CPU en vez de deducirlo de una Hs que ya no invierte PM.
@@ -435,8 +435,8 @@ void TerrestrialPlanet::setOceanState(const Haruka::Planet::OceanState& st, cons
     // ⚠️ `w` = ESCALA DE ESPUMA, y existe para poder BISECAR en el juego. `HARUKA_OCEAN_FOAM=0` apaga
     // la espuma sin recompilar ni tocar la geometria de la ola, que es la unica forma de contestar
     // "¿lo blanco es la espuma?" mirando la pantalla. Por defecto 1. Se lee una vez.
-    up.misc = glm::vec4(st.seaLevelM, 1.0f, Haruka::Planet::oceanClockSeconds(),
-                        Haruka::Planet::oceanFoamScale());
+    up.misc = glm::vec4(st.seaLevelM, 1.0f, Water::oceanClockSeconds(),
+                        Water::oceanFoamScale());
     if (!RHI::valid(m_oceanParamsUBO))
         m_oceanParamsUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(up), &up,
                                              RHI::BufferMemory::Dynamic);
@@ -502,14 +502,14 @@ void TerrestrialPlanet::buildMesh(
     // mutex, sin estado compartido, sin carreras. Los buffers se pre-dimensionan y cada hilo rellena
     // solo su tramo, así que no hay push_back concurrente ni realloc.
     auto buildFace = [&](int face) {
-        const PlanetFace pf = (PlanetFace)face;
+        const Tools::PlanetFace pf = (Tools::PlanetFace)face;
         const uint32_t vBase = (uint32_t)(face * vertsPerFace);
         std::vector<glm::dvec3> faceDirs(vertsPerFace);
         for (int j = 0; j <= res; ++j)
             for (int i = 0; i <= res; ++i) {
                 const double lx = (double)i / res * 2.0 - 1.0;
                 const double ly = (double)j / res * 2.0 - 1.0;
-                faceDirs[j * (res + 1) + i] = cubeFaceToDir(pf, lx, ly);
+                faceDirs[j * (res + 1) + i] = Terrain::cubeFaceToDir(pf, lx, ly);
             }
 
         // Heights and colors
@@ -622,7 +622,7 @@ void TerrestrialPlanet::buildMesh(
     // `if (!valid(m_vertexBuffer)) return;`, que daba la malla base por obligatoria: sin este cambio,
     // no subirla se lleva por delante TODO lo que dibuja esa funcion — el propio v5, el mar y el
     // anillo. Los dos cambios son uno solo.
-    const bool v5DrawsMesh = Haruka::Terrain::TerrainNodeRenderer::enabled();
+    const bool v5DrawsMesh = Terrain::TerrainNodeRenderer::enabled();
     if (!v5DrawsMesh) {
         m_vertexBuffer = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(SimplePlanetVertex), verts.data(), RHI::BufferMemory::Static);
         m_indexBuffer  = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data(), RHI::BufferMemory::Static);
@@ -660,8 +660,8 @@ void TerrestrialPlanet::buildMesh(
     // (m_ringCoverM) se pasa a los shaders por ClipParams (binding 13): el recorte de la malla base
     // (terrain.tese) y los anillos de mar (ocean.vert/.tesc/.tese) leen ESE valor, nunca literales.
     {
-        const float PATCH = (float)Haruka::Planet::TERRAIN_CLIP_PATCH_M;
-        const int   quality = (int)SettingsManager::get().graphics().terrainQuality;
+        const float PATCH = (float)Terrain::TERRAIN_CLIP_PATCH_M;
+        const int   quality = (int)Settings::SettingsManager::get().graphics().terrainQuality;
         const int   NCs[4]  = { 31, 47, 63, 95 };   // Low, Medium, High, Ultra (31 = ±1984 m, como antes)
         const int   NC = NCs[std::clamp(quality, 0, 3)];
         m_ringCoverM = NC * PATCH * 0.5f;
@@ -823,7 +823,7 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::generateProceduralAlbedo(int width
         return (float)m_geology.elevationModifier(dir);
     };
     // Cache biome samples for boundary blending
-    auto sampleBiomeAt = [&](double lat, double lon) -> std::pair<Haruka::Planet::Biome, glm::vec3> {
+    auto sampleBiomeAt = [&](double lat, double lon) -> std::pair<Biome, glm::vec3> {
         double cy = std::sin(lat);
         double cx = std::cos(lon) * std::cos(lat);
         double cz = std::sin(lon) * std::cos(lat);
@@ -857,12 +857,12 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::generateProceduralAlbedo(int width
             float detail = NoiseGenerator::fBm(dir, noiseSeed, 5, 0.45f, 2.3f, 3.0);
             float noiseStrength = 0.12f;
             if (elevKm < 0) noiseStrength = 0.04f;
-            else if (biome == Haruka::Planet::Biome::Desert ||
-                     biome == Haruka::Planet::Biome::Tundra ||
-                     biome == Haruka::Planet::Biome::Snow)
+            else if (biome == Biome::Desert ||
+                     biome == Biome::Tundra ||
+                     biome == Biome::Snow)
                 noiseStrength = 0.20f;
-            else if (biome == Haruka::Planet::Biome::Grassland ||
-                     biome == Haruka::Planet::Biome::Savanna)
+            else if (biome == Biome::Grassland ||
+                     biome == Biome::Savanna)
                 noiseStrength = 0.18f;
             col += glm::vec3(detail * noiseStrength);
 
@@ -984,12 +984,12 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::loadTexture(const std::string& pat
             }
         }
     };
-    takeBest(Haruka::AssetPaths::textures());
+    takeBest(Core::AssetPaths::textures());
     // Raíz del PROYECTO: bajo el IDE el motor resuelve sus assets contra la carpeta del
     // editor, mientras que las biomas por defecto viven en las del proyecto abierto. Sin
     // esta segunda pasada, cada planeta bajo el editor caía al fallback procedural y
     // logueaba 8 WARN por nombre.
-    takeBest(Haruka::AssetPaths::projectTextures());
+    takeBest(Core::AssetPaths::projectTextures());
     if (!data) {
         HARUKA_LOGW("SimplePlanet", "failed to load texture: %s", path.c_str());
         return {};
@@ -1100,8 +1100,8 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::loadTextureArray(
                 unsigned char* data = nullptr;
                 int bestArea = 0;   // persiste entre las dos raices, se resetea por capa
                 std::string bestPath;
-                takeBest(Haruka::AssetPaths::textures(), path, w, h, data, bestArea, bestPath);
-                takeBest(Haruka::AssetPaths::projectTextures(), path, w, h, data, bestArea, bestPath);
+                takeBest(Core::AssetPaths::textures(), path, w, h, data, bestArea, bestPath);
+                takeBest(Core::AssetPaths::projectTextures(), path, w, h, data, bestArea, bestPath);
                 if (!data) {
                     HARUKA_LOGW("Terrain", "capa '%s' no encontrada -> gris neutro", path.c_str());
                     continue;
@@ -1247,7 +1247,7 @@ static bool sampleZone(const std::vector<unsigned char>& img, int W, int H,
 // más cercano, así que declarar una sola zona secuestraba el planeta entero y las reglas de clima,
 // pendiente y altura quedaban muertas. Con umbral, el mapa es una capa aditiva: se pinta lo que se
 // fija a mano y el resto lo deciden las reglas.
-static int zoneToMaterial(const Haruka::Planet::TerrainMaterialTable& table, const glm::vec3& c) {
+static int zoneToMaterial(const Terrain::TerrainMaterialTable& table, const glm::vec3& c) {
     constexpr float kZoneTol2   = 28.0f * 28.0f * 3.0f;   // distancia² máx. para considerarlo pintado
     constexpr float kUnpainted2 = 12.0f * 12.0f * 3.0f;   // por debajo: "negro" = sin pintar
     if (glm::dot(c, c) <= kUnpainted2) return -1;         // fondo sin pintar → mandan las reglas
@@ -1313,7 +1313,7 @@ double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn) const {
     // Campo cercano: el piso de `terrainTriM`, que es el lado real del quad del clipmap. Aquí había
     // un `2.0f` literal y es el camino por el que se anclan LOS PROPS — con el render evaluando a
     // 4 m y el ancla a 2 m, cada prop quedaba ~9 cm en el aire.
-    return sampleHeight(dirIn, Haruka::Planet::terrainTriM(0.0));
+    return sampleHeight(dirIn, Terrain::terrainTriM(0.0));
 }
 
 double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn, float minFeatureM) const {
@@ -1336,8 +1336,8 @@ double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn, float minFeature
     // con la misma bilineal (mismo orden de operaciones, TerrainDetail.h) que los shaders. Así la
     // física, la malla y el clipmap nacen del mismo dato y no pueden divergir (paridad por
     // construcción, fase 2b).
-    const glm::vec2 uv    = Haruka::Planet::equirectUV(glm::vec3(dir));
-    const float     baseH = Haruka::Planet::sampleHeightField(uv, m_heightW, m_heightH,
+    const glm::vec2 uv    = Terrain::equirectUV(glm::vec3(dir));
+    const float     baseH = Terrain::sampleHeightField(uv, m_heightW, m_heightH,
                                                               m_heightCPU.data());
 
     // Y el detalle, con la MISMA función que la GPU y el `minFeatureM` que el render usa EN ESTE
@@ -1346,17 +1346,17 @@ double TerrestrialPlanet::sampleHeight(const glm::dvec3& dirIn, float minFeature
     // se pisa y el que se dibuja se separan decímetros en el anillo fino (paridad medida, triM 0.5
     // es la octava de 4,5 m entera: 0.7 m de amplitud potencial).
     const float baseR = m_baseRadius + baseH;
-    float det = Haruka::Planet::terrainDetail(glm::vec3(dir), baseR, minFeatureM)
-              * Haruka::Planet::seaLevelAttenuation(baseH);
+    float det = Terrain::terrainDetail(glm::vec3(dir), baseR, minFeatureM)
+              * Terrain::seaLevelAttenuation(baseH);
     // Paridad con los eval de teselado: en TIERRA (baseH > 0) se desliza la función del nivel del mar,
     // o el océano (esfera en R) lo taparía. La tierra queda ≥ R, el agua solo rellena los océanos.
     if (baseH > 0.0f) det = glm::max(det, -baseH);
     return (double)baseH + (double)det;
 }
 
-Haruka::FieldSample TerrestrialPlanet::fieldSampleAt(const glm::vec3& dirIn) const {
+FieldSample TerrestrialPlanet::fieldSampleAt(const glm::vec3& dirIn) const {
     const glm::dvec3 dir = glm::normalize(glm::dvec3(dirIn));
-    Haruka::FieldSample s;
+    FieldSample s;
     const double hM = sampleHeight(glm::vec3(dir));
     s.elevKm = (float)(hM / 1000.0);
     const bool ocean = s.elevKm < 0.0f;
@@ -1391,9 +1391,9 @@ float TerrestrialPlanet::densityMapAt(const std::string& path, const glm::vec3& 
     unsigned char* zp = nullptr;
     const std::string cands[] = {
         path,
-        Haruka::AssetPaths::projectRoot() + path,
-        Haruka::AssetPaths::projectTextures() + path,
-        Haruka::AssetPaths::textures() + path,
+        Core::AssetPaths::projectRoot() + path,
+        Core::AssetPaths::projectTextures() + path,
+        Core::AssetPaths::textures() + path,
     };
     for (const auto& c : cands) { zp = stbi_load(c.c_str(), &zw, &zh, &zn, 4); if (zp) break; }
     if (!zp) {
@@ -1421,7 +1421,7 @@ std::string TerrestrialPlanet::zoneNameAt(const glm::vec3& dirIn) const {
     // una ciudad dentro de su polígono manda aunque el color pintado de ahí dijera otra cosa.
     if (!m_namedZones.empty()) {
         for (const auto& z : m_namedZones) {
-            if (z.hasGeometry() && zoneShapeContains(z.shape, dirIn, m_config.radius))
+            if (z.hasGeometry() && Props::zoneShapeContains(z.shape, dirIn, m_config.radius))
                 return z.name;
         }
     }
@@ -1469,9 +1469,9 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::uploadPropDensityMap(const std::st
     unsigned char* zp = nullptr;
     const std::string cands[] = {
         path,
-        Haruka::AssetPaths::projectRoot() + path,
-        Haruka::AssetPaths::projectTextures() + path,
-        Haruka::AssetPaths::textures() + path,
+        Core::AssetPaths::projectRoot() + path,
+        Core::AssetPaths::projectTextures() + path,
+        Core::AssetPaths::textures() + path,
     };
     for (const auto& c : cands) { zp = stbi_load(c.c_str(), &zw, &zh, &zn, 4); if (zp) break; }
     if (!zp) {
@@ -1511,7 +1511,7 @@ static float computeSeaLevel(const HeightFn& heightFn, double landFraction) {
             for (int i = 0; i < R; ++i) {
                 const double lx = ((double)i + 0.5) / R * 2.0 - 1.0;
                 const double ly = ((double)j + 0.5) / R * 2.0 - 1.0;
-                hs.push_back(heightFn(cubeFaceToDir((PlanetFace)face, lx, ly)));
+                hs.push_back(heightFn(Terrain::cubeFaceToDir((Tools::PlanetFace)face, lx, ly)));
             }
     // El cuantil que deja `landFraction` ARRIBA es el (1 - landFraction) de la distribución.
     const size_t k = (size_t)((1.0 - landFraction) * (hs.size() - 1));
@@ -1720,7 +1720,7 @@ static void parallelBake(int width, int height, BuildGraphFn&& buildGraph, RowFn
     char label[64];
     std::snprintf(label, sizeof(label), "horneando %dx%d", width, height);
     while (rowsDone.load(std::memory_order_relaxed) < height) {
-        Haruka::reportProgress(label, (float)rowsDone.load(std::memory_order_relaxed) / (float)height);
+        Core::reportProgress(label, (float)rowsDone.load(std::memory_order_relaxed) / (float)height);
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
     for (auto& th : threads) th.get();
@@ -1728,8 +1728,8 @@ static void parallelBake(int width, int height, BuildGraphFn&& buildGraph, RowFn
 
 // Generate a macro-variation texture (equirectangular) that breaks tile repetition.
 // Sized mapRes², uses climate + large-scale noise → RGBA = (brightness, hueShift, detail, _)
-static RGBAImage generateMacroVariation(const Haruka::Planet::ClimateOutput& climate,
-                                         const Haruka::Planet::GeologyOutput& geology,
+static RGBAImage generateMacroVariation(const ClimateOutput& climate,
+                                         const GeologyOutput& geology,
                                          int width, int height)
 {
     auto buildGraph = [&](Graph& graph) -> int {
@@ -1834,8 +1834,8 @@ static RGBAImage generateMacroVariation(const Haruka::Planet::ClimateOutput& cli
 
 // Generate biome map equirectangular texture using ProcGraph.
 // Replaces GLSL biomeColor() classification with a data-driven texture.
-static RGBAImage generateBiomeMap(const Haruka::Planet::ClimateOutput& climate,
-                                   const Haruka::Planet::GeologyOutput& geology,
+static RGBAImage generateBiomeMap(const ClimateOutput& climate,
+                                   const GeologyOutput& geology,
                                    int width, int height,
                                    float noiseScale,
                                    const Haruka::Tools::ProcGraph::BiomeConfig& cfg)
@@ -1970,7 +1970,7 @@ std::string bakeCacheKey(uint32_t seed, int w, int h,
 
 /** @brief Carpeta de los horneados: la del PROYECTO abierto si lo hay, si no relativa al binario. */
 std::string bakeCacheDir() {
-    const std::string& root = Haruka::AssetPaths::projectRoot();
+    const std::string& root = Core::AssetPaths::projectRoot();
     return root.empty() ? std::string("bakes/") : root + "bakes/";
 }
 
@@ -2002,7 +2002,7 @@ bool loadBakedPNG(const std::string& path, RGBAImage& out) {
 }
 
 bool saveBakedPNG(const std::string& path, const RGBAImage& img) {
-    return Haruka::writePNG(path, img.width, img.height, 4, img.data());
+    return IO::writePNG(path, img.width, img.height, 4, img.data());
 }
 
 /** @brief Carga del cache o, si no existe, hornea y persiste. El archivo es 1:1 con los
@@ -2088,7 +2088,7 @@ bool loadBakedHeightPNG16(const std::string& path, BakedHeightField& out) {
 }
 
 bool saveBakedHeightPNG16(const std::string& path, const BakedHeightField& field) {
-    return Haruka::writePNG16(path, field.w, field.h, field.data.data());
+    return IO::writePNG16(path, field.w, field.h, field.data.data());
 }
 
 /** @brief Clave del cache de altura. A diferencia de macro/bioma (que solo dependen de seed+res),
@@ -2098,7 +2098,7 @@ std::string heightBakeKey(uint32_t seed, int w, int h,
                           const std::vector<uint16_t>& elevCPU,
                           const glm::vec2& elevRange,
                           const std::vector<unsigned char>& zoneCPU,
-                          const Haruka::Planet::TerrainMaterialTable& mats,
+                          const Terrain::TerrainMaterialTable& mats,
                           float seaLevelM) {
     uint64_t hsh = 1469598103934665603ull;
     const char* version = "planet-height-v2";   // v2: convención equirect = inversa de `equirectUV`
@@ -2297,13 +2297,13 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
 
     // GEOLOGÍA: la semilla del planeta MANDA en el reparto de placas; sin esto la geología usaba
     // random_device y el mismo mundo salía distinto en cada arranque.
-    Haruka::Planet::GeologyConfig geo;
+    GeologyConfig geo;
     geo.numPlates = cfg.seed ? (cfg.seed % 20 + 4) : 12;
     geo.seed = cfg.seed ? cfg.seed : (uint32_t)std::hash<std::string>{}(cfg.name);
     m_seed = geo.seed;   // semilla EFECTIVA: la que manda en geología y, por tanto, en los horneados
-    m_geology = Haruka::Planet::generateGeology(geo);
-    m_climate = Haruka::Planet::ClimateOutput{};
-    m_biomes = Haruka::Planet::BiomesOutput{};
+    m_geology = generateGeology(geo);
+    m_climate = ClimateOutput{};
+    m_biomes = BiomesOutput{};
     m_weather.configure((uint32_t)std::hash<std::string>{}(cfg.name));
     m_faceSubdiv = cfg.faceRes > 0 ? cfg.faceRes : 512;
     m_mapRes = cfg.surface.texRes > 0 ? cfg.surface.texRes : 512;
@@ -2376,10 +2376,10 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
         // sustituye a la tabla ENTERA, no la amplía: mezclar defaults con los del autor haría que
         // borrar un material del JSON no lo borrase de la vista.
         if (cfg.raw.contains("materials") && cfg.raw["materials"].is_array()) {
-            Haruka::Planet::TerrainMaterialTable table;
+            Terrain::TerrainMaterialTable table;
             for (const auto& jm : cfg.raw["materials"]) {
                 if (!jm.is_object()) continue;
-                Haruka::Planet::TerrainMaterial m;
+                Terrain::TerrainMaterial m;
                 m.name = jm.value("name", std::string("unnamed"));
                 auto range = [&jm](const char* key, float& lo, float& hi) {
                     if (jm.contains(key) && jm[key].is_array() && jm[key].size() >= 2) {
@@ -2418,8 +2418,8 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
                 {
                     const std::string role = jm.value("role", std::string("cover"));
                     m.role = (role == "bedrock" || role == "lecho" || role == "roca")
-                           ? Haruka::Planet::TerrainMaterial::Role::Bedrock
-                           : Haruka::Planet::TerrainMaterial::Role::Cover;
+                           ? Terrain::TerrainMaterial::Role::Bedrock
+                           : Terrain::TerrainMaterial::Role::Cover;
                 }
                 // COLOR propio: sustituye al del bioma donde manda este material, en 0-1.
                 if (jm.contains("color") && jm["color"].is_array() && jm["color"].size() >= 3) {
@@ -2445,7 +2445,7 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
         if (cfg.raw.contains("zones") && cfg.raw["zones"].is_array()) {
             for (const auto& jz : cfg.raw["zones"]) {
                 if (!jz.is_object()) continue;
-                Haruka::Planet::NamedZone z;
+                NamedZone z;
                 z.name = jz.value("name", std::string());
                 if (jz.contains("center") && jz["center"].is_array() && jz["center"].size() >= 2) {
                     z.shape.hasCircle = true;
@@ -2472,7 +2472,7 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
         // cada capa). El scatter global (`scatterPropsNear`) las parsea del surfaceConfig por su
         // lado; esta copia solo alimenta el UBO de depuración. Ausente = tabla vacía = vista apagada.
         if (cfg.raw.contains("propLayers") && cfg.raw["propLayers"].is_array()) {
-            m_propLayers = Haruka::Planet::PropLayerTable::fromJSON(cfg.raw);
+            m_propLayers = Props::PropLayerTable::fromJSON(cfg.raw);
             HARUKA_LOGI("Terrain", "'%s': %zu capas de props desde la escena",
                         cfg.name.c_str(), m_propLayers.layers.size());
         } else {
@@ -2504,9 +2504,9 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
         unsigned char* zp = nullptr;
         const std::string cands[] = {
             cfg.surface.zoneMap,
-            Haruka::AssetPaths::projectRoot() + cfg.surface.zoneMap,
-            Haruka::AssetPaths::projectTextures() + cfg.surface.zoneMap,
-            Haruka::AssetPaths::textures() + cfg.surface.zoneMap,
+            Core::AssetPaths::projectRoot() + cfg.surface.zoneMap,
+            Core::AssetPaths::projectTextures() + cfg.surface.zoneMap,
+            Core::AssetPaths::textures() + cfg.surface.zoneMap,
         };
         for (const auto& c : cands) { zp = stbi_load(c.c_str(), &zw, &zh, &zn, 4); if (zp) break; }
         if (zp) {
@@ -2571,9 +2571,9 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
         int ew=0, eh=0, en=0;
         const std::string ec[] = {
             cfg.surface.elevationMap,
-            Haruka::AssetPaths::projectRoot() + cfg.surface.elevationMap,
-            Haruka::AssetPaths::projectTextures() + cfg.surface.elevationMap,
-            Haruka::AssetPaths::textures() + cfg.surface.elevationMap,
+            Core::AssetPaths::projectRoot() + cfg.surface.elevationMap,
+            Core::AssetPaths::projectTextures() + cfg.surface.elevationMap,
+            Core::AssetPaths::textures() + cfg.surface.elevationMap,
         };
         // 16 BITS PRIMERO. `stbi_load_16` lee un PNG de 16 bits nativo; si el fichero es de 8, stb lo
         // promociona ×257 él mismo, así que el mapa antiguo da EXACTAMENTE los mismos valores y no hay
@@ -2659,10 +2659,10 @@ bool TerrestrialPlanet::build(const TerrestrialPlanetConfig& cfg) {
     return false;
 }
 
-void TerrestrialPlanet::rebuild(const Haruka::Planet::GeologyConfig& geo, int faceRes) {
+void TerrestrialPlanet::rebuild(const GeologyConfig& geo, int faceRes) {
     if (faceRes > 0) m_faceSubdiv = faceRes;
     m_seed = geo.seed;
-    m_geology = Haruka::Planet::generateGeology(geo);
+    m_geology = generateGeology(geo);
 
     // El campo cambió con la geología nueva: se recalcula el nivel del mar con la MISMA regla que
     // `build` (mapa de elevación → 0; mapa de zonas sin elevación → cuantil 0.5; sin mapas → la
@@ -2735,8 +2735,8 @@ void TerrestrialPlanet::bakeWaterMap() {
     const auto t0 = std::chrono::high_resolution_clock::now();
     // El nivel del mar del bake es la cota 0: `baseHeight` ya viene desplazado por
     // `m_seaLevelOffsetM`. La MAREA no entra — sube y baja cada minuto y esto se hornea una vez.
-    Haruka::Planet::WaterFillResult r =
-        Haruka::Planet::waterFillEquirect(m_heightCPU.data(), m_heightW, m_heightH, 0.0f,
+    Water::WaterFillResult r =
+        Water::waterFillEquirect(m_heightCPU.data(), m_heightW, m_heightH, 0.0f,
                                           m_config.radius);
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::high_resolution_clock::now() - t0).count();
@@ -2750,7 +2750,7 @@ void TerrestrialPlanet::bakeWaterMap() {
     // es como se contesta "¿lo que veo raro es el agua?" en una sola ejecucion.
     //
     // Punto UNICO de verdad, y se anuncia en el log: ver `oceanWaterDisabled`.
-    if (Haruka::Planet::oceanWaterDisabled()) m_hasWater = false;
+    if (Water::oceanWaterDisabled()) m_hasWater = false;
     m_deepestLakeM = r.deepestM;
 
     // ── Y A LA GPU, PARA QUE EL AGUA SE DIBUJE DONDE LA FÍSICA DICE QUE ESTÁ ────────────────────
@@ -2777,8 +2777,8 @@ void TerrestrialPlanet::bakeWaterMap() {
         m_lakeTex = dev->createTexture(td);
         // El 1x1 seco, para atar SIEMPRE algo al binding 18 aunque este cuerpo no tenga lagos.
         if (!RHI::valid(m_lakeDummy)) {
-            const float dry[2] = { Haruka::Planet::WATER_FILL_DRY,
-                                   Haruka::Planet::WATER_FETCH_UNLIMITED };
+            const float dry[2] = { Water::WATER_FILL_DRY,
+                                   Water::WATER_FETCH_UNLIMITED };
             RHI::TextureDesc dd;
             dd.width = 1; dd.height = 1; dd.format = RHI::Format::RG32F;
             dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
@@ -2814,7 +2814,7 @@ void TerrestrialPlanet::bakeWaterMap() {
 /// Direccion → (lon, lat) con la MISMA convencion que `equirectUV`. Si estas dos se separaran, la
 /// ventana y el campo grueso hablarian de puntos distintos del planeta.
 static inline void dirToLonLat(const glm::dvec3& d, double& lon, double& lat) {
-    Haruka::Planet::waterDirToLonLat(d, lon, lat);   // la MISMA de `WaterFill.h`, no una copia
+    Water::waterDirToLonLat(d, lon, lat);   // la MISMA de `WaterFill.h`, no una copia
 }
 
 void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
@@ -2891,8 +2891,8 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
                 dev->updateBuffer(m_lakeWinUBO, 0, sizeof(rect), &rect);
             // El 1x1 seco: en Vulkan un sampler sin atar es INDEFINIDO, no ceros.
             if (!RHI::valid(m_lakeWinDummy)) {
-                const float dry[2] = { Haruka::Planet::WATER_FILL_DRY,
-                                       Haruka::Planet::WATER_FETCH_UNLIMITED };
+                const float dry[2] = { Water::WATER_FILL_DRY,
+                                       Water::WATER_FETCH_UNLIMITED };
                 RHI::TextureDesc dd;
                 dd.width = 1; dd.height = 1; dd.format = RHI::Format::RG32F;
                 dd.filter = RHI::Filter::Nearest; dd.wrap = RHI::Wrap::ClampToEdge;
@@ -2910,7 +2910,7 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
     // La politica vive en `WaterFill.h` y esta probada sola (`water_window_policy`): aqui no se
     // reimplementa, para que "cuando se recentra" tenga una sola respuesta.
     const std::shared_ptr<const LakeWindow> cur = lakeWindow();
-    if (!Haruka::Planet::waterWindowNeedsRecenter(observerDir, cur != nullptr,
+    if (!Water::waterWindowNeedsRecenter(observerDir, cur != nullptr,
                                                   cur ? cur->lonC : 0.0, cur ? cur->latC : 0.0,
                                                   kLakeWinHalfM, R))
         return;
@@ -2933,7 +2933,7 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
                      : std::make_shared<std::vector<float>>(m_waterCPU);
     m_heightCPUsh = heightCPU;   // reutilizar la próxima vez: el bake no corrió entre medias
     m_waterCPUsh  = waterCPU;
-    const float triM = Haruka::Planet::terrainTriM(0.0);
+    const float triM = Terrain::terrainTriM(0.0);
 
     m_lakeWinJob = Haruka::Core::Jobs::jobs().submit(Haruka::Core::Jobs::Priority::Streaming,
         [hw, hh, baseR, heightCPU, waterCPU, triM, R, lon, lat, halfLon, halfLat]()
@@ -2946,23 +2946,23 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
         // exactamente el error que hace inutil un refinamiento.
         auto terreno = [&](double lo, double la) -> float {
             const glm::dvec3 d = dirOf(lo, la);
-            const glm::vec2  uv = Haruka::Planet::equirectUV(glm::vec3(d));
-            const float baseH = Haruka::Planet::sampleHeightField(uv, hw, hh, heightCPU->data());
-            float det = Haruka::Planet::terrainDetail(glm::vec3(d), baseR + baseH, triM)
-                      * Haruka::Planet::seaLevelAttenuation(baseH);
+            const glm::vec2  uv = Terrain::equirectUV(glm::vec3(d));
+            const float baseH = Terrain::sampleHeightField(uv, hw, hh, heightCPU->data());
+            float det = Terrain::terrainDetail(glm::vec3(d), baseR + baseH, triM)
+                      * Terrain::seaLevelAttenuation(baseH);
             if (baseH > 0.0f) det = glm::max(det, -baseH);
             return baseH + det;
         };
         // Y la condicion de contorno: lo que el relleno GRUESO dice ahi fuera.
         auto contorno = [&](double lo, double la) -> float {
-            const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dirOf(lo, la)));
+            const glm::vec2 uv = Terrain::equirectUV(glm::vec3(dirOf(lo, la)));
             int x = (int)std::floor((double)uv.x * hw);
             int y = (int)std::floor((double)uv.y * hh);
             x = ((x % hw) + hw) % hw;
             y = glm::clamp(y, 0, hh - 1);
             return (*waterCPU)[(size_t)y * hw + x];
         };
-        return Haruka::Planet::waterFillWindow(kLakeWinRes, kLakeWinRes, lon, lat, halfLon, halfLat,
+        return Water::waterFillWindow(kLakeWinRes, kLakeWinRes, lon, lat, halfLon, halfLat,
                                                R, terreno, contorno, 0.0f);
     });
     m_lakeWinJobLive = true;
@@ -2973,14 +2973,14 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
 /// misma cuenta y la primera que se toque separa el agua que se nada de la que se ve.
 float TerrestrialPlanet::lakeWindowLevelAt(const glm::dvec3& dir) const {
     const auto w = lakeWindow();
-    if (!w) return Haruka::Planet::WATER_FILL_DRY;
-    return Haruka::Planet::waterWindowLevelAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
+    if (!w) return Water::WATER_FILL_DRY;
+    return Water::waterWindowLevelAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
 }
 
 float TerrestrialPlanet::lakeWindowFetchAt(const glm::dvec3& dir) const {
     const auto w = lakeWindow();
-    if (!w) return Haruka::Planet::WATER_FETCH_UNLIMITED;
-    return Haruka::Planet::waterWindowFetchAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
+    if (!w) return Water::WATER_FETCH_UNLIMITED;
+    return Water::waterWindowFetchAt(w->r, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
 }
 
 /// Fetch en esa dirección: el diámetro equivalente de la masa de agua que hay ahí, o
@@ -2999,7 +2999,7 @@ glm::vec3 TerrestrialPlanet::baseSlopeAt(const glm::dvec3& dirIn) const {
     const glm::vec3 s2 = glm::cross(dir, s1);
     const float e = 6.2831853f / (float)m_heightW;          // un texel de longitud, en radianes
     auto H = [&](const glm::vec3& d) {
-        return Haruka::Planet::sampleHeightField(Haruka::Planet::equirectUV(glm::normalize(d)),
+        return Terrain::sampleHeightField(Terrain::equirectUV(glm::normalize(d)),
                                                  m_heightW, m_heightH, m_heightCPU.data());
     };
     const glm::vec3 g = s1 * (H(dir + s1 * e) - H(dir - s1 * e))
@@ -3014,20 +3014,20 @@ float TerrestrialPlanet::lakeFetchAt(const glm::dvec3& dir) const {
     if (const auto w = lakeWindow()) {
         // UN solo snapshot para las dos consultas: con dos, una ventana nueva entre medias daria el
         // nivel de un recuadro y el fetch de otro.
-        if (Haruka::Planet::waterWindowLevelAt(w->r, dir, w->lonC, w->latC,
-                                               w->invSpanLon, w->invSpanLat) > Haruka::Planet::WATER_FILL_DRY)
-            return Haruka::Planet::waterWindowFetchAt(w->r, dir, w->lonC, w->latC,
+        if (Water::waterWindowLevelAt(w->r, dir, w->lonC, w->latC,
+                                               w->invSpanLon, w->invSpanLat) > Water::WATER_FILL_DRY)
+            return Water::waterWindowFetchAt(w->r, dir, w->lonC, w->latC,
                                                       w->invSpanLon, w->invSpanLat);
     }
     if (m_fetchCPU.empty() || m_heightW <= 0 || m_heightH <= 0)
-        return Haruka::Planet::WATER_FETCH_UNLIMITED;
-    const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dir));
+        return Water::WATER_FETCH_UNLIMITED;
+    const glm::vec2 uv = Terrain::equirectUV(glm::vec3(dir));
     int x = (int)std::floor((double)uv.x * m_heightW);
     int y = (int)std::floor((double)uv.y * m_heightH);
     x = ((x % m_heightW) + m_heightW) % m_heightW;
     y = glm::clamp(y, 0, m_heightH - 1);
     const float f = m_fetchCPU[(size_t)y * m_heightW + x];
-    return (f > 0.0f) ? f : Haruka::Planet::WATER_FETCH_UNLIMITED;
+    return (f > 0.0f) ? f : Water::WATER_FETCH_UNLIMITED;
 }
 
 /// Cota de la lámina del lago en esa dirección. Muestreo NEAREST y no bilineal a propósito: la
@@ -3040,7 +3040,7 @@ float TerrestrialPlanet::lakeLevelAt(const glm::dvec3& dir) const {
     // `harukaWaterLevelAt` usa para combinar parche, lago y mar — una sola respuesta, sin ramas.
     const float win = lakeWindowLevelAt(dir);
     if (m_waterCPU.empty() || m_heightW <= 0 || m_heightH <= 0) return win;
-    const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(dir));
+    const glm::vec2 uv = Terrain::equirectUV(glm::vec3(dir));
     int x = (int)std::floor((double)uv.x * m_heightW);
     int y = (int)std::floor((double)uv.y * m_heightH);
     x = ((x % m_heightW) + m_heightW) % m_heightW;          // longitud envuelve
@@ -3099,7 +3099,7 @@ void TerrestrialPlanet::bakeHeightMap() {
         }
         // Mismo motivo que en `parallelBake`: esperar despierto para que la ventana siga respondiendo.
         while (rowsDone.load(std::memory_order_relaxed) < h) {
-            Haruka::reportProgress("horneando altura",
+            Core::reportProgress("horneando altura",
                                    (float)rowsDone.load(std::memory_order_relaxed) / (float)h);
             std::this_thread::sleep_for(std::chrono::milliseconds(30));
         }
@@ -3198,12 +3198,12 @@ void TerrestrialPlanet::streamVox(const glm::dvec3& camRelPlanet) {
             HARUKA_LOGI("Vox", "cueva colocada: su BOCA en SURVIVAL_SPAWN=%.5f,%.5f",
                         glm::degrees(std::asin(std::clamp(c.y, -1.0, 1.0))), glm::degrees(std::atan2(c.z, c.x)));
         // La definición tal cual iría a la escena (para copiarla de un borrador a un `.scene`).
-        for (const Haruka::CaveDef& d : m_vox.caveDefs()) {
+        for (const Vox::CaveDef& d : m_vox.caveDefs()) {
             const glm::dvec3 p = m_config.position + d.centerDir * m_config.radius;
             HARUKA_LOGI("Vox", "  Cave '%s': position [%.3f, %.3f, %.3f] · radiusM %.0f · depthM %.0f · mouth [%.3f, %.3f, %.4f] · draftSeed %u · planta '%s'",
                         d.name.c_str(), p.x, p.y, p.z, d.radiusM, d.depthM, d.mouth.x, d.mouth.y, d.mouth.z, d.draftSeed, d.planta.c_str());
         }
-        for (const Haruka::IslandDef& d : m_vox.islandDefs()) {
+        for (const Vox::IslandDef& d : m_vox.islandDefs()) {
             const glm::dvec3 p = m_config.position + d.centerDir * m_config.radius;
             HARUKA_LOGI("Vox", "  Island '%s': position [%.3f, %.3f, %.3f] · radiusM %.0f · topM %.0f · rootM %.0f · altitudeM %.0f · draftSeed %u",
                         d.name.c_str(), p.x, p.y, p.z, d.radiusM, d.topM, d.rootM, d.altitudeM, d.draftSeed);
@@ -3216,12 +3216,12 @@ void TerrestrialPlanet::streamVox(const glm::dvec3& camRelPlanet) {
                 m_vox.placeIsland(glm::dvec3(std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)));
             }
         }
-        for (const Haruka::IslandBox& b : m_vox.placedIslandBoxes())
+        for (const Vox::IslandBox& b : m_vox.placedIslandBoxes())
             HARUKA_LOGI("Vox", "isla colocada: centro en %.5f,%.5f · base a %.0f m sobre la cota · medio lado %.0f m",
                         glm::degrees(std::asin(std::clamp(b.centerDir.y, -1.0, 1.0))),
                         glm::degrees(std::atan2(b.centerDir.z, b.centerDir.x)), b.altitudeM, b.radiusM);
         HARUKA_LOGI("Vox", "campo volumetrico configurado: seed %u · chunks de %.0f m · %d^3 voxeles",
-                    m_seed, Haruka::kVoxChunkM, Haruka::kVoxN);
+                    m_seed, Vox::kVoxChunkM, Vox::kVoxN);
     }
     m_vox.pollCaveJobs();   // las cuevas que se hornean en hilo: recoger y rehacer sus chunks
     const double camR = glm::length(camRelPlanet);
@@ -3234,35 +3234,35 @@ void TerrestrialPlanet::streamVox(const glm::dvec3& camRelPlanet) {
 
     // ⚠️ POR COLUMNAS DE CHUNK, NO A PASOS DE METROS: cerca de una esquina del cubo un chunk mide
     // ~50 m y un barrido a 100 m se saltaba columnas (ver `VoxWorld::columnsNear`).
-    for (const Haruka::VoxKey& col : m_vox.columnsNear(up, kVoxStreamM)) {
+    for (const Vox::VoxKey& col : m_vox.columnsNear(up, kVoxStreamM)) {
         // La columna se ancla al chunk de la SUPERFICIE en su centro y baja tres (las cajas de cueva
         // llegan a 300 m).
         const glm::dvec3 dir = m_vox.chunkCenterDir(col);
-        const Haruka::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
-        for (int dk = -3; dk <= 0; ++dk) { Haruka::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
+        const Vox::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
+        for (int dk = -3; dk <= 0; ++dk) { Vox::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
     }
     // ⚠️ UNA CUEVA CERCANA SE CARGA ENTERA. Con el radio de 260 m, una caja de 700 m se quedaba a
     // medias: al quitar la pared del borde (delantal con el campo) lo que se veía era el HUECO
     // donde la galería sigue y no hay malla ("el cacho que falta"). Si la caja está a menos de
     // `kVoxCaveLoadM`, se cargan todas sus columnas, en toda su profundidad.
-    for (const Haruka::CaveBox& b : m_vox.placedCaveBoxes()) {
+    for (const Vox::CaveBox& b : m_vox.placedCaveBoxes()) {
         const double dist = std::acos(std::clamp(glm::dot(b.centerDir, up), -1.0, 1.0)) * m_config.radius;
         if (dist > kVoxCaveLoadM + (double)b.radiusM) continue;
-        const int kDown = (int)std::ceil((double)b.depthM / Haruka::kVoxChunkM) + 1;
-        for (const Haruka::VoxKey& col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42)) {
+        const int kDown = (int)std::ceil((double)b.depthM / Vox::kVoxChunkM) + 1;
+        for (const Vox::VoxKey& col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42)) {
             const glm::dvec3 dir = m_vox.chunkCenterDir(col);
-            const Haruka::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
-            for (int dk = -kDown; dk <= 0; ++dk) { Haruka::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
+            const Vox::VoxKey ks = m_vox.keyAt(dir * (m_config.radius + sampleHeight(dir)));
+            for (int dk = -kDown; dk <= 0; ++dk) { Vox::VoxKey k = ks; k.k += dk; m_vox.ensure(k); }
         }
     }
     // Y UNA ISLA CERCANA, ENTERA: sus columnas por los chunks radiales que la caja cruza, de la
     // raíz a la cima. Nada de esto depende del suelo bajo la cámara: se puede estar encima.
-    for (const Haruka::IslandBox& b : m_vox.placedIslandBoxes()) {
+    for (const Vox::IslandBox& b : m_vox.placedIslandBoxes()) {
         const double dist = std::acos(std::clamp(glm::dot(b.centerDir, up), -1.0, 1.0)) * m_config.radius;
         if (dist > kVoxIslandLoadM + (double)b.radiusM) continue;
-        const int kLo = (int)std::floor((b.baseRM - (double)b.rootM - (double)Haruka::kIslandRangeM - m_config.radius) / Haruka::kVoxChunkM);
-        const int kHi = (int)std::floor((b.baseRM + (double)b.topM + (double)Haruka::kIslandRangeM - m_config.radius) / Haruka::kVoxChunkM);
-        for (Haruka::VoxKey col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42))
+        const int kLo = (int)std::floor((b.baseRM - (double)b.rootM - (double)Vox::kIslandRangeM - m_config.radius) / Vox::kVoxChunkM);
+        const int kHi = (int)std::floor((b.baseRM + (double)b.topM + (double)Vox::kIslandRangeM - m_config.radius) / Vox::kVoxChunkM);
+        for (Vox::VoxKey col : m_vox.columnsNear(b.centerDir, (double)b.radiusM * 1.42))
             for (int k = kLo; k <= kHi; ++k) { col.k = k; m_vox.ensure(col); }
     }
     m_vox.unloadFar(up, std::max(kVoxStreamM * 2.0, std::max(kVoxCaveLoadM, kVoxIslandLoadM) + 900.0));
@@ -3280,7 +3280,7 @@ void TerrestrialPlanet::craterListNear(const glm::dvec3& cameraPos, size_t maxN,
     std::sort(cr.begin(), cr.end(), [&](const auto& a, const auto& b) { return glm::dot(a.dir, camRel) > glm::dot(b.dir, camRel); });
     if (cr.size() > maxN) cr.resize(maxN);
     for (const auto& c : cr) {
-        const double groundR = m_config.radius + (double)sampleHeight(c.dir, Haruka::Planet::terrainTriM(0.0));
+        const double groundR = m_config.radius + (double)sampleHeight(c.dir, Terrain::terrainTriM(0.0));
         C.push_back(glm::vec4(glm::vec3(c.dir * groundR - camRel), c.radiusM));
         U.push_back(glm::vec4(glm::vec3(c.dir), c.depthM));
     }
@@ -3336,7 +3336,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         m_nodeRenderer.setBaseField(m_baseFieldTex);
         m_nodeRenderer.setHeightTex(m_heightTex);   // la MISMA elevación que el clipmap y la física
         const double radPerPx = fovYRad / std::max(viewportH, 1.0);
-        const double cone     = Haruka::Terrain::nodeFrustumConeHalfAngle(fovYRad, aspect);
+        const double cone     = Terrain::nodeFrustumConeHalfAngle(fovYRad, aspect);
         { HARUKA_PROFILE("v5.prepare");
         m_nodeRenderer.prepare(ctx, cameraPos, m_config.position, m_config.radius,
                                viewDir, radPerPx, cone, m_frameDt);
@@ -3387,7 +3387,7 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
     // planeta, y `HARUKA_GPU_CULL=0` lo apaga sin recompilar. El TCS mantiene su propio test, así
     // que este camino solo puede quitar trabajo, nunca dibujar algo distinto.
     const bool gpuCull = settingWithEnvOverride(
-        SettingsManager::get().graphics().gpuPatchCull, "HARUKA_GPU_CULL");
+        Settings::SettingsManager::get().graphics().gpuPatchCull, "HARUKA_GPU_CULL");
     if (!gpuCull || !RHI::valid(s_cullPipeline) || m_patchCount <= 0 ||
         !RHI::valid(m_patchBoundsSSBO) || !RHI::valid(m_patchIdxSSBO) ||
         !RHI::valid(m_patchIdxCulled) || !RHI::valid(m_patchCullCmd))
@@ -3432,7 +3432,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // ⚠️ LA MALLA BASE PUEDE NO EXISTIR, Y NO ES UN FALLO: con el pase v5 activo no se sube (ver el
     // build). Este `return` la daba por obligatoria, y con ella se llevaba por delante todo lo demas
     // que dibuja esta funcion. Solo se exige cuando de verdad se va a dibujar.
-    if (!Haruka::Terrain::TerrainNodeRenderer::enabled() && !RHI::valid(m_vertexBuffer)) return;
+    if (!Terrain::TerrainNodeRenderer::enabled() && !RHI::valid(m_vertexBuffer)) return;
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     RHI::Context* ctx = dev->beginFrame();
@@ -3481,7 +3481,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // pantalla: es ajuste (TerrainShadows), y HARUKA_TERRAIN_SHADOW=0/1 lo fuerza para poder medir
     // el coste real en una escena concreta sin tocar el .ini.
     const bool terrainShadow = settingWithEnvOverride(
-        SettingsManager::get().graphics().terrainShadows, "HARUKA_TERRAIN_SHADOW");
+        Settings::SettingsManager::get().graphics().terrainShadows, "HARUKA_TERRAIN_SHADOW");
     // El ambiente llega ya en COLOR desde el cielo integrado (ver `setSunLight`); antes era un
     // escalar por un tinte fijo, 5-8× por debajo de la luz real del sitio.
     ubo.uAmbient    = glm::vec4(m_ambientColor, terrainShadow ? 1.0f : 0.0f);
@@ -3511,7 +3511,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // `PlanetarySystem.cpp`: dos orígenes de tiempo distintos para la misma ola, así que el mar que
     // se ve y el que se flota iban desfasados (1 s = 9,7 m de cresta en la ola de 61 m). Ahora los dos
     // llaman a `oceanClockSeconds()`, que es `inline` y por tanto tiene UNA instancia garantizada.
-    const float elapsedSec = Haruka::Planet::oceanClockSeconds();
+    const float elapsedSec = Water::oceanClockSeconds();
     // ¿Dibuja el clipmap este frame? (misma condición que el bloque de draw de abajo). La malla
     // base se recorta donde el clipmap la cubre (terrain.tese), y el recorte SOLO debe actuar cuando
     // el clipmap va a pintar de verdad — si el pipeline no compiló, no hay bake o la cámara está en
@@ -3637,7 +3637,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // `planet.clipmap.draw`. Si no cabe, la salida no es volver a la malla basta sino cullear los
     // parches fuera de cámara en el TCS (hoy el clipmap no lo hace; la malla base sí).
     const double horizonM = std::sqrt(std::max(0.0, 2.0 * m_config.radius * std::max(camAltGround, 1.7)));
-    int ringCount = Haruka::Planet::terrainClipRingIndex(horizonM, (double)m_ringCoverM) + 1;
+    int ringCount = Terrain::terrainClipRingIndex(horizonM, (double)m_ringCoverM) + 1;
     ringCount = std::max(1, std::min(ringCount, kMaxClipRings));
     const int clipK = ringCount - 1;                // índice del anillo exterior
 
@@ -3737,8 +3737,8 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             HARUKA_LOGDIAG("TerrainDraw",
                 "clipmap=%s · altura sobre el suelo=%.2f m · enterrado=%d · quad dibujado a los pies=%.1f m",
                 clipActive ? "SI" : "NO", camAltGround, (int)camUnderground,
-                clipActive ? Haruka::Planet::TERRAIN_CLIP_QUAD_M
-                           : (double)Haruka::Planet::TERRAIN_CLIP_PATCH_M * 306.0 / 128.0);
+                clipActive ? Terrain::TERRAIN_CLIP_QUAD_M
+                           : (double)Terrain::TERRAIN_CLIP_PATCH_M * 306.0 / 128.0);
         }
     }
     // VISTA DE DEPURACIÓN POR ENTORNO. `m_debugView` lo pone el EDITOR, que no existe en la build del
@@ -3749,7 +3749,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         const char* v = std::getenv("HARUKA_PLANET_DEBUG");
         return v ? std::atoi(v) : 0;
     }();
-    const int debugView = s_envDebugView ? s_envDebugView : m_debugView;
+    const int debugView = s_envDebugView ? s_envDebugView : (m_editDebugView >= 0 ? m_editDebugView : m_debugView);
     ubo.uDebug = glm::vec4((float)debugView, elapsedSec,
                            RHI::valid(m_heightTex) ? 1.0f : 0.0f,  // z = hay bake de altura (16)
                            clipActive ? 1.0f : 0.0f);              // w = el clipmap dibuja (recorte base)
@@ -3801,11 +3801,11 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         struct GpuMat { glm::vec4 a, b, c, d, e, f, g; };
         struct GpuTable {
             glm::vec4 count;
-            GpuMat    mats[Haruka::Planet::TerrainMaterialTable::kMaxMaterials];
+            GpuMat    mats[Terrain::TerrainMaterialTable::kMaxMaterials];
         } table{};
         const auto& src = m_materialTable.materials;
         const int n = std::min((int)src.size(),
-                               Haruka::Planet::TerrainMaterialTable::kMaxMaterials);
+                               Terrain::TerrainMaterialTable::kMaxMaterials);
         // `y` = ¿existe el array de terreno? Sin él, `harukaSelectMaterial` fuerza `tile = -1` y el
         // shader usa su valor neutro en vez de muestrear un sampler2DArray sin enlazar (indefinido).
         // z = capa de la ORILLA (la arena que se mezcla en la línea de agua). Viene de la tabla, que es
@@ -3838,7 +3838,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // acuerdo con el terreno. Por eso se marca ahora en vez de borrar el material.
             // flags: bit0 = zona · bit1 = agua · bit2 = LECHO (el resto es cobertura).
             const float matFlags = (m.hasZone() ? 1.0f : 0.0f) + (m.submerged ? 2.0f : 0.0f)
-                                 + (m.role == Haruka::Planet::TerrainMaterial::Role::Bedrock ? 4.0f : 0.0f);
+                                 + (m.role == Terrain::TerrainMaterial::Role::Bedrock ? 4.0f : 0.0f);
             table.mats[i].d = glm::vec4(m.detail, m.feather, zonePacked, matFlags);
             table.mats[i].e = m.hasColor()
                 ? glm::vec4(m.baseColor, glm::clamp(m.colorWeight, 0.0f, 1.0f))
@@ -3870,13 +3870,13 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         struct GpuProp { glm::vec4 a, b, c, d; };
         struct GpuPropTable {
             glm::vec4 count;
-            GpuProp    layers[Haruka::Planet::PropLayerTable::kMaxLayers];
+            GpuProp    layers[Props::PropLayerTable::kMaxLayers];
         } ptable{};
         const auto& src = m_propLayers.layers;
         int n = 0;
         for (const auto& L : src) {
             if (L.mesh.empty()) continue;
-            if (n >= Haruka::Planet::PropLayerTable::kMaxLayers) break;
+            if (n >= Props::PropLayerTable::kMaxLayers) break;
             GpuProp& g = ptable.layers[n];
             g.a = glm::vec4(L.humMin, L.humMax, L.tempMin, L.tempMax);
             g.b = glm::vec4(L.slopeMin, L.slopeMax, 0.0f, L.feather);
@@ -4012,7 +4012,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         // siempre (`cameraPos`), que es lo que necesitan el servidor y los tests.
         const glm::dvec3 clipFrom = m_nearRingAnchored ? m_nearRingAnchor : cameraPos;
         glm::dvec3 up, tu, tv;
-        Haruka::Planet::terrainClipFrame(clipFrom, m_config.position, up, tu, tv,
+        Terrain::terrainClipFrame(clipFrom, m_config.position, up, tu, tv,
                                          m_config.radius);
 
         struct ClipParams { glm::vec4 origin, tanU, tanV, cover; };
@@ -4030,7 +4030,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         // cientos de metros no aporta nada, no porque la geometría lo impida.
         const bool nearRingOK = (m_nearRingIndices >= 3 && RHI::valid(m_nearRingVB)
                                  && camAltGround <= 20.0);
-        const float hole0 = nearRingOK ? (float)Haruka::Planet::TERRAIN_CLIP_HOLE_M : 0.0f;
+        const float hole0 = nearRingOK ? (float)Terrain::TERRAIN_CLIP_HOLE_M : 0.0f;
         m_nearRingVisible = (hole0 > 0.0f);
 
         m_ringCount = ringCount;
@@ -4066,7 +4066,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             const float half  = m_ringCoverM * scale;
             if (r == ringCount - 1) m_ringOuterCoverM = half;   // lo usa el hueco de la esfera lejana
             ClipParams cp{};
-            cp.origin = glm::vec4(glm::vec3(up), (float)Haruka::Planet::TERRAIN_CLIP_PATCH_M);
+            cp.origin = glm::vec4(glm::vec3(up), (float)Terrain::TERRAIN_CLIP_PATCH_M);
             cp.tanU   = glm::vec4(glm::vec3(tu), scale);   // w = escala de ESTE anillo (2^r)
             // ⚠️ `tanU.w` NO estaba libre —lleva la escala 2^r de ESTE anillo— asi que el alcance del
             // oleaje va en `tanV.w`, que se rellenaba a 0 y no la lee nadie.
@@ -4158,7 +4158,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     //
     // El v5 cubre del suelo a la órbita (quadtree sobre cube-sphere, sin el techo de ~20-30° de la
     // proyección gnomónica del clipmap), así que no hay rango que la base tenga que rellenar.
-    if (!Haruka::Terrain::TerrainNodeRenderer::enabled()) {
+    if (!Terrain::TerrainNodeRenderer::enabled()) {
     if (useTess) {
         ctx->bindPipeline(s_tessPipeline);
         ctx->bindVertexBuffer(m_vertexBuffer);
@@ -4217,9 +4217,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // Y con ello se salta el sphere-trace de `biome.frag::reanchorToFine` —2-16 pasos POR PÍXEL, el
     // coste que puso `present.swap` en 60 ms— porque este pase usa su propio fragmento: la geometría
     // lleva el relieve, así que no hay nada que fingir. Ése es el arreglo, y es el número a medir.
-    if (Haruka::Terrain::TerrainNodeRenderer::enabled()) {
+    if (Terrain::TerrainNodeRenderer::enabled()) {
         HARUKA_PROFILE("planet.v5.nodes");
-        const std::string v5Dir = Haruka::Shader::baseDir() + "shaders/";
+        const std::string v5Dir = Renderer::Shader::baseDir() + "shaders/";
         const bool v5Ok = m_nodeRenderer.init(dev, v5Dir);
         if (v5Ok && !m_grass.ready() && Haruka::Renderer::GrassRenderer::enabled()) {
             HARUKA_PROFILE("planet.grass.init");
@@ -4235,7 +4235,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // `HARUKA_TERRAIN_V5_DEBUG` ("veo con los 3 igual") y costó dar por descartada una
             // hipótesis correcta. `STRIDE` además se puede contrastar con el `stride a..b` de abajo.
             {
-                using V5 = Haruka::Terrain::TerrainNodeRenderer;
+                using V5 = Terrain::TerrainNodeRenderer;
                 const uint32_t fs = V5::forcedStride();
                 HARUKA_LOGD("TerrenoV5", "biseccion: STRIDE=%s · MORPH=%s · DEBUG=%d · VERTPX=%.1f",
                             fs ? std::to_string(fs).c_str() : "(no)",
@@ -4269,7 +4269,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // `HARUKA_TERRAIN_V5_FLAT=1` deja la luz plana de geometría: es el lado A del A/B con el
             // que se mide lo que cuesta sombrear de verdad.
             {
-                Haruka::Terrain::TerrainNodeRenderer::Shade sh;
+                Terrain::TerrainNodeRenderer::Shade sh;
                 sh.albedo      = m_terrainAlbedoArray;
                 sh.normal      = m_terrainNormalArray;
                 sh.macro       = m_macroTex;
@@ -4283,7 +4283,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 const char* flat = std::getenv("HARUKA_TERRAIN_V5_FLAT");
                 sh.on = !(flat && flat[0] == '1');
                 if (m_voxRenderer.cutValid()) { sh.cutTex = m_voxRenderer.cutTexture(); sh.cutSpace = m_voxRenderer.cutSpace(); }
-                craterListNear(cameraPos, Haruka::Terrain::TerrainNodeRenderer::kMaxCraters, sh.craterC, sh.craterU);
+                craterListNear(cameraPos, Terrain::TerrainNodeRenderer::kMaxCraters, sh.craterC, sh.craterU);
                 m_nodeRenderer.setShade(sh);
                 // Las paredes del campo se pintan con la MISMA roca que el terreno.
                 m_voxRenderer.setRock(m_terrainAlbedoArray, m_materialTable.rockLayer(), m_tiling);
@@ -4300,7 +4300,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // `on` sale de `m_hasWater`, que sale del CAMPO (`bakeWaterMap`), no de la configuración:
             // en un cuerpo seco este pase no se emite y no se paga.
             {
-                Haruka::Terrain::TerrainNodeRenderer::Water w;
+                Terrain::TerrainNodeRenderer::Water w;
                 w.heightTex   = m_heightTex;
                 w.lakeTex     = lakeTexOrDummy();
                 // La ventana fina: donde existe, es ELLA la que sabe de lagos (62 m/texel contra los
@@ -4310,7 +4310,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 w.oceanParams = m_oceanParamsValid ? m_oceanParamsUBO : RHI::BufferHandle{};
                 w.inlandUBO   = m_inlandWaterValid ? m_inlandWaterUBO : RHI::BufferHandle{};
                 w.inlandSSBO  = m_inlandWaterValid ? m_inlandWaterSSBO : RHI::BufferHandle{};
-                w.on          = m_hasWater;
+                w.on          = m_hasWater && m_waterVisible;   // el IDE la apaga para editar
                 w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeLevelAt(dir); };
                 w.lakeEpoch   = m_lakeEpoch;   // invalida la caché del 9x9 si cambió ventana o campo
                 if (const auto lw = lakeWindow()) {
@@ -4381,21 +4381,21 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             }();
             if (s_probe && (s_log % 120) == 0) {
                 const glm::dvec3 dirP = glm::normalize(cameraPos - m_config.position);
-                const float cutColl = Haruka::Planet::terrainTriM(0.0f);
+                const float cutColl = Terrain::terrainTriM(0.0f);
                 const double hColl  = sampleHeight(dirP);                  // colision y props
                 // El nodo mas fino que se esta dibujando: su texel es el corte del render.
-                const Haruka::Terrain::NodeId nP{ Haruka::PlanetFace::FRONT, st.levelMax, 0, 0 };
-                const float cutNode = (float)Haruka::Terrain::nodeTexelM(nP, m_config.radius);
+                const Terrain::NodeId nP{ Tools::PlanetFace::FRONT, st.levelMax, 0, 0 };
+                const float cutNode = (float)Terrain::nodeTexelM(nP, m_config.radius);
                 const double hNode  = sampleHeight(dirP, cutNode);
                 // Y el careo que de verdad importa: el camino FLOAT de `sampleHeight` (colision y
                 // props) contra el camino DOUBLE que usa el render. Misma funcion, misma entrada,
                 // solo cambia la precision con la que se le pasa la direccion y el radio.
-                const glm::vec2 uvP = Haruka::Planet::equirectUV(glm::vec3(dirP));
-                const float bH = Haruka::Planet::sampleHeightField(uvP, m_heightW, m_heightH,
+                const glm::vec2 uvP = Terrain::equirectUV(glm::vec3(dirP));
+                const float bH = Terrain::sampleHeightField(uvP, m_heightW, m_heightH,
                                                                    m_heightCPU.data());
-                float detD = Haruka::Planet::terrainDetail(dirP, (double)m_config.radius + (double)bH,
+                float detD = Terrain::terrainDetail(dirP, (double)m_config.radius + (double)bH,
                                                            cutColl)
-                           * Haruka::Planet::seaLevelAttenuation(bH);
+                           * Terrain::seaLevelAttenuation(bH);
                 if (bH > 0.0f) detD = glm::max(detD, -bH);
                 const double hDouble = (double)bH + (double)detD;
                 // ⚠️ Y LA ALTURA DEL OJO SOBRE EL SUELO. Es el numero que nadie habia mirado: si la
@@ -4466,15 +4466,15 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                         const glm::dvec3 d = glm::normalize(dirC + (t1 * std::cos(ang) +
                                                                    t2 * std::sin(ang)) * (dist / m_config.radius));
                         const double gFull = sampleHeight(d);                       // lo que se ve
-                        const glm::vec2 uv = Haruka::Planet::equirectUV(glm::vec3(d));
-                        const double gBake = (double)Haruka::Planet::sampleHeightField(
+                        const glm::vec2 uv = Terrain::equirectUV(glm::vec3(d));
+                        const double gBake = (double)Terrain::sampleHeightField(
                                                  uv, m_heightW, m_heightH, m_heightCPU.data());
                         worstBakeGap = std::max(worstBakeGap, std::abs(gFull - gBake));
                         const double lv  = (double)lakeLevelAt(d);
                         const double wlv = (double)lakeWindowLevelAt(d);
-                        if (lv  > Haruka::Planet::WATER_FILL_DRY && lv  > gFull)
+                        if (lv  > Water::WATER_FILL_DRY && lv  > gFull)
                             { ++nLake; worstLake = std::max(worstLake, lv  - gFull); }
-                        if (wlv > Haruka::Planet::WATER_FILL_DRY && wlv > gFull)
+                        if (wlv > Water::WATER_FILL_DRY && wlv > gFull)
                             { ++nWin;  worstWin  = std::max(worstWin,  wlv - gFull); }
                     }
                 HARUKA_LOGI("SondaAgua", "abanico de 192 puntos (10..120 m): lago GRUESO afirma agua "
@@ -4519,8 +4519,8 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             //
             // Sin esta linea, "el mar esta plano" y "el mar no se dibuja" se ven igual desde fuera.
             {
-                const double texelFino = Haruka::Terrain::nodeTexelM(
-                    Haruka::Terrain::NodeId{ Haruka::PlanetFace::FRONT, st.levelMax, 0, 0 },
+                const double texelFino = Terrain::nodeTexelM(
+                    Terrain::NodeId{ Tools::PlanetFace::FRONT, st.levelMax, 0, 0 },
                     m_config.radius);
                 // `strideMin` YA es la zancada (1,2,4…), no su logaritmo: el log imprime "stride 4..4"
                 // con este mismo campo. Elevarlo a potencia daria celdas 4x mayores y un diagnostico
@@ -4530,10 +4530,10 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 // copia de la formula en el diagnostico se desincroniza y miente justo cuando importa.
                 int vivos = 0;
                 double ampViva = 0.0;
-                for (int i = 0; i < Haruka::Planet::OCEAN_WAVES; ++i) {
+                for (int i = 0; i < Water::OCEAN_WAVES; ++i) {
                     const float lam = m_oceanStateCPU.wave[i][0];
                     if (lam <= 0.0f) continue;
-                    const float f = Haruka::Planet::oceanShortWaveFade(6.2831853f / lam,
+                    const float f = Water::oceanShortWaveFade(6.2831853f / lam,
                                                                       (float)quadFino);
                     if (f > 0.01f) ++vivos;
                     ampViva += (double)m_oceanStateCPU.wave[i][1] * (double)f;
@@ -4544,7 +4544,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                     HARUKA_LOGDIAG("Mar", "celda del agua %.1f m (texel %.2f x zancada %u) -> %d de %d "
                                 "trenes sobreviven a Nyquist · Sigma amp %.2f m%s",
                                 quadFino, texelFino, st.strideMin, vivos,
-                                Haruka::Planet::OCEAN_WAVES, ampViva,
+                                Water::OCEAN_WAVES, ampViva,
                                 vivos == 0 ? "  <- MAR PLANO: la celda es mas grande que la ola"
                                            : "");
                 }
@@ -4648,7 +4648,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // ⚠️ CON `HARUKA_TERRAIN_V5=0` NO HAY AGUA, y se dice. Esa variable es un escape de depuración del
     // TERRENO (que ahí cae a la malla base); mantener vivo un segundo sistema de agua entero sólo
     // para ella era exactamente lo que este borrado viene a quitar. Callarlo sería peor.
-    if (m_hasWater && !Haruka::Terrain::TerrainNodeRenderer::enabled()) {
+    if (m_hasWater && !Terrain::TerrainNodeRenderer::enabled()) {
         static bool s_said = false;
         if (!s_said) {
             s_said = true;
@@ -4673,4 +4673,4 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     m_lastRenderStats.drawCalls = 1;
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World

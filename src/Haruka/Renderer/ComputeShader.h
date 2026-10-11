@@ -27,5 +27,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::ComputeShader;
-namespace Haruka { using Renderer::ComputeShader; }

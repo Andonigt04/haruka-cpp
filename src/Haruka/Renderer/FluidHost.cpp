@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 FluidHost::FluidHost() {
     m_sim             = std::make_unique<Physics::Fluid::ShallowWaterSim>();
@@ -48,7 +48,7 @@ glm::dvec3 basisTangent(const glm::dvec3& up) {
 }
 } // namespace
 
-void FluidHost::ensurePatch(const WorldPos& cameraPos) {
+void FluidHost::ensurePatch(const Tools::WorldPos& cameraPos) {
     // Re-anclamos solo cuando el jugador se desplaza una fracción del span (la re-muestreada de
     // terreno es n² celdas ≈ barata, pero tampoco hay que hacerla cada frame).
     const double kReanchorM = 160.0;
@@ -111,7 +111,7 @@ void FluidHost::ensurePatch(const WorldPos& cameraPos) {
     for (const auto& [wp, vol] : carry) m_sim->addVolumeAtWorld(wp, vol);
 }
 
-void FluidHost::update(float dt, const WorldPos& cameraPos) {
+void FluidHost::update(float dt, const Tools::WorldPos& cameraPos) {
     // Sin planeta activo el parche no tiene terreno ni mar real que acoplar: no hay que dibujar
     // ninguna lámina. `anchored` queda false → render() no hace nada.
     if (!m_sim || !terrainHeightFn || !hasPlanet) return;
@@ -260,7 +260,7 @@ void FluidHost::update(float dt, const WorldPos& cameraPos) {
     }
 }
 
-void FluidHost::render(const WorldPos& cameraPos, int vpW, int vpH,
+void FluidHost::render(const Tools::WorldPos& cameraPos, int vpW, int vpH,
                        RHI::RenderPassHandle scenePass) {
     // ── LA LÁMINA DE AGUA DEL FLUIDO SE HA BORRADO ──────────────────────────────────────────────
     //
@@ -288,6 +288,6 @@ void FluidHost::render(const WorldPos& cameraPos, int vpW, int vpH,
     (void)cameraPos; (void)vpW; (void)vpH; (void)scenePass;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer
 
 #endif // HARUKA_MOD_FLUIDS

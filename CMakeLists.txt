@@ -131,7 +131,7 @@ set_target_properties(haruka_simbase PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # "sin modulo de reglas -> fallback generico" y sigue con su regla propia, así que **el anti-cheat del
 # juego no se estaba aplicando en despliegue** y nada lo delataba.
 #
-# No lo veía ningún test: `tests/TestDGS.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
+# No lo veía ningún test: `tests/Network/TestDGS.cpp` hace `dlopen` desde `haruka_tests`, que YA enlaza el
 # motor, así que el símbolo aparecía por la puerta de atrás. Lo destapó `dgs_live_terrain`, que carga
 # el módulo desde el nodo de verdad.
 add_library(haruka_rules SHARED
@@ -317,7 +317,8 @@ if(PROJECT_IS_TOP_LEVEL)
 
     install(DIRECTORY "${SHADER_OUT_DIR}/"
         DESTINATION "bin/assets/shaders"
-        FILES_MATCHING PATTERN "*.spv")
+        FILES_MATCHING PATTERN "*.spv"
+        PATTERN "tests" EXCLUDE)   # shaders del banco de pruebas (tests/Shaders/): no se instalan
 endif()
 
 # --- 7. Examples ---

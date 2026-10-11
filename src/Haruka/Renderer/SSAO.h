@@ -31,5 +31,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::SSAO;
-namespace Haruka { using Renderer::SSAO; }

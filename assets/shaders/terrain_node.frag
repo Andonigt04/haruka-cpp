@@ -33,6 +33,7 @@ layout(location = 11) in float vCrater;  // 0..1 cuenco de cráter (terrain_node
 #include "lib/aerial.glsl"            // harukaAerial: perspectiva aérea (la misma que props y nubes)   // harukaSelectMaterial + su UBO (binding 12)
 #include "lib/terrain_shade.glsl"      // harukaTerrainAlbedo
 #include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
+#include "lib/sea_tint.glsl"           // harukaSeaTint — vista 15 (cota sobre el mar)
 
 layout(binding = 10) uniform sampler2D      uMacroVar;
 layout(binding = 11) uniform sampler2D      uBiomeMap;
@@ -85,6 +86,7 @@ layout(std140, binding = 3) uniform VoxCut {
  *       0 exacto, que con la comparación GREATER contra un clear de 0 no pasaría el test.
  *   4 = por STRIDE del nodo, sin iluminar. Si un pincho cae justo en una frontera de color,
  *       viene del stride por nodo o de su cosido; si cae en medio de un color, no.
+ *  15 = COTA SOBRE EL NIVEL DEL MAR (vista de edición del IDE): tinte, costa e isolíneas.
  *  10 = DISPARIDAD dibujado-dato en metros: verde <5cm · amarillo 0,5 m · rojo >=2 m · azul sin dato.
  *   9 = CAIDA A ANCESTRO: verde = datos propios · amarillo->rojo = k niveles por encima.
  *   6 = LA NORMAL como color (sin iluminar): separa un pliegue de GEOMETRIA de uno de la NORMAL.
@@ -270,6 +272,13 @@ void main() {
     // `harukaTerrainAlbedo` MODIFICA `n` con el normal map, asi que la iluminacion va despues.
     const float d = max(dot(n, normalize(uLightDir.xyz)), 0.0);
     vec3 lit = col * (0.25 + 0.75 * d);
+    // ── 15 = COTA SOBRE EL NIVEL DEL MAR (vista de edición del IDE): ver lib/sea_tint.glsl. La cota
+    // es `r − R` en DOUBLE, como las vistas 11/14.
+    if (dbg == 15) {
+        const dvec3 relS = dvec3(vFragPos) - dvec3(uCenter.xyz) - dvec3(uCenterLo.xyz);
+        fragColor = vec4(harukaSeaTint(float(length(relS) - double(uMisc.x)), d), 1.0);
+        return;
+    }
     // El aire de en medio: lo lejano se funde con el cielo de esa dirección (lib/aerial.glsl).
     // ⚠️ Con la ALTITUD del fragmento (`vClimate.x`, km): desde orbita el rayo cruza unos km de
     // aire, no cientos (ver lib/aerial.glsl: "en orbita esta todo en blanco").

@@ -2,8 +2,8 @@
  * @file Camera.h
  * @brief Quaternion-based runtime camera with SDL input handling.
  *
- * Position is stored as `Haruka::WorldPos` (dvec3) for double-precision
- * accuracy at astronomical distances. Orientation is a `Haruka::Rotation`
+ * Position is stored as `Haruka::Tools::WorldPos` (dvec3) for double-precision
+ * accuracy at astronomical distances. Orientation is a `Haruka::Tools::Rotation`
  * (dquat). The view matrix is derived from position + orientation each frame.
  *
  * Input is polled directly from SDL keyboard state in `processInput()`;
@@ -15,9 +15,9 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include "Haruka/Tools/MathTypes.h"
 
-namespace Haruka { namespace Core {
-
 struct SDL_Window;
+
+namespace Haruka { namespace Core {
 
 /**
  * @brief Runtime camera state and input-driven transform controller.
@@ -25,8 +25,8 @@ struct SDL_Window;
 class Camera {
 public:
 
-    Haruka::WorldPos position;    ///< World-space position (km, double precision)
-    Haruka::Rotation orientation; ///< Absolute orientation as unit quaternion
+    Tools::WorldPos position;    ///< World-space position (km, double precision)
+    Tools::Rotation orientation; ///< Absolute orientation as unit quaternion
     float speed = 5.0f;           ///< Movement speed in km/s
     float sensitivity = 0.1f;     ///< Mouse rotation sensitivity (degrees per pixel)
     float zoom = 45.0f;           ///< Vertical FOV in degrees
@@ -40,7 +40,7 @@ public:
     float getNearPlane() const { return m_nearPlane; }
 
     /** @brief Constructs camera at initial world-space position. */
-    Camera(Haruka::WorldPos startPos);
+    Camera(Tools::WorldPos startPos);
     
     /** @brief Returns current forward direction vector. */
     glm::vec3 getFront() const;
@@ -66,5 +66,3 @@ public:
 
 }} // namespace Haruka::Core
 
-using Haruka::Core::Camera;
-namespace Haruka { using Core::Camera; }

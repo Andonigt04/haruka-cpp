@@ -20,7 +20,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Terrain { 
 
 /** @brief Sin textura: superficie lisa (hielo, sal, lava vidriada). Cualquier otro valor es una
  *  CAPA del array de terreno, y la asigna el motor por posición en la tabla. */
@@ -308,4 +308,4 @@ private:
     }
 };
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Terrain

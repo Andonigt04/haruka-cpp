@@ -9,7 +9,7 @@
 #include <sstream>
 #include <algorithm>
 
-namespace Haruka {
+namespace Haruka::Settings {
 
 const Input::ActionValue SettingsManager::s_nullValue = false;
 
@@ -437,4 +437,4 @@ std::vector<std::string> SettingsManager::groups() const {
     return out;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Settings

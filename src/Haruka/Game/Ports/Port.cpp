@@ -8,7 +8,7 @@
 #include <filesystem>
 #include <fstream>
 
-namespace Haruka {
+namespace Haruka::Game::Ports {
 
 // ── nombres <-> enums ───────────────────────────────────────────────────────────────────────────
 const char* toString(PortClass c) {
@@ -260,4 +260,4 @@ bool savePortSetJson(const std::string& path, const PortSet& set) {
     return f.good();
 }
 
-} // namespace Haruka
+} // namespace Haruka::Game::Ports

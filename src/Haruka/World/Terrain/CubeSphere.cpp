@@ -1,16 +1,16 @@
 #include "Haruka/World/Terrain/CubeSphere.h"
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::World::Terrain {
 
-    glm::dvec3 cubeFaceToDir(PlanetFace face, double lx, double ly) {
+    glm::dvec3 cubeFaceToDir(Tools::PlanetFace face, double lx, double ly) {
         glm::dvec3 p;
         switch (face) {
-            case PlanetFace::FRONT:  p = {  1.0,  ly, -lx }; break;
-            case PlanetFace::BACK:   p = { -1.0,  ly,  lx }; break;
-            case PlanetFace::TOP:    p = {  lx,  1.0, -ly }; break;
-            case PlanetFace::BOTTOM: p = {  lx, -1.0,  ly }; break;
-            case PlanetFace::RIGHT:  p = {  lx,   ly,  1.0 }; break;
+            case Tools::PlanetFace::FRONT:  p = {  1.0,  ly, -lx }; break;
+            case Tools::PlanetFace::BACK:   p = { -1.0,  ly,  lx }; break;
+            case Tools::PlanetFace::TOP:    p = {  lx,  1.0, -ly }; break;
+            case Tools::PlanetFace::BOTTOM: p = {  lx, -1.0,  ly }; break;
+            case Tools::PlanetFace::RIGHT:  p = {  lx,   ly,  1.0 }; break;
             default:                 p = { -lx,   ly, -1.0 }; break;   // LEFT
         }
         const double x2 = p.x * p.x, y2 = p.y * p.y, z2 = p.z * p.z;
@@ -21,7 +21,7 @@ namespace Haruka {
 
     // Inversa en forma cerrada. La derivación entera está en CubeSphere.h; aquí solo el cálculo.
     // ⚠️ Gemelo GLSL: assets/shaders/lib/cube_face.glsl. Los dos a la vez.
-    void dirToCubeFaceClosed(const glm::dvec3& dirIn, PlanetFace& outFace, double& lx, double& ly) {
+    void dirToCubeFaceClosed(const glm::dvec3& dirIn, Tools::PlanetFace& outFace, double& lx, double& ly) {
         const glm::dvec3 d = glm::normalize(dirIn);
         const double ax = std::abs(d.x), ay = std::abs(d.y), az = std::abs(d.z);
 
@@ -49,21 +49,21 @@ namespace Haruka {
         // colocación que hace `cubeFaceToDir` en cada cara.
         switch (dom) {
             case 0:
-                if (d.x > 0) { outFace = PlanetFace::FRONT;  ly =  a; lx = -b; }   // p = ( 1, ly,-lx)
-                else         { outFace = PlanetFace::BACK;   ly =  a; lx =  b; }   // p = (-1, ly, lx)
+                if (d.x > 0) { outFace = Tools::PlanetFace::FRONT;  ly =  a; lx = -b; }   // p = ( 1, ly,-lx)
+                else         { outFace = Tools::PlanetFace::BACK;   ly =  a; lx =  b; }   // p = (-1, ly, lx)
                 break;
             case 1:
-                if (d.y > 0) { outFace = PlanetFace::TOP;    lx =  a; ly = -b; }   // p = (lx, 1,-ly)
-                else         { outFace = PlanetFace::BOTTOM; lx =  a; ly =  b; }   // p = (lx,-1, ly)
+                if (d.y > 0) { outFace = Tools::PlanetFace::TOP;    lx =  a; ly = -b; }   // p = (lx, 1,-ly)
+                else         { outFace = Tools::PlanetFace::BOTTOM; lx =  a; ly =  b; }   // p = (lx,-1, ly)
                 break;
             default:
-                if (d.z > 0) { outFace = PlanetFace::RIGHT;  lx =  a; ly =  b; }   // p = (lx,ly, 1)
-                else         { outFace = PlanetFace::LEFT;   lx = -a; ly =  b; }   // p = (-lx,ly,-1)
+                if (d.z > 0) { outFace = Tools::PlanetFace::RIGHT;  lx =  a; ly =  b; }   // p = (lx,ly, 1)
+                else         { outFace = Tools::PlanetFace::LEFT;   lx = -a; ly =  b; }   // p = (-lx,ly,-1)
                 break;
         }
     }
 
-    void dirToCubeFace(const glm::dvec3& dirIn, PlanetFace& outFace, double& lx, double& ly) {
+    void dirToCubeFace(const glm::dvec3& dirIn, Tools::PlanetFace& outFace, double& lx, double& ly) {
         const glm::dvec3 d = glm::normalize(dirIn);
 
         // SEMILLA: la forma cerrada, que ya es exacta. Antes era la proyección gnómica (dividir por
@@ -92,4 +92,4 @@ namespace Haruka {
         }
     }
 
-} // namespace Haruka
+} // namespace Haruka::World::Terrain

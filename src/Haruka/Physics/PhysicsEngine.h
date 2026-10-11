@@ -633,12 +633,3 @@ private:
 }} // namespace Haruka::Physics
 
 // Back-compat aliases during the namespace migration.
-using Haruka::Physics::RigidBody;
-using Haruka::Physics::CollisionInfo;
-using Haruka::Physics::StaticBox;
-using Haruka::Physics::StaticOBB;
-using Haruka::Physics::PhysicsEngine;
-namespace Haruka {
-    using Physics::RigidBody; using Physics::CollisionInfo; using Physics::StaticBox;
-    using Physics::StaticOBB; using Physics::PhysicsEngine;
-}

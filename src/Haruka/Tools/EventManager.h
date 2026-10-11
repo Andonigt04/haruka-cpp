@@ -9,7 +9,7 @@
 #include <vector>
 #include <type_traits>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 // Base event type. Extend for custom events.
 struct Event {
@@ -91,4 +91,4 @@ private:
     std::vector<Handler> handlers_;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Tools

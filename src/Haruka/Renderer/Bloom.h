@@ -21,5 +21,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Bloom;
-namespace Haruka { using Renderer::Bloom; }

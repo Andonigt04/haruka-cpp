@@ -56,7 +56,7 @@ void ShallowWaterSim::init(const glm::dvec3& anchor,
     // ⚠️ EL PARCHE TAMBIEN OBEDECE A `HARUKA_NOWATER`. Se apagaba solo el mar y los lagos del CAMPO
     // (`m_hasWater`), asi que la sim de rios/lagos seguia sembrando agua y "quitar el agua" no la
     // quitaba entera — que es lo que reporto Andoni.
-    if (Haruka::Planet::oceanWaterDisabled()) {
+    if (World::Water::oceanWaterDisabled()) {
         HARUKA_LOGD("Fluid", "agua APAGADA por HARUKA_NOWATER: no se siembra nada");
         return;
     }

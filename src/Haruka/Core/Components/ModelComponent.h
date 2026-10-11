@@ -7,7 +7,7 @@
 #include <string>
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Components {
 
 /**
  * @brief Model asset reference component.

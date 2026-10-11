@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <glm/gtx/quaternion.hpp>
 
-namespace Haruka {
+namespace Haruka::Game {
 
 namespace {
     glm::dvec3 safeNormalize(const glm::dvec3& v, const glm::dvec3& fallback) {
@@ -45,19 +45,19 @@ Character::Character(const glm::dvec3& position, const std::string& userId)
     localPlayer = !userId.empty();
     
     if (localPlayer) {
-        camera = std::make_unique<Camera>(WorldPos(position.x, position.y + currentHeight * 0.9, position.z));
+        camera = std::make_unique<Core::Camera>(Tools::WorldPos(position.x, position.y + currentHeight * 0.9, position.z));
     }
     
     forward = glm::vec3(0, 0, -1);
     right = glm::vec3(1, 0, 0);
     
     double posLen = glm::length(position);
-    upDirection = posLen > 1e-6 ? (position / posLen) : Haruka::WorldPos(0.0, 1.0, 0.0);
+    upDirection = posLen > 1e-6 ? (position / posLen) : Tools::WorldPos(0.0, 1.0, 0.0);
     
     // CORRECCIÓN: Convertir Euler (Pitch, Yaw, Roll) a Cuaternión
-    Haruka::Rotation initialRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+    Tools::Rotation initialRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
     
-    lastSyncPos = Haruka::WorldPos(position.x, position.y + currentHeight * 0.9, position.z);
+    lastSyncPos = Tools::WorldPos(position.x, position.y + currentHeight * 0.9, position.z);
     lastSyncRot = initialRot;
     targetPosition = lastSyncPos;
     targetRotation = initialRot;
@@ -92,8 +92,8 @@ void Character::update(float deltaTime) {
     {
         position = glm::mix(position, targetPosition, (double)(deltaTime * interpolationSpeed));
         
-        Haruka::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
-        Haruka::Rotation newRot = glm::slerp(currentRot, targetRotation, (double)(deltaTime * interpolationSpeed));
+        Tools::Rotation currentRot = glm::dquat(glm::dvec3(glm::radians((double)pitch), glm::radians((double)yaw), 0.0));
+        Tools::Rotation newRot = glm::slerp(currentRot, targetRotation, (double)(deltaTime * interpolationSpeed));
         
         glm::dvec3 euler = glm::eulerAngles(newRot);
         pitch = glm::degrees(euler.x);
@@ -273,9 +273,9 @@ void Character::processInput(SDL_Window* window, float deltaTime) {
         b.callback(*this, deltaTime, val);
     }
 
-    Haruka::Rotation camOrientation = camera
+    Tools::Rotation camOrientation = camera
         ? camera->orientation
-        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
+        : Tools::Rotation(glm::dvec3(0.0, 0.0, 0.0));
 
     if (onTransformChanged)
         onTransformChanged(position, camOrientation);
@@ -292,10 +292,10 @@ float Character::getSpeed() const {
 }
 
 void Character::move(glm::vec2 input, float deltaTime) {
-    Haruka::WorldPos up, surfaceForward, surfaceRight;
-    Haruka::Rotation camOri = camera
+    Tools::WorldPos up, surfaceForward, surfaceRight;
+    Tools::Rotation camOri = camera
         ? camera->orientation
-        : Haruka::Rotation(glm::dvec3(0.0, 0.0, 0.0));
+        : Tools::Rotation(glm::dvec3(0.0, 0.0, 0.0));
     buildSurfaceBasis(getEffectiveUp(), camOri, up, surfaceForward, surfaceRight);
 
     float speed = getSpeed();
@@ -344,11 +344,11 @@ void Character::stopWalking() {
 }
 
 void Character::moveForward(float amount) {
-    position += Haruka::WorldPos(forward) * (double)amount;
+    position += Tools::WorldPos(forward) * (double)amount;
 }
 
 void Character::moveRight(float amount) {
-    position += Haruka::WorldPos(right) * (double)amount;
+    position += Tools::WorldPos(right) * (double)amount;
 }
 
 void Character::jump() {
@@ -393,7 +393,7 @@ void Character::updateCamera() {
 
     glm::dvec3 up = getEffectiveUp();
     glm::dvec3 cameraPos = position + up * (double)(currentHeight * 0.9f);
-    camera->position = WorldPos(cameraPos.x, cameraPos.y, cameraPos.z);
+    camera->position = Tools::WorldPos(cameraPos.x, cameraPos.y, cameraPos.z);
 
     glm::dvec3 referenceForward = glm::dvec3(0.0, 0.0, -1.0);
     if (std::abs(glm::dot(referenceForward, up)) > 0.95) {
@@ -461,4 +461,4 @@ void Character::checkGrounded() {
     }
 }
 
-};
+} // namespace Haruka::Game;

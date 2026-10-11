@@ -12,7 +12,7 @@ namespace Haruka { namespace Renderer {
 
 Mesh::Mesh(std::vector<Vertex> vertex, std::vector<unsigned int> idx, std::vector<MeshTexture> textures) {
     if (vertex.empty()) {
-        HARUKA_RENDERER_ERROR(ErrorCode::MODEL_LOAD_FAILED, "Empty vertex list when creating mesh");
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::MODEL_LOAD_FAILED, "Empty vertex list when creating mesh");
         return;
     }
     this->vertex = vertex;

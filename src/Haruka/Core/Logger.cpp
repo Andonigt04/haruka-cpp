@@ -3,7 +3,7 @@
 #include <ctime>
 #include <cstring>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 // Por defecto INFO: las trazas DEBUG (colliders de props, escalas, listas de GPUs...) salian en
 // cada sesion y se comian el log. `HARUKA_DIAG=1` o `HARUKA_LOG_LEVEL=debug` las devuelven.
@@ -77,4 +77,4 @@ void log(LogLevel level, const char* component, const char* fmt, ...) {
     va_end(args);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Core

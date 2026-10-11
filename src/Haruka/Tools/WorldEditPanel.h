@@ -26,7 +26,7 @@
 
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 class WorldEditPanel {
 public:
@@ -34,8 +34,8 @@ public:
 
     /** @brief El mundo a editar y el centro de su planeta (los puntos del anfitrión llegan en
      *  coordenadas de MUNDO; `VoxWorld` habla relativo al centro). Nulo = panel inerte. */
-    void setWorld(VoxWorld* world, const glm::dvec3& planetCenter, double planetRadiusM);
-    VoxWorld* world() const { return m_world; }
+    void setWorld(World::Vox::VoxWorld* world, const glm::dvec3& planetCenter, double planetRadiusM);
+    World::Vox::VoxWorld* world() const { return m_world; }
 
     /** @brief Carpeta (relativa al proyecto, p. ej. `assets/vox/`) donde se guardan los PNG de las
      *  cuevas e islas nuevas. Vacía = borradores sin fichero. */
@@ -43,8 +43,8 @@ public:
     /** @brief Modo diseñador: los trazos van al MUNDO (carpeta `voxEdits`), no a la partida. */
     void setDesignerMode(bool on) { m_designer = on; if (m_world) m_world->setDesignerMode(on); }
 
-    void setOnCaveCreated(std::function<void(const CaveDef&)> fn)     { m_onCave = std::move(fn); }
-    void setOnIslandCreated(std::function<void(const IslandDef&)> fn) { m_onIsland = std::move(fn); }
+    void setOnCaveCreated(std::function<void(const World::Vox::CaveDef&)> fn)     { m_onCave = std::move(fn); }
+    void setOnIslandCreated(std::function<void(const World::Vox::IslandDef&)> fn) { m_onIsland = std::move(fn); }
     void setOnCaveRemoved(std::function<void(const std::string&)> fn)   { m_onCaveRemoved = std::move(fn); }
     void setOnIslandRemoved(std::function<void(const std::string&)> fn) { m_onIslandRemoved = std::move(fn); }
     /** @brief Algo cambió que la escena/partida debería guardar. */
@@ -55,12 +55,15 @@ public:
 
     Tool tool() const { return m_tool; }
     void setTool(Tool t) { m_tool = t; }
-    const VoxWorld::Brush& brush() const { return m_brush; }
+    const World::Vox::VoxWorld::Brush& brush() const { return m_brush; }
     bool removing() const { return m_remove; }
 
     // ── EL GESTO (lo llama el anfitrión con puntos de MUNDO) ────────────────────────────────────
     /** @brief El cursor está sobre este punto del campo (o no hay impacto). Sólo actualiza el indicador. */
     void hover(bool hit, const glm::dvec3& worldPos);
+    /** @brief El último punto que el anfitrión pasó a `hover` (para enseñar sus coordenadas). */
+    bool hoverHit() const { return m_hoverHit; }
+    const glm::dvec3& hoverPos() const { return m_hoverPos; }
     /** @brief Botón pulsado sobre el punto: un trazo (o una cueva/isla nueva, según la herramienta). */
     void press(const glm::dvec3& worldPos);
     /** @brief Arrastre con el botón pulsado: un trazo cada `radio·spacing` m recorridos, no por frame. */
@@ -80,8 +83,8 @@ public:
 
     // ── Colocar ─────────────────────────────────────────────────────────────────────────────────
     /** @brief Parámetros con los que se crea la próxima cueva/isla (editables en el panel). */
-    CaveDef&   nextCave()   { return m_nextCave; }
-    IslandDef& nextIsland() { return m_nextIsland; }
+    World::Vox::CaveDef&   nextCave()   { return m_nextCave; }
+    World::Vox::IslandDef& nextIsland() { return m_nextIsland; }
     /** @brief Crea una cueva/isla en `dir` (unitaria, desde el centro del planeta) con los
      *  parámetros actuales: nombre único, PNG en `assetDir`, y la coloca en el mundo. */
     bool createCaveAt(const glm::dvec3& dir);
@@ -111,7 +114,7 @@ private:
     // Pintar cambia los texels en memoria; "Rehornear" los guarda en sus rutas y vuelve a colocar
     // la cueva/isla (la clave del derivado lleva el hash de los texels: se rehace solo).
     struct MapView {
-        CaveMap  map;
+        World::Vox::CaveMap  map;
         RHI::TextureHandle tex{}, texOld{};   // la vieja se aparca un frame (command buffer en vuelo)
         uint64_t imTex = 0;                   // ImTextureID de `tex`
         bool     dirty = true;                // hay que subirla
@@ -136,14 +139,16 @@ private:
     void applyBrush(const glm::dvec3& worldPos);
     std::string uniqueName(const char* base, bool cave) const;
 
-    VoxWorld*   m_world = nullptr;
+    World::Vox::VoxWorld*   m_world = nullptr;
     glm::dvec3  m_center{0.0};
     double      m_radius = 0.0;
     std::string m_assetDir;
     bool        m_designer = false;
 
     Tool            m_tool = Tool::None;
-    VoxWorld::Brush m_brush{ VoxWorld::Brush::Shape::Sphere, 6.0f, 6.0f };
+    bool            m_hoverHit = false;
+    glm::dvec3      m_hoverPos{0.0};
+    World::Vox::VoxWorld::Brush m_brush{ World::Vox::VoxWorld::Brush::Shape::Sphere, 6.0f, 6.0f };
     bool            m_remove = true;
     float           m_spacing = 0.5f;     ///< fracción del radio entre trazos al arrastrar
     bool            m_dragging = false;
@@ -151,14 +156,14 @@ private:
     Indicator       m_ind;
     int             m_lastChanged = 0;    ///< vóxeles del último trazo (se muestra)
 
-    CaveDef   m_nextCave;
-    IslandDef m_nextIsland;
+    World::Vox::CaveDef   m_nextCave;
+    World::Vox::IslandDef m_nextIsland;
     int       m_selectedCave = -1, m_selectedIsland = -1;
 
-    std::function<void(const CaveDef&)>     m_onCave;
-    std::function<void(const IslandDef&)>   m_onIsland;
+    std::function<void(const World::Vox::CaveDef&)>     m_onCave;
+    std::function<void(const World::Vox::IslandDef&)>   m_onIsland;
     std::function<void(const std::string&)> m_onCaveRemoved, m_onIslandRemoved;
     std::function<void()>                   m_onChanged;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Tools

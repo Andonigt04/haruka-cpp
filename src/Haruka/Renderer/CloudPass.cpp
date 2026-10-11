@@ -292,7 +292,7 @@ void CloudPass::draw(const Frame& f) {
             if (RHI::valid(m_cloudPSO) && RHI::valid(m_cloudDepthRT) &&
                 RHI::valid(m_cloudRT)  && RHI::valid(m_cloudUpPSO)) {
                 const glm::dvec3 camD = glm::dvec3(f.camera->position);
-                const Haruka::WeatherSample wx = f.planets->weatherAt(camD);
+                const World::WeatherSample wx = f.planets->weatherAt(camD);
                 float coverC = wx.cloudCover;
                 float precC  = wx.precip;
                 if (f.rainOverride >= 0.0f) { precC = f.rainOverride; coverC = glm::max(coverC, precC); }
@@ -400,13 +400,13 @@ void CloudPass::draw(const Frame& f) {
                                     const double lon = (((double)x + 0.5) / CW - 0.5) * 2.0 * kPiH;
                                     const glm::dvec3 dd(std::cos(lat) * std::cos(lon), std::sin(lat),
                                                         std::cos(lat) * std::sin(lon));
-                                    const Haruka::TerrainSample ts =
+                                    const World::Terrain::TerrainSample ts =
                                         f.planets->sampleSurface(pcD + dd * (prD + 1.0));
                                     humField[(size_t)y * CW + x]   = ts.humidity;
                                     tempField[(size_t)y * CW + x]  = ts.tempC;
                                     // ⚠️ NO `landMask`: es la puerta del continente y aqui salia 1 en todo el
                                     // planeta (MAR 0.000 en el log). El mar es la cota bajo el nivel del mar.
-                                    waterField[(size_t)y * CW + x] = (ts.waterType == Haruka::WaterType::Ocean) ? 1.0f : 0.0f;
+                                    waterField[(size_t)y * CW + x] = (ts.waterType == World::Terrain::WaterType::Ocean) ? 1.0f : 0.0f;
                                     groundField[(size_t)y * CW + x] = std::max(ts.elevKm, 0.0f) * 1000.0f;   // la nube nace SOBRE el suelo
                                 }
                             }
@@ -456,7 +456,7 @@ void CloudPass::draw(const Frame& f) {
                             }
                         }
                         if (!m_skyBakeJob.valid()) {
-                            Haruka::WeatherSystem wcopy = f.planets->weather();
+                            World::WeatherSystem wcopy = f.planets->weather();
                             std::vector<float> tcopy = tempField, hcopy = humField, wcp = waterField, gcp = groundField;
                             // Humedad EFECTIVA: la estática del bioma + el vapor del ciclo del agua.
                             wcopy.effectiveHumidityField(humField.data(), hcopy.data(), CW, CH);
@@ -629,8 +629,8 @@ void CloudPass::draw(const Frame& f) {
                     // solo decide cuanto avanza HOY. El primer frame arranca en viento x simT para que
                     // el cielo no empiece en el origen del campo en cada partida.
                     {
-                        const glm::dvec3 wcl = glm::dvec3(f.windVec) * (double)Haruka::WeatherSystem::kCloudLevelWindMul
-                                             * (double)Haruka::WeatherSystem::kFieldScale;
+                        const glm::dvec3 wcl = glm::dvec3(f.windVec) * (double)World::WeatherSystem::kCloudLevelWindMul
+                                             * (double)World::WeatherSystem::kFieldScale;
                         const glm::dvec2 wEN(glm::dot(wcl, glm::dvec3(eastC)), glm::dot(wcl, glm::dvec3(northC)));
                         const glm::dvec2 dAdv = m_cloudDrift.advance(wEN, simT);   // core/cloud_motion.h
                         // HARUKA_DIAG: cuanto habria SALTADO el campo con la formula vieja (viento x simT)
@@ -674,7 +674,7 @@ void CloudPass::draw(const Frame& f) {
                     // con el GROSOR que calcula `sampleAt`: los dos juntos deciden si la nube se lee
                     // como cuerpo o como lámina, y el test `cloud_shape` fija su relación.
                     cp.misc = glm::vec4(atmoC, (float)steps(),
-                                        Haruka::WeatherSystem::kFieldScale, kCloudExtinction);
+                                        World::WeatherSystem::kFieldScale, kCloudExtinction);
 
                     // ── LOS EMBUDOS QUE HAY CERCA ───────────────────────────────────────────
                     // Los más cercanos primero: si hay más de `kCloudMaxVortices` (no debería
@@ -684,8 +684,8 @@ void CloudPass::draw(const Frame& f) {
                     if (f.planets) {
                         auto vs = f.planets->activeVortices();   // copia: se ordena (incluye los del juego)
                         std::sort(vs.begin(), vs.end(),
-                            [&](const Haruka::WeatherSystem::Vortex& a,
-                                const Haruka::WeatherSystem::Vortex& b) {
+                            [&](const World::WeatherSystem::Vortex& a,
+                                const World::WeatherSystem::Vortex& b) {
                                 return glm::dot(a.dir, upD) > glm::dot(b.dir, upD);
                             });
                         for (const auto& v : vs) {

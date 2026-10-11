@@ -22,5 +22,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::HDR;
-namespace Haruka { using Renderer::HDR; }

@@ -26,5 +26,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::RenderTarget;
-namespace Haruka { using Renderer::RenderTarget; }

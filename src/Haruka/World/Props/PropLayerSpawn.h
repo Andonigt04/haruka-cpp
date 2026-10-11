@@ -32,7 +32,7 @@
 #include "Haruka/Tools/ProcGraph/TreeProp.h"              // treePoisson, PoissonPoint
 #include "Haruka/Tools/ProcGraph/ProcNoise.h"             // hash32, WhiteNode
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 namespace PG = Haruka::Tools::ProcGraph;
 
 /** @brief Ancla el Poisson de una capa en la celda de la retícula.
@@ -80,7 +80,7 @@ inline PropsPlaced placeProps(const PG::IPropField& field, const PG::PropGrid& g
                 const float pz = ((float)iy + pp.uv.y) * cellM;
 
                 // Ecología/pendiente locales → ¿cuánto cumple la capa? 0 = fuera de su territorio.
-                const FieldSample fs = field.sampleAt(px, pz);
+                const Planet::FieldSample fs = field.sampleAt(px, pz);
                 const float slope   = PG::slopeAt(field, px, pz);
                 // Mapa de distribución (si la capa lo declara): MANDA sobre las bandas, igual que
                 // el zoneMap sobre los materiales. El campo sabe cómo traducirlo por dirección.
@@ -89,7 +89,7 @@ inline PropsPlaced placeProps(const PG::IPropField& field, const PG::PropGrid& g
                 const std::string layer = field.layerAt(px, pz);
                 const float hM = field.heightAt(px, pz);
                 const std::string biomeK = L.usesBiomeAnywhere()
-                    ? std::string(biomeKey(classifyBiome(BiomeSample{fs.tempC, fs.humidity, hM, slope})))
+                    ? std::string(Planet::biomeKey(Planet::classifyBiome(Planet::BiomeSample{fs.tempC, fs.humidity, hM, slope})))
                     : std::string{};
                 const std::string bk = L.biomeFor(biomeK, mapD, fs.tempC);
                 const float cov   = L.coverage(fs, slope, mapD, zone, layer, bk);
@@ -138,4 +138,4 @@ inline PropsPlaced placeProps(const PG::IPropField& field, const PG::PropGrid& g
     return out;
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

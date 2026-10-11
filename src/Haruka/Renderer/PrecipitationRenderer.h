@@ -21,7 +21,7 @@
 #include <glm/glm.hpp>
 #include "Haruka/RHI/RHITypes.h"
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class PrecipitationRenderer {
 public:
@@ -60,4 +60,4 @@ private:
     bool                m_failed = false;   // el shader no linkó: no reintentar cada frame
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

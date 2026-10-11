@@ -185,18 +185,12 @@ jobs:
             # Compilar el objetivo final
             cmake --build build -j"$(nproc)" --target HarukaEngine
 
-            # El test DGS dlopen libharuka_rules.so (no se enlaza a HarukaEngine → hay que
-            # construirlo aparte) y lo busca con "./libharuka_rules.so", relativo al CWD del
-            # runner (/workspace). Lo copiamos ahí para que la suite del dgs pase completa.
-            cmake --build build -j"$(nproc)" --target haruka_rules
-            cp build/libharuka_rules.so ./libharuka_rules.so
-
-            # Compilar y ejecutar tests (CPU-only, headless)
+            # Compilar y ejecutar tests (CPU-only, headless). haruka_tests construye también
+            # libharuka_rules.so (el test del DGS la carga por su ruta absoluta, fijada por CMake).
+            # Un test de CTest por carpeta de tests/; `-LE modules` porque el piloto de módulos C++20
+            # solo existe con Ninja y no se construye aquí.
             cmake --build build -j"$(nproc)" --target haruka_tests
-            ./build/haruka_tests
-
-            # Suite DGS enfocada (golden wire-format + módulo de reglas) en un solo filtro.
-            ./build/haruka_tests dgs
+            ctest --test-dir build -L cpu -LE modules -j"$(nproc)" --output-on-failure
 
             # Test de estrés de transferencia DGS (bench BDP + framer real). Header-only, sin red:
             # `--fast` reduce el volumen para que sea una verificación rápida en CI.

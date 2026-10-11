@@ -26,8 +26,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
-namespace Haruka {
-namespace Planet {
+namespace Haruka::World::Terrain {
 
 // =================================================================================================
 // Geometría del clipmap — gemelo de clipmap.tesc + Planet.cpp (llenado de ClipParams)
@@ -745,5 +744,4 @@ inline void terrainClipFrame(const glm::dvec3& cameraPos, const glm::dvec3& plan
     tv = glm::cross(up, tu);
 }
 
-} // namespace Planet
-} // namespace Haruka
+} // namespace Haruka::World::Terrain

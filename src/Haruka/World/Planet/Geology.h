@@ -5,7 +5,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>   // glm::pi — llegaba de rebote por el cube_sphere.h borrado
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World { namespace Planet {
 
 // ===========================================================================
 // Plate tectonics layer — mandatory
@@ -174,4 +174,4 @@ inline double GeologyOutput::elevationModifier(const glm::dvec3& dir) const {
     return elev;
 }
 
-}} // namespace Haruka::Planet
+}} // namespace Haruka::World

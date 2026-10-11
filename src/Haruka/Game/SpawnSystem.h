@@ -11,7 +11,7 @@
 #include <memory>
 #include <functional>
 
-namespace Haruka {
+namespace Haruka::Game {
 
 class Character;
 
@@ -117,4 +117,4 @@ private:
     SpawnPoint* findBestSpawnPoint(SpawnType type, const std::string& zoneId);
 };
 
-}
+} // namespace Haruka::Game

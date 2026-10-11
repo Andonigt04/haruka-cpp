@@ -4,7 +4,7 @@
 // Decisor ecológico de props (primera plantilla: ÁRBOLES). GL-free, CPU-only.
 //
 // REGLA DE ORO del PLAN_TERRENO_V3 (§3.5): un prop NO se coloca con una fórmula
-// propia — PREGUNTA al campo. Aquí el campo es `Haruka::FieldSample`
+// propia — PREGUNTA al campo. Aquí el campo es `Haruka::World::Planet::FieldSample`
 // (PlanetFields.h): elevación erosionada, caudal, lago, temperatura, humedad.
 //
 // `treeSuitability(...)`: acepta o rechaza un punto (pendiente, humedad,
@@ -22,7 +22,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Regla ecológica de un árbol en un punto del campo.
@@ -40,7 +40,7 @@ struct TreeSuit {
 // llamador (el campo no la expone aún; ver PlanetFields.h → FieldSample).
 // `seedMix = seedBase + (hash de la celda)` para no repetir el árbol idéntico.
 // ===========================================================================
-inline TreeSuit treeSuitability(const FieldSample& fs, float slopeRad,
+inline TreeSuit treeSuitability(const World::Planet::FieldSample& fs, float slopeRad,
                                uint32_t sampleSeed) {
     TreeSuit s;
 
@@ -54,7 +54,7 @@ inline TreeSuit treeSuitability(const FieldSample& fs, float slopeRad,
     if (fs.tempC > 32.0f) return s;             // tórrida (savas/asavana)
 
     // --- caudal: NO en el cauce de un río ------------------------------------
-    if (fs.flow > Haruka::PlanetFields::kRiverFlow) return s;   // dentro del río
+    if (fs.flow > World::Planet::PlanetFields::kRiverFlow) return s;   // dentro del río
     if (fs.isLake) return s;                                     // en el lago
 
     // --- pendiente: ángulo frontal del suelo (< ~30° ≈ 0.52 rad) ------------
@@ -117,4 +117,4 @@ inline PoissonPoint treePoisson(uint32_t cellHash, float gridScale,
     return { glm::vec2(px, pz), glm::vec3(px, 0.0f, pz), seed };
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

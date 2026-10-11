@@ -20,9 +20,9 @@
 
 #include "Haruka/Tools/MathTypes.h"
 
-namespace Haruka { namespace Core { class Camera; } } using Haruka::Core::Camera;
+namespace Haruka { namespace Core { class Camera; } }
 
-namespace Haruka {
+namespace Haruka::Cinematics {
 
 class CinematicSequencer {
 public:
@@ -41,7 +41,7 @@ public:
      * @param gameplayCam camera to blend FROM during blend-in (live game camera).
      * @return active() after advancing (false → caller keeps its own camera).
      */
-    bool update(double dt, Camera& out, const Camera& gameplayCam);
+    bool update(double dt, Core::Camera& out, const Core::Camera& gameplayCam);
 
     /** @brief Letterbox bar amount 0..1 (eased in/out) — 0 when inactive. */
     float letterbox() const;
@@ -87,5 +87,5 @@ private:
     bool       m_haveStart = false;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Cinematics
 

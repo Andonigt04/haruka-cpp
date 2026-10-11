@@ -44,6 +44,12 @@ struct DebugFrameInfo {
     float       dtSeconds = 0.0f;      ///< el tiempo del frame anterior
     double      worldTimeS = 0.0;      ///< reloj del mundo (simulacion; el del cluster si hay DGS)
     glm::dvec3  worldPos{0.0};         ///< coords del jugador (XYZ del mundo, m)
+    /// Dónde está eso en el planeta (`Application::probeSurface`): lat/lon con la convención de
+    /// `SURVIVAL_SPAWN` y cotas sobre el nivel del mar. `geoOk` = false si no hay planeta activo.
+    bool        geoOk = false;
+    double      latDeg = 0.0, lonDeg = 0.0;
+    double      altSeaM = 0.0;         ///< tu cota sobre el nivel del mar
+    double      groundSeaM = 0.0;      ///< la del suelo en tu vertical (< 0 = bajo el mar)
     int         sceneObjects = 0;
     int         localNpcs = 0;         ///< criaturas del juego (MonsterManager)
     int         scatterProps = 0;

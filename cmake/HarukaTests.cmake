@@ -13,44 +13,25 @@ target_include_directories(bench_dgs_bandwidth PRIVATE "${CMAKE_CURRENT_SOURCE_D
 # --- 6a-bis. haruka_tests: banco de pruebas HEADLESS (LOD/sampler/órbitas, sin ventana/GL) ---
 # Subsistemas puros-CPU dirigidos con entrada sintética + verificación de invariantes → depurar a
 # pequeña escala, determinista y rápido, sin cargar un planeta entero. `ctest` o `./bin/haruka_tests`.
-add_executable(haruka_tests
-    tests/HarukaTests.cpp      # main() — selecciona/dirige
-    tests/TestCommon.cpp       # framework de aserciones compartido
-    tests/TestJobs.cpp         # pool central de trabajos (Core/Jobs)
-    tests/TestResourceStore.cpp # almacen de recursos CPU<->GPU (Renderer/ResourceStore)
-    tests/TestTerrain.cpp      # cube-sphere / climate / weather fronts / ground layer (CPU)
-    tests/TestPhysics.cpp      # caída radial + determinismo (sin GL)
-    tests/TestXPBD.cpp         # enganche de tela a un hueso (piel/membranas de criaturas)
-    tests/TestConstruction.cpp # sistema de construcción: validación de colocación F1 (sin GL)
-    tests/TestPorts.cpp        # puertos autorizados + raíles (mecanismos, no animaciones)
-    tests/TestPrefab.cpp       # prefabricados: los cambios de UN conjunto no tocan el montaje
-    tests/TestPrimitives.cpp   # primitivas: ninguna cara bobinada al revés (una tapa invertida no da error, desaparece)
-    tests/TestDGS.cpp
-    tests/TestSimplePlanet.cpp         # SimplePlanet mesh & config
-    tests/TestTerrainQuality.cpp       # terrain quality → resolution mappings
-    tests/TestInput.cpp                 # acciones de entrada: teclado + mando en la misma accion
-    tests/TestDisplay.cpp               # selector de monitor: re-enumerar al enchufar, indice por pantalla
-    tests/TestSound.cpp                 # sonido: sintesis + puntos logicos agrupados (sin OpenAL)
-    tests/TestSkyAmbient.cpp           # ambiente SH: paridad con sky_palette.glsl + simetría
-    tests/TestProcGraph.cpp             # ProcGraph nodes, BiomeConfig, RGBAImage
-    tests/TestOrbit.cpp                 # órbitas Kepler con elementos precesantes
-    tests/TestImageWriter.cpp          # PNG: ida y vuelta + compresión DEFLATE
-    tests/TestPropLOD.cpp              # LOD de malla de props: envolvente estable
-    tests/TestPropCollider.cpp         # colliders de props por PARTE (esqueleto del arbol)
-    tests/TestRockInterior.cpp         # penones ENTERRADOS de la roca: no se ven (rayos + contraprueba)
-    tests/TestCaves.cpp                 # cuevas: mapas en disco, conectividad garantizada, campo
-    tests/TestVoxWorld.cpp             # el mundo por chunks: sin costura, trazos de la partida
-    tests/TestIslands.cpp               # islas flotantes: roca AÑADIDA al mismo campo
-    tests/TestWeatherSevere.cpp        # tiempo adverso: severidad por condiciones + vortices (Rankine)
-    tests/TestCloudMotion.cpp          # frame a frame: la deriva integrada y el fundido de horneados (sin tirones)
-    tests/TestCloudFormation.cpp       # el UNICO test de formacion: la columna de aire (CloudColumn.h)
-    tests/TestOcean.cpp                 # el mar: derivada de la ola, transporte, bajio y flotacion
-    tests/TestShallowWater.cpp         # agua interior: estabilidad al re-anclar y cobertura en montana
-    tests/TestTerrainNode.cpp)         # v5 F1: direccionamiento de nodos del quadtree (bit-exacto)
+# `tests/` refleja `src/Haruka/`: cada carpeta es un GRUPO del banco y un test de CTest. Las fuentes se
+# recogen por glob (un test nuevo en su carpeta entra solo, y se registra solo: HARUKA_REGISTER_TESTS).
+# Fuera: los binarios propios (RHI con ventana, el DGS vivo y el piloto de módulos).
+file(GLOB_RECURSE HARUKA_TEST_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp")
+list(FILTER HARUKA_TEST_SOURCES EXCLUDE REGEX "/tests/(RHI|Shaders|Data)/")
+# `*GPU.cpp` son del banco de GPU (haruka_tests_rhi): viven junto a los de CPU de su módulo.
+list(FILTER HARUKA_TEST_SOURCES EXCLUDE REGEX "GPU\\.cpp$")
+list(FILTER HARUKA_TEST_SOURCES EXCLUDE REGEX "/tests/Network/DGSLiveTest\\.cpp$")
+list(FILTER HARUKA_TEST_SOURCES EXCLUDE REGEX "/tests/Core/Jobs/ModulePilot[^/]*\\.cpp$")
+add_executable(haruka_tests ${HARUKA_TEST_SOURCES})
+target_include_directories(haruka_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 target_link_libraries(haruka_tests PRIVATE HarukaEngine)
 # TestDGS.cpp incluye el ABI del DGS (external/dgs/include/dgs/game_module.h). El include no siempre
 # se propaga desde HarukaEngine (solo con HARUKA_NETWORK), así que se lo damos al test directamente.
 target_include_directories(haruka_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/external/dgs")
+# El módulo de reglas que TestDGS carga con dlopen: se construye con el banco y se le pasa su ruta
+# absoluta, así el banco no depende del directorio desde el que se lance.
+add_dependencies(haruka_tests haruka_rules)
+target_compile_definitions(haruka_tests PRIVATE HARUKA_RULES_LIB="$<TARGET_FILE:haruka_rules>")
 # RAÍZ DE ASSETS DEL BANCO, absoluta y fijada aquí (ver GLContext en test_gl_fixture.h). El banco se
 # construye también dentro del árbol del JUEGO (FetchContent), donde NO hay assets al lado del
 # ejecutable: sin esto, ese binario corría sin shaders — terreno GPU deshabilitado — y daba números
@@ -64,12 +45,31 @@ target_include_directories(haruka_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ext
 # otro directorio (probado: un test de lluvia bajo cubierto cambiaba de resultado).
 get_filename_component(HARUKA_TESTS_ASSET_ROOT "${SHADER_OUT_DIR}" DIRECTORY)
 target_compile_definitions(haruka_tests PRIVATE
-    HARUKA_TEST_ASSET_DIR="${HARUKA_TESTS_ASSET_ROOT}/")
+    HARUKA_TEST_ASSET_DIR="${HARUKA_TESTS_ASSET_ROOT}/"
+    HARUKA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/Data/")   # ficheros de prueba versionados (p. ej. el .glb de Blender)
 set_target_properties(haruka_tests PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
 enable_testing()
-add_test(NAME haruka_tests COMMAND haruka_tests)
+# Un test de CTest por CARPETA de tests/ (= grupo del banco): `ctest -R World.Terrain`, `ctest -L cpu -j8`,
+# `ctest --rerun-failed`. Etiquetas: `cpu` (todo este banco es headless) y el módulo de primer nivel en
+# minúsculas (`world`, `physics`...). Si una carpeta se queda sin tests, su test FALLA (--group lo exige).
+set(_haruka_test_groups "")
+foreach(_src ${HARUKA_TEST_SOURCES})
+    file(RELATIVE_PATH _rel "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${_src}")
+    get_filename_component(_dir "${_rel}" DIRECTORY)
+    if(_dir AND NOT _dir STREQUAL "Common")
+        list(APPEND _haruka_test_groups "${_dir}")
+    endif()
+endforeach()
+list(REMOVE_DUPLICATES _haruka_test_groups)
+foreach(_g ${_haruka_test_groups})
+    string(REPLACE "/" "." _name "${_g}")
+    string(REGEX REPLACE "/.*" "" _top "${_g}")
+    string(TOLOWER "${_top}" _top)
+    add_test(NAME ${_name} COMMAND haruka_tests --group ${_g})
+    set_tests_properties(${_name} PROPERTIES LABELS "cpu;${_top}" TIMEOUT 1200)
+endforeach()
 
 # --- 6a-bis-2. haruka_tests_rhi: banco ABIERTO del RHI (GL + Vulkan, requiere VENTANA) -------
 # A diferencia de haruka_tests (headless, CPU), esto abre una SDL_Window y crea un device real
@@ -79,9 +79,42 @@ add_test(NAME haruka_tests COMMAND haruka_tests)
 # Cubre: textura por formato, buffers, render targets (incl. depth-as-texture / MRT), array &
 # cubemaps & samplers, y un ciclo completo del frame (acquire->clear->present: la cadena que
 # daba TDR en NVIDIA). Si no hay display, SDL_CreateWindow falla y el test se salta con "skip".
-add_executable(haruka_tests_rhi
-    tests/RHITestMain.cpp)
+# El banco de GPU: `tests/RHI/` (main, tabla de grupos y lo común) + los `*GPU.cpp` de cada módulo
+# (`tests/World/Water/TestWaterGPU.cpp`...), que viven junto a los tests de CPU de lo mismo.
+file(GLOB_RECURSE HARUKA_RHI_TEST_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/RHI/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/tests/*GPU.cpp")
+add_executable(haruka_tests_rhi ${HARUKA_RHI_TEST_SOURCES})
+target_include_directories(haruka_tests_rhi PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
 target_link_libraries(haruka_tests_rhi PRIVATE HarukaEngine)
+
+# Shaders SOLO de test (rhitest_* y las sondas *_probe): viven en tests/Shaders/ y se compilan aquí, no
+# con los del motor, así que un build sin tests no los compila ni los instala. Salen a
+# `<shaders>/tests/` (el banco los pide como "shaders/tests/<nombre>"). Sus `#include "lib/..."` se
+# resuelven desde la raíz de shaders —con -I al compilar y con `shaderIncludeDir()` en tiempo de
+# ejecución—, no desde su carpeta, por eso pueden vivir aquí.
+file(GLOB HARUKA_TEST_SHADERS CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/Shaders/*.vert" "${CMAKE_CURRENT_SOURCE_DIR}/tests/Shaders/*.frag"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tests/Shaders/*.comp")
+set(HARUKA_TEST_SPIRV "")
+foreach(SRC ${HARUKA_TEST_SHADERS})
+    get_filename_component(NAME ${SRC} NAME)
+    set(SPV "${SHADER_OUT_DIR}/tests/${NAME}.spv")
+    if(GLSLC)
+        set(_compile ${GLSLC} --target-env=opengl -I${SHADER_SRC_DIR} ${SRC} -o ${SPV})
+    else()
+        set(_compile ${GLSLANG_V} -G -I${SHADER_SRC_DIR} ${SRC} -o ${SPV})
+    endif()
+    add_custom_command(OUTPUT ${SPV}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_OUT_DIR}/tests"
+        COMMAND ${_compile}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} "${SHADER_OUT_DIR}/tests/${NAME}"
+        DEPENDS ${SRC} ${SHADER_LIBS}
+        COMMENT "glsl (test)  tests/${NAME} -> tests/${NAME}.spv"
+        VERBATIM)
+    list(APPEND HARUKA_TEST_SPIRV ${SPV})
+endforeach()
+add_custom_target(haruka_test_shaders DEPENDS ${HARUKA_TEST_SPIRV})
+add_dependencies(haruka_tests_rhi haruka_test_shaders)
 set_target_properties(haruka_tests_rhi PROPERTIES
     BUILD_RPATH   "$ORIGIN"
     INSTALL_RPATH "$ORIGIN")
@@ -99,11 +132,13 @@ set_target_properties(haruka_tests_rhi PROPERTIES
 # banco FALLE si aun así acabó en otro sitio.
 add_test(NAME haruka_tests_rhi_gl COMMAND haruka_tests_rhi gl)
 set_tests_properties(haruka_tests_rhi_gl PROPERTIES
+    LABELS "gpu;rhi;slow"
     ENVIRONMENT "SDL_VIDEODRIVER=offscreen;__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json;LIBGL_ALWAYS_SOFTWARE=1;GALLIUM_DRIVER=llvmpipe;HARUKA_REQUIRE_DEVICE=llvmpipe;HARUKA_NO_VSYNC=1"
     TIMEOUT 1800)
 
 add_test(NAME haruka_tests_rhi_vk COMMAND haruka_tests_rhi vk)
 set_tests_properties(haruka_tests_rhi_vk PROPERTIES
+    LABELS "gpu;rhi;slow"
     ENVIRONMENT "SDL_VIDEODRIVER=offscreen;VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json;HARUKA_REQUIRE_DEVICE=llvmpipe;HARUKA_NO_VSYNC=1"
     TIMEOUT 1800)
 
@@ -127,7 +162,7 @@ find_program(HARUKA_DGS_VALIDADOR validador_node
 find_library(HARUKA_DGS_CLIENT_LIB dgs_client
              PATHS "${CMAKE_CURRENT_SOURCE_DIR}/../dgs/build" NO_DEFAULT_PATH)
 if (HARUKA_DGS_VALIDADOR AND HARUKA_DGS_CLIENT_LIB)
-    add_executable(haruka_dgs_live tests/DGSLiveTest.cpp)
+    add_executable(haruka_dgs_live tests/Network/DGSLiveTest.cpp)
     target_include_directories(haruka_dgs_live PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src"
         "${CMAKE_CURRENT_SOURCE_DIR}/../dgs"
@@ -141,6 +176,7 @@ if (HARUKA_DGS_VALIDADOR AND HARUKA_DGS_CLIENT_LIB)
 
     add_test(NAME dgs_live_terrain COMMAND haruka_dgs_live)
     set_tests_properties(dgs_live_terrain PROPERTIES
+        LABELS "network;live"
         ENVIRONMENT "HARUKA_DGS_VALIDADOR=${HARUKA_DGS_VALIDADOR}"
         WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
         RUN_SERIAL TRUE TIMEOUT 120)
@@ -162,18 +198,19 @@ if(CMAKE_GENERATOR MATCHES "Ninja")
     target_link_libraries(haruka_jobs_module PUBLIC HarukaEngine)
     set_target_properties(haruka_jobs_module PROPERTIES CXX_SCAN_FOR_MODULES ON)
 
-    add_executable(haruka_module_pilot tests/ModulePilot.cpp)
+    add_executable(haruka_module_pilot tests/Core/Jobs/ModulePilot.cpp)
     target_link_libraries(haruka_module_pilot PRIVATE haruka_jobs_module)
     set_target_properties(haruka_module_pilot PROPERTIES CXX_SCAN_FOR_MODULES ON)
     add_test(NAME haruka_module_pilot COMMAND haruka_module_pilot)
+    set_tests_properties(haruka_module_pilot PROPERTIES LABELS "cpu;modules")
 
     # CONTRAPRUEBA: usar algo NO exportado tiene que fallar al compilar.
-    add_executable(haruka_module_pilot_hidden EXCLUDE_FROM_ALL tests/ModulePilotHidden.cpp)
+    add_executable(haruka_module_pilot_hidden EXCLUDE_FROM_ALL tests/Core/Jobs/ModulePilotHidden.cpp)
     target_link_libraries(haruka_module_pilot_hidden PRIVATE haruka_jobs_module)
     set_target_properties(haruka_module_pilot_hidden PROPERTIES CXX_SCAN_FOR_MODULES ON)
     add_test(NAME haruka_module_hidden
              COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target haruka_module_pilot_hidden)
-    set_tests_properties(haruka_module_hidden PROPERTIES WILL_FAIL TRUE)
+    set_tests_properties(haruka_module_hidden PROPERTIES WILL_FAIL TRUE LABELS "cpu;modules")
 else()
     message(STATUS "Piloto de modulos C++20: solo con Ninja (generador actual: ${CMAKE_GENERATOR})")
 endif()

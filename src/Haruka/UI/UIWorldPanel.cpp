@@ -38,7 +38,7 @@ UIWorldPanel::UIWorldPanel(Desc desc)
     : m_desc(std::move(desc))
     , m_windowId("##wp_" + m_desc.id)
 {
-    m_fbo = std::make_unique<RenderTarget>(m_desc.fboWidth, m_desc.fboHeight);
+    m_fbo = std::make_unique<Renderer::RenderTarget>(m_desc.fboWidth, m_desc.fboHeight);
     m_fboDirtyThisFrame = true;
 
     RHI::Device* dev = RHI::device();
@@ -46,8 +46,8 @@ UIWorldPanel::UIWorldPanel(Desc desc)
 
     m_uboH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PanelUBOData), nullptr, RHI::BufferMemory::Dynamic);
 
-    std::string vsPath = Shader::baseDir() + "shaders/ui_world_panel.vert";
-    std::string fsPath = Shader::baseDir() + "shaders/ui_world_panel.frag";
+    std::string vsPath = Renderer::Shader::baseDir() + "shaders/ui_world_panel.vert";
+    std::string fsPath = Renderer::Shader::baseDir() + "shaders/ui_world_panel.frag";
     RHI::PipelineDesc pd;
     pd.vertexPath = vsPath.c_str();
     pd.fragmentPath = fsPath.c_str();

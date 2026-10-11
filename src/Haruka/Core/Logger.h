@@ -2,7 +2,7 @@
 #include <cstdio>
 #include <cstdarg>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 enum class LogLevel {
     Debug = 0,
@@ -35,12 +35,12 @@ void log(LogLevel level, const char* component, const char* fmt, ...);
  */
 bool diagLogs();
 
-} // namespace Haruka
+} // namespace Haruka::Core
 
-#define HARUKA_LOGD(comp, ...)  Haruka::log(Haruka::LogLevel::Debug, (comp), __VA_ARGS__)
-#define HARUKA_LOGI(comp, ...)  Haruka::log(Haruka::LogLevel::Info,  (comp), __VA_ARGS__)
-#define HARUKA_LOGW(comp, ...)  Haruka::log(Haruka::LogLevel::Warn,  (comp), __VA_ARGS__)
-#define HARUKA_LOGE(comp, ...)  Haruka::log(Haruka::LogLevel::Error, (comp), __VA_ARGS__)
+#define HARUKA_LOGD(comp, ...)  Haruka::Core::log(Haruka::Core::LogLevel::Debug, (comp), __VA_ARGS__)
+#define HARUKA_LOGI(comp, ...)  Haruka::Core::log(Haruka::Core::LogLevel::Info,  (comp), __VA_ARGS__)
+#define HARUKA_LOGW(comp, ...)  Haruka::Core::log(Haruka::Core::LogLevel::Warn,  (comp), __VA_ARGS__)
+#define HARUKA_LOGE(comp, ...)  Haruka::Core::log(Haruka::Core::LogLevel::Error, (comp), __VA_ARGS__)
 
-/** @brief Traza de diagnóstico por frame: solo con `HARUKA_DIAG=1`. Ver `Haruka::diagLogs()`. */
-#define HARUKA_LOGDIAG(comp, ...) do { if (Haruka::diagLogs()) HARUKA_LOGI((comp), __VA_ARGS__); } while (0)
+/** @brief Traza de diagnóstico por frame: solo con `HARUKA_DIAG=1`. Ver `Haruka::Core::diagLogs()`. */
+#define HARUKA_LOGDIAG(comp, ...) do { if (Haruka::Core::diagLogs()) HARUKA_LOGI((comp), __VA_ARGS__); } while (0)

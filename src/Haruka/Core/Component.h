@@ -13,10 +13,10 @@
 #include <memory>
 #include <nlohmann/json.hpp>
 
-namespace Haruka {
+namespace Haruka::Core::Scene { class SceneObject; }
 
-class SceneObject;
 
+namespace Haruka::Core {
 /**
  * @brief Base interface for scene components.
  *
@@ -33,10 +33,10 @@ public:
     /** @brief Renders the component inspector UI, if any. */
     virtual void renderInspector() {}
     /** @brief Non-owning pointer to the owning scene object. */
-    SceneObject* owner = nullptr;
+    Scene::SceneObject* owner = nullptr;
 };
 
 /** @brief Shared ownership alias for components. */
 using ComponentPtr = std::shared_ptr<Component>;
+} // namespace Haruka::Core
 
-}

@@ -19,7 +19,9 @@
 #include "Haruka/RHI/RHIResources.h"
 #include "Haruka/World/CloudMotion.h"   // CloudDrift (deriva integrada) + BakeBlend (fundido de horneados)
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; class WorldSystem; }
+namespace Haruka { namespace Core { class Camera; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
+namespace Haruka::World { class WorldSystem; }
 
 namespace Haruka::Renderer {
 
@@ -28,8 +30,8 @@ public:
     /// Lo que el pase necesita del frame y no es suyo.
     struct Frame {
         Core::Camera*          camera  = nullptr;
-        PlanetarySystem*       planets = nullptr;
-        const WorldSystem*     world   = nullptr;
+        World::Planet::PlanetarySystem*       planets = nullptr;
+        const World::WorldSystem*     world   = nullptr;
         RHI::RenderPassHandle  sceneTargetPass{};   ///< invalido = la escena vive en el backbuffer
         int   width = 1, height = 1;                ///< del target de escena (reducido si hay post)
         float rainOverride = -1.0f;                 ///< consola `rain`: fuerza precipitacion; <0 = auto
@@ -77,8 +79,8 @@ private:
     std::future<SkyBake> m_skyBakeJob;
     std::vector<float>   m_lastSkyRGBA;   ///< ultimo cielo horneado, para el ciclo del agua
     double               m_lastWeatherT = -1.0;
-    Haruka::CloudDrift   m_cloudDrift;    ///< deriva del campo, INTEGRADA (core/cloud_motion.h)
-    Haruka::BakeBlend    m_cloudBlend;    ///< fundido entre horneados
+    World::CloudDrift   m_cloudDrift;    ///< deriva del campo, INTEGRADA (core/cloud_motion.h)
+    World::BakeBlend    m_cloudBlend;    ///< fundido entre horneados
     bool m_enabled = true;
 };
 

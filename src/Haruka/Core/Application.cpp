@@ -63,7 +63,7 @@ Application::Application() : _window(nullptr) {
     // Lo PRIMERO del log: sin saber contra que build se probo, un reporte de fallo no se puede
     // confirmar ni descartar. Va aqui y no tras la inicializacion porque si el arranque revienta es
     // cuando mas falta hace saber que binario reviento.
-    HARUKA_LOGI("Haruka", "Haruka %s", Haruka::buildString().c_str());
+    HARUKA_LOGI("Haruka", "Haruka %s", buildString().c_str());
 }
 
 Application::~Application() {
@@ -98,8 +98,8 @@ static std::string resolveScenePath(const std::string& ref) {
 }
 
 void Application::loadScene(const std::string& scenePathRef) {
-    _ownedScene = std::make_unique<Haruka::SceneManager>();
-    Haruka::SceneLoader loader(*_ownedScene);
+    _ownedScene = std::make_unique<Scene::SceneManager>();
+    Scene::SceneLoader loader(*_ownedScene);
 
     const std::string scenePath = resolveScenePath(scenePathRef);
     if (!scenePath.empty() && loader.loadFromFile(scenePath)) {
@@ -124,14 +124,14 @@ void Application::setEditorViewportSize(int w, int h) {
 void Application::initPlanetarySystem() {
     if (!_currentScene) return;
 
-    _planetarySystem = std::make_unique<Haruka::PlanetarySystem>();
+    _planetarySystem = std::make_unique<World::Planet::PlanetarySystem>();
     _planetarySystem->init();
 
     // Wire up planetary physics: la física solo conoce IWorldProvider (sin GL). Aquí se le inyecta
     // el adaptador CLIENTE sobre WorldSystem (gravedad + mar) + PlanetarySystem (altura del terreno).
 #ifdef HARUKA_MOD_PHYSICS
     if (_physicsEngine) {
-        _worldProvider = std::make_unique<Haruka::WorldSystemProvider>(
+        _worldProvider = std::make_unique<World::WorldSystemProvider>(
             _worldSystem.get(), _planetarySystem.get());
         _physicsEngine->setWorldProvider(_worldProvider.get());
     }
@@ -143,7 +143,7 @@ void Application::initPlanetarySystem() {
 }
 
 void Application::applyGraphicsSettings() {
-    const auto& g = Haruka::SettingsManager::get().graphics();
+    const auto& g = Settings::SettingsManager::get().graphics();
 
     setRenderFeatureBloom(g.bloom);
     setRenderFeatureSSAO(g.ssao);
@@ -180,7 +180,7 @@ void Application::applyGraphicsSettings() {
         if (::SDL_Window* w = _window->getNativeWindow()) {
             // `g` es const aqui (esta funcion solo APLICA ajustes). Resolver el defecto es lo unico
             // que los escribe, y va por el accesor mutable a proposito, para que se vea.
-            auto& gw = Haruka::SettingsManager::get().graphics();
+            auto& gw = Settings::SettingsManager::get().graphics();
             if (g.resolutionW <= 0 || g.resolutionH <= 0) {
                 // Nativa del monitor ELEGIDO (no de donde este la ventana en ese momento): si el
                 // usuario apunto a otro monitor, el "primer arranque" se resuelve contra el suyo.
@@ -208,26 +208,26 @@ void Application::applyGraphicsSettings() {
     // for fill-rate (positive bias = blurrier mips); Ultra = max anisotropy, sharp.
     // Applies to textures loaded after this call (see Texture::setQuality).
     switch (g.textureQuality) {
-        case Haruka::Settings::TextureQuality::Low:    Texture::setQuality(1.0f,  +1.0f); break;
-        case Haruka::Settings::TextureQuality::Medium: Texture::setQuality(4.0f,   0.0f); break;
-        case Haruka::Settings::TextureQuality::High:   Texture::setQuality(8.0f,   0.0f); break;
-        case Haruka::Settings::TextureQuality::Ultra:  Texture::setQuality(16.0f, -0.5f); break;
+        case Haruka::Settings::TextureQuality::Low:    Renderer::Texture::setQuality(1.0f,  +1.0f); break;
+        case Haruka::Settings::TextureQuality::Medium: Renderer::Texture::setQuality(4.0f,   0.0f); break;
+        case Haruka::Settings::TextureQuality::High:   Renderer::Texture::setQuality(8.0f,   0.0f); break;
+        case Haruka::Settings::TextureQuality::Ultra:  Renderer::Texture::setQuality(16.0f, -0.5f); break;
     }
 }
 
-void Application::init(Haruka::SceneManager& scene) {
+void Application::init(Scene::SceneManager& scene) {
     _currentScene = &scene;
     applyGraphicsSettings();
 
     if (!_worldSystem) {
-        _worldSystem = std::make_unique<Haruka::WorldSystem>();
+        _worldSystem = std::make_unique<World::WorldSystem>();
         _worldSystem->init();
     }
     _worldSystem->syncFromScene(scene);
 
 #ifdef HARUKA_MOD_PHYSICS
     if (!_physicsEngine) {
-        _physicsEngine = std::make_unique<Haruka::PhysicsEngine>();
+        _physicsEngine = std::make_unique<Physics::PhysicsEngine>();
         // Las tareas de fondo de la física (la malla del suelo) van al pool CENTRAL. La física no
         // puede llamarlo sola: es una biblioteca aparte que también usa el servidor sin el motor.
         _physicsEngine->setTaskRunner([](std::function<void()> task, bool urgent) {
@@ -255,9 +255,9 @@ void Application::init(Haruka::SceneManager& scene) {
     // planeta a propósito — la interpretación escena→cuerpos celestes es del motor.
     initPlanetarySystem();
 
-    MotorInstance::getInstance().setApplication(this);
-    MotorInstance::getInstance().setScene(_currentScene);
-    MotorInstance::getInstance().setCamera(_camera.get());
+    Renderer::MotorInstance::getInstance().setApplication(this);
+    Renderer::MotorInstance::getInstance().setScene(_currentScene);
+    Renderer::MotorInstance::getInstance().setCamera(_camera.get());
 }
 
 void Application::recreateFBOs(int newWidth, int newHeight) {
@@ -273,12 +273,12 @@ void Application::recreateFBOs(int newWidth, int newHeight) {
             c->setViewport(0, 0, (int)width, (int)height);
 
     // 3. Recreate lighting + post-processing buffers
-    _hdr = std::make_unique<HDR>(width, height);
-    _bloom = std::make_unique<Bloom>(width, height);
+    _hdr = std::make_unique<Renderer::HDR>(width, height);
+    _bloom = std::make_unique<Renderer::Bloom>(width, height);
 
     // 4. Recreate SSAO (needs the new size for its noise and samples)
     if (_ssao) {
-        _ssao = std::make_unique<SSAO>(width, height);
+        _ssao = std::make_unique<Renderer::SSAO>(width, height);
     }
 
     // 5. Update the camera projection matrix
@@ -297,7 +297,7 @@ void Application::cleanup() {
     m_dgs.disconnect();
 #endif
 
-    MotorInstance::getInstance().clear();
+    Renderer::MotorInstance::getInstance().clear();
 
     _currentScene = nullptr;
     _ownedScene.reset();
@@ -409,8 +409,8 @@ void Application::run(const std::string& startScenePath, bool headless) {
         // de la otra en el mismo archivo y se pisan entre si al guardar. Con él, cada ventana tiene
         // su config y las cierras sin romperle la resolucion a la vecina.
         const char* iniPath = std::getenv("HARUKA_INI");
-        Haruka::SettingsManager::get().init(iniPath && *iniPath ? iniPath : "imgui.ini");   // → m_graphics.renderBackend
-        useVulkan = Haruka::SettingsManager::get().graphics().renderBackend
+        Settings::SettingsManager::get().init(iniPath && *iniPath ? iniPath : "imgui.ini");   // → m_graphics.renderBackend
+        useVulkan = Settings::SettingsManager::get().graphics().renderBackend
                     == Haruka::Settings::RenderBackend::Vulkan;
 
         // `HARUKA_BACKEND=vulkan|opengl` fuerza el backend para ESTA ejecución sin tocar los
@@ -459,7 +459,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
         // misma regla que usaba la automatica: la dedicada si la hay. Asi el comportamiento por
         // defecto no cambia; lo unico que cambia es que ahora se ve cual es.
         {
-            auto& gw = Haruka::SettingsManager::get().graphics();
+            auto& gw = Settings::SettingsManager::get().graphics();
             const auto ads = Haruka::RHI::Device::enumerateAdapters(
                 useVulkan ? Haruka::RHI::Backend::Vulkan : Haruka::RHI::Backend::OpenGL, nullptr);
             // Tambien se re-resuelve si el nombre guardado ya no existe: al cambiar de maquina o de
@@ -479,7 +479,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
             }
         }
 
-        const auto& gpus = Haruka::SettingsManager::get().graphics().preferredGpus;
+        const auto& gpus = Settings::SettingsManager::get().graphics().preferredGpus;
         if (!useVulkan && !gpus.empty() && !gpus[0].empty()) {
             std::string want = gpus[0];
             std::transform(want.begin(), want.end(), want.begin(),
@@ -510,11 +510,11 @@ void Application::run(const std::string& startScenePath, bool headless) {
     );
     if (m_headless) {
         if (!_window->initHeadless()) {
-            HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize headless Window system.");
+            HARUKA_MOTOR_ERROR(Tools::ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize headless Window system.");
             return;
         }
     } else if (!_window->init(useVulkan)) {
-        HARUKA_MOTOR_ERROR(ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
+        HARUKA_MOTOR_ERROR(Tools::ErrorCode::WINDOW_CREATION_FAILED, "Failed to initialize Window system.");
         return;
     }
 
@@ -524,7 +524,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
     //
     // El backend se elige por el setting ya cargado arriba. Cambiarlo REQUIERE REINICIAR (el
     // device se crea aquí, una vez). Vulkan cae a OpenGL si no está o si falla al inicializar.
-    const auto& gfx = Haruka::SettingsManager::get().graphics();
+    const auto& gfx = Settings::SettingsManager::get().graphics();
     // Sigue a `useVulkan` (ya con el override aplicado), NO al ajuste: la ventana se creó con ese
     // criterio y device y ventana tienen que ser del mismo backend.
     const Haruka::RHI::Backend requestedBackend =
@@ -553,7 +553,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
     // principal, y comprobarlo es más barato que descubrir un cuelgue de SDL desde un trabajador.
     if (!m_headless) {
         const std::thread::id mainThread = std::this_thread::get_id();
-        Haruka::progressHook() = [mainThread](const char* stage, float frac) {
+        progressHook() = [mainThread](const char* stage, float frac) {
             if (std::this_thread::get_id() != mainThread) return;
             SDL_PumpEvents();
             // El log va MUY espaciado a propósito: es una señal de vida para quien mira la consola,
@@ -698,7 +698,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
                             " · fisica (ultimo frame) %.2f ms",
                             srt.size(), sum / (double)srt.size(),
                             srt[(size_t)((double)srt.size() * 0.95)], srt.back(),
-                            Haruka::physicsFrameMs());
+                            physicsFrameMs());
                 // EL ORQUESTADOR, en el juego de verdad: sin esto el log callaba igual si funcionaba
                 // que si no. Lo que promete es que un trabajo de FRAME no espera detrás de los de
                 // fondo: `espera max` por prioridad es la cifra que lo comprueba.
@@ -772,7 +772,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         // Snapshot last frame's profiler sections at the TRUE frame boundary so
         // the game update (physics: PBF/XPBD/shallow-water) is measured too.
-        Haruka::Profiler::get().newFrame();
+        Tools::Profiler::get().newFrame();
 
         // HARUKA_PROF_LOG=N → vuelca el árbol del profiler a stderr cada N frames. Permite medir
         // el coste de un cambio sin depender de leer el panel en una captura.
@@ -789,14 +789,14 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 static int spikeN = 0;
                 fprintf(stderr, "[Profiler] — SPIKE frame %d · %6.1f ms (umbral %.0f) —\n",
                         ++spikeN, _lastFrameTimeMs, thr);
-                fprintf(stderr, "%s", Haruka::Profiler::get().dumpTree().c_str());
+                fprintf(stderr, "%s", Tools::Profiler::get().dumpTree().c_str());
             }
         }
         if (const char* pl = getenv("HARUKA_PROF_LOG")) {
             static int period = std::max(1, atoi(pl));
             static int frame  = 0;
             if (++frame % period == 0) {
-                const auto& nodes = Haruka::Profiler::get().nodes();
+                const auto& nodes = Tools::Profiler::get().nodes();
                 fprintf(stderr, "[Profiler] --- frame %d ---\n", frame);
                 for (size_t i = 1; i < nodes.size(); ++i)
                     fprintf(stderr, "[Profiler] %*s%-24s %7.2f ms  x%d\n", (nodes[i].depth - 1) * 2, "",
@@ -964,7 +964,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
                 // FRENTE (el -Z de la camara) es `d`; negarlo invertia el pitch. Medido: con el signo
                 // mal, "mirar 60 grados abajo" daba 40 % de terreno en el cuadro y "mirar 5 grados
                 // arriba" daba 100 % — al reves de lo que tiene que pasar.
-                _camera->orientation = Haruka::Rotation(glm::quatLookAt(dir, up));
+                _camera->orientation = Tools::Rotation(glm::quatLookAt(dir, up));
                 static bool s_said = false;
                 if (!s_said) { s_said = true;
                     HARUKA_LOGI("Camera", "pitch FIJADO a %.1f grados sobre el horizonte local "
@@ -1108,7 +1108,7 @@ void Application::run(const std::string& startScenePath, bool headless) {
 
         // Frame-rate cap (battery/heat on laptops; 0 = uncapped). With vsync on,
         // swapBuffers already blocks to refresh — this only caps below that.
-        int maxFps = Haruka::SettingsManager::get().graphics().maxFps;
+        int maxFps = Settings::SettingsManager::get().graphics().maxFps;
         if (maxFps > 0) {
             const double targetNs = 1.0e9 / (double)maxFps;
             const double workNs = std::chrono::duration<double, std::nano>(

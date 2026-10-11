@@ -45,7 +45,7 @@
 #include <cctype>
 #include <functional>
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Props { 
 
 /** @brief Contexto de evaluación: las dos identidades del punto. `layer` = material del terreno,
  *  `zone` = zona nombrada (vacío = el punto no está en ninguna zona declarada). */
@@ -258,4 +258,4 @@ inline std::shared_ptr<PropCond> parsePropCond(const std::string& text, std::str
     return p.parse(error);
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Props

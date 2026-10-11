@@ -10,13 +10,13 @@
 #include <cstdlib>
 #include <glm/glm.hpp>
 
-static Camera*                            g_camera      = nullptr;
-static Haruka::Character*                 g_player      = nullptr;
-static Haruka::SceneManager*              g_scene       = nullptr;
-static std::unique_ptr<Haruka::Character> g_playerOwned;
+static Haruka::Core::Camera*                            g_camera      = nullptr;
+static Haruka::Game::Character*                 g_player      = nullptr;
+static Haruka::Core::Scene::SceneManager*              g_scene       = nullptr;
+static std::unique_ptr<Haruka::Game::Character> g_playerOwned;
 
 static void registerActions() {
-    auto& sm = Haruka::SettingsManager::get();
+    auto& sm = Haruka::Settings::SettingsManager::get();
     sm.registerAction("Move",    "Move",    "Movement",
         Haruka::Input::Axis2DBinding{ SDL_SCANCODE_W, SDL_SCANCODE_S,
                                       SDL_SCANCODE_A, SDL_SCANCODE_D });
@@ -25,11 +25,11 @@ static void registerActions() {
     sm.registerAction("Quit",    "Quit",    "UI",       { SDL_SCANCODE_ESCAPE });
 }
 
-void gameOnInit(Haruka::SceneManager* scene) {
+void gameOnInit(Haruka::Core::Scene::SceneManager* scene) {
     g_scene = scene;
 
     registerActions();
-    Haruka::SettingsManager::get().init("imgui.ini");
+    Haruka::Settings::SettingsManager::get().init("imgui.ini");
 
     // Player name and spawn position from env vars, then scene object, then defaults.
     const char* envName = std::getenv("PLAYER_NAME");
@@ -50,15 +50,15 @@ void gameOnInit(Haruka::SceneManager* scene) {
     if (py) spawnPos.y = std::atof(py);
     if (pz) spawnPos.z = std::atof(pz);
 
-    g_playerOwned = std::make_unique<Haruka::Character>(
-        Haruka::WorldPos(spawnPos), playerName);
+    g_playerOwned = std::make_unique<Haruka::Game::Character>(
+        Haruka::Tools::WorldPos(spawnPos), playerName);
     g_camera = g_playerOwned->getCamera();
     g_player = g_playerOwned.get();
 
     // Wire input
     {
-        auto& sm = Haruka::SettingsManager::get();
-        Haruka::CharacterInputProvider provider;
+        auto& sm = Haruka::Settings::SettingsManager::get();
+        Haruka::Game::CharacterInputProvider provider;
         provider.readValue   = [&sm](const std::string& a) { return sm.readValue(a); };
         provider.isPerformed = [&sm](const std::string& a) { return sm.isPerformed(a); };
         provider.isStarted   = [&sm](const std::string& a) { return sm.isStarted(a); };
@@ -66,15 +66,15 @@ void gameOnInit(Haruka::SceneManager* scene) {
         g_playerOwned->setInputProvider(provider);
     }
 
-    using AT = Haruka::ActionTrigger;
+    using AT = Haruka::Game::ActionTrigger;
     g_playerOwned->bindAction<glm::vec2>("Move", AT::Performed,
-        [](Haruka::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
+        [](Haruka::Game::Character& c, float dt, glm::vec2 v) { c.move(v, dt); });
     g_playerOwned->bindAction("Jump",   AT::Started,
-        [](Haruka::Character& c, float) { c.jump(); });
+        [](Haruka::Game::Character& c, float) { c.jump(); });
     g_playerOwned->bindAction("Sprint", AT::Started,
-        [](Haruka::Character& c, float) { c.sprint(true); });
+        [](Haruka::Game::Character& c, float) { c.sprint(true); });
     g_playerOwned->bindAction("Sprint", AT::Canceled,
-        [](Haruka::Character& c, float) { c.sprint(false); });
+        [](Haruka::Game::Character& c, float) { c.sprint(false); });
 }
 
 // Event-driven input state for Wayland / remote desktop compatibility
@@ -123,9 +123,9 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
     int n = (numKeys < SDL_SCANCODE_COUNT) ? numKeys : SDL_SCANCODE_COUNT;
     for (int i = 0; i < n; ++i)
         merged[i] = polled[i] || g_evtKeys[i];
-    Haruka::SettingsManager::get().update(merged);
+    Haruka::Settings::SettingsManager::get().update(merged);
 
-    auto& sm = Haruka::SettingsManager::get();
+    auto& sm = Haruka::Settings::SettingsManager::get();
     if (sm.justPressed("Quit")) {
         SDL_Event quit{};
         quit.type = SDL_EVENT_QUIT;
@@ -145,7 +145,7 @@ void gameOnUpdate(SDL_Window* window, float deltaTime) {
     g_playerOwned->processInput(window, deltaTime);
 }
 
-Camera* gameGetCamera() { return g_camera; }
+Haruka::Core::Camera* gameGetCamera() { return g_camera; }
 
 void gameOnShutdown() {
     g_playerOwned.reset();
@@ -155,7 +155,7 @@ void gameOnShutdown() {
 }
 
 namespace GameLogic {
-    Haruka::GameInterface gameInterface = {
+    Haruka::Core::GameInterface gameInterface = {
         .onInit     = gameOnInit,
         .onUpdate   = gameOnUpdate,
         .onShutdown = gameOnShutdown,
@@ -165,7 +165,7 @@ namespace GameLogic {
 }
 
 extern "C" {
-    Haruka::GameInterface* getGameInterface() {
+    Haruka::Core::GameInterface* getGameInterface() {
         return &GameLogic::gameInterface;
     }
 }

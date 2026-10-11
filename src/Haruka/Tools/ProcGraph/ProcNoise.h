@@ -3,7 +3,7 @@
 #include "ProcGraph.h"
 #include <random>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // Perlin noise node
@@ -307,4 +307,4 @@ private:
     VoronoiNode::Metric m_metric;
 };
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

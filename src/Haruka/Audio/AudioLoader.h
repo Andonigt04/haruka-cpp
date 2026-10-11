@@ -12,7 +12,7 @@
 
 #include "Haruka/Audio/SoundSynth.h"
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 class AudioLoader {
 public:
@@ -34,4 +34,4 @@ private:
     std::unordered_map<int, uint32_t>         m_synth;   // sintetizados: Sound → buffer
 };
 
-} // namespace Haruka
+} // namespace Haruka::Audio

@@ -131,8 +131,8 @@ void Application::buildRenderQueue() {
         // 2) Entran los nuevos (los únicos que se clasifican).
         for (const auto& o : objects) {
             if (!o || m_queuedObjects.count(o->uid)) continue;
-            Haruka::RenderCommand c = Haruka::classifySceneObject(*o);
-            if (c.kind != Haruka::RenderKind::None) g_sceneRenderQueue.push_back(c);
+            Scene::RenderCommand c = Scene::classifySceneObject(*o);
+            if (c.kind != Scene::RenderKind::None) g_sceneRenderQueue.push_back(c);
             m_queuedObjects.insert(o->uid);    // se marca aunque no se dibuje: no reclasificarlo cada vez
         }
         m_staticQueueCount    = g_sceneRenderQueue.size();
@@ -146,18 +146,18 @@ void Application::buildRenderQueue() {
 #ifdef HARUKA_NETWORK
     m_ghostObjects.clear();
     for (const auto& ghost : m_dgs.pollGhosts()) {
-        Haruka::SceneObject obj;
+        Haruka::Core::Scene::SceneObject obj;
         obj.name = "ghost_" + std::to_string(ghost.uuid);
         obj.type = "Character";
-        obj.position = Haruka::WorldPos(
-            ghost.chunkX * Haruka::Units::KM + ghost.pos[0],
-            ghost.chunkY * Haruka::Units::KM + ghost.pos[1],
-            ghost.chunkZ * Haruka::Units::KM + ghost.pos[2]
+        obj.position = Haruka::Tools::WorldPos(
+            ghost.chunkX * Haruka::Tools::Units::KM + ghost.pos[0],
+            ghost.chunkY * Haruka::Tools::Units::KM + ghost.pos[1],
+            ghost.chunkZ * Haruka::Tools::Units::KM + ghost.pos[2]
         );
         m_ghostObjects.push_back(std::move(obj));
     }
     for (const auto& obj : m_ghostObjects) {
-        g_sceneRenderQueue.push_back({ &obj, Haruka::RenderKind::Primitive, Haruka::PrimitiveType::CHARACTER });
+        g_sceneRenderQueue.push_back({ &obj, Scene::RenderKind::Primitive, Tools::PrimitiveType::CHARACTER });
     }
 #endif
 
@@ -232,7 +232,7 @@ void Application::renderFrameContent() {
 void Application::frameBegin(RenderFrame& f) {
     // Editor path calls this externally (no standalone loop) → reset here.
     // Standalone loop resets at its own frame boundary so game.onUpdate is measured.
-    if (_editorTarget) Haruka::Profiler::get().newFrame();
+    if (_editorTarget) Tools::Profiler::get().newFrame();
 
     // ── AUDITORÍA DE RENDIMIENTO (`HARUKA_PROFILE_DUMP=segundos`) ───────────────────────────────
     //
@@ -255,7 +255,7 @@ void Application::frameBegin(RenderFrame& f) {
             if (m_diagClock - s_last > s_dumpEvery) {
                 s_last = m_diagClock;
                 HARUKA_LOGI("Perf", "arbol del frame (media de %d frames):\n%s", s_frames,
-                            Haruka::Profiler::get().dumpTree(1).c_str());
+                            Tools::Profiler::get().dumpTree(1).c_str());
                 s_frames = 0;
             }
         }
@@ -426,6 +426,7 @@ void Application::passSky(RenderFrame& f) {
     sf.camera = _camera.get(); sf.planets = _planetarySystem.get(); sf.world = _worldSystem.get();
     sf.sceneTargetPass = f.sceneTargetPass; sf.renderW = f.renderW; sf.renderH = f.renderH;
     sf.width = f.width; sf.height = f.height; sf.rainOverride = m_rainOverride;
+    sf.clearWeather = !m_editView.weather;   // vista de edicion: cielo despejado
     m_sky.draw(sf);
 }
 
@@ -478,7 +479,7 @@ void Application::passSceneSetup(RenderFrame& f) {
         // pueden juzgar sabiendo qué se paga por ellas. Ver HARUKA_FRAMELOG en Application.cpp.
         const auto tPhys0 = std::chrono::steady_clock::now();
         _physicsEngine->advance(deltaTime > 0.0f ? (double)deltaTime : 0.016);
-        Haruka::physicsFrameMs() = std::chrono::duration<double, std::milli>(
+        physicsFrameMs() = std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now() - tPhys0).count();
     }
     // Only advertise a feature if its GPU resources are actually allocated.
@@ -499,9 +500,9 @@ void Application::passSceneSetup(RenderFrame& f) {
     //
     // Se crea aquí si falta. Es idempotente y no cuesta nada cuando ya existe.
     // El AJUSTE manda: el panel lo cambia en caliente y esto lo aplica al frame siguiente.
-    setRenderFeatureHDR(Haruka::SettingsManager::get().graphics().hdr);
+    setRenderFeatureHDR(Settings::SettingsManager::get().graphics().hdr);
     if (getRenderFeatureHDR() && !_hdr && f.width > 0 && f.height > 0)
-        _hdr = std::make_unique<HDR>((unsigned)f.width, (unsigned)f.height);
+        _hdr = std::make_unique<Renderer::HDR>((unsigned)f.width, (unsigned)f.height);
     {
         static bool s_logged = false;
         if (!s_logged) {
@@ -544,11 +545,11 @@ void Application::passProps(RenderFrame& f) {
     // El modulo (World/Props/PropSystem.h) hace scatter, cull, LOD y draw; aqui solo se le
     // pasa lo que es del frame.
     if (RHI::valid(m_scene.pso())) {
-        Haruka::World::PropSystem::DrawFrame pf;
+        World::Props::PropSystem::DrawFrame pf;
         pf.camera = _camera.get(); pf.planets = _planetarySystem.get(); pf.world = _worldSystem.get();
         pf.perFrameUBO = m_uboPerFrameH; pf.scenePSO = m_scene.pso();
         pf.aspect = f.aspect; pf.heightPx = (int)f.height; pf.aerial = m_sky.weather().aerial; pf.diagClock = m_diagClock;
-        Haruka::World::PropSystem::DrawStats ps;
+        World::Props::PropSystem::DrawStats ps;
         m_props.draw(f.sceneCtx, pf, ps);
         f.renderedDrawCalls += ps.renderedDrawCalls; f.renderedVertices += ps.renderedVertices; f.renderedTriangles += ps.renderedTriangles;
         f.totalDrawCalls += ps.totalDrawCalls; f.totalVertices += ps.totalVertices; f.totalTriangles += ps.totalTriangles;
@@ -603,6 +604,10 @@ void Application::passPlanet(RenderFrame& f) {
             f.sceneCtx->setViewport(0, 0, (int)f.width, (int)f.height);
     }
 
+    // Vista de edicion (IDE): agua visible y tinte por cota. Cada frame porque un planeta nuevo (al
+    // abrir otra escena) nace con los valores por defecto.
+    _planetarySystem->setEditView(m_editView.water, m_editView.seaTint ? 15 : -1);
+
     // --- SimplePlanet terrain rendering ---
     {
         HARUKA_PROFILE("simple_planet.draw"); HARUKA_GPU_SCOPE("simple_planet.draw");
@@ -612,7 +617,7 @@ void Application::passPlanet(RenderFrame& f) {
         // El suelo cercano que viene de la FÍSICA se entrega ANTES de dibujar: el planeta lo
         // pinta con su propio material (mismo `biome.frag`, mismos bindings), así que lo
         // único distinto respecto al clipmap es de dónde salen los vértices.
-        { Haruka::World::VoxSystem::Frame vf; vf.camera = _camera.get(); vf.planets = _planetarySystem.get(); vf.physics = getPhysicsEngineOrNull();
+        { World::Vox::VoxSystem::Frame vf; vf.camera = _camera.get(); vf.planets = _planetarySystem.get(); vf.physics = getPhysicsEngineOrNull();
           m_vox.updateNearGroundRing(vf); }
         for (size_t i = 0; i < _planetarySystem->getSimplePlanetCount(); ++i) {
             const auto& sp = _planetarySystem->getSimplePlanet(i);
@@ -664,6 +669,7 @@ void Application::passPrecipitation(RenderFrame& f) {
     // Va AQUÍ y no al final del frame a propósito: este es el último punto en el que el target de
     // escena y su DEPTH siguen bindeados. Dibujada después del composite, la gota no tendría contra
     // qué probarse y volveríamos al filtro de pantalla que se acaba de quitar.
+    if (!m_editView.weather) return;   // vista de edicion: sin clima
     if (m_sky.weather().rainAmount > 0.01f || m_sky.weather().snowAmount > 0.01f) {
         HARUKA_PROFILE("precip.draw"); HARUKA_GPU_SCOPE("precip.draw");
         const glm::dvec3 camD = glm::dvec3(_camera->position);
@@ -679,11 +685,11 @@ void Application::passPrecipitation(RenderFrame& f) {
                 // `cloudBaseM` es cota sobre el nivel del mar, igual que la que consume el pase
                 // volumétrico (`CloudParams::slab.x`): se le resta la de la cámara para dejarla en la
                 // MISMA referencia que usa el shader de gotas (altura sobre la cámara).
-                const Haruka::WeatherSample wxP = _planetarySystem->weatherAt(camD);
+                const World::WeatherSample wxP = _planetarySystem->weatherAt(camD);
                 cloudBaseRelCam = (float)(wxP.cloudBaseM - (rl - pr));
             }
         }
-        Haruka::PrecipitationRenderer::Params pp;
+        Renderer::PrecipitationRenderer::Params pp;
         pp.cloudBaseRelCamM = cloudBaseRelCam;
         pp.cameraPos   = camD;
         pp.up          = glm::vec3(upD);
@@ -709,12 +715,13 @@ void Application::passPrecipitation(RenderFrame& f) {
 
 void Application::passFluid(RenderFrame& f) {
 #ifdef HARUKA_MOD_FLUIDS
+    if (!m_editView.water) return;     // vista de edicion: sin agua
     // Rios/lagos/charcos + splash: el enganche al planeta es `World::FluidBridge` (world/water).
-    Haruka::World::FluidBridge::Frame ff;
+    World::Water::FluidBridge::Frame ff;
     ff.planets = _planetarySystem.get(); ff.camera = _camera.get(); ff.dt = deltaTime;
     ff.rainAmount = m_sky.weather().rainAmount; ff.renderW = f.renderW; ff.renderH = f.renderH;
     ff.sceneTargetPass = f.sceneTargetPass; ff.perFrameUBO = m_uboPerFrameH;
-    Haruka::World::FluidBridge::run(_fluidHost, ff);
+    World::Water::FluidBridge::run(_fluidHost, ff);
 #else
     (void)f;
 #endif
@@ -722,6 +729,7 @@ void Application::passFluid(RenderFrame& f) {
 
 
 void Application::passClouds(RenderFrame& f) {
+    if (!m_editView.weather) return;   // vista de edicion: sin clima
     // --- NUBES VOLUMÉTRICAS ------------------------------------------------
     //
     // ⚠️ VA AQUÍ, DESPUÉS DE TODA LA GEOMETRÍA, y ese es el cambio de fondo. El cúmulo se pintaba
@@ -793,7 +801,7 @@ unsigned int Application::getMaterialTextureGL(const std::string& path) {
     return dev ? dev->nativeTexture(tex) : 0;
 }
 
-void Application::renderMaterialPreview(const Haruka::MaterialComponent& material,
+void Application::renderMaterialPreview(const Components::MaterialComponent& material,
                                         Haruka::Renderer::RenderTarget& target) {
     RHI::Device* dev = RHI::device();
     if (!dev || !RHI::valid(target.getPass())) return;
@@ -802,8 +810,8 @@ void Application::renderMaterialPreview(const Haruka::MaterialComponent& materia
     // ajustes de render del usuario, y una preview que cambia de aspecto al tocar un ajuste global
     // no sirve para juzgar un material. Éste se queda SIEMPRE en el look final.
     if (!RHI::valid(m_matPreviewPSO)) {
-        const std::string vsPath = Shader::baseDir() + "shaders/simple.vert";
-        const std::string fsPath = Shader::baseDir() + "shaders/final.frag";
+        const std::string vsPath = Renderer::Shader::baseDir() + "shaders/simple.vert";
+        const std::string fsPath = Renderer::Shader::baseDir() + "shaders/final.frag";
         using V = Haruka::Renderer::Vertex;
         RHI::PipelineDesc pd;
         pd.vertexPath           = vsPath.c_str();
@@ -827,7 +835,7 @@ void Application::renderMaterialPreview(const Haruka::MaterialComponent& materia
         m_uboPerFrameH = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerFrameUBOData), nullptr, RHI::BufferMemory::Dynamic);
     const RHI::BufferHandle perObjectUBO = m_scene.perObjectUBO();
 
-    SimpleMesh* sphere = AppInternal::getPrimitiveMesh(Haruka::PrimitiveType::SPHERE);
+    Renderer::Mesh* sphere = AppInternal::getPrimitiveMesh(Tools::PrimitiveType::SPHERE);
     if (!sphere) return;
 
     // Cámara e iluminación FIJAS: dos materiales solo se pueden comparar si se miran igual. La luz
@@ -980,7 +988,7 @@ void Application::captureScreenshotIfPending(int width, int height) {
         path = name;
     }
 
-    if (Haruka::writePNG(path, width, height, 4, flipped.data()))
+    if (IO::writePNG(path, width, height, 4, flipped.data()))
         std::cout << "[Application] Screenshot saved: " << path << std::endl;
     else
         std::cerr << "[Application] Screenshot FAILED: " << path << std::endl;

@@ -5,7 +5,7 @@
 #include "Haruka/RHI/RHIContext.h"
 #include "Haruka/Core/Logger.h"
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 FluidRenderer::~FluidRenderer() {
     RHI::Device* dev = RHI::device();
@@ -110,7 +110,7 @@ void FluidRenderer::ensureTargets(int w, int h, RHI::Format srcDepthFmt) {
     m_sceneCopyPass = dev->createRenderTarget(sc);
 }
 
-void FluidRenderer::uploadParticles(const Haruka::WorldPos& cameraPos, int n) {
+void FluidRenderer::uploadParticles(const Tools::WorldPos& cameraPos, int n) {
     m_verts.resize(size_t(n) * 3);
     for (int i = 0; i < n; ++i) {
         glm::vec3 cp = glm::vec3(m_solver->worldPos(i) - glm::dvec3(cameraPos));
@@ -120,7 +120,7 @@ void FluidRenderer::uploadParticles(const Haruka::WorldPos& cameraPos, int n) {
         dev->uploadBuffer(m_particleBuf, m_verts.size()*sizeof(float), m_verts.data());
 }
 
-void FluidRenderer::render(const Haruka::WorldPos& cameraPos, int vpW, int vpH,
+void FluidRenderer::render(const Tools::WorldPos& cameraPos, int vpW, int vpH,
                            RHI::RenderPassHandle scenePass) {
     if (!m_solver || m_solver->count() == 0) return;
     if (getenv("HARUKA_NO_FLUID")) return;
@@ -238,4 +238,4 @@ void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle sce
     ctx->endRenderPass();
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

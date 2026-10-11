@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <iostream>
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 bool AudioSystem::init(const std::string& outputDevice) {
     ALCdevice* dev = nullptr;
@@ -127,4 +127,4 @@ void AudioSystem::setMasterGain(float g) {
     if (m_ok) alListenerf(AL_GAIN, std::max(0.0f, g));
 }
 
-} // namespace Haruka
+} // namespace Haruka::Audio

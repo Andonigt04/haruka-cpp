@@ -26,22 +26,24 @@
 #include "Haruka/Tools/PlanetaryTypes.h"           // PlanetFace (GL-free)
 #include "Haruka/RHI/RHITypes.h"
 
-namespace Haruka {
-    struct SceneObject;
+namespace Haruka::Core::Scene { struct SceneObject; }
+namespace Haruka::World::Planet {
     /** @brief Una entrada `"type": "Cave"` de la escena → su definición (centro relativo al planeta
      *  en `planetPos`). Es LA interpretación, la misma para el juego al cargar y para el editor al
      *  sincronizar; si divergieran, lo que se pinta no sería lo que se juega. */
-    CaveDef   caveDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
-    IslandDef islandDefFromSceneObject(const SceneObject& obj, const glm::dvec3& planetPos);
+    Vox::CaveDef   caveDefFromSceneObject(const Core::Scene::SceneObject& obj, const glm::dvec3& planetPos);
+    Vox::IslandDef islandDefFromSceneObject(const Core::Scene::SceneObject& obj, const glm::dvec3& planetPos);
     /** @brief ¿Definen lo mismo? (nombre, centro a 1e-9, tamaños, mapas). */
-    bool sameCaveDef(const CaveDef& a, const CaveDef& b);
-    bool sameIslandDef(const IslandDef& a, const IslandDef& b);
- namespace Planet {
+    bool sameCaveDef(const Vox::CaveDef& a, const Vox::CaveDef& b);
+    bool sameIslandDef(const Vox::IslandDef& a, const Vox::IslandDef& b);
     struct GeologyConfig;
+} // namespace Haruka::World::Planet
+namespace Haruka::World::Terrain {
     struct TerrainGridConfig;
-}}
+} // namespace Haruka::World::Terrain
 
-namespace Haruka {
+
+namespace Haruka::World::Planet {
 
 /**
  * @brief Sistema planetario: órbitas, terreno, clima y renderizado simple.
@@ -96,7 +98,7 @@ public:
     /** @brief Planeta con órbita Kepler analítica. */
     struct Planet {
         std::string name;
-        Haruka::WorldPos position;
+        Tools::WorldPos position;
         double radius;
         SurfaceConfig surface;              // texture-driven surface config
         bool isHome = false;                // planeta del jugador (flags.originShiftingTarget)
@@ -115,7 +117,7 @@ public:
         double orbitEcc    = 0.0;         // excentricidad MEDIA [0,1) (0 = círculo)
         double orbitPeriod = 0.0;         // periodo (s); <=0 = no orbita
         double orbitPhase  = 0.0;         // anomalía media en t=0 (rad)
-        Haruka::Planet::OrbitElements orbit;   // elementos completos + tasas de precesión
+        OrbitElements orbit;   // elementos completos + tasas de precesión
     };
 
     void init();
@@ -144,15 +146,20 @@ public:
     /** @brief TerrestrialPlanet del planeta activo (el que da el campo ecológico + cota de props).
      *  Busca por NOMBRE (m_planets y m_simplePlanets no comparten índice cuando el planeta se
      *  añadió por `addSimplePlanet`). nullptr si no hay planeta con superficie. */
-    const Haruka::Planet::TerrestrialPlanet* activeTerrestrial() const;
+    const TerrestrialPlanet* activeTerrestrial() const;
+    /** @brief VISTA DE EDICIÓN a todos los planetas con superficie: agua visible o no, y la vista de
+     *  depuración del terreno (15 = cota sobre el nivel del mar; −1 = la del entorno). */
+    void setEditView(bool waterVisible, int terrainDebugView) {
+        for (auto& p : m_simplePlanets) { p->setWaterVisible(waterVisible); p->setTerrainDebugView(terrainDebugView); }
+    }
     /** @brief Igual, MUTABLE: hace falta para entregarle al planeta activo el suelo cercano que
      *  monta la física (`setNearGroundRing`). Delega en la versión const — una sola búsqueda. */
-    Haruka::Planet::TerrestrialPlanet* activeTerrestrialMut() {
-        return const_cast<Haruka::Planet::TerrestrialPlanet*>(activeTerrestrial());
+    TerrestrialPlanet* activeTerrestrialMut() {
+        return const_cast<TerrestrialPlanet*>(activeTerrestrial());
     }
 
     /** @brief Parámetros de generación del planeta activo. */
-    bool getActivePlanetParams(Haruka::WorldGenParams& out, double& outRadius) const;
+    bool getActivePlanetParams(Terrain::WorldGenParams& out, double& outRadius) const;
 
     /** @brief Constante para "sin agua". */
     static constexpr double kNoWater = -1e30;
@@ -175,14 +182,14 @@ public:
      *  ⚠️ Es la MISMA tabla que se subió a la GPU este frame (`TerrestrialPlanet::setOceanState`).
      *  Quien necesite la ola en CPU debe leerla de aquí y no volver a derivarla del viento: dos
      *  derivaciones son dos mares, y el motor ya pagó esa lección con el terreno. */
-    const Haruka::Planet::OceanState& oceanState() const { return m_oceanState; }
+    const Water::OceanState& oceanState() const { return m_oceanState; }
     /// El ANCLA del mar (mundo): las funciones de ola reciben posiciones RELATIVAS a ella.
     const glm::dvec3& oceanAnchor() const { return m_sea.anchor; }
 
     /** @brief VELOCIDAD del agua en la superficie (m/s, marco del mundo). Cero si no hay agua.
      *
      *  El movimiento orbital de la ola de Gerstner — lo que EMPUJA a un cuerpo flotante en vez de solo
-     *  mecerlo. Ver `Haruka::Planet::oceanWaveVelocity` para la derivación y sus límites (es la
+     *  mecerlo. Ver `Haruka::World::Water::oceanWaveVelocity` para la derivación y sus límites (es la
      *  velocidad en la superficie; no decae con la inmersión). */
     glm::dvec3 sampleWaterVelocity(const glm::dvec3& worldPos) const;
     /// Espuma (0..1) en la superficie del agua. Gemela de `sampleWaterVelocity`; ver `oceanFoam`.
@@ -190,7 +197,7 @@ public:
 
     /** @brief Cobertura de suelo en un punto. */
     struct GroundCover {
-        Haruka::GroundMaterial material = Haruka::GroundMaterial::None;
+        GroundMaterial material = GroundMaterial::None;
         float                  amount   = 0.0f;
     };
     GroundCover groundCoverAt(const glm::dvec3& worldPos, float snowAccum) const;
@@ -199,9 +206,9 @@ public:
           std::vector<Planet>& getPlanets()       { return m_planets; }
 
     /** @brief Sincroniza desde SceneManager (carga/reloading). */
-    void syncFromScene(const SceneManager& scene);
+    void syncFromScene(const Core::Scene::SceneManager& scene);
     /** @brief Construye planetas desde los objetos de escena con surfaceConfig. */
-    void buildFromScene(SceneManager& scene);
+    void buildFromScene(Core::Scene::SceneManager& scene);
     /**
      * @brief Regenera UN planeta leyendo SU surfaceConfig actual del SceneManager.
      *
@@ -209,7 +216,7 @@ public:
      * (misma interpretación que `buildFromScene`) y reconstruye ese TerrestrialPlanet. Si la
      * escena aún no tiene objeto con ese nombre, no hace nada.
      */
-    void updatePlanetFromScene(SceneManager& scene, const std::string& name);
+    void updatePlanetFromScene(Core::Scene::SceneManager& scene, const std::string& name);
 
     /** @brief Vista de depuración para TODOS los planetas renderizables (ver TerrestrialPlanet::setDebugView). */
     void setDebugView(int view);
@@ -238,7 +245,7 @@ public:
      * @brief Stats de geometría del último frame, sumadas sobre TODOS los SimplePlanets.
      * Lo consume el panel de performance del editor (sustituye al "Chunk Streaming" legacy).
      */
-    Haruka::Planet::TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
+    TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
 
     double simulationTime() const { return m_simulationTime; }
 
@@ -255,12 +262,12 @@ public:
     /// nudged towards it, it IS it: assigned every frame from the server's anchor. Passing a negative
     /// value gives the clock back to the local accumulator, which is what an offline game keeps using.
     void setWorldClock(double seconds) { m_worldClock = seconds; }
-    const Haruka::WeatherSystem& weather() const { return m_weather; }
-    Haruka::WeatherSystem& weatherMut() { return m_weather; }
-    Haruka::WeatherSystem&       weatherMutable() { return m_weather; }
+    const WeatherSystem& weather() const { return m_weather; }
+    WeatherSystem& weatherMut() { return m_weather; }
+    WeatherSystem&       weatherMutable() { return m_weather; }
 
     /** @brief Muestra de clima (temp, humedad, precipitación) en un punto. */
-    Haruka::WeatherSample weatherAt(const glm::dvec3& worldPos) const;
+    WeatherSample weatherAt(const glm::dvec3& worldPos) const;
 
     /**
      * @brief Los VÓRTICES vivos ahora (tornados y trombas), con las condiciones REALES del terreno.
@@ -274,17 +281,17 @@ public:
      * Se cachea por instante de simulación: el sistema es puro, así que dos llamadas en el mismo
      * frame dan lo mismo y no hace falta repetir 28 muestreos de terreno.
      */
-    const std::vector<Haruka::WeatherSystem::Vortex>& activeVortices() const;
+    const std::vector<WeatherSystem::Vortex>& activeVortices() const;
     /** @brief Vórtices que pone el JUEGO (un tornado conjurado). Funcionan IGUAL que los del clima:
      *  entran en `activeVortices()` y por tanto en `windAt()` (arrastran y levantan a quien sufre el
      *  viento) y en el embudo del pase de nubes. El juego los reenvía cada frame (vacía = ninguno).
      *  ⚠️ El DGS recalcula el clima PURO y no los conoce: con un servidor validando, el hechizo que
      *  los crea tiene que replicarse o el arrastre se leerá como trampa. */
-    void setGameVortices(std::vector<Haruka::WeatherSystem::Vortex> v) {
+    void setGameVortices(std::vector<WeatherSystem::Vortex> v) {
         m_gameVortices = std::move(v);
         m_vortexCacheTime = -1e300;   // cambian cada frame: la caché de `activeVortices` no vale
     }
-    const std::vector<Haruka::WeatherSystem::Vortex>& gameVortices() const { return m_gameVortices; }
+    const std::vector<WeatherSystem::Vortex>& gameVortices() const { return m_gameVortices; }
 
     /**
      * @brief UN CHORRO DE AIRE que pone el juego: aire lanzado desde `origin` hacia `dir`.
@@ -347,7 +354,7 @@ public:
      *        normal —el nombre casa— no se usa, que es lo que permite resolverlo fuera del bucle.
      */
     struct TerrainSampler {
-        const Haruka::Planet::TerrestrialPlanet* planet = nullptr;
+        const TerrestrialPlanet* planet = nullptr;
         glm::dvec3 center{0.0};
         explicit operator bool() const { return planet != nullptr; }
         /** @brief Cota del terreno (m sobre el radio). MISMAS cuentas que hacía `sampleTerrainHeight`. */
@@ -392,19 +399,19 @@ public:
     void levelTerrain(const glm::dvec3& worldPos, double radius, double targetHeight);
 
     /** @brief Muestrea la superficie (altura, normal, material) en un punto del mundo. */
-    Haruka::TerrainSample sampleSurface(const glm::dvec3& worldPos) const;
+    Terrain::TerrainSample sampleSurface(const glm::dvec3& worldPos) const;
     bool getSeaSurface(const glm::dvec3& worldPos, glm::dvec3& outCenter, double& outSeaRadius) const;
 
     // ── SimplePlanet ──────────────────────────────────────────────────────
     /**
      * @brief Planeta de terreno simple (una malla, texturas procedurales).
      *
-     * Alias de `Haruka::Planet::TerrestrialPlanetConfig` — la identidad + config cruda con la que
+     * Alias de `Haruka::World::Planet::TerrestrialPlanetConfig` — la identidad + config cruda con la que
      * un planeta SE CREA A SÍ MISMO. La API pública (getSimplePlanet/renderSimplePlanet) no cambia:
      * el nombre y el radio que leían los consumidores siguen ahí, y `seed`/`raw`/`faceRes` son
      * campos extra que la escena puede (o no) rellenar.
      */
-    using SimplePlanet = Haruka::Planet::TerrestrialPlanetConfig;
+    using SimplePlanet = TerrestrialPlanetConfig;
 
     /**
      * @brief Añade un SimplePlanet para rendering.
@@ -413,15 +420,15 @@ public:
      * @param grid  Configuración de la malla (faceRes, etc.).
      */
     void addSimplePlanet(const SimplePlanet& orbit,
-                         const Haruka::Planet::GeologyConfig& geo,
-                         const Haruka::Planet::TerrainGridConfig& grid);
+                         const GeologyConfig& geo,
+                         const Terrain::TerrainGridConfig& grid);
 
     /**
      * @brief Reconstruye el terreno de un SimplePlanet (nueva semilla).
      */
     void rebuildSimplePlanet(const std::string& name,
-                             const Haruka::Planet::GeologyConfig& geo,
-                             const Haruka::Planet::TerrainGridConfig& grid);
+                             const GeologyConfig& geo,
+                             const Terrain::TerrainGridConfig& grid);
 
     /**
      * @brief Renderiza un SimplePlanet (pipelines RHI con shaders inline).
@@ -465,14 +472,14 @@ public:
 
 private:
     std::vector<Planet> m_planets;
-    std::vector<std::unique_ptr<Haruka::Planet::TerrestrialPlanet>> m_simplePlanets;
+    std::vector<std::unique_ptr<TerrestrialPlanet>> m_simplePlanets;
     double m_simulationTime = 0.0;
     double m_worldClock     = -1.0;   // < 0 = no cluster clock, accumulate locally (see setWorldClock)
     /// Estado del mar del frame. Lo calcula `updateOceanState`, lo suben los shaders y lo lee la
     /// física — UNA derivación, dos consumidores.
-    Haruka::Planet::OceanState m_oceanState = Haruka::Planet::oceanDefaultState();
+    Water::OceanState m_oceanState = Water::oceanDefaultState();
     /// El mar sigue al viento (filtrado) y lleva el ancla de la fase. Ver `SeaFollower`.
-    Haruka::Planet::SeaFollower m_sea;
+    Water::SeaFollower m_sea;
 
     // EL SUELO DEL JUEGO (ver sampleTerrainHeight)
     // ⚠️ AQUÍ VIVÍA `ReferenceSurface`: 12 KB de máquina —snapshot atómico, caché de 1 M entradas con
@@ -496,7 +503,7 @@ private:
                                     std::function<float(float)> modifyFn);
 
     // CLIMA del mundo + caché del clima del CAMPO
-    mutable Haruka::WeatherSystem m_weather;
+    mutable WeatherSystem m_weather;
     mutable glm::dvec3            m_weatherFieldPos{1e300};
     mutable float                 m_weatherFieldTempC = 15.0f;
     mutable float                 m_weatherFieldHumid = 0.5f;
@@ -504,8 +511,8 @@ private:
     // Caché de vórtices POR INSTANTE. No es estado del clima (que sigue siendo puro): es memoria de
     // la última evaluación, porque juzgar los 28 huecos cuesta 28 muestreos de terreno y en un frame
     // lo preguntan el jugador, los props, la lluvia y el render.
-    mutable std::vector<Haruka::WeatherSystem::Vortex> m_vortexCache;
-    std::vector<Haruka::WeatherSystem::Vortex> m_gameVortices;   // del juego (hechizos): se suman a los del clima
+    mutable std::vector<WeatherSystem::Vortex> m_vortexCache;
+    std::vector<WeatherSystem::Vortex> m_gameVortices;   // del juego (hechizos): se suman a los del clima
     std::vector<AirJet> m_gameJets;   // del juego: aire que empuja una criatura (ver AirJet)
     mutable double                m_vortexCacheTime = -1e300;
     const double G = 6.67430e-11;
@@ -528,4 +535,4 @@ public:
 private:
 };
 
-}
+} // namespace Haruka::World::Planet

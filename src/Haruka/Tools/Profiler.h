@@ -23,7 +23,7 @@
 #include <algorithm>
 #include <cstdio>    // snprintf — volcado del arbol para la auditoria de rendimiento
 
-namespace Haruka {
+namespace Haruka::Tools {
 
 class Profiler {
 public:
@@ -164,12 +164,12 @@ private:
     std::chrono::high_resolution_clock::time_point m_start;
 };
 
-} // namespace Haruka
+} // namespace Haruka::Tools
 
 #ifndef HARUKA_NO_PROFILER
   #define HARUKA_PROFILE_CONCAT2(a,b) a##b
   #define HARUKA_PROFILE_CONCAT(a,b) HARUKA_PROFILE_CONCAT2(a,b)
-  #define HARUKA_PROFILE(name) ::Haruka::ScopedTimer HARUKA_PROFILE_CONCAT(_haruka_st_, __LINE__)(name)
+  #define HARUKA_PROFILE(name) ::Haruka::Tools::ScopedTimer HARUKA_PROFILE_CONCAT(_haruka_st_, __LINE__)(name)
 #else
   #define HARUKA_PROFILE(name) ((void)0)
 #endif

@@ -15,9 +15,9 @@
 #include <cmath>
 #include <cstdio>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
-void WorldEditPanel::setWorld(VoxWorld* world, const glm::dvec3& planetCenter, double planetRadiusM) {
+void WorldEditPanel::setWorld(World::Vox::VoxWorld* world, const glm::dvec3& planetCenter, double planetRadiusM) {
     m_world = world; m_center = planetCenter; m_radius = planetRadiusM;
     if (m_world) m_world->setDesignerMode(m_designer);
     if (m_world && m_bakesDir.empty()) m_bakesDir = m_world->bakesDir();
@@ -33,8 +33,8 @@ std::string WorldEditPanel::uniqueName(const char* base, bool cave) const {
         std::snprintf(buf, sizeof(buf), "%s_%02d", base, i);
         bool taken = false;
         if (m_world) {
-            if (cave) { for (const CaveDef& d : m_world->caveDefs()) if (d.name == buf) taken = true; }
-            else      { for (const IslandDef& d : m_world->islandDefs()) if (d.name == buf) taken = true; }
+            if (cave) { for (const World::Vox::CaveDef& d : m_world->caveDefs()) if (d.name == buf) taken = true; }
+            else      { for (const World::Vox::IslandDef& d : m_world->islandDefs()) if (d.name == buf) taken = true; }
         }
         if (!taken) return buf;
     }
@@ -44,19 +44,20 @@ std::string WorldEditPanel::uniqueName(const char* base, bool cave) const {
 // ── El gesto ────────────────────────────────────────────────────────────────────────────────────
 
 void WorldEditPanel::hover(bool hit, const glm::dvec3& worldPos) {
+    m_hoverHit = hit; if (hit) m_hoverPos = worldPos;
     m_ind.visible = hit && m_world && m_tool != Tool::None;
     if (!m_ind.visible) return;
     m_ind.center = worldPos;
     const glm::dvec3 rel = worldPos - m_center;
     const double r = glm::length(rel);
     m_ind.up = r > 1e-9 ? rel / r : glm::dvec3(0.0, 1.0, 0.0);
-    m_ind.remove = (m_brush.op == VoxWorld::Brush::Op::Remove || m_brush.op == VoxWorld::Brush::Op::Add) ? m_remove : (m_brush.op == VoxWorld::Brush::Op::Lower);
+    m_ind.remove = (m_brush.op == World::Vox::VoxWorld::Brush::Op::Remove || m_brush.op == World::Vox::VoxWorld::Brush::Op::Add) ? m_remove : (m_brush.op == World::Vox::VoxWorld::Brush::Op::Lower);
     switch (m_tool) {
         case Tool::Brush:
             m_ind.shape = (int)m_brush.shape; m_ind.radiusM = m_brush.radiusM; m_ind.halfM = m_brush.halfM;
             if (m_ind.shape == 3) m_ind.shape = 0;   // el túnel se indica como la esfera de su extremo
-            if (m_brush.op == VoxWorld::Brush::Op::Raise || m_brush.op == VoxWorld::Brush::Op::Lower) { m_ind.shape = 1; m_ind.halfM = m_brush.amountM; }
-            if (m_brush.op == VoxWorld::Brush::Op::Sculpt) { m_ind.shape = 0; m_ind.remove = m_brush.amountM < 0.0f; }
+            if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Raise || m_brush.op == World::Vox::VoxWorld::Brush::Op::Lower) { m_ind.shape = 1; m_ind.halfM = m_brush.amountM; }
+            if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Sculpt) { m_ind.shape = 0; m_ind.remove = m_brush.amountM < 0.0f; }
             break;
         case Tool::PlaceCave:
             m_ind.shape = 3; m_ind.radiusM = m_nextCave.radiusM; m_ind.halfM = m_nextCave.depthM; break;
@@ -68,10 +69,10 @@ void WorldEditPanel::hover(bool hit, const glm::dvec3& worldPos) {
 
 void WorldEditPanel::applyBrush(const glm::dvec3& worldPos) {
     if (!m_world) return;
-    VoxWorld::Brush b = m_brush;
-    if (b.op == VoxWorld::Brush::Op::Remove || b.op == VoxWorld::Brush::Op::Add) b.op = m_remove ? VoxWorld::Brush::Op::Remove : VoxWorld::Brush::Op::Add;
+    World::Vox::VoxWorld::Brush b = m_brush;
+    if (b.op == World::Vox::VoxWorld::Brush::Op::Remove || b.op == World::Vox::VoxWorld::Brush::Op::Add) b.op = m_remove ? World::Vox::VoxWorld::Brush::Op::Remove : World::Vox::VoxWorld::Brush::Op::Add;
     // La cápsula (túnel) va del trazo anterior a éste: el primer clic es una esfera.
-    if (b.shape == VoxWorld::Brush::Shape::Capsule) b.capsuleEnd = (m_dragging ? m_lastStroke : worldPos) - m_center;
+    if (b.shape == World::Vox::VoxWorld::Brush::Shape::Capsule) b.capsuleEnd = (m_dragging ? m_lastStroke : worldPos) - m_center;
     m_lastChanged = m_world->stroke(worldPos - m_center, b);
     m_lastStroke = worldPos;
     if (m_onChanged) m_onChanged();
@@ -102,7 +103,7 @@ void WorldEditPanel::drag(const glm::dvec3& worldPos) {
 
 bool WorldEditPanel::createCaveAt(const glm::dvec3& dir) {
     if (!m_world) return false;
-    CaveDef d = m_nextCave;
+    World::Vox::CaveDef d = m_nextCave;
     d.name = uniqueName("cueva", true);
     d.centerDir = glm::normalize(dir);
     if (!m_assetDir.empty()) {
@@ -119,7 +120,7 @@ bool WorldEditPanel::createCaveAt(const glm::dvec3& dir) {
 
 bool WorldEditPanel::createIslandAt(const glm::dvec3& dir) {
     if (!m_world) return false;
-    IslandDef d = m_nextIsland;
+    World::Vox::IslandDef d = m_nextIsland;
     d.name = uniqueName("isla", false);
     d.centerDir = glm::normalize(dir);
     if (!m_assetDir.empty()) {
@@ -161,23 +162,23 @@ void WorldEditPanel::renderBrushTab() {
     // suelo (allanar, subir, bajar) trabajan con la cota del punto de impacto; suavizar promedia.
     static const char* kOps[] = { "Quitar (abre aire)", "Añadir (pone roca)", "Allanar (a la cota del clic)", "Subir el suelo", "Bajar el suelo", "Suavizar", "Esculpir (Blender: +/- con caida, huella y patron)" };
     int op = (int)m_brush.op;
-    if (m_brush.op == VoxWorld::Brush::Op::Remove || m_brush.op == VoxWorld::Brush::Op::Add) op = m_remove ? 0 : 1;
-    if (ImGui::Combo("Tipo", &op, kOps, 7)) { m_brush.op = (VoxWorld::Brush::Op)op; if (op <= 1) m_remove = (op == 0); }
-    const bool suelo = (m_brush.op == VoxWorld::Brush::Op::Flatten || m_brush.op == VoxWorld::Brush::Op::Raise || m_brush.op == VoxWorld::Brush::Op::Lower);
-    if (m_brush.op == VoxWorld::Brush::Op::Sculpt) {
+    if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Remove || m_brush.op == World::Vox::VoxWorld::Brush::Op::Add) op = m_remove ? 0 : 1;
+    if (ImGui::Combo("Tipo", &op, kOps, 7)) { m_brush.op = (World::Vox::VoxWorld::Brush::Op)op; if (op <= 1) m_remove = (op == 0); }
+    const bool suelo = (m_brush.op == World::Vox::VoxWorld::Brush::Op::Flatten || m_brush.op == World::Vox::VoxWorld::Brush::Op::Raise || m_brush.op == World::Vox::VoxWorld::Brush::Op::Lower);
+    if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Sculpt) {
         // ESCULPIR: lo que hace un pincel de Blender. Signo = sube/baja; la caída es la curva del
         // centro al borde; la huella puede ser un polígono; el patrón modula el desplazamiento.
         ImGui::SliderFloat("Fuerza (m, +sube / -baja)", &m_brush.amountM, -20.0f, 20.0f, "%+.1f");
         ImGui::SameLine(); if (ImGui::SmallButton("+/-")) m_brush.amountM = -m_brush.amountM;
         static const char* kFall[] = { "Suave", "Esfera", "Raiz", "Aguda", "Lineal", "Constante", "Inv. cuadrado" };
-        int fall = (int)m_brush.falloff; if (ImGui::Combo("Caida", &fall, kFall, 7)) m_brush.falloff = (VoxWorld::Brush::Falloff)fall;
+        int fall = (int)m_brush.falloff; if (ImGui::Combo("Caida", &fall, kFall, 7)) m_brush.falloff = (World::Vox::VoxWorld::Brush::Falloff)fall;
         static const char* kSides[] = { "Circulo", "Triangulo", "Cuadrado", "Pentagono", "Hexagono", "Octogono" };
         static const uint8_t kSidesN[] = { 0, 3, 4, 5, 6, 8 };
         int si = 0; for (int i = 0; i < 6; ++i) if (kSidesN[i] == m_brush.sides) si = i;
         if (ImGui::Combo("Huella", &si, kSides, 6)) m_brush.sides = kSidesN[si];
         static const char* kPat[] = { "Ninguno", "Olas", "Anillos", "Hexagonos", "Damero", "Ruido" };
-        int pat = (int)m_brush.pattern; if (ImGui::Combo("Patron", &pat, kPat, 6)) m_brush.pattern = (VoxWorld::Brush::Pattern)pat;
-        if (m_brush.pattern != VoxWorld::Brush::Pattern::PNone) ImGui::SliderFloat("Paso del patron (m)", &m_brush.patternM, 2.0f, 60.0f, "%.0f");
+        int pat = (int)m_brush.pattern; if (ImGui::Combo("Patron", &pat, kPat, 6)) m_brush.pattern = (World::Vox::VoxWorld::Brush::Pattern)pat;
+        if (m_brush.pattern != World::Vox::VoxWorld::Brush::Pattern::PNone) ImGui::SliderFloat("Paso del patron (m)", &m_brush.patternM, 2.0f, 60.0f, "%.0f");
         ImGui::SliderFloat("Radio (m)##sc", &m_brush.radiusM, 1.0f, 120.0f, "%.1f");
         ImGui::SliderFloat("Dureza del borde##sc", &m_brush.hardness, 0.0f, 1.0f, "%.2f");
         ImGui::SliderFloat("Paso del arrastre (x radio)##sc", &m_spacing, 0.1f, 1.0f, "%.2f");
@@ -189,15 +190,15 @@ void WorldEditPanel::renderBrushTab() {
     ImGui::RadioButton("Cilindro", &shape, 1); ImGui::SameLine();
     ImGui::RadioButton("Caja", &shape, 2); ImGui::SameLine();
     ImGui::RadioButton("Tunel (capsula al arrastrar)", &shape, 3);
-    m_brush.shape = (VoxWorld::Brush::Shape)shape;
-    ImGui::SliderFloat(m_brush.shape == VoxWorld::Brush::Shape::Box ? "Medio lado (m)" : "Radio (m)", &m_brush.radiusM, 1.0f, 60.0f, "%.1f");
-    if (m_brush.shape == VoxWorld::Brush::Shape::Cylinder || m_brush.shape == VoxWorld::Brush::Shape::Box)
+    m_brush.shape = (World::Vox::VoxWorld::Brush::Shape)shape;
+    ImGui::SliderFloat(m_brush.shape == World::Vox::VoxWorld::Brush::Shape::Box ? "Medio lado (m)" : "Radio (m)", &m_brush.radiusM, 1.0f, 60.0f, "%.1f");
+    if (m_brush.shape == World::Vox::VoxWorld::Brush::Shape::Cylinder || m_brush.shape == World::Vox::VoxWorld::Brush::Shape::Box)
         ImGui::SliderFloat("Medio alto (m)", &m_brush.halfM, 1.0f, 60.0f, "%.1f");
-    if (m_brush.op == VoxWorld::Brush::Op::Raise || m_brush.op == VoxWorld::Brush::Op::Lower)
+    if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Raise || m_brush.op == World::Vox::VoxWorld::Brush::Op::Lower)
         ImGui::SliderFloat("Cuanto (m)", &m_brush.amountM, 0.5f, 40.0f, "%.1f");
-    if (m_brush.op == VoxWorld::Brush::Op::Smooth)
+    if (m_brush.op == World::Vox::VoxWorld::Brush::Op::Smooth)
         ImGui::SliderFloat("Fuerza", &m_brush.amountM, 0.05f, 1.0f, "%.2f");
-    if (suelo || m_brush.op == VoxWorld::Brush::Op::Smooth)
+    if (suelo || m_brush.op == World::Vox::VoxWorld::Brush::Op::Smooth)
         ImGui::SliderFloat("Dureza del borde", &m_brush.hardness, 0.0f, 1.0f, "%.2f");
     ImGui::SliderFloat("Paso del arrastre (x radio)", &m_spacing, 0.1f, 1.0f, "%.2f");
     if (suelo) ImGui::TextDisabled("Allanar/subir/bajar: la huella es la forma vista desde arriba; el alto lo pone el plano.");
@@ -244,7 +245,7 @@ void WorldEditPanel::renderPlaceTab() {
         const auto defs = m_world->caveDefs();   // copia: quitar reasigna la lista
         for (size_t i = 0; i < defs.size(); ++i) {
             ImGui::PushID((int)i);
-            const CaveDef& d = defs[i];
+            const World::Vox::CaveDef& d = defs[i];
             if (ImGui::RadioButton("##selc", m_selectedCave == (int)i)) { m_selectedCave = (int)i; m_selectedIsland = -1; }
             ImGui::SameLine();
             ImGui::Text("%s · %.0f x %.0f m · %s", d.name.c_str(), d.radiusM, d.depthM, d.planta.empty() ? "borrador" : "con mapas");
@@ -264,7 +265,7 @@ void WorldEditPanel::renderPlaceTab() {
         const auto defs = m_world->islandDefs();
         for (size_t i = 0; i < defs.size(); ++i) {
             ImGui::PushID(1000 + (int)i);
-            const IslandDef& d = defs[i];
+            const World::Vox::IslandDef& d = defs[i];
             if (ImGui::RadioButton("##seli", m_selectedIsland == (int)i)) { m_selectedIsland = (int)i; m_selectedCave = -1; }
             ImGui::SameLine();
             ImGui::Text("%s · %.0f m · a %.0f m · %s", d.name.c_str(), d.radiusM, d.altitudeM, d.planta.empty() ? "borrador" : "con mapas");
@@ -297,25 +298,25 @@ void WorldEditPanel::releaseMaps() {
 void WorldEditPanel::loadMapsFor(int caveIndex, int islandIndex) {
     releaseMaps();
     if (!m_world) return;
-    auto loadOrEmpty = [](const std::string& path, CaveMap& m) {
+    auto loadOrEmpty = [](const std::string& path, World::Vox::CaveMap& m) {
         int w = 0, h = 0; std::vector<float> px;
-        const std::string p = caveResolveAssetPath(path);
-        if (!p.empty() && BakeUtil::loadPNGGray(p, w, h, px)) { m.w = w; m.h = h; m.v = px; return true; }
+        const std::string p = World::Vox::caveResolveAssetPath(path);
+        if (!p.empty() && World::Terrain::BakeUtil::loadPNGGray(p, w, h, px)) { m.w = w; m.h = h; m.v = px; return true; }
         return false;
     };
     if (caveIndex >= 0 && caveIndex < (int)m_world->caveDefs().size()) {
-        const CaveDef d = m_world->caveDefs()[caveIndex];
+        const World::Vox::CaveDef d = m_world->caveDefs()[caveIndex];
         // Sus PNG; si aún no existen (borrador nunca guardado), el borrador que vería el juego.
         if (!loadOrEmpty(d.planta, m_maps[0].map) || !loadOrEmpty(d.perfil, m_maps[1].map)) {
-            const CaveBox box = caveBoxFromDef(d, m_radius);
-            caveBakeMaps(box, kCaveMapRes, m_maps[0].map, m_maps[1].map);
+            const World::Vox::CaveBox box = World::Vox::caveBoxFromDef(d, m_radius);
+            World::Vox::caveBakeMaps(box, World::Vox::kCaveMapRes, m_maps[0].map, m_maps[1].map);
         }
         m_mapCount = 2; m_mapsCave = caveIndex;
     } else if (islandIndex >= 0 && islandIndex < (int)m_world->islandDefs().size()) {
-        const IslandDef d = m_world->islandDefs()[islandIndex];
+        const World::Vox::IslandDef d = m_world->islandDefs()[islandIndex];
         if (!loadOrEmpty(d.planta, m_maps[0].map) || !loadOrEmpty(d.cima, m_maps[1].map) || !loadOrEmpty(d.raiz, m_maps[2].map)) {
-            const IslandBox box = islandBoxFromDef(d, m_radius);
-            islandBakeMaps(box, kIslandMapRes, m_maps[0].map, m_maps[1].map, m_maps[2].map);
+            const World::Vox::IslandBox box = World::Vox::islandBoxFromDef(d, m_radius);
+            World::Vox::islandBakeMaps(box, World::Vox::kIslandMapRes, m_maps[0].map, m_maps[1].map, m_maps[2].map);
         }
         // La planta de la isla es una DISTANCIA (0,5 = borde): se pinta como máscara dentro/fuera
         // y al rehornear se vuelve a convertir en distancia (chanfle), como hace el horneado.
@@ -362,38 +363,38 @@ void WorldEditPanel::paintOn(MapView& v, float u, float t) {
 bool WorldEditPanel::rebakeSelected() {
     ensureMapsLoaded();
     if (!m_world || m_mapCount == 0) return false;
-    auto save = [&](const std::string& path, const CaveMap& m) {
-        const std::string p = caveResolveAssetPath(path);
+    auto save = [&](const std::string& path, const World::Vox::CaveMap& m) {
+        const std::string p = World::Vox::caveResolveAssetPath(path);
         if (p.empty()) return false;
-        return BakeUtil::savePNGGray(p, m.w, m.h, m.v);
+        return World::Terrain::BakeUtil::savePNGGray(p, m.w, m.h, m.v);
     };
     auto basePath = [&](const std::string& name) {
         return (m_assetDir.empty() ? std::string("assets/vox/") : (m_assetDir.back() == '/' ? m_assetDir : m_assetDir + "/")) + name;
     };
     if (m_mapsCave >= 0 && m_mapsCave < (int)m_world->caveDefs().size()) {
-        CaveDef d = m_world->caveDefs()[m_mapsCave];
+        World::Vox::CaveDef d = m_world->caveDefs()[m_mapsCave];
         if (d.planta.empty()) { d.planta = basePath(d.name) + "_planta.png"; d.perfil = basePath(d.name) + "_perfil.png"; }   // borrador sin ruta: ahora la tiene
         if (!save(d.planta, m_maps[0].map) || !save(d.perfil, m_maps[1].map)) { HARUKA_LOGW("Mundo", "no se pudieron guardar los mapas de '%s'", d.name.c_str()); return false; }
         // Conectividad del volumen nuevo, para enseñarla: se deriva aquí (y queda en `bakes/` con
         // la clave de estos texels, así que el mundo no lo repite).
-        CaveSystem sys; sys.box = caveBoxFromDef(d, m_radius); sys.planta = m_maps[0].map; sys.perfil = m_maps[1].map;
-        caveDeriveFromMaps(sys, m_bakesDir);
+        World::Vox::CaveSystem sys; sys.box = World::Vox::caveBoxFromDef(d, m_radius); sys.planta = m_maps[0].map; sys.perfil = m_maps[1].map;
+        World::Vox::caveDeriveFromMaps(sys, m_bakesDir);
         m_lastStats = sys.connectStats;
         m_world->removeCave(d.name);
         m_world->placeCave(d);   // mismo nombre, mismas rutas: los chunks se rehornean con los texels nuevos
         if (m_onCaveRemoved) m_onCaveRemoved(d.name);
         if (m_onCave) m_onCave(d);
     } else if (m_mapsIsland >= 0 && m_mapsIsland < (int)m_world->islandDefs().size()) {
-        IslandDef d = m_world->islandDefs()[m_mapsIsland];
+        World::Vox::IslandDef d = m_world->islandDefs()[m_mapsIsland];
         if (d.planta.empty()) { d.planta = basePath(d.name) + "_planta.png"; d.cima = basePath(d.name) + "_cima.png"; d.raiz = basePath(d.name) + "_raiz.png"; }
         // Máscara → distancia con signo (chanfle), saturada a ±kIslandRangeM, como el horneado.
-        CaveMap planta = m_maps[0].map;
+        World::Vox::CaveMap planta = m_maps[0].map;
         std::vector<uint8_t> inside(planta.v.size());
         for (size_t i = 0; i < inside.size(); ++i) inside[i] = planta.v[i] > 0.5f ? 1 : 0;
-        const int comps = BakeUtil::keepLargestComponent2D(planta.w, planta.h, inside);
-        std::vector<float> sd; BakeUtil::chamferSigned2D(planta.w, planta.h, inside, sd);
+        const int comps = World::Terrain::BakeUtil::keepLargestComponent2D(planta.w, planta.h, inside);
+        std::vector<float> sd; World::Terrain::BakeUtil::chamferSigned2D(planta.w, planta.h, inside, sd);
         const float texelM = 2.0f * d.radiusM / (float)(planta.w - 1);
-        for (size_t i = 0; i < sd.size(); ++i) planta.v[i] = std::clamp(sd[i] * texelM / (2.0f * kIslandRangeM) + 0.5f, 0.0f, 1.0f);
+        for (size_t i = 0; i < sd.size(); ++i) planta.v[i] = std::clamp(sd[i] * texelM / (2.0f * World::Vox::kIslandRangeM) + 0.5f, 0.0f, 1.0f);
         m_lastStats = glm::ivec3(comps, 1, 0);
         if (!save(d.planta, planta) || !save(d.cima, m_maps[1].map) || !save(d.raiz, m_maps[2].map)) { HARUKA_LOGW("Mundo", "no se pudieron guardar los mapas de '%s'", d.name.c_str()); return false; }
         m_world->removeIsland(d.name);
@@ -469,4 +470,4 @@ void WorldEditPanel::renderMapsTab() {
     else         ImGui::TextDisabled("ultimo rehorneado: %d componentes de silueta -> 1", m_lastStats.x);
 }
 
-} // namespace Haruka
+} // namespace Haruka::Tools

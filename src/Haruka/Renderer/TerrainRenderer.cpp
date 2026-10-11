@@ -7,7 +7,7 @@
 #include <string>
 #include "Haruka/Core/Logger.h"
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 TerrainRenderer::~TerrainRenderer() {
     // RHI textures are managed by the device; no explicit cleanup needed here.
@@ -53,4 +53,4 @@ TerrainRenderer::loadTextures(const std::string& albedoPath,
     return bt;
 }
 
-} // namespace Haruka
+} // namespace Haruka::Renderer

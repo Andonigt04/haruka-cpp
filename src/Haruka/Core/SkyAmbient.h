@@ -15,7 +15,7 @@
 
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 /** Los cuatro colores que definen el cielo. Copia EXACTA de `sky_palette.glsl` (mismas cifras). */
 inline constexpr glm::vec3 SKY_ZENITH_NIGHT = glm::vec3(0.012f, 0.016f, 0.045f);
@@ -84,4 +84,4 @@ SkySH skyAmbientSH(float sunElev,
  *  replicar esta fórmula (producto escalar + la misma base) — es la cara GPU de `SkySH`. */
 glm::vec3 skyAmbientEval(const SkySH& sh, const glm::vec3& n, const glm::vec3& up);
 
-} // namespace Haruka
+} // namespace Haruka::Core

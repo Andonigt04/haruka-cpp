@@ -26,5 +26,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::Texture;
-namespace Haruka { using Renderer::Texture; }

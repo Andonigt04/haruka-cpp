@@ -8,7 +8,7 @@
 #include <iterator>
 #include <vector>
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 static uint64_t toneKey(float freq, float dur, const glm::vec3& t, bool loop) {
     auto q = [](float v, float s) { return (uint64_t)(v * s); };
@@ -97,4 +97,4 @@ void AudioLoader::clear() {
     m_synth.clear();
 }
 
-} // namespace Haruka
+} // namespace Haruka::Audio

@@ -83,7 +83,3 @@ private:
 
 }} // namespace Haruka::Physics
 
-using Haruka::Physics::RaycastHit;
-using Haruka::Physics::RaycastTriangle;
-using Haruka::Physics::RaycastSimple;
-namespace Haruka { using Physics::RaycastHit; using Physics::RaycastTriangle; using Physics::RaycastSimple; }

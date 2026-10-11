@@ -146,7 +146,7 @@ void IBL::loadHDRI(const std::string& imagePath) {
     int width, height, nrComponents;
     unsigned char* data = stbi_load(imagePath.c_str(), &width, &height, &nrComponents, 0);
     if (!data) {
-        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load LDR image: " + imagePath);
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::TEXTURE_LOAD_FAILED, "Failed to load LDR image: " + imagePath);
         return;
     }
 

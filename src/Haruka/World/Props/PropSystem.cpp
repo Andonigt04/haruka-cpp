@@ -32,7 +32,7 @@
 #include <glm/gtc/quaternion.hpp>   // glm::mat4_cast
 #include <glm/gtx/quaternion.hpp>   // glm::rotation (up del prototipo → dir radial)
 
-namespace Haruka::World {
+namespace Haruka::World::Props {
 
 using Haruka::RHI::valid;
 using Renderer::FallbackTex;
@@ -96,19 +96,19 @@ PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
 
     // Tono por defecto: calido-vegetal neutro de bajo contraste (el color de vertice manda).
     const glm::vec3 tintA(1.04f, 1.00f, 0.92f), tintB(0.80f, 0.76f, 0.70f);
-    Graph g;
-    int h  = g.emplaceNode<PerlinNode>((int)seed, 7.0f);
-    int nr = g.emplaceNode<MapRangeNode>(-1.0f, 1.0f, 0.0f, 1.0f);
+    Tools::ProcGraph::Graph g;
+    int h  = g.emplaceNode<Tools::ProcGraph::PerlinNode>((int)seed, 7.0f);
+    int nr = g.emplaceNode<Tools::ProcGraph::MapRangeNode>(-1.0f, 1.0f, 0.0f, 1.0f);
     g.connect(h, 0, nr, 0);
     auto ramp = [&](float a, float b) -> int {
-        auto n = std::make_unique<ColorRampNode>();
+        auto n = std::make_unique<Tools::ProcGraph::ColorRampNode>();
         n->setStops({{0.0f, a}, {1.0f, b}});
         return g.addNode(std::move(n));
     };
     int rR = ramp(tintA.r, tintB.r);
     int rG = ramp(tintA.g, tintB.g);
     int rB = ramp(tintA.b, tintB.b);
-    int combine = g.emplaceNode<TreeCombineRGBNode>();
+    int combine = g.emplaceNode<Tools::ProcGraph::TreeCombineRGBNode>();
     g.connect(rR, 0, combine, 0);
     g.connect(rG, 0, combine, 1);
     g.connect(rB, 0, combine, 2);
@@ -117,7 +117,7 @@ PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
     // Albedo PRE-GAMMA: la textura sube RGBA8 sin tag sRGB y prop_inst.frag linealiza con
     // `pow(tex, 2.2)`. Guardar c^(1/2.2) hace que el muestreo recupere el tono horneado exacto.
     int cmap[4] = {0, 1, 2, -1};
-    RGBAImage alb = evaluateToRGBA(g, combine, 0, size, size, 0, 0, 1, cmap);
+    Tools::ProcGraph::RGBAImage alb = Tools::ProcGraph::evaluateToRGBA(g, combine, 0, size, size, 0, 0, 1, cmap);
     const float invGamma = 1.0f / 2.2f;
     for (size_t i = 0; i < alb.pixels.size(); i += 4) {
         for (int c = 0; c < 3; ++c) {
@@ -128,9 +128,9 @@ PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
     }
 
     // Normal desde la altura (derivadas), AO y roughness por-pixel desde la misma altura.
-    RGBAImage nrm = evaluateToNormalMap(g, nr, 0, size, size, 0, 0, 1, 1.5f);
-    RGBAImage ao(size, size);
-    RGBAImage rough(size, size);
+    Tools::ProcGraph::RGBAImage nrm = Tools::ProcGraph::evaluateToNormalMap(g, nr, 0, size, size, 0, 0, 1, 1.5f);
+    Tools::ProcGraph::RGBAImage ao(size, size);
+    Tools::ProcGraph::RGBAImage rough(size, size);
     const float dark  = 0.45f;                 // AO: hendiduras (h baja) oscuras
     const float rLo   = 0.55f, rHi = 0.90f;    // roughness: valles mas lisos, crestas asperas
     for (int y = 0; y < size; ++y) {
@@ -143,10 +143,10 @@ PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
         }
     }
 
-    m.albedo    = createRHIFromRGBA(alb);
-    m.normal    = createRHIFromRGBA(nrm);
-    m.roughness = createRHIFromRGBA(rough);
-    m.ao        = createRHIFromRGBA(ao);
+    m.albedo    = Tools::ProcGraph::createRHIFromRGBA(alb);
+    m.normal    = Tools::ProcGraph::createRHIFromRGBA(nrm);
+    m.roughness = Tools::ProcGraph::createRHIFromRGBA(rough);
+    m.ao        = Tools::ProcGraph::createRHIFromRGBA(ao);
     if (valid(m.albedo))    m.mask |= kTexAlbedo;
     if (valid(m.normal))    m.mask |= kTexNormal;
     if (valid(m.roughness)) m.mask |= kTexRoughness;
@@ -157,11 +157,11 @@ PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
 
 // El campo del planeta visto por el scatter: la MISMA ecologia/cota por direccion que pinta el
 // terreno (`TerrestrialPlanet`), redirigida por direccion.
-struct PlanetSphereField : Haruka::Planet::IPropSphereField {
-    const Haruka::Planet::TerrestrialPlanet* planet = nullptr;
+struct PlanetSphereField : IPropSphereField {
+    const Planet::TerrestrialPlanet* planet = nullptr;
 
-    Haruka::FieldSample sampleAt(const glm::vec3& dir) const override {
-        return planet ? planet->fieldSampleAt(dir) : Haruka::FieldSample{};
+    Planet::FieldSample sampleAt(const glm::vec3& dir) const override {
+        return planet ? planet->fieldSampleAt(dir) : Planet::FieldSample{};
     }
     float heightAt(const glm::vec3& dir) const override {
         return planet ? (float)planet->sampleHeight(dir) : 0.0f;
@@ -184,22 +184,22 @@ Haruka::Tools::ProcGraph::TreeMeshData bakePrototypeMesh(const InstancedPrototyp
     Haruka::Tools::ProcGraph::TreeMeshData tm;
     // CÚMULO de lejanía: el prefijo `clump#` lo firma — bake APLANADO (la escala de instancia
     // estira la celda por el ancho; si fuera alto también parecería un rascacielos).
-    if (Haruka::Planet::isClumpProto(proto.name)) {
-        const Haruka::Planet::PropTreeParams tp = Haruka::Planet::propTreeParams(proto.name);
+    if (isClumpProto(proto.name)) {
+        const PropTreeParams tp = propTreeParams(proto.name);
         // La FORMA del prop base decide el tipo de masa (bosque/pedregal/aldea): el prefijo `clump#`
         // respeta el nombre, y `propShapeKind` lo clasifica por subcadena igual que su individuo.
         return Haruka::Tools::ProcGraph::bakeClumpMesh(
             proto.meshSeed, tp.style, tp.height, tp.trunkR, tp.canopy,
             Haruka::Tools::ProcGraph::kClumpFootprintM, detail,
-            (int)Haruka::Planet::propShapeKind(proto.name));
+            (int)propShapeKind(proto.name));
     }
-    const Haruka::Planet::PropShapeKind shape = Haruka::Planet::propShapeKind(proto.name);
-    if (shape == Haruka::Planet::PropShapeKind::Rock) {
+    const PropShapeKind shape = propShapeKind(proto.name);
+    if (shape == PropShapeKind::Rock) {
         tm = Haruka::Tools::ProcGraph::bakeRockMesh((int)proto.meshSeed, 1.0f, 0.72f);
-    } else if (shape == Haruka::Planet::PropShapeKind::House) {
+    } else if (shape == PropShapeKind::House) {
         tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
     } else {
-        const Haruka::Planet::PropTreeParams tp = Haruka::Planet::propTreeParams(proto.name);
+        const PropTreeParams tp = propTreeParams(proto.name);
         Haruka::Tools::ProcGraph::Graph g;
         const int tree = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
             (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments, detail, tp.style);
@@ -317,7 +317,7 @@ void PropSystem::rebuildGpu(const glm::dvec3& planetC, double planetR, Core::Cam
         // `io.dir` TUMBABA el objeto tanto como lo giraba ("los arboles estan tumbados").
         m = glm::rotate(m, io.yaw, up);
         m = glm::scale(m, glm::vec3(io.scale));
-        InstanceDataFloat& inst = m_gpu[i];
+        Renderer::InstanceDataFloat& inst = m_gpu[i];
         inst.model     = m;
         inst.color     = glm::vec4(io.tint, 1.0f);
         inst.scale     = glm::vec3(io.scale);
@@ -327,7 +327,7 @@ void PropSystem::rebuildGpu(const glm::dvec3& planetC, double planetR, Core::Cam
 
 // ── scatter ───────────────────────────────────────────────────────────────────────────────────
 
-void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, Physics::PhysicsEngine* physics) {
+void PropSystem::refreshScatter(Core::Camera* camera, Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics) {
     // ⚠️ AQUI DECIA QUE EL ANCLAJE DE LOS PROPS ESTABA "17x MAS BASTO QUE EL RENDER A 5 km" Y YA NO
     // ES CIERTO: medido, altura del prop contra la del suelo DIBUJADO es sub-pixel en todo el rango y
     // exacta dentro de 150 m (0,16 px a 600 m). Lo que NO cubre esa medida es el reparto del scatter.
@@ -355,7 +355,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     // Relevo de la hierba tendida: se levanta sola al vencer su reloj y el agua la mantiene/tumba.
     // Corre ANTES de la re-siembra y en cualquier frame (los early-return del anillo no la saltan).
     sweepGrassState(grassClockNow(), physics);
-    const Haruka::Planet::TerrestrialPlanet* planet = planets->activeTerrestrial();
+    const Planet::TerrestrialPlanet* planet = planets->activeTerrestrial();
     const std::string pname = planets->getActivePlanetName();
     if (!planet) {                                   // planeta orbital sin superficie = sin props
         if (m_registry.prototypeCount() > 0) m_registry.reset();
@@ -444,7 +444,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     { HARUKA_PROFILE("re-siembra.lanza");   // preparacion (registro de prototipos, copias) + lanzar worker
     PlanetSphereField field;
     field.planet = planet;
-    const Haruka::Planet::PropLayerTable& table = planet->propLayers();
+    const PropLayerTable& table = planet->propLayers();
     if (table.layers.empty()) return;   // sin capas declaradas = sin props
 
     // UN prototipo por NOMBRE (el mesh de la capa, o cada variante × cada semilla "conifer#2").
@@ -467,9 +467,9 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     for (const auto& L : table.layers) {
         for (const std::string& pn : L.prototypeNames()) {
             registerProto(pn);
-            if (Haruka::Planet::shouldClumpFar(pn))
-                for (int k = 0; k < Haruka::Planet::kClumpKinds; ++k)
-                    registerProto(Haruka::Planet::clumpProtoName(pn, k));
+            if (shouldClumpFar(pn))
+                for (int k = 0; k < kClumpKinds; ++k)
+                    registerProto(clumpProtoName(pn, k));
         }
     }
     if (m_registry.prototypeCount() == 0) return;
@@ -482,7 +482,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
     for (int i = 0; i < m_registry.prototypeCount(); ++i) {
         const std::string& pn = m_registry.prototype(i).name;
         if (pn.find("!flat") != std::string::npos) continue;              // ya es una pisada
-        if (!Haruka::Planet::isGrassProp(pn)) continue;
+        if (!isGrassProp(pn)) continue;
         const std::string flat = pn + "!flat";
         registerProto(flat);
         for (int j = 0; j < m_registry.prototypeCount(); ++j)
@@ -493,7 +493,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             }
     }
 
-    Haruka::Planet::PropScatterParams params;
+    PropScatterParams params;
     params.radius   = planetR;
     params.seed     = planet->config().seed ? planet->config().seed : 1u;
     params.maxProps = 300000;
@@ -549,9 +549,9 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             // cero ya no puede ser "otra se la comio": sus condiciones no pasan en ninguna celda, o
             // ninguna de sus variantes vive ahi. El desglose (una vez) dice cual de los factores.
             static bool s_statsReported = false;
-            Haruka::Planet::PropScatterStats stats;
-            const std::vector<Haruka::Planet::ScatteredProp> placed =
-                Haruka::Planet::scatterPropsNear(field, camPos, planetC, params, table,
+            PropScatterStats stats;
+            const std::vector<ScatteredProp> placed =
+                scatterPropsNear(field, camPos, planetC, params, table,
                                                 s_statsReported ? nullptr : &stats);
             if (!s_statsReported && !placed.empty()) {
                 s_statsReported = true;
@@ -581,14 +581,14 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
                 }
                 // Tabla bioma × capa del primer scatter: la medida de "los props siguen al bioma".
                 std::string line = "biomas en el primer scatter (celdas · colocadas por capa):";
-                for (int b = 0; b < (int)Haruka::Planet::Biome::COUNT; ++b) {
+                for (int b = 0; b < (int)Planet::Biome::COUNT; ++b) {
                     if (stats.cellsByBiome[b] == 0) continue;
-                    line += "\n   " + std::string(Haruka::Planet::biomeKey((Haruka::Planet::Biome)b))
+                    line += "\n   " + std::string(Planet::biomeKey((Planet::Biome)b))
                           + " " + std::to_string(stats.cellsByBiome[b]);
                     for (size_t li = 0; li < table.layers.size(); ++li) {
                         if (table.layers[li].mesh.empty()) continue;
                         line += " · " + table.layers[li].mesh + "=" + std::to_string(
-                            stats.placedByBiome[li * (size_t)Haruka::Planet::Biome::COUNT + (size_t)b]);
+                            stats.placedByBiome[li * (size_t)Planet::Biome::COUNT + (size_t)b]);
                     }
                 }
                 HARUKA_LOGI("PropScatter", "%s", line.c_str());
@@ -600,13 +600,13 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             // ⚠️ El filtro de BOCA no va aquí: `surfaceCut` lee el VOX VIVIENTE, que el hilo de
             // render está streameando/rehorneando; leerlo en paralelo es una raza. Se filtra al
             // aplicar, contra el vox actual.
-            std::vector<Haruka::InstancedObject> objs;
+            std::vector<InstancedObject> objs;
             objs.reserve(placed.size());
             for (const auto& sp : placed) {
                 auto itP = protoByName.find(sp.mesh);
                 if (itP == protoByName.end()) continue;
 
-                Haruka::InstancedObject io;
+                InstancedObject io;
                 io.prototype = itP->second;
                 io.dir       = sp.dir;
                 io.heightM   = sp.heightM;
@@ -627,7 +627,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
             // las construye CONTRA EL ORIGEN DE LANZAMIENTO (`camPos`); el pase de color compensa
             // cada frame con `originRel = m_origin - camD`, así que el origen no necesita ser la
             // cámara actual (ya se quedaba viejo entre re-siembras).
-            std::vector<InstanceDataFloat> gpu;
+            std::vector<Renderer::InstanceDataFloat> gpu;
             gpu.resize(objs.size());
             const glm::vec3 up(0.0f, 1.0f, 0.0f);
             const glm::dvec3 originToCenter = planetC - camPos;   // origin = cámara de lanzamiento
@@ -638,7 +638,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
                 m *= glm::mat4_cast(glm::rotation(up, io.dir));
                 m = glm::rotate(m, io.yaw, up);
                 m = glm::scale(m, glm::vec3(io.scale));
-                InstanceDataFloat& inst = gpu[i];
+                Renderer::InstanceDataFloat& inst = gpu[i];
                 inst.model     = m;
                 inst.color     = glm::vec4(io.tint, 1.0f);
                 inst.scale     = glm::vec3(io.scale);
@@ -652,7 +652,7 @@ void PropSystem::refreshScatter(Core::Camera* camera, PlanetarySystem* planets, 
 void PropSystem::applyScatterResult(ScatterResult res,
                                     const glm::dvec3& planetC, double planetR,
                                     Core::Camera* camera, Physics::PhysicsEngine* physics,
-                                    const Haruka::Planet::TerrestrialPlanet* planet) {
+                                    const Planet::TerrestrialPlanet* planet) {
     const glm::dvec3 camPos = camera ? glm::dvec3(camera->position) : glm::dvec3(planetC);
     // El scatter regenera las instancias DESDE CERO y todas vuelven DE PIE: las tendidas viejas
     // desaparecen y semillas + relojes previos dejan de corresponder. El relevo se queda sin
@@ -672,7 +672,7 @@ void PropSystem::applyScatterResult(ScatterResult res,
     // durante el vuelo; por eso no puede ir al worker) y cuadra el estado ACTUAL (el worker usó un
     // snapshot de lanzamiento — lo roto a mitad de vuelo no resucita). `gpu` va en paralelo: la
     // matriz NO depende del estado (solo la `breakMask` del stream), así que se re-etiqueta aquí.
-    std::vector<Haruka::InstancedObject> objs;
+    std::vector<InstancedObject> objs;
     objs.reserve(res.objs.size());
     // BUFFER PERSISTENTE para `m_gpu`: un vector nuevo por aplicar era un mmap de ~17 MB por
     // re-siembra; en el primer barrido tras el apply sus páginas estaban aún frías (TLB/cache) y
@@ -691,7 +691,7 @@ void PropSystem::applyScatterResult(ScatterResult res,
     // el spawn (~22 ms): la malla del terreno carga chunks en todas partes aunque sean roca maciza.
     // Se colecta una vez la lista de columnas con un chunk de HUECO y `surfaceCut` solo se llama en
     // las que existen; en el resto devuelve 0 por construcción (ver `VoxWorld::loadedCutColumns`).
-    const std::unordered_set<Haruka::VoxKey, Haruka::VoxKeyHash> voxCols = planet->vox().loadedCutColumns();
+    const std::unordered_set<Vox::VoxKey, Vox::VoxKeyHash> voxCols = planet->vox().loadedCutColumns();
     // EL FILTRO (boca + estado) EN PARALELO: es O(N) con dos lookups por instancia (~13 ms a 178k
     // en un hilo) pero SOLO LEE (`voxCols`, `m_state`, `res.gpu`) → se parte en K trozos y cada uno
     // acumula en buffers propios; el hilo de render concatena en orden sobre el nuevo anillo. La
@@ -700,12 +700,12 @@ void PropSystem::applyScatterResult(ScatterResult res,
     const size_t K = std::min<size_t>(8u, std::max<size_t>(1u, N / 20000u));
     std::atomic<size_t> aSobreBoca(0);
     auto filtroRango = [&](size_t b, size_t e) {
-        std::vector<Haruka::InstancedObject> lo; lo.reserve(e - b);
-        std::vector<InstanceDataFloat> li;       li.reserve(e - b);
+        std::vector<InstancedObject> lo; lo.reserve(e - b);
+        std::vector<Renderer::InstanceDataFloat> li;       li.reserve(e - b);
         for (size_t i = b; i < e; ++i) {
-            Haruka::InstancedObject io = res.objs[i];
+            InstancedObject io = res.objs[i];
             if (!voxCols.empty()) {
-                const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
+                const Vox::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
                 if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) {
                     aSobreBoca.fetch_add(1, std::memory_order_relaxed); continue;
                 }
@@ -722,7 +722,7 @@ void PropSystem::applyScatterResult(ScatterResult res,
                     io.breakMask = it->second.breakMask;
                 }
             }
-            InstanceDataFloat inst = res.gpu[i];
+            Renderer::InstanceDataFloat inst = res.gpu[i];
             inst.breakMask = (float)io.breakMask;
             lo.push_back(std::move(io));
             li.push_back(inst);
@@ -734,22 +734,22 @@ void PropSystem::applyScatterResult(ScatterResult res,
         // pool, esperar a otros trabajos del mismo pool podría dejarlo sin nadie libre (todos
         // esperando). En `parallelFor` quien llama también trabaja. El orden de `parts` es el de los
         // tramos, así que el resultado sale en el mismo orden que antes.
-        std::vector<std::pair<std::vector<Haruka::InstancedObject>, std::vector<InstanceDataFloat>>> parts(K);
+        std::vector<std::pair<std::vector<InstancedObject>, std::vector<Renderer::InstanceDataFloat>>> parts(K);
         Haruka::Core::Jobs::jobs().parallelFor(0, K, [&](size_t ki) {
             const size_t b = N * ki / K, e = N * (ki + 1) / K;
             if (b < e) parts[ki] = filtroRango(b, e);
         }, Haruka::Core::Jobs::Priority::Frame);
         for (auto& pr : parts) {
-            std::vector<Haruka::InstancedObject>& lo = pr.first;
-            std::vector<InstanceDataFloat>& li = pr.second;
+            std::vector<InstancedObject>& lo = pr.first;
+            std::vector<Renderer::InstanceDataFloat>& li = pr.second;
             m_gpu.insert(m_gpu.end(), li.begin(), li.end());   // `m_gpu` MANTIENE su capacidad persistente
             objs.insert(objs.end(), lo.begin(), lo.end());
         }
     } else {
         for (size_t i = 0; i < N; ++i) {
-            Haruka::InstancedObject io = res.objs[i];
+            InstancedObject io = res.objs[i];
             if (!voxCols.empty()) {
-                const Haruka::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
+                const Vox::VoxKey ck = planet->vox().columnAt(glm::dvec3(io.dir));
                 if (voxCols.count(ck) != 0 && planet->vox().surfaceCut(glm::dvec3(io.dir)) > 0.5f) { aSobreBoca.fetch_add(1, std::memory_order_relaxed); continue; }
             }
             if (planet->vox().surfaceDeltaM(glm::dvec3(io.dir)) < -0.05f) { aSobreBoca.fetch_add(1, std::memory_order_relaxed); continue; }   // cráteres (ver arriba)
@@ -761,7 +761,7 @@ void PropSystem::applyScatterResult(ScatterResult res,
                     io.breakMask = it->second.breakMask;
                 }
             }
-            InstanceDataFloat inst = res.gpu[i];
+            Renderer::InstanceDataFloat inst = res.gpu[i];
             inst.breakMask = (float)io.breakMask;
             objs.push_back(io);
             m_gpu.push_back(inst);
@@ -790,8 +790,8 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     HARUKA_PROFILE("scene.prop.instanced"); HARUKA_GPU_SCOPE("scene.prop.instanced");
 
     if (!valid(m_instPSO)) {
-        const std::string vs = Shader::baseDir() + "shaders/prop_inst.vert";
-        const std::string fs = Shader::baseDir() + "shaders/prop_inst.frag";
+        const std::string vs = Renderer::Shader::baseDir() + "shaders/prop_inst.vert";
+        const std::string fs = Renderer::Shader::baseDir() + "shaders/prop_inst.frag";
         RHI::PipelineDesc pd;
         pd.vertexPath   = vs.c_str();
         pd.fragmentPath = fs.c_str();
@@ -830,7 +830,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     const float propTime = (s_fixed >= 0.0f) ? s_fixed
                          : std::chrono::duration<float>(std::chrono::steady_clock::now() - s_t0).count();
     // La hierba densa se mece con EL MISMO viento y el mismo reloj que los arboles.
-    if (Haruka::Planet::TerrestrialPlanet* tp = f.planets ? f.planets->activeTerrestrialMut() : nullptr)
+    if (Planet::TerrestrialPlanet* tp = f.planets ? f.planets->activeTerrestrialMut() : nullptr)
         tp->setGrassWind(windWorld, propTime);
 
     if (!m_instancing) { m_instancing = std::make_unique<Renderer::GPUInstancing>(); m_instancing->init(20000); }
@@ -989,7 +989,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // huella, y el árbol se queda en su ~1 px natural. Un barrido antes del bucle: protoCount ≈ decenas.
     std::vector<float> cullRadius((size_t)protoCount, 8.0f);
     for (int pi = 0; pi < protoCount; ++pi)
-        cullRadius[(size_t)pi] = Haruka::Planet::propCullRadiusM(m_registry.prototype(pi).name);
+        cullRadius[(size_t)pi] = propCullRadiusM(m_registry.prototype(pi).name);
 
     // Buckets por (prototipo, nivel), reusados entre frames: UN barrido O(N) del registro (antes
     // era O(prototipos × instancias) y era el grueso de los 39 ms del pase).
@@ -1162,7 +1162,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // nivel 0 mas cercana (distingue "esta a 300 m" de "mide 2 cm" de "esta bajo tierra").
     {
         static int s_diagFrame = 0;
-        if (++s_diagFrame % 120 == 1 && Haruka::diagLogs()) {
+        if (++s_diagFrame % 120 == 1 && Core::diagLogs()) {
             std::string line; char tmp[96];
             for (int di = 0; di < protoCount; ++di) {
                 std::snprintf(tmp, sizeof(tmp), " p%d:%d/[%d+%d+%d]/%d", di, m_aliveCounts[(size_t)di],
@@ -1194,7 +1194,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
 // ── sombras ───────────────────────────────────────────────────────────────────────────────────
 
 void PropSystem::drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Core::Camera* camera,
-                             PlanetarySystem* planets) {
+                             Planet::PlanetarySystem* planets) {
     if (!ctx || !camera || !m_instancing) return;
     const int protoCount = m_registry.prototypeCount();
     if (protoCount <= 0 || m_registry.instances().empty()) return;
@@ -1203,8 +1203,8 @@ void PropSystem::drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Cor
 
     // PSO de solo profundidad, con el MISMO layout de instancia que el pase de color.
     if (!valid(m_shadowPSO)) {
-        const std::string vs = Shader::baseDir() + "shaders/prop_depth_inst.vert";
-        const std::string fs = Shader::baseDir() + "shaders/depth_only.frag";
+        const std::string vs = Renderer::Shader::baseDir() + "shaders/prop_depth_inst.vert";
+        const std::string fs = Renderer::Shader::baseDir() + "shaders/depth_only.frag";
         RHI::PipelineDesc pd;
         pd.vertexPath   = vs.c_str();
         pd.fragmentPath = fs.c_str();
@@ -1315,7 +1315,7 @@ void PropSystem::flattenNear(const glm::dvec3& center, double radius) {
         if (io.prototype < 0 || io.prototype >= protoCount) continue;
         const std::string& pn = m_registry.prototype(io.prototype).name;
         if (pn.find("!flat") != std::string::npos) continue;              // ya pisada
-        if (!Haruka::Planet::isGrassProp(pn)) continue;
+        if (!isGrassProp(pn)) continue;
         const glm::dvec3 wp = m_planetC + glm::dvec3(io.dir) * (m_planetR + (double)io.heightM);
         const glm::dvec3 d = wp - center;
         if (d.x * d.x + d.y * d.y + d.z * d.z > r2) continue;
@@ -1395,7 +1395,7 @@ void PropSystem::sweepGrassState(double now, Physics::PhysicsEngine* physics) {
 }
 
 PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Core::Camera* camera,
-                                    PlanetarySystem* planets, Physics::PhysicsEngine* physics) {
+                                    Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics) {
     Hit best;
     if (!planets) return best;
     glm::dvec3 planetC; double planetR = 6371000.0;
@@ -1405,15 +1405,15 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
 
     // Distancia de un punto a una caja orientada: la misma prueba que hace la fisica, no una
     // esfera envolvente (un tronco es mucho mas alto que ancho).
-    auto distToOBB = [](const Haruka::Planet::PropWorldOBB& o, const glm::dvec3& p) {
+    auto distToOBB = [](const PropWorldOBB& o, const glm::dvec3& p) {
         const glm::dvec3 d = p - o.center;
         glm::dvec3 l(glm::dot(d, glm::dvec3(o.rot[0])), glm::dot(d, glm::dvec3(o.rot[1])), glm::dot(d, glm::dvec3(o.rot[2])));
         const glm::dvec3 c = glm::clamp(l, -o.halfExtents, o.halfExtents);
         return glm::length(l - c);
     };
-    std::vector<std::vector<Haruka::Planet::PropColliderPart>> protoParts((size_t)protoCount);
+    std::vector<std::vector<PropColliderPart>> protoParts((size_t)protoCount);
     for (int pi = 0; pi < protoCount; ++pi)
-        protoParts[(size_t)pi] = Haruka::Planet::propColliderParts(m_registry.prototype(pi).name, m_registry.prototype(pi).meshSeed);
+        protoParts[(size_t)pi] = propColliderParts(m_registry.prototype(pi).name, m_registry.prototype(pi).meshSeed);
 
     // El punto MAS CERCANO, no el primero que toque: rama y tronco se solapan en la axila.
     double bestD = radius;
@@ -1426,7 +1426,7 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
         const glm::dvec3 wp = planetC + glm::dvec3(io.dir) * (planetR + (double)io.heightM);
         const double reach = radius + 12.0 * (double)io.scale;   // alto maximo razonable de un prop
         if (glm::length(wp - center) > reach) continue;
-        const auto boxes = Haruka::Planet::propWorldColliders(protoParts[(size_t)io.prototype], io.dir, io.heightM,
+        const auto boxes = propWorldColliders(protoParts[(size_t)io.prototype], io.dir, io.heightM,
                                                               io.scale, io.yaw, planetC, planetR, io.breakMask);
         for (const auto& b : boxes) {
             if (!b.breakable) continue;
@@ -1461,7 +1461,7 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
     if (best.trunk) {
         const float sc = (bestIdx < insts.size()) ? insts[bestIdx].scale : 1.0f;
         // Un cumulo arrasa su huella; un arbol/roca, ~4 radios del fuste (lo que cae).
-        const float r = Haruka::Planet::isClumpProto(best.prototype)
+        const float r = isClumpProto(best.prototype)
                         ? std::min(35.0f, 13.0f * sc)
                         : std::min(8.0f, std::max(0.6f, (float)best.rBottomM * 4.0f));
         m_planetC = planetC; m_planetR = planetR;
@@ -1474,14 +1474,14 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
 }
 
 std::vector<PropSystem::NearPart> PropSystem::partsNear(const glm::dvec3& center, double radius,
-                                                        PlanetarySystem* planets) const {
+                                                        Planet::PlanetarySystem* planets) const {
     std::vector<NearPart> out;
     if (!planets) return out;
     glm::dvec3 planetC; double planetR = 6371000.0;
     if (!planets->getActivePlanet(planetC, planetR)) return out;
     const int protoCount = m_registry.prototypeCount();
     if (protoCount == 0) return out;
-    std::unordered_map<int, std::vector<Haruka::Planet::PropColliderPart>> protoParts;
+    std::unordered_map<int, std::vector<PropColliderPart>> protoParts;
     const auto& insts = m_registry.instances();
     for (const auto& io : insts) {
         if (io.state != (uint32_t)InstancedObjectState::Alive) continue;
@@ -1490,9 +1490,9 @@ std::vector<PropSystem::NearPart> PropSystem::partsNear(const glm::dvec3& center
         if (glm::length(wp - center) > radius + 12.0 * (double)io.scale) continue;
         auto it = protoParts.find(io.prototype);
         if (it == protoParts.end())
-            it = protoParts.emplace(io.prototype, Haruka::Planet::propColliderParts(
+            it = protoParts.emplace(io.prototype, propColliderParts(
                      m_registry.prototype(io.prototype).name, m_registry.prototype(io.prototype).meshSeed)).first;
-        for (const auto& b : Haruka::Planet::propWorldColliders(it->second, io.dir, io.heightM, io.scale, io.yaw,
+        for (const auto& b : propWorldColliders(it->second, io.dir, io.heightM, io.scale, io.yaw,
                                                                 planetC, planetR, io.breakMask)) {
             if (!b.breakable) continue;
             NearPart np;
@@ -1505,7 +1505,7 @@ std::vector<PropSystem::NearPart> PropSystem::partsNear(const glm::dvec3& center
 }
 
 bool PropSystem::breakPart(uint32_t seed, int partId, bool trunk, const glm::dvec3& pos,
-                           const std::string& prototype, double rBottomM, PlanetarySystem* planets) {
+                           const std::string& prototype, double rBottomM, Planet::PlanetarySystem* planets) {
     // Lo MISMO que hace `breakAt` al encontrar la parte, sin buscarla ni rehacer colliders.
     if (trunk) {
         m_registry.setStateBySeed(seed, InstancedObjectState::Destroyed);
@@ -1525,7 +1525,7 @@ bool PropSystem::breakPart(uint32_t seed, int partId, bool trunk, const glm::dve
         glm::dvec3 pc; double pr = 6371000.0;
         if (planets->getActivePlanet(pc, pr)) {
             m_planetC = pc; m_planetR = pr;
-            const float r = Haruka::Planet::isClumpProto(prototype) ? 20.0f
+            const float r = isClumpProto(prototype) ? 20.0f
                                                                     : std::min(8.0f, std::max(0.6f, (float)rBottomM * 4.0f));
             flattenNear(pos, r);
         }
@@ -1533,7 +1533,7 @@ bool PropSystem::breakPart(uint32_t seed, int partId, bool trunk, const glm::dve
     return true;
 }
 
-void PropSystem::refreshCollidersAround(Core::Camera* camera, PlanetarySystem* planets,
+void PropSystem::refreshCollidersAround(Core::Camera* camera, Planet::PlanetarySystem* planets,
                                         Physics::PhysicsEngine* physics) {
     glm::dvec3 pc; double pr = 6371000.0;
     if (!planets || !planets->getActivePlanet(pc, pr)) return;
@@ -1603,10 +1603,10 @@ void PropSystem::refreshColliders(const glm::dvec3& planetC, double planetR, con
     const double r2 = kColliderRadiusM * kColliderRadiusM;
 
     const int protoCount = m_registry.prototypeCount();
-    std::vector<std::vector<Haruka::Planet::PropColliderPart>> protoParts((size_t)protoCount);
+    std::vector<std::vector<Haruka::World::Props::PropColliderPart>> protoParts((size_t)protoCount);
     for (int pi = 0; pi < protoCount; ++pi) {
         const auto& proto = m_registry.prototype(pi);
-        protoParts[(size_t)pi] = Haruka::Planet::propColliderParts(proto.name, proto.meshSeed);
+        protoParts[(size_t)pi] = Haruka::World::Props::propColliderParts(proto.name, proto.meshSeed);
     }
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -1624,7 +1624,7 @@ void PropSystem::refreshColliders(const glm::dvec3& planetC, double planetR, con
         const glm::dvec3 d  = wp - camPos;
         if (glm::dot(d, d) > r2) continue;
         ++nProps;
-        const auto boxes = Haruka::Planet::propWorldColliders(protoParts[(size_t)io.prototype], io.dir, io.heightM,
+        const auto boxes = Haruka::World::Props::propWorldColliders(protoParts[(size_t)io.prototype], io.dir, io.heightM,
                                                               io.scale, io.yaw, planetC, planetR, io.breakMask);
         perProtoProps[(size_t)io.prototype]++;
         for (const auto& b : boxes) {
@@ -1635,7 +1635,7 @@ void PropSystem::refreshColliders(const glm::dvec3& planetC, double planetR, con
             if (shapeId >= 0) {
                 // La malla esta en el marco local sin escalar y con la base en el origen; la base de
                 // rotacion es la MISMA que usa el render (`propInstanceBasis`).
-                phys->addPropMeshInstance(shapeId, wp, Haruka::Planet::propInstanceBasis(io.dir, io.yaw), (double)io.scale);
+                phys->addPropMeshInstance(shapeId, wp, Haruka::World::Props::propInstanceBasis(io.dir, io.yaw), (double)io.scale);
             } else if (b.isCone && !s_forcePrims) {
                 phys->addPropCone(b.center, b.halfExtents.y, b.rTop, b.rBottom, b.rot);
             } else {
@@ -1675,4 +1675,4 @@ void PropSystem::refreshColliders(const glm::dvec3& planetC, double planetR, con
 #endif
 }
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Props

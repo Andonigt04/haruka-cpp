@@ -17,7 +17,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace Haruka {
+namespace Haruka::Tools {
     /**
      * @brief Identificador de tipo de objeto para el WorldSystem.
      */
@@ -151,4 +151,4 @@ namespace Haruka {
     inline bool isRenderable(ObjectType type) {
         return type == ObjectType::MESH || type == ObjectType::MODEL || type == ObjectType::PLANET;
     }
-}
+} // namespace Haruka::Tools

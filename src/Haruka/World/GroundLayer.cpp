@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::World {
 
 float GroundLayer::lifetimeFor(GroundMaterial m) {
     switch (m) {
@@ -84,4 +84,4 @@ float GroundLayer::trampledAt(const glm::dvec3& worldPos, double now) const {
     return std::min(acc, 1.0f);
 }
 
-} // namespace Haruka
+} // namespace Haruka::World

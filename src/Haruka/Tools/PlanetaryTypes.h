@@ -5,7 +5,7 @@
 #include <string>
 #include <cstdint>
 
-namespace Haruka {
+namespace Haruka::Tools {
 
     /**
      * @brief Las 6 caras de la esfera proyectada.
@@ -16,4 +16,4 @@ namespace Haruka {
 
     
 
-} // namespace Haruka
+} // namespace Haruka::Tools

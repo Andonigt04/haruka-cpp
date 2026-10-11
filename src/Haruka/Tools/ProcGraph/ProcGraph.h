@@ -16,7 +16,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 /** @brief Tipo de dato que fluye por el grafo. */
 enum class DataType { Float, Int, Vec2, Vec3, Vec4, Bool };
@@ -334,4 +334,4 @@ void evaluateToGrid(const Graph& graph, int nodeIndex, int outputIndex,
     }
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

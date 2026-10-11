@@ -15,7 +15,7 @@
  *    que costaba cientos de milisegundos.
  *
  * Todo lo que entra y sale de aquí está en **metros y en `double`**. La conversión
- * a las coordenadas locales que ve la GPU es cosa de @ref Haruka::WorldSystem.
+ * a las coordenadas locales que ve la GPU es cosa de @ref Haruka::World::WorldSystem.
  * El terreno no se conoce: se pregunta por @ref Haruka::Physics::IWorldProvider.
  */
 #include "PhysicsEngine.h"
@@ -251,10 +251,10 @@ struct PhysicsEngine::JoltImpl {
      * superficies diferentes ocupando el mismo sitio, y el personaje se apoya en la mas alta.
      */
     static size_t farFirstRing() {
-        const std::vector<Haruka::Planet::TerrainRingSpec> probe =
-            Haruka::Planet::terrainRingLayout(200000.0);
+        const std::vector<World::Terrain::TerrainRingSpec> probe =
+            World::Terrain::terrainRingLayout(200000.0);
         for (size_t k = 0; k < probe.size(); ++k)
-            if (probe[k].hole >= Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M - 1e-9) return k;
+            if (probe[k].hole >= World::Terrain::TERRAIN_COLLIDE_UNIFORM_M - 1e-9) return k;
         return 1;
     }
 
@@ -288,8 +288,8 @@ struct PhysicsEngine::JoltImpl {
         // bloque de 256 m y menos de 1 mm a 5 m. Se reconstruye asi y no "como se genero" porque lo
         // que hay que poder mirar es lo que se PISA, no lo que se pretendia.
         auto ringPoint = [&](const IWorldProvider::TerrainRing& r, uint32_t i, uint32_t j) {
-            const double x = Haruka::Planet::terrainRingNode(i, r.spec);
-            const double z = Haruka::Planet::terrainRingNode(j, r.spec);
+            const double x = World::Terrain::terrainRingNode(i, r.spec);
+            const double z = World::Terrain::terrainRingNode(j, r.spec);
             return org + rx * x + rz * z + rup * (double)r.samples[(size_t)j * r.spec.samples + i];
         };
 
@@ -320,8 +320,8 @@ struct PhysicsEngine::JoltImpl {
                 const double d = std::abs((double)h00 + h11 - h10 - h01) * 0.25;
                 if (!(d == d)) continue;
                 if (d > twistBlock) twistBlock = d;
-                const double x = Haruka::Planet::terrainRingNode(i, r0.spec);
-                const double z = Haruka::Planet::terrainRingNode(j, r0.spec);
+                const double x = World::Terrain::terrainRingNode(i, r0.spec);
+                const double z = World::Terrain::terrainRingNode(j, r0.spec);
                 if (std::abs(x) <= 8.0 && std::abs(z) <= 8.0 && d > twistNear) twistNear = d;
             }
         }
@@ -343,10 +343,10 @@ struct PhysicsEngine::JoltImpl {
                             std::vector<glm::dvec3>& dv, std::vector<uint32_t>& dt) {
                 const uint32_t n = r.spec.samples;
                 auto solid = [&](uint32_t i, uint32_t j) {
-                    if (Haruka::Planet::terrainRingNoSample(r.samples[(size_t)j * n + i])) return false;
+                    if (World::Terrain::terrainRingNoSample(r.samples[(size_t)j * n + i])) return false;
                     if (limit <= 0.0) return true;
-                    const double x = Haruka::Planet::terrainRingNode(i, r.spec);
-                    const double z = Haruka::Planet::terrainRingNode(j, r.spec);
+                    const double x = World::Terrain::terrainRingNode(i, r.spec);
+                    const double z = World::Terrain::terrainRingNode(j, r.spec);
                     return std::abs(x) <= limit + 1e-9 && std::abs(z) <= limit + 1e-9;
                 };
                 // ⚠️ SOLO los nodos CON superficie. Emitir también los del hueco metía NaN en la lista
@@ -372,7 +372,7 @@ struct PhysicsEngine::JoltImpl {
         // Publicar el anillo 0 al RENDER: vértices e índices ya montados (ver `getNearGroundRing`).
         if (firstRing == 0) {
             std::vector<glm::dvec3> rv; std::vector<uint32_t> rt;
-            emitRing(rings[0], Haruka::Planet::TERRAIN_CLIP_HOLE_M, rv, rt);
+            emitRing(rings[0], World::Terrain::TERRAIN_CLIP_HOLE_M, rv, rt);
             uint64_t ck = 1469598103934665603ull;
             for (const auto& v : rv) {
                 const glm::vec3 f(v - org);      // el checksum va sobre lo que se DIBUJA (float, relativo)
@@ -384,7 +384,7 @@ struct PhysicsEngine::JoltImpl {
             nearRing.anchor = org;
             nearRing.cell   = rings[0].spec.cell;
             // El alcance que se DIBUJA, no el del anillo: fuera de aquí manda el clipmap.
-            nearRing.extent = Haruka::Planet::TERRAIN_CLIP_HOLE_M;
+            nearRing.extent = World::Terrain::TERRAIN_CLIP_HOLE_M;
             ++nearRing.revision;
             nearRingValid = true;
             HARUKA_LOGDIAG("Physics", "  anillo cercano publicado: rev %llu · %zu vert · %zu tris · "
@@ -409,7 +409,7 @@ struct PhysicsEngine::JoltImpl {
             JPH::HeightFieldShapeSettings hs;
             hs.mHeightSamples.resize(r.samples.size());
             for (size_t i = 0; i < r.samples.size(); ++i)
-                hs.mHeightSamples[i] = Haruka::Planet::terrainRingNoSample(r.samples[i])
+                hs.mHeightSamples[i] = World::Terrain::terrainRingNoSample(r.samples[i])
                     ? JPH::HeightFieldShapeConstants::cNoCollisionValue : r.samples[i];
             hs.mSampleCount = r.spec.samples;
             // ⚠️ 16 BITS POR MUESTRA, no los 8 de fábrica. Jolt cuantiza las alturas dentro de cada
@@ -420,7 +420,7 @@ struct PhysicsEngine::JoltImpl {
             // más de un metro por pura cuantización, en una superficie cuyo objetivo es 0.
             // Cuesta el doble de memoria: 360 KB en total. No es un ajuste libre.
             hs.mBitsPerSample = 16;
-            const double lo = Haruka::Planet::terrainRingNode(0, r.spec);
+            const double lo = World::Terrain::terrainRingNode(0, r.spec);
             hs.mOffset = JPH::Vec3((float)lo, 0.0f, (float)lo);
             hs.mScale  = JPH::Vec3((float)r.spec.cell, 1.0f, (float)r.spec.cell);
             JPH::ShapeSettings::ShapeResult hr = hs.Create();
@@ -539,8 +539,8 @@ struct PhysicsEngine::JoltImpl {
             hs.mSampleCount = hfN;
             // La superficie de Jolt es `mOffset + mScale·(x, muestra, y)` con x,y enteros: el offset
             // lleva la esquina a su coordenada tangente y la escala convierte índice→metros.
-            hs.mOffset = JPH::Vec3((float)Haruka::Planet::TERRAIN_HF_LO, 0.0f,
-                                   (float)Haruka::Planet::TERRAIN_HF_LO);
+            hs.mOffset = JPH::Vec3((float)World::Terrain::TERRAIN_HF_LO, 0.0f,
+                                   (float)World::Terrain::TERRAIN_HF_LO);
             hs.mScale  = JPH::Vec3((float)hfCell, 1.0f, (float)hfCell);
             JPH::ShapeSettings::ShapeResult hres = hs.Create();
             if (hres.IsValid()) {
@@ -610,7 +610,7 @@ struct PhysicsEngine::JoltImpl {
     static glm::dvec3 anchorOf(IWorldProvider* w, const glm::dvec3& p) {
         glm::dvec3 up(0.0, 1.0, 0.0), t1, t2;
         if (w && w->hasActivePlanet())
-            Haruka::Planet::terrainClipFrame(p, w->activePlanetCenter(), up, t1, t2,
+            World::Terrain::terrainClipFrame(p, w->activePlanetCenter(), up, t1, t2,
                                              w->activePlanetRadius());
         return up;
     }
@@ -630,7 +630,7 @@ struct PhysicsEngine::JoltImpl {
         // anillos y sin el heightfield cercano. Ahora los dos pasan por `buildGroundShape`.
         // Camino de ANILLOS: dos cuerpos, dos cadencias (ver los miembros `nearId`/`farId`).
         JPH::Ref<JPH::Shape> nearShape =
-            buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
+            buildGroundRings(w, near, 0, World::Terrain::TERRAIN_COLLIDE_UNIFORM_M, 0);
         if (nearShape) {
             // ⚠️ EL LEJANO EMPIEZA DONDE ACABA EL CERCANO, NO EN EL ANILLO 1.
             //
@@ -1009,7 +1009,7 @@ struct PhysicsEngine::JoltImpl {
     // los dos parches se van y queda una sola función.
     glm::dvec3 gravityAtPoint(IWorldProvider* w, const glm::dvec3& pos) const {
         if (!w) return glm::dvec3(0.0);
-        const glm::dvec3 g = Haruka::Planet::gravityAt(w->gravBodies(), pos);
+        const glm::dvec3 g = World::Planet::gravityAt(w->gravBodies(), pos);
         // Red de seguridad: si la escena aún no ha registrado ningún cuerpo masivo (carga a medias),
         // sin esto el jugador se queda sin "arriba" y el controlador de personaje pierde su eje.
         if (glm::dot(g, g) > 1e-18 || !w->hasActivePlanet()) return g;
@@ -1017,7 +1017,7 @@ struct PhysicsEngine::JoltImpl {
         const double r = glm::length(toC);
         if (r < 1e-6) return glm::dvec3(0.0);
         const double R = w->activePlanetRadius();
-        return (toC / r) * (Haruka::Planet::surfaceGravity(R) * (R * R) / (r * r));
+        return (toC / r) * (World::Planet::surfaceGravity(R) * (R * R) / (r * r));
     }
 
     void stepCharacter(double dt, PhysicsEngine* eng, IWorldProvider* w) {
@@ -1545,7 +1545,7 @@ struct PhysicsEngine::JoltImpl {
         if (groundIsMesh && haveNear && !nearJob.valid()) {
             const glm::dvec3 a = anchorOf(w, near);
             const bool moved = nearAnchorSet && glm::length(a - nearAnchor) > 1e-12 &&
-                               Haruka::Planet::terrainAnchorShouldJump(
+                               World::Terrain::terrainAnchorShouldJump(
                                    nearAnchor, near - w->activePlanetCenter(),
                                    w->activePlanetRadius());
             // ⚠️ Y TAMBIÉN CUANDO EL SUELO CAMBIA SIN MOVERSE: una boca de cueva que acaba de
@@ -1557,7 +1557,7 @@ struct PhysicsEngine::JoltImpl {
                 lastEditsVersion = edits;
                 nearJobAnchor = a;
                 nearJob = runInBackground(true, [this, w, near] {
-                    return buildGroundRings(w, near, 0, Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M, 0);
+                    return buildGroundRings(w, near, 0, World::Terrain::TERRAIN_COLLIDE_UNIFORM_M, 0);
                 });
             }
         }
@@ -1620,8 +1620,8 @@ struct PhysicsEngine::JoltImpl {
         // esta. Ahora se deriva de la celda del primer anillo lejano, para que no puedan divergir.
         double farCellM = 16.0;
         {
-            const std::vector<Haruka::Planet::TerrainRingSpec> lay =
-                Haruka::Planet::terrainRingLayout(200000.0);
+            const std::vector<World::Terrain::TerrainRingSpec> lay =
+                World::Terrain::terrainRingLayout(200000.0);
             const size_t k = farFirstRing();
             if (k < lay.size()) farCellM = lay[k].cell;
         }
@@ -1768,9 +1768,9 @@ struct PhysicsEngine::JoltImpl {
         const double     Rw  = farQuery ? w->activePlanetRadius() : 0.0;
         // La celda del anillo a cada distancia acota cuanto puede mentir la malla, y con ella la banda
         // en la que un cuerpo "apoyado" se considera apoyado en la superficie EQUIVOCADA.
-        const std::vector<Haruka::Planet::TerrainRingSpec> ringLay =
-            farQuery ? Haruka::Planet::terrainRingLayout(200000.0)
-                     : std::vector<Haruka::Planet::TerrainRingSpec>{};
+        const std::vector<World::Terrain::TerrainRingSpec> ringLay =
+            farQuery ? World::Terrain::terrainRingLayout(200000.0)
+                     : std::vector<World::Terrain::TerrainRingSpec>{};
 
         for (auto& sp : bodies) {
             auto it = map.find(sp.get()); if (it == map.end()) continue;
@@ -1789,7 +1789,7 @@ struct PhysicsEngine::JoltImpl {
             // fallo que documenta `charactervirtual-no-cancela-gravedad`.
             if (!farQuery || sp->isCharacter || !sp->groundByQuery || Rw <= 0.0) continue;
             const double distAnchor = glm::length(sp->position - meshCenter);
-            if (distAnchor <= Haruka::Planet::TERRAIN_COLLIDE_UNIFORM_M) continue;
+            if (distAnchor <= World::Terrain::TERRAIN_COLLIDE_UNIFORM_M) continue;
 
             const glm::dvec3 rel = sp->position - pcW;
             const double     r   = glm::length(rel);
@@ -2669,7 +2669,7 @@ double PhysicsEngine::calculateGravityAtPosition(const glm::dvec3& worldPos, glm
     // exactamente `Planet::kGravConstant` y nadie llama al setter, así que el resultado es idéntico;
     // si algún día alguien lo cambia, el sitio a cambiar es la constante compartida — tener G en dos
     // sitios es exactamente el tipo de duplicado que este cambio viene a quitar.
-    const glm::dvec3 totalGravity = Haruka::Planet::gravityAt(m_world->gravBodies(), worldPos);
+    const glm::dvec3 totalGravity = World::Planet::gravityAt(m_world->gravBodies(), worldPos);
 
 
     double magnitude = glm::length(totalGravity);

@@ -19,15 +19,17 @@
 #include <filesystem>
 #include <numeric>
 
-namespace Haruka {
 
-using namespace BakeUtil;
+namespace Haruka::World::Vox {
+using namespace Terrain::BakeUtil;
+} // namespace Haruka::World::Vox
 
+namespace Haruka::World::Terrain {
 namespace BakeUtil {
 
 std::string bakesDir(const std::string& dir) {
     if (!dir.empty()) return (dir.back() == '/' || dir.back() == '\\') ? dir : dir + "/";
-    const std::string& root = AssetPaths::projectRoot();
+    const std::string& root = Core::AssetPaths::projectRoot();
     return root.empty() ? std::string("bakes/") : root + "bakes/";
 }
 
@@ -44,7 +46,7 @@ bool savePNGGray(const std::string& path, int w, int h, const std::vector<float>
     }
     std::error_code ec;
     std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
-    return writePNG(path, w, h, 4, px.data());
+    return IO::writePNG(path, w, h, 4, px.data());
 }
 
 bool loadPNGGray(const std::string& path, int& w, int& h, std::vector<float>& v) {
@@ -117,7 +119,9 @@ int keepLargestComponent2D(int w, int h, std::vector<uint8_t>& inside) {
 }
 
 } // namespace BakeUtil
+} // namespace Haruka::World::Terrain
 
+namespace Haruka::World::Vox {
 namespace {
 inline int cellsPerFace() {
     return (int)std::lround((3.14159265358979 * 0.5) / kCaveCellRad);
@@ -660,7 +664,7 @@ std::string caveResolveAssetPath(const std::string& path) {
     if (path.empty()) return path;
     std::error_code ec;
     if (std::filesystem::exists(path, ec)) return path;
-    const std::string& root = AssetPaths::projectRoot();
+    const std::string& root = Core::AssetPaths::projectRoot();
     return root.empty() ? path : root + path;
 }
 
@@ -1108,5 +1112,5 @@ float caveEntranceMask(const CaveSystem& sys, const glm::dvec3& dir) {
     if (d > 1e8f) return 0.0f;
     return std::clamp(-d / 4.0f, 0.0f, 1.0f);   // 0 en la pared, 1 a 4 m dentro del aire
 }
+} // namespace Haruka::World::Vox
 
-} // namespace Haruka

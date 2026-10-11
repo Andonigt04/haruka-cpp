@@ -17,9 +17,9 @@
 #include "Haruka/Physics/XPBD/Softbody.h"
 #include "Haruka/Tools/MathTypes.h"
 
-namespace Haruka { namespace Renderer { class Shader; } } using Haruka::Renderer::Shader;
+namespace Haruka { namespace Renderer { class Shader; } }
 
-namespace Haruka {
+namespace Haruka::Renderer {
 
 class SoftBodyRenderer {
 public:
@@ -32,7 +32,7 @@ public:
     /** @brief Deja de dibujarlo y libera sus buffers (lo que dibuja una criatura muere con ella). */
     void remove(int id);
 
-    void render(const Haruka::WorldPos& cameraPos);
+    void render(const Tools::WorldPos& cameraPos);
 
     void clear();
 
@@ -56,8 +56,8 @@ private:
     int m_nextId = 1;
 
     void ensurePSO();
-    void uploadEntry(Entry& e, const Haruka::WorldPos& cameraPos);
+    void uploadEntry(Entry& e, const Tools::WorldPos& cameraPos);
 };
 
-} // namespace Haruka
+} // namespace Haruka::Renderer
 

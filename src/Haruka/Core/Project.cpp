@@ -9,8 +9,7 @@
 
 namespace fs = std::filesystem;
 
-namespace Haruka
-{
+namespace Haruka::Core {
     Project::Project() {}
     Project::~Project() {}
 
@@ -52,7 +51,7 @@ namespace Haruka
             std::cout << "Project created at: " << path << std::endl;
             return ok;
         } catch (const std::exception& e) {
-            HARUKA_MOTOR_ERROR(ErrorCode::GAME_LOGIC_ERROR, std::string("Error creating project: ") + e.what());
+            HARUKA_MOTOR_ERROR(Tools::ErrorCode::GAME_LOGIC_ERROR, std::string("Error creating project: ") + e.what());
             return false;
         }
     }
@@ -95,7 +94,7 @@ namespace Haruka
     bool Project::loadFromJSON(const std::string& filepath) {
         std::ifstream file(filepath);
         if (!file.is_open()) {
-            HARUKA_MOTOR_ERROR(ErrorCode::FILE_NOT_FOUND, std::string("Cannot open project file: ") + filepath);
+            HARUKA_MOTOR_ERROR(Tools::ErrorCode::FILE_NOT_FOUND, std::string("Cannot open project file: ") + filepath);
             return false;
         }
         try {
@@ -135,7 +134,7 @@ namespace Haruka
                 config.exportSettings.customLaunchScript = exportData.value("customLaunchScript", config.exportSettings.customLaunchScript);
             }
         } catch (const std::exception& e) {
-            HARUKA_MOTOR_ERROR(ErrorCode::INVALID_PROJECT, std::string("Invalid project file: ") + e.what());
+            HARUKA_MOTOR_ERROR(Tools::ErrorCode::INVALID_PROJECT, std::string("Invalid project file: ") + e.what());
             return false;
         }
 
@@ -145,7 +144,7 @@ namespace Haruka
     bool Project::saveToJSON(const std::string& filepath) {
         std::ofstream file(filepath);
         if (!file.is_open()) {
-            HARUKA_MOTOR_ERROR(ErrorCode::FILE_WRITE_ERROR, std::string("Cannot create project file: ") + filepath);
+            HARUKA_MOTOR_ERROR(Tools::ErrorCode::FILE_WRITE_ERROR, std::string("Cannot create project file: ") + filepath);
             return false;
         }
 
@@ -176,4 +175,4 @@ namespace Haruka
         file << data.dump(2) << '\n';
         return true;
     }
-}
+} // namespace Haruka::Core

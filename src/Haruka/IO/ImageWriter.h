@@ -19,14 +19,14 @@
  *
  * Los datos INCOMPRESIBLES (ruido) no crecen: si el Huffman fijo empeorara el tamaño, se guarda un
  * bloque "stored" — o sea el comportamiento anterior, que así queda como el peor caso y no como el
- * único. `tests/TestImageWriter.cpp` verifica la ida y vuelta contra el inflate de stb_image, que
+ * único. `tests/IO/TestImageWriter.cpp` verifica la ida y vuelta contra el inflate de stb_image, que
  * es un decodificador ajeno: es la única forma de detectar un error de empaquetado de bits.
  */
 #pragma once
 
 #include <string>
 
-namespace Haruka {
+namespace Haruka::IO {
 
 /**
  * @brief Writes an 8-bit PNG. `channels` = 3 (RGB) or 4 (RGBA).
@@ -42,5 +42,5 @@ bool writePNG(const std::string& path, int w, int h, int channels, const unsigne
  */
 bool writePNG16(const std::string& path, int w, int h, const unsigned short* gray);
 
-} // namespace Haruka
+} // namespace Haruka::IO
 

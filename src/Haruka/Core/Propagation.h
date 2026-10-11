@@ -10,7 +10,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Core {
 
 class Propagation {
 public:
@@ -23,4 +23,4 @@ public:
     static float through(const glm::dvec3& a, const glm::dvec3& b);
 };
 
-} // namespace Haruka
+} // namespace Haruka::Core

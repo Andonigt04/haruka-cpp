@@ -10,7 +10,7 @@
 #include <vector>
 #include <glm/glm.hpp>
 
-namespace Haruka {
+namespace Haruka::Audio {
 
 class AudioSystem {
 public:
@@ -48,4 +48,4 @@ private:
     std::vector<uint32_t> m_pool;   // voces reutilizables para one-shots
 };
 
-} // namespace Haruka
+} // namespace Haruka::Audio

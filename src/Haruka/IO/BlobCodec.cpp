@@ -2,7 +2,7 @@
 #include <zstd.h>
 #include <cstring>
 
-namespace Haruka::codec {
+namespace Haruka::IO::codec {
 
 static const uint8_t kMagic[4] = { 'H', 'B', '1', 0 };
 
@@ -65,4 +65,4 @@ bool decodeString(const Bytes& blob, const std::string& key, std::string& out) {
     return true;
 }
 
-} // namespace Haruka::codec
+} // namespace Haruka::IO::codec

@@ -16,7 +16,8 @@
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; namespace RHI { class Context; } }
+namespace Haruka { namespace Core { class Camera; } namespace RHI { class Context; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
 
 namespace Haruka::Renderer {
 
@@ -24,7 +25,7 @@ class ScenePass {
 public:
     struct Frame {
         Core::Camera*         camera  = nullptr;
-        PlanetarySystem*      planets = nullptr;    ///< la vertical del planeta para los personajes
+        World::Planet::PlanetarySystem*      planets = nullptr;    ///< la vertical del planeta para los personajes
         RHI::BufferHandle     perFrameUBO{};        ///< binding 0 (view/proj + luces)
         RHI::RenderPassHandle sceneTargetPass{};    ///< invalido = backbuffer
         uint32_t width = 1, height = 1;
@@ -43,7 +44,7 @@ public:
     /// `useFinalLook` = final.frag (HDR/bloom/SSAO/IBL/sombras) frente a preview.frag.
     void begin(RHI::Context* ctx, const Frame& f, bool useFinalLook);
     /// Los objetos de la cola + las piezas de construccion instanciadas. Deja atado `pso()`.
-    void drawObjects(RHI::Context* ctx, const Frame& f, const std::vector<Haruka::RenderCommand>& queue, DrawStats& st);
+    void drawObjects(RHI::Context* ctx, const Frame& f, const std::vector<Core::Scene::RenderCommand>& queue, DrawStats& st);
 
     RHI::PipelineHandle pso() const { return m_scenePSO; }        ///< para restaurarlo tras otro pase
     RHI::BufferHandle   perObjectUBO();                           ///< binding 1 (lo crea si falta)

@@ -203,43 +203,38 @@ private:
 
     // Convenience macros for source-location capture
 #define HARUKA_ERROR(component, code, message) \
-    ErrorReporter::report(component, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(component, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_MOTOR_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::MOTOR, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::MOTOR, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_EDITOR_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::EDITOR, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::EDITOR, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_GAMEPLAY_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::GAMEPLAY, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::GAMEPLAY, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_RENDERER_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::RENDERER, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::RENDERER, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_NETWORK_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::NETWORK, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::NETWORK, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_PHYSICS_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::PHYSICS, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::PHYSICS, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_AUDIO_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::AUDIO, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::AUDIO, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_IO_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::IO, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::IO, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_SCENE_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::SCENE, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::SCENE, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 #define HARUKA_ASSET_ERROR(code, message) \
-    ErrorReporter::report(ErrorComponent::ASSET_LOADER, code, message, __FILE__, __LINE__, __FUNCTION__)
+    Haruka::Tools::ErrorReporter::report(Haruka::Tools::ErrorComponent::ASSET_LOADER, code, message, __FILE__, __LINE__, __FUNCTION__)
 
 
 }} // namespace Haruka::Tools
 
-using Haruka::Tools::ErrorComponent;
-using Haruka::Tools::ErrorCode;
-using Haruka::Tools::ErrorInfo;
-using Haruka::Tools::ErrorReporter;
-namespace Haruka { using Tools::ErrorComponent; using Tools::ErrorCode; using Tools::ErrorInfo; using Tools::ErrorReporter; }

@@ -13,7 +13,7 @@
 #include "Haruka/Tools/MathTypes.h"
 #include "Haruka/Input/InputAction.h"
 
-namespace Haruka {
+namespace Haruka::Game {
 
 /** When an action callback fires. */
 enum class ActionTrigger {
@@ -71,13 +71,13 @@ public:
     /** @name Camera controls */
     ///@{
     void rotate(float yaw, float pitch);
-    Camera* getCamera() const { return camera.get(); }
+    Core::Camera* getCamera() const { return camera.get(); }
     ///@}
     
     /** @name Physics binding */
     ///@{
-    void setPhysicsBody(std::shared_ptr<RigidBody> body) { physicsBody = body; }
-    std::shared_ptr<RigidBody> getPhysicsBody() { return physicsBody; }
+    void setPhysicsBody(std::shared_ptr<Physics::RigidBody> body) { physicsBody = body; }
+    std::shared_ptr<Physics::RigidBody> getPhysicsBody() { return physicsBody; }
     /** @brief (Fase 2) Movimiento GESTIONADO POR EL MOTOR: en vez de escribir la posición a mano,
      *  move() fija la velocidad de locomoción en el body y el motor integra (gravedad radial +
      *  ground-snap). Así una fuerza externa (viento, empujón, magia) SÍ afecta al jugador. Off =
@@ -88,9 +88,9 @@ public:
     
     /** @name Network synchronization */
     ///@{
-    void applyServerUpdate(const Haruka::WorldPos& serverPos, const Haruka::Rotation& serverRot);
+    void applyServerUpdate(const Tools::WorldPos& serverPos, const Tools::Rotation& serverRot);
 
-    std::function<void(const WorldPos&, const Rotation&)> onTransformChanged;
+    std::function<void(const Tools::WorldPos&, const Tools::Rotation&)> onTransformChanged;
     ///@}
     
     /** @name State accessors */
@@ -216,8 +216,8 @@ private:
     glm::vec3 forward;
     glm::vec3 right;
     
-    std::unique_ptr<Camera> camera;
-    std::shared_ptr<RigidBody> physicsBody;
+    std::unique_ptr<Core::Camera> camera;
+    std::shared_ptr<Physics::RigidBody> physicsBody;
     bool m_physicsDriven = false;   // (Fase 2) el motor integra el body; move() fija velocidad, no posición
     
     CharacterState state = CharacterState::IDLE;
@@ -256,10 +256,10 @@ private:
     float currentHeight = 1.9f;
     
     // Network sync
-    Haruka::WorldPos lastSyncPos;
-    Haruka::Rotation lastSyncRot;
-    Haruka::WorldPos targetPosition;
-    Haruka::Rotation targetRotation;
+    Tools::WorldPos lastSyncPos;
+    Tools::Rotation lastSyncRot;
+    Tools::WorldPos targetPosition;
+    Tools::Rotation targetRotation;
     float syncThreshold = 0.1f;
     float syncInterval = 0.1f;
     float syncTimer = 0.0f;
@@ -276,4 +276,4 @@ private:
     glm::dvec3 getEffectiveUp() const;
 };
 
-}
+} // namespace Haruka::Game

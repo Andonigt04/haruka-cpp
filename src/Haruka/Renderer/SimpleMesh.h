@@ -11,5 +11,3 @@
  */
 #include "Mesh.h"
 namespace Haruka { namespace Renderer { using SimpleMesh = Mesh; } }
-using SimpleMesh = Haruka::Renderer::SimpleMesh;   // back-compat (== Mesh)
-namespace Haruka { using Renderer::SimpleMesh; }

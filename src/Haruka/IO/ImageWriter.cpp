@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <thread>
 
-namespace Haruka {
+namespace Haruka::IO {
 namespace {
 
 uint32_t crc32(const uint8_t* data, size_t len) {
@@ -447,4 +447,4 @@ bool writePNG16(const std::string& path, int w, int h, const unsigned short* gra
     return writePNGChunks(path, ihdr, raw);
 }
 
-} // namespace Haruka
+} // namespace Haruka::IO

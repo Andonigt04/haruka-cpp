@@ -5,13 +5,11 @@
 #pragma once
 
 namespace Haruka { namespace Core { class Application; class Camera; } }
-using Haruka::Core::Application;
-using Haruka::Core::Camera;
-namespace Haruka { namespace Renderer { class RenderTarget; } } using Haruka::Renderer::RenderTarget;
+namespace Haruka { namespace Renderer { class RenderTarget; } }
 
-namespace Haruka {
+namespace Haruka::Core::Scene {
     class SceneManager;
-}
+} // namespace Haruka::Core::Scene
 
 namespace Haruka { namespace Renderer {
 
@@ -37,17 +35,17 @@ public:
     }
     
     /** @brief Stores the active scene pointer. */
-    void setScene(Haruka::SceneManager* scene) {
+    void setScene(Core::Scene::SceneManager* scene) {
         motorScene = scene;
     }
     
     /** @brief Stores the active camera pointer. */
-    void setCamera(Camera* cam) {
+    void setCamera(Core::Camera* cam) {
         motorCamera = cam;
     }
     
     /** @brief Stores the active application pointer. */
-    void setApplication(Application* app) {
+    void setApplication(Core::Application* app) {
         motorApplication = app;
     }
     
@@ -57,17 +55,17 @@ public:
     }
     
     /** @brief Returns the active scene pointer. */
-    Haruka::SceneManager* getScene() const {
+    Core::Scene::SceneManager* getScene() const {
         return motorScene;
     }
     
     /** @brief Returns the active camera pointer. */
-    Camera* getCamera() const {
+    Core::Camera* getCamera() const {
         return motorCamera;
     }
     
     /** @brief Returns the active application pointer. */
-    Application* getApplication() const {
+    Core::Application* getApplication() const {
         return motorApplication;
     }
     
@@ -96,13 +94,12 @@ private:
     MotorInstance& operator=(const MotorInstance&) = delete;
 
     RenderTarget* motorRenderTarget = nullptr;
-    Haruka::SceneManager* motorScene = nullptr;
-    Camera* motorCamera = nullptr;
-    Application* motorApplication = nullptr;
+    Core::Scene::SceneManager* motorScene = nullptr;
+    Core::Camera* motorCamera = nullptr;
+    Core::Application* motorApplication = nullptr;
     bool motorPlayMode = false;
 };
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::MotorInstance;             // back-compat alias (migration)
-namespace Haruka { using Renderer::MotorInstance; }
+             // back-compat alias (migration)

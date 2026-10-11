@@ -148,4 +148,3 @@ public:
 
 }} // namespace Haruka::Renderer
 
-namespace Haruka { using Renderer::InstanceDataFloat; using Renderer::GPUInstancing; }

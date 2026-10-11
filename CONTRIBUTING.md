@@ -27,16 +27,19 @@ cmake --build build -j6 --target HarukaEngine haruka_tests haruka_tests_rhi
 1. Fork the repository and create a branch from `develop`.
 2. Keep the change focused: one problem per pull request. A refactor and a behaviour change go in
    separate pull requests, so each one can be reviewed and reverted on its own.
-3. Follow [QUALITY.md](QUALITY.md): naming, headers, threads, floating point, and above all
+3. Put a new test in the `tests/` folder that mirrors the code it tests (`src/Haruka/Physics/` →
+   `tests/Physics/`) and register it at the end of its file with `HARUKA_REGISTER_TESTS`.
+4. Follow [QUALITY.md](QUALITY.md): naming, headers, threads, floating point, and above all
    **tests with a counter-test**.
-4. Run the suites that cover what you touched:
+5. Run the suites that cover what you touched:
 
    ```bash
-   ./build/haruka_tests            # whole CPU suite, or pass a group name
-   ./build/haruka_tests_rhi all    # GPU bench, both backends (needs a GPU)
+   ctest --test-dir build -L cpu -j8      # whole CPU suite, one folder per job
+   ctest --test-dir build -R World.Terrain # just the folder you touched
+   ./build/haruka_tests_rhi all            # GPU bench, both backends (needs a GPU)
    ```
 
-5. If you changed shaders, check that the `.spv` was regenerated. A shader that fails to compile
+6. If you changed shaders, check that the `.spv` was regenerated. A shader that fails to compile
    to SPIR-V falls back silently under OpenGL, so the tests can stay green while Vulkan is broken.
 
 ## Pull requests

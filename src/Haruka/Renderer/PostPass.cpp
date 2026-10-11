@@ -53,7 +53,7 @@ void PostPass::setupQuad() {
 }
 
 bool PostPass::begin(int windowW, int windowH, bool editorTarget) {
-    const auto& gpost = Haruka::SettingsManager::get().graphics();
+    const auto& gpost = Settings::SettingsManager::get().graphics();
     // `HARUKA_RENDER_SCALE=<0.5..2>`: A/B de coste por PIXEL sin tocar los ajustes guardados. Si el
     // tiempo de GPU cae con el cuadrado de la escala, el pase es de relleno (fragmentos/overdraw);
     // si no se mueve, es de vertices o de draws.
@@ -189,7 +189,7 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
 
     // 1. Bright-pass: scene color -> tex[0].
     const RHI::BufferHandle uboExtract =
-        setParams(Haruka::SettingsManager::get().graphics().bloomThreshold, 0.0f);
+        setParams(Settings::SettingsManager::get().graphics().bloomThreshold, 0.0f);
     ctx->beginRenderPass(m_bloomPass[0], keep);   // bindea FBO + viewport(bw,bh)
     ctx->bindPipeline(m_bloomExtractPSO);
     ctx->bindVertexBuffer(m_quadBuf);
@@ -203,7 +203,7 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
     // El radio del halo sale de aquí (σ ∝ √N). Ya no es un literal: es ajuste, junto al umbral y la
     // fuerza. Acotado 1..8 porque por debajo de 1 no hay blur y por encima de 8 el halo se come la
     // pantalla sin aportar nada — y ambos extremos son fáciles de escribir por error en el .json.
-    const int iterations = std::clamp(Haruka::SettingsManager::get().graphics().bloomIterations, 1, 8);
+    const int iterations = std::clamp(Settings::SettingsManager::get().graphics().bloomIterations, 1, 8);
     for (int i = 0; i < iterations; ++i) {
         const RHI::BufferHandle uboH = setParams(0.0f, 1.0f);   // horizontal -> tex[1]
         ctx->beginRenderPass(m_bloomPass[1], keep);
@@ -262,7 +262,7 @@ if (m_active && m_scene) {
         PresentParams p{};
         p.texel[0]      = 1.0f / (float)m_w;
         p.texel[1]      = 1.0f / (float)m_h;
-        p.bloomStrength = Haruka::SettingsManager::get().graphics().bloomStrength;
+        p.bloomStrength = Settings::SettingsManager::get().graphics().bloomStrength;
         p.fxaa          = m_wantFXAA  ? 1.0f : 0.0f;
         p.bloom         = haveBloom ? 1.0f : 0.0f;
         dev->updateBuffer(m_presentUBO, 0, sizeof(p), &p);

@@ -88,7 +88,7 @@ private:
     bool m_focused   = false;
     bool m_meshDirty = true;
 
-    std::unique_ptr<RenderTarget> m_fbo;
+    std::unique_ptr<Renderer::RenderTarget> m_fbo;
 
     // RHI pipeline and buffers
     Haruka::RHI::PipelineHandle m_pipeline;

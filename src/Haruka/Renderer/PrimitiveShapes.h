@@ -42,5 +42,3 @@ private:
 
 }} // namespace Haruka::Renderer
 
-using Haruka::Renderer::PrimitiveShapes;
-namespace Haruka { using Renderer::PrimitiveShapes; }

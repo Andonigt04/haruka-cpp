@@ -9,9 +9,9 @@
 
 namespace {
 
-using Haruka::LODSettings;
-using Haruka::StreamingSettings;
-using Haruka::TerrainGeneratorSettings;
+using Haruka::Core::Scene::LODSettings;
+using Haruka::Core::Scene::StreamingSettings;
+using Haruka::Core::Scene::TerrainGeneratorSettings;
 
 bool parseBoolField(const nlohmann::json& value, const char* key, bool defaultValue) {
     if (value.contains(key) && value[key].is_boolean()) {
@@ -20,8 +20,8 @@ bool parseBoolField(const nlohmann::json& value, const char* key, bool defaultVa
     return defaultValue;
 }
 
-Haruka::Flags parseFlags(const nlohmann::json& value) {
-    Haruka::Flags flags;
+Haruka::Core::Scene::Flags parseFlags(const nlohmann::json& value) {
+    Haruka::Core::Scene::Flags flags;
     if (value.is_object()) {
         flags.hasChunks = parseBoolField(value, "hasChunks", flags.hasChunks);
         flags.isPersistent = parseBoolField(value, "isPersistent", flags.isPersistent);
@@ -40,17 +40,17 @@ Haruka::Flags parseFlags(const nlohmann::json& value) {
     return flags;
 }
 
-Haruka::Rotation parseRotation(const nlohmann::json& value) {
+Haruka::Tools::Rotation parseRotation(const nlohmann::json& value) {
     if (value.is_array()) {
         if (value.size() == 4) {
             const double x = value[0].get<double>();
             const double y = value[1].get<double>();
             const double z = value[2].get<double>();
             const double w = value[3].get<double>();
-            return Haruka::Rotation(w, x, y, z);
+            return Haruka::Tools::Rotation(w, x, y, z);
         }
         if (value.size() == 3) {
-            return Haruka::Rotation(glm::radians(glm::dvec3(
+            return Haruka::Tools::Rotation(glm::radians(glm::dvec3(
                 value[0].get<double>(),
                 value[1].get<double>(),
                 value[2].get<double>()
@@ -58,11 +58,11 @@ Haruka::Rotation parseRotation(const nlohmann::json& value) {
         }
     }
 
-    return Haruka::Rotation(1.0, 0.0, 0.0, 0.0);
+    return Haruka::Tools::Rotation(1.0, 0.0, 0.0, 0.0);
 }
 
-LODSettings parseLodSettings(const nlohmann::json& value) {
-    LODSettings settings;
+Haruka::Core::Scene::LODSettings parseLodSettings(const nlohmann::json& value) {
+    Haruka::Core::Scene::LODSettings settings;
     settings.type = value.value("type", "");
     settings.maxDepth = value.value("maxDepth", 0);
     settings.splitThreshold = value.value("splitThreshold", 0.0);
@@ -79,16 +79,16 @@ LODSettings parseLodSettings(const nlohmann::json& value) {
     return settings;
 }
 
-StreamingSettings parseStreamingSettings(const nlohmann::json& value) {
-    StreamingSettings settings;
+Haruka::Core::Scene::StreamingSettings parseStreamingSettings(const nlohmann::json& value) {
+    Haruka::Core::Scene::StreamingSettings settings;
     settings.mode = value.value("mode", "");
     settings.priority = value.value("priority", "");
     settings.enabled = value.value("enabled", true);
     return settings;
 }
 
-TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
-    TerrainGeneratorSettings settings;
+Haruka::Core::Scene::TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
+    Haruka::Core::Scene::TerrainGeneratorSettings settings;
     settings.type = value.value("type", "");
     settings.shader = value.value("shader", "");
     if (value.contains("config") && value["config"].is_object()) {
@@ -103,7 +103,7 @@ TerrainGeneratorSettings parseTerrainSettings(const nlohmann::json& value) {
     return settings;
 }
 
-nlohmann::json toJson(const LODSettings& settings) {
+nlohmann::json toJson(const Haruka::Core::Scene::LODSettings& settings) {
     nlohmann::json value;
     if (!settings.type.empty()) value["type"] = settings.type;
     if (settings.maxDepth != 0) value["maxDepth"] = settings.maxDepth;
@@ -113,7 +113,7 @@ nlohmann::json toJson(const LODSettings& settings) {
     return value;
 }
 
-nlohmann::json toJson(const StreamingSettings& settings) {
+nlohmann::json toJson(const Haruka::Core::Scene::StreamingSettings& settings) {
     nlohmann::json value;
     if (!settings.mode.empty()) value["mode"] = settings.mode;
     if (!settings.priority.empty()) value["priority"] = settings.priority;
@@ -121,7 +121,7 @@ nlohmann::json toJson(const StreamingSettings& settings) {
     return value;
 }
 
-nlohmann::json toJson(const TerrainGeneratorSettings& settings) {
+nlohmann::json toJson(const Haruka::Core::Scene::TerrainGeneratorSettings& settings) {
     nlohmann::json value;
     if (!settings.type.empty()) value["type"] = settings.type;
     if (!settings.shader.empty()) value["shader"] = settings.shader;
@@ -134,7 +134,7 @@ nlohmann::json toJson(const TerrainGeneratorSettings& settings) {
 
 }
 
-namespace Haruka {
+namespace Haruka::Core::Scene {
 
 // Map obfuscation key. The .hmap codec uses this; ships in the binary (same
 // honest scope as saves: stops casual reading/editing, not strong DRM).
@@ -188,10 +188,10 @@ bool SceneLoader::loadPacked(const std::string& filepath, nlohmann::json& out) {
         std::cerr << "[Loader] Error: No se pudo abrir " << filepath << std::endl;
         return false;
     }
-    Haruka::codec::Bytes blob((std::istreambuf_iterator<char>(f)),
+    IO::codec::Bytes blob((std::istreambuf_iterator<char>(f)),
                                std::istreambuf_iterator<char>());
     std::string text;
-    if (!Haruka::codec::decodeString(blob, kMapKey, text)) {
+    if (!IO::codec::decodeString(blob, kMapKey, text)) {
         std::cerr << "[Loader] Error: .hmap corrupto o clave incorrecta" << std::endl;
         return false;
     }
@@ -213,7 +213,7 @@ bool SceneLoader::packToFile(const std::string& sceneJsonPath, const std::string
     // building the DOM and returns a bool, so there's no nodiscard to ignore).
     if (!nlohmann::json::accept(text)) return false;
 
-    Haruka::codec::Bytes blob = Haruka::codec::encodeString(text, kMapKey);
+    IO::codec::Bytes blob = IO::codec::encodeString(text, kMapKey);
     if (blob.empty()) return false;
     std::ofstream out(outHmapPath, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) return false;
@@ -254,7 +254,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     // Asignación de campos básicos (ya validados por el SceneValidator)
     obj->name = mergedJson.at("name").get<std::string>();
     obj->type = mergedJson.at("type").get<std::string>();
-    obj->objectType = Haruka::classifyObjectType(obj->type);
+    obj->objectType = Tools::classifyObjectType(obj->type);
     obj->templateName = mergedJson.value("template", "");
     // La entrada de un PREFABRICADO: un nombre y una pose. Quien la expande en piezas es el
     // anfitrión (ver `SceneManager::setPrefabExpander`), porque expandir significa cosas distintas
@@ -264,7 +264,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     if (mergedJson.contains("prefabEdits") && mergedJson["prefabEdits"].is_array()) {
         for (const auto& e : mergedJson["prefabEdits"]) {
             if (!e.is_object()) continue;
-            PrefabEdit ed;
+            Game::Prefab::PrefabEdit ed;
             ed.index   = e.value("piece", -1);
             ed.removed = e.value("removed", false);
             ed.item    = e.value("item", std::string{});
@@ -312,7 +312,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     // las texturas que hornea el editor de node graph (y cualquier material asignado por código) se
     // perdían al recargar la escena: el loader lo ignoraba y `save()` no lo escribía.
     if (mergedJson.contains("material") && mergedJson["material"].is_object()) {
-        obj->material = std::make_shared<MaterialComponent>();
+        obj->material = std::make_shared<Components::MaterialComponent>();
         obj->material->fromJSON(mergedJson["material"]);
     }
 
@@ -320,7 +320,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
     // (`castLight`) sin terreno emite su propia luz: el disco del sol (sun_disc.png) + emisión
     // hacen que brille desde el shader. Vale en el IDE y en el juego, sin editar la escena.
     if (obj->flags.castLight &&
-        (obj->objectType == ObjectType::PLANET || obj->objectType == ObjectType::STAR)) {
+        (obj->objectType == Tools::ObjectType::PLANET || obj->objectType == Tools::ObjectType::STAR)) {
         glm::vec3 sunColor(1.0f, 0.9f, 0.7f);
         if (obj->components.is_object() && obj->components.contains("light") &&
             obj->components["light"].is_object()) {
@@ -330,7 +330,7 @@ std::shared_ptr<SceneObject> SceneLoader::createObjectFromJSON(const nlohmann::j
                                      lc["color"][1].get<float>(),
                                      lc["color"][2].get<float>());
         }
-        obj->material = std::make_shared<MaterialComponent>();
+        obj->material = std::make_shared<Components::MaterialComponent>();
         obj->material->name = obj->name + "_SunMaterial";
         obj->material->albedo    = glm::vec3(1.0f);
         obj->material->emission  = sunColor;
@@ -454,7 +454,7 @@ bool SceneManager::save(const std::string& filepath) const {
         if (!obj.prefabName.empty()) item["prefab"] = obj.prefabName;
         if (!obj.prefabEdits.empty()) {
             nlohmann::json eds = nlohmann::json::array();
-            for (const PrefabEdit& ed : obj.prefabEdits) {
+            for (const Game::Prefab::PrefabEdit& ed : obj.prefabEdits) {
                 nlohmann::json e;
                 e["piece"] = ed.index;
                 if (ed.removed)      e["removed"] = true;
@@ -492,4 +492,4 @@ bool SceneManager::save(const std::string& filepath) const {
     return true;
 }
 
-}
+} // namespace Haruka::Core::Scene

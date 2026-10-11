@@ -20,7 +20,7 @@ Texture::Texture(const char* path)
 {
     unsigned char* data = stbi_load(path, &width, &height, &nrChannels, 0);
     if (!data) {
-        HARUKA_RENDERER_ERROR(ErrorCode::TEXTURE_LOAD_FAILED,
+        HARUKA_RENDERER_ERROR(Tools::ErrorCode::TEXTURE_LOAD_FAILED,
             std::string("Failed to load texture: ") + path);
         return;
     }

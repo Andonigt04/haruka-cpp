@@ -24,7 +24,7 @@
 #include <cstdlib>
 #include "Haruka/World/Water/WaterFill.h"   // WATER_FETCH_UNLIMITED: el fetch del oceano
 
-namespace Haruka { namespace Planet {
+namespace Haruka::World::Water { 
 
 inline constexpr float  OCEAN_G     = 9.81f;
 inline constexpr int    OCEAN_WAVES = 8;
@@ -1391,4 +1391,4 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
     return oceanWaveVelocity(wp, up, t, depthM, fade, s_ref);
 }
 
-}} // namespace Haruka::Planet
+} // namespace Haruka::World::Water

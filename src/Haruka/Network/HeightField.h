@@ -83,11 +83,11 @@ struct HeightField
     double heightAt(const glm::dvec3& dirIn, float minFeatureM) const {
         if (!valid()) return 0.0;
         const glm::dvec3 dir = glm::normalize(dirIn);
-        const glm::vec2  uv  = Haruka::Planet::equirectUV(glm::vec3(dir));
-        const float baseH = Haruka::Planet::sampleHeightField(uv, w, h, data.data());
+        const glm::vec2  uv  = World::Terrain::equirectUV(glm::vec3(dir));
+        const float baseH = World::Terrain::sampleHeightField(uv, w, h, data.data());
         const float baseR = baseRadiusM + baseH;
-        float det = Haruka::Planet::terrainDetail(glm::vec3(dir), baseR, minFeatureM)
-                  * Haruka::Planet::seaLevelAttenuation(baseH);
+        float det = World::Terrain::terrainDetail(glm::vec3(dir), baseR, minFeatureM)
+                  * World::Terrain::seaLevelAttenuation(baseH);
         // Misma paridad con los eval de teselado que en el motor: en TIERRA la funcion no baja del
         // nivel del mar, o el oceano (esfera en R) la taparia.
         if (baseH > 0.0f) det = glm::max(det, -baseH);
@@ -96,7 +96,7 @@ struct HeightField
 
     /// Campo cercano, con el MISMO piso que el motor (`terrainTriM(0)`), no un literal.
     double heightAt(const glm::dvec3& dir) const {
-        return heightAt(dir, Haruka::Planet::terrainTriM(0.0));
+        return heightAt(dir, World::Terrain::terrainTriM(0.0));
     }
 };
 

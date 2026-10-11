@@ -11,15 +11,16 @@
 #include <unordered_map>
 #include <glm/glm.hpp>
 
-namespace Haruka { namespace Core { class Camera; } class PlanetarySystem; namespace Physics { class PhysicsEngine; } }
+namespace Haruka { namespace Core { class Camera; } namespace Physics { class PhysicsEngine; } }
+namespace Haruka::World::Planet { class PlanetarySystem; }
 
-namespace Haruka::World {
+namespace Haruka::World::Vox {
 
 class VoxSystem {
 public:
     struct Frame {
         Core::Camera*           camera  = nullptr;
-        PlanetarySystem*        planets = nullptr;
+        Planet::PlanetarySystem*        planets = nullptr;
         Physics::PhysicsEngine* physics = nullptr;
     };
     /// Por frame, antes de dibujar: lo remallado por el render → cuerpos de Jolt (y lo soltado, fuera).
@@ -33,4 +34,4 @@ private:
     glm::dvec3 m_ringAnchor{0.0};
 };
 
-} // namespace Haruka::World
+} // namespace Haruka::World::Vox

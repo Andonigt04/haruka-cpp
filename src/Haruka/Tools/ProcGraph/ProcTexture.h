@@ -7,7 +7,7 @@
 #include <vector>
 #include <cstdint>
 
-namespace Haruka { namespace Tools { namespace ProcGraph {
+namespace Haruka::Tools {  namespace ProcGraph {
 
 // ===========================================================================
 // RGBAImage — 2D grid of RGBA8 pixels
@@ -169,4 +169,4 @@ inline Haruka::RHI::TextureHandle createRHIFromRGBA(const RGBAImage& img) {
     return dev->createTexture(td);
 }
 
-}}} // namespace Haruka::Tools::ProcGraph
+}} // namespace Haruka::Tools

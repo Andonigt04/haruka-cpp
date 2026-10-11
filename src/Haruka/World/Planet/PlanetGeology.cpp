@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
-namespace Haruka {
+namespace Haruka::World::Planet {
 
 namespace {
 
@@ -202,4 +202,4 @@ GeologySample PlanetGeology::sample(const glm::vec3& dirIn) const {
     return s;
 }
 
-} // namespace Haruka
+} // namespace Haruka::World::Planet
