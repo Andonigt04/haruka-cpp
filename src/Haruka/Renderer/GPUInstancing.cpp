@@ -35,6 +35,8 @@ void GPUInstancing::beginFrame() {
     m_retired.clear();
     m_arenaUsed = 0;
     m_draws = 0;
+    m_lastFrameDemand = m_frameDemand;
+    m_frameDemand = 0;
 }
 
 size_t GPUInstancing::hostBytes() const {
@@ -106,6 +108,7 @@ void GPUInstancing::upload() {
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     const size_t need = m_instances.size();
+    m_frameDemand += need;
     if (!RHI::valid(m_arena) || m_arenaUsed + need > m_arenaCap) {
         if (m_hardCap > 0 && RHI::valid(m_arena)) {
             // Tope duro: NO se reasigna (cada alloc host-visible cuesta ~110 ms). Se escribe lo que
@@ -132,7 +135,13 @@ void GPUInstancing::upload() {
         // DOBLE un buffer host-visible (una allocacion que en este portatil hibrido cuesta cientos
         // de ms y dobla cada frame: 157 -> 278 -> 671 ms). Con el tamaño exacto, si vuelve a cruzar
         // crece por el DELTA, nunca al doble, y lo retenido cubre al frame siguiente.
-        size_t c = m_arenaUsed + need;
+        // ⚠️ SIZED FOR A WHOLE FRAME, not for "what the old one held + this batch". That was the size,
+        // and the new arena only received the REST of the frame: next frame the full demand did not
+        // fit again and it was recreated a few instances bigger — EVERY frame, never converging
+        // (measured: 21 420 -> 21 450 -> 21 480 ... with 23 040 a frame), one host-visible
+        // allocation per frame. Now: at least everything asked so far this frame and everything the
+        // previous frame asked for, so the next frame fits whole. Still exact, never doubled.
+        size_t c = std::max(m_frameDemand, m_lastFrameDemand);
         if (c < (size_t)m_maxInstances) c = (size_t)m_maxInstances;
         if (RHI::valid(m_arena)) m_retired.push_back(m_arena);
         m_arena = dev->createBuffer(RHI::BufferUsage::Vertex, c * sizeof(InstanceDataFloat),

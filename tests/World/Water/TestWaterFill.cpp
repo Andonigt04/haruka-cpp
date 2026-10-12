@@ -445,3 +445,64 @@ void test_water_window_policy() {
         CHECK(ms / (segundos * 60.0) < 1.0, "amortizado cuesta menos de 1 ms por frame");
     }
 }
+
+// THE SHORE BAND GOES ONLY UP (12-10, Andoni's capture of terraced blue slabs with walls on a slope).
+// `lakeWindowGpuRG` carries a lake's level into the dry texels around it so the terrain can cut the
+// shore per pixel. Carried into EVERY dry neighbour, the upper of two terraced lakes spilled its level
+// over the lower one's shore, and an outlet's downhill texels got a slab. A row, west to east:
+//     upper lake (410) | rim 410.5 | lower shore 404.6 | lower lake (404) | rising shore 406
+void test_water_window_shore_rises() {
+    beginTest("water_window_shore_rises");
+    namespace W = Haruka::World::Water;
+    const int w = 5, h = 1;
+    const std::vector<float> level = { 410.0f, W::WATER_FILL_DRY, W::WATER_FILL_DRY, 404.0f, W::WATER_FILL_DRY };
+    const std::vector<float> fetch = { 300.0f, 0.0f, 0.0f, 200.0f, 0.0f };
+    const std::vector<float> ground = { 409.0f, 410.5f, 404.6f, 403.0f, 406.0f };
+    std::vector<float> now, first;
+    W::lakeWindowGpuRG(level, fetch, w, h, 2, now, &ground);
+    W::lakeWindowGpuRG(level, fetch, w, h, 2, first, nullptr);
+    std::printf("    drawn level, west to east: %.1f %.1f %.1f %.1f %.1f  (into every neighbour: %.1f %.1f %.1f %.1f %.1f)\n",
+                now[0], now[2], now[4], now[6], now[8], first[0], first[2], first[4], first[6], first[8]);
+    CHECK(now[2] == 410.0f, "the rim (ground above the upper lake) takes the upper lake's level: its shore");
+    CHECK(now[4] == 404.0f, "the LOWER lake's shore keeps the lower level: the upper one does not spill over it");
+    CHECK(now[8] == 404.0f, "a shore that rises from the lower lake takes its level");
+    CHECK(now[5] < 0.0f && now[3] < 0.0f, "the band's texels are marked as shore (negative fetch: dry)");
+    CHECK(first[4] == 410.0f, "CONTROL: into every neighbour, the lower lake's shore got the UPPER level (the slab)");
+}
+
+// A PUDDLE IS NOT A LAKE (12-10, Andoni: "desniveles notorios y el agua no se nivela"). On the real
+// bake the fine window held 1144 lake levels in 16 km, 925 of them 1-2 texels: perched puddles side by
+// side at different heights. `waterFillWindow` now keeps a body of `WATER_WINDOW_MIN_LAKE_TEXELS` or
+// more, or one that touches the window's edge (it goes on outside). Three dips on a flat 100 m plain,
+// 2 m deep: 3 texels (dry), 4 texels (lake), and 2 texels against the west edge, where the coarse
+// fill has water outside at 99 m (kept, 1 m deep).
+void test_water_window_min_lake() {
+    beginTest("water_window_min_lake");
+    namespace W = Haruka::World::Water;
+    const int n = 32;
+    const double R = 6371000.0, half = 1000.0 / R;   // 2 km window: 62.5 m texels
+    auto texel = [&](double lo, double la, int& x, int& y) {
+        x = (int)std::floor((lo + half) / (2.0 * half) * n); y = (int)std::floor((la + half) / (2.0 * half) * n);
+    };
+    auto inDip = [](int x, int y) {
+        if (y == 10 && x >= 10 && x <= 12) return 1;                 // 3 texels in a row
+        if ((y == 20 || y == 21) && (x == 20 || x == 21)) return 2;  // 2x2
+        if (y == 5 && (x == 0 || x == 1)) return 3;                  // 2 texels on the west edge
+        return 0;
+    };
+    auto ground = [&](double lo, double la) -> float { int x, y; texel(lo, la, x, y); return inDip(x, y) ? 98.0f : 100.0f; };
+    // Outside the window, to the west, the coarse fill holds water at 99 m: a lake that goes on out
+    // there. (With a dry outside a border cell is a wall and never a lake, by design of the fill.)
+    auto border = [&](double lo, double) -> float { return (lo < -half * 0.9) ? 99.0f : W::WATER_FILL_DRY; };
+    const W::WaterWindowResult r = W::waterFillWindow(n, n, 0.0, 0.0, half, half, R, ground, border, 0.0f);
+    int wet[4] = { 0, 0, 0, 0 };
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x)
+            if (r.levelM[(size_t)y * n + x] > W::WATER_FILL_DRY) wet[inDip(x, y)]++;
+    std::printf("    wet texels: 3-texel dip %d · 2x2 dip %d · 2 texels on the edge %d · elsewhere %d · bodies %zu\n",
+                wet[1], wet[2], wet[3], wet[0], r.bodies);
+    CHECK(wet[1] == 0, "a 3-texel dip is dry: under the minimum lake");
+    CHECK(wet[2] == 4, "CONTROL: the 2x2 dip (4 texels) is a lake, so the dips do flood");
+    CHECK(wet[3] == 2, "a small dip against the window's edge is kept: it may go on outside");
+    CHECK(wet[0] == 0 && r.bodies == 2, "nothing else is wet, and two bodies are counted");
+}

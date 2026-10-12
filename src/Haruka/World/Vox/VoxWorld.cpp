@@ -375,25 +375,6 @@ std::vector<VoxWorld::Crater> VoxWorld::cratersNear(const glm::dvec3& dir, doubl
     return out;
 }
 
-float VoxWorld::floorDepthM(const glm::dvec3& dir, float maxM) const {
-    if (!configured()) return 0.0f;
-    const glm::dvec3 d = glm::normalize(dir);
-    const double top = m_radius + (m_elev ? (double)m_elev(d) : 0.0);
-    std::shared_lock<std::shared_mutex> lk(m_mx);
-    // Se baja por la columna de metro en metro mientras el campo diga aire. El primer metro va a
-    // -3 como `surfaceCut` (a 0 exacto la trilineal está en el borde del chunk).
-    if (!findNoLock(keyAt(d * (top - 0.75)))) return 0.0f;
-    auto vol = [&](const glm::dvec3& p) { return std::max(caveDensityNoLock(p), addedDensityNoLock(p)); };
-    if (vol(d * (top - 0.75)) >= 0.0f) return 0.0f;
-    float depth = 1.0f;
-    while (depth < maxM) {
-        const glm::dvec3 p = d * (top - (double)depth);
-        if (!findNoLock(keyAt(p)) || vol(p) >= 0.0f) break;
-        depth += 1.0f;
-    }
-    return depth;
-}
-
 static int chunksPerFaceFor(double R) {
     return std::max(1, (int)std::lround((3.14159265358979 * 0.5) / (kVoxChunkM / R)));
 }
@@ -1217,6 +1198,40 @@ void VoxWorld::surfaceCutFineMany(const std::vector<glm::dvec3>& dirs, std::vect
     }
 }
 
+float VoxWorld::floorDepthM(const glm::dvec3& dir, float maxM) const {
+    if (!configured()) return 0.0f;
+    const glm::dvec3 d = glm::normalize(dir);
+    // THE BED ON THE ANALYTIC FIELD, not on the 4 m grid stepping a metre at a time from 0.75 m down:
+    // a 30 cm pick was shallower than that first step and had no bed at all, and a 1 m pit read 1 m
+    // whatever its real depth. From 2 cm under the ground (craters included, like the ground the
+    // water sees), it marches down by the field's own distance to the next wall (it is a distance:
+    // the step never jumps over rock), and bisects the last step to a millimetre.
+    std::shared_lock<std::shared_mutex> lk(m_mx);
+    const double top = m_radius + (m_elev ? (double)m_elev(d) : 0.0) + (double)surfaceDeltaNoLock(d);
+    FrameCache cache;
+    auto air = [&](double depth, float& f) {
+        const glm::dvec3 p = d * (top - depth);
+        if (!findNoLock(keyAt(p))) { f = kVoxRockM; return false; }   // not loaded: no bed below what is known
+        float dc, da;
+        finePartsCached(p, nullptr, cache, dc, da);
+        f = std::max(dc, da);
+        return f < 0.0f;
+    };
+    float f = 0.0f;
+    double depth = 0.02;
+    if (!air(depth, f)) return 0.0f;
+    while (depth < (double)maxM) {
+        const double prev = depth;
+        depth = std::min((double)maxM, depth + std::clamp((double)-f, 0.02, 4.0));
+        if (!air(depth, f)) {
+            double lo = prev, hi = depth;
+            for (int i = 0; i < 12; ++i) { const double mid = 0.5 * (lo + hi); float fm; (air(mid, fm) ? lo : hi) = mid; }
+            return (float)hi;
+        }
+    }
+    return maxM;
+}
+
 float VoxWorld::fieldAt(const glm::dvec3& p) const {
     std::shared_lock<std::shared_mutex> lk(m_mx);
     const float t = terrainDensity(p);
@@ -1265,16 +1280,10 @@ bool VoxWorld::fineBrickMayHaveWalls(const VoxKey& key, const glm::ivec3& cell) 
                 rel -= f.up * glm::dot(rel, f.up);
             if (glm::length(rel) <= (double)f.reach + halfDiag) { candidate = true; break; }
         }
-    // Caves and islands: the stored channels are (approximate) distances to their walls.
-    if (!candidate) {
-        const float diag = 2.0f * (float)halfDiag + 1.0f;
-        for (int dz = 0; dz <= 1 && !candidate; ++dz)
-            for (int dy = 0; dy <= 1 && !candidate; ++dy)
-                for (int dx = 0; dx <= 1 && !candidate; ++dx) {
-                    const int x = std::min(cell.x + dx, kVoxN - 1), y = std::min(cell.y + dy, kVoxN - 1), z = std::min(cell.z + dz, kVoxN - 1);
-                    candidate = c->cutAt(x, y, z) < diag || c->addedAt(x, y, z) > -diag;
-                }
-    }
+    // ONLY STROKES. Caves and islands are NOT refined on their own: their definition is coarser than
+    // the 4 m grid anyway (maps of 2.5 m texels, the legacy volume of 7.5 m), and refining every
+    // wall near the eye inside a cave asked for hundreds of bricks (Andoni: "the LOD is very close").
+    // A cave wall IS refined where a stroke reaches it: the brick samples the whole field.
     if (!candidate) return false;
     // And the wall must come near: the field is a distance (approximately), so if the cut and added
     // channels are both further than the brick's half diagonal (with margin) from the centre, no

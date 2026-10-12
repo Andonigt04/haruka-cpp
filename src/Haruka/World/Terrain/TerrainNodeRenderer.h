@@ -1288,7 +1288,12 @@ public:
         std::array<std::vector<NodeInstGPU>, kStrides> waterBuckets;
         static const double s_vpxEnv = [] { const char* e = std::getenv("HARUKA_WATER_VERTEX_PX"); return e ? std::atof(e) : -1.0; }();
         const double waterVertexPx = (s_vpxEnv >= 0.0) ? s_vpxEnv : (double)m_water.waveVertexPx;
-        auto pushWater = [&](const NodeInstGPU& g, uint32_t k, const NodeId& n) {
+        // `surfM` = the top of the water this node holds (m): the sea's margin, a lake's level + margin.
+        // The distance of the vertex law is measured TO THAT SURFACE. It was measured to the sea
+        // (`R + seaMarginM`) for every node: over a lake at 400 m with the eye 60 m above it, the water
+        // "was" 460 m away and took quads of ~30 m — one triangle across a whole 70 m view, and a lake
+        // shore cut by its interpolation in straight lines (`testLakeShoreline`, eye at the band's end).
+        auto pushWater = [&](const NodeInstGPU& g, uint32_t k, const NodeId& n, double surfM) {
             uint32_t kW = k;
             const double texel = nodeTexelM(n, planetRadiusM);
             // El quad que el agua quiere: el mayor de "un vertice cada waveVertexPx pixeles" (a la
@@ -1299,7 +1304,7 @@ public:
                 for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += TERRAIN_NODE_CELLS / 2)
                     for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += TERRAIN_NODE_CELLS / 2)
                         nearest = std::min(nearest, glm::length(planetCenter + nodeTexelDir(n, u, v)
-                                                                * (planetRadiusM + (double)m_water.seaMarginM) - camPos));
+                                                                * (planetRadiusM + surfM) - camPos));
                 wantQuad = std::max(wantQuad, waterVertexPx * std::max(nearest, 1.0) * m_lastRadPerPx);
             }
             // La zancada mas gruesa cuyo quad NO pasa del pedido (nunca mas fina que la del terreno).
@@ -1316,9 +1321,10 @@ public:
                     const NodeInstGPU& g = m_inst[ii];
                     NodeId n; n.face = (Tools::PlanetFace)g.node[0]; n.level = (uint32_t)g.node[1];
                     n.i = (uint32_t)g.node[2]; n.j = (uint32_t)g.node[3];
-                    if (s_allNodes) { pushWater(g, k, n); continue; }
                     const NodeRange r = m_pool.rangeOf(n);
+                    if (s_allNodes) { pushWater(g, k, n, r.valid() ? (double)r.minM : (double)m_water.seaMarginM); continue; }
                     bool keep = !r.valid();
+                    double surfM = (double)m_water.seaMarginM;   // unknown range: the sea, as before
                     // Dentro del parche de agua interior (o tocandolo): se dibuja siempre.
                     if (!keep && m_water.inlandRadiusM > 0.0f) {
                         const double cells = (double)(1u << n.level);
@@ -1329,6 +1335,7 @@ public:
                         const double halfDiag = planetRadiusM * 1.5707963 / cells * 0.71;
                         const double dist = glm::length(cW - (camPos + glm::dvec3(m_water.inlandRelEye)));
                         keep = dist < (double)m_water.inlandRadiusM + halfDiag;
+                        if (keep) surfM = (double)r.minM;   // a puddle of the patch lies on the ground
                     }
                     if (!keep) {
                         float waterMax = m_water.seaMarginM;
@@ -1409,8 +1416,12 @@ public:
                             }
                         }
                         keep = r.minM <= waterMax;
+                        // The TOP of the water that may touch it (level + margin): for the sea this is
+                        // the old `R + seaMarginM` exactly — a test puts its sea at +2000 m only through
+                        // `seaMarginM` — and for a lake its level + the margin, never farther than the water.
+                        surfM = (double)waterMax;
                     }
-                    if (keep) pushWater(g, k, n);
+                    if (keep) pushWater(g, k, n, surfM);
                 }
             }
             }   // v5.water.filtro

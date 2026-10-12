@@ -1159,6 +1159,7 @@ void testNodeWaterDraws()
         wcfg.heightTex   = floorTex;
         wcfg.oceanParams = oceanUBO;
         wcfg.on = true;
+        wcfg.seaMarginM = 2000.0f + 15.0f;   // the sea is at +2000 m here: the renderer has to know (filter, LOD)
         r.setWater(wcfg);
 
         // ⚠️ AL NADIR Y DESDE ARRIBA, NO AL HORIZONTE. La primera version miraba a la tangente desde
@@ -1240,22 +1241,21 @@ void testNodeWaterDraws()
     // ── ⚠️ LA OLA VIAJA EN EL PASE REAL (2026-09-18) ────────────────────────────────────────────
     //
     // La fase `k·(D·x) − ω·t` se evaluaba con `x = dir·R`: `D` tangente, `x` radial, producto CERO.
-    // El mar entero subia en bloque y las "olas" eran ruido de float. NINGUN test lo veia: los careos
-    // CPU<->GPU usan marco plano, y este test solo contaba pixeles azules. Ahora la ola se evalua
-    // relativa al ANCLA del mar (`uOceanAnchor`), y aqui se mide en el pase de nodos de verdad: a
-    // reloj fijo, la sombra del mar tiene que VARIAR por la imagen (la normal analitica sigue a la
-    // ola). CONTRAPRUEBA: con el ancla en el centro del planeta (`anchorRelEye = −cam`, lo que hacia
-    // el vert) la sombra es plana.
+    // El mar entero subia en bloque y las "olas" eran ruido de float. Ahora la ola se evalua relativa
+    // al ANCLA del mar (`uOceanAnchor`). CONTRAPRUEBA: con el ancla en el centro del planeta
+    // (`anchorRelEye = −cam`, lo que hacia el vert) el mar no tiene fase espacial.
+    //
+    // ⚠️ HOW IT IS MEASURED (redone 11-10, the old measure had stopped measuring anything): the same
+    // sea drawn at two instants, 1.5 s apart; the mean change of the water's luminance between the
+    // two frames. A wave that travels changes the picture; a sea that only heaves as a block keeps its
+    // normal = the vertical and the picture does not change. The old measure was the deviation of the
+    // luminance over ONE frame from 5 km with the default light (0,1,0): since the water got its own
+    // stride the waves fade at that height (its quads are ~40 m) and the default light is grazing
+    // there, so both variants gave 0.39 — what was measured was the sun's gradient. Now: 200 m over
+    // the sea (every train above two quads survives) and a high sun (30 degrees from the zenith).
     {
-        auto shadeSigma = [&](const glm::vec3& anchorRelEye, const char* tag) {
-            Haruka::World::Water::OceanState sw = Haruka::World::Water::oceanDefaultState();
-            sw.seaLevelM = 2000.0f;
-            BufferHandle ubo = makeOceanStateUBO(sw, anchorRelEye, 5.0f);
-            TextureHandle floorTex = makeFloor(-500.0f);
-            Haruka::World::Terrain::TerrainNodeRenderer::Water wcfg;
-            wcfg.heightTex = floorTex; wcfg.oceanParams = ubo; wcfg.on = true;
-            r.setWater(wcfg);
-            const glm::dvec3 cam = pc + up0 * (R + 5000.0);
+        auto change = [&](const glm::vec3& anchorRelEye, const char* tag) {
+            const glm::dvec3 cam = pc + up0 * (R + 2000.0 + 200.0);
             const glm::dvec3 fwd = -up0;
             const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
             const float aspect = (float)w / (float)h;
@@ -1263,52 +1263,62 @@ void testNodeWaterDraws()
             glm::mat4 proj(0.0f);
             proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
             const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
-            std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
-            for (int f = 0; f < 12; ++f) {
-                Context* ctx = g_dev->beginFrame();
-                if (!ctx) break;
-                r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
-                ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
-                ctx->beginRenderPass({}, cv);
-                r.draw(ctx, cam, pc, R, mvp);
-                ctx->endRenderPass();
-                if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
-                g_dev->endFrame();
-                pumpWindowEvents();
-                if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
-            }
-            // HARUKA_WATER_PNG=<dir>: volcar la vista para MIRARLA. Los anillos concentricos del mar
-            // (zancadas del terreno) no salen en ninguna cifra agregada; hay que verlos.
-            if (const char* dirW = std::getenv("HARUKA_WATER_PNG")) {
-                const bool flipW = detectRowFlip(px, w, h);
-                std::vector<uint8_t> img(px.size());
-                for (int y = 0; y < h; ++y) {
-                    const int src = flipW ? (h - 1 - y) : y;
-                    std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)src * w * 4], (size_t)w * 4);
+            Haruka::World::Terrain::TerrainNodeRenderer::Shade sh;
+            sh.lightDir = glm::vec3(glm::normalize(up0 * 0.87 + glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0))) * 0.5));
+            r.setShade(sh);
+            auto frameAt = [&](float clockS) {
+                Haruka::World::Water::OceanState sw = Haruka::World::Water::oceanDefaultState();
+                sw.seaLevelM = 2000.0f;
+                BufferHandle ubo = makeOceanStateUBO(sw, anchorRelEye, clockS);
+                TextureHandle floorTex = makeFloor(-500.0f);
+                Haruka::World::Terrain::TerrainNodeRenderer::Water wcfg;
+                wcfg.heightTex = floorTex; wcfg.oceanParams = ubo; wcfg.on = true;
+                wcfg.seaMarginM = 2000.0f + 15.0f;   // the sea is at +2000 m here: the renderer has to know (filter, LOD)
+                r.setWater(wcfg);
+                std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+                for (int f = 0; f < 12; ++f) {
+                    Context* ctx = g_dev->beginFrame();
+                    if (!ctx) break;
+                    r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+                    ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                    ctx->beginRenderPass({}, cv);
+                    r.draw(ctx, cam, pc, R, mvp);
+                    ctx->endRenderPass();
+                    if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                    g_dev->endFrame();
+                    pumpWindowEvents();
+                    if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
                 }
-                const std::string path = std::string(dirW) + "/" + (isVk ? "vk_" : "gl_")
-                                       + "mar_nodos_" + std::string(tag).substr(0, 12) + ".png";
-                Haruka::IO::writePNG(path, w, h, 4, img.data());
-                std::printf("      -> %s\n", path.c_str());
+                if (const char* dirW = std::getenv("HARUKA_WATER_PNG")) {   // to LOOK at it
+                    const bool flipW = detectRowFlip(px, w, h);
+                    std::vector<uint8_t> img(px.size());
+                    for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)(flipW ? h - 1 - y : y) * w * 4], (size_t)w * 4);
+                    char name[160]; std::snprintf(name, sizeof(name), "%s/%s_mar_%s_t%.1f.png", dirW, isVk ? "vk" : "gl", std::string(tag).substr(0, 8).c_str(), clockS);
+                    for (char* c = name; *c; ++c) if (*c == ' ') *c = '_';
+                    Haruka::IO::writePNG(name, w, h, 4, img.data());
+                }
+                g_dev->destroy(floorTex); g_dev->destroy(ubo);
+                return px;
+            };
+            const std::vector<uint8_t> a0 = frameAt(5.0f), a1 = frameAt(6.5f);
+            double sum = 0.0, lum = 0.0; size_t n = 0;
+            for (size_t k = 0; k < a0.size(); k += 4) {
+                const bool water = a0[k+2] > a0[k] + 4 && a0[k+2] > 8 && a1[k+2] > a1[k] + 4 && a1[k+2] > 8;
+                if (!water) continue;
+                const double l0 = 0.3 * a0[k] + 0.6 * a0[k+1] + 0.1 * a0[k+2], l1 = 0.3 * a1[k] + 0.6 * a1[k+1] + 0.1 * a1[k+2];
+                sum += std::fabs(l1 - l0); lum += l0; ++n;
             }
-            // Luminancia de los pixeles de agua: media y desviacion. Un mar plano = una sola sombra.
-            double s1 = 0.0, s2 = 0.0; size_t n = 0;
-            for (size_t k = 0; k < px.size(); k += 4) {
-                if (!(px[k+2] > px[k] + 4 && px[k+2] > 8)) continue;
-                const double l = 0.3 * px[k] + 0.6 * px[k+1] + 0.1 * px[k+2];
-                s1 += l; s2 += l * l; ++n;
-            }
-            const double mean = n ? s1 / n : 0.0, sd = n ? std::sqrt(std::max(s2 / n - mean * mean, 0.0)) : 0.0;
-            std::printf("    sombra del mar (%s): %zu px de agua · luminancia media %.1f · desviacion %.2f\n", tag, n, mean, sd);
-            g_dev->destroy(floorTex); g_dev->destroy(ubo);
-            return sd;
+            const double d = n ? sum / n : 0.0;
+            std::printf("    mar a 200 m (%s): %zu px de agua · luminancia media %.1f · cambio entre t=5 y t=6,5 s %.2f\n",
+                        tag, n, n ? lum / n : 0.0, d);
+            r.setShade(TerrainNodeRenderer::Shade{});
+            return d;
         };
-        const glm::dvec3 camA = pc + up0 * (R + 5000.0);
-        const double sdOK  = shadeSigma(glm::vec3((pc + up0 * R) - camA), "ancla bajo la camara");
-        const double sdBug = shadeSigma(glm::vec3(pc - camA),             "ancla en el centro del planeta = el bug");
-        // Medido: 1,67 con el ancla bien y 0,34 con el bug (luminancia media ~11 desde 5 km).
-        CHECK(sdOK > 1.0, "en el pase real la sombra del mar VARIA por la imagen (la ola viaja)");
-        CHECK(sdOK > 3.0 * sdBug, "CONTRAPRUEBA: con la fase planetocentrica el mar era una sola sombra");
+        const glm::dvec3 camA = pc + up0 * (R + 2000.0 + 200.0);
+        const double dOK  = change(glm::vec3((pc + up0 * (R + 2000.0)) - camA), "ancla bajo la camara");
+        const double dBug = change(glm::vec3(pc - camA),                       "ancla en el centro del planeta = el bug");
+        CHECK(dOK > 1.0, "en el pase real la ola VIAJA: el mar cambia entre dos instantes");
+        CHECK(dOK > 5.0 * dBug, "CONTRAPRUEBA: con la fase planetocentrica el mar solo sube y baja en bloque (casi no cambia)");
     }
 
     // ── ⚠️ ANILLOS DE ZANCADA EN EL MAR (19-09) ────────────────────────────────────────────────
@@ -1448,7 +1458,14 @@ void testNodeWaterDraws()
             CHECK(cS > 0, "en la costa la zancada se acota (si no, el tope no hace nada)");
             CHECK(cD == 0, "CONTRAPRUEBA: en mar abierto NO se acota ni un nodo (el tope es de 200 m alli)");
             CHECK(tS >= tD, "y el coste va donde el agua es somera: mas triangulos en la costa que en mar abierto");
-            CHECK(pS > 0 && nS > nD, "en la costa el agua pide particiones que la pantalla no pedia, y cuesta nodos");
+            // ⚠️ THE NODE COUNT IS NO LONGER COMPARED WITH THE OPEN SEA (11-10). It was "the coast costs
+            // more nodes than the open sea", and that only held because the open sea was selected by its
+            // SEABED (-2 000 m, far away, coarse nodes) — the bug that left the water sheet with 50 m
+            // quads and no waves. Now a node under water is judged by the water level, so the open sea
+            // is refined like land at sea level (139 nodes vs 99, measured) and is no cheap reference.
+            // What the shallow-water rule does is ask splits the screen did not: some on the coast, none
+            // in the open sea.
+            CHECK(pS > 0 && pD == 0, "en la costa el agua pide particiones que la pantalla no pedia, y en mar abierto ninguna");
             CHECK(pD == 0, "CONTRAPRUEBA: en mar abierto (presupuesto 500 m) el agua no pide ni una particion");
 
             // ── ¿EL AGUA CUESTA POR VERTICE O POR PIXEL? (Andoni, 20-09: "sigue con el .5") ──────
@@ -1785,4 +1802,284 @@ void testNodeWaterDraws()
     g_dev->destroy(pipe); g_dev->destroy(height); g_dev->destroy(ubo);
     g_dev->destroy(vb); g_dev->destroy(inlandUbo); g_dev->destroy(inlandSsbo);
     return true;
+}
+
+// ── THE SHORE OF A LAKE IS CUT BY THE TERRAIN, PER PIXEL ────────────────────────────────────────
+//
+// Andoni's captures (11-10 and 12-10): lakes with straight edges and angles, ignoring the contour
+// lines. Three causes, each measured here:
+//   1. The shore was where the interpolated DEPTH crossed zero inside each water triangle, against a
+//      dry neighbour that had the SEA's level (0 m): a polygon of the window's 62 m texels. Now the GPU
+//      copy of the window carries the lake level two texels past the shore (`lakeWindowGpuRG`) and
+//      those vertices are a sheet at the lake level that the terrain's depth cuts.
+//   2. The water node filter read the window WITHOUT that band (`lakeLevelAt`): a node on the band
+//      held no lake sample, was not drawn, and the lake ended on the node's edges. The planet now
+//      gives the filter the drawn level (`lakeDrawnLevelAt`); this test uses the same CPU sampler.
+//   3. The water's vertex law measured the distance to the SEA's surface: over a lake at 400 m with
+//      the eye 60 m above, the water "was" 460 m away and took ~30 m quads, and the end of the band
+//      was cut by one triangle across the whole view. Before the fix, scene "band end": 4091 wrong.
+//   4. (12-10, terraced blue slabs with walls on a slope) The band was carried into EVERY dry texel,
+//      also a lower one — the lake's outlet, downhill: a slab over falling ground ended by a wall.
+//      Now only into a shore that rises to the level (`heightM`), and a triangle with a dry vertex
+//      keeps the depth rule in the fragment. Scene "outlet".
+//
+// Measured: a lake in the window (its west half, level = the ground under the eye + 0.5 m, calm) over
+// the detail terrain, 60 m up. For each pixel the CPU twin of the terrain says where the ray meets the
+// ground, and so whether that point is under the lake. On the lake's texels and the shore texels a
+// pixel must be water exactly when its ground is below the level (0.3 m of margin both ways). Two
+// scenes: the lake's texel edge under the eye, and the END of the shore band under the eye. CONTROL:
+// the same window WITHOUT the shore texels (the old behaviour) misclassifies far more.
+// `HARUKA_WATER_PNG=<dir>` dumps the frames and the truth maps (R = drawn water, G = ground below).
+void testLakeShoreline()
+{
+    BEGIN("water: a lake's shore is cut by the terrain per pixel, not by texels, nodes or triangles");
+    using namespace Haruka::World::Terrain;
+    namespace Water = Haruka::World::Water;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+
+    // A constant bake of 500 m (land) and the zero cube: the ground is 500 + detail, as the pass draws it.
+    const float B0 = 500.0f;
+    static float s_b0 = 500.0f; s_b0 = B0;
+    std::vector<float> bake(8, B0);
+    TextureDesc bd; bd.width = 4; bd.height = 2; bd.format = Format::R32F; bd.filter = Filter::Linear;
+    bd.wrap = Wrap::ClampToEdge; bd.mipmaps = false; bd.initialData = bake.data();
+    TextureHandle bakeTex = g_dev->createTexture(bd);
+    std::vector<float> rgba((size_t)6 * 9 * 9 * 4, 0.0f);
+    TextureDesc cd; cd.width = cd.height = 9; cd.layers = 6; cd.format = Format::RGBA32F;
+    cd.filter = Filter::Nearest; cd.wrap = Wrap::ClampToEdge; cd.initialData = rgba.data();
+    TextureHandle cubeTex = g_dev->createTexture(cd);
+    auto groundAt = [&](const glm::dvec3& dir) {
+        return (double)B0 + (double)terrainDetail(dir, R + (double)B0, 0.5f) * seaLevelAttenuation(B0);
+    };
+
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Renderer::Shader::baseDir() + "shaders/", 4096)) { CHECK(false, "pass init"); return; }
+    r.setBaseField(cubeTex);
+    r.setHeightTex(bakeTex);
+    // The node ranges from the FULL ground, as the planet gives them (`sampleHeight`): with the bake
+    // alone (500 m) every node "lay" 100 m above the lake and the water filter dropped them all.
+    r.setHeightSampler([](const glm::dvec3& d, void*) {
+        return (float)((double)s_b0 + (double)terrainDetail(d, 6371000.0 + (double)s_b0, 0.5f) * seaLevelAttenuation(s_b0));
+    }, nullptr);
+
+    // The lake window, centred on `up0`: 256² over +-8 km (62.5 m a texel). The lake is its WEST half.
+    const int WN = 256; const double halfM = 8000.0, texelM = 2.0 * halfM / WN;
+    const double latC = std::asin(up0.y), lonC = std::atan2(up0.z, up0.x);
+    const double halfLat = halfM / R, halfLon = halfLat / std::cos(latC);
+    const double invSpanLon = 1.0 / (2.0 * halfLon), invSpanLat = 1.0 / (2.0 * halfLat);
+    auto texelOf = [&](const glm::dvec3& d, double& tx, double& ty) {
+        const double lat = std::asin(std::clamp(d.y, -1.0, 1.0)), lon = std::atan2(d.z, d.x);
+        tx = ((lon - lonC) * invSpanLon + 0.5) * WN; ty = ((lat - latC) * invSpanLat + 0.5) * WN;
+    };
+    const glm::vec4 rect((float)lonC, (float)latC, (float)invSpanLon, (float)invSpanLat);
+    BufferHandle rectUBO = g_dev->createBuffer(BufferUsage::Uniform, sizeof(rect), &rect, BufferMemory::Dynamic);
+    // A calm sea: with the default trains (Hs 2.8 m) the sheet rises and falls by more than the lake is
+    // deep, and the measure judged the waves, not the shore.
+    Water::OceanState st = Water::oceanDefaultState();
+    for (int i = 0; i < Water::OCEAN_WAVES; ++i) st.wave[i][1] = 0.0f;
+    BufferHandle oceanUBO = makeOceanStateUBO(st);
+    const glm::dvec3 east(-std::sin(lonC), 0.0, std::cos(lonC));
+    uint64_t epoch = 1;
+
+    // eastTexels = where the eye is, in texels east of the lake's texel edge; the lake's level is the
+    // ground under the eye + `aboveM`. Otherwise the dry side is a shore that RISES above the level —
+    // what a fill reports for a dry texel next to a lake. `outlet` = what a fill reports on a spill
+    // side: the first dry column is the RIM, at the level (a priority-flood never leaves a dry texel
+    // lower than the lake next to it), and past it the ground FALLS (`heightM` = the real ground).
+    // `upperM` > 0: TERRACES. Past a one-texel rim, a second lake `upperM` higher (the probe on the real
+    // bake, 12-10: 1179 lakes in the 16 km window, band texels next to a lake up to 5.95 m away in level).
+    auto scene = [&](const char* name, double eastTexels, double aboveM, bool outlet, double upperM = 0.0) {
+        const glm::dvec3 eye = glm::normalize(up0 + east * (eastTexels * texelM / R));
+        const double h0 = groundAt(eye);
+        const float level = (float)(h0 + aboveM);
+        std::vector<float> lv((size_t)WN * WN, Water::WATER_FILL_DRY), fe((size_t)WN * WN, 0.0f), hm((size_t)WN * WN, 0.0f);
+        for (int y = 0; y < WN; ++y)
+            for (int x = 0; x < WN; ++x) {
+                const size_t i = (size_t)y * WN + x;
+                if (x < WN / 2) { lv[i] = level; fe[i] = 300.0f; hm[i] = level - 1.0f; continue; }
+                if (upperM > 0.0) {
+                    if (x == WN / 2) { hm[i] = level + (float)upperM + 0.1f; continue; }   // the rim between them
+                    lv[i] = level + (float)upperM; fe[i] = 300.0f; hm[i] = level - 1.0f; continue;
+                }
+                if (!outlet) { hm[i] = level + 1.0f; continue; }
+                if (x == WN / 2) { hm[i] = level + 0.1f; continue; }   // the rim
+                // Past it, a slope that only falls. (With the real ground at the texel centres a hump
+                // past the rim — measured: 407.87 m against a lake at 407.48 — is a shore that rises and
+                // rightly takes the level; its lower half then shows water cut on the texel's edges.
+                // That is a limit of deciding per texel, not this cause.)
+                hm[i] = level - 2.0f - 0.5f * (float)(x - WN / 2 - 1);
+            }
+
+        // 60 m up: there the drawn terrain IS its CPU twin to the millimetre (`v5: un frame entero`,
+        // band 2-150 m), so the twin can say where the shore must be. From 400 m the two differ by up to
+        // 1.35 m, which on a shallow lake moves the shore by metres: the measure judged that instead.
+        const glm::dvec3 cam = pc + eye * (R + h0 + 60.0);
+        const glm::dvec3 fwd = -eye;
+        const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+        const float aspect = (float)w / (float)h, fCot = 1.0f / std::tan((float)fovY * 0.5f);
+        glm::mat4 proj(0.0f);
+        proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+        const glm::mat4 view = glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup));
+        const glm::mat4 mvp = proj * glm::mat4(glm::mat3(view));
+        const glm::mat4 invVP = glm::inverse(mvp);
+
+        // WATER = what changes against the same frame drawn WITHOUT the water pass. Not "blue": with
+        // the default light this water comes out grey-blue (B barely above R) and a colour rule saw none.
+        auto drawFrame = [&](std::vector<uint8_t>& px) {
+            px.assign((size_t)w * h * 4, 0xAA);
+            for (int f = 0; f < 12; ++f) {
+                Context* ctx = g_dev->beginFrame();
+                if (!ctx) break;
+                r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+                ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+                ctx->beginRenderPass({}, cv);
+                r.draw(ctx, cam, pc, R, mvp);
+                ctx->endRenderPass();
+                if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+                g_dev->endFrame(); pumpWindowEvents();
+                if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            }
+        };
+        std::vector<uint8_t> dryPx;
+        { TerrainNodeRenderer::Water off; off.on = false; r.setWater(off); drawFrame(dryPx); }
+        // Wrong pixels within TWO water quads of the band's end are the mesh's own transition (a
+        // triangle with a sheet vertex and a dry one keeps the depth rule, and its diagonal is ~1.4
+        // quads); farther in they are a defect. The quad the pass asks for here:
+        // `waveVertexPx` (16, the game's) pixels at 60 m, never under `waveQuadMinM` (2 m).
+        const double quadM = std::max(2.0, 16.0 * 60.0 * radPerPx);
+        struct Count { size_t wrongWet = 0, wrongDry = 0, judged = 0, water = 0, deepWrong = 0, slab = 0; double worstFromEndM = 0.0; };
+        auto measure = [&](int shoreTexels, bool useHeights) {
+            Count c;
+            std::vector<float> rg;
+            Water::lakeWindowGpuRG(lv, fe, WN, WN, shoreTexels, rg, useHeights ? &hm : nullptr);
+            TextureDesc td; td.width = WN; td.height = WN; td.format = Format::RG32F; td.filter = Filter::Nearest;
+            td.wrap = Wrap::ClampToEdge; td.mipmaps = false; td.initialData = rg.data();
+            TextureHandle win = g_dev->createTexture(td);
+            // The node filter samples what the GPU draws, as the planet does (`lakeDrawnLevelAt`).
+            auto drawn = std::make_shared<Water::WaterWindowResult>();
+            drawn->w = drawn->h = WN; drawn->levelM.resize((size_t)WN * WN);
+            for (size_t i = 0; i < drawn->levelM.size(); ++i) drawn->levelM[i] = rg[i * 2];
+            TerrainNodeRenderer::Water wc; wc.heightTex = bakeTex; wc.oceanParams = oceanUBO; wc.on = true;
+            wc.lakeWinTex = win; wc.lakeWinUBO = rectUBO;
+            // Terraces: 16 m water quads, what the game draws a few hundred metres away (16 px a
+            // vertex). A ramp between two levels spans one quad; with the 2-4 m quads of 60 m up it
+            // was 1.4 % of the lake and hid under any threshold.
+            if (upperM > 0.0) wc.waveQuadMinM = 16.0f;
+            wc.lakeLevelFn = [drawn, lonC, latC, invSpanLon, invSpanLat](const glm::dvec3& d) {
+                return Water::waterWindowLevelAt(*drawn, d, lonC, latC, invSpanLon, invSpanLat);
+            };
+            wc.lakeEpoch = ++epoch;   // a new window: the filter's per-node cache must not answer
+            wc.lakeWindowRect = glm::vec4((float)(lonC - halfLon), (float)(latC - halfLat),
+                                          (float)(lonC + halfLon), (float)(latC + halfLat));
+            r.setWater(wc);
+            std::vector<uint8_t> px;
+            drawFrame(px);
+            // Rows by the backend, not `detectRowFlip`: that one looks for the sun, and looking at the
+            // nadir there is none (it guessed, and the CPU truth came out mirrored). GL reads bottom-up;
+            // VK reads top-down but this raw `mvp` has no Vulkan clip fix (y points down there), so VK
+            // draws upside down and both end in the same order. Measured: either other choice mirrors.
+            const bool flip = true;
+            const char* dumpDir = std::getenv("HARUKA_WATER_PNG");
+            const std::string tag = std::string(isVk ? "vk" : "gl") + "_shore_" + name + "_" + std::to_string(shoreTexels) + (useHeights ? "" : "_noheights");
+            if (dumpDir) {
+                std::vector<uint8_t> img(px.size());
+                for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)(flip ? h - 1 - y : y) * w * 4], (size_t)w * 4);
+                Haruka::IO::writePNG(std::string(dumpDir) + "/" + tag + ".png", w, h, 4, img.data());
+            }
+            std::vector<uint8_t> truth(dumpDir ? (size_t)w * h * 4 : 0, 0);
+            for (int y = 0; y < h; y += 2)
+                for (int x = 0; x < w; x += 2) {
+                    const int yy = flip ? (h - 1 - y) : y;
+                    const size_t k = ((size_t)yy * w + x) * 4;
+                    const bool water = std::abs((int)px[k] - (int)dryPx[k]) + std::abs((int)px[k + 1] - (int)dryPx[k + 1])
+                                     + std::abs((int)px[k + 2] - (int)dryPx[k + 2]) > 6;
+                    // The ray of this pixel, met with the ground by a few fixed-point steps (near nadir).
+                    const glm::vec4 ndc((x + 0.5f) / w * 2.0f - 1.0f, 1.0f - (y + 0.5f) / h * 2.0f, 0.5f, 1.0f);
+                    glm::vec4 wv = invVP * ndc; const glm::dvec3 ray = glm::normalize(glm::dvec3(wv) / (double)wv.w);
+                    double t = 60.0;
+                    glm::dvec3 p;
+                    for (int it = 0; it < 8; ++it) {
+                        p = cam + ray * t;
+                        const glm::dvec3 d = glm::normalize(p - pc);
+                        const double alt = glm::length(p - pc) - (R + groundAt(d));
+                        t += alt / std::max(-glm::dot(ray, d), 0.2);
+                    }
+                    const glm::dvec3 d = glm::normalize(p - pc);
+                    double tx, ty; texelOf(d, tx, ty);
+                    if (water) ++c.water;
+                    // A SLAB: water past the lake's texels (more than ~6 m out) over ground that is not a
+                    // shore rising to the level. Only meaningful on an outlet side, where nothing may be drawn.
+                    if (outlet && water && tx > WN * 0.5 + 1.1) ++c.slab;   // past the rim column
+                    if (outlet) continue;   // the truth below assumes a rising shore
+                    // Judged only where the truth is known: the lake's texels and the shore band.
+                    // (Terraces: only the LOWER lake's texels, where the truth is its level.)
+                    if (tx >= WN * 0.5 + (upperM > 0.0 ? 0.0 : (double)Water::LAKE_WINDOW_SHORE_TEXELS)) continue;
+                    const double g = groundAt(d);
+                    if (!truth.empty())
+                        for (int q = 0; q < 4; ++q) {
+                            const size_t o = ((size_t)(y + q / 2) * w + x + q % 2) * 4;
+                            truth[o] = water ? 255 : 0; truth[o + 1] = g < level ? 255 : 0; truth[o + 2] = 0; truth[o + 3] = 255;
+                        }
+                    bool wrong = false;
+                    if (g < level - 0.3)      { ++c.judged; if (!water) { ++c.wrongDry; wrong = true; } }
+                    else if (g > level + 0.3) { ++c.judged; if (water) { ++c.wrongWet; wrong = true; } }
+                    if (wrong) {
+                        const double fromEndM = (WN * 0.5 + Water::LAKE_WINDOW_SHORE_TEXELS - tx) * texelM;
+                        c.worstFromEndM = std::max(c.worstFromEndM, fromEndM);
+                        if (fromEndM > 2.0 * quadM) ++c.deepWrong;
+                    }
+                }
+            if (dumpDir) Haruka::IO::writePNG(std::string(dumpDir) + "/" + tag + "_truth.png", w, h, 4, truth.data());
+            g_dev->destroy(win);
+            return c;
+        };
+        const std::string n(name);
+        if (outlet) {
+            const Count now = measure(Water::LAKE_WINDOW_SHORE_TEXELS, true), first = measure(Water::LAKE_WINDOW_SHORE_TEXELS, false);
+            std::printf("    [%s] eye %.2f texels east of the lake's edge, past the rim the ground FALLS (lake %.1f m over the ground under the eye)\n",
+                        name, eastTexels, aboveM);
+            std::printf("      WITH the rising-shore rule: %zu water · %zu water pixels past the rim, over falling ground (a slab)\n", now.water, now.slab);
+            std::printf("      CONTROL, the band into every dry texel (11-10): %zu water · %zu slab pixels\n", first.water, first.slab);
+            CHECK(now.slab * 100 < 2 * (size_t)(w * h / 4), ("[" + n + "] no slab past an outlet: under 2 % of the view").c_str());
+            CHECK(first.slab > 10 * now.slab + 200, ("[" + n + "] CONTROL: carrying the level into a lower texel draws the slab").c_str());
+            return;
+        }
+        if (upperM > 0.0) {
+            const Count now = measure(Water::LAKE_WINDOW_SHORE_TEXELS, true);
+            std::printf("    [%s] lower lake %.1f m, the upper one %.1f m higher past a one-texel rim: %zu pixels of the lower lake judged\n",
+                        name, level, upperM, now.judged);
+            std::printf("      water over HIGHER ground (a ramp from the upper level) %zu · dry over lower ground %zu\n",
+                        now.wrongWet, now.wrongDry);
+            CHECK(now.judged > 200, ("[" + n + "] there is a lower lake to judge").c_str());
+            CHECK((now.wrongWet + now.wrongDry) * 100 < now.judged * 2,
+                  ("[" + n + "] the lower lake stays at ITS level: under 2 % wrong (no ramp from the upper lake's level)").c_str());
+            return;
+        }
+        const Count now = measure(Water::LAKE_WINDOW_SHORE_TEXELS, true), old = measure(0, true);
+        std::printf("    [%s] eye %.2f texels east of the lake's edge, level %.1f m (ground under the eye %.1f): %zu pixels judged\n",
+                    name, eastTexels, level, h0, now.judged);
+        std::printf("      WITH the shore (what runs): %zu water · water over HIGHER ground %zu · dry over LOWER ground %zu"
+                    " · worst %.1f m from the band's end (a quad: %.1f m) · %zu wrong past two quads\n",
+                    now.water, now.wrongWet, now.wrongDry, now.worstFromEndM, quadM, now.deepWrong);
+        std::printf("      CONTROL without it (before): %zu water · water over higher %zu · dry over lower %zu\n",
+                    old.water, old.wrongWet, old.wrongDry);
+        CHECK(now.judged > 200, ("[" + n + "] there is a shore to judge (pixels on both sides of the level)").c_str());
+        CHECK(now.deepWrong * 100 < now.judged * 2,
+              ("[" + n + "] with the shore, under 2 % of the judged pixels are wrong farther than two water quads from the band's end").c_str());
+        CHECK(old.wrongWet + old.wrongDry > 3 * (now.wrongWet + now.wrongDry) + 20 && old.deepWrong > 3 * now.deepWrong + 20,
+              ("[" + n + "] CONTROL: without the shore (the old rule) far more are wrong").c_str());
+    };
+    scene("edge", 0.0, 0.5, false);       // the lake's texel edge under the eye: the old straight cut
+    scene("band_end", 1.75, 0.5, false);  // the end of the shore band under the eye: nodes and quads, causes 2 and 3
+    scene("outlet", 1.5, 3.0, true);      // past the rim the ground falls: no slab, no wall (cause 4)
+    scene("terraces", -0.4, 0.5, false, 4.0);   // a lake 4 m higher past the rim: no ramp between them (cause 5)
+    g_dev->destroy(bakeTex); g_dev->destroy(cubeTex); g_dev->destroy(rectUBO); g_dev->destroy(oceanUBO);
 }

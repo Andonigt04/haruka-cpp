@@ -789,17 +789,24 @@ void testInstancingRing()
                 total, total * sizeof(Haruka::Renderer::InstanceDataFloat) / 1048576.0, bytes1 / 1048576.0, fijo / 1048576.0,
                 bytes3 / 1048576.0, msPerFrame);
     CHECK(inst.ringSize() == 60, "60 lotes subidos en el frame");
-    CHECK(bytes1 <= total * sizeof(Haruka::Renderer::InstanceDataFloat) * 2, "la reserva no pasa del doble de lo que se mueve (redondeo a potencia de dos)");
+    CHECK(bytes1 <= total * sizeof(Haruka::Renderer::InstanceDataFloat) * 2, "la reserva no pasa del doble de lo que se mueve");
     CHECK(bytes1 < fijo / 8, "al menos 8x menos que el anillo fijo de 20 000 por entrada");
     CHECK(bytes3 == bytes1, "los frames siguientes no reservan nada mas");
     CHECK(msPerFrame < 8.0, "subir 2,1 MB en 60 lotes baja de 8 ms (con una entrada por draw eran ~22)");
     baselineMetric("instancias.subida_60_lotes_ms", msPerFrame, 1.50, true, true);   // 0,4-0,8 ms de un frame a otro: es ruido de subida
     // Contraprueba: un frame que no cabe crea un arena mayor (el viejo se retira hasta el frame
-    // siguiente), y solo entonces.
+    // siguiente), y solo entonces. ⚠️ EXACT, NOT DOUBLED (11-10): the arena grows to what is asked
+    // for (doubling recreated huge host-visible buffers, 157 -> 278 -> 671 ms measured), so the old
+    // "37 040 -> 65 536" no longer applies; what holds is: it grows to hold the frame, not to twice
+    // it, and within a frame or two it stops growing.
     lotes[0] = 20000;
+    size_t total2 = 0; for (size_t n : lotes) total2 += n;
     frame();
+    frame();   // the growing frame sized it for the previous frame's demand: at most one more
     const size_t bytes4 = inst.hostBytes();
-    CHECK(bytes4 == bytes3 * 2, "contraprueba: 37 040 instancias no caben en 32 768 -> arena de 65 536");
-    frame();
-    CHECK(inst.hostBytes() == bytes4, "y el siguiente frame ya cabe sin crecer");
+    const size_t need2 = total2 * sizeof(Haruka::Renderer::InstanceDataFloat);
+    std::printf("    contraprueba: %zu instancias por frame -> arena %.2f MB (lo pedido %.2f MB)\n", total2, bytes4 / 1048576.0, need2 / 1048576.0);
+    CHECK(bytes4 > bytes3 && bytes4 >= need2 && bytes4 < need2 * 2, "contraprueba: un frame mayor hace crecer el arena a lo pedido, no al doble");
+    frame(); frame(); frame();
+    CHECK(inst.hostBytes() == bytes4, "y los frames siguientes ya caben sin crecer");
 }

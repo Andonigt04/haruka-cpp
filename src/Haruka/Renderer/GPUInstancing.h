@@ -127,6 +127,8 @@ private:
     uint32_t m_lastCount = 0;  ///< instancias del lote actual (puede ser menor que `m_instances` si el tope duro recortó)
     int    m_draws     = 0;    ///< lotes subidos este frame (diagnóstico)
     std::vector<Haruka::RHI::BufferHandle> m_retired;   ///< arenas viejos: se destruyen al frame siguiente
+    size_t m_frameDemand = 0;       ///< instances asked for this frame (in every arena, retired ones too)
+    size_t m_lastFrameDemand = 0;   ///< ...and in the whole previous frame: what a new arena must hold
     int  m_maxInstances = 0;
     size_t m_hardCap   = 0;    ///< tope duro del arena (0 = sin tope, se crece como antes)
     bool m_dirty = false;

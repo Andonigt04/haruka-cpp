@@ -23,6 +23,7 @@
 #include <cmath>
 #include <cstdlib>   // getenv: HARUKA_COLLISION_WIRE
 #include "Application.h"
+#include "Haruka/Core/Modules.h"
 #include "Haruka/World/Water/WaterFill.h"   // WATER_FILL_DRY: el centinela del mapa de lagos
 #include "ApplicationInternal.h"
 #include "Haruka/RHI/RHIContext.h"   // ruta PSO: comandos de dibujo del frame (bloom migrado)

@@ -73,6 +73,58 @@ inline constexpr float WATER_FILL_DRY = -1.0e30f;
 /// Es el mismo criterio (y el mismo número) que usaba `seedLakes` en el parche.
 inline constexpr float WATER_FILL_MIN_DEPTH_M = 0.25f;
 
+/**
+ * @brief THE GPU COPY of a lake window: level and fetch interleaved (RG32F), with the lake level
+ *        carried `dilateTexels` texels beyond the shore (the SHORE texels: their fetch is stored
+ *        NEGATIVE, which the shader reads as "unlimited" — they are dry).
+ *
+ * Why: the shoreline used to be where the interpolated DEPTH crossed zero inside each water
+ * triangle, and a dry texel next to the lake had the SEA's level (0 m) — so the depth fell by
+ * hundreds of metres in one vertex and the shore was a polygon drawn by 62 m texels and the water
+ * mesh's triangles (Andoni's capture: straight-edged lakes that ignore the contour lines). With the
+ * level known a little beyond the shore, `terrain_node_water.vert` draws those vertices as a sheet AT
+ * the lake level (under the ground) and the depth test against the terrain cuts the shore per
+ * pixel. The water node filter and the physics read the same levels (`lakeDrawnLevelAt`).
+ *
+ * ⚠️ ONLY INTO A SHORE THAT RISES (`heightM`, the ground the fill sampled): a dry texel takes a lake's
+ * level only if its ground is AT OR ABOVE that level (less the fill's minimum depth: a texel left
+ * dry for being too shallow is still the rim) — then the true shore lies inside it and the
+ * terrain cuts the sheet there. A dry texel LOWER than the lake is its outlet, downhill: the first
+ * version carried the level there too and drew a slab hanging over falling ground, ended by a wall
+ * (Andoni's capture, 12-10: terraced blue slabs with vertical sides on a slope), and between two
+ * terraced lakes the upper level spilled over the lower one's shore. Among the lakes it may take, a
+ * texel takes the highest. `heightM == nullptr`: every neighbour (only for tests that compare).
+ */
+inline void lakeWindowGpuRG(const std::vector<float>& levelM, const std::vector<float>& fetchM, int w, int h,
+                            int dilateTexels, std::vector<float>& rg, const std::vector<float>* heightM = nullptr) {
+    rg.assign((size_t)w * h * 2, 0.0f);
+    for (size_t i = 0; i < (size_t)w * h; ++i) { rg[i * 2] = levelM[i]; rg[i * 2 + 1] = fetchM[i]; }
+    if (dilateTexels <= 0) return;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const size_t i = (size_t)y * w + x;
+            if (levelM[i] > WATER_FILL_DRY) continue;   // a lake texel: as it is
+            // The fill leaves dry a texel up to `WATER_FILL_MIN_DEPTH_M` under the level (too shallow
+            // to call lake): that is still the rim, not the outlet.
+            const float ground = heightM ? (*heightM)[i] + WATER_FILL_MIN_DEPTH_M : std::numeric_limits<float>::max();
+            float best = WATER_FILL_DRY, bestFetch = 0.0f;
+            for (int dy = -dilateTexels; dy <= dilateTexels; ++dy)
+                for (int dx = -dilateTexels; dx <= dilateTexels; ++dx) {
+                    const int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+                    const size_t j = (size_t)ny * w + nx;
+                    if (levelM[j] > best && levelM[j] <= ground) { best = levelM[j]; bestFetch = fetchM[j]; }
+                }
+            if (best > WATER_FILL_DRY) { rg[i * 2] = best; rg[i * 2 + 1] = -std::fabs(bestFetch) - 1.0f; }
+        }
+}
+/// The smallest lake the fine window keeps (texels, 62.5 m each: 4 = ~1.6 ha). Andoni's choice
+/// (12-10) among 4 / 8 / 16, measured on the real bake (see `waterFillWindow`).
+inline constexpr int WATER_WINDOW_MIN_LAKE_TEXELS = 4;
+/// Texels the lake level is carried beyond the shore on the GPU (62 m each in the 256² window).
+inline constexpr int LAKE_WINDOW_SHORE_TEXELS = 2;
+
+
 /// "Aquí el viento tiene todo el recorrido que quiera": el océano. Se elige un valor explícito, y no
 /// un infinito, para que el gemelo GLSL pueda compararlo con el mismo número.
 inline constexpr float WATER_FETCH_UNLIMITED = 1.0e7f;
@@ -287,6 +339,9 @@ struct WaterWindowResult {
     /// para esas, o ampliar la ventana. Sin esta cuenta, un lago cortado daria ola de charca.
     std::size_t clippedBodies = 0;
     double texelM = 0.0;          ///< lado del texel de la ventana (m) en su latitud central
+    /// The GPU copy (`lakeWindowGpuRG`: level + fetch interleaved, the shore band included). Filled by
+    /// the planet's window job, empty otherwise.
+    std::vector<float> drawnRG;
     float  deepestM = 0.0f;
 };
 
@@ -415,10 +470,26 @@ inline WaterWindowResult waterFillWindow(int w, int h,
                     label[nc] = id; stack.push_back(nc);
                 }
             }
+            // ⚠️ A PUDDLE OF A FEW TEXELS IS NOT A LAKE. The detail relief's noise has a closed dip every
+            // few hundred metres and the fill floods each at its own level: on the real bake around the
+            // spawn, 1144 levels in the 16 km window, 925 of them 1-2 texels, side by side at different
+            // heights with a one-texel rim between them (792 rims over 1 m apart, the worst 13.6 m) —
+            // Andoni: "desniveles notorios y el agua no se nivela". Under `WATER_WINDOW_MIN_LAKE_TEXELS`
+            // a body is dry (150 lakes and 47 such rims left, 83 % of the water). Not one that touches
+            // the window's edge: it goes on outside and its size here says nothing.
+            if (!touches && cells.size() < (std::size_t)WATER_WINDOW_MIN_LAKE_TEXELS) {
+                for (std::size_t c : cells) { out.levelM[c] = WATER_FILL_DRY; out.fetchM[c] = 0.0f; }
+                out.lakeCells -= cells.size();
+                --out.bodies;
+                continue;
+            }
             const float fetch = (float)std::sqrt(area > 0.0 ? area : 0.0);
             for (std::size_t c : cells) { out.fetchM[c] = fetch; out.clipped[c] = touches ? 1 : 0; }
             if (touches) ++out.clippedBodies;
         }
+        out.deepestM = 0.0f;   // over what is left
+        for (std::size_t c = 0; c < N; ++c)
+            if (out.levelM[c] > WATER_FILL_DRY) out.deepestM = std::max(out.deepestM, out.levelM[c] - out.heightM[c]);
     }
     return out;
 }

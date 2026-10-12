@@ -779,7 +779,11 @@ void testFrameDrawnVsBaked()
     CHECK(bands[0].worst < 0.15, "y el peor pixel cercano < 15 cm");
     CHECK(bands[1].sum / std::max(bands[1].n, (size_t)1) < 0.06, "de 150 a 300 m (mapa del padre), medio < 6 cm");
     CHECK(bands[2].sum / std::max(bands[2].n, (size_t)1) < 0.2, "de 300 a 1000 m (corte continuo), medio < 20 cm");
-    CHECK(bands[3].n == 0 || bands[3].sum / bands[3].n < 0.75, "de 1 a 2 km, medio < 75 cm");
+    // ⚠️ 0.90 m AND NOT 0.75 (11-10, Andoni's decision): this is the far relief's DETAIL, and since
+    // `vertexPx` went from 8 to 24 (23-09, for 60 fps: terrain pass ~10.25 -> ~8 ms of GPU) the far
+    // map is read up to 1.6 levels coarser. Measured here: 0.37 m with 8, 0.48 with 16, 0.80 with 24.
+    // Andoni kept 24; the bound stays just above it so that it still catches anything WORSE.
+    CHECK(bands[3].n == 0 || bands[3].sum / bands[3].n < 0.90, "de 1 a 2 km, medio < 90 cm (con vertexPx 24)");
     const double c0 = bands2[0].sum / std::max(bands2[0].n, (size_t)1);
     CHECK(c0 > 2.5 && c0 < 3.5, "CONTRAPRUEBA: un bake 3 m distinto del horneado aparece como ~3 m de error (el instrumento ve el relieve horneado)");
     g_dev->destroy(bakeTex); g_dev->destroy(bakeTex2); g_dev->destroy(cubeTex);
@@ -909,18 +913,23 @@ void testStrideRingsOnLand()
             if (d0 < 100.0 || d1 < 100.0 || d0 > 1500.0 || d1 > 1500.0) continue;   // 8 m de resolucion: a 100 m son 0,1 de log2
             const double A0 = (pxMap[k0] / 255.0 - 0.1) / 0.08 + 6.0, A1 = (pxMap[k1] / 255.0 - 0.1) / 0.08 + 6.0;
             const double dA = A1 - A0;   // nivel absoluto del mapa: decrece con la distancia segun la ley
+            // ⚠️ `screenWant` IS THE RENDERER'S `vertexPx / errorPx`, NOT A WRITTEN 4.0 (11-10). The 4.0
+            // was 8 px / 2 px; since `vertexPx` went to 24 (23-09) the shader gets 12, and the test
+            // compared the GPU with a law the game no longer uses (measured: 1.66 against 0.16).
+            const double screenWant = Haruka::World::Terrain::TerrainNodeRenderer::vertexPx()
+                                    / std::max(Haruka::World::Terrain::TerrainNodeRenderer::errorPx(), 1e-3);
             // La ley, en nivel absoluto: la misma `nodeStrideMapF` (con el texel del nivel 17, que es
             // el que a 1080p es hoja hasta 614 m; para otro nivel solo cambia una constante, y aqui
             // se comparan diferencias). En la contraprueba (rampa 0) la ley es la del escalon.
             const double tex17 = Haruka::World::Terrain::nodeTexelM(Haruka::World::Terrain::NodeId{ Haruka::Tools::PlanetFace::FRONT, 17, 0, 0 }, R);
             const double ramp = (pass == 1) ? 0.0 : Haruka::World::Terrain::TERRAIN_NODE_STRIDE_RAMP;
-            const double fA = Haruka::World::Terrain::nodeStrideMapF(d0, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, ramp, 4.0, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX);
-            const double fB = Haruka::World::Terrain::nodeStrideMapF(d1, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, ramp, 4.0, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX);
+            const double fA = Haruka::World::Terrain::nodeStrideMapF(d0, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, ramp, screenWant, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX);
+            const double fB = Haruka::World::Terrain::nodeStrideMapF(d1, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, ramp, screenWant, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX);
             const double expected = -(fB - fA);
             // Con la rampa a 0 el escalon cae en un pixel concreto y la vista 13 lo situa con 8 m de
             // error: en la contraprueba se mide contra la ley CONTINUA para que el escalon aparezca.
-            const double expectedC = -(Haruka::World::Terrain::nodeStrideMapF(d1, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_RAMP, 4.0, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX)
-                                     - Haruka::World::Terrain::nodeStrideMapF(d0, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_RAMP, 4.0, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX));
+            const double expectedC = -(Haruka::World::Terrain::nodeStrideMapF(d1, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_RAMP, screenWant, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX)
+                                     - Haruka::World::Terrain::nodeStrideMapF(d0, tex17, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_MATCH_M, Haruka::World::Terrain::TERRAIN_NODE_STRIDE_RAMP, screenWant, 0.5, radPerPx, Haruka::World::Terrain::TERRAIN_NODE_ERROR_PX));
             const double resid = std::abs(dA - (pass == 1 ? expectedC : expected));
             if (resid > worst) { worst = resid; wy = y; wx = x; }
         }

@@ -100,3 +100,5 @@ void test_ocean_fetch();
 void test_water_bake_resolution_limit();
 void test_water_fill_window();
 void test_water_window_policy();
+void test_water_window_shore_rises();
+void test_water_window_min_lake();

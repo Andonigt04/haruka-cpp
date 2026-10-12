@@ -618,7 +618,10 @@ inline double nodeStrideMapF(double distM, double texelM, double strideMatchM, d
     if (radPerPx > 0.0 && distM > 2.0 * strideMatchM) {
         const double texelPx = texelM / std::max(distM * radPerPx, 1e-12);
         const double fPx = std::log2(std::max(screenWant * errorPx / std::max(texelPx, 1e-9), 1.0));
-        f = std::max(f, std::min(fPx, 6.0));
+        // It comes in over [2D, 4D], not at 2D: with `vertexPx` above 8 the two laws do not meet at
+        // 2D and the read map dropped levels in one pixel (see the twin in `terrain_node.vert`).
+        const double w = std::min(std::max((distM - 2.0 * strideMatchM) / (2.0 * strideMatchM), 0.0), 1.0);
+        f = std::max(f, f + (std::min(fPx, 6.0) - f) * w);
     }
     return f;
 }
@@ -1245,10 +1248,18 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
         return ((uint64_t)n.face << 58) | ((uint64_t)n.level << 52)
              | ((uint64_t)n.i << 26) | (uint64_t)n.j;
     };
+    // ⚠️ UNDER WATER THE SURFACE THAT IS DRAWN IS THE WATER, NOT THE SEABED. The node's height was
+    // its seabed's (`maxM`), so over deep water the screen error was measured to a floor kilometres
+    // down: the nodes under the eye stayed coarse and the water sheet drawn on them had 50 m+ quads
+    // (measured in `testNodeWaterDraws`: 200 m over a sea 2.5 km deep) — every wave shorter than two
+    // quads faded and the sea looked flat. And the horizon cut hid far sea whose sheet is visible.
+    // With water on, a node's height is the higher of its seabed and the water level.
+    const bool waterOn = waterLevelM > -1e29;
+    const auto drawnTopM = [&](double maxM) { return waterOn ? std::max(maxM, waterLevelM) : maxM; };
     const auto errOf = [&](const NodeId& n) {
         double elevM = 0.0;
         if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) elevM = r.maxM; }
-        return nodeScreenError(n, planetRadiusM, camPos, planetCenter, radPerPx, elevM);
+        return nodeScreenError(n, planetRadiusM, camPos, planetCenter, radPerPx, drawnTopM(elevM));
     };
     // ⚠️ RECORTAR AL METER, NO AL SACAR. La pila descartaba al sacar, que con una pila da igual —
     // meter es gratis—. Con un monticulo NO: meter cuesta un `push_heap` y, sobre todo, calcular el
@@ -1268,6 +1279,8 @@ inline void nodeSelectVisible(double planetRadiusM, const glm::dvec3& camPos,
         // recortes: el horizonte (un monte asoma mas alla del horizonte liso) y el frustum.
         double bound = terrainBoundM, maxElev = terrainBoundM;
         if (rangeFn) { const NodeRange r = rangeFn(n, rangeUser); if (r.valid()) { bound = r.boundM(); maxElev = r.maxM; } }
+        maxElev = drawnTopM(maxElev);
+        bound = std::max(bound, std::fabs(maxElev));
         if (nodeBelowHorizon(n, planetRadiusM, camPos, planetCenter, maxElev)) {
             if (outCulledHorizon) ++*outCulledHorizon;
             return;

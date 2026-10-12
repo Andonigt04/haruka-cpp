@@ -1,4 +1,5 @@
 #include "Haruka/Renderer/CollisionWire.h"
+#include "Haruka/Core/Modules.h"   // HARUKA_MOD_PHYSICS: without it the wire compiled to nothing
 
 #include "Haruka/Core/Camera.h"
 #include "Haruka/Core/Logger.h"

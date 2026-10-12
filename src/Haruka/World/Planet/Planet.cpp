@@ -2858,6 +2858,15 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
         snap->invSpanLon = 1.0 / (2.0 * halfLon);
         snap->invSpanLat = 1.0 / (2.0 * halfLat);
         const bool ok = (snap->r.w > 0 && snap->r.h > 0);
+        // With the lake level carried a little past the shore (see `lakeWindowGpuRG`): the shoreline
+        // is cut by the terrain per pixel, not drawn by texels and triangles. The CPU keeps the same
+        // levels for the water node filter (`lakeDrawnLevelAt`).
+        const std::vector<float>& rg = snap->r.drawnRG;   // made in the job (`lakeWindowGpuRG`)
+        if (ok && rg.size() == (size_t)snap->r.w * snap->r.h * 2) {
+            snap->drawn.w = snap->r.w; snap->drawn.h = snap->r.h;
+            snap->drawn.levelM.resize((size_t)snap->r.w * snap->r.h);
+            for (size_t i = 0; i < snap->drawn.levelM.size(); ++i) snap->drawn.levelM[i] = rg[i * 2];
+        }
         // ⚠️ SE PUBLICA ENTERA O NADA. Escribir datos y recuadro por separado deja una rendija en la
         // que un lector ve la ventana NUEVA con el centro VIEJO — o sea un lago desplazado.
         m_lakeWin.store(ok ? std::shared_ptr<const LakeWindow>(snap)
@@ -2869,11 +2878,6 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
         if (RHI::Device* dev = RHI::device()) {
             if (ok) {
                 if (RHI::valid(m_lakeWinTex)) { dev->destroy(m_lakeWinTex); m_lakeWinTex = {}; }
-                std::vector<float> rg((size_t)snap->r.w * snap->r.h * 2);
-                for (size_t i = 0; i < (size_t)snap->r.w * snap->r.h; ++i) {
-                    rg[i * 2 + 0] = snap->r.levelM[i];
-                    rg[i * 2 + 1] = snap->r.fetchM[i];
-                }
                 RHI::TextureDesc td;
                 td.width = (uint32_t)snap->r.w; td.height = (uint32_t)snap->r.h;
                 td.format = RHI::Format::RG32F; td.filter = RHI::Filter::Nearest;
@@ -2962,8 +2966,28 @@ void TerrestrialPlanet::updateLakeWindow(const glm::dvec3& observerDir) {
             y = glm::clamp(y, 0, hh - 1);
             return (*waterCPU)[(size_t)y * hw + x];
         };
-        return Water::waterFillWindow(kLakeWinRes, kLakeWinRes, lon, lat, halfLon, halfLat,
-                                               R, terreno, contorno, 0.0f);
+        // ⚠️ THE FILL SEES THE LOWEST POINT OF EACH TEXEL, NOT ITS CENTRE. With the centre, a lake's
+        // level was the spill between 62 m samples, and the fine ground has channels between them: on
+        // the real bake 20 % of the drawn shore was a straight texel edge with the fine ground still
+        // under the lake on both sides (Andoni's capture, 12-10: straight-sided lakes on a plain). The
+        // water escapes there; the level was too high. Measured with `water_real_bake_probe`, straight
+        // cuts / time in this job: centre 20 % / 16 ms · 2x2 10 % / 48 · 3x3 6 % / 99 · 4x4 4 % / 170.
+        // Every recentre (4 km walked), off the main thread.
+        constexpr int kSub = 4;
+        const double dLonT = 2.0 * halfLon / kLakeWinRes, dLatT = 2.0 * halfLat / kLakeWinRes;
+        auto terrenoMin = [&](double lo, double la) -> float {
+            float m = std::numeric_limits<float>::max();
+            for (int a = 0; a < kSub; ++a)
+                for (int b = 0; b < kSub; ++b)
+                    m = std::min(m, terreno(lo + ((a + 0.5) / kSub - 0.5) * dLonT, la + ((b + 0.5) / kSub - 0.5) * dLatT));
+            return m;
+        };
+        Water::WaterWindowResult res = Water::waterFillWindow(kLakeWinRes, kLakeWinRes, lon, lat, halfLon, halfLat,
+                                                              R, terrenoMin, contorno, 0.0f);
+        // The GPU copy here too, off the main thread.
+        static const int s_shore = [] { const char* e = std::getenv("HARUKA_LAKE_SHORE"); return e ? std::atoi(e) : Water::LAKE_WINDOW_SHORE_TEXELS; }();
+        if (res.w > 0) Water::lakeWindowGpuRG(res.levelM, res.fetchM, res.w, res.h, s_shore, res.drawnRG, &res.heightM);
+        return res;
     });
     m_lakeWinJobLive = true;
 }
@@ -3033,6 +3057,13 @@ float TerrestrialPlanet::lakeFetchAt(const glm::dvec3& dir) const {
 /// Cota de la lámina del lago en esa dirección. Muestreo NEAREST y no bilineal a propósito: la
 /// lámina de un lago es PLANA y su borde es un escalón contra la orilla; interpolar entre "hay lago
 /// a 40 m" y "no hay lago" inventaría una rampa de agua que no existe y mojaría la ladera.
+float TerrestrialPlanet::lakeDrawnLevelAt(const glm::dvec3& dir) const {
+    float win = Water::WATER_FILL_DRY;
+    if (const auto w = lakeWindow())
+        win = Water::waterWindowLevelAt(w->drawn, dir, w->lonC, w->latC, w->invSpanLon, w->invSpanLat);
+    return std::max(win, lakeLevelAt(dir));
+}
+
 float TerrestrialPlanet::lakeLevelAt(const glm::dvec3& dir) const {
     // ⚠️ `max` DE LOS DOS, no "la ventana o el global". Los dos son laminas de agua reales y la que
     // manda es la MAS ALTA: un mar interior del campo grueso que se mete en la ventana sigue estando
@@ -4317,7 +4348,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 w.inlandUBO   = m_inlandWaterValid ? m_inlandWaterUBO : RHI::BufferHandle{};
                 w.inlandSSBO  = m_inlandWaterValid ? m_inlandWaterSSBO : RHI::BufferHandle{};
                 w.on          = m_hasWater && m_waterVisible;   // el IDE la apaga para editar
-                w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeLevelAt(dir); };
+                w.lakeLevelFn = [this](const glm::dvec3& dir) { return lakeDrawnLevelAt(dir); };   // the shore band too
                 w.lakeEpoch   = m_lakeEpoch;   // invalida la caché del 9x9 si cambió ventana o campo
                 if (const auto lw = lakeWindow()) {
                     // Rect (lon, lat) de la ventana fina, para el atajo del filtro de agua: si el nodo

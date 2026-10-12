@@ -246,11 +246,11 @@ void testNodeVoxCutFine()
 //
 // `VoxRenderer` near the eye: a 30 cm pick right under a camera 2 m above flat ground. The 4 m chunk
 // meshes have nothing there (the grid cannot open it); the fine bricks do. Measured: the bricks are
-// chosen, the fine radius only opens once they are UPLOADED (before that, nothing fine is drawn — the
-// control), and then the hole's rock is drawn in the middle of the image.
+// chosen, nothing fine is drawn before they are UPLOADED (the control), then the hole's rock is drawn
+// in the middle of the image and the fine cut window (computed in a job) opens the ground over it.
 void testVoxFineBricks()
 {
-    BEGIN("caves: VoxRenderer draws a 30 cm pick with fine bricks, only once they are uploaded");
+    BEGIN("caves: VoxRenderer draws a 30 cm pick with fine bricks once they are uploaded, and cuts the ground over it");
     namespace V = Haruka::World::Vox;
     const double R = 6371000.0;
     const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_vox_fine_gpu").string();
@@ -301,47 +301,116 @@ void testVoxFineBricks()
             }
         return rock;
     };
-    // (1) chosen and published, NOT uploaded yet: no fine radius
+    // (1) chosen and published, NOT uploaded yet: nothing fine is drawn
     vr.update(w, cam, 10.0);
     const size_t loaded = vr.fineBricksLoaded();
-    const float r0 = vr.fineRadius();
     const size_t rock0 = rockPixels();
-    // (2) uploaded
+    const size_t drawn0 = vr.fineBricksDrawn();
+    // (2) uploaded: until the fine window (computed in a job, over UPLOADED bricks) opens the hole.
     int frames = 0;
-    // The bricks are built in the job system: a few ms each, so each update waits a little.
-    for (; frames < 200 && vr.fineRadius() < 10.0f; ++frames) {
+    for (; frames < 200 && vr.fineCutAt(glm::vec3(ground - cam)) <= 0.5f; ++frames) {
         Haruka::Renderer::resources().processUploads(1000.0); vr.update(w, cam, 10.0);
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    const float r1 = vr.fineRadius();
     const size_t rock1 = rockPixels();
-    // THE FINE WINDOW the job computed (same eye as the draw): open over the hole, closed 1.5 m away (what the terrain reads).
+    const size_t drawn1 = vr.fineBricksDrawn();
+    // THE FINE WINDOW the job computed (same eye as the draw): open over the hole, closed 1.5 m away.
     {
         const glm::dvec3 side = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
         const float inHole = vr.fineCutAt(glm::vec3(ground - cam)), away = vr.fineCutAt(glm::vec3(ground + side * 1.5 - cam));
-        std::printf("    fine window (computed in a job): over the hole %.2f · 1.5 m away %.2f\n", inHole, away);
-        CHECK(inHole > 0.5f && away >= 0.0f && away < 0.5f, "the fine window opens the ground over the hole and only there");
+        const float bed = vr.fineBedAt(glm::vec3(ground - cam));
+        std::printf("    fine window (computed in a job): over the hole %.2f · 1.5 m away %.2f · water bed over the hole %.2f m (bottom at 0.45)\n", inHole, away, bed);
+        CHECK(inHole > 0.5f && away < 0.5f, "the fine window opens the ground over the hole and only there");
+        CHECK(std::fabs(bed - 0.45f) < 0.06f, "and holds its water bed (tenths of a metre) for the water pass");
     }
-    // Steady state on the render thread: choosing the bricks (nothing to build) and the fine window
-    // rebuilt once (as when the eye moves 2 m).
-    double steadyMs = 0.0;
+    // Steady state on the render thread, and an update that starts a new fine window (the eye moved 2.5 m).
+    double steadyMs = 0.0, moveMs = 0.0;
     {
         const auto t0 = std::chrono::high_resolution_clock::now();
         for (int i = 0; i < 20; ++i) vr.update(w, cam, 10.0);
         steadyMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count() / 20.0;
-    }
-    double moveMs = 0.0;
-    {
-        const auto t0 = std::chrono::high_resolution_clock::now();
-        vr.update(w, cam + glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0))) * 2.5, 10.0);   // > 2 m: the fine window is rebuilt
-        moveMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t0).count();
+        const auto t1 = std::chrono::high_resolution_clock::now();
+        vr.update(w, cam + glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0))) * 2.5, 10.0);
+        moveMs = std::chrono::duration<double, std::milli>(std::chrono::high_resolution_clock::now() - t1).count();
     }
     std::printf("    render-thread cost: steady update %.2f ms · update that rebuilds the fine window %.2f ms\n", steadyMs, moveMs);
-    std::printf("    bricks chosen %zu · before upload: fine radius %.1f m, %zu rock px in the hole · after %d updates: %.1f m, %zu rock px · %zu bricks drawn\n",
-                loaded, r0, rock0, frames, r1, rock1, vr.fineBricksDrawn());
+    std::printf("    bricks chosen %zu · before upload: %zu drawn, %zu rock px in the hole · after %d updates: %zu drawn, %zu rock px\n",
+                loaded, drawn0, rock0, frames, drawn1, rock1);
     CHECK(loaded > 0, "fine bricks are chosen around the pick");
-    CHECK(r0 == 0.0f && rock0 == 0, "CONTROL: before the upload there is no fine radius and the 4 m walls draw nothing for a 30 cm hole");
-    CHECK(r1 > 10.0f, "once uploaded the fine radius opens (~12 m)");
-    CHECK(rock1 > 200 && vr.fineBricksDrawn() > 0, "and the hole's rock is drawn by the fine bricks");
+    CHECK(drawn0 == 0 && rock0 == 0, "CONTROL: before the upload nothing fine is drawn, and the 4 m walls draw nothing for a 30 cm hole");
+    CHECK(drawn1 > 0 && rock1 > 200, "once uploaded the hole's rock is drawn by the fine bricks");
+    std::filesystem::remove_all(tmp, ec);
+}
+
+// ── NO CRACK BETWEEN THE FINE AND THE 4 M WALLS ─────────────────────────────────────────────────
+//
+// Andoni: "in the cave the LOD is very close and you can see through the planet". The first
+// hand-over cut the 4 m walls inside a sphere around the eye and the fine ones outside it; the two
+// surfaces are metres apart, so a crack ran all round the sphere. Now the coarse mesh is never cut
+// (its covered cells are pushed back into the rock). Measured here inside a 60 m tunnel dug with a
+// capsule: near the eye fine bricks, far away 4 m walls, and the number of pixels where the
+// BACKGROUND shows through must be 0. Control: without the 4 m meshes the far tunnel is open, and
+// the same count sees it.
+void testVoxNoCrack()
+{
+    BEGIN("caves: inside a dug tunnel, fine bricks near and 4 m walls far, nothing shows through");
+    namespace V = Haruka::World::Vox;
+    const double R = 6371000.0;
+    const std::string tmp = (std::filesystem::temp_directory_path() / "haruka_vox_nocrack").string();
+    std::error_code ec; std::filesystem::remove_all(tmp, ec);
+    V::VoxWorld w;
+    V::caveSetAutoProbability(0.0f);
+    w.configure(5u, R, tmp + "/bakes", "", [](const glm::dvec3&) { return 10.0f; });
+    w.setSynchronousBake(true);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(0.3, 0.8, 0.5));
+    const glm::dvec3 e1 = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const glm::dvec3 a = up0 * (R + 10.0 - 15.0), b = a + e1 * 60.0;   // 15 m under the ground
+    V::VoxWorld::Brush br; br.shape = V::VoxWorld::Brush::Shape::Capsule; br.op = V::VoxWorld::Brush::Op::Remove;
+    br.radiusM = 3.0f; br.capsuleEnd = b;
+    w.stroke(a, br);
+    const glm::dvec3 cam = a + e1 * 5.0;
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int W = (uw > 0) ? (int)uw : 256, H = (uh > 0) ? (int)uh : 256;
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    const double fovY = 70.0 * 3.14159265358979 / 180.0;
+    const float aspect = (float)W / (float)H, fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / aspect; proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 rotVP = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(e1), glm::vec3(up0))));
+    Haruka::Renderer::VoxRenderer vr;
+    for (int i = 0; i < 120; ++i) {   // coarse meshes, fine bricks, uploads
+        Haruka::Renderer::resources().processUploads(1000.0);
+        vr.update(w, cam, 10.0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    auto background = [&](bool coarse) {
+        vr.setDrawCoarse(coarse);
+        std::vector<uint8_t> img((size_t)W * H * 4, 0);
+        for (int f = 0; f < 3; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = 1.0f; cv.color[1] = 0.0f; cv.color[2] = 1.0f; cv.color[3] = 1.0f; cv.depth = 0.0f;   // magenta = background
+            ctx->beginRenderPass({}, cv);
+            vr.draw(w, rotVP, cam, glm::vec3(up0));
+            ctx->endRenderPass();
+            if (!isVk && f == 2) g_dev->readPixels(0, 0, W, H, Format::RGBA8, img.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk && f == 2) g_dev->readPixels(0, 0, W, H, Format::RGBA8, img.data());
+        }
+        size_t bg = 0;
+        for (size_t k = 0; k < img.size(); k += 4) if (img[k] > 240 && img[k + 1] < 15 && img[k + 2] > 240) ++bg;
+        return bg;
+    };
+    const size_t bgAll = background(true);
+    const size_t drawn = vr.fineBricksDrawn();
+    const size_t bgFineOnly = background(false);
+    vr.setDrawCoarse(true);
+    std::printf("    tunnel: %zu fine bricks drawn · background pixels with everything %zu · CONTROL fine bricks only %zu (of %d)\n",
+                drawn, bgAll, bgFineOnly, W * H);
+    CHECK(drawn > 0, "there are fine bricks near the eye");
+    CHECK(bgAll == 0, "with fine bricks near and 4 m walls far, nothing shows through");
+    CHECK(bgFineOnly > 1000, "CONTROL: without the 4 m walls the far tunnel is open (the count sees holes)");
     std::filesystem::remove_all(tmp, ec);
 }

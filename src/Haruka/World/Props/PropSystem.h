@@ -181,6 +181,13 @@ public:
     const std::vector<PropPrototypeDebug>& scatterDebug() const { return m_scatterDebug; }
 
     const InstancedObjectRegistry& registry() const { return m_registry; }
+    /// For tests and tools: put prototypes and instances by hand, then `refreshColliders`. The props'
+    /// collision compiled to nothing (12-10, `Modules.h` missing) and nothing outside the game ran it.
+    InstancedObjectRegistry& mutableRegistry() { return m_registry; }
+    /** @brief Rebuilds the physics colliders of the living props within 96 m of `camPos`: the exact
+     *  path a re-seed runs. Each part is its prop's real mesh (trunk, branches; never the canopy). */
+    void refreshColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos,
+                          Physics::PhysicsEngine* physics);
     /// Ids de las mallas de colision por (prototipo → parte) y su copia CPU: el alambre de
     /// depuracion dibuja EXACTAMENTE la geometria que usa la fisica.
     const std::unordered_map<int, std::vector<int>>& meshShapes() const { return m_meshShapes; }
@@ -203,8 +210,6 @@ private:
     };
     const PrototypeGpu* prototypeGpu(const InstancedPrototype& proto);   // hornea si falta
     void rebuildGpu(const glm::dvec3& planetC, double planetR, Core::Camera* camera);
-    void refreshColliders(const glm::dvec3& planetC, double planetR, const glm::dvec3& camPos,
-                          Physics::PhysicsEngine* physics);
     const std::vector<int>& meshShapesFor(int protoIdx, Physics::PhysicsEngine* physics);
     /// Lo que devuelve el worker del scatter: las INSTANCIAS finales (prototipo deducido, yaw
     /// determinista y estado inicial) y SUS MATRICES GPU ya construidas (relativas a `origin`):

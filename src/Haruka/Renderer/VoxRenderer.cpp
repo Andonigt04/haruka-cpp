@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <tuple>
 #include <unordered_set>
 #include <cmath>
 #include <cstdio>
@@ -23,6 +24,7 @@ VoxRenderer::~VoxRenderer() {
     if (m_fineCutPending) m_fineCutJob.wait();   // reads the world
     m_fine.finishJobs();   // the jobs read the world: done before anything goes
     for (auto& kv : m_gpuBricks) if (kv.second.id) Renderer::resources().release(kv.second.id);
+    for (auto& kv : m_push) if (kv.second.id) Renderer::resources().release(kv.second.id);
 }
 
 bool VoxRenderer::ensurePipeline() {
@@ -145,25 +147,66 @@ void VoxRenderer::update(World::Vox::VoxWorld& world, const glm::dvec3& camRelPl
     bool anyWanted = false;
     m_fine.forEach([&](const World::Vox::VoxFineBricks::Brick& b) { anyWanted = anyWanted || b.wanted; });
     if (collectFineCut(camRelPlanet)) upload = true;   // a fine window computed in a job landed
+    uint64_t readySig = 0;
+    for (const auto& [bk, g] : m_gpuBricks) if (brickReady(g)) readySig += (uint64_t)World::Vox::VoxFineBricks::KeyHash{}(bk) * 31u + g.brickRev;
     if (!anyWanted) {
         if (m_fineCutHave) { m_fineCutHave = false; upload = true; }   // back to the plain coarse texture
     } else {
-        if (!m_fineCutPending && (!m_fineCutHave || world.version() + m_fine.version() != m_fineCutVersion || glm::length(foot - m_fineCutCenter) > 2.0))
-            rebuildFineCut(world, camRelPlanet, surfaceElevM);   // starts the job; the current window stays
+        if (!m_fineCutPending && (!m_fineCutHave || world.version() + readySig != m_fineCutVersion || glm::length(foot - m_fineCutCenter) > 2.0))
+        { m_readySig = readySig; rebuildFineCut(world, camRelPlanet, surfaceElevM); }   // starts the job; the current window stays
         if (m_fineCutHave) refreshFineCutSpace(camRelPlanet);
     }
     if (upload) uploadCutAtlas();
-    // THE FINE RADIUS: as far as every wanted brick is uploaded (or empty), and inside the fine window.
-    // Built (world side) AND uploaded (GPU side).
-    double R = (m_fineOn && m_fineCutHave) ? std::min(kFineRadiusM, m_fine.builtRadius()) : 0.0;
-    for (const auto& [bk, g] : m_gpuBricks) {
-        if (R <= 0.0) break;
-        uint64_t gpuRev = 0;
-        const bool uploaded = g.empty || (g.id && Renderer::resources().gpu(g.id, &gpuRev) && gpuRev >= g.storeRev);
-        if (!uploaded) R = std::min(R, g.dist - g.halfDiag);
+    // The terrain may read the fine window wherever it covers (its alpha says what was evaluated).
+    m_fineR = m_fineCutHave ? (float)std::max(kFineCutHalfM - glm::length(foot - m_fineCutCenter) - 0.5, 0.0) : 0.0f;
+    updatePush(world);
     }
-    if (m_fineCutHave) R = std::min(R, kFineCutHalfM - glm::length(foot - m_fineCutCenter) - 0.5);
-    m_fineR = (float)std::max(R, 0.0);
+}
+
+bool VoxRenderer::brickReady(const GpuBrick& g) const {
+    uint64_t gpuRev = 0;
+    return g.empty || (g.id && Renderer::resources().gpu(g.id, &gpuRev) && gpuRev >= g.storeRev);
+}
+
+void VoxRenderer::updatePush(World::Vox::VoxWorld& world) {
+    // Which cells each chunk has covered by an UPLOADED fine brick (with its revision).
+    std::unordered_map<World::Vox::VoxKey, std::vector<std::pair<glm::ivec3, uint64_t>>, World::Vox::VoxKeyHash> cover;
+    for (const auto& [bk, g] : m_gpuBricks) if (brickReady(g)) cover[bk.key].push_back({ bk.cell, g.brickRev });
+    for (const auto& [k, id] : m_ids) {
+        auto cv = cover.find(k);
+        uint64_t meshRev = 0;
+        auto mesh = Renderer::resources().cpu<World::Vox::CaveMesh>(id, &meshRev);
+        const World::Vox::VoxChunk* c = world.get(k);
+        auto pit = m_push.find(k);
+        if (cv == cover.end() || !mesh || mesh->empty() || !c) {
+            if (pit != m_push.end()) { if (pit->second.id) Renderer::resources().release(pit->second.id); m_push.erase(pit); }
+            continue;
+        }
+        std::sort(cv->second.begin(), cv->second.end(), [](const auto& a, const auto& b) {
+            return std::tie(a.first.x, a.first.y, a.first.z) < std::tie(b.first.x, b.first.y, b.first.z); });
+        uint64_t sig = 1469598103934665603ull ^ meshRev;
+        for (const auto& [cell, rev] : cv->second) {
+            const uint64_t v[4] = { (uint64_t)(uint32_t)cell.x, (uint64_t)(uint32_t)cell.y, (uint64_t)(uint32_t)cell.z, rev };
+            for (uint64_t x : v) sig = (sig ^ x) * 1099511628211ull;
+        }
+        PushMesh& pm = m_push[k];
+        if (pm.sig == sig) continue;
+        pm.sig = sig;
+        auto pushed = std::make_shared<World::Vox::CaveMesh>(*mesh);
+        std::unordered_set<uint64_t> cells;
+        for (const auto& [cell, rev] : cv->second) cells.insert(((uint64_t)(uint32_t)cell.x << 42) ^ ((uint64_t)(uint32_t)cell.y << 21) ^ (uint64_t)(uint32_t)cell.z);
+        for (size_t i = 0; i < pushed->positions.size(); ++i) {
+            const glm::dvec3 g = c->gridOf(pushed->origin + glm::dvec3(pushed->positions[i]));
+            const uint64_t key = ((uint64_t)(uint32_t)(int)std::floor(g.x) << 42) ^ ((uint64_t)(uint32_t)(int)std::floor(g.y) << 21) ^ (uint64_t)(uint32_t)(int)std::floor(g.z);
+            if (cells.count(key)) pushed->positions[i] += pushed->normals[i] * kCoarsePushM;   // the normal points into the rock
+        }
+        if (!pm.id) pm.id = Renderer::resources().create("voxpush", false);
+        pm.storeRev = Renderer::resources().publish<World::Vox::CaveMesh>(pm.id, pushed, &VoxRenderer::uploadMesh);
+    }
+    for (auto it = m_push.begin(); it != m_push.end();) {
+        if (m_ids.count(it->first)) { ++it; continue; }
+        if (it->second.id) Renderer::resources().release(it->second.id);
+        it = m_push.erase(it);
     }
 }
 
@@ -204,7 +247,11 @@ void VoxRenderer::rebuildFineCut(World::Vox::VoxWorld& world, const glm::dvec3& 
     std::vector<uint8_t> want((size_t)W * W, 0);
     const double footUp = glm::dot(foot, up);
     m_fine.forEach([&](const World::Vox::VoxFineBricks::Brick& b) {
-        if (!b.wanted || (b.built() && (!b.walls || b.walls->empty()) && !b.air)) return;   // built, no wall, no air: nothing to cut
+        // Only bricks already UPLOADED (a hole is never cut before its wall is drawn), with a wall or
+        // with air in them: elsewhere the alpha stays 0 and the terrain reads the coarse window.
+        if (!b.wanted || !b.built() || ((!b.walls || b.walls->empty()) && !b.air)) return;
+        auto gb = m_gpuBricks.find(b.key);
+        if (gb == m_gpuBricks.end() || !brickReady(gb->second) || gb->second.brickRev != b.revision) return;
         const World::Vox::VoxFineBricks::Key& bk = b.key;
         const World::Vox::VoxChunk* c = world.get(bk.key);
         if (!c) return;
@@ -237,17 +284,25 @@ void VoxRenderer::rebuildFineCut(World::Vox::VoxWorld& world, const glm::dvec3& 
     // (and the game's heightfield costs more than the tests'). The window in use stays valid until
     // the new one lands: it carries its own frame, and the fine radius is capped by its coverage.
     const World::Vox::VoxWorld* wp = &world;
-    const uint64_t version = world.version() + m_fine.version();
+    const uint64_t version = world.version() + m_readySig;
     m_fineCutJob = Core::Jobs::jobs().submit(Core::Jobs::Priority::Frame,
         [wp, dirs = std::move(dirs), where = std::move(where), foot, e1, e2, up, version]() {
             FineCut r;
-            r.pixels.assign((size_t)kFineCutRes * kFineCutRes * 4, 0);
-            for (size_t o = 3; o < r.pixels.size(); o += 4) r.pixels[o] = 255;
+            r.pixels.assign((size_t)kFineCutRes * kFineCutRes * 4, 0);   // alpha 0 = not evaluated: the coarse window rules
             std::vector<float> cuts;
             wp->surfaceCutFineMany(dirs, cuts);
             for (size_t i = 0; i < where.size(); ++i) {
-                r.pixels[where[i] * 4] = (unsigned char)std::lround(cuts[i] * 255.0f);
-                if (cuts[i] > 0.5f) ++r.open;
+                unsigned char* px = &r.pixels[where[i] * 4];
+                px[0] = (unsigned char)std::lround(cuts[i] * 255.0f);
+                px[3] = 255;
+                if (cuts[i] > 0.5f) {
+                    ++r.open;
+                    // THE WATER BED (G): in tenths of a metre where it fits (B = 255 says so), in
+                    // metres like the coarse window when it does not (B = 0). lib/vox_cut.glsl decodes it.
+                    const float bed = wp->floorDepthM(dirs[i], 255.0f);
+                    if (bed < 25.5f) { px[1] = (unsigned char)std::lround(bed * 10.0f); px[2] = 255; }
+                    else             { px[1] = (unsigned char)std::lround(std::min(bed, 255.0f)); px[2] = 0; }
+                }
             }
             r.evaluated = dirs.size();
             r.center = foot; r.e1 = e1; r.e2 = e2; r.up = up; r.version = version;
@@ -281,6 +336,15 @@ void VoxRenderer::refreshFineCutSpace(const glm::dvec3& camRelPlanet) {
     glm::dmat4 toUV(1.0);
     toUV[0][0] = 0.5 / kFineCutHalfM; toUV[1][1] = 0.5 / kFineCutHalfM; toUV[3] = glm::dvec4(0.5, 0.5, 0.0, 1.0);
     m_fineCutSpace = glm::mat4(toUV * toFrame);
+}
+
+float VoxRenderer::fineBedAt(const glm::vec3& posRelEye) const {
+    if (!m_fineCutHave || m_fineCutPixels.empty()) return -1.0f;
+    const glm::vec4 uv = m_fineCutSpace * glm::vec4(posRelEye, 1.0f);
+    if (uv.x <= 0.0f || uv.x >= 1.0f || uv.y <= 0.0f || uv.y >= 1.0f) return -1.0f;
+    const int x = std::min((int)(uv.x * kFineCutRes), kFineCutRes - 1), y = std::min((int)(uv.y * kFineCutRes), kFineCutRes - 1);
+    const unsigned char* px = &m_fineCutPixels[((size_t)y * kFineCutRes + x) * 4];
+    return px[2] > 127 ? (float)px[1] * 0.1f : (float)px[1];
 }
 
 float VoxRenderer::fineCutAt(const glm::vec3& posRelEye) const {
@@ -512,7 +576,14 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
     (void)viewDir;
     ctx->bindPipeline(m_pipe);
     for (const auto& [key, id] : m_ids) {
+        if (!m_drawCoarse) break;
         const Renderer::GpuSet* gs = Renderer::resources().gpu(id);
+        // The PUSHED version when a fine brick covers part of this chunk and it is uploaded.
+        if (auto pit = m_push.find(key); pit != m_push.end() && pit->second.id) {
+            uint64_t prev = 0;
+            const Renderer::GpuSet* ps = Renderer::resources().gpu(pit->second.id, &prev);
+            if (ps && prev >= pit->second.storeRev && ps->metaAs<VoxDraw>()) gs = ps;
+        }
         const VoxDraw* d = gs ? gs->metaAs<VoxDraw>() : nullptr;
         if (!d || !d->indexCount || gs->buffers.size() < 3) continue;   // aún sin subir, o vacía
         const RHI::BufferHandle vb = gs->buffers[0], ib = gs->buffers[1], ubo = gs->buffers[2];
@@ -560,7 +631,7 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
         u.texOrigin = glm::vec4((float)(o.x - std::floor(o.x / T) * T), (float)(o.y - std::floor(o.y / T) * T),
                                 (float)(o.z - std::floor(o.z / T) * T), RHI::valid(m_albedo) ? (float)m_rockLayer : -1.0f);
         u.texInfo = glm::vec4((float)T, 0.0f, 0.0f, 0.0f);
-        u.fineClip = glm::vec4(m_fineR, m_fineR > 0.0f ? 1.0f : 0.0f, 0.0f, 0.0f);   // inside the fine sphere the bricks draw
+        u.fineClip = glm::vec4(0.0f);   // never cut: the covered cells are pushed back instead (see the header)
         // ⚠️ UN UBO POR CHUNK. `updateBuffer` sobre el mismo buffer entre dos draws del mismo
         // command buffer NO se versiona: todos los draws leerían la última escritura (el pase de
         // nodos, por eso, sube su UBO UNA vez antes de cualquier draw).
@@ -576,9 +647,9 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
     }
     // THE FINE BRICKS, inside the fine sphere only (the coarse meshes discard there).
     m_fineDrawn = 0;
-    if (m_fineR > 0.0f)
+    {
         for (const auto& [bk, b] : m_gpuBricks) {
-            if (!b.id || b.empty || b.dist - b.halfDiag > m_fineR) continue;
+            if (!b.id || b.empty) continue;
             const Renderer::GpuSet* gs = Renderer::resources().gpu(b.id);
             const VoxDraw* d = gs ? gs->metaAs<VoxDraw>() : nullptr;
             if (!d || !d->indexCount || gs->buffers.size() < 3) continue;
@@ -594,7 +665,7 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
             u.texOrigin = glm::vec4((float)(o.x - std::floor(o.x / T) * T), (float)(o.y - std::floor(o.y / T) * T),
                                     (float)(o.z - std::floor(o.z / T) * T), RHI::valid(m_albedo) ? (float)m_rockLayer : -1.0f);
             u.texInfo = glm::vec4((float)T, 0.0f, 0.0f, 0.0f);
-            u.fineClip = glm::vec4(m_fineR, 2.0f, 0.0f, 0.0f);
+            u.fineClip = glm::vec4(0.0f);
             dev->updateBuffer(gs->buffers[2], 0, sizeof(u), &u);
             ctx->bindUniformBuffer(5, gs->buffers[2]);
             ctx->bindTexture(1, RHI::valid(m_albedo) ? m_albedo : m_cutTex);
@@ -603,6 +674,7 @@ void VoxRenderer::draw(const World::Vox::VoxWorld& world, const glm::mat4& rotVP
             ctx->drawIndexed(d->indexCount, 0, 1);
             ++m_fineDrawn; m_tris += d->indexCount / 3;
         }
+    }
     static bool s_first = true;
     static auto s_last = std::chrono::steady_clock::now();
     const auto now = std::chrono::steady_clock::now();

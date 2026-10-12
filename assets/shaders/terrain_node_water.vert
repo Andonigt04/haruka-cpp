@@ -67,6 +67,7 @@ layout(std140, binding = 3) uniform VoxCut {
     vec4 uVoxCutAtlas;       // where each window sits in the cut texture (lib/vox_cut.glsl)
 };
 
+layout(location = 6) out float vSheet;   // 1 = lake sheet (cut by the terrain's depth, not discarded)
 layout(location = 0) out vec3  vNormal;
 layout(location = 1) out vec3  vFragPos;
 layout(location = 2) out float vDepth;    // profundidad del agua: < 0 = tierra, el fragmento descarta
@@ -216,10 +217,10 @@ void main() {
     // el lecho, y una que quede por debajo del lecho no se dibuja. Misma ventana que recorta el suelo.
     const vec3  posRelEye = dir * R + uCenter.xyz;
     if (uVoxCutInfo.x > 0.5) {
-        // Coarse window only: the water bed of a decimetre hole changes nothing that can be seen.
+        // The fine window too: a pit dug near the eye has its bed in tenths of a metre.
         bool inside;
-        const vec4 vc = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, posRelEye + uCenterLo.xyz, false, inside);
-        if (inside && vc.r > 0.5) groundH -= vc.g * 255.0;
+        const vec4 vc = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, posRelEye + uCenterLo.xyz, true, inside);
+        if (inside && vc.r > 0.5) groundH -= harukaVoxCutBedM(vc);
     }
 
     // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────
@@ -246,7 +247,17 @@ void main() {
     //
     // ⚠️ EL MAR NO CAMBIA: alli `level` es 0 y `groundH` es negativo, o sea `max` = 0, el mismo
     // vertice de siempre. Por eso el oceano nunca enseño cubos y el agua interior si.
-    const float drawLevel = max(level, groundH);
+    // ⚠️ AND ON THE SHORE OF A LAKE, THE SHEET STAYS AT THE LAKE'S LEVEL (11-10). The lake window
+    // carries the level a little past the shore (`lakeWindowGpuRG`); a dry vertex there is drawn AT
+    // that level — under the ground — and the fragment does not discard it, so the DEPTH TEST against
+    // the terrain cuts the shoreline per pixel. Before, the shore was where the interpolated depth
+    // crossed zero, against a neighbour with the sea's level (0 m): straight-edged lakes drawn by the
+    // 62 m texels and the water mesh (Andoni's capture). Only lakes from the window: the sea and the
+    // global bake keep their rule, and far from any lake this is the same `max(level, groundH)`.
+    const float lakeLv = harukaWindowLakeAt(dir);
+    const bool  sheet  = lakeLv > HARUKA_NO_INLAND && lakeLv >= level - 1e-3;
+    vSheet = sheet ? 1.0 : 0.0;
+    const float drawLevel = sheet ? level : max(level, groundH);
 
     // ── LA PENDIENTE DEL FONDO, para que la ola REFRACTE ────────────────────────────────────────
     //

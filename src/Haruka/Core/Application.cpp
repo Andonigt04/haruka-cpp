@@ -16,6 +16,7 @@
  *   sin tocar el ajuste guardado.
  */
 #include "Application.h"
+#include "Haruka/Core/Modules.h"
 #include "ApplicationInternal.h"
 
 #include "Haruka/RHI/RHIContext.h"

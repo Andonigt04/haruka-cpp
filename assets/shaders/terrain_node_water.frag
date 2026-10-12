@@ -23,13 +23,21 @@ layout(location = 2) in float vDepth;
 layout(location = 3) in float vFoam;
 layout(location = 4) flat in int vWStride;
 layout(location = 5) flat in int vWLevel;
+layout(location = 6) in float vSheet;
 
 layout(location = 0) out vec4 fragColor;
 
 void main() {
     // Aqui no hay agua: el fondo asoma. Mismo criterio que `ocean.frag` — la orilla la decide la
     // PROFUNDIDAD, no un recorte de geometria, asi que sube y baja con la marea sola.
-    if (vDepth <= 0.0) discard;
+    // A lake's sheet is not discarded on its shore: the terrain's depth cuts it per pixel (see the
+    // vert). Where the interpolated depth says "dry" but the sheet is visible, the ground there is
+    // below the lake: shallow water.
+    // Only a triangle that is ALL sheet skips the depth rule. One with a dry vertex (the band's end)
+    // keeps it: that vertex lies on its own ground, maybe metres below the lake, and with `vSheet <
+    // 0.5` half of such a triangle was drawn as a sloping wall from the lake down to it (12-10).
+    if (vDepth <= 0.0 && vSheet < 0.999) discard;
+    const float depthShade = (vSheet > 0.5) ? max(vDepth, 0.3) : vDepth;
     // Vistas de depuracion (`HARUKA_TERRAIN_V5_DEBUG`, uMisc.z), las mismas que el terreno: 4 = color
     // por ZANCADA, 1 = por nivel. Existen por los "bloques negros en la linea del mar" (captura,
     // 18-09): si se colorean, son nodos de agua; si no, no es el agua.
@@ -38,5 +46,5 @@ void main() {
     if (dbg == 1) { fragColor = vec4(fract(vec3(0.31, 0.57, 0.83) * float(vWLevel + 1)), 1.0); return; }
     const vec3 wp = vFragPos - uCenter.xyz - uCenterLo.xyz;
     fragColor = harukaOceanShade(wp, vFragPos, normalize(vNormal), normalize(uLightDir.xyz),
-                                 vec3(1.0), vec3(0.10, 0.13, 0.18), vDepth, vFoam);
+                                 vec3(1.0), vec3(0.10, 0.13, 0.18), depthShade, vFoam);
 }

@@ -72,24 +72,32 @@ public:
     size_t drawnLastFrame() const { return m_drawn; }
     size_t trisLastFrame()  const { return m_tris; }
 
-    // ── FINE BRICKS: decimetre walls near the eye ───────────────────────────────────────────────
-    // Within `fineRadius()` of the eye the walls are fine bricks (`VoxWorld::buildFineMesh`) and the
-    // terrain is cut with the fine window; beyond it, the 4 m chunk meshes and the coarse window.
-    // `vox.frag` and `lib/vox_cut.glsl` hand over at that same sphere, so every wall and every hole
-    // is drawn by exactly one of the two. The radius is only as large as the bricks that are already
-    // UPLOADED: a hole is never cut where its wall is not drawn yet.
-    static constexpr double kFineRadiusM    = World::Vox::VoxFineBricks::kRadiusM;   ///< the fine sphere, at most
+    // ── FINE BRICKS: decimetre walls where the player dug ───────────────────────────────────────
+    // The bricks (`VoxFineBricks`, built by the world) are drawn wherever they are uploaded. There is
+    // NO hand-over sphere: the first version cut the 4 m walls inside a sphere and the fine ones
+    // outside it, and the two surfaces are metres apart in a cave — a crack all round the sphere
+    // through which the planet was seen (Andoni). Now the 4 m mesh is never cut: in the cells a fine
+    // brick covers, its vertices are pushed `kCoarsePushM` into the rock (along the field normal),
+    // so the fine wall is in front and the coarse one stays closed behind it. The terrain reads the
+    // fine cut window where it was evaluated (alpha) and the coarse one elsewhere.
+    static constexpr double kFineRadiusM    = World::Vox::VoxFineBricks::kRadiusM;   ///< bricks within this of the eye
+    static constexpr float  kCoarsePushM    = 1.5f;   ///< how far the covered coarse walls go back into the rock
     static constexpr int    kFineCutRes     = 320;    ///< fine cut window: 320² texels...
     static constexpr double kFineCutHalfM   = 16.0;   ///< ...over ±16 m (10 cm texels)
     const glm::mat4& fineCutSpace() const { return m_fineCutSpace; }
     /** @brief What the fine window says at a position RELATIVE TO THE EYE (nearest texel, [0,1]; -1
      *  outside it or with no window): the CPU side of the shader's lookup, for tests. */
     float fineCutAt(const glm::vec3& posRelEye) const;
-    /// Radius (m) around the eye where the fine walls and the fine cut apply now (0 = none).
+    /** @brief The water bed (m under the ground) the fine window holds there (-1 outside it). */
+    float fineBedAt(const glm::vec3& posRelEye) const;
+    /// Radius (m) around the eye where the terrain may read the fine cut window (0 = no window);
+    /// inside it, only the texels the window evaluated count (its alpha), the rest is the coarse one.
     float fineRadius() const { return m_fineR; }
     /// Where each window sits in the cut texture (lib/vox_cut.glsl); x = 0 when it is not an atlas.
     glm::vec4 cutAtlas() const;
     size_t fineBricksLoaded() const { return m_fine.size(); }
+    /// Draw the 4 m chunk meshes (default). Off only to test what the fine bricks alone cover.
+    void setDrawCoarse(bool on) { m_drawCoarse = on; }
     size_t fineBricksDrawn() const { return m_fineDrawn; }
     /** @brief The fine bricks (built in the world module, without RHI): the physics reads them too. */
     const World::Vox::VoxFineBricks& fineBricks() const { return m_fine; }
@@ -146,7 +154,15 @@ private:
     float      m_fineR = 0.0f;
     size_t     m_fineDrawn = 0;
     bool       m_fineOn = true;
+    bool       m_drawCoarse = true;
     void updateFine(World::Vox::VoxWorld& world, const glm::dvec3& camRelPlanet);
+    bool brickReady(const GpuBrick& g) const;
+    /// The coarse chunk meshes with the covered cells pushed back (render only: the physics keeps the
+    /// original and drops those triangles, see `VoxSystem::syncColliders`).
+    struct PushMesh { Renderer::ResourceId id = 0; uint64_t sig = 0; uint64_t storeRev = 0; };
+    std::unordered_map<World::Vox::VoxKey, PushMesh, World::Vox::VoxKeyHash> m_push;
+    void updatePush(World::Vox::VoxWorld& world);
+    uint64_t m_readySig = 0;   ///< which bricks are uploaded: the fine window follows it
     // The fine cut window (right part of the atlas).
     std::vector<unsigned char> m_fineCutPixels;
     glm::mat4  m_fineCutSpace{1.0f};

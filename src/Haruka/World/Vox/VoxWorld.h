@@ -239,7 +239,8 @@ namespace Haruka::World::Vox {
         /** @brief Cuánto aire hay bajo la superficie en esta columna, en metros: 0 si el suelo está
          *  entero; si hay boca, la profundidad hasta el primer suelo de roca (hasta `maxM`). Es el
          *  LECHO que ve el agua: la simulación de fluidos y la lámina se apoyan aquí, no en el
-         *  heightfield, y así el agua se ACUMULA en el foso en vez de flotar sobre él. */
+         *  heightfield, y así el agua se ACUMULA en el foso en vez de flotar sobre él.
+         *  On the ANALYTIC field (strokes, caves, islands), to a millimetre: a decimetre pick has its bed. */
         float floorDepthM(const glm::dvec3& dir, float maxM = 300.0f) const;
 
         /** @brief Recoge los horneados de cueva que corren en hilo y rehace los chunks que los
@@ -393,9 +394,9 @@ namespace Haruka::World::Vox {
          */
         void buildFineMesh(const VoxKey& key, const glm::ivec3& cell, int S, CaveMesh& out, size_t maxTris = 200000,
                            CaveMesh* solidOut = nullptr) const;
-        /** @brief Can this brick have walls of its own? Cheap: a stroke reaches it, or the stored cut /
-         *  added channel at its 8 corners is closer to a wall than the cell's diagonal (they are
-         *  distances). False = `buildFineMesh` would return nothing; it is not sampled. */
+        /** @brief Should this brick be refined? Cheap: a STROKE's shape reaches it and the field has a
+         *  wall near its centre. Caves and islands alone are not refined (see the .cpp). False =
+         *  `buildFineMesh` returns nothing; it is not sampled. */
         bool fineBrickMayHaveWalls(const VoxKey& key, const glm::ivec3& cell) const;
         /// Coarse cells of a chunk per axis (the bricks of `buildFineMesh`).
         static constexpr int kFineCellsPerAxis = kVoxN - 1;

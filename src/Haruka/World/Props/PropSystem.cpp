@@ -1,4 +1,5 @@
 #include "Haruka/World/Props/PropSystem.h"
+#include "Haruka/Core/Modules.h"   // HARUKA_MOD_PHYSICS: without it the colliders compiled to nothing
 #include "Haruka/Core/Jobs/JobSystem.h"
 
 #include "Haruka/Core/Camera.h"

@@ -1053,7 +1053,9 @@ Terrain::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos
         // mismo sitio que él, que es lo que evita la tercera respuesta. La simulación de aguas
         // someras sigue existiendo, pero para lo DINÁMICO (lluvia, caudal), no para decir dónde hay
         // una lámina quieta.
-        const float lakeM = tpw->lakeLevelAt(dir);
+        // The DRAWN level (the shore band included): where you see a lake you can swim in it. With
+        // `lakeLevelAt` the band was water on screen and dry ground for the body (12-10).
+        const float lakeM = tpw->lakeDrawnLevelAt(dir);
         if (lakeM > Water::WATER_FILL_DRY && s.elevKm * 1000.0f < lakeM) {
             s.waterType    = Terrain::WaterType::Lake;
             s.waterLevelKm = lakeM / 1000.0f;

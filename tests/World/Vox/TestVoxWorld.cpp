@@ -1264,6 +1264,13 @@ void test_vox_fine_mesh() {
     std::printf("    fine cut: centre %.2f · at 3x the radius %.2f · CONTROL coarse cut at the centre %.2f\n", cutIn, cutOut, coarseIn);
     CHECK(cutIn > 0.5f && cutOut < 0.5f, "the fine cut opens the ground in the hole and only there");
     CHECK(coarseIn < 0.5f, "CONTROL: the coarse cut does not open a 15 cm hole");
+    // THE WATER BED: the bottom of the pick is 7.5 cm (its centre) + 15 cm (its radius) down.
+    {
+        const float bed = w.floorDepthM(ground), bedOut = w.floorDepthM(ground + e1 * (3.0 * expected));
+        std::printf("    water bed: in the pick %.4f m (bottom at 0.2250) · at 3x the radius %.4f m\n", bed, bedOut);
+        CHECK(std::fabs(bed - 0.225f) < 0.005f, "the water bed of a 15 cm pick is its bottom, to 5 mm");
+        CHECK(bedOut == 0.0f, "CONTROL: outside the pick the bed is the ground");
+    }
     {
         World::Vox::CaveMesh empty;
         auto t1 = clk::now();

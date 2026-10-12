@@ -153,6 +153,14 @@ add_library(HarukaEngine SHARED
 
 add_dependencies(HarukaEngine haruka_version)   # version.h fresco antes de compilar
 
+# Every `#ifdef HARUKA_MOD_*` must see Modules.h, or its block compiles to nothing (see the script).
+# Runs on every build: removing the include later fails the build, not the game.
+add_custom_target(haruka_check_modules_include
+    COMMAND ${CMAKE_COMMAND} -DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}/src
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/check_modules_include.cmake
+    COMMENT "Checking that HARUKA_MOD_* users include Modules.h")
+add_dependencies(HarukaEngine haruka_check_modules_include)
+
 target_include_directories(HarukaEngine PUBLIC
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src"

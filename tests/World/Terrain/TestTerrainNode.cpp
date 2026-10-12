@@ -1537,7 +1537,11 @@ void test_terrain_node_shallow_split() {
     const auto on   = select(coast, waterLv, frac, &splitsOn);  // con la regla
     const auto dry  = select(coast, -1e30, frac, &splitsDry);   // regla activa, sin agua
     const auto dp   = select(deep,  waterLv, frac, &splitsDeep);// regla activa, todo hondo
-    const auto dpB  = select(deep,  -1e30, 0.0, nullptr);
+    // The reference is the SAME water level with the rule off (fraction 0), not "no water": since
+    // 11-10 the water level also raises a submerged node's height to the sheet (the sea is what is
+    // drawn there, not the seabed), so with and without water the deep sea selects differently by
+    // design. What this control isolates is the shallow rule: in deep water it must ask nothing.
+    const auto dpB  = select(deep,  waterLv, 0.0, nullptr);
 
     std::printf("    seleccion: sin regla %zu nodos · con regla %zu (+%.0f %%, %zu particiones del agua)\n",
                 base.size(), on.size(), 100.0 * ((double)on.size() / (double)base.size() - 1.0), splitsOn);
@@ -1629,7 +1633,7 @@ void test_terrain_node_shallow_split() {
     std::printf("    CONTRAPRUEBA sin agua: %zu nodos, %zu particiones del agua (debe ser %zu y 0)\n",
                 dry.size(), splitsDry, base.size());
     CHECK(dry == base && splitsDry == 0, "sin agua, la regla no cambia NADA: mismo conjunto, mismos nodos");
-    std::printf("    CONTRAPRUEBA mar hondo (-2000 m): %zu nodos, %zu particiones del agua (sin regla %zu)\n",
+    std::printf("    CONTRAPRUEBA mar hondo (-2000 m): %zu nodos, %zu particiones del agua (mismo nivel de agua sin regla %zu)\n",
                 dp.size(), splitsDeep, dpB.size());
     CHECK(dp == dpB && splitsDeep == 0, "con el fondo a -2000 m el presupuesto es 500 m: la regla no pide nada");
 }

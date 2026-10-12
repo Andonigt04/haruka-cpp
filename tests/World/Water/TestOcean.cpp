@@ -1381,6 +1381,8 @@ HARUKA_REGISTER_TESTS(
     { "ocean_gerstner_ellipse", test_ocean_gerstner_ellipse },
     { "water_fill_window", test_water_fill_window },
     { "water_window_policy", test_water_window_policy },
+    { "water_window_shore_rises", test_water_window_shore_rises },
+    { "water_window_min_lake", test_water_window_min_lake },
     { "ocean_refraction_and_break", test_ocean_refraction_and_break },
     { "ocean_spectrum_limits", test_ocean_spectrum_limits },
     { "water_fill_global", test_water_fill_global },

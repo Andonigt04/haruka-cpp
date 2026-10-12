@@ -31,8 +31,8 @@ public:
     void record(const std::string& system, Status status, const std::string& detail = "") {
         entries.push_back({system, status, detail});
         // Live progress line
-        const char* icon = (status == OK) ? "\033[32m✓\033[0m" :
-                           (status == FAIL) ? "\033[31m✗\033[0m" : "\033[33m-\033[0m";
+        const char* icon = (status == Status::OK) ? "\033[32m✓\033[0m" :
+                           (status == Status::FAIL) ? "\033[31m✗\033[0m" : "\033[33m-\033[0m";
         if (detail.empty())
             printf("  %s %s\n", icon, system.c_str());
         else
@@ -43,8 +43,8 @@ public:
     void printSummary() {
         int ok = 0, fail = 0, skip = 0;
         for (const auto& e : entries) {
-            if (e.status == OK)   ok++;
-            else if (e.status == FAIL) fail++;
+            if (e.status == Status::OK)   ok++;
+            else if (e.status == Status::FAIL) fail++;
             else skip++;
         }
 
@@ -65,7 +65,7 @@ public:
             if (fail > 0) {
                 printf("  \033[1;31mFailed systems:\033[0m\n");
                 for (const auto& e : entries) {
-                    if (e.status != FAIL) continue;
+                    if (e.status != Status::FAIL) continue;
                     printf("    \033[31m✗ %-28s\033[0m %s\n",
                            e.system.c_str(), e.detail.c_str());
                 }
@@ -74,7 +74,7 @@ public:
             if (skip > 0) {
                 printf("  \033[1;33mSkipped systems:\033[0m\n");
                 for (const auto& e : entries) {
-                    if (e.status != SKIP) continue;
+                    if (e.status != Status::SKIP) continue;
                     printf("    \033[33m- %-28s\033[0m %s\n",
                            e.system.c_str(), e.detail.c_str());
                 }

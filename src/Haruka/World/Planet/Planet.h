@@ -290,6 +290,8 @@ public:
     /// `terrain_node_water.vert`: mismo campo, mismo marco tangente y mismo paso de UN TEXEL.
     glm::vec3 baseSlopeAt(const glm::dvec3& dir) const;
     float lakeLevelAt(const glm::dvec3& dir) const;
+    /// `lakeLevelAt` with the window's DRAWN level (the shore band included): what the water pass draws.
+    float lakeDrawnLevelAt(const glm::dvec3& dir) const;
     /// Fetch en esa dirección (m). `WATER_FETCH_UNLIMITED` en el océano.
     float lakeFetchAt(const glm::dvec3& dir) const;
     /** @brief Lado del quad con el que se DIBUJA el agua bajo `dir` este frame (m), o el piso de
@@ -617,6 +619,10 @@ private:
     struct LakeWindow {
         Water::WaterWindowResult r;
         double lonC = 0.0, latC = 0.0, invSpanLon = 0.0, invSpanLat = 0.0;
+        /// The level the GPU draws (`lakeWindowGpuRG`: carried past a rising shore). The water node
+        /// filter (a node on the shore band must be drawn, or the lake ends on its edges) and the
+        /// physics (`sampleSurface`: where you see a lake you can swim) read this one.
+        Water::WaterWindowResult drawn;
     };
     std::atomic<std::shared_ptr<const LakeWindow>> m_lakeWin;   ///< la ventana vigente, o nula si no hay
     /// ⚠️ ÉPOCA DE LA VENTANA + CAMPO DE LAGOS, para la CACHÉ del 9x9 del filtro de agua del terreno

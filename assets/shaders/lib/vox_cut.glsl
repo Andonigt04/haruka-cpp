@@ -4,9 +4,9 @@
  *
  * The cut texture can be an ATLAS: the coarse window (±320 m, 4 m texels) in its lower-left corner
  * and the FINE window (±16 m, 10 cm texels) of the decimetre holes to its right, full height. The
- * fine window is read within `info.z` metres of the eye — the radius in which the fine wall bricks
- * are all uploaded, the same sphere `vox.frag` uses to hand over from the 4 m walls to the fine ones —
- * so a hole is never cut where its wall is not drawn yet.
+ * fine window is read within `info.z` metres of the eye, and only where its ALPHA says it was
+ * evaluated (under fine bricks that are already uploaded: a hole is never cut before its wall is
+ * drawn); everywhere else the coarse window answers.
  *
  * info:  x = window valid · y = debug mode (terrain) · z = fine radius (m, 0 = none) · w = unused
  * atlas: x, y = coarse window size / atlas size · z = fine window's x offset / atlas width ·
@@ -23,7 +23,8 @@ vec4 harukaVoxCutLookup(sampler2D tex, mat4 coarseSpace, mat4 fineSpace, vec4 in
             inside = true;
             const vec2 half_ = 0.5 / vec2(atlas.w * ts.x, ts.y);   // half a texel of the fine window, in its uv
             f = clamp(f, half_, vec2(1.0) - half_);
-            return textureLod(tex, vec2(atlas.z + atlas.w * f.x, f.y), 0.0);
+            const vec4 fine = textureLod(tex, vec2(atlas.z + atlas.w * f.x, f.y), 0.0);
+            if (fine.a > 0.5) return fine;   // evaluated here; else the coarse window (below)
         }
     }
     vec2 c = (coarseSpace * vec4(posRelEye, 1.0)).xy;
@@ -34,4 +35,10 @@ vec4 harukaVoxCutLookup(sampler2D tex, mat4 coarseSpace, mat4 fineSpace, vec4 in
         c = clamp(c, half_, vec2(1.0) - half_) * atlas.xy;
     }
     return textureLod(tex, c, 0.0);
+}
+
+/** @brief The WATER BED (m under the ground) in a cut-window sample: the fine window stores it in
+ *  tenths of a metre and says so in B; the coarse one (B = 0) in whole metres. */
+float harukaVoxCutBedM(vec4 cut) {
+    return cut.b > 0.5 ? cut.g * 25.5 : cut.g * 255.0;
 }

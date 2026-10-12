@@ -438,7 +438,13 @@ void main() {
             if (distT > 2.0 * uStrideRamp.x) {
                 const float texelPx = texOwn / max(distT * uLod.x, 1e-12);
                 const float fPx = log2(max(uStrideRamp.z * uLod.y / max(texelPx, 1e-9), 1.0));
-                f = max(f, min(fPx, 6.0));
+                // ⚠️ IT COMES IN OVER [2D, 4D], NOT AT 2D (11-10). At 2D the near law is at 2 and this
+                // one at log2(vertexPx/8) + 2: equal with `vertexPx` 8, but with 24 (23-09) the read
+                // map dropped 1.6 levels in one pixel at 300 m — a ring where the relief loses detail
+                // (measured in `v5: los circulos de zancada`: 1.66, and 0.16 with 8). Gemelo de
+                // `nodeStrideMapF`.
+                const float w = clamp((distT - 2.0 * uStrideRamp.x) / (2.0 * uStrideRamp.x), 0.0, 1.0);
+                f = max(f, mix(f, min(fPx, 6.0), w));
             }
             float fEff = max(f, float(skMap));
             // Un nodo CAIDO dibuja desde su ancestro `kUp`: la misma ley, medida desde ese mapa. Si la
