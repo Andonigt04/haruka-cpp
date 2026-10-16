@@ -1,4 +1,5 @@
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec4 FragColor;
 
@@ -6,21 +7,7 @@ layout(location = 0) in vec3 Normal;
 layout(location = 1) in vec3 FragPos;
 layout(location = 2) in vec2 TexCoord;
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 cameraPos;      float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-    int  enableBloom;
-    int  enableSSAO;
-    int  enableIBL;
-    int  enableShadows;
-    int  _pad3a; int _pad3b; int _pad3c; // 3 ints sueltos (no array std140 → moon alineada a 208)
-    vec3 moonDirection;  float moonIntensity;
-    vec3 moonLightColor; float _pad4;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 // Idéntico a simple.vert, con el que linka (ver la nota de allí): declararlo con menos campos da
 // un error de LINKADO, no de compilación, y el modo Preview se quedaría mudo.

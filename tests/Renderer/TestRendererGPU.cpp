@@ -1,4 +1,8 @@
 #include "RHI/Common/RHITestCommon.h"
+#include <glm/gtc/packing.hpp>
+#include "Haruka/World/Props/MassBurst.h"   // MassBurstGpu: el brote del test de hierba
+#include "Haruka/World/Props/PropGpu.h"     // PropVertex / PropParams
+#include <cstring>   // el vértice empaquetado del prop (ver propLitPixel)
 
 void testItemPreviewShader()
 {
@@ -318,12 +322,13 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
     pf.ambientStrength = 0.18f;
     BufferHandle pfUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pf), &pf, BufferMemory::Dynamic);
 
-    // ⚠️ 64 B, como el bloque `PropParams` del shader (viento, PBR, ORIGEN RELATIVO y perspectiva
+    // ⚠️ 96 B, como el bloque `PropParams` del shader (viento, PBR, ORIGEN RELATIVO y perspectiva
     // aerea). Con 32 B el shader leia `u_originRel`/`u_aerial` FUERA del buffer: Mesa devuelve 0 y
     // el test pasaba; NVIDIA/OpenGL devuelve basura y el prop no escribia pixeles o salia negro
     // (10 de 12 angulos a 0). Misma clase de fallo que el `CloudUBO` de 304 B contra 320.
-    struct PropParams { float wind[3]; float time; float matPBR[4]; float originRel[4]; float aerial[4]; } pp{};
-    static_assert(sizeof(PropParams) == 64, "PropParams del banco desincronizado del shader");
+    struct PropParams { float wind[3]; float time; float matPBR[4]; float originRel[4]; float aerial[4];
+                        float weather[4]; float flags[4]; } pp{};
+    static_assert(sizeof(PropParams) == 96, "PropParams del banco desincronizado del shader (lib/prop_params.glsl)");
     pp.matPBR[0] = 0.0f;   // metallic
     pp.matPBR[1] = 0.6f;   // roughness
     pp.matPBR[2] = 1.0f;   // ao
@@ -337,21 +342,26 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
                   t2 = g_dev->createTexture(td), t3 = g_dev->createTexture(td),
                   t4 = g_dev->createTexture(td);
 
-    // Malla: un triángulo con normal hacia +Y (mira al cielo), color gris.
-    struct V { float p[3], n[3], c[3], uv[2]; float part; };
+    // Malla: un triángulo con normal hacia +Y (mira al cielo), color gris. MISMO layout empaquetado
+    // que `PropVertex` (PropSystem.cpp, 32 B): normal en 10/10/10/2 y color RGBA8 con la escala en el
+    // alfa. Con el layout viejo de 48 B el shader lee la normal y el color de bytes que no son suyos.
+    struct V { float p[3]; uint32_t n, c; float uv[2]; float part; };
+    static_assert(sizeof(V) == 32, "V debe casar con PropVertex");
+    const uint32_t nUp   = glm::packSnorm3x10_1x2(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+    const uint32_t grey5 = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 0.5f, 0.25f));   // escala 1
     const V verts[3] = {
-        { {-1,-1,0}, {0,1,0}, {0.5f,0.5f,0.5f}, {0,0}, 0 },
-        { { 3,-1,0}, {0,1,0}, {0.5f,0.5f,0.5f}, {1,0}, 0 },
-        { {-1, 3,0}, {0,1,0}, {0.5f,0.5f,0.5f}, {0,1}, 0 },
+        { {-1,-1,0}, nUp, grey5, {0,0}, 0 },
+        { { 3,-1,0}, nUp, grey5, {1,0}, 0 },
+        { {-1, 3,0}, nUp, grey5, {0,1}, 0 },
     };
     BufferHandle vb = g_dev->createBuffer(BufferUsage::Vertex, sizeof(verts), verts, BufferMemory::Static);
 
-    // UNA instancia: identidad, color blanco, escala 1, sin partes rotas.
-    struct Inst { float model[16]; float color[4]; float scale[3]; float breakMask; };
-    Inst inst{};
-    inst.model[0] = inst.model[5] = inst.model[10] = inst.model[15] = 1.0f;
-    inst.color[0] = inst.color[1] = inst.color[2] = inst.color[3] = 1.0f;
-    inst.scale[0] = inst.scale[1] = inst.scale[2] = 1.0f;
+    // UNA instancia: identidad, color blanco, escala 1, sin partes rotas. El MISMO struct y el MISMO
+    // layout que el motor (`InstanceDataFloat` + `appendInstanceLayout`): un banco con su propia copia
+    // del layout fue lo que dejó de casar con el shader al compactar la instancia.
+    using Haruka::Renderer::InstanceDataFloat;
+    const InstanceDataFloat inst = InstanceDataFloat::make(glm::vec3(0.0f), glm::quat(1, 0, 0, 0),
+                                                           glm::vec3(1.0f), glm::vec3(1.0f));
     BufferHandle ib = g_dev->createBuffer(BufferUsage::Vertex, sizeof(inst), &inst, BufferMemory::Static);
 
     const std::string sd = Haruka::Renderer::Shader::baseDir() + "shaders/";
@@ -359,19 +369,16 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
     PipelineDesc pd;
     pd.vertexPath   = vs.c_str();
     pd.fragmentPath = fs.c_str();
-    pd.vertexLayout.strides = { (uint32_t)sizeof(V), (uint32_t)sizeof(Inst) };
+    pd.vertexLayout.strides = { (uint32_t)sizeof(V) };
     pd.vertexLayout.attributes = {
-        { 0,  0,  Format::RGB32F, 0 }, { 1,  12, Format::RGB32F, 0 },
-        { 2,  24, Format::RGB32F, 0 }, { 9,  36, Format::RG32F,  0 },
-        { 11, 44, Format::R32F,   0 },
-        { 3,  0,  Format::RGBA32F, 1 }, { 4, 16, Format::RGBA32F, 1 },
-        { 5,  32, Format::RGBA32F, 1 }, { 6, 48, Format::RGBA32F, 1 },
-        { 7,  64, Format::RGBA32F, 1 }, { 8, 80, Format::RGB32F,  1 },
-        { 10, 92, Format::R32F,    1 },
+        { 0,  0,  Format::RGB32F, 0 }, { 1,  12, Format::RGB10A2_SNORM, 0 },
+        { 2,  16, Format::RGBA8,  0 }, { 9,  20, Format::RG32F,  0 },
+        { 11, 28, Format::R32F,   0 },
     };
+    pd.vertexLayout.rates = { InputRate::Vertex };
     // El binding 1 avanza POR INSTANCIA, no por vértice: es lo que hace que una malla se
-    // dibuje N veces con N matrices distintas.
-    pd.vertexLayout.rates = { InputRate::Vertex, InputRate::Instance };
+    // dibuje N veces con N transformaciones distintas.
+    Haruka::Renderer::GPUInstancing::appendInstanceLayout(pd.vertexLayout, 1);
     pd.topology   = PrimitiveTopology::Triangles;
     pd.depth.test = false; pd.depth.write = false;
     pd.cull       = CullMode::None;
@@ -809,4 +816,128 @@ void testInstancingRing()
     CHECK(bytes4 > bytes3 && bytes4 >= need2 && bytes4 < need2 * 2, "contraprueba: un frame mayor hace crecer el arena a lo pedido, no al doble");
     frame(); frame(); frame();
     CHECK(inst.hostBytes() == bytes4, "y los frames siguientes ya caben sin crecer");
+}
+
+// ================================================================================================
+// LA HIERBA EN GPU: un brote se dibuja DONDE debe, y solo el que se pide (GrassSystem).
+//
+// `prop_burst.vert` no tiene stream de instancia: el brote es el `firstInstance` del comando
+// indirecto, leído como `gl_BaseInstanceARB`, y la mata es `gl_InstanceID` MENOS esa base solo en
+// Vulkan (donde el backend lo reescribe a `gl_InstanceIndex`, que ya la lleva). Es exactamente el
+// tipo de diferencia GL/Vulkan que no da error de compilación: con la resta mal, en un backend se
+// lee el brote de otro sitio o una mata fuera de rango y la hierba sale donde no es.
+//
+// Montaje: dos brotes de UNA mata (celda 0 → la mata cae en el centro exacto), uno a la izquierda y
+// otro a la derecha del cuadro (vista y proyección identidad). Se dibuja SOLO el brote 1 con un
+// comando indirecto. Tiene que salir la mancha de la derecha y NO la de la izquierda.
+// ================================================================================================
+void testGrassBurstDraw()
+{
+    BEGIN("hierba: el brote pedido se dibuja en su sitio (firstInstance, GL y Vulkan)");
+    using namespace Haruka::World::Props;
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    struct PerFrame {
+        float view[16], proj[16];
+        float camPos[4], sunDir[4], sunColor[3]; float ambientStrength;
+        int   hdr, bloom, ssao, ibl, shadows, p3a, p3b, p3c;
+        float moonDir[3]; float moonIntensity;
+        float moonColor[3]; float pad4;
+    } pf{};
+    static_assert(sizeof(PerFrame) == 240, "PerFrame debe casar con PerFrameUBOData (std140)");
+    pf.view[0] = pf.view[5] = pf.view[10] = pf.view[15] = 1.0f;
+    pf.proj[0] = pf.proj[5] = pf.proj[10] = pf.proj[15] = 1.0f;
+    pf.sunDir[2] = 1.0f; pf.sunColor[0] = pf.sunColor[1] = pf.sunColor[2] = 1.0f; pf.ambientStrength = 0.5f;
+    BufferHandle pfUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pf), &pf, BufferMemory::Dynamic);
+
+    PropParams pp{};
+    pp.matPBR = glm::vec4(0.0f, 0.6f, 1.0f, 0.0f);
+    pp.flags  = glm::vec4(isVk ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    BufferHandle ppUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pp), &pp, BufferMemory::Dynamic);
+
+    const uint8_t grey[4] = { 128, 128, 128, 255 };
+    TextureDesc td; td.width = td.height = 1; td.format = Format::RGBA8;
+    td.filter = Filter::Nearest; td.wrap = Wrap::ClampToEdge; td.initialData = grey;
+    TextureHandle t[5];
+    for (auto& x : t) x = g_dev->createTexture(td);
+
+    // La mata: un triángulo en el plano local XZ (y = 0) alrededor de su raíz, de ±0,15 (en clip).
+    const uint32_t nUp = glm::packSnorm3x10_1x2(glm::vec4(0.0f, 1.0f, 0.0f, 0.0f));
+    const uint32_t col = glm::packUnorm4x8(glm::vec4(0.9f, 0.9f, 0.9f, 0.25f));
+    const PropVertex verts[3] = {
+        { {-0.15f, 0.0f, -0.15f}, nUp, col, {0, 0}, 0.0f },
+        { { 0.15f, 0.0f, -0.15f}, nUp, col, {1, 0}, 0.0f },
+        { { 0.00f, 0.0f,  0.15f}, nUp, col, {0, 1}, 0.0f },
+    };
+    const uint32_t idx[3] = { 0, 1, 2 };
+    BufferHandle vb = g_dev->createBuffer(BufferUsage::Vertex, sizeof(verts), verts, BufferMemory::Static);
+    BufferHandle ib = g_dev->createBuffer(BufferUsage::Index, sizeof(idx), idx, BufferMemory::Static);
+
+    // Dos brotes. La vertical local es +Z (hacia el ojo): la mata se tumba en el plano XY de pantalla.
+    MassBurstGpu bursts[2];
+    const float zeroCell = 0.0f; uint32_t zeroBits; std::memcpy(&zeroBits, &zeroCell, 4);
+    bursts[0].a = glm::vec4(-0.5f, 0.0f, 0.5f, 1.0f); bursts[0].b = glm::vec4(0, 0, 1, 1.0f);
+    bursts[0].c = glm::uvec4(11u, 1u, kMassNoState, zeroBits);
+    bursts[1].a = glm::vec4( 0.5f, 0.0f, 0.5f, 1.0f); bursts[1].b = glm::vec4(0, 0, 1, 1.0f);
+    bursts[1].c = glm::uvec4(22u, 1u, kMassNoState, zeroBits);
+    BufferHandle burstBuf = g_dev->createBuffer(BufferUsage::Storage, sizeof(bursts), bursts, BufferMemory::Dynamic);
+    const uint32_t stateWord = 0u;
+    BufferHandle stateBuf = g_dev->createBuffer(BufferUsage::Storage, sizeof(stateWord), &stateWord, BufferMemory::Dynamic);
+    struct Cmd { uint32_t indexCount, instanceCount, firstIndex; int32_t vertexOffset; uint32_t firstInstance; };
+    const Cmd cmd{ 3u, 1u, 0u, 0, 1u };   // SOLO el brote 1
+    BufferHandle cmdBuf = g_dev->createBuffer(BufferUsage::Indirect, sizeof(cmd), &cmd, BufferMemory::Dynamic);
+
+    const std::string sd = Haruka::Renderer::Shader::baseDir() + "shaders/";
+    const std::string vs = sd + "prop_burst.vert", fs = sd + "prop_inst.frag";
+    PipelineDesc pd;
+    pd.vertexPath = vs.c_str(); pd.fragmentPath = fs.c_str();
+    appendPropVertexLayout(pd.vertexLayout, false);
+    pd.topology = PrimitiveTopology::Triangles;
+    pd.depth.test = false; pd.depth.write = false;
+    pd.cull = CullMode::None;
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    CHECK(valid(pipe), "el pipeline de prop_burst se crea");
+
+    const int W = 256, H = 256;
+    std::vector<uint8_t> px((size_t)W * H * 4, 0);
+    if (valid(pipe)) {
+        if (Context* c = g_dev->beginFrame()) {
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true;
+            cv.color[0] = 1.0f; cv.color[1] = 0.0f; cv.color[2] = 1.0f; cv.color[3] = 1.0f;
+            cv.depth = 0.0f;
+            c->beginRenderPass({}, cv);
+            c->bindPipeline(pipe);
+            c->bindUniformBuffer(0, pfUbo);
+            c->bindUniformBuffer(6, ppUbo);
+            for (int i = 0; i < 5; ++i) c->bindTexture((uint32_t)i, t[i]);
+            c->bindStorageBuffer(2, burstBuf);
+            c->bindStorageBuffer(3, stateBuf);
+            c->bindVertexBuffer(vb, 0);
+            c->bindIndexBuffer(ib);
+            c->drawIndexedIndirect(cmdBuf, 1, (uint32_t)sizeof(Cmd), 0);
+            c->endRenderPass();
+            if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        }
+    }
+    // Cuenta píxeles que NO son el clear (magenta) en cada mitad.
+    auto painted = [&](int x0, int x1) {
+        int n = 0;
+        for (int y = 0; y < H; ++y)
+            for (int x = x0; x < x1; ++x) {
+                const uint8_t* p = &px[((size_t)y * W + x) * 4];
+                if (!(p[0] > 200 && p[1] < 60 && p[2] > 200)) ++n;
+            }
+        return n;
+    };
+    const int left = painted(0, W / 2), right = painted(W / 2, W);
+    std::printf("    pixeles pintados: izquierda (brote 0, no pedido) %d · derecha (brote 1) %d\n", left, right);
+    CHECK(right > 200, "el brote 1 se dibuja (a la derecha, donde esta su centro)");
+    CHECK(left == 0, "el brote 0 NO se dibuja: el shader lee el brote del firstInstance, no otro");
+
+    if (valid(pipe)) g_dev->destroy(pipe);
+    for (BufferHandle b : { pfUbo, ppUbo, vb, ib, burstBuf, stateBuf, cmdBuf }) g_dev->destroy(b);
+    for (auto& x : t) g_dev->destroy(x);
 }

@@ -5,6 +5,7 @@
  * particles look bigger (perspective). Sphere shading is done in the fragment.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) in vec3 aPos; // camera-relative particle position
 
@@ -21,14 +22,7 @@ layout(std140, binding = 8) uniform FluidParams {
     float u_viewportH;      // alto del viewport (px)
 };
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 void main() {
     vec3 vp = mat3(view) * aPos; // view-space (camera at origin)

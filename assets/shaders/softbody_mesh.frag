@@ -1,9 +1,10 @@
 /**
  * @file softbody_mesh.frag
  * @brief La piel de autor: color base = textura (si hay) x color por vértice x tinte, con la misma luz
- *        que `softbody.frag` (Lambert de dos caras + especular del sol).
+ *        que `softbody.frag` y que los props: `harukaToonShade` (low-poly sin costuras), de dos caras.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec4 FragColor;
 
@@ -18,14 +19,7 @@ layout(std140, binding = 6) uniform SoftbodyMeshParams {
 };
 layout(binding = 1) uniform sampler2D uBaseColor;
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/toon_shade.glsl"   // + frame_ubo (PerFrameData, binding 0)
 
 void main() {
     vec3 albedo = Color * u_tint;
@@ -33,19 +27,15 @@ void main() {
     // (ver tools/blender_haruka.py), así que aquí se muestrea tal cual.
     if (u_hasTexture > 0.5) albedo *= texture(uBaseColor, UV).rgb;
 
-    vec3 N = normalize(Normal);
+    // Dos caras: la normal suave se gira hacia la cámara; la de cara ya se orienta sola hacia `V`.
     vec3 V = normalize(-FragPos);
-    if (dot(N, V) < 0.0) N = -N;
+    vec3 smoothN = normalize(Normal);
+    if (dot(smoothN, V) < 0.0) smoothN = -smoothN;
     vec3 L = normalize(sunDirection);
-    vec3 H = normalize(L + V);
-    float ndl  = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), 48.0);
-    vec3 color = ambientStrength * albedo + 0.85 * ndl * sunLightColor * albedo + sunLightColor * 0.15 * spec;
-    if (enableHDR != 0) {
-        color = color / (color + vec3(1.0));
-        color = pow(color, vec3(1.0 / 2.2));
-    } else {
-        color = clamp(color, 0.0, 1.0);
-    }
-    FragColor = vec4(color, 1.0);
+
+    HarukaToonParams tp = harukaToonDefaults();
+    vec3 N = harukaLightingNormal(smoothN, FragPos, V, tp.facet);
+    // Sin material PBR: dieléctrico de rugosidad media (el brillo de 48 que tenía) y sin oclusión.
+    vec3 color = harukaToonShade(albedo, N, smoothN, L, V, 0.0, 0.55, 1.0, tp);
+    FragColor = vec4(harukaOutputTonemap(color), 1.0);
 }

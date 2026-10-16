@@ -197,6 +197,7 @@ void Application::renderFrameContent() {
     // pantalla no salía ni un prop, con el log lleno de `tope duro`.
     m_scene.beginFrame();
     m_props.beginFrame();
+    m_grass.beginFrame();
     // SERVICIOS CENTRALES, al empezar el frame: lo que los trabajos de fondo dejaron para el hilo
     // principal, y la GPU que ya no está en ningún frame en vuelo.
     Haruka::Core::Jobs::jobs().drainMain();
@@ -334,6 +335,11 @@ void Application::frameBegin(RenderFrame& f) {
     // Debe correr ANTES del render pass de escena, donde el pase instanciado lee el registro.
     { HARUKA_PROFILE("prop.scatter(re-siembra)");
       m_props.refreshScatter(_camera.get(), _planetarySystem.get(), getPhysicsEngineOrNull()); }
+    { HARUKA_PROFILE("grass.scatter(re-siembra)");
+      // Lo que derriba PropSystem aplasta la hierba de GrassSystem: dos sistemas, un evento.
+      if (!m_props.onGroundImpact)
+          m_props.onGroundImpact = [this](const glm::dvec3& c, double r) { m_grass.flattenNear(c, r); };
+      m_grass.refreshScatter(_camera.get(), _planetarySystem.get(), getPhysicsEngineOrNull()); }
 
     // Cielo atmosférico: color por elevación solar + altitud (azul de día → cálido al
     // amanecer/atardecer → oscuro de noche → negro en el espacio). Fallback oscuro.
@@ -550,8 +556,11 @@ void Application::passProps(RenderFrame& f) {
         pf.camera = _camera.get(); pf.planets = _planetarySystem.get(); pf.world = _worldSystem.get();
         pf.perFrameUBO = m_uboPerFrameH; pf.scenePSO = m_scene.pso();
         pf.aspect = f.aspect; pf.heightPx = (int)f.height; pf.aerial = m_sky.weather().aerial; pf.diagClock = m_diagClock;
+        { const auto& wx = m_sky.weather();   // el clima que aplasta y blanquea la capa masiva
+          pf.weather = glm::vec4(wx.snowAccum, wx.groundWetness, wx.rainAmount, wx.snowAmount); }
         World::Props::PropSystem::DrawStats ps;
         m_props.draw(f.sceneCtx, pf, ps);
+        m_grass.draw(f.sceneCtx, pf, ps);   // la hierba: su propio sistema, el mismo frame
         f.renderedDrawCalls += ps.renderedDrawCalls; f.renderedVertices += ps.renderedVertices; f.renderedTriangles += ps.renderedTriangles;
         f.totalDrawCalls += ps.totalDrawCalls; f.totalVertices += ps.totalVertices; f.totalTriangles += ps.totalTriangles;
     }

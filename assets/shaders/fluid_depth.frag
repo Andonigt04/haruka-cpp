@@ -7,6 +7,7 @@
  *        (instead of the per-particle "balls" look).
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 1) in vec3 vViewPos;   // particle CENTRE in view space
 layout(location = 0) out float FragEyeDepth;
@@ -21,14 +22,7 @@ layout(std140, binding = 8) uniform FluidParams {
     float u_viewportH;
 };
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 void main() {
     vec2 d = gl_PointCoord * 2.0 - 1.0;

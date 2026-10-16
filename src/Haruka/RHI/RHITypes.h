@@ -53,6 +53,11 @@ namespace Haruka::RHI
         // como el shader linealiza en el último momento (pow 2.2), se filtra en sRGB y se linealiza
         // DESPUÉS — media con gamma ≠ gamma de la media ("gamma-incorrect filtering").
         SRGB8_ALPHA8,
+
+        // Formato de VÉRTICE: 4 × int16 normalizados a [-1,1] (8 B). Lo usa el CUATERNIÓN de giro
+        // de la instancia compacta (`InstanceDataFloat`): 1/32767 de resolución, ~0,3 mm de error a
+        // 10 m del pivote. GL: GL_SHORT normalizado · Vulkan: VK_FORMAT_R16G16B16A16_SNORM.
+        RGBA16_SNORM,
     };
 
     // Patches = entrada de la TESELACIÓN. No es un modo de dibujo más: con teselación activa el

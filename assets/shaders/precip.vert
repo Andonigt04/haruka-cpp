@@ -24,6 +24,7 @@
  * mide 6.4e6 m: en absolutas, un float no resuelve una gota).
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec3  vRel;      // posición relativa a la cámara (para la niebla/fade)
 layout(location = 1) out vec2  vQuadUV;   // [-1,1]² dentro del quad (para la forma)
@@ -46,17 +47,10 @@ layout(std140, binding = 5) uniform PrecipParams {
 // sol, pero con la cámara en el cénit.
 layout(binding = 0) uniform sampler2D u_skyMask;
 
-// ⚠️ ORDEN: `view` va PRIMERO. Es el layout real del UBO per-frame del motor (ver planet.vert):
+// ⚠️ ORDEN: `view` va PRIMERO. Es el layout real del UBO per-frame del motor (ver lib/frame_ubo.glsl):
 // declararlo al revés no da error de compilación, simplemente lee la proyección donde está la vista
 // y viceversa → todo se transforma con basura y no se rasteriza NADA. Así se perdió el primer intento.
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;      float _pad0;
-    vec3 _sunDirection;   float _pad1;
-    vec3 _sunLightColor;  float ambientStrength;
-    int  _enableHDR;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 // Hash 3D barato y determinista: la gota N siempre nace en el mismo sitio de la celda.
 vec3 hash31(float n) {
@@ -145,7 +139,7 @@ void main() {
     if (u_misc.y > 0.5) {
         vec4 sp = u_skySpace * vec4(rel, 1.0);
         // Con glClipControl(ZERO_TO_ONE) la z de clip YA sale en [0,1]; solo x/y van en [-1,1].
-        // (Mismo convenio que el shadow map del sol en planet.frag — remapear la z aquí la hundiría
+        // (Mismo convenio que el shadow map del sol — remapear la z aquí la hundiría
         // y saldría "todo tapado".)
         vec3 sc = vec3(sp.xy / sp.w * 0.5 + 0.5, sp.z / sp.w);
         if (sc.z <= 1.0 && sc.x > 0.0 && sc.x < 1.0 && sc.y > 0.0 && sc.y < 1.0) {

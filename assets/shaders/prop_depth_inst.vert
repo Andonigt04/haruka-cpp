@@ -1,4 +1,5 @@
 #version 460 core
+#extension GL_GOOGLE_include_directive : require
 /**
  * @file prop_depth_inst.vert
  * @brief Profundidad de props INSTANCIADOS para el mapa de sombras.
@@ -7,9 +8,9 @@
  * pase de sombras solo llamaba al hook del juego, que dibuja SUS recursos. Resultado: ni un árbol en
  * el mapa de sombras, y por tanto ninguna sombra de prop.
  *
- * Es el mismo layout de instancia que `GPUInstancing.h` declara (locations 3..6 = mat4 model,
- * 7 = color, 8 = escala), para poder reusar el MISMO buffer de instancias que el pase de color —
- * si el layout divergiera, las sombras saldrían en otro sitio que los objetos.
+ * Es el mismo layout de instancia que el pase de color (`lib/instance.glsl`), para poder reusar el
+ * MISMO buffer de instancias — si el layout divergiera, las sombras saldrían en otro sitio que los
+ * objetos.
  *
  * La matriz de luz llega por UBO en vez de por uniform suelto: los uniforms sueltos no existen en
  * Vulkan y el RHI va por PSO.
@@ -18,11 +19,7 @@
 layout(location = 0) in vec3 aPos;
 // locations 1 y 2 (normal, uv) existen en el vertex buffer pero no se usan aquí: la profundidad no
 // necesita sombreado. Se declaran para que el layout del PSO case con el del pase de color.
-layout(location = 3) in vec4 iModel0;
-layout(location = 4) in vec4 iModel1;
-layout(location = 5) in vec4 iModel2;
-layout(location = 6) in vec4 iModel3;
-layout(location = 10) in float iBreakMask;  // partes rotas de esta instancia
+#include "lib/instance.glsl"
 layout(location = 11) in float aPart;       // parte del esqueleto de este vértice
 
 layout(std140, binding = 0) uniform PropShadowUBO {
@@ -31,13 +28,12 @@ layout(std140, binding = 0) uniform PropShadowUBO {
 };
 
 void main() {
-    mat4 model = mat4(iModel0, iModel1, iModel2, iModel3);
     // Misma regla que el pase de color: una parte rota no proyecta sombra. Si faltara aquí, la rama
     // arrancada seguiría dibujando su sombra en el suelo — la forma más barata de delatar que lo que
     // se ve y lo que hay no son lo mismo. Colapsa a un punto (área cero), NO se expulsa del NDC.
-    if ((uint(iBreakMask) & (1u << uint(aPart + 0.5))) != 0u) {
-        gl_Position = uLightSpace * vec4(iModel3.xyz + uOriginRel.xyz, 1.0);
+    if (harukaInstancePartBroken(aPart)) {
+        gl_Position = uLightSpace * vec4(iPos + uOriginRel.xyz, 1.0);
         return;
     }
-    gl_Position = uLightSpace * (model * vec4(aPos, 1.0) + vec4(uOriginRel.xyz, 0.0));
+    gl_Position = uLightSpace * vec4(harukaInstancePoint(harukaInstanceQuat(), aPos) + uOriginRel.xyz, 1.0);
 }

@@ -13,13 +13,17 @@
  *    quedaba pegado al VAO y contaminaba los draws siguientes.)
  *  - El PSO y la malla base los pone el LLAMADOR; esta clase solo aporta el buffer de instancias.
  *
- * El layout que espera el shader (ver PSO del llamador):
- *    location 3..6 = mat4 model (4 columnas)   ·   7 = vec4 color   ·   8 = vec3 scale
+ * El layout que espera el shader (`assets/shaders/lib/instance.glsl`, ver PSO del llamador):
+ *    3 = vec3 posición · 4 = vec4 cuaternión (snorm16) · 5 = vec3 escala · 7 = color RGBA8 · 10 = máscara
  */
 #pragma once
 
 #include <glm/glm.hpp>
 #include <glm/ext.hpp>
+#include <glm/gtc/packing.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <cmath>
+#include <cstdint>
 #include <vector>
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
@@ -28,18 +32,70 @@ namespace Haruka { namespace RHI { class Context; } }
 
 namespace Haruka { namespace Renderer {
 
-/** @brief Datos por INSTANCIA (el buffer que avanza una vez por objeto, no por vértice). */
+/**
+ * @brief Datos por INSTANCIA (el buffer que avanza una vez por objeto, no por vértice). 40 B.
+ *
+ * ⚠️ ERA UNA mat4 + vec4 + vec3 + float = 96 B, y la mitad era redundante: una transformación de
+ * prop o de pieza es TRASLACIÓN · GIRO · ESCALA (sin cizalla), y eso son 10 números, no 16. Con
+ * 300 000 props eran 29 MB en RAM más lo que se sube cada frame; ahora 12 MB. Y el shader ya no
+ * necesita `inverse()` por vértice para la normal: con giro y escala separados es `R · (n / s)`.
+ *
+ * Lo que NO se ha comprimido, a propósito: la posición y la escala siguen en float32. Las piezas de
+ * construcción encajan unas con otras y un error de milímetros en un sillar de 10 m se ve como una
+ * rendija; en half lo habría.
+ *
+ * Se construye con `make()` o `fromMatrix()`; los campos empaquetados no se escriben a mano.
+ */
 struct InstanceDataFloat {
-    glm::mat4 model;           // transformación completa
-    glm::vec4 color;           // tinte RGBA (la variedad sale de aquí, no de geometría nueva)
-    glm::vec3 scale;           // escala (para normales/efectos que la necesiten)
+    glm::vec3 position{0.0f};  // traslación (relativa al origen del pase)
+    uint32_t  rot[2] = { 0u, 0x7FFF0000u };   // cuaternión (x,y,z,w) en snorm16 — identidad por defecto
+    glm::vec3 scale{1.0f};     // escala por eje (construcción: no uniforme)
+    /// Tinte RGBA8 con la ESCALA en el alfa: rgb × (a·4). Los tintes de variedad del scatter llegan a
+    /// 1,15 y un RGBA8 normal los saturaría (mismo esquema que el color de vértice de `PropVertex`).
+    uint32_t  color = 0x40FFFFFFu;   // blanco, escala 1
     /// MÁSCARA DE PARTES ROTAS de esta instancia (bit p = la parte p ya no está). Ocupa el hueco
     /// que antes era relleno, así que el stream de instancia NO crece. Va como float con el VALOR
     /// entero (no el patrón de bits): un índice de parte cabe exacto en float hasta 2^24, y el
     /// patrón de bits de un entero pequeño es un denormal que la GPU puede vaciar a cero.
     /// Los pases que no rompen nada (construcción) la dejan en 0 = nada roto.
     float     breakMask = 0.0f;
+
+    /// Tinte → RGBA8 con la escala en el alfa (hasta 4,0). El alfa del tinte de entrada se ignora:
+    /// ningún pase instanciado lo usaba.
+    static uint32_t packTint(const glm::vec3& c) {
+        const glm::vec3 cc = glm::max(c, glm::vec3(0.0f));
+        const float want = glm::clamp(glm::max(glm::max(cc.r, cc.g), glm::max(cc.b, 1.0f)), 1.0f, 4.0f);
+        // La escala se CUANTIZA PRIMERO (hacia arriba, para que rgb/s no pase de 1) y el color se
+        // divide por la escala ya cuantizada: si no, el error del alfa (pasos de 4/255) se suma al
+        // de los canales.
+        const float a = std::ceil(want * 0.25f * 255.0f - 1e-4f) / 255.0f;
+        return glm::packUnorm4x8(glm::vec4(glm::min(cc / (a * 4.0f), glm::vec3(1.0f)), a));
+    }
+    static InstanceDataFloat make(const glm::vec3& pos, const glm::quat& q, const glm::vec3& scl,
+                                  const glm::vec3& tint, float breakMask = 0.0f) {
+        InstanceDataFloat d;
+        d.position = pos;
+        const glm::quat n = glm::normalize(q);
+        const uint64_t pk = glm::packSnorm4x16(glm::vec4(n.x, n.y, n.z, n.w));   // x en los bits bajos
+        d.rot[0] = (uint32_t)(pk & 0xFFFFFFFFull);
+        d.rot[1] = (uint32_t)(pk >> 32);
+        d.scale = scl;
+        d.color = packTint(tint);
+        d.breakMask = breakMask;
+        return d;
+    }
+    /// Desde una matriz TRS (sin cizalla). Una matriz con espejo (determinante < 0) se representa
+    /// con la escala X negativa, que es lo único que un cuaternión no puede llevar.
+    static InstanceDataFloat fromMatrix(const glm::mat4& m, const glm::vec3& tint, float breakMask = 0.0f) {
+        glm::vec3 c0(m[0]), c1(m[1]), c2(m[2]);
+        glm::vec3 s(glm::length(c0), glm::length(c1), glm::length(c2));
+        if (glm::dot(glm::cross(c0, c1), c2) < 0.0f) s.x = -s.x;
+        const auto safe = [](float v) { return std::abs(v) > 1e-20f ? v : 1e-20f; };
+        const glm::mat3 r(c0 / safe(s.x), c1 / safe(s.y), c2 / safe(s.z));
+        return make(glm::vec3(m[3]), glm::quat_cast(r), s, tint, breakMask);
+    }
 };
+static_assert(sizeof(InstanceDataFloat) == 40, "InstanceDataFloat: el layout compacto son 40 B");
 
 class GPUInstancing {
 public:
@@ -59,6 +115,8 @@ public:
      *  bucket de cada (prototipo, LOD) es una lista de índices, no una copia de 96 B por instancia. */
     void setInstancesGather(const InstanceDataFloat* src, const std::vector<uint32_t>& idx);
 
+    /** @brief Encola una instancia ya empaquetada. */
+    void addInstance(const InstanceDataFloat& inst);
     /** @brief Encola una instancia con matriz ya construida (p.ej. orientada a la normal del suelo). */
     void addInstance(const glm::mat4& model,
                      const glm::vec4& color = glm::vec4(1.0f),

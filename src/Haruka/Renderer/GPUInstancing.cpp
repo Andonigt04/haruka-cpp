@@ -54,10 +54,15 @@ void GPUInstancing::addInstance(const glm::vec3& position, const glm::vec3& scal
     addInstance(m, color, scale);
 }
 
-void GPUInstancing::addInstance(const glm::mat4& model, const glm::vec4& color, const glm::vec3& scale) {
+void GPUInstancing::addInstance(const InstanceDataFloat& inst) {
     if ((int)m_instances.size() >= m_maxInstances) return;   // cota dura: el buffer es fijo
-    m_instances.push_back({ model, color, scale, 0.0f });
+    m_instances.push_back(inst);
     m_dirty = true;
+}
+
+void GPUInstancing::addInstance(const glm::mat4& model, const glm::vec4& color, const glm::vec3& /*scale*/) {
+    // La escala sale de la propia matriz (fromMatrix): pasarla aparte era redundante.
+    addInstance(InstanceDataFloat::fromMatrix(model, glm::vec3(color)));
 }
 
 void GPUInstancing::setInstances(const std::vector<InstanceDataFloat>& data) {
@@ -183,14 +188,15 @@ void GPUInstancing::appendInstanceLayout(RHI::VertexLayout& layout, uint32_t bin
     layout.strides[binding] = (uint32_t)sizeof(InstanceDataFloat);
     layout.rates[binding]   = RHI::InputRate::Instance;   // ← avanza una vez por OBJETO
 
-    // mat4 = 4 columnas vec4 en locations 3..6 (así lo declara el shader).
-    for (uint32_t col = 0; col < 4; ++col)
-        layout.attributes.push_back({ 3 + col, (uint32_t)(col * sizeof(glm::vec4)),
-                                      RHI::Format::RGBA32F, binding });
-    layout.attributes.push_back({ 7, (uint32_t)offsetof(InstanceDataFloat, color),
-                                  RHI::Format::RGBA32F, binding });
-    layout.attributes.push_back({ 8, (uint32_t)offsetof(InstanceDataFloat, scale),
+    // Gemelo de `assets/shaders/lib/instance.glsl`: si cambia una location, cambia allí también.
+    layout.attributes.push_back({ 3, (uint32_t)offsetof(InstanceDataFloat, position),
                                   RHI::Format::RGB32F, binding });
+    layout.attributes.push_back({ 4, (uint32_t)offsetof(InstanceDataFloat, rot),
+                                  RHI::Format::RGBA16_SNORM, binding });
+    layout.attributes.push_back({ 5, (uint32_t)offsetof(InstanceDataFloat, scale),
+                                  RHI::Format::RGB32F, binding });
+    layout.attributes.push_back({ 7, (uint32_t)offsetof(InstanceDataFloat, color),
+                                  RHI::Format::RGBA8, binding });
     // Máscara de partes rotas (loc 10). Va en el stream de INSTANCIA porque cada árbol pierde sus
     // propias ramas mientras comparte la malla prototipo con todos los demás.
     layout.attributes.push_back({ 10, (uint32_t)offsetof(InstanceDataFloat, breakMask),

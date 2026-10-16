@@ -11,8 +11,11 @@
  * doubles por la CPU, así que la posición que se muestrea es exacta y NO nada con la cámara.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 // (No se incluye `lib/terrain_shade.glsl`: arrastra `harukaSelectMaterial` y su UBO de materiales.
-//  El triplanar es una función de diez líneas; copiada, con la misma receta.)
+//  Solo hace falta el triplanar, que vive aparte para eso.)
+#include "lib/triplanar.glsl"
+#include "lib/lowpoly.glsl"   // la roca de la cueva, facetada como el terreno de fuera
 
 layout(location = 0) in vec3 vNormal;
 layout(location = 1) in vec3 vPosRel;
@@ -31,16 +34,6 @@ layout(std140, binding = 5) uniform VoxParams {
 };
 layout(binding = 1) uniform sampler2DArray uAlbedo;
 
-// Triplanar sobre una CAPA del array: los tres planos pesados por la normal elevada a 4. Gemela de
-// `harukaTriplanarArr` (lib/terrain_shade.glsl).
-vec3 voxTriplanar(sampler2DArray tex, float layer, vec3 wp, vec3 n, float s) {
-    vec3 bw = pow(abs(n), vec3(4.0));
-    bw /= max(bw.x + bw.y + bw.z, 1e-6);
-    return texture(tex, vec3(wp.zy * s, layer)).rgb * bw.x
-         + texture(tex, vec3(wp.xz * s, layer)).rgb * bw.y
-         + texture(tex, vec3(wp.xy * s, layer)).rgb * bw.z;
-}
-
 void main() {
     // THE HAND-OVER between the 4 m walls and the fine bricks: one sphere around the eye, the same
     // radius the terrain uses for its fine cut (lib/vox_cut.glsl). Each surface is drawn by exactly
@@ -55,12 +48,16 @@ void main() {
     vec3 base = uColor.rgb;
     if (uTexOrigin.w >= 0.0) {
         const vec3 wp = uTexOrigin.xyz + vPosLocal;
-        base = voxTriplanar(uAlbedo, uTexOrigin.w, wp, n, 1.0 / max(uTexInfo.x, 0.01));
+        base = harukaTriplanarArr(uAlbedo, uTexOrigin.w, wp, n, 1.0 / max(uTexInfo.x, 0.01));
     }
     // Dentro de una cueva casi no llega sol directo. Lo que hay es luz de la boca, que viene de
     // ARRIBA: hemisferio (suelo claro, techo oscuro) sobre un ambiente de base, y el sol atenuado.
     const float hemi = 0.5 + 0.5 * dot(n, up);
-    const float nl   = max(dot(n, l), 0.0);
+    // Low-poly: el sol con la normal de CARA y banda ancha; el hemisferio y el triplanar, con la
+    // suave (facetarlos cambiaría de tono/textura en cada arista: ver lib/lowpoly.glsl).
+    const vec3  nLit = harukaLightingNormal(n, vPosRel, -normalize(vPosRel), 1.0);
+    const float ndl  = dot(nLit, l);
+    const float nl   = harukaFacetBand(max(ndl, 0.0), ndl, 1.0);
     const float amb  = 0.16 + 0.34 * hemi;
     fragColor = vec4(base * (amb + 0.45 * nl), 1.0);
 }

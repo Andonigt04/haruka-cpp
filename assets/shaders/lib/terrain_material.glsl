@@ -1,7 +1,7 @@
 // ===========================================================================================
 // MATERIALES DEL TERRENO — definición ÚNICA, compartida por los dos shaders de terreno.
 //
-// La incluyen `planet.frag` (terreno V3 por chunks) y el shader inline del SimplePlanet
+// La incluyen `terrain_node.frag`, `planet/biome.frag` y el shader inline del SimplePlanet
 // (`kBiomeFragSrc` en PlanetarySystem.cpp). Antes cada uno tenía su copia del mismo look y
 // cualquier ajuste había que hacerlo dos veces — la misma clase de duplicación que en este motor
 // ya produjo "tres suelos distintos" y "dos climas describiendo el mismo planeta". Si el color de
@@ -299,39 +299,6 @@ void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm, f
     if (coverW < 0.5 && idxB >= 0) matIdx = idxB;
     if (tile    < 0) tile    = tileBed;    // cobertura sin textura: que el triplanar use el lecho
     if (tileBed < 0) tileBed = tile;
-}
-
-/**
- * @brief CUANTA HIERBA crece en este punto, 0..1. La misma regla que elige el material, sin sacar
- *        una segunda tabla: cada material declara `grass` (`g.w`, 0..1; en el JSON `"grass"`, y por
- *        defecto 1 si su albedo se llama grass_*), y aqui se promedia entre las COBERTURAS que ganan
- *        el punto con los mismos pesos de banda que `harukaSelectMaterial`, por el espesor del manto
- *        (`coverW`: donde asoma el lecho no hay hierba).
- *
- * ⚠️ Es un gemelo PARCIAL de la seleccion: no mira el mapa de zonas ni las profundidades (solo
- * superficie). Lo lee `grass_gen.comp`, que no tiene el mapa de zonas atado; una zona pintada que
- * cambie el material cambiaria el suelo pero no la hierba. Cuando importe, se le ata el mapa y se
- * anade el bono de zona aqui igual que arriba.
- */
-float harukaGrassAmount(float humid, float tempC, float slope, float elevKm) {
-    float wSum = 0.0, gAcc = 0.0;
-    bool  anyBed = false;
-    int count = int(uMatCount.x);
-    for (int i = 0; i < count && i < MAX_TERRAIN_MATERIALS; ++i) {
-        if (harukaIsWaterMat(i)) continue;
-        if (harukaIsBedrock(i)) { anyBed = true; continue; }
-        float f = uMat[i].d.y;
-        float w = harukaBandWeight(humid, uMat[i].a.x, uMat[i].a.y, f)
-                * harukaBandWeight(tempC, uMat[i].a.z, uMat[i].a.w, max(f * 12.0, 0.5))
-                * harukaBandWeight(slope, uMat[i].b.x, uMat[i].b.y, f)
-                * harukaBandWeight(elevKm, uMat[i].f.x, uMat[i].f.y, max(uMat[i].f.z, 0.01));
-        if (w <= 0.0) continue;
-        wSum += w; gAcc += uMat[i].g.w * w;
-    }
-    if (wSum <= 1e-4) return 0.0;
-    // Como en `harukaSelectMaterial`: sin ningun lecho declarado la cobertura manda en todas partes.
-    const float coverW = anyBed ? harukaCoverWeight(0.0, harukaCoverThickness(slope, humid, elevKm)) : 1.0;
-    return clamp(gAcc / wSum, 0.0, 1.0) * coverW;
 }
 
 #endif // HARUKA_TERRAIN_MATERIAL_GLSL

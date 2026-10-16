@@ -5,18 +5,12 @@
  * the validation look; screen-space fluid surfacing comes later if desired.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 1) in vec3 vViewPos;
 layout(location = 0) out vec4 FragColor;
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 void main() {
     // gl_PointCoord in [0,1]; map to [-1,1] disc.
@@ -39,8 +33,5 @@ void main() {
                + 0.85 * ndl * sunLightColor * base
                + sunLightColor * 0.4 * spec;
 
-    if (enableHDR != 0) { color = color/(color+vec3(1.0)); color = pow(color, vec3(1.0/2.2)); }
-    else color = clamp(color, 0.0, 1.0);
-
-    FragColor = vec4(color, 1.0);
+    FragColor = vec4(harukaOutputTonemap(color), 1.0);
 }

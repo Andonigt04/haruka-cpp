@@ -84,7 +84,8 @@ struct TerrainMaterial {
     glm::vec3 tint   = glm::vec3(1.0f);          ///< multiplica al color de bioma (NO lo sustituye)
     float     grain  = 1.0f;                     ///< cuánto moteado aporta su textura [0..2]
     float     detail = 1.0f;                     ///< cuánto relieve aporta su normal map [0..2]
-    /// CUÁNTA HIERBA DENSA crece sobre este material, 0..1 (ver `Renderer/GrassRenderer.h`). En el
+    /// CUÁNTA HIERBA crece sobre este material, 0..1 (hoy no lo lee ningún shader: la hierba es una capa
+    /// de props; se conserva porque los mundos lo declaran y la tabla GPU le guarda el hueco). En el
     /// JSON es `"grass"`; sin declarar (−1) vale 1 si el albedo se llama `grass*` y 0 si no: la misma
     /// regla que ya pinta el suelo de verde pone la hierba, sin una segunda tabla que la contradiga.
     float     grass  = -1.0f;

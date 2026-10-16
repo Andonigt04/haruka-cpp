@@ -324,6 +324,20 @@ namespace Haruka::RHI::Vulkan
         // la validación lo verían). El GL fallback sigue disponible.
         VkPhysicalDeviceVulkan12Features v12{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
         v12.descriptorBindingPartiallyBound = VK_TRUE;
+        // `gl_BaseInstanceARB` / `gl_DrawIDARB` (SPIR-V DrawParameters): la capa masiva identifica el
+        // brote por el firstInstance de su comando indirecto (prop_burst.vert). Core en 1.1 pero
+        // OPCIONAL: se pide solo si el HW lo anuncia.
+        VkPhysicalDeviceVulkan11Features v11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+        {
+            VkPhysicalDeviceVulkan11Features q11{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
+            VkPhysicalDeviceFeatures2 q{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
+            q.pNext = &q11;
+            vkGetPhysicalDeviceFeatures2(m_physical, &q);
+            v11.shaderDrawParameters = q11.shaderDrawParameters;
+            if (!q11.shaderDrawParameters)
+                HARUKA_LOGW("RHI/VK", "shaderDrawParameters no soportado: la capa masiva (prop_burst) no se dibujara");
+        }
+        v11.pNext = &v12;
         v12.runtimeDescriptorArray = VK_TRUE;   // usado por los arrays de texturas del set compartido
 
         // Características base del device que el motor pide EXPLÍCITAMENTE: los pipelines de teselado
@@ -340,7 +354,7 @@ namespace Haruka::RHI::Vulkan
         // Cadenar base features + Vulkan 1.2 features bajo VkDeviceCreateInfo.
         VkPhysicalDeviceFeatures2 devFeats{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
         devFeats.features = feats;
-        devFeats.pNext = &v12;
+        devFeats.pNext = &v11;   // v11 → v12
 
         VkDeviceCreateInfo dci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
         dci.queueCreateInfoCount = 1;

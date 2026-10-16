@@ -761,7 +761,6 @@ Haruka::RHI::TextureHandle TerrestrialPlanet::propWhiteTex() {
 }
 
 void TerrestrialPlanet::clearGPU() {
-    m_grass.shutdown();
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     if (RHI::valid(m_vertexBuffer)) { dev->destroy(m_vertexBuffer); m_vertexBuffer = {}; }
@@ -3372,47 +3371,6 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         m_nodeRenderer.prepare(ctx, cameraPos, m_config.position, m_config.radius,
                                viewDir, radPerPx, cone, m_frameDt);
         }
-        // ── LA HIERBA, sobre lo que `prepare` acaba de resolver ─────────────────────────────────
-        // Pase de presion + compute, aqui fuera del render pass. Lee el mapa de alturas de los
-        // nodos (generado en el mismo command buffer: la barrera de `prepare` ya lo ordena).
-        if (m_grass.ready()) {
-            HARUKA_PROFILE("planet.grass.prepare"); HARUKA_GPU_SCOPE("v5.hierba.gen");
-            Haruka::Renderer::GrassRenderer::Frame gf;
-            gf.finestTexelM = (float)m_nodeRenderer.nearNodes(cameraPos, m_config.position, m_config.radius,
-                                                              (double)m_grass.config().radiusM, m_grassNodes);
-            gf.nodes         = &m_grassNodes;
-            gf.camPos        = cameraPos;
-            gf.planetCenter  = m_config.position;
-            gf.planetRadiusM = m_config.radius;
-            gf.viewDir       = glm::vec3(viewDir);
-            gf.viewUp        = glm::vec3(glm::dot(viewUp, viewUp) > 0.5 ? viewUp : glm::normalize(cameraPos - m_config.position));
-            gf.tanHalfV      = (float)std::tan(fovYRad * 0.5);
-            gf.aspect        = (float)aspect;
-            gf.coneHalfAngle = (float)cone;
-            gf.seaLevelM     = m_seaLevelOffsetM;
-            gf.sunDir        = m_sunDir;
-            gf.sunIntensity  = 1.0f;
-            gf.ambient       = 0.30f;
-            gf.wind          = m_grassWind;
-            gf.time          = m_grassTime;
-            gf.dt            = (float)m_frameDt;
-            gf.aerial        = m_aerial;
-            gf.heights       = m_nodeRenderer.heightsBuffer();
-            gf.baseField     = m_nodeRenderer.baseFieldOrDummy();
-            gf.materialUBO   = m_materialUBO;
-            // La ventana de recorte de los vox: la hierba no crece donde el suelo se recorta para
-            // enseñar la boca (la brizna quedaría en el aire). Sin ventana (cutTex vacia) no recorta.
-            gf.cutTex        = m_voxRenderer.cutTexture();
-            gf.cutSpace      = m_voxRenderer.cutSpace();
-            gf.cutFineSpace  = m_voxRenderer.fineCutSpace();
-            gf.cutFineR      = m_voxRenderer.fineRadius();
-            gf.cutAtlas      = m_voxRenderer.cutAtlas();
-            // + los cráteres: la hierba no crece en el cuenco (una explosión deja tierra desnuda) y
-            // uno nuevo tiene que regenerarla. Las dos versiones sólo crecen: la suma cambia siempre.
-            gf.cutVersion    = m_voxRenderer.cutVersion() + m_vox.craterVersion();
-            craterListNear(cameraPos, Haruka::Renderer::GrassRenderer::kMaxCraters, gf.craterC, gf.craterU);
-            m_grass.prepare(ctx, gf);
-        }
     }
 
     if (!RHI::valid(m_vertexBuffer)) return;
@@ -3883,7 +3841,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             table.mats[i].f = glm::vec4(m.elevMinKm, m.elevMaxKm, m.elevFeatherKm, 0.0f);
             // ⚠️ `g` es NUEVO y su gemelo GLSL (`TerrainMat`) tiene que crecer EN EL MISMO COMMIT:
             // el UBO es std140 y un vec4 de diferencia desalinea TODOS los materiales, no solo éste.
-            // `g.w` = hierba densa sobre este material (`harukaGrassAmount`, grass_gen.comp).
+            // `g.w` = hierba del material (JSON `"grass"`). Lo leía el viejo `grass_gen.comp`; hoy la
+            // hierba es una capa de props y ningún shader lo lee, pero se conserva el hueco: quitarlo
+            // movería el layout std140 de la tabla.
             table.mats[i].g = glm::vec4(m.depthMinKm, m.depthMaxKm, m.depthFeatherKm, m.grassAmount());
         }
         if (!RHI::valid(m_materialUBO)) {
@@ -4255,10 +4215,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         HARUKA_PROFILE("planet.v5.nodes");
         const std::string v5Dir = Renderer::Shader::baseDir() + "shaders/";
         const bool v5Ok = m_nodeRenderer.init(dev, v5Dir);
-        if (v5Ok && !m_grass.ready() && Haruka::Renderer::GrassRenderer::enabled()) {
-            HARUKA_PROFILE("planet.grass.init");
-            m_grass.init(dev, v5Dir);
-        }
         static bool s_initLogged = false;
         if (!s_initLogged) {
             s_initLogged = true;
@@ -4366,11 +4322,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             // se dibuja: una barrera dentro del render pass invalida el command buffer en Vulkan.
             const auto st = m_nodeRenderer.draw(ctx, cameraPos, m_config.position,
                                                 m_config.radius, rotVP);
-            // La hierba densa, tras el terreno y antes del campo volumetrico: opaca, con profundidad.
-            if (m_grass.ready()) {
-                HARUKA_PROFILE("planet.grass.draw"); HARUKA_GPU_SCOPE("v5.hierba");
-                m_grass.draw(ctx, rotVP);
-            }
             // Las paredes del campo volumétrico, TRAS el terreno: las bocas ya están recortadas y
             // la cueva se ve por el agujero. Mismo `rotVP`, misma convención relativa al ojo.
             {

@@ -35,6 +35,7 @@ layout(location = 11) in float vCrater;  // 0..1 cuenco de cráter (terrain_node
 #include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
 #include "lib/vox_cut.glsl"             // harukaVoxCutLookup: coarse + fine cut windows
 #include "lib/sea_tint.glsl"           // harukaSeaTint — vista 15 (cota sobre el mar)
+#include "lib/lowpoly.glsl"            // harukaTerrainFacet + normal de cara: el estilo low-poly
 
 layout(binding = 10) uniform sampler2D      uMacroVar;
 layout(binding = 11) uniform sampler2D      uBiomeMap;
@@ -249,6 +250,10 @@ void main() {
     const float lod    = 1.0 - smoothstep(3000.0, 12000.0, dist);
     const float lodNrm = 1.0 - smoothstep( 300.0,  2500.0, dist);
 
+    // La normal SUAVE elige material y pesa el triplanar; facetar eso cambiaría de textura en cada
+    // arista. La de CARA solo entra en la luz directa (ver lib/lowpoly.glsl).
+    const vec3 nSmooth = n;
+
     vec3 ignoredCol; int ignoredMat;   // solo los usa `biome.frag`, para sus vistas de depuracion
     vec3 rawTex; float texW;           // vistas 7 y 8: la muestra cruda y su peso
     vec3 col = harukaTerrainAlbedo(uTerrainAlbedo, uTerrainNormal, uMacroVar, uBiomeMap, uZoneMap,
@@ -273,7 +278,13 @@ void main() {
         col = mix(col, vec3(0.20, 0.15, 0.11) * (0.6 + 0.8 * lum / max(dot(col, vec3(0.333)), 0.05)), vCrater * 0.85);
     }
     // `harukaTerrainAlbedo` MODIFICA `n` con el normal map, asi que la iluminacion va despues.
-    const float d = max(dot(n, normalize(uLightDir.xyz)), 0.0);
+    // Low-poly: la luz directa con la normal de CARA y banda ancha, conservando el detalle que el
+    // normal map haya puesto en `n`. De lejos se funde a la suave (triángulos subpíxel = ruido).
+    const float facet = harukaTerrainFacet(dist);
+    const vec3  nLit  = harukaCarryDetail(
+        harukaLightingNormal(nSmooth, vFragPos, -vFragPos / max(dist, 1e-3), facet), nSmooth, n);
+    const float ndl   = dot(nLit, normalize(uLightDir.xyz));
+    const float d     = harukaFacetBand(max(ndl, 0.0), ndl, facet);
     vec3 lit = col * (0.25 + 0.75 * d);
     // ── 15 = COTA SOBRE EL NIVEL DEL MAR (vista de edición del IDE): ver lib/sea_tint.glsl. La cota
     // es `r − R` en DOUBLE, como las vistas 11/14.

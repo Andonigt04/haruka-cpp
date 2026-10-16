@@ -46,5 +46,6 @@ void main() {
     if (dbg == 1) { fragColor = vec4(fract(vec3(0.31, 0.57, 0.83) * float(vWLevel + 1)), 1.0); return; }
     const vec3 wp = vFragPos - uCenter.xyz - uCenterLo.xyz;
     fragColor = harukaOceanShade(wp, vFragPos, normalize(vNormal), normalize(uLightDir.xyz),
-                                 vec3(1.0), vec3(0.10, 0.13, 0.18), depthShade, vFoam);
+                                 vec3(1.0), vec3(0.10, 0.13, 0.18), depthShade, vFoam,
+                                 harukaTerrainFacet(length(vFragPos)));   // mismo fundido que el suelo
 }

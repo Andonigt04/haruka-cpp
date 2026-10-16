@@ -3,6 +3,7 @@
  * @brief XPBD softbody shading — two-sided Lambert + sun specular.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec4 FragColor;
 
@@ -18,37 +19,21 @@ layout(std140, binding = 6) uniform SoftbodyParams {
 };
 // 0 = opaque (softbodies). >0.5 = use per-vertex Alpha (water depth fade).
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/toon_shade.glsl"   // + frame_ubo (PerFrameData, binding 0)
 
 void main() {
-    vec3 N = normalize(Normal);
-    // Two-sided: flip the normal to face the camera (cloth/jelly viewed from any side).
+    // Two-sided: flip the normal to face the camera (cloth/jelly viewed from any side). La normal de
+    // cara (low-poly, lib/lowpoly.glsl) ya se orienta sola hacia `V`.
     vec3 V = normalize(-FragPos);
-    if (dot(N, V) < 0.0) N = -N;
-
+    vec3 smoothN = normalize(Normal);
+    if (dot(smoothN, V) < 0.0) smoothN = -smoothN;
     vec3 L = normalize(sunDirection);
-    vec3 H = normalize(L + V);
 
-    float ndl  = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), 48.0);
+    HarukaToonParams tp = harukaToonDefaults();
+    vec3 N = harukaLightingNormal(smoothN, FragPos, V, tp.facet);
+    // Gelatina/tela: algo más de brillo que la piel de autor (tenía 0,25 frente a 0,15).
+    vec3 color = harukaToonShade(u_color, N, smoothN, L, V, 0.0, 0.40, 1.0, tp);
 
-    vec3 color = ambientStrength * u_color
-               + 0.85 * ndl * sunLightColor * u_color
-               + sunLightColor * 0.25 * spec;
-
-    if (enableHDR != 0) {
-        color = color / (color + vec3(1.0));
-        color = pow(color, vec3(1.0 / 2.2));
-    } else {
-        color = clamp(color, 0.0, 1.0);
-    }
     float a = (u_alphaMode > 0.5) ? Alpha : 1.0;
-    FragColor = vec4(color, a);
+    FragColor = vec4(harukaOutputTonemap(color), a);
 }

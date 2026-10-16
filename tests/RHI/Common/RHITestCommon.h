@@ -13,7 +13,6 @@
 #include <chrono>
 #include "Haruka/RHI/RHIDevice.h"
 #include "Haruka/Renderer/GPUInstancing.h"
-#include "Haruka/Renderer/GrassRenderer.h"
 #include "Haruka/World/Terrain/CubeSphere.h"      // dirToCubeFaceClosed (la sonda de la hierba)
 #include "Haruka/RHI/RHIContext.h"
 #include "Haruka/RHI/RHIResources.h"
@@ -287,8 +286,8 @@ void testInstancingRing();
 void testSkyAmbientGPU();
 void testPropLighting();
 void testPropLightSweep();
+void testGrassBurstDraw();
 void testSceneTerrainAndProp();
-void testGrassGen();
 void testTerrainNodeGpuParity();
 void testTerrainNodeGpuCost();
 void testTerrainNodePoolGpu();

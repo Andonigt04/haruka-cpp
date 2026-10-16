@@ -37,7 +37,6 @@
 #include "Haruka/World/Terrain/TerrainNodeRenderer.h" // v5: pase de terreno por nodos (HARUKA_TERRAIN_V5=1)
 #include "Haruka/World/Vox/VoxWorld.h"             // el campo volumétrico: cuevas y lo que se pica
 #include "Haruka/Renderer/VoxRenderer.h"
-#include "Haruka/Renderer/GrassRenderer.h"     // hierba densa en GPU sobre el pase de nodos
 #include "Haruka/World/WeatherSystem.h"
 #include "Haruka/World/Water/WaterFill.h"          // WaterWindowResult: el relleno FINO de una ventana
 #include <future>
@@ -798,13 +797,6 @@ private:
     /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
     /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
     Terrain::TerrainNodeRenderer m_nodeRenderer;
-    /// LA HIERBA DENSA (primer plano, ~60 m): generada en GPU sobre los nodos que dibuja el pase v5
-    /// y aplastada por lo que se mueve (ver `Renderer/GrassRenderer.h`). Va pegada al pase de nodos
-    /// porque lee SU mapa de alturas: sin v5 no hay hierba densa (queda la capa de props).
-    Haruka::Renderer::GrassRenderer m_grass;
-    std::vector<Terrain::TerrainNodeRenderer::NearNode> m_grassNodes;
-    glm::vec3 m_grassWind{0.0f};
-    float     m_grassTime = 0.0f;
 
     // ── EL CAMPO VOLUMÉTRICO: cuevas sembradas y todo lo que el jugador pique o rellene ──────────
     // Una sola forma de tocar el mundo (ver `VoxWorld.h`). El planeta lo streamea alrededor de la
@@ -821,19 +813,13 @@ private:
 public:
     /// El campo, para quien pique (el jugador, el editor) o consulte (la colisión).
     /** @brief Los cráteres a menos de 3 km de la cámara, los más cercanos primero (hasta `maxN`),
-     *  para la GPU: C = centro relativo al ojo (m) + radio · U = vertical + hondo. Lo leen el pase de
-     *  nodos y la hierba (el mismo cuenco en los dos). */
+     *  para la GPU: C = centro relativo al ojo (m) + radio · U = vertical + hondo. Lo lee el pase de
+     *  nodos. */
     void craterListNear(const glm::dvec3& cameraPos, size_t maxN,
                         std::vector<glm::vec4>& C, std::vector<glm::vec4>& U) const;
     Vox::VoxWorld&       vox()       { return m_vox; }
     const Vox::VoxWorld& vox() const { return m_vox; }
     const Renderer::VoxRenderer& voxRenderer() const { return m_voxRenderer; }
-    /// La hierba del primer plano. Pase optativo de GPU (`GrassRenderer`, `HARUKA_GRASS=1`); por
-    /// defecto la hierba vive en el instancing de props y quien se mueve la aplasta con
-    /// `PropSystem::flattenNear` (jugador, objetos con física, props derribados).
-    /// El viento y el reloj los pone quien los tenga (la app).
-    Haruka::Renderer::GrassRenderer& grass() { return m_grass; }
-    void setGrassWind(const glm::vec3& windWorld, float timeS) { m_grassWind = windWorld; m_grassTime = timeS; }
     /// Dónde guarda la partida los trazos. Sin esto, lo picado se pierde al salir (se avisa una vez).
     void setVoxEditsDir(const std::string& dir) { m_voxEditsDir = dir; if (m_vox.configured()) m_vox.setSaveDir(dir); }
     /// Cuevas e islas de la ESCENA (se aplican al configurar el campo, o al momento si ya lo está).

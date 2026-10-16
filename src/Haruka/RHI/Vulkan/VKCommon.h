@@ -27,6 +27,7 @@ namespace Haruka::RHI::Vulkan
             case Format::RG16F:       return VK_FORMAT_R16G16_SFLOAT;
             // Empaquetado (el terreno): normal en 4 B. Convención VK: A2B10G10R10 == GL_INT_2_10_10_10_REV.
             case Format::RGB10A2_SNORM: return VK_FORMAT_A2B10G10R10_SNORM_PACK32;
+            case Format::RGBA16_SNORM:  return VK_FORMAT_R16G16B16A16_SNORM;   // cuaternión de instancia
             // El default devuelve un vec4 float en silencio si no logueáramos: un formato no
             // mapeado (p.ej. los empaquetados de arriba) leería BASURA del buffer sin avisar.
             default:

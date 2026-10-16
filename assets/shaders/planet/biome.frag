@@ -61,6 +61,7 @@ layout(binding = 17) uniform sampler2D uSkyMaskTerrain;
 // El cielo en armónicos esféricos: el ambiente se evalúa POR NORMAL, no como constante.
 #include "lib/sky_sh.glsl"
 #include "lib/terrain_shade.glsl"   // harukaTerrainAlbedo: LA MISMA que usa el pase de nodos
+#include "lib/lowpoly.glsl"         // normal de cara + banda ancha: el MISMO estilo que el pase de nodos
 layout(location = 0) out vec4 fragColor;
 
 vec2 equirectUV(vec3 dir) {
@@ -452,6 +453,10 @@ void main() {
     PlanetFrame pf = planetFrame();
     vec3 up = frameDir(pf, fragP);
     float elev = vClimate.x; // km
+#if !HARUKA_TERRAIN_LOWPOLY
+    // ⚠️ RELIEVE FINO POR PÍXEL: APAGADO EN LOW-POLY (lib/lowpoly.glsl). Inventa detalle más fino
+    // que el triángulo —lo contrario del estilo— y es lo más caro de este fragment (sphere-trace
+    // de hasta 16 evaluaciones de ruido). Con HARUKA_TERRAIN_LOWPOLY 0 vuelve tal cual estaba.
     {
         // PER-PIXEL (Fase 2, §9): re-ancla el fragmento a la superficie fina ANTES de triplanar e
         // iluminar. Solo fuera de la caja del clipmap (`!inClip`, Mismo test que terrain.tese) y con
@@ -574,6 +579,7 @@ void main() {
             }
         }
     }
+#endif
 
     // ── COTA POR PÍXEL, no interpolada del vértice. ─────────────────────────────────────────────
     //
@@ -635,6 +641,7 @@ void main() {
     // sacarla de la libreria por otro out-param.
     vec3  zoneRGB = hasZoneMap ? texture(uZoneMap, bUV).rgb * 255.0 : vec3(0.0);
     vec3  biomeCol; int matIdx;
+    const vec3 nSmooth = n;                  // la de material/triplanar/cielo; la de CARA solo para el sol
     vec3 ignoredRawTex; float ignoredTexW;   // solo los usa la vista 7/8 de `terrain_node.frag`
     vec3  col = harukaTerrainAlbedo(uTerrainAlbedo, uTerrainNormal, uMacroVar, uBiomeMap, uZoneMap,
                                     true, true, hasZoneMap,
@@ -642,7 +649,17 @@ void main() {
                                     elev, tempC, humid,
                                     tiling, int(uMatCount.z), lod, lodNrm,
                                     biomeCol, matIdx, ignoredRawTex, ignoredTexW);
-    diff = max(dot(n, normalize(uLightDir.xyz)), 0.0);   // reiluminar: el normal map movio `n`
+    // Reiluminar (el normal map movio `n`). Low-poly: la luz directa con la normal de CARA de la
+    // malla y banda ancha, igual que `terrain_node.frag` — si los dos pases facetan distinto, la
+    // transicion entre ellos es una costura. El cielo (`harukaSkySHEval`) sigue con la suave.
+    {
+        const float distF = length(fragP);
+        const float facet = harukaTerrainFacet(distF);
+        const vec3  nLit  = harukaCarryDetail(
+            harukaLightingNormal(nSmooth, fragP, -fragP / max(distF, 1e-3), facet), nSmooth, n);
+        const float ndl   = dot(nLit, normalize(uLightDir.xyz));
+        diff = harukaFacetBand(max(ndl, 0.0), ndl, facet);
+    }
     // La banda de ORILLA la usa tambien el barniz de arena mojada, mas abajo. Es funcion pura de
     // `elev`, asi que se recalcula aqui en vez de sacarla de la libreria por otro out-param —
     // gemela de la de `harukaTerrainAlbedo`: si una cambia, cambian las dos.

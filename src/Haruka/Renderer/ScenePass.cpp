@@ -219,10 +219,8 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         // Pieza de construcción → al pase INSTANCIADO (no draw individual). Mismo model/color que
         // llevaría por-objeto, así se ve idéntica; el cull de arriba ya se aplicó.
         if (command.instanced && command.kind == Core::Scene::RenderKind::Model && !obj->modelPath.empty()) {
-            InstanceDataFloat inst;
-            inst.model = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
-            inst.color = glm::vec4(instColor, 1.0f);
-            inst.scale = glm::vec3(obj->scale);
+            const InstanceDataFloat inst = InstanceDataFloat::fromMatrix(
+                Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position), instColor);
             const std::string key = obj->modelPath + "|" + instancedMaterialKey(mat);
             ConstInstGroup& g = constGroups[key];
             if (g.instances.empty()) {
@@ -236,10 +234,8 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         // material): un edificio tejido son cientos o miles de cubos —las tablas/sillares del muro—
         // y por-objeto serían cientos o miles de draws.
         if (command.instanced && command.kind == Core::Scene::RenderKind::Primitive) {
-            InstanceDataFloat inst;
-            inst.model = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
-            inst.color = glm::vec4(instColor, 1.0f);
-            inst.scale = glm::vec3(obj->scale);
+            const InstanceDataFloat inst = InstanceDataFloat::fromMatrix(
+                Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position), instColor);
             const std::string key = std::string("prim:") + std::to_string((int)command.primitive) +
                                     "|" + instancedMaterialKey(mat);
             ConstInstGroup& g = constGroups[key];
@@ -390,7 +386,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 const std::size_t n = std::min(cap, src.size() - off);
                 m_instancing->clear();
                 for (std::size_t i = 0; i < n; ++i)
-                    m_instancing->addInstance(src[off + i].model, src[off + i].color, src[off + i].scale);
+                    m_instancing->addInstance(src[off + i]);
             };
             // Enlaza las texturas del material del grupo + su UBO (escalares/máscara) → per-pixel.
             auto bindGroupMaterial = [&](const ConstGroupMaterial& gm) {

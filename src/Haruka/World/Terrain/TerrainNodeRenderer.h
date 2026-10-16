@@ -1633,55 +1633,6 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
      * Lo que se dibuja depende de la cámara, así que esto también: es inherente, no un defecto.
      * Válido después de `draw()` y hasta el siguiente.
      */
-    /**
-     * @brief NODO HOJA DIBUJADO, para quien tenga que apoyarse en el suelo que se VE (la hierba).
-     *
-     * Es lo que `prepare` resolvio para este frame: la huella de la hoja pedida y el hueco de donde
-     * salen sus datos (el suyo, o un ancestro `kUp` niveles arriba con el sub-rectangulo `sub`).
-     * Con esto y `heightsBuffer()` un shader lee la MISMA altura que `terrain_node.vert`: no el
-     * campo, que difiere en centimetros de lo dibujado (`terrain_node_drawn_vs_field`).
-     * Gemelo de `NearNode` en `grass_gen.comp`.
-     */
-    struct NearNode { int32_t node[4]; int32_t slot[4]; };   // node = cara/nivel/i/j · slot = hueco/kUp/subI/subJ
-
-    /** @brief Los nodos hoja dibujados cuyo cuadrado toca la esfera de `radiusM` alrededor de la camara.
-     *  Valido despues de `prepare()`. Devuelve el texel (m) del nivel mas fino que entro (0 si ninguno). */
-    double nearNodes(const glm::dvec3& camPos, const glm::dvec3& planetCenter, double planetRadiusM,
-                     double radiusM, std::vector<NearNode>& out) const {
-        out.clear();
-        double finest = 0.0;
-        const glm::dvec3 camRel = camPos - planetCenter;
-        const double camR = glm::length(camRel);
-        const glm::dvec3 camDir = (camR > 1e-9) ? camRel / camR : glm::dvec3(0, 1, 0);
-        const double camAlt = camR - planetRadiusM;
-        for (size_t ri = 0; ri < m_resolved.size() && ri < m_sel.size(); ++ri) {
-            const auto& r = m_resolved[ri];
-            if (r.slot < 0) continue;
-            const NodeId leaf = m_sel[ri];
-            const double texel = nodeTexelM(leaf, planetRadiusM);
-            const double halfDiag = texel * (double)TERRAIN_NODE_CELLS * 0.7072;
-            // Distancia a la CAJA del nodo, no a su centro: horizontal por el arco sobre la esfera
-            // (menos la media diagonal) y vertical contra el rango publicado [minM, maxM]. Con el
-            // centro a media altura, un nodo con 100 m de relieve quedaba "a 80 m" de una camara que
-            // pisaba su suelo, y la tabla salia con un nodo de nueve.
-            const NodeRange rg = m_pool.rangeOf(leaf);
-            const glm::dvec3 nd = nodeTexelDir(leaf, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
-            const double ang = std::acos(std::clamp(glm::dot(nd, camDir), -1.0, 1.0));
-            const double dH  = std::max(0.0, ang * planetRadiusM - halfDiag);
-            const double dV  = rg.valid() ? std::max({ 0.0, camAlt - (double)rg.maxM, (double)rg.minM - camAlt }) : 0.0;
-            if (dH * dH + dV * dV > radiusM * radiusM) continue;
-            const int kUp = (int)leaf.level - (int)r.node.level;
-            NearNode n;
-            n.node[0] = (int32_t)leaf.face; n.node[1] = (int32_t)leaf.level;
-            n.node[2] = (int32_t)leaf.i;    n.node[3] = (int32_t)leaf.j;
-            n.slot[0] = r.slot; n.slot[1] = kUp;
-            n.slot[2] = (kUp > 0) ? (int32_t)(leaf.i & ((1u << kUp) - 1u)) : 0;
-            n.slot[3] = (kUp > 0) ? (int32_t)(leaf.j & ((1u << kUp) - 1u)) : 0;
-            out.push_back(n);
-            finest = (finest == 0.0) ? texel : std::min(finest, texel);
-        }
-        return finest;
-    }
     RHI::BufferHandle  heightsBuffer()    const { return m_gpu.heights(); }
 
     double waterQuadAt(const glm::dvec3& dir, double planetRadiusM) const {

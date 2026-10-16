@@ -10,6 +10,7 @@
  * is seeded with the scene depth), so this pass only runs where fluid is in front.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
 
 layout(location = 0) out vec4 FragColor;
 layout(location = 0) in  vec2 TexCoords;
@@ -27,14 +28,7 @@ layout(std140, binding = 8) uniform FluidParams {
     float u_viewportH;
 };
 
-layout(std140, binding = 0) uniform PerFrameData {
-    mat4 view;
-    mat4 projection;
-    vec3 _cameraPos;     float _pad0;
-    vec3 sunDirection;   float _pad1;
-    vec3 sunLightColor;  float ambientStrength;
-    int  enableHDR;
-};
+#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
 
 vec3 viewPosFromUV(vec2 uv, float d) {
     vec2 ndc = uv * 2.0 - 1.0;

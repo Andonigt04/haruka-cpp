@@ -18,6 +18,8 @@
 #ifndef HARUKA_OCEAN_SHADE_GLSL
 #define HARUKA_OCEAN_SHADE_GLSL
 
+#include "lib/lowpoly.glsl"
+
 /**
  * @param wp       posición de la superficie del agua relativa al CENTRO del planeta (m).
  * @param fragPos  la misma posición relativa a la CÁMARA (m): de ahí salen vista y distancia.
@@ -27,15 +29,22 @@
  * @param ambient  ambiente del ciclo día/noche (uAmbient.xyz).
  * @param depthM   profundidad del agua bajo este punto (m). Gobierna color y opacidad.
  * @param foam     0..1 de `harukaGerstner`: cuánto rompe la ola aquí.
+ * @param facet    1 = olas low-poly (luz y brillo con la normal de CARA), 0 = suaves.
  * @return rgb = color iluminado · a = opacidad sobre el fondo marino que hay detrás.
  */
 vec4 harukaOceanShade(vec3 wp, vec3 fragPos, vec3 n, vec3 L, vec3 lightCol, vec3 ambient,
-                      float depthM, float foam) {
+                      float depthM, float foam, float facet) {
     vec3 V = normalize(-fragPos);
     vec3 H = normalize(L + V);
-    float diff = max(dot(n, L), 0.0);
+    // Low-poly: sol y brillo con la normal de CARA; el Fresnel —que es un rim— con la suave, o cada
+    // triángulo de ola al ras se encendería entero (ver lib/lowpoly.glsl).
+    vec3  nF   = harukaLightingNormal(n, fragPos, V, facet);
+    float ndl  = dot(nF, L);
+    float diff = harukaFacetBand(max(ndl, 0.0), ndl, facet);
     float fres = pow(1.0 - max(dot(n, V), 0.0), 5.0);      // Schlick, exponente 5 (el clásico)
-    float spec = pow(max(dot(n, H), 0.0), 220.0);          // brillo estrecho: agua, no plástico
+    // Brillo estrecho (agua, no plástico) con la suave; facetado se abre a 48: un lóbulo de 220
+    // sobre una cara plana es todo-o-nada, la cara entera destella y se apaga — una costura.
+    float spec = pow(max(dot(nF, H), 0.0), mix(220.0, 48.0, clamp(facet, 0.0, 1.0)));
 
     // Color propio del agua por absorción: el agua se come el rojo primero, por eso el mar somero
     // tira a turquesa y el profundo a azul marino. No son dos colores elegidos a ojo, es el mismo

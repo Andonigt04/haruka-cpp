@@ -308,6 +308,7 @@ void Application::cleanup() {
     // con una siembra en vuelo el hilo leía un mapa ya liberado (SIGSEGV en `densityMapAt`, 26-09).
     // El device sigue vivo aquí, así que soltar su GPU también vale.
     m_props.shutdown();
+    m_grass.shutdown();   // idem: su re-siembra también lee el planeta
 
 #ifdef HARUKA_MOD_PHYSICS
     _physicsEngine.reset();
@@ -339,6 +340,7 @@ void Application::cleanup() {
     _pointShadow.reset();
     m_scene.shutdown();
     m_props.shutdown();   // (ya hecho antes del planeta; idempotente)
+    m_grass.shutdown();
     m_clouds.shutdown();  // idem las nubes (y espera al horneado del cielo si esta en vuelo)
     m_wire.shutdown();
     m_sky.shutdown();
@@ -1051,9 +1053,11 @@ void Application::run(const std::string& startScenePath, bool headless) {
                     }
                     fclose(f);
                 }
-                HARUKA_LOGI("Mem", "frame %d · RSS %.0f MB (pico %.0f MB) · VmData %.0f MB · props: %zu instancias, %.1f MB en CPU · GPU inst. arena %.1f MB",
+                HARUKA_LOGI("Mem", "frame %d · RSS %.0f MB (pico %.0f MB) · VmData %.0f MB · props: %zu instancias, %.1f MB en CPU · hierba: %zu brotes (%llu matas), %.1f MB · GPU inst. arena %.1f MB",
                             memFrame, rssKb / 1024.0, hwmKb / 1024.0, dataKb / 1024.0,
                             m_props.registry().instances().size(), m_props.hostBytes() / 1048576.0,
+                            m_grass.bursts().size(), (unsigned long long)m_grass.elementCount(),
+                            m_grass.hostBytes() / 1048576.0,
                             m_scene.hostBytes() / 1048576.0);
             }
         }

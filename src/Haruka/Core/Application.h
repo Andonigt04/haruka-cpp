@@ -92,6 +92,7 @@
 #include "Haruka/Core/GameInterface.h"
 #include "Haruka/World/Props/InstancedObject.h"
 #include "Haruka/World/Props/PropSystem.h"
+#include "Haruka/World/Props/GrassSystem.h"   // la hierba: sistema hermano de los props
 
 namespace Haruka { namespace Renderer { class MotorInstance; } }
 namespace Haruka { namespace Renderer { class Model; class RenderTarget; } }
@@ -190,6 +191,12 @@ public:
     }
     const World::Props::InstancedObjectRegistry& propRegistry() const { return m_props.registry(); }
     World::Props::PropSystem& props() { return m_props; }
+    /// La hierba (y flores, líquenes): SISTEMA PROPIO, hermano de los props (ver GrassSystem.h).
+    /// El juego la pisa (`flattenNear`) y la destruye por zona o por mata desde aquí.
+    World::Props::GrassSystem& grass() { return m_grass; }
+    using GrassStateDelta = World::Props::GrassSystem::Delta;
+    std::vector<GrassStateDelta> serializeGrassState() const { return m_grass.serialize(); }
+    void restoreGrassState(const std::vector<GrassStateDelta>& deltas) { m_grass.restore(deltas); }
 
 
     using PropStateDelta = World::Props::PropSystem::StateDelta;
@@ -778,7 +785,8 @@ private:
     // (binding 1). Un draw por modelo. Ver ApplicationRender.cpp (recolección + dibujo).
 
     /// LOS PROPS DEL MUNDO (scatter, registro, pase instanciado, sombras, colliders, rotura).
-    World::Props::PropSystem m_props;
+    World::Props::PropSystem  m_props;
+    World::Props::GrassSystem m_grass;   ///< hermano de m_props (los dos heredan de PropSystemBase)
     /// LAS NUBES VOLUMETRICAS (horneado del cielo, marcha reducida, composicion): Renderer/CloudPass.h.
     Haruka::Renderer::CloudPass     m_clouds;
     /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L (por metro) · y = día. Sale del clima

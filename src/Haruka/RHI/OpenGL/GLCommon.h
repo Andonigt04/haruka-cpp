@@ -29,6 +29,7 @@ namespace Haruka::RHI::OpenGL
             // Empaquetados (el terreno): normal en 4 B y uv en 4 B.
             case Format::RGB10A2_SNORM: return { 4, GL_INT_2_10_10_10_REV, GL_TRUE };
             case Format::RG16F:         return { 2, GL_HALF_FLOAT, GL_FALSE };
+            case Format::RGBA16_SNORM:  return { 4, GL_SHORT, GL_TRUE };   // cuaternión de instancia
             // El default ANTERIOR devolvía {4, GL_FLOAT} en silencio → un formato no mapeado
             // (p.ej. los empaquetados de arriba) habría leído BASURA del buffer sin avisar.
             // Ahora se queja: un layout mal declarado se ve al instante, no en pantalla.

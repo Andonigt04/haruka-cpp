@@ -32,6 +32,7 @@
 
 #include "Haruka/World/Props/PropLayer.h"        // PropLayerTable, PlacedProp
 #include "Haruka/World/Props/PropCollider.h"     // shouldClumpFar (toda capa se funde en masa de lejanía)
+#include "Haruka/World/Props/MassBurst.h"        // kMassMaxCount: el brote de la capa masiva
 #include "Haruka/World/Planet/Biomes.h"            // classifyBiome / biomeKey: la identidad `biome` del when
 #include "Haruka/World/Planet/PlanetFields.h"    // FieldSample
 #include "Haruka/World/Terrain/CubeSphere.h"      // cubeFaceToDir / dirToCubeFaceClosed: el cuantizador
@@ -124,7 +125,29 @@ struct PropScatterParams {
     float grassNearM     = 0.0f;
     float grassNearMul   = 1.0f;
     float grassNearFadeM = 80.0f;
+    /// ── CAPA MASIVA (`MassBurst.h`) ──────────────────────────────────────────────────────────────
+    /// true = toda capa evaluada emite UN brote por celda (`burst` = cuántas matas) en vez de N
+    /// instancias (los cúmulos de lejanía siguen siendo uno por celda). Lo enciende `GrassSystem`. false = el scatter histórico, mata a mata (los
+    /// tests del scatter cuentan instancias y no cambian). PropSystem lo enciende.
+    bool  massBursts     = false;
+    /// ── DE QUIÉN ES CADA CAPA ────────────────────────────────────────────────────────────────────
+    /// Por ÍNDICE de capa: 1 = este scatter la evalúa, 0 = la salta (vacío = todas). Así dos
+    /// sistemas (`PropSystem` y `GrassSystem`) se reparten la tabla sin tocarla: los hashes usan el
+    /// índice de la capa como sal, y filtrar la tabla los cambiaría. Una capa saltada pesa 0, que es
+    /// lo mismo que si no aceptara la celda, y las libres tiran su dado aparte: la unión de los dos
+    /// scatters es EXACTAMENTE el scatter de toda la tabla (lo fija `mass_scatter_equivalence`).
+    std::vector<uint8_t> layerOwned;
 };
+
+/** @brief ¿Pertenece esta capa a la CAPA MASIVA (`GrassSystem`) y no a los props? Libre (no reclama
+ *  sitio) y SIN collider en ninguno de sus prototipos: la hierba se atraviesa; un arbusto o una
+ *  flor con esqueleto colisionan, así que siguen siendo props aunque no reclamen sitio. */
+inline bool isMassLayer(const PropLayer& L) {
+    if (L.mesh.empty() || L.claimRadius > 0.0f) return false;
+    for (const std::string& pn : L.prototypeNames())
+        if (!propColliderParts(pn, 1u).empty()) return false;
+    return true;
+}
 
 /** @brief Una instancia colocada con coordenadas de MUNDO (dir + cota), lista para instancing.
  *  El renderer la convierte en una entrada del buffer de instancias: malla compartida por
@@ -138,6 +161,11 @@ struct ScatteredProp {
     float       scale      = 1.0f;              ///< escala de la capa × variación de celda
     glm::vec3   tint       = glm::vec3(1.0f);   ///< tinte por instancia (variedad sin geometría)
     uint32_t    state      = 0;                 ///< 0 = vivo · >0 = oculto/destruido (tocón)
+    /// BROTE de la capa masiva (`params.massBursts`): >0 = este registro son `burst` matas que la GPU
+    /// reconstruye (`MassBurst.h`), no una instancia. `scale` es entonces la escala MÍNIMA de la capa.
+    uint32_t    burst      = 0;
+    float       burstCellM = 0.0f;              ///< lado de la celda del brote (m)
+    float       burstScaleMax = 1.0f;           ///< escala MÁXIMA de la capa
 };
 
 /** @brief Coloca las capas de props delante del jugador, determinista por celda mundial.
@@ -440,6 +468,8 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                     w[li] = 0.0f;
                     const PropLayer& L = table.layers[li];
                     if (L.mesh.empty()) continue;                 // capa informativa: no instala
+                    if (!params.layerOwned.empty() &&
+                        ((size_t)li >= params.layerOwned.size() || !params.layerOwned[(size_t)li])) continue;   // de otro sistema
                     if (L.maxDistM > 0.0f && rad > L.maxDistM) continue;   // fuera de su alcance
                     if (stats) ++stats->offered[(size_t)li];
                     if (hM < 0.0f && !L.submerged) {              // sumergido: solo capas `submerged`
@@ -513,6 +543,22 @@ inline std::vector<ScatteredProp> scatterPropsNear(
                         const float tv = PG::WhiteNode::hashFloat((int)hc, 400 + li, 0, params.seed);
                         pr.tint = glm::vec3(0.85f + 0.30f * tv);
                         pr.state = 0;
+                        out.push_back(pr);
+                        return;
+                    }
+                    // CAPA MASIVA: la hierba NO es un prop → UN brote por celda, aunque sea de una
+                    // mata. La identidad mezcla la capa: dos capas en la misma celda son dos brotes.
+                    if (params.massBursts) {
+                        ScatteredProp pr;
+                        pr.mesh          = protoOf[li];
+                        pr.layerIndex    = li;
+                        pr.dir           = dir;
+                        pr.heightM       = hM;
+                        pr.cellSeed      = PG::hash32(hc ^ (uint32_t)(li * 0x85EBCA6Bu) ^ 0x6D2B79F5u);
+                        pr.scale         = L.scaleMin;
+                        pr.burstScaleMax = L.scaleMax;
+                        pr.burst         = (uint32_t)std::min(nInst, (int)kMassMaxCount);
+                        pr.burstCellM    = cell;
                         out.push_back(pr);
                         return;
                     }

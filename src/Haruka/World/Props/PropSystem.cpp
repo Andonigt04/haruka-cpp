@@ -28,8 +28,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>   // memcpy: los bits de cellM en el brote GPU
 #include <future>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/packing.hpp>   // packSnorm3x10_1x2 / packUnorm4x8: PropVertex empaquetado
 #include <glm/gtc/quaternion.hpp>   // glm::mat4_cast
 #include <glm/gtx/quaternion.hpp>   // glm::rotation (up del prototipo → dir radial)
 
@@ -41,180 +43,13 @@ using Renderer::fallbackTexture;
 
 namespace {
 
-// Reloj del relevo de hierba (`m_flatUntil` / `sweepGrassState`): UN solo epoch para que los
-// instantes sellados en `flattenNear` y los que compara el relevo sean comparables. Reloj de
-// PARED (igual que el del draw): la fase del relevo no es estado de juego, solo vida efimera.
-struct GrassClockT0 { const std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now(); };
-const GrassClockT0 g_grassClockT0;
-inline double grassClockNow() {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - g_grassClockT0.t0).count();
-}
-
-// Bits de `matPBR.w`: que slots de textura estan REALMENTE atados este draw (mismo esquema que el
-// pase de escena y que prop_inst.frag). Potencias de 2 → exacto en float.
-enum MaterialTexBit { kTexAlbedo = 1, kTexNormal = 2, kTexMetallic = 4, kTexRoughness = 8, kTexAO = 16 };
-
-// UBO del pase de PROPS instanciados (binding 6) — espejo de `PropParams` en prop_inst.vert/frag.
-// Los escalares del material son del PROTOTIPO (compartido por sus instancias), por eso viven aqui.
-struct PropParams {
-    glm::vec3 wind;   float time;       // viento del clima (mundo, m/s) · segundos
-    glm::vec4 matPBR;                   // x=metallic y=roughness z=ao w=mascara de texturas (bits)
-    glm::vec4 originRel;                // origen del scatter relativo a la camara (ver m_gpu)
-    glm::vec4 aerial;                   // perspectiva aerea (lib/aerial.glsl): x = 1/L · y = dia
-};
-static_assert(sizeof(PropParams) == 64, "PropParams std140 size mismatch");
+// `PropParams` (UBO binding 6) y `PropVertex` viven en PropGpu.h: la capa masiva usa los mismos.
 /// UBO del pase de sombras de props: matriz de luz + el mismo origen relativo.
 struct PropShadowUBO {
     glm::mat4 lightSpace;
     glm::vec4 originRel;
 };
 static_assert(sizeof(PropShadowUBO) == 80, "PropShadowUBO std140 size mismatch");
-
-// Vertice del PROTOTIPO (binding 0): Pos(0)/Normal(1)/Color(2)/Uv(9)/Parte(11). El `Vertex` de
-// escena no tiene canal de color, asi que el prototipo usa su propio layout (el Uv a 9 no choca con
-// el stream de instancia que ocupa loc 3-8; la 10 es la mascara de roturas, por instancia).
-struct PropVertex {
-    glm::vec3 pos, normal, color;
-    glm::vec2 uv;
-    /// PARTE del esqueleto (tronco = 0, ramas = 1..n). Va como float: el valor es un indice pequeño
-    /// y `float` lo representa exacto; como PATRON DE BITS en un R32F caeria en los denormales.
-    float partId = 0.0f;
-};
-
-// Material PER-PIXEL del prototipo: el MISMO grafo de texturas del editor de node graph (perlin →
-// altura → albedo por rampa + normal por derivadas + AO/roughness desde la altura), horneado a CPU
-// y subido a GPU sin pasar por disco. El albedo MODULA el color de vertice (que lleva la identidad
-// del material: corteza/copa, muro/tejado, tinte de roca).
-struct PropMaterialBake {
-    RHI::TextureHandle albedo = {}, normal = {}, metallic = {}, roughness = {}, ao = {};
-    float metallicS = 0.0f, roughnessS = 0.5f, aoS = 1.0f;
-    uint32_t mask = 0u;
-};
-
-PropMaterialBake bakePropPrototypeMaterial(uint32_t seed, int size = 128) {
-    using namespace Haruka::Tools::ProcGraph;
-    PropMaterialBake m;
-
-    // Tono por defecto: calido-vegetal neutro de bajo contraste (el color de vertice manda).
-    const glm::vec3 tintA(1.04f, 1.00f, 0.92f), tintB(0.80f, 0.76f, 0.70f);
-    Tools::ProcGraph::Graph g;
-    int h  = g.emplaceNode<Tools::ProcGraph::PerlinNode>((int)seed, 7.0f);
-    int nr = g.emplaceNode<Tools::ProcGraph::MapRangeNode>(-1.0f, 1.0f, 0.0f, 1.0f);
-    g.connect(h, 0, nr, 0);
-    auto ramp = [&](float a, float b) -> int {
-        auto n = std::make_unique<Tools::ProcGraph::ColorRampNode>();
-        n->setStops({{0.0f, a}, {1.0f, b}});
-        return g.addNode(std::move(n));
-    };
-    int rR = ramp(tintA.r, tintB.r);
-    int rG = ramp(tintA.g, tintB.g);
-    int rB = ramp(tintA.b, tintB.b);
-    int combine = g.emplaceNode<Tools::ProcGraph::TreeCombineRGBNode>();
-    g.connect(rR, 0, combine, 0);
-    g.connect(rG, 0, combine, 1);
-    g.connect(rB, 0, combine, 2);
-    if (!g.compile()) return m;
-
-    // Albedo PRE-GAMMA: la textura sube RGBA8 sin tag sRGB y prop_inst.frag linealiza con
-    // `pow(tex, 2.2)`. Guardar c^(1/2.2) hace que el muestreo recupere el tono horneado exacto.
-    int cmap[4] = {0, 1, 2, -1};
-    Tools::ProcGraph::RGBAImage alb = Tools::ProcGraph::evaluateToRGBA(g, combine, 0, size, size, 0, 0, 1, cmap);
-    const float invGamma = 1.0f / 2.2f;
-    for (size_t i = 0; i < alb.pixels.size(); i += 4) {
-        for (int c = 0; c < 3; ++c) {
-            const float v = alb.pixels[i + (size_t)c] / 255.0f;
-            alb.pixels[i + (size_t)c] = (uint8_t)(std::pow(v, invGamma) * 255.0f);
-        }
-        alb.pixels[i + 3] = 255;
-    }
-
-    // Normal desde la altura (derivadas), AO y roughness por-pixel desde la misma altura.
-    Tools::ProcGraph::RGBAImage nrm = Tools::ProcGraph::evaluateToNormalMap(g, nr, 0, size, size, 0, 0, 1, 1.5f);
-    Tools::ProcGraph::RGBAImage ao(size, size);
-    Tools::ProcGraph::RGBAImage rough(size, size);
-    const float dark  = 0.45f;                 // AO: hendiduras (h baja) oscuras
-    const float rLo   = 0.55f, rHi = 0.90f;    // roughness: valles mas lisos, crestas asperas
-    for (int y = 0; y < size; ++y) {
-        for (int x = 0; x < size; ++x) {
-            const float hh = g.evaluate(nr, 0, (float)x, (float)y, 0).asFloat();
-            const uint8_t av = (uint8_t)(glm::clamp(1.0f - hh * dark, 0.0f, 1.0f) * 255.0f);
-            ao.setPixel(x, y, av, av, av);
-            const uint8_t rv = (uint8_t)((rLo + (rHi - rLo) * hh) * 255.0f);
-            rough.setPixel(x, y, rv, rv, rv);
-        }
-    }
-
-    m.albedo    = Tools::ProcGraph::createRHIFromRGBA(alb);
-    m.normal    = Tools::ProcGraph::createRHIFromRGBA(nrm);
-    m.roughness = Tools::ProcGraph::createRHIFromRGBA(rough);
-    m.ao        = Tools::ProcGraph::createRHIFromRGBA(ao);
-    if (valid(m.albedo))    m.mask |= kTexAlbedo;
-    if (valid(m.normal))    m.mask |= kTexNormal;
-    if (valid(m.roughness)) m.mask |= kTexRoughness;
-    if (valid(m.ao))        m.mask |= kTexAO;
-    m.metallicS = 0.0f; m.roughnessS = rLo; m.aoS = 1.0f;
-    return m;
-}
-
-// El campo del planeta visto por el scatter: la MISMA ecologia/cota por direccion que pinta el
-// terreno (`TerrestrialPlanet`), redirigida por direccion.
-struct PlanetSphereField : IPropSphereField {
-    const Planet::TerrestrialPlanet* planet = nullptr;
-
-    Planet::FieldSample sampleAt(const glm::vec3& dir) const override {
-        return planet ? planet->fieldSampleAt(dir) : Planet::FieldSample{};
-    }
-    float heightAt(const glm::vec3& dir) const override {
-        return planet ? (float)planet->sampleHeight(dir) : 0.0f;
-    }
-    float mapDensityAt(const glm::vec3& dir, const std::string& mapPath) const override {
-        return planet ? planet->densityMapAt(mapPath, dir) : 1.0f;
-    }
-    std::string zoneAt(const glm::vec3& dir) const override {
-        return planet ? planet->zoneNameAt(dir) : std::string{};
-    }
-    std::string layerAt(const glm::vec3& dir) const override {
-        return planet ? planet->materialNameAt(dir) : std::string{};
-    }
-};
-
-// Hornea la malla de un prototipo a un detalle dado. ⚠️ La clasificacion y los parametros del
-// arbol viven en `PropCollider.h`: el COLLIDER se deriva del mismo esqueleto que esta malla. Si el
-// bake decidiera por su cuenta que es un arbol y con que altura, chocarias con otro arbol.
-Haruka::Tools::ProcGraph::TreeMeshData bakePrototypeMesh(const InstancedPrototype& proto, float detail) {
-    Haruka::Tools::ProcGraph::TreeMeshData tm;
-    // CÚMULO de lejanía: el prefijo `clump#` lo firma — bake APLANADO (la escala de instancia
-    // estira la celda por el ancho; si fuera alto también parecería un rascacielos).
-    if (isClumpProto(proto.name)) {
-        const PropTreeParams tp = propTreeParams(proto.name);
-        // La FORMA del prop base decide el tipo de masa (bosque/pedregal/aldea): el prefijo `clump#`
-        // respeta el nombre, y `propShapeKind` lo clasifica por subcadena igual que su individuo.
-        return Haruka::Tools::ProcGraph::bakeClumpMesh(
-            proto.meshSeed, tp.style, tp.height, tp.trunkR, tp.canopy,
-            Haruka::Tools::ProcGraph::kClumpFootprintM, detail,
-            (int)propShapeKind(proto.name));
-    }
-    const PropShapeKind shape = propShapeKind(proto.name);
-    if (shape == PropShapeKind::Rock) {
-        tm = Haruka::Tools::ProcGraph::bakeRockMesh((int)proto.meshSeed, 1.0f, 0.72f);
-    } else if (shape == PropShapeKind::House) {
-        tm = Haruka::Tools::ProcGraph::bakeHouseMesh((int)proto.meshSeed, 1.0f);
-    } else {
-        const PropTreeParams tp = propTreeParams(proto.name);
-        Haruka::Tools::ProcGraph::Graph g;
-        const int tree = g.emplaceNode<Haruka::Tools::ProcGraph::TreeMeshNode>(
-            (int)proto.meshSeed, tp.height, tp.trunkR, tp.canopy, tp.segments, detail, tp.style);
-        g.compile();
-        Haruka::Tools::ProcGraph::bakeTreeMesh(g, tree, tm);   // vacio si el nodo no es valido
-    }
-    return tm;
-}
-
-// `HARUKA_NOPROPS=1` APAGA EL CAMINO ENTERO (scatter, colliders y dibujo), como biseccion.
-bool noProps() {
-    static const bool s = [] { const char* e = std::getenv("HARUKA_NOPROPS"); return e && e[0] == '1'; }();
-    return s;
-}
 
 } // namespace
 
@@ -223,292 +58,52 @@ bool noProps() {
 PropSystem::~PropSystem() { shutdown(); }
 
 void PropSystem::shutdown() {
-    // El worker de re-siembra puede estar leyendo el campo del planeta mientras soltamos la GPU:
-    // esperarle AQUÍ, antes de destruir nada (el futuro de un `std::async` también bloquea al
-    // destruirse, pero mejor unir con la cola del campo viva).
-    if (m_scatterBusy && m_scatterFut.valid()) {
-        try { m_scatterFut.get(); }
-        catch (const std::exception& e) { HARUKA_LOGE("PropSystem", "shutdown: re-siembra abortada: %s", e.what()); }
-        m_scatterBusy = false;
-        m_scatterFut  = {};
-    }
-    RHI::Device* dev = RHI::device();
-    if (dev) {
-        for (auto& [name, pg] : m_protoMesh) {
-            for (int l = 0; l < PrototypeGpu::kLods; ++l) {
-                if (valid(pg.vbo[l])) dev->destroy(pg.vbo[l]);
-                if (valid(pg.ebo[l])) dev->destroy(pg.ebo[l]);
-            }
-            for (RHI::TextureHandle* t : { &pg.albedo, &pg.normal, &pg.metallic, &pg.roughness, &pg.ao })
-                if (valid(*t)) dev->destroy(*t);
-        }
-        for (auto& b : m_paramsUBOs) if (valid(b)) dev->destroy(b);
+    if (RHI::Device* dev = RHI::device()) {
         if (valid(m_shadowUBO)) dev->destroy(m_shadowUBO);
         if (valid(m_instPSO))   dev->destroy(m_instPSO);
         if (valid(m_shadowPSO)) dev->destroy(m_shadowPSO);
     }
-    m_protoMesh.clear(); m_paramsUBOs.clear();
     m_shadowUBO = {}; m_instPSO = {}; m_shadowPSO = {};
     m_instancing.reset();
+    PropSystemBase::shutdown();   // worker + mallas de prototipo + UBOs de parámetros
 }
 
-// ── prototipos ────────────────────────────────────────────────────────────────────────────────
-
-const PropSystem::PrototypeGpu* PropSystem::prototypeGpu(const InstancedPrototype& proto) {
-    auto it = m_protoMesh.find(proto.name);
-    if (it != m_protoMesh.end()) return &it->second;
-    RHI::Device* dev = RHI::device();
-    if (!dev) return nullptr;
-
-    // ESCALERA DE DETALLE. Los numeros salen de medir la malla, no a ojo:
-    //   detalle 1.00 -> 464 triangulos (la de siempre) · 0.60 -> 130 · 0.45 -> 40
-    // Con la distribucion real del scatter (casi todo esta lejos) esto lleva los 3,24 M de
-    // triangulos de arbol a ~0,27 M: -92 %. Roca y casa no tienen mando de detalle (126 y 22
-    // triangulos): sus tres niveles salen identicos y el camino de dibujo queda uniforme.
-    static constexpr float kLodDetail[PrototypeGpu::kLods] = { 1.0f, 0.60f, 0.45f };
-    PrototypeGpu pg;
-    bool anyLevel = false;
-    for (int lod = 0; lod < PrototypeGpu::kLods; ++lod) {
-        const Haruka::Tools::ProcGraph::TreeMeshData tm = bakePrototypeMesh(proto, kLodDetail[lod]);
-        if (tm.positions.empty()) continue;
-        std::vector<PropVertex> verts;
-        verts.reserve(tm.positions.size());
-        for (size_t vi = 0; vi < tm.positions.size(); ++vi) {
-            PropVertex pv;
-            pv.pos    = tm.positions[vi];
-            pv.normal = (vi < tm.normals.size()) ? tm.normals[vi] : glm::vec3(0, 1, 0);
-            pv.color  = (vi < tm.colors.size())  ? tm.colors[vi]  : glm::vec3(1.0f);
-            pv.uv     = (vi < tm.uvs.size())     ? tm.uvs[vi]     : glm::vec2(0.0f);
-            // Roca/casa no traen partId (sin esqueleto): parte 0, la que se lleva el prop entero.
-            pv.partId = (vi < tm.partId.size()) ? (float)tm.partId[vi] : 0.0f;
-            verts.push_back(pv);
-        }
-        pg.vbo[lod] = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(PropVertex), verts.data());
-        pg.ebo[lod] = dev->createBuffer(RHI::BufferUsage::Index, tm.indices.size() * sizeof(unsigned int), tm.indices.data());
-        pg.indexCount[lod]  = (uint32_t)tm.indices.size();
-        pg.vertexCount[lod] = (uint32_t)verts.size();
-        anyLevel = true;
-    }
-    if (!anyLevel) return nullptr;   // bake fallido: se reintenta el frame siguiente
-
-    // Material PER-PIXEL, una vez, COMPARTIDO por los niveles.
-    const PropMaterialBake pm = bakePropPrototypeMaterial(proto.meshSeed);
-    pg.albedo = pm.albedo; pg.normal = pm.normal; pg.metallic = pm.metallic;
-    pg.roughness = pm.roughness; pg.ao = pm.ao;
-    pg.metallicS = pm.metallicS; pg.roughnessS = pm.roughnessS; pg.aoS = pm.aoS; pg.mask = pm.mask;
-    return &m_protoMesh.emplace(proto.name, pg).first->second;
+/// La instancia GPU de un prop: posición relativa a `origin` (le llega `originToCenter` = centro del
+/// planeta − origen), giro = vertical local · yaw, escala uniforme. La construyen el worker del
+/// scatter y `rebuildGpu`: una sola receta, o el prop se movería al pasar de una a otra.
+static Renderer::InstanceDataFloat propInstance(const InstancedObject& io, const glm::dvec3& originToCenter,
+                                                double planetR) {
+    const glm::vec3 up(0.0f, 1.0f, 0.0f);
+    const glm::vec3 posF = glm::vec3(originToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
+    // ⚠️ El giro de yaw va sobre el eje LOCAL, no sobre `io.dir`: primero el yaw alrededor de +Y del
+    // prototipo y DESPUÉS la vertical up→dir. Hacerlo al revés (yaw sobre `io.dir`) TUMBABA el
+    // objeto tanto como lo giraba ("los arboles estan tumbados"). Es el mismo orden que tenía la
+    // matriz: translate · rotation(up,dir) · rotate(yaw, up) · scale.
+    const glm::quat q = glm::rotation(up, io.dir) * glm::angleAxis(io.yaw, up);
+    return Renderer::InstanceDataFloat::make(posF, q, glm::vec3(io.scale), io.tint, (float)io.breakMask);
 }
 
-// Las matrices de las instancias, UNA vez por scatter. El origen es la camara en ese momento: las
+// Las instancias GPU, UNA vez por scatter. El origen es la camara en ese momento: las
 // posiciones relativas caben en float con precision de mm (el scatter llega a 6 km) y el shader
 // suma `originRel` (origen − camara actual), una resta en double por frame.
 void PropSystem::rebuildGpu(const glm::dvec3& planetC, double planetR, Core::Camera* camera) {
     const auto& insts = m_registry.instances();
     m_origin = camera ? glm::dvec3(camera->position) : planetC;
     m_gpu.resize(insts.size());
-    const glm::vec3 up(0.0f, 1.0f, 0.0f);
     const glm::dvec3 originToCenter = planetC - m_origin;
     for (size_t i = 0; i < insts.size(); ++i) {
         const auto& io = insts[i];
-        const glm::vec3 posF = glm::vec3(originToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
-        glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
-        m *= glm::mat4_cast(glm::rotation(up, io.dir));
-        // ⚠️ El giro de yaw va sobre el eje LOCAL, no sobre `io.dir`. `glm::rotate` POST-multiplica:
-        // el eje se interpreta en el espacio de `m`, que ya lleva la rotacion up→dir. Pasarle
-        // `io.dir` TUMBABA el objeto tanto como lo giraba ("los arboles estan tumbados").
-        m = glm::rotate(m, io.yaw, up);
-        m = glm::scale(m, glm::vec3(io.scale));
-        Renderer::InstanceDataFloat& inst = m_gpu[i];
-        inst.model     = m;
-        inst.color     = glm::vec4(io.tint, 1.0f);
-        inst.scale     = glm::vec3(io.scale);
-        inst.breakMask = (float)io.breakMask;   // ramas que ya no estan
+        m_gpu[i] = propInstance(io, originToCenter, planetR);
     }
 }
 
 // ── scatter ───────────────────────────────────────────────────────────────────────────────────
 
-void PropSystem::refreshScatter(Core::Camera* camera, Planet::PlanetarySystem* planets, Physics::PhysicsEngine* physics) {
-    // ⚠️ AQUI DECIA QUE EL ANCLAJE DE LOS PROPS ESTABA "17x MAS BASTO QUE EL RENDER A 5 km" Y YA NO
-    // ES CIERTO: medido, altura del prop contra la del suelo DIBUJADO es sub-pixel en todo el rango y
-    // exacta dentro de 150 m (0,16 px a 600 m). Lo que NO cubre esa medida es el reparto del scatter.
-    if (!m_enabled || noProps()) {
-        if (m_registry.prototypeCount() > 0) m_registry.reset();
-        m_scatterDebug.clear();
-        m_planet.clear();
-        m_lastCam = {1e300, 1e300, 1e300};
-        return;
-    }
-    if (!camera || !planets) return;
-    const glm::dvec3 camPos = glm::dvec3(camera->position);
-    // Reloj del tramo adaptivo. Se actualiza al LANZAR un worker y al APLICAR su resultado (abajo):
-    // la velocidad se mide SIEMPRE desde el último evento, no desde el arranque del proceso (antes
-    // nunca se tocaba y la adaptación a la velocidad era agua muerta).
-    static std::chrono::steady_clock::time_point s_lastT = std::chrono::steady_clock::now();
+// ── re-siembra (los huecos de PropSystemBase) ─────────────────────────────────────────────────
 
-    glm::dvec3 planetC; double planetR = 0.0;
-    if (!planets->getActivePlanet(planetC, planetR)) {
-        if (m_registry.prototypeCount() > 0) m_registry.reset();
-        m_planet.clear();
-        return;
-    }
-    m_planetC = planetC; m_planetR = planetR;   // anclaje para `flattenNear` (API del juego)
-    // Relevo de la hierba tendida: se levanta sola al vencer su reloj y el agua la mantiene/tumba.
-    // Corre ANTES de la re-siembra y en cualquier frame (los early-return del anillo no la saltan).
-    sweepGrassState(grassClockNow(), physics);
-    const Planet::TerrestrialPlanet* planet = planets->activeTerrestrial();
-    const std::string pname = planets->getActivePlanetName();
-    if (!planet) {                                   // planeta orbital sin superficie = sin props
-        if (m_registry.prototypeCount() > 0) m_registry.reset();
-        m_planet.clear();
-        m_lastCam = {1e300, 1e300, 1e300};
-        return;
-    }
-    if (pname != m_planet) {
-        m_registry.reset();   // planeta nuevo: re-registrar prototipos
-        m_planet = pname;
-    }
-
-    // ── RE-SIEMBRA ASINCRONA ────────────────────────────────────────────────────────────────
-    // `scatterPropsNear` (~61k celdas × muestreo del campo) era el grueso de los tirones de 181 ms
-    // al cruzar un tramo. Ahora corre en un hilo worker: SOLO lee el CAMPO (el bake de alturas y los
-    // mapas son inmutables tras `bakeHeightMap`; "seguro desde el hilo async", PlanetarySystem.cpp:
-    // 1241) y una copia de la tabla de capas. Nunca toca el registro ni la GPU. El frame muestra el
-    // anillo anterior mientras calcula y publica el resultado cuando esté listo. El profiler es
-    // thread_local, así que el trabajo del worker NO aparece en el árbol del frame (correcto: no
-    // es trabajo del frame).
-    //
-    // ⚠️ EL ACK SE RETRASA ADREDE A LA PUBLICACIÓN Y SE RE-ANCLA A LA CÁMARA ACTUAL. `m_lastCam`
-    // se fija al APLICAR el resultado, no al lanzarlo — pero a la cámara de AHORA (camPos), no al
-    // punto de lanzamiento: el tramo siguiente se mide desde donde está el jugador, y el anillo
-    // nuevo se re-genera centrado en él. Antes se anclaba a `m_scatterCam` (~180 ms atrás) y al
-    // volar el anillo acababa quedando un tramo entero detrás ("se ve lejos y no se propaga"). Si
-    // durante el vuelo la cámara YA cruzó otro tramo (aceleración brusca) se relanza AL INSTANTE,
-    // centrado en la cámara actual, en vez de esperar a la siguiente muestra.
-    bool relaunchNow = false;
-    { HARUKA_PROFILE("re-siembra.aplica");   // checkout del worker + apply + re-lanzamiento rapido
-    if (m_scatterBusy) {
-        if (m_scatterFut.valid() &&
-            m_scatterFut.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
-            try {
-                ScatterResult res = m_scatterFut.get();
-                m_scatterBusy = false;
-                m_scatterFut  = {};
-                // El resultado vive en el planeta con el que se lanzó: si el usuario cambió de
-                // planeta durante el vuelo se descarta (el nuevo ya disparará su re-siembra).
-                if (m_scatterPlanet == pname && pname == m_planet) {
-                    applyScatterResult(std::move(res), planetC, planetR, camera, physics, planet);
-                    m_voxVersion = planet->vox().version() + planet->vox().craterVersion();   // ACK del campo (y cráteres): ya reflejado
-                    m_lastCam    = camPos;                    // ACK: RE-ANCLA el tramo a la cámara ACTUAL
-                }
-                // Velocidad fresca: `s_lastT` se quedó en el lanzamiento del anillo que acaba de
-                // aterrizar. Si la cámara ya cruzó OTRO tramo durante el vuelo, relanzar ahora.
-                const double flightS = std::chrono::duration<double>(
-                    std::chrono::steady_clock::now() - s_lastT).count();
-                const double distLaunch = glm::length(camPos - m_scatterCam);
-                const double speedL     = flightS > 1e-3 ? distLaunch / flightS : 0.0;
-                s_lastT = std::chrono::steady_clock::now();
-                relaunchNow = (m_scatterPlanet == pname && pname == m_planet) &&
-                              distLaunch > std::max(30.0, speedL * 1.5);
-            } catch (const std::exception& e) {
-                HARUKA_LOGE("PropSystem", "re-siembra async fallo: %s", e.what());
-                m_scatterBusy = false;
-                m_scatterFut  = {};
-            }
-        }
-        if (!relaunchNow) return;   // en vuelo (o recién aplicada): aguantar el anillo anterior
-    }
-    }   // re-siembra.aplica (tambien sale si se vuelve en vuelo)
-
-    // Solo re-enumera cuando la camara cruza un tramo desde la ultima muestra. El scatter (~61k
-    // celdas × muestreo del campo) es caro (~121 ms). El tramo es ADAPTATIVO a la velocidad: al
-    // andar bastan 30 m; al volar, ~1,5 s de viaje. Las celdas son MUNDIALES y deterministas.
-    // Y cuando el CAMPO cambia (una boca que carga, un trazo): los props que estaban sobre el
-    // agujero tienen que irse, aunque no te hayas movido. SEGURO DESPUES del checkout del worker:
-    // si está en vuelo aplicamos el resultado ANTES de decidir si hay que relanzar.
-    if (!relaunchNow) {
-        const auto nowT = std::chrono::steady_clock::now();
-        const double elapsed = std::chrono::duration<double>(nowT - s_lastT).count();
-        const double distCam = glm::length(camPos - m_lastCam);
-        const double speed   = elapsed > 1e-3 ? distCam / elapsed : 0.0;
-        const double refreshM = std::max(30.0, speed * 1.5);
-        const bool tooSoon = elapsed < 0.5;
-        // + cráteres: uno nuevo tiene que despejar lo que haya dentro (las dos versiones sólo crecen).
-        const bool campoCambio = planet->vox().version() + planet->vox().craterVersion() != m_voxVersion;
-        if ((distCam < refreshM || tooSoon) && !campoCambio && !m_rescatter && !m_planet.empty())
-            return;
-    }
-
-    // El controlador de carga pidio re-sembrar por un cambio de RADIO: este intento la cubre.
-    m_rescatter = false;
-
-    { HARUKA_PROFILE("re-siembra.lanza");   // preparacion (registro de prototipos, copias) + lanzar worker
-    PlanetSphereField field;
-    field.planet = planet;
-    const PropLayerTable& table = planet->propLayers();
-    if (table.layers.empty()) return;   // sin capas declaradas = sin props
-
-    // UN prototipo por NOMBRE (el mesh de la capa, o cada variante × cada semilla "conifer#2").
-    // `meshSeed` = hash32 de planeta+nombre: un arbol es SIEMPRE el mismo arbol. Cualquier capa
-    // registra TAMBIÉN sus CÚMULOS (`clump#<proto>#k`): las celdas gruesas de lejanía instalan una
-    // masa por celda en vez de individuos (la malla del cúmulo se hornea bajo este mismo nombre,
-    // por forma: bosque, pedregal, aldea o pradera). Es DERIVADO (shouldClumpFar), no un flag.
-    auto registerProto = [&](const std::string& pn) {
-        for (int i = 0; i < m_registry.prototypeCount(); ++i)
-            if (m_registry.prototype(i).name == pn) return;
-        InstancedPrototype p;
-        p.name = pn;
-        uint32_t h = 2166136261u;
-        for (const char c : m_planet) h = (h ^ (uint8_t)c) * 16777619u;
-        for (const char c : pn)       h = (h ^ (uint8_t)c) * 16777619u;
-        p.meshSeed = Haruka::Tools::ProcGraph::hash32(h);
-        p.lodLevel = 0;
-        m_registry.addPrototype(p);
-    };
-    for (const auto& L : table.layers) {
-        for (const std::string& pn : L.prototypeNames()) {
-            registerProto(pn);
-            if (shouldClumpFar(pn))
-                for (int k = 0; k < kClumpKinds; ++k)
-                    registerProto(clumpProtoName(pn, k));
-        }
-    }
-    if (m_registry.prototypeCount() == 0) return;
-
-    // Variante TENDIDA de cada mata de hierba (`nombre + "!flat"`): la misma mata con las cuchillas
-    // tumbadas, que `flattenNear` engancha al pisar (cambio de PROTOTIPO, no de estado — el draw la
-    // redirige por prototipo en el siguiente barrido). No es clump (isGrassProp la excluye).
-    m_pressedProto.clear();
-    m_flatRev.clear();
-    for (int i = 0; i < m_registry.prototypeCount(); ++i) {
-        const std::string& pn = m_registry.prototype(i).name;
-        if (pn.find("!flat") != std::string::npos) continue;              // ya es una pisada
-        if (!isGrassProp(pn)) continue;
-        const std::string flat = pn + "!flat";
-        registerProto(flat);
-        for (int j = 0; j < m_registry.prototypeCount(); ++j)
-            if (m_registry.prototype(j).name == flat) {
-                m_pressedProto[i] = j;   // de pie (i) → tendida (j): lo que `flattenNear` cambia
-                m_flatRev[j]      = i;   // tendida (j) → de pie (i): lo que `sweepGrassState` revierte
-                break;
-            }
-    }
-
-    PropScatterParams params;
-    params.radius   = planetR;
-    params.seed     = planet->config().seed ? planet->config().seed : 1u;
+void PropSystem::configureScatter(PropScatterParams& params) {
     params.maxProps = 300000;
     params.fadeInM  = kRingFadeM;
-    // PRIMER PLANO DE HIERBA dentro del instancing: la capa de hierba cerca de la camara saca
-    // `perCell` x `grassNearMul` matas (y con mas celdas ganadas) y se funde a x1 a lo lejos.
-    // Sustituye al `GrassRenderer` (apagado por defecto): la hierba densa se dibuja con el MISMO
-    // pase de props, cuesta ~nada en comparacion con el compute de GPU, y se aplasta con
-    // `flattenNear` (estado de matas).
-    params.grassNearM     = 24.0f;
-    params.grassNearMul   = 150.0f;
-    params.grassNearFadeM = 60.0f;
-    if (const char* e = std::getenv("HARUKA_GRASS"); e && e[0] == '1')
-        params.grassNearM = 0.0f;   // alguien reactivo el viejo renderer GPU: no apilar la doble hierba
     // ⚠️ NO hay horizonte de cúmulos "por carga" NI "por autor" AQUÍ. La fusión sale del bioma/clima
     // (la capa sólo se coloca donde su ecología la acepta) + el NIVEL de celda del cubo (lo decide
     // shouldClumpFar dentro del scatter): el contenido de una celda es función de (celda, seed del
@@ -530,135 +125,75 @@ void PropSystem::refreshScatter(Core::Camera* camera, Planet::PlanetarySystem* p
         if (params.lods.empty()) params.lods.push_back({ m_ringM, 12.0f, 0.30f });
     }
 
-    // El worker construye ADEMÁS las InstancedObject finales (prototipo + yaw + estado) y sus MATRICES
-    // GPU: se le pasan copias del nombre→índice y del estado roto. `m_state` la toca el juego en el
-    // hilo de render; esta copia es la foto de lanzamiento, y `applyScatterResult` vuelve a cuadrar
-    // el estado ACTUAL y el filtro de bocas al aplicar (no puede ir aquí: `surfaceCut` lee el vox).
-    std::unordered_map<std::string, int> protoByName;
-    for (int i = 0; i < m_registry.prototypeCount(); ++i)
-        protoByName.emplace(m_registry.prototype(i).name, i);
-    const std::unordered_map<uint32_t, StateDelta> stateSnap = m_state;
-    const uint32_t planetSeed = params.seed;
-
-    m_scatterBusy  = true;
-    m_scatterPlanet = pname;
-    m_scatterCam    = camPos;
-    s_lastT = std::chrono::steady_clock::now();   // el tramo adaptivo se mide desde ESTE lanzamiento
-    m_scatterFut = Haruka::Core::Jobs::jobs().submit(Haruka::Core::Jobs::Priority::Streaming,
-        [field, camPos, planetC, planetR, params, table, protoByName, stateSnap, planetSeed]() {
-            // ⚠️ CAPAS MUERTAS. Cada celda SORTEA entre las capas que la aceptan, asi que una capa a
-            // cero ya no puede ser "otra se la comio": sus condiciones no pasan en ninguna celda, o
-            // ninguna de sus variantes vive ahi. El desglose (una vez) dice cual de los factores.
-            static bool s_statsReported = false;
-            PropScatterStats stats;
-            const std::vector<ScatteredProp> placed =
-                scatterPropsNear(field, camPos, planetC, params, table,
-                                                s_statsReported ? nullptr : &stats);
-            if (!s_statsReported && !placed.empty()) {
-                s_statsReported = true;
-                for (size_t li = 0; li < table.layers.size(); ++li) {
-                    const auto& L = table.layers[li];
-                    if (L.mesh.empty() || stats.placed[li] > 0) continue;
-                    HARUKA_LOGW("PropScatter",
-                        "capa %zu ('%s', mesh '%s'): 0 props en %d celdas. Descartes: sumergido=%d densidad=%d sin_variante=%d · coverage=%d de los cuales "
-                        "zona=%d when=%d humedad=%d temp=%d pendiente=%d mapa=%d",
-                        li, L.name.c_str(), L.mesh.c_str(), stats.offered[li],
-                        stats.noSubmerged[li], stats.noDensity[li], stats.noVariant[li], stats.noCoverage[li],
-                        stats.failZone[li], stats.failWhen[li], stats.failHum[li],
-                        stats.failTemp[li], stats.failSlope[li], stats.failMap[li]);
-                    if (stats.failHum[li] > 0)
-                        HARUKA_LOGW("PropScatter", "   humedad: la capa pide [%.2f, %.2f] · el terreno da [%.2f, %.2f]",
-                                    L.humMin, L.humMax, stats.humLo, stats.humHi);
-                    if (stats.failTemp[li] > 0)
-                        HARUKA_LOGW("PropScatter", "   temp: la capa pide [%.1f, %.1f] C · el terreno da [%.1f, %.1f]",
-                                    L.tempMin, L.tempMax, stats.tempLo, stats.tempHi);
-                    if (stats.failSlope[li] > 0)
-                        HARUKA_LOGW("PropScatter", "   pendiente: la capa pide [%.2f, %.2f] · el terreno da [%.2f, %.2f]",
-                                    L.slopeMin, L.slopeMax, stats.slopeLo, stats.slopeHi);
-                    if (stats.failZone[li] > 0)
-                        HARUKA_LOGW("PropScatter", "   zona: la capa declara %zu zona(s) y es un filtro DURO — "
-                                    "fuera de ellas no instala NADA. La escena declara las zonas en surfaceConfig.",
-                                    L.zones.size());
-                }
-                // Tabla bioma × capa del primer scatter: la medida de "los props siguen al bioma".
-                std::string line = "biomas en el primer scatter (celdas · colocadas por capa):";
-                for (int b = 0; b < (int)Planet::Biome::COUNT; ++b) {
-                    if (stats.cellsByBiome[b] == 0) continue;
-                    line += "\n   " + std::string(Planet::biomeKey((Planet::Biome)b))
-                          + " " + std::to_string(stats.cellsByBiome[b]);
-                    for (size_t li = 0; li < table.layers.size(); ++li) {
-                        if (table.layers[li].mesh.empty()) continue;
-                        line += " · " + table.layers[li].mesh + "=" + std::to_string(
-                            stats.placedByBiome[li * (size_t)Planet::Biome::COUNT + (size_t)b]);
-                    }
-                }
-                HARUKA_LOGI("PropScatter", "%s", line.c_str());
-            }
-
-            // Fase de transformación (antes estaba en `applyScatterResult`, en el hilo de render, y
-            // eran los ~50 ms del tiron): prototipo por nombre, yaw determinista y estado inicial,
-            // y las MATRICES GPU — todo contra copias capturadas, nunca el registro ni la GPU.
-            // ⚠️ El filtro de BOCA no va aquí: `surfaceCut` lee el VOX VIVIENTE, que el hilo de
-            // render está streameando/rehorneando; leerlo en paralelo es una raza. Se filtra al
-            // aplicar, contra el vox actual.
-            std::vector<InstancedObject> objs;
-            objs.reserve(placed.size());
-            for (const auto& sp : placed) {
-                auto itP = protoByName.find(sp.mesh);
-                if (itP == protoByName.end()) continue;
-
-                InstancedObject io;
-                io.prototype = itP->second;
-                io.dir       = sp.dir;
-                io.heightM   = sp.heightM;
-                io.scale     = sp.scale;
-                io.tint      = sp.tint;
-                io.yaw = Haruka::Tools::ProcGraph::WhiteNode::hashFloat((int)sp.cellSeed, 500, 0, planetSeed) * 6.2831853f;
-                io.seed  = sp.cellSeed;
-                io.state = sp.state;
-                auto itS = stateSnap.find(io.seed);
-                if (itS != stateSnap.end()) {
-                    io.state     = itS->second.state;
-                    io.regrow    = itS->second.regrow;
-                    io.breakMask = itS->second.breakMask;
-                }
-                objs.push_back(io);
-            }
-            // La MITAD del coste del aplicar eran las ~200k matrices (rebuildGpu, ~30 ms). El worker
-            // las construye CONTRA EL ORIGEN DE LANZAMIENTO (`camPos`); el pase de color compensa
-            // cada frame con `originRel = m_origin - camD`, así que el origen no necesita ser la
-            // cámara actual (ya se quedaba viejo entre re-siembras).
-            std::vector<Renderer::InstanceDataFloat> gpu;
-            gpu.resize(objs.size());
-            const glm::vec3 up(0.0f, 1.0f, 0.0f);
-            const glm::dvec3 originToCenter = planetC - camPos;   // origin = cámara de lanzamiento
-            for (size_t i = 0; i < objs.size(); ++i) {
-                const auto& io = objs[i];
-                const glm::vec3 posF = glm::vec3(originToCenter + glm::dvec3(io.dir) * (planetR + (double)io.heightM));
-                glm::mat4 m = glm::translate(glm::mat4(1.0f), posF);
-                m *= glm::mat4_cast(glm::rotation(up, io.dir));
-                m = glm::rotate(m, io.yaw, up);
-                m = glm::scale(m, glm::vec3(io.scale));
-                Renderer::InstanceDataFloat& inst = gpu[i];
-                inst.model     = m;
-                inst.color     = glm::vec4(io.tint, 1.0f);
-                inst.scale     = glm::vec3(io.scale);
-                inst.breakMask = (float)io.breakMask;
-            }
-            return ScatterResult{ std::move(objs), std::move(gpu), camPos };
-        });
-    }   // re-siembra.lanza
 }
 
-void PropSystem::applyScatterResult(ScatterResult res,
-                                    const glm::dvec3& planetC, double planetR,
-                                    Core::Camera* camera, Physics::PhysicsEngine* physics,
-                                    const Planet::TerrestrialPlanet* planet) {
+PropSystem::ScatterJob PropSystem::makeJob(const ScatterContext& ctx) {
+    // El worker construye ADEMÁS las InstancedObject finales (prototipo + yaw + estado) y sus
+    // instancias GPU: se le pasan copias del nombre→índice y del estado roto. `m_state` la toca el
+    // juego en el hilo de render; esta copia es la foto de lanzamiento, y `applyScatter` vuelve a
+    // cuadrar el estado ACTUAL y el filtro de bocas al aplicar (no puede ir aquí: `surfaceCut` lee
+    // el vox).
+    const std::unordered_map<std::string, int> protoByName = ctx.protoByName;
+    const std::unordered_map<uint32_t, StateDelta> stateSnap = m_state;
+    const uint32_t planetSeed = ctx.planetSeed;
+    const glm::dvec3 camPos = ctx.camPos, planetC = ctx.planetC;
+    const double planetR = ctx.planetR;
+    return [protoByName, stateSnap, planetSeed, camPos, planetC, planetR]
+           (std::vector<ScatteredProp>&& placed) -> std::shared_ptr<ScatterOutput> {
+        auto out = std::make_shared<PropOutput>();
+        out->origin = camPos;
+        // Fase de transformación (antes estaba en `applyScatterResult`, en el hilo de render, y
+        // eran los ~50 ms del tiron): prototipo por nombre, yaw determinista y estado inicial,
+        // y las MATRICES GPU — todo contra copias capturadas, nunca el registro ni la GPU.
+        // ⚠️ El filtro de BOCA no va aquí: `surfaceCut` lee el VOX VIVIENTE, que el hilo de
+        // render está streameando/rehorneando; leerlo en paralelo es una raza. Se filtra al
+        // aplicar, contra el vox actual.
+        std::vector<InstancedObject>& objs = out->objs;
+        objs.reserve(placed.size());
+        for (const auto& sp : placed) {
+            auto itP = protoByName.find(sp.mesh);
+            if (itP == protoByName.end()) continue;
+
+            InstancedObject io;
+            io.prototype = itP->second;
+            io.dir       = sp.dir;
+            io.heightM   = sp.heightM;
+            io.scale     = sp.scale;
+            io.tint      = sp.tint;
+            io.yaw = Haruka::Tools::ProcGraph::WhiteNode::hashFloat((int)sp.cellSeed, 500, 0, planetSeed) * 6.2831853f;
+            io.seed  = sp.cellSeed;
+            io.state = sp.state;
+            auto itS = stateSnap.find(io.seed);
+            if (itS != stateSnap.end()) {
+                io.state     = itS->second.state;
+                io.regrow    = itS->second.regrow;
+                io.breakMask = itS->second.breakMask;
+            }
+            objs.push_back(io);
+        }
+        // La MITAD del coste del aplicar eran las ~200k matrices (rebuildGpu, ~30 ms). El worker
+        // las construye CONTRA EL ORIGEN DE LANZAMIENTO (`camPos`); el pase de color compensa
+        // cada frame con `originRel = m_origin - camD`, así que el origen no necesita ser la
+        // cámara actual (ya se quedaba viejo entre re-siembras).
+        std::vector<Renderer::InstanceDataFloat>& gpu = out->gpu;
+        gpu.resize(objs.size());
+        const glm::dvec3 originToCenter = planetC - camPos;   // origin = cámara de lanzamiento
+        for (size_t i = 0; i < objs.size(); ++i) {
+            const auto& io = objs[i];
+            gpu[i] = propInstance(io, originToCenter, planetR);
+        }
+        return out;
+    };
+}
+
+void PropSystem::applyScatter(std::shared_ptr<ScatterOutput> outBase, const ApplyContext& ctx) {
+    PropOutput& res = static_cast<PropOutput&>(*outBase);
+    const glm::dvec3 planetC = ctx.planetC;
+    const double     planetR = ctx.planetR;
+    Core::Camera*    camera  = ctx.camera;
+    Physics::PhysicsEngine* physics = ctx.physics;
+    const Planet::TerrestrialPlanet* planet = ctx.planet;
     const glm::dvec3 camPos = camera ? glm::dvec3(camera->position) : glm::dvec3(planetC);
-    // El scatter regenera las instancias DESDE CERO y todas vuelven DE PIE: las tendidas viejas
-    // desaparecen y semillas + relojes previos dejan de corresponder. El relevo se queda sin
-    // memoria (la proxima pisada volverá a sellar) — evita una acumulación sin cota.
-    m_flatUntil.clear();
     // El scatter regenera las instancias desde CERO: el estado marcado por el juego (destruido,
     // rama arrancada) se conserva por semilla en `m_state`, que sobrevive a que el prop salga del
     // radio. Se sincroniza primero lo que haya en el registro por si algo lo toco sin pasar por
@@ -785,7 +320,7 @@ void PropSystem::applyScatterResult(ScatterResult res,
 
 void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // `HARUKA_NOPROPS=1` salta el pase (A/B de atribucion de GPU: apagar pases y restar).
-    if (noProps() || !m_enabled || m_registry.prototypeCount() <= 0 || !ctx || !f.camera) return;
+    if (propsDisabled() || !m_enabled || m_registry.prototypeCount() <= 0 || !ctx || !f.camera) return;
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     HARUKA_PROFILE("scene.prop.instanced"); HARUKA_GPU_SCOPE("scene.prop.instanced");
@@ -796,14 +331,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
         RHI::PipelineDesc pd;
         pd.vertexPath   = vs.c_str();
         pd.fragmentPath = fs.c_str();
-        pd.vertexLayout.strides = { (uint32_t)sizeof(PropVertex) };  // binding 0 = prototipo
-        pd.vertexLayout.attributes = {
-            { 0, (uint32_t)offsetof(PropVertex, pos),    RHI::Format::RGB32F, 0 },
-            { 1, (uint32_t)offsetof(PropVertex, normal), RHI::Format::RGB32F, 0 },
-            { 2, (uint32_t)offsetof(PropVertex, color),  RHI::Format::RGB32F, 0 },
-            { 9, (uint32_t)offsetof(PropVertex, uv),     RHI::Format::RG32F,  0 },
-            { 11, (uint32_t)offsetof(PropVertex, partId), RHI::Format::R32F, 0 },
-        };
+        appendPropVertexLayout(pd.vertexLayout, /*withPart*/true);          // binding 0 = prototipo
         Renderer::GPUInstancing::appendInstanceLayout(pd.vertexLayout, 1);  // binding 1 = instancias
         pd.topology     = RHI::PrimitiveTopology::Triangles;
         pd.depth.test   = true;  pd.depth.write = true;
@@ -813,26 +341,10 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     }
     if (!valid(m_instPSO)) return;
 
-    if ((int)m_paramsUBOs.size() < m_registry.prototypeCount()) {
-        const size_t was = m_paramsUBOs.size();
-        m_paramsUBOs.resize((size_t)m_registry.prototypeCount());
-        for (size_t i = was; i < m_paramsUBOs.size(); ++i)
-            m_paramsUBOs[i] = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PropParams), nullptr, RHI::BufferMemory::Dynamic);
-    }
-
-    // Viento del CLIMA (m/s, marco del observador) y reloj del balanceo.
-    glm::vec3 windWorld(0.0f);
-    if (f.world) windWorld = f.world->getWind(glm::dvec3(f.camera->position));
-    // ⚠️ ESTE RELOJ ES DE PARED, no el de simulacion: la fase del balanceo depende de cuanto tardo
-    // en cargar el proceso, y eso metia un 20 % de diferencia entre dos capturas identicas de
-    // Vulkan. `HARUKA_PROP_TIME=<segundos>` lo fija para capturas comparables.
-    static const auto s_t0 = std::chrono::steady_clock::now();
-    static const float s_fixed = [] { const char* e = std::getenv("HARUKA_PROP_TIME"); return e ? (float)std::atof(e) : -1.0f; }();
-    const float propTime = (s_fixed >= 0.0f) ? s_fixed
-                         : std::chrono::duration<float>(std::chrono::steady_clock::now() - s_t0).count();
-    // La hierba densa se mece con EL MISMO viento y el mismo reloj que los arboles.
-    if (Planet::TerrestrialPlanet* tp = f.planets ? f.planets->activeTerrestrialMut() : nullptr)
-        tp->setGrassWind(windWorld, propTime);
+    // Viento del CLIMA (m/s, marco del observador) y reloj del balanceo: los de la base, los mismos
+    // que mecen la hierba.
+    const glm::vec3 windWorld = frameWind(f);
+    const float     propTime  = frameTime();
 
     if (!m_instancing) { m_instancing = std::make_unique<Renderer::GPUInstancing>(); m_instancing->init(20000); }
     ctx->bindPipeline(m_instPSO);
@@ -843,13 +355,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // lejos, sin tablas por tipo, y sale de la misma division que el descarte sub-pixel). Los
     // umbrales los pone el controlador de carga (abajo): historicos 90 px -> nivel 0 (464 tris),
     // 25 px -> nivel 1 (130), resto -> nivel 2 (40), pero con holgura de GPU suben a nivel 0 todo
-    // lo que no sea sub-pixel.
-    const glm::vec3 camF = f.camera->getFront();
-    const glm::vec3 camU = f.camera->getUp();
-    const glm::vec3 camR = glm::normalize(glm::cross(camF, camU));
-    const float tanV = std::tan(glm::radians(f.camera->zoom * 0.5f));
-    const float tanH = tanV * std::max(f.aspect, 0.01f);
-    const float vpPx = std::max((float)f.heightPx, 1.0f);
+    // lo que no sea sub-pixel. El cull en sí es el de la base (`makeCull`), el mismo que la hierba.
 
     // ── LOD POR CARGA (no por distancia) ───────────────────────────────────────────────────────
     // En vez de tabla fija, el detalle lo decide la CARGA del pase: con holgura todo lo que no sea
@@ -952,33 +458,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
     // (sub-pixel (1 px) y LOD) se reescriben como dist^2 comparado con (radio * k)^2. Con
     // 178k instancias en el registro, el `sqrt` del length y la division del px por instancia
     // eran el grueso del barrido (~22 ms en el frame tras la re-siembra).
-    const float kPixPerM   = vpPx / tanV;                  // px = radio * kPixPerM / dist
-    const float kPixPerM2  = kPixPerM * kPixPerM;          // sub-pixel: dist^2 > radio^2 * kPixPerM2
-    const float kNearM2    = kNearM * kNearM;              // prioridad cercana (LOD0 garantizado)
-    const float kLod02     = kPixPerM / kLodPx0;           // LOD0: dist^2 <= radio^2 * kLod02^2
-    const float kLod12     = kPixPerM / kLodPx1;           // LOD1: dist^2 <= radio^2 * kLod12^2
-    const float kLod02Sq   = kLod02 * kLod02;
-    const float kLod12Sq   = kLod12 * kLod12;
-    // `HARUKA_PROP_LOD=0..2` fuerza el nivel para TODOS los props (A/B de un fallo por nivel).
-    static const int s_forceLod = [] { const char* e = std::getenv("HARUKA_PROP_LOD"); return e ? std::atoi(e) : -1; }();
-    auto propCull = [&](const glm::vec3& posF, float radius, int& outLod) -> uint8_t {
-        outLod = 0;
-        const float d2 = glm::dot(posF, posF);
-        if (d2 <= 1e-6f) return 0;
-        const float fwd = glm::dot(posF, camF);
-        if (fwd < -radius) return 1;                      // detras de la camara
-        if (std::abs(glm::dot(posF, camR)) > fwd * tanH + radius) return 1;
-        if (std::abs(glm::dot(posF, camU)) > fwd * tanV + radius) return 1;
-        const float r2 = radius * radius;
-        if (d2 > r2 * kPixPerM2) return 2;                // sub-pixel (px < kMinPropPixels)
-        // PRIORIDAD CERCANA: dentro de `kNearM` se dibuja SIEMPRE a nivel 0, haga lo que haga el
-        // controlador de carga. Son pocos y baratos, y el player los ve de cerca: "lo mas cercano
-        // al 100 %" no se negocia ni cuando el pase va sobre presupuesto.
-        if (d2 <= kNearM2) { outLod = 0; return 0; }
-        outLod = (d2 <= r2 * kLod02Sq) ? 0 : (d2 <= r2 * kLod12Sq ? 1 : 2);
-        if (s_forceLod >= 0) outLod = std::min(s_forceLod, PrototypeGpu::kLods - 1);
-        return 0;
-    };
+    const Cull propCull = makeCull(f, kLodPx0, kLodPx1);
 
     const glm::dvec3 camD = glm::dvec3(f.camera->position);
     glm::dvec3 planetC; double planetR = 6371000.0;
@@ -1057,7 +537,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
         uint8_t cull = 0;
         if (alive) {
             ++m_aliveCounts[(size_t)pi];
-            const glm::vec3 posF = glm::vec3(m_gpu[ii].model[3]) + originRel;
+            const glm::vec3 posF = m_gpu[ii].position + originRel;
             int lod = 0;
             cull = propCull(posF, io.scale * cullRadius[(size_t)pi], lod);
             if (cull == 0) { m_buckets[(size_t)(pi * kLods + lod)].push_back(ii); ++nKept; }
@@ -1102,11 +582,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
         stats.totalTriangles += (int)(pg.indexCount[0] / 3) * aliveN;
         ++stats.totalDrawCalls;
 
-        PropParams pp{};
-        pp.wind = windWorld; pp.time = propTime;
-        pp.matPBR = glm::vec4(pg.metallicS, pg.roughnessS, pg.aoS, (float)pg.mask);
-        pp.originRel = glm::vec4(originRel, 0.0f);
-        pp.aerial    = f.aerial;
+        const PropParams pp = makeParams(pg, windWorld, propTime, originRel, f);
 
         // UN DRAW POR NIVEL: el instancing sigue intacto y lo que baja es la geometria por instancia.
         int drawnTotal = 0;
@@ -1123,15 +599,8 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
             ctx->bindPipeline(m_instPSO);   // re-bind (creacion perezosa de buffers)
             ctx->bindVertexBuffer(pg.vbo[lod], 0);
             ctx->bindIndexBuffer(pg.ebo[lod]);
-            // ⚠️ SE ATAN LOS CINCO SLOTS SIEMPRE: en Vulkan un descriptor sin atar es basura (props
-            // GRISES, visto en RenderDoc como `u_matMetallic` sin recurso). El relleno lo ignora el
-            // shader por la mascara, asi que no cambia el resultado en GL.
-            ctx->bindTexture(0, valid(pg.albedo)    ? pg.albedo    : fallbackTexture(FallbackTex::White));
-            ctx->bindTexture(1, valid(pg.normal)    ? pg.normal    : fallbackTexture(FallbackTex::Normal));
-            ctx->bindTexture(2, valid(pg.metallic)  ? pg.metallic  : fallbackTexture(FallbackTex::Metallic));
-            ctx->bindTexture(3, valid(pg.roughness) ? pg.roughness : fallbackTexture(FallbackTex::White));
-            ctx->bindTexture(4, valid(pg.ao)        ? pg.ao        : fallbackTexture(FallbackTex::White));
-            const RHI::BufferHandle ppUbo = (pi < (int)m_paramsUBOs.size()) ? m_paramsUBOs[(size_t)pi] : RHI::BufferHandle{};
+            bindPrototypeMaterial(ctx, pg);
+            const RHI::BufferHandle ppUbo = paramsUBO(dev, pi);
             if (valid(ppUbo)) {
                 HARUKA_PROFILE("prop.ubo.update");
                 dev->updateBuffer(ppUbo, 0, sizeof(pp), &pp);
@@ -1177,7 +646,7 @@ void PropSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
                 if (b0.empty()) continue;
                 float best = 1e30f; glm::vec3 bp(0.0f); float bs = 0.0f;
                 for (const uint32_t bi : b0) {
-                    const glm::vec3 pp3 = glm::vec3(m_gpu[bi].model[3]) + originRel;
+                    const glm::vec3 pp3 = m_gpu[bi].position + originRel;
                     const float d = glm::length(pp3);
                     if (d < best) { best = d; bp = pp3; bs = m_gpu[bi].scale.x; }
                 }
@@ -1261,7 +730,7 @@ void PropSystem::drawShadows(RHI::Context* ctx, const glm::mat4& lightSpace, Cor
         const auto& io = insts[ii];
         if (io.prototype < 0 || io.prototype >= protoCount) continue;
         if (io.state != (uint32_t)InstancedObjectState::Alive) continue;
-        const glm::vec3 posF = glm::vec3(m_gpu[ii].model[3]) + originRel;
+        const glm::vec3 posF = m_gpu[ii].position + originRel;
         if (glm::dot(posF, posF) > kBox2) continue;      // fuera de la caja de la luz
         m_shadowBuckets[(size_t)io.prototype].push_back(ii);
     }
@@ -1296,103 +765,6 @@ std::vector<PropSystem::StateDelta> PropSystem::serializeState() const {
 void PropSystem::restoreState(const std::vector<StateDelta>& deltas) {
     m_state.clear();
     for (const auto& d : deltas) m_state[d.seed] = d;
-}
-
-void PropSystem::flattenNear(const glm::dvec3& center, double radius) {
-    // Ver cabecera: las matas de hierba dentro de la esfera pasan a su variante TENDIDA (`!flat`).
-    // No entran en `m_state`: al re-sembrar el anillo vuelven DE PIE desde su semilla (hierba
-    // efimera, como las pisadas viejas).
-    if (m_planetC == glm::dvec3(0.0)) return;          // nunca se sembro
-    const int protoCount = m_registry.prototypeCount();
-    if (protoCount == 0) return;
-    // Pisada EFIMERA: reloj compartido con `sweepGrassState` (mismo epoch que `m_flatUntil`).
-    const double nowFlat = grassClockNow();
-    const double r2 = radius * radius;
-    const auto& insts = m_registry.instances();
-    const int n = (int)insts.size();
-    for (int ii = 0; ii < n; ++ii) {
-        const auto& io = insts[ii];
-        if (io.state != (uint32_t)InstancedObjectState::Alive) continue;
-        if (io.prototype < 0 || io.prototype >= protoCount) continue;
-        const std::string& pn = m_registry.prototype(io.prototype).name;
-        if (pn.find("!flat") != std::string::npos) continue;              // ya pisada
-        if (!isGrassProp(pn)) continue;
-        const glm::dvec3 wp = m_planetC + glm::dvec3(io.dir) * (m_planetR + (double)io.heightM);
-        const glm::dvec3 d = wp - center;
-        if (d.x * d.x + d.y * d.y + d.z * d.z > r2) continue;
-        // → variante tendida. El gemelo `!flat` se registra SIEMPRE en el mismo `refreshScatter`
-        // que su de-pie (m_pressedProto): si por algun motivo faltara, se deja en pie (no se borra).
-        const auto fp = m_pressedProto.find(io.prototype);
-        if (fp == m_pressedProto.end()) continue;
-        m_registry.setPrototypeByIndex((size_t)ii, fp->second);
-        // Pisada EFIMERA: sella hasta cuando sigue tendida. `sweepGrassState` la relevara sola al
-        // vencer `kFlatDwellS` (o la mantendra bajo el agua).
-        m_flatUntil[io.seed] = nowFlat + kFlatDwellS;
-    }
-}
-
-void PropSystem::sweepGrassState(double now, Physics::PhysicsEngine* physics) {
-    // HIERBA VIVA: tres trabajos en un solo pase:
-    //   1) la mata tendida cuyo reloj vencio se LEVANTA sola (la pisada es EFIMERA, ffsica);
-    //   2) la mata tendida que quedo bajo el agua se MANTIENE tendida (no releva mientras la cubra);
-    //   3) la mata de pie que acaba de quedar sumergida se TUMBA (el agua la empuja).
-    //
-    // ⚠️ ERA EL 99 % DE LOS TIRONES (26-09): con el jugador QUIETO, 303 de 306 frames de más de 45 ms
-    // pasaban ~61 ms aquí. Recorría las ~146 000 instancias de golpe cada 0,12 s y pedía la cota del
-    // agua CON OLAS para cada mata de hierba. Y la comparación estaba mal: `waterSurfaceAt` da la
-    // COTA (m sobre el radio) y se comparaba con `wp.y`, la coordenada Y del mundo (~3e6 m) — nunca
-    // era cierta: el agua jamás tumbó una mata y se pagaban 60 ms por nada. Ahora: cota contra cota
-    // (`io.heightM`), la vuelta se REPARTE en frames con un presupuesto de `kFlatSweepBudgetMs`, y el
-    // agua se pregunta una vez por celda de 4 m y vuelta (las matas van en racimos).
-    if (m_sweepCursor == 0 && now - m_sweepRoundEnd < kFlatSweepS) return;
-    if (m_flatUntil.empty() && !physics) return;         // nada tendido y sin agua a la que atender
-    const int protoCount = m_registry.prototypeCount();
-    if (protoCount == 0) return;
-    const Haruka::Physics::IWorldProvider* water = physics ? physics->worldProvider() : nullptr;
-    const auto& insts = m_registry.instances();
-    const size_t n = insts.size();
-    if (m_sweepCursor >= n) m_sweepCursor = 0;          // la re-siembra cambió el registro
-    if (m_sweepCursor == 0) m_sweepWater.clear();
-    const auto t0 = std::chrono::steady_clock::now();
-    size_t ii = m_sweepCursor;
-    for (; ii < n; ++ii) {
-        if ((ii & 255u) == 0 && ii != m_sweepCursor &&
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count() > kFlatSweepBudgetMs)
-            break;
-        const auto& io = insts[ii];
-        if (io.state != (uint32_t)InstancedObjectState::Alive) continue;
-        if (io.prototype < 0 || io.prototype >= protoCount) continue;
-        const auto fp = m_pressedProto.find(io.prototype);   // de pie → tendida
-        const auto fr = m_flatRev.find(io.prototype);        // tendida → de pie
-        if (fp == m_pressedProto.end() && fr == m_flatRev.end()) continue;   // no es hierba
-
-        // El AGUA usa la MISMA cota con la ola que dibuja la fisica (`IWorldProvider::waterSurfaceAt`):
-        // la mata esta sumergida cuando la superficie cubre el pie que la sostiene.
-        if (water) {
-            const glm::dvec3 wp = m_planetC + glm::dvec3(io.dir) * (m_planetR + (double)io.heightM);
-            const uint64_t ck = ((uint64_t)(int64_t)std::floor(wp.x * 0.25) * 73856093ull) ^
-                                ((uint64_t)(int64_t)std::floor(wp.y * 0.25) * 19349663ull) ^
-                                ((uint64_t)(int64_t)std::floor(wp.z * 0.25) * 83492791ull);
-            auto wit = m_sweepWater.find(ck);
-            if (wit == m_sweepWater.end()) wit = m_sweepWater.emplace(ck, water->waterSurfaceAt(wp)).first;
-            if (wit->second > (double)io.heightM) {
-                if (fp != m_pressedProto.end()) {
-                    m_registry.setPrototypeByIndex(ii, fp->second);   // la acaban de sumergir
-                    m_flatUntil[io.seed] = now + kFlatDwellS;
-                } else {
-                    m_flatUntil[io.seed] = now + kFlatDwellS;         // sigue cubierta: no releva
-                }
-                continue;
-            }
-        }
-        if (fr == m_flatRev.end()) continue;              // de pie y fuera del agua → nada que hacer
-        const auto fu = m_flatUntil.find(io.seed);
-        if (fu == m_flatUntil.end() || now < fu->second) continue;        // aun tendida
-        m_registry.setPrototypeByIndex(ii, fr->second);                   // se levanta sola
-        m_flatUntil.erase(fu);
-    }
-    if (ii >= n) { m_sweepCursor = 0; m_sweepRoundEnd = now; }
-    else m_sweepCursor = ii;
 }
 
 PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Core::Camera* camera,
@@ -1455,9 +827,9 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
     if (best.trunk) st.state = (uint32_t)InstancedObjectState::Destroyed;
     else if (best.partId >= 0 && best.partId < 32) st.breakMask |= (1u << (uint32_t)best.partId);
 
-    // Un prop DERRIDADO tumba la hierba a su alrededor: lo que cae aplasta donde cae. El jugador
-    // (player.cpp) y las rocas que ruedan (dynamic_props.cpp) llaman a `flattenNear` desde el
-    // juego; esto cubre arboles, rocas y cumulos al PARTIRSE en el sitio. Solo el derrumbe completo
+    // Un prop DERRIBADO tumba la hierba a su alrededor: lo que cae aplasta donde cae. La hierba es
+    // de OTRO sistema (`GrassSystem`): aquí solo se avisa (`onGroundImpact`) y la app lo conecta.
+    // Esto cubre arboles, rocas y cumulos al PARTIRSE en el sitio. Solo el derrumbe completo
     // (tronco, caja, cumulo): arrancar una rama no tumba nada al suelo.
     if (best.trunk) {
         const float sc = (bestIdx < insts.size()) ? insts[bestIdx].scale : 1.0f;
@@ -1466,7 +838,7 @@ PropSystem::Hit PropSystem::breakAt(const glm::dvec3& center, double radius, Cor
                         ? std::min(35.0f, 13.0f * sc)
                         : std::min(8.0f, std::max(0.6f, (float)best.rBottomM * 4.0f));
         m_planetC = planetC; m_planetR = planetR;
-        flattenNear(best.pos, r);
+        if (onGroundImpact) onGroundImpact(best.pos, r);
     }
 
     // Los colliders se rehacen ya: si no, seguirias chocando con la rama que acabas de arrancar.
@@ -1528,7 +900,7 @@ bool PropSystem::breakPart(uint32_t seed, int partId, bool trunk, const glm::dve
             m_planetC = pc; m_planetR = pr;
             const float r = isClumpProto(prototype) ? 20.0f
                                                                     : std::min(8.0f, std::max(0.6f, (float)rBottomM * 4.0f));
-            flattenNear(pos, r);
+            if (onGroundImpact) onGroundImpact(pos, r);
         }
     }
     return true;
