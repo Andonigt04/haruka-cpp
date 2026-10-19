@@ -3,6 +3,7 @@
 
 #include "Haruka/Core/Camera.h"
 #include "Haruka/Core/Logger.h"
+#include "Haruka/World/CloudColumn.h"
 #include "Haruka/World/WeatherSystem.h"
 #include "Haruka/World/WorldSystem.h"
 #include "Haruka/World/Planet/PlanetarySystem.h"
@@ -13,6 +14,7 @@
 #include "Haruka/Tools/Profiler.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -114,11 +116,145 @@ bool CloudPass::envOff() { return cloudVolumetricOffImpl(); }
 
 CloudPass::~CloudPass() { shutdown(); }
 
+bool CloudPass::clumpsEnvOff() {
+    // ⚠️ APAGADOS POR DEFECTO (18-10): tras probar bolas, SDF y mallas horneadas, Andoni prefiere el
+    // cúmulo VOLUMÉTRICO con las mejoras (el clima decide, pincel). `HARUKA_CLUMPS=1` los enciende.
+    static const bool s_off = [] { const char* e = std::getenv("HARUKA_CLUMPS"); return !(e && e[0] == '1'); }();
+    return s_off;
+}
+
+void CloudPass::prepareClumps(RHI::Context* ctx, const ClumpFrame& f) {
+    m_clumpsActive = false;
+    if (!ctx || !enabled() || clumpsEnvOff() || !f.camera || !f.planets) return;
+    // Sin horneado del clima todavía no hay de dónde sacar los cúmulos (la marcha tampoco los pinta).
+    if (!RHI::valid(m_cloudCoverTex)) return;
+    glm::dvec3 pc(0.0); double R = 0.0;
+    if (!f.planets->getActivePlanet(pc, R) || R <= 0.0) return;
+    const glm::dvec3 cam(f.camera->position);
+    const double camR = glm::length(cam - pc);
+    if (camR - R > kClumpMaxEyeAltM) return;   // desde órbita: el volumétrico (ver kClumpMaxEyeAltM)
+    RHI::Device* dev = RHI::device();
+    if (!dev) return;
+    if (!m_clumpsTried) {
+        m_clumpsTried = true;
+        World::Props::ShellScatter::Config cfg;
+        if (const char* e = std::getenv("HARUKA_CLUMP_CELL_M")) cfg.cellM = std::clamp(std::atof(e), 200.0, 20000.0);
+        if (const char* e = std::getenv("HARUKA_CLUMP_MS")) cfg.budgetMs = std::clamp(std::atof(e), 0.2, 20.0);
+        if (const char* e = std::getenv("HARUKA_CLUMP_REACH_KM")) cfg.maxReachM = std::clamp(std::atof(e), 5.0, 2000.0) * 1000.0;
+        // Para afinar la luz sin recompilar: "opacidad,múltiple,rodeo,contraluz" (ver lib/volume_light.glsl).
+        if (const char* e = std::getenv("HARUKA_CLUMP_PAINT")) cfg.paint = std::clamp((float)std::atof(e), 0.0f, 1.0f);
+        if (const char* e = std::getenv("HARUKA_CLUMP_BRUSH_PX")) cfg.brushPx = std::clamp((float)std::atof(e), 1.0f, 200.0f);
+        if (const char* e = std::getenv("HARUKA_CLUMP_LIGHT"))
+            std::sscanf(e, "%f,%f,%f,%f", &cfg.opacity, &cfg.multi, &cfg.wrap, &cfg.translucency);
+        m_clumps.init(dev, cfg);
+        // Las capas en altura: la misma ley y las mismas mallas, con su retícula. El altocúmulo son
+        // elementos de cientos de metros; el cirro, bancos de kilómetros. Semillas distintas: no
+        // repiten la misma nube encima de la de abajo.
+        // EL ASPECTO de cada tipo (no dónde: eso es el campo): el altocúmulo, agua a −10 °C, son
+        // elementos pequeños y PLANOS; el cirro, hielo a −40 °C, láminas muy
+        // finas, estiradas por el viento de altura, con los trazos a lo largo de él (fibras) y velo.
+        World::Props::ShellScatter::Config mid = cfg;
+        mid.cellM = 500.0; mid.seed = cfg.seed ^ 0x51D0u; mid.budgetMs = 0.5 * cfg.budgetMs;
+        mid.aspectMul = 0.35f;   // opaco: un altocúmulo es agua, cuerpo; el velo es del cirro
+        m_clumpsMid.init(dev, mid);
+        World::Props::ShellScatter::Config high = cfg;
+        high.cellM = 3000.0; high.seed = cfg.seed ^ 0xC1A0u; high.budgetMs = 0.5 * cfg.budgetMs;
+        high.aspectMul = 0.08f; high.stretch = 4.0f; high.alpha = 0.45f; high.windStrokes = true;
+        m_clumpsHigh.init(dev, high);
+    }
+    if (!m_clumps.ready()) return;
+    HARUKA_PROFILE("clouds.clumps");
+
+    // El lazo de detalle: lo que costó el pase entero (siembra + dibujo, las tres capas) el último
+    // frame medido. Cada capa lo compara con su presupuesto.
+    const double simT = f.planets->simulationTime();
+    {
+        double ms = 0.0;
+        for (const auto& s : dev->gpuScopes())
+            if (s.name == "shell.scatter" || s.name == "scene.shell") ms += s.ms;
+        static const auto s_t0 = std::chrono::steady_clock::now();
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now() - s_t0).count();
+        for (World::Props::ShellScatter* sc : { &m_clumps, &m_clumpsMid, &m_clumpsHigh }) sc->feedGpuMs(ms, now);
+    }
+
+    // EL VIENTO LLEVA LA RETÍCULA: el de nivel de nube (el de superficie × kCloudLevelWindMul).
+    const glm::dvec3 up = (cam - pc) / std::max(camR, 1e-6);
+    const glm::dvec3 windW = glm::dvec3(f.windVec) * (double)World::WeatherSystem::kCloudLevelWindMul;
+    m_cloudSpin.advance(windW, up, R + (double)m_cloudBaseMin, simT);
+
+    World::Props::ShellScatter::Frame sf;
+    sf.camPos = cam; sf.planetC = pc; sf.planetR = R; sf.rot = m_cloudSpin.rot;
+    sf.viewDir = glm::normalize(f.camera->getFront());
+    sf.viewUp  = glm::normalize(f.camera->getUp());
+    sf.heightPx = std::max(f.viewH, 1);
+    sf.tanHalfV = (float)std::tan(glm::radians((double)f.camera->zoom) * 0.5);
+    sf.aspect = (f.viewW > 0 && f.viewH > 0) ? (float)f.viewW / (float)f.viewH : f.camera->aspectRatio;
+    sf.blend = RHI::valid(m_cloudCoverTexPrev) ? (float)m_cloudBlend.factor(simT) : 1.0f;
+    sf.now = simT;
+    sf.windDir = (glm::dot(windW, windW) > 1e-6) ? glm::vec3(glm::normalize(windW)) : glm::vec3(0.0f);
+    // Una capa: su campo (nuevo y anterior) y su banda de cotas. Sin campo, no hay nada que sembrar.
+    auto layer = [&](World::Props::ShellScatter& sc, RHI::TextureHandle tex, RHI::TextureHandle prev, double lo, double hi) {
+        if (!sc.ready() || !RHI::valid(tex)) return;
+        sf.field = tex;
+        sf.fieldPrev = RHI::valid(prev) ? prev : tex;
+        sf.shellLoM = lo;
+        sf.shellHiM = hi + 0.2 * std::max(hi - lo, 0.0);
+        sc.dispatch(ctx, sf);
+    };
+    layer(m_clumps, m_cloudCoverTex, m_cloudCoverTexPrev, m_cloudBaseMin, m_cloudConvTopMax);
+    layer(m_clumpsMid, m_cloudMidTex, m_cloudMidTexPrev, m_midLoM, m_midHiM);
+    layer(m_clumpsHigh, m_cloudHighTex, m_cloudHighTexPrev, m_highLoM, m_highHiM);
+    m_clumpsActive = true;
+
+    static double s_lastLog = -1e9;
+    if (simT - s_lastLog > 4.0 || simT < s_lastLog) {
+        s_lastLog = simT;
+        // Qué pone el CLIMA en cada capa: bajo la cámara y lo máximo en 400 km (si una capa no
+        // dibuja nada, aquí se ve si es que el clima no la pone o que el render la pierde).
+        if (m_lastSkyW > 0 && m_lastMid.size() == (size_t)m_lastSkyW * m_lastSkyH * 4) {
+            const glm::dvec3 d = up;
+            float midC = 0, highC = 0, midMax = 0, highMax = 0;
+            const double kPi = 3.14159265358979323846, reach = 400000.0 / R;
+            for (int y = 0; y < m_lastSkyH; ++y) {
+                const double lat = (0.5 - ((double)y + 0.5) / m_lastSkyH) * kPi;
+                for (int x = 0; x < m_lastSkyW; ++x) {
+                    const double lon = (((double)x + 0.5) / m_lastSkyW - 0.5) * 2.0 * kPi;
+                    const glm::dvec3 t(std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon));
+                    const double a = std::acos(std::clamp(glm::dot(t, d), -1.0, 1.0));
+                    if (a > reach) continue;
+                    const size_t i = ((size_t)y * m_lastSkyW + x) * 4;
+                    midMax = std::max(midMax, m_lastMid[i]); highMax = std::max(highMax, m_lastHigh[i]);
+                }
+            }
+            const double u = 0.5 + std::atan2(d.z, d.x) / (2.0 * kPi), v = 0.5 - std::asin(std::clamp(d.y, -1.0, 1.0)) / kPi;
+            const size_t i = ((size_t)std::clamp((int)(v * m_lastSkyH), 0, m_lastSkyH - 1) * m_lastSkyW
+                              + (size_t)std::clamp((int)(u * m_lastSkyW), 0, m_lastSkyW - 1)) * 4;
+            midC = m_lastMid[i]; highC = m_lastHigh[i];
+            HARUKA_LOGDIAG("Clouds", "el clima en altura: medio %.2f aqui (max %.2f en 400 km, %.0f-%.0f m) · alto %.2f aqui (max %.2f, %.0f-%.0f m)",
+                           midC, midMax, m_lastMid[i + 1], m_lastMid[i + 2], highC, highMax, m_lastHigh[i + 1], m_lastHigh[i + 2]);
+        }
+        HARUKA_LOGDIAG("Clouds", "nubes de malla: %.2f ms GPU · detalle %.2f (minimo %.1f px) · alcance %.0f km · nubes bajas %u (pedidas %u) · medias %u a %.0f-%.0f m · altas %u a %.0f-%.0f m",
+                       m_clumps.gpuMs(), m_clumps.detail(), m_clumps.cullPx(), m_clumps.lastReach() / 1000.0,
+                       m_clumps.lastCount(), m_clumps.lastWanted(),
+                       m_clumpsMid.lastCount(), m_midLoM, m_midHiM, m_clumpsHigh.lastCount(), m_highLoM, m_highHiM);
+    }
+}
+
+void CloudPass::drawClumps(RHI::Context* ctx, RHI::BufferHandle perFrameUBO, RHI::PipelineHandle restorePSO, float time) {
+    if (!m_clumpsActive || !ctx) return;
+    m_clumps.draw(ctx, perFrameUBO, restorePSO, time);
+    m_clumpsMid.draw(ctx, perFrameUBO, restorePSO, time);
+    m_clumpsHigh.draw(ctx, perFrameUBO, restorePSO, time);
+}
+
 void CloudPass::shutdown() {
     if (m_skyBakeJob.valid()) m_skyBakeJob.wait();   // el hilo del horneado no puede sobrevivir al objeto
+    m_clumps.shutdown(); m_clumpsMid.shutdown(); m_clumpsHigh.shutdown();
+    m_clumpsTried = false; m_clumpsActive = false;
     RHI::Device* dev = RHI::device();
     if (dev) {
-        for (RHI::TextureHandle* t : { &m_cloudCoverTex, &m_cloudHiTex, &m_cloudCoverTexPrev, &m_cloudHiTexPrev, &m_cloudCoverDummy })
+        for (RHI::TextureHandle* t : { &m_cloudCoverTex, &m_cloudHiTex, &m_cloudCoverTexPrev, &m_cloudHiTexPrev, &m_cloudCoverDummy,
+                                       &m_cloudMidTex, &m_cloudMidTexPrev, &m_cloudHighTex, &m_cloudHighTexPrev })
             if (RHI::valid(*t)) dev->destroy(*t);
         if (RHI::valid(m_cloudRT))      dev->destroy(m_cloudRT);
         if (RHI::valid(m_cloudDepthRT)) dev->destroy(m_cloudDepthRT);
@@ -127,6 +263,7 @@ void CloudPass::shutdown() {
         if (RHI::valid(m_cloudUpPSO))   dev->destroy(m_cloudUpPSO);
     }
     m_cloudCoverTex = m_cloudHiTex = m_cloudCoverTexPrev = m_cloudHiTexPrev = m_cloudCoverDummy = {};
+    m_cloudMidTex = m_cloudMidTexPrev = m_cloudHighTex = m_cloudHighTexPrev = {};
     m_cloudRT = m_cloudDepthRT = {}; m_cloudUBO = {}; m_cloudPSO = m_cloudUpPSO = {};
 }
 
@@ -201,7 +338,9 @@ void CloudPass::draw(const Frame& f) {
                 m_cloudUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(CloudParams),
                                                nullptr, RHI::BufferMemory::Dynamic);
 
-                const std::string uvs = Shader::baseDir() + "shaders/cloud_upsample.vert";
+                // El MISMO vertex que la marcha: da el rayo de cada píxel, con el que la subida ancla el
+                // borde y el pincel a la nube.
+                const std::string uvs = Shader::baseDir() + "shaders/cloud_vol.vert";
                 const std::string ufs = Shader::baseDir() + "shaders/cloud_upsample.frag";
                 RHI::PipelineDesc up;
                 up.vertexPath   = uvs.c_str();
@@ -229,7 +368,16 @@ void CloudPass::draw(const Frame& f) {
                 const int v = std::atoi(e);
                 if (v >= 1 && v <= 8) resDiv = v;
             }
-            const int rw = std::max(64, cw / resDiv), rh = std::max(64, ch / resDiv);
+            // ⚠️ MÁS RESOLUCIÓN EN VERTICAL que en horizontal: cerca del horizonte una nube lejana mide
+            // 2-3 texeles de ALTO a 1/8 y la subida la estira en rayas horizontales (con 1/4 en los
+            // dos ejes desaparecían, a 3x el coste). Lo que falta es vertical: 1/8 × 1/4 cuesta 2x.
+            // `HARUKA_CLOUD_RESDIV_Y` lo cambia sin recompilar.
+            int resDivY = std::max(1, resDiv / 2);
+            if (const char* e = std::getenv("HARUKA_CLOUD_RESDIV_Y")) {
+                const int v = std::atoi(e);
+                if (v >= 1 && v <= 8) resDivY = v;
+            }
+            const int rw = std::max(64, cw / resDiv), rh = std::max(64, ch / resDivY);
             if (RHI::valid(m_cloudPSO) && (!RHI::valid(m_cloudRT) ||
                                            m_cloudRTW != rw || m_cloudRTH != rh)) {
                 if (RHI::valid(m_cloudRT)) dev->destroy(m_cloudRT);
@@ -470,6 +618,29 @@ void CloudPass::draw(const Frame& f) {
                                                                r.rgba.data(), &r.baseMin, &r.topMax,
                                                                wcp.data(), r.hi.data(),
                                                                gcp.size() == (size_t)CW * CH ? gcp.data() : nullptr);
+                                    // LAS CAPAS EN ALTURA, del mismo horneado: cobertura = el vapor de cada
+                                    // banda, cotas = las de su temperatura (−10 °C, −40 °C ± media anchura)
+                                    // en ESA columna. Es lo que ya decía el clima; aquí solo se escribe en
+                                    // el formato de las nubes de malla.
+                                    const size_t n = (size_t)CW * CH;
+                                    r.mid.assign(n * 4, 0.0f); r.high.assign(n * 4, 0.0f);
+                                    float mLo = 1e9f, mHi = 0.0f, hLo = 1e9f, hHi = 0.0f;
+                                    for (size_t i = 0; i < n; ++i) {
+                                        World::AirColumn c;
+                                        c.groundM = (gcp.size() == n) ? std::max(gcp[i], 0.0f) : 0.0f;
+                                        c.tSurfC  = r.hi[i * 4 + 3];
+                                        const float mb = World::altitudeOfTempM(c, World::kMidCloudC + 0.5f * World::kMidCloudWidthC);
+                                        const float mt = World::altitudeOfTempM(c, World::kMidCloudC - 0.5f * World::kMidCloudWidthC);
+                                        const float hb = World::altitudeOfTempM(c, World::kHighCloudC + 0.5f * World::kHighCloudWidthC);
+                                        const float ht = World::altitudeOfTempM(c, World::kHighCloudC - 0.5f * World::kHighCloudWidthC);
+                                        const float mc = r.hi[i * 4 + 1], hc = r.hi[i * 4 + 0];
+                                        r.mid[i * 4 + 0] = mc;  r.mid[i * 4 + 1] = mb;  r.mid[i * 4 + 2] = mt;
+                                        r.high[i * 4 + 0] = hc; r.high[i * 4 + 1] = hb; r.high[i * 4 + 2] = ht;
+                                        if (mc > 0.01f) { mLo = std::min(mLo, mb); mHi = std::max(mHi, mt); }
+                                        if (hc > 0.01f) { hLo = std::min(hLo, hb); hHi = std::max(hHi, ht); }
+                                    }
+                                    if (mHi > 0.0f) { r.midLo = mLo; r.midHi = mHi; }
+                                    if (hHi > 0.0f) { r.highLo = hLo; r.highHi = hHi; }
                                     r.ms = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - t0).count();
                                     return r;
@@ -485,6 +656,7 @@ void CloudPass::draw(const Frame& f) {
                         const int CW = r.w, CH = r.h;
                         const std::vector<float>& sky = r.rgba;
                         m_lastSkyRGBA = r.rgba;   // lo que el ciclo del agua lee como "dónde llueve"
+                        m_lastMid = r.mid; m_lastHigh = r.high; m_lastSkyW = CW; m_lastSkyH = CH;
                         // Media por AREA (un texel polar cubre cos(lat) veces menos superficie).
                         const double kPi = 3.14159265358979323846;
                         double sum = 0.0, wsum = 0.0, sumTower = 0.0; int nStorm = 0;
@@ -540,11 +712,18 @@ void CloudPass::draw(const Frame& f) {
                         m_cloudCoverTex = dev->createTexture(ct);
                         ct.initialData = r.hi.data();
                         m_cloudHiTex = dev->createTexture(ct);
+                        // Las capas en altura, con el mismo fundido entre horneados.
+                        for (RHI::TextureHandle* t : { &m_cloudMidTexPrev, &m_cloudHighTexPrev }) if (RHI::valid(*t)) dev->destroy(*t);
+                        m_cloudMidTexPrev = m_cloudMidTex; m_cloudHighTexPrev = m_cloudHighTex;
+                        ct.initialData = r.mid.data();  m_cloudMidTex  = dev->createTexture(ct);
+                        ct.initialData = r.high.data(); m_cloudHighTex = dev->createTexture(ct);
+                        m_midLoM = r.midLo; m_midHiM = r.midHi; m_highLoM = r.highLo; m_highHiM = r.highHi;
                         m_cloudCoverMax = r.coverMax;
                         m_cloudBaseMin  = r.baseMin;
                         // La marcha es UNA por la columna de aire: hasta el techo de la atmosfera util
                         // (13 km: el hielo del vapor alto en el tropico esta a 10-11 km).
                         m_cloudTopMax   = std::max(r.topMax, 13000.0f);
+                        m_cloudConvTopMax = r.topMax;   // los cúmulos de malla: solo lo convectivo
                         static int s_bakeLog = 0;
                         if ((s_bakeLog++ % 30) == 0)   // cada minuto de mundo, no cada horneado
                             HARUKA_LOGI("Clouds", "cielo horneado %dx%d en %.1f ms (en hilo) · cobertura media por AREA %.3f "
@@ -574,7 +753,13 @@ void CloudPass::draw(const Frame& f) {
                 // ⚠️ LA SALIDA RAPIDA VA POR EL MAXIMO DEL PLANETA, no por el punto de la camara.
                 // Con el escalar, estando sobre un claro el pase se saltaba entero y no se dibujaba
                 // la tormenta que tenias a 300 km — que desde orbita es media pantalla.
-                if (coverMax > 0.01f || (f.planets && !f.planets->activeVortices().empty())) {
+                // ⚠️ CON LOS CÚMULOS DE MALLA ACTIVOS LA MARCHA NO PINTA NADA. Se dejó pintando el vapor
+                // en altura (máscara 6) y se veía como lo que era: las nubes VIEJAS, difusas, detrás de
+                // las nuevas (Andoni, 18-10: "hay nubes antiguas"). El horneado de arriba sigue: es el
+                // clima del que salen los racimos. `HARUKA_CLOUD_MODES` la vuelve a encender (diagnóstico).
+                static const bool s_modesForced = std::getenv("HARUKA_CLOUD_MODES") != nullptr;
+                const bool marchOff = m_clumpsActive && !s_modesForced;
+                if (!marchOff && (coverMax > 0.01f || (f.planets && !f.planets->activeVortices().empty()))) {
                     glm::dvec3 upD = camD - pcD; const double ul = glm::length(upD);
                     upD = (ul > 1e-9) ? upD / ul : glm::dvec3(0, 1, 0);
                     const float altEye = (float)(ul - prD);
@@ -709,11 +894,14 @@ void CloudPass::draw(const Frame& f) {
                     // se calibra con lo que de verdad resuelve, no con una constante.
                     const float fovYc = glm::radians(f.camera ? f.camera->zoom : 60.0f);
                     // w = máscara de capas (diagnóstico): HARUKA_CLOUD_MODES=1 cúmulo · 2 nivel medio · 4 cirro.
+                    // Con los cúmulos de MALLA activos la marcha solo pinta el vapor en altura (6): el
+                    // cúmulo lo dibujan ellos, y dos cúmulos superpuestos serían dos cielos.
                     static const float s_modes = [] {
                         const char* e = std::getenv("HARUKA_CLOUD_MODES");
-                        return e ? (float)std::atoi(e) : 7.0f;
+                        return e ? (float)std::atoi(e) : -1.0f;
                     }();
-                    cp.vortexN = glm::vec4((float)nv, ct, fovYc / (float)std::max(m_cloudRTH, 1), s_modes);
+                    const float modes = (s_modes >= 0.0f) ? s_modes : (m_clumpsActive ? 6.0f : 7.0f);
+                    cp.vortexN = glm::vec4((float)nv, ct, fovYc / (float)std::max(m_cloudRTH, 1), modes);
                     cp.aerial  = f.aerial;
                     {   // fundido del horneado (core/cloud_motion.h): 0 al llegar el nuevo, 1 antes del siguiente
                         const double wnow = f.planets ? f.planets->simulationTime() : 0.0;
@@ -762,6 +950,7 @@ void CloudPass::draw(const Frame& f) {
                         // 96,4 % en Vulkan, con el mismo shader y los mismos datos.
                         cctx->setViewport(0, 0, cw, ch);
                         cctx->bindPipeline(m_cloudUpPSO);
+                        cctx->bindUniformBuffer(5, m_cloudUBO);   // el rayo y la capa (ver cloud_upsample.frag)
                         cctx->bindTexture(0, dev->getColorTexture(m_cloudRT, 0));
                         // ⚠️ Y LA PROFUNDIDAD DE LA ESCENA, la misma copia que leyo el pase: con ella
                         // la composicion descarta las muestras de nube que se marcharon contra OTRA

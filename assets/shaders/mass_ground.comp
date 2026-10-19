@@ -1,0 +1,66 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64      : require
+/**
+ * @file mass_ground.comp
+ * @brief POSA LAS MATAS DE LOS BROTES MASIVOS SOBRE EL SUELO QUE SE DIBUJA. Genérico: no sabe si el
+ *        brote es hierba, flores o piedrecillas; reconstruye la mata `k` igual que `prop_burst.vert`
+ *        (`lib/mass_burst.glsl`) y le busca la cota DIBUJADA (`lib/ground_view.glsl`).
+ *
+ * ── POR QUÉ ──────────────────────────────────────────────────────────────────────────────────────
+ * Un brote planta todas sus matas en el plano tangente de su centro, a la cota del CAMPO en ese
+ * centro, sobre celdas de hasta 12 m. En una ladera del 10 % las de los bordes flotaban o se
+ * enterraban medio metro, y además el campo no es el suelo dibujado (zancada, ver ground_view):
+ * "la hierba sobresale del terreno". Aquí cada mata recibe cuánto subir o bajar por su vertical.
+ *
+ * ── LA DIRECCIÓN, SIN INVERSA EN FLOAT ───────────────────────────────────────────────────────────
+ * La inversa cubo↔esfera en GLSL es de float, y a radio terrestre eso es ~1 m en (lx, ly): el mismo
+ * tamaño que el error que se quiere quitar. La CPU manda por brote su (cara, lx, ly) en DOBLE y el
+ * jacobiano d(lx, ly)/d(u, v) del plano del brote; dentro de una celda la curvatura de la proyección
+ * son micras, así que la mata `k` cae en `l0 + J·offset` sin más.
+ *
+ * Un grupo por brote; cada hilo recorre sus matas de 64 en 64. Salida: `uSnap[base + k]` (m, sobre
+ * la vertical del brote) y `uStamp[brote] = (base, frame)`: el vertex solo la usa si es de ESTE frame,
+ * así que lo que no se ajustó no hay que limpiarlo.
+ */
+#include "lib/mass_burst.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std140, binding = 0) uniform MassGround {
+    ivec4 uNodeGrid;    // x = téxeles por nodo · y = celdas por nodo · z = nodos en la tabla · w = frame
+    ivec4 uIdxGrid;     // x,y = celdas del índice · z = trabajos · w = (libre)
+    dvec4 uIdx;         // esquina mínima del índice (lx,ly) · lado de celda · lado total
+    vec4  uMisc;        // x = hundido de la raíz (m)
+};
+
+struct NearNode { ivec4 node; ivec4 slot; };
+layout(std430, binding = 1) readonly  buffer NearNodes   { NearNode uNodes[]; };
+layout(std430, binding = 2) readonly  buffer NodeHeights { float uHeights[]; };
+layout(std430, binding = 3) readonly  buffer MassBursts  { HarukaMassBurst uBursts[]; };
+struct SnapJob { uvec4 a; dvec2 l; vec4 j; vec4 m; };   // brote, base, matas, cara · lx, ly · J · cota del centro
+layout(std430, binding = 4) readonly  buffer Jobs        { SnapJob uJobs[]; };
+layout(std430, binding = 5) writeonly buffer Snap        { float uSnap[]; };
+layout(std430, binding = 6) readonly  buffer IndexOffs   { uint uIdxOff[]; };
+layout(std430, binding = 7) readonly  buffer IndexList   { uint uIdxList[]; };
+layout(std430, binding = 8) writeonly buffer Stamps      { uvec2 uStamp[]; };
+
+#include "lib/ground_view.glsl"
+
+void main() {
+    const uint ji = gl_WorkGroupID.x;
+    if (ji >= uint(uIdxGrid.z)) return;
+    const SnapJob J = uJobs[ji];
+    const uint bi = J.a.x, base = J.a.y, n = J.a.z;
+    const int  face = int(J.a.w);
+    const HarukaMassBurst B = uBursts[bi];
+    const float cellM = uintBitsToFloat(B.c.w);
+    if (gl_LocalInvocationID.x == 0u) uStamp[bi] = uvec2(base, uint(uNodeGrid.w));
+    for (uint k = gl_LocalInvocationID.x; k < n; k += 64u) {
+        const HarukaMassElement e = harukaMassElement(B.c.x, k, cellM, B.a.w, B.b.w);
+        const double lx = J.l.x + double(J.j.x * e.offset.x + J.j.y * e.offset.y);
+        const double ly = J.l.y + double(J.j.z * e.offset.x + J.j.w * e.offset.y);
+        float h; vec2 dh;
+        uSnap[base + k] = harukaGroundHeight(face, lx, ly, h, dh) ? (h - uMisc.x - J.m.x) : 0.0;
+    }
+}

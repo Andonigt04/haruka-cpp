@@ -40,7 +40,6 @@ public:
     void composite(int windowW, int windowH);
 
 private:
-    void setupQuad();
     RHI::TextureHandle renderBloom(RHI::TextureHandle srcColorTex);
 
     std::unique_ptr<HDR> m_scene;        ///< la escena a escala de render (RGBA16F + depth)
@@ -48,7 +47,6 @@ private:
     bool m_active = false;
     bool m_wantFXAA = false, m_wantBloom = false;
 
-    RHI::BufferHandle     m_quadBuf{};
     /// BLOOM por PSO/Context: dos targets ping-pong a media resolucion y un UBO POR DRAW (en Vulkan
     /// los comandos se graban y se ejecutan despues; un UBO compartido leeria el ultimo valor).
     RHI::RenderPassHandle m_bloomPass[2] = {};

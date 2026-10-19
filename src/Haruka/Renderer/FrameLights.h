@@ -1,15 +1,14 @@
 #pragma once
 /**
  * @file Renderer/FrameLights.h
- * @brief LAS LUCES DEL FRAME: el sol (direccion y color del WorldSystem, multi-estrella), la luna y
- *        el ambiente que sale del CIELO QUE SE DIBUJA (armonicos esfericos de la misma paleta que
- *        sky.frag, recalculados por tramos de elevacion solar), repartidos al UBO por frame y al
- *        planeta. Y el diagnostico de los cuerpos emisores ("¿el sol no se renderiza?" son tres
+ * @brief LAS LUCES DEL FRAME, repartidas: el Sol, la Luna y el ambiente que calcula `SkyLight` por
+ *        fisica, llevados al UBO por frame (los shaders que aun leen `sunLightColor`) y al planeta. Y el diagnostico de los cuerpos emisores ("¿el sol no se renderiza?" son tres
  *        numeros: detras, fuera del frustum o subpixel). Vivia en `Application::passSceneSetup`.
  */
 #include <glm/glm.hpp>
 
 #include "Haruka/Renderer/SceneUBO.h"
+#include "Haruka/Renderer/SkyLight.h"
 
 namespace Haruka { namespace Core { class Camera; } }
 namespace Haruka::World::Planet { class PlanetarySystem; }
@@ -27,6 +26,7 @@ public:
         Core::Scene::SceneManager*    scene   = nullptr;     ///< para el sync perezoso de los cuerpos del mundo
         glm::vec3        cameraOrigin{0.0f};
         int              heightPx = 1;          ///< para el tamaño en pixeles del diagnostico
+        const SkyLightUBO* sky = nullptr;       ///< la luz del frame por fisica (Renderer/SkyLight.h)
         double           diagClock = 0.0;
     };
     /// Rellena sol, luna y ambiente en `fd`, y se los pasa al planeta (`setSunLight`, `setSkyAmbientSH`).

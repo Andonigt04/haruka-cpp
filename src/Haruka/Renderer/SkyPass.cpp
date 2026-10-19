@@ -150,10 +150,10 @@ void SkyPass::draw(const Frame& f) {
             const glm::vec2 windEN(glm::dot(wx.wind, eastW), glm::dot(wx.wind, northW));
             m_wx.windSlant = glm::clamp(windEN.x * 0.02f, -0.45f, 0.45f);   // para el pase de lluvia
 
-            // ── EL AIRE DEL FRAME (perspectiva aérea) ─────────────────────────────────────────
-            // Visibilidad L: ~60 km con aire seco, ~18 km húmedo, y la lluvia la recorta más. `día`
-            // es el mismo `harukaSkyDay` del cielo (smoothstep(-0,12, 0,22) de la elevación solar),
-            // para que el color del aire sea el del domo y no otro.
+            // ── LA VISIBILIDAD DEL CLIMA ──────────────────────────────────────────────────────
+            // L: ~60 km con aire seco, ~18 km húmedo, y la lluvia la recorta más. ⚠️ El COLOR y la
+            // atenuación del aire ya no salen de aquí: la perspectiva aérea es la integral física
+            // (`lib/aerial.glsl`). L la siguen usando las nubes para acotar su marcha.
             {
                 const float hum = glm::clamp(wx.humidity, 0.0f, 1.0f);
                 float L = glm::mix(60000.0f, 18000.0f, hum);

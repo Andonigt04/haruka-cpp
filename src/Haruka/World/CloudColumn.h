@@ -76,17 +76,26 @@ inline float condensationLevelM(const AirColumn& c) {
 constexpr float kMinBaseAglM = 600.0f;
 
 /**
- * @brief Qué parte de la cobertura de BUEN TIEMPO (el fondo por humedad, sin frente) es cúmulo.
+ * @brief La nube de BUEN TIEMPO (sin frente) por unidad de humedad: `kFairWeatherCover · H`. Es
+ * cúmulo entero; el vapor de nivel medio y el alto salen SOLO de los frentes.
  *
- * ⚠️ La cobertura media del mundo (0,4-0,6, calibrada contra el 0,67 de la Tierra) iba ENTERA a
- * cúmulo opaco. En la Tierra ese 0,67 es de todo tipo de nube: los cúmulos solos rara vez pasan del
- * 30 %; el resto son velos y altocúmulos, translúcidos. Con cúmulo al 50 % una capa vista de canto
- * se cierra (10 sorteos a 0,5 = 0,1 % de hueco): desde encima de la capa el suelo junto al horizonte
- * quedaba tapado al 83-96 % (medido en el banco, barrido de altitud). El fondo se reparte: esta
- * parte es cúmulo y el resto va al vapor de NIVEL MEDIO (condensa a −10 °C: altocúmulo, velo). Lo
- * que ponen los FRENTES sigue siendo convectivo entero: un frente es un cuerpo, no un velo.
+ * ⚠️ ERA 0,73 Y SE CALIBRÓ CONTRA EL 0,67 DE LA TIERRA, que es la cobertura de TODO tipo de nube
+ * (estratos, velos, altocúmulos, cirros). La mitad iba a cúmulo y la otra mitad a vapor medio, así
+ * que el cielo estaba cubierto casi siempre y en casi todas partes (Andoni, 18-10: "¿siempre hay
+ * nubes o casi siempre?"; con la capa media dibujada, el cielo salía CERRADO). Los cúmulos de buen
+ * tiempo cubren de 0,1 a 0,3 del cielo: esto deja 0,10 con la humedad media del mundo (0,286) y 0,32
+ * en la selva, y lo que sube de ahí son los frentes, que van y vienen. Para más o menos nube, se
+ * cambia aquí (el clima), no en el render.
  */
-constexpr float kFairWeatherCumulusShare = 0.5f;
+constexpr float kFairWeatherCover = 0.365f;
+
+/**
+ * @brief Qué parte de la cobertura de un frente queda como vapor de NIVEL MEDIO detrás de él.
+ * ⚠️ Era la cobertura entera: un frente que pasaba dejaba 0,6 de altocúmulo y, dibujado como nube
+ * (no como velo), el cielo salía cerrado (Andoni, 18-10: "hay muchas nubes"). El frente sigue
+ * trayendo nube media; menos.
+ */
+constexpr float kFrontMidVaporShare = 0.4f;
 
 /// La BASE de la nube convectiva (m sobre el nivel del mar): el nivel de condensación, nunca más
 /// bajo que `kMinBaseAglM` sobre el suelo. Es la que usan la fracción, la lluvia y el horneado.

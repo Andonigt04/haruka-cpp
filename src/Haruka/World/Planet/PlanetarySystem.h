@@ -170,6 +170,12 @@ public:
      *  en reposo. */
     double sampleWaterLevel(const glm::dvec3& worldPos) const;
 
+    /** @brief EL AGUA DINÁMICA (lluvia, cauces, charcos: la simulación de aguas someras) para la
+     *  física: `fn(posición)` = metros de LÁMINA ahí (≤ 0 = seco o fuera del parche). La enchufa el
+     *  fluido (`FluidBridge`). Sin ella, `sampleWaterLevel` no la veía: el agua que se dibujaba sobre
+     *  el parche no existía para el cuerpo, que andaba por el fondo como en seco. */
+    void setDynamicWaterFn(std::function<float(const glm::dvec3&)> fn) { m_dynamicWaterFn = std::move(fn); }
+
     /** @brief Profundidad de la columna de agua en un punto (m; 0 si no hay agua).
      *
      *  Es la del mar EN REPOSO (nivel − suelo), que es la que gobierna el bajío y la rompiente — la
@@ -183,6 +189,8 @@ public:
      *  Quien necesite la ola en CPU debe leerla de aquí y no volver a derivarla del viento: dos
      *  derivaciones son dos mares, y el motor ya pagó esa lección con el terreno. */
     const Water::OceanState& oceanState() const { return m_oceanState; }
+    /// Lámina mínima (m) para que el agua dinámica cuente como agua: por debajo es suelo mojado.
+    static constexpr float kDynamicWaterMinM = 0.05f;
     /// El ANCLA del mar (mundo): las funciones de ola reciben posiciones RELATIVAS a ella.
     const glm::dvec3& oceanAnchor() const { return m_sea.anchor; }
 
@@ -248,6 +256,12 @@ public:
     TerrestrialPlanet::RenderStats getTerrainRenderStats() const;
 
     double simulationTime() const { return m_simulationTime; }
+
+    /// LOS CUERPOS DEL CIELO para la marea del planeta ACTIVO: el Sol y la Luna de `SkyEphemeris.h`,
+    /// con su GM real, relativos al centro del planeta. Los pone `WorldSystem` cada frame. Sin ellos
+    /// el mar solo veia los cuerpos de `m_planets` (planetas con superficie: ni Sol ni Luna) y la
+    /// marea salia 0,00 m.
+    void setSkyTidalBodies(std::vector<TerrestrialPlanet::MassiveBody> bodies) { m_skyTidal = std::move(bodies); }
 
     /// ⚠️ THE WORLD'S CLOCK, WHEN THERE IS ONE — and this is a SET, not an offset, on purpose.
     ///
@@ -475,6 +489,7 @@ public:
     void generateSimpleLOD(const std::string& name, int lod);
 
 private:
+    std::function<float(const glm::dvec3&)> m_dynamicWaterFn;   ///< ver `setDynamicWaterFn`
     std::vector<Planet> m_planets;
     std::vector<std::unique_ptr<TerrestrialPlanet>> m_simplePlanets;
     double m_simulationTime = 0.0;
@@ -482,8 +497,11 @@ private:
     /// Estado del mar del frame. Lo calcula `updateOceanState`, lo suben los shaders y lo lee la
     /// física — UNA derivación, dos consumidores.
     Water::OceanState m_oceanState = Water::oceanDefaultState();
+    std::vector<TerrestrialPlanet::MassiveBody> m_skyTidal;   ///< ver `setSkyTidalBodies`
     /// El mar sigue al viento (filtrado) y lleva el ancla de la fase. Ver `SeaFollower`.
     Water::SeaFollower m_sea;
+    /// La mar de fondo que dice el clima (m, trenes largos): objetivo muestreado y valor filtrado.
+    float m_swellTarget = 0.0f, m_swellAmp = 0.0f, m_swellT = -1.0f, m_swellSampleT = -1.0e9f;
 
     // EL SUELO DEL JUEGO (ver sampleTerrainHeight)
     // ⚠️ AQUÍ VIVÍA `ReferenceSurface`: 12 KB de máquina —snapshot atómico, caché de 1 M entradas con

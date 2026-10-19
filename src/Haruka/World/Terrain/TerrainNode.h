@@ -2,7 +2,7 @@
  * @file TerrainNode.h
  * @brief DIRECCIONAMIENTO DE NODOS del quadtree de terreno (v5). Enteros dentro, dirección fuera.
  *
- * Es la pieza F1 de `docs/guides/PLAN_TERRENO_V5.md` y el cimiento de todo el plan: si esto no es
+ * Es la pieza F1 de `docs/archivo/PLAN_TERRENO_V5.md` y el cimiento de todo el plan: si esto no es
  * exacto, nada de lo que se apoye encima puede serlo.
  *
  * ── QUÉ RESUELVE, Y POR QUÉ NO ES "OTRA FORMA DE HACER LO MISMO" ────────────────────────────────

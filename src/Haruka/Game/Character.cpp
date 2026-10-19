@@ -392,7 +392,7 @@ void Character::updateCamera() {
     if (!camera) return;
 
     glm::dvec3 up = getEffectiveUp();
-    glm::dvec3 cameraPos = position + up * (double)(currentHeight * 0.9f);
+    glm::dvec3 cameraPos = position + up * (double)getEyeHeight();
     camera->position = Tools::WorldPos(cameraPos.x, cameraPos.y, cameraPos.z);
 
     glm::dvec3 referenceForward = glm::dvec3(0.0, 0.0, -1.0);

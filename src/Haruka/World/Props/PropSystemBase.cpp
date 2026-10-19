@@ -289,10 +289,10 @@ PropParams PropSystemBase::makeParams(const PrototypeGpu& pg, const glm::vec3& w
     pp.wind = wind; pp.time = time;
     pp.matPBR    = glm::vec4(pg.metallicS, pg.roughnessS, pg.aoS, (float)pg.mask);
     pp.originRel = glm::vec4(originRel, 0.0f);
-    pp.aerial    = f.aerial;
+    pp.material  = glm::vec4(1.0f, 0.0f, 0.0f, 0.0f);   // facetado, sin contraluz (vegetación, rocas, casas)
     pp.weather   = f.weather;
     const RHI::Device* dev = RHI::device();
-    pp.flags     = glm::vec4(dev && dev->backend() == RHI::Backend::Vulkan ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    pp.flags     = glm::vec4(dev && dev->backend() == RHI::Backend::Vulkan ? 1.0f : 0.0f, 1.0f, 1.0f, 0.0f);
     return pp;
 }
 

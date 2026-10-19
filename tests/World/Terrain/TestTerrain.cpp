@@ -715,14 +715,16 @@ void test_weather_fronts() {
         const float sDesierto = sueloA(0.059f), sMedia = sueloA(0.286f), sSelva = sueloA(0.882f);
         std::printf("    suelo de cobertura (fuera de frentes): desierto %.3f · media %.3f · selva %.3f\n",
                     sDesierto, sMedia, sSelva);
-        std::printf("      esperado con k = 0,73: %.3f / %.3f / %.3f\n",
-                    0.73f*0.059f, 0.73f*0.286f, 0.73f*0.882f);
-        CHECK(std::fabs(sMedia - 0.73f * 0.286f) < 0.01f, "el fondo de cobertura es k·H con k = 0,73");
+        const float k = Haruka::World::kFairWeatherCover;
+        std::printf("      esperado con k = %.3f: %.3f / %.3f / %.3f\n", k, k*0.059f, k*0.286f, k*0.882f);
+        CHECK(std::fabs(sMedia - k * 0.286f) < 0.01f, "el fondo de cobertura es k·H con k = kFairWeatherCover");
         // Y el invariante que ya rompio una vez: con poca humedad el cielo TIENE que poder limpiarse.
         // `weather_fronts` llama despejado a `cover < 0.15`; si el suelo lo supera, no hay un solo
         // punto limpio en el planeta a ninguna hora.
         CHECK(sDesierto < 0.15f, "con aire seco el cielo puede limpiarse de verdad");
-        CHECK(sSelva > 0.5f,     "y con aire humedo se cierra sin llegar a saturar");
+        // (Era > 0,5: el fondo cerraba el cielo humedo. Desde el 18-10 es solo cúmulo de buen tiempo,
+        //  0,1-0,3 del cielo como en la Tierra; lo que lo cierra son los frentes.)
+        CHECK(sSelva > 0.25f && sSelva < 0.45f, "y con aire humedo hay cúmulo de buen tiempo, sin cerrar el cielo");
     }
 
     World::WeatherSystem W2; W2.configure(4242u); W2.setTime(1000.0);

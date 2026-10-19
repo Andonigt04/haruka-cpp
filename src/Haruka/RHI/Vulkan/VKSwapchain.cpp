@@ -132,7 +132,11 @@ namespace Haruka::RHI::Vulkan
         sci.imageExtent = m_extent;
         sci.imageArrayLayers = 1;
         // TRANSFER_SRC: para readPixels/blitColor del backbuffer (fase 5). No molesta al present.
+        // TRANSFER_DST: `blitColor(rt, {})` copia AL backbuffer, y sin el bit la copia es ilegal
+        // (VUID-vkCmdCopyImage-aspect-06663). Solo si la superficie lo admite.
         sci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+            sci.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         sci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;   // una sola familia graphics+present
         sci.preTransform = caps.currentTransform;
         sci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;

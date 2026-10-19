@@ -1,0 +1,203 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+#extension GL_ARB_gpu_shader_fp64      : require
+/**
+ * @file ground_scatter.comp
+ * @brief SIEMBRA EN LA GPU, CADA FRAME, ELEMENTOS FINOS Y REPETIDOS SOBRE EL SUELO QUE SE DIBUJA, y
+ *        los deja como instancias del stream compacto de props (`lib/instance_pack.glsl`) más el
+ *        `instanceCount` de un comando indirecto. Los dibuja `prop_inst.vert` + `prop_inst.frag` con
+ *        la malla del prototipo: ni un vertex ni un fragment propios.
+ *
+ * No sabe QUÉ siembra (hierba, flores, piedrecillas, hojarasca): eso es el prototipo que se ata al
+ * dibujar y la escala/tinte que pide el UBO. Lo usa `GroundScatter` (World/Props/GroundScatter.h).
+ *
+ * ── LA RETÍCULA: FIJA AL MUNDO ───────────────────────────────────────────────────────────────────
+ * Cada GRUPO es una celda de la cara del cubo a un nivel fijo (`uElem.y` celdas por lado de cara, ~1 m
+ * en la Tierra) y cada hilo es (grupo, k). El elemento k del grupo (cara, cx, cy) sale de un hash de
+ * esos números: siempre en el mismo sitio, con la misma escala y el mismo giro. Al andar entran grupos
+ * y salen grupos; ninguno se recoloca. La CPU manda la lista de trabajo: por grupo visible, cuántos
+ * hilos lanzar (`pxGroupThreads`) partidos en tandas de 64 (`uWork`).
+ *
+ * ── EL DETALLE: PÍXELES, NO METROS ───────────────────────────────────────────────────────────────
+ * `lib/px_lod.glsl`: el elemento k se queda si `k < K·keep(d)` (un PREFIJO, sin parpadeo al moverse el
+ * umbral) y los que quedan se ensanchan `pxWiden(d)`, así que la cobertura en pantalla se conserva y
+ * el conjunto se hace más basto en vez de aclararse. El umbral (`uPx.z`) lo mueve el controlador de ms
+ * de GPU del que llama; el alcance sale de él. Ningún radio fijo.
+ *
+ * ── DÓNDE ────────────────────────────────────────────────────────────────────────────────────────
+ * La cota es la del nodo DIBUJADO (`lib/ground_view.glsl`), no la del campo. La densidad la declara el
+ * material del suelo (`harukaMaterialGrass` × `uMisc.z`). Nada bajo el mar, en pendientes de más de
+ * ~46°, en la boca recortada de una cueva, dentro de un cráter ni en una zona destruida (`uZone`).
+ *
+ * ── LO QUE PASA POR ENCIMA ───────────────────────────────────────────────────────────────────────
+ * El campo de suelo (`ground_field.frag`, canal rg = empuje) tumba el elemento hacia donde le empujan;
+ * la nieve acumulada lo acorta y lo vence. Se resuelve AQUÍ, una vez por elemento, y no en el vertex.
+ *
+ * Salida: `uInst[]` (10 palabras por instancia) y `instanceCount` (palabra 1 de `DrawCmd`). La palabra 5
+ * cuenta TODO lo que quiso entrar: si pasa de la capacidad, el que llama baja el detalle.
+ */
+#include "lib/cube_face.glsl"         // harukaCubeFaceToDir (double)
+#include "lib/base_field.glsl"        // harukaSampleBaseField (clima)
+#include "lib/terrain_material.glsl"  // harukaMaterialGrass (UBO de materiales, binding 12)
+#include "lib/px_lod.glsl"
+#include "lib/instance_pack.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std140, binding = 0) uniform GroundScatter {
+    vec4  uCenter;      // xyz = centro del planeta − cámara, parte GRUESA (múltiplo de 64 m) · w = R
+    vec4  uCenterLo;    // xyz = el resto fino · w = nivel del mar (m)
+    vec4  uPx;          // PxLod: focalPx, widthM, thrPx, widenMax
+    vec4  uElem;        // x = elementos por grupo (K) · y = grupos por lado de cara · z,w = escala mín/máx
+    vec4  uMisc;        // x = téxel (m) del nivel más fino de la tabla · y = semilla · z = densidad 0..1 · w = hundido de la raíz (m)
+    vec4  uWeather;     // x = nieve acumulada 0..1 · y = cuánto tumba el empuje (rad) · z = máx. pendiente (1 − n·up) · w = (libre)
+    ivec4 uNodeGrid;    // x = téxeles por nodo · y = celdas por nodo · z = nodos en la tabla · w = cráteres
+    ivec4 uIdxGrid;     // x,y = celdas del índice · z = capacidad (instancias) · w = zonas destruidas
+    dvec4 uIdx;         // x,y = esquina mínima del índice (lx,ly) · z = lado de celda · w = lado total
+    vec4  uPlane[4];    // los 4 planos laterales del frustum por el ojo (normales hacia dentro)
+    mat4  uVoxCutSpace;     // ventana de recorte de los vox (lib/vox_cut.glsl): misma convención que terrain_node.frag
+    vec4  uVoxCutInfo;      // x = 1 si la ventana vale
+    mat4  uVoxCutFineSpace;
+    vec4  uVoxCutAtlas;
+    vec4  uFieldO;      // campo de suelo: xyz = su centro relativo al ojo · w = téxel (m)
+    vec4  uFieldE;      // xyz = eje Este del campo · w = lado (téxeles); 0 = sin campo
+    vec4  uFieldN;      // xyz = eje Norte del campo · w = (libre)
+    vec4  uCraterC[32]; // xyz = centro relativo al ojo · w = radio (m)
+    vec4  uCraterU[32]; // xyz = vertical del cráter · w = hondo (m)
+    vec4  uZone[32];    // zonas destruidas: xyz = centro relativo al ojo · w = radio (m)
+};
+
+struct NearNode { ivec4 node; ivec4 slot; };
+layout(std430, binding = 1) readonly  buffer NearNodes   { NearNode uNodes[]; };
+layout(std430, binding = 2) readonly  buffer NodeHeights { float uHeights[]; };
+layout(std430, binding = 3) writeonly buffer Instances   { uint uInst[]; };
+layout(std430, binding = 4) buffer DrawCmd { uint uCmd[]; };   // indexCount, instanceCount, firstIndex, baseVertex, baseInstance, pedidas
+layout(std430, binding = 5) readonly  buffer Work        { uvec4 uWork[]; };   // cx, cy, cara | kBase << 3, hilos del grupo
+layout(std430, binding = 6) readonly  buffer IndexOffs   { uint uIdxOff[]; };
+layout(std430, binding = 7) readonly  buffer IndexList   { uint uIdxList[]; };
+
+layout(binding = 15) uniform sampler2DArray uBaseField;
+layout(binding = 16) uniform sampler2D      uVoxCut;
+layout(binding = 17) uniform sampler2D      uField;
+#include "lib/vox_cut.glsl"      // harukaVoxCutLookup
+#include "lib/ground_view.glsl"  // harukaGroundHeight
+
+uint gsHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+float gsHashF(uint h, uint salt) { return float(gsHash(h ^ (salt * 0x85EBCA6Bu)) & 0xFFFFFFu) / 16777216.0; }
+
+void main() {
+    const uvec4 w   = uWork[gl_WorkGroupID.x];
+    const uint  k   = (w.z >> 3) + gl_LocalInvocationID.x;
+    const uint  K   = uint(uElem.x);
+    if (k >= w.w || k >= K) return;
+    const int face  = int(w.z & 7u);
+    const int cx = int(w.x), cy = int(w.y);
+    const int cellsFace = int(uElem.y);
+
+    // ── EL ELEMENTO k DEL GRUPO: hash del mundo, no del frame ───────────────────────────────────
+    const uint hc = gsHash(uint(cx) * 73856093u ^ uint(cy) * 19349663u ^ uint(face) * 83492791u ^ floatBitsToUint(uMisc.y));
+    const uint hk = gsHash(hc ^ (k * 0x9E3779B9u));
+    const double cellD = 2.0LF / double(cellsFace);
+    const double lx = -1.0LF + (double(cx) + double(gsHashF(hk, 1u))) * cellD;
+    const double ly = -1.0LF + (double(cy) + double(gsHashF(hk, 2u))) * cellD;
+
+    const dvec3 dirD = harukaCubeFaceToDir(face, lx, ly);
+    const vec3  dir  = vec3(dirD);
+
+    // ── EL SUELO DIBUJADO ───────────────────────────────────────────────────────────────────────
+    float h; vec2 dh;
+    if (!harukaGroundHeight(face, lx, ly, h, dh)) return;   // ningún nodo dibujado lo cubre
+    if (h < uCenterLo.w + 0.3) return;                       // bajo el mar o en la orilla mojada
+
+    // Posición relativa al ojo: en double hasta cancelar con la cámara (misma convención que
+    // terrain_node.vert); sin esto la raíz temblaría medio metro.
+    const dvec3 pRel = dirD * (double(uCenter.w) + double(h) - double(uMisc.w)) + dvec3(uCenter.xyz);
+    const vec3  pos  = vec3(pRel) + uCenterLo.xyz;
+    const float dist = length(pos);
+
+    // ── EL PREFIJO POR PÍXELES ──────────────────────────────────────────────────────────────────
+    if (!pxKeeps(uPx, K, k, dist)) return;
+    // Lo que no cae en la IMAGEN no se escribe (margen: el elemento mide ~1 m y se ensancha).
+    if (dist > 3.0) for (int i = 0; i < 4; ++i) if (dot(pos, uPlane[i].xyz) < -1.0) return;
+
+    // ── EL MATERIAL: ¿aquí crece? ───────────────────────────────────────────────────────────────
+    vec3 t1 = normalize(abs(dir.y) < 0.99 ? cross(dir, vec3(0, 1, 0)) : cross(dir, vec3(1, 0, 0)));
+    vec3 t2 = cross(dir, t1);
+    // Pendiente del mapa con el téxel del nivel MÁS FINO de la tabla: sesga a "más pendiente" en los
+    // nodos gruesos, el lado seguro (menos en un cortado, nunca más).
+    const vec3  nrm   = normalize(dir - (t1 * dh.x + t2 * dh.y) / max(uMisc.x, 0.05));
+    const float slope = 1.0 - dot(nrm, dir);
+    if (slope > uWeather.z) return;
+    const vec3  fld   = harukaSampleBaseField(uBaseField, dir);
+    const float amount = harukaMaterialGrass(clamp(fld.z, 0.0, 1.0), fld.y, slope, h * 0.001) * uMisc.z;
+    if (gsHashF(hk, 7u) >= amount) return;   // como probabilidad: el borde ralea, no se corta
+
+    // ── LO QUE NO TIENE SUELO O YA NO TIENE NADA ────────────────────────────────────────────────
+    if (uVoxCutInfo.x > 0.5) {
+        bool inside;
+        const float cut = harukaVoxCutLookup(uVoxCut, uVoxCutSpace, uVoxCutFineSpace, uVoxCutInfo, uVoxCutAtlas, pos, true, inside).r;
+        if (inside && cut > 0.5) return;
+    }
+    for (int ci = 0; ci < uNodeGrid.w; ++ci) {   // cráter: tierra desnuda, y la cota del nodo es la de antes
+        const vec3 q  = pos - uCraterC[ci].xyz;
+        const vec3 hq = q - uCraterU[ci].xyz * dot(q, uCraterU[ci].xyz);
+        if (dot(hq, hq) < uCraterC[ci].w * uCraterC[ci].w) return;
+    }
+    for (int zi = 0; zi < uIdxGrid.w; ++zi) {
+        const vec3 q = pos - uZone[zi].xyz;
+        if (dot(q, q) < uZone[zi].w * uZone[zi].w) return;
+    }
+
+    // ── LA FORMA ────────────────────────────────────────────────────────────────────────────────
+    const float yaw   = gsHashF(hk, 5u) * 6.2831853;
+    const vec3  up    = normalize(mix(dir, nrm, 0.3));
+    const vec3  u     = normalize(t1 - up * dot(t1, up));
+    const vec3  v     = cross(up, u);
+    const vec3  X     = u * cos(yaw) + v * sin(yaw);
+    const vec3  Z     = cross(X, up);
+    vec4 q = harukaQuatFromBasis(X, up, Z);
+
+    float s     = mix(uElem.z, uElem.w, gsHashF(hk, 3u));
+    float hMul  = 1.0;
+    float bend  = uWeather.x * 0.55;   // la nieve vence hacia su +X (aleatorio por el yaw)
+    vec3  bendDir = X;
+    if (uFieldE.w > 0.0) {
+        const vec3 r  = pos - uFieldO.xyz;
+        const vec2 uv = vec2(dot(r, uFieldE.xyz), dot(r, uFieldN.xyz)) / (uFieldO.w * uFieldE.w) + 0.5;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+            const vec2  push = textureLod(uField, uv, 0.0).rg;
+            const float m    = length(push);
+            if (m > 0.02) {
+                bendDir = normalize(uFieldE.xyz * push.x + uFieldN.xyz * push.y);
+                bend    = max(bend, m * uWeather.y);
+                hMul    = 1.0 - 0.3 * m;
+            }
+        }
+    }
+    hMul *= 1.0 - 0.4 * uWeather.x;
+    if (bend > 1e-3) {
+        const vec3 axis = cross(up, bendDir);
+        if (dot(axis, axis) > 1e-8) q = harukaQuatMul(harukaQuatAxisAngle(normalize(axis), bend), q);
+    }
+    const float widen = pxWiden(uPx, dist);
+    const vec3  scale = vec3(s * widen, s * hMul, s * widen);
+    const float tint  = 0.85 + 0.30 * gsHashF(hk, 4u);
+
+    // ── EL REGISTRO ─────────────────────────────────────────────────────────────────────────────
+    // `uCmd[5]` cuenta lo PEDIDO; solo los huecos < capacidad se escriben y cuentan en el comando,
+    // así que `instanceCount` = min(pedidas, capacidad) y todos sus huecos están escritos.
+    const uint slot = atomicAdd(uCmd[5], 1u);
+    if (slot >= uint(uIdxGrid.z)) return;
+    const uint o = slot * HARUKA_INSTANCE_WORDS;
+    uInst[o + 0u] = floatBitsToUint(pos.x);
+    uInst[o + 1u] = floatBitsToUint(pos.y);
+    uInst[o + 2u] = floatBitsToUint(pos.z);
+    uInst[o + 3u] = packSnorm2x16(q.xy);
+    uInst[o + 4u] = packSnorm2x16(q.zw);
+    uInst[o + 5u] = floatBitsToUint(scale.x);
+    uInst[o + 6u] = floatBitsToUint(scale.y);
+    uInst[o + 7u] = floatBitsToUint(scale.z);
+    uInst[o + 8u] = harukaPackTint(vec3(tint));
+    uInst[o + 9u] = floatBitsToUint(0.0);
+    atomicAdd(uCmd[1], 1u);
+}

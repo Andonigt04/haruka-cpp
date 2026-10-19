@@ -11,6 +11,7 @@
 #include <vector>
 #include <cmath>
 #include <chrono>
+#include <glm/glm.hpp>
 #include "Haruka/RHI/RHIDevice.h"
 #include "Haruka/Renderer/GPUInstancing.h"
 #include "Haruka/World/Terrain/CubeSphere.h"      // dirToCubeFaceClosed (la sonda de la hierba)
@@ -40,9 +41,9 @@
 #include <unordered_set>
 
 #define HARUKA_AMD_GL_FP64 \
-    "AMD+OpenGL degrada el fp64 en su compilador GLSL (medido: el mismo hardware en Vulkan da lo " \
-    "mismo que NVIDIA). Cerrado, sin arreglo por codigo; el motor avisa al arrancar y por defecto " \
-    "usa Vulkan. Ver la nota de esta lista."
+    "AMD+OpenGL degrada la RAIZ en doble en su compilador GLSL (producto y division son exactos: " \
+    "medido con lib/fp64.glsl; Vulkan, el mismo hardware, la da bien). El motor avisa al arrancar y " \
+    "por defecto usa Vulkan. Ver la nota de esta lista."
 #define HARUKA_LLVMPIPE_FP64 "el rasterizador software de Mesa anuncia fp64 y no lo cumple"
 #define CHECK(cond, msg) do { \
     if (cond) { ++g_pass; } \
@@ -114,7 +115,7 @@ struct DriverDefect {
 
 
 
-extern DriverDefect g_driverDefects[19];
+extern DriverDefect g_driverDefects[16];
 
 
 
@@ -275,6 +276,7 @@ void testFrameCycle();
 void testBindingPersistence();
 void testComputeArraySampler();
 void testDispatchInsideRenderPass();
+void testBlitInsideRenderPass();
 void testTextureContent();
 void testVertexColor();
 void testVertexInterpolation();
@@ -282,11 +284,28 @@ void testGpuFp64();
 void testCullWindingWithProjection();
 void testEnginePipelines();
 void testItemPreviewShader();
+/**
+ * @brief Pone LA LUZ DEL FRAME (binding 31 + tabla del 20) en el escenario de un test: el ojo en el
+ *        origen, el centro del planeta en `planetCenterRelEye`, el Sol hacia `sunDir` a 1 UA y
+ *        exposicion fija `exposure`. Sin esto la luz es la del mediodia de referencia de `RHITestMain`
+ *        — otro ojo, otro planeta, otro Sol —, y el cielo, el aire y la luz del test no casan con su
+ *        geometria. `resetTestSkyLight` vuelve a la de referencia (llamarlo al acabar).
+ */
+void setTestSkyLight(const glm::dvec3& planetCenterRelEye, double planetR, const glm::dvec3& sunDir,
+                     double exposure = 1.0);
+void resetTestSkyLight();
+/// Igual, DENTRO de un frame ya abierto (no lo cierra): para quien rellena sus UBO por frame.
+void setTestSkyLightInFrame(const glm::dvec3& planetCenterRelEye, double planetR, const glm::dvec3& sunDir,
+                            double exposure = 1.0);
+void testScenePassObjects();
 void testInstancingRing();
 void testSkyAmbientGPU();
 void testPropLighting();
 void testPropLightSweep();
 void testGrassBurstDraw();
+void testGroundScatterGpu();
+void testShellScatterGpu();
+void testMassGroundGpu();
 void testSceneTerrainAndProp();
 void testTerrainNodeGpuParity();
 void testTerrainNodeGpuCost();
@@ -309,8 +328,6 @@ void testTerrainNodeSharedEdgeGpu();
 void testTerrainNodeStitchSymmetryGpu();
 void testTerrainNodeSceneSeams();
 void testTerrainNodeShadeCost();
-void testTerrainLighting();
-void testTerrainShadow();
 void testNodeVoxCut();
 void testNodeVoxCutFine();
 void testVoxFineBricks();
@@ -318,15 +335,25 @@ void testVoxNoCrack();
 void testWaterFieldParity();
 void testWaveNumberParity();
 void testNodeWaterDraws();
+void testNodeWaterCrater();
+void testNodeWaterSurfMesh();
+void testNodeWaterFarWaves();
 void testLakeShoreline();
 void testOceanWaveParity();
 void testOceanFoldParity();
 void testWaterShapes();
+void testApicFluidStill();
+void testApicFluidBreaker();
+void testApicFluidChannel();
+void testApicFluidSurface();
+void testApicFluidDraw();
+void testApicFluidBody();
 void testSoftBodyMesh();
 void testCloudPassDraws();
 void testCloudPassOrbit();
 void testCloudHighLayers();
 void testCloudPassSceneDepth();
+void testCloudBelowHorizon();
 void testCloudFlatTop();
 void testCloudMotionFrames();
 void testCloudMarchConvergence();
@@ -339,3 +366,4 @@ void testCloudColumnParity();
 void testCloudNoiseParity();
 void testSkyLayersHaveDepth();
 void testAtmosphereLimb();
+void testSkyAtmosphereParity();

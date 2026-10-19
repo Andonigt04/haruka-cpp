@@ -35,6 +35,7 @@
 #include "Haruka/World/Planet/PlanetFields.h"        // FieldSample (fieldSampleAt)
 #include "Haruka/World/Water/OceanWave.h"            // OceanState: el estado del mar que se sube a la GPU
 #include "Haruka/World/Terrain/TerrainNodeRenderer.h" // v5: pase de terreno por nodos (HARUKA_TERRAIN_V5=1)
+#include "Haruka/World/Planet/GroundView.h"          // el suelo dibujado, para lo que se apoye en él en la GPU
 #include "Haruka/World/Vox/VoxWorld.h"             // el campo volumétrico: cuevas y lo que se pica
 #include "Haruka/Renderer/VoxRenderer.h"
 #include "Haruka/World/WeatherSystem.h"
@@ -228,7 +229,7 @@ public:
      * inventado que no sabía nada del cielo bajo el que está el terreno. MEDIDO: el ambiente real
      * del cielo es entre 5 y 8 veces mayor, y de otro color. Con el escalar, cualquier superficie
      * sin sol directo caía a 0,043 de luminancia bajo un cielo de 0,60 — el agujero negro de las
-     * sombras. Ahora llega integrado del MISMO cielo que se dibuja (`SkyAmbient.cpp`).
+     * sombras. Ahora llega de la luz del frame, la MISMA física que pinta el cielo (`Renderer/SkyLight`).
      *
      * No se recorta a [0,1]: es un multiplicador de albedo ya normalizado (irradiancia/π) y
      * recortarlo volvería a inventar un techo.
@@ -367,6 +368,12 @@ public:
     /** @brief VISTA DE EDICIÓN (IDE): sin la lámina de agua (mar y lagos no se dibujan; el campo
      *  y la física no cambian). */
     void setWaterVisible(bool on) { m_waterVisible = on; }
+    /// El parche del líquido 3D (lo pone `World/Water/LiquidPatch` cada frame): ahí el agua del
+    /// pase de nodos no se dibuja. `on = false` lo quita.
+    void setLiquidClip(bool on, const glm::dvec3& origin, const glm::dvec3& axisX, const glm::dvec3& axisZ,
+                       double sizeX, double sizeZ) {
+        m_liquidClip = { on, origin, axisX, axisZ, sizeX, sizeZ };
+    }
     /** @brief Vista de depuración del terreno (`terrain_node.frag`): 15 = cota sobre el nivel del
      *  mar (tinte + isolíneas + costa). −1 = la del entorno (`HARUKA_TERRAIN_V5_DEBUG`). */
     void setTerrainDebugView(int v) { m_nodeRenderer.setDebugViewOverride(v); m_editDebugView = v; }
@@ -428,10 +435,6 @@ public:
     const Props::PropLayerTable& propLayers() const { return m_propLayers; }
 
 private:
-    /// ¿Se ejecutó el culling por compute en `prepare()` de este frame? Lo consume `render()`
-    /// para elegir entre el draw indirecto (culleado) y el camino normal.
-    bool m_cullReady = false;
-
     TerrestrialPlanetConfig m_config;
     GeologyOutput m_geology;
     ClimateOutput m_climate;
@@ -445,6 +448,8 @@ private:
      */
     float m_seaLevelOffsetM = 0.0f;
     bool  m_waterVisible = true;   ///< ver setWaterVisible
+    struct LiquidClip { bool on = false; glm::dvec3 origin{ 0.0 }, axisX{ 1, 0, 0 }, axisZ{ 0, 0, 1 }; double sizeX = 0.0, sizeZ = 0.0; };
+    LiquidClip m_liquidClip;       ///< ver setLiquidClip
 
     /** @brief Ancho de la biome map horneada (2:1, alto = ancho/2). */
     int m_mapRes = 512;
@@ -683,16 +688,12 @@ private:
     // el resto. Si tocas esos uniformes, este es su lado de CPU.
     Haruka::RHI::BufferHandle m_ringGridVB, m_ringGridIB;
 
-    // EL SUELO CERCANO QUE VIENE DE LA FÍSICA (ver `setNearGroundRing`). El planeta no lo genera:
-    // lo recibe ya montado y solo lo dibuja con su propio material, que es el punto entero.
-    Haruka::RHI::BufferHandle m_nearRingVB{}, m_nearRingIB{}, m_nearRingUBO{};
+    // EL SUELO CERCANO QUE VIENE DE LA FÍSICA (ver `setNearGroundRing`). Ya no se dibuja: solo
+    // queda cuántos índices trae y su ancla.
     uint32_t                  m_nearRingIndices = 0;
     // Ancla del anillo en coordenadas de MUNDO. El clipmap se ancla AQUÍ y no en la cámara: si no,
     // las dos retículas caen en celdas distintas (medido: hasta 4 m) y dejan de compartir vértices.
     glm::dvec3                m_nearRingAnchor{0.0};
-    // ¿Se dibuja el anillo cercano ESTE frame? Solo con el clipmap sin estirar (ver ClipParams): su
-    // hueco de 192 m únicamente encaja en un borde de parche cuando el parche mide 128 m.
-    bool                      m_nearRingVisible = false;
     bool                      m_nearRingAnchored = false;
 public:
     /** @brief Entrega el suelo cercano ya montado por la física, en float RELATIVO a `anchorRelEye`.
@@ -754,19 +755,6 @@ private:
     uint32_t m_indexCount = 0;
     uint32_t m_vertexCount = 0;
 
-    // TESELACIÓN: mismo vertex buffer, OTRO índice (parches del quad).
-    Haruka::RHI::BufferHandle m_patchIB;
-    uint32_t m_patchIndexCount = 0;
-    // ── Culling de parches en GPU (terrain_cull.comp). Opt-in: HARUKA_GPU_CULL=1 ────────────────
-    // La malla base envía 393 216 parches por frame y el TCS mata casi todos (a pie se ve parte de
-    // UNO). El compute los descarta antes, con una invocación por parche en vez de cuatro, y
-    // compacta los supervivientes para dibujar con `drawIndexedIndirect`.
-    uint32_t m_patchCount = 0;                        ///< parches de la malla base
-    Haruka::RHI::BufferHandle m_patchBoundsSSBO;      ///< 4 esquinas por parche (estático)
-    Haruka::RHI::BufferHandle m_patchIdxSSBO;         ///< el índice de parches como storage (origen)
-    Haruka::RHI::BufferHandle m_patchIdxCulled;       ///< índice compactado (destino + draw)
-    Haruka::RHI::BufferHandle m_patchCullCmd;         ///< DrawElementsIndirectCommand
-    Haruka::RHI::BufferHandle m_patchCullUBO;         ///< CullParams (cámara + radio + nº parches)
 
 
     // ── EL MAR ──────────────────────────────────────────────────────────────────────────────────
@@ -795,7 +783,7 @@ private:
     float                      m_inlandSpanM = 0.0f;
     /// PASE DE TERRENO v5 (quadtree + pool de nodos). Opt-in con `HARUKA_TERRAIN_V5=1`; cuando está
     /// activo SUSTITUYE a la malla base y al clipmap — no se suma a ellos, porque tres superficies
-    /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/guides/PLAN_TERRENO_V5.md`.
+    /// coplanares es justo el bug que el v5 viene a quitar. Ver `docs/archivo/PLAN_TERRENO_V5.md`.
     Terrain::TerrainNodeRenderer m_nodeRenderer;
 
     // ── EL CAMPO VOLUMÉTRICO: cuevas sembradas y todo lo que el jugador pique o rellene ──────────
@@ -817,6 +805,10 @@ public:
      *  nodos. */
     void craterListNear(const glm::dvec3& cameraPos, size_t maxN,
                         std::vector<glm::vec4>& C, std::vector<glm::vec4>& U) const;
+    /** @brief EL SUELO DIBUJADO este frame alrededor de la cámara, hasta `radiusM` (ver
+     *  GroundView.h). Válido después de `prepare()`. false si el pase de nodos no está activo o aún
+     *  no hay ningún nodo resuelto: sin suelo dibujado no hay donde apoyar nada. */
+    bool groundView(const glm::dvec3& cameraPos, double radiusM, GroundView& out) const;
     Vox::VoxWorld&       vox()       { return m_vox; }
     const Vox::VoxWorld& vox() const { return m_vox; }
     const Renderer::VoxRenderer& voxRenderer() const { return m_voxRenderer; }
@@ -844,6 +836,8 @@ private:
     /// sobreviven a Nyquist con la celda que el agua está dibujando (el log de `[Mar]`). Sin él, "el
     /// mar está plano" y "el mar no se dibuja" se ven igual desde fuera.
     Water::OceanState m_oceanStateCPU = Water::oceanDefaultState();
+    float m_surfHs = -1.0f;                       ///< la Hs con la que se barrió la franja
+    float m_surfDepthM = 0.0f, m_surfUpM = 0.0f, m_surfQuadM = 0.0f;  ///< franja de rompiente (ver `setOceanState`)
     Haruka::RHI::BufferHandle  m_oceanParamsUBO;
     bool                       m_oceanParamsValid = false;
 
@@ -898,17 +892,9 @@ private:
     void bakeWaterMap();
 
     // Shaders y UBO COMPARTIDOS entre planetas (estáticos).
+    /// El terreno de RESPALDO básico (`planet/simple.vert/.frag`, color por vértice): solo dibuja con
+    /// `HARUKA_TERRAIN_V5=0`. Los demás (teselado, biomas, anillo, culling) se borraron el 2026-10-18.
     static Haruka::RHI::PipelineHandle s_pipeline;
-    static Haruka::RHI::PipelineHandle s_texPipeline;
-    static Haruka::RHI::PipelineHandle s_biomePipeline;
-    static Haruka::RHI::PipelineHandle s_tessPipeline;
-    /// Pipeline de COMPUTE del culling de parches (terrain_cull.comp). Compartido: la malla base es
-    /// del mismo tipo en todos los planetas. Inválido = el camino de siempre (draw de todo).
-    static Haruka::RHI::PipelineHandle s_cullPipeline;
-    /** @brief Mar cercano: la rejilla del clipmap teselada con oleaje de Gerstner. */
-    /** @brief Mar lejano: la esfera lisa a nivel del mar, con el MISMO fragment. */
-    static Haruka::RHI::PipelineHandle s_nearRingPipeline;
-    static Haruka::RHI::PipelineHandle s_wirePipeline;
     static Haruka::RHI::BufferHandle s_ubo;
     static bool s_shadersReady;
 };

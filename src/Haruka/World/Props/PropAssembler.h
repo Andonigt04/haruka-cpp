@@ -131,7 +131,7 @@ inline glm::vec3 propPatchDir(const PropWorldAnchor& a, float px, float pz) {
  *   · position  = planetCenter + dir*(radius + heightM) → asentado sobre el campo.
  *   · scale     = el de la capa (variación por celda).
  *   · meshRenderer = MeshRendererComponent::setMesh(bakeTreeMesh) — sube los buffers.
- *   · material  = MaterialComponent con shaderPath "shaders/pbr.frag" y las texturas PBR.
+ *   · material  = MaterialComponent con las texturas PBR (el shader es el del pase).
  *
  * @param baked  Salida de `bakeProps`.
  * @param anchor Ancla del parche en el mundo.
@@ -172,7 +172,6 @@ inline std::vector<std::shared_ptr<Core::Scene::SceneObject>> assembleSceneObjec
         // Material PBR con las texturas horneadas.
         auto mat = std::make_shared<Core::Components::MaterialComponent>();
         mat->name = b.baseName;
-        mat->shaderPath = "shaders/pbr.frag";
         mat->textures["albedo"]    = b.tex.albedo;
         mat->textures["normal"]    = b.tex.normal;
         mat->textures["metallic"]  = b.tex.metallic;

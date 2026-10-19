@@ -31,10 +31,10 @@ layout(std140, binding = 0) uniform PerFrameData {
     vec3 moonLightColor; float _pad4;
 };
 
-/// Tonemap de salida de los pases forward: Reinhard + gamma con HDR, o recorte sin él.
-/// Estaba copiado literal al final de cada fragment de malla.
+/// Salida de los pases forward. ⚠️ YA NO ES REINHARD + GAMMA: la luz llega expuesta y codificada
+/// para pantalla desde `lib/sky_light.glsl` (`harukaLit`, `harukaDisplay`), igual que el terreno, el
+/// agua y el cielo. Codificar otra vez aquí oscurecía las mallas frente a todo lo demás.
 vec3 harukaOutputTonemap(vec3 c) {
-    if (enableHDR != 0) return pow(c / (c + vec3(1.0)), vec3(1.0 / 2.2));
     return clamp(c, 0.0, 1.0);
 }
 

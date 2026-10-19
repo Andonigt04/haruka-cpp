@@ -4,7 +4,7 @@
 
 # --- 3b. Build-time modules (MODULES=1011...) ---
 # Bitmask string, one char per module, in this FIXED order. '1'=on, '0'=off.
-# Absent/short string → missing positions default ON. See docs/MODULES.md.
+# Absent/short string → missing positions default ON. See docs/guides/MODULOS.md.
 set(HARUKA_MODULE_LIST
     FLUIDS      # 0: ocean + shallow-water + PBF + hybrid
     DEFORM      # 1: terrain deformation field

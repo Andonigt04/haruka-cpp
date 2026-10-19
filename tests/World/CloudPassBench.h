@@ -150,6 +150,9 @@ struct CloudPassBench {
 
     // El relleno del UBO, aparte: el caso de coste monta su propia secuencia de pases y necesita los
     // MISMOS uniformes que el resto, no una copia que pueda divergir.
+    /// Sin atmosfera en la luz (ni aire de en medio ni transmitancia): para los casos que miden OTRA
+    /// cosa —la composicion del borde— y a los que la neblina de 60 km de aire les quita el contraste.
+    bool sinAire = false;
     void fillUBO(float cover) {
             const glm::dvec3 pcR = -upCur * (R + (double)ojoA);
             // "Arriba" de la camara = la vertical del OJO. Antes era `cross(mira, +Y)`, que es un vector
@@ -169,6 +172,8 @@ struct CloudPassBench {
             // igual y el careo de sombreado no mediria nada.
             const glm::vec3 sun = sunCur;
             u.sun[0] = sun.x; u.sun[1] = sun.y; u.sun[2] = sun.z; u.sun[3] = sun.y;
+            // La luz del frame (Sol, aire) en ESTE escenario: la nube la lee de ahi, no de `sunColor`.
+            setTestSkyLightInFrame(pcR, sinAire ? 0.0 : R, glm::dvec3(sun));
             u.sunColor[0] = u.sunColor[1] = u.sunColor[2] = 1.0f; u.sunColor[3] = 1.0f;
             u.wind[0] = windOffX; u.wind[1] = windOffY; u.wind[2] = 7.0f; u.wind[3] = ojoA;
             u.misc[0] = 1.0f;                       // atmosfera: dentro
@@ -251,6 +256,7 @@ struct CloudPassBench {
     void orbit();
     void highLayers();
     void sceneDepth();
+    void belowHorizon();
     void flatTop();
     void motion();
     void convergence();

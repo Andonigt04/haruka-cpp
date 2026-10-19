@@ -36,6 +36,14 @@ namespace Haruka::RHI::Vulkan
         }
     }
 
+    /// ⚠️ LA PROFUNDIDAD DE 24 BITS NO EXISTE EN TODAS LAS GPUs. AMD (RADV, RDNA) no anuncia ni
+    /// `D24_UNORM_S8_UINT` ni `X8_D24_UNORM_PACK32`, y aun asi se creaban imagenes y render passes con
+    /// ellos (el default de `RenderTargetDesc` es D24S8): comportamiento indefinido en cada target con
+    /// profundidad por defecto. La validacion lo cantaba (VUID-...-02251/02650/02274). El device
+    /// elige al arrancar (`VKDevice::pickDepthFormats`) y cae a 32 bits flotantes si no estan.
+    inline VkFormat g_fmtD24   = VK_FORMAT_X8_D24_UNORM_PACK32;
+    inline VkFormat g_fmtD24S8 = VK_FORMAT_D24_UNORM_S8_UINT;
+
     /** @brief Formato de textura/attachment traducido a Vulkan. */
     inline VkFormat texFmt(Format f)
     {
@@ -57,8 +65,8 @@ namespace Haruka::RHI::Vulkan
             case Format::RG32UI:      return VK_FORMAT_R32G32_UINT;
             case Format::RGBA16UI:    return VK_FORMAT_R16G16B16A16_UINT;
             case Format::R32F:        return VK_FORMAT_R32_SFLOAT;
-            case Format::D24:         return VK_FORMAT_X8_D24_UNORM_PACK32;
-            case Format::D24S8:       return VK_FORMAT_D24_UNORM_S8_UINT;
+            case Format::D24:         return g_fmtD24;     // o D32 si la GPU no lo tiene
+            case Format::D24S8:       return g_fmtD24S8;   // o D32S8 si la GPU no lo tiene
             case Format::D32F:        return VK_FORMAT_D32_SFLOAT;
             default:                  return VK_FORMAT_R8G8B8A8_UNORM;
         }
@@ -129,8 +137,10 @@ namespace Haruka::RHI::Vulkan
             case BufferUsage::Vertex:   return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
             case BufferUsage::Index:    return VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
             case BufferUsage::Uniform:  return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            case BufferUsage::Indirect: return VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-            case BufferUsage::Storage:  return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            // Un compute que genera trabajo escribe el comando indirecto (SSBO) y sus instancias, que
+            // luego lee el stream de vértices: en GL un buffer vale para todo; aquí hay que pedirlo.
+            case BufferUsage::Indirect: return VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+            case BufferUsage::Storage:  return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
         }
         return VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     }
@@ -200,6 +210,15 @@ namespace Haruka::RHI::Vulkan
                                 (f == VK_FORMAT_D32_SFLOAT_S8_UINT) ||
                                 (f == VK_FORMAT_D16_UNORM_S8_UINT);
         return VK_IMAGE_ASPECT_DEPTH_BIT | (hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+    }
+    inline bool isDepthFormat(VkFormat f) {
+        return f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_X8_D24_UNORM_PACK32 || f == VK_FORMAT_D32_SFLOAT ||
+               f == VK_FORMAT_D16_UNORM_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT ||
+               f == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    }
+    /// Aspecto de una barrera sobre toda la imagen: el de profundidad si lo es, COLOR si no.
+    inline VkImageAspectFlags imageAspectOf(VkFormat f) {
+        return isDepthFormat(f) ? depthAspectOf(f) : VK_IMAGE_ASPECT_COLOR_BIT;
     }
     inline uint32_t textureSlotToBinding(uint32_t slot) { return kTextureBindingBase + slot; }
 }

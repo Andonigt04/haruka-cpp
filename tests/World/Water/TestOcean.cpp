@@ -1176,7 +1176,7 @@ void test_ocean_mesh_stretch() {
     CHECK(fracInv < 0.005,
           "TECHO MEDIDO: las celdas invertidas de la rompiente no pasan del 0,5 % (hoy 0,18 %)");
     CHECK(peorGlobal < 2.5,
-          "TECHO MEDIDO: ninguna celda se estira mas de 2,5x (hoy 2,34x)");
+          "TECHO MEDIDO: ninguna celda se estira mas de 2,5x (hoy 2,29x)");
 }
 
 // ================================================================================================

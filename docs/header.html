@@ -28,65 +28,39 @@ $darkmode
 $extrastylesheet
 <!-- Arbol de ejecucion (tools/doc_flow.py) -->
 <script type="text/javascript">var harukaRelPath="$relpath^";</script>
+<!-- Navegacion de las guias (tools/doc_meta.py) -->
+<script type="text/javascript" src="$relpath^haruka_docs.js"></script>
 </head>
 <body>
-<!-- Top navigation bar (Tailwind utilities; styled via theme/haruka.css) -->
+<!-- Top bar (Tailwind utilities; styled via theme/haruka.css) -->
 <nav class="haruka-topbar flex items-center gap-6 px-6 border-b border-haruka-border bg-haruka-surface" style="height:3.25rem">
   <a href="$relpath^index.html" class="flex items-center gap-2 text-haruka-heading font-bold text-lg no-underline">
     <span class="inline-block w-2.5 h-2.5 rounded-sm" style="background:#478cbf"></span>
     Haruka&nbsp;Engine
   </a>
   <span class="text-haruka-muted text-sm hidden sm:inline">$projectbrief</span>
-  <div class="ml-auto flex items-center gap-5 text-sm">
-    <a href="$relpath^annotated.html" class="text-haruka-fg hover:text-haruka-blueHi no-underline">Classes</a>
-    <a href="$relpath^files.html" class="text-haruka-fg hover:text-haruka-blueHi no-underline">Files</a>
-    <a href="$relpath^namespaces.html" class="text-haruka-fg hover:text-haruka-blueHi no-underline">Namespaces</a>
-    <a href="$relpath^pages.html" class="text-haruka-fg hover:text-haruka-blueHi no-underline">Guides</a>
-  </div>
 </nav>
-<!--BEGIN FULL_SIDEBAR-->
-<div id="side-nav" class="ui-resizable side-nav-resizable"><!-- do not remove this div, it is closed by doxygen! -->
-<!--END FULL_SIDEBAR-->
+
+<!-- Barra izquierda: Fijadas + Guias (haruka_docs.js), y debajo Comunes (fijo) -->
+<div class="haruka-layout">
+<aside id="haruka-side">
+  <!--BEGIN SEARCHENGINE-->
+  <div class="haruka-search">$searchbox</div>
+  <!--END SEARCHENGINE-->
+  <nav id="haruka-docnav">
+    <div class="hd-sec"><ul class="hd-list"><li><a href="$relpath^pages.html">Guías</a></li></ul></div>
+  </nav>
+  <div class="hd-sec hd-commons">
+    <div class="hd-sec-title">Comunes</div>
+    <ul class="hd-list">
+      <li><a href="$relpath^annotated.html">Clases</a></li>
+      <li><a href="$relpath^files.html">Archivos</a></li>
+      <li><a href="$relpath^namespaces.html">Namespaces</a></li>
+      <li><a href="$relpath^pages.html">Todas las páginas</a></li>
+    </ul>
+  </div>
+</aside>
+<div id="haruka-main">
 
 <div id="top"><!-- do not remove this div, it is closed by doxygen! -->
-
-<!--BEGIN TITLEAREA-->
-<div id="titlearea">
-<table cellspacing="0" cellpadding="0">
- <tbody>
- <tr id="projectrow">
-  <!--BEGIN PROJECT_LOGO-->
-  <td id="projectlogo"><img alt="Logo" src="$relpath^$projectlogo"$logosize/></td>
-  <!--END PROJECT_LOGO-->
-  <!--BEGIN PROJECT_NAME-->
-  <td id="projectalign">
-   <div id="projectname">$projectname<!--BEGIN PROJECT_NUMBER--><span id="projectnumber">&#160;$projectnumber</span><!--END PROJECT_NUMBER-->
-   </div>
-   <!--BEGIN PROJECT_BRIEF--><div id="projectbrief">$projectbrief</div><!--END PROJECT_BRIEF-->
-  </td>
-  <!--END PROJECT_NAME-->
-  <!--BEGIN !PROJECT_NAME-->
-   <!--BEGIN PROJECT_BRIEF-->
-    <td>
-    <div id="projectbrief">$projectbrief</div>
-    </td>
-   <!--END PROJECT_BRIEF-->
-  <!--END !PROJECT_NAME-->
-  <!--BEGIN DISABLE_INDEX-->
-   <!--BEGIN SEARCHENGINE-->
-     <!--BEGIN !FULL_SIDEBAR-->
-    <td>$searchbox</td>
-     <!--END !FULL_SIDEBAR-->
-   <!--END SEARCHENGINE-->
-  <!--END DISABLE_INDEX-->
- </tr>
-  <!--BEGIN SEARCHENGINE-->
-   <!--BEGIN FULL_SIDEBAR-->
-   <tr><td colspan="2">$searchbox</td></tr>
-   <!--END FULL_SIDEBAR-->
-  <!--END SEARCHENGINE-->
- </tbody>
-</table>
-</div>
-<!--END TITLEAREA-->
 <!-- end header part -->

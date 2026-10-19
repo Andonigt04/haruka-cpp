@@ -28,6 +28,16 @@
  * (`flattenNear`), agua que la tumba (`onRefresh`), destrucción por zona (`destroyAt`: explosión,
  * fuego, siega) o por mata (`nearest` + `destroyElement`: coger una flor); las dos acaban en los
  * mismos bits y persisten por semilla de brote (`serialize`/`restore`).
+ *
+ * ── LA CUBIERTA DENSA: "CADA CM" ─────────────────────────────────────────────────────────────────
+ *
+ * Los brotes no llegan a cubrir el suelo (≤1024 matas por celda de 12 m, una cota por celda). Debajo
+ * de ellos va la CUBIERTA (`GroundScatter`): el prototipo de hierba sembrado en la GPU cada frame
+ * sobre el suelo DIBUJADO, con detalle por píxeles y un lazo de ms de GPU (sin radios), sin nada
+ * guardado por elemento. Lo que la toca: el campo de suelo (`GroundField`, las pisadas la tumban),
+ * los cráteres y bocas de cueva (no crece), y las ZONAS destruidas (`destroyAt` las guarda: una
+ * esfera por evento, persistente con `serializeZones`). Su compute va en `prepareGpu`, antes del
+ * pase de escena; su dibujo, en `draw`, con `prop_inst.vert/.frag` y la malla del prototipo.
  */
 #include <cstdint>
 #include <functional>
@@ -37,7 +47,10 @@
 #include <glm/glm.hpp>
 
 #include "Haruka/RHI/RHIResources.h"
+#include "Haruka/Renderer/GroundField.h"
+#include "Haruka/World/Props/GroundScatter.h"
 #include "Haruka/World/Props/MassBurst.h"
+#include "Haruka/World/Props/MassGround.h"
 #include "Haruka/World/Props/PropSystemBase.h"
 
 namespace Haruka::World::Props {
@@ -57,9 +70,28 @@ public:
         int        proto   = -1;      ///< prototipo (índice del registro de props)
         glm::dvec3 pos{0.0};          ///< raíz de la mata, en el mundo
     };
+    /// Una zona destruida (explosión, fuego, siega): ahí la cubierta densa no vuelve a salir.
+    struct Zone {
+        glm::dvec3 center{0.0};
+        double     radius = 0.0;
+    };
+    /// Lo que la cubierta necesita del frame para su compute.
+    struct GpuFrame {
+        Core::Camera*            camera  = nullptr;
+        Planet::PlanetarySystem* planets = nullptr;
+        uint32_t                 viewW = 0, viewH = 0;   ///< el framebuffer que se dibuja
+        float                    snow  = 0.0f;           ///< nieve acumulada 0..1
+        float                    dt    = 0.016f;
+    };
     GrassSystem() = default;
     ~GrassSystem() override;
     void shutdown() override;   ///< suelta la GPU (el device sigue vivo)
+
+    /** @brief El trabajo de GPU de la cubierta: campo de suelo + siembra. FUERA de cualquier render
+     *  pass y DESPUÉS de `prepare` del planeta (necesita los nodos dibujados de este frame). */
+    void prepareGpu(RHI::Context* ctx, const GpuFrame& f);
+    const GroundScatter&         cover() const { return m_cover; }
+    const Renderer::GroundField& field() const { return m_field; }
 
     /** @brief Un comando indirecto por brote visible, dentro del pase de escena (tras los props). */
     void draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) override;
@@ -92,6 +124,11 @@ public:
     /** @brief Lo destruido, para guardar/sincronizar (las pisadas no: son efímeras). */
     std::vector<Delta> serialize() const;
     void restore(const std::vector<Delta>& deltas);
+    /** @brief Las zonas destruidas de la cubierta densa (las pone `destroyAt`). Una esfera dentro de
+     *  otra no se guarda dos veces. */
+    const std::vector<Zone>& zones() const { return m_zones; }
+    std::vector<Zone> serializeZones() const { return m_zones; }
+    void restoreZones(const std::vector<Zone>& zones) { m_zones = zones; }
 
     /// Raíz de la mata `k` en el mundo: la MISMA cuenta que `prop_burst.vert`, en double.
     glm::dvec3 elementWorld(const MassBurst& b, uint32_t k) const;
@@ -140,6 +177,28 @@ private:
     RHI::PipelineHandle m_pso{};
     RHI::BufferHandle   m_burstSSBO{}, m_stateSSBO{}, m_cmdBuf{};
     size_t m_burstCap = 0, m_stateCap = 0, m_cmdCap = 0;   ///< bytes
+
+    // ── La cubierta densa ──
+    static constexpr size_t kMaxZones = 4096;   ///< zonas guardadas (las más viejas se olvidan)
+    /// Nivel de malla del prototipo que dibuja la cubierta: la ley de píxeles ya ralea y ensancha,
+    /// así que no hace falta la mata completa en cada instancia.
+    static constexpr int    kCoverLod = 1;
+    /// Hasta dónde se posan las matas de los brotes en el suelo dibujado, y cuántas como mucho (4 B
+    /// cada una: 4 MB). Más allá, medio metro de ladera son menos de un par de píxeles.
+    static constexpr double   kGroundSnapReachM = 250.0;
+    static constexpr uint32_t kGroundSnapBudget = 1u << 20;
+    /// El prototipo que siembra la cubierta: la primera mata de hierba de SUS capas (-1 = ninguna).
+    int  coverPrototype() const;
+    void drawCover(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats);
+    GroundScatter         m_cover;
+    Renderer::GroundField m_field;
+    bool                  m_coverTried = false;   ///< init intentado (no reintentar cada frame)
+    /// Las matas de los brotes, sobre el suelo DIBUJADO (`MassGround`, `mass_ground.comp`).
+    MassGround            m_ground;
+    bool                  m_groundTried = false;
+    RHI::PipelineHandle   m_coverPSO{};
+    std::vector<Zone>     m_zones;
+    double                m_coverClock = 0.0;
 };
 
 } // namespace Haruka::World::Props

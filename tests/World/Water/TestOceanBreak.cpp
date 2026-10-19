@@ -312,7 +312,16 @@ void test_ocean_break_fold() {
     //  · el DETERMINANTE del mapa horizontal 2x2, `det(I + ∂disp_h/∂x)`, que es el criterio real de
     //    que la superficie deje de ser inyectiva. Solo coinciden si todos los trenes van paralelos.
     {
-        const float d = 5.15f;
+        // ⚠️ LA PROFUNDIDAD SALE DEL INDICE DE ROMPIENTE, NO DE UN NUMERO (17-10). Eran 5,15 m fijos,
+        // elegidos cuando el pliegue lo hacia el adelanto de cresta en la ESPALDA de la ola (el signo
+        // estaba al reves, ver `coast_lip_front_steep`). Con el signo bueno quien pliega es el LABIO
+        // (`oceanLipGain`), que vive en el indice 0,78-1,7 — y a 5,15 m esta mar ya va por 1,69: espuma,
+        // labio apagado. Se mide donde el labio esta entero (indice ~1,15).
+        float d = 5.15f;
+        for (float dd = 30.0f, bestErr = 1e9f; dd > 0.5f; dd -= 0.05f) {
+            const float e = std::abs(Haruka::World::Water::oceanBreakIndex(dd, st) - 1.15f);
+            if (e < bestErr) { bestErr = e; d = dd; }
+        }
         // ⚠️ SIN PENDIENTE NO HAY REFRACCION, y en una playa de verdad la hay: al perder fondo los
         // trenes GIRAN hacia la orilla y se alinean entre si. Ocho trenes en ocho direcciones no
         // pliegan porque nunca coinciden en fase; ocho trenes casi paralelos son otra cosa. Se mide
@@ -387,10 +396,13 @@ void test_ocean_break_fold() {
         // EL CRITERIO REAL DE PLIEGUE, y se cruza: con refraccion el determinante es NEGATIVO, o sea
         // que la superficie deja de ser inyectiva. Eso es una ola volcando — y es lo que se quiere.
         CHECK(minDetRefr < 0.0, "CON REFRACCION la superficie SE PLIEGA (determinante < 0)");
-        // Y SIN refraccion no pliega: hace falta que los trenes se alineen. Las dos mitades juntas son
-        // lo que demuestra que el mecanismo es la CONCENTRACION y no simplemente "mas compresion".
-        CHECK(minDet > 0.0, "sin alinear los trenes NO pliega: el mecanismo es concentrar, no apretar");
-        std::printf("      CONTRAPRUEBA: la refraccion es lo que pliega (%.3f -> %.3f)\n",
+        // ⚠️ Y SIN REFRACCION YA TAMBIEN PLIEGA, y es correcto: aqui se pedia `minDet > 0` ("sin alinear
+        // los trenes no pliega: el mecanismo es concentrar"). Eso medía el refuerzo del tren 0, que solo
+        // concentra si la refraccion alinea los demas. El LABIO concentra por construccion: va entero
+        // en el rumbo del tren que rompe. Lo que sigue siendo cierto —y es lo que se mide— es que
+        // alinear los trenes pliega MAS.
+        CHECK(minDetRefr < minDet, "la refraccion (trenes alineados hacia la orilla) pliega MAS");
+        std::printf("      CONTRAPRUEBA: la refraccion pliega MAS (%.3f -> %.3f)\n",
                     minDet, minDetRefr);
 
         // ⚠️ LA GUARDA QUE DE VERDAD IMPORTA: EL AGUA INTERIOR. El intento de voluta de 2026-08-29 se
@@ -617,14 +629,45 @@ void test_ocean_foam() {
 
     // LA GRADACION es lo que hace que la espuma signifique algo: si fuera un tinte uniforme, o si
     // saltara de 0 a 1 en la orilla, no estaria describiendo un mar.
-    CHECK(fShore > 0.9f,  "la orilla es agua blanca");
+    // ⚠️ NO "> 0,9", QUE ERA EL DEFECTO: con la espuma de rompiente atada solo a la profundidad la
+    // orilla salia blanca opaca y quieta en el juego (17-10). Ahora sigue a la cresta: de media, entre
+    // el resto de espuma gastada y el blanco entero.
+    CHECK(fShore > 0.35f && fShore < 0.85f, "la orilla es mas blanca que el mar, pero no una mancha opaca");
     CHECK(fDeep  < 0.05f, "el mar abierto tiene borreguillos, no espuma (poca superficie)");
     // ⚠️ A 20 m NO tiene por que haber mas: los borreguillos son de VIENTO y su cobertura es Monahan a
     // cualquier profundidad (el umbral se deriva de ella). Lo que crece hacia la costa es la espuma de
     // ROMPIENTE, y esa aparece cuando el indice cruza 0,78 — no a 20 m, donde vale 0,31.
     CHECK(std::fabs(fMid - fDeep) < 0.02f, "a 20 m la ola aun no rompe: espuma de viento, como en profundo");
     CHECK(fBreak > fMid,   "y en la franja de rompiente mas todavia");
-    CHECK(fShore >= fBreak, "y la orilla al menos tanto como la rompiente (las dos saturan)");
+    CHECK(fShore >= fBreak - 0.02f, "y la orilla al menos tanto como la rompiente");
+
+    // LA ESPUMA DE ROMPIENTE VIAJA CON LA OLA. En un punto fijo de la rompiente, a lo largo del tiempo:
+    // blanca cuando pasa la cresta, el resto de espuma gastada en el seno. Se mide la ELEVACION con
+    // `oceanJacobian` (la misma fase que usa `oceanFoam`) y se compara la espuma en cresta y en seno.
+    {
+        double crestFoam = 0.0, troughFoam = 0.0; int nc = 0, nt = 0;
+        float fMin = 1.0f, fMax = 0.0f;
+        for (int i = 0; i < 30; ++i) {
+            const glm::vec3 p = wp + glm::vec3(1.0f, 0.0f, 0.4f) * (float)(i * 5);
+            for (int j = 0; j < 60; ++j) {
+                const float tt = 0.21f * j;
+                float slope = 0.0f, sigma = 0.0f, e = 0.0f;
+                Haruka::World::Water::oceanJacobian(p, up, tt, 0.4f, 1.0f, st, WATER_FETCH_UNLIMITED,
+                                                    glm::vec3(0.0f), &slope, &sigma, OCEAN_MIN_QUAD_M, &e);
+                const float f = Haruka::World::Water::oceanFoam(p, up, tt, 0.4f, 1.0f, st);
+                fMin = std::min(fMin, f); fMax = std::max(fMax, f);
+                if (e > 0.6f)  { crestFoam  += f; ++nc; }
+                if (e < -0.2f) { troughFoam += f; ++nt; }
+            }
+        }
+        const float fc = nc ? (float)(crestFoam / nc) : 0.0f, ft = nt ? (float)(troughFoam / nt) : 1.0f;
+        std::printf("    orilla 0,4 m: espuma en CRESTA %.3f (%d) · en SENO %.3f (%d) · rango %.3f..%.3f\n",
+                    fc, nc, ft, nt, fMin, fMax);
+        CHECK(nc > 0 && nt > 0, "el barrido pasa por crestas y por senos");
+        CHECK(fc > 0.95f, "la cresta que revienta es agua blanca");
+        CHECK(ft < 0.40f, "en el seno queda espuma gastada, no blanco opaco");
+        CHECK(fMax - fMin > 0.6f, "la espuma de la orilla CAMBIA al pasar la ola (antes: constante)");
+    }
 
     // `fade` apaga la ola fuera del alcance del clipmap, y tiene que apagar la espuma con ella: si no,
     // quedaria un cerco de blanco flotando sobre un mar que ya esta liso.

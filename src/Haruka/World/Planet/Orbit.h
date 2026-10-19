@@ -61,7 +61,7 @@ inline constexpr double kTwoPi = 6.283185307179586476925286766559;
  *
  * Las tasas NO se guardan en rad/s sino como "cuántas órbitas tarda en dar una vuelta completa"
  * (`apsidalCycles`, `nodalCycles`). Eso es deliberado: atadas al periodo del propio cuerpo, escalan
- * solas con la compresión temporal del juego (un día dura 240 s aquí, o sea ~131 000× el real). Una
+ * solas con la compresión temporal del juego (si el día del juego se acorta). Una
  * tasa en rad/s escrita a mano se quedaría absurda en cuanto se cambiara la escala de tiempo.
  *
  * Signo: positivo = avanza (progrado). Los nodos reales REGRESAN, así que su valor por defecto es

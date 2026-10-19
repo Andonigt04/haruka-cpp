@@ -280,10 +280,13 @@ public:
     void removeBody(const std::string& name);
     /** @brief Returns body by name or null when missing. */
     std::shared_ptr<RigidBody> getBody(const std::string& name);
+    /** @brief Todos los cuerpos, solo lectura: para quien los necesita como OBSTÁCULO (el líquido 3D
+     *  los mete como esferas sólidas que lo empujan, `World/Water/LiquidPatch`). */
+    const std::vector<std::shared_ptr<RigidBody>>& getBodies() const { return bodies; }
 
     // ── RAÍLES: mecanismos con UN grado de libertad ─────────────────────────────────────────────
     // Puertas, rampas, escotillas, torretas y suspensiones NO son animaciones (ver
-    // `docs/guides/PLAN_PUERTOS.md` §4). Son cuerpos restringidos, y por eso pueden BLOQUEARSE contra
+    // `docs/archivo/PLAN_PUERTOS.md` §4). Son cuerpos restringidos, y por eso pueden BLOQUEARSE contra
     // lo que estorbe, CEDER cuando la carga supera su límite y viajar dentro de un vehículo en marcha
     // sin reautorizar nada. Aquí solo vive el MECANISMO: el dato autorizado en el asset es
     // `Game/Ports/Port.h`, que traduce a esto. ⚠️ `HarukaPhysics` no puede depender de `game/`, así

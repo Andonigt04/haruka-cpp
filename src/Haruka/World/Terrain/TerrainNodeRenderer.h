@@ -41,6 +41,8 @@
 #include "Haruka/RHI/RHIGPUScope.h"
 #include "Haruka/Core/Logger.h"
 #include "Haruka/Tools/Profiler.h"   // HARUKA_PROFILE: el reparto del CPU del pase v5 (select/stride/gen)
+#include "Haruka/World/Props/LoadController.h"   // el lazo de ms de la franja de rompiente
+#include <chrono>
 
 namespace Haruka::World { namespace Terrain {
 
@@ -423,6 +425,12 @@ public:
             // `harukaWindowLakeAt` sale por el `textureSize <= 1` sin llegar a mirar esto.
             m_lakeWinDummyUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(zero4),
                                                   zero4, RHI::BufferMemory::Static);
+            // Lo que solo lee el pase de agua (binding 30, `WaterDraw`): se rellena en cada draw.
+            // 4 vec4: (olas por píxel, recorte del líquido, lados) · origen del parche relativo al ojo ·
+            // eje x · eje z.
+            const float zero16[16] = {};
+            m_waterDrawUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(zero16),
+                                               zero16, RHI::BufferMemory::Dynamic);
             // ── EL BLOQUE DEL MAR (29) TAMBIEN, Y ERA EL UNICO QUE NO LO TENIA ──────────────────
             //
             // ⚠️ `oceanParams` se ataba SOLO `if (valid(...))`, mientras que sus tres vecinos (24, 25,
@@ -502,6 +510,7 @@ public:
         if (RHI::valid(m_ubo)) { m_dev->destroy(m_ubo); m_ubo = {}; }
         if (RHI::valid(m_voxCutUBO)) { m_dev->destroy(m_voxCutUBO); m_voxCutUBO = {}; }
         if (RHI::valid(m_craterUBO)) { m_dev->destroy(m_craterUBO); m_craterUBO = {}; }
+        if (RHI::valid(m_waterDrawUBO)) { m_dev->destroy(m_waterDrawUBO); m_waterDrawUBO = {}; }
         for (uint32_t k = 0; k < kStrides; ++k) {
             if (RHI::valid(m_ibs[k]))      { m_dev->destroy(m_ibs[k]);      m_ibs[k] = {}; }
             if (RHI::valid(m_instSSBO[k])) { m_dev->destroy(m_instSSBO[k]); m_instSSBO[k] = {}; m_instCap[k] = 0; }
@@ -517,6 +526,8 @@ public:
     struct FrameStats {
         size_t drawn = 0, generated = 0, resident = 0, ancestors = 0, tris = 0;
         size_t waterNodes = 0;   ///< nodos que pasaron por el pase de agua (ver Water::lakeLevelFn)
+        size_t waterSurf = 0;      ///< nodos de agua con malla de rompiente (`Water::surfDepthM`)
+        size_t waterSurfTris = 0;  ///< sus triangulos: la parte de `v5.agua` que paga la franja
         size_t waterCoarsened = 0; ///< de esos, los que el agua dibuja con MAS zancada que el terreno (Water::waveQuadMinM)
         size_t waterTris = 0;      ///< triangulos del pase de agua (los del terreno estan en `tris`)
         size_t waterByStride[8] = {}; ///< nodos de agua por indice de zancada (0 = zancada 1, 1 = 2, ...)
@@ -729,6 +740,38 @@ public:
         /// del pase es vertice— y costaba 4,8 ms; con 16, 0,8 ms (frame total 25 → 18, ~54 FPS). El
         /// tren largo sigue vivo hasta 32 px en pantalla; si el mar lejano se ve liso, baja a 8.
         float     waveVertexPx = 16.0f;
+        /// ── LA FRANJA DE ROMPIENTE, CON MALLA FINA ────────────────────────────────────────────
+        /// Con 16 px por vértice y quads de >= 2 m, una ola que rompe (5 m de cara con la mar del
+        /// juego, `coast_surf_breaks`) cae entre dos o tres vértices: se puede plegar en el gemelo
+        /// (`coast_surf_curls`) pero no DIBUJAR el labio. Los nodos de mar cuyo suelo cae en la
+        /// franja `[mar − surfDepthM, mar + surfUpM]` usan otra ley: el quad pide lo más grueso
+        /// entre `surfQuadM` (la cara de la ola que rompe / 6: sus vértices) y un vértice cada
+        /// `surfVertexPx` px (lo mueve un lazo cerrado contra `surfBudgetMs`, su parte de `v5.agua`, entre
+        /// `surfVertexPxMin` y `waveVertexPx`). Más fino que la cara no aporta nada, y es lo que
+        /// acota el coste: medido en el banco, un vértice cada 3 px en TODA la franja llevaba el pase
+        /// de 0,23 a 2,11 ms. Sigue sin bajar de la zancada del terreno, que en la costa ya es fina
+        /// (`kWaterReliefFrac`). `surfDepthM = 0` = sin franja (como antes). Lo pone el planeta con
+        /// `oceanBreakDepth` y `oceanBreakerFaceM`.
+        float     seaLevelM       = 0.0f;   ///< la cota del mar (marea incluida)
+        float     surfDepthM      = 0.0f;   ///< fondo más hondo que ya rompe (m)
+        float     surfUpM         = 0.0f;   ///< hasta dónde trepa por la arena (m sobre el mar)
+        float     surfQuadM       = 0.0f;   ///< la cara de la ola que rompe / 6 (m)
+        float     surfVertexPxMin = 3.0f;
+        /// Lo que puede AÑADIR la franja (ms de GPU). No el pase entero: medido en el juego, `v5.agua`
+        /// ya cuesta 2,3 ms sin franja en la costa, y un presupuesto del pase dejaba la franja apagada
+        /// siempre. Se estima como `v5.agua × trisFranja / trisAgua` del último frame.
+        float     surfBudgetMs    = 0.8f;
+        /// Las olas que la malla no lleva (más cortas que dos quads), POR PÍXEL en la normal: solo luz.
+        /// Es lo que hace que el mar lejano no sea un espejo con 16 px por vértice. Ver
+        /// `harukaWaveSlopeResidual`. `HARUKA_WATER_PIXEL_WAVES=0` lo apaga para comparar.
+        bool      pixelWaves      = true;
+        /// EL LÍQUIDO 3D manda dentro de su parche (`World/Water/LiquidPatch`): ahí este agua NO se
+        /// dibuja, para que en cada sitio haya UN agua. Origen = esquina del parche (mundo, m), ejes en
+        /// el plano tangente, lados (m).
+        bool       liquidClipOn = false;
+        glm::dvec3 liquidOrigin{ 0.0 };
+        glm::vec3  liquidAxisX{ 1, 0, 0 }, liquidAxisZ{ 0, 0, 1 };
+        float      liquidSizeX = 0.0f, liquidSizeZ = 0.0f;
     };
     void setWater(const Water& w) { m_water = w; }
 
@@ -1288,6 +1331,15 @@ public:
         std::array<std::vector<NodeInstGPU>, kStrides> waterBuckets;
         static const double s_vpxEnv = [] { const char* e = std::getenv("HARUKA_WATER_VERTEX_PX"); return e ? std::atof(e) : -1.0; }();
         const double waterVertexPx = (s_vpxEnv >= 0.0) ? s_vpxEnv : (double)m_water.waveVertexPx;
+        // La franja de rompiente (ver `Water::surfDepthM`): su ley de pantalla, del lazo de ms.
+        // `HARUKA_SURF_VERTEX_PX` la fija para medir (0 = sin franja).
+        static const double s_surfPxEnv = [] { const char* e = std::getenv("HARUKA_SURF_VERTEX_PX"); return e ? std::atof(e) : -1.0; }();
+        const bool   surfOn = m_water.surfDepthM > 0.0f && s_surfPxEnv != 0.0;
+        const double surfVertexPx = (s_surfPxEnv > 0.0) ? s_surfPxEnv : surfVertexPxNow();
+        const double surfLoM = (double)m_water.seaLevelM - (double)m_water.surfDepthM;
+        const double surfHiM = (double)m_water.seaLevelM + (double)m_water.surfUpM;
+        fs.waterSurf = 0;
+        fs.waterSurfTris = 0;
         // `surfM` = the top of the water this node holds (m): the sea's margin, a lake's level + margin.
         // The distance of the vertex law is measured TO THAT SURFACE. It was measured to the sea
         // (`R + seaMarginM`) for every node: over a lake at 400 m with the eye 60 m above it, the water
@@ -1296,22 +1348,36 @@ public:
         auto pushWater = [&](const NodeInstGPU& g, uint32_t k, const NodeId& n, double surfM) {
             uint32_t kW = k;
             const double texel = nodeTexelM(n, planetRadiusM);
-            // El quad que el agua quiere: el mayor de "un vertice cada waveVertexPx pixeles" (a la
+            // ¿Lleva este nodo suelo de la franja de rompiente? Solo el MAR (`surfM` = su margen; un
+            // lago tiene su propia cota) y solo con rango conocido.
+            const NodeRange rs = m_pool.rangeOf(n);
+            const bool surf = surfOn && rs.valid() && surfM == (double)m_water.seaMarginM
+                           && (double)rs.minM <= surfHiM && (double)rs.maxM >= surfLoM;
+            if (surf) ++fs.waterSurf;
+            const double vertexPx = surf ? std::min(surfVertexPx, waterVertexPx) : waterVertexPx;
+            // El quad que el agua quiere: el mayor de "un vertice cada vertexPx pixeles" (a la
             // distancia del punto MAS CERCANO del nodo, como la ley del terreno) y el minimo en metros.
-            double wantQuad = waterQuadMin;
-            if (waterVertexPx > 0.0 && m_lastRadPerPx > 0.0) {
+            double wantQuad = surf ? std::min(waterQuadMin, (double)m_water.surfQuadM) : waterQuadMin;
+            if (vertexPx > 0.0 && m_lastRadPerPx > 0.0) {
                 double nearest = 1e300;
                 for (uint32_t v = 0; v <= TERRAIN_NODE_CELLS; v += TERRAIN_NODE_CELLS / 2)
                     for (uint32_t u = 0; u <= TERRAIN_NODE_CELLS; u += TERRAIN_NODE_CELLS / 2)
                         nearest = std::min(nearest, glm::length(planetCenter + nodeTexelDir(n, u, v)
                                                                 * (planetRadiusM + surfM) - camPos));
-                wantQuad = std::max(wantQuad, waterVertexPx * std::max(nearest, 1.0) * m_lastRadPerPx);
+                wantQuad = std::max(wantQuad, vertexPx * std::max(nearest, 1.0) * m_lastRadPerPx);
             }
-            // La zancada mas gruesa cuyo quad NO pasa del pedido (nunca mas fina que la del terreno).
+            // La zancada mas gruesa cuyo quad NO pasa del pedido (nunca mas fina que la del terreno)...
+            // ⚠️ ...SALVO EN LA FRANJA DE ROMPIENTE (18-10). Sobre una llanura a ras del mar el TERRENO
+            // va con zancada gruesa (es plano: no le hace falta detalle) y el agua la heredaba: la ola
+            // que corre sobre la arena salia en triangulos de decenas de metros ("se ven como olas pero
+            // por low-poly no se ve claro, son vertices", Andoni; vista de depuracion 4). La franja
+            // empieza en la zancada mas fina y engorda solo hasta lo que pide su ley de pantalla.
+            if (surf) kW = 0;
             while (kW + 1 < m_strideCount && texel * (double)(1u << (kW + 1)) <= wantQuad) ++kW;
             NodeInstGPU gw = g;
             gw.slot[2] = (int32_t)kW;   // la zancada del AGUA: la lee el shader y `waterQuadAt` (fisica)
             if (kW > k) ++fs.waterCoarsened;
+            if (surf) fs.waterSurfTris += (size_t)(m_indexCount[kW] / 3);
             waterBuckets[kW].push_back(gw);
         };
         if (m_water.on) {
@@ -1573,6 +1639,8 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
             // El recorte volumétrico, igual que en el pase de suelo (UBO 3 ya está relleno arriba).
             ctx->bindUniformBuffer(3, m_voxCutUBO);
             ctx->bindTexture(17, RHI::valid(m_shade.cutTex) ? m_shade.cutTex : m_lakeDummy);
+            // Los cráteres (UBO 4, relleno arriba): el fondo del agua baja con el hoyo.
+            ctx->bindUniformBuffer(4, m_craterUBO);
             ctx->bindUniformBuffer(26, RHI::valid(m_water.lakeWinUBO) ? m_water.lakeWinUBO
                                                                       : m_lakeWinDummyUBO);
             ctx->bindUniformBuffer(29, RHI::valid(m_water.oceanParams) ? m_water.oceanParams
@@ -1581,6 +1649,17 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
                                                                      : m_inlandDummyUBO);
             ctx->bindStorageBuffer(25, RHI::valid(m_water.inlandSSBO) ? m_water.inlandSSBO
                                                                       : m_inlandDummySSBO);
+            {
+                static const int s_pixEnv = [] { const char* e = std::getenv("HARUKA_WATER_PIXEL_WAVES"); return e ? std::atoi(e) : -1; }();
+                const bool pix = (s_pixEnv >= 0) ? (s_pixEnv != 0) : m_water.pixelWaves;
+                const glm::vec3 lo = glm::vec3(m_water.liquidOrigin - camPos);
+                const float wd[16] = { pix ? 1.0f : 0.0f, m_water.liquidClipOn ? 1.0f : 0.0f, m_water.liquidSizeX, m_water.liquidSizeZ,
+                                       lo.x, lo.y, lo.z, 0.0f,
+                                       m_water.liquidAxisX.x, m_water.liquidAxisX.y, m_water.liquidAxisX.z, 0.0f,
+                                       m_water.liquidAxisZ.x, m_water.liquidAxisZ.y, m_water.liquidAxisZ.z, 0.0f };
+                m_dev->updateBuffer(m_waterDrawUBO, 0, sizeof(wd), wd);
+                ctx->bindUniformBuffer(30, m_waterDrawUBO);
+            }
             ctx->bindVertexBuffer(m_vb);
             for (uint32_t k = 0; k < m_strideCount; ++k) {
                 const size_t n = m_groupWater[k + 1] - m_groupWater[k];
@@ -1596,6 +1675,8 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
 
         fs.resident = m_pool.residentCount();
         fs.live = m_pool.stats().live;
+        m_lastSurfTris  = fs.waterSurfTris;
+        m_lastWaterTris = fs.waterTris;
         m_stats = fs;
         return fs;
     }
@@ -1633,6 +1714,59 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
      * Lo que se dibuja depende de la cámara, así que esto también: es inherente, no un defecto.
      * Válido después de `draw()` y hasta el siguiente.
      */
+    /**
+     * @brief NODO HOJA DIBUJADO, para quien tenga que apoyarse en el suelo que se VE (hierba, piedras, decals…).
+     *
+     * Es lo que `prepare` resolvio para este frame: la huella de la hoja pedida y el hueco de donde
+     * salen sus datos (el suyo, o un ancestro `kUp` niveles arriba con el sub-rectangulo `sub`).
+     * Con esto y `heightsBuffer()` un shader lee la MISMA altura que `terrain_node.vert`: no el
+     * campo, que difiere en centimetros de lo dibujado (`terrain_node_drawn_vs_field`).
+     * Gemelo de `NearNode` en el GLSL que lo lea (generico: lo usa cualquier cosa apoyada en el suelo).
+     */
+    /// node = cara/nivel/i/j · slot = hueco / (kUp | zancada << 8) / subI / subJ. La ZANCADA (log2) es
+    /// con la que se dibuja el nodo este frame: quien se apoye en el suelo tiene que hacerlo en los
+    /// triangulos de esa malla, no en el texel fino (ver `harukaGroundNodeAt`).
+    struct NearNode { int32_t node[4]; int32_t slot[4]; };
+
+    /** @brief Los nodos hoja dibujados cuyo cuadrado toca la esfera de `radiusM` alrededor de la camara.
+     *  Valido despues de `prepare()`. Devuelve el texel (m) del nivel mas fino que entro (0 si ninguno). */
+    double nearNodes(const glm::dvec3& camPos, const glm::dvec3& planetCenter, double planetRadiusM,
+                     double radiusM, std::vector<NearNode>& out) const {
+        out.clear();
+        double finest = 0.0;
+        const glm::dvec3 camRel = camPos - planetCenter;
+        const double camR = glm::length(camRel);
+        const glm::dvec3 camDir = (camR > 1e-9) ? camRel / camR : glm::dvec3(0, 1, 0);
+        const double camAlt = camR - planetRadiusM;
+        for (size_t ri = 0; ri < m_resolved.size() && ri < m_sel.size(); ++ri) {
+            const auto& r = m_resolved[ri];
+            if (r.slot < 0) continue;
+            const NodeId leaf = m_sel[ri];
+            const double texel = nodeTexelM(leaf, planetRadiusM);
+            const double halfDiag = texel * (double)TERRAIN_NODE_CELLS * 0.7072;
+            // Distancia a la CAJA del nodo, no a su centro: horizontal por el arco sobre la esfera
+            // (menos la media diagonal) y vertical contra el rango publicado [minM, maxM]. Con el
+            // centro a media altura, un nodo con 100 m de relieve quedaba "a 80 m" de una camara que
+            // pisaba su suelo, y la tabla salia con un nodo de nueve.
+            const NodeRange rg = m_pool.rangeOf(leaf);
+            const glm::dvec3 nd = nodeTexelDir(leaf, TERRAIN_NODE_CELLS / 2, TERRAIN_NODE_CELLS / 2);
+            const double ang = std::acos(std::clamp(glm::dot(nd, camDir), -1.0, 1.0));
+            const double dH  = std::max(0.0, ang * planetRadiusM - halfDiag);
+            const double dV  = rg.valid() ? std::max({ 0.0, camAlt - (double)rg.maxM, (double)rg.minM - camAlt }) : 0.0;
+            if (dH * dH + dV * dV > radiusM * radiusM) continue;
+            const int kUp = (int)leaf.level - (int)r.node.level;
+            NearNode n;
+            n.node[0] = (int32_t)leaf.face; n.node[1] = (int32_t)leaf.level;
+            n.node[2] = (int32_t)leaf.i;    n.node[3] = (int32_t)leaf.j;
+            const auto sk = m_skPrev.find(nodeKey(leaf));   // tras `prepare`, la de ESTE frame
+            n.slot[0] = r.slot; n.slot[1] = kUp | ((int32_t)(sk != m_skPrev.end() ? sk->second : 0u) << 8);
+            n.slot[2] = (kUp > 0) ? (int32_t)(leaf.i & ((1u << kUp) - 1u)) : 0;
+            n.slot[3] = (kUp > 0) ? (int32_t)(leaf.j & ((1u << kUp) - 1u)) : 0;
+            out.push_back(n);
+            finest = (finest == 0.0) ? texel : std::min(finest, texel);
+        }
+        return finest;
+    }
     RHI::BufferHandle  heightsBuffer()    const { return m_gpu.heights(); }
 
     double waterQuadAt(const glm::dvec3& dir, double planetRadiusM) const {
@@ -1651,14 +1785,42 @@ m_dev->updateBuffer(m_instWaterSSBO[k], 0, needB, m_instWater.data() + m_groupWa
         return 0.0;
     }
 
+    /// Los px por vértice que la franja de rompiente pide AHORA (`Water::surfVertexPxMin` con
+    /// holgura, hasta `waveVertexPx` si `v5.agua` se pasa de `surfBudgetMs`). Lo lee el log.
+    float surfVertexPx() const {
+        return m_water.waveVertexPx + (m_water.surfVertexPxMin - m_water.waveVertexPx) * m_surfCtl.detail;
+    }
+
 private:
+    /// El lazo de la franja: su parte de `v5.agua` (por triángulos, del último frame medido) contra
+    /// `surfBudgetMs`. Sin timestamps (GL) no hay medida y se queda donde arranca: el detalle entero
+    /// (la franja es una tira de costa, no el mar).
+    Props::LoadController m_surfCtl;
+    /// Los triángulos del último `draw` (franja / agua entera). Aparte de `m_stats` porque `prepare`
+    /// la pone a cero ANTES de que `draw` decida la franja: leída de ahí, el lazo veía siempre 0.
+    size_t m_lastSurfTris = 0, m_lastWaterTris = 0;
+    double surfVertexPxNow() {
+        double ms = 0.0;
+        if (m_dev)
+            for (const auto& sc : m_dev->gpuScopes())
+                if (sc.name == "v5.agua") ms += sc.ms;
+        // Sin franja el frame pasado, nada que medir: no se cuenta como holgura (un frame de 0 ms
+        // subiría el detalle sin que la franja haya costado nada todavía).
+        if (m_lastSurfTris == 0 || m_lastWaterTris == 0) return (double)surfVertexPx();
+        ms *= (double)m_lastSurfTris / (double)m_lastWaterTris;
+        m_surfCtl.budgetMs = std::max(0.1, (double)m_water.surfBudgetMs);
+        const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        m_surfCtl.update(ms, now);
+        return (double)surfVertexPx();
+    }
 
     /// Gemelo del bloque `NodeDraw` de `terrain_node.vert`. std140: mat4 + 4 vec4 de 16 B.
     struct VoxCutUBO { glm::mat4 space{1.0f}; glm::vec4 info{0.0f}; glm::mat4 fine{1.0f}; glm::vec4 atlas{0.0f}; };   // = VoxCut in terrain_node.frag / _water.vert
     RHI::BufferHandle m_voxCutUBO{};
-    /// Gemelo de `NodeCraters` (binding 4) de `terrain_node.vert`. std140.
+    /// Gemelo de `SurfaceBowls` (binding 4) de `lib/surface_bowls.glsl` (terreno y agua). std140.
     struct CraterUBO { int32_t info[4]{}; glm::vec4 c[kMaxCraters]{}; glm::vec4 u[kMaxCraters]{}; };
     RHI::BufferHandle m_craterUBO{};
+    RHI::BufferHandle m_waterDrawUBO{};   ///< `WaterDraw` (binding 30): solo el pase de agua
 
     struct DrawUBO {
         glm::mat4 mvp{1.0f};
@@ -1745,3 +1907,4 @@ private:
 };
 
 }} // namespace Haruka::World
+

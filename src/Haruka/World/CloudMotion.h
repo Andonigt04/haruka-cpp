@@ -1,5 +1,6 @@
 #pragma once
 #include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <algorithm>
 
 namespace Haruka::World {
@@ -33,6 +34,31 @@ struct CloudDrift {
         const glm::dvec2 d = windEN * dts;
         offset += d; lastSimT = simT;
         return d;
+    }
+};
+
+/// EL GIRO DE LA RETÍCULA DE RACIMOS (`World/ShellClumps.h`) CON EL VIENTO. Los cúmulos de malla no
+/// son un campo de ruido que se desplaza: son sitios de una retícula de la esfera. Que el viento los
+/// lleve es GIRAR la retícula entera alrededor del centro del planeta: en el sitio de la cámara el
+/// giro es exactamente el viento de ahí (un círculo máximo en su dirección), y ninguna nube se
+/// recoloca. Integrado en doble frame a frame, con el mismo tope de paso que `CloudDrift`.
+struct CloudSpin {
+    glm::dquat rot{1.0, 0.0, 0.0, 0.0};   ///< marco de la retícula → planeta
+    double     lastSimT = 0.0;
+    bool       init     = false;
+
+    /// `windW`: viento a nivel de nube (m/s, mundo) · `upCam`: vertical de la cámara · `shellR`:
+    /// radio de la cáscara (m). Devuelve cuántos metros se movió la retícula en el sitio de la cámara.
+    double advance(const glm::dvec3& windW, const glm::dvec3& upCam, double shellR, double simT) {
+        if (!init) { lastSimT = simT; init = true; return 0.0; }
+        const double dts = std::clamp(simT - lastSimT, 0.0, CloudDrift::kMaxStepS);
+        lastSimT = simT;
+        const glm::dvec3 wh = windW - upCam * glm::dot(windW, upCam);   // solo lo horizontal
+        const double speed = glm::length(wh);
+        if (dts <= 0.0 || speed < 1e-9 || shellR <= 0.0) return 0.0;
+        const glm::dvec3 axis = glm::normalize(glm::cross(upCam, wh));  // gira `up` hacia el viento
+        rot = glm::normalize(glm::angleAxis(speed * dts / shellR, axis) * rot);
+        return speed * dts;
     }
 };
 

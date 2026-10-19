@@ -3,6 +3,10 @@
 #include "Haruka/World/Props/MassBurst.h"   // MassBurstGpu: el brote del test de hierba
 #include "Haruka/World/Props/PropGpu.h"     // PropVertex / PropParams
 #include <cstring>   // el vértice empaquetado del prop (ver propLitPixel)
+#include "Haruka/Renderer/ScenePass.h"     // testScenePassObjects: el pase de escena REAL
+#include "Haruka/Renderer/SceneUBO.h"
+#include "Haruka/Core/Camera.h"
+#include "Haruka/Core/ApplicationInternal.h"   // cleanupGLStatics: mallas primitivas por backend
 
 void testItemPreviewShader()
 {
@@ -125,6 +129,119 @@ void testItemPreviewShader()
 
 
 // ================================================================================================
+// EL PASE DE ESCENA DIBUJA CADA OBJETO CON SUS DATOS, en los DOS backends.
+//
+// ⚠️ FALLO MEDIDO (17-10): `ScenePass` reescribia UN solo UBO por objeto antes de cada draw. En GL
+// `glBufferSubData` queda ordenado entre draws; en Vulkan el buffer es memoria mapeada y la escritura
+// es un `memcpy` inmediato, asi que todos los draws del frame leian los datos del ULTIMO objeto. En el
+// juego el Sol y la Luna salian con la matriz de otro y no se veian (y en GL si).
+//
+// Tres objetos emisivos con el pase REAL (`ScenePass::begin` + `drawObjects`): uno a cada lado y una
+// "Luna" a 384 400 km en el centro, a su escala real. Tienen que salir los tres. Con el UBO compartido
+// solo sale el ultimo, asi que el test lo ve en una sola pasada.
+// ================================================================================================
+void testScenePassObjects()
+{
+    BEGIN("pase de escena: cada objeto con su UBO (Sol y Luna en Vulkan)");
+    using namespace Haruka::Core::Scene;
+
+    auto body = [](const char* name, glm::dvec3 pos, double scale, glm::vec3 col) {
+        auto o = std::make_shared<SceneObject>();
+        // LUZ emisiva (no STAR: una estrella es un cuerpo del cielo y su color sale de la radiometria,
+        // no del objeto). Color plano: lo que se mide es que cada uno salga con SUS datos.
+        o->name = name; o->objectType = Haruka::Tools::ObjectType::LIGHT;
+        o->flags.castLight = true;
+        o->position = Haruka::Tools::WorldPos(pos); o->scale = glm::dvec3(scale);
+        o->color = glm::vec4(col, 1.0f);
+        return o;
+    };
+    std::vector<std::shared_ptr<SceneObject>> objs = {
+        body("izq",  { -3.0, 0.0, -10.0 }, 1.0, { 1.0f, 0.2f, 0.2f }),
+        body("Luna", {  0.0, 0.0, -384400000.0 }, 1737400.0 * 8.0, { 0.2f, 1.0f, 0.2f }),
+        body("der",  {  3.0, 0.0, -10.0 }, 1.0, { 0.2f, 0.2f, 1.0f }),
+    };
+    std::vector<RenderCommand> queue;
+    RenderQueueState qs;
+    syncSceneRenderQueue(objs, queue, qs);
+    CHECK(queue.size() == 3, "los tres van a la cola");
+
+    const int W = 256, H = 256;
+    Haruka::Core::Camera cam(Haruka::Tools::WorldPos(glm::dvec3(0.0)));   // mira a -Z
+    Haruka::Renderer::PerFrameUBOData fd{};
+    fd.view = glm::mat4(glm::mat3(cam.getViewMatrix()));
+    fd.projection = cam.getProjectionMatrix((float)W / (float)H);
+    fd.sunDirection = glm::vec3(0, 1, 0); fd.sunLightColor = glm::vec3(1.0f);
+    BufferHandle frameUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(fd), &fd, BufferMemory::Dynamic);
+
+    // EL TARGET DE ESCENA DEL MOTOR: color + D32F con reversed-Z. Con un depth de punto fijo (el
+    // backbuffer de GL es D24) la profundidad de la Luna (~1e-10) redondea a 0 y no pasa el GREATER.
+    RenderTargetDesc rd{};
+    rd.width = W; rd.height = H;
+    rd.colorFormats = { Format::RGBA8 };
+    rd.hasDepth = true; rd.depthFormat = Format::D32F;
+    RenderPassHandle rt = g_dev->createRenderTarget(rd);
+    CHECK(valid(rt), "target de escena D32F creado");
+    if (!valid(rt)) { g_dev->destroy(frameUbo); return; }
+
+    Haruka::Renderer::ScenePass pass;
+    Haruka::Renderer::ScenePass::Frame sf;
+    sf.camera = &cam; sf.perFrameUBO = frameUbo; sf.width = W; sf.height = H;
+    sf.sceneTargetPass = rt;
+    Haruka::Renderer::ScenePass::DrawStats st;
+
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+    std::vector<uint8_t> px((size_t)W * H * 4, 0x00);
+    if (Context* c = g_dev->beginFrame()) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;        // reversed-Z, como el motor
+        c->beginRenderPass(rt, cv);
+        c->setViewport(0, 0, W, H);
+        c->endRenderPass();
+        pass.begin(c, sf, true);
+        c->setViewport(0, 0, W, H);
+        pass.drawObjects(c, sf, queue, st);
+        c->endRenderPass();
+        ClearValues bb; bb.clearColor = true; bb.clearDepth = true; bb.depth = 0.0f;
+        c->beginRenderPass({}, bb);
+        c->endRenderPass();
+        c->blitColor(rt, {}, W, H);                    // el color de la escena, a donde se lee
+        if (!isVk) g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk)  g_dev->readPixels(0, 0, W, H, Format::RGBA8, px.data());
+    }
+
+    // Por TERCIOS en horizontal (el volteo vertical de un backend no los mezcla): rojo a la izquierda,
+    // verde en el centro, azul a la derecha. Rojo y azul se cuentan sin distinguirlos entre si: la
+    // copia al backbuffer de Vulkan es CRUDA (target RGBA -> swapchain BGRA) y los intercambia; lo
+    // que se mide es que el objeto ESTE, no su canal.
+    long red = 0, green = 0, blue = 0;
+    for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+            const uint8_t* p = &px[((size_t)y * W + x) * 4];
+            const int third = x * 3 / W;
+            const bool rb = std::max(p[0], p[2]) > 100 && std::abs((int)p[0] - (int)p[2]) > 40 && p[1] < 120;
+            if (third == 0 && rb) ++red;
+            if (third == 1 && p[1] > 100 && p[1] > p[0] + 40) ++green;
+            if (third == 2 && rb) ++blue;
+        }
+    std::printf("    %s: draws %d · px rojo (izq) %ld · verde (Luna, centro) %ld · azul (der) %ld\n",
+                isVk ? "VULKAN" : "OpenGL", st.renderedDrawCalls, red, green, blue);
+    CHECK(st.renderedDrawCalls == 3, "el pase dibuja los tres");
+    CHECK(red > 50,   "sale el objeto de la izquierda (con un UBO compartido, no)");
+    CHECK(green > 50, "sale la Luna a 384 400 km (con un UBO compartido, no)");
+    CHECK(blue > 50,  "sale el de la derecha (el ultimo: este salia siempre)");
+
+    pass.shutdown();
+    // Las primitivas del motor (la esfera) se cachean en globales con buffers del device que las
+    // creo: sin soltarlas aqui, la pasada de Vulkan dibujaba con los buffers de GL y no salia nada.
+    Haruka::Core::AppInternal::cleanupGLStatics();
+    g_dev->destroy(rt);
+    g_dev->destroy(frameUbo);
+}
+
+// ================================================================================================
 // PIPELINES REALES DEL MOTOR: que TODOS enlacen, en los DOS backends.
 //
 // ⚠️ ESTE TEST EXISTE POR UN FALLO CONCRETO Y CARO. `ocean.frag` es compartido por dos vertex
@@ -151,10 +268,8 @@ void testEnginePipelines()
     // Los pares REALES que crea el motor. Si alguien añade un pipeline y no lo pone aquí, este test
     // no lo cubre — por eso la lista vive junto a los tests y no dentro del engine: se ve lo que hay.
     const std::vector<Case> cases = {
-        { "planeta/base teselado", sh+"planet/terrain.vert", sh+"planet/biome.frag",
-          sh+"planet/terrain.tesc", sh+"planet/terrain.tese", true },
+        { "planeta/respaldo",      sh+"planet/simple.vert", sh+"planet/simple.frag", "", "", false },
         { "planeta/nodos (v5)",    sh+"terrain_node.vert", sh+"terrain_node.frag", "", "", false },
-        { "planeta/suelo cercano", sh+"planet/nearground.vert", sh+"planet/biome.frag", "", "", false },
         // ⚠️ AQUI HABIA DOS ENTRADAS DE MAR (`ocean.*` teselado y `ocean_far.*`) Y SUS SHADERS YA NO
         // EXISTEN. El agua se migro al pase de nodos el 2026-09-01: dejo de tener geometria propia,
         // asi que dejo de tener pipelines propios. La entrada nueva es la que hay que vigilar.
@@ -163,8 +278,24 @@ void testEnginePipelines()
         { "cielo",                 sh+"sky.vert",  sh+"sky.frag",  "", "", false },
         { "nubes volumétricas",    sh+"cloud_vol.vert", sh+"cloud_vol.frag", "", "", false },
         { "props instanciados",    sh+"prop_inst.vert", sh+"prop_inst.frag", "", "", false },
-        // ⚠️ `simple.vert`, NO `screenquad.vert`: es el par que construye el motor
-        // (`ApplicationRender.cpp`, `_mainShader`/`m_scenePSO`). `screenquad.vert` solo saca
+        // Los pares GENERICOS: un vertex para muchos fragment. Si uno deja de casar locations o UBOs
+        // con su vertex compartido, el pase entero desaparece sin error de compilacion.
+        { "obra instanciada",      sh+"mesh_inst.vert", sh+"prop_inst.frag", "", "", false },
+        { "post: bloom extract",   sh+"fullscreen_tri.vert", sh+"bloom_extract.frag", "", "", false },
+        { "post: bloom blur",      sh+"fullscreen_tri.vert", sh+"bloom_blur.frag", "", "", false },
+        { "post: present",         sh+"fullscreen_tri.vert", sh+"post_present.frag", "", "", false },
+        { "fluido: blur",          sh+"fullscreen_tri.vert", sh+"fluid_blur.frag", "", "", false },
+        { "fluido: superficie",    sh+"fullscreen_tri.vert", sh+"fluid_surface.frag", "", "", false },
+        { "nubes: composicion",    sh+"fullscreen_tri.vert", sh+"cloud_upsample.frag", "", "", false },
+        { "IBL: BRDF LUT",         sh+"fullscreen_tri.vert", sh+"brdf_lut.frag", "", "", false },
+        // El campo de suelo (Renderer/GroundField). Con los `BIND_*` de lib/backend.glsl su sampler caía
+        // en el binding 133 en Vulkan y RADV se caía DENTRO de vkCreateGraphicsPipelines.
+        { "suelo: campo",          sh+"fullscreen_tri.vert", sh+"ground_field.frag", "", "", false },
+        { "IBL: equirect→cubo",    sh+"cube_capture.vert", sh+"equirect_to_cubemap.frag", "", "", false },
+        { "IBL: irradiancia",      sh+"cube_capture.vert", sh+"irradiance_convolution.frag", "", "", false },
+        { "IBL: prefiltrado",      sh+"cube_capture.vert", sh+"prefilter_env.frag", "", "", false },
+        // ⚠️ `simple.vert`, NO un vertex de pantalla completa: es el par que construye el motor
+        // (`ApplicationRender.cpp`, `_mainShader`/`m_scenePSO`). Aquel (hoy `fullscreen_tri.vert`) solo saca
         // `TexCoords`, y `final.frag` lee `Normal`/`FragPos`/`TexCoord` — o sea que este caso
         // comprobaba un par que el motor NUNCA arma. Colaba porque el driver de AMD enlaza
         // varyings que faltan; Mesa aplica la especificacion y da
@@ -214,8 +345,10 @@ void testSkyAmbientGPU()
 {
     BEGIN("ambiente del cielo: direccional y con paridad CPU/GPU");
 
-    // Un cielo de día pleno: sol alto, sin nubes. Los mismos coeficientes van a la CPU y a la GPU.
-    const Haruka::Core::SkySH sh = Haruka::Core::skyAmbientSH(0.9f, 0.0f);
+    // Un cielo azul arriba y un suelo oscuro abajo (lo que da `SkyLight` de día). Los mismos
+    // coeficientes van a la CPU y a la GPU; por debajo de la saturación del target de 8 bits.
+    const Haruka::Core::SkySH sh = Haruka::Core::skyHemisphereSH(glm::vec3(0.45f, 0.62f, 0.90f),
+                                                                  glm::vec3(0.06f, 0.07f, 0.05f));
     struct SHUBO { float c[9][4]; } u{};
     for (int i = 0; i < 9; ++i) {
         u.c[i][0] = sh.coef[i].x; u.c[i][1] = sh.coef[i].y; u.c[i][2] = sh.coef[i].z;
@@ -326,13 +459,16 @@ static bool propLitPixel(const float sunDir[3], uint8_t out[4],
     // aerea). Con 32 B el shader leia `u_originRel`/`u_aerial` FUERA del buffer: Mesa devuelve 0 y
     // el test pasaba; NVIDIA/OpenGL devuelve basura y el prop no escribia pixeles o salia negro
     // (10 de 12 angulos a 0). Misma clase de fallo que el `CloudUBO` de 304 B contra 320.
-    struct PropParams { float wind[3]; float time; float matPBR[4]; float originRel[4]; float aerial[4];
+    struct PropParams { float wind[3]; float time; float matPBR[4]; float originRel[4]; float material[4];
                         float weather[4]; float flags[4]; } pp{};
     static_assert(sizeof(PropParams) == 96, "PropParams del banco desincronizado del shader (lib/prop_params.glsl)");
     pp.matPBR[0] = 0.0f;   // metallic
     pp.matPBR[1] = 0.6f;   // roughness
     pp.matPBR[2] = 1.0f;   // ao
     pp.matPBR[3] = 0.0f;   // SIN texturas: manda el escalar (ver la nota de arriba)
+    pp.flags[1]  = 1.0f;   // rim     (prop_inst.frag: la ganancia viaja en el UBO; la obra usa 0,35)
+    pp.flags[2]  = 1.0f;   // especular (la obra usa 0)
+    pp.material[0] = 1.0f; // facetado (low-poly), como la vegetación del motor
     BufferHandle ppUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pp), &pp, BufferMemory::Dynamic);
 
     const uint8_t grey[4] = { 128, 128, 128, 255 };
@@ -852,7 +988,7 @@ void testGrassBurstDraw()
 
     PropParams pp{};
     pp.matPBR = glm::vec4(0.0f, 0.6f, 1.0f, 0.0f);
-    pp.flags  = glm::vec4(isVk ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    pp.flags  = glm::vec4(isVk ? 1.0f : 0.0f, 1.0f, 1.0f, 0.0f);   // y/z = rim y especular, los del juego
     BufferHandle ppUbo = g_dev->createBuffer(BufferUsage::Uniform, sizeof(pp), &pp, BufferMemory::Dynamic);
 
     const uint8_t grey[4] = { 128, 128, 128, 255 };

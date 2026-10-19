@@ -40,18 +40,6 @@ struct PresentParams {
 static_assert(sizeof(PresentParams) == 32, "PresentParams std140 size mismatch");
 } // namespace
 
-void PostPass::setupQuad() {
-    if (RHI::valid(m_quadBuf)) return;
-    constexpr float quadVertices[] = {
-        -1.0f,  1.0f,  0.0f, 1.0f,
-        -1.0f, -1.0f,  0.0f, 0.0f,
-         1.0f,  1.0f,  1.0f, 1.0f,
-         1.0f, -1.0f,  1.0f, 0.0f,
-    };
-    RHI::Device* dev = RHI::device();
-    m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quadVertices), quadVertices);
-}
-
 bool PostPass::begin(int windowW, int windowH, bool editorTarget) {
     const auto& gpost = Settings::SettingsManager::get().graphics();
     // `HARUKA_RENDER_SCALE=<0.5..2>`: A/B de coste por PIXEL sin tocar los ajustes guardados. Si el
@@ -91,13 +79,12 @@ void PostPass::shutdown() {
         for (int i = 0; i < 2; ++i) if (RHI::valid(m_bloomPass[i])) dev->destroy(m_bloomPass[i]);
         if (RHI::valid(m_presentPSO)) dev->destroy(m_presentPSO);
         if (RHI::valid(m_presentUBO)) dev->destroy(m_presentUBO);
-        if (RHI::valid(m_quadBuf))    dev->destroy(m_quadBuf);
     }
     m_bloomExtractPSO = m_bloomBlurPSO = m_presentPSO = {};
     m_bloomUBOs.clear();
     m_bloomPass[0] = m_bloomPass[1] = {}; m_bloomTexH[0] = m_bloomTexH[1] = {};
     m_bloomW = m_bloomH = 0;
-    m_presentUBO = {}; m_quadBuf = {};
+    m_presentUBO = {};
     m_scene.reset();
     m_active = false; m_w = m_h = 0;
 }
@@ -125,7 +112,6 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
         }
         m_bloomW = bw; m_bloomH = bh;
     }
-    if (m_quadBuf.id == 0) setupQuad();   // crea el VBO del quad (el VAO lo aporta el PSO)
 
     // Pipelines horneados UNA vez: shader + vertex layout + estado de rasterizado. El VAO y el
     // glUseProgram viven DENTRO del pipeline → el llamador ya no toca GL.
@@ -133,18 +119,14 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
         // OJO: createPipeline hace un ifstream CRUDO de la ruta — NO la resuelve. Hay que
         // enraizarla con el base dir de assets (lo que hace Shader por dentro). Pasar
         // "shaders/x.vert" a pelo → fichero no encontrado → shader 0 → programa sin linkar.
-        const std::string vsPath = Shader::baseDir() + "shaders/screenquad.vert";
+        const std::string vsPath = Shader::baseDir() + "shaders/fullscreen_tri.vert";
         const std::string fsExtract = Shader::baseDir() + "shaders/bloom_extract.frag";
         const std::string fsBlur    = Shader::baseDir() + "shaders/bloom_blur.frag";
 
         RHI::PipelineDesc pd;
         pd.vertexPath              = vsPath.c_str();
-        pd.vertexLayout.strides     = { (uint32_t)(4 * sizeof(float)) };
-        pd.vertexLayout.attributes = {
-            { 0, 0,                 RHI::Format::RG32F },   // aPos (NDC xy)
-            { 1, 2 * sizeof(float), RHI::Format::RG32F },   // aTexCoords
-        };
-        pd.topology     = RHI::PrimitiveTopology::TriangleStrip;
+        // Triangulo de pantalla completa sin VBO (fullscreen_tri.vert): layout vacio, draw(3).
+        pd.topology     = RHI::PrimitiveTopology::Triangles;
         pd.depth.test   = false;  pd.depth.write = false;   // pase fullscreen: sin depth
         pd.blend.enable = false;
 
@@ -192,10 +174,9 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
         setParams(Settings::SettingsManager::get().graphics().bloomThreshold, 0.0f);
     ctx->beginRenderPass(m_bloomPass[0], keep);   // bindea FBO + viewport(bw,bh)
     ctx->bindPipeline(m_bloomExtractPSO);
-    ctx->bindVertexBuffer(m_quadBuf);
     ctx->bindUniformBuffer(2, uboExtract);
     ctx->bindTexture(0, srcColorTex);
-    ctx->draw(4);
+    ctx->draw(3);
 
     // 2. Separable Gaussian: N iterations of horizontal+vertical, ping-ponging
     //    tex[1] <-> tex[0]. Result ends up in tex[0].
@@ -208,18 +189,16 @@ RHI::TextureHandle PostPass::renderBloom(RHI::TextureHandle srcColorTex) {
         const RHI::BufferHandle uboH = setParams(0.0f, 1.0f);   // horizontal -> tex[1]
         ctx->beginRenderPass(m_bloomPass[1], keep);
         ctx->bindPipeline(m_bloomBlurPSO);
-        ctx->bindVertexBuffer(m_quadBuf);
         ctx->bindUniformBuffer(2, uboH);
         ctx->bindTexture(0, src);
-        ctx->draw(4);
+        ctx->draw(3);
 
         const RHI::BufferHandle uboV = setParams(0.0f, 0.0f);   // vertical -> tex[0]
         ctx->beginRenderPass(m_bloomPass[0], keep);
         ctx->bindPipeline(m_bloomBlurPSO);
-        ctx->bindVertexBuffer(m_quadBuf);
         ctx->bindUniformBuffer(2, uboV);
         ctx->bindTexture(0, m_bloomTexH[1]);
-        ctx->draw(4);
+        ctx->draw(3);
         src = m_bloomTexH[0];
     }
     ctx->endRenderPass();
@@ -231,21 +210,15 @@ void PostPass::composite(int width, int height) {
 if (m_active && m_scene) {
     HARUKA_PROFILE("post.composite(FXAA+bloom+upscale)"); HARUKA_GPU_SCOPE("post.composite(FXAA+bloom+upscale)");
     RHI::Device* dev = RHI::device();
-    if (m_quadBuf.id == 0) setupQuad();   // VBO del quad (el VAO lo aporta el PSO)
 
     // Pipeline horneado 1 vez. Dibuja a PANTALLA → sin depth ni blend.
     if (!RHI::valid(m_presentPSO)) {
-        const std::string vsPath = Shader::baseDir() + "shaders/screenquad.vert";
+        const std::string vsPath = Shader::baseDir() + "shaders/fullscreen_tri.vert";
         const std::string fsPath = Shader::baseDir() + "shaders/post_present.frag";
         RHI::PipelineDesc pd;
         pd.vertexPath              = vsPath.c_str();
         pd.fragmentPath            = fsPath.c_str();
-        pd.vertexLayout.strides     = { (uint32_t)(4 * sizeof(float)) };
-        pd.vertexLayout.attributes = {
-            { 0, 0,                 RHI::Format::RG32F },   // aPos
-            { 1, 2 * sizeof(float), RHI::Format::RG32F },   // aTexCoords
-        };
-        pd.topology     = RHI::PrimitiveTopology::TriangleStrip;
+        pd.topology     = RHI::PrimitiveTopology::Triangles;
         pd.depth.test   = false;  pd.depth.write = false;
         pd.blend.enable = false;
         m_presentPSO = dev->createPipeline(pd);
@@ -284,13 +257,12 @@ if (m_active && m_scene) {
         ctx->beginRenderPass(RHI::RenderPassHandle{}, clr);  // id 0 = backbuffer (pantalla)
         ctx->setViewport(0, 0, (int)width, (int)height);      // el pass a pantalla NO fija viewport
         ctx->bindPipeline(m_presentPSO);
-        ctx->bindVertexBuffer(m_quadBuf);
         ctx->bindUniformBuffer(3, m_presentUBO);
         ctx->bindTexture(0, m_scene->getColorTextureHandle());
         // El sampler u_bloomTex se lee SIEMPRE en el shader aunque u_bloom sea 0; bindea algo
         // válido para no dejar la unidad 1 con basura de un pase anterior.
         ctx->bindTexture(1, haveBloom ? bloomTex : m_scene->getColorTextureHandle());
-        ctx->draw(4);
+        ctx->draw(3);
         ctx->endRenderPass();
     }
 

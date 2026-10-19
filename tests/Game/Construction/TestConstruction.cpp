@@ -2,7 +2,7 @@
 // Tests del SISTEMA DE CONSTRUCCIÓN (F1): validación de colocación free-form. Verifica lo que el DGS
 // usará para validar (mismo código que el cliente): una pieza NO penetra el terreno, NO solapa otra, y
 // debe estar ANCLADA (apoyada en el suelo o tocando una pieza). Geometría pura, sin GL. Ver
-// docs/guides/PLAN_CONSTRUCCION.md.
+// docs/archivo/PLAN_CONSTRUCCION.md.
 // ================================================================================================
 #include "Common/TestCommon.h"
 

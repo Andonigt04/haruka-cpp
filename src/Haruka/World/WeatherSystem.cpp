@@ -80,7 +80,11 @@ void WeatherSystem::configure(uint32_t seed) {
         // pueden cubrir sin cerrar el planeta. Lo que de verdad limita la cobertura de este mundo es
         // su HUMEDAD (media 0,286 contra la terrestre, mucho mas alta), y eso se decide en el bioma,
         // no aqui.
-        f.radius   = 0.25 + 0.47 * (double)hashf(seed, i, 6);
+        // ⚠️ Y AL REVÉS (18-10): con 0,25-0,72 rad el cielo seguía con demasiada nube (Andoni: "todavía
+        // demasiadas nubes"), y estando bajo un frente el altocúmulo y el cúmulo lo cerraban. La banda
+        // nubosa de un sistema frontal real tiene cientos a ~2 000 km; con 0,12-0,40 rad (760-2 500 km
+        // de radio) hay más cielo limpio entre frentes y siguen pasando borrascas grandes.
+        f.radius   = 0.12 + 0.28 * (double)hashf(seed, i, 6);
         f.strength = 0.55f + 0.45f * hashf(seed, i, 7);
     }
     m_configured = true;
@@ -185,7 +189,7 @@ float WeatherSystem::cloudCoverAtTime(const glm::dvec3& dir, float humidity, dou
     // Ver la nota de `ApplicationRender.cpp`, que ahora imprime las dos medias.
     // El valor sale de DOS medidas, no de una: con 0,85 la media por area era 0,732 y con 0,63 bajaba a
     // 0,614, o sea 0,536 de cobertura por unidad de coeficiente. Para los 0,67 de la Tierra toca 0,73.
-    const float background = 0.73f * H;
+    const float background = kFairWeatherCover * H;   // ver CloudColumn.h: solo cúmulo
     return glm::clamp(cover * (0.70f + 1.00f * H) + background, 0.0f, 1.0f);
 }
 
@@ -272,12 +276,9 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // SUELO. Sigue siendo el techo de la lluvia. La cota mínima de 600 m sobre el suelo conserva lo
     // que se aprendió con la fórmula vieja: una base a 200-400 m se lee como un techo encima de la
     // cabeza ("la gris está muy cercana").
-    // ⚠️ NO TODA LA COBERTURA ES CÚMULO. El fondo de buen tiempo (`0,73·H`, sin frente) se reparte:
-    // la mitad cúmulo, la otra mitad velo de nivel medio (ver `kFairWeatherCumulusShare`); lo que
-    // añaden los frentes es convectivo entero. `cloudCover` (lluvia, oscuridad del cielo) no cambia.
-    const float bgCover  = glm::clamp(0.73f * w.humidity, 0.0f, 1.0f);
-    const float fairPart = std::min(w.cloudCover, bgCover);
-    w.column.cover = glm::clamp(fairPart * kFairWeatherCumulusShare + (w.cloudCover - fairPart), 0.0f, 1.0f);
+    // La cobertura es convectiva entera: el fondo de buen tiempo ya es solo cúmulo
+    // (`kFairWeatherCover`) y lo que añaden los frentes es un cuerpo, no un velo.
+    w.column.cover = glm::clamp(w.cloudCover, 0.0f, 1.0f);
     w.cloudBaseM = cloudBaseM(w.column);
 
     // ── TECHO: el DESARROLLO VERTICAL ───────────────────────────────────────────────────────────
@@ -316,11 +317,9 @@ WeatherSample WeatherSystem::sampleAt(const glm::dvec3& dir, float tempC, float 
     // hacía el horneado; sin el fondo de humedad, que sería otra capa cerrada. Condensan a SU
     // temperatura (−40 / −10 °C), a la cota que toque en esta columna (ver `aloftFractionAt`).
     {
-        const float bg = 0.73f * w.humidity;
+        const float bg = kFairWeatherCover * w.humidity;
         w.column.vaporHigh = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time + kCirrusLeadS / m_timeScale) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
-        w.column.vaporMid  = glm::clamp((cloudCoverAtTime(d, w.humidity, m_time - kMidLagS / m_timeScale)   - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
-        // Y la parte del fondo de buen tiempo que NO es cúmulo, como velo de nivel medio.
-        w.column.vaporMid  = glm::clamp(w.column.vaporMid + fairPart * (1.0f - kFairWeatherCumulusShare), 0.0f, 1.0f);
+        w.column.vaporMid  = kFrontMidVaporShare * glm::clamp((cloudCoverAtTime(d, w.humidity, m_time - kMidLagS / m_timeScale) - bg) / std::max(1.0f - bg, 0.05f), 0.0f, 1.0f);
     }
 
     // ── VIENTO ──────────────────────────────────────────────────────────────────────────────────

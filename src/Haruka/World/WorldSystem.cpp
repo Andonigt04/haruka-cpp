@@ -3,15 +3,15 @@
 #include "Haruka/Core/Scene/SceneManager.h"
 #include "Haruka/Tools/ObjectTypes.h"
 #include <cmath>
+#include <cstdlib>
 #include <numbers>
 
 namespace Haruka::World {
 
-// Duración de un día completo (s). Showcase: ~4 min para que se note el ciclo sin
-// marear. (Futuro: exponer como ajuste.)
-static constexpr double kDayLengthSeconds = 240.0;
-// Periodo orbital de la Luna (s). Más lento que el día → se mueve por el cielo.
-static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva visible pero suave
+// Duración de un día solar completo (s): 24 h reales.
+static constexpr double kDayLengthSeconds = 86400.0;
+// La Luna REAL: a su distancia (m), con su radio en la escena (objeto "Moon").
+static constexpr double kMoonDistanceM = 3.844e8;
 
     WorldSystem::WorldSystem() : m_worldOrigin(0.0, 0.0, 0.0) {}
 
@@ -146,68 +146,56 @@ static constexpr double kMoonPeriodSeconds = 1800.0; // 30 min/órbita: deriva v
         return (float)(h * kTideAmplitudeM);
     }
 
-    void WorldSystem::updateMoon(double dt) {
-        if (!m_scene || !m_hasActivePlanet) return;
-        auto moon = m_scene->getObject("Moon");
-        if (!moon) return;
-        const glm::dvec3 pc = m_planetCenter;
-
-        if (!m_moonInit) { m_moonOffset0 = glm::dvec3(moon->position) - pc; m_moonInit = true; }
-        m_moonAngle += dt * (2.0 * std::numbers::pi / kMoonPeriodSeconds);
-
-        // Órbita circular INCLINADA (no plana): el plano orbital se inclina un ángulo `incl`
-        // respecto al ecuador y se gira por el nodo ascendente `node` → la Luna cruza el cielo en
-        // diagonal, como la Luna real (~5° real; aquí ~25° para que se note). Radio = distancia inicial.
-        const double R    = glm::length(m_moonOffset0);
-        const double incl = 0.44;  // inclinación del plano orbital (rad, ~25°)
-        const double node = 0.7;   // longitud del nodo ascendente (rad) → orienta el plano
-        // Normal del plano orbital (inclinada desde +Y) y base (u,v) perpendicular a ella.
-        const glm::dvec3 n(std::sin(incl) * std::cos(node), std::cos(incl), std::sin(incl) * std::sin(node));
-        glm::dvec3 u = glm::normalize(glm::cross(n, glm::dvec3(0.0, 1.0, 0.001)));
-        glm::dvec3 v = glm::cross(n, u);
-        moon->position = pc + (u * std::cos(m_moonAngle) + v * std::sin(m_moonAngle)) * R;
+    void WorldSystem::updateMoon(double /*dt*/) {
+        // La Luna es un objeto de la escena ("Moon"): se coloca a su distancia REAL en la direccion que
+        // da `SkyEphemeris` (ya calculada en `updateDayNight`). Sale y se pone cada dia porque el
+        // planeta gira; antes solo seguia su orbita y no salia ni se ponia.
+        if (!m_hasActivePlanet || !m_celestialInit) return;
+        m_moonFromPlanet = m_skyNow.moonDir * kMoonDistanceM;
+        if (!m_scene) return;
+        if (auto moon = m_scene->getObject("Moon")) moon->position = m_planetCenter + m_moonFromPlanet;
     }
 
     void WorldSystem::updateDayNight(double dt) {
         if (!m_hasActivePlanet) return;
         const glm::dvec3 pc = m_planetCenter;
 
-        // Localiza el Sol (primera estrella). Guarda su offset inicial al planeta.
+        // Localiza el Sol (primera estrella).
         CelestialBody* sun = nullptr;
         for (auto& b : m_bodies) { if (b.type == Tools::ObjectType::STAR) { sun = &b; break; } }
         if (!sun) return;
         if (!m_celestialInit) {
-            // Offset inicial desde el OBJETO DE ESCENA (absoluto, nunca desplazado por
-            // el floating-origin), no desde el body (que sí se desplaza) → frame correcto.
+            // Distancia y hora INICIALES desde el OBJETO DE ESCENA (absoluto, nunca desplazado por el
+            // floating-origin): el juego arranca con el Sol donde lo puso la escena.
             glm::dvec3 sunAbs = sun->worldPos;
             if (m_scene) if (auto so = m_scene->getObject(sun->name)) sunAbs = glm::dvec3(so->position);
-            m_sunOffset0 = sunAbs - pc;
+            const glm::dvec3 o = sunAbs - pc;
+            m_sunDist = glm::length(o);
+            m_sky.dayS = kDayLengthSeconds;
+            // En t = 0 el planeta esta en el equinoccio (orbit0 = 0: el Sol sobre el ecuador, en
+            // -X inercial). Lo quieto en el espacio se ve girar `-spin` (`planetFromInertial`), asi
+            // que -X queda en el angulo `spin - pi`: el giro inicial que deja el Sol donde lo puso la
+            // escena es ese angulo + pi.
+            m_sky.orbit0 = 0.0;
+            m_sky.spin0  = 3.14159265358979323846 + std::atan2(o.z, o.x);
+            m_sky.moon0  = 2.0;   // la Luna empieza a ~115 grados del Sol: creciente, de tarde
             m_celestialInit = true;
         }
-
-        m_dayAngle += dt * (2.0 * std::numbers::pi / kDayLengthSeconds);
+        if (!m_hasSimTime) m_localTime += dt;
+        const double t = m_hasSimTime ? m_simTime : m_localTime;
 
         // ⚠️ `HARUKA_DAY_ANGLE=<radianes>` CONGELA la hora del dia. No es para jugar: es para poder
-        // COMPARAR dos capturas. El angulo se acumula con el dt, asi que depende del tiempo de carga
-        // y del ritmo de frames — dos ejecuciones del mismo binario cogen el Sol en sitios distintos y
-        // la imagen cambia de brillo. Midiendo asi llegue a atribuir a Vulkan un frame "1,64x mas
-        // claro" que en realidad estaba dentro de esa variacion: el mismo OpenGL daba 29,5 y 50,1 de
-        // media en dos arranques. Sin fijar la hora, cualquier careo de color entre backends miente.
-        { static const double s_fixed = [] {
-              const char* e = std::getenv("HARUKA_DAY_ANGLE");
-              return e ? std::atof(e) : -1.0; }();
-          if (s_fixed >= 0.0) m_dayAngle = s_fixed; }
+        // COMPARAR dos capturas. Dos ejecuciones del mismo binario cogian el Sol en sitios distintos y
+        // la imagen cambiaba de brillo: midiendo asi llegue a atribuir a Vulkan un frame "1,64x mas
+        // claro" que estaba dentro de esa variacion. Ahora fija el GIRO del planeta, medido desde el
+        // inicial (0 = la hora de la escena, pi = doce horas despues), como antes fijaba el del Sol.
+        static const double s_fixed = [] {
+            const char* e = std::getenv("HARUKA_DAY_ANGLE");
+            return e ? std::atof(e) : -1.0; }();
+        m_skyNow = Planet::skyAt(m_sky, t, s_fixed >= 0.0 ? m_sky.spin0 + s_fixed : -1.0);
 
-        // Rotación del Sol alrededor del EJE DEL PLANETA, que va INCLINADO ~23.5° (como el eje
-        // real de la Tierra) en vez del eje Y recto → el terminador día/noche cruza en DIAGONAL y
-        // la altura del Sol cambia con la latitud (sensación de estaciones/eje inclinado). Rodrigues.
-        const double tilt = 0.41; // ~23.5° (inclinación axial)
-        const glm::dvec3 axis = glm::normalize(glm::dvec3(std::sin(tilt), std::cos(tilt), 0.0));
-        const glm::dvec3 o = m_sunOffset0;
-        const double c = std::cos(m_dayAngle), s = std::sin(m_dayAngle);
-        const glm::dvec3 rot = o * c + glm::cross(axis, o) * s + axis * (glm::dot(axis, o) * (1.0 - c));
-        sun->worldPos = pc + rot;
-
+        m_sunFromPlanet = m_skyNow.sunDir * m_sunDist;
+        sun->worldPos = pc + m_sunFromPlanet;
         // Mueve también el Sol VISIBLE (objeto de escena) para que cruce el cielo.
         if (m_scene) {
             if (auto so = m_scene->getObject(sun->name)) so->position = sun->worldPos;

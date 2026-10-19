@@ -42,6 +42,7 @@
 #include "lib/ocean_wave.glsl"       // harukaGerstner
 #include "lib/inland_water.glsl"     // harukaWaterLevelAt (mar + lago horneado + parche)
 #include "lib/vox_cut.glsl"           // harukaVoxCutLookup
+#include "lib/surface_bowls.glsl"     // harukaSurfaceBowls: los cráteres hunden también el FONDO
 
 layout(location = 0) in vec2 aTexel;
 
@@ -74,6 +75,10 @@ layout(location = 2) out float vDepth;    // profundidad del agua: < 0 = tierra,
 layout(location = 3) out float vFoam;
 layout(location = 4) flat out int vWStride;   // vista 4 (HARUKA_TERRAIN_V5_DEBUG): color por zancada, tambien el agua
 layout(location = 5) flat out int vWLevel;
+// Para las olas que la malla no lleva, por píxel (`harukaWaveSlopeResidual`): el quad del nodo y el fetch.
+layout(location = 7) flat out float vQuadM;
+layout(location = 8) out float vFetch;
+layout(location = 9) out float vBed;      // fondo SUAVE bajo el agua en reposo: lleva la fase (`harukaTrainPhase`)
 
 void main() {
     const NodeInst I = uInst[INSTANCE_INDEX];
@@ -223,10 +228,52 @@ void main() {
         if (inside && vc.r > 0.5) groundH -= harukaVoxCutBedM(vc);
     }
 
+    // ── LOS CRÁTERES, TAMBIÉN BAJO EL AGUA ──────────────────────────────────────────────────────
+    // ⚠️ AQUÍ FALTABAN. El terreno hunde el cuenco (`terrain_node.vert`) y la física también
+    // (`TerrainSampler::heightAt` suma `surfaceDeltaM`), pero el agua medía su profundidad contra el
+    // suelo SIN el hoyo: un cráter en el fondo del mar se dibujaba con el agua de antes, y uno en la
+    // playa que bajaba de la cota del mar se quedaba seco a la vista mientras el cuerpo nadaba en él.
+    // Mismo punto que el terreno (el suelo, en double y con `uCenter` partido): en float, a radio
+    // terrestre, el error es de medio metro, del tamaño del propio hoyo.
+    {
+        precise dvec3 pG = dirD * (double(R) + double(groundH)) + dvec3(uCenter.xyz);
+        vec3  bowlG;
+        float bowlW;
+        groundH += harukaSurfaceBowls(vec3(pG) + uCenterLo.xyz, bowlG, bowlW);
+    }
+
     // ── Y AHORA SI, LA COTA DEL AGUA: mar, lago horneado, ventana o parche, en UNA respuesta ────
     const float level = harukaWaterLevelAt(posRelEye, dir, harukaSeaLevelM(), groundH);
 
-    const float depthRest = level - groundH;
+    const float depthRest0 = level - groundH;
+    // El FONDO SUAVE (`HARUKA_PHASE_BED_M`, sin el rizo fino), el que lleva la FASE de la ola: con el
+    // fondo del vertice la fase saltaba de uno a otro. Mismo orden que `groundH` y que la fisica
+    // (`TerrestrialPlanet::sampleHeight(dir, OCEAN_PHASE_BED_M)`); sin crateres ni cuevas, y medido
+    // desde el agua EN REPOSO (si siguiera a la trepada, la fase latiria con ella).
+    float bedM = HARUKA_NO_BED;
+    if (hSize.x > 2) {
+        float detP = harukaTerrainDetailFrom(detN, HARUKA_PHASE_BED_M) * harukaSeaLevelAttenuation(baseH);
+        if (baseH > 0.0 && detP < -baseH) detP = -baseH;
+        bedM = level - (baseH + detP);
+    }
+    vBed = bedM;
+    const float fetchHere  = harukaWaterFetchAt(posRelEye, dir);
+
+    // ── LA TREPADA (swash): la lamina sube y baja por la arena ──────────────────────────────────
+    // ⚠️ ESTO FALTABA DESDE QUE EL AGUA PASO A LOS NODOS, y por eso la orilla que se VE estaba quieta
+    // con cualquier viento. La fisica (`PlanetarySystem::sampleWaterSurface`) si la aplicaba —su nota
+    // dice "MISMO ORDEN QUE ocean.tese"—, pero `ocean.tese` se borro con el clipmap y la llamada no se
+    // llevo al pase de nodos: se nadaba una orilla que no se dibujaba. Mismo orden que la fisica:
+    // primero trepa la lamina (solo donde hay agua en reposo) y la ola se evalua sobre la profundidad
+    // ya trepada. Fase desde el ANCLA del mar, en double como el resto del vertice.
+    float swash = 0.0;
+    if (depthRest0 > 0.0) {
+        precise dvec3 pLv = dirD * (double(R) + double(level)) + dvec3(uCenter.xyz);
+        const vec3 wpRest = vec3(pLv) + uCenterLo.xyz - uOceanAnchor.xyz;
+        swash = harukaSwash(depthRest0, wpRest, dir, harukaOceanTime(), fetchHere, bedM);
+    }
+    const float levelSw   = level + swash;
+    const float depthRest = levelSw - groundH;
     vDepth = depthRest;
 
     // ── Y LA COTA A LA QUE SE DIBUJA EL VERTICE, QUE NO ES LA MISMA ─────────────────────────────
@@ -257,7 +304,7 @@ void main() {
     const float lakeLv = harukaWindowLakeAt(dir);
     const bool  sheet  = lakeLv > HARUKA_NO_INLAND && lakeLv >= level - 1e-3;
     vSheet = sheet ? 1.0 : 0.0;
-    const float drawLevel = sheet ? level : max(level, groundH);
+    const float drawLevel = sheet ? level : max(levelSw, groundH);
 
     // ── LA PENDIENTE DEL FONDO, para que la ola REFRACTE ────────────────────────────────────────
     //
@@ -304,11 +351,13 @@ void main() {
     float foam = 0.0;
     vec3  disp = vec3(0.0);
     if (depthRest > 0.0) {
-        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, harukaWaterFetchAt(posRelEye, dir), quadM, 1.0,
-                              slope, n, foam);
+        disp = harukaGerstner(wp, dir, harukaOceanTime(), depthRest, fetchHere, quadM, 1.0,
+                              slope, bedM, n, foam);
     }
     vNormal = n;
     vFoam   = foam;
+    vQuadM  = quadM;
+    vFetch  = fetchHere;
     vWStride = I.slot.z;
     vWLevel  = I.node.y;
 

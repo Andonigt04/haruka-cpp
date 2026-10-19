@@ -27,22 +27,32 @@ layout(location = 1)  in vec4 aNormal;     // RGB10A2_SNORM
 layout(location = 2)  in vec4 aColorPk;    // RGBA8: rgb × (a·4)
 layout(location = 9)  in vec2 aUv;
 
+#include "lib/backend.glsl"       // INSTANCE_INDEX: gl_InstanceID en GL, gl_InstanceIndex en Vulkan
 #include "lib/frame_ubo.glsl"     // PerFrameData (binding 0)
+#include "lib/aerial.glsl"        // el aire, por vértice
 #include "lib/prop_params.glsl"   // PropParams (binding 6)
 #include "lib/prop_sway.glsl"
 #include "lib/mass_burst.glsl"
 
 layout(std430, binding = 2) readonly buffer MassBursts { HarukaMassBurst uBursts[]; };
 layout(std430, binding = 3) readonly buffer MassState  { uint uMassState[]; };
+// EL SUELO DIBUJADO bajo cada mata (`mass_ground.comp`): `uStamp[brote] = (base, frame)` y
+// `uSnap[base + k]` = cuánto subir/bajar la raíz por la vertical del brote. Solo vale si el sello es
+// de ESTE frame (`u_flags.w`); si no, la mata se queda en el plano del brote, como antes.
+layout(std430, binding = 4) readonly buffer MassStamps { uvec2 uStamp[]; };
+layout(std430, binding = 5) readonly buffer MassSnap   { float uSnap[]; };
 
 layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
 layout(location = 2) out vec3 Color;
 layout(location = 3) out vec2 TexCoord;
+// EL AIRE entre el ojo y el vértice (lib/aerial.glsl, por vértice: ver `harukaAerialTS`).
+layout(location = 4) out vec3 AerialT;
+layout(location = 5) out vec3 AerialS;
 
 void main() {
     const uint bi = uint(gl_BaseInstanceARB);
-    const uint k  = uint(gl_InstanceID) - (u_flags.x > 0.5 ? bi : 0u);
+    const uint k  = uint(INSTANCE_INDEX) - (u_flags.x > 0.5 ? bi : 0u);
     const HarukaMassBurst B = uBursts[bi];
     const vec3 center = B.a.xyz;
 
@@ -55,6 +65,7 @@ void main() {
     if (st == 2u) {   // destruida: colapsa a un punto (ver prop_inst.vert: NO se expulsa del NDC)
         gl_Position = projection * view * vec4(center + u_originRel.xyz, 1.0);
         Normal = vec3(0.0, 1.0, 0.0); FragPos = center + u_originRel.xyz; Color = vec3(0.0); TexCoord = vec2(0.0);
+        AerialT = vec3(1.0); AerialS = vec3(0.0);
         return;
     }
 
@@ -66,7 +77,9 @@ void main() {
     // prototipo).
     const vec3 X = u * cos(e.yaw) + v * sin(e.yaw);
     const vec3 Z = cross(X, up);
-    const vec3 root = center + u * e.offset.x + v * e.offset.y;
+    vec3 root = center + u * e.offset.x + v * e.offset.y;
+    const uvec2 stamp = uStamp[bi];
+    if (stamp.y == uint(u_flags.w)) root += up * uSnap[stamp.x + k];
 
     // PESO y PISADA: se acorta y se vence hacia su +X (que el yaw ya hace aleatorio por mata).
     const float h = clamp(aPos.y, 0.0, 4.0);
@@ -91,5 +104,6 @@ void main() {
     Normal   = normalize(X * aNormal.x + up * aNormal.y + Z * aNormal.z);   // escala uniforme
     Color    = col;
     TexCoord = aUv;
+    harukaAerialTS(camRel, AerialT, AerialS);
     gl_Position = projection * view * vec4(camRel, 1.0);
 }

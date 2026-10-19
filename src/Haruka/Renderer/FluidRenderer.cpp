@@ -11,7 +11,7 @@ FluidRenderer::~FluidRenderer() {
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     auto del = [&](auto& h) { if (RHI::valid(h)) { dev->destroy(h); h = {}; } };
-    del(m_particleBuf); del(m_quadBuf); del(m_uboParams);
+    del(m_particleBuf); del(m_uboParams);
     del(m_depthPass); del(m_smoothPass[0]); del(m_smoothPass[1]); del(m_sceneCopyPass);
     del(m_psoSpheres); del(m_psoDepth); del(m_psoBlur); del(m_psoSurface);
 }
@@ -25,7 +25,7 @@ void FluidRenderer::ensureGL() {
     const std::string vPart = base + "shaders/fluid_particle.vert";
     const std::string fPart = base + "shaders/fluid_particle.frag";
     const std::string fDep  = base + "shaders/fluid_depth.frag";
-    const std::string vQuad = base + "shaders/screenquad.vert";
+    const std::string vQuad = base + "shaders/fullscreen_tri.vert";
     const std::string fBlur = base + "shaders/fluid_blur.frag";
     const std::string fSurf = base + "shaders/fluid_surface.frag";
 
@@ -47,12 +47,7 @@ void FluidRenderer::ensureGL() {
     RHI::PipelineDesc pq;
     pq.vertexPath              = vQuad.c_str();
     pq.fragmentPath            = fBlur.c_str();
-    pq.vertexLayout.strides    = { (uint32_t)(4 * sizeof(float)) };
-    pq.vertexLayout.attributes = {
-        { 0, 0,                        RHI::Format::RG32F, 0 },
-        { 1, (uint32_t)(2*sizeof(float)), RHI::Format::RG32F, 0 },
-    };
-    pq.topology     = RHI::PrimitiveTopology::TriangleStrip;
+    pq.topology     = RHI::PrimitiveTopology::Triangles;   // fullscreen_tri.vert: sin VBO, draw(3)
     pq.depth.test   = false;
     pq.depth.write  = false;
     pq.blend.enable = false;
@@ -63,9 +58,6 @@ void FluidRenderer::ensureGL() {
     m_psoSurface = dev->createPipeline(pq);
 
     m_particleBuf = dev->createBuffer(RHI::BufferUsage::Vertex, 0, nullptr, RHI::BufferMemory::Stream);
-
-    constexpr float quad[] = { -1,1, 0,1,  -1,-1, 0,0,  1,1, 1,1,  1,-1, 1,0 };
-    m_quadBuf = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quad), quad);
 
     m_uboParams = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(FluidParamsUBO), nullptr,
                                     RHI::BufferMemory::Dynamic);
@@ -206,18 +198,17 @@ void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle sce
 
     ctx->beginRenderPass(m_smoothPass[0], ccv);
     ctx->bindPipeline(m_psoBlur);
-    ctx->bindVertexBuffer(m_quadBuf, 0);
     m_params.blurDir = glm::vec2(texelX, 0.0f);
     bindParams(ctx);
     ctx->bindTexture(0, dev->getColorTexture(m_depthPass, 0));
-    ctx->draw(4);
+    ctx->draw(3);
     ctx->endRenderPass();
 
     ctx->beginRenderPass(m_smoothPass[1], ccv);
     m_params.blurDir = glm::vec2(0.0f, texelY);
     bindParams(ctx);
     ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[0], 0));
-    ctx->draw(4);
+    ctx->draw(3);
     ctx->endRenderPass();
 
     // 3) Compuesto de SUPERFICIE OPAQUE sobre el target de escena. El quad cubre toda la
@@ -231,10 +222,9 @@ void FluidRenderer::renderSurface(int n, int w, int h, RHI::RenderPassHandle sce
     m_params.texel       = glm::vec2(texelX, texelY);
     m_params.refractScale = 0.03f;
     bindParams(ctx);
-    ctx->bindVertexBuffer(m_quadBuf, 0);
     ctx->bindTexture(0, dev->getColorTexture(m_smoothPass[1], 0));   // smoothed depth
     ctx->bindTexture(1, dev->getColorTexture(m_sceneCopyPass, 0));   // scene colour behind
-    ctx->draw(4);
+    ctx->draw(3);
     ctx->endRenderPass();
 }
 

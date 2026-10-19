@@ -1,31 +1,32 @@
 #include "RHI/Common/RHITestCommon.h"
+#include <cstdio>
+#include <cstdlib>
 
 int g_xfail = 0;
 int g_fail = 0;
 int g_pass = 0;
 const char * g_cur = "";
-DriverDefect g_driverDefects[19] = {
+DriverDefect g_driverDefects[16] = {
     // AMD sobre OpenGL: los siete de la sonda de aritmética...
     { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(3) `normalize(dvec3)*R`",
       HARUKA_AMD_GL_FP64, 0 },
     { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(6) `inversesqrt(double)`",
       HARUKA_AMD_GL_FP64, 0 },
     // ⚠️ (7) y (8) YA NO ESTAN, Y NO PORQUE EL DRIVER MEJORARA: `harukaCubeFaceToDir` dejo de usar
-    // `sqrt(double)` del driver y hace la raiz con `harukaSqrtD` (rsqrt pulido con Newton, sin
-    // division; ver cube_face.glsl, 16-09). Con eso la direccion del bake sale unitaria con precision
-    // de double TAMBIEN en AMD+OpenGL, y la regla de "entrada muerta = fallo" nos lo dijo: dos tandas
-    // en rojo hasta borrarlas. Los otros cinco (producto, division, normalize, inversesqrt en
-    // crudo, cubeFaceToDir en crudo) siguen degradados: son la aritmetica del driver, no la nuestra.
-    { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(10) `harukaCubeFaceToDir`",
+    // `sqrt(double)` del driver y hace la raiz con `harukaSqrtD` (ver cube_face.glsl, 16-09).
+    //
+    // ⚠️ Y (10), (11), (12) Y LOS DOS DE LA BISECCION TAMPOCO (16-10): NUNCA FUERON DEL DRIVER. La
+    // sonda media el residuo con `a - double(float(a))`, y el compilador (NIR) pliega esa ida y
+    // vuelta: el residuo salia CERO con un producto que era EXACTO (los 16 bits bajos de
+    // `6371000*0.31f` dan 30720 en la GPU y en la CPU, en GL y en Vulkan). Con el redondeo a float
+    // hecho sobre los bits (`lib/fp64.glsl`) los cinco casan con la CPU en AMD+OpenGL, y la regla de
+    // "entrada muerta = fallo" lo dijo. En Vulkan el mismo artefacto daba seis FALLOS en rojo.
+    // Lo que SI degrada AMD+OpenGL es la raiz en doble: (3) pasa por `normalize` y (6) es la raiz.
+    // ...y su consecuencia en el SUELO DIBUJADO: la misma raiz en doble en el vertice. Vulkan, mismo
+    // hardware y mismo frame: 0,19 cm de media a menos de 150 m; OpenGL: 4,2 cm (16-10).
+    { Backend::OpenGL, "AMD", "un frame entero contra el relieve horneado", "a menos de 150 m",
       HARUKA_AMD_GL_FP64, 0 },
-    { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(11) el PRODUCTO en doble",
-      HARUKA_AMD_GL_FP64, 0 },
-    { Backend::OpenGL, "AMD", "DOUBLE, o la degrada a float", "(12) la DIVISION en doble",
-      HARUKA_AMD_GL_FP64, 0 },
-    // ...y los dos de la bisección del bake, que son ese mismo fp64 un eslabón más abajo.
-    { Backend::OpenGL, "AMD", "biseccion por texel", "la direccion del texel es la MISMA",
-      HARUKA_AMD_GL_FP64, 0 },
-    { Backend::OpenGL, "AMD", "biseccion por texel", "la posicion `dir*R` es la MISMA",
+    { Backend::OpenGL, "AMD", "un frame entero contra el relieve horneado", "de 300 a 1000 m",
       HARUKA_AMD_GL_FP64, 0 },
     // Vulkan sobre lavapipe.
     { Backend::Vulkan, "llvmpipe", "DOUBLE, o la degrada a float", "(3) `normalize(dvec3)*R`",
@@ -132,6 +133,16 @@ void recordShot(const char* name, int w, int h, const std::vector<uint8_t>& px)
 {
     const int b = (g_dev && g_dev->backend() == Backend::Vulkan) ? 1 : 0;
     g_shots[b][name] = Shot{ w, h, px };
+    // `HARUKA_SHOT_DIR=<carpeta>`: además se vuelca a disco (PPM, filas tal cual las leyó el backend)
+    // para MIRAR la imagen, que el careo en ASCII no deja ver.
+    if (const char* dir = std::getenv("HARUKA_SHOT_DIR")) {
+        const std::string path = std::string(dir) + "/" + (b ? "vk_" : "gl_") + baselineSlug(name) + ".ppm";
+        if (FILE* fp = std::fopen(path.c_str(), "wb")) {
+            std::fprintf(fp, "P6\n%d %d\n255\n", w, h);
+            for (int i = 0; i < w * h; ++i) std::fwrite(&px[(size_t)i * 4], 1, 3, fp);
+            std::fclose(fp);
+        }
+    }
 }
 
 void pumpWindowEvents()

@@ -301,4 +301,35 @@ void harukaSelectMaterial(float humid, float tempC, float slope, float elevKm, f
     if (tileBed < 0) tileBed = tile;
 }
 
+/**
+ * @brief CUÁNTA HIERBA declara el suelo en este punto, 0..1: el campo `grass` de cada material (`g.w`;
+ *        en el JSON `"grass"`, por defecto según su albedo) promediado entre las COBERTURAS que ganan
+ *        el punto con los mismos pesos de banda que `harukaSelectMaterial`, por el espesor del manto
+ *        (`coverW`: donde asoma el lecho no crece nada). La misma regla que pinta el suelo, sin una
+ *        segunda tabla de biomas que la contradiga.
+ *
+ * ⚠️ Gemelo PARCIAL de la selección: solo superficie, sin mapa de zonas ni profundidades. Una zona
+ * pintada que cambie el material cambia el suelo pero no esto.
+ */
+float harukaMaterialGrass(float humid, float tempC, float slope, float elevKm) {
+    float wSum = 0.0, gAcc = 0.0;
+    bool  anyBed = false;
+    const int count = int(uMatCount.x);
+    for (int i = 0; i < count && i < MAX_TERRAIN_MATERIALS; ++i) {
+        if (harukaIsWaterMat(i)) continue;
+        if (harukaIsBedrock(i)) { anyBed = true; continue; }
+        const float f = uMat[i].d.y;
+        const float w = harukaBandWeight(humid, uMat[i].a.x, uMat[i].a.y, f)
+                      * harukaBandWeight(tempC, uMat[i].a.z, uMat[i].a.w, max(f * 12.0, 0.5))
+                      * harukaBandWeight(slope, uMat[i].b.x, uMat[i].b.y, f)
+                      * harukaBandWeight(elevKm, uMat[i].f.x, uMat[i].f.y, max(uMat[i].f.z, 0.01));
+        if (w <= 0.0) continue;
+        wSum += w; gAcc += uMat[i].g.w * w;
+    }
+    if (wSum <= 1e-4) return 0.0;
+    // Como en `harukaSelectMaterial`: sin ningún lecho declarado la cobertura manda en todas partes.
+    const float coverW = anyBed ? harukaCoverWeight(0.0, harukaCoverThickness(slope, humid, elevKm)) : 1.0;
+    return clamp(gAcc / wSum, 0.0, 1.0) * coverW;
+}
+
 #endif // HARUKA_TERRAIN_MATERIAL_GLSL

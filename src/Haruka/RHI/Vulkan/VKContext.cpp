@@ -163,6 +163,25 @@ namespace Haruka::RHI::Vulkan
             }
         }
 
+        // Lo mismo con la PROFUNDIDAD que se conserva. Al cerrar un pase offscreen queda en
+        // SHADER_READ (para muestrearla), y un target recien creado esta en UNDEFINED: abrir con LOAD
+        // declarando DEPTH_STENCIL_ATTACHMENT era indefinido (VUID-vkCmdDraw-None-09600).
+        if (!screen && hasDepth && (loadVariant & 2) == 0)
+        {
+            if (VkImageLayout* dl = depthLayoutOf(target))
+            {
+                if (*dl != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                {
+                    transitionImage(m_dev.m_frameCmd, depthImageOf(target), *dl,
+                                    VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depthAspectOfPass(target),
+                                    VK_ACCESS_MEMORY_WRITE_BIT,
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                    VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+                    *dl = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                }
+            }
+        }
+
         // Todas las render passes del port son loadOp CLEAR → siempre hay que pasar clear values.
         std::vector<VkClearValue> clears(colorCount + (hasDepth ? 1u : 0u));
         for (uint32_t i = 0; i < colorCount; ++i)
@@ -212,7 +231,7 @@ namespace Haruka::RHI::Vulkan
             if (t->layout == VK_IMAGE_LAYOUT_UNDEFINED)
             {
                 transitionImage(m_dev.m_frameCmd, t->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, imageAspectOf(t->format),
                                 0, VK_ACCESS_SHADER_READ_BIT,
                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                 t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -250,7 +269,7 @@ namespace Haruka::RHI::Vulkan
                                         depthAspectOf(texFmt(rt->desc.depthFormat)),
                                         VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
                                         VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-                        if (RHI::valid(rt->depthTex)) m_dev.texture(rt->depthTex)->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        if (VkImageLayout* dl = depthLayoutOf(m_target)) *dl = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     }
                 }
             }
@@ -482,7 +501,7 @@ namespace Haruka::RHI::Vulkan
             else
             {
                 transitionImage(m_dev.m_frameCmd, t->image, VK_IMAGE_LAYOUT_UNDEFINED,
-                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, imageAspectOf(t->format),
                                 0, VK_ACCESS_SHADER_READ_BIT,
                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
                 t->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -728,8 +747,11 @@ namespace Haruka::RHI::Vulkan
     // ------------------------------------------------------------------ blits (copia de imagen)
     VkImage VKContext::colorImageOf(RenderPassHandle h)
     {
+        // El backbuffer es la imagen que ESTE frame graba (`m_currentImage`), no la 0: con tres
+        // imagenes en el swapchain, dos de cada tres copias iban a una imagen que no se presentaba.
         if (h.id == 0)
-            return m_dev.m_swapchain && m_dev.m_swapchain->valid() ? m_dev.m_swapchain->image(0) : VK_NULL_HANDLE;
+            return m_dev.m_swapchain && m_dev.m_swapchain->valid()
+                 ? m_dev.m_swapchain->image(m_dev.m_currentImage) : VK_NULL_HANDLE;
         const VKRenderTarget* rt = m_dev.renderTarget(h);
         if (rt && !rt->colors.empty()) return m_dev.texture(rt->colors[0])->image;
         return VK_NULL_HANDLE;
@@ -746,6 +768,80 @@ namespace Haruka::RHI::Vulkan
         return VK_NULL_HANDLE;
     }
 
+    VkImageLayout* VKContext::colorLayoutOf(RenderPassHandle h)
+    {
+        if (h.id == 0) return nullptr;
+        VKRenderTarget* rt = m_dev.renderTarget(h);
+        if (!rt || rt->colors.empty()) return nullptr;
+        VKTexture* t = m_dev.texture(rt->colors[0]);
+        return t ? &t->layout : nullptr;
+    }
+
+    VkImageLayout* VKContext::depthLayoutOf(RenderPassHandle h)
+    {
+        if (h.id == 0) return nullptr;
+        VKRenderTarget* rt = m_dev.renderTarget(h);
+        if (!rt) return nullptr;
+        if (rt->depthImage) return &rt->depthLayout;
+        if (VKTexture* t = m_dev.texture(rt->depthTex)) return &t->layout;
+        return nullptr;
+    }
+
+    VkImageAspectFlags VKContext::depthAspectOfPass(RenderPassHandle h)
+    {
+        if (h.id == 0) return VK_IMAGE_ASPECT_DEPTH_BIT;   // backbuffer: D32_SFLOAT
+        const VKRenderTarget* rt = m_dev.renderTarget(h);
+        return rt ? depthAspectOf(texFmt(rt->desc.depthFormat)) : VK_IMAGE_ASPECT_DEPTH_BIT;
+    }
+
+    // ⚠️ COPIAR UN ATTACHMENT A OTRO, FUERA DE UN PASE. Antes `blitDepth`/`blitColor` daban por hecho
+    // que las dos imagenes estaban en su layout de attachment y las dejaban en TRANSFER_*: pero un
+    // target offscreen sale de `endRenderPass` en SHADER_READ (y uno nuevo en UNDEFINED), y el pase o
+    // muestreo siguiente lo encontraba en un layout que nadie declaraba. La validacion lo cantaba en
+    // cada frame de nubes y fluido (VUID-VkImageMemoryBarrier-oldLayout-01197).
+    //
+    // El origen sale del layout que se le sigue (`*layout`); el destino de UNDEFINED, porque se pisa
+    // entero. Los dos quedan en SHADER_READ, como queda un target offscreen tras su pase (el siguiente
+    // pase con LOAD lo vuelve a attachment). Los que no se siguen (backbuffer, `layout == nullptr`)
+    // salen de `fixedLayout` y vuelven a el.
+    void VKContext::copyAttachment(VkImage s, VkImageLayout* sLayout, VkImage d, VkImageLayout* dLayout,
+                                   VkImageLayout fixedLayout, VkImageAspectFlags barrierAspect,
+                                   VkImageAspectFlags copyAspect, int w, int h)
+    {
+        // ⚠️ UNA COPIA NO PUEDE IR DENTRO DE UN PASE (VUID-vkCmdCopyImage-renderpass), y nubes y
+        // fluido la piden con el de la escena ABIERTO (`beginFrame` + blit: en GL un blit no depende
+        // del FBO atado). Grabarla igual es de lo que pierde el dispositivo (ver `dispatch`). Se
+        // cierra aqui, como hace `beginRenderPass`; quien siga dibujando abre otro, y el que
+        // CONSERVA encuentra sus attachments en el layout seguido.
+        if (m_inPass) endRenderPass();
+
+        const VkImageLayout sOld = sLayout ? *sLayout : fixedLayout;
+        const VkImageLayout sNew = sLayout ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : fixedLayout;
+        const VkImageLayout dNew = dLayout ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : fixedLayout;
+        VkCommandBuffer cmd = m_dev.m_frameCmd;
+
+        transitionImage(cmd, s, sOld, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, barrierAspect,
+                        VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        transitionImage(cmd, d, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, barrierAspect,
+                        VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageCopy r{};
+        r.srcSubresource = { copyAspect, 0, 0, 1 };
+        r.dstSubresource = { copyAspect, 0, 0, 1 };
+        r.extent = { (uint32_t)w, (uint32_t)h, 1 };
+        vkCmdCopyImage(cmd, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+
+        transitionImage(cmd, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, sNew, barrierAspect,
+                        0, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        transitionImage(cmd, d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, dNew, barrierAspect,
+                        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        if (sLayout) *sLayout = sNew;
+        if (dLayout) *dLayout = dNew;
+    }
+
     void VKContext::blitDepth(RenderPassHandle src, RenderPassHandle dst, int w, int h)
     {
         if (!m_dev.m_frameCmd) return;
@@ -754,24 +850,11 @@ namespace Haruka::RHI::Vulkan
         if (!s || !d || s == d) return;
         if (w <= 0) w = (int)m_extent.width;
         if (h <= 0) h = (int)m_extent.height;
-
-        // Los layouts actuales se asumen DEPTH_STENCIL_ATTACHMENT_OPTIMAL (acabados de renderizar).
-        transitionImage(m_dev.m_frameCmd, s, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT,
-                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        transitionImage(m_dev.m_frameCmd, d, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT,
-                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkImageCopy r{};
-        r.srcSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
-        r.srcOffset = { 0, 0, 0 };
-        r.dstSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 };
-        r.dstOffset = { 0, 0, 0 };
-        r.extent = { (uint32_t)w, (uint32_t)h, 1 };
-        vkCmdCopyImage(m_dev.m_frameCmd, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+        // Barrera con todos los aspectos del formato (con stencil la spec exige los dos); se copia
+        // solo la profundidad, que es lo que leen nubes y fluido.
+        copyAttachment(s, depthLayoutOf(src), d, depthLayoutOf(dst),
+                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, depthAspectOfPass(src),
+                       VK_IMAGE_ASPECT_DEPTH_BIT, w, h);
     }
 
     void VKContext::blitColor(RenderPassHandle src, RenderPassHandle dst, int w, int h)
@@ -782,23 +865,9 @@ namespace Haruka::RHI::Vulkan
         if (!s || !d || s == d) return;
         if (w <= 0) w = (int)m_extent.width;
         if (h <= 0) h = (int)m_extent.height;
-
-        transitionImage(m_dev.m_frameCmd, s, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
-                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        transitionImage(m_dev.m_frameCmd, d, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
-                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
-                        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkImageCopy r{};
-        r.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        r.srcOffset = { 0, 0, 0 };
-        r.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        r.dstOffset = { 0, 0, 0 };
-        r.extent = { (uint32_t)w, (uint32_t)h, 1 };
-        vkCmdCopyImage(m_dev.m_frameCmd, s, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       d, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+        copyAttachment(s, colorLayoutOf(src), d, colorLayoutOf(dst),
+                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+                       VK_IMAGE_ASPECT_COLOR_BIT, w, h);
     }
 
     void VKContext::memoryBarrier(uint32_t /*barriers*/)

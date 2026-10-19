@@ -148,12 +148,13 @@ static void gsReadLine(ImGuiContext*, ImGuiSettingsHandler*, void*, const char* 
     else if (!strcmp(key, "RenderScale"))    g.renderScale    = (float)atof(val);
     else if (!strcmp(key, "VSync"))          g.vsync          = atoi(val) != 0;
     else if (!strcmp(key, "SSAO"))           g.ssao           = atoi(val) != 0;
+    else if (!strcmp(key, "Grass"))          g.grass          = atoi(val) != 0;
+    else if (!strcmp(key, "Liquid"))         g.liquid         = atoi(val) != 0;
     else if (!strcmp(key, "Bloom"))          g.bloom          = atoi(val) != 0;
     else if (!strcmp(key, "HDR"))            g.hdr            = atoi(val) != 0;
     else if (!strcmp(key, "BloomThreshold")) g.bloomThreshold = (float)atof(val);
     else if (!strcmp(key, "BloomStrength"))  g.bloomStrength  = (float)atof(val);
     else if (!strcmp(key, "BloomIterations")) g.bloomIterations = atoi(val);   // radio del halo (σ ∝ √N)
-    else if (!strcmp(key, "GpuPatchCull"))   g.gpuPatchCull   = atoi(val) != 0;
     else if (!strcmp(key, "TerrainShadows")) g.terrainShadows = atoi(val) != 0;
     else if (!strcmp(key, "WaterQuality"))   g.waterQuality   = (Settings::WaterQuality)atoi(val);
     else if (!strcmp(key, "TerrainQuality")) g.terrainQuality = (Settings::TerrainQuality)atoi(val);
@@ -193,12 +194,13 @@ static void gsWriteAll(ImGuiContext*, ImGuiSettingsHandler* h, ImGuiTextBuffer* 
     buf->appendf("RenderScale=%.2f\n",  g.renderScale);
     buf->appendf("VSync=%d\n",          g.vsync     ? 1 : 0);
     buf->appendf("SSAO=%d\n",           g.ssao      ? 1 : 0);
+    buf->appendf("Grass=%d\n",          g.grass     ? 1 : 0);
+    buf->appendf("Liquid=%d\n",         g.liquid    ? 1 : 0);
     buf->appendf("HDR=%d\n",            g.hdr       ? 1 : 0);
     buf->appendf("Bloom=%d\n",          g.bloom     ? 1 : 0);
     buf->appendf("BloomThreshold=%.2f\n", g.bloomThreshold);
     buf->appendf("BloomStrength=%.2f\n",  g.bloomStrength);
     buf->appendf("BloomIterations=%d\n", g.bloomIterations);
-    buf->appendf("GpuPatchCull=%d\n",   g.gpuPatchCull ? 1 : 0);
     buf->appendf("TerrainShadows=%d\n", g.terrainShadows ? 1 : 0);
     buf->appendf("WaterQuality=%d\n",   (int)g.waterQuality);
     buf->appendf("TerrainQuality=%d\n", (int)g.terrainQuality);

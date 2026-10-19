@@ -97,5 +97,45 @@ void test_cloud_motion() {
 }
 
 // Registro: el grupo sale de la carpeta de este archivo (ver Common/TestCommon.h).
+/// EL GIRO DE LA RETÍCULA DE CÚMULOS (`CloudSpin`): en el sitio de la cámara la nube va con el viento
+/// de ahí, a su velocidad, sin tirones; un salto del reloj no es viento; y girar no deforma (la
+/// distancia entre dos nubes vecinas se conserva).
+void test_cloud_spin() {
+    beginTest("cloud_spin");
+    using namespace Haruka::World;
+    const double R = 6371000.0 + 1500.0;
+    const glm::dvec3 up = glm::normalize(glm::dvec3(0.3, 0.8, -0.2));
+    const glm::dvec3 east = glm::normalize(glm::cross(glm::dvec3(0, 1, 0), up));
+    const glm::dvec3 wind = east * 12.0 + up * 3.0;   // 12 m/s hacia el este (+3 vertical, que no cuenta)
+    CloudSpin spin;
+    double simT = 1000.0;
+    spin.advance(wind, up, R, simT);
+    const glm::dvec3 site0 = up * R;                       // la nube que está encima AHORA
+    const glm::dvec3 nb0 = glm::normalize(up + east * 0.0005) * R;   // y una vecina a ~3 km
+    const glm::dvec3 c0 = glm::inverse(spin.rot) * site0, n0 = glm::inverse(spin.rot) * nb0;   // en el marco de la retícula
+    double maxStep = 0.0;
+    glm::dvec3 prev = site0;
+    for (int f = 0; f < 600; ++f) {   // 10 s
+        simT += 1.0 / 60.0;
+        spin.advance(wind, up, R, simT);
+        const glm::dvec3 now = spin.rot * c0;
+        maxStep = std::max(maxStep, glm::length(now - prev)); prev = now;
+    }
+    const glm::dvec3 moved = prev - site0;
+    const double along = glm::dot(moved, east), dist = glm::length(moved);
+    const double gap0 = glm::length(nb0 - site0), gap1 = glm::length(spin.rot * n0 - spin.rot * c0);
+    std::printf("    10 s a 12 m/s: la nube avanza %.2f m (%.2f hacia el este) · peor paso por frame %.3f m · distancia a la vecina %.3f -> %.3f m\n",
+                dist, along, maxStep, gap0, gap1);
+    CHECK(std::abs(dist - 120.0) < 0.5 && along > 119.5, "en el sitio de la cámara la nube va con el viento, a su velocidad");
+    CHECK(maxStep < 12.0 / 60.0 + 1e-3, "sin tirones: cada frame avanza lo que el viento en un frame");
+    CHECK(std::abs(gap1 - gap0) < 1e-3, "girar no deforma: las vecinas siguen a la misma distancia");
+    const glm::dquat before = spin.rot;
+    spin.advance(wind, up, R, simT + 3600.0);   // el reloj salta una hora (carga, pausa)
+    const double jump = glm::length(spin.rot * c0 - before * c0);
+    std::printf("    salto de reloj de 1 h: la nube se mueve %.1f m (tope %.0f s de viento)\n", jump, CloudDrift::kMaxStepS);
+    CHECK(jump <= 12.0 * CloudDrift::kMaxStepS + 1e-3, "un salto del reloj NO es viento (tope de paso)");
+}
+
 HARUKA_REGISTER_TESTS(
-    { "cloud_motion", test_cloud_motion });
+    { "cloud_motion", test_cloud_motion },
+    { "cloud_spin", test_cloud_spin });

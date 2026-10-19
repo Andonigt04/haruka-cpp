@@ -3,7 +3,7 @@
  * @brief Núcleo del SISTEMA DE CONSTRUCCIÓN (F1) — data model + validación de colocación. GL-free y
  *        DETERMINISTA, en su PROPIA lib `HarukaConstruction` (game/construction, FUERA de físicas: es
  *        lógica de validación, no física) → el cliente predice y el DGS valida con el MISMO código.
- *        Ver docs/guides/PLAN_CONSTRUCCION.md. F1 = piezas primitivas (caja/OBB); Jolt entra en F2-F3.
+ *        Ver docs/archivo/PLAN_CONSTRUCCION.md. F1 = piezas primitivas (caja/OBB); Jolt entra en F2-F3.
  *        Depende solo de glm + `IWorldProvider` (interfaz GL-free de consulta del mundo/terreno).
  *
  * La colocación es FREE-FORM (cualquier posición/orientación) pero VALIDADA: no penetra el terreno, no

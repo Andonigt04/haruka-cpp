@@ -15,6 +15,7 @@
 #include "Haruka/RHI/RHIGPUScope.h"
 #include "Haruka/Tools/Profiler.h"
 #include "Haruka/World/Planet/PlanetarySystem.h"
+#include "Haruka/World/Props/PropGpu.h"            // PropParams: el UBO de prop_inst.frag
 
 #include <algorithm>
 #include <cstring>
@@ -31,12 +32,6 @@ using Haruka::Core::AppInternal::getOrLoadMaterialTexture;
 
 namespace {
 
-// UBO del pase de CONSTRUCCIÓN (binding 6) — espejo de `ConstParams` en construction_inst.frag.
-// Solo los escalares/máscara del material del GRUPO (el color por pieza va por instancia).
-struct ConstParams {
-    glm::vec4 matPBR;   // x=metallic y=roughness z=ao w=máscara de texturas (bits)
-};
-static_assert(sizeof(ConstParams) == 16, "ConstParams std140 size mismatch");
 
 // Material PER-PIXEL de un grupo de piezas instanciadas (objetos NPC/construcción): los MISMOS
 // slots que el pase de escena (MaterialComponent). mask == 0 → solo color por instancia.
@@ -102,11 +97,14 @@ ScenePass::~ScenePass() { shutdown(); }
 void ScenePass::shutdown() {
     if (RHI::Device* dev = RHI::device()) {
         if (RHI::valid(m_scenePSO))       dev->destroy(m_scenePSO);
+        if (RHI::valid(m_skyBodyPSO))     dev->destroy(m_skyBodyPSO);
         if (RHI::valid(m_perObjectUBO))   dev->destroy(m_perObjectUBO);
+        for (RHI::BufferHandle b : m_objectUBOs) if (RHI::valid(b)) dev->destroy(b);
         if (RHI::valid(m_constInstPSO))   dev->destroy(m_constInstPSO);
         if (RHI::valid(m_constParamsUBO)) dev->destroy(m_constParamsUBO);
     }
-    m_scenePSO = m_constInstPSO = {}; m_perObjectUBO = m_constParamsUBO = {};
+    m_scenePSO = m_constInstPSO = m_skyBodyPSO = {}; m_perObjectUBO = m_constParamsUBO = {};
+    m_objectUBOs.clear();
     m_instancing.reset();
 }
 
@@ -115,6 +113,21 @@ RHI::BufferHandle ScenePass::perObjectUBO() {
         if (RHI::Device* dev = RHI::device())
             m_perObjectUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerObjectUBOData), nullptr, RHI::BufferMemory::Dynamic);
     return m_perObjectUBO;
+}
+
+// ⚠️ UN UBO POR OBJETO, NO UNO PARA TODOS (17-10). Se reescribia `m_perObjectUBO` antes de cada draw:
+// en GL `glBufferSubData` queda ordenado entre draws, pero en Vulkan el buffer es memoria MAPEADA y la
+// escritura es un `memcpy` inmediato — los draws ya grabados en el command buffer leen al ejecutarse,
+// asi que TODOS veian los datos del ULTIMO objeto. El Sol y la Luna se dibujaban con la matriz de otro
+// y no salian (medido: la Luna aparecia en GL y no en Vulkan con el mismo frame).
+RHI::BufferHandle ScenePass::objectUBO(size_t i) {
+    while (m_objectUBOs.size() <= i) {
+        RHI::Device* dev = RHI::device();
+        if (!dev) return {};
+        m_objectUBOs.push_back(dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(PerObjectUBOData),
+                                                 nullptr, RHI::BufferMemory::Dynamic));
+    }
+    return m_objectUBOs[i];
 }
 
 void ScenePass::begin(RHI::Context* ctx, const Frame& f, bool useFinalLook) {
@@ -146,6 +159,12 @@ void ScenePass::begin(RHI::Context* ctx, const Frame& f, bool useFinalLook) {
         pd.blend.enable = false;
         pd.cull         = RHI::CullMode::Back;   // lo hacía el glEnable(GL_CULL_FACE) global
         m_scenePSO = dev->createPipeline(pd);
+        // Cuerpos del cielo: la radiancia del disco se SUMA a la del aire de delante, sin tapar el
+        // depth de nada cercano (estan a cientos de miles de km).
+        if (RHI::valid(m_skyBodyPSO)) dev->destroy(m_skyBodyPSO);
+        pd.depth.write  = false;
+        pd.blend.enable = true; pd.blend.mode = RHI::BlendMode::Additive;
+        m_skyBodyPSO = dev->createPipeline(pd);
         m_scenePSOFinalLook = useFinalLook;
     }
 
@@ -179,6 +198,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
     std::unordered_map<std::string, ConstInstGroup> constGroups;
 
     { HARUKA_PROFILE("scene.objects.draw"); HARUKA_GPU_SCOPE("scene.objects.draw");
+    size_t objSlot = 0;   // UBO por objeto: ver `objectUBO`
     for (const auto& command : queue) {
         const auto* obj = command.object;
         if (!obj) continue;
@@ -257,8 +277,15 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             objData.model                    = Haruka::Core::AppInternal::getTransformMatrix(*obj, f.camera->position);
         }
         objData.baseColorAndPlanetRadius = glm::vec4(baseColor, 1.0f);
-        // w = 0: normal, 1: procedural terrain, 2: emissive star (no diffuse shading)
-        objData.planetCenterAndFlag      = glm::vec4(0.0f, 0.0f, 0.0f, isStar ? 2.0f : 0.0f);
+        // w = 0: normal, 1: procedural terrain, 2: emisivo sin sombreado (lamparas...),
+        //     3: cuerpo del cielo ILUMINADO (la Luna), 4: cuerpo del cielo que EMITE (el Sol).
+        // Los dos ultimos sacan su luz de la radiometria (`lib/sky_light.glsl`), no de un color.
+        const bool skyStar = obj->objectType == Tools::ObjectType::STAR;
+        const bool skyBody = skyStar ||
+            ((obj->objectType == Tools::ObjectType::PLANET || obj->objectType == Tools::ObjectType::SATELLITE) &&
+             command.kind == Core::Scene::RenderKind::MeshComponent);
+        objData.planetCenterAndFlag      = glm::vec4(0.0f, 0.0f, 0.0f,
+                                                     skyStar ? 4.0f : skyBody ? 3.0f : isStar ? 2.0f : 0.0f);
         // Sin MaterialComponent: dieléctrico mate sin texturas → el aspecto de siempre.
         objData.materialPBR              = glm::vec4(0.0f, 0.5f, 1.0f, 0.0f);
         objData.materialEmission         = glm::vec4(0.0f);
@@ -291,7 +318,9 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             objData.materialPBR = glm::vec4(mat.metallic, mat.roughness, mat.ao, (float)texMask);
         }
 
-        dev->updateBuffer(m_perObjectUBO, 0, sizeof(PerObjectUBOData), &objData);
+        const RHI::BufferHandle objUBO = objectUBO(objSlot++);
+        dev->updateBuffer(objUBO, 0, sizeof(PerObjectUBOData), &objData);
+        ctx->bindUniformBuffer(1, objUBO);
 
         switch (command.kind) {
             case Core::Scene::RenderKind::Model: {
@@ -315,7 +344,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             case Core::Scene::RenderKind::MeshComponent: {
                 if (!obj->meshRenderer || !obj->meshRenderer->isResident()) break;
                 if (!RHI::valid(m_scenePSO)) break;
-                ctx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
+                ctx->bindPipeline(skyBody && RHI::valid(m_skyBodyPSO) ? m_skyBodyPSO : m_scenePSO);   // ver nota del caso Model (estado GL)
                 obj->meshRenderer->renderRHI(*ctx);
                 ++st.renderedDrawCalls;
                 st.renderedVertices  += obj->meshRenderer->getResidentVertexCount();
@@ -329,7 +358,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                 SimpleMesh* primitiveMesh = Haruka::Core::AppInternal::getPrimitiveMesh(command.primitive);
                 if (!primitiveMesh) break;
                 if (!RHI::valid(m_scenePSO)) break;
-                ctx->bindPipeline(m_scenePSO);   // ver nota del caso Model (estado GL)
+                ctx->bindPipeline(skyBody && RHI::valid(m_skyBodyPSO) ? m_skyBodyPSO : m_scenePSO);   // ver nota del caso Model (estado GL)
                 primitiveMesh->drawRHI(*ctx);
                 ++st.renderedDrawCalls;
                 st.renderedVertices  += primitiveMesh->getVertexCount();
@@ -350,8 +379,8 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
         HARUKA_PROFILE("scene.construction.instanced"); HARUKA_GPU_SCOPE("scene.construction.instanced");
         if (!RHI::valid(m_constInstPSO)) {                    // PSO instanciado (una vez)
             using V = Haruka::Renderer::Vertex;
-            const std::string vs = Shader::baseDir() + "shaders/construction_inst.vert";
-            const std::string fs = Shader::baseDir() + "shaders/construction_inst.frag";
+            const std::string vs = Shader::baseDir() + "shaders/mesh_inst.vert";
+            const std::string fs = Shader::baseDir() + "shaders/prop_inst.frag";
             RHI::PipelineDesc pd;
             pd.vertexPath   = vs.c_str();
             pd.fragmentPath = fs.c_str();
@@ -372,7 +401,7 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
             if (!m_instancing) { m_instancing = std::make_unique<GPUInstancing>(); m_instancing->init(20000); }
             if (!RHI::valid(m_constParamsUBO)) {              // UBO del material del grupo (binding 6)
                 m_constParamsUBO = dev->createBuffer(RHI::BufferUsage::Uniform,
-                                                        sizeof(ConstParams), nullptr,
+                                                        sizeof(Haruka::World::Props::PropParams), nullptr,
                                                         RHI::BufferMemory::Dynamic);
             }
             ctx->bindPipeline(m_constInstPSO);
@@ -401,8 +430,12 @@ void ScenePass::drawObjects(RHI::Context* ctx, const Frame& f, const std::vector
                                          : fallbackTexture(FallbackTex::White));
                 ctx->bindTexture(4, RHI::valid(gm.ao)        ? gm.ao
                                          : fallbackTexture(FallbackTex::White));
-                ConstParams cp;
+                // El MISMO fragment que los props (prop_inst.frag): lo que distingue la obra es
+                // material — rim al 35 % y sin especular (ver la cabecera del shader). Sin viento,
+                // sin aire y con el origen en la cámara: las piezas ya llegan cámara-relativas.
+                Haruka::World::Props::PropParams cp{};
                 cp.matPBR = glm::vec4(gm.metallicS, gm.roughnessS, gm.aoS, (float)gm.mask);
+                cp.flags  = glm::vec4(dev->backend() == RHI::Backend::Vulkan ? 1.0f : 0.0f, 0.35f, 0.0f, 0.0f);
                 dev->updateBuffer(m_constParamsUBO, 0, sizeof(cp), &cp);
                 ctx->bindUniformBuffer(6, m_constParamsUBO);
             };

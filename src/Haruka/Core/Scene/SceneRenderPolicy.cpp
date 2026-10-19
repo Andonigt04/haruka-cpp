@@ -79,6 +79,11 @@ namespace Haruka::Core::Scene {
 RenderCommand classifySceneObject(const SceneObject& obj) {
     RenderCommand command;
     command.object = &obj;
+    // ⚠️ EL UID ES LA IDENTIDAD CON LA QUE `buildRenderQueue` DECIDE QUE SIGUE EN LA ESCENA. No se
+    // copiaba y quedaba en 0: al primer cambio en el nº de objetos la cola entera salia por "ya no
+    // esta" y, marcada como clasificada, no volvia a entrar. Asi desaparecian el Sol y la Luna
+    // (medido: en cola hasta el frame ~100, fuera al pasar de 7 a 8 objetos, 17-10).
+    command.uid = obj.uid;
     // Se resuelve AQUÍ (una vez por objeto, no una vez por frame): las piezas de construcción y de
     // edificio van al pase instanciado. Consultar este mapa JSON en el bucle de dibujo costaba dos
     // búsquedas por cadena × objeto × frame.
@@ -131,6 +136,11 @@ RenderCommand classifySceneObject(const SceneObject& obj) {
             if (obj.flags.castLight) {
                 command.kind = RenderKind::Primitive;
                 command.primitive = Tools::PrimitiveType::SPHERE;
+            } else if (obj.meshRenderer && obj.meshRenderer->isResident()) {
+                // Un cuerpo SIN terreno pero con malla PROPIA (la Luna: `proceduralMesh: cratered_moon`):
+                // se dibuja con ella, sombreado por el Sol (fases). Antes caia aqui sin tipo de dibujo
+                // y la Luna, colocada en su orbita cada frame, no salia en el cielo (17-10).
+                command.kind = RenderKind::MeshComponent;
             }
             return command;
 
@@ -194,6 +204,38 @@ std::vector<RenderCommand> buildSceneRenderQueue(const SceneManager& scene) {
     }
 
     return commands;
+}
+
+void syncSceneRenderQueue(const std::vector<std::shared_ptr<SceneObject>>& objects,
+                          std::vector<RenderCommand>& queue, RenderQueueState& st) {
+    // INCREMENTAL: solo se clasifican los objetos NUEVOS. Clasificar es la parte cara (comparar
+    // cadenas de tipo, mirar el mapa de propiedades) y antes se rehacía la escena ENTERA cada vez
+    // que cambiaba el nº de objetos — con escombros apareciendo y caducando, eso es a todas horas.
+    // Se identifica por UID, no por puntero: una dirección liberada se reutiliza para el objeto
+    // siguiente, y entonces se daría por "ya clasificado" algo nuevo. Además así la fase de borrado
+    // NO desreferencia punteros que pueden estar colgando.
+    st.present.clear();
+    st.present.reserve(objects.size());
+    for (const auto& o : objects) if (o) st.present.insert(o->uid);
+
+    // 1) Fuera los que ya no están en la escena (intercambio con el último → sin desplazar nada).
+    if (st.staticCount > queue.size()) st.staticCount = queue.size();
+    for (std::size_t k = 0; k < st.staticCount; ) {
+        if (st.present.count(queue[k].uid)) { ++k; continue; }
+        st.queued.erase(queue[k].uid);
+        queue[k] = queue[st.staticCount - 1];
+        --st.staticCount;
+    }
+    queue.resize(st.staticCount);
+
+    // 2) Entran los nuevos (los únicos que se clasifican).
+    for (const auto& o : objects) {
+        if (!o || st.queued.count(o->uid)) continue;
+        RenderCommand c = classifySceneObject(*o);
+        if (c.kind != RenderKind::None) queue.push_back(c);
+        st.queued.insert(o->uid);    // se marca aunque no se dibuje: no reclasificarlo cada vez
+    }
+    st.staticCount = queue.size();
 }
 
 } // namespace Haruka::Core::Scene

@@ -395,6 +395,103 @@ void testDispatchInsideRenderPass()
 
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
+// BLIT CON EL PASE ABIERTO: nubes y fluido copian la escena (`blitColor`/`blitDepth`) justo tras
+// `beginFrame`, con el pase de la escena SIN CERRAR. En GL es legal (un blit no depende del FBO atado);
+// en Vulkan `vkCmdCopyImage` y sus barreras dentro de un pase son ilegales (VUID-vkCmdCopyImage-
+// renderpass, -PipelineBarrier-None-07889), y lo ilegal es lo que pierde el dispositivo. Lo destapo
+// la capa de validacion en el juego (17-10), tras un cuelgue de GPU que tumbo el escritorio.
+//
+// Ademas la profundidad va con el formato POR DEFECTO (D24S8), que AMD no tiene en Vulkan: ejerce la
+// caida a D32F_S8 y la copia de profundidad entre dos targets de ese formato.
+//
+// Se mide que la copia LLEGUE: A se limpia a naranja con el pase abierto, se copia a B (que estaba
+// verde) y se muestrea B en pantalla. CONTRAPRUEBA: lo mismo sin la copia tiene que seguir verde,
+// o el test no estaria leyendo B.
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+void testBlitInsideRenderPass()
+{
+    BEGIN("blit: copiar con el pase ABIERTO llega y no tumba el device");
+
+    const std::string base = Haruka::Renderer::Shader::baseDir();
+    const std::string vs = base + "shaders/tests/rhitest_fullscreen.vert";
+    const std::string fs = base + "shaders/tests/rhitest_tex.frag";
+    PipelineDesc pd;
+    pd.vertexPath   = vs.c_str();
+    pd.fragmentPath = fs.c_str();
+    pd.topology     = PrimitiveTopology::Triangles;
+    pd.depth.test   = false; pd.depth.write = false;
+    pd.blend.enable = false;
+    pd.cull         = CullMode::None;
+    PipelineHandle pipe = g_dev->createPipeline(pd);
+    CHECK(valid(pipe), "pipeline de muestreo creado");
+    if (!valid(pipe)) return;
+
+    const int n = 64;
+    RenderTargetDesc d{};
+    d.width = n; d.height = n;
+    d.colorFormats = { Format::RGBA8 };
+    d.colorFilter = Filter::Nearest;
+    d.hasDepth = true;                    // D24S8 por defecto: AMD no lo tiene en Vulkan
+    RenderPassHandle a = g_dev->createRenderTarget(d);
+    RenderPassHandle b = g_dev->createRenderTarget(d);
+    CHECK(valid(a) && valid(b), "dos targets RGBA8 + profundidad por defecto");
+    const float uv[4] = { 0.5f, 0.5f, 0.0f, 0.0f };
+    BufferHandle ubo = g_dev->createBuffer(BufferUsage::Uniform, 16, uv, BufferMemory::Dynamic);
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    auto clearTo = [](Context* c, RenderPassHandle t, float r, float g, float bl) {
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = r; cv.color[1] = g; cv.color[2] = bl; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass(t, cv);
+    };
+    // Un frame: B a verde (cerrado), A a naranja (ABIERTO), copia A -> B si `blit`, y B a pantalla.
+    auto run = [&](bool blit, unsigned char out[4]) {
+        std::memset(out, 0, 4);
+        Context* c = g_dev->beginFrame();
+        if (!c) return false;
+        clearTo(c, b, 0.1f, 0.8f, 0.2f);
+        c->endRenderPass();
+        clearTo(c, a, 0.9f, 0.5f, 0.1f);  // se queda ABIERTO a proposito
+        if (blit) {
+            c->blitColor(a, b, n, n);
+            c->blitDepth(a, b, n, n);
+        }
+        ClearValues cv;
+        cv.clearColor = true; cv.color[0] = cv.color[1] = cv.color[2] = 0.0f; cv.color[3] = 1.0f;
+        cv.clearDepth = true; cv.depth = 0.0f;
+        c->beginRenderPass({}, cv);
+        c->bindPipeline(pipe);
+        c->bindUniformBuffer(0, ubo);
+        c->bindTexture(0, g_dev->getColorTexture(b, 0));
+        c->draw(3);
+        c->endRenderPass();
+        if (!isVk) g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+        g_dev->endFrame();
+        pumpWindowEvents();
+        if (isVk)  g_dev->readPixels(128, 128, 1, 1, Format::RGBA8, out);
+        return true;
+    };
+
+    unsigned char got[4] = {}, ctl[4] = {};
+    if (valid(a) && valid(b) && run(true, got) && run(false, ctl)) {
+        std::printf("    B tras copiar A con el pase abierto = (%d,%d,%d) · sin copiar = (%d,%d,%d)\n",
+                    got[0], got[1], got[2], ctl[0], ctl[1], ctl[2]);
+        auto near = [](const unsigned char* p, int r, int g, int bl) {
+            return std::abs(p[0] - r) <= 8 && std::abs(p[1] - g) <= 8 && std::abs(p[2] - bl) <= 8;
+        };
+        CHECK(near(got, 230, 128, 26), "la copia hecha con el pase de A abierto llega a B (naranja)");
+        CHECK(near(ctl, 26, 204, 51), "CONTRAPRUEBA: sin copiar, B sigue verde (se lee B de verdad)");
+    }
+
+    g_dev->destroy(ubo);
+    if (valid(a)) g_dev->destroy(a);
+    if (valid(b)) g_dev->destroy(b);
+    g_dev->destroy(pipe);
+}
+
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
 // CONTENIDO DE TEXTURA: que los píxeles subidos LLEGUEN al shader.
 //
 // El banco probaba que las texturas se CREAN por formato. Eso no es lo mismo: una textura puede

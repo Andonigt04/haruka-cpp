@@ -99,6 +99,28 @@ float harukaFacetBand(float baseResponse, float ndl, float facet) {
                clamp(facet, 0.0, 1.0));
 }
 
+/**
+ * @brief FACETAS EN UNA REJILLA DEL MUNDO, no en el triángulo de la malla.
+ *
+ * `harukaFaceNormal` faceta con el triángulo DIBUJADO, y eso enseña la malla: donde el LOD cambia la
+ * densidad (dos nodos vecinos con distinta zancada) el tamaño de las caras salta y se ve el corte.
+ * Para una superficie cuya forma es una función analítica (el agua, un campo) la faceta puede salir
+ * de una rejilla FIJA en el plano tangente: triángulos equiláteros de lado `cellM`, iguales en todos
+ * los nodos, a cualquier LOD.
+ *
+ * Devuelve el CENTRO del triángulo de rejilla que contiene `uv`: quien llama evalúa allí su normal,
+ * y todos los píxeles del triángulo comparten la misma luz.
+ */
+vec2 harukaLatticeCenter(vec2 uv, float cellM) {
+    const float h  = cellM * 0.8660254;                 // altura del triángulo equilátero
+    const float b  = uv.y / h;
+    const float a  = uv.x / cellM - b * 0.5;
+    const vec2  i  = floor(vec2(a, b));
+    const vec2  f  = vec2(a, b) - i;
+    const vec2  c  = i + ((f.x + f.y < 1.0) ? vec2(1.0 / 3.0) : vec2(2.0 / 3.0));
+    return vec2(c.x * cellM + c.y * cellM * 0.5, c.y * h);
+}
+
 /// Cuánto facetar el terreno a esta distancia (ver HARUKA_TERRAIN_FACET_*).
 float harukaTerrainFacet(float dist) {
     return HARUKA_TERRAIN_LOWPOLY != 0

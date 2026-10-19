@@ -52,11 +52,17 @@ public:
 
 private:
     RHI::PipelineHandle m_scenePSO{};
+    /// Los CUERPOS DEL CIELO (Sol, Luna): mismo shader, pero su luz se SUMA a la del aire que hay
+    /// delante (el cielo ya pintado es esa luz dispersada). Ver `drawObjects`.
+    RHI::PipelineHandle m_skyBodyPSO{};
     bool                m_scenePSOFinalLook = false;
     RHI::BufferHandle   m_perObjectUBO{};
+    /// UNO POR OBJETO DIBUJADO EN EL FRAME (crece, no se encoge). Ver `objectUBO`.
+    std::vector<RHI::BufferHandle> m_objectUBOs;
+    RHI::BufferHandle   objectUBO(size_t i);
     /// Piezas de construccion: mismo Vertex + stream de instancia; un draw por (malla, material).
     RHI::PipelineHandle m_constInstPSO{};
-    RHI::BufferHandle   m_constParamsUBO{};   // ConstParams (binding 6)
+    RHI::BufferHandle   m_constParamsUBO{};   // PropParams de la obra (binding 6, prop_inst.frag)
     std::unique_ptr<GPUInstancing> m_instancing;
 };
 

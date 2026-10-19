@@ -61,7 +61,7 @@ private:
 
     // Handles RHI (buffers + render targets). Los FBO/textura GL de abajo se conservan porque
     // los BLITS (copia de color/depth de la escena) siguen en GL: el RHI no tiene comando de blit.
-    Haruka::RHI::BufferHandle m_particleBuf, m_quadBuf;
+    Haruka::RHI::BufferHandle m_particleBuf;
     Haruka::RHI::RenderPassHandle m_depthPass, m_smoothPass[2], m_sceneCopyPass;
 
     // Los 4 PSO del fluido (antes: 4 Shader + VAOs + glUniform + glEnable sueltos).

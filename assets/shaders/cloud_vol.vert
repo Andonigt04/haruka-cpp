@@ -7,6 +7,9 @@
  * el rayo se reconstruye igual, pero el fragment además lee la profundidad de la escena.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+#include "lib/backend.glsl"
+#include "lib/fullscreen.glsl"
 
 layout(std140, binding = 5) uniform CloudParams {
     // Una sola inversa, la de ROTACIÓN: la escena se dibuja cámara-relativa (`view` sin traslación),
@@ -35,11 +38,8 @@ layout(location = 1) out vec2 vNdc;
 
 void main()
 {
-    vec2 ndc = vec2((gl_VertexID == 1) ? 3.0 : -1.0,
-                    (gl_VertexID == 2) ? 3.0 : -1.0);
-    gl_Position = vec4(ndc, 1.0, 1.0);
+    const vec2 ndc = harukaFullscreenNdc(int(VERTEX_INDEX));
+    gl_Position = vec4(ndc, 1.0, 1.0); // z=1 → plano lejano
     vNdc = ndc;
-
-    vec4 far = u_invViewProjRot * vec4(ndc, 1.0, 1.0);
-    vRayDir = far.xyz / far.w;
+    vRayDir = harukaFullscreenRay(u_invViewProjRot, ndc);
 }

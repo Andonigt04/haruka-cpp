@@ -3,7 +3,9 @@
 #include "Haruka/Core/Camera.h"
 #include "Haruka/Core/Logger.h"
 #include "Haruka/Physics/PhysicsEngine.h"
+#include "Haruka/Renderer/GPUInstancing.h"      // appendInstanceLayout: el stream que escribe la cubierta
 #include "Haruka/World/Planet/Planet.h"
+#include "Haruka/World/Planet/PlanetarySystem.h"
 #include "Haruka/World/Props/PropCollider.h"   // propCullRadiusM
 #include "Haruka/Renderer/Shader.h"
 #include "Haruka/RHI/RHIContext.h"
@@ -40,6 +42,12 @@ void GrassSystem::shutdown() {
     m_burstSSBO = {}; m_stateSSBO = {}; m_cmdBuf = {}; m_pso = {};
     m_burstCap = m_stateCap = m_cmdCap = 0;
     m_dirty = true;
+    if (RHI::Device* dev = RHI::device(); dev && valid(m_coverPSO)) dev->destroy(m_coverPSO);
+    m_coverPSO = {};
+    m_cover.shutdown();
+    m_ground.shutdown(); m_groundTried = false;
+    m_field.shutdown();
+    m_coverTried = false;
     PropSystemBase::shutdown();   // worker + mallas de prototipo + UBOs de parámetros
 }
 
@@ -50,8 +58,12 @@ void GrassSystem::configureScatter(PropScatterParams& params) {
     // cuesta memoria por mata y puede ser MUCHO más denso y ancho que cuando cada mata era un prop
     // (24 m ×150). Mandos para medir sin recompilar: `HARUKA_GRASS_NEAR=<m>`,
     // `HARUKA_GRASS_MUL=<x>` (tope de matas por brote: kMassMaxCount).
+    // ⚠️ Con la CUBIERTA densa activa (`HARUKA_COVER`, por defecto sí) el halo se apaga: el suelo lo
+    // cubre ella, por píxeles y ms, y el halo es justo lo que no debe haber —un anillo de metros
+    // fijos—. Queda como mando para medir con la cubierta apagada.
+    static const bool  s_cover = [] { const char* e = std::getenv("HARUKA_COVER"); return !(e && e[0] == '0'); }();
     static const float s_near = [] { const char* e = std::getenv("HARUKA_GRASS_NEAR"); return e ? (float)std::atof(e) : 48.0f; }();
-    static const float s_mul  = [] { const char* e = std::getenv("HARUKA_GRASS_MUL");  return e ? (float)std::atof(e) : 320.0f; }();
+    static const float s_mul  = [] { const char* e = std::getenv("HARUKA_GRASS_MUL");  return e ? (float)std::atof(e) : (s_cover ? 1.0f : 320.0f); }();
     params.massBursts     = true;
     params.grassNearM     = s_near;
     params.grassNearMul   = s_mul;
@@ -115,7 +127,162 @@ void GrassSystem::onRefresh(Physics::PhysicsEngine* physics) {
 }
 
 int GrassSystem::flattenNear(const glm::dvec3& center, double radius) {
+    // La cubierta densa no tiene estado por elemento: la pisada va al campo de suelo, que la recuerda
+    // y la borra solo (`GroundField::Config::pushRecoverS`).
+    m_field.stamp(center, (float)radius, glm::vec3(0.0f), 1.0f);
     return flattenAt(center, radius, grassClockNow() + kFlatDwellS);
+}
+
+// ── la cubierta densa ─────────────────────────────────────────────────────────────────────────
+
+int GrassSystem::coverPrototype() const {
+    for (int i = 0; i < m_registry.prototypeCount(); ++i)
+        if (isGrassProp(m_registry.prototype(i).name)) return i;
+    return -1;
+}
+
+void GrassSystem::prepareGpu(RHI::Context* ctx, const GpuFrame& f) {
+    static const bool s_on = [] { const char* e = std::getenv("HARUKA_COVER"); return !(e && e[0] == '0'); }();
+    if (propsDisabled() || !m_enabled || !ctx || !f.camera || !f.planets) return;
+    const Planet::TerrestrialPlanet* planet = f.planets->activeTerrestrial();
+    RHI::Device* dev = RHI::device();
+    if (!planet || !dev) return;
+    // La cubierta densa solo con su prototipo; el ajuste de los brotes al suelo, siempre que haya brotes.
+    const int proto = s_on ? coverPrototype() : -1;
+    const PrototypeGpu* pg = (proto >= 0) ? prototypeGpu(m_registry.prototype(proto)) : nullptr;
+    if (pg && !m_coverTried) {
+        m_coverTried = true;
+        GroundScatter::Config cc;
+        if (const char* e = std::getenv("HARUKA_COVER_DENSITY")) cc.elemPerM2 = std::clamp((float)std::atof(e), 0.5f, 400.0f);
+        m_cover.init(dev, cc);
+        Renderer::GroundField::Config fc;   // empuje que se recupera en ~5 s, sin marca
+        m_field.init(dev, fc);
+    }
+    if (!m_groundTried) { m_groundTried = true; m_ground.init(dev); }
+    const bool coverOn = pg && m_cover.ready();
+    if (!coverOn && (!m_ground.ready() || m_bursts.empty())) return;
+    HARUKA_PROFILE("hierba.cubierta");
+
+    const glm::dvec3 cam(f.camera->position);
+    const glm::dvec3 up = glm::normalize(cam - planet->config().position);
+    m_coverClock += std::max(f.dt, 0.0f);
+    if (coverOn && m_field.ready()) m_field.update(ctx, cam, up, f.dt);
+
+    const uint32_t vpH = f.viewH ? f.viewH : 1080u;
+    const float tanHalfV = (float)std::tan(glm::radians((double)f.camera->zoom) * 0.5);
+    const float aspect = (f.viewW && f.viewH) ? (float)f.viewW / (float)f.viewH : f.camera->aspectRatio;
+    // El suelo dibujado hasta un poco más allá del alcance que da el detalle de ahora (la cubierta) o
+    // del de los brotes que se ajustan, lo que llegue más lejos.
+    PxLod px; px.focalPx = 0.5f * (float)vpH / std::max(tanHalfV, 1e-3f);
+    px.widthM = m_cover.config().widthM; px.thrPx = m_cover.thrPx(); px.widenMax = m_cover.config().widenMax;
+    const double coverReach = coverOn ? (double)pxReachM(px) + 8.0 : 0.0;
+    Planet::GroundView gv;
+    static double s_lastWhy = -1e9;
+    const bool logNow = m_coverClock - s_lastWhy > 2.0;
+    if (logNow) s_lastWhy = m_coverClock;
+    if (!planet->groundView(cam, std::max(coverReach, kGroundSnapReachM + 16.0), gv)) {
+        if (logNow) HARUKA_LOGDIAG("GrassSystem", "cubierta: ningún nodo dibujado a su alcance · cámara a %.1f m del radio, suelo del campo %.1f m (bajo el agua o en el aire no hay nada)",
+                                   glm::length(cam - planet->config().position) - planet->config().radius, planet->sampleHeight(up));
+        return;
+    }
+
+    // ── LAS MATAS DE LOS BROTES, SOBRE EL SUELO DIBUJADO ────────────────────────────────────
+    // Antes de la cubierta y sin depender de ella: los brotes se suben aquí (fuera del pase de
+    // escena, donde un compute no puede ir) y el compute les escribe el ajuste de cada mata.
+    if (m_ground.ready() && !m_bursts.empty()) {
+        if (m_gpu.size() != m_bursts.size()) rebuildGpu();
+        upload(dev);
+        MassGroundPlanInput mi;
+        mi.bursts = &m_bursts; mi.planetC = m_planetC; mi.planetR = m_planetR;
+        mi.camPos = cam; mi.reachM = kGroundSnapReachM; mi.budget = kGroundSnapBudget;
+        uint32_t total = 0;
+        std::vector<MassGroundJob> jobs;
+        { HARUKA_PROFILE("mass.ground.plan"); jobs = planMassGround(mi, total); }
+        m_ground.dispatch(ctx, gv, cam, kGroundSnapReachM + 16.0, m_burstSSBO, m_bursts.size(), jobs, total);
+    }
+    if (!coverOn) return;
+
+    GroundScatter::Frame sf;
+    sf.camPos = cam;
+    sf.viewDir = glm::normalize(f.camera->getFront());
+    sf.viewUp  = glm::normalize(f.camera->getUp());
+    sf.tanHalfV = tanHalfV; sf.aspect = aspect; sf.heightPx = (int)vpH;
+    sf.groundM = planet->sampleHeight(up);
+    sf.ground = &gv;
+    if (m_field.ready()) { sf.fieldTex = m_field.texture(); sf.field = m_field.view(); }
+    sf.snow = f.snow;
+    sf.now = m_coverClock;
+    // Las zonas destruidas que alcanza la cubierta, relativas al ojo (las más cercanas primero).
+    const double reach = (double)pxReachM(px) + 8.0;
+    std::vector<std::pair<double, glm::vec4>> near;
+    for (const Zone& z : m_zones) {
+        const glm::dvec3 d = z.center - cam;
+        const double dl = glm::length(d) - z.radius;
+        if (dl < reach) near.push_back({ dl, glm::vec4(glm::vec3(d), (float)z.radius) });
+    }
+    std::sort(near.begin(), near.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& n : near) sf.zones.push_back(n.second);
+    const bool ok = m_cover.dispatch(ctx, sf, pg->indexCount[kCoverLod]);
+    if (logNow && !ok)
+        HARUKA_LOGDIAG("GrassSystem", "cubierta: nada que sembrar · %zu nodos · alcance %.0f m · %u grupos",
+                       gv.nodes.size(), m_cover.reachM(), m_cover.lastGroups());
+}
+
+void GrassSystem::drawCover(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
+    if (!m_cover.ready()) return;
+    // El lazo de detalle: lo que costó el pase entero (compute + dibujo) el último frame medido.
+    if (RHI::Device* dev = RHI::device()) {
+        double ms = 0.0;
+        for (const auto& s : dev->gpuScopes())
+            if (s.name == "ground.scatter" || s.name == "scene.grass.cover") ms += s.ms;
+        m_cover.feedGpuMs(ms, m_coverClock);
+    }
+    if (!m_cover.hasWork()) return;
+    const int proto = coverPrototype();
+    RHI::Device* dev = RHI::device();
+    const PrototypeGpu* pg = (proto >= 0) ? prototypeGpu(m_registry.prototype(proto)) : nullptr;
+    if (!pg || !dev || !valid(pg->vbo[kCoverLod]) || pg->indexCount[kCoverLod] == 0) return;
+    HARUKA_PROFILE("scene.grass.cover"); HARUKA_GPU_SCOPE("scene.grass.cover");
+    if (!valid(m_coverPSO)) {
+        const std::string vs = Renderer::Shader::baseDir() + "shaders/prop_inst.vert";
+        const std::string fs = Renderer::Shader::baseDir() + "shaders/prop_inst.frag";
+        RHI::PipelineDesc pd;
+        pd.vertexPath   = vs.c_str();
+        pd.fragmentPath = fs.c_str();
+        appendPropVertexLayout(pd.vertexLayout, /*withPart*/true);          // binding 0 = prototipo
+        Renderer::GPUInstancing::appendInstanceLayout(pd.vertexLayout, 1);  // binding 1 = lo que escribió el compute
+        pd.topology     = RHI::PrimitiveTopology::Triangles;
+        pd.depth.test   = true;  pd.depth.write = true;
+        pd.blend.enable = false;
+        pd.cull         = RHI::CullMode::Back;
+        m_coverPSO = dev->createPipeline(pd);
+        if (!valid(m_coverPSO)) { HARUKA_LOGE("GrassSystem", "no se pudo crear el pipeline de la cubierta"); return; }
+    }
+    // Las instancias van relativas a la cámara de ESTE frame (el compute corrió en `prepareGpu`).
+    const PropParams pp = makeParams(*pg, frameWind(f), frameTime(), glm::vec3(0.0f), f);
+    const RHI::BufferHandle ubo = paramsUBO(dev, proto);
+    ctx->bindPipeline(m_coverPSO);
+    ctx->bindUniformBuffer(0, f.perFrameUBO);
+    if (valid(ubo)) { dev->updateBuffer(ubo, 0, sizeof(pp), &pp); ctx->bindUniformBuffer(6, ubo); }
+    bindPrototypeMaterial(ctx, *pg);
+    ctx->bindVertexBuffer(pg->vbo[kCoverLod], 0);
+    ctx->bindVertexBuffer(m_cover.instances(), 1);
+    ctx->bindIndexBuffer(pg->ebo[kCoverLod]);
+    ctx->drawIndexedIndirect(m_cover.command(), 1, 20u, 0);
+    ++stats.renderedDrawCalls;
+    const uint64_t n = m_cover.lastCount();   // lectura atrasada: solo para las cifras
+    stats.renderedVertices  += (int)std::min<uint64_t>((uint64_t)pg->vertexCount[kCoverLod] * n, 0x7fffffff);
+    stats.renderedTriangles += (int)std::min<uint64_t>((uint64_t)pg->indexCount[kCoverLod] / 3u * n, 0x7fffffff);
+    if (valid(f.scenePSO)) ctx->bindPipeline(f.scenePSO);
+
+    static double s_lastLog = -1e9;
+    if (f.diagClock - s_lastLog > 2.0) {
+        s_lastLog = f.diagClock;
+        HARUKA_LOGDIAG("GrassSystem", "cubierta: %.2f ms GPU · detalle %.2f (%.2f px) · alcance %.0f m · %u grupos · %llu hilos · %u/%u instancias (pedidas %u)",
+                       m_cover.gpuMs(), m_cover.detail(), m_cover.thrPx(), m_cover.reachM(), m_cover.lastGroups(),
+                       (unsigned long long)m_cover.lastThreads(), m_cover.lastCount(),
+                       m_cover.config().capacity, m_cover.lastWanted());
+    }
 }
 
 // ── datos ─────────────────────────────────────────────────────────────────────────────────────
@@ -146,7 +313,10 @@ void GrassSystem::rebuildGpu() {
     for (size_t i = 0; i < m_bursts.size(); ++i) {
         const MassBurst& b = m_bursts[i];
         MassBurstGpu& g = m_gpu[i];
-        const glm::vec3 c = glm::vec3(originToCenter + glm::dvec3(b.dir) * (m_planetR + (double)b.heightM));
+        // ⚠️ LA DIRECCIÓN SE NORMALIZA EN DOBLE. `b.dir` es un `vec3`: su longitud es 1 ± 6e-8, y por el
+        // radio terrestre eso son hasta ±0,38 m de cota. Sin normalizar, cada brote entero flotaba o se
+        // hundía según su redondeo (medido en `MassGround`: −0,167 m en el centro de uno de prueba).
+        const glm::vec3 c = glm::vec3(originToCenter + glm::normalize(glm::dvec3(b.dir)) * (m_planetR + (double)b.heightM));
         g.a = glm::vec4(c, b.scaleMin);
         g.b = glm::vec4(b.dir, b.scaleMax);
         uint32_t cellBits; std::memcpy(&cellBits, &b.cellM, sizeof(cellBits));
@@ -191,7 +361,9 @@ void GrassSystem::upload(RHI::Device* dev) {
 // sus matas y a nivel 2 un cuarto — las primeras `k`, así que el subconjunto es estable (no
 // parpadea al cambiar de nivel). `firstInstance` = índice del brote en el SSBO.
 void GrassSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) {
-    if (propsDisabled() || !m_enabled || !ctx || !f.camera || m_bursts.empty()) return;
+    if (propsDisabled() || !m_enabled || !ctx || !f.camera) return;
+    drawCover(ctx, f, stats);
+    if (m_bursts.empty()) return;
     const int protoCount = m_registry.prototypeCount();
     if (protoCount <= 0) return;
     RHI::Device* dev = RHI::device();
@@ -273,6 +445,11 @@ void GrassSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) 
         ctx->bindUniformBuffer(0, f.perFrameUBO);
         ctx->bindStorageBuffer(2, m_burstSSBO);
         ctx->bindStorageBuffer(3, m_stateSSBO);
+        // El ajuste de cada mata al suelo dibujado (`MassGround`). Sus buffers existen aunque el compute
+        // no (sellos a 0); si ni eso, `kMassGroundNone` como frame no coincide con ningún sello.
+        const bool groundOk = valid(m_ground.stamps()) && valid(m_ground.snap());
+        ctx->bindStorageBuffer(4, groundOk ? m_ground.stamps() : m_stateSSBO);
+        ctx->bindStorageBuffer(5, groundOk ? m_ground.snap()   : m_stateSSBO);
         for (int pi = 0; pi < protoCount; ++pi) {
             bool any = false;
             for (int lod = 0; lod < kLods; ++lod) any = any || !groups[(size_t)(pi * kLods + lod)].empty();
@@ -280,7 +457,8 @@ void GrassSystem::draw(RHI::Context* ctx, const DrawFrame& f, DrawStats& stats) 
             const PrototypeGpu* pgp = prototypeGpu(m_registry.prototype(pi));
             if (!pgp) continue;
             const PrototypeGpu& pg = *pgp;
-            const PropParams pp = makeParams(pg, wind, time, originRel, f);
+            PropParams pp = makeParams(pg, wind, time, originRel, f);
+            pp.flags.w = (groundOk && m_ground.ready()) ? m_ground.frameStamp() : MassGround::kNone;
             const RHI::BufferHandle ubo = paramsUBO(dev, pi);
             if (valid(ubo)) { dev->updateBuffer(ubo, 0, sizeof(pp), &pp); ctx->bindUniformBuffer(6, ubo); }
             bindPrototypeMaterial(ctx, pg);
@@ -347,6 +525,19 @@ int GrassSystem::setStateIn(const glm::dvec3& center, double radius, uint32_t fr
 }
 
 int GrassSystem::destroyAt(const glm::dvec3& center, double radius) {
+    // La cubierta densa: una esfera más, salvo que ya esté dentro de otra.
+    if (radius > 0.0) {
+        bool covered = false;
+        for (const Zone& z : m_zones)
+            if (glm::length(z.center - center) + radius <= z.radius) { covered = true; break; }
+        if (!covered) {
+            // La nueva se traga a las que contiene; y si se llega al tope, se olvida la más vieja.
+            m_zones.erase(std::remove_if(m_zones.begin(), m_zones.end(), [&](const Zone& z) {
+                return glm::length(z.center - center) + z.radius <= radius; }), m_zones.end());
+            if (m_zones.size() >= kMaxZones) m_zones.erase(m_zones.begin());
+            m_zones.push_back({ center, radius });
+        }
+    }
     return setStateIn(center, radius,
                       (1u << (uint32_t)MassState::Alive) | (1u << (uint32_t)MassState::Flat),
                       MassState::Destroyed, -1.0);

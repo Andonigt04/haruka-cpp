@@ -27,16 +27,15 @@ public:
 private:
     void setupCubemap();
     void renderCube(Haruka::RHI::Context& ctx);
-    void renderQuad(Haruka::RHI::Context& ctx);
+    void renderFullscreen(Haruka::RHI::Context& ctx);
 
     Haruka::RHI::TextureHandle hEnv, hIrradiance, hPrefilter, hBrdf;
-    Haruka::RHI::BufferHandle  m_cubeBuf, m_quadBuf;
+    Haruka::RHI::BufferHandle  m_cubeBuf;
     Haruka::RHI::BufferHandle  m_matrixUBO, m_paramUBO;
     Haruka::RHI::PipelineHandle m_equirectPipe, m_irradiancePipe, m_prefilterPipe, m_brdfPipe;
     Haruka::RHI::RenderPassHandle m_brdfPass;
 
     int m_cubeCount = 36;
-    int m_quadCount = 6;
 };
 
 }} // namespace Haruka::Renderer

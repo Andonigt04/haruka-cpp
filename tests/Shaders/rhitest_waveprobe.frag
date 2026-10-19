@@ -47,7 +47,7 @@ void main() {
     // es exactamente la sobrecarga de antes: los tests que no la usan no cambian ni un bit.
     vec3  pend = vec3(uProbeStep.w, uProbeStepY.w, uProbeUp.w);
     vec3  disp = harukaGerstner(wp, up, uProbeOrigin.w, depth, HARUKA_FETCH_UNLIMITED, 4.0, 1.0,
-                                pend, n, foam);
+                                pend, HARUKA_NO_BED, n, foam);
     // La componente a lo largo de `up` ES la altura; las otras dos son el vaiven horizontal, que es
     // donde vive el vuelco. El marco tangente es EL MISMO que construyen `harukaGerstner` y
     // `oceanDisplacement` — si no lo fuera, se compararian proyecciones sobre ejes distintos.

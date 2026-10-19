@@ -1,57 +1,78 @@
+/**
+ * @file aerial.glsl
+ * @brief LA PERSPECTIVA AEREA POR FISICA: lo lejano se ve a traves del aire que hay en medio.
+ *
+ * Es la MISMA integral que pinta el cielo (`lib/atmosphere.glsl`), cortada en el objeto: lo de detras
+ * llega atenuado por la transmitancia del tramo y se le suma la luz que ese aire dispersa hacia el
+ * ojo. Por eso una montaña lejana se funde EXACTAMENTE con el cielo de su direccion, al atardecer se
+ * tiñe de naranja y de noche no brilla.
+ *
+ * ⚠️ AQUI HABIA un `mix(colorDelCielo, col, exp(-d/L))` con el color del cielo sacado de la paleta de
+ * cuatro colores y una visibilidad L elegida (60 km seco, 18 km humedo). Andoni (17-10): "la
+ * atmosfera los colores estan harcodeados no por atmosfera".
+ *
+ * Usa la luz del frame (`lib/sky_light.glsl`, binding 31) y la tabla de dispersion multiple (binding 20).
+ */
 #ifndef HARUKA_AERIAL_GLSL
 #define HARUKA_AERIAL_GLSL
-// ── PERSPECTIVA AÉREA: el aire entre el ojo y lo que se mira ────────────────────────────────────
-//
-// No existía. El terreno a 50-125 km se pintaba con el contraste de a 50 m, y las nubes a 100 km
-// con el blanco de encima de tu cabeza: el horizonte era una raya dura (marrón contra azul) y la
-// capa de nubes vista de canto se leía como tiras cortadas. Reportado mirando ("las nubes se
-// entrecortan y el horizonte está cortado por clima y terreno").
-//
-// UNA función para terreno, props y nubes, para que el aire sea el MISMO en los tres. El color del
-// aire es el del propio cielo en esa dirección (`harukaSkyBase`, la misma paleta que dibuja el domo),
-// así que lo lejano se funde con el fondo en vez de con un gris inventado. Extinción exponencial con
-// una sola escala `L` (metros de visibilidad), que el motor saca del clima: aire seco ~60 km,
-// húmedo ~18 km, lloviendo mucho menos.
-//
-// `aerial`: x = 1/L (por metro, a NIVEL DEL MAR) · y = día [0,1] (harukaSkyDay en CPU) ·
-//           z = altitud del ojo (m) · w = escala de altura del aire H (m). Ver abajo.
-#include "lib/sky_palette.glsl"
 
-/** @brief Transmitancia del aire a `distM` metros. */
-float harukaAerialT(float distM, vec4 aerial) {
-    return exp(-max(distM, 0.0) * aerial.x);
-}
+#include "lib/sky_light.glsl"
+#include "lib/atmosphere.glsl"
 
-/** @brief Color visto tras `distM` metros de aire mirando con elevación `t` (dot(dir, up)), con el
- *  fragmento a la MISMA altitud que el ojo (props, cosas cercanas). */
-vec3 harukaAerial(vec3 col, float distM, float t, vec4 aerial) {
-    const float T   = harukaAerialT(distM, aerial);
-    const vec3  air = harukaSkyBase(max(t, 0.0), aerial.y);   // bajo el horizonte: color de horizonte
-    return mix(air, col, T);
+/// Pasos de la integral para el aire de en medio: es por pixel de TODO el suelo, asi que menos que el
+/// cielo (que tiene que resolver el halo del Sol y el crepusculo).
+const int   HARUKA_AERIAL_VIEW_STEPS  = 6;
+const int   HARUKA_AERIAL_LIGHT_STEPS = 3;
+/// Por debajo de esto el aire de en medio no se ve (T > 0,998 en el azul): se ahorra la integral.
+const float HARUKA_AERIAL_MIN_M = 150.0;
+
+/**
+ * @brief Color de PANTALLA de algo a `fragRel` (relativo al OJO, m), visto a traves del aire.
+ * @param displayCol  su color de pantalla ya iluminado (lo que se veria sin aire en medio).
+ */
+vec3 harukaAerialSky(vec3 displayCol, vec3 fragRel) {
+    const float R = uSkyPlanet.w;
+    const float d = length(fragRel);
+    if (R <= 0.0 || d < HARUKA_AERIAL_MIN_M) return displayCol;
+    vec3 T;
+    const vec3 S = harukaAtmoInscatterN(-uSkyPlanet.xyz, fragRel / d, d, R,
+                                        uSkySunDir.xyz, uSkySunE.rgb, uSkyMoonDir.xyz, uSkyMoonE.rgb,
+                                        HARUKA_AERIAL_VIEW_STEPS, HARUKA_AERIAL_LIGHT_STEPS, T);
+    return harukaDisplay(harukaLinear(displayCol) * T + S);
 }
 
-// ⚠️ LA EXTINCIÓN VA POR EL AIRE ATRAVESADO, NO POR LOS METROS. Con `exp(−dist/L)` a secas, desde
-// 250 km el planeta entero salía al 1,5 % de su color (e^{−250/60}) y desde 2 000 km a cero: TODO
-// del color del aire bajo el horizonte, que es blanquecino — "en órbita está todo en blanco". El
-// rayo desde órbita cruza ~10 km de aire, no 250. El aire decae con la altura (`e^{−h/H}`), y a lo
-// largo de un tramo recto con la altura variando linealmente el camino EQUIVALENTE a nivel del mar
-// tiene forma cerrada: `D·H/(hB−hA)·(e^{−hA/H} − e^{−hB/H})`. Desde órbita al nadir da ~`H` (unos km)
-// sea cual sea la altitud; a ras de suelo da `D`, o sea lo de siempre.
-// `aerial.z` = altitud del OJO sobre la esfera (m) · `aerial.w` = escala de altura H (m); 0 = plano.
-/** @brief Metros de aire A NIVEL DEL MAR equivalentes a un tramo recto de `distM` entre las
- *  altitudes `hA` y `hB` (m), con escala de altura `H`. Con `H <= 0` es el camino plano. */
-float harukaAirPath(float distM, float hA, float hB, float H) {
-    if (H <= 0.0) return max(distM, 0.0);
-    hA = max(hA, 0.0); hB = max(hB, 0.0);
-    const float dh = hB - hA;
-    if (abs(dh) < 1.0) return max(distM, 0.0) * exp(-hA / H);
-    return max(distM, 0.0) * H / dh * (exp(-hA / H) - exp(-hB / H));
+/// Lo mismo en LINEAL (para quien compone su luz en lineal antes de llevarla a pantalla: las nubes).
+vec3 harukaAerialSkyLinear(vec3 linearCol, vec3 fragRel) {
+    const float R = uSkyPlanet.w;
+    const float d = length(fragRel);
+    if (R <= 0.0 || d < HARUKA_AERIAL_MIN_M) return linearCol;
+    vec3 T;
+    const vec3 S = harukaAtmoInscatterN(-uSkyPlanet.xyz, fragRel / d, d, R,
+                                        uSkySunDir.xyz, uSkySunE.rgb, uSkyMoonDir.xyz, uSkyMoonE.rgb,
+                                        HARUKA_AERIAL_VIEW_STEPS, HARUKA_AERIAL_LIGHT_STEPS, T);
+    return linearCol * T + S;
 }
-/** @brief Ídem `harukaAerial` con el fragmento a la altitud `hFragM`: el aire atravesado es el real. */
-vec3 harukaAerialAlt(vec3 col, float distM, float t, float hFragM, vec4 aerial) {
-    const float path = harukaAirPath(distM, aerial.z, hFragM, aerial.w);
-    const float T    = exp(-path * aerial.x);
-    const vec3  air  = harukaSkyBase(max(t, 0.0), aerial.y);
-    return mix(air, col, T);
+
+/**
+ * @brief EL AIRE POR VÉRTICE: transmitancia `T` y luz dispersada `S` (lineales) hasta `rel` (relativo
+ *        al OJO, m). Para lo que se dibuja con miles de fragmentos por objeto lejano: el aire cambia en
+ *        kilómetros, no de un píxel al siguiente, y una nube a 80 km son ~200 px con un puñado de
+ *        vértices. Medido: los cúmulos de malla integraban el aire POR FRAGMENTO (con solapamiento
+ *        entre bultos) y costaban 4,2 ms de GPU. Se aplica en el fragment con `harukaAerialApply`.
+ */
+void harukaAerialTS(vec3 rel, out vec3 T, out vec3 S) {
+    T = vec3(1.0); S = vec3(0.0);
+    const float R = uSkyPlanet.w;
+    const float d = length(rel);
+    if (R <= 0.0 || d < HARUKA_AERIAL_MIN_M) return;
+    S = harukaAtmoInscatterN(-uSkyPlanet.xyz, rel / d, d, R,
+                             uSkySunDir.xyz, uSkySunE.rgb, uSkyMoonDir.xyz, uSkyMoonE.rgb,
+                             HARUKA_AERIAL_VIEW_STEPS, HARUKA_AERIAL_LIGHT_STEPS, T);
 }
-#endif
+/// Color de PANTALLA visto a través del aire `T`, `S` (de `harukaAerialTS`, interpolados).
+vec3 harukaAerialApply(vec3 displayCol, vec3 T, vec3 S) {
+    if (S == vec3(0.0) && T == vec3(1.0)) return displayCol;   // de cerca: sin ida y vuelta por lineal
+    return harukaDisplay(harukaLinear(displayCol) * T + S);
+}
+
+#endif // HARUKA_AERIAL_GLSL

@@ -1,6 +1,6 @@
 /**
  * @file TestPorts.cpp
- * @brief Puertos autorizados y RAÍLES (docs/guides/PLAN_PUERTOS.md).
+ * @brief Puertos autorizados y RAÍLES (docs/archivo/PLAN_PUERTOS.md).
  *
  * Lo que hay que demostrar, y su CONTRAPRUEBA en cada caso — un test que solo comprueba que algo
  * "no peta" no distingue una implementación buena de una que devuelve siempre lo mismo:

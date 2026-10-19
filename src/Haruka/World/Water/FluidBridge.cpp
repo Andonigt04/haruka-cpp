@@ -11,6 +11,7 @@
 #include "Haruka/World/Planet/Biomes.h"
 #include "Haruka/World/Planet/Planet.h"
 #include "Haruka/World/Planet/PlanetarySystem.h"
+#include "Haruka/Physics/Fluid/ShallowWater.h"   // waterAtWorld: la lámina para la física
 #include "Haruka/World/Water/WaterFill.h"   // WATER_FILL_DRY: el centinela del mapa de lagos
 #include "Haruka/World/WeatherSystem.h"
 
@@ -132,6 +133,13 @@ void FluidBridge::run(std::unique_ptr<Renderer::FluidHost>& host, const Frame& f
             }
             // El agua interior la DIBUJA EL MAR: el fluido publica su campo y el planeta lo consume.
             // Sin este enganche la sim sigue corriendo (cauces, charcos, lluvia) pero no se ve nada.
+            // Y LA FÍSICA, del mismo campo: sin esto el agua dinámica se veía pero no existía para el
+            // cuerpo (`PlanetarySystem::setDynamicWaterFn`). Se captura el `unique_ptr` del host (un
+            // miembro de la aplicación) y no el puntero: si el host se recrea, no queda colgando.
+            ps->setDynamicWaterFn([&host](const glm::dvec3& wp) -> float {
+                Physics::Fluid::ShallowWaterSim* sim = host ? host->sim() : nullptr;
+                return (sim && sim->valid()) ? sim->waterAtWorld(wp) : -1.0f;
+            });
             host->publishInlandWater =
                 [ps](const std::vector<float>& surf, int n, const glm::vec3& anchorRelEye,
                        const glm::vec3& tan, const glm::vec3& bit, const glm::vec3& up, float span) {

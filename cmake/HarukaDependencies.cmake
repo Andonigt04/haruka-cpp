@@ -20,7 +20,7 @@ macro(find_header_fallback NAME HEADER_FILE SUBDIR)
     )
     if(${NAME}_INCLUDE_DIR)
         message(STATUS "Found ${NAME}: ${${NAME}_INCLUDE_DIR}")
-        include_directories(${${NAME}_INCLUDE_DIR})
+        include_directories(SYSTEM ${${NAME}_INCLUDE_DIR})   # de terceros: sus avisos no son nuestros
     else()
         message(FATAL_ERROR "${NAME} not found. Install the -devel package or place it in third_party/")
     endif()

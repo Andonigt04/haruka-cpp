@@ -114,6 +114,9 @@ public:
     // Jump impulse (m/s). Also reused as the ascend/descend speed in flight mode.
     void  setJumpForce(float f) { jumpForce = f; }
     float getJumpForce() const  { return jumpForce; }
+    /// Altura de los OJOS sobre el pie (m): donde `updateCamera` pone la cámara. Quien decida cuánto
+    /// asoma la cabeza (nadar) la lee de aquí y no de otro número.
+    float getEyeHeight() const  { return currentHeight * 0.9f; }
 
     bool isGrounded() const { return grounded; }
     bool isSprinting() const { return sprinting; }

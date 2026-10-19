@@ -1,0 +1,391 @@
+#version 460 core
+/**
+ * @file apic_fluid.comp
+ * @brief UN LIQUIDO 3D, SIN SABER QUE ES UNA OLA: APIC (Jiang et al. 2015) sobre una rejilla MAC.
+ *        Genérico: no hay término de rompiente, de rollo ni de espuma. Lo que se mueve lo mueven la
+ *        gravedad, la incompresibilidad, el lecho y una PARED que puede desplazarse (la pala de un
+ *        tanque de olas, o el borde por donde entra el agua de fuera).
+ *
+ * ── UN PASO ──────────────────────────────────────────────────────────────────────────────────────
+ *   TICK      reloj del paso (un hilo)
+ *   CLEAR     acumuladores a cero
+ *   P2G       cada partícula reparte momento (velocidad + matriz afín C) a las caras con B-spline
+ *             cuadrática, en PUNTO FIJO con atomicAdd entero: el orden de los hilos no cambia la
+ *             suma, así que GL y Vulkan dan lo mismo
+ *   MARK      celda sólida (bajo el lecho / tras la pared), líquida (tiene partículas) o aire
+ *   FACES     velocidad = momento / peso, gravedad, y la cara pegada a un sólido toma la velocidad
+ *             del sólido (deslizamiento libre: solo la componente NORMAL)
+ *   DIV       lado derecho de la presión: −divergencia, más una expansión donde hay más partículas
+ *             que en reposo (corrige la deriva de volumen que deja un solver iterativo)
+ *   PRESS     Gauss-Seidel rojo-negro con sobrerrelajación; presión 0 en el aire
+ *   PROJECT   resta el gradiente de presión a las caras entre líquido y no-sólido
+ *   G2P       velocidad y C de vuelta a la partícula, avance, choque con lecho y paredes
+ *
+ * Presión escalada: P = p·dt/ρ, así que ni ρ ni dt aparecen en el sistema.
+ *
+ * Ejes de la rejilla: x a lo largo, y ARRIBA, z de través (PERIÓDICO). Coordenadas locales al
+ * parche (m, floats pequeños): el anclaje en el planeta lo pone quien lo usa.
+ */
+
+layout(local_size_x = 128) in;
+
+layout(std140, binding = 0) uniform FluidParams {
+    ivec4 uDims;     // nx, ny, nz, partículas
+    vec4  uGrid;     // dx, dt, gravedad, partículas por celda en reposo
+    vec4  uWall;     // pared móvil x(t) = S/2·(1 + tanh((t − t0)/τ)): S, t0, τ · ganancia de densidad
+    vec4  uMisc;     // escala del punto fijo, ω (SOR), Lx, Ly
+    vec4  uForce;    // xz = viento: aceleración de la capa de superficie (m/s²) · w = través periódico (1/0)
+    vec4  uSponge;   // x = ancho de la esponja de los bordes abiertos (m) · y = tasa (1/s) · z = esferas
+};
+layout(std140, binding = 1) uniform FluidPass {
+    ivec4 uPass;     // x = pase · y = color (PRESS)
+};
+
+struct Particle { vec4 x; vec4 v; vec4 cu; vec4 cv; vec4 cw; };
+layout(std430, binding = 2) buffer Particles { Particle uP[]; };
+layout(std430, binding = 3) buffer Accum     { int   uAcc[]; };    // [0,N) momento · [N,2N) peso
+layout(std430, binding = 4) buffer Faces     { float uVel[]; };    // u | v | w concatenadas
+layout(std430, binding = 5) buffer CellCount { uint  uCount[]; };
+layout(std430, binding = 6) buffer CellType  { uint  uType[]; };   // 0 aire · 1 líquido · 2 sólido
+layout(std430, binding = 7) buffer Pressure  { float uPres[]; };
+layout(std430, binding = 8) buffer Rhs       { float uRhs[]; };
+layout(std430, binding = 9) readonly buffer Bed { float uBed[]; }; // cota del lecho por columna (i,k)
+layout(std430, binding = 10) buffer State    { vec4  uState; };    // x = tiempo
+// Campo de DENSIDAD en los nodos (esquinas de celda), para dibujar: (nx+1)·(ny+1)·nz, z periódico.
+layout(std430, binding = 11) buffer NodeAcc   { int   uNodeAcc[]; };
+layout(std430, binding = 12) buffer NodeField { float uField[]; };   // ≈ 1 dentro del líquido, 0 fuera
+// SÓLIDOS MÓVILES: esferas (cuerpos, el jugador). Por esfera dos vec4: (centro, radio), (velocidad, 0).
+layout(std430, binding = 13) readonly buffer Solids { vec4 uSolid[]; };
+
+const int P_TICK = 0, P_CLEAR = 1, P_P2G = 2, P_MARK = 3, P_FACES = 4, P_DIV = 5, P_PRESS = 6,
+          P_PROJECT = 7, P_G2P = 8, P_NODE_CLEAR = 9, P_SPLAT = 10, P_FIELD = 11;
+const uint AIR = 0u, LIQUID = 1u, SOLID = 2u;
+
+int nx() { return uDims.x; }
+int ny() { return uDims.y; }
+int nz() { return uDims.z; }
+float dx() { return uGrid.x; }
+float dt() { return uGrid.y; }
+int numU() { return (nx() + 1) * ny() * nz(); }
+int numV() { return nx() * (ny() + 1) * nz(); }
+bool periodic() { return uForce.w > 0.5; }
+/// Caras w y nodos en z: con través periódico la última es la primera; con paredes hay una más.
+int nzW() { return nz() + (periodic() ? 0 : 1); }
+int numW() { return nx() * ny() * nzW(); }
+int numFaces() { return numU() + numV() + numW(); }
+int numCells() { return nx() * ny() * nz(); }
+
+int numNodes() { return (nx() + 1) * (ny() + 1) * nzW(); }
+int nodeIndex(int i, int j, int k) { return (k * (ny() + 1) + j) * (nx() + 1) + i; }
+
+int wrapZ(int k) { return ((k % nz()) + nz()) % nz(); }
+int cellIndex(int i, int j, int k) { return (k * ny() + j) * nx() + i; }
+
+// ── La pared móvil ──
+float wallX(float t)  { return 0.5 * uWall.x * (1.0 + tanh((t - uWall.y) / uWall.z)); }
+float wallU(float t)  { const float th = tanh((t - uWall.y) / uWall.z); return 0.5 * uWall.x * (1.0 - th * th) / uWall.z; }
+
+/// Tipo de una celda, con lo de fuera del dominio: paredes en x (y en z si no es periódico), suelo
+/// abajo, aire arriba.
+uint typeAt(int i, int j, int k) {
+    if (i < 0 || i >= nx() || j < 0) return SOLID;
+    if (!periodic() && (k < 0 || k >= nz())) return SOLID;
+    if (j >= ny()) return AIR;
+    return uType[cellIndex(i, j, wrapZ(k))];
+}
+float presAt(int i, int j, int k) {
+    if (i < 0 || i >= nx() || j < 0 || j >= ny()) return 0.0;
+    if (!periodic() && (k < 0 || k >= nz())) return 0.0;
+    return uPres[cellIndex(i, j, wrapZ(k))];
+}
+
+/// Índice global de la cara (comp, i, j, k), o −1 si cae fuera.
+int faceIndex(int comp, int i, int j, int k) {
+    if (periodic()) k = wrapZ(k);
+    else if (k < 0 || k >= (comp == 2 ? nz() + 1 : nz())) return -1;
+    if (comp == 0) {
+        if (i < 0 || i > nx() || j < 0 || j >= ny()) return -1;
+        return (k * ny() + j) * (nx() + 1) + i;
+    }
+    if (comp == 1) {
+        if (i < 0 || i >= nx() || j < 0 || j > ny()) return -1;
+        return numU() + (k * (ny() + 1) + j) * nx() + i;
+    }
+    if (i < 0 || i >= nx() || j < 0 || j >= ny()) return -1;
+    return numU() + numV() + (k * ny() + j) * nx() + i;
+}
+/// Al revés: de índice global a (comp, i, j, k).
+ivec4 faceCoords(int f) {
+    if (f < numU()) { const int r = nx() + 1; return ivec4(0, f % r, (f / r) % ny(), f / (r * ny())); }
+    f -= numU();
+    if (f < numV()) { return ivec4(1, f % nx(), (f / nx()) % (ny() + 1), f / (nx() * (ny() + 1))); }
+    f -= numV();
+    return ivec4(2, f % nx(), (f / nx()) % ny(), f / (nx() * ny()));
+}
+/// Desplazamiento de la retícula de cada componente, en celdas.
+vec3 latticeShift(int comp) { return comp == 0 ? vec3(0.0, 0.5, 0.5) : comp == 1 ? vec3(0.5, 0.0, 0.5) : vec3(0.5, 0.5, 0.0); }
+
+/// Las dos celdas que separa la cara (a = lado negativo, b = positivo).
+void faceCells(ivec4 f, out ivec3 a, out ivec3 b) {
+    b = f.yzw;
+    a = b; a[f.x] -= 1;
+}
+
+/// ¿Está `p` dentro de una esfera sólida (con holgura `pad`)? Devuelve su índice o −1.
+int solidAt(vec3 p, float pad) {
+    const int n = int(uSponge.z);
+    for (int s = 0; s < n; ++s) {
+        const vec4 c = uSolid[2 * s];
+        if (distance(p, c.xyz) < c.w + pad) return s;
+    }
+    return -1;
+}
+
+/// Velocidad del sólido en una cara: una esfera que la toca la arrastra con la suya; la pared móvil
+/// empuja en x; el resto está quieto. La pared cuenta si la celda de la IZQUIERDA es sólida por ella
+/// (su centro quedó detrás): la cara que separa la pared del agua está delante de `wallX`.
+float solidVelocity(ivec4 f) {
+    const vec3 p = (vec3(f.yzw) + latticeShift(f.x)) * dx();
+    const int s = solidAt(p, 0.5 * dx());
+    if (s >= 0) return uSolid[2 * s + 1][f.x];
+    if (f.x != 0) return 0.0;
+    const float t = uState.x;
+    return (float(f.y) - 0.5) * dx() < wallX(t) ? wallU(t) : 0.0;
+}
+
+/// Cota del lecho bajo (x, z), bilineal entre centros de columna; y su pendiente.
+float bedAt(float x, float z, out vec2 grad) {
+    const float gx = clamp(x / dx() - 0.5, 0.0, float(nx() - 1));
+    const float gz = z / dx() - 0.5;
+    const int i0 = min(int(floor(gx)), nx() - 2);
+    const int kf = int(floor(gz));
+    const int k0 = periodic() ? wrapZ(kf) : clamp(kf, 0, nz() - 1);
+    const int k1 = periodic() ? wrapZ(kf + 1) : clamp(kf + 1, 0, nz() - 1);
+    const float fx = gx - float(i0), fz = gz - float(kf);
+    const float b00 = uBed[k0 * nx() + i0], b10 = uBed[k0 * nx() + i0 + 1];
+    const float b01 = uBed[k1 * nx() + i0], b11 = uBed[k1 * nx() + i0 + 1];
+    const float bz0 = mix(b00, b10, fx), bz1 = mix(b01, b11, fx);
+    grad = vec2(mix(b10 - b00, b11 - b01, fz), bz1 - bz0) / dx();
+    return mix(bz0, bz1, fz);
+}
+
+/// Pesos de la B-spline cuadrática en una dimensión.
+vec3 bspline(float f) {
+    return vec3(0.5 * (1.5 - f) * (1.5 - f), 0.75 - (f - 1.0) * (f - 1.0), 0.5 * (f - 0.5) * (f - 0.5));
+}
+
+void p2gComponent(int comp, vec3 xp, float vel, vec3 c) {
+    const vec3 s = xp / dx() - latticeShift(comp);
+    const ivec3 base = ivec3(floor(s - 0.5));
+    const vec3 f = s - vec3(base);
+    const vec3 wx = bspline(f.x), wy = bspline(f.y), wz = bspline(f.z);
+    const float FX = uMisc.x;
+    const int N = numFaces();
+    for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) for (int e = 0; e < 3; ++e) {
+        const int fi = faceIndex(comp, base.x + a, base.y + b, base.z + e);
+        if (fi < 0) continue;
+        const float w = wx[a] * wy[b] * wz[e];
+        const vec3 d = (vec3(base + ivec3(a, b, e)) - s) * dx();
+        atomicAdd(uAcc[fi], int(round(w * (vel + dot(c, d)) * FX)));
+        atomicAdd(uAcc[N + fi], int(round(w * FX)));
+    }
+}
+
+void g2pComponent(int comp, vec3 xp, out float vel, out vec3 c) {
+    const vec3 s = xp / dx() - latticeShift(comp);
+    const ivec3 base = ivec3(floor(s - 0.5));
+    const vec3 f = s - vec3(base);
+    const vec3 wx = bspline(f.x), wy = bspline(f.y), wz = bspline(f.z);
+    vel = 0.0; c = vec3(0.0);
+    for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) for (int e = 0; e < 3; ++e) {
+        const int fi = faceIndex(comp, base.x + a, base.y + b, base.z + e);
+        if (fi < 0) continue;
+        const float w = wx[a] * wy[b] * wz[e];
+        const vec3 d = (vec3(base + ivec3(a, b, e)) - s) * dx();
+        const float u = uVel[fi];
+        vel += w * u;
+        c   += w * u * d;
+    }
+    c *= 4.0 / (dx() * dx());   // D⁻¹ de la cuadrática: D = dx²/4
+}
+
+void main() {
+    const int id = int(gl_GlobalInvocationID.x);
+    const int pass = uPass.x;
+
+    if (pass == P_TICK) {
+        if (id == 0) uState.x += dt();
+        return;
+    }
+    if (pass == P_CLEAR) {
+        const int N = numFaces();
+        if (id < 2 * N) uAcc[id] = 0;
+        if (id < numCells()) uCount[id] = 0u;
+        return;
+    }
+    if (pass == P_P2G) {
+        if (id >= uDims.w) return;
+        const Particle p = uP[id];
+        p2gComponent(0, p.x.xyz, p.v.x, p.cu.xyz);
+        p2gComponent(1, p.x.xyz, p.v.y, p.cv.xyz);
+        p2gComponent(2, p.x.xyz, p.v.z, p.cw.xyz);
+        const ivec3 c = clamp(ivec3(floor(p.x.xyz / dx())), ivec3(0), ivec3(nx() - 1, ny() - 1, nz() - 1));
+        atomicAdd(uCount[cellIndex(c.x, c.y, c.z)], 1u);
+        return;
+    }
+    if (pass == P_MARK) {
+        if (id >= numCells()) return;
+        const int i = id % nx(), j = (id / nx()) % ny(), k = id / (nx() * ny());
+        const float xc = (float(i) + 0.5) * dx(), yc = (float(j) + 0.5) * dx();
+        uint t = uCount[id] > 0u ? LIQUID : AIR;
+        const vec3 pc = (vec3(i, j, k) + 0.5) * dx();
+        if (yc < uBed[k * nx() + i] || xc < wallX(uState.x) || solidAt(pc, 0.0) >= 0) t = SOLID;
+        uType[id] = t;
+        if (t != LIQUID) uPres[id] = 0.0;
+        return;
+    }
+    if (pass == P_FACES || pass == P_PROJECT) {
+        if (id >= numFaces()) return;
+        const ivec4 f = faceCoords(id);
+        ivec3 a, b; faceCells(f, a, b);
+        const uint ta = typeAt(a.x, a.y, a.z), tb = typeAt(b.x, b.y, b.z);
+        float vel;
+        if (pass == P_FACES) {
+            const float w = float(uAcc[numFaces() + id]);
+            vel = w > 0.0 ? float(uAcc[id]) / w : 0.0;
+            if (f.x == 1 && w > 0.0) vel -= uGrid.z * dt();
+            // EL VIENTO tira de la capa de SUPERFICIE (celda líquida con aire encima, a un lado de la
+            // cara): un esfuerzo tangencial, no una ola.
+            if (f.x != 1 && w > 0.0) {
+                const bool surfA = ta == LIQUID && typeAt(a.x, a.y + 1, a.z) == AIR;
+                const bool surfB = tb == LIQUID && typeAt(b.x, b.y + 1, b.z) == AIR;
+                if (surfA || surfB) vel += (f.x == 0 ? uForce.x : uForce.z) * dt();
+            }
+        } else {
+            vel = uVel[id];
+            if (ta == LIQUID || tb == LIQUID)
+                vel -= (presAt(b.x, b.y, b.z) - presAt(a.x, a.y, a.z)) / dx();
+        }
+        if (ta == SOLID || tb == SOLID) vel = solidVelocity(f);
+        uVel[id] = vel;
+        return;
+    }
+    if (pass == P_DIV) {
+        if (id >= numCells() || uType[id] != LIQUID) return;
+        const int i = id % nx(), j = (id / nx()) % ny(), k = id / (nx() * ny());
+        const float div = (uVel[faceIndex(0, i + 1, j, k)] - uVel[faceIndex(0, i, j, k)]
+                         + uVel[faceIndex(1, i, j + 1, k)] - uVel[faceIndex(1, i, j, k)]
+                         + uVel[faceIndex(2, i, j, k + 1)] - uVel[faceIndex(2, i, j, k)]) / dx();
+        const float over = max(0.0, float(uCount[id]) / uGrid.w - 1.0);
+        const float target = uWall.w * over / dt();
+        uRhs[id] = (target - div) * dx() * dx();
+        return;
+    }
+    if (pass == P_PRESS) {
+        if (id >= numCells() || uType[id] != LIQUID) return;
+        const int i = id % nx(), j = (id / nx()) % ny(), k = id / (nx() * ny());
+        if (((i + j + k) & 1) != uPass.y) return;
+        float sum = 0.0; int n = 0;
+        const ivec3 nb[6] = ivec3[6](ivec3(-1, 0, 0), ivec3(1, 0, 0), ivec3(0, -1, 0), ivec3(0, 1, 0), ivec3(0, 0, -1), ivec3(0, 0, 1));
+        for (int q = 0; q < 6; ++q) {
+            const ivec3 c = ivec3(i, j, k) + nb[q];
+            if (typeAt(c.x, c.y, c.z) == SOLID) continue;
+            sum += presAt(c.x, c.y, c.z);
+            ++n;
+        }
+        const float pNew = n > 0 ? (sum + uRhs[id]) / float(n) : 0.0;
+        uPres[id] = mix(uPres[id], pNew, uMisc.y);
+        return;
+    }
+    // ── EL CAMPO PARA DIBUJAR (no lo usa el paso) ──
+    if (pass == P_NODE_CLEAR) {
+        if (id < numNodes()) uNodeAcc[id] = 0;
+        return;
+    }
+    if (pass == P_SPLAT) {
+        if (id >= uDims.w) return;
+        const vec3 s = uP[id].x.xyz / dx();
+        const ivec3 base = ivec3(floor(s - 0.5));
+        const vec3 f = s - vec3(base);
+        const vec3 wx = bspline(f.x), wy = bspline(f.y), wz = bspline(f.z);
+        for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) for (int e = 0; e < 3; ++e) {
+            const int i = base.x + a, j = base.y + b;
+            int k = base.z + e;
+            if (periodic()) k = wrapZ(k); else if (k < 0 || k > nz()) continue;
+            if (i < 0 || i > nx() || j < 0 || j > ny()) continue;
+            atomicAdd(uNodeAcc[nodeIndex(i, j, k)], int(round(wx[a] * wy[b] * wz[e] * uMisc.x)));
+        }
+        return;
+    }
+    if (pass == P_FIELD) {
+        if (id >= numNodes()) return;
+        const int i = id % (nx() + 1), j = (id / (nx() + 1)) % (ny() + 1), k = id / ((nx() + 1) * (ny() + 1));
+        // Bajo el lecho, y dentro de una esfera sólida, no hay partículas y el campo caería a 0:
+        // saldría una superficie PEGADA al fondo, o un hueco con la forma del cuerpo bajo el agua.
+        // El nodo enterrado toma el valor del primero que queda por encima (del lecho o del cuerpo):
+        // un cuerpo sumergido queda dentro del agua, uno que asoma la deja rodeándolo.
+        vec2 g;
+        const float bed = bedAt(float(i) * dx(), float(k) * dx(), g);
+        int jj = j;
+        // `bed + 0.5·dx`: la capa de nodos PEGADA al lecho (o al fondo del parche) solo recibe media
+        // B-spline —la otra mitad caería en el sólido— y daba un campo ≈ 0,5, justo el umbral: una
+        // superficie de ruido en el fondo. Igual en las PAREDES del parche (x, y z sin periodo): el
+        // nodo del borde copia al de dentro. Medido en el juego: bloques translúcidos bajo el agua.
+        while (jj < ny() && (float(jj) * dx() < bed + 0.5 * dx() || solidAt(vec3(i, jj, k) * dx(), 0.5 * dx()) >= 0)) ++jj;
+        const int ii = clamp(i, 1, nx() - 1);
+        const int kk = periodic() ? k : clamp(k, 1, nz() - 1);
+        uField[id] = float(uNodeAcc[nodeIndex(ii, jj, kk)]) / (uMisc.x * uGrid.w);
+        return;
+    }
+    if (pass == P_G2P) {
+        if (id >= uDims.w) return;
+        Particle p = uP[id];
+        vec3 v; vec3 cu, cv, cw;
+        g2pComponent(0, p.x.xyz, v.x, cu);
+        g2pComponent(1, p.x.xyz, v.y, cv);
+        g2pComponent(2, p.x.xyz, v.z, cw);
+        vec3 x = p.x.xyz + v * dt();
+        const float t = uState.x, eps = 0.01 * dx();
+        const float xw = wallX(t);
+        if (x.x < xw + eps) { x.x = xw + eps; v.x = max(v.x, wallU(t)); }
+        if (x.x > uMisc.z - eps) { x.x = uMisc.z - eps; v.x = min(v.x, 0.0); }
+        vec2 g;
+        const float bed = bedAt(x.x, x.z, g);
+        if (x.y < bed + eps) {
+            x.y = bed + eps;
+            const vec3 n = normalize(vec3(-g.x, 1.0, -g.y));
+            const float vn = dot(v, n);
+            if (vn < 0.0) v -= vn * n;
+        }
+        if (x.y > uMisc.w - eps) { x.y = uMisc.w - eps; v.y = min(v.y, 0.0); }
+        const float lz = float(nz()) * dx();
+        if (periodic()) x.z = mod(x.z, lz);
+        else {
+            if (x.z < eps) { x.z = eps; v.z = max(v.z, 0.0); }
+            if (x.z > lz - eps) { x.z = lz - eps; v.z = min(v.z, 0.0); }
+        }
+        // Las esferas sólidas: fuera, y sin velocidad relativa hacia dentro.
+        const int sp = solidAt(x, 0.0);
+        if (sp >= 0) {
+            const vec4 c = uSolid[2 * sp];
+            const vec3 vs = uSolid[2 * sp + 1].xyz;
+            const vec3 d = x - c.xyz;
+            const vec3 n = length(d) > 1e-6 ? normalize(d) : vec3(0.0, 1.0, 0.0);
+            x = c.xyz + n * (c.w + eps);
+            const float vn = dot(v - vs, n);
+            if (vn < 0.0) v -= vn * n;
+        }
+        // LA ESPONJA de los bordes abiertos: el agua de fuera está en reposo, así que lo que llega al
+        // borde se frena en vez de rebotar contra la pared del parche.
+        if (uSponge.x > 0.0) {
+            float d = min(x.x, uMisc.z - x.x);
+            if (!periodic()) d = min(d, min(x.z, lz - x.z));
+            const float sg = clamp(1.0 - d / uSponge.x, 0.0, 1.0);
+            const float damp = exp(-uSponge.y * sg * sg * dt());
+            v *= damp; cu *= damp; cv *= damp; cw *= damp;
+        }
+        p.x.xyz = x; p.v.xyz = v; p.cu.xyz = cu; p.cv.xyz = cv; p.cw.xyz = cw;
+        uP[id] = p;
+        return;
+    }
+}

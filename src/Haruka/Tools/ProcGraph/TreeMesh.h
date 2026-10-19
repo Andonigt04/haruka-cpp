@@ -522,53 +522,44 @@ inline void TreeMeshNode::build(int seed, float height, float trunkR,
             appendBlade(top, mid, side, 0.25f, lenF * 0.30f, 1, foliageCol);
             appendBlade(mid, tip, side, lenF * 0.30f, 0.05f, 1, foliageCol);
         }
-    } else if (style == TreeStyle::Grass) {
-        // Mata: manojo de BRIZNAS finas y afiladas (la sintaxis del `GrassRenderer` de GPU,
-        // horneada e instanciada, sin su compute). Anillo EXTERIOR de hojas (2 segmentos, curvatura
-        // propia hacia fuera) + hojas CORTAS de relleno en el centro: ese cuerpo es lo que hace que
-        // la mata se LEA a distancia — las cuchillas de 2 cm solas se perdian en el cielo y en el
-        // suelo ("ahora no hay hierva"). El LOD quita hojas pero conserva la silueta.
-        const int outer = std::max(3, (int)std::lround(8.0f * detail));
-        const int inner = std::max(2, (int)std::lround(3.0f * detail));
-        const float H = height;   // pradera: las exteriores quedan a 0,6-0,8 H (rodilla), no un muro
-        for (int b = 0; b < outer + inner; ++b) {
-            const float ang = kPi * (float)b / (float)std::max(outer, 1)
-                            + 0.4f * WhiteNode::hashFloat(b, 8, 0, seed);
-            const glm::vec3 side(std::cos(ang), 0.0f, std::sin(ang));
-            if (b < outer) {
-                const float h    = H * (0.62f + 0.20f * WhiteNode::hashFloat(b, 9, 0, seed));
-                const float lean = 0.16f + 0.24f * WhiteNode::hashFloat(b, 10, 0, seed);
-                const glm::vec3 dir = side * lean + glm::vec3(0.0f, 1.0f, 0.0f);   // abre el manojo
-                const glm::vec3 root = glm::vec3(0.0f, 0.015f, 0.0f);
-                const glm::vec3 mid  = root + dir * (h * 0.55f);
-                const glm::vec3 tip  = root + dir * h;
-                appendBlade(root, mid, side, h * 0.055f, h * 0.022f, 1, foliageCol);
-                appendBlade(mid,  tip, side, h * 0.022f, h * 0.007f, 1, foliageCol);
-            } else {
-                // relleno corto y derecho: volumen bajo la mata sin robarle luz a las exteriores
-                const float h = H * (0.40f + 0.12f * WhiteNode::hashFloat(b, 11, 0, seed));
-                appendBlade(glm::vec3(0.0f, 0.01f, 0.0f), glm::vec3(0.0f, h, 0.0f),
-                            side, h * 0.040f, h * 0.010f, 1, foliageCol);
-            }
-        }
-    } else if (style == TreeStyle::GrassPressed) {
-        // PISADA: las mismas cuchillas TENDIDAS en abanico, casi a ras de suelo — el rastro que
-        // dejan pies y rocas rodantes. `PropSystem::flattenNear` cambia la mata de pie a ESTA
-        // variante (mismo prototipo, malla tumbada): la pradera se dobla donde se pisa y vuelve al
-        // re-sembrar (efimera, como las pisadas viejas).
-        const int blades = std::max(3, (int)std::lround(7.0f * detail));
-        const float H = height;
+    } else if (style == TreeStyle::Grass || style == TreeStyle::GrassPressed) {
+        // UN TROZO DE PRADERA, NO UNA MATA: cada brizna nace de SU punto del suelo, repartidas por
+        // un disco de `rPatch`. La hierba no sale en abanico de una raíz común (Andoni, 2026-10-17:
+        // "no sale de un solo punto de tierra sino de varios, y no como un matojo"); los parches se
+        // solapan y el suelo queda cubierto sin que se lea la unidad que se repite.
+        //   · raíz: muestreo uniforme en área (sqrt) del disco, por hash.
+        //   · inclinación y rumbo propios (no hacia fuera del centro) y altura propia.
+        //   · dos tramos: el de arriba se vence más (curva), afilándose hasta la punta.
+        // PISADA (`GrassPressed`): las mismas raíces, tendidas casi todas hacia el mismo lado (por
+        // donde pasó lo que pisa), con algo de abanico, a ras de suelo.
+        const bool  pressed = (style == TreeStyle::GrassPressed);
+        const int   blades  = std::max(4, (int)std::lround(14.0f * detail));
+        const float H       = height;
+        const float rPatch  = H * 0.30f;
+        const float pressAng = 2.0f * kPi * WhiteNode::hashFloat(0, 20, 0, seed);
         for (int b = 0; b < blades; ++b) {
-            const float ang = kPi * (float)b / (float)blades + 0.35f * WhiteNode::hashFloat(b, 8, 0, seed);
-            const glm::vec3 side(std::cos(ang), 0.0f, std::sin(ang));
-            const glm::vec3 out(-side.z, 0.0f, side.x);                    // hacia donde se tumban
-            const float reach = H * (0.38f + 0.20f * WhiteNode::hashFloat(b, 9, 0, seed));
-            const glm::vec3 base = glm::vec3(0.0f, 0.01f, 0.0f);
-            const glm::vec3 mid  = base + glm::vec3(0.0f, H * 0.07f, 0.0f);
-            const glm::vec3 tip  = out * reach + glm::vec3(0.0f, H * 0.10f, 0.0f)
-                                 + side * (0.02f * (WhiteNode::hashFloat(b, 10, 0, seed) - 0.5f));
-            appendBlade(base, mid, side, H * 0.030f, H * 0.020f, 1, foliageCol);
-            appendBlade(mid,  tip, side, H * 0.020f, H * 0.006f, 1, foliageCol);
+            const float ra  = rPatch * std::sqrt(WhiteNode::hashFloat(b, 12, 0, seed));
+            const float rt  = 2.0f * kPi * WhiteNode::hashFloat(b, 13, 0, seed);
+            const glm::vec3 root(std::cos(rt) * ra, 0.01f, std::sin(rt) * ra);
+            // La cara de la brizna: perpendicular a hacia donde se vence.
+            const float lt  = pressed ? pressAng + 0.9f * (WhiteNode::hashFloat(b, 14, 0, seed) - 0.5f)
+                                      : 2.0f * kPi * WhiteNode::hashFloat(b, 14, 0, seed);
+            const glm::vec3 leanDir(std::cos(lt), 0.0f, std::sin(lt));
+            const glm::vec3 side(-leanDir.z, 0.0f, leanDir.x);
+            // La 0 a la altura nominal: el LOD quita las ÚLTIMAS, así que la silueta no encoge.
+            const float h   = (b == 0) ? H : H * (0.45f + 0.50f * WhiteNode::hashFloat(b, 15, 0, seed));
+            glm::vec3 mid, tip;
+            if (pressed) {
+                const float reach = h * (0.75f + 0.20f * WhiteNode::hashFloat(b, 16, 0, seed));
+                mid = root + leanDir * (reach * 0.45f) + glm::vec3(0.0f, H * 0.05f, 0.0f);
+                tip = root + leanDir * reach + glm::vec3(0.0f, H * 0.03f, 0.0f);
+            } else {
+                const float lean = (b == 0) ? 0.05f : 0.08f + 0.30f * WhiteNode::hashFloat(b, 16, 0, seed);
+                mid = root + glm::vec3(0.0f, h * 0.55f, 0.0f) + leanDir * (h * lean * 0.35f);
+                tip = root + glm::vec3(0.0f, h * (1.0f - 0.5f * lean * lean), 0.0f) + leanDir * (h * lean);
+            }
+            appendBlade(root, mid, side, H * 0.030f, H * 0.018f, 1, foliageCol);
+            appendBlade(mid,  tip, side, H * 0.018f, H * 0.004f, 1, foliageCol);
         }
     } else if (style == TreeStyle::Shrub) {
         // Blobs a ras de suelo alrededor de la punta del fuste corto.

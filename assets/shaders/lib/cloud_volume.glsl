@@ -501,6 +501,39 @@ float harukaCloudDetailLOD(vec3 q, float wavelengthM, float footprintM) {
 }
 
 /**
+ * @brief LA COLIFLOR: cúpulas redondas (una por celda de lado 1, en un punto al azar del centro de la
+ * celda) — la altura de la más alta que cubre `q`, en [0,1]; 0 entre cúpulas. Con el centro en
+ * [0,25; 0,75] de su celda y radio 0,7 bastan las 2×2×2 celdas del lado de `q` (8 hashes, exacto).
+ *
+ * ⚠️ El detalle de antes (`harukaCloudDetail`, 125/46/18 m) es más fino que lo que la marcha resuelve a
+ * 1/8: el LOD lo apagaba casi siempre y el cúmulo quedaba como una MANCHA LISA. Los bultos de un
+ * cúmulo son de cientos de metros y REDONDOS; el ruido de valor da arrugas, no bultos.
+ */
+float harukaCloudBillows(vec3 q) {
+    const vec3 cell = floor(q), f = q - cell;
+    const ivec3 side = ivec3(step(0.5, f)) * 2 - 1;
+    float best = 0.0;
+    for (int i = 0; i < 8; ++i) {
+        const ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1) * side;
+        const float hx = harukaCloudHash13(cell + vec3(o));
+        const float hy = harukaCloudHash13(cell + vec3(o) + vec3(17.0, 3.0, 5.0));
+        const float hz = harukaCloudHash13(cell + vec3(o) + vec3(7.0, 29.0, 11.0));
+        const vec3 d = vec3(o) + 0.25 + 0.5 * vec3(hx, hy, hz) - f;
+        best = max(best, 0.49 - dot(d, d));
+    }
+    return sqrt(max(best, 0.0)) * 1.4286;
+}
+/** @brief La coliflor con LOD (como `harukaCloudDetailLOD`): dos tamaños de bulto, `wavelengthM`
+ *  (la primera octava del detalle) × 3,2 y × 1,3; cada uno se apaga cuando no cubre unos píxeles. */
+float harukaCloudBillowsLOD(vec3 q, float wavelengthM, float footprintM) {
+    const float w0 = 1.0 - smoothstep(wavelengthM * 3.2 / 8.0, wavelengthM * 3.2 / 4.0, footprintM);
+    const float w1 = 1.0 - smoothstep(wavelengthM * 1.3 / 8.0, wavelengthM * 1.3 / 4.0, footprintM);
+    const float a0 = 0.65 * w0, a1 = 0.35 * w1;
+    if (a0 + a1 <= 0.001) return 0.55;                // sin bultos resolubles: su valor medio
+    return (a0 * harukaCloudBillows(q / 3.2) + a1 * harukaCloudBillows(q / 1.3 + 23.7)) / (a0 + a1);
+}
+
+/**
  * @brief Densidad de la nube en un punto, en [0,1].
  *
  * @param strength  salida de `harukaCloudStrength`: cuánta nube hay en esta VERTICAL.
@@ -569,7 +602,11 @@ float harukaCloudDensity(float strength, float f, vec3 q, float minTop, float wa
     const float edge = mix(0.35, 1.0, 1.0 - smoothstep(0.30, 0.85, body));
     // La erosion muerde ARRIBA (coliflor) y apenas abajo (base plana): sube con la altura en la nube.
     const float topBias = 0.20 + 0.80 * clamp(f / localTop, 0.0, 1.0);
-    const float dens = max(body - HARUKA_CLOUD_ERODE * edge * topBias * harukaCloudDetailLOD(q, wavelengthM, footprintM), 0.0);
+    // La erosión: entre los bultos de la coliflor (1 − cúpula) muerde FUERTE en el borde y la cima —
+    // es lo que hace el contorno en festón redondo— y, de cerca, el detalle fino como antes.
+    const float billow = 1.0 - harukaCloudBillowsLOD(q, wavelengthM, footprintM);
+    const float dens = max(body - 1.1 * edge * topBias * billow
+                                - HARUKA_CLOUD_ERODE * 0.4 * edge * topBias * harukaCloudDetailLOD(q, wavelengthM, footprintM), 0.0);
     // El BORDE se adelgaza: donde la fuerza es baja (periferia de la nube) la densidad baja con ella,
     // asi la opacidad sube en cientos de metros y no en dos celdas ("corta de repente": medido 125 m
     // de 0,1 a 0,9 de opacidad, ahora >= 190).

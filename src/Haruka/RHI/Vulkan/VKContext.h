@@ -164,6 +164,14 @@ namespace Haruka::RHI::Vulkan
             VkDescriptorSet nextDescSet();                 // siguiente set libre del ring del device
             VkImage         colorImageOf(RenderPassHandle); // imagen de color del pass (o 0)
             VkImage         depthImageOf(RenderPassHandle); // imagen de profundidad del pass (o 0)
+            // Layout SEGUIDO de esas imagenes, o nullptr si no se sigue (backbuffer: queda siempre en
+            // su layout de attachment). Ver `copyAttachment`.
+            VkImageLayout*  colorLayoutOf(RenderPassHandle);
+            VkImageLayout*  depthLayoutOf(RenderPassHandle);
+            VkImageAspectFlags depthAspectOfPass(RenderPassHandle);
+            void            copyAttachment(VkImage s, VkImageLayout* sLayout, VkImage d, VkImageLayout* dLayout,
+                                           VkImageLayout fixedLayout, VkImageAspectFlags barrierAspect,
+                                           VkImageAspectFlags copyAspect, int w, int h);
 
             // Transiciones UNDEFINED → SHADER_READ diferidas desde bindTexture dentro de un pase
             // activo (dónde una barrier es ilegal) y aplicadas en endRenderPass, ya fuera del pase.

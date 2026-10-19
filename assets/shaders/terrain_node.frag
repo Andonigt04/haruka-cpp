@@ -30,7 +30,7 @@ layout(location = 11) in float vCrater;  // 0..1 cuenco de cráter (terrain_node
 // divergen en color, la transicion entre los dos se ve como una costura — justo lo que el v5 venia
 // a quitar. Ver `lib/terrain_shade.glsl`.
 #include "lib/terrain_material.glsl"
-#include "lib/aerial.glsl"            // harukaAerial: perspectiva aérea (la misma que props y nubes)   // harukaSelectMaterial + su UBO (binding 12)
+#include "lib/aerial.glsl"            // harukaAerialSky: el aire de en medio, por fisica (la misma que props y nubes)
 #include "lib/terrain_shade.glsl"      // harukaTerrainAlbedo
 #include "lib/terrain_detail.glsl"     // harukaTerrainDetail — para la vista 11 (ver vs pisar)
 #include "lib/vox_cut.glsl"             // harukaVoxCutLookup: coarse + fine cut windows
@@ -285,7 +285,15 @@ void main() {
         harukaLightingNormal(nSmooth, vFragPos, -vFragPos / max(dist, 1e-3), facet), nSmooth, n);
     const float ndl   = dot(nLit, normalize(uLightDir.xyz));
     const float d     = harukaFacetBand(max(ndl, 0.0), ndl, facet);
-    vec3 lit = col * (0.25 + 0.75 * d);
+    // ── LA LUZ, POR FISICA (lib/sky_light.glsl) ─────────────────────────────────────────────────
+    // ⚠️ AQUI PONIA `col * (0.25 + 0.75 * d)`: ni color ni intensidad del Sol, ni Luna, ni cielo — el
+    // suelo brillaba igual a mediodia que a medianoche. Ahora: el Sol que llega tras el aire por la
+    // banda low-poly de siempre, la Luna, y el cielo y el suelo como ambiente; todo expuesto.
+    const vec3 upN = normalize(vUp);
+    const vec3 E = uSkySunGround.rgb * d
+                 + uSkyMoonGround.rgb * max(dot(nLit, uSkyMoonDir.xyz), 0.0)
+                 + harukaSkyAmbient(nLit, upN);
+    vec3 lit = harukaLit(col, E);
     // ── 15 = COTA SOBRE EL NIVEL DEL MAR (vista de edición del IDE): ver lib/sea_tint.glsl. La cota
     // es `r − R` en DOUBLE, como las vistas 11/14.
     if (dbg == 15) {
@@ -296,6 +304,6 @@ void main() {
     // El aire de en medio: lo lejano se funde con el cielo de esa dirección (lib/aerial.glsl).
     // ⚠️ Con la ALTITUD del fragmento (`vClimate.x`, km): desde orbita el rayo cruza unos km de
     // aire, no cientos (ver lib/aerial.glsl: "en orbita esta todo en blanco").
-    lit = harukaAerialAlt(lit, dist, dot(vFragPos / max(dist, 1.0), normalize(vUp)), vClimate.x * 1000.0, uAerial);
+    lit = harukaAerialSky(lit, vFragPos);
     fragColor = vec4(lit, 1.0);
 }

@@ -882,6 +882,10 @@ void testAtmosphereLimb()
 
     bool sinPlaneta = false;   // R = 0 -> `harukaAtmoLimb` sale por su primera linea
     auto shootVP = [&](float atmo, const glm::mat4& iVP, std::vector<uint8_t>& px) {
+        // ⚠️ "DENTRO" Y "FUERA" YA NO SON UN MANDO (`atmo`): el cielo sale de donde esta el OJO (la luz
+        // del frame, `lib/sky_light.glsl`). Fuera = a 3 000 km; dentro = a 2 m del suelo.
+        const double eyeAlt = (atmo > 0.5f) ? 2.0 : ALT;
+        setTestSkyLight(-up0 * (R + eyeAlt), sinPlaneta ? 0.0 : R, glm::dvec3(sun));
         SkyUBO u{};
         std::memcpy(u.invVP, &iVP[0][0], sizeof(u.invVP));
         u.sunDir[0]=sun.x; u.sunDir[1]=sun.y; u.sunDir[2]=sun.z; u.sunElev = 0.0f;

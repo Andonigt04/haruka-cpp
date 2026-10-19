@@ -29,8 +29,10 @@ public:
     ///@{
     /** @brief Human-readable material name. */
     std::string name = "DefaultMaterial";
-    /** @brief Fragment shader/base material path. */
-    std::string shaderPath = "shaders/pbr.frag";
+    /** @brief Shader propio del material. VACÍO = el del pase (`final.frag`/`preview.frag`), que es
+     *  lo único que dibuja hoy: ningún pase lee este campo. Se conserva por compatibilidad del JSON
+     *  (antes valía "shaders/pbr.frag", un shader que nadie cargaba y que se ha borrado). */
+    std::string shaderPath;
     ///@}
     
     /**

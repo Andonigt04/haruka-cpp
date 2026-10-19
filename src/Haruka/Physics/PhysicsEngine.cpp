@@ -50,7 +50,7 @@
 #include "Haruka/World/Terrain/TerrainLOD.h"
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
-// RAÍLES (docs/guides/PLAN_PUERTOS.md §4): puertas, rampas y suspensiones son MECANISMOS, no clips.
+// RAÍLES (docs/archivo/PLAN_PUERTOS.md §4): puertas, rampas y suspensiones son MECANISMOS, no clips.
 #include <Jolt/Physics/Constraints/HingeConstraint.h>
 #include <Jolt/Physics/Constraints/SliderConstraint.h>
 #include <Jolt/Physics/Constraints/PulleyConstraint.h>
@@ -131,8 +131,9 @@ struct PhysicsEngine::JoltImpl {
     };
     std::vector<RailEntry> rails;
     // MARCO LOCAL: Jolt usa float; a escala planetaria (Tierra a ~1.5e8 m en la escena) eso da ~16 m de
-    // precisión → inservible. Simulamos TODO relativo a `origin` (posición del primer cuerpo) → floats
-    // pequeños. El mundo exterior sigue en double. (Recentrar al alejarse mucho = refinamiento posterior.)
+    // precisión → inservible. Simulamos TODO relativo a `origin` → floats pequeños. El mundo exterior
+    // sigue en double. El origen lo fija el primer cuerpo y SE RECENTRA en el personaje cuando se aleja
+    // (`recenter`): ver la nota de ahí, que es por lo que no se podía andar.
     glm::dvec3 origin{0.0}; bool originSet = false;
     double simTime = 0.0, lastRebuildT = -1e9;   // reloj de simulación para rate-limitar la reconstrucción
     double lastParityLogT = -1e9;                // rate-limit de la sonda de paridad suelo↔render
@@ -1020,6 +1021,59 @@ struct PhysicsEngine::JoltImpl {
         return (toC / r) * (World::Planet::surfaceGravity(R) * (R * R) / (r * r));
     }
 
+    // ── ORIGEN FLOTANTE ─────────────────────────────────────────────────────────────────────────
+    //
+    // ⚠️ SIN ESTO NO SE PODIA ANDAR (17-10). El origen lo fijaba el PRIMER cuerpo y no se movia nunca:
+    // en la partida del reporte el jugador estaba a 9 407 km de el. A esa distancia un float resuelve
+    // 1 m, y un paso de andar (1,5 m/s · 1/60 s = 2,5 cm) se redondea a CERO: `CharacterVirtual` tenia
+    // la velocidad, cero contactos laterales, y se movia 0,00 m por paso (la caida salia a saltos de
+    // 6,25 y 12,5 cm, la misma cuantizacion). Volando si se movia porque esa posicion la escribe el
+    // juego en double. Medido con la sonda `CharContacts` (`movido`).
+    //
+    // Recentrar NO desplaza los cuerpos en float (heredarian el metro perdido): se REHACE todo desde
+    // lo que esta en double — dinamicos desde `RigidBody::position`, estaticos con `syncStatics`, el
+    // suelo con `rebuildGround`. Lo unico que Jolt guarda en el mundo y no se puede rehacer asi son
+    // los puntos fijos de las POLEAS (cuerdas): se rehacen con sus ajustes, desplazados.
+    // ⚠️ Solo sin trabajos de suelo en vuelo: leen `origin` desde su hilo.
+    static constexpr double kRecenterM = 1024.0;   // a 1 km el float resuelve 0,1 mm
+    bool recenter(PhysicsEngine* eng, IWorldProvider* w, const glm::dvec3& at) {
+        if (!originSet || groundJob.valid() || nearJob.valid()) return false;
+        if (glm::length(at - origin) <= kRecenterM) return false;
+        const glm::dvec3 d = at - origin;
+        origin = at;
+        JPH::BodyInterface& bi = system.GetBodyInterface();
+        for (auto& [rb, id] : map) {
+            const glm::dvec3 lp = rb->position - origin;
+            bi.SetPosition(id, JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z), JPH::EActivation::DontActivate);
+        }
+        if (charCtrl && charBody) {
+            const glm::dvec3 lp = charBody->position - origin;
+            charCtrl->SetPosition(JPH::RVec3((float)lp.x, (float)lp.y, (float)lp.z));
+        }
+        const JPH::Vec3 jd((float)d.x, (float)d.y, (float)d.z);
+        for (RailEntry& e : rails) {
+            if (!e.alive || !e.c || e.spec.dof != PhysicsEngine::RailSpec::Dof::Rope) continue;
+            auto* pc = static_cast<JPH::PulleyConstraint*>(e.c.GetPtr());
+            JPH::Ref<JPH::ConstraintSettings> cs = pc->GetConstraintSettings();
+            auto* ps = static_cast<JPH::PulleyConstraintSettings*>(cs.GetPtr());
+            ps->mFixedPoint1 -= jd; ps->mFixedPoint2 -= jd;
+            JPH::Body* b1 = pc->GetBody1(); JPH::Body* b2 = pc->GetBody2();
+            system.RemoveConstraint(e.c);
+            e.c = static_cast<JPH::TwoBodyConstraint*>(ps->Create(*b1, *b2));
+            system.AddConstraint(e.c);
+        }
+        staticVersion = ~0ull;            // fuerza `syncStatics` a rehacerlos en el marco nuevo
+        syncStatics(eng);
+        // El suelo, en el marco nuevo. La ESFERA de respaldo no se rehace sola (`rebuildGround` la deja
+        // si ya existe), asi que se quita antes.
+        if (haveGround()) {
+            if (!groundIsMesh && haveFar) { bi.RemoveBody(farId); bi.DestroyBody(farId); haveFar = false; }
+            rebuildGround(w, at);
+        }
+        HARUKA_LOGI("Physics", "origen recentrado %.0f m (el personaje se habia alejado)", glm::length(d));
+        return true;
+    }
+
     void stepCharacter(double dt, PhysicsEngine* eng, IWorldProvider* w) {
         if (!charCtrl || !charBody) return;
         RigidBody* b = charBody;
@@ -1139,11 +1193,19 @@ struct PhysicsEngine::JoltImpl {
                 const glm::dvec3 vg(vNow.GetX(), vNow.GetY(), vNow.GetZ());
                 const double vRad = glm::dot(vg, up);
                 const double vTan = glm::length(vg - up * vRad);
+                // Y CUANTO SE MOVIO DE VERDAD desde el ultimo informe (mundo, m): separa "Jolt no lo
+                // mueve" de "lo mueve y alguien lo devuelve" — con velocidad tangencial y 0 m aqui,
+                // el problema es del controlador; con metros aqui y el jugador quieto, de quien lo lea.
+                static glm::dvec3 s_lastPos(0.0);
+                const JPH::RVec3 pNow = charCtrl->GetPosition();
+                const glm::dvec3 wNow = origin + glm::dvec3(pNow.GetX(), pNow.GetY(), pNow.GetZ());
+                const double moved = glm::length(wNow - s_lastPos);
+                s_lastPos = wNow;
                 HARUKA_LOGDIAG("CharContacts", "contactos=%zu (suelo=%d, laterales=%d) · onGround=%d "
-                            "· v radial %+.3f m/s · v TANGENCIAL %.3f m/s",
+                            "· v radial %+.3f m/s · v TANGENCIAL %.3f m/s · movido %.2f m",
                             contacts.size(), nGround, nOther,
                             charCtrl->GetGroundState() == JPH::CharacterVirtual::EGroundState::OnGround,
-                            vRad, vTan);
+                            vRad, vTan, moved);
             }
         }
 
@@ -1494,6 +1556,9 @@ struct PhysicsEngine::JoltImpl {
         glm::dvec3 near(0.0);
         if (charBody) near = charBody->position;
         else for (auto& sp : bodies) if (map.count(sp.get())) { near = sp->position; break; }
+        // El origen sigue al personaje (ver `recenter`). Antes del primer suelo, para no construirlo
+        // en un marco que se va a tirar.
+        if (charBody && recenter(eng, w, near)) lastRebuildT = simTime;
         // Primera vez (spawn): SÍNCRONO — hay que tener suelo ya, no se puede caer un frame.
         if (!haveGround()) { rebuildGround(w, near); lastRebuildT = simTime; }
 
@@ -1923,7 +1988,7 @@ std::shared_ptr<RigidBody> PhysicsEngine::getBody(const std::string& name) {
     return (it != bodies.end()) ? *it : nullptr;
 }
 
-// ── RAÍLES (docs/guides/PLAN_PUERTOS.md §4) ─────────────────────────────────────────────────────
+// ── RAÍLES (docs/archivo/PLAN_PUERTOS.md §4) ─────────────────────────────────────────────────────
 // Sin Jolt no hay mecanismo: se devuelve -1 en vez de fingir uno. Un raíl simulado a mano sería justo
 // la animación que este sistema existe para no tener.
 void PhysicsEngine::setNoCollidePairs(const std::vector<std::string>& bodyNames,

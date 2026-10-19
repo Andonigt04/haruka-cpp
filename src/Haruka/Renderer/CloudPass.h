@@ -17,7 +17,8 @@
 
 #include "Haruka/RHI/RHITypes.h"
 #include "Haruka/RHI/RHIResources.h"
-#include "Haruka/World/CloudMotion.h"   // CloudDrift (deriva integrada) + BakeBlend (fundido de horneados)
+#include "Haruka/World/CloudMotion.h"   // CloudDrift (deriva integrada) + BakeBlend (fundido de horneados) + CloudSpin
+#include "Haruka/World/Props/ShellScatter.h"
 
 namespace Haruka { namespace Core { class Camera; } }
 namespace Haruka::World::Planet { class PlanetarySystem; }
@@ -53,8 +54,39 @@ public:
     /// Despues de toda la geometria y antes del post: hornea si toca, marcha y compone.
     void draw(const Frame& f);
 
+    // ── LOS CÚMULOS DE MALLA (low-poly anime) ─────────────────────────────────────────────────
+    // Andoni (17-10): "nubes mas tipo low-poly anime", con la panza plana. El cúmulo deja de ser un
+    // medio que se marcha: son racimos de domos (tapa plana en el nivel de condensación) y esferas,
+    // sembrados en la GPU (`World/Props/ShellScatter`) desde el MISMO horneado del clima (cobertura,
+    // base, techo, lluvia) y dibujados con el pase de props. La retícula gira con el viento
+    // (`World::CloudSpin`). Mientras están activos, la marcha volumétrica solo pinta el vapor en
+    // altura (máscara 6): el cúmulo lo pone la malla. `HARUKA_CLUMPS=0` vuelve al cúmulo volumétrico.
+    struct ClumpFrame {
+        Core::Camera*                   camera  = nullptr;
+        World::Planet::PlanetarySystem* planets = nullptr;
+        glm::vec3 windVec{0.0f};   ///< el viento del mundo (m/s, superficie)
+        int viewW = 0, viewH = 0;  ///< el framebuffer que se dibuja
+    };
+    /// Gira la retícula con el viento y siembra (compute: FUERA de cualquier render pass).
+    void prepareClumps(RHI::Context* ctx, const ClumpFrame& f);
+    /// Dibuja lo sembrado DENTRO del pase de escena.
+    void drawClumps(RHI::Context* ctx, RHI::BufferHandle perFrameUBO, RHI::PipelineHandle restorePSO, float time);
+    bool clumpsActive() const { return m_clumpsActive; }
+    static bool clumpsEnvOff();
+    /// Cota de ojo por encima de la cual el cúmulo vuelve a ser volumétrico. ⚠️ PROVISIONAL: desde
+    /// órbita un racimo de 1,5 km mide 2 px y harían falta racimos jerárquicos (el siguiente paso).
+    static constexpr double kClumpMaxEyeAltM = 30000.0;
+    const World::Props::ShellScatter& clumps() const { return m_clumps; }
+
 private:
-    struct SkyBake { std::vector<float> rgba, hi; float coverMax = 0, baseMin = 700, topMax = 1800; double ms = 0; int w = 0, h = 0; };
+    /// `mid` y `high`: las capas de vapor en ALTURA del clima (−10 °C y −40 °C, `World/CloudColumn.h`)
+    /// en el mismo formato que `rgba` (cobertura, base, techo, oscurecer), con su banda de cotas.
+    struct SkyBake {
+        std::vector<float> rgba, hi, mid, high;
+        float coverMax = 0, baseMin = 700, topMax = 1800;
+        float midLo = 4000, midHi = 6000, highLo = 8000, highHi = 11000;
+        double ms = 0; int w = 0, h = 0;
+    };
 
     RHI::PipelineHandle   m_cloudPSO{}, m_cloudUpPSO{};
     RHI::BufferHandle     m_cloudUBO{};
@@ -78,8 +110,20 @@ private:
     /// El horneado del cielo EN VUELO (134 ms medidos a 256x128: en el hilo de render eran 8 frames).
     std::future<SkyBake> m_skyBakeJob;
     std::vector<float>   m_lastSkyRGBA;   ///< ultimo cielo horneado, para el ciclo del agua
+    std::vector<float>   m_lastMid, m_lastHigh;   ///< sus capas en altura (diagnóstico: qué pone el clima)
+    int                  m_lastSkyW = 0, m_lastSkyH = 0;
     double               m_lastWeatherT = -1.0;
     World::CloudDrift   m_cloudDrift;    ///< deriva del campo, INTEGRADA (core/cloud_motion.h)
+    World::CloudSpin    m_cloudSpin;     ///< giro de la retícula de cúmulos de malla con el viento
+    World::Props::ShellScatter m_clumps;
+    /// LAS CAPAS EN ALTURA, sembradas igual que el cúmulo. Ninguna se enciende ni se apaga aquí: hay
+    /// nube donde el CLIMA pone vapor, a la cota de su temperatura. Para cambiar dónde o cuánta, se
+    /// cambia el clima (`WeatherSystem`, `CloudColumn.h`), no el render.
+    World::Props::ShellScatter m_clumpsMid, m_clumpsHigh;
+    RHI::TextureHandle m_cloudMidTex{}, m_cloudMidTexPrev{}, m_cloudHighTex{}, m_cloudHighTexPrev{};
+    float  m_midLoM = 4000.0f, m_midHiM = 6000.0f, m_highLoM = 8000.0f, m_highHiM = 11000.0f;
+    bool   m_clumpsTried = false, m_clumpsActive = false;
+    float  m_cloudConvTopMax = 1800.0f;  ///< techo CONVECTIVO máximo del último horneado (sin el vapor en altura)
     World::BakeBlend    m_cloudBlend;    ///< fundido entre horneados
     bool m_enabled = true;
 };

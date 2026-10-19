@@ -290,7 +290,15 @@ inline TreeMeshData bakeClumpMesh(uint32_t seed, TreeStyle style, float heightM,
                 const float wa = kPi * (float)b / (float)blades + 0.3f * WhiteNode::hashFloat(b, 8, 0, (uint32_t)(seed + t * 131u));
                 const glm::vec3 side(std::cos(wa), 0.0f, std::sin(wa));
                 const glm::vec3 lean = glm::vec3(-side.z, 0.0f, side.x) * (0.12f * (WhiteNode::hashFloat(b, 9, 0, seed) - 0.5f));
-                appendBlade(glm::vec3(cx, 0, cz), glm::vec3(cx, h, cz) + lean * h,
+                // La hierba nace de varios puntos (no de la raíz común de una palmera): cada brizna
+                // del mechón con su propia raíz alrededor del centro.
+                glm::vec3 root(cx, 0, cz);
+                if (style == TreeStyle::Grass) {
+                    const float ra = h * 0.35f * std::sqrt(WhiteNode::hashFloat(b, 12, 0, (uint32_t)(seed + t * 131u)));
+                    const float rt = 2.0f * kPi * WhiteNode::hashFloat(b, 13, 0, (uint32_t)(seed + t * 131u));
+                    root += glm::vec3(std::cos(rt) * ra, 0.0f, std::sin(rt) * ra);
+                }
+                appendBlade(root, root + glm::vec3(0, h, 0) + lean * h,
                             side, h * 0.22f, h * 0.04f, 1, ff);
             }
             continue;

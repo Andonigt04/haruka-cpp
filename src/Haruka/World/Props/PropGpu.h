@@ -25,9 +25,14 @@ struct PropParams {
     glm::vec3 wind;   float time;       // viento del clima (mundo, m/s) · segundos
     glm::vec4 matPBR;                   // x=metallic y=roughness z=ao w=mascara de texturas (bits)
     glm::vec4 originRel;                // origen del scatter relativo a la camara
-    glm::vec4 aerial;                   // perspectiva aerea (lib/aerial.glsl): x = 1/L · y = dia
+    /// MATERIAL del toon (`lib/toon_shade.glsl`): x = facetado (1 = normal de cara, low-poly; 0 = liso) ·
+    /// y = contraluz (luz del Sol que atraviesa los bordes finos) · z = difusión (la parte del Sol que
+    /// llega a la cara a la sombra atravesando el cuerpo) · w = libre. Aquí iba la
+    /// perspectiva aérea vieja (1/L, día), que ya nadie leía: el aire es físico (`lib/aerial.glsl`).
+    glm::vec4 material{1.0f, 0.0f, 0.0f, 0.0f};
     glm::vec4 weather;                  // nieve acumulada · suelo mojado · lluvia · nevada
-    glm::vec4 flags;                    // x = 1 en Vulkan (prop_burst.vert: quién suma firstInstance)
+    glm::vec4 flags;                    // x = 1 en Vulkan (prop_burst.vert: quién suma firstInstance) ·
+                                        // y = rim · z = especular (prop_inst.frag; obra: 0,35 y 0)
 };
 static_assert(sizeof(PropParams) == 96, "PropParams std140 size mismatch (gemelo: lib/prop_params.glsl)");
 

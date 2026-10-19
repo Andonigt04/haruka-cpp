@@ -61,6 +61,69 @@ ahora dice **dónde** está el peor vértice, no solo cuánto.
 
 ---
 
+## ⏳ Pendiente — nubes y luz (2026-10-18)
+
+Estado al cerrar la sesión: nubes **volumétricas** con sombra entre cúmulos, sombreado en manchas
+suaves (anime), borde en festón, el clima decide dónde y a qué altura, horizonte sin rayas
+(marcha a 1/8 × 1/4). Todo visto solo en capturas estáticas.
+
+**Nubes**
+1. **Probarlo jugando.** Todo se ha visto en capturas estáticas: falta ver en movimiento si el festón
+   o las manchas parpadean, si las nubes "nadan" al girar la cámara y cómo se ven al volar entre ellas.
+2. **Por dentro de la nube.** Volando dentro no hay niebla propia, solo lo que dé la marcha.
+3. **Desde muy alto / órbita**: no revisado con los cambios de hoy.
+4. **Las mallas** (`ShellScatter`, `BlobSurface`, `prop_vol`): apagadas por defecto (`HARUKA_CLUMPS=1`
+   las enciende). Decidir si se borran o se guardan; si se guardan, su test GPU tiene 4 fallos abiertos.
+
+**Coste**
+
+5. **Nubes en GPU: de ~2,9 a ~5,3 ms** (resolución vertical + sombra entre nubes). Margen para bajarlo:
+   reproyección temporal (marchar una parte de los píxeles cada frame).
+6. **`sky.draw` ~6 ms** (el cielo físico por píxel), sin tocar.
+
+**Luz y cielo**
+
+7. **Oscuridad de noche** y rendimiento de la luz física, abiertos.
+8. **Brillo blanco grande bajo el Sol en el horizonte** (probablemente reflejo del mar lejano).
+
+**Arte**
+
+9. **El hacha (y modelos claros)**: a pleno Sol se ven color crema; para que se lean como madera y metal
+   hay que oscurecer su material.
+
+**Clima movido por el Sol** (idea, varias sesiones)
+
+12. Hoy el clima son 14 frentes que giran con una regla fija (`WeatherSystem`), no salen del calor
+    del Sol. Hacer que la insolación (hora, estación, latitud, mar/tierra) genere presión, viento y
+    borrascas. Así el oleaje y el rollo en la playa saldrían del sistema planetario entero (las mareas
+    ya salen de Sol y Luna). Cambia el clima del que dependen las nubes, la lluvia y el oleaje.
+
+**Tests**
+
+10. **`[defectos de driver]`** en `haruka_tests_rhi`: falla desde antes de esta sesión.
+11. **El resto de bancos GPU de nubes**: solo se pasaron `CloudPassDraws`, `CloudPassCost` y el de
+    ShellScatter.
+
+---
+
+## 📋 Shaders en lista — desactualizados o huérfanos, sin sustituto (2026-10-18)
+
+El terreno de respaldo de `planet/` se borró (teselado, biomas, anillo cercano, `textured.frag`,
+`wire.*`, `terrain_cull.comp` y el ajuste `GpuPatchCull`); queda `planet/simple.vert/.frag` como respaldo
+básico con `HARUKA_TERRAIN_V5=0`. Lo de abajo NO se borra: es estándar o útil y nada lo sustituye hoy.
+
+| Qué | Estado | Decidir |
+|---|---|---|
+| **IBL** (`cube_capture.vert`, `equirect_to_cubemap`, `irradiance_convolution`, `prefilter_env`, `brdf_lut`) | La clase existe pero `_ibl` nunca se crea; solo lo compilan los tests. El ambiente difuso ya sale de `sky_light`; el **reflejo especular del entorno** no lo da nadie | Conectarlo al cielo físico o borrarlo |
+| `lib/sky_sh.glsl` | Ambiente en armónicos esféricos (gemelo de `SkyAmbient`). Solo lo usaba `biome.frag`; ahora solo un test | Usarlo en el v5/props o borrarlo |
+| `lib/prop_layer_debug.glsl` | Vista de SPAWN del editor (dónde nace cada capa de props). Solo la tenía `biome.frag`; el v5 no la tiene | Portarla a `terrain_node.frag` |
+| `lib/terrain_deform.glsl` | Gemelo GLSL de `TerrainDeform.h`; no lo incluye ningún shader | Usarlo o borrarlo |
+| Tests `TerrainLighting` / `TerrainShadow` | Medían que el terreno responde al Sol y recibe sombra, sobre `biome.frag`. Borrados con él; **el v5 no tiene equivalente** | Portarlos al pase de nodos |
+| Bloque `ClipParams` (binding 13) y anclas del anillo en `Planet::render` | Restos del clipmap: ya no los lee ningún shader | Limpiar el C++ |
+| `TestWaterGPU.cpp`: la función del mar con `planet/ocean_far.vert` | Sin uso desde 5025b4f y sus shaders no existen | Borrar |
+
+---
+
 ## 🐛 Bugs abiertos
 
 

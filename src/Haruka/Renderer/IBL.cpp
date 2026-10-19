@@ -20,15 +20,6 @@ static const float cubeVerts[] = {
     -1.0f, 1.0f,-1.0f,  1.0f, 1.0f,-1.0f,  1.0f, 1.0f, 1.0f,  1.0f, 1.0f, 1.0f, -1.0f, 1.0f, 1.0f, -1.0f, 1.0f,-1.0f
 };
 
-static const float quadVerts[] = {
-    -1.0f,  1.0f,  0.0f, 1.0f,
-    -1.0f, -1.0f,  0.0f, 0.0f,
-     1.0f,  1.0f,  1.0f, 1.0f,
-     1.0f,  1.0f,  1.0f, 1.0f,
-    -1.0f, -1.0f,  0.0f, 0.0f,
-     1.0f, -1.0f,  1.0f, 0.0f,
-};
-
 struct IBLMatrices { glm::mat4 projection; glm::mat4 view; };
 struct IBLParams { float roughness; float _pad[3]; };
 
@@ -39,28 +30,27 @@ IBL::IBL() {
     m_matrixUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(IBLMatrices), nullptr, RHI::BufferMemory::Dynamic);
     m_paramUBO  = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(IBLParams), nullptr, RHI::BufferMemory::Dynamic);
     m_cubeBuf   = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(cubeVerts), cubeVerts);
-    m_quadBuf   = dev->createBuffer(RHI::BufferUsage::Vertex, sizeof(quadVerts), quadVerts);
 
     auto makePipe = [&](const char* vs, const char* fs, int stride,
                         std::initializer_list<RHI::VertexAttribute> attrs,
                         RHI::PrimitiveTopology topo = RHI::PrimitiveTopology::Triangles) {
         RHI::PipelineDesc pd;
         pd.vertexPath = vs; pd.fragmentPath = fs;
-        pd.vertexLayout.strides = { (uint32_t)stride };
+        if (stride > 0) pd.vertexLayout.strides = { (uint32_t)stride };   // 0 = sin VBO
         for (auto& a : attrs) pd.vertexLayout.attributes.push_back(a);
         pd.topology = topo;
         pd.depth.test = true; pd.depth.write = true; pd.depth.compare = RHI::CompareOp::Less;
         return dev->createPipeline(pd);
     };
 
-    m_equirectPipe = makePipe("shaders/equirect_to_cubemap.vert", "shaders/equirect_to_cubemap.frag",
+    m_equirectPipe = makePipe("shaders/cube_capture.vert", "shaders/equirect_to_cubemap.frag",
                                12, {{0, 0, RHI::Format::RGB32F, 0}});
-    m_irradiancePipe = makePipe("shaders/irradiance_convolution.vert", "shaders/irradiance_convolution.frag",
+    m_irradiancePipe = makePipe("shaders/cube_capture.vert", "shaders/irradiance_convolution.frag",
                                 12, {{0, 0, RHI::Format::RGB32F, 0}});
-    m_prefilterPipe = makePipe("shaders/prefilter_env.vert", "shaders/prefilter_env.frag",
+    m_prefilterPipe = makePipe("shaders/cube_capture.vert", "shaders/prefilter_env.frag",
                                12, {{0, 0, RHI::Format::RGB32F, 0}});
-    m_brdfPipe = makePipe("shaders/brdf_lut.vert", "shaders/brdf_lut.frag",
-                          16, {{0, 0, RHI::Format::RG32F, 0}, {1, 8, RHI::Format::RG32F, 0}});
+    // La LUT es un pase de texel a texel: el triangulo de pantalla completa, sin VBO ni layout.
+    m_brdfPipe = makePipe("shaders/fullscreen_tri.vert", "shaders/brdf_lut.frag", 0, {});
 
     // BRDF LUT render target (2D texture, not cubemap)
     RHI::RenderTargetDesc rtd;
@@ -81,7 +71,6 @@ IBL::~IBL() {
         if (RHI::valid(hPrefilter)) dev->destroy(hPrefilter);
         if (RHI::valid(hBrdf)) dev->destroy(hBrdf);
         if (RHI::valid(m_cubeBuf)) dev->destroy(m_cubeBuf);
-        if (RHI::valid(m_quadBuf)) dev->destroy(m_quadBuf);
         if (RHI::valid(m_matrixUBO)) dev->destroy(m_matrixUBO);
         if (RHI::valid(m_paramUBO)) dev->destroy(m_paramUBO);
         if (RHI::valid(m_equirectPipe)) dev->destroy(m_equirectPipe);
@@ -203,9 +192,8 @@ void IBL::renderCube(RHI::Context& ctx) {
     ctx.draw(m_cubeCount);
 }
 
-void IBL::renderQuad(RHI::Context& ctx) {
-    ctx.bindVertexBuffer(m_quadBuf);
-    ctx.draw(m_quadCount);
+void IBL::renderFullscreen(RHI::Context& ctx) {
+    ctx.draw(3);   // fullscreen_tri.vert
 }
 
 void IBL::generateIrradianceMap() {
@@ -322,7 +310,7 @@ void IBL::generateBRDFLUT() {
     RHI::ClearValues clear;
     ctx->beginRenderPass(m_brdfPass, clear);
     ctx->bindPipeline(m_brdfPipe);
-    renderQuad(*ctx);
+    renderFullscreen(*ctx);
     ctx->endRenderPass();
 }
 

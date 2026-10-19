@@ -342,8 +342,12 @@ void Application::cleanup() {
     m_props.shutdown();   // (ya hecho antes del planeta; idempotente)
     m_grass.shutdown();
     m_clouds.shutdown();  // idem las nubes (y espera al horneado del cielo si esta en vuelo)
+#ifdef HARUKA_MOD_FLUIDS
+    m_liquid.shutdown();  // el líquido 3D: sus buffers son del device, que se destruye abajo
+#endif
     m_wire.shutdown();
     m_sky.shutdown();
+    m_skyLight.shutdown();
     _cascadedShadow.reset();
 
     // Render targets (own FBOs / textures)

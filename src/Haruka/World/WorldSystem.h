@@ -17,6 +17,7 @@
  * temblor.
  */
 
+#include "Haruka/World/Planet/SkyEphemeris.h"
 #include "Haruka/Tools/MathTypes.h"
 #include <vector>
 #include <string>
@@ -123,6 +124,13 @@ namespace Haruka::World {
         /** @brief Avanza la mecánica celeste un frame: órbita del Sol (día/noche),
          *  órbita de la Luna, marea y tiempo atmosférico. Lo llama el render. */
         void advanceCelestial(double dt);
+        /** @brief El RELOJ del cielo: `PlanetarySystem::simulationTime` del sistema real (el mismo en
+         *  todos los clientes). Lo pasa Application antes de `advanceCelestial`. */
+        void setSimulationTime(double t) { m_simTime = t; m_hasSimTime = true; }
+        /** @brief Sol y Luna RELATIVOS al centro del planeta activo (m), tras `advanceCelestial`: para
+         *  la marea (`PlanetarySystem::setSkyTidalBodies`). Cero si no hay cielo todavia. */
+        glm::dvec3 sunFromPlanet()  const { return m_sunFromPlanet; }
+        glm::dvec3 moonFromPlanet() const { return m_moonFromPlanet; }
 
         // --- Atmósfera ---
         /** @brief Elevación solar: dot(arriba_local, dirección_al_Sol). 1=mediodía,
@@ -150,20 +158,20 @@ namespace Haruka::World {
         // Lista de entidades macroscópicas (estrellas, estaciones, planetas)
         std::vector<CelestialBody> m_bodies;
 
-        // --- Mecánica celeste (ciclo día/noche) ---
-        // Orbitamos el SOL alrededor del planeta (equivale a girar el planeta sobre
-        // su eje, pero sin mover el terreno ni al jugador). La dirección de luz sigue
-        // al Sol → amanece y anochece. El Sol visible (objeto de escena) se mueve con
-        // él. m_scene permite escribir la posición del objeto de escena.
+        // --- Mecánica celeste: EL SOL QUIETO Y EL PLANETA QUE SE MUEVE (Planet/SkyEphemeris.h) ---
+        // El planeta orbita el Sol y gira sobre su eje inclinado; la Luna orbita el planeta. Se calcula
+        // en el marco inercial y se pasa al del planeta (el del juego, que no gira): el terreno, la
+        // fisica y la red no se mueven. m_scene permite escribir los objetos de escena Sol y Luna.
         Core::Scene::SceneManager* m_scene = nullptr;
         bool          m_celestialInit = false;
-        glm::dvec3    m_sunOffset0{0.0}; // offset Sol→planeta inicial (se rota en Y)
-        double        m_dayAngle = 0.0;  // ángulo del día acumulado (rad)
-
-        // --- Órbita de la Luna (objeto de escena "Moon", la crea el juego) ---
-        bool          m_moonInit = false;
-        glm::dvec3    m_moonOffset0{0.0};
-        double        m_moonAngle = 0.0;
+        double        m_sunDist = 0.0;      // distancia Sol-planeta de la escena (m)
+        double        m_simTime = 0.0;      // reloj compartido (setSimulationTime)
+        bool          m_hasSimTime = false;
+        double        m_localTime = 0.0;    // sin reloj compartido (editor): se acumula el dt
+        Planet::SkyClock m_sky;             // dia/año/mes del juego y fases iniciales
+        Planet::SkyState m_skyNow;          // el cielo de este frame
+        glm::dvec3    m_sunFromPlanet{0.0};
+        glm::dvec3    m_moonFromPlanet{0.0};
 
         // Marea actual (escala de amplitud del oleaje) por alineación Sol–Luna.
         float         m_tideFactor = 1.0f;

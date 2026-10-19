@@ -8,6 +8,9 @@
  * gradiente cénit→horizonte, el disco solar y las estrellas por dirección.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+#include "lib/backend.glsl"
+#include "lib/fullscreen.glsl"
 
 // UBO compartido con sky.frag (binding 5) — antes eran uniforms sueltos (glUniformMatrix4fv/
 // glUniform3fv/1f). Los glUniform* NO existen en Vulkan → van por UBO (ruta PSO/RHI). El bloque
@@ -33,12 +36,7 @@ layout(location = 0) out vec3 vRayDir; // dirección de vista en espacio mundo
 
 void main()
 {
-    // Triángulo fullscreen: NDC (-1,-1),(3,-1),(-1,3) cubre todo el clip.
-    vec2 ndc = vec2((gl_VertexID == 1) ? 3.0 : -1.0,
-                    (gl_VertexID == 2) ? 3.0 : -1.0);
-    gl_Position = vec4(ndc, 1.0, 1.0); // z=1 → plano lejano (detrás de todo)
-
-    // Rayo de mundo: punto en el plano lejano reproyectado sin traslación.
-    vec4 far = u_invViewProjRot * vec4(ndc, 1.0, 1.0);
-    vRayDir = far.xyz / far.w;
+    const vec2 ndc = harukaFullscreenNdc(int(VERTEX_INDEX));
+    gl_Position = vec4(ndc, 1.0, 1.0); // z=1 → plano lejano
+    vRayDir = harukaFullscreenRay(u_invViewProjRot, ndc);
 }

@@ -1,0 +1,146 @@
+#version 460 core
+/**
+ * @file iso_surface.comp
+ * @brief DE UN CAMPO ESCALAR A TRIÁNGULOS (surface nets), en la GPU. Genérico: no sabe si el campo
+ *        es agua, una nube o una cueva. Un vértice por celda que corta la isosuperficie (la media de
+ *        los cortes en sus aristas) y un quad por arista cortada, entre las cuatro celdas que la
+ *        rodean. Sale una malla sin T, cerrada donde el campo lo está.
+ *
+ * Pases:
+ *   CLEAR  contador y comando indirecto a cero
+ *   VERTS  por celda: ¿corta? → posición del vértice y normal (−gradiente del campo)
+ *   QUADS  por celda: sus tres aristas desde la esquina mínima; si una corta, dos triángulos con los
+ *          vértices de las cuatro celdas que la comparten → `uOut` (6 vértices, sin índices)
+ *   FINISH el comando indirecto (cuenta = vértices escritos, recortada a la capacidad)
+ *
+ * El dibujo usa un índice identidad 0..capacidad: el vértice `k` del triángulo es `uOut[k]`.
+ * Campo: nodos `dims.xyz` (x más rápido), z periódico si `dims.w` = 1. Dentro = campo > iso.
+ */
+
+layout(local_size_x = 128) in;
+
+layout(std140, binding = 0) uniform IsoParams {
+    ivec4 uDims;     // nodos x, y, z · z periódico (1/0)
+    vec4  uIso;      // x = lado de celda (m) · y = umbral · z = capacidad (vértices) · w = 1: lados x/z abiertos
+    vec4  uOrigin;   // xyz = posición del nodo (0,0,0) en el marco de salida
+};
+layout(std140, binding = 1) uniform IsoPass { ivec4 uPass; };
+
+layout(std430, binding = 2) readonly buffer Field  { float uField[]; };
+struct CellVert { vec4 p; vec4 n; };                       // p.w = 1 si la celda corta
+layout(std430, binding = 3) buffer CellVerts { CellVert uCell[]; };
+struct OutVert { vec4 p; vec4 n; };
+layout(std430, binding = 4) writeonly buffer OutVerts { OutVert uOut[]; };
+// DrawElementsIndirectCommand: count, instanceCount, firstIndex, baseVertex, baseInstance · + escritos
+layout(std430, binding = 5) buffer Cmd { uint uCmd[6]; };
+
+const int P_CLEAR = 0, P_VERTS = 1, P_QUADS = 2, P_FINISH = 3;
+
+bool periodic() { return uDims.w == 1; }
+int cellsX() { return uDims.x - 1; }
+int cellsY() { return uDims.y - 1; }
+int cellsZ() { return periodic() ? uDims.z : uDims.z - 1; }
+int numCells() { return cellsX() * cellsY() * cellsZ(); }
+
+float field(int i, int j, int k) {
+    if (periodic()) k = ((k % uDims.z) + uDims.z) % uDims.z;
+    // Lados abiertos: fuera en x/z vale lo del borde, así la superficie no se cierra en una pared.
+    if (uIso.w > 0.5) { i = clamp(i, 0, uDims.x - 1); if (!periodic()) k = clamp(k, 0, uDims.z - 1); }
+    if (i < 0 || j < 0 || k < 0 || i >= uDims.x || j >= uDims.y || k >= uDims.z) return 0.0;
+    return uField[(k * uDims.y + j) * uDims.x + i];
+}
+int cellIndex(int i, int j, int k) {
+    if (periodic()) k = ((k % cellsZ()) + cellsZ()) % cellsZ();
+    if (i < 0 || j < 0 || k < 0 || i >= cellsX() || j >= cellsY() || k >= cellsZ()) return -1;
+    return (k * cellsY() + j) * cellsX() + i;
+}
+
+void main() {
+    const int id = int(gl_GlobalInvocationID.x);
+    const int pass = uPass.x;
+    const float h = uIso.x, iso = uIso.y;
+
+    if (pass == P_CLEAR) {
+        if (id < 6) uCmd[id] = 0u;
+        return;
+    }
+    if (pass == P_FINISH) {
+        if (id == 0) {
+            const uint cap = uint(uIso.z);
+            uCmd[0] = min(uCmd[5], cap - cap % 3u);
+            uCmd[1] = 1u; uCmd[2] = 0u; uCmd[3] = 0u; uCmd[4] = 0u;
+        }
+        return;
+    }
+    if (id >= numCells()) return;
+    const int i = id % cellsX(), j = (id / cellsX()) % cellsY(), k = id / (cellsX() * cellsY());
+
+    if (pass == P_VERTS) {
+        float v[8];
+        for (int c = 0; c < 8; ++c) v[c] = field(i + (c & 1), j + ((c >> 1) & 1), k + (c >> 2));
+        vec3 sum = vec3(0.0); int n = 0;
+        // 12 aristas: pares de esquinas que difieren en un bit.
+        for (int a = 0; a < 8; ++a) for (int bit = 0; bit < 3; ++bit) {
+            const int b = a | (1 << bit);
+            if (b == a) continue;
+            if ((v[a] > iso) == (v[b] > iso)) continue;
+            const float t = clamp((iso - v[a]) / (v[b] - v[a]), 0.0, 1.0);
+            const vec3 pa = vec3(a & 1, (a >> 1) & 1, a >> 2);
+            sum += mix(pa, pa + vec3(bit == 0, bit == 1, bit == 2), t);
+            ++n;
+        }
+        CellVert o;
+        if (n == 0) { o.p = vec4(0.0); o.n = vec4(0.0); uCell[id] = o; return; }
+        const vec3 local = sum / float(n);
+        // Gradiente trilineal en el vértice.
+        vec3 g;
+        const vec3 f = local;
+        g.x = mix(mix(v[1] - v[0], v[3] - v[2], f.y), mix(v[5] - v[4], v[7] - v[6], f.y), f.z);
+        g.y = mix(mix(v[2] - v[0], v[3] - v[1], f.x), mix(v[6] - v[4], v[7] - v[5], f.x), f.z);
+        g.z = mix(mix(v[4] - v[0], v[5] - v[1], f.x), mix(v[6] - v[2], v[7] - v[3], f.x), f.y);
+        const float gl = length(g);
+        o.p = vec4(uOrigin.xyz + (vec3(i, j, k) + local) * h, 1.0);
+        o.n = vec4(gl > 1e-12 ? -g / gl : vec3(0.0, 1.0, 0.0), 0.0);
+        uCell[id] = o;
+        return;
+    }
+    if (pass == P_QUADS) {
+        // Arista desde el nodo (i+1, j+1, k+1) en cada eje: la comparten las 4 celdas que la rodean.
+        const float v0 = field(i + 1, j + 1, k + 1);
+        for (int axis = 0; axis < 3; ++axis) {
+            ivec3 e = ivec3(0); e[axis] = 1;
+            const float v1 = field(i + 1 + e.x, j + 1 + e.y, k + 1 + e.z);
+            const bool in0 = v0 > iso, in1 = v1 > iso;
+            if (in0 == in1) continue;
+            // Las 4 celdas: la arista va de (i+1,j+1,k+1) a +e; las celdas que la tocan varían en los
+            // otros dos ejes entre {i, i+1} (o j, k) y en el eje de la arista son la de índice i+1.
+            const int u = (axis + 1) % 3, w = (axis + 2) % 3;
+            ivec3 base = ivec3(i, j, k); base[axis] += 1;
+            ivec3 c00 = base, c10 = base, c01 = base, c11 = base;
+            c10[u] += 1; c01[w] += 1; c11[u] += 1; c11[w] += 1;
+            const int q[4] = int[4](cellIndex(c00.x, c00.y, c00.z), cellIndex(c10.x, c10.y, c10.z),
+                                    cellIndex(c11.x, c11.y, c11.z), cellIndex(c01.x, c01.y, c01.z));
+            if (q[0] < 0 || q[1] < 0 || q[2] < 0 || q[3] < 0) continue;
+            CellVert cv[4];
+            bool okq = true;
+            const ivec3 cc[4] = ivec3[4](c00, c10, c11, c01);
+            for (int r = 0; r < 4; ++r) {
+                cv[r] = uCell[q[r]]; okq = okq && cv[r].p.w > 0.5;
+                // Celda que dio la vuelta por el borde periódico: su vértice, una vuelta más allá
+                // (si no, el quad cruza el dominio entero hacia atrás).
+                if (periodic()) cv[r].p.z += float((cc[r].z - ((cc[r].z % cellsZ()) + cellsZ()) % cellsZ()) ) * h;
+            }
+            if (!okq) continue;
+            // Orientación: el triángulo mira hacia FUERA (de dentro hacia el campo bajo).
+            const bool flip = in1;
+            const uint base6 = atomicAdd(uCmd[5], 6u);
+            if (base6 + 6u > uint(uIso.z)) continue;
+            const int tri[6] = flip ? int[6](0, 2, 1, 0, 3, 2) : int[6](0, 1, 2, 0, 2, 3);
+            for (int t = 0; t < 6; ++t) {
+                OutVert ov; ov.p = cv[tri[t]].p; ov.n = cv[tri[t]].n;
+                uOut[base6 + uint(t)] = ov;
+            }
+        }
+        return;
+    }
+}

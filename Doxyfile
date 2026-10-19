@@ -5,14 +5,17 @@
 #---------------------------------------------------------------------------
 PROJECT_NAME           = "HarukaEngine"
 PROJECT_NUMBER         = 1.0.0
-PROJECT_BRIEF          = "OpenGL C++17 game engine"
+PROJECT_BRIEF          = "Motor C++26 de planetas a escala real · OpenGL 4.6 y Vulkan"
 OUTPUT_DIRECTORY       = docs
 CREATE_SUBDIRS         = YES
 
 #---------------------------------------------------------------------------
 # Input
 #---------------------------------------------------------------------------
-INPUT                  = src shaders README.md docs/guides
+INPUT                  = src shaders docs/guides
+# La guia principal es la portada (index.html). Las guias siguen la plantilla de
+# docs/guides/DOCUMENTACION.md; tools/doc_meta.py la comprueba.
+USE_MDFILE_AS_MAINPAGE = docs/guides/ARQUITECTURA.md
 FILE_PATTERNS          = *.h *.hpp *.cpp *.vert *.frag *.comp *.geom *.md
 EXTENSION_MAPPING      = vert=C frag=C comp=C geom=C
 RECURSIVE              = YES
@@ -63,7 +66,10 @@ DOT_CLEANUP            = YES
 GENERATE_HTML          = YES
 HTML_OUTPUT            = html
 HTML_DYNAMIC_SECTIONS  = YES
-GENERATE_TREEVIEW      = YES
+# Sin arbol ni pestañas de Doxygen: la barra izquierda (Fijadas, Guias, Comunes)
+# la monta docs/header.html + docs/theme/haruka_docs.js.
+GENERATE_TREEVIEW      = NO
+DISABLE_INDEX          = YES
 TREEVIEW_WIDTH         = 250
 USE_MATHJAX            = NO
 
@@ -115,6 +121,8 @@ COLS_IN_ALPHA_INDEX    = 3
 HTML_HEADER            = docs/header.html
 HTML_FOOTER            = docs/footer.html
 HTML_EXTRA_STYLESHEET  = docs/theme/haruka.css \
-                         docs/theme/haruka_flow.css
-HTML_EXTRA_FILES       = docs/theme/haruka_flow.js
+                         docs/theme/haruka_flow.css \
+                         docs/theme/haruka_docs.css
+HTML_EXTRA_FILES       = docs/theme/haruka_flow.js \
+                         docs/theme/haruka_docs.js
 HTML_COLORSTYLE        = DARK

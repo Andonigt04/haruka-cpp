@@ -157,6 +157,12 @@ struct OceanState {
      * fija del mundo cerca de la cámara, y al moverla se compensa aquí para que ninguna cresta salte.
      */
     float phase[OCEAN_WAVES];
+    /**
+     * La parte de cada tren que es MAR DE FONDO (m de amplitud, incluida en `wave[i][1]`). La pone
+     * `oceanAddSwell`; 0 = todo es mar de viento. Existe para que el agua CERRADA no la reciba: el
+     * swell viene de un temporal a miles de km y no cabe en un lago (ver `oceanAmp`).
+     */
+    float swell[OCEAN_WAVES];
 };
 
 /// El estado por defecto: la tabla de referencia y el mar a su cota. Es lo que se ve si nadie
@@ -167,7 +173,7 @@ inline OceanState oceanDefaultState() {
         for (int c = 0; c < 4; ++c) s.wave[i][c] = OCEAN_WAVE[i][c];
     s.seaLevelM = 0.0f;
     s.windMS = 0.0f;
-    for (int i = 0; i < OCEAN_WAVES; ++i) s.phase[i] = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) { s.phase[i] = 0.0f; s.swell[i] = 0.0f; }
     return s;
 }
 
@@ -183,6 +189,22 @@ inline constexpr float OCEAN_WIND_MAX = 22.0f;
 /// (medido): la Hs de todo el océano saltaba 5,7 m de un frame al siguiente.
 inline constexpr float OCEAN_WIND_GROW_S  = 1200.0f;
 inline constexpr float OCEAN_WIND_DECAY_S = 3600.0f;
+
+/// LA MAR DE FONDO de una costa que recibe la de una borrasca moderada (m, trenes LARGOS:
+/// `λ >= OCEAN_SWELL_MIN_LAMBDA`). Es la que usan los TESTS de costa; el JUEGO pasa la que dice el
+/// clima (`oceanSwellFromWeather`). Ver `oceanAddSwell`.
+inline constexpr float OCEAN_SWELL_AMP        = 0.25f;
+inline constexpr float OCEAN_SWELL_MIN_LAMBDA = 80.0f;
+
+/// LA MARJADILLA MINIMA: escarpado minimo `k·a` de los trenes medios y cortos (λ < 80 m). 0,06 hasta
+/// 19 m, bajando en log hasta 0,02 a 61 m. Lo que el ojo lee como "ola" es la PENDIENTE: el swell
+/// de 137 m con 25 cm tiene un 1 % y se ve como un plano (`coast_open_sea_waves_visible`).
+inline float oceanMinSteepness(float lambdaM) {
+    if (lambdaM >= OCEAN_SWELL_MIN_LAMBDA) return 0.0f;
+    if (lambdaM <= 19.0f) return 0.06f;
+    const float u = std::log(lambdaM / 19.0f) / std::log(61.0f / 19.0f);
+    return std::max(0.06f - 0.04f * u, 0.02f);
+}
 
 /**
  * @brief El mar que levanta un viento dado (Pierson-Moskowitz), girado a su rumbo.
@@ -246,6 +268,63 @@ inline OceanState oceanStateFromWind(float windSpeed, float windDirX, float wind
         const float dx = OCEAN_WAVE[i][2], dy = OCEAN_WAVE[i][3];
         s.wave[i][2] = dx * cx - dy * cy;
         s.wave[i][3] = dx * cy + dy * cx;
+    }
+    return s;
+}
+
+/**
+ * @brief LA MAR DE FONDO QUE DICE EL CLIMA: la que llega aquí de los vientos que sopla el clima lejos.
+ *
+ * ⚠️ ANTES ERA UN SUELO FIJO (0,25 m en los trenes largos SIEMPRE, y un escarpado mínimo en los medios):
+ * con 3,5 m/s de viento el mar salía con ~1,6 m de Hs donde Pierson-Moskowitz da 0,27, y en la orilla
+ * (1-6 m de fondo) esa ola se plegaba en láminas como cristal roto (captura del 18-10). Andoni: "el
+ * clima decide". Ahora: cada muestra es un viento del clima `U` a una distancia `d`; su mar de fondo
+ * es la amplitud del tren LARGO de un mar plenamente desarrollado a ese viento (la de
+ * `oceanStateFromWind`) atenuada con la distancia (`e^(−d/OCEAN_SWELL_DECAY_M)`: dispersión y
+ * apertura del frente de ondas). Se queda la MAYOR. Sin viento fuerte en ningún sitio, no hay.
+ */
+inline constexpr float OCEAN_SWELL_DECAY_M = 3.0e6f;
+inline float oceanSwellFromWeather(const float* windMS, const float* distM, int n) {
+    float amp = 0.0f;
+    for (int i = 0; i < n; ++i) {
+        float a0 = 0.0f;
+        const OceanState far = oceanStateFromWind(windMS[i], 1.0f, 0.0f);
+        for (int j = 0; j < OCEAN_WAVES; ++j)
+            if (far.wave[j][0] >= OCEAN_SWELL_MIN_LAMBDA) a0 = std::max(a0, far.wave[j][1]);
+        amp = std::max(amp, a0 * std::exp(-std::max(distM[i], 0.0f) / OCEAN_SWELL_DECAY_M));
+    }
+    return amp;
+}
+
+/**
+ * @brief LA MAR DE FONDO sobre un mar de viento: el estado que el JUEGO usa.
+ *
+ * ⚠️ SIN ESTO LA COSTA ESTABA QUIETA CON EL CLIMA DE CASI SIEMPRE. Pierson-Moskowitz a viento flojo
+ * mata justo los trenes largos (a 3,5 m/s el de 137 m vale ~0), y son los que dan la ROMPIENTE y la
+ * trepada: en la partida del 16-10, viento 3,5 m/s -> Hs 0,27 m, orilla inmovil y ni una cresta
+ * plegada (`coast_surf_*`). Una costa real recibe oleaje de temporales lejanos aunque aqui no sople:
+ * el swell viaja miles de km.
+ *
+ * Se modela como un SUELO de amplitud en los trenes largos (Hs ~1 m entre los dos) y de ESCARPADO
+ * en los medios (`oceanMinSteepness`, Hs ~0,6 m más): sin lo segundo el swell de 137 m llega a la
+ * costa pero el mar abierto se ve como un plano. No es un tren aparte: la banda de λ y las fases no
+ * cambian. Con viento fuerte PM ya los supera y no hace nada.
+ * La parte añadida queda anotada en `swell[i]`, y el agua de fetch limitado no la recibe (`oceanAmp`).
+ * `oceanStateFromWind` sigue siendo el mar de viento puro (lo que miden `ocean_sea_state` y
+ * `ocean_low_wind_spectrum`).
+ */
+inline OceanState oceanAddSwell(OceanState s, float swellAmp = OCEAN_SWELL_AMP) {
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        const float wind = s.wave[i][1] - s.swell[i];
+        // Largos: amplitud minima (el swell). Medios y cortos: escarpado minimo (la marejadilla que
+        // hace que el mar abierto se vea ondulado aunque no sople aqui).
+        const float lam  = s.wave[i][0];
+        // ⚠️ El escarpado mínimo de los medios (`oceanMinSteepness`) ya no se aplica: era un mar
+        // inventado que no venía del clima. Solo los trenes largos reciben la mar de fondo.
+        const float floorAmp = (lam >= OCEAN_SWELL_MIN_LAMBDA) ? swellAmp : 0.0f;
+        const float tot  = std::max(wind, floorAmp);
+        s.wave[i][1] = tot;
+        s.swell[i]   = tot - wind;
     }
     return s;
 }
@@ -348,7 +427,11 @@ struct SeaFollower {
 inline double oceanTideAt(const glm::dvec3& dir, double planetRadius,
                           const glm::dvec3* bodyPos, const double* bodyGM, int bodyCount) {
     if (!bodyPos || !bodyGM || bodyCount <= 0 || planetRadius <= 0.0) return 0.0;
-    const double scale  = (planetRadius * planetRadius / 9.8) * 15.0;
+    // ⚠️ EXAGERACION x3, NO x15. El x15 venia del fluido y no hacia daño porque al mar no le llegaban
+    // cuerpos (marea 0,00 m en el log). Con el Sol y la Luna REALES (`SkyEphemeris.h`) daba 12 m de
+    // rango en marea viva: las playas enteras se inundaban dos veces al dia. x3 da ~2,4 m en viva y
+    // ~0,8 m en muerta (`sky_tide`), una costa normal: se ve subir y bajar sin tragarse la playa.
+    const double scale  = (planetRadius * planetRadius / 9.8) * 3.0;
     const double floorD = planetRadius * 0.5;
     double h = 0.0;
     for (int i = 0; i < bodyCount; ++i) {
@@ -518,10 +601,24 @@ inline float oceanWhitecapCoverage(const OceanState& st) {
     return (U <= 0.0f) ? 0.0f : 3.84e-6f * std::pow(U, 3.41f);
 }
 
+/// ¿Agua CERRADA (lago, charco), con su fetch? `<= 0` es "este punto no trae fetch": océano.
+inline bool oceanFetchLimited(float fetchM) {
+    return fetchM > 0.0f && fetchM < WATER_FETCH_UNLIMITED * 0.5f;
+}
+
+/// Amplitud del tren `i` para el agua con este fetch: en mar abierto, entera; en agua cerrada, SIN la
+/// mar de fondo (`OceanState::swell`). Gemelo de `harukaAmpAt`.
+inline float oceanAmp(const OceanState& st, int i, float fetchM) {
+    return oceanFetchLimited(fetchM) ? st.wave[i][1] - st.swell[i] : st.wave[i][1];
+}
+
 inline float oceanFetchFactor(const OceanState& st, float fetchM) {
     // Océano, o sin dato: no se limita nada. `<= 0` es "este punto no trae fetch", no "fetch cero".
-    if (fetchM <= 0.0f || fetchM >= WATER_FETCH_UNLIMITED * 0.5f) return 1.0f;
-    const float Hs = oceanSignificantHeight(st);
+    if (!oceanFetchLimited(fetchM)) return 1.0f;
+    // Contra el MAR DE VIENTO: el fetch limita lo que el viento levanta aqui; el swell ni entra.
+    float sum2 = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) { const float a = oceanAmp(st, i, fetchM); sum2 += a * a; }
+    const float Hs = 4.0f * std::sqrt(sum2 * 0.5f);
     if (Hs <= 1e-4f) return 1.0f;
     const float U   = oceanWindSpeed(st);                       // el viento que da ese Hs (PM)
     const float HsF = 0.0016f * U * std::sqrt(fetchM / OCEAN_G); // JONSWAP limitado por fetch
@@ -555,7 +652,7 @@ inline float oceanBreakScale(float depthM, const OceanState& st,
     // pasar mas de la que si.
     for (int i = 0; i < OCEAN_WAVES; ++i) {
         const float k0 = 6.2831853f / st.wave[i][0];
-        sum += st.wave[i][1] * oceanShortWaveFade(oceanWaveNumber(k0, depthM), quadM);
+        sum += oceanAmp(st, i, fetchM) * oceanShortWaveFade(oceanWaveNumber(k0, depthM), quadM);
     }
     const float total = sum * green;
     const float limit = 0.55f * std::max(depthM, 0.0f);
@@ -753,9 +850,34 @@ inline float oceanBreakIndex(float depthM, const OceanState& st,
     float sum = 0.0f;
     for (int i = 0; i < OCEAN_WAVES; ++i) {
         const float k0 = 6.2831853f / st.wave[i][0];
-        sum += st.wave[i][1] * oceanShortWaveFade(oceanWaveNumber(k0, depthM), quadM);
+        sum += oceanAmp(st, i, fetchM) * oceanShortWaveFade(oceanWaveNumber(k0, depthM), quadM);
     }
     return 2.0f * sum * green / depthM;     // H = 2·Σamp (pico a pico)
+}
+
+/**
+ * @brief El fondo más hondo en el que esta mar ya ROMPE (`H/d ≥ 0,78`), en metros; 0 = no rompe en
+ *        ningún fondo de más de 2 cm. Es el borde exterior de la franja de rompiente: quien tenga que
+ *        dibujar la ola rota (la malla fina del agua) sabe con esto qué suelo la lleva.
+ *
+ * Barrido de fuera hacia dentro a paso de 5 cm: el índice crece al bajar el fondo (Green `d^-1/4`
+ * contra `1/d`), así que el primer fondo que pasa es el borde. Coste ~600 evaluaciones, una vez por
+ * cambio de mar, no por frame.
+ */
+inline float oceanBreakDepth(const OceanState& st, float maxDepthM = 30.0f) {
+    for (float d = maxDepthM; d >= 0.02f; d -= 0.05f)
+        if (oceanBreakIndex(d, st) >= 0.78f) return d;
+    return 0.0f;
+}
+
+/// La CARA de la ola al romper (m, pico a pico): `H = 2·Σamp·Green` sin recortar, en el fondo donde
+/// rompe. Lo que la malla tiene que poder dibujar (`coast_surf_breaks`). 0 = no rompe.
+inline float oceanBreakerFaceM(const OceanState& st) {
+    const float db = oceanBreakDepth(st);
+    if (db <= 0.0f) return 0.0f;
+    float sum = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) sum += st.wave[i][1];
+    return 2.0f * sum * oceanGreenGain(db);
 }
 
 inline float oceanCurlGain(float depthM, const OceanState& st,
@@ -813,6 +935,195 @@ inline float oceanBreakerGain(float depthM, const OceanState& st,
     // cresta: peraltarse es una cosa y volcar es otra, y no deben empezar juntas.
     const float gamma = oceanBreakIndex(depthM, st, fetchM, quadM);
     return OCEAN_BREAKER_MAX * glm::smoothstep(0.78f, 1.20f, gamma);
+}
+
+/**
+ * @brief EL LABIO: la cresta que se lanza por delante de su cara y cae — el "rollo de papel".
+ *        Gemelo de `harukaLipGain` / el bloque del labio de `harukaGerstner`.
+ *
+ * ⚠️ NO SALE DE UN TREN, SALE DE LA OLA ENTERA. Montado sobre el tren 0 (como `breaker`) no forma
+ * tubo: con la mar del juego ese tren mide 0,42 m dentro de una ola de 3,6 m que suman los ocho, y su
+ * cresta no es la que se ve. Aquí el labio lee la superficie COMPUESTA:
+ *
+ *     e = η / Σamp            (0..1: cuánto de cresta hay aquí; η = Σ amp·sin φ, sin el 2º armónico)
+ *     u = e^P                 (solo cerca de la cresta)
+ *     f = clamp(−∂η/∂Dl / Σamp·k, 0, 1)   (solo en la cara DELANTERA, la que mira a la orilla)
+ *     labio = Dl·(L·u) − up·(L·caída·u·f),   L = ganancia·Σamp
+ *
+ * con `Dl` el rumbo REFRACTADO del tren 0 (el que rompe: hacia la orilla). La cresta avanza más que
+ * su cara (`u` cae al bajar), así que la adelanta; y lo que queda delante baja (`f`): un labio que
+ * cuelga sobre un hueco de aire. Proporcional a `Σamp`, y cerrado por el índice de rompiente — las
+ * dos puertas del agua interior (ver `oceanBreakerGain`).
+ *
+ * La ventana: nace en el 0,78 clásico (revienta), está entero hacia 1,0 y se deshace entre 1,3 y 1,7,
+ * donde la ola ya es espuma (`shoreFoam` sube de 0,78 a 1,60). Las tres cifras de forma (2,5 · 4 · 1)
+ * salen de un barrido medido con la mar del juego (`coast_lip_barrel`): con menos no queda hueco bajo
+ * el labio, con más el labio sale más largo que la propia ola. La caída era 2 y bajó a 1 (18-10): con 2
+ * la punta bajaba hasta la cara y la atravesaba (`coast_lip_no_loop`); con 1 cae por delante y el hueco
+ * sigue (~1 m en los tres mares).
+ */
+inline constexpr float OCEAN_LIP_MAX = 2.5f;
+inline constexpr float OCEAN_LIP_POW = 4.0f;
+inline constexpr float OCEAN_LIP_DROOP = 1.0f;
+
+inline float oceanLipGain(float depthM, const OceanState& st,
+                          float fetchM = WATER_FETCH_UNLIMITED,
+                          float quadM = OCEAN_MIN_QUAD_M) {
+    const float gamma = oceanBreakIndex(depthM, st, fetchM, quadM);
+    return OCEAN_LIP_MAX * glm::smoothstep(0.78f, 1.0f, gamma) * (1.0f - glm::smoothstep(1.3f, 1.7f, gamma));
+}
+
+/// Lo que el labio necesita de la ola compuesta, acumulado en el MISMO bucle de los trenes (sin otra
+/// pasada). Gemelo de las variables `lip*` de `harukaGerstner`.
+struct OceanLipAcc {
+    glm::vec3 Dl{0.0f};        ///< rumbo del tren 0 refractado (0 = el tren 0 no esta: sin labio)
+    float     eta = 0.0f;      ///< Σ amp·sin φ
+    float     sumA = 0.0f;     ///< Σ amp
+    float     sumAK = 0.0f;    ///< Σ amp·k
+    glm::vec3 grad{0.0f};      ///< ∇η = Σ amp·k·cos φ·D
+    glm::vec3 hessL{0.0f};     ///< Σ amp·k²·sin φ·(D·Dl)·D  (−∂(∇η·Dl)/∂T = hessL·T)
+    void add(int i, const glm::vec3& D, float amp, float k, float c, float s) {
+        if (i == 0) Dl = D;
+        eta += amp * s; sumA += amp; sumAK += amp * k;
+        grad  += D * (amp * k * c);
+        hessL += D * (amp * k * k * s * glm::dot(D, Dl));
+    }
+    /// Cuánto de cresta (`u`) y de cara delantera (`f`). Sin labio, los dos a 0.
+    void shape(float& u, float& f) const {
+        u = f = 0.0f;
+        if (!(sumA > 0.0f) || !(sumAK > 0.0f) || glm::dot(Dl, Dl) < 0.5f) return;
+        u = std::pow(std::max(eta / sumA, 0.0f), OCEAN_LIP_POW);
+        f = glm::clamp(-glm::dot(grad, Dl) / sumAK, 0.0f, 1.0f);
+    }
+    /// Desplazamiento del labio (m). `gain` = `oceanLipGain`.
+    glm::vec3 disp(const glm::vec3& up, float gain) const {
+        float u, f; shape(u, f);
+        const float L = gain * sumA;
+        return Dl * (L * u) - up * (L * OCEAN_LIP_DROOP * u * f);
+    }
+    /// Lo que el labio suma a la divergencia del mapa horizontal (`jac`): ∂(L·u)/∂Dl.
+    float jacTerm(float gain) const {
+        if (!(sumA > 0.0f) || glm::dot(Dl, Dl) < 0.5f) return 0.0f;
+        const float e = eta / sumA;
+        if (e <= 0.0f) return 0.0f;
+        return gain * OCEAN_LIP_POW * std::pow(e, OCEAN_LIP_POW - 1.0f) * glm::dot(grad, Dl);
+    }
+};
+
+/**
+ * @brief LA FASE DE UN TREN, CONTINUA EN EL ESPACIO (18-10). Gemelo de `harukaTrainPhase`.
+ *
+ * ⚠️ LA FASE ERA `k·dot(D, wp)` CON EL `k` LOCAL, y eso es ruido en cuanto el fondo varía. `wp` se
+ * mide desde el ANCLA del mar (hasta `SeaFollower::kReanchorM`, 20 km), así que dos vértices vecinos
+ * con unos centímetros de fondo distinto —una llanura de marea a ras del mar— tienen `k` distintos y
+ * fases que difieren en `Δk·|wp|`: decenas de radianes. Cada vértice subía o bajaba la ola al azar y
+ * la orilla salía en "tiendas" de triángulos con el borde recto de la malla (Andoni: "se ven como olas
+ * pero por low-poly no se ve claro, son vértices"). Medido en el juego: con la fase de aguas
+ * profundas las tiendas desaparecen enteras.
+ *
+ * La fase de verdad es la integral de `k` a lo largo del rayo, y no se puede hacer por punto. Lo que
+ * sí se puede: la fase de aguas profundas (`k0·D0·wp`, exacta y continua: la misma que compensa el
+ * reanclaje) más el RETRASO que acumula la ola al perder fondo,
+ *
+ *     Λ(h) = ∫_h^∞ (k − k0) dh' / σ = (1 − √(k0·h))² / σ      (k somera = √(k0/h), k0·h < 1)
+ *
+ * con `h` el fondo SUAVE (`OCEAN_PHASE_BED_M`, sin el rizo fino: con él la fase volvía a ser ruido) y
+ * `σ` una pendiente de playa de referencia. En una playa de pendiente σ el gradiente de `Λ` es
+ * exactamente `k − k0` hacia la orilla, o sea la ola se acorta como debe. En otra pendiente se acorta
+ * de más o de menos — es la aproximación que se acepta por tener una fase sin ruido.
+ *
+ * `bedM` = cota del agua EN REPOSO menos el fondo suave (m; negativo = seco). `OCEAN_NO_BED` = el
+ * llamante no lo sabe, y queda la ley de siempre (fondo uniforme, donde `k·D·wp` es exacta).
+ * ⚠️ LAS DERIVADAS SIGUEN CON `k·D` LOCAL: en la playa de referencia coinciden con el gradiente de
+ * esta fase; fuera de ella son una aproximación (la normal y el jacobiano no se recalculan con `Λ`).
+ */
+inline constexpr float OCEAN_NO_BED       = -1.0e30f;
+inline constexpr float OCEAN_PHASE_BED_M  = 64.0f;   ///< corte del fondo que lleva la fase (m)
+inline constexpr float OCEAN_PHASE_SLOPE  = 0.02f;   ///< pendiente de playa de referencia (σ)
+
+inline float oceanShoalLag(float k0, float bedM) {
+    const float x = std::sqrt(k0 * std::max(bedM, 0.0f));
+    return (x < 1.0f) ? (1.0f - x) * (1.0f - x) / OCEAN_PHASE_SLOPE : 0.0f;
+}
+
+inline float oceanTrainPhase(const OceanState& st, int i, float k0, float k, const glm::vec3& D,
+                             const glm::vec3& wp, const glm::vec3& t1, const glm::vec3& t2,
+                             float t, float bedM) {
+    const float w = std::sqrt(OCEAN_G * k0);   // la frecuencia NO cambia con el fondo
+    if (!(bedM > OCEAN_NO_BED)) return k * glm::dot(D, wp) - w * t + st.phase[i];
+    const glm::vec3 D0 = glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]);
+    return k0 * glm::dot(D0, wp) + oceanShoalLag(k0, bedM) - w * t + st.phase[i];
+}
+
+/**
+ * @brief LA PUERTA DEL ADELANTO: cuánto es este punto CARA DELANTERA de la ola COMPUESTA (0..1), la
+ *        misma `f` que usa el labio (`OceanLipAcc::shape`), y su gradiente en el plano tangente.
+ *        Gemelo de la pasada previa de `harukaGerstner`.
+ *
+ * ⚠️ EL ADELANTO IBA POR TREN, CON LA FASE DE CADA UNO (`max(0, −cos φ)`), y la cara delantera de un
+ * tren no es la de la ola que se ve: con solo mar de fondo (dos trenes largos parecidos, 18-10) la
+ * cara delantera del de 89 m caía sobre la ESPALDA de la cresta compuesta y la plegaba
+ * (`coast_lip_front_steep`: espalda 2,74 contra < 0,5; sin adelanto, 0,32). Con la puerta, cada tren
+ * sigue empujando su mitad delantera, pero solo donde la ola compuesta baja hacia la orilla.
+ * Cuesta una pasada más por los trenes (fase y coseno, sin el resto).
+ */
+/**
+ * @brief TOPE DEL ADELANTO POR TREN (18-10): lo que el adelanto mueve la cara (`hBase·curl`) no pasa de
+ *        `OCEAN_CURL_REACH` veces la amplitud VERTICAL del tren. Gemelo de `harukaCurlCap`.
+ *
+ * ⚠️ En el bajío la elipse orbital se ensancha (`1/tanh(k·d)`) y `hBase` llega a varias veces `amp`.
+ * Multiplicado por el adelanto, con solo mar de fondo (viento mínimo) la cara delantera se iba metros
+ * hacia ATRÁS, por detrás de la propia espalda de la cresta: el perfil se cruzaba consigo mismo en un
+ * lazo enorme (`coast_lip_no_loop`: 240 de 390 cortes aun sin labio). Una cara que vuelca se mide en
+ * alturas de ola, no en anchos de órbita. Constante por tren y fondo: no rompe la derivada espacial.
+ */
+inline constexpr float OCEAN_CURL_REACH = 1.75f;
+inline float oceanCurlCap(float curl, float hBase, float amp) {
+    return (hBase > 0.0f) ? std::min(curl, OCEAN_CURL_REACH * amp / hBase) : curl;
+}
+
+/// Fraccion de cara delantera (`fr`) a la que la puerta ya esta entera. Se eligio JUNTO con
+/// `OCEAN_CURL_REACH` y `OCEAN_LIP_DROOP` en un barrido (18-10) de cuatro tests a la vez:
+/// `coast_lip_no_loop` (lazos en los 3 mares), `coast_lip_*`, `ocean_break_fold` (jac a 6 m) y
+/// `ocean_mesh_stretch`. Con 0,35 / 1,75 / 1,0: lazos 0·0·0, tubo en los tres mares, jac −0,21, 2,29x.
+/// Sin el tope del adelanto, 0,35 pliega de sobra pero estira 3,08x y deja lazos en todas partes.
+inline constexpr float OCEAN_CURL_GATE_FR = 0.35f;
+struct OceanCurlGate {
+    float     G = 0.0f;           ///< puerta [0,1]
+    glm::vec3 gradG{0.0f};        ///< ∂G/∂x en el plano tangente (0 donde G está topada)
+};
+inline OceanCurlGate oceanCurlGate(const glm::vec3& wp, const glm::vec3& up,
+                                   const glm::vec3& t1, const glm::vec3& t2, float t,
+                                   float depthM, float fade, const OceanState& st, float fetchM,
+                                   const glm::vec3& upSlope, float quadM, float green, float scale,
+                                   float bedM) {
+    OceanCurlGate g;
+    glm::vec3 Dl(0.0f), hess(0.0f);
+    float gradDl = 0.0f, sumAK = 0.0f;
+    for (int i = 0; i < OCEAN_WAVES; ++i) {
+        if (!(st.wave[i][0] > 0.0f)) continue;
+        const float k0 = 6.2831853f / st.wave[i][0];
+        const float k  = oceanWaveNumber(k0, depthM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * fade * oceanShortWaveFade(k, quadM);
+        if (amp <= 1e-4f) continue;
+        const glm::vec3 D = oceanRefract(glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]),
+                                         upSlope, up, k0, k);
+        const float ph = oceanTrainPhase(st, i, k0, k, D, wp, t1, t2, t, bedM);
+        if (i == 0) Dl = D;
+        const float dd = glm::dot(D, Dl);
+        gradDl += amp * k * std::cos(ph) * dd;
+        hess   += D * (amp * k * k * std::sin(ph) * dd);
+        sumAK  += amp * k;
+    }
+    if (!(sumAK > 0.0f) || glm::dot(Dl, Dl) < 0.5f) return g;
+    // Suave (C1) y entera ya a `OCEAN_CURL_GATE_FR`: con `G = fr` a secas la cara delantera rara vez
+    // pasaba de ~0,3 y el adelanto se quedaba en un tercio — la rompiente dejo de plegarse
+    // (`ocean_break_fold`). La rampa suave es para que la divergencia (`gradG`) no tenga saltos.
+    const float fr = -gradDl / sumAK;
+    const float x  = glm::clamp(fr / OCEAN_CURL_GATE_FR, 0.0f, 1.0f);
+    g.G = x * x * (3.0f - 2.0f * x);
+    if (x > 0.0f && x < 1.0f) g.gradG = hess * (6.0f * x * (1.0f - x) / (OCEAN_CURL_GATE_FR * sumAK));
+    return g;
 }
 
 /**
@@ -875,6 +1186,12 @@ inline constexpr float OCEAN_WHITECAP_FIT = 0.657f;
 /// Semiancho de la banda alrededor del umbral (el `smoothstep` no puede ser un escalon).
 inline constexpr float OCEAN_WHITECAP_LO = 0.769f;
 inline constexpr float OCEAN_WHITECAP_HI = 1.250f;
+/// ⚠️ Gemelos de `HARUKA_BORE_*`. La espuma de ROMPIENTE va con la FASE de la ola compuesta: blanca en
+/// la cresta que revienta (`e = η/Σamp` sobre `OCEAN_BORE_LO..HI`) y, entre una y otra, el resto de
+/// espuma gastada (`OCEAN_SPENT_FOAM`). Ver `oceanFoam`.
+inline constexpr float OCEAN_BORE_LO    = -0.20f;
+inline constexpr float OCEAN_BORE_HI    =  0.60f;
+inline constexpr float OCEAN_SPENT_FOAM =  0.25f;
 
 /**
  * @brief Coeficiente del 2º armónico de UN TREN, del STOKES de segundo orden. Gemelo de
@@ -918,7 +1235,7 @@ inline float oceanSkewness(float depthM, const OceanState& st,
         if (!(st.wave[i][0] > 0.0f)) continue;
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * scale * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * oceanShortWaveFade(k, quadM);
         if (amp > bestAmp) { bestAmp = amp; best = oceanStokesSkew(k, amp, depthM); }
     }
     return best;
@@ -933,7 +1250,7 @@ inline float oceanSteepScale(float depthM, const OceanState& st,
     for (int i = 0; i < OCEAN_WAVES; ++i) {
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * brk * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * brk * oceanShortWaveFade(k, quadM);
         sum += k * oceanHorizAmp(k, amp, depthM);
     }
     // ⚠️ EL TECHO SUBE DONDE LA OLA ROMPE, y ese es el punto entero. Con el techo fijo en 0,75 la
@@ -967,7 +1284,8 @@ inline float oceanShoalAmp(float depthM, float ampDeep) {
  * @param depthRest profundidad con la lámina EN REPOSO (m). Negativa sobre tierra.
  */
 inline float oceanSwash(float depthRest, const glm::vec3& wp, const glm::vec3& up, float t,
-                        const OceanState& st) {
+                        const OceanState& st, float fetchM = WATER_FETCH_UNLIMITED,
+                        float bedM = OCEAN_NO_BED) {
     const float lambda0 = st.wave[0][0];
     const float kDeep0  = 6.2831853f / lambda0;
     // ⚠️ La trepada sigue al tren que rompe, así que su fase va con el `k` LOCAL — el mismo que usa
@@ -981,11 +1299,19 @@ inline float oceanSwash(float depthRest, const glm::vec3& wp, const glm::vec3& u
 
     // Amplitud a `max(prof, 1 m)`: con profundidad negativa (arena seca, que es a donde la trepada
     // tiene que llegar) el tope `0.55·d` de `oceanShoalAmp` daría amplitud NEGATIVA.
-    const float aBreak = oceanShoalAmp(std::max(depthRest, 1.0f), st.wave[0][1]);
+    // ⚠️ LA AMPLITUD ES LA DEL MAR ENTERO (`sqrt(Σa²)`), NO LA DEL TREN 0. La fase sigue al tren largo
+    // —es el que marca el ritmo de la trepada—, pero con viento flojo ese tren casi no tiene energia
+    // y la orilla se quedaba quieta aunque el agua de al lado subiera 70 cm (`coast_surf_moves`).
+    float sum2 = 0.0f;
+    // En agua cerrada, la del mar de viento con su fetch: sin esto la orilla de un lago respiraria
+    // con la mar de fondo del oceano.
+    for (int i = 0; i < OCEAN_WAVES; ++i) { const float a = oceanAmp(st, i, fetchM); sum2 += a * a; }
+    const float aBreak = oceanShoalAmp(std::max(depthRest, 1.0f),
+                                       std::sqrt(sum2) * oceanFetchFactor(st, fetchM));
     const float reach  = std::max(aBreak * 6.0f, 2.0f);
     const float wgt    = 1.0f - glm::smoothstep(0.0f, reach, std::max(depthRest, 0.0f));
     // Cuarto de ciclo de retraso respecto a la cresta: el agua sube DESPUÉS de que rompa.
-    const float ph = k0 * glm::dot(D0, wp) - w0 * t - 1.5707963f + st.phase[0];
+    const float ph = oceanTrainPhase(st, 0, kDeep0, k0, D0, wp, t1, t2, t, bedM) - 1.5707963f;
     return aBreak * std::sin(ph) * wgt;
 }
 
@@ -1007,7 +1333,8 @@ inline glm::vec3 oceanDisplacement(const glm::vec3& wp, const glm::vec3& up, flo
                                    float depthM, float fade, const OceanState& st,
                                    float fetchM = WATER_FETCH_UNLIMITED,
                                    const glm::vec3& upSlope = glm::vec3(0.0f),
-                                   float quadM = OCEAN_MIN_QUAD_M) {
+                                   float quadM = OCEAN_MIN_QUAD_M,
+                                   float bedM = OCEAN_NO_BED) {
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
     const glm::vec3 t2 = glm::cross(up, t1);
@@ -1016,30 +1343,41 @@ inline glm::vec3 oceanDisplacement(const glm::vec3& wp, const glm::vec3& up, flo
     const float steepScale = oceanSteepScale(depthM, st, fetchM, quadM);
     const float curl       = oceanCurlGain(depthM, st, fetchM, quadM);
     const float breaker    = oceanBreakerGain(depthM, st, fetchM, quadM);
+    const float lipGain    = oceanLipGain(depthM, st, fetchM, quadM);
+    const float gate       = (curl > 0.0f) ? oceanCurlGate(wp, up, t1, t2, t, depthM, fade, st, fetchM,
+                                                           upSlope, quadM, green, scale, bedM).G : 0.0f;
+    OceanLipAcc lip;
     glm::vec3 disp(0.0f);
     for (int i = 0; i < OCEAN_WAVES; ++i) {
         if (!(st.wave[i][0] > 0.0f)) continue;
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * fade * oceanShortWaveFade(k, quadM);
         if (amp <= 1e-4f) continue;
         const glm::vec3 D = oceanRefract(glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]),
                                          upSlope, up, k0, k);
         const float w  = std::sqrt(OCEAN_G * k0);
-        const float ph = k * glm::dot(D, wp) - w * t + st.phase[i];
+        const float ph = oceanTrainPhase(st, i, k0, k, D, wp, t1, t2, t, bedM);
         const float c = std::cos(ph), s = std::sin(ph);
         // ⚠️ EL REFUERZO DE ROMPIENTE VA SOLO AL TREN 0, Y ESE ES EL PUNTO. Repartido entre los ocho
         // comprime en ocho direcciones y el determinante nunca llega a 0; concentrado en el tren que
         // rompe —refractado, o sea ya apuntando a la orilla— toda la compresión cae en un eje, que es
         // como se organiza un surf real. Ver `oceanBreakerGain`.
-        const float horiz = oceanHorizAmp(k, amp, depthM) * steepScale
-                          * (1.0f + curl * std::max(0.0f, c))
+        // ⚠️ EL ADELANTO VA EN LA MITAD DELANTERA, `cos φ < 0` (17-10): la ola viaja hacia +D y la
+        // cresta esta en `sin φ = 1`. Con `max(0, cos φ)` empinaba la cara de ATRAS (medido en el
+        // corte de la rompiente; `coast_lip_front_steep`).
+        const float hBase = oceanHorizAmp(k, amp, depthM) * steepScale
                           * ((i == 0) ? (1.0f + breaker) : 1.0f);
+        const float curlI = oceanCurlCap(curl, hBase, amp);             // ver `oceanCurlCap`
+        const float horiz = hBase * (1.0f + curlI * gate * std::max(0.0f, -c));   // ver `oceanCurlGate`
         // El 2º armónico va en la VERTICAL: cresta picuda, seno plano. POR TREN, del escarpado y el
         // fondo de ESE tren (`oceanStokesSkew`), no de una constante común a los ocho.
         const float skew = oceanStokesSkew(k, amp, depthM);
         disp += D * (horiz * c) + up * (amp * (s - skew * std::cos(2.0f * ph)));
+        lip.add(i, D, amp, k, c, s);
     }
+    // EL LABIO, sobre la ola compuesta (ver `oceanLipGain`).
+    if (lipGain > 0.0f) disp += lip.disp(up, lipGain);
     return disp;
 }
 
@@ -1065,7 +1403,8 @@ inline float oceanJacobian(const glm::vec3& wp, const glm::vec3& up, float t,
                            float fetchM = WATER_FETCH_UNLIMITED,
                            const glm::vec3& upSlope = glm::vec3(0.0f),
                            float* outSlope = nullptr, float* outSigma = nullptr,
-                           float quadM = OCEAN_MIN_QUAD_M) {
+                           float quadM = OCEAN_MIN_QUAD_M, float* outCrest = nullptr,
+                           float bedM = OCEAN_NO_BED) {
     // MISMO marco tangente que `oceanWaveHeight`, `oceanWaveVelocity` y el shader.
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
@@ -1075,6 +1414,12 @@ inline float oceanJacobian(const glm::vec3& wp, const glm::vec3& up, float t,
     const float steepScale = oceanSteepScale(depthM, st, fetchM, quadM);
     const float curl       = oceanCurlGain(depthM, st, fetchM, quadM);
     const float breaker    = oceanBreakerGain(depthM, st, fetchM, quadM);
+    const float lipGain    = oceanLipGain(depthM, st, fetchM, quadM);
+    const OceanCurlGate gate = (curl > 0.0f) ? oceanCurlGate(wp, up, t1, t2, t, depthM, fade, st, fetchM,
+                                                             upSlope, quadM, green, scale, bedM)
+                                             : OceanCurlGate{};
+    glm::vec3 curlVec(0.0f);   // Σ D·(H·adelanto·max(0,−cos φ)·cos φ): lo que multiplica a ∇G en la divergencia
+    OceanLipAcc lip;
     float jac = 1.0f;
     // ⚠️ LA PENDIENTE DE LA SUPERFICIE, acumulada en este mismo bucle (no cuesta otra pasada). Es
     // `∇(Σ amp·sin φ) = Σ D·(amp·k·cos φ)`, o sea el escarpado de VERDAD — y NO es lo mismo que
@@ -1089,33 +1434,43 @@ inline float oceanJacobian(const glm::vec3& wp, const glm::vec3& up, float t,
         if (!(st.wave[i][0] > 0.0f)) continue;          // guardia de `λ > 0`, ver `oceanWaveHeight`
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * fade * oceanShortWaveFade(k, quadM);
         if (amp <= 1e-4f) continue;
         const glm::vec3 D = oceanRefract(glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]),
                                          upSlope, up, k0, k);
         const float w  = std::sqrt(OCEAN_G * k0);       // la frecuencia NO cambia con el fondo
-        const float ph = k * glm::dot(D, wp) - w * t + st.phase[i];
+        const float ph = oceanTrainPhase(st, i, k0, k, D, wp, t1, t2, t, bedM);
         const float c = std::cos(ph), s = std::sin(ph);
         // ⚠️ AQUI HABIA UN ERROR DE DERIVADA, Y ERA EL QUE MANTENIA APAGADA LA ESPUMA DE PLEGADO.
-        // El desplazamiento a lo largo de `D` es `H·cos φ·(1 + g·max(0,cos φ))`, o sea
-        // `H·(cos φ + g·cos²φ)` en la mitad delantera. Su derivada respecto a la fase es
-        // `−H·sin φ·(1 + 2g·cos φ)` — con un DOS, porque el termino del adelanto es cuadratico en
-        // `cos φ`. El motor acumulaba `horiz·k·sin φ`, o sea `(1 + g·cos φ)`: se dejaba la mitad del
+        // El desplazamiento a lo largo de `D` es `H·cos φ·(1 + g·max(0,−cos φ))`, o sea
+        // `H·(cos φ − g·cos²φ)` en la mitad delantera (`cos φ < 0`: ver la nota de `oceanDisplacement`).
+        // Su derivada respecto a la fase es `−H·sin φ·(1 − 2g·cos φ)` — con un DOS, porque el termino
+        // del adelanto es cuadratico en `cos φ`. El motor acumulaba `(1 + g·cos φ)`: se dejaba la mitad del
         // efecto del adelanto justo en la magnitud que decide si la ola rompe.
         //
         // Medido con la derivada NUMERICA de `oceanDisplacement` como oraculo: el peor
         // `|analitico − traza|` era **0,3071**. No es un ajuste fino: es que la formula no era la
         // derivada de lo que el motor dibuja.
-        const float dHoriz = oceanHorizAmp(k, amp, depthM) * steepScale
-                           * (1.0f + 2.0f * curl * std::max(0.0f, c))
-                           * ((i == 0) ? (1.0f + breaker) : 1.0f);   // ver `oceanBreakerGain`
+        const float hBase = oceanHorizAmp(k, amp, depthM) * steepScale
+                          * ((i == 0) ? (1.0f + breaker) : 1.0f);   // ver `oceanBreakerGain`
+        const float curlI  = oceanCurlCap(curl, hBase, amp);            // ver `oceanCurlCap`
+        const float dHoriz = hBase * (1.0f + 2.0f * curlI * gate.G * std::max(0.0f, -c));
         jac -= dHoriz * k * s;
+        curlVec += D * (hBase * curlI * std::max(0.0f, -c) * c);
+        lip.add(i, D, amp, k, c, s);
         const float ka = amp * k;
         grad += glm::vec2(glm::dot(D, t1), glm::dot(D, t2)) * (ka * c);
         sumSq += ka * ka;                      // σ de la pendiente: escala de la distribucion
     }
+    // La puerta del adelanto cambia de un punto a otro: su gradiente también entra en la divergencia.
+    jac += glm::dot(curlVec, gate.gradG);
+    // El labio adelanta la cresta a su cara: en la cara delantera `∂(L·u)/∂Dl < 0` y la lamina pliega.
+    if (lipGain > 0.0f) jac += lip.jacTerm(lipGain);
     if (outSlope) *outSlope = glm::length(grad);
     if (outSigma) *outSigma = std::sqrt(sumSq * 0.5f);
+    // Elevacion de la ola COMPUESTA en unidades de su amplitud (−1 seno · +1 cresta): la fase que
+    // sigue la espuma de rompiente.
+    if (outCrest) *outCrest = (lip.sumA > 0.0f) ? lip.eta / lip.sumA : 0.0f;
     return jac;
 }
 
@@ -1152,9 +1507,10 @@ inline float oceanFoam(const glm::vec3& wp, const glm::vec3& up, float t,
                        float depthM, float fade, const OceanState& st,
                        float fetchM = WATER_FETCH_UNLIMITED,
                        const glm::vec3& upSlope = glm::vec3(0.0f),
-                                   float quadM = OCEAN_MIN_QUAD_M) {
-    float slope = 0.0f, sigma = 0.0f;
-    const float jac = oceanJacobian(wp, up, t, depthM, fade, st, fetchM, upSlope, &slope, &sigma, quadM);
+                                   float quadM = OCEAN_MIN_QUAD_M,
+                                   float bedM = OCEAN_NO_BED) {
+    float slope = 0.0f, sigma = 0.0f, crest = 0.0f;
+    const float jac = oceanJacobian(wp, up, t, depthM, fade, st, fetchM, upSlope, &slope, &sigma, quadM, &crest, bedM);
     (void)jac;
     // ⚠️ ESTA RAMA ERA `smoothstep(0.55, 0.05, jac)` Y ESTABA MUERTA: pedía un escarpado local de
     // 0,45 y en mar abierto se alcanza el **0,000 %** de las veces (200 000 muestras). El océano salía
@@ -1207,7 +1563,16 @@ inline float oceanFoam(const glm::vec3& wp, const glm::vec3& up, float t,
     // 7,85 a 1,5 m). Arranca en el 0,78 clasico. Sustituye a la banda por PROFUNDIDAD que habia
     // (`smoothstep(1.6, 0.7, d/2A₀)`): era la misma idea escrita en metros en vez de en fisica — no
     // sabia nada de la ola, solo de cuanta agua hay debajo.
-    const float shoreFoam = glm::smoothstep(0.78f, 1.60f, oceanBreakIndex(depthM, st, fetchM, quadM));
+    // ⚠️ Y VA CON LA FASE DE LA OLA (17-10). El indice solo dice CUANTO rompe este sitio, no CUANDO:
+    // usado tal cual, todo lo mas somero que ~2 m salia blanco opaco y QUIETO, con el borde siguiendo
+    // los triangulos del agua (captura en 31,09 · 126,07: la orilla entera una mancha blanca, sin una
+    // sola ola). El agua blanca de verdad viaja con la cresta que revienta y deja detras espuma
+    // gastada, asi que se modula con la elevacion de la ola compuesta: 1 en la cresta, el resto
+    // (`OCEAN_SPENT_FOAM`) en el seno. `ocean_foam` mide que la orilla siga mas blanca que el mar
+    // abierto y que ahora haya bandas que se mueven.
+    const float bore = glm::smoothstep(OCEAN_BORE_LO, OCEAN_BORE_HI, crest);
+    const float shoreFoam = glm::smoothstep(0.78f, 1.60f, oceanBreakIndex(depthM, st, fetchM, quadM))
+                          * (OCEAN_SPENT_FOAM + (1.0f - OCEAN_SPENT_FOAM) * bore);
     // ⚠️ LA ESCALA VA AQUI TAMBIEN, y faltaba: `harukaGerstner` multiplica su espuma por
     // `harukaFoamScale()` (el `misc.w` del UBO, que sale de este mismo `oceanFoamScale`) y este
     // gemelo no lo hacia. Con la escala por defecto (1,0) daba igual, pero `HARUKA_OCEAN_FOAM=0.5`
@@ -1245,7 +1610,8 @@ inline float oceanWaveHeight(const glm::vec3& wp, const glm::vec3& up, float t,
                              float depthM, float fade, const OceanState& st,
                              float fetchM = WATER_FETCH_UNLIMITED,
                              const glm::vec3& upSlope = glm::vec3(0.0f),
-                                   float quadM = OCEAN_MIN_QUAD_M) {
+                                   float quadM = OCEAN_MIN_QUAD_M,
+                                   float bedM = OCEAN_NO_BED) {
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
                                                                : glm::cross(up, glm::vec3(1, 0, 0)));
     const glm::vec3 t2 = glm::cross(up, t1);
@@ -1255,6 +1621,9 @@ inline float oceanWaveHeight(const glm::vec3& wp, const glm::vec3& up, float t,
     // amplifique. Sin él, un lago hereda el swell del océano — ver `oceanFetchFactor`.
     const float green = oceanGreenGain(depthM) * oceanFetchFactor(st, fetchM);
     const float scale = oceanBreakScale(depthM, st, fetchM, quadM);
+    // La CAIDA del labio (`oceanLipGain`) tambien: es vertical, y lo que se nada es lo que se ve.
+    const float lipGain = oceanLipGain(depthM, st, fetchM, quadM);
+    OceanLipAcc lip;
     // ⚠️ EL 2º ARMONICO TAMBIEN AQUI, y no es opcional: esta es la cota que usa la FISICA para flotar
     // y para ahogarse. Si solo estuviera en el shader, lo que se ve y lo que se nada volverian a ser
     // dos superficies distintas — la misma discrepancia que este fichero existe para impedir.
@@ -1268,18 +1637,20 @@ inline float oceanWaveHeight(const glm::vec3& wp, const glm::vec3& up, float t,
         // —que es lo que se conserva— sigue siendo la profunda. Ver `oceanWaveNumber`.
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * fade * oceanShortWaveFade(k, quadM);
         if (amp <= 1e-4f) continue;
         // ⚠️ REFRACTADA. La direccion de la tabla es la de AGUAS PROFUNDAS; al perder fondo la ola
         // gira hacia la orilla (`oceanRefract`). Sin pendiente el vector sale identico.
         const glm::vec3 D = oceanRefract(glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]),
                                          upSlope, up, k0, k);
         const float w  = std::sqrt(OCEAN_G * k0);         // la frecuencia NO cambia con el fondo
-        const float ph = k * glm::dot(D, wp) - w * t + st.phase[i];
+        const float ph = oceanTrainPhase(st, i, k0, k, D, wp, t1, t2, t, bedM);
         // Componente a lo largo de `up`, con el 2º armonico POR TREN. No cambia la altura pico-valle,
         // asi que el limite de rompiente y la flotabilidad siguen significando lo mismo.
         h += amp * (std::sin(ph) - oceanStokesSkew(k, amp, depthM) * std::cos(2.0f * ph));
+        lip.add(i, D, amp, k, std::cos(ph), std::sin(ph));
     }
+    if (lipGain > 0.0f) h += glm::dot(lip.disp(up, lipGain), up);
     return h;
 }
 
@@ -1323,7 +1694,8 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
                                    float depthM, float fade, const OceanState& st,
                                    float fetchM = WATER_FETCH_UNLIMITED,
                                    const glm::vec3& upSlope = glm::vec3(0.0f),
-                                   float quadM = OCEAN_MIN_QUAD_M) {
+                                   float quadM = OCEAN_MIN_QUAD_M,
+                                   float bedM = OCEAN_NO_BED) {
     // MISMO marco que `oceanWaveHeight` y que el shader. Si estas dos líneas divergen, la velocidad
     // apunta a otro sitio que la altura y el agua empuja en diagonal respecto a sus propias crestas.
     const glm::vec3 t1 = glm::normalize(std::abs(up.y) < 0.99f ? glm::cross(up, glm::vec3(0, 1, 0))
@@ -1338,6 +1710,8 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
     const float steepScale = oceanSteepScale(depthM, st, fetchM, quadM);
     const float curl       = oceanCurlGain(depthM, st, fetchM, quadM);
     const float breaker    = oceanBreakerGain(depthM, st, fetchM, quadM);
+    const float gate       = (curl > 0.0f) ? oceanCurlGate(wp, up, t1, t2, t, depthM, fade, st, fetchM,
+                                                           upSlope, quadM, green, scale, bedM).G : 0.0f;
     (void)breakiness;
     glm::vec3 v(0.0f);
     for (int i = 0; i < OCEAN_WAVES; ++i) {
@@ -1345,7 +1719,7 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
         // velocidad dejaría de ser la derivada de la altura y `ocean_wave_velocity` lo cazaría.
         const float k0 = 6.2831853f / st.wave[i][0];
         const float k  = oceanWaveNumber(k0, depthM);
-        const float amp = st.wave[i][1] * green * scale * fade * oceanShortWaveFade(k, quadM);
+        const float amp = oceanAmp(st, i, fetchM) * green * scale * fade * oceanShortWaveFade(k, quadM);
         if (amp <= 1e-4f) continue;
         // ⚠️ AQUI FALTABA LA REFRACCION, Y EL PARAMETRO YA LLEGABA. `upSlope` se aceptaba en la firma
         // y no se usaba NUNCA: `oceanWaveHeight` giraba la ola al perder fondo y esto no, asi que en
@@ -1359,7 +1733,7 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
         const glm::vec3 D = oceanRefract(glm::normalize(t1 * st.wave[i][2] + t2 * st.wave[i][3]),
                                          upSlope, up, k0, k);
         const float w  = std::sqrt(OCEAN_G * k0);         // la frecuencia NO cambia con el fondo
-        const float ph = k * glm::dot(D, wp) - w * t + st.phase[i];
+        const float ph = oceanTrainPhase(st, i, k0, k, D, wp, t1, t2, t, bedM);
         // Q = escarpado, GEMELO EXACTO de `ocean_wave.glsl`. Entra en la velocidad horizontal porque
         // es quien reparte cuánto del círculo es avance y cuánto subida — y al romper crece, que es
         // por lo que la cresta de una ola que revienta te empuja hacia la playa mucho más que el
@@ -1370,9 +1744,12 @@ inline glm::vec3 oceanWaveVelocity(const glm::vec3& wp, const glm::vec3& up, flo
         // mitad delantera de la ola. Es lo que hace que una rompiente te empuje hacia la playa mucho
         // mas que el mismo oleaje en agua honda.
         const float cph = std::cos(ph);
-        const float horiz = oceanHorizAmp(k, amp, depthM) * steepScale
-                          * (1.0f + curl * std::max(0.0f, cph))
+        const float hBase = oceanHorizAmp(k, amp, depthM) * steepScale
                           * ((i == 0) ? (1.0f + breaker) : 1.0f);   // ver `oceanBreakerGain`
+        // ⚠️ Era `max(0, cos φ)`: el signo VIEJO del adelanto (la mitad de atrás), que
+        // `oceanDisplacement` ya había corregido. `∂/∂t` de `H·(cos φ − g·cos²φ)` lleva el DOS, como
+        // el jacobiano. Y con la puerta de la ola compuesta y el tope por tren (`oceanCurlCap`).
+        const float horiz = hBase * (1.0f + 2.0f * oceanCurlCap(curl, hBase, amp) * gate * std::max(0.0f, -cph));
         // ⚠️ LA VERTICAL LLEVA EL 2º ARMONICO DERIVADO. La elevacion es `amp·(sin φ − S·cos 2φ)` y
         // `∂φ/∂t = −ω`, asi que la velocidad vertical es `−amp·ω·(cos φ + 2S·sin 2φ)`. Sin el segundo
         // termino la velocidad dejaria de ser la derivada de la altura y `ocean_wave_velocity` lo

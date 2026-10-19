@@ -615,7 +615,10 @@ void test_sky_bake() {
         std::printf("    humedad 1.0 como TIERRA: cobertura media %.3f, llueve en %.1f%% · como MAR: %.3f, "
                     "claros (<0.35) %.1f%%, llueve en %.1f%%\n", mL, 100 * rainL, mS, 100 * clearS, 100 * rainS);
         std::printf("    cirro: media %.3f · max %.3f · correlacion con el cumulo %.3f\n", cirMean, cirMax, corr);
-        CHECK(mL > 0.8, "con humedad 1.0 tratada como tierra el cielo esta cerrado (es el sintoma)");
+        // (Era `mL > 0,8`, con el fondo de buen tiempo a 0,73·H. Desde el 18-10 el fondo es solo cúmulo,
+        //  `kFairWeatherCover`·H, y la tierra empapada ya no cierra el cielo sola: lo que se protege es
+        //  que el mar NO se trate como tierra, o sea que la tierra quede claramente por encima.)
+        CHECK(mL > mS + 0.15, "con humedad 1.0 tratada como tierra hay bastante más nube que como mar (es el sintoma)");
         CHECK(mS < 0.75, "tratada como MAR queda por debajo de 0.75 de media");
         CHECK(clearS > 0.10, "y con claros de verdad (mas del 10 % del mar por debajo de 0.35)");
         CHECK(rainS < rainL, "y llueve MENOS sobre el mar que con la humedad cruda");

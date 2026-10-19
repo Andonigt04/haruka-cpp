@@ -270,6 +270,40 @@ void test_physics_transient_wall() {
     CHECK(eng.getTransientOBBs().empty(), "removeTransientOBB lo quita de la lista");
 }
 
+// EL PERSONAJE ANDA AUNQUE EL ORIGEN DE JOLT LO HAYA FIJADO ALGO LEJOS (17-10).
+//
+// "El jugador no se puede mover, pero volando si". Jolt simula en float relativo a un origen que fijaba
+// el PRIMER cuerpo y no se movia nunca; en la partida el jugador quedo a 9 407 km de el, donde un float
+// resuelve 1 m y un paso de andar (2,5 cm) se redondea a cero. Se reproduce igual: un cuerpo anclado a
+// 9 407 km entra primero, y despues el personaje anda 5 s a 1,5 m/s. CONTRAPRUEBA: el mismo paseo sin
+// el cuerpo lejano (origen en el personaje) — los dos tienen que recorrer lo mismo.
+void test_physics_far_origin_walk() {
+    beginTest("physics_far_origin_walk");
+    auto walk = [](bool farFirst) {
+        Haruka::Physics::PhysicsEngine eng; FlatMeshWorld w(glm::dvec3(0.0)); eng.setWorldProvider(&w);
+        std::shared_ptr<Haruka::Physics::RigidBody> far;
+        if (farFirst) {
+            far = std::make_shared<Haruka::Physics::RigidBody>();
+            far->name = "lejos"; far->position = glm::dvec3(9.407e6, 0.0, 0.0);
+            far->radius = 0.5; far->mass = 10.0; far->anchored = true;
+            eng.addBody(far);
+        }
+        auto b = std::make_shared<Haruka::Physics::RigidBody>();
+        b->position = glm::dvec3(0.0, 1.0, 0.0); b->radius = 0.5; b->mass = 70.0; b->name = "player";
+        b->isCharacter = true;
+        eng.addBody(b);
+        for (int i = 0; i < 120; ++i) eng.advance(1.0 / 60.0);                      // se asienta
+        const double x0 = b->position.x;
+        for (int i = 0; i < 300; ++i) { b->velocity.x = 1.5; eng.advance(1.0 / 60.0); }
+        return b->position.x - x0;
+    };
+    const double dFar = walk(true), dNear = walk(false);
+    std::printf("    5 s a 1,5 m/s: %.2f m con el origen fijado a 9 407 km · %.2f m con el origen en el personaje\n",
+                dFar, dNear);
+    CHECK(dFar > 6.5, "con el origen fijado lejos, el personaje ANDA (~7,5 m en 5 s)");
+    CHECK(std::abs(dFar - dNear) < 0.5, "CONTRAPRUEBA: recorre lo mismo que con el origen en el");
+}
+
 // OBJETOS con física real (lo que sueltas: cae, se asienta) + RETIRADA limpia del cuerpo.
 // El bug que cubre: `removeBody` borraba el cuerpo de la lista pero NO de Jolt → quedaba un
 // colisionador FANTASMA invisible en ese sitio (y una clave `RigidBody*` colgando en el mapa). Se
@@ -1218,6 +1252,7 @@ HARUKA_REGISTER_TESTS(
     { "physics_mesh_ground", test_physics_mesh_ground },
     { "physics_static_wall", test_physics_static_wall },
     { "physics_transient_wall", test_physics_transient_wall },
+    { "physics_far_origin_walk", test_physics_far_origin_walk },
     { "physics_character", test_physics_character },
     { "physics_character_resting_velocity", test_physics_character_resting_velocity },
     { "physics_character_capsule", test_physics_character_capsule },

@@ -115,10 +115,6 @@ void boxDownsample(const unsigned char* src, int sw, int sh, int factor,
 
 // Shaders y UBO compartidos entre TODOS los planetas (estáticos).
 Haruka::RHI::PipelineHandle TerrestrialPlanet::s_pipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_texPipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_biomePipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_tessPipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_cullPipeline;
 
 namespace {
 /// Ajuste con OVERRIDE por entorno. El valor de `SettingsManager` es el que manda; la variable solo
@@ -130,8 +126,6 @@ bool settingWithEnvOverride(bool setting, const char* envVar) {
     return setting;
 }
 } // namespace
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_nearRingPipeline;
-Haruka::RHI::PipelineHandle TerrestrialPlanet::s_wirePipeline;
 Haruka::RHI::BufferHandle TerrestrialPlanet::s_ubo;
 bool TerrestrialPlanet::s_shadersReady = false;
 
@@ -173,16 +167,8 @@ void TerrestrialPlanet::ensureShaders() {
     // ⚠️ Las rutas tienen que seguir VIVAS mientras se llama a createPipeline: PipelineDesc
     // guarda `const char*`, no copia. Por eso son locales de esta función y no temporales.
     const std::string shaderDir = Renderer::Shader::baseDir() + "shaders/planet/";
-    const std::string pBiomeFrag       = shaderDir + "biome.frag";
-    const std::string pTerrainCull     = shaderDir + "terrain_cull.comp";
     const std::string pSimpleFrag      = shaderDir + "simple.frag";
     const std::string pSimpleVert      = shaderDir + "simple.vert";
-    const std::string pTessCtrl        = shaderDir + "terrain.tesc";
-    const std::string pTessEval        = shaderDir + "terrain.tese";
-    const std::string pTessVert        = shaderDir + "terrain.vert";
-    const std::string pTexFrag         = shaderDir + "textured.frag";
-    const std::string pSimpleWireFrag  = shaderDir + "wire.frag";
-    const std::string pSimpleWireVert  = shaderDir + "wire.vert";
 
     // Terrain pipeline (per-vertex color fallback)
     RHI::PipelineDesc pd;
@@ -206,106 +192,24 @@ void TerrestrialPlanet::ensureShaders() {
         { 3, offsetof(SimplePlanetVertex, cr), RHI::Format::RGB32F },
     };
     pd.vertexLayout.strides[0] = (uint32_t)sizeof(SimplePlanetVertex);
+    // ⚠️ `simple.vert` declara `aClimate` (location 4) para TODOS sus pipelines, no solo el de biomas:
+    // sin el atributo, Vulkan lee una entrada sin declarar (indefinido; VUID-...-Input-07904 en el
+    // juego). Los que siguen copiando `pd.vertexLayout` ya no pueden olvidarlo.
+    pd.vertexLayout = withClimate(pd.vertexLayout);
     pd.depth.test   = true;  pd.depth.write = true;
     pd.depth.compare = RHI::CompareOp::Greater;
     pd.cull = RHI::CullMode::Back;
     s_pipeline = dev->createPipeline(pd);
 
-    // Textured terrain pipeline — same vertex layout, triplanar fragment shader
-    RHI::PipelineDesc tpd;
-    tpd.vertexPath   = pSimpleVert.c_str();
-    tpd.fragmentPath = pTexFrag.c_str();
-    tpd.vertexLayout   = pd.vertexLayout;
-    tpd.depth          = pd.depth;
-    tpd.cull           = pd.cull;
-    s_texPipeline = dev->createPipeline(tpd);
-
-    // Biome-blended pipeline — 4-layer triplanar texturing keyed by biome map
-    RHI::PipelineDesc bpd;
-    bpd.vertexPath   = pSimpleVert.c_str();
-    bpd.fragmentPath = pBiomeFrag.c_str();
-    bpd.vertexLayout   = withClimate(pd.vertexLayout);
-    bpd.depth          = pd.depth;
-    bpd.cull           = pd.cull;
-    // ── ⚠️ NO SE CREAN SI EL PASE v5 DIBUJA. MEDIDO: 187 ms DE ARRANQUE ────────────────────────
+    // ── EL TERRENO DE RESPALDO SE BORRÓ (2026-10-18) ──────────────────────────────────────────────
     //
-    // `s_biomePipeline` (simple.vert|biome.frag) y `s_tessPipeline` (terrain.vert|biome.frag) son la
-    // malla base del planeta. Sus UNICOS `bindPipeline` estan dentro del `if
-    // (!TerrainNodeRenderer::enabled())` de mas abajo, o sea que con el v5 activo —el caso por
-    // defecto— se compilaban para no dibujarse jamas. Del log del juego de Andoni:
-    //
-    //     simple.vert    | biome.frag     75 ms
-    //     terrain.vert   | biome.frag    112 ms
-    //     ------------------------------------
-    //                                   187 ms   de 423 ms de creacion de pipelines
-    //
-    // Se crean con la MISMA condicion que sus draws, asi que con `HARUKA_TERRAIN_V5=0` siguen
-    // estando. No es una optimizacion con riesgo: es dejar de construir lo que no se usa.
-    //
-    // ⚠️ EL DEL ANILLO CERCANO NO ENTRA AQUI aunque cueste 97 ms: su draw esta detras de `!v5Drew`,
-    // que es una red de seguridad EN TIEMPO DE EJECUCION (si el v5 no dibuja un frame, tapa el
-    // agujero). Quitarlo cambiaria comportamiento, no solo coste.
-    const bool v5Draws = Terrain::TerrainNodeRenderer::enabled();
-
-    if (!v5Draws) s_biomePipeline = dev->createPipeline(bpd);
-
-    // Pipeline TESELADO: mismo fragment que el de bioma (las salidas del evaluation coinciden con
-    // sus entradas), pero con control + evaluación y entrada de PARCHES.
-    {
-        RHI::PipelineDesc tpd;
-        tpd.vertexPath      = pTessVert.c_str();
-        tpd.tessControlPath = pTessCtrl.c_str();
-        tpd.tessEvalPath    = pTessEval.c_str();
-        tpd.fragmentPath    = pBiomeFrag.c_str();
-        tpd.vertexLayout      = withClimate(pd.vertexLayout);
-        tpd.topology          = RHI::PrimitiveTopology::Patches;
-        tpd.patchVertices     = 4;
-        tpd.depth             = pd.depth;
-        tpd.cull              = pd.cull;
-        if (!v5Draws) s_tessPipeline = dev->createPipeline(tpd);
-
-        // El pipeline del CLIPMAP se borró el 2026-08-24: lo sustituye el pase de nodos (v5).
-
-        // ── SUELO CERCANO DESDE LA COLISIÓN ─────────────────────────────────────────────────────
-        //
-        // MISMO fragment que el clipmap (`biome.frag`) y mismos bindings: solo cambia de dónde sale
-        // la geometría. Ese es el objetivo — que el material, el bioma y las sombras sean los de
-        // siempre y lo único distinto sea que los vértices ya no los inventa el teselador, sino que
-        // llegan de la física. Sin teselación: triángulos y un índice explícito con la diagonal de
-        // Jolt, que es lo que el teselador no puede garantizar.
-        RHI::PipelineDesc npd;
-        const std::string pNearVert = shaderDir + "nearground.vert";
-        npd.vertexPath   = pNearVert.c_str();
-        npd.fragmentPath = pBiomeFrag.c_str();
-        npd.vertexLayout.strides    = { (uint32_t)(3 * sizeof(float)) };
-        npd.vertexLayout.attributes = { { 0, 0, RHI::Format::RGB32F, 0 } };
-        npd.topology = RHI::PrimitiveTopology::Triangles;
-        npd.depth    = pd.depth;
-        // Más sesgo que el clipmap: este parche y el clipmap son coplanares dentro de ±256 m y
-        // mientras no haya hueco (paso 5 del plan) hay que decidir cuál gana. Tiene que ganar este,
-        // que es el que describe lo que se pisa.
-        npd.depth.biasConstant = 96.0f;
-        npd.depth.biasSlope    = 3.0f;
-        npd.cull = pd.cull;
-        s_nearRingPipeline = dev->createPipeline(npd);
-        HARUKA_LOGD("SimplePlanet", "pipeline suelo cercano: %s",
-                    RHI::valid(s_nearRingPipeline) ? "ok" : "FALLO");
-
-        HARUKA_LOGD("SimplePlanet", "pipeline clipmap: %s",
-                    "borrado (lo sustituye el pase v5)");
-        HARUKA_LOGD("SimplePlanet", "pipeline teselado: %s",
-                    v5Draws ? "NO SE CREA (dibuja el pase v5; ahorra 187 ms con el de bioma)"
-                            : (RHI::valid(s_tessPipeline) ? "ok" : "FALLO (se usa la malla sin teselar)"));
-
-        // COMPUTE del culling de parches. Se crea siempre (es barato) pero solo se USA con
-        // el ajuste: así el pipeline se valida en cada arranque y el fallo sale en el log
-        // aunque el camino esté apagado, en vez de descubrirse el día que alguien lo enciende.
-        RHI::PipelineDesc ccd;
-        ccd.computePath = pTerrainCull.c_str();
-        s_cullPipeline  = dev->createPipeline(ccd);
-        HARUKA_LOGD("SimplePlanet", "pipeline culling de parches (compute): %s",
-                    RHI::valid(s_cullPipeline) ? "ok" : "FALLO (se dibujan todos los parches)");
-    }
+    // Aquí se creaban el clipmap TESELADO (`terrain.vert/.tesc/.tese` + `biome.frag`), la malla de
+    // biomas sin teselar, la triplanar (`textured.frag`, nunca dibujada), el anillo de suelo cercano
+    // desde la física (`nearground.vert`) y el compute que recortaba sus parches (`terrain_cull.comp`).
+    // Todo eso era el terreno de antes del pase de nodos (v5): con el v5 activo no se dibujaba, pero
+    // los buffers del recorte (~25 MB de envolventes + el índice de parches) se subían a la VRAM
+    // igualmente. Queda solo `simple.vert/.frag`, el respaldo básico por color de vértice
+    // (`HARUKA_TERRAIN_V5=0`).
 
     // ── EL MAR: SUS PIPELINES SE BORRARON CON SU GEOMETRIA (2026-09-01) ─────────────────────────
     //
@@ -315,21 +219,6 @@ void TerrestrialPlanet::ensureShaders() {
     //
     // ⚠️ Y NO ES SOLO LIMPIEZA: crear pipelines que nunca dibujan cuesta. Ya se midio una vez —187 ms
     // en las del bioma y la teselacion, que se dejaron de crear al pasar el terreno al v5.
-
-    // Wireframe pipeline
-    RHI::PipelineDesc wire;
-    wire.vertexPath   = pSimpleWireVert.c_str();
-    wire.fragmentPath = pSimpleWireFrag.c_str();
-    wire.vertexLayout   = withClimate({}); // ensure stride matches vertex size
-    wire.vertexLayout.attributes = {
-        { 0, offsetof(SimplePlanetVertex, px), RHI::Format::RGB32F },
-    };
-    wire.depth.test   = true;  wire.depth.write = false;
-    wire.depth.compare = RHI::CompareOp::Greater;
-    wire.cull = RHI::CullMode::None;
-    wire.blend.enable = true;
-    wire.blend.mode   = RHI::BlendMode::Alpha;
-    s_wirePipeline = dev->createPipeline(wire);
 
     struct SimplePlanetUBO {
         glm::mat4 uMVP;
@@ -353,14 +242,6 @@ void TerrestrialPlanet::cleanupStatics() {
     RHI::Device* dev = RHI::device();
     if (!dev) return;
     if (RHI::valid(s_pipeline))     { dev->destroy(s_pipeline);     s_pipeline = {}; }
-    if (RHI::valid(s_texPipeline))  { dev->destroy(s_texPipeline);  s_texPipeline = {}; }
-    if (RHI::valid(s_biomePipeline)){ dev->destroy(s_biomePipeline); s_biomePipeline = {}; }
-    if (RHI::valid(s_wirePipeline)) { dev->destroy(s_wirePipeline);  s_wirePipeline = {}; }
-    // ⚠️ Estos tres faltaban: los pipelines de teselación y clipmap se creaban y nunca se
-    // destruían. Fuga preexistente, no del culling — pero se arregla aquí porque es el mismo sitio.
-    if (RHI::valid(s_tessPipeline)) { dev->destroy(s_tessPipeline);  s_tessPipeline = {}; }
-    if (RHI::valid(s_nearRingPipeline)) { dev->destroy(s_nearRingPipeline); s_nearRingPipeline = {}; }
-    if (RHI::valid(s_cullPipeline)) { dev->destroy(s_cullPipeline);  s_cullPipeline = {}; }
     if (RHI::valid(s_ubo))          { dev->destroy(s_ubo);           s_ubo = {}; }
     s_shadersReady = false;
 }
@@ -411,17 +292,32 @@ void TerrestrialPlanet::setInlandWater(const std::vector<float>* surfaceM, int n
 
 void TerrestrialPlanet::setOceanState(const Water::OceanState& st, const glm::vec3& anchorRelEye) {
     m_oceanStateCPU = st;   // ver el log de `[Mar]`: cuantos trenes caben en la celda del agua
+    // La franja de rompiente para la malla fina del agua (`Water::surfDepthM`). Llega cada frame y la
+    // mar se interpola con el clima, así que los trenes cambian en cada llamada (comparándolos exactos
+    // se rebarría siempre: medido, el log salía cada frame). Se rebarre cuando la Hs se mueve un 2 %.
+    const float hsNow = Water::oceanSignificantHeight(st);
+    if (!(std::abs(hsNow - m_surfHs) <= 0.02f * m_surfHs)) {
+        m_surfHs = hsNow;
+        m_surfDepthM = Water::oceanBreakDepth(st);
+        m_surfQuadM  = Water::oceanBreakerFaceM(st) / 6.0f;   // 6 vertices por cara de ola rota
+        m_surfUpM    = Water::oceanSignificantHeight(st);   // la trepada no pasa de Hs (medido 1,1 m con Hs 1,6)
+        HARUKA_LOGI("Mar", "franja de rompiente: rompe desde %.2f m de fondo, trepa hasta %.2f m -> malla fina "
+                       "del agua en ese suelo (quad %.2f m o %.0f px/vertice con holgura)",
+                       m_surfDepthM, m_surfUpM, m_surfQuadM, (double)Terrain::TerrainNodeRenderer::Water{}.surfVertexPxMin);
+    }
     RHI::Device* dev = RHI::device();
     if (!dev) { m_oceanParamsValid = false; return; }
     // Gemelo EXACTO del bloque `OceanParams` de `lib/ocean_params.glsl`: 8 vec4 de trenes + misc +
     // 2 vec4 de desfase + ancla. std140 alinea cada elemento de un array a 16 bytes, y un vec4 ya
     // los ocupa — sin relleno.
     struct OceanParamsUBO { glm::vec4 wave[Water::OCEAN_WAVES]; glm::vec4 misc;
-                            glm::vec4 phase[2]; glm::vec4 anchor; } up{};
-    static_assert(sizeof(OceanParamsUBO) == (Water::OCEAN_WAVES + 4) * 16, "OceanParams descuadrado");
+                            glm::vec4 phase[2]; glm::vec4 anchor; glm::vec4 swell[2]; } up{};
+    static_assert(sizeof(OceanParamsUBO) == (Water::OCEAN_WAVES + 6) * 16, "OceanParams descuadrado");
     for (int i = 0; i < Water::OCEAN_WAVES; ++i)
         up.wave[i] = glm::vec4(st.wave[i][0], st.wave[i][1], st.wave[i][2], st.wave[i][3]);
     for (int i = 0; i < Water::OCEAN_WAVES; ++i) up.phase[i / 4][i % 4] = st.phase[i];
+    // La parte de MAR DE FONDO de cada tren: el agua cerrada no la recibe (`harukaAmpAt`).
+    for (int i = 0; i < Water::OCEAN_WAVES; ++i) up.swell[i / 4][i % 4] = st.swell[i];
     // El ANCLA del mar relativa al ojo: la fase de cada vertice se mide desde ella (ver
     // `OceanState::phase`). Y el viento filtrado, para que el fetch y los borreguillos de la GPU
     // usen el mismo que la CPU en vez de deducirlo de una Hs que ya no invierte PM.
@@ -445,36 +341,18 @@ void TerrestrialPlanet::setOceanState(const Water::OceanState& st, const glm::ve
     m_oceanParamsValid = RHI::valid(m_oceanParamsUBO);
 }
 
-// EL SUELO CERCANO QUE VIENE DE LA FÍSICA. Solo se re-suben los buffers cuando llega geometría
-// nueva (al saltar el anclaje del clipmap); el UBO del ancla sí va por frame, porque la traslación
-// ancla→ojo cambia con la cámara aunque la geometría no.
+// EL SUELO CERCANO QUE VIENE DE LA FÍSICA. Ya no se dibuja (su pipeline, `nearground.vert`, se borró
+// con el terreno de respaldo el 2026-10-18); solo queda su ANCLA, que fija la retícula del bloque de
+// ClipParams en `render` (ver allí).
 void TerrestrialPlanet::setNearGroundRing(const std::vector<glm::vec3>* verts,
                                           const std::vector<uint32_t>* tris,
-                                          const glm::vec3& anchorRelEye, const glm::vec3& anchorUp,
+                                          const glm::vec3& /*anchorRelEye*/, const glm::vec3& /*anchorUp*/,
                                           const glm::dvec3& anchorWorld) {
-    RHI::Device* dev = RHI::device();
-    if (!dev) return;
-    if (verts && tris && verts->size() >= 3 && tris->size() >= 3) {
-        if (RHI::valid(m_nearRingVB)) { dev->destroy(m_nearRingVB); m_nearRingVB = {}; }
-        if (RHI::valid(m_nearRingIB)) { dev->destroy(m_nearRingIB); m_nearRingIB = {}; }
-        m_nearRingVB = dev->createBuffer(RHI::BufferUsage::Vertex,
-                                         verts->size() * sizeof(glm::vec3), verts->data());
-        m_nearRingIB = dev->createBuffer(RHI::BufferUsage::Index,
-                                         tris->size() * sizeof(uint32_t), tris->data());
+    if (verts && tris && verts->size() >= 3 && tris->size() >= 3)
         m_nearRingIndices = (uint32_t)tris->size();
-    }
     if (m_nearRingIndices < 3) return;
-    // El ancla del anillo pasa a ser también la del clipmap (ver el bloque de ClipParams en `draw`):
-    // es la única forma de que las dos retículas compartan vértices en la frontera del hueco.
     m_nearRingAnchor   = anchorWorld;
     m_nearRingAnchored = true;
-    struct { glm::vec4 anchorRelEye; glm::vec4 anchorUp; } u{
-        glm::vec4(anchorRelEye, 0.0f), glm::vec4(anchorUp, 0.0f) };
-    if (!RHI::valid(m_nearRingUBO))
-        m_nearRingUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(u), &u,
-                                          RHI::BufferMemory::Dynamic);
-    else
-        dev->updateBuffer(m_nearRingUBO, 0, sizeof(u), &u);
 }
 
 void TerrestrialPlanet::buildMesh(
@@ -491,13 +369,9 @@ void TerrestrialPlanet::buildMesh(
 
     std::vector<SimplePlanetVertex> verts(totalVerts);
     std::vector<uint32_t> indices(totalIndices);
-    std::vector<uint32_t> patchIdx((size_t)6 * res * res * 4);
-    // 4 esquinas por parche (vec4 cada una) para el culling en GPU. 393 216 parches × 64 B = 25 MB
-    // en un planeta de faceRes 256; estático, se sube una vez y no se vuelve a tocar.
-    std::vector<glm::vec4> patchBounds((size_t)6 * res * res * 4);
 
     // LAS 6 CARAS EN PARALELO: cada cara solo lee su retícula local (`faceDirs`/`heights`) y escribe
-    // en un rango DISJUNTO de verts/indices/patchIdx; `heightFn`/`biomeColor`/`m_climate` son puras
+    // en un rango DISJUNTO de verts/indices; `heightFn`/`biomeColor`/`m_climate` son puras
     // `const` (geología, clima, elevación/zona: solo lectura). Es el reparto de carga ESTABLE: sin
     // mutex, sin estado compartido, sin carreras. Los buffers se pre-dimensionan y cada hilo rellena
     // solo su tramo, así que no hay push_back concurrente ni realloc.
@@ -576,7 +450,6 @@ void TerrestrialPlanet::buildMesh(
 
         // Indices
         size_t iout = (size_t)face * res * res * 6;
-        size_t pout = (size_t)face * res * res * 4;
         for (int j = 0; j < res; ++j)
             for (int i = 0; i < res; ++i) {
                 const uint32_t a = vBase + (uint32_t)(j * (res + 1) + i);
@@ -585,22 +458,6 @@ void TerrestrialPlanet::buildMesh(
                 const uint32_t d = vBase + (uint32_t)((j + 1) * (res + 1) + i + 1);
                 indices[iout++] = a; indices[iout++] = b; indices[iout++] = c;
                 indices[iout++] = b; indices[iout++] = d; indices[iout++] = c;
-                // Orden del PARCHE: recorrido del quad (a,b,d,c), no el de los triángulos. El tess
-                // eval interpola con `mix(mix(p0,p1,u), mix(p3,p2,u), v)`, así que los cuatro tienen
-                // que ir en anillo; con el orden de triángulos el parche saldría cruzado.
-                patchIdx[pout++] = a; patchIdx[pout++] = b;
-                patchIdx[pout++] = d; patchIdx[pout++] = c;
-                // ENVOLVENTE DEL PARCHE para el culling en GPU (terrain_cull.comp): las 4 esquinas
-                // en coords del planeta. Se calcula UNA vez aquí —la malla base es estática— para
-                // que el compute no tenga que replicar el layout del vertex buffer en GLSL.
-                const size_t pb = (size_t)(pout / 4 - 1) * 4;
-                auto vpos = [&](uint32_t vi) {
-                    return glm::vec4(verts[vi].px, verts[vi].py, verts[vi].pz, 0.0f);
-                };
-                patchBounds[pb + 0] = vpos(a);
-                patchBounds[pb + 1] = vpos(b);
-                patchBounds[pb + 2] = vpos(d);
-                patchBounds[pb + 3] = vpos(c);
             }
     };
 
@@ -615,8 +472,7 @@ void TerrestrialPlanet::buildMesh(
     // salta es la SUBIDA, porque sus unicos `drawIndexed` estan dentro del `if
     // (!TerrainNodeRenderer::enabled())` del render.
     //
-    // Del log del juego: `idx=2359296` indices = 9,4 MB de indices, mas los vertices y el buffer de
-    // parches, residentes en VRAM para no dibujarse jamas.
+    // Del log del juego: `idx=2359296` indices = 9,4 MB de indices, mas los vertices, residentes en VRAM para no dibujarse jamas.
     //
     // ⚠️ Y HAY QUE TOCAR LA GUARDA DE `render()` A LA VEZ. Empieza con
     // `if (!valid(m_vertexBuffer)) return;`, que daba la malla base por obligatoria: sin este cambio,
@@ -626,32 +482,9 @@ void TerrestrialPlanet::buildMesh(
     if (!v5DrawsMesh) {
         m_vertexBuffer = dev->createBuffer(RHI::BufferUsage::Vertex, verts.size() * sizeof(SimplePlanetVertex), verts.data(), RHI::BufferMemory::Static);
         m_indexBuffer  = dev->createBuffer(RHI::BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data(), RHI::BufferMemory::Static);
-        m_patchIB      = dev->createBuffer(RHI::BufferUsage::Index, patchIdx.size() * sizeof(uint32_t), patchIdx.data(), RHI::BufferMemory::Static);
     }
     m_indexCount   = (uint32_t)indices.size();
     m_vertexCount  = (uint32_t)verts.size();
-    m_patchIndexCount = (uint32_t)patchIdx.size();
-    // ── Culling de parches en GPU (ajuste GpuPatchCull; HARUKA_GPU_CULL=0/1 lo fuerza) ──────────
-    // Buffers del compute: envolventes (SSBO estático), índice ORIGEN (el mismo patchIdx, como
-    // storage), índice COMPACTADO (destino, tamaño máximo = el original) y el comando indirecto.
-    // Se crean aquí porque su tamaño lo fija la malla; el dispatch va en el draw.
-    m_patchCount   = (uint32_t)patchIdx.size() / 4u;
-    m_patchBoundsSSBO = dev->createBuffer(RHI::BufferUsage::Storage,
-                                          patchBounds.size() * sizeof(glm::vec4),
-                                          patchBounds.data(), RHI::BufferMemory::Static);
-    m_patchIdxSSBO = dev->createBuffer(RHI::BufferUsage::Storage,
-                                       patchIdx.size() * sizeof(uint32_t),
-                                       patchIdx.data(), RHI::BufferMemory::Static);
-    // El compactado es a la vez ÍNDICE (para el draw) y STORAGE (destino del compute).
-    m_patchIdxCulled = dev->createBuffer(RHI::BufferUsage::Index,
-                                         patchIdx.size() * sizeof(uint32_t),
-                                         nullptr, RHI::BufferMemory::Dynamic);
-    // DrawElementsIndirectCommand: {indexCount, instanceCount, firstIndex, baseVertex, baseInstance}.
-    // El compute solo escribe indexCount; el resto lo fija la CPU una vez.
-    const uint32_t cmdInit[5] = { 0u, 1u, 0u, 0u, 0u };
-    m_patchCullCmd = dev->createBuffer(RHI::BufferUsage::Indirect, sizeof(cmdInit), cmdInit,
-                                       RHI::BufferMemory::Dynamic);
-
     // REJILLA DE PARCHES: N x N parches de 128 m con la cámara en el centro; la rejilla no se
     // regenera nunca, solo se reorienta con el marco tangente del UBO. Sobrevivió al borrado del
     // pipeline del clipmap porque la reusan los anillos de MAR (ver el bloque de `m_ringGridVB` en el
@@ -765,14 +598,6 @@ void TerrestrialPlanet::clearGPU() {
     if (!dev) return;
     if (RHI::valid(m_vertexBuffer)) { dev->destroy(m_vertexBuffer); m_vertexBuffer = {}; }
     if (RHI::valid(m_indexBuffer))  { dev->destroy(m_indexBuffer);  m_indexBuffer  = {}; }
-    if (RHI::valid(m_patchIB))      { dev->destroy(m_patchIB);      m_patchIB      = {}; }
-    // Buffers del culling en GPU: por planeta, porque su tamaño lo fija su faceRes.
-    if (RHI::valid(m_patchBoundsSSBO)) { dev->destroy(m_patchBoundsSSBO); m_patchBoundsSSBO = {}; }
-    if (RHI::valid(m_patchIdxSSBO))    { dev->destroy(m_patchIdxSSBO);    m_patchIdxSSBO    = {}; }
-    if (RHI::valid(m_patchIdxCulled))  { dev->destroy(m_patchIdxCulled);  m_patchIdxCulled  = {}; }
-    if (RHI::valid(m_patchCullCmd))    { dev->destroy(m_patchCullCmd);    m_patchCullCmd    = {}; }
-    if (RHI::valid(m_patchCullUBO))    { dev->destroy(m_patchCullUBO);    m_patchCullUBO    = {}; }
-    m_patchCount = 0;
     if (RHI::valid(m_baseFieldTex)) { dev->destroy(m_baseFieldTex); m_baseFieldTex = {}; }
     if (RHI::valid(m_lakeTex))          { dev->destroy(m_lakeTex);          m_lakeTex          = {}; }
     if (RHI::valid(m_lakeDummy))        { dev->destroy(m_lakeDummy);        m_lakeDummy        = {}; }
@@ -3316,10 +3141,31 @@ void TerrestrialPlanet::craterListNear(const glm::dvec3& cameraPos, size_t maxN,
     }
 }
 
+bool TerrestrialPlanet::groundView(const glm::dvec3& cameraPos, double radiusM, GroundView& out) const {
+    if (!m_nodeRenderer.enabled() || !RHI::valid(m_nodeRenderer.heightsBuffer())) return false;
+    out.planetCenter  = m_config.position;
+    out.planetRadiusM = m_config.radius;
+    out.seaLevelM     = m_seaLevelOffsetM;
+    out.finestTexelM  = (float)m_nodeRenderer.nearNodes(cameraPos, m_config.position, m_config.radius,
+                                                        radiusM, out.nodes);
+    if (out.nodes.empty()) return false;
+    out.heights      = m_nodeRenderer.heightsBuffer();
+    out.baseField    = m_nodeRenderer.baseFieldOrDummy();
+    out.materialUBO  = m_materialUBO;
+    out.cutTex       = m_voxRenderer.cutTexture();
+    out.cutSpace     = m_voxRenderer.cutSpace();
+    out.cutFineSpace = m_voxRenderer.fineCutSpace();
+    out.cutFineR     = m_voxRenderer.fineRadius();
+    out.cutAtlas     = m_voxRenderer.cutAtlas();
+    // Las dos versiones solo crecen: la suma cambia cuando cambia cualquiera de las dos.
+    out.cutVersion   = m_voxRenderer.cutVersion() + m_vox.craterVersion();
+    craterListNear(cameraPos, 32, out.craterC, out.craterU);
+    return true;
+}
+
 void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& viewDir,
                                 double fovYRad, double aspect, double viewportH,
                                 const glm::dvec3& viewUp) {
-    m_cullReady = false;
     // LA VENTANA FINA DE LAGOS. Va aqui y no en el bake porque SIGUE AL OBSERVADOR: el bake se hace
     // una vez y esto se recentra al caminar. No bloquea — lanza un hilo y recoge cuando esta.
     {
@@ -3373,48 +3219,6 @@ void TerrestrialPlanet::prepare(const glm::dvec3& cameraPos, const glm::dvec3& v
         }
     }
 
-    if (!RHI::valid(m_vertexBuffer)) return;
-
-    // Mismas condiciones que antes. OPT-IN a propósito: un fallo aquí se ve como AGUJEROS en el
-    // planeta, y `HARUKA_GPU_CULL=0` lo apaga sin recompilar. El TCS mantiene su propio test, así
-    // que este camino solo puede quitar trabajo, nunca dibujar algo distinto.
-    const bool gpuCull = settingWithEnvOverride(
-        Settings::SettingsManager::get().graphics().gpuPatchCull, "HARUKA_GPU_CULL");
-    if (!gpuCull || !RHI::valid(s_cullPipeline) || m_patchCount <= 0 ||
-        !RHI::valid(m_patchBoundsSSBO) || !RHI::valid(m_patchIdxSSBO) ||
-        !RHI::valid(m_patchIdxCulled) || !RHI::valid(m_patchCullCmd))
-        return;
-    { HARUKA_PROFILE("planet.gpucull"); HARUKA_GPU_SCOPE("planet.gpucull");
-
-    // El comando se resetea por CPU cada frame: el compute solo ACUMULA con atomicAdd, así que si no
-    // se pusiera indexCount a 0 crecería sin fin entre frames.
-    const uint32_t cmdReset[5] = { 0u, 1u, 0u, 0u, 0u };
-    dev->updateBuffer(m_patchCullCmd, 0, sizeof(cmdReset), &cmdReset);
-
-    struct CullParams { glm::vec4 camRel, camDir; } cp{};
-    const glm::dvec3 rel = cameraPos - m_config.position;
-    const double relLen = glm::length(rel);
-    cp.camRel = glm::vec4(glm::vec3(rel), (float)m_config.radius);
-    cp.camDir = glm::vec4(glm::vec3(relLen > 1e-9 ? rel / relLen : glm::dvec3(0, 1, 0)),
-                          (float)m_patchCount);
-    if (!RHI::valid(m_patchCullUBO))
-        m_patchCullUBO = dev->createBuffer(RHI::BufferUsage::Uniform, sizeof(cp), &cp,
-                                           RHI::BufferMemory::Dynamic);
-    else
-        dev->updateBuffer(m_patchCullUBO, 0, sizeof(cp), &cp);
-
-    ctx->bindPipeline(s_cullPipeline);
-    ctx->bindStorageBuffer(0, m_patchBoundsSSBO);
-    ctx->bindStorageBuffer(1, m_patchIdxSSBO);
-    ctx->bindStorageBuffer(2, m_patchIdxCulled);
-    ctx->bindStorageBuffer(3, m_patchCullCmd);
-    ctx->bindUniformBuffer(4, m_patchCullUBO);
-    ctx->dispatch((m_patchCount + 63u) / 64u, 1, 1);
-    // El draw leerá lo que el compute acaba de escribir: índice, comando y storage.
-    ctx->memoryBarrier();
-
-    m_cullReady = true;
-    }
 }
 
 void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
@@ -3841,9 +3645,8 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
             table.mats[i].f = glm::vec4(m.elevMinKm, m.elevMaxKm, m.elevFeatherKm, 0.0f);
             // ⚠️ `g` es NUEVO y su gemelo GLSL (`TerrainMat`) tiene que crecer EN EL MISMO COMMIT:
             // el UBO es std140 y un vec4 de diferencia desalinea TODOS los materiales, no solo éste.
-            // `g.w` = hierba del material (JSON `"grass"`). Lo leía el viejo `grass_gen.comp`; hoy la
-            // hierba es una capa de props y ningún shader lo lee, pero se conserva el hueco: quitarlo
-            // movería el layout std140 de la tabla.
+            // `g.w` = hierba del material (JSON `"grass"`): lo lee `harukaMaterialGrass`
+            // (`ground_scatter.comp` decide con él dónde crece la cubierta densa).
             table.mats[i].g = glm::vec4(m.depthMinKm, m.depthMaxKm, m.depthFeatherKm, m.grassAmount());
         }
         if (!RHI::valid(m_materialUBO)) {
@@ -3952,25 +3755,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // hasta el agua (ninguna bind intermedia toca la unidad 16).
     if (RHI::valid(m_heightTex))            ctx->bindTexture(16, m_heightTex);
 
-    // TESELADO si está disponible: la malla base es la misma, cambia el índice (parches) y el
-    // pipeline. Si el pipeline no compiló se cae a la malla sin teselar.
-    // ── INTERRUPTOR PARA AISLAR LAS BANDAS ──────────────────────────────────────────────────────
-    //
-    // Todo el lado de DATOS está verificado limpio sobre la captura de RenderDoc (frame 919 de
-    // testC2): posiciones de la malla base dentro de ±0,1 % de R, índice compactado con los 852
-    // parches de dispersión exacta 258, comando indirecto 3408 = 852·4, instancias de props cuadrando
-    // con su subida, hacha con matriz de rotación pura. Si aun así aparecen franjas estiradas, las
-    // genera un shader de TESELACIÓN a partir de entradas sanas — y solo hay dos candidatos.
-    //
-    // `HARUKA_NO_TESS=1` dibuja la malla base SIN teselar (camino de respaldo que ya existía). Si con
-    // eso desaparecen, el culpable es `terrain.tesc/tese`; si siguen, es el clipmap.
-    static const bool s_noTess = [] {
-        const char* e = std::getenv("HARUKA_NO_TESS");
-        return e && e[0] == '1';
-    }();
-    const bool useTess = !s_noTess &&
-                         RHI::valid(s_tessPipeline) && RHI::valid(m_patchIB) && hasBiome;
-
     // CLIPMAP: solo tiene sentido si la cámara está lo bastante cerca de la superficie. Con la
     // cámara en órbita la rejilla sería un punto, y el coste de decidirlo es despreciable. Misma
     // condición que `clipActive` del UBO (recorte de la malla base en terrain.tese).
@@ -4022,10 +3806,9 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
         // borde de parche. Ahora el NIVEL 0 nunca se estira, así que el hueco sería legal a cualquier
         // altura — se mantiene la condición porque 192 m de detalle fino bajo un jugador que está a
         // cientos de metros no aporta nada, no porque la geometría lo impida.
-        const bool nearRingOK = (m_nearRingIndices >= 3 && RHI::valid(m_nearRingVB)
+        const bool nearRingOK = (m_nearRingIndices >= 3
                                  && camAltGround <= 20.0);
         const float hole0 = nearRingOK ? (float)Terrain::TERRAIN_CLIP_HOLE_M : 0.0f;
-        m_nearRingVisible = (hole0 > 0.0f);
 
         m_ringCount = ringCount;
         if ((int)m_ringParamUBOs.size() < ringCount) m_ringParamUBOs.resize((size_t)ringCount, RHI::BufferHandle{});
@@ -4153,44 +3936,12 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // El v5 cubre del suelo a la órbita (quadtree sobre cube-sphere, sin el techo de ~20-30° de la
     // proyección gnomónica del clipmap), así que no hay rango que la base tenga que rellenar.
     if (!Terrain::TerrainNodeRenderer::enabled()) {
-    if (useTess) {
-        ctx->bindPipeline(s_tessPipeline);
-        ctx->bindVertexBuffer(m_vertexBuffer);
-
-        // ── CULLING DE PARCHES EN GPU (ajuste GpuPatchCull; HARUKA_GPU_CULL=0/1 lo fuerza) ──────
-        //
-        // Sin esto se envían los 393 216 parches y el TCS mata casi todos: a altura de ojo el
-        // horizonte está a 4,65 km y un parche mide 39,1 km, así que se ve parte de UNO. Con el
-        // compute, el TCS solo recibe los que pueden salir en pantalla.
-        //
-        // ⚠️ Es OPT-IN a propósito. Un fallo aquí se ve como AGUJEROS en el planeta, y con una
-        // variable de entorno se apaga sin recompilar ni revertir. El TCS mantiene su propio test,
-        // así que este camino solo puede quitar trabajo, nunca dibujar algo distinto.
-        // ⚠️ EL DISPATCH YA NO ESTÁ AQUÍ: lo hace `prepare()`, ANTES de abrir el render pass.
-        // `vkCmdDispatch` dentro de una instancia de render pass es ILEGAL en Vulkan (en OpenGL es
-        // legal, y por eso vivía aquí). Cerraba el programa, y el síntoma no se parecía a la causa:
-        // en una captura de RenderDoc los draws se veían bien uno a uno —el replay los ejecuta
-        // aislados— mientras en ejecución el dispositivo se perdía a mitad de frame y la pantalla
-        // quedaba negra. `m_cullReady` transporta aquí si el culling llegó a ejecutarse.
-        if (m_cullReady) {
-            ctx->bindPipeline(s_tessPipeline);
-            ctx->bindVertexBuffer(m_vertexBuffer);
-            ctx->bindIndexBuffer(m_patchIdxCulled);
-            ctx->drawIndexedIndirect(m_patchCullCmd, 1, 0, 0);
-        } else {
-            ctx->bindIndexBuffer(m_patchIB);
-            ctx->drawIndexed(m_patchIndexCount);
-        }
-    } else if (hasBiome) {
-        ctx->bindPipeline(s_biomePipeline);
-    } else {
-        ctx->bindPipeline(s_pipeline);
-    }
-    if (!useTess) {
-        ctx->bindVertexBuffer(m_vertexBuffer);
-        ctx->bindIndexBuffer(m_indexBuffer);
-        ctx->drawIndexed(m_indexCount);
-    }
+    // El respaldo BÁSICO (por color de vértice): el teselado y el de biomas se borraron con
+    // `planet/terrain.*` y `biome.frag` (2026-10-18).
+    ctx->bindPipeline(s_pipeline);
+    ctx->bindVertexBuffer(m_vertexBuffer);
+    ctx->bindIndexBuffer(m_indexBuffer);
+    ctx->drawIndexed(m_indexCount);
     }
     }  // fin planet.base.draw
 
@@ -4316,6 +4067,16 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                 }
                 w.inlandRelEye  = m_inlandWaterValid ? m_inlandCenterRelEye : glm::vec3(0.0f);
                 w.inlandRadiusM = m_inlandWaterValid ? m_inlandSpanM * 0.75f : 0.0f;
+                w.seaLevelM  = m_oceanStateCPU.seaLevelM;
+                w.surfDepthM = m_oceanParamsValid ? m_surfDepthM : 0.0f;
+                w.surfUpM    = m_surfUpM;
+                w.surfQuadM  = m_surfQuadM;
+                w.liquidClipOn = m_liquidClip.on;
+                w.liquidOrigin = m_liquidClip.origin;
+                w.liquidAxisX  = glm::vec3(m_liquidClip.axisX);
+                w.liquidAxisZ  = glm::vec3(m_liquidClip.axisZ);
+                w.liquidSizeX  = (float)m_liquidClip.sizeX;
+                w.liquidSizeZ  = (float)m_liquidClip.sizeZ;
                 m_nodeRenderer.setWater(w);
             }
             // ⚠️ `prepare` (compute) YA se despachó fuera del pase — ver prepareNodePass(). Aquí solo
@@ -4537,6 +4298,14 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
                                            : "");
                 }
             }
+            // La franja de rompiente, cada ~10 s: cuántos nodos la llevan, qué paga y a qué ley va.
+            {
+                static int s_surfLog = 0;
+                if (st.waterSurf > 0 && (s_surfLog++ % 600) == 0)
+                    HARUKA_LOGI("Mar", "franja: %zu nodos de agua de %zu · %zu tris de %zu · %.1f px/vertice",
+                                st.waterSurf, st.waterNodes, st.waterSurfTris, st.waterTris,
+                                (double)m_nodeRenderer.surfVertexPx());
+            }
             v5Drew = st.drawn > 0;
         }
     }
@@ -4556,40 +4325,6 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // Se dibuja DESPUÉS del clipmap y con más sesgo de profundidad: dentro de ±256 m los dos
     // describen el mismo suelo y tiene que ganar éste, que es el que de verdad se pisa. Cuando el
     // paso 5 abra el hueco en el clipmap dejarán de solaparse y el sesgo sobrará.
-    { HARUKA_PROFILE("planet.nearring.draw"); HARUKA_GPU_SCOPE("planet.nearring.draw");
-    // ⚠️ CON EL v5 NO HAY HUECO QUE TAPAR, Y ESTE ANILLO ERA "EL TERRENO FALSO A PIE".
-    //
-    // El anillo cercano existe para rellenar el HUECO DEL NIVEL 0 del clipmap, dibujando la malla de
-    // colisión con sus mismos vértices. El pase de nodos no deja hueco: cubre del suelo a la órbita.
-    // Así que con v5 esto pintaba una SEGUNDA superficie —más basta, la de colisión— encima de la
-    // buena. Y con `biasConstant = 96.0` va empujada hacia la cámara, así que gana el depth siempre:
-    // a pie se veía el suelo de colisión en vez del terreno.
-    //
-    // Misma razón por la que `useClip` se anula unas líneas más arriba. `v5Drew` ya está resuelto
-    // aquí (el pase dibujó en este mismo frame), así que la condición es exacta y no una suposición.
-    if (!v5Drew && m_nearRingVisible && m_nearRingIndices >= 3 && RHI::valid(s_nearRingPipeline)
-        && RHI::valid(m_nearRingVB) && RHI::valid(m_nearRingIB)) {
-        ctx->bindPipeline(s_nearRingPipeline);
-        ctx->bindUniformBuffer(0, s_ubo);
-        // ClipParams del NIVEL 0: es el anillo cuyo hueco rellena este suelo. Con el del exterior
-        // vería una cobertura 2^k veces mayor y un hueco que no es el suyo.
-        ctx->bindUniformBuffer(13, m_ringParamUBOs[0]);
-        ctx->bindUniformBuffer(22, m_nearRingUBO);
-        ctx->bindUniformBuffer(23, m_wetUBO);
-        if (RHI::valid(m_skyMaskTex)) ctx->bindTexture(17, m_skyMaskTex);
-        // ⚠️ NUNCA `m_baseFieldTex` A PELO. Sin bake ese handle es INVÁLIDO, y este era el único
-        // sitio del terreno que lo ataba sin red: de ahí el aviso `bindTexture(15): handle sin
-        // textura` del backend de GL. Que sea un aviso y no un fallo es engañoso — en Vulkan la
-        // ranura queda sin escribir, y el shader de este anillo DECLARA `uBaseField` (binding 15 en
-        // `terrain_node.vert`/`lib/base_field.glsl`), así que muestrearla es leer un descriptor
-        // indefinido. `baseFieldOrDummy()` devuelve el mismo bake cuando lo hay y el 1x1 de relleno
-        // cuando no, que es el criterio que ya siguen las ranuras 15/16/18/19 del pase de nodos.
-        ctx->bindTexture(15, m_nodeRenderer.baseFieldOrDummy());
-        ctx->bindVertexBuffer(m_nearRingVB);
-        ctx->bindIndexBuffer(m_nearRingIB);
-        ctx->drawIndexed(m_nearRingIndices);
-    }
-    }  // fin planet.nearring.draw
 
     // ── EL MAR ──────────────────────────────────────────────────────────────────────────────────
     //
@@ -4650,7 +4385,7 @@ void TerrestrialPlanet::render(const glm::dvec3& cameraPos,
     // Geometría DEL ÚLTIMO FRAME para el panel: la malla base (teselada o lisa), el clipmap solo
     // cuando pinta,. Triángulos = índices/3.
     m_lastRenderStats.baseVertices  = m_vertexCount;
-    m_lastRenderStats.baseTriangles = (useTess ? m_patchIndexCount : m_indexCount) / 3;
+    m_lastRenderStats.baseTriangles = m_indexCount / 3;
     // × anillos: el clipmap ya no es un draw sino `m_ringCount`. Sin multiplicar, el panel
     // seguiría enseñando el coste de UN anillo y el cambio saldría gratis en pantalla.
     // (Es una cota ALTA: los anillos exteriores descartan su centro en el TCS, ~736 de 961 parches.)

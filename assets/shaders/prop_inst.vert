@@ -10,7 +10,7 @@
  * In (per-instance, binding 1): ver lib/instance.glsl (pos 3, giro 4, escala 5, tinte 7, rotas 10)
  *                              — MISMO layout que GPUInstancing::appendInstanceLayout.
  * Out: Normal (0), FragPos (1), Color (2), TexCoord (3) → prop_inst.frag
- * UBOs: PerFrameData (binding 0, MISMO que construction_inst) + PropParams (binding 6).
+ * UBOs: PerFrameData (binding 0, MISMO que mesh_inst) + PropParams (binding 6).
  */
 #version 450 core
 #extension GL_GOOGLE_include_directive : require
@@ -24,7 +24,8 @@ layout(location = 9) in vec2 aUv;
 #include "lib/instance.glsl"
 layout(location = 11) in float aPart;      // parte del esqueleto de ESTE vértice (per-vertex)
 
-#include "lib/frame_ubo.glsl"   // PerFrameData (binding 0)
+#include "lib/frame_ubo.glsl"     // PerFrameData (binding 0)
+#include "lib/aerial.glsl"        // el aire, por vértice
 
 #include "lib/prop_params.glsl"   // PropParams (binding 6)
 #include "lib/prop_sway.glsl"     // harukaPropSway: el viento, el mismo que la capa masiva
@@ -33,6 +34,9 @@ layout(location = 0) out vec3 Normal;
 layout(location = 1) out vec3 FragPos;
 layout(location = 2) out vec3 Color;
 layout(location = 3) out vec2 TexCoord;
+// EL AIRE entre el ojo y el vértice (lib/aerial.glsl, por vértice: ver `harukaAerialTS`).
+layout(location = 4) out vec3 AerialT;
+layout(location = 5) out vec3 AerialS;
 
 void main() {
     const vec3 aColor = aColorPk.rgb * (aColorPk.a * 4.0);
@@ -48,6 +52,7 @@ void main() {
     if (harukaInstancePartBroken(aPart)) {
         gl_Position = projection * view * vec4(iPos + u_originRel.xyz, 1.0);
         Normal = vec3(0.0, 1.0, 0.0); FragPos = iPos + u_originRel.xyz; Color = vec3(0.0); TexCoord = vec2(0.0);
+        AerialT = vec3(1.0); AerialS = vec3(0.0);
         return;
     }
 
@@ -65,5 +70,6 @@ void main() {
     Normal   = harukaInstanceNormal(q, aNormal.xyz);   // R·(n/s): exacta con escala no uniforme, sin inverse()
     Color    = aColor * harukaInstanceTint();
     TexCoord = aUv;
+    harukaAerialTS(camRel, AerialT, AerialS);
     gl_Position = projection * view * vec4(camRel, 1.0);
 }

@@ -34,6 +34,7 @@
 // el propio test se convertiria en la tautologia que viene a descartar.
 // ================================================================================================
 #include "lib/cube_face.glsl"    // harukaCubeFaceToDir — el camino real del bake, con sus tres sqrt
+#include "lib/fp64.glsl"         // el residuo sub-float sin la ida y vuelta que el compilador pliega
 
 layout(local_size_x = 1) in;
 layout(std430, binding = 0) writeonly buffer Out { float uOut[]; };
@@ -46,7 +47,9 @@ layout(std430, binding = 1) readonly buffer In { float uIn[]; };
 // Lo que un float NO puede representar de `a`. Si la GPU calculo `a` en double de verdad, esto es un
 // numero del orden de medio ulp de float; si lo degrado a float, es CERO EXACTO. No cancela con
 // nada, que es justo lo que le fallaba al caso (3) viejo.
-double subFloatResidual(double a) { return a - double(float(a)); }
+// ⚠️ Ver lib/fp64.glsl: `a - double(float(a))` lo pliega el compilador del driver (tambien con
+// `precise`) y daba CERO siempre — la sonda acusaba al hardware de degradar el producto y la division.
+double subFloatResidual(double a) { return harukaSubFloatResidual(a); }
 
 void main()
 {

@@ -2,7 +2,7 @@
  * @file Port.h
  * @brief PUERTOS AUTORIZADOS de un asset: puntos de MONTAJE, de INTERACCIÓN y RAÍLES.
  *
- * Ver `docs/guides/PLAN_PUERTOS.md`. Resumen de por qué existe esto:
+ * Ver `docs/archivo/PLAN_PUERTOS.md`. Resumen de por qué existe esto:
  *
  * Hasta ahora los puntos de acople se DERIVABAN de la caja envolvente (los centros de cara del
  * AABB — ver `PLAN_CONSTRUCCION.md`, "Sockets/SNAP derivados del AABB"). Eso vale para muros y

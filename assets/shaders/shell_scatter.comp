@@ -1,0 +1,152 @@
+#version 460 core
+#extension GL_GOOGLE_include_directive : require
+/**
+ * @file shell_scatter.comp
+ * @brief SIEMBRA EN LA GPU, CADA FRAME, RACIMOS DE BULTOS SOBRE UNA CÁSCARA ESFÉRICA a la cota que
+ *        dice un campo por dirección, y los deja como instancias del stream compacto de props
+ *        (`lib/instance_pack.glsl`) más seis comandos indirectos (domo/esfera × 3 niveles de malla).
+ *        Los dibuja `prop_inst.vert` + `prop_inst.frag` con la malla de cada forma: ni un vertex ni un
+ *        fragment propios.
+ *
+ * No sabe QUÉ siembra: la ley es `lib/shell_clumps.glsl` (gemelo de `World/ShellClumps.h`) y el campo
+ * es (cobertura, base, techo, oscurecer) por dirección. El cielo lo usa para los cúmulos.
+ *
+ * ── LA RETÍCULA: FIJA A LA ESFERA, GIRADA ENTERA ─────────────────────────────────────────────────
+ * Cada hilo es UNA celda de una cara del cubo (`uGrid.x` por lado) en el marco de la retícula; cada
+ * grupo, un bloque de 8×8 celdas que manda la CPU (`uWork`). `uRot` lleva el marco al planeta: así
+ * la retícula entera gira con el viento (`CloudSpin`) y nada se recoloca al moverse la cámara.
+ *
+ * ── EL DETALLE: PÍXELES ──────────────────────────────────────────────────────────────────────────
+ * Un racimo de menos de `uPx.z` px no se escribe. Uno que se ve elige el nivel de malla de su variante
+ * por su ancho en píxeles (`uLod`, `uCap.y`), con los umbrales escalados por `uPx.y`, que mueve el
+ * controlador de ms del que llama. La FORMA no depende del detalle: solo la malla.
+ *
+ * Salida: `uInst[]` (10 palabras por instancia, región r = variante·4 + nivel en [r·cap, (r+1)·cap)),
+ * `uVol[]` (la envolvente, en el mismo hueco) y `uCmd` (un comando de 5 palabras por región; detrás,
+ * una palabra por región que cuenta lo PEDIDO: si pasa de la capacidad, el que llama baja el detalle).
+ */
+#include "lib/shell_clumps.glsl"
+#include "lib/instance_pack.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std140, binding = 0) uniform ShellScatter {
+    mat4  uRot;        // columnas 0..2: marco de la retícula → planeta
+    vec4  uCenter;     // xyz = centro del planeta − cámara · w = R
+    vec4  uGrid;       // x = celdas por lado de cara · y = celda (m) · z = semilla (bits) · w = peso del campo NUEVO
+    vec4  uPx;         // x = focalPx · y = escala de los umbrales de malla (el mando, ≥ 1) · z = px mínimos de un racimo · w = libre
+    vec4  uLod;        // x = ancho px para la malla 0 · y = para la 1 · z = tinte · w = tinte a oscuro total
+    vec4  uPlane[4];   // los 4 planos laterales del frustum por el ojo (normales hacia dentro)
+    uvec4 uCap;        // x = capacidad por región · y = ancho px para la malla 2 (bits de float; si no, la 3) · z = variantes
+    vec4  uShape;      // x = alto máximo × (aspecto del tipo de nube) · y = estirado a lo largo del viento (1 = no)
+    vec4  uWind;       // xyz = dirección del viento (marco del ojo; 0 = sin viento)
+};
+
+layout(std430, binding = 3) writeonly buffer Instances { uint uInst[]; };
+layout(std430, binding = 4) buffer DrawCmd { uint uCmd[]; };
+layout(std430, binding = 5) readonly  buffer Work { uvec4 uWork[]; };   // cara, bx, by, -
+/// La ENVOLVENTE del racimo de cada bulto, en el MISMO hueco que su instancia (segundo stream de
+/// `prop_vol.vert`): centro (ojo) · semieje horizontal · semieje vertical · semilla del racimo (los
+/// trazos de pincel de `prop_vol.frag` cambian de una nube a otra).
+layout(std430, binding = 6) writeonly buffer Volumes { float uVol[]; };
+
+/// El campo por dirección (equirect del motor), NUEVO y ANTERIOR: se funden con `uGrid.w`.
+/// rgba = cobertura · base (m) · techo (m) · oscurecer [0,1].
+layout(binding = 1) uniform sampler2D uField;
+layout(binding = 2) uniform sampler2D uFieldPrev;
+
+vec4 fieldAt(vec3 d) {
+    const vec2 uv = vec2(0.5 + atan(d.z, d.x) * 0.1591549, 0.5 - asin(clamp(d.y, -1.0, 1.0)) * 0.3183099);
+    return mix(textureLod(uFieldPrev, uv, 0.0), textureLod(uField, uv, 0.0), clamp(uGrid.w, 0.0, 1.0));
+}
+
+void main() {
+    const uvec4 w = uWork[gl_WorkGroupID.x];
+    const uint li = gl_LocalInvocationID.x;
+    const uint i = w.y * 8u + (li & 7u), j = w.z * 8u + (li >> 3);
+    const uint N = uint(uGrid.x);
+    if (i >= N || j >= N) return;
+    const int face = int(w.x);
+
+    // ── EL SITIO Y SU RACIMO ────────────────────────────────────────────────────────────────────
+    const uint h = harukaClumpCellHash(face, i, j, floatBitsToUint(uGrid.z));
+    const vec3 dirC = harukaClumpSiteDir(face, i, j, N, h);
+    const vec3 dir = normalize(mat3(uRot) * dirC);
+    vec4 f = fieldAt(dir);
+    const HarukaClump c = harukaClumpAt(f.xyz, h, uGrid.y, uShape.x);
+    if (!c.present) return;
+
+    const float R = uCenter.w;
+    const vec3  C = uCenter.xyz + dir * (R + f.y + c.baseOffsetM);   // centro de la BASE, relativo al ojo
+    const float H = c.heightM, rw = 0.5 * c.widthM;
+    const float d = max(length(C), 1.0);
+    const float px = c.widthM * uPx.x / d;
+    if (px < uPx.z) return;
+
+    // ── LO QUE NO SE VE ─────────────────────────────────────────────────────────────────────────
+    // Fuera de la imagen (esfera que envuelve el racimo).
+    const vec3  mid = C + dir * (0.5 * H);
+    const float bound = max(rw, 0.5 * H) * 1.2;
+    for (int p = 0; p < 4; ++p) if (dot(mid, uPlane[p].xyz) < -bound) return;
+    // Tras el planeta: el rayo del ojo a la CIMA corta la esfera del suelo antes de llegar.
+    {
+        const vec3  T = C + dir * H;
+        const float tl = length(T);
+        const vec3  rd = T / tl;
+        const float b = dot(-uCenter.xyz, rd);           // ro = ojo (0), centro en uCenter
+        const float cc = dot(uCenter.xyz, uCenter.xyz) - R * R;
+        const float disc = b * b - cc;
+        if (cc > 0.0 && disc > 0.0) {
+            const float t0 = -b - sqrt(disc);
+            if (t0 > 0.0 && t0 < tl) return;
+        }
+    }
+
+    // ── LA NUBE: UNA INSTANCIA ──────────────────────────────────────────────────────────────────
+    // Cada racimo es UNA de las `uCap.z` variantes horneadas (`World/Props/BlobSurface`: la unión
+    // suave de sus bultos, ya fundida), elegida por su hash y escalada a su ancho y su alto. La forma
+    // no cambia con la distancia ni con el detalle: de lejos solo baja la malla (4 niveles por px).
+    // ⚠️ Antes un bulto era una instancia y el detalle decidía cuántos se dibujaban: el controlador de
+    // ms movía ese número cada pocos frames y la nube crecía, menguaba y cambiaba de forma sola.
+    const vec3 up = dir;
+    const vec3 ref = (abs(up.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    const vec3 e1 = normalize(cross(ref, up));
+    const vec3 e2 = cross(up, e1);
+    const float dark = smoothstep(0.2, 0.8, f.w);
+    const uint tint = harukaPackTint(vec3(uLod.z * mix(1.0, uLod.w, dark)));
+    const uint cap = uCap.x, nVar = uCap.z;
+    const float ls = max(uPx.y, 1.0);   // el mando de detalle: sube los umbrales de malla
+    const uint lod = (px > uLod.x * ls) ? 0u : ((px > uLod.y * ls) ? 1u : ((px > uintBitsToFloat(uCap.y) * ls) ? 2u : 3u));
+    const uint variant = (h >> 8) % max(nVar, 1u);
+    const uint region = variant * 4u + lod;
+    const uint slot = atomicAdd(uCmd[nVar * 4u * 5u + region], 1u);
+    if (slot >= cap) return;
+    // El eje X de la nube: al azar, o A LO LARGO DEL VIENTO si se estira (el cirro son fibras que el
+    // viento de altura peina).
+    const float yaw = harukaClumpHashF(h, 9u) * 6.2831853;
+    vec3 X = e1 * cos(yaw) + e2 * sin(yaw);
+    const float st = max(uShape.y, 1.0);
+    const vec3 wt = uWind.xyz - up * dot(uWind.xyz, up);
+    if (st > 1.01 && dot(wt, wt) > 1e-6) X = normalize(wt);
+    const vec3 Z = cross(X, up);
+    const vec4 q = harukaQuatFromBasis(X, up, Z);
+    // La variante se hornea con semiancho 1 y alto HARUKA_CLUMP_BAKE_H: la escala la lleva a la nube.
+    const vec3 scl = vec3(rw * st, H / HARUKA_CLUMP_BAKE_H, rw / sqrt(st));   // el estirado conserva el área
+    const uint o = (region * cap + slot) * HARUKA_INSTANCE_WORDS;
+    uInst[o + 0u] = floatBitsToUint(C.x);
+    uInst[o + 1u] = floatBitsToUint(C.y);
+    uInst[o + 2u] = floatBitsToUint(C.z);
+    uInst[o + 3u] = packSnorm2x16(q.xy);
+    uInst[o + 4u] = packSnorm2x16(q.zw);
+    uInst[o + 5u] = floatBitsToUint(scl.x);
+    uInst[o + 6u] = floatBitsToUint(scl.y);
+    uInst[o + 7u] = floatBitsToUint(scl.z);
+    uInst[o + 8u] = tint;
+    uInst[o + 9u] = 0u;
+    // La envolvente (luz de volumen) y la semilla (el pincel cambia de una nube a otra).
+    const vec3 volC = C + up * (0.5 * H);
+    const uint ov = (region * cap + slot) * 6u;
+    uVol[ov + 0u] = volC.x; uVol[ov + 1u] = volC.y; uVol[ov + 2u] = volC.z;
+    uVol[ov + 3u] = 1.05 * rw; uVol[ov + 4u] = 0.55 * H; uVol[ov + 5u] = float(h & 0xFFFFu);
+    atomicAdd(uCmd[region * 5u + 1u], 1u);
+}

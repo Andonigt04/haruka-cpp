@@ -1,0 +1,97 @@
+/* haruka_docs.css — barra izquierda (fijadas, guias, comunes) y cabecera de cada guia.
+ * Los colores salen de las variables --g-* de input.css. */
+
+.haruka-layout {
+  display: flex;
+  align-items: flex-start;
+  min-height: calc(100vh - 3.25rem);
+}
+
+#haruka-side {
+  position: sticky;
+  top: 0;
+  flex: 0 0 250px;
+  width: 250px;
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 14px 12px 24px;
+  background: var(--g-surface, #282d38);
+  border-right: 1px solid var(--g-border, #3a4150);
+  font-size: 14px;
+}
+
+#haruka-main {
+  flex: 1 1 auto;
+  min-width: 0;          /* las tablas anchas hacen scroll dentro, no empujan la pagina */
+  overflow-x: auto;
+}
+
+/* La caja de busqueda de Doxygen se posiciona sola (absolute/float): aqui va en el flujo */
+.haruka-search { display: flow-root; min-height: 28px; margin-bottom: 16px; }
+.haruka-search #MSearchBox {
+  position: relative !important;
+  float: none !important;
+  left: auto !important; right: auto !important; top: auto !important;
+  display: flex; align-items: center;
+  width: 100%; box-sizing: border-box; margin: 0;
+}
+.haruka-search #MSearchField { flex: 1 1 auto; min-width: 0; }
+
+.hd-sec { margin-bottom: 18px; }
+.hd-sec-title {
+  margin: 0 0 6px;
+  padding: 0 8px;
+  color: var(--g-muted, #8b93a3);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.hd-commons { padding-top: 14px; border-top: 1px solid var(--g-border, #3a4150); }
+
+.hd-list { list-style: none; margin: 0; padding: 0; }
+.hd-list a {
+  display: block;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: var(--g-fg, #c7ccd6) !important;
+  line-height: 1.35;
+}
+.hd-list a:hover { background: rgba(71, 140, 191, .16); color: #fff !important; }
+.hd-list a.hd-current { background: var(--g-blue, #478cbf); color: #fff !important; }
+
+/* Cabecera de una guia: ruta + fecha (+ fijada), debajo del titulo */
+.hd-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin-top: 6px;
+  color: var(--g-muted, #8b93a3);
+  font-size: 13px;
+  font-weight: 400;
+}
+.hd-meta .hd-path { padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+.hd-pin { color: var(--g-heading, #fff); }
+
+/* La primera linea de una guia es su resumen */
+#haruka-main .textblock > p:first-child {
+  font-size: 1.05em;
+  color: var(--g-heading, #fff);
+}
+
+/* Movil: la barra pasa arriba */
+@media (max-width: 760px) {
+  .haruka-layout { flex-direction: column; }
+  #haruka-side {
+    position: static;
+    width: 100%;
+    flex-basis: auto;
+    height: auto;
+    max-height: 45vh;      /* que el contenido asome sin bajar toda la lista */
+    border-right: 0;
+    border-bottom: 1px solid var(--g-border, #3a4150);
+  }
+  #haruka-main { width: 100%; }
+}

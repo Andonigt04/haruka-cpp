@@ -102,6 +102,13 @@ struct GraphicsSettings {
     // ~358 MB por array, ~716 MB entre albedo y normal. Con las 9 capas de antes habrían sido 1,6 GB.
     TerrainQuality  terrainQuality  = TerrainQuality::Medium;
     FoliageQuality  foliageQuality  = FoliageQuality::Medium; // densidad/alcance de árboles/rocas
+    /// La HIERBA (`GrassSystem`: matas + cubierta densa en la GPU). Apagada por defecto (17-10): hoy
+    /// se apoya en el mapa fino del nodo y no en la superficie que se dibuja con zancada, así que
+    /// sobresale del terreno. Con ella apagada no se siembra, ni se prepara, ni se dibuja.
+    bool            grass           = false;
+    /// El LÍQUIDO 3D (`World/Water/LiquidPatch`): un parche de agua simulada bajo la cámara, 3 ms de
+    /// GPU. Encendido: convive con el agua de siempre para compararlos (19-10).
+    bool            liquid          = true;
     float           fov             = 90.0f;
     float           renderScale     = 1.0f;
     bool            vsync           = false;
@@ -110,7 +117,7 @@ struct GraphicsSettings {
     /**
      * @brief TONEMAPPING. Sin él, lo que pasa de 1 se RECORTA y sale blanco puro.
      *
-     * ⚠️ No es un efecto decorativo: `prop_inst.frag` y `pbr.frag` deciden dentro del shader si
+     * ⚠️ No es un efecto decorativo: `prop_inst.frag` y `final.frag` deciden dentro del shader si
      * tonemapean (`color/(color+1)` + gamma) o si hacen `clamp(color, 0, 1)`. Con esto apagado, un
      * prop bien iluminado se quema — que es exactamente el síntoma que se persiguió durante horas
      * creyendo que era un fallo del backend de Vulkan.
@@ -136,15 +143,6 @@ struct GraphicsSettings {
      *  kernel de 5 taps, que es peor que un halo ancho. */
     int             bloomIterations = 3;
 
-    /** @brief Culling de PARCHES de la malla base en GPU (compute + drawIndexedIndirect).
-     *
-     *  La malla base envía 393 216 parches por frame y el TCS mata casi todos: a altura de ojo el
-     *  horizonte está a 4,65 km y un parche mide 39,1 km, así que se ve parte de UNO. El compute los
-     *  descarta antes, con una invocación por parche en vez de cuatro.
-     *
-     *  ⚠️ Un fallo aquí se ve como AGUJEROS en el planeta. `HARUKA_GPU_CULL=0` lo apaga sin tocar los
-     *  ajustes ni recompilar, que es la salida que uno quiere a las 3 de la mañana. */
-    bool            gpuPatchCull    = true;
 
     /** @brief Sombras del TERRENO por ray-march contra la función de altura, en el fragment.
      *

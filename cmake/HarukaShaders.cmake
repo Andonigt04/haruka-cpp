@@ -65,9 +65,8 @@ endif()
 file(GLOB SHADER_LIBS CONFIGURE_DEPENDS
     "${SHADER_SRC_DIR}/lib/*.glsl")
 list(FILTER SHADER_SOURCES EXCLUDE REGEX "/(lib|planet)/")
-# ⚠️ `.comp` incluido: el culling de parches (planet/terrain_cull.comp) es un COMPUTE, y sin él en
-# este glob el fichero no se copiaba al build ni se compilaba a SPIR-V. El síntoma era
-# "createPipeline: falta la etapa COMPUTE" — el motor pedía una ruta que no existía en bin/.
+# Solo queda el respaldo básico (`simple.vert/.frag`): el teselado, los biomas y el culling de
+# parches se borraron el 2026-10-18. Los demás tipos se siguen aceptando por si vuelve alguno.
 file(GLOB PLANET_SHADERS CONFIGURE_DEPENDS
     "${SHADER_SRC_DIR}/planet/*.vert" "${SHADER_SRC_DIR}/planet/*.frag"
     "${SHADER_SRC_DIR}/planet/*.tesc" "${SHADER_SRC_DIR}/planet/*.tese"

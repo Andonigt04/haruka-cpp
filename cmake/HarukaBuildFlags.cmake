@@ -132,7 +132,7 @@ if(NOT MSVC)
 
     # ⚠️ EL CAMINO DE ALTURA DEL TERRENO SE COMPILA SIN fast-math. No es purismo: el invariante
     # render↔colisión es de 1 cm, y se cumple porque la CPU y el shader evalúan la MISMA fórmula con
-    # la MISMA aritmética (ver terrain_gen.comp y `haruka_tests paridad`). `-ffast-math` autoriza a
+    # la MISMA aritmética (ver terrain_node.comp y `haruka_tests paridad`). `-ffast-math` autoriza a
     # GCC a reasociar sumas y —con `-march=native`, que sí tiene FMA— a fundir `a*b + c` en un FMA.
     # Las dos cosas cambian el resultado en ulps, y en el terreno un ulp de la dirección son
     # decímetros de superficie: la paridad se rompería SOLO en la build de Release, o sea justo en la

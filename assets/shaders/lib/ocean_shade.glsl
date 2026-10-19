@@ -19,51 +19,70 @@
 #define HARUKA_OCEAN_SHADE_GLSL
 
 #include "lib/lowpoly.glsl"
+#include "lib/sky_light.glsl"   // harukaLinear: los colores del agua son de pantalla
 
 /**
+ * @brief Luz que sale del mar hacia el ojo, en LINEAL (radiancia del motor, ya expuesta).
+ *
+ * ⚠️ ANTES ERA COLOR DE PANTALLA CON LUZ INVENTADA: quien llamaba pasaba `lightCol = vec3(1.0)` y un
+ * ambiente fijo `(0,10, 0,13, 0,18)`, el cielo reflejado era ese ambiente por un tinte azul elegido, y
+ * el brillo del Sol un `·2,2`. El mar brillaba igual de dia que de noche. Ahora entra la luz del frame
+ * (`lib/sky_light.glsl`) y cada termino es fisico: el agua de debajo (difusa, con su color por
+ * absorcion), el cielo REFLEJADO con Fresnel y el Sol reflejado con un lobulo que conserva la energia.
+ * Quien llama le pone el aire de en medio y lo lleva a pantalla (`harukaDisplay`).
+ *
  * @param wp       posición de la superficie del agua relativa al CENTRO del planeta (m).
  * @param fragPos  la misma posición relativa a la CÁMARA (m): de ahí salen vista y distancia.
  * @param n        normal de la superficie (ya con la ola, si la hay).
- * @param L        dirección a la luz (normalizada).
- * @param lightCol color de la luz directa.
- * @param ambient  ambiente del ciclo día/noche (uAmbient.xyz).
+ * @param nF       normal de la LUZ DIRECTA (sol y brillo): la de la faceta en low-poly.
+ * @param L        dirección al Sol (normalizada).
+ * @param sunE     irradiancia del Sol que llega a la superficie (tras el aire), lineal y expuesta.
+ * @param ambE     irradiancia difusa (cielo, suelo, Luna) sobre la superficie.
+ * @param skyRad   radiancia del cielo en la dirección REFLEJADA (π·L).
  * @param depthM   profundidad del agua bajo este punto (m). Gobierna color y opacidad.
  * @param foam     0..1 de `harukaGerstner`: cuánto rompe la ola aquí.
- * @param facet    1 = olas low-poly (luz y brillo con la normal de CARA), 0 = suaves.
- * @return rgb = color iluminado · a = opacidad sobre el fondo marino que hay detrás.
+ * @param facet    cuánto pesa la faceta (0..1): abre la banda difusa y el lóbulo especular.
+ * @return rgb = radiancia lineal · a = opacidad sobre el fondo marino que hay detrás.
  */
-vec4 harukaOceanShade(vec3 wp, vec3 fragPos, vec3 n, vec3 L, vec3 lightCol, vec3 ambient,
+vec4 harukaOceanShade(vec3 wp, vec3 fragPos, vec3 n, vec3 nF, vec3 L, vec3 sunE, vec3 ambE, vec3 skyRad,
                       float depthM, float foam, float facet) {
     vec3 V = normalize(-fragPos);
     vec3 H = normalize(L + V);
-    // Low-poly: sol y brillo con la normal de CARA; el Fresnel —que es un rim— con la suave, o cada
-    // triángulo de ola al ras se encendería entero (ver lib/lowpoly.glsl).
-    vec3  nF   = harukaLightingNormal(n, fragPos, V, facet);
+    // Low-poly: sol y brillo con la normal de FACETA; el Fresnel —que es un rim— con la suave, o cada
+    // faceta al ras se encendería entera (ver lib/lowpoly.glsl).
     float ndl  = dot(nF, L);
     float diff = harukaFacetBand(max(ndl, 0.0), ndl, facet);
-    float fres = pow(1.0 - max(dot(n, V), 0.0), 5.0);      // Schlick, exponente 5 (el clásico)
-    // Brillo estrecho (agua, no plástico) con la suave; facetado se abre a 48: un lóbulo de 220
-    // sobre una cara plana es todo-o-nada, la cara entera destella y se apaga — una costura.
-    float spec = pow(max(dot(nF, H), 0.0), mix(220.0, 48.0, clamp(facet, 0.0, 1.0)));
+    // Fresnel del agua (F0 = 0,02: índice 1,33), Schlick.
+    float F    = 0.02 + 0.98 * pow(1.0 - max(dot(n, V), 0.0), 5.0);
+    // Lóbulo especular NORMALIZADO (Blinn-Phong, (k+8)/8): la energía del Sol reflejado no depende
+    // de lo estrecho que sea. Estrecho (agua, no plástico) con la suave; facetado se abre a 48: un
+    // lóbulo de 220 sobre una cara plana es todo-o-nada, la cara entera destella y se apaga.
+    float k    = mix(220.0, 48.0, clamp(facet, 0.0, 1.0));
+    float FH   = 0.02 + 0.98 * pow(1.0 - max(dot(H, V), 0.0), 5.0);
+    // ANIME: el Sol reflejado son CHISPAS recortadas, no un brillo difuso. El lóbulo se corta con un
+    // escalón corto (la chispa tiene borde) y su energía se reparte en lo que queda.
+    const float lobe  = pow(max(dot(nF, H), 0.0), k);
+    const float glint = smoothstep(0.35, 0.55, lobe);
+    vec3  spec = sunE * ((k + 8.0) / 8.0) * mix(lobe, glint * 0.6, 0.75) * FH * max(ndl, 0.0);
 
     // Color propio del agua por absorción: el agua se come el rojo primero, por eso el mar somero
-    // tira a turquesa y el profundo a azul marino. No son dos colores elegidos a ojo, es el mismo
-    // color con distinto camino óptico.
+    // tira a turquesa y el profundo a azul marino. Los dos son colores de PANTALLA (como el resto de
+    // materiales del motor): se pasan a lineal para iluminarlos.
     vec3  deep    = vec3(0.02, 0.11, 0.26);
     vec3  shallow = vec3(0.10, 0.42, 0.48);
     float shoal   = exp(-max(depthM, 0.0) * 0.12);          // 1 en la orilla → 0 a ~40 m
-    vec3  body    = mix(deep, shallow, shoal);
+    vec3  body    = harukaLinear(mix(deep, shallow, shoal));
 
-    float sunD = clamp(diff * 1.6, 0.0, 1.0);
-    vec3  sky   = ambient * vec3(0.9, 1.15, 1.6);           // el ambiente ya sigue el ciclo día/noche
-    vec3  amb   = ambient + sky * (0.55 + 0.45 * fres);
-    vec3  col   = body * (amb + lightCol * sunD * 1.1)
-                + lightCol * spec * (0.05 + 0.95 * fres) * 2.2;
+    // ANIME: el reflejo del cielo en un degradado LIMPIO (el Fresnel suavizado en tres tramos) y el
+    // agua saturada: el color propio pesa más cerca, el cielo manda al ras.
+    const float Fs = smoothstep(0.0, 1.0, F);
+    vec3 col = body * 1.15 * (ambE + sunE * diff) * (1.0 - Fs) + Fs * skyRad + spec;
 
     // ESPUMA. Va al final y por MEZCLA, no por suma: la espuma no es un brillo, es aire mezclado con
-    // agua — un material distinto, difuso y casi blanco, que TAPA el agua de debajo. Sumarla dejaba
-    // láminas autoiluminadas que se veían igual a medianoche (el bug que ya tuvo `shallow_water`).
-    vec3 foamCol = vec3(0.92, 0.95, 0.97) * (amb + lightCol * sunD);
+    // agua — un material distinto, difuso y casi blanco, que TAPA el agua de debajo.
+    // ANIME: la espuma son MANCHAS blancas con borde, no un velo: la cobertura se recorta.
+    vec3 foamCol = harukaLinear(vec3(0.92, 0.95, 0.97)) * (ambE + sunE * diff);
+    foam = smoothstep(0.30, 0.50, foam);
     col = mix(col, foamCol, foam);
 
     // OPACIDAD por camino óptico, no por profundidad vertical: al ras del agua la luz atraviesa

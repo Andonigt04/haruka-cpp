@@ -392,6 +392,8 @@ void SettingsPanel::tabGraphics() {
     ImGui::SeparatorText(TR("gfx.postProcessing").c_str());
     ImGui::Checkbox(TR("gfx.vsync").c_str(), &g.vsync);
     ImGui::Checkbox(TR("gfx.ssao").c_str(),  &g.ssao);
+    ImGui::Checkbox(TR("gfx.grass").c_str(), &g.grass);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", TR("gfx.grass.tip").c_str());
     if (g.ssao) ImGui::TextDisabled("  %s", TR("gfx.ssaoNote").c_str());
     // TONEMAPPING. Apagarlo RECORTA los valores altos a blanco: útil para diagnosticar qué se sale
     // de rango, desastroso sin querer (props quemados).

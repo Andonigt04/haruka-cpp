@@ -1218,10 +1218,15 @@ void testTerrainNodeCoverage()
                 if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
             }
         };
-        std::vector<uint8_t> pxNone, pxAir, pxFlat;
+        // ⚠️ EL AIRE YA NO ES UN MANDO (`aerial`), es la atmosfera: la luz del frame en ESTE escenario
+        // (ojo a 2 000 km, Sol al cenit). "Sin aire" = un planeta sin atmosfera (radio 0 para la luz:
+        // ni transmitancia ni aire de en medio). La "contraprueba del camino plano" medía un modelo
+        // que ya no existe (la integral va por la densidad real a cada altitud).
+        std::vector<uint8_t> pxNone, pxAir;
+        setTestSkyLight(pc - cam, 0.0, glm::dvec3(up0));
         renderAir(glm::vec4(0.0f, 1.0f, (float)altO, 4000.0f), pxNone);          // sin aire
-        renderAir(glm::vec4(1.0f / 60000.0f, 1.0f, (float)altO, 4000.0f), pxAir); // aire de verdad
-        renderAir(glm::vec4(1.0f / 60000.0f, 1.0f, (float)altO, 0.0f), pxFlat);   // camino plano (el bug)
+        setTestSkyLight(pc - cam, R, glm::dvec3(up0));
+        renderAir(glm::vec4(0.0f, 1.0f, (float)altO, 4000.0f), pxAir);           // la atmosfera
         auto desvio = [&](const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
             double acc = 0.0; size_t n = 0;
             for (size_t k = 0; k + 3 < a.size(); k += 4) {
@@ -1232,10 +1237,10 @@ void testTerrainNodeCoverage()
             }
             return n ? acc / (double)n : -1.0;
         };
-        const double dAir = desvio(pxNone, pxAir), dFlat = desvio(pxNone, pxFlat);
-        std::printf("    desde 2 000 km al nadir, desvio medio del color respecto a SIN aire: aire exponencial %.1f/255 · camino plano (el bug) %.1f/255\n", dAir, dFlat);
-        CHECK(dAir >= 0.0 && dAir < 25.0, "con el aire de verdad el planeta conserva su color desde orbita (desvio < 25/255)");
-        CHECK(dFlat > 3.0 * std::max(dAir, 1.0), "CONTRAPRUEBA: con el camino plano el planeta se va al color del aire");
+        const double dAir = desvio(pxNone, pxAir);
+        std::printf("    desde 2 000 km al nadir, desvio medio del color respecto a SIN atmosfera: %.1f/255\n", dAir);
+        CHECK(dAir >= 0.0 && dAir < 25.0, "con la atmosfera el planeta conserva su color desde orbita (desvio < 25/255)");
+        CHECK(dAir > 1.0, "CONTRAPRUEBA: y la atmosfera SE VE (el aire de en medio tiñe y atenua: no es un no-op)");
         Haruka::World::Terrain::TerrainNodeRenderer::Shade sh0; r.setShade(sh0);
         g_dev->destroy(albedo); g_dev->destroy(normal); g_dev->destroy(matUBO);
     }

@@ -325,17 +325,24 @@ void testTerrainNodeGpuCost()
                     g_dev->endFrame();
                     if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(fw, 5000000000ull); c2->deleteFence(fw); g_dev->endFrame(); }
                 }
-            const auto t0 = std::chrono::high_resolution_clock::now();
-            if (Context* c = g_dev->beginFrame()) {
-                c->bindPipeline(cp); c->bindUniformBuffer(0, ubo); c->bindStorageBuffer(1, out);
-                for (int k = 0; k < kNodes; ++k) c->dispatch((N + 7) / 8, (N + 7) / 8, 1);
-                FenceHandle f = c->signalFence();
-                g_dev->endFrame();
-                if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(f, 10000000000ull); c2->deleteFence(f); g_dev->endFrame(); }
+            // ⚠️ EL MINIMO DE CINCO TANDAS, NO UNA. Es reloj de pared con un frame entero alrededor, y
+            // una sola muestra se llevaba cualquier hipo del sistema: se midio "sin relieve 0,130 ms,
+            // con relieve 0,036" en la misma pasada, y la CONTRAPRUEBA de abajo caia una vez de cada
+            // pocas tandas. El minimo es la cota del coste real; el ruido solo suma.
+            double best = 1e30;
+            for (int rep = 0; rep < 5; ++rep) {
+                const auto t0 = std::chrono::high_resolution_clock::now();
+                if (Context* c = g_dev->beginFrame()) {
+                    c->bindPipeline(cp); c->bindUniformBuffer(0, ubo); c->bindStorageBuffer(1, out);
+                    for (int k = 0; k < kNodes; ++k) c->dispatch((N + 7) / 8, (N + 7) / 8, 1);
+                    FenceHandle f = c->signalFence();
+                    g_dev->endFrame();
+                    if (Context* c2 = g_dev->beginFrame()) { c2->waitFence(f, 10000000000ull); c2->deleteFence(f); g_dev->endFrame(); }
+                }
+                best = std::min(best, std::chrono::duration<double, std::milli>(
+                    std::chrono::high_resolution_clock::now() - t0).count());
             }
-            const double ms = std::chrono::duration<double, std::milli>(
-                std::chrono::high_resolution_clock::now() - t0).count();
-            return ms / (double)kNodes;
+            return best / (double)kNodes;
         };
 
         std::printf("\n    nivel 18 · %u texeles por nodo · reparto del coste\n", (unsigned)count);

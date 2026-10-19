@@ -84,6 +84,7 @@ namespace Haruka::RHI::Vulkan
 
         pickPhysicalDevice();
         if (!m_physical) { HARUKA_LOGE("RHI/VK", "sin physical device con graphics+present"); return; }
+        pickDepthFormats();
         createLogicalDevice();
         if (!m_device) return;
 
@@ -308,6 +309,25 @@ namespace Haruka::RHI::Vulkan
         }
     }
 
+    void VKDevice::pickDepthFormats()
+    {
+        // Lo que piden los targets de profundidad: attachment + muestreo + copia (`blitDepth`).
+        const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
+                                        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+                                        | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT
+                                        | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        auto has = [&](VkFormat f) {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(m_physical, f, &fp);
+            return (fp.optimalTilingFeatures & need) == need;
+        };
+        g_fmtD24   = has(VK_FORMAT_X8_D24_UNORM_PACK32) ? VK_FORMAT_X8_D24_UNORM_PACK32 : VK_FORMAT_D32_SFLOAT;
+        g_fmtD24S8 = has(VK_FORMAT_D24_UNORM_S8_UINT)   ? VK_FORMAT_D24_UNORM_S8_UINT
+                                                        : VK_FORMAT_D32_SFLOAT_S8_UINT;
+        if (g_fmtD24S8 != VK_FORMAT_D24_UNORM_S8_UINT)
+            HARUKA_LOGI("RHI/VK", "sin profundidad de 24 bits en esta GPU: D24 -> D32F, D24S8 -> D32F_S8");
+    }
+
     void VKDevice::createLogicalDevice()
     {
         float prio = 1.0f;
@@ -493,7 +513,9 @@ namespace Haruka::RHI::Vulkan
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
         // DEPTH_STENCIL + SAMPLED: algún pase la muestrea como SHADER_READ (SSAO/tele/etc.), y sin el
         // bit VVL aborta la transición (VUID-01211). En D32 no encarece casi nada.
-        ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // TRANSFER_SRC/DST: `blitDepth` copia desde y hacia ella (nubes, fluido).
+        ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                 | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (!vkSuccess(vkCreateImage(m_device, &ii, nullptr, &m_backbufferDepthImage), "create bb depth image")) return false;
@@ -956,6 +978,16 @@ namespace Haruka::RHI::Vulkan
         const VKBuffer* d = buffer(dst);
         if (!s || !d || bytes == 0) return;
         submitOneShot([&](VkCommandBuffer c) {
+            // ⚠️ SIN ESTA BARRERA LA COPIA LEIA A DESTIEMPO. El origen lo escribe casi siempre un compute
+            // de un frame ya ENVIADO, y el orden de envio en la cola no da visibilidad de memoria: hace
+            // falta una dependencia. Era una carrera, y salia o no segun el tiempo: el gemelo CPU<->GPU
+            // del bake del terreno daba 0 m de la GPU (1 891 m de error) con solo meter un frame mas
+            // antes del test (17-10). Una barrera en la misma cola cubre todo lo enviado antes.
+            VkMemoryBarrier mb{ VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(c, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &mb, 0, nullptr, 0, nullptr);
             VkBufferCopy r{ (VkDeviceSize)srcOff, (VkDeviceSize)dstOff, bytes };
             vkCmdCopyBuffer(c, s->buffer, d->buffer, 1, &r);
         });
@@ -1417,7 +1449,10 @@ namespace Haruka::RHI::Vulkan
             ii.arrayLayers = dt.layers;
             ii.samples = VK_SAMPLE_COUNT_1_BIT;
             ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-            ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+            // TRANSFER_SRC/DST: `blitDepth` copia desde y hacia ella (nubes, fluido). Sin estos bits
+            // la copia de la profundidad de la escena era ilegal (VUID-vkCmdCopyImage-aspect-06662).
+            ii.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                     | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
             if (d.depthCube) ii.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
             ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
             ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -2048,6 +2083,13 @@ namespace Haruka::RHI::Vulkan
             m_setBase      = slot * kDescRing;
         }
         m_setCursor = 0;
+        // ⚠️ EL SET "EN CURSO" DEL CONTEXTO ES DEL FRAME ANTERIOR: se suelta. Si un frame acababa con un
+        // `bind*` y sin ningun draw/dispatch, `m_descDirty` quedaba a true con un set del tramo del
+        // anillo de AQUEL frame, y el frame siguiente escribia sus binds en el sin pedir uno nuevo. Ese
+        // set se recicla cuando aquel hueco vuelve a empezar —con este frame aun en vuelo—: el compute
+        // del terreno leia descriptores pisados y devolvia 0 m (gemelo del bake, 17-10). El estado
+        // pegajoso (`m_shadow*`) se conserva: el primer bind o draw de este frame pide set nuevo y lo copia.
+        if (m_context) { m_context->m_curSet = VK_NULL_HANDLE; m_context->m_descDirty = false; }
 
         // ── EL SWAPCHAIN NO SE ENTERA SOLO DE QUE LA VENTANA HA CRECIDO ─────────────────────────
         //
@@ -2529,6 +2571,13 @@ if (m_swapchain && m_swapchain->valid())
         // Render passes cacheados (owned por el device).
         for (auto& [k, pass] : m_renderPasses) if (pass) vkDestroyRenderPass(m_device, pass, nullptr);
         m_renderPasses.clear();
+        // Las cuatro variantes de loadOp del backbuffer (una degradada apunta a `m_backbufferPass`:
+        // no se destruye dos veces).
+        for (VkRenderPass& v : m_backbufferPassVariant)
+        {
+            if (v && v != m_backbufferPass) vkDestroyRenderPass(m_device, v, nullptr);
+            v = VK_NULL_HANDLE;
+        }
         if (m_backbufferPass) { vkDestroyRenderPass(m_device, m_backbufferPass, nullptr); m_backbufferPass = VK_NULL_HANDLE; }
         destroyBackbufferDepth();
 

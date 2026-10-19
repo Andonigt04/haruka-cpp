@@ -17,6 +17,9 @@
  * pero hecho a mano en cuatro lecturas.
  */
 #version 450 core
+#extension GL_GOOGLE_include_directive : require
+
+#include "lib/cloud_volume.glsl"   // harukaCloudBillows: la coliflor
 
 layout(binding = 0) uniform sampler2D u_cloudLo;
 /// ⚠️ LA PROFUNDIDAD DE LA ESCENA, A RESOLUCION COMPLETA — la MISMA copia que leyo el pase de nubes.
@@ -25,8 +28,59 @@ layout(binding = 0) uniform sampler2D u_cloudLo;
 /// el pase escriba nada mas.
 layout(binding = 1) uniform sampler2D u_sceneDepth;
 
-layout(location = 0) in  vec2 vUV;
+// El rayo de vista de cada píxel (`cloud_vol.vert`) y el UBO de la marcha: con ellos el borde y el
+// pincel se anclan a la NUBE (el punto de la capa donde cae el píxel, con la deriva del viento).
+layout(location = 0) in vec3 vRayDir;
+layout(location = 1) in vec2 vNdc;
 layout(location = 0) out vec4 FragColor;
+
+layout(std140, binding = 5) uniform CloudParams {   // ⚠️ el MISMO bloque que `cloud_vol.vert/.frag`
+    mat4  u_invViewProjRot;
+    vec4  u_planetC;   // xyz = centro del planeta relativo a la cámara · w = radio
+    vec4  u_slab;      // x = base · y = techo · z = cobertura · w = precipitación
+    vec4  u_sun;       // xyz = hacia el Sol · w = elevación
+    vec4  u_sunColor;
+    vec4  u_wind;      // xy = deriva · z = tiempo · w = altitud del ojo
+    vec4  u_misc;      // z = escala del campo
+    vec4  u_vortexPos[4];
+    vec4  u_vortexInfo[4];
+    vec4  u_vortexN;
+    vec4  u_aerial;
+    vec4  u_blend;
+    vec4  u_vortexEmit[4];
+};
+
+/// La dirección del CENTRO de la pantalla (hacia dónde mira la cámara), con la misma inversa.
+vec3 harukaFullscreenRayC(mat4 invViewProjRot) {
+    const vec4 far = invViewProjRot * vec4(0.0, 0.0, 1.0, 1.0);
+    return far.xyz / far.w;
+}
+
+/// El punto de la capa de cúmulos donde cae el rayo, relativo al CENTRO DEL PLANETA y anclado al campo
+/// (con la deriva del viento, la misma que suma la marcha), y lo que mide un píxel ahí (m).
+/// La capa es una esfera a la base + 800 m: el borde y el pincel solo necesitan un punto que se
+/// mueva con la nube; la distancia exacta no la tiene la subida (la marcha no la escribe).
+bool cloudAnchor(out vec3 pm, out vec3 pc, out vec3 upv, out float mpp) {
+    const vec3 rd = normalize(vRayDir);
+    const vec3 C = u_planetC.xyz;
+    const float Rs = u_planetC.w + u_slab.x + 800.0;
+    const float b = dot(rd, C), c = dot(C, C) - Rs * Rs;
+    const float disc = b * b - c;
+    if (disc < 0.0) return false;
+    const float sq = sqrt(disc);
+    const float t = (c < 0.0) ? b + sq : b - sq;   // dentro de la esfera: la salida · fuera: la entrada
+    if (t <= 0.0) return false;
+    const vec3 p = rd * t - C;
+    upv = normalize(p);
+    const vec3 ref = abs(upv.y) < 0.99 ? vec3(0, 1, 0) : vec3(1, 0, 0);
+    const vec3 east = normalize(cross(ref, upv));
+    const vec3 wv = east * u_wind.x + cross(upv, east) * u_wind.y;   // `harukaWindAt` de la marcha
+    const float fs = max(u_misc.z, 1.0e-7);
+    pm = p + wv / (fs * 1.3);                                          // metros, fijos al campo
+    pc = rd * t + wv / (fs * 1.3);                                     // lo mismo, relativo a la CÁMARA (números pequeños)
+    mpp = t * max(length(fwidth(rd)), 1.0e-6);
+    return true;
+}
 
 // ── POR QUE HAY QUE MIRAR LA PROFUNDIDAD AL SUBIR LA RESOLUCION ────────────────────────────────
 //
@@ -70,6 +124,7 @@ float bspline(float x) {
 
 void main()
 {
+    const vec2  vUV = vNdc * 0.5 + 0.5;
     const vec2  sz = vec2(textureSize(u_cloudLo, 0));
     if (sz.x < 2.0 || sz.y < 2.0) { FragColor = vec4(0.0); return; }
 
@@ -111,5 +166,69 @@ void main()
     if (wSum < 0.02) { a = aP; wa = waP; c = cP; wSum = 1.0; }
     a /= max(wSum, 1.0e-4);
     if (a <= 0.002) { FragColor = vec4(0.0); return; }
-    FragColor = vec4(c / max(wa, 1e-4), a);
+    vec3 col = c / max(wa, 1e-4);
+
+    // EL VOLUMEN, EN MANCHAS (anime "sólido"): tres tonos planos — luz, medio tono y sombra azulada —
+    // con un paso corto entre ellos. Las fronteras las pone la LUZ de la marcha (la sombra de un bulto
+    // sobre otro, la panza, el núcleo a contraluz), así que dibujan la forma de la nube.
+    // ⚠️ Antes: una S suave (se leía plana) y pinceladas encima (ruido estirado y luego sellos: "como
+    // estirado", "sin trazos"). En las mallas el posterizado dibujaba ANILLOS porque su luz era un
+    // degradado liso en círculo; aquí sale de la sombra marchada de cada bulto.
+    {
+        const float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+        const float t   = clamp((lum - 0.25) / 0.65, 0.0, 1.0);          // 0 sombra honda · 1 luz plena
+        // Pasos ANCHOS y la mancha a medias con el degradado: con pasos de 0,08 era "muy agresivo y
+        // no progresivo", y en las partes pequeñas (donde la luz no cruza ninguna frontera) no había
+        // sombreado ninguno. El degradado mantiene el volumen de lo pequeño; la mancha, el estilo.
+        const float qc  = 0.5 * smoothstep(0.22, 0.44, t) + 0.5 * smoothstep(0.60, 0.84, t);
+        const float q   = mix(t, qc, 0.55);
+        const float want = mix(0.36, 0.92, q);                            // sombra · medio · luz (techo 0,92)
+        col *= want / max(lum, 1.0e-3);
+        col  = mix(col, col * vec3(0.80, 0.89, 1.10), (1.0 - q) * 0.6);   // la sombra, al azul del cielo
+    }
+
+    // ── EL ACABADO, A RESOLUCIÓN COMPLETA ───────────────────────────────────────────────────────
+    // La marcha va a 1/8: un bulto de 400 m a 20 km le cabe en 2-3 de sus píxeles y la subida lo
+    // difumina — la nube era una MANCHA LISA. Aquí, anclado a la nube, el borde se recorta en FESTÓN:
+    // las cúpulas de la coliflor mueven el umbral solo donde la opacidad es de borde; el interior
+    // opaco no cambia.
+    vec3 pm, pc, upv; float mpp;
+    float edgeShift = 0.0;
+    if (cloudAnchor(pm, pc, upv, mpp)) {
+        // EL PLANO DEL FESTÓN: el que pasa por el punto de la nube MIRANDO A LA CÁMARA (la horizontal
+        // perpendicular a la vista y su vertical). ⚠️ Sobre la capa HORIZONTAL, cerca del horizonte un
+        // píxel de pantalla en vertical son cientos de metros de capa: el ruido se comprimía en filas
+        // y el borde salía en RAYAS horizontales. En este plano un píxel es un píxel en las dos
+        // direcciones, y el plano solo gira con el rumbo de la cámara (el festón no nada).
+        // ⚠️ EL PLANO ES EL MISMO PARA TODA LA PANTALLA (hacia dónde mira la cámara y su vertical), y
+        // el punto va RELATIVO A LA CÁMARA. Con el rayo de cada píxel y el punto referido al centro
+        // del planeta (6 400 km), girar el plano lo que gira un píxel movía sus coordenadas ~6 km: el
+        // ruido salía distinto en cada píxel — GRANO de arena en todo el borde.
+        const vec3 fwd = normalize(harukaFullscreenRayC(u_invViewProjRot));
+        const vec3 upc = normalize(-u_planetC.xyz);
+        const vec3 s1 = normalize(cross(upc, fwd)), s2 = cross(fwd, s1);
+        const vec3 pf = vec3(dot(pc, s1), dot(pc, s2), 0.0);
+        // Lo que mide un píxel EN ESTE PLANO (no en la capa): cerca del horizonte la distancia a la
+        // capa es enorme pero el plano apenas avanza por píxel, y con `mpp` de la capa el relieve
+        // salía gigante en vertical — manchas corridas. El plano es suave en toda la pantalla, así
+        // que su derivada es fiable.
+        mpp = max(length(fwidth(pf.xy)) * 0.7071, 1.0e-3);
+        const float B0 = 380.0, B1 = 150.0;                       // bultos de la coliflor (m)
+        const float w0 = smoothstep(2.0, 6.0, B0 / mpp), w1 = smoothstep(2.0, 6.0, B1 / mpp);
+        const float bil = (w0 + w1 > 0.001)
+            ? (0.65 * w0 * harukaCloudBillows(pf / B0) + 0.35 * w1 * harukaCloudBillows(pf / B1 + 23.7)) / (0.65 * w0 + 0.35 * w1)
+            : 0.55;
+        // Solo donde YA hay borde de nube: el festón recorta, no crea nube. ⚠️ Sin esto, delante de un
+        // objeto cercano (el hacha en la mano) el respaldo del filtro deja una opacidad pequeña de la
+        // nube de detrás, y el festón la subía por encima del umbral: el hacha salía pintada de nube.
+        edgeShift = 0.50 * (bil - 0.55) * smoothstep(0.08, 0.22, a);
+    }
+
+    // EL BORDE NÍTIDO (estilo anime / Tenki no Ko): la opacidad suave de la marcha se ENDURECE (con
+    // el festón de arriba). A 1/8 de lado el borde era un degradado de 8-16 px; con la
+    // curva pasa a ~2 px. Endurecer aquí cuesta una curva por píxel; marchar a más resolución, 4-16
+    // veces más.
+    a = smoothstep(0.18, 0.55, a + edgeShift);
+    if (a <= 0.002) { FragColor = vec4(0.0); return; }
+    FragColor = vec4(col, a);
 }

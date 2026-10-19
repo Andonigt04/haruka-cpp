@@ -20,6 +20,7 @@
  *
  * Devuelve 0 si TODO pasa, !=0 si algo falla. Se registra como ctest `haruka_tests_rhi`.
  */
+#include "Haruka/Renderer/SkyLight.h"
 #include "RHI/Common/RHITestCommon.h"
 
 static void baselineWriteIfAsked();
@@ -262,6 +263,39 @@ static bool locateAssets()
 
 
 static std::string g_filter;   // segundo argumento del banco: grupo o test (subcadena)
+// La luz del frame de los tests (ver `setTestSkyLight`): una por backend, viva mientras dura.
+static Haruka::Renderer::SkyLight* g_testSky = nullptr;
+
+static void updateTestSky(const glm::dvec3& planetCenterRelEye, double planetR, const glm::dvec3& sunDir,
+                          double exposure) {
+    Haruka::Renderer::SkyLight::Input in;
+    in.eye = glm::dvec3(0.0);
+    in.planetCenter = planetCenterRelEye; in.planetRadius = planetR;
+    in.hasSun = true;
+    in.sunPos = glm::normalize(sunDir) * 1.495978707e11;
+    g_testSky->setFixedExposure(exposure);
+    g_testSky->update(in);
+}
+
+void setTestSkyLightInFrame(const glm::dvec3& planetCenterRelEye, double planetR, const glm::dvec3& sunDir,
+                            double exposure) {
+    if (!g_testSky || !g_dev) return;
+    updateTestSky(planetCenterRelEye, planetR, sunDir, exposure);
+    if (Context* c = g_dev->beginFrame()) g_testSky->bind(c);   // reentrante: el frame que ya esta abierto
+}
+
+void setTestSkyLight(const glm::dvec3& planetCenterRelEye, double planetR, const glm::dvec3& sunDir,
+                     double exposure) {
+    if (!g_testSky || !g_dev) return;
+    updateTestSky(planetCenterRelEye, planetR, sunDir, exposure);
+    if (Context* c = g_dev->beginFrame()) { g_testSky->bind(c); g_dev->endFrame(); }
+}
+
+void resetTestSkyLight() {
+    // Mediodia de referencia: ojo a 2 m del suelo, Sol a ~60°.
+    setTestSkyLight(glm::dvec3(0.0, -6371002.0, 0.0), 6371000.0, glm::dvec3(0.45, 0.80, 0.30), 1.0);
+}
+
 static int runBackend(Backend backend)
 {
     const char* name = (backend == Backend::Vulkan) ? "Vulkan" : "OpenGL";
@@ -306,6 +340,14 @@ static int runBackend(Backend backend)
     g_curDevice  = dev->deviceName();
     std::printf("== Backend %s activo · dispositivo: %s ==\n", name, g_curDevice.c_str());
 
+    // LA LUZ DEL FRAME (binding 31) Y LA TABLA DE DISPERSION MULTIPLE (binding 20): el cielo, el
+    // terreno, el agua, los props y las mallas la leen. Sin atar, GL lee ceros (todo negro) y Vulkan
+    // basura. Se ata UNA vez por backend (estado pegajoso) con el `SkyLight` del motor: un mediodia
+    // de referencia —Sol a ~60°, a 1 UA— y exposicion fija 1, para que las cifras sean reproducibles.
+    Haruka::Renderer::SkyLight testSky;
+    g_testSky = &testSky;
+    resetTestSkyLight();
+
     // ⚠️ EXIGIR UN DISPOSITIVO, Y QUE FALLE SI NO ES ESE. Pedirlo por variables de entorno NO basta:
     // en un equipo con NVIDIA, `/usr/share/glvnd/egl_vendor.d/10_nvidia.json` ordena antes que
     // `50_mesa.json`, así que el vendor EGL de NVIDIA gana y `LIBGL_ALWAYS_SOFTWARE=1` —que es de
@@ -336,7 +378,7 @@ static int runBackend(Backend backend)
     const std::vector<RhiGroup> groups = {
         { "RHI basico", "texturas, buffers, render targets, ciclo de frame, bindings, compute, instancing, pipelines del motor",
           { "rhi", "basic", "basico", "textura", "buffer", "target", "frame", "pipeline", "instanc" },
-          { { "TextureFormats", testTextureFormats }, { "Buffers", testBuffers }, { "RenderTargets", testRenderTargets }, { "ArrayAndCube", testArrayAndCube }, { "FrameCycle", testFrameCycle }, { "BindingPersistence", testBindingPersistence }, { "ComputeArraySampler", testComputeArraySampler }, { "DispatchInsideRenderPass", testDispatchInsideRenderPass }, { "TextureContent", testTextureContent }, { "VertexColor", testVertexColor }, { "VertexInterpolation", testVertexInterpolation }, { "EnginePipelines", testEnginePipelines }, { "ItemPreviewShader", testItemPreviewShader }, { "InstancingRing", testInstancingRing }, { "SoftBodyMesh", testSoftBodyMesh } } },
+          { { "TextureFormats", testTextureFormats }, { "Buffers", testBuffers }, { "RenderTargets", testRenderTargets }, { "ArrayAndCube", testArrayAndCube }, { "FrameCycle", testFrameCycle }, { "BindingPersistence", testBindingPersistence }, { "ComputeArraySampler", testComputeArraySampler }, { "DispatchInsideRenderPass", testDispatchInsideRenderPass }, { "BlitInsideRenderPass", testBlitInsideRenderPass }, { "TextureContent", testTextureContent }, { "VertexColor", testVertexColor }, { "VertexInterpolation", testVertexInterpolation }, { "EnginePipelines", testEnginePipelines }, { "ItemPreviewShader", testItemPreviewShader }, { "ScenePassObjects", testScenePassObjects }, { "InstancingRing", testInstancingRing }, { "SoftBodyMesh", testSoftBodyMesh } } },
         { "fp64 y paridad GPU", "la aritmetica de la GPU contra la CPU: fp64, octavas, el adaptador y el horneado por etapas",
           { "fp64", "parity", "paridad", "bisect", "bake", "horneado" },
           { { "GpuFp64", testGpuFp64 }, { "OctaveDivergence", testOctaveDivergence }, { "NodeGpuAdapterBisect", testNodeGpuAdapterBisect }, { "TerrainNodeGpuParity", testTerrainNodeGpuParity }, { "BakeStageBisect", testBakeStageBisect }, { "TerrainBakeAcrossLevels", testTerrainBakeAcrossLevels } } },
@@ -344,14 +386,14 @@ static int runBackend(Backend backend)
           { "terreno", "terrain", "node", "v5", "stride", "zancada", "seam", "costura" },
           { { "TerrainNodeGpuCost", testTerrainNodeGpuCost }, { "TerrainNodePoolGpu", testTerrainNodePoolGpu }, { "TerrainNodeRender", testTerrainNodeRender }, { "TerrainNodeDrawnVsField", testTerrainNodeDrawnVsField }, { "TerrainStrideMatchCost", testTerrainStrideMatchCost }, { "TerrainNodeRendererInit", testTerrainNodeRendererInit }, { "TerrainNodeBaseField", testTerrainNodeBaseField }, { "NodeVoxCut", testNodeVoxCut }, { "NodeVoxCutFine", testNodeVoxCutFine }, { "VoxFineBricks", testVoxFineBricks }, { "VoxNoCrack", testVoxNoCrack }, { "HorizonPlateau", testHorizonPlateau }, { "StrideRingsOnLand", testStrideRingsOnLand }, { "FrameDrawnVsBaked", testFrameDrawnVsBaked }, { "TerrainNodeCoverage", testTerrainNodeCoverage }, { "TerrainNodeSeamHoles", testTerrainNodeSeamHoles }, { "TerrainNodeSharedEdgeGpu", testTerrainNodeSharedEdgeGpu }, { "TerrainNodeStitchSymmetryGpu", testTerrainNodeStitchSymmetryGpu } } },
         { "agua", "campo del agua, numero de onda, nodos con agua, olas y pliegue, formas de la profundidad",
-          { "agua", "water", "ocean", "mar", "wave", "ola" },
-          { { "WaterFieldParity", testWaterFieldParity }, { "WaveNumberParity", testWaveNumberParity }, { "NodeWaterDraws", testNodeWaterDraws }, { "LakeShoreline", testLakeShoreline }, { "OceanWaveParity", testOceanWaveParity }, { "OceanFoldParity", testOceanFoldParity }, { "WaterShapes", testWaterShapes } } },
+          { "agua", "water", "ocean", "mar", "wave", "ola", "fluid", "liquid" },
+          { { "WaterFieldParity", testWaterFieldParity }, { "WaveNumberParity", testWaveNumberParity }, { "NodeWaterDraws", testNodeWaterDraws }, { "NodeWaterCrater", testNodeWaterCrater }, { "NodeWaterSurfMesh", testNodeWaterSurfMesh }, { "NodeWaterFarWaves", testNodeWaterFarWaves }, { "LakeShoreline", testLakeShoreline }, { "OceanWaveParity", testOceanWaveParity }, { "OceanFoldParity", testOceanFoldParity }, { "WaterShapes", testWaterShapes }, { "ApicFluidStill", testApicFluidStill }, { "ApicFluidBreaker", testApicFluidBreaker }, { "ApicFluidSurface", testApicFluidSurface }, { "ApicFluidDraw", testApicFluidDraw }, { "ApicFluidBody", testApicFluidBody }, { "ApicFluidChannel", testApicFluidChannel } } },
         { "cielo y nubes", "limbo de la atmosfera, el pase volumetrico, el campo, la forma, la columna y el ruido; ambiente SH",
           { "cielo", "sky", "nube", "cloud", "atmos", "ambient" },
-          { { "AtmosphereLimb", testAtmosphereLimb }, { "CloudPassDraws", testCloudPassDraws }, { "CloudPassOrbit", testCloudPassOrbit }, { "CloudHighLayers", testCloudHighLayers }, { "CloudPassSceneDepth", testCloudPassSceneDepth }, { "CloudFlatTop", testCloudFlatTop }, { "CloudMotionFrames", testCloudMotionFrames }, { "CloudMarchConvergence", testCloudMarchConvergence }, { "CloudPassCost", testCloudPassCost }, { "CloudCoverageByDirection", testCloudCoverageByDirection }, { "CloudOrbitView", testCloudOrbitView }, { "CloudFieldDistribution", testCloudFieldDistribution }, { "CloudShape3D", testCloudShape3D }, { "CloudColumnParity", testCloudColumnParity }, { "CloudNoiseParity", testCloudNoiseParity }, { "SkyLayersHaveDepth", testSkyLayersHaveDepth }, { "SkyAmbientGPU", testSkyAmbientGPU } } },
+          { { "AtmosphereLimb", testAtmosphereLimb }, { "SkyAtmosphereParity", testSkyAtmosphereParity }, { "CloudPassDraws", testCloudPassDraws }, { "CloudPassOrbit", testCloudPassOrbit }, { "CloudHighLayers", testCloudHighLayers }, { "CloudPassSceneDepth", testCloudPassSceneDepth }, { "CloudBelowHorizon", testCloudBelowHorizon }, { "CloudFlatTop", testCloudFlatTop }, { "CloudMotionFrames", testCloudMotionFrames }, { "CloudMarchConvergence", testCloudMarchConvergence }, { "CloudPassCost", testCloudPassCost }, { "CloudCoverageByDirection", testCloudCoverageByDirection }, { "CloudOrbitView", testCloudOrbitView }, { "CloudFieldDistribution", testCloudFieldDistribution }, { "CloudShape3D", testCloudShape3D }, { "CloudColumnParity", testCloudColumnParity }, { "CloudNoiseParity", testCloudNoiseParity }, { "SkyLayersHaveDepth", testSkyLayersHaveDepth }, { "SkyAmbientGPU", testSkyAmbientGPU } } },
         { "luz y sombra", "iluminacion del terreno y de los props, el barrido de luz, el pase de sombra",
           { "luz", "light", "sombra", "shadow", "prop" },
-          { { "TerrainLighting", testTerrainLighting }, { "PropLighting", testPropLighting }, { "PropLightSweep", testPropLightSweep }, { "GrassBurstDraw", testGrassBurstDraw }, { "TerrainShadow", testTerrainShadow } } },
+          { { "PropLighting", testPropLighting }, { "PropLightSweep", testPropLightSweep }, { "GrassBurstDraw", testGrassBurstDraw }, { "GroundScatter", testGroundScatterGpu }, { "ShellScatter", testShellScatterGpu }, { "MassGround", testMassGroundGpu } } },
         { "escena", "todo junto: culling con proyeccion, costuras de la escena, terreno + prop, coste del sombreado (los ultimos a proposito)",
           { "escena", "scene", "cull", "shade" },
           { { "CullWindingWithProjection", testCullWindingWithProjection }, { "TerrainNodeSceneSeams", testTerrainNodeSceneSeams }, { "SceneTerrainAndProp", testSceneTerrainAndProp }, { "TerrainNodeShadeCost", testTerrainNodeShadeCost } } },
@@ -384,6 +426,7 @@ static int runBackend(Backend backend)
         for (size_t ti = 0; ti < p.tests.size(); ++ti) {
             std::printf("[%zu/%zu · %zu/%zu] %s\n", gi + 1, plan.size(), ti + 1, p.tests.size(), p.tests[ti]->name);
             std::fflush(stdout);
+            resetTestSkyLight();   // cada test empieza con la luz de referencia, no con la del anterior
             p.tests[ti]->fn();
             // `HARUKA_BENCH_FRAMES=<dir>`: lo que la VENTANA enseña al acabar cada test, a PNG. Es
             // para saber que test dibujo lo que se ve en la ventana del banco (Andoni, 21-09: una
@@ -425,6 +468,8 @@ static int runBackend(Backend backend)
                     d.test, d.check, d.device);
     }
 
+    testSky.shutdown();
+    g_testSky = nullptr;
     setDevice(nullptr);
     dev.reset();
     SDL_DestroyWindow(w);

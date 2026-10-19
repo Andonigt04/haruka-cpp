@@ -9,7 +9,7 @@
  * assets en `ApplicationAssets.cpp`.
  *
  * `renderFrameContent()` es la función más grande del motor. No se lee de arriba
- * abajo: su árbol de ejecución (@ref flujo_interactivo) enseña los pases como una
+ * abajo: su árbol de ejecución (@ref guia_docs) enseña los pases como una
  * lista plegable, y el nivel *Pasos grandes* deja a la vista las condiciones que
  * activan cada uno.
  *
@@ -30,7 +30,6 @@
 
 #include <algorithm>
 
-#include "Haruka/Core/SkyAmbient.h"   // ambiente integrado del MISMO cielo que se dibuja
 #include "Haruka/Core/Logger.h"
 #include "Haruka/Core/ProgressHook.h"
 
@@ -108,40 +107,12 @@ void Application::buildRenderQueue() {
     // read live from the shared_ptr at draw time, so movement still updates.
     const auto& objects = _currentScene->getAllObjects();
     if (m_renderQueueDirty || objects.size() != m_renderQueueObjCount) {
-        // INCREMENTAL: solo se clasifican los objetos NUEVOS. Clasificar es la parte cara (comparar
-        // cadenas de tipo, mirar el mapa de propiedades) y antes se rehacía la escena ENTERA cada vez
-        // que cambiaba el nº de objetos — con escombros apareciendo y caducando, eso es a todas horas.
-        // Ahora un derrumbe cuesta clasificar sus 48 piezas, no reclasificar la ciudad.
-        // Se identifica por UID, no por puntero: una dirección liberada se reutiliza para el objeto
-        // siguiente, y entonces se daría por "ya clasificado" algo nuevo. Además así la fase de borrado
-        // NO desreferencia punteros que pueden estar colgando.
-        m_presentObjects.clear();
-        m_presentObjects.reserve(objects.size());
-        for (const auto& o : objects) if (o) m_presentObjects.insert(o->uid);
-
-        // 1) Fuera los que ya no están en la escena (intercambio con el último → sin desplazar nada).
-        if (m_staticQueueCount > g_sceneRenderQueue.size()) m_staticQueueCount = g_sceneRenderQueue.size();
-        for (std::size_t k = 0; k < m_staticQueueCount; ) {
-            if (m_presentObjects.count(g_sceneRenderQueue[k].uid)) { ++k; continue; }
-            m_queuedObjects.erase(g_sceneRenderQueue[k].uid);
-            g_sceneRenderQueue[k] = g_sceneRenderQueue[m_staticQueueCount - 1];
-            --m_staticQueueCount;
-        }
-        g_sceneRenderQueue.resize(m_staticQueueCount);
-
-        // 2) Entran los nuevos (los únicos que se clasifican).
-        for (const auto& o : objects) {
-            if (!o || m_queuedObjects.count(o->uid)) continue;
-            Scene::RenderCommand c = Scene::classifySceneObject(*o);
-            if (c.kind != Scene::RenderKind::None) g_sceneRenderQueue.push_back(c);
-            m_queuedObjects.insert(o->uid);    // se marca aunque no se dibuje: no reclasificarlo cada vez
-        }
-        m_staticQueueCount    = g_sceneRenderQueue.size();
+        Scene::syncSceneRenderQueue(objects, g_sceneRenderQueue, m_renderQueue);
         m_renderQueueObjCount = objects.size();
         m_renderQueueDirty    = false;
     } else {
         // Quita solo lo que se añadió el frame anterior (fantasmas de red). Sin copias ni realloc.
-        g_sceneRenderQueue.resize(m_staticQueueCount);
+        g_sceneRenderQueue.resize(m_renderQueue.staticCount);
     }
 
 #ifdef HARUKA_NETWORK
@@ -290,8 +261,19 @@ void Application::frameBegin(RenderFrame& f) {
         glm::dvec3 pc; double pr;
         if (_planetarySystem->getActivePlanet(pc, pr))
             _worldSystem->setActivePlanet(pc, pr);
+        // El cielo va con el reloj COMPARTIDO (el mismo en todos los clientes), no con dt sumados.
+        _worldSystem->setSimulationTime(_planetarySystem->simulationTime());
         { HARUKA_PROFILE("world.advanceCelestial");
           _worldSystem->advanceCelestial(deltaTime > 0.0f ? (double)deltaTime : 0.016); }
+        // Y la MAREA del mar con el Sol y la Luna reales (GM de verdad): ver `setSkyTidalBodies`.
+        {
+            std::vector<World::Planet::TerrestrialPlanet::MassiveBody> sky;
+            if (glm::length(_worldSystem->sunFromPlanet()) > 0.0)
+                sky.push_back({ _worldSystem->sunFromPlanet(), World::Planet::kGmSun });
+            if (glm::length(_worldSystem->moonFromPlanet()) > 0.0)
+                sky.push_back({ _worldSystem->moonFromPlanet(), World::Planet::kGmMoon });
+            _planetarySystem->setSkyTidalBodies(std::move(sky));
+        }
     }
 
     // NEAR PLANE DINÁMICO: pegado a cualquier superficie (alt ≤ 2 km) near=0.1 (precisión cercana
@@ -335,7 +317,9 @@ void Application::frameBegin(RenderFrame& f) {
     // Debe correr ANTES del render pass de escena, donde el pase instanciado lee el registro.
     { HARUKA_PROFILE("prop.scatter(re-siembra)");
       m_props.refreshScatter(_camera.get(), _planetarySystem.get(), getPhysicsEngineOrNull()); }
-    { HARUKA_PROFILE("grass.scatter(re-siembra)");
+    // La hierba solo si el ajuste la enciende (`GraphicsSettings::grass`, apagada por defecto).
+    const bool grassOn = Settings::SettingsManager::get().graphics().grass;
+    if (grassOn) { HARUKA_PROFILE("grass.scatter(re-siembra)");
       // Lo que derriba PropSystem aplasta la hierba de GrassSystem: dos sistemas, un evento.
       if (!m_props.onGroundImpact)
           m_props.onGroundImpact = [this](const glm::dvec3& c, double r) { m_grass.flattenNear(c, r); };
@@ -425,10 +409,75 @@ void Application::passCompute(RenderFrame& f) {
             glm::radians((double)_camera->zoom), vpAspect,
             (vpH > 0) ? (double)vpH : 1080.0,
             glm::dvec3(glm::normalize(_camera->getUp())));
+
+        // LA CUBIERTA DENSA DE HIERBA: campo de suelo + siembra en la GPU. Aquí y no en el pase de
+        // escena por lo mismo que lo de arriba (un dispatch dentro de un render pass es ilegal en
+        // Vulkan), y DESPUÉS de `prepare`: siembra sobre los nodos que este frame se dibujan.
+        World::Props::GrassSystem::GpuFrame gf;
+        gf.camera = _camera.get(); gf.planets = _planetarySystem.get();
+        gf.viewW = vpW; gf.viewH = vpH;
+        gf.snow = m_sky.weather().snowAccum;
+        gf.dt = deltaTime > 0.0f ? (float)deltaTime : 0.016f;
+        if (Settings::SettingsManager::get().graphics().grass)
+            if (RHI::Device* d = RHI::device()) m_grass.prepareGpu(d->beginFrame(), gf);
+
+        // EL LÍQUIDO 3D: colocar, empujar (viento, cuerpos), avanzar y extraer su superficie. Compute,
+        // así que aquí y no en el pase de escena.
+#ifdef HARUKA_MOD_FLUIDS
+        if (Settings::SettingsManager::get().graphics().liquid) {
+            if (RHI::Device* d = RHI::device()) m_liquid.prepare(d->beginFrame(), liquidFrame(vpW, vpH));
+        } else {
+            m_liquid.disable(_planetarySystem.get());   // y el agua de siempre vuelve a estar entera
+        }
+#endif
+
+        // LOS CÚMULOS DE MALLA: giro con el viento + siembra en la GPU (Renderer/CloudPass.h). Aquí
+        // por lo mismo que la hierba: es un compute y no puede ir dentro de un render pass.
+        if (m_editView.weather) {
+            Haruka::Renderer::CloudPass::ClumpFrame cf;
+            cf.camera = _camera.get(); cf.planets = _planetarySystem.get();
+            cf.windVec = m_sky.weather().windVec;
+            cf.viewW = (int)vpW; cf.viewH = (int)vpH;
+            if (RHI::Device* d = RHI::device()) m_clouds.prepareClumps(d->beginFrame(), cf);
+        }
     }
 }
 
+#ifdef HARUKA_MOD_FLUIDS
+World::Water::LiquidPatch::Frame Application::liquidFrame(int viewW, int viewH) {
+    World::Water::LiquidPatch::Frame lf;
+    lf.camera = _camera.get(); lf.planets = _planetarySystem.get(); lf.physics = getPhysicsEngineOrNull();
+    lf.wind = m_sky.weather().windVec;
+    lf.dt = deltaTime > 0.0f ? (float)deltaTime : 0.016f;
+    lf.viewH = viewH > 0 ? viewH : 1080;
+    lf.aspect = (viewW > 0 && viewH > 0) ? (float)viewW / (float)viewH : _camera->aspectRatio;
+    return lf;
+}
+#endif
+
 void Application::passSky(RenderFrame& f) {
+    // LA LUZ DEL FRAME, antes que nada que la lea: el cielo es el primero. Sol y Luna son los objetos
+    // de la escena (su posicion la pone `WorldSystem` con las efemerides); el resto es fisica.
+    {
+        Haruka::Renderer::SkyLight::Input li;
+        li.eye = glm::dvec3(_camera->position);
+        li.dtS = deltaTime > 0.0f ? (double)deltaTime : 0.016;
+        glm::dvec3 pc(0.0); double pr = 0.0;
+        if (_planetarySystem && _planetarySystem->getActivePlanet(pc, pr)) { li.planetCenter = pc; li.planetRadius = pr; }
+        if (_worldSystem) {
+            for (const auto& b : _worldSystem->getBodies())
+                if (b.type == Tools::ObjectType::STAR) { li.hasSun = true; li.sunPos = b.worldPos; li.sunRadius = b.radius; break; }
+        }
+        if (_currentScene)
+            if (auto moon = _currentScene->getObject("Moon")) {
+                li.hasMoon = true; li.moonPos = glm::dvec3(moon->position);
+                li.moonRadius = std::max({ moon->scale.x, moon->scale.y, moon->scale.z });
+            }
+        static const double s_fixedExp = std::getenv("HARUKA_EXPOSURE") ? std::atof(std::getenv("HARUKA_EXPOSURE")) : -1.0;
+        m_skyLight.setFixedExposure(s_fixedExp);
+        m_skyLight.update(li);
+        if (RHI::Device* dev = RHI::device()) m_skyLight.bind(dev->beginFrame());
+    }
     Haruka::Renderer::SkyPass::Frame sf;
     sf.camera = _camera.get(); sf.planets = _planetarySystem.get(); sf.world = _worldSystem.get();
     sf.sceneTargetPass = f.sceneTargetPass; sf.renderW = f.renderW; sf.renderH = f.renderH;
@@ -474,6 +523,7 @@ void Application::passSceneSetup(RenderFrame& f) {
     Haruka::Renderer::FrameLights::Frame lf;
     lf.camera = _camera.get(); lf.world = _worldSystem.get(); lf.planets = _planetarySystem.get(); lf.scene = _currentScene;
     lf.cameraOrigin = cameraOrigin; lf.heightPx = (int)f.height; lf.diagClock = m_diagClock;
+    lf.sky = &m_skyLight.data();
     m_lights.fill(f.frameData, lf);
     // Viento atmosférico → arrastre aerodinámico de la física (por cuerpo, barato).
     if (_physicsEngine && _worldSystem)
@@ -560,7 +610,10 @@ void Application::passProps(RenderFrame& f) {
           pf.weather = glm::vec4(wx.snowAccum, wx.groundWetness, wx.rainAmount, wx.snowAmount); }
         World::Props::PropSystem::DrawStats ps;
         m_props.draw(f.sceneCtx, pf, ps);
-        m_grass.draw(f.sceneCtx, pf, ps);   // la hierba: su propio sistema, el mismo frame
+        if (Settings::SettingsManager::get().graphics().grass)
+            m_grass.draw(f.sceneCtx, pf, ps);   // la hierba: su propio sistema, el mismo frame
+        // Los cúmulos de malla: geometría opaca de la escena, con su depth (Renderer/CloudPass.h).
+        m_clouds.drawClumps(f.sceneCtx, m_uboPerFrameH, m_scene.pso(), 0.0f);   // sin balanceo: una nube no es una hoja
         f.renderedDrawCalls += ps.renderedDrawCalls; f.renderedVertices += ps.renderedVertices; f.renderedTriangles += ps.renderedTriangles;
         f.totalDrawCalls += ps.totalDrawCalls; f.totalVertices += ps.totalVertices; f.totalTriangles += ps.totalTriangles;
     }
@@ -726,6 +779,11 @@ void Application::passPrecipitation(RenderFrame& f) {
 void Application::passFluid(RenderFrame& f) {
 #ifdef HARUKA_MOD_FLUIDS
     if (!m_editView.water) return;     // vista de edicion: sin agua
+    // EL LÍQUIDO 3D: aquí, tras el terreno y el agua (`passPlanet`), con el target de escena y su
+    // depth aún atados. En `passProps` lo pisaba el terreno, que va después y no lo veía: el líquido
+    // es transparente y no escribe profundidad.
+    if (Settings::SettingsManager::get().graphics().liquid)
+        if (RHI::Device* d = RHI::device()) m_liquid.draw(d->beginFrame(), liquidFrame((int)f.renderW, (int)f.renderH));
     // Rios/lagos/charcos + splash: el enganche al planeta es `World::FluidBridge` (world/water).
     World::Water::FluidBridge::Frame ff;
     ff.planets = _planetarySystem.get(); ff.camera = _camera.get(); ff.dt = deltaTime;

@@ -107,13 +107,14 @@ void test_cloud_formation() {
         CHECK(std::fabs(Haruka::World::airTempC(c, 5000.0f) - (15.0f - 32.5f)) < 0.01f, "gradiente estandar: -17,5 C a 5 km con 15 C en el suelo");
     }
 
-    // ── 6. NO TODA LA COBERTURA ES CÚMULO (2026-09-18) ──────────────────────────────────────────
-    // El fondo de buen tiempo (por humedad, sin frente) va mitad a cumulo y mitad a velo de nivel
-    // medio; lo que anade un frente es convectivo entero (ver `kFairWeatherCumulusShare`).
+    // ── 6. EL BUEN TIEMPO ES CÚMULO Y POCO; EL VAPOR EN ALTURA ES DE LOS FRENTES (2026-10-18) ───
+    // El fondo de buen tiempo (por humedad, sin frente) es `kFairWeatherCover·H` y es cumulo entero;
+    // sin frente NO hay vapor de nivel medio (antes la mitad del fondo iba a velo medio y, dibujado,
+    // el cielo salia cerrado siempre). Lo que anade un frente es convectivo entero.
     {
         Haruka::World::WeatherSystem w; w.configure(1234u); w.setTime(30.0);
         // Se buscan un punto SIN frente (cobertura == fondo) y el punto MAS cubierto (frente).
-        const float hum = 0.5f, bg = 0.73f * hum;
+        const float hum = 0.5f, bg = Haruka::World::kFairWeatherCover * hum;
         Haruka::World::WeatherSample calm{}, storm{}; bool haveCalm = false; float bestCover = -1.0f;
         for (int i = 0; i < 4000 && !(haveCalm && bestCover > 0.9f); ++i) {
             const double a = i * 2.399963, z = 1.0 - 2.0 * ((i + 0.5) / 4000.0);
@@ -126,9 +127,9 @@ void test_cloud_formation() {
         std::printf("    sin frente: cobertura %.3f -> cumulo %.3f · velo medio %.3f  |  frente: cobertura %.3f -> cumulo %.3f\n",
                     calm.cloudCover, calm.column.cover, calm.column.vaporMid, storm.cloudCover, storm.column.cover);
         CHECK(haveCalm, "hay un punto sin frente (cobertura = fondo por humedad)");
-        CHECK(std::fabs(calm.column.cover - bg * Haruka::World::kFairWeatherCumulusShare) < 1e-3f, "sin frente, el cumulo es la mitad del fondo");
-        CHECK(calm.column.vaporMid >= bg * (1.0f - Haruka::World::kFairWeatherCumulusShare) - 1e-3f, "y el resto es velo de nivel medio");
-        CHECK(storm.column.cover >= storm.cloudCover - bg * (1.0f - Haruka::World::kFairWeatherCumulusShare) - 1e-3f, "con frente, lo que anade el frente es convectivo entero");
+        CHECK(std::fabs(calm.column.cover - bg) < 1e-3f, "sin frente, el cumulo es el fondo entero");
+        CHECK(calm.column.vaporMid < 1e-3f, "y sin frente no hay velo de nivel medio: el cielo puede estar despejado");
+        CHECK(storm.column.cover >= storm.cloudCover - 1e-3f, "con frente, toda la cobertura es convectiva");
         CHECK(storm.column.cover > calm.column.cover + 0.2f, "CONTRAPRUEBA: el frente sigue teniendo mucho mas cumulo que el buen tiempo");
     }
 }

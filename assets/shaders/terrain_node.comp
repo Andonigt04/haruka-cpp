@@ -34,6 +34,7 @@
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "lib/cube_face.glsl"        // harukaCubeFaceToDir — gemelo de cubeFaceToDir
+#include "lib/fp64.glsl"             // harukaSubFloatResidual: el residuo SIN la ida y vuelta que el compilador pliega
 #include "lib/terrain_detail.glsl"   // harukaTerrainDetail(dvec3, double, float)
 
 layout(std140, binding = 0) uniform NodeParams {
@@ -131,11 +132,13 @@ void main() {
     // puede guardar— amplificado. Es la misma tecnica que el caso (3) de `fp64_probe.comp`, y por lo
     // mismo: no cancela con nada. Resolucion efectiva ~2e-7 en unidades de 1e-9, o sea 1e-15 en
     // direccion: seis ordenes por debajo de lo que se busca.
-    else if (uGrid.z == 6) outv = float((dir.x - double(float(dir.x))) * 1.0e9LF);
+    // ⚠️ CON `harukaSubFloatResidual`, NO CON `x - double(float(x))`: esa ida y vuelta la pliega el
+    // compilador del driver y el residuo salia CERO o basura en GL y en Vulkan (ver lib/fp64.glsl).
+    else if (uGrid.z == 6) outv = float(harukaSubFloatResidual(dir.x) * 1.0e9LF);
     // El mismo residuo pero de la POSICION `dir·R`, en metros. Cubre el eslabon siguiente: si el 6
     // casa y el 7 no, la direccion esta bien y lo que se pierde es la multiplicacion por el radio.
     else if (uGrid.z == 7) { precise double px = dir.x * double(uMisc.x);
-                             outv = float(px - double(float(px))); }
+                             outv = float(harukaSubFloatResidual(px)); }
     else {
         // GEMELO de `clipmap.tese`: base + detalle atenuado, con el detalle recortado para que no
         // hunda el suelo por debajo del nivel del mar. Cualquier cambio va en los dos.

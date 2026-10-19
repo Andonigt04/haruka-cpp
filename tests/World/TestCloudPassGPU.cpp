@@ -223,6 +223,44 @@ void CloudPassBench::sceneDepth() {
     }
 }
 
+void CloudPassBench::belowHorizon() {
+    BEGIN("nubes: por debajo del horizonte no hay nube aunque la profundidad este vacia (mar abierto)");
+    // EL MAR NO ESCRIBE PROFUNDIDAD (es translucido) y en mar abierto el fondo queda a kilometros o
+    // sin dibujar: bajo el horizonte la copia de depth dice "vacio" y `sceneT` no recorta nada. Con
+    // el ojo bajo la base de la capa, la entrada a la cascara era la SALIDA de la esfera interior, que
+    // para un rayo que baja esta AL OTRO LADO DEL PLANETA: la marcha recogia las nubes de las antipodas
+    // y las pintaba encima del agua (Andoni, 2026-10-17: "las nubes se sobreponen al agua").
+    // Montaje: ojo a 2 m sobre el nivel del mar, mirando 35 grados hacia abajo (todo el cuadro bajo el
+    // horizonte con 60 grados de campo), profundidad vacia, cobertura entera.
+    const float altAnt = ojoA; const glm::dvec3 miraAnt = mira;
+    ojoA = 2.0f;
+    const double a = glm::radians(35.0);
+    mira = glm::normalize(fwd * std::cos(a) - up0 * std::sin(a));
+    std::vector<uint8_t> px;
+    render(1.0f, px);
+    size_t lit = 0, n = 0;
+    for (size_t k = 0; k + 3 < px.size(); k += 4) {
+        if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+        if (px[k] > 6 || px[k+1] > 6 || px[k+2] > 6) ++lit;
+        ++n;
+    }
+    std::printf("    bajo el horizonte, profundidad vacia: %.2f %% con nube\n", n ? 100.0 * (double)lit / (double)n : 0.0);
+    CHECK(n > 0 && lit == 0, "bajo el horizonte no se pinta nube (el rayo no atraviesa el planeta)");
+    // CONTRAPRUEBA: la misma escena mirando 35 grados hacia ARRIBA si tiene nube; si no, el caso de
+    // arriba pasaria tambien con el pase roto.
+    mira = glm::normalize(fwd * std::cos(a) + up0 * std::sin(a));
+    render(1.0f, px);
+    lit = 0; n = 0;
+    for (size_t k = 0; k + 3 < px.size(); k += 4) {
+        if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+        if (px[k] > 6 || px[k+1] > 6 || px[k+2] > 6) ++lit;
+        ++n;
+    }
+    std::printf("    CONTRAPRUEBA mirando arriba: %.2f %% con nube\n", n ? 100.0 * (double)lit / (double)n : 0.0);
+    CHECK(lit > n / 2, "CONTRAPRUEBA: mirando arriba la misma capa si se dibuja");
+    ojoA = altAnt; mira = miraAnt;
+}
+
 void CloudPassBench::cost() {
     BEGIN("nubes: el pase VOLUMETRICO dibuja, y aguanta el angulo rasante");
     // (6e) EL COSTE, QUE NUNCA SE HABIA MEDIDO. Mientras la profundidad era basura el pase se
@@ -289,7 +327,9 @@ void CloudPassBench::cost() {
     //      color negro donde no hay nube, asi que una bilineal normal mezcla ese negro con la nube y
     //      ensucia cada borde. Por eso el shader interpola PONDERANDO POR ALFA.
     {
-        const std::string uvs = base + "shaders/cloud_upsample.vert";
+        // El MISMO vertex que la marcha (el rayo de cada píxel) y el UBO de nubes: la composición
+        // ancla el borde a la nube con ellos (ver `cloud_upsample.frag`), igual que en `CloudPass`.
+        const std::string uvs = base + "shaders/cloud_vol.vert";
         const std::string ufs = base + "shaders/cloud_upsample.frag";
         PipelineDesc up;
         up.vertexPath = uvs.c_str(); up.fragmentPath = ufs.c_str();
@@ -353,6 +393,7 @@ void CloudPassBench::cost() {
                     ctx->setViewport(0, 0, w, h);
                     if (reducido) {
                         ctx->bindPipeline(pipeUp);
+                        ctx->bindUniformBuffer(5, ubo);
                         ctx->bindTexture(0, bajoTex);
                         // La profundidad de la escena (binding 1): aqui es el 1x1 de "cielo
                         // despejado", asi que el filtro guiado se apaga solo (`textureSize <= 1`) y
@@ -420,6 +461,7 @@ void CloudPassBench::cost() {
                         ctx->setViewport(0, 0, w, h);
                         if (reducido) {
                             ctx->bindPipeline(pipeUp);
+                        ctx->bindUniformBuffer(5, ubo);
                             ctx->bindTexture(0, bajoTex);
                             ctx->bindTexture(1, guiada ? depEsc : depthTex);   // 1x1 = sin guia
                         } else {
@@ -433,10 +475,14 @@ void CloudPassBench::cost() {
                         if (isVk && f == 2) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
                     }
                 };
+                // Sin aire en medio: lo que se mide es la COMPOSICION del borde, y a 60 km la neblina
+                // (fisica) acerca la nube al color del cielo y le quita al borde el contraste que mide.
                 std::vector<uint8_t> pxRef, pxGuia, pxCiega;
+                sinAire = true;
                 pintarEsc(false, false, pxRef);
                 pintarEsc(true,  true,  pxGuia);
                 pintarEsc(true,  false, pxCiega);
+                sinAire = false;
                 // Error contra la referencia en la BANDA del borde (±8 px del escalon), que es donde
                 // se decide "cortar o no cortar".
                 auto errBanda = [&](const std::vector<uint8_t>& px) {
@@ -445,6 +491,14 @@ void CloudPassBench::cost() {
                         if (std::abs(y - edge[x]) > 8) continue;
                         const size_t k = ((size_t)y * w + x) * 4;
                         if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) continue;
+                        // SOLO EL LADO DE LA MONTAÑA: donde la referencia NO tiene nube (el fondo del
+                        // clear, gris 0,5). Ahi es donde la composicion ciega SANGRA nube sobre la
+                        // montaña y la guiada la recorta — lo que se mide. Contar tambien el lado del
+                        // cielo metia la diferencia de textura de la marcha a 1/4 (que no es de la
+                        // composicion), y con la luz fisica la nube tiene mas contraste interno: la
+                        // diluia hasta un 6 %.
+                        if (std::abs((int)pxRef[k] - 128) > 2 || std::abs((int)pxRef[k+1] - 128) > 2 ||
+                            std::abs((int)pxRef[k+2] - 128) > 2) continue;
                         acc += (std::abs((int)px[k] - pxRef[k]) + std::abs((int)px[k+1] - pxRef[k+1])
                               + std::abs((int)px[k+2] - pxRef[k+2])) / 3.0;
                         ++n;
@@ -452,14 +506,15 @@ void CloudPassBench::cost() {
                     return n ? acc / (double)n : -1.0;
                 };
                 const double eG = errBanda(pxGuia), eC = errBanda(pxCiega);
-                std::printf("    RECORTE contra una silueta ESCALONADA (a 60 km): error medio en la banda del borde"
-                            " · composicion GUIADA por profundidad %.2f/255 · CIEGA %.2f/255\n", eG, eC);
+                std::printf("    RECORTE contra una silueta ESCALONADA (a 60 km): error medio en la banda del borde, lado de la montaña"
+                            " · composicion GUIADA por profundidad %.2f/255 · CIEGA %.2f/255 (%.0f %% menos)\n", eG, eC,
+                            eC > 0.0 ? 100.0 * (1.0 - eG / eC) : 0.0);
                 CHECK(eG >= 0.0 && eC >= 0.0, "las dos composiciones dan lectura");
                 CHECK(eG < eC, "la composicion guiada por profundidad se parece MAS a la referencia que la ciega");
-                // Medido: 14,6 contra 17,8 = **18 % menos** de error en el borde. Lo que queda NO es
+                // Medido (lado de la montaña, 17-10): 11,3 contra 16,6 = **32 % menos** de error en el borde. Lo que queda NO es
                 // la composicion: es que el pase corre a 1/4 y su marcha no es la de resolucion
                 // completa ni con el recorte perfecto. Por eso el listón va en el 10 %.
-                CHECK(eG < eC * 0.9, "y no por poco: al menos un 10 % menos de error en el borde (medido 18 %)");
+                CHECK(eG < eC * 0.9, "y no por poco: al menos un 10 % menos de error en el borde (medido 32 %, lado de la montaña)");
                 g_dev->destroy(depEsc);
             }
 
@@ -588,5 +643,6 @@ void CloudPassBench::coverageByDir() {
 // Un test por caso, cada uno con su banco.
 void testCloudPassDraws() { CloudPassBench b; if (b.ok) b.draws(); }
 void testCloudPassSceneDepth() { CloudPassBench b; if (b.ok) b.sceneDepth(); }
+void testCloudBelowHorizon() { CloudPassBench b; if (b.ok) b.belowHorizon(); }
 void testCloudPassCost() { CloudPassBench b; if (b.ok) b.cost(); }
 void testCloudCoverageByDirection() { CloudPassBench b; if (b.ok) b.coverageByDir(); }

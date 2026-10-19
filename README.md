@@ -202,7 +202,7 @@ cmake -S . -B build -DMODULES=0011111111   # fluids and deformation off
 ```
 
 The mask generates `src/Haruka/Core/Modules.h` inside the source tree, so the engine and the game must be
-configured with the **same** mask. See [docs/MODULES.md](docs/MODULES.md).
+configured with the **same** mask. See [docs/guides/MODULOS.md](docs/guides/MODULOS.md).
 
 ### Useful runtime switches
 
@@ -263,9 +263,10 @@ Measured on 2026-10-10 (GCC 16.2, RelWithDebInfo, RTX 3050 Laptop):
 
 | Document | Content |
 |---|---|
-| [docs/MODULES.md](docs/MODULES.md) | The module bitmask and how to add a module |
+| [docs/guides/](docs/guides/) | One guide per system: intent, how it works, main files, options, how to use it (Spanish). [DOCUMENTACION.md](docs/guides/DOCUMENTACION.md) has the template |
+| [docs/guides/MODULOS.md](docs/guides/MODULOS.md) | The module bitmask and how to add a module |
 | [docs/HISTORIAL.md](docs/HISTORIAL.md) | Development log (Spanish) |
-| [docs/guides/](docs/guides/) | Design notes and plans: terrain v5, Vulkan, construction, ports, packaging… (Spanish) |
+| [docs/archivo/](docs/archivo/) | Old plans and design notes, kept for history; not maintained |
 | Doxygen | `./tools/build_docs.sh` → `docs/html/index.html` |
 
 ---

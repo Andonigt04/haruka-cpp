@@ -328,7 +328,40 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
     // ancla de la fase, que sin ella el mar entero subía en bloque (`OceanState::phase`).
     const float nowS = Water::oceanClockSeconds();
     const glm::vec2 wSea = m_sea.filterWind(glm::vec2(ws.wind.x, ws.wind.z), nowS);
-    m_oceanState = Water::oceanStateFromWind(glm::length(wSea), wSea.x, wSea.y, (float)tideM);
+    // El mar de viento + la MAR DE FONDO que llega de lejos (ver `oceanAddSwell`: sin ella la costa
+    // estaba quieta con el viento flojo de casi siempre).
+    // LA MAR DE FONDO LA DICE EL CLIMA (`oceanSwellFromWeather`): el viento del clima en 24 puntos a
+    // 500, 1 000 y 2 000 km de aquí, cada 2 s del reloj del oleaje, y filtrada como el viento (la mar
+    // de fondo no aparece de golpe). Antes era un suelo fijo y el mar estaba agitado SIEMPRE.
+    {
+        if (nowS - m_swellSampleT > 2.0f || nowS < m_swellSampleT) {
+            m_swellSampleT = nowS;
+            glm::dvec3 east = glm::cross(glm::dvec3(0, 1, 0), dir);
+            east = (glm::length(east) > 1e-6) ? glm::normalize(east) : glm::dvec3(1, 0, 0);
+            const glm::dvec3 north = glm::cross(dir, east);
+            float U[24], D[24]; int n = 0;
+            for (double distM : { 5.0e5, 1.0e6, 2.0e6 }) {
+                const double ang = distM / pr;
+                for (int k = 0; k < 8; ++k) {
+                    const double az = k * 0.78539816339;
+                    const glm::dvec3 t = east * std::cos(az) + north * std::sin(az);
+                    const glm::dvec3 d2 = dir * std::cos(ang) + t * std::sin(ang);
+                    U[n] = glm::length(m_weather.sampleAt(d2, 15.0f, 0.5f).wind);
+                    D[n] = (float)distM; ++n;
+                }
+            }
+            m_swellTarget = Water::oceanSwellFromWeather(U, D, n);
+        }
+        // El PRIMER frame toma el objetivo tal cual (sin rampa desde cero: al cargar una partida el mar
+        // ya está como dice el clima). ⚠️ Antes el arranque comprobaba `m_swellAmp <= 0` DESPUÉS de
+        // sumarle el primer paso, que ya era > 0: el mar de fondo se quedaba en 0,00 con objetivo 0,77.
+        if (m_swellT < 0.0f) m_swellAmp = m_swellTarget;
+        const float dt = std::clamp(nowS - m_swellT, 0.0f, 5.0f);
+        m_swellT = nowS;
+        m_swellAmp += (m_swellTarget - m_swellAmp) * (1.0f - std::exp(-dt / Water::OCEAN_WIND_GROW_S));
+    }
+    m_oceanState = Water::oceanAddSwell(
+        Water::oceanStateFromWind(glm::length(wSea), wSea.x, wSea.y, (float)tideM), m_swellAmp);
     if (m_sea.anchorFor(m_oceanState, cameraPos, pc, pr))
         HARUKA_LOGI("Mar", "ancla del mar movida (%d): la camara estaba a mas de %.0f km",
                     m_sea.reanchors, Water::SeaFollower::kReanchorM / 1000.0);
@@ -344,6 +377,10 @@ void PlanetarySystem::updateOceanState(const glm::dvec3& cameraPos) {
             s_lastU = u;
             double sumAmp = 0.0;
             for (int i = 0; i < Water::OCEAN_WAVES; ++i) sumAmp += m_oceanState.wave[i][1];
+            double sum2 = 0.0;
+            for (int i = 0; i < Water::OCEAN_WAVES; ++i) sum2 += m_oceanState.wave[i][1] * m_oceanState.wave[i][1];
+            HARUKA_LOGI("Mar", "mar de fondo del clima %.2f m (objetivo %.2f) · Hs %.2f m",
+                        m_swellAmp, m_swellTarget, 4.0 * std::sqrt(sum2 * 0.5));
             HARUKA_LOGI("Mar", "viento del mar %.1f m/s (clima ahora %.1f)%s -> Sigma amp %.2f m (cresta-valle ~%.2f m) · lambda %.0f..%.0f m · marea %.2f m",
                         uSea, speed,
                         (uSea < Water::OCEAN_WIND_MIN) ? " (TOPADO: mar en calma)" : "",
@@ -1075,7 +1112,16 @@ Terrain::TerrainSample PlanetarySystem::sampleSurface(const glm::dvec3& worldPos
 
 double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     const Terrain::TerrainSample s = sampleSurface(worldPos);
-    if (s.waterType == Terrain::WaterType::None) return kNoWater;
+    if (s.waterType == Terrain::WaterType::None) {
+        // EL AGUA DINÁMICA: suelo + lámina, PLANA. La dibuja el pase de agua como `suelo + lámina`
+        // (`harukaInlandWaterDepthAt`), y aquí con el mismo suelo que pisa el cuerpo. Sin oleaje: un
+        // charco no tiene la mar de fondo del océano (y su fetch no está en el mapa de lagos).
+        if (m_dynamicWaterFn) {
+            const float d = m_dynamicWaterFn(worldPos);
+            if (d > kDynamicWaterMinM) return double(s.elevKm) * 1000.0 + (double)d;
+        }
+        return kNoWater;
+    }
     const double levelM = double(s.waterLevelKm) * 1000.0;
 
     // ── Y LA OLA, QUE HASTA AHORA NO EXISTÍA PARA LA FÍSICA ─────────────────────────────────────
@@ -1112,8 +1158,15 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // ⚠️ MISMO ORDEN QUE `ocean.tese`: primero la lámina trepa (swash), y la ola se evalúa sobre la
     // profundidad ya trepada. Invertirlo aquí daría una cota parecida pero no la misma, y "parecida"
     // es exactamente el fallo que se persigue — la orilla que se nada dejaría de ser la que se ve.
+    // El fetch ANTES de la trepada: un lago no respira con la mar de fondo del oceano (`oceanAmp`).
+    const auto* tpf = activeTerrestrial();
+    const float fetchM = tpf ? tpf->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
+    // El FONDO SUAVE bajo el agua en reposo: lleva la fase (ver `oceanTrainPhase`). El mismo en la
+    // trepada y en la ola, y sin la trepada: si siguiera a la lamina, la fase latiria con ella.
+    const float bedM = tpf ? (float)(levelM - tpf->sampleHeight(up, Water::OCEAN_PHASE_BED_M))
+                           : Water::OCEAN_NO_BED;
     const double swash = (double)Water::oceanSwash((float)depthRest, wp, glm::vec3(up), t,
-                                                            m_oceanState);
+                                                   m_oceanState, fetchM, bedM);
     const double level2 = levelM + swash;
     const double depth2 = level2 - double(s.elevKm) * 1000.0;
     if (depth2 <= 0.0) return level2;
@@ -1121,8 +1174,6 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // ⚠️ EL FETCH VA AQUÍ TAMBIÉN, y no sólo en el shader: sin él la física seguiría flotando sobre
     // la ola oceánica en un lago de montaña mientras el render dibuja el rizo que le toca — la misma
     // discrepancia "lo que se pisa contra lo que se ve" que este fichero entero existe para impedir.
-    const auto* tpf = activeTerrestrial();
-    const float fetchM = tpf ? tpf->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     // ⚠️ Y LA PENDIENTE DEL FONDO, por lo mismo que el fetch: la ola REFRACTA al perder fondo, y si
     // el shader la girara y la fisica no, la cresta que se ve y la que empuja apuntarian a distinto.
     const glm::vec3 slopeH = tpf ? tpf->baseSlopeAt(up) : glm::vec3(0.0f);
@@ -1131,7 +1182,7 @@ double PlanetarySystem::sampleWaterLevel(const glm::dvec3& worldPos) const {
     // 4, 9,5 m de celda) dibuja 3 — se nadaba una ola que no se ve. Ver `waterQuadAt`.
     const float quadH = tpf ? tpf->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
     return level2 + (double)Water::oceanWaveHeight(wp2, glm::vec3(up), t, (float)depth2,
-                                                            1.0f, m_oceanState, fetchM, slopeH, quadH);
+                                                            1.0f, m_oceanState, fetchM, slopeH, quadH, bedM);
 }
 
 double PlanetarySystem::sampleWaterDepth(const glm::dvec3& worldPos) const {
@@ -1160,8 +1211,10 @@ glm::dvec3 PlanetarySystem::sampleWaterVelocity(const glm::dvec3& worldPos) cons
     const float fetchV = tpv ? tpv->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
     const float quadV = tpv ? tpv->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
+    const float bedV = tpv ? (float)(levelM - tpv->sampleHeight(up, Water::OCEAN_PHASE_BED_M))
+                           : Water::OCEAN_NO_BED;
     return glm::dvec3(Water::oceanWaveVelocity(wp, glm::vec3(up), t, (float)depth,
-                                                    1.0f, m_oceanState, fetchV, slopeV, quadV));
+                                                    1.0f, m_oceanState, fetchV, slopeV, quadV, bedV));
 }
 
 float PlanetarySystem::sampleWaterFoam(const glm::dvec3& worldPos) const {
@@ -1187,8 +1240,10 @@ float PlanetarySystem::sampleWaterFoam(const glm::dvec3& worldPos) const {
     const float fetchV = tpv ? tpv->lakeFetchAt(up) : Water::WATER_FETCH_UNLIMITED;
     const glm::vec3 slopeV = tpv ? tpv->baseSlopeAt(up) : glm::vec3(0.0f);
     const float quadV = tpv ? tpv->waterQuadAt(up) : Water::OCEAN_MIN_QUAD_M;
+    const float bedV = tpv ? (float)(levelM - tpv->sampleHeight(up, Water::OCEAN_PHASE_BED_M))
+                           : Water::OCEAN_NO_BED;
     return Water::oceanFoam(wp, glm::vec3(up), t, (float)depth,
-                                     1.0f, m_oceanState, fetchV, slopeV, quadV);
+                                     1.0f, m_oceanState, fetchV, slopeV, quadV, bedV);
 }
 
 double PlanetarySystem::sampleTerrainHeight(const glm::dvec3& worldPos) const {
@@ -1504,7 +1559,7 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
     // (m_planets: soles/planetas/lunas) que atraen y mueven el océano de cada planeta de agua.
     // Planet no expone masa: proxy por densidad uniforme a partir del radio ⇒ GM ≈ G·ρ·(4/3)π·r³.
     // Sin m_planets no hay cuerpos → setTidalBodies({}) deja el mar neutro (mismo que antes).
-    if (!m_planets.empty() || m_simplePlanets.size() > 1) {
+    if (!m_planets.empty() || m_simplePlanets.size() > 1 || !m_skyTidal.empty()) {
         using MB = TerrestrialPlanet::MassiveBody;
         const double den = 3000.0;              // kg/m³ proxy planetario
         // Candidatos masivos = cuerpos orbitales (m_planets: soles) + el resto de planetas/lunas
@@ -1537,6 +1592,9 @@ void PlanetarySystem::updateSimpleOrbits(double /*dt*/) {
                 if (glm::length(b.posCenter) > p->radius()) nearest.push_back(b);
                 if ((int)nearest.size() >= 8) break;
             }
+            // El Sol y la Luna del cielo (`setSkyTidalBodies`), que son del planeta ACTIVO.
+            if (p.get() == activeTerrestrial())
+                nearest.insert(nearest.end(), m_skyTidal.begin(), m_skyTidal.end());
             p->setTidalBodies(std::move(nearest));
         }
     }

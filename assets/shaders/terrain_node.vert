@@ -90,6 +90,7 @@ layout(std430, binding = 2) readonly buffer NodeInsts { NodeInst uInst[]; };
 #include "lib/cube_face.glsl"     // harukaCubeFaceToDir — el mismo gemelo que usa el compute
 #include "lib/terrain_detail.glsl" // harukaEquirectUV + harukaSampleHeightField (el bake equirect)
 #include "lib/base_field.glsl"  // harukaSampleBaseField — el bake, para el CLIMA
+#include "lib/surface_bowls.glsl" // harukaSurfaceBowls: los CRÁTERES (UBO 4), evaluados en el propio vértice
 
 // ⚠️ EL CLIMA SALE DEL BAKE, NO DE LA ALTURA DEL POOL.
 //
@@ -97,16 +98,6 @@ layout(std430, binding = 2) readonly buffer NodeInsts { NodeInst uInst[]; };
 // define la banda de arena de la costa (−30 m … +12 m). Sumarle el detalle la corrompe — el mismo
 // error que `clipmap.tese` documenta al reves. Asi que se vuelve a muestrear el bake aqui, que es
 // exactamente lo que hace el clipmap por vertice teselado.
-// ── LOS CRÁTERES ─────────────────────────────────────────────────────────────────────────────
-// Gemelo de `VoxWorld::surfaceDeltaM`: cada cráter es un cuenco −D·(1−s²)², s = distancia
-// horizontal / radio, y se SUMAN. No es una textura: un hoyo de medio metro cabe entre dos téxeles
-// de cualquier ventana razonable, y aquí se evalúa en el propio vértice. Centros RELATIVOS AL OJO
-// (la CPU resta en double): cerca de la cámara el float da micras. `TerrainNodeRenderer::CraterUBO`.
-layout(std140, binding = 4) uniform NodeCraters {
-    ivec4 uCraterInfo;      // x = cuántos
-    vec4  uCraterC[64];     // xyz = centro relativo al ojo (m) · w = radio (m)
-    vec4  uCraterU[64];     // xyz = vertical del cráter · w = hondo en el centro (m)
-};
 
 layout(binding = 15) uniform sampler2DArray uBaseField;
 layout(binding = 16) uniform sampler2D      uHeightTex;   // el bake EQUIRECT: ver terrain_node.comp
@@ -651,21 +642,9 @@ void main() {
     vFragPos = vec3(pRel) + uCenterLo.xyz;
 
     // Cráteres: cuánto baja el suelo aquí y su gradiente horizontal (para la normal, abajo).
-    float craterDH = 0.0;
-    vec3  craterG  = vec3(0.0);
-    float craterW  = 0.0;
-    for (int ci = 0; ci < uCraterInfo.x; ++ci) {
-        const vec3  q  = vFragPos - uCraterC[ci].xyz;
-        const vec3  cu = uCraterU[ci].xyz;
-        const vec3  hq = q - cu * dot(q, cu);          // horizontal: el relieve no cuenta como distancia
-        const float R2 = uCraterC[ci].w * uCraterC[ci].w;
-        const float s2 = dot(hq, hq) / R2;
-        if (s2 >= 1.0) continue;
-        const float w = 1.0 - s2;
-        craterDH -= uCraterU[ci].w * w * w;
-        craterG  += hq * (4.0 * uCraterU[ci].w * w / R2);   // d(−D·w²)/dx = 4·D·w·x/R²
-        craterW   = max(craterW, smoothstep(0.0, 0.35, w));   // tierra hasta casi el borde, que funde
-    }
+    vec3  craterG;
+    float craterW;
+    const float craterDH = harukaSurfaceBowls(vFragPos, craterG, craterW);
     vCrater = craterW;
     if (craterDH != 0.0) {
         vFragPos += dir * craterDH;

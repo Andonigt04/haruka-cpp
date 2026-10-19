@@ -23,7 +23,7 @@
  * @note La clase es grande y sus métodos también. Para leer uno concreto no hace
  * falta seguirlo a mano: en su página de documentación, el botón
  * *Flujo de ejecución* despliega lo que llama, por qué ramas pasa y qué variables
- * escribe, sacado del AST del compilador (@ref flujo_interactivo).
+ * escribe, sacado del AST del compilador (@ref guia_docs).
  */
 
 #include <SDL3/SDL.h>
@@ -55,11 +55,14 @@
 #include "Haruka/Renderer/CollisionWire.h"   // alambre de la malla de colision (modulo)
 #include "Haruka/Renderer/SkyPass.h"         // cielo + clima del frame (modulo)
 #include "Haruka/Renderer/ScenePass.h"       // objetos de la escena + construccion (modulo)
+#include "Haruka/Renderer/SkyLight.h"       // la luz del frame por fisica (binding 31)
 #include "Haruka/Renderer/FrameLights.h"     // sol, luna, ambiente del cielo (modulo)
 #include "Haruka/World/Vox/VoxSystem.h"      // cuevas → Jolt y anillo del suelo cercano (modulo)
 #include "Haruka/Renderer/ShadowPass.h"      // sombra del sol + mascara cenital (modulo)
 #ifdef HARUKA_MOD_FLUIDS
 #include "Haruka/World/Water/FluidBridge.h"   // el enganche del agua dinamica al planeta
+#include "Haruka/Core/Modules.h"               // HARUKA_MOD_FLUIDS
+#include "Haruka/World/Water/LiquidPatch.h"   // el líquido 3D (APIC) bajo la cámara
 #endif
 #include "Haruka/RHI/RHIDevice.h"
 #include "Haruka/Core/Scene/SceneManager.h"
@@ -74,7 +77,6 @@
 #include "Haruka/Renderer/IBL.h"
 #include "Haruka/Renderer/PointShadow.h"
 #include "Haruka/Renderer/PrecipitationRenderer.h"  // lluvia/nieve EN EL MUNDO (con depth)
-#include "Haruka/Renderer/GroundStampRenderer.h"   // HUELLAS en la capa granular (nieve/arena)
 #include "Haruka/World/GroundLayer.h"                // la capa granular en sí (GL-free)
 #include "Haruka/Renderer/RenderTarget.h"
 #include "Haruka/Renderer/SimpleMesh.h"
@@ -197,6 +199,10 @@ public:
     using GrassStateDelta = World::Props::GrassSystem::Delta;
     std::vector<GrassStateDelta> serializeGrassState() const { return m_grass.serialize(); }
     void restoreGrassState(const std::vector<GrassStateDelta>& deltas) { m_grass.restore(deltas); }
+    /// Las zonas donde la cubierta densa ya no crece (`GrassSystem::destroyAt`): se guardan aparte.
+    using GrassZone = World::Props::GrassSystem::Zone;
+    std::vector<GrassZone> serializeGrassZones() const { return m_grass.serializeZones(); }
+    void restoreGrassZones(const std::vector<GrassZone>& zones) { m_grass.restoreZones(zones); }
 
 
     using PropStateDelta = World::Props::PropSystem::StateDelta;
@@ -653,6 +659,8 @@ private:
      *  el triángulo fullscreen sale de gl_VertexID y el VAO (vacío) lo aporta el pipeline. */
     /// EL CIELO Y EL CLIMA DEL FRAME (Renderer/SkyPass.h): lluvia, nieve, viento, mojado, aire.
     Haruka::Renderer::SkyPass   m_sky;
+    /// LA LUZ DEL FRAME POR FISICA (Sol, Luna, aire, exposicion): Renderer/SkyLight.h, binding 31.
+    Haruka::Renderer::SkyLight  m_skyLight;
     EditView                    m_editView;   ///< ver setEditView
     float                       m_rainOverride = [] {
         const char* e = std::getenv("HARUKA_RAIN");
@@ -668,10 +676,9 @@ private:
     Haruka::Renderer::ShadowPass m_shadows;
     /** @brief Agua acumulada en el suelo [0,1]. Se INTEGRA (subir rápido, secar lento) → el suelo
      *  sigue mojado tras la lluvia. Es, de hecho, el canal "mojado" de la capa granular. */
-    /** @brief Las HUELLAS: la lista (GL-free, compartible con el servidor) y el pase que las pinta
-     *  en su ventana cenital para que el terreno las muestree. */
+    /** @brief Las HUELLAS: la lista (GL-free, compartible con el servidor). Se pintan con el campo
+     *  genérico de suelo (`ground_field.frag`: hundido + reborde, aditivo). */
     World::GroundLayer         m_groundLayer;
-    Renderer::GroundStampRenderer m_stampRenderer;
     /// Las paredes del campo volumétrico → cuerpos de Jolt. Por frame, sólo lo que cambió de revisión.
     /// Las paredes del campo volumetrico → Jolt, y el anillo del suelo cercano: World/Vox/VoxSystem.h.
     World::Vox::VoxSystem m_vox;
@@ -773,7 +780,7 @@ private:
     // (`_pointShadowShader` y `_instancingShader` vivían aquí: dos unique_ptr que NUNCA se
     //  construían — su único rastro era el `.reset()` del destructor. Sus shaders
     //  (point_shadow.*, instancing.*) se han borrado con ellos; el instancing real de las piezas de
-    //  construcción va por GPUInstancing + construction_inst.*.)
+    //  construcción va por GPUInstancing + mesh_inst.vert/prop_inst.frag.)
     // Pase de ESCENA (objetos) migrado a PSO/Context. Dos variantes de fragment (final/preview)
     // → el pipeline se recrea si cambia useFinalLook.
 
@@ -787,6 +794,10 @@ private:
     /// LOS PROPS DEL MUNDO (scatter, registro, pase instanciado, sombras, colliders, rotura).
     World::Props::PropSystem  m_props;
     World::Props::GrassSystem m_grass;   ///< hermano de m_props (los dos heredan de PropSystemBase)
+#ifdef HARUKA_MOD_FLUIDS
+    World::Water::LiquidPatch m_liquid;  ///< el líquido 3D bajo la cámara (física + superficie)
+    World::Water::LiquidPatch::Frame liquidFrame(int viewW, int viewH);
+#endif
     /// LAS NUBES VOLUMETRICAS (horneado del cielo, marcha reducida, composicion): Renderer/CloudPass.h.
     Haruka::Renderer::CloudPass     m_clouds;
     /// Perspectiva aérea del frame (lib/aerial.glsl): x = 1/L (por metro) · y = día. Sale del clima
@@ -867,12 +878,9 @@ private:
 
     /** @brief Statistics for rendered geometry. */
     // Cached static render queue (rebuilt only when the scene object set changes).
-    // Nº de comandos de la parte ESTÁTICA de la cola (todo menos los fantasmas de red, que se
-    // añaden y quitan por frame). Sustituye a la copia entera que se hacía cada frame.
-    std::size_t m_staticQueueCount = 0;
-    // Qué objetos YA están clasificados en la cola, y buffer de los presentes en la escena: permiten
-    // reconstruirla de forma INCREMENTAL (clasificar solo lo nuevo) en vez de rehacerla entera.
-    std::unordered_set<uint64_t> m_queuedObjects, m_presentObjects;   // por UID, no por puntero
+    // Parte ESTÁTICA de la cola (todo menos los fantasmas de red, que se añaden y quitan por frame)
+    // y qué objetos ya están clasificados: la reconstrucción INCREMENTAL de `syncSceneRenderQueue`.
+    Scene::RenderQueueState m_renderQueue;
     size_t m_renderQueueObjCount = (size_t)-1;
     bool   m_renderQueueDirty = true;
 

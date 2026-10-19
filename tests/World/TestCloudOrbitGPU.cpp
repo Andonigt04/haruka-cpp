@@ -281,7 +281,9 @@ void CloudPassBench::orbit() {
                         if (pxP[k] == 0xAA && pxP[k+1] == 0xAA && pxP[k+2] == 0xAA) continue;
                         const double l = (pxP[k] + pxP[k+1] + pxP[k+2]) / 3.0;
                         if (l < 8.0) continue;
-                        sl += l; ++n;
+                        // En RADIANCIA (lineal): la salida va codificada para pantalla (gamma 2,2), y una
+                        // proporcion de valores de pantalla no es una proporcion de luz.
+                        sl += std::pow(l / 255.0, 2.2); ++n;
                     }
                     return n ? sl / n : 0.0;
                 };
@@ -289,8 +291,8 @@ void CloudPassBench::orbit() {
                 const glm::vec3 sunFront = glm::normalize(glm::vec3(fwd * std::cos(glm::radians(55.0)) + up0 * std::sin(glm::radians(55.0))));
                 const glm::vec3 sunBack  = glm::normalize(glm::vec3(-fwd * std::cos(glm::radians(55.0)) + up0 * std::sin(glm::radians(55.0))));
                 const double lF = meanLum(sunFront, look25), lB = meanLum(sunBack, look25);
-                std::printf("    LUZ (b): luminancia media de la nube fina mirando HACIA el Sol %.1f · en CONTRA %.1f (x%.2f)\n", lF, lB, lB > 0 ? lF / lB : 0.0);
-                CHECK(lF > lB * 1.10, "dispersion hacia delante: la nube fina es mas clara mirando hacia el Sol (x1,10 o mas)");
+                std::printf("    LUZ (b): radiancia media (lineal) de la nube fina mirando HACIA el Sol %.4f · en CONTRA %.4f (x%.2f)\n", lF, lB, lB > 0 ? lF / lB : 0.0);
+                CHECK(lF > lB * 1.10, "dispersion hacia delante: la nube fina es mas clara mirando hacia el Sol (x1,10 o mas, en radiancia)");
                 sunCur = sunAnt; modosCur = modosAntes; ojoA = eyeA; mira = fwd;
                 corrAt[ip] = std::abs(corr); faseAt[ip] = lB > 0 ? lF / lB : 0.0;
             }
@@ -331,10 +333,19 @@ void CloudPassBench::orbit() {
                     prof[y] = n ? acc / n : 0.0;
                 }
                 // el salto mayor entre filas vecinas (dentro de |e| < 6 grados, donde vive la capa de canto)
+                // ⚠️ EL HORIZONTE MISMO NO CUENTA: debajo está el PLANETA y la nube se acaba ahí, que es
+                // un borde de verdad (a 2 m el horizonte cae 0,05°). Este caso medía hasta 2026-10-17 un
+                // perfil suave a través del horizonte porque bajo él la marcha atravesaba el planeta y
+                // recogía las nubes de las antípodas (el bug de "las nubes encima del mar"). Lo que se
+                // vigila es un corte RECTO por encima del horizonte (el tope de la marcha), así que se
+                // salta el par de filas que lo cruza. (El sentido de las filas cambia entre GL y Vulkan:
+                // por eso se mira el signo de los dos lados, no "arriba" o "abajo".)
                 double worstJump = 0.0; int worstRow = 0; double eWorst = 0.0;
                 for (int y = 1; y < h; ++y) {
                     const double e = std::atan(((h * 0.5 - (y + 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
+                    const double ePrev = std::atan(((h * 0.5 - (y - 0.5)) / (h * 0.5)) * tanHalf) * 180.0 / 3.14159265358979;
                     if (std::abs(e) > 6.0) continue;
+                    if (e * ePrev <= 0.0) continue;   // el par que cruza el horizonte
                     const double j = std::abs(prof[y] - prof[y - 1]);
                     if (j > worstJump) { worstJump = j; worstRow = y; eWorst = e; }
                 }

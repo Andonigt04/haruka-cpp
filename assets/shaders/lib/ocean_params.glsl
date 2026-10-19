@@ -41,7 +41,15 @@ layout(std140, binding = 29) uniform OceanParams {
     /// La fase de la ola se mide desde el ancla: `k·(D·(x − ancla)) − ω·t`. Con la posicion
     /// planetocentrica `D·x` era 0 (D es tangente y x radial) y el mar entero subia en bloque.
     vec4 uOceanAnchor;
+    /// La parte de MAR DE FONDO de cada tren (m de amplitud, incluida en `uOceanWave[i].y`), 8 floats
+    /// en dos vec4. Gemelo de `OceanState::swell`. El agua cerrada no la recibe (`harukaAmpAt`).
+    vec4 uOceanSwell[2];
 };
+
+float harukaSwellAt(int i) {
+    if (uOceanMisc.y < 0.5) return 0.0;
+    return (i < 4) ? uOceanSwell[0][i] : uOceanSwell[1][i - 4];
+}
 
 float harukaPhaseAt(int i) {
     if (uOceanMisc.y < 0.5) return 0.0;

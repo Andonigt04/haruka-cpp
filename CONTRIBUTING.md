@@ -53,7 +53,7 @@ Fill in the pull request template. In particular:
   not.
 - **Keep the module masks building.** CI builds several `MODULES` masks. If your code touches a
   module from outside it, guard it with `#ifdef HARUKA_MOD_<NAME>` (see
-  [docs/MODULES.md](docs/MODULES.md)).
+  [docs/guides/MODULOS.md](docs/guides/MODULOS.md)).
 
 ## Sign your commits (DCO)
 

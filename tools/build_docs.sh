@@ -36,6 +36,9 @@ if [ "$FLOW_ONLY" -eq 0 ]; then
   fi
 fi
 
+echo "== guias (navegacion + plantilla) =="
+python3 tools/doc_meta.py
+
 echo "== arbol de ejecucion =="
 python3 tools/doc_flow.py ${DOC_FLOW_ARGS:-}
 

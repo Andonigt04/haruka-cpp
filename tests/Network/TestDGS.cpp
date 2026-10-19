@@ -1087,6 +1087,56 @@ void test_net_entity_visible() {
 
 
 // ================================================================================================
+// test_scene_queue_keeps_bodies — the incremental render queue must not drop objects that are still
+// in the scene when a NEW one arrives.
+//
+// It did, for every object: `classifySceneObject` never copied the object's `uid` into the command,
+// so every queued entry carried uid 0. The first time the object count changed (in the game, ~100
+// frames in), the "remove what is no longer present" pass found no uid 0 in the scene and removed the
+// whole queue; and since those objects were still marked as classified, they never came back. That
+// is how the Sun and the Moon vanished while still being in the scene (measured 17-10).
+//
+// COUNTER-PROOF: removing an object from the scene must still take it out of the queue.
+// ================================================================================================
+void test_scene_queue_keeps_bodies() {
+    beginTest("scene_queue_keeps_bodies");
+    using namespace Haruka::Core::Scene;
+
+    auto make = [](const char* name, Haruka::Tools::ObjectType t) {
+        auto o = std::make_shared<SceneObject>();
+        o->name = name; o->objectType = t;
+        return o;
+    };
+    std::vector<std::shared_ptr<SceneObject>> objects = {
+        make("Sun",  Haruka::Tools::ObjectType::STAR),
+        make("Hero", Haruka::Tools::ObjectType::CHARACTER),
+    };
+    auto inQueue = [](const std::vector<RenderCommand>& q, const char* name) {
+        for (const auto& c : q) if (c.object && c.object->name == name) return true;
+        return false;
+    };
+
+    std::vector<RenderCommand> queue;
+    RenderQueueState st;
+    syncSceneRenderQueue(objects, queue, st);
+    CHECK(queue.size() == 2 && inQueue(queue, "Sun"), "first build queues the Sun and the player");
+    CHECK(queue[0].uid == objects[0]->uid || queue[1].uid == objects[0]->uid,
+          "the command carries the object's uid (it used to stay 0)");
+
+    objects.push_back(make("Crate", Haruka::Tools::ObjectType::CHARACTER));   // something new arrives
+    syncSceneRenderQueue(objects, queue, st);
+    std::printf("    after a new object: queue %zu (Sun %d · Hero %d · Crate %d)\n", queue.size(),
+                inQueue(queue, "Sun"), inQueue(queue, "Hero"), inQueue(queue, "Crate"));
+    CHECK(inQueue(queue, "Sun") && inQueue(queue, "Hero"), "objects still in the scene stay queued");
+    CHECK(inQueue(queue, "Crate") && queue.size() == 3, "and the new one is added once");
+
+    objects.erase(objects.begin() + 1);                                        // the player leaves
+    syncSceneRenderQueue(objects, queue, st);
+    CHECK(!inQueue(queue, "Hero") && queue.size() == 2, "COUNTER-PROOF: a removed object leaves the queue");
+    CHECK(inQueue(queue, "Sun"), "and the Sun is still there");
+}
+
+// ================================================================================================
 // test_weather_replicated — two clients must be standing in the SAME storm.
 //
 // Nothing about the weather travels on the wire, and nothing needs to: a front's axis, start point,
@@ -1179,4 +1229,5 @@ HARUKA_REGISTER_TESTS(
     { "dgs_server_simulates", test_dgs_server_simulates },
     { "dgs_ground_matches_engine", test_dgs_ground_matches_engine },
     { "net_entity_visible", test_net_entity_visible },
+    { "scene_queue_keeps_bodies", test_scene_queue_keeps_bodies },
     { "weather_replicated", test_weather_replicated });

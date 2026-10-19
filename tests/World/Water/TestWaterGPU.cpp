@@ -58,9 +58,9 @@
 // aun en 4, fue el contrario y mas silencioso — el agua no dibujaba un pixel porque los trenes
 // vacios daban `k = 2π/0`. Un gemelo a mano con una constante escrita rompe en las dos direcciones.
 struct OceanParamsUBO { float wave[Haruka::World::Water::OCEAN_WAVES][4]; float misc[4];
-                        float phase[2][4]; float anchor[4]; };
-static_assert(sizeof(OceanParamsUBO) == (Haruka::World::Water::OCEAN_WAVES + 4) * 16,
-              "OceanParams del banco descuadrado del bloque GLSL (8 trenes + misc + 2 fases + ancla)");
+                        float phase[2][4]; float anchor[4]; float swell[2][4]; };
+static_assert(sizeof(OceanParamsUBO) == (Haruka::World::Water::OCEAN_WAVES + 6) * 16,
+              "OceanParams del banco descuadrado del bloque GLSL (8 trenes + misc + 2 fases + ancla + 2 swell)");
 
 /// `anchorRelEye`: el ancla del mar relativa al ojo (0 = el marco plano de las sondas). `clockS`:
 /// el reloj del oleaje (0 = lo pone cada sonda).
@@ -74,6 +74,7 @@ static BufferHandle makeOceanStateUBO(const Haruka::World::Water::OceanState& st
     // raro", fue "el mar no existe", y en UN backend de los dos. El bucle va con `OCEAN_WAVES`.
     for (int i = 0; i < Haruka::World::Water::OCEAN_WAVES; ++i)
         for (int c = 0; c < 4; ++c) u.wave[i][c] = st.wave[i][c];
+    for (int i = 0; i < Haruka::World::Water::OCEAN_WAVES; ++i) u.swell[i / 4][i % 4] = st.swell[i];
     u.misc[0] = st.seaLevelM;
     u.misc[1] = 1.0f;              // "el bloque trae datos validos": sin esto el shader usaria su
                                    // tabla de respaldo y el careo no probaria nada del estado subido.
@@ -1691,6 +1692,321 @@ void testNodeWaterDraws()
           "CONTRAPRUEBA: sobre TIERRA el agua se descarta — es la profundidad quien manda");
     r.shutdown();
     if (valid(oceanUBO)) g_dev->destroy(oceanUBO);
+}
+
+// ================================================================================================
+// UN CRÁTER QUE BAJA DE LA COTA DEL MAR SE LLENA DE MAR — TAMBIÉN EN PANTALLA (2026-10-17).
+//
+// El terreno hunde el cuenco (`lib/surface_bowls.glsl`) y la física también (`TerrainSampler::
+// heightAt` suma `surfaceDeltaM`), pero `terrain_node_water.vert` medía la profundidad contra el
+// suelo SIN el hoyo: el cuerpo nadaba en un agua que no se dibujaba, y un cráter en el fondo del mar
+// conservaba la profundidad de antes. Escena: suelo seco a +3500 m (± 915 m de relieve, así que
+// nunca baja de +2585), mar a +2000 m, y un cráter de 4500 m de hondo y 2500 m de radio bajo la
+// cámara. Su fondo queda a −1000 ± 915 m: mar. CONTRAPRUEBA: la misma escena sin el cráter no tiene
+// ni una gota — lo único que cambia entre las dos es el hoyo.
+void testNodeWaterCrater()
+{
+    BEGIN("agua: un crater bajo la cota del mar se LLENA (el fondo del agua baja con el hoyo)");
+
+    using namespace Haruka::World::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Renderer::Shader::baseDir() + "shaders/", 256)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    const float floorM = 3500.0f, seaM = 2000.0f, craterR = 2500.0f, craterD = 4500.0f;
+    std::vector<float> fd(8, floorM);
+    TextureDesc td; td.width = 4; td.height = 2; td.format = Format::R32F;
+    td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false; td.initialData = fd.data();
+    TextureHandle floorTex = g_dev->createTexture(td);
+    Haruka::World::Water::OceanState st = Haruka::World::Water::oceanDefaultState();
+    st.seaLevelM = seaM;
+    BufferHandle oceanUBO = makeOceanStateUBO(st);
+    TerrainNodeRenderer::Water wcfg;
+    wcfg.heightTex = floorTex; wcfg.oceanParams = oceanUBO; wcfg.on = true;
+    wcfg.seaMarginM = seaM + 15.0f;
+    r.setWater(wcfg);
+
+    // Al nadir desde +6000 m (por encima de cualquier pico: 3500 + 915). Reversed-Z infinita, como
+    // `testNodeWaterDraws` (ver allí por qué `glm::perspective` no vale).
+    const glm::dvec3 cam = pc + up0 * (R + 6000.0);
+    const glm::dvec3 fwd = -up0;
+    const glm::dvec3 vup = glm::normalize(glm::cross(fwd, glm::dvec3(0, 1, 0)));
+    const float fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / ((float)w / (float)h); proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+
+    auto waterPixels = [&](bool crater) {
+        TerrainNodeRenderer::Shade sh;
+        if (crater) {
+            // Centro RELATIVO AL OJO, en el suelo nominal bajo la cámara; u = vertical, w = hondo.
+            sh.craterC.push_back(glm::vec4(glm::vec3(up0 * (double)(floorM - 6000.0f)), craterR));
+            sh.craterU.push_back(glm::vec4(glm::vec3(up0), craterD));
+        }
+        r.setShade(sh);
+        std::vector<uint8_t> px((size_t)w * h * 4, 0xAA);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame();
+            pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        // Mismo discriminante que `testNodeWaterDraws`: el agua es la única con B > R.
+        size_t blue = 0, sentinel = 0;
+        for (size_t k = 0; k < px.size(); k += 4) {
+            if (px[k] == 0xAA && px[k+1] == 0xAA && px[k+2] == 0xAA) { ++sentinel; continue; }
+            if (px[k+2] > px[k] + 4 && px[k+2] > 8) ++blue;
+        }
+        std::printf("    %s: %zu px de agua (%.1f %%) · centinela %zu\n", crater ? "con CRATER" : "sin crater",
+                    blue, 100.0 * (double)blue / ((double)w * h), sentinel);
+        CHECK(sentinel < (size_t)w * h / 2, "el readback escribio (si no, el conteo no significa nada)");
+        return blue;
+    };
+    const size_t total = (size_t)w * h;
+    const size_t withC = waterPixels(true);
+    const size_t noC   = waterPixels(false);
+    CHECK(withC > total / 20, "el crater que baja de la cota del mar se LLENA de agua en pantalla");
+    CHECK(noC * 10 < withC + 1, "CONTRAPRUEBA: sin el crater el mismo suelo esta seco — es el hoyo quien trae el agua");
+    r.setShade(TerrainNodeRenderer::Shade{});
+    r.shutdown();
+    g_dev->destroy(floorTex);
+    if (valid(oceanUBO)) g_dev->destroy(oceanUBO);
+}
+
+// ================================================================================================
+// LA FRANJA DE ROMPIENTE SE DIBUJA CON MALLA FINA (2026-10-17).
+//
+// Con la ley del mar (16 px por vértice, quad >= 2 m) una ola que rompe —5 m de cara con la mar del
+// juego, `coast_surf_breaks`— cae entre dos o tres vértices: el gemelo la pliega (`coast_surf_curls`)
+// pero la malla no puede dibujar el labio. Los nodos con suelo en la franja usan su propia ley
+// (`Water::surfDepthM`). Se mide el quad que el pase DIBUJA (`waterQuadAt`, el que lee la física)
+// sobre una costa somera (fondo −2 m) mirando a 45° desde 20 m. CONTRAPRUEBA: la misma escena con
+// `surfDepthM = 0` — mismo terreno, mismos nodos; lo único que cambia es la ley.
+void testNodeWaterSurfMesh()
+{
+    BEGIN("agua: la franja de rompiente se dibuja con malla fina (>= 4 vertices por cara de ola)");
+
+    namespace W = Haruka::World::Water;
+    using namespace Haruka::World::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Renderer::Shader::baseDir() + "shaders/", 512)) {
+        CHECK(false, "init del pase"); return;
+    }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 t1  = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+
+    // El rango de los nodos sale del muestreador, como en el juego (`Planet.cpp`): sin él todos los
+    // rangos son inválidos y ninguno se puede decir de la franja.
+    r.setHeightSampler([](const glm::dvec3&, void*) { return -2.0f; }, nullptr);
+    std::vector<float> fd(8, -2.0f);
+    TextureDesc td; td.width = 4; td.height = 2; td.format = Format::R32F;
+    td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false; td.initialData = fd.data();
+    TextureHandle floorTex = g_dev->createTexture(td);
+    const W::OceanState st = W::oceanAddSwell(W::oceanStateFromWind(3.5f, 1.0f, 0.0f, 0.0f));   // la calma del log
+    BufferHandle oceanUBO = makeOceanStateUBO(st);
+    const float breakD = W::oceanBreakDepth(st);
+    const float faceM  = W::oceanBreakerFaceM(st);   // la cara de la ola al romper (`coast_surf_breaks`)
+    std::printf("    mar de la calma: rompe desde %.2f m de fondo con cara de %.2f m\n", breakD, faceM);
+
+    const glm::dvec3 cam = pc + up0 * (R + 20.0);
+    const glm::dvec3 fwd = glm::normalize(-up0 + t1);
+    const glm::dvec3 vup = glm::normalize(glm::cross(glm::cross(fwd, up0), fwd));
+    const float fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / ((float)w / (float)h); proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+
+    const double xs[] = { 20.0, 35.0, 60.0, 100.0, 200.0 };
+    auto quads = [&](float surfDepthM, std::vector<double>& out, size_t& surfNodes) {
+        TerrainNodeRenderer::Water wc;
+        wc.heightTex = floorTex; wc.oceanParams = oceanUBO; wc.on = true;
+        wc.seaLevelM = 0.0f; wc.surfDepthM = surfDepthM; wc.surfUpM = W::oceanSignificantHeight(st);
+        wc.surfQuadM = faceM / 6.0f;   // lo que pone el planeta
+        // Se mide la LEY, no el lazo: en 16 frames el lazo arranca con la medida de los primeros
+        // (compilando pipelines, varios ms) y no tiene tiempo de volver. Presupuesto holgado.
+        wc.surfBudgetMs = 100.0f;
+        r.setWater(wc);
+        for (int f = 0; f < 16; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            g_dev->endFrame();
+            pumpWindowEvents();
+        }
+        surfNodes = r.stats().waterSurf;
+        double aguaMs = 0.0;
+        for (const auto& sc : g_dev->gpuScopes()) if (sc.name == "v5.agua") aguaMs += sc.ms;
+        std::printf("      (franja %.2f m) v5.agua %.2f ms · %zu nodos de agua · %zu tris de agua\n",
+                    (double)surfDepthM, aguaMs, r.stats().waterNodes, r.stats().waterTris);
+        out.clear();
+        for (double x : xs) out.push_back(r.waterQuadAt(glm::normalize(up0 * R + t1 * x), R));
+    };
+    std::vector<double> qSurf, qSea;
+    size_t nSurf = 0, nSea = 0;
+    quads(breakD, qSurf, nSurf);
+    quads(0.0f, qSea, nSea);
+    std::printf("    nodos con malla de rompiente: %zu (con franja) · %zu (sin) · %.1f px/vertice\n",
+                nSurf, nSea, (double)r.surfVertexPx());
+    bool fine = true, finer = true, drawn = true;
+    for (size_t i = 0; i < std::size(xs); ++i) {
+        const double distM = std::sqrt(xs[i] * xs[i] + 20.0 * 20.0);
+        const double faceNeed = (double)faceM / 4.0;                         // 4 vertices por cara
+        const double pxNeed   = 4.0 * distM * radPerPx;                       // o uno cada 4 px si la cara mide menos de 16
+        std::printf("      a %4.0f m: quad %.2f m con franja · %.2f m sin · pide <= %.2f m\n",
+                    xs[i], qSurf[i], qSea[i], std::max(faceNeed, pxNeed));
+        drawn &= qSurf[i] > 0.0 && qSea[i] > 0.0;
+        fine  &= qSurf[i] <= std::max(faceNeed, pxNeed) + 1e-6;
+        finer &= qSurf[i] < qSea[i] || qSea[i] <= std::max(faceNeed, pxNeed);
+    }
+    CHECK(drawn, "hay nodo de agua bajo cada punto medido (si no, el quad no significa nada)");
+    CHECK(nSurf > 0 && nSea == 0, "la franja la llevan los nodos de costa, y solo con `surfDepthM`");
+    CHECK(fine, "en la franja la cara de la ola que rompe lleva >= 4 vertices (o uno cada 4 px)");
+    CHECK(finer, "CONTRAPRUEBA: sin franja el mismo mar se dibuja mas grueso");
+
+    r.shutdown();
+    g_dev->destroy(floorTex);
+    if (valid(oceanUBO)) g_dev->destroy(oceanUBO);
+}
+
+// ================================================================================================
+// LAS OLAS LEJANAS NO SON UN ESPEJO (2026-10-17).
+//
+// "Las olas lejanas se ven planas": el agua pone un vértice cada 16 px, así que lejos cada tren más
+// corto que dos quads se apaga (Nyquist) y con él se iba su LUZ; lo que quedaba (mar de fondo de
+// 90-140 m, 1 % de pendiente) era un espejo. `harukaWaveSlopeResidual` devuelve por píxel la parte
+// que la malla soltó. Se mide en mar abierto entre 400 y 2000 m (cámara a 30 m, 5° hacia abajo): la
+// variación de luz A LO LARGO de cada fila (un espejo da filas casi uniformes). CONTRAPRUEBA: el mismo
+// cuadro con `pixelWaves = false`.
+void testNodeWaterFarWaves()
+{
+    BEGIN("agua: las olas lejanas se ven (por píxel donde la malla ya no las lleva)");
+    namespace W = Haruka::World::Water;
+    using namespace Haruka::World::Terrain;
+    const double R = 6371000.0;
+    const glm::dvec3 pc(0.0);
+    TerrainNodeRenderer r;
+    if (!r.init(g_dev, Haruka::Renderer::Shader::baseDir() + "shaders/", 512)) { CHECK(false, "init del pase"); return; }
+    uint32_t uw = 0, uh = 0; g_dev->framebufferSize(uw, uh);
+    const int w = (uw > 0) ? (int)uw : 256, h = (uh > 0) ? (int)uh : 256;
+    const double fovY = 60.0 * 3.14159265358979 / 180.0;
+    const double radPerPx = fovY / (double)h;
+    const double cone = nodeFrustumConeHalfAngle(fovY, (double)w / (double)h);
+    const glm::dvec3 up0 = glm::normalize(glm::dvec3(1.0, 0.05, 0.03));
+    const glm::dvec3 east = glm::normalize(glm::cross(up0, glm::dvec3(0, 1, 0)));
+    const bool isVk = (g_dev->backend() == Backend::Vulkan);
+
+    // Mar a +2000 m sobre un fondo de −500 m (hondo, como `testNodeWaterDraws`: el relieve no asoma).
+    std::vector<float> fd(8, -500.0f);
+    TextureDesc td; td.width = 4; td.height = 2; td.format = Format::R32F;
+    td.filter = Filter::Linear; td.wrap = Wrap::ClampToEdge; td.mipmaps = false; td.initialData = fd.data();
+    TextureHandle floorTex = g_dev->createTexture(td);
+    // BRISA (8 m/s), no la calma del log: desde el 18-10 la calma no lleva el escarpado mínimo inventado
+    // (el mar lo decide el clima) y casi no tiene trenes cortos que poner por píxel. Lo que se mide es
+    // el MECANISMO de las olas por píxel, y para eso hace falta un mar con olas.
+    W::OceanState st = W::oceanAddSwell(W::oceanStateFromWind(8.0f, 1.0f, 0.0f, 0.0f));
+    st.seaLevelM = 2000.0f;
+
+    const double camH = 30.0, pitch = glm::radians(5.0);
+    const glm::dvec3 cam = pc + up0 * (R + 2000.0 + camH);
+    const glm::dvec3 fwd = glm::normalize(east * std::cos(pitch) - up0 * std::sin(pitch));
+    const glm::dvec3 vup = glm::normalize(glm::cross(glm::cross(fwd, up0), fwd));
+    const float fCot = 1.0f / std::tan((float)fovY * 0.5f);
+    glm::mat4 proj(0.0f);
+    proj[0][0] = fCot / ((float)w / (float)h); proj[1][1] = fCot; proj[2][3] = -1.0f; proj[3][2] = 1.0f;
+    const glm::mat4 mvp = proj * glm::mat4(glm::mat3(glm::lookAt(glm::vec3(0.0f), glm::vec3(fwd), glm::vec3(vup))));
+    TerrainNodeRenderer::Shade sh;
+    sh.lightDir = glm::vec3(glm::normalize(up0 * 0.5 + east * 0.6 + glm::cross(up0, east) * 0.6));   // sol de cara, bajo
+    r.setShade(sh);
+    // La luz del frame en ESTE escenario (el mismo Sol bajo y de cara, este planeta y este ojo).
+    setTestSkyLight(pc - cam, R, glm::dvec3(sh.lightDir));
+
+    // Las filas que caen en el mar entre 400 y 2000 m: depresión `a` bajo la horizontal, d ≈ camH / tan a.
+    auto rowDist = [&](int row) {   // fila 0 = arriba en la imagen ya enderezada
+        const double a = pitch + ((double)row + 0.5 - 0.5 * h) * radPerPx;
+        return (a > 1e-4) ? camH / std::tan(a) : 1e9;
+    };
+    auto farVariation = [&](bool pixelWaves, int& rowsOut) {
+        BufferHandle ubo = makeOceanStateUBO(st, glm::vec3((pc + up0 * (R + 2000.0)) - cam), 7.0f);
+        TerrainNodeRenderer::Water wc;
+        wc.heightTex = floorTex; wc.oceanParams = ubo; wc.on = true;
+        wc.seaMarginM = 2000.0f + 15.0f; wc.pixelWaves = pixelWaves;
+        r.setWater(wc);
+        std::vector<uint8_t> px((size_t)w * h * 4, 0);
+        for (int f = 0; f < 12; ++f) {
+            Context* ctx = g_dev->beginFrame();
+            if (!ctx) break;
+            r.prepare(ctx, cam, pc, R, fwd, radPerPx, cone);
+            ClearValues cv; cv.clearColor = true; cv.clearDepth = true; cv.depth = 0.0f;
+            ctx->beginRenderPass({}, cv);
+            r.draw(ctx, cam, pc, R, mvp);
+            ctx->endRenderPass();
+            if (!isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+            g_dev->endFrame(); pumpWindowEvents();
+            if (isVk && f == 11) g_dev->readPixels(0, 0, w, h, Format::RGBA8, px.data());
+        }
+        g_dev->destroy(ubo);
+        if (const char* dumpDir = std::getenv("HARUKA_WATER_PNG")) {   // para MIRARLO
+            std::vector<uint8_t> img(px.size());
+            for (int y = 0; y < h; ++y) std::memcpy(&img[(size_t)y * w * 4], &px[(size_t)(h - 1 - y) * w * 4], (size_t)w * 4);
+            Haruka::IO::writePNG(std::string(dumpDir) + "/" + (isVk ? "vk" : "gl") + "_mar_lejano_" + (pixelWaves ? "con" : "sin") + ".png",
+                                 w, h, 4, img.data());
+        }
+        // Filas por backend, como `testLakeShoreline` (GL de abajo arriba; VK sin el arreglo de clip:
+        // también al revés), así que las dos acaban en el mismo orden.
+        double sum = 0.0; rowsOut = 0;
+        for (int y = 0; y < h; ++y) {
+            const double d = rowDist(y);
+            if (d < 400.0 || d > 2000.0) continue;
+            const int yy = h - 1 - y;
+            double s = 0.0, s2 = 0.0; int n = 0;
+            for (int x = 0; x < w; ++x) {
+                const uint8_t* p = &px[((size_t)yy * w + x) * 4];
+                if (!(p[2] > p[0] + 4)) continue;          // solo agua (el azul manda)
+                const double l = 0.3 * p[0] + 0.6 * p[1] + 0.1 * p[2];
+                s += l; s2 += l * l; ++n;
+            }
+            if (n < w / 2) continue;
+            sum += std::sqrt(std::max(s2 / n - (s / n) * (s / n), 0.0));
+            ++rowsOut;
+        }
+        return rowsOut ? sum / rowsOut : 0.0;
+    };
+    int rOn = 0, rOff = 0;
+    const double vOn = farVariation(true, rOn), vOff = farVariation(false, rOff);
+    std::printf("    mar de 400 a 2000 m (%d filas): variación de luz a lo largo de la fila %.2f con olas por píxel · %.2f sin ellas\n",
+                rOn, vOn, vOff);
+    CHECK(rOn >= 4 && rOff >= 4, "hay filas de mar lejano en el cuadro (si no, la medida no significa nada)");
+    CHECK(vOn > 1.5 * vOff, "lejos, con las olas por píxel el mar tiene luz de olas (no es un espejo)");
+    r.shutdown();
+    g_dev->destroy(floorTex);
 }
 
 // ⚠️ SIN USO desde el commit 5025b4f (nadie la llama). Se conserva al partir RHITestMain.cpp por si un

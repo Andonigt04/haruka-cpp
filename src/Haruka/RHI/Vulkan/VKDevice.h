@@ -86,6 +86,9 @@ namespace Haruka::RHI::Vulkan
         VkImage        depthImage  = VK_NULL_HANDLE;   // profundidad como renderbuffer (o 0)
         VkDeviceMemory depthMemory = VK_NULL_HANDLE;
         VkImageView    depthView   = VK_NULL_HANDLE;
+        /// Layout conocido de `depthImage` (el de `depthTex` va en su `VKTexture::layout`): el pase
+        /// que CONSERVA la profundidad y `blitDepth` necesitan saber de donde transicionar.
+        VkImageLayout  depthLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         uint32_t       width = 0, height = 0;
         /// Descripción con la que se creó: hace falta para pedir la VARIANTE de render pass
         /// según se quiera limpiar o conservar (ver `renderPassFor`).
@@ -166,6 +169,9 @@ namespace Haruka::RHI::Vulkan
             // así que necesita mutar el VKTexture. Solo lo usa el backend VK.
             VKTexture* texture(TextureHandle h)
             { return (h.id == 0 || h.id > m_textures.size()) ? nullptr : &m_textures[h.id - 1]; }
+            /// Igual, para el layout de la profundidad-renderbuffer (`VKRenderTarget::depthLayout`).
+            VKRenderTarget* renderTarget(RenderPassHandle h)
+            { return (h.id == 0 || h.id > m_targets.size()) ? nullptr : &m_targets[h.id - 1]; }
 
         private:
             std::string m_deviceName = "(sin consultar)";
@@ -195,6 +201,7 @@ namespace Haruka::RHI::Vulkan
             void createInstance();
             void createDebugMessenger();
             void pickPhysicalDevice();
+            void pickDepthFormats();   // g_fmtD24 / g_fmtD24S8 segun lo que anuncie la GPU elegida
             void createLogicalDevice();
             void createBackbufferResources();
             bool createBackbufferDepth(const VkExtent2D& e);

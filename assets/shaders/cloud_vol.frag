@@ -188,7 +188,12 @@ vec3  g_rad  = vec3(0.0);   // RADIANCIA integrada a lo largo del rayo (premulti
 //  0,01 a 0,1/m), el albedo se toma 0,98 y la paleta del cielo no es un modelo de atmosfera.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════
 const float HARUKA_CLOUD_ALBEDO = 0.98;
-const float HARUKA_CLOUD_SUN_E  = 0.35;   ///< irradiancia solar en las unidades del resto del render (con 0,55 la cara al Sol ya tocaba la rodilla y la fase no se veia: x1,04)
+/// ⚠️ La luz del Sol ya no es una constante (`HARUKA_CLOUD_SUN_E` = 0,35 "en las unidades del
+/// render"): es la del frame. Lo que queda es CONSERVAR LA ENERGIA: una nube gruesa casi no absorbe y
+/// devuelve casi toda la luz que recibe (albedo ~0,98 tras muchas dispersiones). Las tres octavas de
+/// `harukaMultiScatterSun` con fase isotropa suman 1 + 0,5 + 0,25 = 1,75; normalizar por eso hace que
+/// una nube isotropa gruesa refleje su albedo, ni mas ni menos.
+const float HARUKA_CLOUD_MS_NORM = 1.0 / 1.75;
 const float HARUKA_CLOUD_HG_G   = 0.72;   ///< lobulo delantero (agua en gotas, ~0,7-0,85)
 const float HARUKA_CLOUD_HG_B   = -0.30;  ///< lobulo trasero
 const float HARUKA_CLOUD_HG_MIX = 0.30;   ///< peso del lobulo trasero
@@ -201,12 +206,16 @@ float harukaHG(float c, float g) {
 float harukaCloudPhase(float c, float g) {
     return mix(harukaHG(c, g), harukaHG(c, HARUKA_CLOUD_HG_B), HARUKA_CLOUD_HG_MIX);
 }
-/// Σᵢ aⁱ·exp(−τ·bⁱ)·p(cⁱ·g), tres octavas (a = b = c = 0,5).
+/// Σᵢ aⁱ·exp(−τ·bⁱ)·p(cⁱ·g), tres octavas (a = c = 0,5; b = 0,7).
+/// ⚠️ b ERA 0,5 (Hillaire): la tercera octava se atenuaba con τ/4 y, con la fase hacia delante casi
+/// alineada con el Sol, el NÚCLEO grueso de un cúmulo a contraluz devolvía casi tanta luz como el
+/// borde: la nube entera brillaba en crema, plana (captura a contraluz, 18-10). Un cúmulo real a
+/// contraluz es gris oscuro con el borde fino plateado; con 0,7 el núcleo se apaga y el borde sigue.
 float harukaMultiScatterSun(float tau, float cosTh) {
     float sum = 0.0, a = 1.0, b = 1.0, c = 1.0;
     for (int i = 0; i < 3; ++i) {
         sum += a * exp(-tau * b) * harukaCloudPhase(cosTh, HARUKA_CLOUD_HG_G * c);
-        a *= 0.5; b *= 0.5; c *= 0.5;
+        a *= 0.5; b *= 0.7; c *= 0.5;
     }
     return sum;
 }
@@ -381,15 +390,15 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         // la que condensa ondula, cada nube a su altura, sin bandas planas.
         const float tCell = (harukaCloudVNoise3(p0 * fscaleA * 0.19 + vec3(51.0, 13.0, 27.0)) - 0.5) * 6.0;
         const float tC    = harukaColAirTempC(hi.w, alt0) + tCell;
-        // Borreguillos de buen tiempo: humedad en altura sin frente, a escala de ~150 km (no va con
-        // la humedad de superficie: atarla dejaba la llanura seca sin una nube alta). Se los come
-        // la conveccion profunda.
-        const float manchas  = smoothstep(0.50, 0.76, harukaCloudVNoise3(p0 * 0.00003 + vec3(31.0, 5.0, 17.0)));
-        const float vaporMid = ((mask & 2) != 0) ? max(hi.y * 0.6, 0.55 * manchas * (0.6 + 0.4 * hi.z)) * (1.0 - smoothstep(3500.0, 6000.0, sky.z - sky.y)) : 0.0;
-        // Vapor alto: la antesala del frente, el YUNQUE (la cima de la tormenta que se desparrama:
-        // va con la lluvia) y jirones sueltos a escala de cientos de km.
-        const float manchasH = smoothstep(0.50, 0.78, harukaCloudVNoise3(p0 * 0.000012 + vec3(3.0, 41.0, 9.0)));
-        const float vaporHigh = ((mask & 4) != 0) ? max(max(hi.x * 0.7, smoothstep(0.30, 0.75, sky.w) * 0.85), 0.45 * manchasH * (0.6 + 0.4 * hi.z)) : 0.0;
+        // EL VAPOR EN ALTURA ES EL DEL CLIMA y nada más (`World/CloudColumn.h`: medio y alto salen de
+        // los frentes). Se lo come la convección profunda. ⚠️ Aquí había "borreguillos de buen tiempo"
+        // y "jirones sueltos": ruido PROPIO del pase (escalas de 150 y 400 km) que ponía vapor donde
+        // el clima no ponía nada — un velo gris por todo el cielo (Andoni, 18-10: "el fog suelto es el
+        // que hace que se vea mal"; y "el clima decide; si se quiere cambiar, se cambia el clima").
+        const float vaporMid = ((mask & 2) != 0) ? hi.y * (1.0 - smoothstep(3500.0, 6000.0, sky.z - sky.y)) : 0.0;
+        // Vapor alto: la antesala del frente (clima) y el YUNQUE, la cima de la tormenta que se
+        // desparrama — va con la lluvia del clima (`sky.w`).
+        const float vaporHigh = ((mask & 4) != 0) ? max(hi.x, smoothstep(0.30, 0.75, sky.w) * 0.85) : 0.0;
         const float fracA = harukaColAloft(vaporMid, vaporHigh, tC);
 
         const bool convective = fracC >= fracA;
@@ -507,12 +516,16 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
             const vec2 wz = vec2(lonM, latM) * 2.5e-5;
             const float along  = lonM + 20000.0 * (harukaCloudVNoise3(vec3(wz, 2.0)) - 0.5) * 2.0;
             const float across = latM + 20000.0 * (harukaCloudVNoise3(vec3(wz, 8.0)) - 0.5) * 2.0;
-            const float dWater = harukaLayerDensity(sNd, 0.0, 1.0, pf * 11.4);
+            // El ALTOCÚMULO son CÉLULAS: cuerpo con borde (la fuerza endurecida) y cielo entre ellas.
+            // ⚠️ Con la densidad de capa a secas (0,45-1,2 según textura) y extinción 0,8 era una gasa
+            // gris continua: donde el clima ponía vapor medio, el cielo entero salía con NIEBLA
+            // (Andoni, 18-10: "el fog suelto es el que hace que se vea mal").
+            const float dWater = harukaLayerDensity(sNd, 0.0, 1.0, pf * 11.4) * smoothstep(0.15, 0.45, sNd);
             const float dIce   = harukaCirrusDensity(sNd, 0.0, 1.0, along, across, fpPix);
             // La campana en temperatura es el perfil vertical (normalizada: el vapor ya entro en el umbral).
             const float shapeA = fracA / max(max(vaporMid, vaporHigh), 1.0e-3);
             dens = mix(dWater, dIce, ice) * shapeA;
-            ext *= mix(0.80, 0.22, ice);              // el hielo extingue mucho menos: velo
+            ext *= mix(2.4, 0.22, ice);               // célula de agua opaca · el hielo extingue mucho menos: velo
         }
         fineK = (dens > 0.0) ? 0.4 : min(fineK * 1.6, 1.0);
         if (dens <= 0.0) continue;
@@ -567,7 +580,9 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         const float localTopM = convective ? (lBase + lThick * mix(HARUKA_CLOUD_MINTOP, 1.0, sNd)) : (alt + 300.0);
         float tauSun = 0.0;
         {
-            const float span = clamp(max(localTopM - alt, 30.0) / g_sunUp, 60.0, widthM);
+            // Hasta DOS longitudes de onda del campo: con el Sol bajo el camino por la nube es largo, y
+            // topado en una sola se contaba menos nube de la que hay entre la muestra y el Sol.
+            const float span = clamp(max(localTopM - alt, 30.0) / g_sunUp, 60.0, 2.0 * widthM);
             const float ds   = span / 3.0;
             for (int k = 1; k <= 3; ++k) {
                 const vec3  q    = p + u_sun.xyz * (ds * (float(k) - 0.5));
@@ -577,7 +592,12 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
                     const float fq = harukaColConvective(sky.x, lBase, lTop, altQ);
                     if (fq <= 0.0) continue;
                     const vec3  pq  = harukaCloudSquashedPos(q, R, altQ, fscale);
-                    const float fpq = ds * fscale * HARUKA_CLOUD_HORIZ_SCALE;
+                    // ⚠️ CON EL MISMO DETALLE QUE LA MUESTRA QUE SE VE, no con la huella del tramo hacia
+                    // el Sol (~1 km): ese LOD fundía las octavas a su media y, con poca cobertura, el
+                    // umbral queda muy por encima de la media — las muestras hacia el Sol NUNCA
+                    // encontraban nube, τ_sol ≈ 0, y la nube a contraluz recibía el Sol entero: crema
+                    // brillante y plana (medido con dbg 2048/4096: solo-Sol = crema, solo-cielo = gris).
+                    const float fpq = fpM * fscale * HARUKA_CLOUD_HORIZ_SCALE;
                     const float fieldQ = harukaCloudField3LOD(pq, wv, fpPix * fscale * HARUKA_CLOUD_HORIZ_SCALE, fpq);
                     const float sq  = harukaCloudStrengthCumulo(fieldQ, lo);
                     const float fh  = (altQ - lBase) / max(lThick, 1.0);
@@ -590,15 +610,45 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
                 }
                 tauSun += dq * ds * ext;
             }
+            // LA SOMBRA DE LAS NUBES VECINAS: tres muestras más LEJOS hacia el Sol (2, 4 y 8 veces el
+            // tramo, hasta ~20 km). ⚠️ Con solo el tramo de la propia nube (≤ 2 longitudes de onda) un
+            // cúmulo alto entre la muestra y el Sol no le hacía sombra: con el Sol bajo, las torres no
+            // se sombreaban entre sí ("la luz entre cúmulos verticales no produce sombra?"). Cada una
+            // vale por su segmento (span, 2·span, 4·span), con el mismo detalle que la muestra que se ve.
+            if (convective) {
+                float dFar = span, seg = span;
+                for (int k = 0; k < 3; ++k) {
+                    dFar += seg;
+                    const vec3  q    = p + u_sun.xyz * dFar;
+                    const float altQ = length(q) - R;
+                    if (altQ > lTop + 200.0) break;   // por encima de la capa: ya no hay quien tape
+                    const float fq = harukaColConvective(sky.x, lBase, lTop, altQ);
+                    if (fq > 0.0) {
+                        const vec3  pq  = harukaCloudSquashedPos(q, R, altQ, fscale);
+                        const float fpq = fpM * fscale * HARUKA_CLOUD_HORIZ_SCALE;
+                        const float fieldQ = harukaCloudField3LOD(pq, wv, fpPix * fscale * HARUKA_CLOUD_HORIZ_SCALE, fpq);
+                        const float sq  = harukaCloudStrengthCumulo(fieldQ, lo);
+                        const float fh  = (altQ - lBase) / max(lThick, 1.0);
+                        const float bq  = harukaCloudTopBumps(pq) * harukaCloudTowerMul(fieldQ - lo);
+                        tauSun += harukaCloudDensity(sq, fh, q * fscale * 11.4, HARUKA_CLOUD_MIN_THICK_M / lThick, 1.0 / (fscale * 11.4), ds, bq) * seg * ext;
+                    }
+                    seg *= 2.0;
+                }
+            }
         }
         const float cosTh = dot(g_dir, u_sun.xyz);
-        const float day   = u_sunColor.a;
-        const vec3  sunE  = u_sunColor.rgb * HARUKA_CLOUD_SUN_E * mix(0.02, 1.0, day);
-        // Ambiente: el cielo por encima (cenit) y el horizonte por los lados, atenuado por la nube
-        // que queda hasta la cima; y algo de suelo por debajo. La misma paleta que el domo.
+        // EL SOL QUE LE LLEGA A ESTA MUESTRA, por fisica: la irradiancia en lo alto de la atmosfera
+        // por el aire que hay ENCIMA de la nube (no el del suelo). Por eso al atardecer la nube sigue
+        // encendida en naranja cuando el suelo ya esta en sombra. ⚠️ Aqui habia un color de objeto
+        // por `0,35` y por un factor de dia `mix(0,02, 1, dia)`. Lo unico que se fija es la
+        // NORMALIZACION de las octavas (`HARUKA_CLOUD_MS_NORM`): ver su nota.
+        const vec3  sunE  = uSkySunE.rgb * harukaAtmoTransmittanceToSpace(p, uSkySunDir.xyz, R, 3) * HARUKA_CLOUD_MS_NORM;
+        // Ambiente: el cielo por encima y por los lados, atenuado por la nube que queda hasta la cima
+        // y hasta el borde; y el suelo por debajo. La luz del cielo de ESTE frame (`SkyLight`), no una
+        // paleta: de noche no hay, al atardecer es naranja.
         const float tauTop = max(localTopM - alt, 0.0) * ext * inner;
         const float fH     = convective ? clamp((alt - lBase) / max(lThick, 1.0), 0.0, 1.0) : 0.5;
-        const vec3  skyZ   = harukaSkyBase(1.0, day), skyH = harukaSkyBase(0.0, day);
+        const vec3  skyZ   = uSkyZenith.rgb + uSkyMoonGround.rgb, skyH = uSkyHorizon.rgb;
         // Cielo por arriba a traves de la nube que queda hasta la cima (difusa), horizonte por los
         // lados (a traves de media anchura de nube) y suelo por abajo (albedo ~0,2, a traves de la
         // nube que queda hasta la base).
@@ -606,9 +656,12 @@ void harukaMarchColumn(float baseA, float topA, float fscale, int steps,
         const float tauSide = 0.5 * widthM * ext * inner * 0.5;
         const vec3  amb    = skyZ * 0.5 * harukaDiffuseT(tauTop)
                            + skyH * 0.5 * harukaDiffuseT(tauSide)
-                           + skyH * 0.2 * harukaDiffuseT(tauBot);
+                           + uSkyAmbientDown.rgb * harukaDiffuseT(tauBot);
         const float dark   = mix(1.0, 0.55, clamp(sky.w, 0.0, 1.0));   // la tormenta: mas agua = mas extincion, menos luz
-        const vec3  L      = HARUKA_CLOUD_ALBEDO * (sunE * harukaMultiScatterSun(tauSun, cosTh) + amb) * dark;
+        // (dbg & 2048): sin AMBIENTE, solo el Sol · (dbg & 4096): sin Sol, solo el ambiente — para ver
+        // de cuál de los dos sale el brillo de una nube (a contraluz salía entera en crema).
+        const float kSun = ((dbg & 4096) != 0) ? 0.0 : 1.0, kAmb = ((dbg & 2048) != 0) ? 0.0 : 1.0;
+        const vec3  L      = HARUKA_CLOUD_ALBEDO * (kSun * sunE * harukaMultiScatterSun(tauSun, cosTh) + kAmb * amb) * dark;
         g_rad  += dAlpha * L;
         lit    += dAlpha;          // (diagnostico: la opacidad repartida)
         wsum   += dens;
@@ -797,6 +850,18 @@ void main()
     const vec3 ro  = -pc;                       // el ojo, respecto al CENTRO del planeta
     const vec3 up0 = normalize(ro);
 
+    // ── EL PLANETA TAPA, AUNQUE LA COPIA DE DEPTH ESTÉ VACÍA ─────────────────────────────────────
+    // El mar no escribe profundidad (es translúcido) y en mar abierto el fondo queda a kilómetros o
+    // sin dibujar: bajo el horizonte la copia dice "vacío" y `sceneT` no recortaba nada. Con el ojo
+    // bajo la base, la entrada a la cáscara es la SALIDA de la esfera interior, que para un rayo que
+    // baja está AL OTRO LADO DEL PLANETA: se pintaban las nubes de las antípodas encima del agua
+    // ("las nubes se sobreponen al agua"). La esfera del nivel del mar recorta: lo que hay debajo es
+    // agua o roca, y la roca ya está en el depth. Con el ojo bajo el agua (`g0 < 0`) no recorta.
+    {
+        float g0, g1;
+        if (harukaRaySphere(ro, dir, R, g0, g1) && g0 > 0.0) sceneT = min(sceneT, g0);
+    }
+
     // JITTER: con pocos pasos, arrancar todos los rayos en el mismo sitio pone la estructura de la
     // marcha EN PANTALLA (anillos concentricos). Desplazar el arranque lo convierte en ruido.
     // ⚠️ ERA `fract(sin(dot(xy, (12.9898, 78.233))) * 43758.5)`, y ese hash tiene el jitter
@@ -886,18 +951,17 @@ void main()
     // Beer-Lambert: la opacidad sale de la profundidad óptica, no de una media. Atravesar más nube
     // tapa MÁS — que es lo que distingue un volumen de una calcomanía.
     const float alpha = 1.0 - exp(-optical);
-    const float day   = u_sunColor.a;
-    // La radiancia integrada, sin premultiplicar (ver la nota de `g_rad`). Los embudos siguen
-    // aportando por `lit` a la antigua: se funden con su propia nube madre.
+    // La radiancia integrada, sin premultiplicar (ver la nota de `g_rad`), en LINEAL y ya expuesta
+    // (la luz es la de `SkyLight`). Los embudos siguen aportando por `lit` a la antigua: se funden
+    // con su propia nube madre.
     vec3 col = (alpha > 1.0e-4) ? g_rad / alpha : vec3(0.0);
-    // ⚠️ RODILLA DE EXPOSICION, no un tope. La dispersion hacia delante es fisica y HDR: un borde
-    // fino contra el Sol da 2-4 veces la radiancia isotropa (fase de HG a 0,72 por 4π), y este render
-    // no tiene pipeline HDR ni tonemapping: todo lo demas vive en [0,1]. Por debajo de 0,8 no se toca
-    // (ahi esta la forma de la nube); lo que sobra se comprime suavemente en [0,8, 1,0] para que el
-    // brillo del borde se vea sin quemarse a blanco plano ("quemados" en el banco).
-    col = mix(col, 0.8 + 0.2 * (1.0 - exp(-(col - 0.8) / 0.2)), step(0.8, col));
+    // ⚠️ AQUI HABIA UNA RODILLA DE EXPOSICION propia (por encima de 0,8 se comprimia) porque el resto
+    // del render vivia en [0,1] sin curva de salida. Ahora la curva es la de todo el motor
+    // (`harukaDisplay`, al final), con la misma rodilla y conservando el tono.
+    // Lo que no es nube (polvo, la manga) es MATERIAL: un albedo de pantalla bajo la luz que hay.
+    const vec3 Emat = uSkyAmbientUp.rgb + 0.5 * uSkySunGround.rgb;
     if (wsum > 0.0 && (dust > 0.0 || manga > 0.0)) {
-        const vec3 cFunnel = mix(vec3(0.28, 0.31, 0.38), vec3(0.55, 0.57, 0.63), day);
+        const vec3 cFunnel = harukaLinear(vec3(0.55, 0.57, 0.63)) * Emat;
         col = mix(col, cFunnel, clamp((dust + manga) / wsum, 0.0, 1.0));
     }
 
@@ -908,23 +972,27 @@ void main()
         // La MANGA es oscura: un cuerpo grueso que se ve a contraluz de su propia nube. Con el color
         // de sombra de la nube (0,55 de gris a pleno día) salía blanca contra el cielo en la captura.
         col *= mix(1.0, 0.38, clamp(manga / wsum, 0.0, 1.0));
-        col  = mix(col, vec3(0.42, 0.34, 0.24) * (0.5 + 0.5 * day), clamp(dust / wsum, 0.0, 0.8));
-        // Embudo del JUEGO: su propio color, que no depende del día — el fuego se ve igual de noche.
-        if (glowW > 0.0) col = mix(col, min(glow / glowW, vec3(1.0)), clamp(glowW / wsum, 0.0, 1.0));
+        col  = mix(col, harukaLinear(vec3(0.42, 0.34, 0.24)) * Emat, clamp(dust / wsum, 0.0, 0.8));
+        // Embudo del JUEGO: su propio color, que EMITE — el fuego se ve igual de noche.
+        if (glowW > 0.0) col = mix(col, harukaLinear(min(glow / glowW, vec3(1.0))), clamp(glowW / wsum, 0.0, 1.0));
     }
 
-    // EL AIRE DE EN MEDIO: una nube a 100 km se ve a través de 100 km de aire, y con L = 18-60 km
-    // eso es casi todo aire. Es lo que quita las "tiras" del horizonte: la capa vista de canto, con
-    // su ruido aliasado a esa distancia, se funde con el cielo en vez de recortarse en blanco. El
-    // mismo `harukaAerial` que usan el terreno y los props, a la distancia media de lo atravesado.
-    if (wsum > 0.0) {
-        const vec3  upC   = normalize(-u_planetC.xyz);
-        const float tMean = g_tsum / wsum;
-        // Con la altitud de lo atravesado: desde orbita una nube a 3 km se ve a traves de unos km de
-        // aire, no de 250 (ver lib/aerial.glsl). `g_ro` es relativo al CENTRO del planeta.
-        const float hCloud = length(g_ro + g_dir * tMean) - u_planetC.w;
-        col = harukaAerialAlt(col, tMean, dot(g_dir, upC), hCloud, u_aerial);
+    // EL AIRE DE EN MEDIO: una nube a 100 km se ve a través de 100 km de aire. Es lo que quita las
+    // "tiras" del horizonte: la capa vista de canto se funde con el cielo de su dirección en vez de
+    // recortarse en blanco. La MISMA integral que el cielo y el terreno (lib/aerial.glsl), hasta la
+    // distancia media de lo atravesado.
+    if (wsum > 0.0) col = harukaAerialSkyLinear(col, g_dir * (g_tsum / wsum));
+    // EL HOMBRO DE LA NUBE: la cara al Sol de un cúmulo vale varias veces el blanco de pantalla, y la
+    // rodilla de `harukaDisplay` (corta, desde 0,8) lo clavaba todo en el MISMO blanco: la cima salía
+    // plana, sin forma (Andoni, 18-10: "la luz satura"). Esta curva lleva de 0 a ~4 veces el blanco
+    // a [0; 1,1] conservando el tono y la gradación; lo que queda por encima de 0,8 lo acaba la
+    // rodilla de siempre. La cara al Sol sigue siendo lo más claro: solo deja de ser un plano.
+    {
+        const float m = max(col.r, max(col.g, col.b));
+        const float W = 1.2;
+        if (m > 1.0e-4) col *= (1.0 - exp(-m / W)) * W / m;
     }
+    col = harukaDisplay(col);
     // (dbg & 128): SONDA — `light` en gris, `wsum` en alfa, para bisecar un negro opaco.
     if ((((u_vortexN.w > 0.5) ? int(u_vortexN.w) : 0) & 128) != 0) {
         FragColor = vec4(lit / 10.0, wsum / 10.0, min(optical, 8.0) / 8.0, 1.0);
